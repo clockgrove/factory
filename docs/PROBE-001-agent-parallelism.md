@@ -86,6 +86,60 @@ surfaces only at the *second merge*.
 Integration is therefore the loop's responsibility, not the agent's — which is the correct place
 for it.
 
+### Finding 4 — a third throttle plane, invisible to `/rate_limit`
+
+Observed while building fixtures on 2026-08-30, and reproduced deliberately.
+
+Every REST call returned:
+
+```
+403  API rate limit exceeded for user ID <id>
+```
+
+while the documented quota endpoint simultaneously reported:
+
+```
+core:    5000/5000
+graphql: 5000/5000
+```
+
+Both planes fully unconsumed, yet every request refused. `git push` over HTTPS
+continued to work throughout, so this is neither a token nor a network problem.
+
+There are therefore **three distinct throttles on three planes**, and only one of them is
+introspectable:
+
+| # | Plane | Signal | Visible in `/rate_limit`? |
+|---|---|---|---|
+| 1 | REST/GraphQL quota | `429`, `x-ratelimit-remaining: 0` | ✅ |
+| 2 | Agent engine | `HTTP 500` inside the session | ❌ |
+| 3 | Per-user abuse/secondary | `403 rate limit exceeded` | ❌ **reports full quota** |
+
+Plane 3 also produced a `403` on the Copilot session-creation endpoint under sustained
+agent dispatch, so it is not specific to repository writes.
+
+**Why this matters more than it looks.** Octokit's `plugin-throttling` and `plugin-retry`
+model plane 1. Planes 2 and 3 are outside that model, and plane 3 is actively misleading:
+a client that consults `/rate_limit` to decide whether it may proceed will conclude it has
+full budget and keep hammering a closed door.
+
+The failure mode this creates is specific and severe. A `403` arriving at dispatch time is
+trivially misread as *"this Work Item failed"* — which triggers retry, then escalation,
+then replanning, all against a platform that is merely asking the client to wait. That is
+how a loop starts thrashing, and it is precisely the class of behavior v1 accumulated
+machinery to survive.
+
+**Requirement.** Factory must classify platform refusals as **platform-unavailable, retry
+later** — a property of the *substrate*, never of the *Work Item*. Concretely: a `403`
+carrying rate-limit text, a `429`, or a `5xx` must not increment an attempt count, must not
+mark an item failed, and must not reach the replanner. Corroborating this in the derived
+model is cheap, because attempts are counted from linked PRs (§4.4): a refused dispatch
+creates no PR, so a correctly-implemented client cannot inflate the count even if it
+misclassifies.
+
+Also: back off on wall-clock time, not on quota introspection. The only trustworthy signal
+that plane 3 has cleared is a successful request.
+
 ## Design requirements
 
 - **Confirm dispatch; never assume it.** Assignment success ≠ session started. Verify a session
@@ -94,6 +148,10 @@ for it.
 - **Make retry idempotent.** Transient infrastructure failure is normal at burst.
 - **Budget ~85% first-pass success**; design retry as routine.
 - **Throttle both dispatch and polling.** Both directions rate-limit.
+- **Separate platform refusal from work failure.** `403`/`429`/`5xx` are substrate conditions;
+  they must never consume an attempt or reach the replanner (Finding 4).
+- **Do not trust `/rate_limit` as a gate.** It reports full quota while refusing every call.
+  Back off on wall-clock time and treat a successful request as the only clear signal.
 
 ## Verdict
 

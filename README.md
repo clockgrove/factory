@@ -4,9 +4,9 @@ A GitHub-native engineering-management plugin. You author an **Objective**; Fact
 **Work Items**, dispatches them to parallel GitHub Copilot agent sessions, supervises the results,
 and replans — unattended.
 
-> **Status: pre-implementation.** This repository currently contains a PRD awaiting acceptance and
-> the measured platform evidence behind it. No implementation has started. See
-> [`docs/PRD.md`](docs/PRD.md).
+> **Status: in implementation.** The PRD is accepted and build order step 1 is complete — Factory can
+> derive the full state of an Objective from GitHub alone. See [`docs/PRD.md`](docs/PRD.md) and
+> [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md).
 
 ## Design in one picture
 
@@ -36,7 +36,34 @@ Two constraints shape everything:
 
 1. **No deployed infrastructure.** No database, queue, dashboard, or service. GitHub holds the
    durable state; the harness holds the loop.
-2. **Harness-agnostic.** Packaged as an agent plugin, not as GitHub Actions workflows.
+2. **Harness- and model-agnostic.** Packaged as an [Agent Plugins 1.0](https://agent-plugins.org)
+   package — an open, vendor-neutral standard — targeting Codex, GitHub Copilot, and Claude Code
+   with no architectural primacy for any. Factory selects no model anywhere.
+
+### Derived state
+
+Factory stores nothing. Every Work Item's state is a pure function of what GitHub currently says:
+
+| Concept | GitHub primitive |
+|---|---|
+| Objective | Issue labelled `factory:objective` |
+| Work Item | **sub-issue** of the Objective |
+| Dependency | native **`blocked by`** relationship |
+| Assignment | `copilot-swe-agent` as assignee |
+| Attempt | a linked pull request |
+| Completion | PR merged → issue closed |
+
+There is no status label, no sidecar file, and no lease. Nothing stored can go stale or diverge,
+crash recovery is free, and "resume" and "start" are the same code path.
+
+## Try it
+
+Read-only. Prints the derived state of an Objective and exits.
+
+```bash
+npm install && npm run build
+GITHUB_TOKEN=$(gh auth token) node dist/factory.js owner/repo 42
+```
 
 ## Why this repository is new
 
@@ -60,9 +87,12 @@ Before writing any code, the load-bearing assumption was tested directly
 | First-pass success at burst (26) | **85%** |
 | Work correctness | 11/11 actionable tasks correct and minimal |
 | Terminal status | **must be read from the PR, not the run conclusion** |
+| Throttle planes | **3, only 1 visible to `/rate_limit`** |
 
-The last row is the important one: a workflow run reports that the *session finished*, never that
-the *work was done*. An impossible task returned `conclusion: success`.
+The last two rows are the important ones. A workflow run reports that the *session finished*, never
+that the *work was done* — an impossible task returned `conclusion: success`. And GitHub will refuse
+requests with `403 API rate limit exceeded` while `/rate_limit` reports full quota, so platform
+refusal must never be mistaken for work failure.
 
 ## License
 

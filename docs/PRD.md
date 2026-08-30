@@ -135,7 +135,12 @@ Items (e.g. "add three pure functions, each with tests").
 **Run:** author the Objective. Do not intervene.
 
 **Success:** Director compiles the Objective, applies the graph, dispatches parallel GitHub agent
-sessions, and every Work Item reaches a merged PR with the Objective closed — unattended.
+sessions, and every Work Item reaches a merged PR with the Objective closed — without human
+intervention.
+
+A **well-founded escalation does not fail Gate 0.** If Director stops and asks a question that a
+human agrees was genuinely necessary, the loop worked. What fails Gate 0 is spinning, silent
+stalling, or escalating on something it should have resolved itself.
 
 **If Gate 0 does not close** within a pre-committed budget (proposed: 3 attempts or 4 hours of
 active execution), **stop and revise the architecture — do not harden forward.** A gate that will
@@ -324,8 +329,10 @@ supervisor. It is *not* a permit protocol, a serialization fence, or a terminal 
    Remaining unknown: whether the ceiling is a hard cap or purely capacity-dependent.
 3. **Is a trivial Objective enough to exercise the compiler**, or does decomposition only become
    meaningful at Gate 1+?
-4. **What is the harness's unattended story?** A scheduled session restores "no HITL"; confirm the
-   intended trigger and whether crash recovery is simply "start a new session and re-read GitHub."
+4. ~~What is the harness's unattended story?~~ **Resolved: unattended operation is a goal, not a
+   mandate.** Some decisions legitimately require a human. Escalation is a first-class outcome with
+   an explicit confidence bar, not a failure — see `IMPLEMENTATION-PLAN.md` §7. A well-founded
+   escalation is the system working; a suppressed one is a defect.
 5. **Which harnesses must v1.0 support?** "Any harness" needs a concrete initial target list
    (Copilot CLI first) and a defined portability boundary.
 6. ~~Public from day one, or public at Gate 2?~~ **Decided: private for now.** Public is a

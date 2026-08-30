@@ -97,10 +97,11 @@ in_flight     session running, or draft PR with real commits
 failed        session concluded failure, OR PR is a no-op (§5.1)
 for_review    PR has a real diff and checks have settled
 blocked       open, but some `blocked by` issue is still open
+escalated     open, assigned to a human, Copilot not assigned (§7.2)
 done          linked PR merged and issue closed
 ```
 
-**Ready** = `unstarted` AND every `blocked by` issue is closed.
+**Ready** = `unstarted` AND every `blocked by` issue is closed AND not `escalated`.
 
 Note what is absent: no "claimed", no "leased", no "owned by run 12345". A Work Item's state is
 whatever GitHub currently says it is, and two Directors reading simultaneously derive the same
@@ -238,7 +239,7 @@ Merging one at a time per cycle keeps conflicts rare without a serialization pro
 
 ---
 
-## 7. Replanning
+## 7. Replanning and escalation
 
 Triggers: attempts exhausted (§4.4), repeated declines, or repeated conflicts.
 
@@ -247,8 +248,55 @@ criteria — and is the one place Factory changes its own plan. Per F4, a wave i
 multiple Objectives*; Work Item identity is stable and titles are never rewritten to encode status.
 Title drift was the root of v1's replan deadlock.
 
-If replanning cannot produce a change it believes will succeed, it stops and asks a human. Not every
-loop closes, and pretending otherwise is what produces livelock.
+### 7.1 Escalation is a first-class outcome
+
+**Unattended operation is a goal, not a mandate.** Some decisions legitimately require a human, and
+a system that cannot say so will invent a way to keep going.
+
+This is not a concession — it is a structural fix. v1 had no legitimate "stop and ask" state, so
+every problem had to be solved by more machinery. Its circuit breaker had to be added *by a human*,
+from outside, after the loop had already been spinning for days. A loop that can stop does not need
+to be stopped.
+
+Escalating is therefore a **successful outcome** of a cycle, not a failure of one. The metric that
+matters is whether escalations are *well-founded*, not whether they are rare. Suppressing a needed
+escalation is a defect; raising a clear one is the system working.
+
+### 7.2 How escalation is represented
+
+Derived state, like everything else (§1). No new label, no stored flag:
+
+```
+unassign copilot-swe-agent
+assign the human owner
+comment: what was attempted, what failed, the evidence, the specific question
+```
+
+`escalated` = open, assigned to a human, Copilot not assigned. Director does not re-dispatch an
+issue assigned to a human. Reassigning Copilot is the human's "carry on" signal — an ordinary
+GitHub gesture, not a Factory protocol.
+
+### 7.3 The confidence bar
+
+Director acts autonomously — including merging — only when **all** of these hold:
+
+- mechanical checks pass (§5.1): real diff, declared scope respected, checks green, mergeable
+- semantic review passes (§5.2): the diff satisfies the acceptance criteria and nothing more
+- the change is **reversible**: one squash commit on a branch, revertible without coordination
+- no security-sensitive surface: auth, secrets, permissions, CI configuration, dependency sources
+
+Director **stops and asks** when **any** of these hold:
+
+- intent is ambiguous, or acceptance criteria are open to more than one honest reading
+- the diff touches workflows, permissions, secrets, or release configuration
+- existing behavior not named in the Work Item is deleted or rewritten
+- a conflict needs a judgment about intent rather than a mechanical rebase
+- attempts are exhausted and no graph change looks likely to succeed
+- the action is irreversible: force push, history rewrite, repository or settings mutation, release,
+  or anything outside the target repository
+
+The asymmetry is deliberate. Merging a reviewed, reversible, in-scope change is cheap to undo.
+Guessing at intent is not.
 
 ---
 
@@ -329,8 +377,10 @@ non-goals are falsification evidence rather than obstacles to route around.
 1. **Is a 3-function Objective enough to exercise the compiler** (PRD Q3), or is it so trivial that
    compilation is nearly free and Gate 0 proves only execution? Leaning: fine — Gate 0 is meant to
    prove *the loop closes*, and Gate 1 introduces real decomposition.
-2. **Unattended trigger** (PRD Q4). Gate 0 runs in a foreground session. Production needs a
-   scheduled or long-lived session; needs confirmation.
+2. ~~**Unattended trigger** (PRD Q4).~~ **Resolved:** unattended operation is a goal, not a mandate.
+   Escalation is a first-class outcome (§7.1) with an explicit confidence bar (§7.3). Gate 0 still
+   runs in a foreground session; a scheduled or long-lived session remains the production shape, but
+   nothing depends on it existing before Gate 2.
 3. **Harness targets** (PRD Q5). Copilot CLI first. The portability boundary is that `factory/` is
    plain Python driven by markdown skills — but this needs one non-Copilot dry run to be credible.
 4. **Language.** Python for parity with v1's reference material and `gh` ergonomics. Node is

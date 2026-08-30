@@ -383,5 +383,96 @@ non-goals are falsification evidence rather than obstacles to route around.
    nothing depends on it existing before Gate 2.
 3. **Harness targets** (PRD Q5). Copilot CLI first. The portability boundary is that `factory/` is
    plain Python driven by markdown skills — but this needs one non-Copilot dry run to be credible.
-4. **Language.** Python for parity with v1's reference material and `gh` ergonomics. Node is
-   defensible if harness packaging prefers it. Decide before step 1.
+4. ~~**Language.**~~ **Decided: TypeScript / Node.** See §13.
+
+---
+
+## 13. Language: TypeScript / Node
+
+Decided after surveying how agent plugins are actually built and distributed.
+
+### Evidence
+
+| Signal | Finding |
+|---|---|
+| Claude Code plugins | `plugin.json` + `SKILL.md` + `bin/`; scripts run via the OS shell, so **language is unconstrained by the plugin format** |
+| Agent Skills | An open, harness-agnostic standard — markdown, not code. Portability lives here, not in the library |
+| MCP reference servers | ~70% TypeScript, ~30% Python |
+| GitHub API client | **Octokit is officially maintained by GitHub**: first-class GraphQL, generated types, `plugin-throttling`, `plugin-retry`, built-in pagination |
+| Python equivalent | **PyGithub is REST-only — no GraphQL** — and its README states it is seeking maintainers. GitHub publishes no official Python SDK |
+| Install friction | `npx` is present wherever a Node-based harness is; `uvx` is equally reliable but is an extra install. Roughly a wash, slight edge to Node |
+
+### Why the "keep Python" argument does not apply
+
+The strongest case for Python is that v1 is 129 Python files with working GraphQL over `urllib`.
+Three of its four supporting arguments are void under decisions already made:
+
+- *"The library already exists"* — PRD §11 is clean-room. Nothing is copied. There is no incumbent.
+- *"The Copilot SDK is Python-only"* — PRD §5 forbids a self-hosted agent execution runtime. We do
+  not use that SDK; it was Inversion B. Issues are assigned over GraphQL, which is language-neutral.
+- *"Python is dominant for ML tooling"* — Factory runs no models locally. Judgment lives in markdown
+  skills executed by the harness.
+
+What survives is that `uvx` is fine. True, and not decisive.
+
+### Why TypeScript wins on the merits
+
+Factory's deterministic layer is **almost entirely GitHub API calls that must survive rate limits and
+transient 5xx**. PROBE-001 measured both: a client-side `429` from polling, and two `HTTP 500`
+failures in 26 dispatches. `@octokit/plugin-throttling` and `@octokit/plugin-retry` implement exactly
+those behaviors, are maintained by GitHub, and track the API spec by definition. In Python we would
+hand-roll the same logic against a REST-only client or raw HTTP — which is precisely what v1 did.
+
+Typed GraphQL responses also matter more than usual here, because §3's derived state is a projection
+over GraphQL shapes. A wrong field name should fail at build time, not mid-loop.
+
+### Shape
+
+- Node ≥ 20, TypeScript, ESM
+- `@octokit/core` + `graphql`, `plugin-throttling`, `plugin-retry`, `plugin-paginate-rest`
+- `vitest` for tests
+- Distributed so the harness can invoke it without a global install
+
+**Portability note:** harness-agnosticism lives in the markdown skills and JSON schemas, which are
+plain text under an open standard. The TypeScript library is an implementation detail invoked through
+a shell boundary. Any harness that can run a command can use it.
+
+---
+
+## 14. Hooks
+
+Claude Code plugins may declare hooks (`PreToolUse`, `PostToolUse`, `SessionStart`, …) that run
+commands on harness events. Most candidate uses for Factory are marginal, but **one is genuinely
+valuable**.
+
+### The one that matters: mechanical enforcement of irreversibility
+
+§7.3 lists actions Director must never take autonomously — force push, history rewrite, repository or
+settings mutation, release, writes outside the target repository. Today that is an *instruction*, and
+instructions are advisory: they hold exactly as long as the model's judgment does.
+
+A `PreToolUse` hook turns the most catastrophic entries into a **mechanical block**. The distinction
+is between *"the agent was told not to"* and *"the agent cannot."* For a system designed to run
+unattended for long stretches, that difference is the whole point.
+
+This is also the correct home for v1's "Keeper" idea — a deterministic guardrail — implemented as an
+existing harness primitive rather than a custom service. Same invariant, no infrastructure.
+
+Deliberately narrow: a short denylist of irreversible operations. Not a policy engine, not a
+permission model. If the list grows past a handful of entries, that is a sign judgment is leaking
+into the guardrail.
+
+### Considered and rejected
+
+| Candidate | Verdict |
+|---|---|
+| `SessionStart` injecting current GitHub state | **No.** The loop reads state on cycle 1 anyway. Adds a second path to the same fact. |
+| `PostToolUse` audit trail of merges | **No.** GitHub already is the audit trail. Duplicating it is stored state (§1). |
+| `Stop` checkpointing progress | **No.** Directly violates §1. There is nothing to checkpoint. |
+| Hook-driven dispatch or scheduling | **No.** That is the loop, and the loop belongs in the harness, not in event handlers. This is Inversion A in miniature. |
+
+### Constraint
+
+Hook formats are harness-specific, so hooks are **optional hardening and never required for the core
+loop**. If Factory stops working correctly without them, portability is broken and that is a finding
+against the thesis (PRD §5).

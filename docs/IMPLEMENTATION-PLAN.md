@@ -441,30 +441,32 @@ a shell boundary. Any harness that can run a command can use it.
 
 ## 14. Hooks
 
-Claude Code plugins may declare hooks that run commands on harness events, and **Codex plugins
-support the same idea as a first-class manifest component** — `"hooks": "./hooks/hooks.json"`, with
-`hooks/` at the plugin root (verified, §15). Most candidate uses for Factory are marginal, but **one
-is genuinely valuable**.
+Hooks run commands on harness lifecycle events. They are **client-specific, not portable** (§15.2),
+which bounds what they may be asked to carry.
 
-### The one that matters: mechanical enforcement of irreversibility
+### The invariant they were meant to enforce
 
 §7.3 lists actions Director must never take autonomously — force push, history rewrite, repository or
 settings mutation, release, writes outside the target repository. Today that is an *instruction*, and
 instructions are advisory: they hold exactly as long as the model's judgment does.
 
-A pre-tool-use hook turns the most catastrophic entries into a **mechanical block**. The distinction
-is between *"the agent was told not to"* and *"the agent cannot."* For a system designed to run
-unattended for long stretches, that difference is the whole point.
+Turning that into a mechanical block is right. Doing it with hooks is not: a guardrail present on one
+harness and absent on another is not a guarantee. **§15.3 places the enforcement in the bundled MCP
+server instead** — the only portable, behavior-bearing component — so the dangerous operations simply
+are not exposed as tools.
 
-*(The `hooks/hooks.json` mechanism is confirmed for Codex; the exact event vocabulary is not yet
-verified — see §15.)*
+### What hooks are still good for
 
-This is also the correct home for v1's "Keeper" idea — a deterministic guardrail — implemented as an
-existing harness primitive rather than a custom service. Same invariant, no infrastructure.
+**Defense in depth, where a harness supports them.** The MCP server cannot see a raw
+`git push --force` issued through a shell tool; a pre-tool-use hook can block it. That is real value,
+and it is additive.
 
 Deliberately narrow: a short denylist of irreversible operations. Not a policy engine, not a
 permission model. If the list grows past a handful of entries, that is a sign judgment is leaking
 into the guardrail.
+
+This is also where v1's "Keeper" idea lands — a deterministic guardrail built from existing
+primitives rather than a custom service. Same invariant, no infrastructure.
 
 ### Considered and rejected
 
@@ -477,85 +479,169 @@ into the guardrail.
 
 ### Constraint
 
-Hook formats are harness-specific, so hooks are **optional hardening and never required for the core
-loop**. If Factory stops working correctly without them, portability is broken and that is a finding
-against the thesis (PRD §5).
+Hooks are **optional hardening and never required for the core loop**. If Factory stops working
+correctly without them, portability is broken and that is a finding against the thesis (PRD §5).
+
+*Open:* hook event vocabularies differ per client and are verified only for Claude Code (§15.8).
 
 ---
 
-## 15. Harness target: Codex desktop app
+## 15. Harness targets: portable by construction
 
-Initial target. Verified against the official plugin documentation
-(https://developers.openai.com/plugins/build/plugins), not inferred.
+Factory must work on **Codex, GitHub Copilot, and Claude Code**, and must not be architected around
+any one of them. This section establishes what "portable" means concretely, because there is now a
+real standard to hold it to rather than a hopeful claim.
 
-### Plugin shape
+Verified against primary sources: the Agent Plugins 1.0 specification
+(https://agent-plugins.org), the OpenAI plugin docs
+(https://developers.openai.com/plugins/build/plugins), GitHub's plugin concept docs
+(docs.github.com/copilot/concepts/agents/about-plugins), the VS Code agent-plugins reference,
+and the Claude Code plugins reference (code.claude.com/docs/en/plugins-reference).
+
+### 15.1 There is a vendor-neutral standard, and Factory should target it
+
+**Agent Plugins 1.0** is an open, vendor-neutral packaging standard whose Technical Steering
+Committee includes Amazon, Cursor, Microsoft, OpenAI, and Vercel. It defines exactly two portable
+component types and leaves everything else to individual clients:
 
 ```
-clockgrove-factory/
-├── .codex-plugin/plugin.json     required manifest; nothing else lives here
-├── skills/<name>/SKILL.md        the management reasoning
-├── hooks/hooks.json              optional lifecycle hooks (§14)
-└── dist/factory.js               bundled deterministic library (§13)
+factory/
+├── plugin.json          # $schema = agent-plugins.org/schemas/1.0.0/plugin.schema.json
+├── skills/              # PORTABLE — Agent Skills format
+│   └── <name>/SKILL.md
+├── mcp.json             # PORTABLE — MCP server definitions
+└── com.github.copilot/  # client-owned, ignored by everyone else
+    └── hooks/hooks.json
 ```
 
-Manifest fields are `name`, `version`, `description`, plus pointers: `skills`,
-`hooks`, `mcpServers`, `apps`, and an `interface` block for install-surface metadata.
+Clients read namespaces they implement and ignore the rest without failing validation. Format
+detection is by manifest path, so the same tree can carry adapters:
 
-### Three findings that change the design
+| Client | Manifest it looks for |
+|---|---|
+| Agent Plugins 1.0 | `plugin.json` with the canonical `$schema` |
+| GitHub Copilot | `plugin.json` |
+| Claude Code | `.claude-plugin/plugin.json` |
+| Codex | `.codex-plugin/plugin.json` |
 
-**1. There is no `agents` field. Director must be a skill.**
-Codex plugins bundle skills, MCP servers, and hooks — not agents. v1's manifest declared
-`"agents": ".github/agents/"`, which is the *Claude Code* shape, not Codex's. Director is therefore
-authored as a skill that owns the loop, and §2's component map changes accordingly. This is a
-naming and packaging change, not a change to the architecture.
+**Decision: author Factory as an Agent Plugins 1.0 package**, with thin per-harness manifest
+adapters. The portable core is the product; the adapters are packaging.
 
-**2. Exact-ref install is native. No release machinery is needed.**
-Marketplace entries accept Git sources with `ref` **or `sha`** selectors:
+### 15.2 The portability boundary is narrower than expected — and it is load-bearing
 
-```json
-{ "source": { "source": "git-subdir", "url": "https://github.com/clockgrove/factory.git",
-              "path": "./plugins/clockgrove-factory", "ref": "main" } }
-```
+This is the finding that actually constrains the design:
 
-and the CLI supports `codex plugin marketplace add owner/repo --ref <ref>`.
+| Capability | Portable? |
+|---|---|
+| **Skills** | ✅ standard |
+| **MCP servers** | ✅ standard |
+| Agents | ❌ client-specific |
+| Hooks | ❌ client-specific |
+| Slash commands / rules | ❌ client-specific |
 
-This satisfies PRD §9 — *"installable from an exact Git ref by an unrelated adopter"* — with a
-platform primitive. v1 built generations, qualification gates, signed approvals, and a release
-pipeline to reach a guarantee that a `sha` selector already provides. Factory ships **no release
-machinery**; a commit SHA is the version.
+Only **skills and MCP servers cross harnesses**. Three consequences follow, and they are not
+cosmetic.
 
-**3. Dependencies must be bundled.**
-For npm-sourced plugins the docs state Codex *"downloads the package without running lifecycle
-scripts."* There is no install step, so `node_modules` will not be materialized.
+**1. Director must be a skill — and for a stronger reason than previously recorded.**
+The earlier note said "Codex has no `agents` field." The real reason is more general: *agents are
+non-portable on every client.* Claude Code puts them in `agents/`, Copilot in
+`com.github.copilot/agents/`, Codex omits them. Any design in which Director is an agent is
+harness-locked by construction. v1's manifest declared `"agents": ".github/agents/"` — the Claude
+Code shape — which is precisely the coupling to avoid.
 
-The library must therefore ship as a **single pre-bundled JS file** (esbuild → `dist/factory.js`),
-with Octokit and its plugins bundled in. This is a constraint worth having: install becomes a copy,
-there is no network at install time, no dependency resolution on the adopter's machine, and the
-exact bytes that were tested are the exact bytes that run.
+**2. Hooks cannot carry the irreversibility guarantee.**
+This corrects §14. Hooks are client-specific, so a hook-based guardrail protects Factory on
+whichever harness implements it and silently protects nothing everywhere else. A safety property
+that is present on one host and absent on another is not a safety property. §14's closing constraint
+already said hooks are "optional hardening"; §15.3 says where the actual enforcement goes.
 
-### Distribution
+**3. MCP is the portable way to give Director deterministic tools.**
+This is the design opportunity. Factory needs the Director skill to call the deterministic library
+(§13). Shelling out to `node ${PLUGIN_ROOT}/dist/factory.js` works, but it is undeclared, needs
+shell permission, and differs per harness. Bundling the library as an **MCP server declared in
+`mcp.json`** is the standard, portable mechanism — the same tools appear on all three harnesses with
+no adapter.
 
-Two supported paths, both zero-infrastructure:
+### 15.3 Where enforcement lives: inside the tools, not around them
 
-- **Repo marketplace** — `$REPO_ROOT/.agents/plugins/marketplace.json`, for dogfooding from
-  `clockgrove/clockgrove`.
-- **Git-backed marketplace** — pinned by `ref` or `sha`, for external adopters.
+Combining §15.2's points two and three produces a better answer than §14's hook:
 
-Codex installs to `~/.codex/plugins/cache/$MARKETPLACE/$PLUGIN/$VERSION/` and stores enable/disable
-state in `~/.codex/config.toml`. Neither is Factory's concern — worth knowing, not worth managing.
+> **Every GitHub mutation Factory performs goes through the bundled MCP server. The server refuses
+> the irreversible-operation denylist. Director has no other write path.**
 
-### Portability signal
+The guarantee then rests on the *only* behavior-bearing component that is portable, and it holds by
+construction rather than by instruction — the model cannot route around a capability its tools do
+not expose. This is v1's "Keeper" idea, finally sized correctly: not a custom service, not a
+document, just the absence of a dangerous function in the one process allowed to write.
 
-Codex also reads a legacy-compatible marketplace at `$REPO_ROOT/.claude-plugin/marketplace.json`,
-and `SKILL.md` with YAML frontmatter is common to both ecosystems. The portable surface is the
-markdown and the schemas; the manifest is a thin per-harness adapter. That is the harness-agnostic
-claim in PRD §1 reduced to something concrete and testable.
+Hooks remain worthwhile as **defense in depth** where a harness supports them (Claude Code's
+`PreToolUse` can block a raw `git push --force` typed into a shell tool, which the MCP server never
+sees). They harden; they do not carry the invariant.
 
-### Open
+*Open:* this makes the MCP server load-bearing, so its trust and startup behavior need review —
+plugin MCP servers start automatically and are implicitly trusted on install.
 
-- **Hook event names for Codex are unverified.** The `hooks/hooks.json` mechanism is confirmed as a
-  first-class manifest component, but the event vocabulary was not established from the docs read so
-  far. Confirm before relying on §14.
-- **Codex CLI vs desktop app.** The docs direct local plugin *installation and testing* through the
-  desktop app while the CLI manages marketplaces. Confirm the desktop app can run Director's loop
-  for a long-running session, or whether the CLI is the better host for Gate 0.
+### 15.4 Distribution and pinning
+
+Marketplaces are `marketplace.json` files listing versioned plugins; a marketplace can be a GitHub
+repo, any Git host, or a local path. Installation is per-harness but uniformly zero-infrastructure:
+
+- **Codex** — `codex plugin marketplace add owner/repo --ref <ref>`; Git sources accept `ref` **or
+  `sha`** selectors.
+- **Copilot CLI** — `copilot plugin install owner/repo`, or declaratively via `enabledPlugins` in
+  `~/.copilot/settings.json` or `.github/copilot/settings.json`.
+- **Claude Code** — `.claude-plugin/marketplace.json`.
+
+PRD §9 requires installation from an **exact Git ref**. Codex satisfies this natively with a `sha`
+selector, which is why Factory ships **no release machinery** — a commit SHA is the version. v1
+built generations, qualification gates, signed approvals, and a release pipeline to reach a
+guarantee the platform already provides. *Per-harness pinning fidelity is unverified for Copilot CLI
+and Claude Code and must be tested, not assumed* (§15.6).
+
+**Noted for later:** the Copilot **cloud agent** reads `enabledPlugins` from
+`.github/copilot/settings.json`. That is a supported path for delivering the *project* skill package
+to the agent sessions Factory dispatches — relevant to §8, and not something Factory needs to invent.
+
+### 15.5 Bundling
+
+For npm-sourced plugins, Codex "downloads the package without running lifecycle scripts." There is
+no install step and `node_modules` is never materialized. The library therefore ships as a **single
+pre-bundled file** (esbuild → `dist/factory.js`), Octokit included.
+
+This is a constraint worth having, and it is harness-independent: install is a copy, there is no
+network at install time, no dependency resolution on the adopter's machine, and the exact bytes
+tested are the exact bytes that run.
+
+### 15.6 How portability gets proven
+
+The claim is only credible if it is exercised. Gate 0 (§10) runs on **one** harness — the Codex
+desktop app, chosen for available usage limits, not for architectural primacy. Portability is then
+verified by a deliberate, minimal check:
+
+**Install Factory on all three harnesses and run one identical Objective to terminal state.**
+
+Same skills, same MCP server, same GitHub evidence — only the manifest adapter differs. Any behavior
+that diverges is either a bug or a hidden dependency on a client-specific capability, and either way
+it is a finding. Deferred until after Gate 0; the target is `v0.2`, not `v1.0`.
+
+### 15.7 Model neutrality
+
+Distinct from harness neutrality, and cheaper to hold. Factory chooses no model anywhere: the
+harness supplies whatever model the operator has selected for the Director session, and execution
+uses whichever agent the *platform* provides — PROBE-001 measured `copilot-swe-agent`, which GitHub
+may re-point at any time.
+
+The load-bearing consequence, already established by PROBE-001: **outcomes are read from GitHub
+evidence — diffs, commits, checks — never from an agent's self-report.** A `conclusion: success` on
+an impossible task is exactly what model-agnosticism costs, and evidence-based evaluation (§5) is
+what pays for it. Nothing in Factory should improve if the model improves, except the pass rate.
+
+### 15.8 Open
+
+- **Hook event vocabularies differ per client** and are unverified outside Claude Code. Confirm
+  before relying on §14's hardening layer. Not blocking, given §15.3.
+- **Does Codex support Agent Plugins 1.0 natively**, or only `.codex-plugin/plugin.json`? OpenAI
+  sits on the TSC, so convergence is likely, but the currently documented Codex path is its own
+  manifest. Ship both; verify at install.
+- **Skill-invocation semantics vary.** Claude Code exposes skills as `/name`; other clients differ.
+  Director must be invocable and long-running on each target — verify during §15.6.

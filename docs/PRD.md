@@ -333,10 +333,13 @@ supervisor. It is *not* a permit protocol, a serialization fence, or a terminal 
    mandate.** Some decisions legitimately require a human. Escalation is a first-class outcome with
    an explicit confidence bar, not a failure — see `IMPLEMENTATION-PLAN.md` §7. A well-founded
    escalation is the system working; a suppressed one is a defect.
-5. ~~Which harnesses must v1.0 support?~~ **Decided: Codex desktop app first.** Plugin shape,
-   exact-ref install, and bundling constraints verified against the official docs; see
-   `IMPLEMENTATION-PLAN.md` §15. Portability rests on `SKILL.md` + schemas, with the manifest as a
-   thin per-harness adapter.
+5. ~~Which harnesses must v1.0 support?~~ **Decided: Codex, GitHub Copilot, and Claude Code — all
+   three, with no architectural primacy for any.** Factory is authored as an **Agent Plugins 1.0**
+   package (open, vendor-neutral standard; TSC includes Amazon, Cursor, Microsoft, OpenAI, Vercel),
+   whose portable surface is *skills + MCP servers only*. Agents, hooks, and commands are
+   client-specific and therefore cannot be load-bearing. Gate 0 runs on the Codex desktop app for
+   usage-limit reasons alone; portability is proven in `v0.2` by running one identical Objective on
+   all three. See `IMPLEMENTATION-PLAN.md` §15.
 6. ~~Public from day one, or public at Gate 2?~~ **Decided: private for now.** Public is a
    one-command change; published history is not recallable. The open-source-ready criteria in §10
    still bind from day one so nothing has to be retrofitted — no private dependencies, no

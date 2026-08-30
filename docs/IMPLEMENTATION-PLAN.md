@@ -43,12 +43,14 @@ plugin/
 ├── schemas/                      validation contracts
 │   ├── work-item.schema.json
 │   └── objective.schema.json
-└── factory/                      deterministic Python; no judgment
-    ├── github.py                 thin gh/GraphQL client
-    ├── state.py                  GitHub → derived state (§3)
-    ├── graph.py                  apply Work Item graph to Issues
-    ├── dispatch.py               assign + confirm + retry (§4)
-    └── evaluate.py               mechanical PR checks (§5)
+└── factory/                      deterministic TypeScript; no judgment
+    ├── types.ts                  shared shapes (§3.1)
+    ├── github.ts                 read-only GraphQL client → snapshot (§2)
+    ├── state.ts                  GitHub → derived state (§3)
+    ├── platform.ts               refusal vs. work-failure, pacing (Finding 4)
+    ├── graph.ts                  apply Work Item graph to Issues
+    ├── dispatch.ts               assign + confirm + retry (§4)
+    └── evaluate.ts               mechanical PR checks (§5)
 ```
 
 **The split between code and reasoning is load-bearing:**
@@ -171,6 +173,15 @@ if neither appears:
 
 This is the *only* reconciliation Factory performs, it is bounded, and it exists because a measured
 platform behavior demands it — not because a design pattern suggested it.
+
+**"On second failure" is derived, not counted.** The obvious implementation stores a retry counter —
+but that is exactly the sidecar state §1 forbids, and an in-process counter would not survive a
+restart honestly either. Instead, `state.ts`'s `confirmFailureStreak` walks the issue's own
+`AssignedEvent` timeline (already fetched for the confirm-window check) and counts trailing
+assignment windows that produced zero linked PRs, stopping at the first one that did. Every
+unassign/reassign leaves a fresh `AssignedEvent`, so the timeline already encodes the retry history;
+this reads it rather than duplicating it. A Dispatcher restart mid-retry loses nothing — the next
+cycle recomputes the same streak from the same GitHub history and reaches the same decision.
 
 ### 4.3 Idempotency
 

@@ -27,6 +27,8 @@ export type PullRequestState = "OPEN" | "CLOSED" | "MERGED";
 export type CheckRollup = "PENDING" | "SUCCESS" | "FAILURE" | null;
 
 export interface LinkedPullRequest {
+  /** GraphQL node ID, needed to address `closePullRequest` at retry time. */
+  id: string;
   number: number;
   state: PullRequestState;
   isDraft: boolean;
@@ -36,6 +38,7 @@ export interface LinkedPullRequest {
   /** Commit subjects, oldest first. */
   commitSubjects: string[];
   checks: CheckRollup;
+  createdAt: Date;
 }
 
 export interface IssueRef {
@@ -44,10 +47,13 @@ export interface IssueRef {
 }
 
 /**
- * One raw Work Item snapshot. Everything needed to derive state, and nothing
- * else — if a field here is unused by `deriveState`, it should not be fetched.
+ * One raw Work Item snapshot. Everything needed to derive state, plus `id`
+ * and `number` for addressing it in write calls — nothing else should be
+ * fetched here if `deriveState` and the dispatcher don't both need it.
  */
 export interface WorkItemSnapshot {
+  /** GraphQL node ID, needed to address `replaceActorsForAssignable` etc. */
+  id: string;
   number: number;
   title: string;
   closed: boolean;
@@ -56,18 +62,19 @@ export interface WorkItemSnapshot {
   /** PRs that would close this issue, via `closedByPullRequestsReferences`. */
   linkedPullRequests: LinkedPullRequest[];
   /**
-   * When the coding agent was most recently assigned, from the issue's
-   * `AssignedEvent` timeline (§4.2). `null` when it has never been assigned.
+   * Every time the coding agent was assigned, from the issue's `AssignedEvent`
+   * timeline (§4.2), oldest first. Empty when it has never been assigned.
    *
    * There is no queryable, per-issue session-status API (verified live,
    * 2026-08-30 — see PRD F8): the Agent Tasks REST API exposes a task `state`
    * but no issue-reference field, so a task cannot be matched back to the
    * issue that triggered it once more than one Work Item is in flight. This
-   * timestamp is the load-bearing signal instead: it gates how long a
-   * still-evidence-free attempt is given the benefit of the doubt before
-   * `deriveState` calls it `failed` and before the dispatcher retries it.
+   * history is the load-bearing signal instead: `state.ts` derives both "is a
+   * still-evidence-free attempt within its grace period" and "how many
+   * consecutive assignments produced no pull request at all" from it — a pure
+   * function of GitHub's own event log, needing no separate storage.
    */
-  copilotAssignedAt: Date | null;
+  copilotAssignments: Date[];
 }
 
 export interface ObjectiveSnapshot {
@@ -77,4 +84,14 @@ export interface ObjectiveSnapshot {
   workItems: WorkItemSnapshot[];
   /** When the snapshot was taken. One snapshot serves a whole cycle (§4.1). */
   readAt: Date;
+  /** GraphQL node ID of the repository (§4.2's `agentAssignment.targetRepositoryId`). */
+  repositoryId: string;
+  /** The repository's default branch, used as `agentAssignment.baseRef`. */
+  defaultBranch: string;
+  /**
+   * Node ID of the coding agent's bot actor, discovered via
+   * `suggestedActors(capabilities: [CAN_BE_ASSIGNED])` (verified live,
+   * 2026-08-30). `null` if the repository has no assignable coding agent.
+   */
+  copilotBotId: string | null;
 }

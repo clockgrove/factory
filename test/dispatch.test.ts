@@ -1,0 +1,320 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import {
+  Dispatcher,
+  attemptAction,
+  confirmAction,
+  type DispatcherOptions,
+  type GitHubWriter,
+} from "../src/dispatch.js";
+import {
+  CircuitBreaker,
+  ContentCreationPacer,
+  PlatformUnavailableError,
+} from "../src/platform.js";
+import { attemptCount, deriveState, DISPATCH_CONFIRM_WINDOW_MS } from "../src/state.js";
+import type { DerivedWorkItem } from "../src/state.js";
+import {
+  COPILOT_LOGIN,
+  INITIAL_PLAN_COMMIT,
+  type LinkedPullRequest,
+  type WorkItemSnapshot,
+} from "../src/types.js";
+
+const NOW = new Date("2026-01-01T00:00:00Z");
+
+function pr(over: Partial<LinkedPullRequest> = {}): LinkedPullRequest {
+  return {
+    id: "PR_1",
+    number: 1,
+    state: "OPEN",
+    isDraft: true,
+    changedLines: 0,
+    changedFiles: 0,
+    commitSubjects: [INITIAL_PLAN_COMMIT],
+    checks: "PENDING",
+    createdAt: NOW,
+    ...over,
+  };
+}
+
+let nextId = 1;
+
+function wi(over: Partial<WorkItemSnapshot> = {}): WorkItemSnapshot {
+  return {
+    id: `WI_${nextId++}`,
+    number: 10,
+    title: "Add slugify",
+    closed: false,
+    assignees: [COPILOT_LOGIN],
+    blockedBy: [],
+    linkedPullRequests: [],
+    copilotAssignments: [],
+    ...over,
+  };
+}
+
+/** Builds a `DerivedWorkItem` without going through a full `ObjectiveSnapshot`. */
+function derivedWi(over: Partial<WorkItemSnapshot> = {}, now = NOW): DerivedWorkItem {
+  const snap = wi(over);
+  return { ...snap, state: deriveState(snap, now), attempts: attemptCount(snap) };
+}
+
+/** Records every call made to it, and can be configured to reject on a given method. */
+class FakeWriter implements GitHubWriter {
+  calls: string[] = [];
+  failing: Partial<Record<keyof GitHubWriter, unknown>>;
+
+  constructor(failing: Partial<Record<keyof GitHubWriter, unknown>> = {}) {
+    this.failing = failing;
+  }
+
+  async assignCopilot(args: {
+    issueId: string;
+    botId: string;
+    repositoryId: string;
+    baseRef: string;
+  }): Promise<void> {
+    this.calls.push(`assignCopilot:${args.issueId}:${args.botId}`);
+    if (this.failing.assignCopilot) throw this.failing.assignCopilot;
+  }
+
+  async clearActors(issueId: string): Promise<void> {
+    this.calls.push(`clearActors:${issueId}`);
+    if (this.failing.clearActors) throw this.failing.clearActors;
+  }
+
+  async addHumanAssignee(issueId: string, userId: string): Promise<void> {
+    this.calls.push(`addHumanAssignee:${issueId}:${userId}`);
+    if (this.failing.addHumanAssignee) throw this.failing.addHumanAssignee;
+  }
+
+  async addComment(subjectId: string, body: string): Promise<void> {
+    this.calls.push(`addComment:${subjectId}`);
+    if (this.failing.addComment) throw this.failing.addComment;
+  }
+
+  async closePullRequest(pullRequestId: string): Promise<void> {
+    this.calls.push(`closePullRequest:${pullRequestId}`);
+    if (this.failing.closePullRequest) throw this.failing.closePullRequest;
+  }
+}
+
+/** Shape `classifyRefusal` (platform.ts) recognizes as a secondary rate limit. */
+function rateLimitError(): unknown {
+  return {
+    status: 403,
+    message: "API rate limit exceeded for user ID 1.",
+    response: { headers: { "x-ratelimit-remaining": "5000" } },
+  };
+}
+
+function makeDispatcher(
+  writer: GitHubWriter,
+  overrides: Partial<DispatcherOptions> = {},
+): Dispatcher {
+  return new Dispatcher({
+    writer,
+    repositoryId: "R_1",
+    copilotBotId: "BOT_1",
+    defaultBranch: "main",
+    escalateToId: "U_human",
+    // No gap between calls, so tests run fast rather than pacing for real.
+    pacer: new ContentCreationPacer(10_000, 100_000, 0),
+    ...overrides,
+  });
+}
+
+describe("confirmAction", () => {
+  it("waits inside the confirm window", () => {
+    const item = derivedWi({ copilotAssignments: [new Date(NOW.getTime() - 30_000)] });
+    expect(confirmAction(item, NOW)).toBe("wait");
+  });
+
+  it("retries on the first PR-less assignment past the window", () => {
+    const item = derivedWi({
+      copilotAssignments: [new Date(NOW.getTime() - DISPATCH_CONFIRM_WINDOW_MS - 1)],
+    });
+    expect(confirmAction(item, NOW)).toBe("retry");
+  });
+
+  it("escalates on the second consecutive PR-less assignment", () => {
+    const item = derivedWi({
+      copilotAssignments: [
+        new Date(NOW.getTime() - DISPATCH_CONFIRM_WINDOW_MS - 120_000),
+        new Date(NOW.getTime() - DISPATCH_CONFIRM_WINDOW_MS - 1),
+      ],
+    });
+    expect(confirmAction(item, NOW)).toBe("escalate");
+  });
+});
+
+describe("attemptAction", () => {
+  it("retries under three attempts", () => {
+    const item = derivedWi({
+      linkedPullRequests: [pr({ number: 1, state: "CLOSED" }), pr({ number: 2 })],
+    });
+    expect(attemptAction(item)).toBe("retry");
+  });
+
+  it("escalates at three attempts", () => {
+    const item = derivedWi({
+      linkedPullRequests: [
+        pr({ number: 1, state: "CLOSED" }),
+        pr({ number: 2, state: "CLOSED" }),
+        pr({ number: 3 }),
+      ],
+    });
+    expect(attemptAction(item)).toBe("escalate");
+  });
+});
+
+describe("Dispatcher.start", () => {
+  it("assigns Copilot to the issue", async () => {
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    const item = derivedWi();
+    await d.start(item);
+    expect(writer.calls).toEqual([`assignCopilot:${item.id}:BOT_1`]);
+  });
+});
+
+describe("Dispatcher.confirm", () => {
+  it("does nothing inside the confirm window", async () => {
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    const item = derivedWi({ copilotAssignments: [new Date(NOW.getTime() - 30_000)] });
+    await d.confirm(item, NOW);
+    expect(writer.calls).toEqual([]);
+  });
+
+  it("clears then reassigns on the first confirm failure", async () => {
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    const item = derivedWi({
+      copilotAssignments: [new Date(NOW.getTime() - DISPATCH_CONFIRM_WINDOW_MS - 1)],
+    });
+    await d.confirm(item, NOW);
+    // Order matters: a bare reassignment is not a transition (PRD F8).
+    expect(writer.calls).toEqual([`clearActors:${item.id}`, `assignCopilot:${item.id}:BOT_1`]);
+  });
+
+  it("escalates instead of retrying on the second confirm failure", async () => {
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    const item = derivedWi({
+      copilotAssignments: [
+        new Date(NOW.getTime() - DISPATCH_CONFIRM_WINDOW_MS - 120_000),
+        new Date(NOW.getTime() - DISPATCH_CONFIRM_WINDOW_MS - 1),
+      ],
+    });
+    await d.confirm(item, NOW);
+    expect(writer.calls).toEqual([
+      `addHumanAssignee:${item.id}:U_human`,
+      `clearActors:${item.id}`,
+      `addComment:${item.id}`,
+    ]);
+  });
+
+  it("stops after the failing call and never reaches the reassignment", async () => {
+    // A partial failure here must not paper over the refusal by continuing
+    // on to assignCopilot — the next cycle re-derives state and retries.
+    const writer = new FakeWriter({ clearActors: rateLimitError() });
+    const d = makeDispatcher(writer);
+    const item = derivedWi({
+      copilotAssignments: [new Date(NOW.getTime() - DISPATCH_CONFIRM_WINDOW_MS - 1)],
+    });
+    await expect(d.confirm(item, NOW)).rejects.toBeInstanceOf(PlatformUnavailableError);
+    expect(writer.calls).toEqual([`clearActors:${item.id}`]);
+  });
+});
+
+describe("Dispatcher.retryOrEscalate", () => {
+  it("comments, closes the current PR, then reassigns when under the attempt cap", async () => {
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    const item = derivedWi({ linkedPullRequests: [pr({ id: "PR_current" })] });
+    await d.retryOrEscalate(item);
+    expect(writer.calls).toEqual([
+      "addComment:PR_current",
+      "closePullRequest:PR_current",
+      `clearActors:${item.id}`,
+      `assignCopilot:${item.id}:BOT_1`,
+    ]);
+  });
+
+  it("skips the PR steps when no open PR remains and still reassigns", async () => {
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    // Two closed attempts already, no currently open PR (an edge case, but
+    // `retryOrEscalate` should still make forward progress).
+    const item = derivedWi({
+      linkedPullRequests: [
+        pr({ number: 1, state: "CLOSED" }),
+        pr({ number: 2, state: "CLOSED" }),
+      ],
+    });
+    await d.retryOrEscalate(item);
+    expect(writer.calls).toEqual([`clearActors:${item.id}`, `assignCopilot:${item.id}:BOT_1`]);
+  });
+
+  it("escalates by issue, not by PR, once attempts are exhausted", async () => {
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    const item = derivedWi({
+      linkedPullRequests: [
+        pr({ number: 1, state: "CLOSED" }),
+        pr({ number: 2, state: "CLOSED" }),
+        pr({ number: 3, id: "PR_current" }),
+      ],
+    });
+    await d.retryOrEscalate(item);
+    expect(writer.calls).toEqual([
+      `addHumanAssignee:${item.id}:U_human`,
+      `clearActors:${item.id}`,
+      `addComment:${item.id}`,
+    ]);
+  });
+});
+
+describe("Dispatcher / platform.ts integration", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("wraps a classified refusal rather than swallowing it", async () => {
+    const writer = new FakeWriter({ assignCopilot: rateLimitError() });
+    const d = makeDispatcher(writer);
+    await expect(d.start(derivedWi())).rejects.toBeInstanceOf(PlatformUnavailableError);
+  });
+
+  it("propagates a genuine, non-refusal error unchanged", async () => {
+    const boom = new Error("issue not found");
+    const writer = new FakeWriter({ assignCopilot: boom });
+    const d = makeDispatcher(writer);
+    await expect(d.start(derivedWi())).rejects.toBe(boom);
+  });
+
+  it("waits out an open circuit before making the next call", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+
+    const writer = new FakeWriter({ assignCopilot: rateLimitError() });
+    const breaker = new CircuitBreaker({
+      openAfterConsecutiveRefusals: 1,
+      baseCooldownMs: 60_000,
+      maxCooldownMs: 60_000,
+    });
+    const d = makeDispatcher(writer, { circuitBreaker: breaker });
+
+    await expect(d.start(derivedWi())).rejects.toBeInstanceOf(PlatformUnavailableError);
+    expect(breaker.isOpen(new Date())).toBe(true);
+
+    writer.failing.assignCopilot = undefined;
+    const second = d.start(derivedWi());
+    await vi.advanceTimersByTimeAsync(60_000);
+    await second;
+
+    expect(writer.calls.filter((c) => c.startsWith("assignCopilot")).length).toBe(2);
+  });
+});

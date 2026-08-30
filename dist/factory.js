@@ -2669,12 +2669,21 @@ var FactoryOctokit = Octokit.plugin(retry, throttling);
 var OBJECTIVE_QUERY = `
 query Objective($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
+    id
+    defaultBranchRef { name }
+    suggestedActors(capabilities: [CAN_BE_ASSIGNED], first: 10) {
+      nodes {
+        login
+        ... on Bot { id }
+      }
+    }
     issue(number: $number) {
       number
       title
       state
       subIssues(first: 100) {
         nodes {
+          id
           number
           title
           state
@@ -2682,9 +2691,11 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
           blockedBy(first: 50) { nodes { number state } }
           closedByPullRequestsReferences(first: 20, includeClosedPrs: true) {
             nodes {
+              id
               number
               state
               isDraft
+              createdAt
               additions
               deletions
               changedFiles
@@ -2727,24 +2738,19 @@ function normalizeChecks(pr) {
 }
 function toPullRequest(pr) {
   return {
+    id: pr.id,
     number: pr.number,
     state: pr.state,
     isDraft: pr.isDraft,
     changedLines: pr.additions + pr.deletions,
     changedFiles: pr.changedFiles,
     commitSubjects: pr.commits.nodes.map((n) => n.commit.messageHeadline),
-    checks: normalizeChecks(pr)
+    checks: normalizeChecks(pr),
+    createdAt: new Date(pr.createdAt)
   };
 }
-function copilotAssignedAt(wi) {
-  const events = wi.timelineItems.nodes.filter(
-    (e) => e.assignee?.login === COPILOT_LOGIN
-  );
-  if (events.length === 0) return null;
-  const latest = events.reduce(
-    (max, e) => e.createdAt > max.createdAt ? e : max
-  );
-  return new Date(latest.createdAt);
+function copilotAssignments(wi) {
+  return wi.timelineItems.nodes.filter((e) => e.assignee?.login === COPILOT_LOGIN).map((e) => new Date(e.createdAt)).sort((a, b) => a.getTime() - b.getTime());
 }
 function toWorkItem(wi) {
   const blockedBy = wi.blockedBy.nodes.map((d) => ({
@@ -2752,37 +2758,41 @@ function toWorkItem(wi) {
     closed: d.state === "CLOSED"
   }));
   return {
+    id: wi.id,
     number: wi.number,
     title: wi.title,
     closed: wi.state === "CLOSED",
     assignees: wi.assignees.nodes.map((a) => a.login),
     blockedBy,
     linkedPullRequests: wi.closedByPullRequestsReferences.nodes.map(toPullRequest),
-    copilotAssignedAt: copilotAssignedAt(wi)
+    copilotAssignments: copilotAssignments(wi)
   };
+}
+function createOctokit(opts) {
+  const notify = opts.onThrottle ?? (() => {
+  });
+  return new FactoryOctokit({
+    auth: opts.token,
+    throttle: {
+      onRateLimit: (after, o) => {
+        notify(`rate limit on ${o.method} ${o.url}; retrying in ${after}s`);
+        return true;
+      },
+      onSecondaryRateLimit: (after, o) => {
+        notify(`secondary limit on ${o.method} ${o.url}; retrying in ${after}s`);
+        return true;
+      }
+    }
+  });
 }
 var GitHubReader = class {
   #octokit;
   #owner;
   #repo;
   constructor(opts) {
-    const notify = opts.onThrottle ?? (() => {
-    });
     this.#owner = opts.owner;
     this.#repo = opts.repo;
-    this.#octokit = new FactoryOctokit({
-      auth: opts.token,
-      throttle: {
-        onRateLimit: (after, o) => {
-          notify(`rate limit on ${o.method} ${o.url}; retrying in ${after}s`);
-          return true;
-        },
-        onSecondaryRateLimit: (after, o) => {
-          notify(`secondary limit on ${o.method} ${o.url}; retrying in ${after}s`);
-          return true;
-        }
-      }
-    });
+    this.#octokit = createOctokit(opts);
   }
   /** Read one Objective and everything derivable about its Work Items. */
   async readObjective(number) {
@@ -2791,19 +2801,46 @@ var GitHubReader = class {
       repo: this.#repo,
       number
     });
-    const issue = data.repository?.issue;
-    if (!issue) {
+    const repository = data.repository;
+    const issue = repository?.issue;
+    if (!repository || !issue) {
       throw new Error(
         `Objective #${number} not found in ${this.#owner}/${this.#repo}`
       );
     }
+    if (!repository.defaultBranchRef) {
+      throw new Error(
+        `${this.#owner}/${this.#repo} has no default branch (empty repository?)`
+      );
+    }
+    const bot = repository.suggestedActors.nodes.find(
+      (a) => a.login === COPILOT_LOGIN
+    );
     return {
       number: issue.number,
       title: issue.title,
       closed: issue.state === "CLOSED",
       workItems: issue.subIssues.nodes.map(toWorkItem),
-      readAt: /* @__PURE__ */ new Date()
+      readAt: /* @__PURE__ */ new Date(),
+      repositoryId: repository.id,
+      defaultBranch: repository.defaultBranchRef.name,
+      copilotBotId: bot?.id ?? null
     };
+  }
+  /**
+   * Resolve a login to its GraphQL node ID, needed once at startup to
+   * configure `Dispatcher`'s escalation target (§7.2). A plain, stable
+   * `user(login:)` lookup — not part of the per-cycle snapshot.
+   */
+  async resolveUserId(login) {
+    const data = await this.#octokit.graphql(
+      `query ResolveUser($login: String!) { user(login: $login) { id } }`,
+      { login }
+    );
+    if (!data.user) {
+      throw new Error(`GitHub user '${login}' not found`);
+    }
+    return data.user.id;
   }
 };
 
@@ -2823,9 +2860,14 @@ function isAssignedToCopilot(wi) {
   return wi.assignees.includes(COPILOT_LOGIN);
 }
 var DISPATCH_CONFIRM_WINDOW_MS = 9e4;
+function latestCopilotAssignment(wi) {
+  if (wi.copilotAssignments.length === 0) return null;
+  return wi.copilotAssignments[wi.copilotAssignments.length - 1];
+}
 function withinConfirmWindow(wi, now) {
-  if (!wi.copilotAssignedAt) return false;
-  return now.getTime() - wi.copilotAssignedAt.getTime() < DISPATCH_CONFIRM_WINDOW_MS;
+  const assignedAt = latestCopilotAssignment(wi);
+  if (!assignedAt) return false;
+  return now.getTime() - assignedAt.getTime() < DISPATCH_CONFIRM_WINDOW_MS;
 }
 function humanAssignees(wi) {
   return wi.assignees.filter((a) => a !== COPILOT_LOGIN);
@@ -2833,16 +2875,19 @@ function humanAssignees(wi) {
 function attemptCount(wi) {
   return wi.linkedPullRequests.length;
 }
+function currentOpenPullRequest(wi) {
+  const open = wi.linkedPullRequests.filter((p) => p.state === "OPEN");
+  return open.length > 0 ? open[open.length - 1] : null;
+}
 function deriveState(wi, now) {
   if (wi.closed) return "done";
-  const open = wi.linkedPullRequests.filter((p) => p.state === "OPEN");
   const merged = wi.linkedPullRequests.filter((p) => p.state === "MERGED");
   if (merged.length > 0) return "done";
   if (!isAssignedToCopilot(wi) && humanAssignees(wi).length > 0) {
     return "escalated";
   }
-  if (open.length > 0) {
-    const current = open[open.length - 1];
+  const current = currentOpenPullRequest(wi);
+  if (current) {
     if (isNoOp(current)) {
       return withinConfirmWindow(wi, now) ? "in_flight" : "failed";
     }
@@ -2859,6 +2904,9 @@ function derive(snapshot) {
     title: snapshot.title,
     closed: snapshot.closed,
     readAt: snapshot.readAt,
+    repositoryId: snapshot.repositoryId,
+    defaultBranch: snapshot.defaultBranch,
+    copilotBotId: snapshot.copilotBotId,
     items: snapshot.workItems.map((wi) => ({
       ...wi,
       state: deriveState(wi, snapshot.readAt),

@@ -44,12 +44,21 @@ export interface GitHubOptions {
 const OBJECTIVE_QUERY = `
 query Objective($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
+    id
+    defaultBranchRef { name }
+    suggestedActors(capabilities: [CAN_BE_ASSIGNED], first: 10) {
+      nodes {
+        login
+        ... on Bot { id }
+      }
+    }
     issue(number: $number) {
       number
       title
       state
       subIssues(first: 100) {
         nodes {
+          id
           number
           title
           state
@@ -57,9 +66,11 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
           blockedBy(first: 50) { nodes { number state } }
           closedByPullRequestsReferences(first: 20, includeClosedPrs: true) {
             nodes {
+              id
               number
               state
               isDraft
+              createdAt
               additions
               deletions
               changedFiles
@@ -93,9 +104,11 @@ interface GqlIssueState {
 }
 
 interface GqlPr {
+  id: string;
   number: number;
   state: "OPEN" | "CLOSED" | "MERGED";
   isDraft: boolean;
+  createdAt: string;
   additions: number;
   deletions: number;
   changedFiles: number;
@@ -111,6 +124,7 @@ interface GqlAssignedEvent {
 }
 
 interface GqlWorkItem extends GqlIssueState {
+  id: string;
   number: number;
   title: string;
   assignees: { nodes: { login: string }[] };
@@ -119,8 +133,16 @@ interface GqlWorkItem extends GqlIssueState {
   timelineItems: { nodes: GqlAssignedEvent[] };
 }
 
+interface GqlSuggestedActor {
+  login: string;
+  id?: string;
+}
+
 interface GqlResponse {
   repository: {
+    id: string;
+    defaultBranchRef: { name: string } | null;
+    suggestedActors: { nodes: GqlSuggestedActor[] };
     issue: {
       number: number;
       title: string;
@@ -151,6 +173,7 @@ function normalizeChecks(pr: GqlPr): CheckRollup {
 
 function toPullRequest(pr: GqlPr): LinkedPullRequest {
   return {
+    id: pr.id,
     number: pr.number,
     state: pr.state,
     isDraft: pr.isDraft,
@@ -158,24 +181,21 @@ function toPullRequest(pr: GqlPr): LinkedPullRequest {
     changedFiles: pr.changedFiles,
     commitSubjects: pr.commits.nodes.map((n) => n.commit.messageHeadline),
     checks: normalizeChecks(pr),
+    createdAt: new Date(pr.createdAt),
   };
 }
 
 /**
- * Latest time the coding agent was assigned, from the issue's `AssignedEvent`
- * timeline (§4.2). `null` if it has never been assigned. GitHub auto-assigns
- * the requesting human alongside Copilot (verified live, 2026-08-30), so this
- * filters to the agent's own events rather than trusting timeline order.
+ * Every time the coding agent was assigned, from the issue's `AssignedEvent`
+ * timeline (§4.2), oldest first. GitHub auto-assigns the requesting human
+ * alongside Copilot (verified live, 2026-08-30), so this filters to the
+ * agent's own events rather than trusting timeline order or count.
  */
-function copilotAssignedAt(wi: GqlWorkItem): Date | null {
-  const events = wi.timelineItems.nodes.filter(
-    (e) => e.assignee?.login === COPILOT_LOGIN,
-  );
-  if (events.length === 0) return null;
-  const latest = events.reduce((max, e) =>
-    e.createdAt > max.createdAt ? e : max,
-  );
-  return new Date(latest.createdAt);
+function copilotAssignments(wi: GqlWorkItem): Date[] {
+  return wi.timelineItems.nodes
+    .filter((e) => e.assignee?.login === COPILOT_LOGIN)
+    .map((e) => new Date(e.createdAt))
+    .sort((a, b) => a.getTime() - b.getTime());
 }
 
 function toWorkItem(wi: GqlWorkItem): WorkItemSnapshot {
@@ -185,6 +205,7 @@ function toWorkItem(wi: GqlWorkItem): WorkItemSnapshot {
   }));
 
   return {
+    id: wi.id,
     number: wi.number,
     title: wi.title,
     closed: wi.state === "CLOSED",
@@ -192,8 +213,34 @@ function toWorkItem(wi: GqlWorkItem): WorkItemSnapshot {
     blockedBy,
     linkedPullRequests:
       wi.closedByPullRequestsReferences.nodes.map(toPullRequest),
-    copilotAssignedAt: copilotAssignedAt(wi),
+    copilotAssignments: copilotAssignments(wi),
   };
+}
+
+/**
+ * Shared low-level client construction. Exported so `dispatch.ts` can build
+ * its own client for writes without duplicating the retry/throttle config —
+ * this is plumbing, not a reader method, so it does not compromise the "no
+ * writes" contract above.
+ */
+export function createOctokit(opts: GitHubOptions): Octokit {
+  const notify = opts.onThrottle ?? (() => {});
+  return new FactoryOctokit({
+    auth: opts.token,
+    throttle: {
+      onRateLimit: (after: number, o: { method: string; url: string }) => {
+        notify(`rate limit on ${o.method} ${o.url}; retrying in ${after}s`);
+        return true;
+      },
+      onSecondaryRateLimit: (
+        after: number,
+        o: { method: string; url: string },
+      ) => {
+        notify(`secondary limit on ${o.method} ${o.url}; retrying in ${after}s`);
+        return true;
+      },
+    },
+  });
 }
 
 export class GitHubReader {
@@ -202,25 +249,9 @@ export class GitHubReader {
   readonly #repo: string;
 
   constructor(opts: GitHubOptions) {
-    const notify = opts.onThrottle ?? (() => {});
     this.#owner = opts.owner;
     this.#repo = opts.repo;
-    this.#octokit = new FactoryOctokit({
-      auth: opts.token,
-      throttle: {
-        onRateLimit: (after: number, o: { method: string; url: string }) => {
-          notify(`rate limit on ${o.method} ${o.url}; retrying in ${after}s`);
-          return true;
-        },
-        onSecondaryRateLimit: (
-          after: number,
-          o: { method: string; url: string },
-        ) => {
-          notify(`secondary limit on ${o.method} ${o.url}; retrying in ${after}s`);
-          return true;
-        },
-      },
-    });
+    this.#octokit = createOctokit(opts);
   }
 
   /** Read one Objective and everything derivable about its Work Items. */
@@ -231,12 +262,23 @@ export class GitHubReader {
       number,
     });
 
-    const issue = data.repository?.issue;
-    if (!issue) {
+    const repository = data.repository;
+    const issue = repository?.issue;
+    if (!repository || !issue) {
       throw new Error(
         `Objective #${number} not found in ${this.#owner}/${this.#repo}`,
       );
     }
+
+    if (!repository.defaultBranchRef) {
+      throw new Error(
+        `${this.#owner}/${this.#repo} has no default branch (empty repository?)`,
+      );
+    }
+
+    const bot = repository.suggestedActors.nodes.find(
+      (a) => a.login === COPILOT_LOGIN,
+    );
 
     return {
       number: issue.number,
@@ -244,6 +286,25 @@ export class GitHubReader {
       closed: issue.state === "CLOSED",
       workItems: issue.subIssues.nodes.map(toWorkItem),
       readAt: new Date(),
+      repositoryId: repository.id,
+      defaultBranch: repository.defaultBranchRef.name,
+      copilotBotId: bot?.id ?? null,
     };
+  }
+
+  /**
+   * Resolve a login to its GraphQL node ID, needed once at startup to
+   * configure `Dispatcher`'s escalation target (§7.2). A plain, stable
+   * `user(login:)` lookup — not part of the per-cycle snapshot.
+   */
+  async resolveUserId(login: string): Promise<string> {
+    const data = await this.#octokit.graphql<{ user: { id: string } | null }>(
+      `query ResolveUser($login: String!) { user(login: $login) { id } }`,
+      { login },
+    );
+    if (!data.user) {
+      throw new Error(`GitHub user '${login}' not found`);
+    }
+    return data.user.id;
   }
 }

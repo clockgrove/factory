@@ -4,6 +4,7 @@ import {
   DISPATCH_CONFIRM_WINDOW_MS,
   allDone,
   attemptCount,
+  confirmFailureStreak,
   counts,
   derive,
   deriveState,
@@ -23,6 +24,7 @@ const NOW = new Date("2026-01-01T00:00:00Z");
 
 function pr(over: Partial<LinkedPullRequest> = {}): LinkedPullRequest {
   return {
+    id: "PR_1",
     number: 1,
     state: "OPEN",
     isDraft: true,
@@ -30,19 +32,23 @@ function pr(over: Partial<LinkedPullRequest> = {}): LinkedPullRequest {
     changedFiles: 2,
     commitSubjects: [INITIAL_PLAN_COMMIT, "Add slugify"],
     checks: "SUCCESS",
+    createdAt: NOW,
     ...over,
   };
 }
 
+let nextId = 1;
+
 function wi(over: Partial<WorkItemSnapshot> = {}): WorkItemSnapshot {
   return {
+    id: `WI_${nextId++}`,
     number: 10,
     title: "Add slugify",
     closed: false,
     assignees: [],
     blockedBy: [],
     linkedPullRequests: [],
-    copilotAssignedAt: null,
+    copilotAssignments: [],
     ...over,
   };
 }
@@ -54,6 +60,9 @@ function objective(items: WorkItemSnapshot[]): ObjectiveSnapshot {
     closed: false,
     workItems: items,
     readAt: NOW,
+    repositoryId: "R_1",
+    defaultBranch: "main",
+    copilotBotId: "BOT_1",
   };
 }
 
@@ -156,7 +165,7 @@ describe("deriveState", () => {
     // no reliable per-issue session-status API) may still be pushing commits.
     const item = wi({
       assignees: [COPILOT_LOGIN],
-      copilotAssignedAt: new Date(NOW.getTime() - 30_000),
+      copilotAssignments: [new Date(NOW.getTime() - 30_000)],
       linkedPullRequests: [
         pr({ changedLines: 0, changedFiles: 0, commitSubjects: [] }),
       ],
@@ -167,9 +176,9 @@ describe("deriveState", () => {
   it("is failed once the confirm window elapses with only a no-op PR", () => {
     const item = wi({
       assignees: [COPILOT_LOGIN],
-      copilotAssignedAt: new Date(
-        NOW.getTime() - DISPATCH_CONFIRM_WINDOW_MS - 1,
-      ),
+      copilotAssignments: [
+        new Date(NOW.getTime() - DISPATCH_CONFIRM_WINDOW_MS - 1),
+      ],
       linkedPullRequests: [
         pr({ changedLines: 0, changedFiles: 0, commitSubjects: [INITIAL_PLAN_COMMIT] }),
       ],
@@ -267,6 +276,82 @@ describe("attemptCount", () => {
 
   it("is zero before any attempt", () => {
     expect(attemptCount(wi())).toBe(0);
+  });
+});
+
+/**
+ * §4.2's "unassign, reassign; on second failure escalate" needs to know how
+ * many assignments in a row produced zero pull requests. This is derived
+ * purely from the assignment timeline and each PR's `createdAt` — no stored
+ * retry counter, so it survives a restart and needs no coordination even if
+ * more than one process ever evaluated it (2026-08-30 design decision).
+ */
+describe("confirmFailureStreak", () => {
+  it("is zero when Copilot has never been assigned", () => {
+    expect(confirmFailureStreak(wi())).toBe(0);
+  });
+
+  it("is one after a single assignment that produced no PR", () => {
+    const item = wi({ copilotAssignments: [new Date("2026-01-01T00:00:00Z")] });
+    expect(confirmFailureStreak(item)).toBe(1);
+  });
+
+  it("is zero when the only assignment produced a PR", () => {
+    const item = wi({
+      copilotAssignments: [new Date("2026-01-01T00:00:00Z")],
+      linkedPullRequests: [pr({ createdAt: new Date("2026-01-01T00:05:00Z") })],
+    });
+    expect(confirmFailureStreak(item)).toBe(0);
+  });
+
+  it("counts two consecutive PR-less assignments as a streak of two", () => {
+    const item = wi({
+      copilotAssignments: [
+        new Date("2026-01-01T00:00:00Z"),
+        new Date("2026-01-01T01:00:00Z"),
+      ],
+    });
+    expect(confirmFailureStreak(item)).toBe(2);
+  });
+
+  it("stops the streak at the first earlier window that produced a PR", () => {
+    // First assignment made a (later closed) no-op PR; the second, more
+    // recent reassignment has produced nothing yet. Only the second should
+    // count — conflating this with §4.4's separate attempt-count escalation
+    // would escalate a fresh reassignment prematurely.
+    const item = wi({
+      copilotAssignments: [
+        new Date("2026-01-01T00:00:00Z"),
+        new Date("2026-01-01T02:00:00Z"),
+      ],
+      linkedPullRequests: [
+        pr({
+          number: 1,
+          state: "CLOSED",
+          createdAt: new Date("2026-01-01T00:05:00Z"),
+        }),
+      ],
+    });
+    expect(confirmFailureStreak(item)).toBe(1);
+  });
+
+  it("does not count a PR created before the assignment window it is checked against", () => {
+    // A PR from an even earlier attempt must not be misattributed to a later
+    // assignment window it predates.
+    const item = wi({
+      copilotAssignments: [
+        new Date("2026-01-01T00:00:00Z"),
+        new Date("2026-01-01T02:00:00Z"),
+      ],
+      linkedPullRequests: [
+        pr({
+          number: 1,
+          state: "CLOSED",
+          createdAt: new Date("2025-12-31T23:00:00Z"),
+        }),
+      ],
+    });
+    expect(confirmFailureStreak(item)).toBe(2);
   });
 });
 

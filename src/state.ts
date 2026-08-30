@@ -68,6 +68,12 @@ export function isAssignedToCopilot(wi: WorkItemSnapshot): boolean {
  */
 export const DISPATCH_CONFIRM_WINDOW_MS = 90_000;
 
+/** The most recent time the coding agent was assigned, or `null` if never. */
+export function latestCopilotAssignment(wi: WorkItemSnapshot): Date | null {
+  if (wi.copilotAssignments.length === 0) return null;
+  return wi.copilotAssignments[wi.copilotAssignments.length - 1]!;
+}
+
 /**
  * Whether `wi` was assigned to the coding agent recently enough that a
  * still-evidence-free attempt should not yet be judged. `now` is threaded in
@@ -75,8 +81,44 @@ export const DISPATCH_CONFIRM_WINDOW_MS = 90_000;
  * inputs (§1) — callers pass the snapshot's `readAt` (§4.1).
  */
 export function withinConfirmWindow(wi: WorkItemSnapshot, now: Date): boolean {
-  if (!wi.copilotAssignedAt) return false;
-  return now.getTime() - wi.copilotAssignedAt.getTime() < DISPATCH_CONFIRM_WINDOW_MS;
+  const assignedAt = latestCopilotAssignment(wi);
+  if (!assignedAt) return false;
+  return now.getTime() - assignedAt.getTime() < DISPATCH_CONFIRM_WINDOW_MS;
+}
+
+/**
+ * How many consecutive, most-recent coding-agent assignments produced no
+ * pull request at all (§4.2's "unassign, reassign; on second failure
+ * escalate"), counted purely from GitHub's own event history.
+ *
+ * Every confirm-retry (unassign then reassign) leaves a fresh `AssignedEvent`,
+ * so the assignment timeline already partitions into windows: from one
+ * assignment up to the next (or "now", for the latest). A window "produced a
+ * PR" if any linked PR's `createdAt` falls inside it — regardless of whether
+ * that PR was later closed as a no-op by a *different* retry path (§4.4);
+ * this only counts the narrower "assigned and nothing ever showed up" case.
+ * Walking backward from the most recent assignment and stopping at the first
+ * window that produced a PR keeps the count from conflating the two retry
+ * mechanisms. This needs no stored counter and survives a restart for free —
+ * the same guarantee every other derived fact in this module has (§1).
+ */
+export function confirmFailureStreak(wi: WorkItemSnapshot): number {
+  if (wi.copilotAssignments.length === 0) return 0;
+
+  const assigns = [...wi.copilotAssignments].sort(
+    (a, b) => a.getTime() - b.getTime(),
+  );
+  const prCreatedAts = wi.linkedPullRequests.map((pr) => pr.createdAt.getTime());
+
+  let streak = 0;
+  for (let i = assigns.length - 1; i >= 0; i--) {
+    const windowStart = assigns[i]!.getTime();
+    const windowEnd = i + 1 < assigns.length ? assigns[i + 1]!.getTime() : Infinity;
+    const producedPr = prCreatedAts.some((t) => t >= windowStart && t < windowEnd);
+    if (producedPr) break;
+    streak++;
+  }
+  return streak;
 }
 
 /** Human assignees, i.e. everyone who is not the coding agent. */
@@ -90,6 +132,18 @@ export function humanAssignees(wi: WorkItemSnapshot): string[] {
  */
 export function attemptCount(wi: WorkItemSnapshot): number {
   return wi.linkedPullRequests.length;
+}
+
+/**
+ * The PR judged as the current attempt: the newest open one, if any.
+ * `deriveState` and `dispatch.ts`'s retry path (§4.4, which needs to close
+ * this exact PR) both need this same judgment, so it lives in one place.
+ */
+export function currentOpenPullRequest(
+  wi: WorkItemSnapshot,
+): LinkedPullRequest | null {
+  const open = wi.linkedPullRequests.filter((p) => p.state === "OPEN");
+  return open.length > 0 ? open[open.length - 1]! : null;
 }
 
 /**
@@ -110,7 +164,6 @@ export function attemptCount(wi: WorkItemSnapshot): number {
 export function deriveState(wi: WorkItemSnapshot, now: Date): WorkItemState {
   if (wi.closed) return "done";
 
-  const open = wi.linkedPullRequests.filter((p) => p.state === "OPEN");
   const merged = wi.linkedPullRequests.filter((p) => p.state === "MERGED");
 
   // A merged PR whose issue is still open: GitHub has not yet propagated the
@@ -121,9 +174,8 @@ export function deriveState(wi: WorkItemSnapshot, now: Date): WorkItemState {
     return "escalated";
   }
 
-  if (open.length > 0) {
-    // Newest PR is the current attempt; earlier ones are closed-out retries.
-    const current = open[open.length - 1]!;
+  const current = currentOpenPullRequest(wi);
+  if (current) {
     if (isNoOp(current)) {
       // No diff yet is not evidence of failure while the session may still
       // be pushing commits (§4.2) — only call it once the confirm window
@@ -151,6 +203,9 @@ export interface DerivedObjective {
   title: string;
   closed: boolean;
   readAt: Date;
+  repositoryId: string;
+  defaultBranch: string;
+  copilotBotId: string | null;
   items: DerivedWorkItem[];
 }
 
@@ -160,6 +215,9 @@ export function derive(snapshot: ObjectiveSnapshot): DerivedObjective {
     title: snapshot.title,
     closed: snapshot.closed,
     readAt: snapshot.readAt,
+    repositoryId: snapshot.repositoryId,
+    defaultBranch: snapshot.defaultBranch,
+    copilotBotId: snapshot.copilotBotId,
     items: snapshot.workItems.map((wi) => ({
       ...wi,
       state: deriveState(wi, snapshot.readAt),

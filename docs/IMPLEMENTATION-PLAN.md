@@ -441,9 +441,10 @@ a shell boundary. Any harness that can run a command can use it.
 
 ## 14. Hooks
 
-Claude Code plugins may declare hooks (`PreToolUse`, `PostToolUse`, `SessionStart`, …) that run
-commands on harness events. Most candidate uses for Factory are marginal, but **one is genuinely
-valuable**.
+Claude Code plugins may declare hooks that run commands on harness events, and **Codex plugins
+support the same idea as a first-class manifest component** — `"hooks": "./hooks/hooks.json"`, with
+`hooks/` at the plugin root (verified, §15). Most candidate uses for Factory are marginal, but **one
+is genuinely valuable**.
 
 ### The one that matters: mechanical enforcement of irreversibility
 
@@ -451,9 +452,12 @@ valuable**.
 settings mutation, release, writes outside the target repository. Today that is an *instruction*, and
 instructions are advisory: they hold exactly as long as the model's judgment does.
 
-A `PreToolUse` hook turns the most catastrophic entries into a **mechanical block**. The distinction
+A pre-tool-use hook turns the most catastrophic entries into a **mechanical block**. The distinction
 is between *"the agent was told not to"* and *"the agent cannot."* For a system designed to run
 unattended for long stretches, that difference is the whole point.
+
+*(The `hooks/hooks.json` mechanism is confirmed for Codex; the exact event vocabulary is not yet
+verified — see §15.)*
 
 This is also the correct home for v1's "Keeper" idea — a deterministic guardrail — implemented as an
 existing harness primitive rather than a custom service. Same invariant, no infrastructure.
@@ -476,3 +480,82 @@ into the guardrail.
 Hook formats are harness-specific, so hooks are **optional hardening and never required for the core
 loop**. If Factory stops working correctly without them, portability is broken and that is a finding
 against the thesis (PRD §5).
+
+---
+
+## 15. Harness target: Codex desktop app
+
+Initial target. Verified against the official plugin documentation
+(https://developers.openai.com/plugins/build/plugins), not inferred.
+
+### Plugin shape
+
+```
+clockgrove-factory/
+├── .codex-plugin/plugin.json     required manifest; nothing else lives here
+├── skills/<name>/SKILL.md        the management reasoning
+├── hooks/hooks.json              optional lifecycle hooks (§14)
+└── dist/factory.js               bundled deterministic library (§13)
+```
+
+Manifest fields are `name`, `version`, `description`, plus pointers: `skills`,
+`hooks`, `mcpServers`, `apps`, and an `interface` block for install-surface metadata.
+
+### Three findings that change the design
+
+**1. There is no `agents` field. Director must be a skill.**
+Codex plugins bundle skills, MCP servers, and hooks — not agents. v1's manifest declared
+`"agents": ".github/agents/"`, which is the *Claude Code* shape, not Codex's. Director is therefore
+authored as a skill that owns the loop, and §2's component map changes accordingly. This is a
+naming and packaging change, not a change to the architecture.
+
+**2. Exact-ref install is native. No release machinery is needed.**
+Marketplace entries accept Git sources with `ref` **or `sha`** selectors:
+
+```json
+{ "source": { "source": "git-subdir", "url": "https://github.com/clockgrove/factory.git",
+              "path": "./plugins/clockgrove-factory", "ref": "main" } }
+```
+
+and the CLI supports `codex plugin marketplace add owner/repo --ref <ref>`.
+
+This satisfies PRD §9 — *"installable from an exact Git ref by an unrelated adopter"* — with a
+platform primitive. v1 built generations, qualification gates, signed approvals, and a release
+pipeline to reach a guarantee that a `sha` selector already provides. Factory ships **no release
+machinery**; a commit SHA is the version.
+
+**3. Dependencies must be bundled.**
+For npm-sourced plugins the docs state Codex *"downloads the package without running lifecycle
+scripts."* There is no install step, so `node_modules` will not be materialized.
+
+The library must therefore ship as a **single pre-bundled JS file** (esbuild → `dist/factory.js`),
+with Octokit and its plugins bundled in. This is a constraint worth having: install becomes a copy,
+there is no network at install time, no dependency resolution on the adopter's machine, and the
+exact bytes that were tested are the exact bytes that run.
+
+### Distribution
+
+Two supported paths, both zero-infrastructure:
+
+- **Repo marketplace** — `$REPO_ROOT/.agents/plugins/marketplace.json`, for dogfooding from
+  `clockgrove/clockgrove`.
+- **Git-backed marketplace** — pinned by `ref` or `sha`, for external adopters.
+
+Codex installs to `~/.codex/plugins/cache/$MARKETPLACE/$PLUGIN/$VERSION/` and stores enable/disable
+state in `~/.codex/config.toml`. Neither is Factory's concern — worth knowing, not worth managing.
+
+### Portability signal
+
+Codex also reads a legacy-compatible marketplace at `$REPO_ROOT/.claude-plugin/marketplace.json`,
+and `SKILL.md` with YAML frontmatter is common to both ecosystems. The portable surface is the
+markdown and the schemas; the manifest is a thin per-harness adapter. That is the harness-agnostic
+claim in PRD §1 reduced to something concrete and testable.
+
+### Open
+
+- **Hook event names for Codex are unverified.** The `hooks/hooks.json` mechanism is confirmed as a
+  first-class manifest component, but the event vocabulary was not established from the docs read so
+  far. Confirm before relying on §14.
+- **Codex CLI vs desktop app.** The docs direct local plugin *installation and testing* through the
+  desktop app while the CLI manages marketplaces. Confirm the desktop app can run Director's loop
+  for a long-running session, or whether the CLI is the better host for Gate 0.

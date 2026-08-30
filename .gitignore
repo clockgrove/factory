@@ -7,3 +7,4 @@ node_modules/
 # Harnesses install plugins without running lifecycle scripts, so there is no
 # build step on the adopter's machine (plan 15.5). The bundle must be
 # committed for a Git-sourced install to work at all.
+COMMITMSG.txt

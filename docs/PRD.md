@@ -84,13 +84,14 @@ These were expensive lessons; they are what must survive.
 
 | ID | Finding |
 |----|---------|
-| F1 | GitHub Agent Tasks accepts **only a prompt** — no model pin, tool allowlist, or structured context slots. |
+| F1 | *(Superseded 2026-08-30, see F8.)* ~~GitHub Agent Tasks accepts only a prompt — no model pin, tool allowlist, or structured context slots.~~ |
 | F2 | An Actions-resident loop has **no memory**. It must reconstruct all state per wake and cannot synchronously observe its own dispatch. This forces permits, receipts, propagation windows, serialization fences, and terminal routers into existence. |
 | F3 | Synthesizing exactly-once orchestration from GitHub primitives is *possible* but its cost **dominates the system**. It consumed essentially all of the prior effort. |
 | F4 | A **wave is a workstream of multiple Objectives**, not a single Objective. Modeling wave = Objective produces Work Item title drift and unstable identity, and was the root cause of a replanning deadlock in the prior design. |
 | F5 | A gh-aw / Actions runtime is **GitHub-only** and can never satisfy "usable from any harness." Only the cognition layer is portable. |
 | F6 | **"Zero open issues" is not a valid completion criterion** for a process whose normal operation emits issues. Completion must be an external capability demonstration. |
 | F7 | Recording only *desiderata* ("we want model pinning") rather than *measured limits* lets a one-line platform gap justify an unbounded build. Capability findings must be recorded as measured limits, with the scope of response bounded against them. |
+| F8 | *(Measured live, 2026-08-30.)* Issue-based Copilot assignment **does** accept `customInstructions`, `customAgent`, `model`, and `baseRef`/`targetRepositoryId` (GraphQL `agentAssignment` on `replaceActorsForAssignable`/`addAssigneesToAssignable`; REST `agent_assignment` on the issues/assignees, create-issue, and update-issue endpoints — public preview, `GraphQL-Features: issues_copilot_assignment_api_support,coding_agent_model_selection` header required for GraphQL). Separately, a dedicated Agent Tasks REST API (`GET/POST /agents/repos/{owner}/{repo}/tasks`) exposes a queryable `state` (`queued\|in_progress\|completed\|failed\|idle\|waiting_for_user\|timed_out\|cancelled`) and PR-correlated `artifacts` — but the task object carries **no issue-reference field**, so a task cannot be deterministically matched to the issue that triggered it except by creation-time proximity, which is unreliable once more than one Work Item is dispatched concurrently (Factory's normal operating mode). It therefore does not close the session-status observability gap for issue-triggered work. Live probes in the Gate 0 fixture repo also produced two immediate task failures (`state: failed`, `session_count: 0`, no artifacts, both with and without `agentAssignment` set) and one recurrence of the plane-3 abuse-detection 403 (Finding 4, §Probe) under trivial call volume — both first-class reliability risks the confirm/retry/escalate design must absorb regardless of which assignment fields are used. |
 
 ---
 
@@ -113,14 +114,26 @@ If a non-goal appears necessary, that is a **result** to record against the thes
 
 F1 is accepted rather than engineered around.
 
-**Decision:** compile the Work Packet **into the prompt**. Give up per-session model pinning and
-tool allowlists in exchange for deleting the entire execution and reconciliation tier.
+**Decision:** compile the Work Packet **into the prompt**. Give up per-session tool allowlists and
+any session-status polling loop in exchange for deleting the entire execution and reconciliation tier.
 
-**Rationale:** per-session control produced zero completed work items in the prior design. Its
-demonstrated value is currently zero; its architectural cost was most of the codebase.
+**Rationale:** per-session control and observability produced zero completed work items in the
+prior design. Its demonstrated value is currently zero; its architectural cost was most of the
+codebase.
 
 **Revisit trigger:** a measured failure directly attributable to missing model or tool control —
 recorded as a capability limit per F7, with the scope of any response bounded against it.
+
+**Status (2026-08-30, per F8):** the trigger fired on a factual point — model pinning and structured
+custom instructions are real, documented, currently available fields on issue assignment — but not
+on the underlying rationale. The conclusion is unchanged: Factory still does not stand up a
+reconciliation tier or a task-status polling loop, because the Agent Tasks API cannot deterministically
+correlate a task to the issue that triggered it under concurrent dispatch, so it would not actually
+buy the observability the tradeoff gave up. The one bounded addition adopted: `customInstructions` and
+`model` are passed as structured fields on the same assignment mutation Factory already issues (zero
+added machinery, no polling, no new failure mode), as a thin, optional refinement — not a reopening of
+the no-reconciliation-tier bet. Session status continues to be derived from issue/PR timeline state
+(§3), not from Agent Tasks.
 
 ---
 

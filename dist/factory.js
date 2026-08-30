@@ -2660,6 +2660,10 @@ function throttling(octokit, octokitOptions) {
 throttling.VERSION = VERSION6;
 throttling.triggersNotification = triggersNotification;
 
+// src/types.ts
+var COPILOT_LOGIN = "copilot-swe-agent";
+var INITIAL_PLAN_COMMIT = "Initial plan";
+
 // src/github.ts
 var FactoryOctokit = Octokit.plugin(retry, throttling);
 var OBJECTIVE_QUERY = `
@@ -2692,6 +2696,17 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
               }
             }
           }
+          timelineItems(last: 10, itemTypes: [ASSIGNED_EVENT]) {
+            nodes {
+              ... on AssignedEvent {
+                createdAt
+                assignee {
+                  ... on Bot { login }
+                  ... on User { login }
+                }
+              }
+            }
+          }
         }
       }
     }
@@ -2721,6 +2736,16 @@ function toPullRequest(pr) {
     checks: normalizeChecks(pr)
   };
 }
+function copilotAssignedAt(wi) {
+  const events = wi.timelineItems.nodes.filter(
+    (e) => e.assignee?.login === COPILOT_LOGIN
+  );
+  if (events.length === 0) return null;
+  const latest = events.reduce(
+    (max, e) => e.createdAt > max.createdAt ? e : max
+  );
+  return new Date(latest.createdAt);
+}
 function toWorkItem(wi) {
   const blockedBy = wi.blockedBy.nodes.map((d) => ({
     number: d.number,
@@ -2733,10 +2758,7 @@ function toWorkItem(wi) {
     assignees: wi.assignees.nodes.map((a) => a.login),
     blockedBy,
     linkedPullRequests: wi.closedByPullRequestsReferences.nodes.map(toPullRequest),
-    // Session status is a separate source (workflow runs) and is layered on by
-    // the dispatcher in step 2. Absent that, PR evidence alone decides state.
-    sessionActive: false,
-    sessionFailed: false
+    copilotAssignedAt: copilotAssignedAt(wi)
   };
 }
 var GitHubReader = class {
@@ -2785,10 +2807,6 @@ var GitHubReader = class {
   }
 };
 
-// src/types.ts
-var COPILOT_LOGIN = "copilot-swe-agent";
-var INITIAL_PLAN_COMMIT = "Initial plan";
-
 // src/state.ts
 function isNoOp(pr) {
   const hasDiff = pr.changedLines > 0 || pr.changedFiles > 0;
@@ -2804,13 +2822,18 @@ function checksSettled(pr) {
 function isAssignedToCopilot(wi) {
   return wi.assignees.includes(COPILOT_LOGIN);
 }
+var DISPATCH_CONFIRM_WINDOW_MS = 9e4;
+function withinConfirmWindow(wi, now) {
+  if (!wi.copilotAssignedAt) return false;
+  return now.getTime() - wi.copilotAssignedAt.getTime() < DISPATCH_CONFIRM_WINDOW_MS;
+}
 function humanAssignees(wi) {
   return wi.assignees.filter((a) => a !== COPILOT_LOGIN);
 }
 function attemptCount(wi) {
   return wi.linkedPullRequests.length;
 }
-function deriveState(wi) {
+function deriveState(wi, now) {
   if (wi.closed) return "done";
   const open = wi.linkedPullRequests.filter((p) => p.state === "OPEN");
   const merged = wi.linkedPullRequests.filter((p) => p.state === "MERGED");
@@ -2818,11 +2841,11 @@ function deriveState(wi) {
   if (!isAssignedToCopilot(wi) && humanAssignees(wi).length > 0) {
     return "escalated";
   }
-  if (wi.sessionActive) return "in_flight";
-  if (wi.sessionFailed) return "failed";
   if (open.length > 0) {
     const current = open[open.length - 1];
-    if (isNoOp(current)) return "failed";
+    if (isNoOp(current)) {
+      return withinConfirmWindow(wi, now) ? "in_flight" : "failed";
+    }
     if (checksSettled(current)) return "for_review";
     return "in_flight";
   }
@@ -2838,7 +2861,7 @@ function derive(snapshot) {
     readAt: snapshot.readAt,
     items: snapshot.workItems.map((wi) => ({
       ...wi,
-      state: deriveState(wi),
+      state: deriveState(wi, snapshot.readAt),
       attempts: attemptCount(wi)
     }))
   };

@@ -22,6 +22,7 @@ import type {
   ObjectiveSnapshot,
   WorkItemSnapshot,
 } from "./types.js";
+import { COPILOT_LOGIN } from "./types.js";
 
 const FactoryOctokit = Octokit.plugin(retry, throttling);
 
@@ -70,6 +71,17 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
               }
             }
           }
+          timelineItems(last: 10, itemTypes: [ASSIGNED_EVENT]) {
+            nodes {
+              ... on AssignedEvent {
+                createdAt
+                assignee {
+                  ... on Bot { login }
+                  ... on User { login }
+                }
+              }
+            }
+          }
         }
       }
     }
@@ -93,12 +105,18 @@ interface GqlPr {
   };
 }
 
+interface GqlAssignedEvent {
+  createdAt: string;
+  assignee: { login?: string } | null;
+}
+
 interface GqlWorkItem extends GqlIssueState {
   number: number;
   title: string;
   assignees: { nodes: { login: string }[] };
   blockedBy: { nodes: ({ number: number } & GqlIssueState)[] };
   closedByPullRequestsReferences: { nodes: GqlPr[] };
+  timelineItems: { nodes: GqlAssignedEvent[] };
 }
 
 interface GqlResponse {
@@ -143,6 +161,23 @@ function toPullRequest(pr: GqlPr): LinkedPullRequest {
   };
 }
 
+/**
+ * Latest time the coding agent was assigned, from the issue's `AssignedEvent`
+ * timeline (§4.2). `null` if it has never been assigned. GitHub auto-assigns
+ * the requesting human alongside Copilot (verified live, 2026-08-30), so this
+ * filters to the agent's own events rather than trusting timeline order.
+ */
+function copilotAssignedAt(wi: GqlWorkItem): Date | null {
+  const events = wi.timelineItems.nodes.filter(
+    (e) => e.assignee?.login === COPILOT_LOGIN,
+  );
+  if (events.length === 0) return null;
+  const latest = events.reduce((max, e) =>
+    e.createdAt > max.createdAt ? e : max,
+  );
+  return new Date(latest.createdAt);
+}
+
 function toWorkItem(wi: GqlWorkItem): WorkItemSnapshot {
   const blockedBy: IssueRef[] = wi.blockedBy.nodes.map((d) => ({
     number: d.number,
@@ -157,10 +192,7 @@ function toWorkItem(wi: GqlWorkItem): WorkItemSnapshot {
     blockedBy,
     linkedPullRequests:
       wi.closedByPullRequestsReferences.nodes.map(toPullRequest),
-    // Session status is a separate source (workflow runs) and is layered on by
-    // the dispatcher in step 2. Absent that, PR evidence alone decides state.
-    sessionActive: false,
-    sessionFailed: false,
+    copilotAssignedAt: copilotAssignedAt(wi),
   };
 }
 

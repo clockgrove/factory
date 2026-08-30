@@ -56,12 +56,18 @@ export interface WorkItemSnapshot {
   /** PRs that would close this issue, via `closedByPullRequestsReferences`. */
   linkedPullRequests: LinkedPullRequest[];
   /**
-   * Whether a coding-agent session is currently executing for this item.
-   * Sourced from workflow runs, not from the issue itself.
+   * When the coding agent was most recently assigned, from the issue's
+   * `AssignedEvent` timeline (§4.2). `null` when it has never been assigned.
+   *
+   * There is no queryable, per-issue session-status API (verified live,
+   * 2026-08-30 — see PRD F8): the Agent Tasks REST API exposes a task `state`
+   * but no issue-reference field, so a task cannot be matched back to the
+   * issue that triggered it once more than one Work Item is in flight. This
+   * timestamp is the load-bearing signal instead: it gates how long a
+   * still-evidence-free attempt is given the benefit of the doubt before
+   * `deriveState` calls it `failed` and before the dispatcher retries it.
    */
-  sessionActive: boolean;
-  /** True when the most recent agent session reached a failure conclusion. */
-  sessionFailed: boolean;
+  copilotAssignedAt: Date | null;
 }
 
 export interface ObjectiveSnapshot {

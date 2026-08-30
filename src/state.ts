@@ -53,6 +53,32 @@ export function isAssignedToCopilot(wi: WorkItemSnapshot): boolean {
   return wi.assignees.includes(COPILOT_LOGIN);
 }
 
+/**
+ * The dispatch-confirmation window (§4.2): how long an assignment is given
+ * the benefit of the doubt before an evidence-free attempt is treated as
+ * failed rather than merely slow.
+ *
+ * There is no reliable, per-issue session-status API to poll instead (PRD
+ * F8, measured live 2026-08-30): the Agent Tasks REST API's task objects
+ * carry no issue reference, so a task cannot be matched back to the issue
+ * that triggered it once more than one Work Item is dispatched concurrently.
+ * PROBE-001 measured 8 trivial parallel sessions completing in ~80s wall
+ * clock; 90s gives a single session headroom beyond that without letting a
+ * genuinely stuck attempt sit unaddressed for long.
+ */
+export const DISPATCH_CONFIRM_WINDOW_MS = 90_000;
+
+/**
+ * Whether `wi` was assigned to the coding agent recently enough that a
+ * still-evidence-free attempt should not yet be judged. `now` is threaded in
+ * rather than read from the clock so the answer stays a pure function of its
+ * inputs (§1) — callers pass the snapshot's `readAt` (§4.1).
+ */
+export function withinConfirmWindow(wi: WorkItemSnapshot, now: Date): boolean {
+  if (!wi.copilotAssignedAt) return false;
+  return now.getTime() - wi.copilotAssignedAt.getTime() < DISPATCH_CONFIRM_WINDOW_MS;
+}
+
 /** Human assignees, i.e. everyone who is not the coding agent. */
 export function humanAssignees(wi: WorkItemSnapshot): string[] {
   return wi.assignees.filter((a) => a !== COPILOT_LOGIN);
@@ -69,18 +95,19 @@ export function attemptCount(wi: WorkItemSnapshot): number {
 /**
  * Derive a Work Item's state.
  *
+ * `now` is the snapshot's read time (§4.1), not the wall clock, so the
+ * function stays a pure mapping from its inputs to a single answer.
+ *
  * Precedence matters and is ordered most-terminal first, so that a single
  * unambiguous answer falls out. The ordering rationale:
  *
  *  1. `done` and `escalated` are terminal for the loop — nothing to dispatch.
- *  2. An active session outranks PR inspection: the artifact is still moving,
- *     so judging it now would judge an intermediate state.
- *  3. PR evidence outranks assignment, because a PR proves work began whereas
+ *  2. PR evidence outranks assignment, because a PR proves work began whereas
  *     an assignee only proves work was requested (§4.2).
- *  4. `blocked` is checked before `unstarted` so the loop never treats a
+ *  3. `blocked` is checked before `unstarted` so the loop never treats a
  *     dependency-blocked item as ready.
  */
-export function deriveState(wi: WorkItemSnapshot): WorkItemState {
+export function deriveState(wi: WorkItemSnapshot, now: Date): WorkItemState {
   if (wi.closed) return "done";
 
   const open = wi.linkedPullRequests.filter((p) => p.state === "OPEN");
@@ -94,15 +121,15 @@ export function deriveState(wi: WorkItemSnapshot): WorkItemState {
     return "escalated";
   }
 
-  // Work in motion is not yet evidence. Judge it when it stops.
-  if (wi.sessionActive) return "in_flight";
-
-  if (wi.sessionFailed) return "failed";
-
   if (open.length > 0) {
     // Newest PR is the current attempt; earlier ones are closed-out retries.
     const current = open[open.length - 1]!;
-    if (isNoOp(current)) return "failed";
+    if (isNoOp(current)) {
+      // No diff yet is not evidence of failure while the session may still
+      // be pushing commits (§4.2) — only call it once the confirm window
+      // has elapsed without a real diff appearing.
+      return withinConfirmWindow(wi, now) ? "in_flight" : "failed";
+    }
     if (checksSettled(current)) return "for_review";
     return "in_flight";
   }
@@ -135,7 +162,7 @@ export function derive(snapshot: ObjectiveSnapshot): DerivedObjective {
     readAt: snapshot.readAt,
     items: snapshot.workItems.map((wi) => ({
       ...wi,
-      state: deriveState(wi),
+      state: deriveState(wi, snapshot.readAt),
       attempts: attemptCount(wi),
     })),
   };

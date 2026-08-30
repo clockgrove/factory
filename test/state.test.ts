@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DISPATCH_CONFIRM_WINDOW_MS,
   allDone,
   attemptCount,
   counts,
@@ -17,6 +18,8 @@ import {
   type ObjectiveSnapshot,
   type WorkItemSnapshot,
 } from "../src/types.js";
+
+const NOW = new Date("2026-01-01T00:00:00Z");
 
 function pr(over: Partial<LinkedPullRequest> = {}): LinkedPullRequest {
   return {
@@ -39,8 +42,7 @@ function wi(over: Partial<WorkItemSnapshot> = {}): WorkItemSnapshot {
     assignees: [],
     blockedBy: [],
     linkedPullRequests: [],
-    sessionActive: false,
-    sessionFailed: false,
+    copilotAssignedAt: null,
     ...over,
   };
 }
@@ -51,7 +53,7 @@ function objective(items: WorkItemSnapshot[]): ObjectiveSnapshot {
     title: "Add three utilities",
     closed: false,
     workItems: items,
-    readAt: new Date("2026-01-01T00:00:00Z"),
+    readAt: NOW,
   };
 }
 
@@ -113,60 +115,79 @@ describe("isNoOp", () => {
 
 describe("deriveState", () => {
   it("is unstarted with no assignee and no PR", () => {
-    expect(deriveState(wi())).toBe("unstarted");
+    expect(deriveState(wi(), NOW)).toBe("unstarted");
   });
 
   it("is dispatched once Copilot is assigned but nothing exists yet", () => {
-    expect(deriveState(wi({ assignees: [COPILOT_LOGIN] }))).toBe("dispatched");
+    expect(deriveState(wi({ assignees: [COPILOT_LOGIN] }), NOW)).toBe(
+      "dispatched",
+    );
   });
 
   it("is blocked while a dependency is open", () => {
-    expect(deriveState(wi({ blockedBy: [{ number: 9, closed: false }] }))).toBe(
-      "blocked",
-    );
+    expect(
+      deriveState(wi({ blockedBy: [{ number: 9, closed: false }] }), NOW),
+    ).toBe("blocked");
   });
 
   it("is unstarted once every dependency is closed", () => {
-    expect(deriveState(wi({ blockedBy: [{ number: 9, closed: true }] }))).toBe(
-      "unstarted",
-    );
+    expect(
+      deriveState(wi({ blockedBy: [{ number: 9, closed: true }] }), NOW),
+    ).toBe("unstarted");
   });
 
   it("is escalated when a human holds it and Copilot does not", () => {
-    expect(deriveState(wi({ assignees: ["kirkmarple"] }))).toBe("escalated");
+    expect(deriveState(wi({ assignees: ["kirkmarple"] }), NOW)).toBe(
+      "escalated",
+    );
   });
 
   it("is not escalated while Copilot is still an assignee", () => {
     // Escalation is defined as a handoff (§7.2): Copilot must be removed.
+    // GitHub also auto-assigns the requesting human alongside Copilot
+    // (verified live, 2026-08-30) — this is exactly that shape.
     expect(
-      deriveState(wi({ assignees: [COPILOT_LOGIN, "kirkmarple"] })),
+      deriveState(wi({ assignees: [COPILOT_LOGIN, "kirkmarple"] }), NOW),
     ).toBe("dispatched");
   });
 
-  it("is in_flight while a session is running, regardless of PR contents", () => {
+  it("is in_flight when a no-op PR is still within the confirm window", () => {
+    // No diff yet is not evidence of failure: the session (PRD F8 — there is
+    // no reliable per-issue session-status API) may still be pushing commits.
     const item = wi({
       assignees: [COPILOT_LOGIN],
-      sessionActive: true,
-      linkedPullRequests: [pr({ changedLines: 0, changedFiles: 0, commitSubjects: [] })],
+      copilotAssignedAt: new Date(NOW.getTime() - 30_000),
+      linkedPullRequests: [
+        pr({ changedLines: 0, changedFiles: 0, commitSubjects: [] }),
+      ],
     });
-    // Judging an empty PR mid-session would judge an intermediate state.
-    expect(deriveState(item)).toBe("in_flight");
+    expect(deriveState(item, NOW)).toBe("in_flight");
   });
 
-  it("is failed when a settled PR changed nothing", () => {
+  it("is failed once the confirm window elapses with only a no-op PR", () => {
+    const item = wi({
+      assignees: [COPILOT_LOGIN],
+      copilotAssignedAt: new Date(
+        NOW.getTime() - DISPATCH_CONFIRM_WINDOW_MS - 1,
+      ),
+      linkedPullRequests: [
+        pr({ changedLines: 0, changedFiles: 0, commitSubjects: [INITIAL_PLAN_COMMIT] }),
+      ],
+    });
+    expect(deriveState(item, NOW)).toBe("failed");
+  });
+
+  it("is failed when a settled no-op PR has no assignment timestamp at all", () => {
+    // Defensive default: no evidence of a recent dispatch, so a no-op is not
+    // excused. Should not occur in practice — a linked PR implies Copilot
+    // was assigned at some point — but the fallback stays conservative.
     const item = wi({
       assignees: [COPILOT_LOGIN],
       linkedPullRequests: [
         pr({ changedLines: 0, changedFiles: 0, commitSubjects: [INITIAL_PLAN_COMMIT] }),
       ],
     });
-    expect(deriveState(item)).toBe("failed");
-  });
-
-  it("is failed when the session reported failure", () => {
-    expect(
-      deriveState(wi({ assignees: [COPILOT_LOGIN], sessionFailed: true })),
-    ).toBe("failed");
+    expect(deriveState(item, NOW)).toBe("failed");
   });
 
   it("is for_review when a real diff has settled checks", () => {
@@ -174,7 +195,7 @@ describe("deriveState", () => {
       assignees: [COPILOT_LOGIN],
       linkedPullRequests: [pr({ checks: "SUCCESS" })],
     });
-    expect(deriveState(item)).toBe("for_review");
+    expect(deriveState(item, NOW)).toBe("for_review");
   });
 
   it("reaches for_review even while the PR is still a draft", () => {
@@ -184,7 +205,7 @@ describe("deriveState", () => {
       assignees: [COPILOT_LOGIN],
       linkedPullRequests: [pr({ isDraft: true, checks: "SUCCESS" })],
     });
-    expect(deriveState(item)).toBe("for_review");
+    expect(deriveState(item, NOW)).toBe("for_review");
   });
 
   it("reaches for_review when the repo has no checks configured", () => {
@@ -192,7 +213,7 @@ describe("deriveState", () => {
       assignees: [COPILOT_LOGIN],
       linkedPullRequests: [pr({ checks: null })],
     });
-    expect(deriveState(item)).toBe("for_review");
+    expect(deriveState(item, NOW)).toBe("for_review");
   });
 
   it("sends a failing-check PR to review rather than calling it failed", () => {
@@ -201,7 +222,7 @@ describe("deriveState", () => {
       assignees: [COPILOT_LOGIN],
       linkedPullRequests: [pr({ checks: "FAILURE" })],
     });
-    expect(deriveState(item)).toBe("for_review");
+    expect(deriveState(item, NOW)).toBe("for_review");
   });
 
   it("is in_flight while checks are still pending", () => {
@@ -209,16 +230,16 @@ describe("deriveState", () => {
       assignees: [COPILOT_LOGIN],
       linkedPullRequests: [pr({ checks: "PENDING" })],
     });
-    expect(deriveState(item)).toBe("in_flight");
+    expect(deriveState(item, NOW)).toBe("in_flight");
   });
 
   it("is done when the issue is closed", () => {
-    expect(deriveState(wi({ closed: true }))).toBe("done");
+    expect(deriveState(wi({ closed: true }), NOW)).toBe("done");
   });
 
   it("is done when a linked PR merged even if closure has not propagated", () => {
     const item = wi({ linkedPullRequests: [pr({ state: "MERGED" })] });
-    expect(deriveState(item)).toBe("done");
+    expect(deriveState(item, NOW)).toBe("done");
   });
 
   it("judges the newest open PR, not a closed earlier attempt", () => {
@@ -229,7 +250,7 @@ describe("deriveState", () => {
         pr({ number: 2, state: "OPEN", changedLines: 50, checks: "SUCCESS" }),
       ],
     });
-    expect(deriveState(item)).toBe("for_review");
+    expect(deriveState(item, NOW)).toBe("for_review");
   });
 });
 

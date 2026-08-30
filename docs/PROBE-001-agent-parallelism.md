@@ -1,11 +1,11 @@
 # PROBE-001 — Copilot agent parallelism and terminal status
 
 **Date:** 2026-08-30
-**Repository:** `clockgrove/factory-probe-parallel` (disposable)
+**Repository:** a disposable probe repository (archived after the probe concluded)
 **Question:** Does GitHub Copilot agent assignment parallelize, and does it report terminal status
 reliably enough for an unattended orchestration loop?
 
-This probe was run **before any implementation**, because the entire v2 architecture rests on the
+This probe was run **before any implementation**, because the entire architecture rests on the
 answer. Recording measured limits rather than desired ones is a direct response to finding F7 in
 [`PRD.md`](PRD.md).
 
@@ -126,8 +126,8 @@ full budget and keep hammering a closed door.
 The failure mode this creates is specific and severe. A `403` arriving at dispatch time is
 trivially misread as *"this Work Item failed"* — which triggers retry, then escalation,
 then replanning, all against a platform that is merely asking the client to wait. That is
-how a loop starts thrashing, and it is precisely the class of behavior v1 accumulated
-machinery to survive.
+how a loop starts thrashing, and it is precisely the class of behavior a prior implementation
+accumulated machinery to survive.
 
 **Requirement.** Factory must classify platform refusals as **platform-unavailable, retry
 later** — a property of the *substrate*, never of the *Work Item*. Concretely: a `403`

@@ -1,6 +1,6 @@
 # Credentials and environments
 
-## What v1 accumulated
+## What the prior design accumulated
 
 | Environment | Contents |
 |---|---|
@@ -17,20 +17,20 @@ GitHub environments are a **deployment** primitive. They exist to gate a job beh
 branch restrictions and to scope secrets to a deployment target. They answer *"may this job run, and
 what may it see?"*
 
-v1 used them as a **configuration lookup keyed by workflow phase**. The names give it away:
-`-initial-assignment` and `-initial-model` are steps in a dispatch sequence, not trust boundaries.
-Two of them never held anything at all — created speculatively, then abandoned.
+The prior design used them as a **configuration lookup keyed by workflow phase**. The names give it
+away: `-initial-assignment` and `-initial-model` are steps in a dispatch sequence, not trust
+boundaries. Two of them never held anything at all — created speculatively, then abandoned.
 
-This is not an isolated tidiness problem. It is the fossil record of Inversion B (PRD §3). v1 was
-trying to pin a model and shape a session per dispatch, which finding F1 says GitHub Agent Tasks
-does not support. Unable to get per-session control through the API, v1 reached for the nearest
+This is not an isolated tidiness problem. It is the fossil record of Inversion B (PRD §3). The prior
+design was trying to pin a model and shape a session per dispatch, which finding F1 says GitHub Agent
+Tasks does not support. Unable to get per-session control through the API, it reached for the nearest
 primitive that *looked* like scoped configuration and bent it into that shape. The environment
 sprawl is what an unsupported requirement looks like after it has been routed around.
 
 The correct count of environments is the number of distinct **trust boundaries**, not the number of
 steps in a process.
 
-## v2 policy
+## This design's policy
 
 One rule:
 
@@ -40,15 +40,15 @@ One rule:
 Behavior selection belongs in configuration that is visible in the repository and reviewable in a
 diff. A secret store is a bad configuration file: invisible, unversioned, and unreviewable.
 
-Applying that rule, v2's environment requirements mostly vanish as a consequence of decisions
-already taken:
+Applying that rule, this design's environment requirements mostly vanish as a consequence of
+decisions already taken:
 
-| v1 environment | v2 |
+| Prior environment | This design |
 |---|---|
 | `copilot` | **Keep if needed.** GitHub's Copilot coding agent reads runtime configuration from an environment of this name; it is platform convention, not a Factory invention. Create it only when there is something to put in it. |
 | `copilot-initial-assignment` | **Gone.** No phase-keyed configuration. |
 | `copilot-initial-model` | **Gone.** PRD §6 accepts F1 and drops per-session model pinning outright. |
-| `factory-qualification-consumer` | **Gone.** `factory-controller` is discarded (PRD §11). |
+| `factory-qualification-consumer` | **Gone.** The independent release-approval service is discarded (PRD §11). |
 
 **Target: zero Factory-created environments.** The core loop runs in the harness with the operator's
 own credentials and needs no repository secrets at all. If Factory ever appears to need one, that is

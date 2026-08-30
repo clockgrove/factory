@@ -65,15 +65,15 @@ npm install && npm run build
 GITHUB_TOKEN=$(gh auth token) node dist/factory.js owner/repo 42
 ```
 
-## Why this repository is new
+## Why this design starts from a clean slate
 
-A prior implementation (`clockgrove/factory-legacy`, archived) inverted both halves of this design:
-it put the orchestration loop *inside* GitHub Actions, and moved work execution *out* of GitHub onto
-self-hosted runners. Those two inversions produced ~1.7 MB of distributed-systems machinery — permit
-protocols, serialization fences, terminal routers — to recreate guarantees the platform already
-offers, and no product code was ever shipped by it.
+An earlier attempt at this same idea inverted both halves of this design: it put the orchestration
+loop *inside* CI, and moved work execution *out* of GitHub onto self-hosted infrastructure. Those two
+choices compounded, producing a large amount of distributed-systems machinery — reconciliation,
+recovery, ownership takeover — to recreate guarantees the platform already offers, and no product
+code was ever shipped by it.
 
-This is a clean-room rewrite. Details and evidence in [`docs/PRD.md`](docs/PRD.md) §3.
+This is a clean-room rewrite, not an evolution of that codebase. Rationale in [`docs/PRD.md`](docs/PRD.md) §3.
 
 ## Measured platform evidence
 

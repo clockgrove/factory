@@ -1,7 +1,6 @@
-# Clockgrove Factory — PRD v2 (clean-room)
+# Clockgrove Factory — Product Requirements
 
 Status: draft for review
-Supersedes: all v1 implementation (`clockgrove/factory` @ `main`, generations 1–56)
 Date: 2026-08-30
 
 ---
@@ -25,7 +24,7 @@ Those constraints are a thesis worth proving, but the output is a **product, not
 Everything is built to be shipped, adopted by strangers, and maintained.
 
 This document exists because none of the above was ever written down. Its absence is the direct
-cause of the two inversions in §3.
+cause of the two choices in §3.
 
 ---
 
@@ -56,38 +55,39 @@ reconstruct the world on every wake, and does not need to prove its own effects 
 
 ---
 
-## 3. Why v1 is discarded
+## 3. Why the design starts over
 
-Two architectural inversions, both dated and traceable. Neither was ever presented as a choice.
+Two architectural choices, made early and never revisited as choices, define why this starts from a
+clean slate rather than extending what came before.
 
-**Inversion A — orchestration moved into GitHub Actions.**
-Issue #53 (2026-08-21, day 5) opens: *"Repository events provide fast wakeups, a scheduled sweep
-recovers missed/suppressed events."* This placed the top-level loop inside Actions. Intended location:
-the harness.
+**Inversion A — orchestration moved into CI.** An early decision placed the top-level loop inside a
+scheduled Actions-style runtime: repository events for fast wakeups, a scheduled sweep to recover
+missed or suppressed ones. Intended location: the harness.
 
-**Inversion B — work execution moved out of GitHub.**
-Issue #149 / PR #161 deleted GitHub-native Agent Tasks in favor of self-hosted runner SDK sessions.
-Intended location: GitHub, tied to issues.
+**Inversion B — work execution moved out of GitHub.** A working GitHub-native path for dispatching
+agent work (issue-tied Agent Tasks) was deleted in favor of self-hosted runner SDK sessions, in
+pursuit of finer per-session control. Intended location: GitHub, tied to issues.
 
 The two compound. Self-hosting execution is *why* an Actions-resident loop then needs session
 reconciliation, capacity management, and ownership resolution.
 
-**Measured outcome of v1:** 13 days, ~1.7 MB of Python, 46 workflows, 56 installed generations,
-**zero completed work items**. Recent defect classes are all distributed-systems failures:
-livelock, lost receipts, stale routing, paused-owner takeover, packet admission ordering.
+**Measured outcome:** roughly two weeks of continuous iteration, a large amount of Python, dozens of
+workflows, many release generations, and **zero completed work items**. The defect classes toward the
+end were all distributed-systems failures of the same shape: livelock, lost receipts, stale routing,
+paused-owner takeover, packet admission ordering.
 
 ---
 
 ## 4. Findings carried forward
 
-These were expensive. They are the only artifacts of v1 that must survive.
+These were expensive lessons; they are what must survive.
 
 | ID | Finding |
 |----|---------|
 | F1 | GitHub Agent Tasks accepts **only a prompt** — no model pin, tool allowlist, or structured context slots. |
 | F2 | An Actions-resident loop has **no memory**. It must reconstruct all state per wake and cannot synchronously observe its own dispatch. This forces permits, receipts, propagation windows, serialization fences, and terminal routers into existence. |
-| F3 | Synthesizing exactly-once orchestration from GitHub primitives is *possible* but its cost **dominates the system**. It consumed essentially all of v1. |
-| F4 | A **wave is a workstream of multiple Objectives**, not a single Objective. Modeling wave = Objective produces Work Item title drift and unstable identity, and was the root of the v1 replan deadlock. |
+| F3 | Synthesizing exactly-once orchestration from GitHub primitives is *possible* but its cost **dominates the system**. It consumed essentially all of the prior effort. |
+| F4 | A **wave is a workstream of multiple Objectives**, not a single Objective. Modeling wave = Objective produces Work Item title drift and unstable identity, and was the root cause of a replanning deadlock in the prior design. |
 | F5 | A gh-aw / Actions runtime is **GitHub-only** and can never satisfy "usable from any harness." Only the cognition layer is portable. |
 | F6 | **"Zero open issues" is not a valid completion criterion** for a process whose normal operation emits issues. Completion must be an external capability demonstration. |
 | F7 | Recording only *desiderata* ("we want model pinning") rather than *measured limits* lets a one-line platform gap justify an unbounded build. Capability findings must be recorded as measured limits, with the scope of response bounded against them. |
@@ -116,8 +116,8 @@ F1 is accepted rather than engineered around.
 **Decision:** compile the Work Packet **into the prompt**. Give up per-session model pinning and
 tool allowlists in exchange for deleting the entire execution and reconciliation tier.
 
-**Rationale:** per-session control produced zero completed work items in v1. Its demonstrated value
-is currently zero; its architectural cost was most of the codebase.
+**Rationale:** per-session control produced zero completed work items in the prior design. Its
+demonstrated value is currently zero; its architectural cost was most of the codebase.
 
 **Revisit trigger:** a measured failure directly attributable to missing model or tool control —
 recorded as a capability limit per F7, with the scope of any response bounded against it.
@@ -126,8 +126,9 @@ recorded as a capability limit per F7, with the scope of any response bounded ag
 
 ## 7. Gate 0 — minimum viable proof
 
-v1 was only ever run at full scale, on an unproven mechanism, and never closed a single loop.
-v2 inverts that: prove the loop closes on something trivial, then grow the workload.
+The prior design was only ever run at full scale, on an unproven mechanism, and never closed a
+single loop. This design inverts that: prove the loop closes on something trivial, then grow the
+workload.
 
 **Setup:** one disposable repository. One trivial Objective decomposing into 2–3 independent Work
 Items (e.g. "add three pure functions, each with tests").
@@ -144,7 +145,8 @@ stalling, or escalating on something it should have resolved itself.
 
 **If Gate 0 does not close** within a pre-committed budget (proposed: 3 attempts or 4 hours of
 active execution), **stop and revise the architecture — do not harden forward.** A gate that will
-not close is design feedback. Acting on it immediately is precisely what v1 failed to do for nine days.
+not close is design feedback. Acting on it immediately is precisely what the prior effort failed to
+do for over a week.
 
 ---
 
@@ -178,7 +180,7 @@ recorded as a finding against the thesis.
 
 ## 10. Completion
 
-Factory v2 ships when:
+Factory ships when:
 
 - **Gate 2 is green** — the loop closes unattended on parallel + dependent work.
 - The plugin **installs cleanly into a fresh repository** from an exact ref by an unrelated adopter.
@@ -191,28 +193,29 @@ qualification runs.
 
 ---
 
-## 11. v1 asset disposition
+## 11. Disposition of prior work
 
-Clean-room: nothing is copied. v1 is readable as reference only.
+Clean-room: nothing is copied forward. The prior implementation is readable only as private internal
+reference, never as a public artifact of this project.
 
-| v1 asset | Disposition |
+| Prior asset | Disposition |
 |---|---|
-| 8 management skills + Director agent | **Reference.** The reasoning is sound; the packaging is not. Rewrite clean. |
-| `objective_plan.py`, `objective_compilation.py` | **Reference.** The Objective → Work Item compiler is the core product. |
-| `native_graph.py` | **Reference.** Graph application to Issues/sub-issues/dependencies is needed; 2,021 lines is not. |
-| `work_packet.py` | **Reference.** Becomes the prompt compiler (§6). |
-| Schemas | **Reference.** v1 had ~65; keep only those that earn their place. |
-| `clockgrove_orchestrator.py`, `execution_scheduler.py`, `graph_application_runtime.py`, `routing_transition.py`, permit protocol, terminal routers | **Discard.** Artifacts of Inversion A. |
-| `copilot_sdk_execution.py` + SDK session/receipt pipeline | **Discard.** Artifact of Inversion B. |
-| 46 GitHub Actions workflows | **Discard.** §9 forbids workflows in the core loop. |
-| `clockgrove/factory-controller` | **Discard.** See below. |
+| Management skill definitions + a top-level orchestrating agent | **Reference only.** The reasoning is sound; the packaging is not. Rewrite clean. |
+| The Objective → Work Item compiler | **Reference only.** This is the core product and is rebuilt, not ported. |
+| Graph application to Issues/sub-issues/dependencies | **Reference only.** The capability is needed; the prior implementation's size was not. |
+| The prompt-compilation step | **Reference only.** Becomes the Work Packet → prompt compiler (§6). |
+| Schemas | **Reference only.** Kept only where they earn their place; most are dropped. |
+| CI-resident scheduling, permit/reconciliation machinery, execution routing, terminal routers | **Discard.** Artifacts of Inversion A. |
+| The self-hosted execution runtime and its SDK session/receipt pipeline | **Discard.** Artifact of Inversion B. |
+| The CI workflows implementing the core loop | **Discard.** §9 forbids workflows in the core loop. |
+| A separate independent release-approval service | **Discard.** See below. |
 
-### factory-controller
+### Independent release approval
 
-A private repository that independently approves Factory releases *"so a Factory candidate cannot
-approve itself."* It fetches an exact Factory commit read-only, validates package and syntax,
-evaluates behavior once through hosted Copilot, and **cryptographically signs** the approval record.
-Factory pins the accepted controller SHA, tag, and public key, with revocation lists.
+A separate private service independently approved releases *"so a release candidate cannot approve
+itself."* It fetched an exact commit read-only, validated package and syntax, evaluated behavior once
+through a hosted agent, and **cryptographically signed** the approval record. The consumer pinned the
+accepted service's identity and public key, with revocation lists.
 
 The invariant is real — a behavior change should not govern its own review. The implementation is
 disproportionate, and it is **disqualifying for an open-source product**:
@@ -233,7 +236,7 @@ finding per F7 *before* building anything.
 
 ## 12. Measured platform capabilities
 
-Recorded per F7: measured limits, not desiderata. Probe **PROBE-001**, `clockgrove/factory-probe-parallel`,
+Recorded per F7: measured limits, not desiderata. Probe **PROBE-001**, run in a disposable repository,
 2026-08-30, 12 issues across 2 waves.
 
 | Capability | Measured |
@@ -291,16 +294,16 @@ Three distinct degradation modes appeared, and **all three are silent**:
 4. **Client-side `429`** on my own polling. The orchestrator will rate-limit itself observing at
    this scale.
 
-**Conflicting writes are safe but not resolved.** Both `shared_hot.py` PRs branched from the same
-base (`c2201cac`) and each produced a clean, correct, non-overlapping diff. GitHub isolates them by
-branch; the *second merge* is where conflict surfaces. Integration is the loop's problem, not the
-agent's — which is the correct place for it.
+**Conflicting writes are safe but not resolved.** Both same-file PRs branched from the same base
+commit and each produced a clean, correct, non-overlapping diff. GitHub isolates them by branch; the
+*second merge* is where conflict surfaces. Integration is the loop's problem, not the agent's — which
+is the correct place for it.
 
 ### Design requirements this imposes
 
 - **Dispatch must be confirmed, not assumed.** Assignment success ≠ session started. The loop must
   verify a session exists and re-dispatch when it does not. This is the one reconciliation duty that
-  is genuinely required — v1's instinct was right, its location was wrong.
+  is genuinely required — the prior instinct was right, its location was wrong.
 - **`[WIP]` + empty diff = failed attempt**, and must be retried rather than evaluated.
 - **Retry must be safe.** Two of 26 failures were transient infrastructure; retry is the correct
   response, and it must not duplicate work.
@@ -311,7 +314,7 @@ agent's — which is the correct place for it.
 
 **Gate 0's load-bearing assumption holds, with a bounded caveat.** Cloud-hosted agent sessions are
 the execution substrate: parallel to at least 24, fast, correct, honest about non-actionability, and
-non-self-merging. Inversion B (#149/#161) discarded a working primitive.
+non-self-merging. Inversion B discarded a working primitive.
 
 The caveat is that the substrate is **lossy under burst**, so the loop needs exactly three things —
 dispatch confirmation, no-op detection, and idempotent retry. That is a small, well-understood
@@ -349,21 +352,19 @@ supervisor. It is *not* a permit protocol, a serialization fence, or a terminal 
 
 ## 14. Immediate actions
 
-1. ~~Stop the running Codex session.~~ **Done** — stopped at `a3e5d83`, 15 commits, nothing in flight.
+1. ~~Stop the running prior-implementation session.~~ **Done** — stopped cleanly, all commits
+   preserved, nothing left in flight.
 2. ~~Answer open question 1.~~ **Done** — PROBE-001, §12.
-3. **Repo strategy.** ~~Rename `clockgrove/factory` → `clockgrove/factory-legacy`~~ **Done.** Next:
-   create a **new** `clockgrove/factory`, public-ready from day one. v1 carried four configured
-   environments — `copilot` (empty), `copilot-initial-assignment` (empty), `copilot-initial-model`
-   (`COPILOT_GITHUB_TOKEN`), `factory-qualification-consumer` (`FACTORY_CONTROLLER_READ_TOKEN`) —
-   plus controller trust pins. **Do not inherit these implicitly.** v2 targets **zero
-   Factory-created environments**; see `CREDENTIALS.md`.
-4. **Harvest from `factory-legacy` before it goes cold**: `docs/DIST-002-STANDARD-PACKAGE-BASELINE.md`
-   (337-line packaging baseline) and the plugin install/uninstall evidence on
-   `codex/factory-package-completion`. The packaging research is sound; only the packaged runtime is
-   superseded.
-5. **Reset `clockgrove/clockgrove`** to docs-only (keep `docs/`, `.source/`, `assets/`, `BRAND.md`,
-   `STYLE.md`, `README.md`, `AGENTS.md`). **Deactivate Factory first** — 12 effect types are still
-   live — and capture v1 run IDs as diagnostic evidence.
-6. **Close the v1 Clockgrove issues** (#7, #88–#90, #109, #121–#127) as superseded by the
-   wave ≠ Objective remodel (F4).
+3. **Repo strategy.** ~~Retire the prior repository~~ **Done.** Next: build in a **new**,
+   public-ready-from-day-one repository. The prior design carried several configured environments
+   holding dispatch-phase credentials and release-approval trust pins. **Do not inherit these
+   implicitly.** This design targets **zero Factory-created environments**; see `CREDENTIALS.md`.
+4. **Harvest reusable research from the prior implementation before it goes cold**: the packaging
+   research and the plugin install/uninstall evidence remain sound even though the packaged runtime
+   is superseded.
+5. **Reset the Clockgrove product repository** to docs-only (keep `docs/`, `.source/`, `assets/`,
+   `BRAND.md`, `STYLE.md`, `README.md`, `AGENTS.md`). **Deactivate the prior Factory installation
+   first** — its effect types are still live — and capture its run history as diagnostic evidence
+   before removal.
+6. **Close the Clockgrove issues superseded by the wave ≠ Objective remodel (F4).**
 7. **Accept this PRD**, then start Gate 0.

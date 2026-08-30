@@ -4,7 +4,7 @@ Peer document to [`PRD.md`](PRD.md). The PRD says *what and why*; this says *how
 
 Status: draft for review
 Date: 2026-08-30
-Depends on: PRD v2 (accepted), [`PROBE-001`](PROBE-001-agent-parallelism.md)
+Depends on: PRD (accepted), [`PROBE-001`](PROBE-001-agent-parallelism.md)
 
 ---
 
@@ -12,7 +12,8 @@ Depends on: PRD v2 (accepted), [`PROBE-001`](PROBE-001-agent-parallelism.md)
 
 **Factory stores nothing. All work state is a pure function of GitHub state.**
 
-This single decision is what removes the entire class of machinery that consumed v1. If state is
+This single decision is what removes the entire class of machinery that consumed the prior effort.
+If state is
 never stored, it can never be stale, never diverge, never need reconciliation, and never need a
 permit protocol to protect it. There is nothing to recover because there is nothing to lose.
 
@@ -63,8 +64,8 @@ plugin/
 | Judging whether work is *correct* | **skill** | judgment |
 | Deciding to replan | **skill** | judgment |
 
-v1 wrote code for the judgment and accreted judgment into the code. Keeping this boundary sharp is
-the main defense against that.
+The prior design wrote code for the judgment and accreted judgment into the code. Keeping this
+boundary sharp is the main defense against that.
 
 ---
 
@@ -249,17 +250,17 @@ Triggers: attempts exhausted (§4.4), repeated declines, or repeated conflicts.
 Replanning **edits the graph** — split a Work Item, add a missing dependency, correct acceptance
 criteria — and is the one place Factory changes its own plan. Per F4, a wave is a *workstream of
 multiple Objectives*; Work Item identity is stable and titles are never rewritten to encode status.
-Title drift was the root of v1's replan deadlock.
+Title drift was the root cause of the prior design's replan deadlock.
 
 ### 7.1 Escalation is a first-class outcome
 
 **Unattended operation is a goal, not a mandate.** Some decisions legitimately require a human, and
 a system that cannot say so will invent a way to keep going.
 
-This is not a concession — it is a structural fix. v1 had no legitimate "stop and ask" state, so
-every problem had to be solved by more machinery. Its circuit breaker had to be added *by a human*,
-from outside, after the loop had already been spinning for days. A loop that can stop does not need
-to be stopped.
+This is not a concession — it is a structural fix. The prior design had no legitimate "stop and
+ask" state, so every problem had to be solved by more machinery; a circuit breaker had to be added
+*by a human*, from outside, after the loop had already been spinning for days. A loop that can stop
+does not need to be stopped.
 
 Escalating is therefore a **successful outcome** of a cycle, not a failure of one. The metric that
 matters is whether escalations are *well-founded*, not whether they are rare. Suppressing a needed
@@ -338,7 +339,7 @@ Each step ends in something runnable. No step is "framework".
 | 7 | `director.md` | assemble the loop → **Gate 0** |
 
 Steps 1–4 use a hand-written Work Item graph, so execution is proven before compilation is written.
-That ordering is deliberate: v1 built compilation first and never proved execution.
+That ordering is deliberate: the prior design built compilation first and never proved execution.
 
 ---
 
@@ -368,10 +369,10 @@ question "what did Director believe and why" must be answerable from the log alo
 | Dispatch loss exceeds retry budget | measured at 2/26; bounded confirm + escalate (§4.2) |
 | Rate limits at higher concurrency | one snapshot per cycle; staggered dispatch; backoff (§4.1) |
 | Conflicts on shared files | rebase, else re-dispatch; repeat ⇒ replan (§6) |
-| **Scope creep back into v1 shape** | PRD §5 non-goals; any "we need a queue" is a **finding**, not a task |
+| **Scope creep back into the prior design's shape** | PRD §5 non-goals; any "we need a queue" is a **finding**, not a task |
 
-The last one is the real risk. Every piece of v1 was locally reasonable. The defense is that
-non-goals are falsification evidence rather than obstacles to route around.
+The last one is the real risk. Every piece of the prior design was locally reasonable. The defense
+is that non-goals are falsification evidence rather than obstacles to route around.
 
 ---
 
@@ -407,7 +408,8 @@ Decided after surveying how agent plugins are actually built and distributed.
 
 ### Why the "keep Python" argument does not apply
 
-The strongest case for Python is that v1 is 129 Python files with working GraphQL over `urllib`.
+The strongest case for Python is that the prior implementation has over a hundred Python files with
+working GraphQL over `urllib`.
 Three of its four supporting arguments are void under decisions already made:
 
 - *"The library already exists"* — PRD §11 is clean-room. Nothing is copied. There is no incumbent.
@@ -424,7 +426,8 @@ Factory's deterministic layer is **almost entirely GitHub API calls that must su
 transient 5xx**. PROBE-001 measured both: a client-side `429` from polling, and two `HTTP 500`
 failures in 26 dispatches. `@octokit/plugin-throttling` and `@octokit/plugin-retry` implement exactly
 those behaviors, are maintained by GitHub, and track the API spec by definition. In Python we would
-hand-roll the same logic against a REST-only client or raw HTTP — which is precisely what v1 did.
+hand-roll the same logic against a REST-only client or raw HTTP — which is precisely what the prior
+design did.
 
 Typed GraphQL responses also matter more than usual here, because §3's derived state is a projection
 over GraphQL shapes. A wrong field name should fail at build time, not mid-loop.
@@ -468,8 +471,8 @@ Deliberately narrow: a short denylist of irreversible operations. Not a policy e
 permission model. If the list grows past a handful of entries, that is a sign judgment is leaking
 into the guardrail.
 
-This is also where v1's "Keeper" idea lands — a deterministic guardrail built from existing
-primitives rather than a custom service. Same invariant, no infrastructure.
+This is also where the prior design's "Keeper" idea lands — a deterministic guardrail built from
+existing primitives rather than a custom service. Same invariant, no infrastructure.
 
 ### Considered and rejected
 
@@ -549,8 +552,8 @@ cosmetic.
 The earlier note said "Codex has no `agents` field." The real reason is more general: *agents are
 non-portable on every client.* Claude Code puts them in `agents/`, Copilot in
 `com.github.copilot/agents/`, Codex omits them. Any design in which Director is an agent is
-harness-locked by construction. v1's manifest declared `"agents": ".github/agents/"` — the Claude
-Code shape — which is precisely the coupling to avoid.
+harness-locked by construction. An early manifest draft declared `"agents": ".github/agents/"` — the
+Claude Code shape — which is precisely the coupling to avoid.
 
 **2. Hooks cannot carry the irreversibility guarantee.**
 This corrects §14. Hooks are client-specific, so a hook-based guardrail protects Factory on
@@ -574,8 +577,8 @@ Combining §15.2's points two and three produces a better answer than §14's hoo
 
 The guarantee then rests on the *only* behavior-bearing component that is portable, and it holds by
 construction rather than by instruction — the model cannot route around a capability its tools do
-not expose. This is v1's "Keeper" idea, finally sized correctly: not a custom service, not a
-document, just the absence of a dangerous function in the one process allowed to write.
+not expose. This is the prior design's "Keeper" idea, finally sized correctly: not a custom service,
+not a document, just the absence of a dangerous function in the one process allowed to write.
 
 Hooks remain worthwhile as **defense in depth** where a harness supports them (Claude Code's
 `PreToolUse` can block a raw `git push --force` typed into a shell tool, which the MCP server never
@@ -596,10 +599,10 @@ repo, any Git host, or a local path. Installation is per-harness but uniformly z
 - **Claude Code** — `.claude-plugin/marketplace.json`.
 
 PRD §9 requires installation from an **exact Git ref**. Codex satisfies this natively with a `sha`
-selector, which is why Factory ships **no release machinery** — a commit SHA is the version. v1
-built generations, qualification gates, signed approvals, and a release pipeline to reach a
-guarantee the platform already provides. *Per-harness pinning fidelity is unverified for Copilot CLI
-and Claude Code and must be tested, not assumed* (§15.6).
+selector, which is why Factory ships **no release machinery** — a commit SHA is the version. The
+prior design built generations, qualification gates, signed approvals, and a release pipeline to
+reach a guarantee the platform already provides. *Per-harness pinning fidelity is unverified for
+Copilot CLI and Claude Code and must be tested, not assumed* (§15.6).
 
 **Noted for later:** the Copilot **cloud agent** reads `enabledPlugins` from
 `.github/copilot/settings.json`. That is a supported path for delivering the *project* skill package
@@ -625,7 +628,7 @@ verified by a deliberate, minimal check:
 
 Same skills, same MCP server, same GitHub evidence — only the manifest adapter differs. Any behavior
 that diverges is either a bug or a hidden dependency on a client-specific capability, and either way
-it is a finding. Deferred until after Gate 0; the target is `v0.2`, not `v1.0`.
+it is a finding. Deferred until after Gate 0; the target is `v0.2`, not the first stable release.
 
 ### 15.7 Model neutrality
 

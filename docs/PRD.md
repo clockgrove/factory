@@ -341,9 +341,10 @@ supervisor. It is *not* a permit protocol, a serialization fence, or a terminal 
 2. ~~Answer open question 1.~~ **Done** — PROBE-001, §12.
 3. **Repo strategy.** ~~Rename `clockgrove/factory` → `clockgrove/factory-legacy`~~ **Done.** Next:
    create a **new** `clockgrove/factory`, public-ready from day one. v1 carried four configured
-   environments holding credentials — `copilot`, `copilot-initial-assignment`,
-   `copilot-initial-model`, `factory-qualification-consumer` — plus controller trust pins.
-   **Do not inherit these implicitly.**
+   environments — `copilot` (empty), `copilot-initial-assignment` (empty), `copilot-initial-model`
+   (`COPILOT_GITHUB_TOKEN`), `factory-qualification-consumer` (`FACTORY_CONTROLLER_READ_TOKEN`) —
+   plus controller trust pins. **Do not inherit these implicitly.** v2 targets **zero
+   Factory-created environments**; see `CREDENTIALS.md`.
 4. **Harvest from `factory-legacy` before it goes cold**: `docs/DIST-002-STANDARD-PACKAGE-BASELINE.md`
    (337-line packaging baseline) and the plugin install/uninstall evidence on
    `codex/factory-package-completion`. The packaging research is sound; only the packaged runtime is

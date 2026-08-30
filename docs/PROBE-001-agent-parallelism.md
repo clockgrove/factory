@@ -140,6 +140,35 @@ misclassifies.
 Also: back off on wall-clock time, not on quota introspection. The only trustworthy signal
 that plane 3 has cleared is a successful request.
 
+**Addendum (2026-08-30, PRD investigation session, verified against
+docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api and
+.../best-practices-for-using-the-rest-api).** Plane 3 recurred five times in a single session of
+light, non-burst API usage (a handful of GraphQL introspection calls, two issue mutations, and REST
+reads spread over roughly 15 minutes) — not just under PROBE-001's original 26-parallel-dispatch
+burst. One recurrence persisted through a 45s wall-clock backoff and a retry. This revises the
+original framing: plane 3 is not solely a burst-ceiling effect; it can trigger and hold under
+ordinary, low-volume interactive use, on an unknown and unobserved cooldown ("there is not a way to
+check the status of your secondary rate limit" — same docs). The requirement is unchanged (classify
+as platform-unavailable, never as Work Item failure) but the implication is stronger, and the
+official docs make it explicit that this is not merely a pacing nuisance:
+
+> Continuing to make requests while you are rate limited may result in the banning of your
+> integration.
+
+The documented secondary-limit triggers, any one of which is sufficient:
+
+| Trigger | Documented threshold |
+|---|---|
+| Concurrent requests | > 100, shared across REST + GraphQL |
+| Points per minute, single endpoint | > 900 (REST) / > 2,000 (GraphQL); GET/query = 1pt, mutation = 5pts |
+| CPU time | > 90s CPU per 60s real time (≤ 60s of which may be GraphQL) |
+| Content-creating requests | > 80/minute or > 500/hour (issues, comments, PRs, assignments) |
+| OAuth token requests | > 2,000/hour |
+
+Factory's original wave shapes sat directly on these: 26 issues created in ~35s, and bursts of
+`session.create` calls, are exactly the concurrent-request and content-creation triggers, not a
+platform anomaly. This was self-inflicted by wave shape, not something GitHub did to us.
+
 ## Design requirements
 
 - **Confirm dispatch; never assume it.** Assignment success ≠ session started. Verify a session
@@ -152,6 +181,15 @@ that plane 3 has cleared is a successful request.
   they must never consume an attempt or reach the replanner (Finding 4).
 - **Do not trust `/rate_limit` as a gate.** It reports full quota while refusing every call.
   Back off on wall-clock time and treat a successful request as the only clear signal.
+- **Pace well under the documented secondary limits, not up to them** (`src/platform.ts`,
+  `FACTORY_PACING`): cap concurrent in-flight calls to a handful (not 99), cap content-creating
+  calls to roughly half the documented 80/min and 500/hour, and enforce a minimum 1s gap between
+  mutative calls, per GitHub's own best-practice guidance to prefer serial requests.
+- **Trip a wave-level circuit breaker on repeated refusals, not just a per-call retry**
+  (`src/platform.ts`, `CircuitBreaker`): after a small number of consecutive refusals, pause *all*
+  dispatch for a cooldown measured in minutes, growing on repeated trips, and surface for a human
+  decision (§7.3) once the breaker has tripped enough times — because continuing to retry through
+  a secondary limit risks the integration being banned, not just a wasted call.
 
 ## Verdict
 

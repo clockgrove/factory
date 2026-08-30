@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  CircuitBreaker,
+  ConcurrencyLimiter,
+  ContentCreationPacer,
   classifyRefusal,
   isPlatformUnavailable,
 } from "../src/platform.js";
@@ -92,5 +95,136 @@ describe("classifyRefusal", () => {
     expect(isPlatformUnavailable(new Error("boom"))).toBe(false);
     expect(isPlatformUnavailable(undefined)).toBe(false);
     expect(isPlatformUnavailable(null)).toBe(false);
+  });
+});
+
+/**
+ * The wave-level breaker exists because GitHub says continuing to retry
+ * while rate limited risks the integration being banned — so a refusal must
+ * pause every upcoming call, not just retry the one that hit it.
+ */
+describe("CircuitBreaker", () => {
+  const t0 = new Date("2026-01-01T00:00:00Z");
+  const refusal = { kind: "rate_limit" as const, retryAfterMs: 1_000 };
+
+  it("stays closed under the consecutive-refusal threshold", () => {
+    const cb = new CircuitBreaker({ openAfterConsecutiveRefusals: 3 });
+    cb.recordRefusal(refusal, t0);
+    cb.recordRefusal(refusal, t0);
+    expect(cb.isOpen(t0)).toBe(false);
+  });
+
+  it("opens once consecutive refusals reach the threshold", () => {
+    const cb = new CircuitBreaker({
+      openAfterConsecutiveRefusals: 3,
+      baseCooldownMs: 60_000,
+    });
+    cb.recordRefusal(refusal, t0);
+    cb.recordRefusal(refusal, t0);
+    cb.recordRefusal(refusal, t0);
+    expect(cb.isOpen(t0)).toBe(true);
+    expect(cb.waitMs(t0)).toBeGreaterThanOrEqual(60_000);
+  });
+
+  it("closes again once the cooldown elapses", () => {
+    const cb = new CircuitBreaker({
+      openAfterConsecutiveRefusals: 1,
+      baseCooldownMs: 60_000,
+    });
+    cb.recordRefusal(refusal, t0);
+    expect(cb.isOpen(t0)).toBe(true);
+    const later = new Date(t0.getTime() + 60_001);
+    expect(cb.isOpen(later)).toBe(false);
+  });
+
+  it("only a success resets the consecutive-refusal count", () => {
+    const cb = new CircuitBreaker({ openAfterConsecutiveRefusals: 2 });
+    cb.recordRefusal(refusal, t0);
+    cb.recordSuccess();
+    cb.recordRefusal(refusal, t0);
+    expect(cb.isOpen(t0)).toBe(false);
+  });
+
+  it("grows the cooldown on repeated trips, capped at maxCooldownMs", () => {
+    const cb = new CircuitBreaker({
+      openAfterConsecutiveRefusals: 1,
+      baseCooldownMs: 60_000,
+      maxCooldownMs: 90_000,
+    });
+    cb.recordRefusal(refusal, t0); // opens #1: 60_000
+    const afterFirst = new Date(t0.getTime() + 60_001);
+    cb.recordRefusal(refusal, afterFirst); // opens #2: min(120_000, 90_000)
+    expect(cb.waitMs(afterFirst)).toBe(90_000);
+  });
+
+  it("reports exhausted once maxOpens trips have occurred", () => {
+    const cb = new CircuitBreaker({
+      openAfterConsecutiveRefusals: 1,
+      baseCooldownMs: 1,
+      maxOpens: 2,
+    });
+    let now = t0;
+    cb.recordRefusal(refusal, now);
+    now = new Date(now.getTime() + 2);
+    cb.recordRefusal(refusal, now);
+    expect(cb.exhausted()).toBe(true);
+  });
+});
+
+describe("ContentCreationPacer", () => {
+  it("allows the first call immediately", () => {
+    const p = new ContentCreationPacer(40, 250, 1_000);
+    expect(p.waitMs(new Date("2026-01-01T00:00:00Z"))).toBe(0);
+  });
+
+  it("enforces the minimum gap between mutative calls", () => {
+    const p = new ContentCreationPacer(40, 250, 1_000);
+    const t0 = new Date("2026-01-01T00:00:00.000Z");
+    p.recordCall(t0);
+    expect(p.waitMs(new Date(t0.getTime() + 200))).toBe(800);
+  });
+
+  it("blocks once the per-minute budget is spent", () => {
+    const p = new ContentCreationPacer(2, 250, 0);
+    const t0 = new Date("2026-01-01T00:00:00.000Z");
+    p.recordCall(t0);
+    p.recordCall(new Date(t0.getTime() + 10));
+    expect(p.waitMs(new Date(t0.getTime() + 20))).toBeGreaterThan(0);
+  });
+
+  it("frees up the per-minute budget once the window slides past", () => {
+    const p = new ContentCreationPacer(1, 250, 0);
+    const t0 = new Date("2026-01-01T00:00:00.000Z");
+    p.recordCall(t0);
+    expect(p.waitMs(new Date(t0.getTime() + 60_001))).toBe(0);
+  });
+});
+
+describe("ConcurrencyLimiter", () => {
+  it("admits calls up to the limit without waiting", async () => {
+    const limiter = new ConcurrencyLimiter(2);
+    const release1 = await limiter.acquire();
+    const release2 = await limiter.acquire();
+    expect(release1).toBeInstanceOf(Function);
+    expect(release2).toBeInstanceOf(Function);
+  });
+
+  it("queues a call beyond the limit until a slot is released", async () => {
+    const limiter = new ConcurrencyLimiter(1);
+    const release1 = await limiter.acquire();
+
+    const order: string[] = [];
+    const second = limiter.acquire().then((release2) => {
+      order.push("second-acquired");
+      release2();
+    });
+
+    // The second acquire should still be pending — the first slot is held.
+    await Promise.resolve();
+    order.push("checked-pending");
+    release1();
+    await second;
+
+    expect(order).toEqual(["checked-pending", "second-acquired"]);
   });
 });

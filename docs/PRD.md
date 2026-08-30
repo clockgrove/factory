@@ -328,8 +328,10 @@ supervisor. It is *not* a permit protocol, a serialization fence, or a terminal 
    intended trigger and whether crash recovery is simply "start a new session and re-read GitHub."
 5. **Which harnesses must v1.0 support?** "Any harness" needs a concrete initial target list
    (Copilot CLI first) and a defined portability boundary.
-6. **Public from day one, or public at Gate 2?** Building in the open from the start prevents
-   private-dependency creep of the `factory-controller` kind.
+6. ~~Public from day one, or public at Gate 2?~~ **Decided: private for now.** Public is a
+   one-command change; published history is not recallable. The open-source-ready criteria in §10
+   still bind from day one so nothing has to be retrofitted — no private dependencies, no
+   Clockgrove hardcoding, documented install/upgrade/uninstall.
 
 ---
 

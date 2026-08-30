@@ -88,7 +88,7 @@ label is stored state wearing a disguise.
 
 ### 3.2 Derived states
 
-`state.py` computes each Work Item's state per cycle. Pure function, no writes:
+`state.ts` computes each Work Item's state per cycle. Pure function, no writes:
 
 ```
 unstarted     open, no Copilot assignee, no linked PR
@@ -113,27 +113,30 @@ answer.
 
 Runs in the harness, holding continuous context. One cycle:
 
-```python
-while True:
-    s = state.read(objective)               # one snapshot per cycle
+```ts
+while (true) {
+  const s = derive(await reader.readObjective(objective));   // one snapshot per cycle
 
-    if s.all_done():
-        close_objective(); break
+  if (allDone(s)) { await closeObjective(s); break; }
 
-    for wi in s.ready()[:CONCURRENCY]:      # 4.1
-        dispatch.start(wi)
+  for (const wi of ready(s).slice(0, CONCURRENCY)) {         // 4.1
+    await dispatch.start(wi);
+  }
 
-    dispatch.confirm(s.dispatched)          # 4.2  — required by PROBE-001
-    for wi in s.failed:
-        dispatch.retry_or_escalate(wi)      # 4.4
+  await dispatch.confirm(inState(s, "dispatched"));          // 4.2 — required by PROBE-001
 
-    for wi in s.for_review:
-        integrate(wi)                       # §6
+  for (const wi of inState(s, "failed")) {
+    await dispatch.retryOrEscalate(wi);                      // 4.4
+  }
 
-    if s.stalled():
-        replan(s)                           # §7
+  for (const wi of inState(s, "for_review")) {
+    await integrate(wi);                                     // §6
+  }
 
-    sleep(POLL_INTERVAL)
+  if (isStalled(s)) await replan(s);                         // §7
+
+  await sleep(POLL_INTERVAL);
+}
 ```
 
 ### 4.1 Concurrency and pacing
@@ -188,7 +191,7 @@ Attempt count = **number of linked PRs**. No counter is stored.
 PROBE-001's headline finding: **`conclusion: success` does not mean the work was done.** An
 impossible task returned success. Evaluation must read the pull request.
 
-### 5.1 Mechanical checks (`evaluate.py`)
+### 5.1 Mechanical checks (`evaluate.ts`)
 
 Cheap, deterministic, run first:
 
@@ -326,12 +329,12 @@ Each step ends in something runnable. No step is "framework".
 
 | # | Deliverable | Proves |
 |---|---|---|
-| 1 | `github.py` + `state.py` | derive full state of a hand-made Objective |
-| 2 | `dispatch.py` | assign, confirm, retry against a real repo |
-| 3 | `evaluate.py` | correctly classify a known no-op |
+| 1 | `github.ts` + `state.ts` | derive full state of a hand-made Objective |
+| 2 | `dispatch.ts` | assign, confirm, retry against a real repo |
+| 3 | `evaluate.ts` | correctly classify a known no-op |
 | 4 | integration | merge a PR and close its issue |
 | 5 | `objective-compilation` skill + schema | Objective → validated Work Item graph |
-| 6 | `graph.py` | apply graph as sub-issues + dependencies |
+| 6 | `graph.ts` | apply graph as sub-issues + dependencies |
 | 7 | `director.md` | assemble the loop → **Gate 0** |
 
 Steps 1–4 use a hand-written Work Item graph, so execution is proven before compilation is written.

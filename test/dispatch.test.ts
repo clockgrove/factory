@@ -102,6 +102,21 @@ class FakeWriter implements GitHubWriter {
     this.calls.push(`closePullRequest:${pullRequestId}`);
     if (this.failing.closePullRequest) throw this.failing.closePullRequest;
   }
+
+  async markPullRequestReady(pullRequestId: string): Promise<void> {
+    this.calls.push(`markPullRequestReady:${pullRequestId}`);
+    if (this.failing.markPullRequestReady) throw this.failing.markPullRequestReady;
+  }
+
+  async mergePullRequest(pullRequestId: string): Promise<void> {
+    this.calls.push(`mergePullRequest:${pullRequestId}`);
+    if (this.failing.mergePullRequest) throw this.failing.mergePullRequest;
+  }
+
+  async updatePullRequestBranch(pullRequestId: string): Promise<void> {
+    this.calls.push(`updatePullRequestBranch:${pullRequestId}`);
+    if (this.failing.updatePullRequestBranch) throw this.failing.updatePullRequestBranch;
+  }
 }
 
 /** Shape `classifyRefusal` (platform.ts) recognizes as a secondary rate limit. */
@@ -277,6 +292,99 @@ describe("Dispatcher.retryOrEscalate", () => {
       `addHumanAssignee:${item.id}:U_human`,
       `clearActors:${item.id}`,
       `addComment:${item.id}`,
+    ]);
+  });
+});
+
+describe("Dispatcher.integrate", () => {
+  it("merges a ready, non-draft PR without marking it ready first", async () => {
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    const item = derivedWi();
+    const p = pr({ id: "PR_ready", isDraft: false });
+    await d.integrate(item, p, { kind: "ready" });
+    expect(writer.calls).toEqual(["mergePullRequest:PR_ready"]);
+  });
+
+  it("marks a draft PR ready before merging", async () => {
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    const item = derivedWi();
+    const p = pr({ id: "PR_draft", isDraft: true });
+    await d.integrate(item, p, { kind: "ready" });
+    expect(writer.calls).toEqual(["markPullRequestReady:PR_draft", "mergePullRequest:PR_draft"]);
+  });
+
+  it("waits on checks_pending without writing anything", async () => {
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    const item = derivedWi();
+    await d.integrate(item, pr(), { kind: "checks_pending" });
+    expect(writer.calls).toEqual([]);
+  });
+
+  it("resolves a conflict by updating the branch when GitHub accepts it", async () => {
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    const item = derivedWi();
+    const p = pr({ id: "PR_conflict" });
+    await d.integrate(item, p, { kind: "conflict" });
+    expect(writer.calls).toEqual(["updatePullRequestBranch:PR_conflict"]);
+  });
+
+  it("closes and re-dispatches when the branch update is rejected as unresolvable", async () => {
+    const boom = new Error("merge conflict between base and head");
+    const writer = new FakeWriter({ updatePullRequestBranch: boom });
+    const d = makeDispatcher(writer);
+    const item = derivedWi();
+    const p = pr({ id: "PR_conflict" });
+    await d.integrate(item, p, { kind: "conflict" });
+    expect(writer.calls).toEqual([
+      "updatePullRequestBranch:PR_conflict",
+      "addComment:PR_conflict",
+      "closePullRequest:PR_conflict",
+      `clearActors:${item.id}`,
+      `assignCopilot:${item.id}:BOT_1`,
+    ]);
+  });
+
+  it("rethrows a platform refusal from the branch update rather than treating it as unresolvable", async () => {
+    const writer = new FakeWriter({ updatePullRequestBranch: rateLimitError() });
+    const d = makeDispatcher(writer);
+    const item = derivedWi();
+    const p = pr({ id: "PR_conflict" });
+    await expect(d.integrate(item, p, { kind: "conflict" })).rejects.toBeInstanceOf(
+      PlatformUnavailableError,
+    );
+    expect(writer.calls).toEqual(["updatePullRequestBranch:PR_conflict"]);
+  });
+
+  it("routes untouched through retryOrEscalate with a scope-specific reason", async () => {
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    const item = derivedWi({ linkedPullRequests: [pr({ id: "PR_untouched" })] });
+    await d.integrate(item, pr({ id: "PR_untouched" }), {
+      kind: "untouched",
+      touchedFiles: ["unrelated.ts"],
+    });
+    expect(writer.calls).toEqual([
+      "addComment:PR_untouched",
+      "closePullRequest:PR_untouched",
+      `clearActors:${item.id}`,
+      `assignCopilot:${item.id}:BOT_1`,
+    ]);
+  });
+
+  it("routes checks_failed through retryOrEscalate", async () => {
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    const item = derivedWi({ linkedPullRequests: [pr({ id: "PR_failed" })] });
+    await d.integrate(item, pr({ id: "PR_failed" }), { kind: "checks_failed" });
+    expect(writer.calls).toEqual([
+      "addComment:PR_failed",
+      "closePullRequest:PR_failed",
+      `clearActors:${item.id}`,
+      `assignCopilot:${item.id}:BOT_1`,
     ]);
   });
 });

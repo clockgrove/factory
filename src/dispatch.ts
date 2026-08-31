@@ -1,5 +1,6 @@
 /**
- * Dispatch: assign, confirm, retry, escalate (§4).
+ * Dispatch and integration: assign, confirm, retry, escalate (§4), then merge
+ * and close (§6) once a PR clears `evaluate.ts`'s mechanical checks.
  *
  * Two layers, deliberately kept apart:
  *
@@ -23,10 +24,17 @@
  * partial failure just makes the next cycle redo (part of) the same step,
  * which is safe because every write here is either idempotent or reduces to
  * a state `ready()`/`confirm()` already knows how to handle from scratch.
+ *
+ * Integration (§6, `integrate()`) reuses that same "no stored retry state"
+ * discipline: a merge conflict is resolved or rejected inline, in the same
+ * cycle it is observed, by attempting `updatePullRequestBranch` once and
+ * closing/re-dispatching on failure — never by remembering "we already tried
+ * this PR once" across cycles.
  */
 
 import { Octokit } from "@octokit/core";
 
+import type { MechanicalVerdict } from "./evaluate.js";
 import { createOctokit, type GitHubOptions } from "./github.js";
 import {
   CircuitBreaker,
@@ -42,6 +50,7 @@ import {
   withinConfirmWindow,
 } from "./state.js";
 import type { DerivedWorkItem } from "./state.js";
+import type { LinkedPullRequest } from "./types.js";
 
 /**
  * What to do about a Work Item sitting in `dispatched` state (§4.2).
@@ -129,6 +138,39 @@ mutation ClosePullRequest($pullRequestId: ID!) {
 }`;
 
 /**
+ * Integration mutations (§6), verified against
+ * docs.github.com/en/graphql/reference/pulls (2026-08-30). Not yet exercised
+ * live — same known gap noted above for the retry/escalate mutations.
+ */
+const MARK_READY_FOR_REVIEW_MUTATION = `
+mutation MarkReady($pullRequestId: ID!) {
+  markPullRequestReadyForReview(input: { pullRequestId: $pullRequestId }) {
+    clientMutationId
+  }
+}`;
+
+const MERGE_PULL_REQUEST_MUTATION = `
+mutation MergePullRequest($pullRequestId: ID!) {
+  mergePullRequest(input: { pullRequestId: $pullRequestId, mergeMethod: SQUASH }) {
+    clientMutationId
+  }
+}`;
+
+/**
+ * `updatePullRequestBranch`'s payload carries no success flag (verified live
+ * against the schema, 2026-08-30) — only `pullRequest`/`clientMutationId`.
+ * Whether the update actually resolved anything is read back on the *next*
+ * cycle's snapshot (`mergeable` recomputed); a thrown error here is the only
+ * same-cycle signal that GitHub could not apply it at all (§6).
+ */
+const UPDATE_PULL_REQUEST_BRANCH_MUTATION = `
+mutation UpdatePullRequestBranch($pullRequestId: ID!) {
+  updatePullRequestBranch(input: { pullRequestId: $pullRequestId }) {
+    clientMutationId
+  }
+}`;
+
+/**
  * The GitHub write surface `Dispatcher` needs. An interface, not a concrete
  * class, so `Dispatcher`'s own tests inject a fake and never touch the
  * network (see `test/dispatch.test.ts`). `GithubOctokitWriter` below is the
@@ -152,6 +194,15 @@ export interface GitHubWriter {
   addHumanAssignee(issueId: string, userId: string): Promise<void>;
   addComment(subjectId: string, body: string): Promise<void>;
   closePullRequest(pullRequestId: string): Promise<void>;
+  /** Convert a draft PR to ready-for-review; a precondition for merging (§6). */
+  markPullRequestReady(pullRequestId: string): Promise<void>;
+  /** Squash-merge. GitHub auto-closes the linked issue (§6, PROBE-001 §12). */
+  mergePullRequest(pullRequestId: string): Promise<void>;
+  /**
+   * Merge the base branch into the PR branch (§6's "attempt rebase"). Throws
+   * if GitHub cannot apply it — a real conflict, not merely being behind.
+   */
+  updatePullRequestBranch(pullRequestId: string): Promise<void>;
 }
 
 /** `GitHubWriter` backed by a real Octokit GraphQL client. */
@@ -197,6 +248,24 @@ export class GithubOctokitWriter implements GitHubWriter {
 
   async closePullRequest(pullRequestId: string): Promise<void> {
     await this.#octokit.graphql(CLOSE_PULL_REQUEST_MUTATION, {
+      pullRequestId,
+    });
+  }
+
+  async markPullRequestReady(pullRequestId: string): Promise<void> {
+    await this.#octokit.graphql(MARK_READY_FOR_REVIEW_MUTATION, {
+      pullRequestId,
+    });
+  }
+
+  async mergePullRequest(pullRequestId: string): Promise<void> {
+    await this.#octokit.graphql(MERGE_PULL_REQUEST_MUTATION, {
+      pullRequestId,
+    });
+  }
+
+  async updatePullRequestBranch(pullRequestId: string): Promise<void> {
+    await this.#octokit.graphql(UPDATE_PULL_REQUEST_BRANCH_MUTATION, {
       pullRequestId,
     });
   }
@@ -273,12 +342,21 @@ export class Dispatcher {
     await this.#assign(wi.id);
   }
 
-  /** §4.4: a no-op PR sat past its confirm window. Retry or escalate. */
-  async retryOrEscalate(wi: DerivedWorkItem): Promise<void> {
+  /**
+   * §4.4 / §5.1: the current attempt was judged unusable — a no-op, a
+   * decline, a diff outside the declared scope, or failed checks. Retry or
+   * escalate. `reason` is surfaced in both the escalation comment (§7.2) and
+   * the close comment, so the log answers "what did Director believe and
+   * why" (§10) without needing to store which mechanical check fired.
+   */
+  async retryOrEscalate(
+    wi: DerivedWorkItem,
+    reason = "no diff appeared before the confirm window elapsed",
+  ): Promise<void> {
     if (attemptAction(wi) === "escalate") {
       await this.#escalate(
         wi,
-        `${attemptCount(wi)} attempts produced no usable diff`,
+        `${attemptCount(wi)} attempts produced no usable result (${reason})`,
       );
       return;
     }
@@ -289,16 +367,99 @@ export class Dispatcher {
       // reattempted next cycle (the PR is still open and no-op, so the Work
       // Item is still `failed`) — a duplicate comment is noise, never harm.
       await this.#call(() =>
-        this.#writer.addComment(
-          current.id,
-          "Closing: no diff appeared before the confirm window elapsed (§4.4). Retrying.",
-        ),
+        this.#writer.addComment(current.id, `Closing: ${reason} (§4.4/§5.1). Retrying.`),
       );
       await this.#call(() => this.#writer.closePullRequest(current.id));
     }
 
     await this.#call(() => this.#writer.clearActors(wi.id));
     await this.#assign(wi.id);
+  }
+
+  /**
+   * §6: act on `evaluate.ts`'s mechanical verdict for a Work Item's current
+   * PR. Only meaningful once the Work Item is `for_review` (a real diff with
+   * settled checks) — `no_op`/`declined` cannot occur there (state.ts already
+   * routes those to `failed` before this is ever called), but are handled
+   * defensively rather than assumed unreachable.
+   */
+  async integrate(
+    wi: DerivedWorkItem,
+    pr: LinkedPullRequest,
+    verdict: MechanicalVerdict,
+  ): Promise<void> {
+    switch (verdict.kind) {
+      case "ready":
+        await this.#mergeReady(pr);
+        return;
+      case "conflict":
+        await this.#resolveConflict(wi, pr);
+        return;
+      case "untouched":
+        await this.retryOrEscalate(
+          wi,
+          "the diff did not touch the Work Item's declared file scope",
+        );
+        return;
+      case "checks_failed":
+        await this.retryOrEscalate(wi, "required checks failed");
+        return;
+      case "declined":
+        await this.retryOrEscalate(
+          wi,
+          "the agent declined the task as not actionable",
+        );
+        return;
+      case "no_op":
+        await this.retryOrEscalate(wi);
+        return;
+      case "checks_pending":
+        return; // wait for the next cycle; nothing to do yet
+    }
+  }
+
+  /** §6: "mark ready → checks green → squash merge → issue auto-closes". */
+  async #mergeReady(pr: LinkedPullRequest): Promise<void> {
+    if (pr.isDraft) {
+      await this.#call(() => this.#writer.markPullRequestReady(pr.id));
+    }
+    await this.#call(() => this.#writer.mergePullRequest(pr.id));
+  }
+
+  /**
+   * §6: "attempt rebase; if clean, proceed; if not, close the PR and
+   * re-dispatch against the new base." `updatePullRequestBranch`'s payload
+   * carries no success flag (verified live against the schema, 2026-08-30),
+   * so a thrown, non-refusal error is the only same-cycle signal that GitHub
+   * could not apply it — a genuine content conflict, not merely being
+   * behind. A refusal (rate limit, etc.) is rethrown rather than treated as
+   * an unresolvable conflict, so platform pacing is never mistaken for a
+   * graph defect.
+   *
+   * Unmeasured live: Gate 0's Work Items are independent by design (PRD §7),
+   * so this path has not yet been exercised against a real conflicting PR.
+   */
+  async #resolveConflict(
+    wi: DerivedWorkItem,
+    pr: LinkedPullRequest,
+  ): Promise<void> {
+    try {
+      await this.#call(() => this.#writer.updatePullRequestBranch(pr.id));
+      // Success: the branch was updated. The next cycle's snapshot rereads
+      // `mergeable`; if it is now MERGEABLE, `integrate()` proceeds normally,
+      // and if GitHub still reports CONFLICTING, this method runs again.
+    } catch (error) {
+      if (error instanceof PlatformUnavailableError) throw error;
+      await this.#call(() =>
+        this.#writer.addComment(
+          pr.id,
+          "Closing: could not automatically resolve a merge conflict against the base branch (§6). Re-dispatching.",
+        ),
+      );
+      await this.#call(() => this.#writer.closePullRequest(pr.id));
+      await this.#call(() => this.#writer.clearActors(wi.id));
+      await this.#assign(wi.id);
+    }
   }
 
   async #assign(issueId: string): Promise<void> {

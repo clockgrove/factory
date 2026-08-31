@@ -2678,6 +2678,7 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
       }
     }
     issue(number: $number) {
+      id
       number
       title
       state
@@ -2827,6 +2828,7 @@ var GitHubReader = class {
       (a) => a.login === COPILOT_LOGIN
     );
     return {
+      id: issue.id,
       number: issue.number,
       title: issue.title,
       closed: issue.state === "CLOSED",
@@ -2910,6 +2912,7 @@ function deriveState(wi, now) {
 }
 function derive(snapshot) {
   return {
+    id: snapshot.id,
     number: snapshot.number,
     title: snapshot.title,
     closed: snapshot.closed,

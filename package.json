@@ -7,15 +7,17 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "esbuild src/cli.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/factory.js",
+    "build": "esbuild src/cli.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/factory.js && esbuild src/mcp-server.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/mcp-server.js",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@octokit/core": "^6.1.4",
     "@octokit/plugin-paginate-rest": "^11.4.0",
     "@octokit/plugin-retry": "^7.1.2",
-    "@octokit/plugin-throttling": "^9.3.2"
+    "@octokit/plugin-throttling": "^9.3.2",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/node": "^22.10.5",

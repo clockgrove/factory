@@ -199,6 +199,7 @@ export interface DerivedWorkItem extends WorkItemSnapshot {
 }
 
 export interface DerivedObjective {
+  id: string;
   number: number;
   title: string;
   closed: boolean;
@@ -211,6 +212,7 @@ export interface DerivedObjective {
 
 export function derive(snapshot: ObjectiveSnapshot): DerivedObjective {
   return {
+    id: snapshot.id,
     number: snapshot.number,
     title: snapshot.title,
     closed: snapshot.closed,

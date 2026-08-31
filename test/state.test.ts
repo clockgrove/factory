@@ -59,6 +59,7 @@ function wi(over: Partial<WorkItemSnapshot> = {}): WorkItemSnapshot {
 
 function objective(items: WorkItemSnapshot[]): ObjectiveSnapshot {
   return {
+    id: "I_OBJ",
     number: 1,
     title: "Add three utilities",
     closed: false,

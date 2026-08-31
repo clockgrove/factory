@@ -95,6 +95,10 @@ export interface WorkItemSnapshot {
 }
 
 export interface ObjectiveSnapshot {
+  /** GraphQL node ID of the Objective issue itself, needed to address it as
+   * `graph.ts`'s `objectiveIssueId` (`CreateIssueInput.parentIssueId`) when
+   * applying a compiled Work Item graph (§9 build order step 6). */
+  id: string;
   number: number;
   title: string;
   closed: boolean;

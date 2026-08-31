@@ -54,6 +54,7 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
       }
     }
     issue(number: $number) {
+      id
       number
       title
       state
@@ -155,6 +156,7 @@ interface GqlResponse {
     defaultBranchRef: { name: string } | null;
     suggestedActors: { nodes: GqlSuggestedActor[] };
     issue: {
+      id: string;
       number: number;
       title: string;
       state: "OPEN" | "CLOSED";
@@ -296,6 +298,7 @@ export class GitHubReader {
     );
 
     return {
+      id: issue.id,
       number: issue.number,
       title: issue.title,
       closed: issue.state === "CLOSED",

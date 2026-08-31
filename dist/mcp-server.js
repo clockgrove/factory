@@ -24074,6 +24074,7 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
       id
       number
       title
+      body
       state
       subIssues(first: 100) {
         nodes {
@@ -24224,6 +24225,7 @@ var GitHubReader = class {
       id: issue2.id,
       number: issue2.number,
       title: issue2.title,
+      body: issue2.body,
       closed: issue2.state === "CLOSED",
       workItems: issue2.subIssues.nodes.map(toWorkItem),
       readAt: /* @__PURE__ */ new Date(),
@@ -24476,6 +24478,7 @@ function derive(snapshot) {
     id: snapshot.id,
     number: snapshot.number,
     title: snapshot.title,
+    body: snapshot.body,
     closed: snapshot.closed,
     readAt: snapshot.readAt,
     repositoryId: snapshot.repositoryId,
@@ -25085,6 +25088,7 @@ function serializeObjective(o) {
     id: o.id,
     number: o.number,
     title: o.title,
+    body: o.body,
     closed: o.closed,
     readAt: o.readAt.toISOString(),
     repositoryId: o.repositoryId,
@@ -25165,7 +25169,7 @@ server.registerTool(
   "read_objective",
   {
     title: "Read Objective",
-    description: "Read one GitHub Objective issue and every Work Item sub-issue beneath it, and derive each one's state (\xA71, \xA73.2). This is the one-snapshot-per-cycle read (\xA74.1) \u2014 call it once at the start of a cycle, then act on its `items[].number` via the other tools. Also reports whether the platform circuit breaker has tripped enough times to need a human (\xA77.3) via `platformExhausted`.",
+    description: "Read one GitHub Objective issue and every Work Item sub-issue beneath it, and derive each one's state (\xA71, \xA73.2). This is the one-snapshot-per-cycle read (\xA74.1) \u2014 call it once at the start of a cycle, then act on its `items[].number` via the other tools. The returned `objective.title`/`objective.body` are the human's stated intent, verbatim, for the compile-if-needed step (skills/objective-compilation) \u2014 never invent scope beyond them. Also reports whether the platform circuit breaker has tripped enough times to need a human (\xA77.3) via `platformExhausted`.",
     inputSchema: {
       ...RepoShape,
       number: external_exports.number().int().positive().describe("Objective issue number")

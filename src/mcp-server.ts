@@ -171,6 +171,7 @@ function serializeObjective(o: DerivedObjective) {
     id: o.id,
     number: o.number,
     title: o.title,
+    body: o.body,
     closed: o.closed,
     readAt: o.readAt.toISOString(),
     repositoryId: o.repositoryId,
@@ -276,8 +277,11 @@ server.registerTool(
     description:
       "Read one GitHub Objective issue and every Work Item sub-issue beneath it, and derive each " +
       "one's state (§1, §3.2). This is the one-snapshot-per-cycle read (§4.1) — call it once at the " +
-      "start of a cycle, then act on its `items[].number` via the other tools. Also reports whether " +
-      "the platform circuit breaker has tripped enough times to need a human (§7.3) via `platformExhausted`.",
+      "start of a cycle, then act on its `items[].number` via the other tools. The returned " +
+      "`objective.title`/`objective.body` are the human's stated intent, verbatim, for the " +
+      "compile-if-needed step (skills/objective-compilation) — never invent scope beyond them. Also " +
+      "reports whether the platform circuit breaker has tripped enough times to need a human (§7.3) " +
+      "via `platformExhausted`.",
     inputSchema: {
       ...RepoShape,
       number: z.number().int().positive().describe("Objective issue number"),

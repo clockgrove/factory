@@ -202,6 +202,7 @@ export interface DerivedObjective {
   id: string;
   number: number;
   title: string;
+  body: string;
   closed: boolean;
   readAt: Date;
   repositoryId: string;
@@ -215,6 +216,7 @@ export function derive(snapshot: ObjectiveSnapshot): DerivedObjective {
     id: snapshot.id,
     number: snapshot.number,
     title: snapshot.title,
+    body: snapshot.body,
     closed: snapshot.closed,
     readAt: snapshot.readAt,
     repositoryId: snapshot.repositoryId,

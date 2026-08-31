@@ -57,6 +57,7 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
       id
       number
       title
+      body
       state
       subIssues(first: 100) {
         nodes {
@@ -159,6 +160,7 @@ interface GqlResponse {
       id: string;
       number: number;
       title: string;
+      body: string;
       state: "OPEN" | "CLOSED";
       subIssues: { nodes: GqlWorkItem[] };
     } | null;
@@ -301,6 +303,7 @@ export class GitHubReader {
       id: issue.id,
       number: issue.number,
       title: issue.title,
+      body: issue.body,
       closed: issue.state === "CLOSED",
       workItems: issue.subIssues.nodes.map(toWorkItem),
       readAt: new Date(),

@@ -62,6 +62,7 @@ function objective(items: WorkItemSnapshot[]): ObjectiveSnapshot {
     id: "I_OBJ",
     number: 1,
     title: "Add three utilities",
+    body: "Add three pure utility functions, each with tests.",
     closed: false,
     workItems: items,
     readAt: NOW,

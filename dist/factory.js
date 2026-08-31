@@ -2681,6 +2681,7 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
       id
       number
       title
+      body
       state
       subIssues(first: 100) {
         nodes {
@@ -2831,6 +2832,7 @@ var GitHubReader = class {
       id: issue.id,
       number: issue.number,
       title: issue.title,
+      body: issue.body,
       closed: issue.state === "CLOSED",
       workItems: issue.subIssues.nodes.map(toWorkItem),
       readAt: /* @__PURE__ */ new Date(),
@@ -2915,6 +2917,7 @@ function derive(snapshot) {
     id: snapshot.id,
     number: snapshot.number,
     title: snapshot.title,
+    body: snapshot.body,
     closed: snapshot.closed,
     readAt: snapshot.readAt,
     repositoryId: snapshot.repositoryId,

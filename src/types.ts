@@ -101,6 +101,10 @@ export interface ObjectiveSnapshot {
   id: string;
   number: number;
   title: string;
+  /** Issue description, exactly as the human wrote it. `objective-compilation`
+   * reads this — and only this, plus `title` — as the stated intent (§2); the
+   * compile-if-needed step of the loop cannot function without it. */
+  body: string;
   closed: boolean;
   workItems: WorkItemSnapshot[];
   /** When the snapshot was taken. One snapshot serves a whole cycle (§4.1). */

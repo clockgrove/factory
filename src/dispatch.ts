@@ -85,13 +85,12 @@ export function attemptAction(wi: DerivedWorkItem): "retry" | "escalate" {
  * current schema (docs.github.com/en/graphql/reference/input-objects,
  * 2026-08-30) except where noted.
  *
- * `replaceActorsForAssignable`/`agentAssignment` was additionally confirmed
- * *live* this session (PRD F8) — the only one of these actually exercised
- * against a real repository so far. `addAssigneesToAssignable`, `addComment`
- * and `closePullRequest` are long-stable, pre-agent GraphQL mutations
- * verified against current docs but not yet exercised live; this is a known
- * gap to close (a single cheap live check per mutation) before Gate 0
- * depends on the escalate/retry paths for real.
+ * `replaceActorsForAssignable`/`agentAssignment` was confirmed live in an
+ * earlier session (PRD F8). `addAssigneesToAssignable`, `addComment`, and
+ * `closePullRequest` were each confirmed live this session too (2026-08-31,
+ * against clockgrove/factory-gate0, ahead of Gate 0 itself) — every mutation
+ * this file's escalate/retry paths depend on has now actually been exercised
+ * against a real repository, not just verified against docs.
  */
 const COPILOT_ASSIGNMENT_HEADERS = {
   "GraphQL-Features":

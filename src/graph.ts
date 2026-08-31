@@ -166,10 +166,10 @@ export interface GraphWriter {
  * (2026-08-30). `CreateIssueInput.parentIssueId` and `AddBlockedByInput`'s
  * exact field names (`issueId` = the blocked issue, `blockingIssueId` = the
  * dependency) were both confirmed directly in the fetched schema reference,
- * not inferred from search results. Neither has yet been exercised against a
- * real repository — a known gap, same as the other write mutations added
- * this session, to close with one cheap live check before Gate 0 depends on
- * this path for real.
+ * not inferred from search results, and each was also confirmed *live*
+ * (2026-08-31, against clockgrove/factory-gate0, ahead of Gate 0 itself) —
+ * a sub-issue created with `parentIssueId` set, and `addBlockedBy` read back
+ * afterward as an actual `blockedBy` edge on the dependent issue.
  */
 const CREATE_WORK_ITEM_ISSUE_MUTATION = `
 mutation CreateWorkItemIssue(

@@ -2662,6 +2662,7 @@ throttling.triggersNotification = triggersNotification;
 
 // src/types.ts
 var COPILOT_LOGIN = "copilot-swe-agent";
+var COPILOT_ASSIGNEE_LOGIN = "Copilot";
 var INITIAL_PLAN_COMMIT = "Initial plan";
 
 // src/github.ts
@@ -2871,7 +2872,7 @@ function checksSettled(pr) {
   return pr.checks !== "PENDING";
 }
 function isAssignedToCopilot(wi) {
-  return wi.assignees.includes(COPILOT_LOGIN);
+  return wi.assignees.includes(COPILOT_ASSIGNEE_LOGIN);
 }
 var DISPATCH_CONFIRM_WINDOW_MS = 9e4;
 function latestCopilotAssignment(wi) {
@@ -2884,7 +2885,7 @@ function withinConfirmWindow(wi, now) {
   return now.getTime() - assignedAt.getTime() < DISPATCH_CONFIRM_WINDOW_MS;
 }
 function humanAssignees(wi) {
-  return wi.assignees.filter((a) => a !== COPILOT_LOGIN);
+  return wi.assignees.filter((a) => a !== COPILOT_ASSIGNEE_LOGIN);
 }
 function attemptCount(wi) {
   return wi.linkedPullRequests.length;

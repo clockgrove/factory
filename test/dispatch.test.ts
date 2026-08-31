@@ -15,7 +15,7 @@ import {
 import { attemptCount, deriveState, DISPATCH_CONFIRM_WINDOW_MS } from "../src/state.js";
 import type { DerivedWorkItem } from "../src/state.js";
 import {
-  COPILOT_LOGIN,
+  COPILOT_ASSIGNEE_LOGIN,
   INITIAL_PLAN_COMMIT,
   type LinkedPullRequest,
   type WorkItemSnapshot,
@@ -50,7 +50,7 @@ function wi(over: Partial<WorkItemSnapshot> = {}): WorkItemSnapshot {
     number: 10,
     title: "Add slugify",
     closed: false,
-    assignees: [COPILOT_LOGIN],
+    assignees: [COPILOT_ASSIGNEE_LOGIN],
     blockedBy: [],
     linkedPullRequests: [],
     copilotAssignments: [],

@@ -10,7 +10,7 @@
  */
 
 import {
-  COPILOT_LOGIN,
+  COPILOT_ASSIGNEE_LOGIN,
   INITIAL_PLAN_COMMIT,
   type LinkedPullRequest,
   type ObjectiveSnapshot,
@@ -50,7 +50,7 @@ export function checksSettled(pr: LinkedPullRequest): boolean {
 }
 
 export function isAssignedToCopilot(wi: WorkItemSnapshot): boolean {
-  return wi.assignees.includes(COPILOT_LOGIN);
+  return wi.assignees.includes(COPILOT_ASSIGNEE_LOGIN);
 }
 
 /**
@@ -123,7 +123,7 @@ export function confirmFailureStreak(wi: WorkItemSnapshot): number {
 
 /** Human assignees, i.e. everyone who is not the coding agent. */
 export function humanAssignees(wi: WorkItemSnapshot): string[] {
-  return wi.assignees.filter((a) => a !== COPILOT_LOGIN);
+  return wi.assignees.filter((a) => a !== COPILOT_ASSIGNEE_LOGIN);
 }
 
 /**

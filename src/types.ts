@@ -6,7 +6,26 @@
  * that is computed, never stored.
  */
 
+/**
+ * The coding agent's login as it appears in `suggestedActors` (a `Bot` actor)
+ * and in `AssignedEvent.assignee` on the issue timeline. Used to find the bot
+ * to assign, and to filter the assignment timeline to the agent's own events.
+ */
 export const COPILOT_LOGIN = "copilot-swe-agent";
+
+/**
+ * The coding agent's login as it appears in the *current* `assignees`
+ * connection once actually assigned — a distinct, `User`-typed identity from
+ * `COPILOT_LOGIN`, not a typo (verified live against a real assignment,
+ * 2026-08-31, clockgrove/factory-gate0: `suggestedActors`/`AssignedEvent`
+ * both report `{login: "copilot-swe-agent", __typename: "Bot"}` for the same
+ * actor that `issue.assignees` reports back as `{login: "Copilot",
+ * __typename: "User"}`). `state.ts`'s `isAssignedToCopilot`/`humanAssignees`
+ * — which read `assignees`, not the timeline or `suggestedActors` — must use
+ * this constant, or every dispatched Work Item misclassifies as `escalated`
+ * the moment it has any assignee at all (Gate 0 finding, 2026-08-31).
+ */
+export const COPILOT_ASSIGNEE_LOGIN = "Copilot";
 
 /** The commit GitHub's coding agent pushes before doing any real work. */
 export const INITIAL_PLAN_COMMIT = "Initial plan";

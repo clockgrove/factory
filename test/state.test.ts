@@ -13,7 +13,7 @@ import {
   ready,
 } from "../src/state.js";
 import {
-  COPILOT_LOGIN,
+  COPILOT_ASSIGNEE_LOGIN,
   INITIAL_PLAN_COMMIT,
   type LinkedPullRequest,
   type ObjectiveSnapshot,
@@ -134,7 +134,7 @@ describe("deriveState", () => {
   });
 
   it("is dispatched once Copilot is assigned but nothing exists yet", () => {
-    expect(deriveState(wi({ assignees: [COPILOT_LOGIN] }), NOW)).toBe(
+    expect(deriveState(wi({ assignees: [COPILOT_ASSIGNEE_LOGIN] }), NOW)).toBe(
       "dispatched",
     );
   });
@@ -162,7 +162,7 @@ describe("deriveState", () => {
     // GitHub also auto-assigns the requesting human alongside Copilot
     // (verified live, 2026-08-30) — this is exactly that shape.
     expect(
-      deriveState(wi({ assignees: [COPILOT_LOGIN, "kirkmarple"] }), NOW),
+      deriveState(wi({ assignees: [COPILOT_ASSIGNEE_LOGIN, "kirkmarple"] }), NOW),
     ).toBe("dispatched");
   });
 
@@ -170,7 +170,7 @@ describe("deriveState", () => {
     // No diff yet is not evidence of failure: the session (PRD F8 — there is
     // no reliable per-issue session-status API) may still be pushing commits.
     const item = wi({
-      assignees: [COPILOT_LOGIN],
+      assignees: [COPILOT_ASSIGNEE_LOGIN],
       copilotAssignments: [new Date(NOW.getTime() - 30_000)],
       linkedPullRequests: [
         pr({ changedLines: 0, changedFiles: 0, commitSubjects: [] }),
@@ -181,7 +181,7 @@ describe("deriveState", () => {
 
   it("is failed once the confirm window elapses with only a no-op PR", () => {
     const item = wi({
-      assignees: [COPILOT_LOGIN],
+      assignees: [COPILOT_ASSIGNEE_LOGIN],
       copilotAssignments: [
         new Date(NOW.getTime() - DISPATCH_CONFIRM_WINDOW_MS - 1),
       ],
@@ -197,7 +197,7 @@ describe("deriveState", () => {
     // excused. Should not occur in practice — a linked PR implies Copilot
     // was assigned at some point — but the fallback stays conservative.
     const item = wi({
-      assignees: [COPILOT_LOGIN],
+      assignees: [COPILOT_ASSIGNEE_LOGIN],
       linkedPullRequests: [
         pr({ changedLines: 0, changedFiles: 0, commitSubjects: [INITIAL_PLAN_COMMIT] }),
       ],
@@ -207,7 +207,7 @@ describe("deriveState", () => {
 
   it("is for_review when a real diff has settled checks", () => {
     const item = wi({
-      assignees: [COPILOT_LOGIN],
+      assignees: [COPILOT_ASSIGNEE_LOGIN],
       linkedPullRequests: [pr({ checks: "SUCCESS" })],
     });
     expect(deriveState(item, NOW)).toBe("for_review");
@@ -217,7 +217,7 @@ describe("deriveState", () => {
     // PROBE-001: agents never undraft and never self-merge. Requiring a
     // ready-for-review PR here would stall every item forever.
     const item = wi({
-      assignees: [COPILOT_LOGIN],
+      assignees: [COPILOT_ASSIGNEE_LOGIN],
       linkedPullRequests: [pr({ isDraft: true, checks: "SUCCESS" })],
     });
     expect(deriveState(item, NOW)).toBe("for_review");
@@ -225,7 +225,7 @@ describe("deriveState", () => {
 
   it("reaches for_review when the repo has no checks configured", () => {
     const item = wi({
-      assignees: [COPILOT_LOGIN],
+      assignees: [COPILOT_ASSIGNEE_LOGIN],
       linkedPullRequests: [pr({ checks: null })],
     });
     expect(deriveState(item, NOW)).toBe("for_review");
@@ -234,7 +234,7 @@ describe("deriveState", () => {
   it("sends a failing-check PR to review rather than calling it failed", () => {
     // A red check is a review signal, not a no-op. Integration (§6) decides.
     const item = wi({
-      assignees: [COPILOT_LOGIN],
+      assignees: [COPILOT_ASSIGNEE_LOGIN],
       linkedPullRequests: [pr({ checks: "FAILURE" })],
     });
     expect(deriveState(item, NOW)).toBe("for_review");
@@ -242,7 +242,7 @@ describe("deriveState", () => {
 
   it("is in_flight while checks are still pending", () => {
     const item = wi({
-      assignees: [COPILOT_LOGIN],
+      assignees: [COPILOT_ASSIGNEE_LOGIN],
       linkedPullRequests: [pr({ checks: "PENDING" })],
     });
     expect(deriveState(item, NOW)).toBe("in_flight");
@@ -259,7 +259,7 @@ describe("deriveState", () => {
 
   it("judges the newest open PR, not a closed earlier attempt", () => {
     const item = wi({
-      assignees: [COPILOT_LOGIN],
+      assignees: [COPILOT_ASSIGNEE_LOGIN],
       linkedPullRequests: [
         pr({ number: 1, state: "CLOSED", changedLines: 0, changedFiles: 0, commitSubjects: [] }),
         pr({ number: 2, state: "OPEN", changedLines: 50, checks: "SUCCESS" }),
@@ -367,7 +367,7 @@ describe("ready", () => {
       objective([
         wi({ number: 1 }),
         wi({ number: 2, blockedBy: [{ number: 1, closed: false }] }),
-        wi({ number: 3, assignees: [COPILOT_LOGIN] }),
+        wi({ number: 3, assignees: [COPILOT_ASSIGNEE_LOGIN] }),
       ]),
     );
     expect(ready(o).map((i) => i.number)).toEqual([1]);
@@ -385,7 +385,7 @@ describe("determinism", () => {
     // "resume" and "start" are the same code path.
     const snapshot = objective([
       wi({ number: 1, closed: true }),
-      wi({ number: 2, assignees: [COPILOT_LOGIN], linkedPullRequests: [pr()] }),
+      wi({ number: 2, assignees: [COPILOT_ASSIGNEE_LOGIN], linkedPullRequests: [pr()] }),
       wi({ number: 3, blockedBy: [{ number: 2, closed: false }] }),
     ]);
     expect(derive(snapshot)).toEqual(derive(snapshot));
@@ -428,7 +428,7 @@ describe("objective-level rollups", () => {
   it("is not stalled while work is dispatched", () => {
     const o = derive(
       objective([
-        wi({ number: 1, assignees: [COPILOT_LOGIN] }),
+        wi({ number: 1, assignees: [COPILOT_ASSIGNEE_LOGIN] }),
         wi({ number: 2, blockedBy: [{ number: 1, closed: false }] }),
       ]),
     );
@@ -443,7 +443,7 @@ describe("objective-level rollups", () => {
     const o = derive(
       objective([
         wi({ number: 1, closed: true }),
-        wi({ number: 2, assignees: [COPILOT_LOGIN] }),
+        wi({ number: 2, assignees: [COPILOT_ASSIGNEE_LOGIN] }),
         wi({ number: 3 }),
       ]),
     );

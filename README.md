@@ -12,9 +12,14 @@ and replans — unattended.
 > validated Work Item graph (`skills/objective-compilation/SKILL.md`,
 > `schemas/objective.schema.json`, `schemas/work-item.schema.json`), and apply that graph to GitHub as
 > sub-issues plus native `blocked by` edges (`src/graph.ts`), through the same
-> breaker/pacer/concurrency discipline as dispatch. Step 4's live proof (actually merging a PR and
-> watching its issue auto-close, per §9) is deferred to Gate 0's full-loop rehearsal rather than run
-> standalone, to avoid a second live-GitHub pass over the same code path.
+> breaker/pacer/concurrency discipline as dispatch. Step 7 is now in progress: `src/mcp-server.ts`
+> bundles that whole library as a portable stdio MCP server (Director's only write path,
+> IMPLEMENTATION-PLAN.md §15.3), and `skills/director/SKILL.md` assembles §4's loop entirely through
+> its tools. Root `plugin.json`/`mcp.json` (Agent Plugins 1.0 — read natively by both Copilot CLI and
+> Codex CLI) and `.claude-plugin/plugin.json`/`.mcp.json` (Claude Code's own manifest/MCP format) are
+> in place. Remaining before step 7 is done: a live check of the not-yet-exercised write mutations
+> (`dispatch.ts`/`graph.ts`'s `addHumanAssignee`/`addComment`/`closePullRequest`/`addBlockedBy`/
+> `createIssue`), then Gate 0's full-loop rehearsal against `clockgrove/factory-gate0` (§10).
 > See [`docs/PRD.md`](docs/PRD.md) and [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md).
 
 ## Design in one picture

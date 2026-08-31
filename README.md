@@ -4,8 +4,10 @@ A GitHub-native engineering-management plugin. You author an **Objective**; Fact
 **Work Items**, dispatches them to parallel GitHub Copilot agent sessions, supervises the results,
 and replans — unattended.
 
-> **Status: in implementation.** The PRD is accepted and build order step 1 is complete — Factory can
-> derive the full state of an Objective from GitHub alone. See [`docs/PRD.md`](docs/PRD.md) and
+> **Status: in implementation.** The PRD is accepted and build order steps 1–3 are complete — Factory
+> can derive the full state of an Objective from GitHub alone, dispatch/confirm/retry/escalate Work
+> Items against a real repo, and mechanically classify a PR's outcome (no-op, declined, untouched,
+> conflict, checks). See [`docs/PRD.md`](docs/PRD.md) and
 > [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md).
 
 ## Design in one picture

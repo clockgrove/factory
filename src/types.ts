@@ -26,18 +26,35 @@ export type PullRequestState = "OPEN" | "CLOSED" | "MERGED";
 /** Aggregate status of a PR's checks. `null` when no checks are configured. */
 export type CheckRollup = "PENDING" | "SUCCESS" | "FAILURE" | null;
 
+/**
+ * GitHub's own three-way mergeability verdict (schema: `PullRequest.mergeable`,
+ * verified against docs.github.com/en/graphql/reference/pulls, 2026-08-30).
+ * `UNKNOWN` is not a failure — GitHub computes this asynchronously and has not
+ * finished yet, so it must not be read as `CONFLICTING` (§5.1 "conflict").
+ */
+export type MergeableState = "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
+
 export interface LinkedPullRequest {
   /** GraphQL node ID, needed to address `closePullRequest` at retry time. */
   id: string;
   number: number;
   state: PullRequestState;
   isDraft: boolean;
+  title: string;
+  /** PR description. Used only as a secondary signal (§5.1 "declined") — the
+   * diff and commit list remain the primary evidence, per PROBE-001's finding
+   * that PR text (e.g. `[WIP]` titles) is not reliable on its own. */
+  body: string;
   /** Total lines added + deleted across the PR. */
   changedLines: number;
   changedFiles: number;
+  /** Repo-relative paths touched by the PR, up to the first page (§5.1
+   * "untouched"). */
+  changedFilePaths: string[];
   /** Commit subjects, oldest first. */
   commitSubjects: string[];
   checks: CheckRollup;
+  mergeable: MergeableState;
   createdAt: Date;
 }
 

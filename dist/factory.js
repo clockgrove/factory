@@ -2695,10 +2695,16 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
               number
               state
               isDraft
+              title
+              body
+              mergeable
               createdAt
               additions
               deletions
               changedFiles
+              files(first: 100) {
+                nodes { path }
+              }
               commits(first: 100) {
                 nodes { commit { messageHeadline } }
               }
@@ -2742,10 +2748,14 @@ function toPullRequest(pr) {
     number: pr.number,
     state: pr.state,
     isDraft: pr.isDraft,
+    title: pr.title,
+    body: pr.body ?? "",
     changedLines: pr.additions + pr.deletions,
     changedFiles: pr.changedFiles,
+    changedFilePaths: pr.files.nodes.map((n) => n.path),
     commitSubjects: pr.commits.nodes.map((n) => n.commit.messageHeadline),
     checks: normalizeChecks(pr),
+    mergeable: pr.mergeable,
     createdAt: new Date(pr.createdAt)
   };
 }

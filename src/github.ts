@@ -19,6 +19,7 @@ import type {
   CheckRollup,
   IssueRef,
   LinkedPullRequest,
+  MergeableState,
   ObjectiveSnapshot,
   WorkItemSnapshot,
 } from "./types.js";
@@ -70,10 +71,16 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
               number
               state
               isDraft
+              title
+              body
+              mergeable
               createdAt
               additions
               deletions
               changedFiles
+              files(first: 100) {
+                nodes { path }
+              }
               commits(first: 100) {
                 nodes { commit { messageHeadline } }
               }
@@ -108,10 +115,14 @@ interface GqlPr {
   number: number;
   state: "OPEN" | "CLOSED" | "MERGED";
   isDraft: boolean;
+  title: string;
+  body: string;
+  mergeable: MergeableState;
   createdAt: string;
   additions: number;
   deletions: number;
   changedFiles: number;
+  files: { nodes: { path: string }[] };
   commits: { nodes: { commit: { messageHeadline: string } }[] };
   statusCheckRollup: {
     nodes: { commit: { statusCheckRollup: { state: string } | null } }[];
@@ -177,10 +188,14 @@ function toPullRequest(pr: GqlPr): LinkedPullRequest {
     number: pr.number,
     state: pr.state,
     isDraft: pr.isDraft,
+    title: pr.title,
+    body: pr.body ?? "",
     changedLines: pr.additions + pr.deletions,
     changedFiles: pr.changedFiles,
+    changedFilePaths: pr.files.nodes.map((n) => n.path),
     commitSubjects: pr.commits.nodes.map((n) => n.commit.messageHeadline),
     checks: normalizeChecks(pr),
+    mergeable: pr.mergeable,
     createdAt: new Date(pr.createdAt),
   };
 }

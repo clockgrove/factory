@@ -4,15 +4,17 @@ A GitHub-native engineering-management plugin. You author an **Objective**; Fact
 **Work Items**, dispatches them to parallel GitHub Copilot agent sessions, supervises the results,
 and replans — unattended.
 
-> **Status: in implementation.** The PRD is accepted and build order steps 1–5 are complete — Factory
+> **Status: in implementation.** The PRD is accepted and build order steps 1–6 are complete — Factory
 > can derive the full state of an Objective from GitHub alone, dispatch/confirm/retry/escalate Work
 > Items against a real repo, mechanically classify a PR's outcome (no-op, declined, untouched,
 > conflict, checks), integrate a mechanically-ready PR (mark ready, merge, resolve or reject a
-> conflict) back through the same retry/escalate machinery, and compile a human-authored Objective
-> into a validated Work Item graph (`skills/objective-compilation/SKILL.md`,
-> `schemas/objective.schema.json`, `schemas/work-item.schema.json`). Step 4's live proof (actually
-> merging a PR and watching its issue auto-close, per §9) is deferred to Gate 0's full-loop
-> rehearsal rather than run standalone, to avoid a second live-GitHub pass over the same code path.
+> conflict) back through the same retry/escalate machinery, compile a human-authored Objective into a
+> validated Work Item graph (`skills/objective-compilation/SKILL.md`,
+> `schemas/objective.schema.json`, `schemas/work-item.schema.json`), and apply that graph to GitHub as
+> sub-issues plus native `blocked by` edges (`src/graph.ts`), through the same
+> breaker/pacer/concurrency discipline as dispatch. Step 4's live proof (actually merging a PR and
+> watching its issue auto-close, per §9) is deferred to Gate 0's full-loop rehearsal rather than run
+> standalone, to avoid a second live-GitHub pass over the same code path.
 > See [`docs/PRD.md`](docs/PRD.md) and [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md).
 
 ## Design in one picture

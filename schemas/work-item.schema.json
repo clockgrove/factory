@@ -1,0 +1,65 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/clockgrove/factory/schemas/work-item.schema.json",
+  "title": "Work Item",
+  "description": "One compiled Work Item: an Objective's sub-issue (§3.1), described fully enough to become both a GitHub issue and an Agent Tasks prompt (§8's Work Packet -> prompt) with no further judgment required at dispatch time.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "title", "goal", "acceptance", "scope"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Compiler-local identifier, unique within one compiled graph. Never sent to GitHub and never stored -- used only to express `dependsOn` edges before the corresponding issue exists (§3.1: dependencies become native 'blocked by' relationships once graph.ts applies the graph).",
+      "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "minLength": 1,
+      "maxLength": 64
+    },
+    "title": {
+      "type": "string",
+      "description": "GitHub issue title, used verbatim for the sub-issue.",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "goal": {
+      "type": "string",
+      "description": "One sentence: what this Work Item accomplishes (§8).",
+      "minLength": 1
+    },
+    "acceptance": {
+      "type": "array",
+      "description": "Explicit, checkable criteria (§8). Each entry must be verifiable from the diff alone: outcome-evaluation (§5.2) checks these against the PR, never against the agent's self-report (§15.7).",
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1
+    },
+    "scope": {
+      "type": "array",
+      "description": "Files or directories (trailing '/' scopes a whole directory) this Work Item may modify (§8). PROBE-001 measured a one-line scope constraint holding 11/11 times. This is also `evaluate.ts`'s `isUntouched` input -- keep entries concrete paths, not glob patterns.",
+      "items": { "type": "string", "minLength": 1 },
+      "minItems": 1
+    },
+    "preconditions": {
+      "type": "array",
+      "description": "What must already be true for this Work Item to be actionable (§8). A well-specified precondition is what lets the agent decline rather than invent (§5.3) -- e.g. 'the file being modified already exists'.",
+      "items": { "type": "string", "minLength": 1 },
+      "default": []
+    },
+    "outOfScope": {
+      "type": "array",
+      "description": "Explicit non-goals (§8) -- guards against the agent silently widening scope beyond `scope`.",
+      "items": { "type": "string", "minLength": 1 },
+      "default": []
+    },
+    "conventions": {
+      "type": "array",
+      "description": "Repo-specific constraints the agent must follow (§8) -- test/build commands, commit style, file layout conventions.",
+      "items": { "type": "string", "minLength": 1 },
+      "default": []
+    },
+    "dependsOn": {
+      "type": "array",
+      "description": "IDs (this schema's `id` field, not issue numbers -- those do not exist yet at compile time) of other Work Items in the same compiled graph that must be `done` first. `graph.ts` applies these as native GitHub 'blocked by' relationships (§3.1); `state.ts` reads them back to compute `ready` (§3.2). Every entry must resolve to another Work Item's `id` in the same `objective.schema.json` document, and the graph they describe must be acyclic -- both invariants this schema cannot express structurally and the compiling skill must self-check before emitting (see `skills/objective-compilation/SKILL.md`).",
+      "items": { "type": "string", "minLength": 1 },
+      "default": []
+    }
+  }
+}

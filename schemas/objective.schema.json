@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/clockgrove/factory/schemas/objective.schema.json",
+  "title": "Compiled Objective",
+  "description": "The output of the objective-compilation skill: one Objective decomposed into a validated Work Item graph (§9 build order step 5), ready for graph.ts (step 6) to apply to GitHub as an issue, sub-issues, and 'blocked by' dependencies (§3.1). This is a compiler artifact, not a stored Factory concept -- once graph.ts has applied it, GitHub is the only remaining source of truth (§3.1's 'no custom fields, no state labels, no sidecar files').",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["title", "workItems"],
+  "properties": {
+    "title": {
+      "type": "string",
+      "description": "The Objective issue's title, unchanged from the human-authored Objective (§4's Objective is read, not rewritten, by the loop).",
+      "minLength": 1
+    },
+    "workItems": {
+      "type": "array",
+      "description": "Every Work Item this Objective decomposes into. Order is not meaningful -- readiness (§3.2) is derived from each item's `dependsOn`, not array position. Gate 0 (PRD §7) expects 2-3 items with empty `dependsOn` on every item (independent); Gate 1 introduces non-empty `dependsOn`.",
+      "items": { "$ref": "work-item.schema.json" },
+      "minItems": 1
+    }
+  }
+}

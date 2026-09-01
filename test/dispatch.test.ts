@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+/** A clean mechanical verdict: in scope, whole file list seen. */
+const READY = {
+  kind: "ready" as const,
+  outOfScopeFiles: [] as string[],
+  fileListComplete: true,
+};
+
 import {
   Dispatcher,
   attemptAction,
@@ -440,7 +447,8 @@ describe("Dispatcher.approveChecks", () => {
     expect(writer.comments).toEqual([]);
   });
 
-  it("reports an ordinary failure as retryable rather than permanent", async () => {    const writer = new FakeWriter({ approveWorkflowRun: new Error("502 bad gateway") });
+  it("reports an ordinary failure as retryable rather than permanent", async () => {
+    const writer = new FakeWriter({ approveWorkflowRun: new Error("502 bad gateway") });
     const d = makeDispatcher(writer);
     const item = derivedWi();
     const outcome = await d.approveChecks(item, RUNS, SAFE);
@@ -553,7 +561,7 @@ describe("Dispatcher.integrate", () => {
     const d = makeDispatcher(writer);
     const item = derivedWi();
     const p = pr({ id: "PR_ready", isDraft: false });
-    await d.integrate(item, p, { kind: "ready" });
+    await d.integrate(item, p, READY);
     expect(writer.calls).toEqual(["mergePullRequest:PR_ready"]);
   });
 
@@ -562,7 +570,7 @@ describe("Dispatcher.integrate", () => {
     const d = makeDispatcher(writer);
     const item = derivedWi();
     const p = pr({ id: "PR_draft", isDraft: true });
-    await d.integrate(item, p, { kind: "ready" });
+    await d.integrate(item, p, READY);
     expect(writer.calls).toEqual(["markPullRequestReady:PR_draft", "mergePullRequest:PR_draft"]);
   });
 
@@ -587,10 +595,33 @@ describe("Dispatcher.integrate", () => {
     expect(outcome.merged).toBe(false);
   });
 
-  it("reports a successful merge", async () => {    const writer = new FakeWriter();
+  it("reports a successful merge", async () => {
+    const writer = new FakeWriter();
     const d = makeDispatcher(writer);
-    const outcome = await d.integrate(derivedWi(), pr({ isDraft: false }), { kind: "ready" });
+    const outcome = await d.integrate(derivedWi(), pr({ isDraft: false }), READY);
     expect(outcome).toEqual({ merged: true });
+  });
+
+  it("escalates a sensitive surface instead of merging or retrying it", async () => {
+    // Gate 5 measured agents adding files nobody asked for. When the extra file
+    // is one that redefines what CI runs, §7.3 makes it a human's call — and
+    // retrying would be actively wrong: the work is correct, so a replacement
+    // pull request would arrive with the same diff and burn an attempt.
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    const item = derivedWi();
+    const outcome = await d.integrate(item, pr({ isDraft: false }), {
+      kind: "sensitive_surface",
+      files: [{ path: "package-lock.json", reason: "controls the dependency tree" }],
+    });
+
+    expect(outcome.merged).toBe(false);
+    // Not merged, and above all not closed.
+    expect(writer.calls).toEqual([
+      `assignHumanOnly:${item.id}:U_human`,
+      `addComment:${item.id}`,
+    ]);
+    expect(writer.comments.join("\n")).toContain("dependency tree");
   });
 
   it("defers rather than throwing when the base branch moved under the merge", async () => {
@@ -601,7 +632,7 @@ describe("Dispatcher.integrate", () => {
       mergePullRequest: new Error("Base branch was modified. Review and try the merge again."),
     });
     const d = makeDispatcher(writer);
-    const outcome = await d.integrate(derivedWi(), pr({ isDraft: false }), { kind: "ready" });
+    const outcome = await d.integrate(derivedWi(), pr({ isDraft: false }), READY);
 
     expect(outcome.merged).toBe(false);
     expect(outcome.deferred).toContain("base branch moved");
@@ -614,7 +645,7 @@ describe("Dispatcher.integrate", () => {
       mergePullRequest: new Error("Pull Request is not mergeable"),
     });
     const d = makeDispatcher(writer);
-    const outcome = await d.integrate(derivedWi(), pr({ isDraft: false }), { kind: "ready" });
+    const outcome = await d.integrate(derivedWi(), pr({ isDraft: false }), READY);
     expect(outcome.merged).toBe(false);
     expect(outcome.deferred).toBeTruthy();
   });
@@ -627,7 +658,7 @@ describe("Dispatcher.integrate", () => {
     });
     const d = makeDispatcher(writer);
     await expect(
-      d.integrate(derivedWi(), pr({ isDraft: false }), { kind: "ready" }),
+      d.integrate(derivedWi(), pr({ isDraft: false }), READY),
     ).rejects.toThrow("approving review");
   });
 
@@ -635,7 +666,7 @@ describe("Dispatcher.integrate", () => {
     const writer = new FakeWriter({ mergePullRequest: rateLimitError() });
     const d = makeDispatcher(writer);
     await expect(
-      d.integrate(derivedWi(), pr({ isDraft: false }), { kind: "ready" }),
+      d.integrate(derivedWi(), pr({ isDraft: false }), READY),
     ).rejects.toBeInstanceOf(PlatformUnavailableError);
   });
 

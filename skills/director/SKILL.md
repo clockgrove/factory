@@ -125,6 +125,25 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
      **That is a race, not a failure.** Leave the pull request open, do not retry it, do not escalate
      it, and simply call `dispatch_integrate` again next cycle — the fresh snapshot will merge it.
      (Observed live in Gate 3, §10.5, where it surfaced as a thrown tool error; it no longer throws.)
+
+     A `ready` verdict also carries **`outOfScopeFiles`** — changed paths the Work Item never
+     declared. `dispatch_integrate` merges straight through them, so this is yours to check, not
+     the tool's to block on. The scope check only fails when *nothing* in scope was touched, which
+     means a pull request that does exactly what was asked **and also** edits whatever else it likes
+     passes every mechanical check. Gate 5 measured precisely that: two pull requests each added a
+     1454-line `package-lock.json` no Work Item mentioned (§10.12). Extra files are often perfectly
+     legitimate — updating a test the change broke, for instance — so treat this as something to
+     confirm in the diff rather than a fault. If `fileListComplete` is `false` the pull request
+     changed more than 100 files and `outOfScopeFiles` is a lower bound, so read the diff before
+     merging.
+   - `sensitive_surface` — mergeable and green, but the diff changes something that redefines what
+     CI executes or what it can reach: a workflow, a composite action, a dependency manifest or
+     lockfile, registry configuration. §7.3 reserves these for a human whatever the Work Item
+     declared in `scope` — scope is written by the compiler, which is a model reading an issue body,
+     so letting a declared path buy an autonomous merge would let the safety property certify
+     itself. The tool has **escalated, not retried**, and deliberately: the work is very likely
+     correct, and a replacement pull request would contain the same diff and burn an attempt. Tell
+     the operator what the file is and why it was flagged; the fix is a human merging it by hand.
    - `conflict` — the tool already attempted a rebase or closed-and-redispatched, per §6. If the same
      Work Item conflicts repeatedly, that is itself replanning evidence (step 7), not something to
      keep retrying past. The tool now stops on its own once attempts are exhausted, escalating with
@@ -221,10 +240,16 @@ Act autonomously, including merging, only when **all** hold:
 - the diff satisfies the Work Item's acceptance criteria and nothing more — **your own read of the
   actual patch text, via `read_pull_request_diff`.** `evaluate_mechanical` deliberately does not
   make this judgment (§5.1 is mechanical only), and `read_objective` reports `changedFilePaths`
-  but no content. A `ready` verdict therefore means "open, touches the expected files, mergeable" —
-  considerably weaker than it reads. It is not a substitute for this line.
+  but no content. A `ready` verdict therefore means "open, touches **at least one** expected file,
+  mergeable" — considerably weaker than it reads, and note the "at least one": it does not mean the
+  pull request stayed inside its scope. Check `outOfScopeFiles` for what else it touched. This is
+  not a substitute for reading the diff.
 - the change is reversible: one squash commit on a branch, revertible without coordination
-- nothing touches auth, secrets, permissions, CI configuration, or dependency sources
+- nothing touches auth, secrets, permissions, CI configuration, or dependency sources. The
+  `sensitive_surface` verdict now enforces the mechanically visible part of this line (workflows,
+  actions, dependency manifests and lockfiles, registry config), so you will not reach a `ready`
+  verdict on one of those. It does **not** cover auth or application-level permissions, which have
+  no reliable path signature — those remain your read of the diff.
 
 **Any acceptance criterion about what the code *does* requires the diff read, not file paths.**
 "Must import and actually call `truncate` rather than reimplement it" is invisible in

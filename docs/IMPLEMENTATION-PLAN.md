@@ -213,10 +213,30 @@ declined     PR body states the task is not actionable
 untouched    diff does not touch any file the Work Item names
 checks       required checks concluded
 conflict     PR not mergeable against base
+sensitive    diff changes what CI runs or what it can reach
 ```
 
 A no-op or a decline is a **failed attempt**, not a result. Critically, `[WIP]` titles are *not* a
 signal — PROBE-001 saw `[WIP]` on both genuine work and empty failures.
+
+`untouched` is a deliberately weak check: it fires only when the diff touches *nothing* the Work
+Item declared, because it routes to close-and-retry and a false positive there destroys correct
+work. The consequence is that it says nothing about extra files, so `evaluateMechanical` reports
+them separately as `outOfScopeFiles` on the `ready` verdict — evidence for §5.2's semantic review
+rather than a failing verdict, since scope creep is frequently legitimate (a Work Item correctly
+updating a test its change broke). See §10.12.
+
+`sensitive` is the exception that does block, because §7.3 makes CI configuration and dependency
+sources an unconditional bar on autonomy. It escalates rather than retrying — the work is usually
+correct, so a replacement pull request would carry the same diff — and it ignores the declared
+scope on purpose: scope is written by the compiler, so honouring it here would let the safety
+property certify itself. It shares its path rules with the CI blast-radius review (`approval.ts`),
+which asks the same question about the same paths.
+
+Every scope judgment additionally requires the *whole* file list. GraphQL returns `files(first:
+100)` beside an authoritative `changedFiles`, so a large pull request arrives partial; `untouched`
+declines to fire on a partial list (it cannot prove a negative from page 1), and the `ready` verdict
+carries `fileListComplete` so a caller knows whether `outOfScopeFiles` is exhaustive.
 
 ### 5.2 Semantic check (skill)
 
@@ -1054,6 +1074,57 @@ buys a distinction no caller currently acts on, and reverts remain untrackable r
 pagination worry (`closedByPullRequestsReferences(first: 20)`) needs a Work Item with more than twenty
 linked pull requests, against a three-attempt cap plus a few conflict re-dispatches. Declined on both
 counts; recorded here so it is not relitigated.
+
+## 10.12 Scope creep was invisible, and the check that should have caught it could not
+
+Gate 5's session reported it as an aside, after the conflict-path result it was actually run to
+test. Both replacement pull requests on `factory-gate2` added **`package-lock.json` (+1454/−0)** —
+a file no Work Item declared. Every mechanical check passed. The Director merged one anyway, flagged
+the override honestly, and named the cause exactly:
+
+> `isUntouched()` in `evaluate.ts` is `!changedFilePaths.some(inScope)` — it fires only when **no**
+> declared file is touched. A PR that touches its whole declared scope **plus** arbitrary extra
+> files passes every mechanical check.
+
+That is right, and §7.3 had been claiming otherwise the whole time: "mechanical checks pass (§5.1):
+real diff, **declared scope respected**, checks green, mergeable". Scope was never respected, only
+*visited*. Six gates ran against that gap.
+
+**The fix is deliberately asymmetric**, because the two halves of it fail in opposite directions:
+
+- **Ordinary extra files are reported, not enforced.** `outOfScopeFiles` rides on the `ready`
+  verdict and feeds §5.2. Blocking them would have been wrong twice over on evidence already in
+  hand: Gate 3's Work Item correctly updated a test outside its scope rather than leaving it broken,
+  and `untouched` — the one scope verdict that *does* block — routes to close-and-retry, so a false
+  positive does not stall work, it deletes it.
+- **Files that redefine what CI runs do block**, as `sensitive_surface`, and escalate rather than
+  retry. Retrying would close correct work and produce an identical diff. This ignores the declared
+  scope on purpose: scope is authored by the compiler, itself a model reading an issue body, so a
+  Work Item that declared `.github/workflows/ci.yml` would otherwise have bought an autonomous merge
+  of it — the F5 self-certifying shape again. The rules are shared with `approval.ts` rather than
+  copied, since "can this diff change what CI executes" is the same question the blast-radius review
+  already answers before approving a held run.
+
+Two things fell out of writing it that were not in the report:
+
+- **`isUntouched` could fire on a partial file list.** The GraphQL selection asks for `files(first:
+  100)` while `changedFiles` carries the true total, so a pull request touching more than 100 files
+  arrives with a silently partial list — and a verdict that closes pull requests was reading it as
+  proof that nothing in scope was touched. The in-scope file may simply have sorted onto page 2. It
+  now declines to fire, and `ready` carries `fileListComplete` so `outOfScopeFiles` is never
+  mistaken for exhaustive.
+- **The test fixture had been asserting the bug.** `pr()` in `test/evaluate.test.ts` set
+  `changedFiles: 2` beside a single path — internally inconsistent, and harmless only because
+  nothing compared the two. The builder now derives the count from the paths unless a test is
+  deliberately exercising a partial list.
+
+Four tests fail when either new guard is reverted, so they are load-bearing rather than decorative.
+
+The general lesson is about where the finding came from. This was not caught by a reviewer reading
+the code, and not by any of the six gates that ran through this function — it was caught by an agent
+being *told to do something else* and noticing that a rule it had just tripped could not have been
+enforced. Gate 5's mandate was the conflict path; this arrived in the margin. Worth remembering when
+deciding whether a rehearsal that "passed" produced its full value.
 
 ## 11. Risks
 

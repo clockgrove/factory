@@ -145,6 +145,21 @@ and replans — unattended.
 > `type: "submodule"`, a symlink to a directory is `type: "symlink"`, and a symlink to a file is
 > resolved into real content — all three already handled correctly. Those exact response bodies are
 > now pinned as tests.
+>
+> **Gate 5 left a finding in its margin that outlasted the gate.** It was run to exercise the merge
+> conflict path, which it did — but it also noticed that both replacement pull requests had added a
+> 1454-line `package-lock.json` no Work Item asked for, and that nothing could have stopped them.
+> The scope check fired only when a pull request touched *nothing* it was asked to, so doing the job
+> **and** editing whatever else it liked passed every mechanical check — while §7.3 claimed
+> "declared scope respected" the whole time. Extra files are now reported as `outOfScopeFiles` for
+> the semantic review to weigh (blocking them would be wrong: an agent updating a test its change
+> broke is behaving correctly). Files that redefine what CI runs — workflows, actions, dependency
+> manifests and lockfiles — do block, as `sensitive_surface`, and escalate to a human rather than
+> retrying, since the work is usually right and a replacement would carry the same diff. That check
+> ignores the declared scope deliberately: scope is written by the compiler, so honouring it would
+> let the safety property certify itself. Writing it turned up one more bug nobody had reported —
+> the scope check read a file list capped at 100 entries as if it were complete, so a large pull
+> request could be closed as "touched nothing in scope" when the file was merely on page 2.
 
 ## Design in one picture
 

@@ -578,6 +578,21 @@ export class Dispatcher {
           "the agent declined the task as not actionable",
         );
         return { merged: false };
+      case "sensitive_surface":
+        // Mergeable and green, but the diff changes what CI executes or what it
+        // can reach. §7.3 bars autonomous merges of "auth, secrets,
+        // permissions, CI configuration, dependency sources" outright, so a
+        // human confirms this one. Escalating rather than retrying is
+        // deliberate: nothing is wrong with the work, and a replacement pull
+        // request would touch the same surface.
+        await this.#escalate(
+          wi,
+          "this pull request is mergeable but changes a security-sensitive surface, " +
+            "which §7.3 reserves for a human even when the work looks correct: " +
+            verdict.files.map((f) => f.reason).join("; ") +
+            ". Review the diff and merge it by hand if the change is intended",
+        );
+        return { merged: false };
       case "no_op":
         await this.retryOrEscalate(wi);
         return { merged: false };

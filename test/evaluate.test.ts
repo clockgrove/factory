@@ -5,16 +5,25 @@ import {
   hasConflict,
   isDeclined,
   isUntouched,
+  outOfScopeFiles,
+  sensitiveSurfaceFiles,
 } from "../src/evaluate.js";
 import { INITIAL_PLAN_COMMIT, type LinkedPullRequest } from "../src/types.js";
+
+/** The clean-PR verdict: in scope, and the whole file list was seen. */
+const READY = {
+  kind: "ready",
+  outOfScopeFiles: [],
+  fileListComplete: true,
+} as const;
 
 const NOW = new Date("2026-01-01T00:00:00Z");
 
 function pr(over: Partial<LinkedPullRequest> = {}): LinkedPullRequest {
-  return {
+  const merged = {
     id: "PR_1",
     number: 1,
-    state: "OPEN",
+    state: "OPEN" as const,
     isDraft: true,
     title: "Add slugify",
     body: "",
@@ -22,11 +31,20 @@ function pr(over: Partial<LinkedPullRequest> = {}): LinkedPullRequest {
     changedFiles: 2,
     changedFilePaths: ["src/slugify.ts"],
     commitSubjects: [INITIAL_PLAN_COMMIT, "Add slugify"],
-    checks: "SUCCESS",
-    mergeable: "MERGEABLE",
+    checks: "SUCCESS" as const,
+    mergeable: "MERGEABLE" as const,
     createdAt: NOW,
     headSha: "deadbeef",
     ...over,
+  };
+  // Keep the count consistent with the paths unless a test is deliberately
+  // exercising a partial file list. GraphQL returns `files(first: 100)` beside
+  // an authoritative `changedFiles`, so `changedFiles > paths.length` means
+  // "page 2 exists" — a fixture that says so accidentally is claiming the
+  // scope checks cannot see the whole diff, which suppresses them.
+  return {
+    ...merged,
+    changedFiles: over.changedFiles ?? merged.changedFilePaths.length,
   };
 }
 
@@ -180,7 +198,7 @@ describe("evaluateMechanical", () => {
   });
 
   it("classifies a clean PR as ready", () => {
-    expect(evaluateMechanical(pr())).toEqual({ kind: "ready" });
+    expect(evaluateMechanical(pr())).toEqual(READY);
   });
 
   // Gate 4 (§10.7, F3). A held run reports the same `FAILURE` rollup as a real
@@ -219,13 +237,11 @@ describe("evaluateMechanical", () => {
   });
 
   it("still treats absent checks as ready when no CI is expected", () => {
-    expect(evaluateMechanical(pr({ checks: null }), undefined, false)).toEqual({
-      kind: "ready",
-    });
+    expect(evaluateMechanical(pr({ checks: null }), undefined, false)).toEqual(READY);
   });
 
   it("defaults to the pre-Gate-3 behaviour when ciExpected is omitted", () => {
-    expect(evaluateMechanical(pr({ checks: null }))).toEqual({ kind: "ready" });
+    expect(evaluateMechanical(pr({ checks: null }))).toEqual(READY);
   });
 
   // The probe is a REST call. Catching a 5xx or a rate limit and reporting
@@ -241,13 +257,11 @@ describe("evaluateMechanical", () => {
   it("does not let an unknown CI expectation override settled checks", () => {
     expect(
       evaluateMechanical(pr({ checks: "SUCCESS" }), undefined, "unknown"),
-    ).toEqual({ kind: "ready" });
+    ).toEqual(READY);
   });
 
   it("reports settled checks even when CI is expected", () => {
-    expect(evaluateMechanical(pr({ checks: "SUCCESS" }), undefined, true)).toEqual({
-      kind: "ready",
-    });
+    expect(evaluateMechanical(pr({ checks: "SUCCESS" }), undefined, true)).toEqual(READY);
     expect(evaluateMechanical(pr({ checks: "FAILURE" }), undefined, true)).toEqual({
       kind: "checks_failed",
     });
@@ -329,5 +343,136 @@ describe("evaluateMechanical", () => {
     expect(
       evaluateMechanical(pr({ mergeable: "CONFLICTING", checks: "FAILURE" })),
     ).toEqual({ kind: "conflict" });
+  });
+});
+
+/**
+ * Gate 5's finding. `isUntouched` fires only when *no* declared file is
+ * touched, so a pull request that did everything asked of it **plus** anything
+ * else passed every mechanical check. Measured live: both replacement pull
+ * requests on `factory-gate2` added a 1454-line `package-lock.json` that no
+ * Work Item declared, and nothing in the pipeline could see it.
+ */
+describe("scope creep", () => {
+  it("reports extra files on an otherwise clean PR without blocking it", () => {
+    const verdict = evaluateMechanical(
+      pr({ changedFilePaths: ["src/slugify.ts", "docs/NOTES.md"] }),
+      ["src/slugify.ts"],
+    );
+    expect(verdict).toEqual({
+      kind: "ready",
+      outOfScopeFiles: ["docs/NOTES.md"],
+      fileListComplete: true,
+    });
+  });
+
+  it("is silent when every changed file is in scope", () => {
+    expect(
+      evaluateMechanical(
+        pr({ changedFilePaths: ["src/a.ts", "src/b.ts"] }),
+        ["src/"],
+      ),
+    ).toEqual(READY);
+  });
+
+  it("cannot judge scope without a declared scope", () => {
+    expect(
+      outOfScopeFiles(pr({ changedFilePaths: ["anything.ts"] }), undefined),
+    ).toEqual([]);
+  });
+
+  it("still merges in-scope work, so a legitimate extra file is not fatal", () => {
+    // Gate 3's Work Item correctly updated a test outside its declared scope
+    // rather than leaving it broken. Blocking that would have been wrong, which
+    // is why this is evidence for §5.2 rather than a failing verdict.
+    const verdict = evaluateMechanical(
+      pr({ changedFilePaths: ["src/pipeline.ts", "test/loadConfig.test.ts"] }),
+      ["src/pipeline.ts"],
+    );
+    expect(verdict.kind).toBe("ready");
+  });
+});
+
+/**
+ * §7.3 bars autonomous merges of "auth, secrets, permissions, CI
+ * configuration, dependency sources" outright. This is the mechanical half of
+ * that bar.
+ */
+describe("sensitive surfaces", () => {
+  it("refuses to auto-merge a workflow change", () => {
+    const verdict = evaluateMechanical(
+      pr({ changedFilePaths: [".github/workflows/ci.yml"] }),
+      [".github/workflows/ci.yml"],
+    );
+    expect(verdict.kind).toBe("sensitive_surface");
+  });
+
+  it("blocks even when the Work Item declared the file in scope", () => {
+    // Scope is written by the compiler, which is a model reading an issue
+    // body. If declaring a path in scope bought an autonomous merge of it, the
+    // safety property would certify itself.
+    const declared = evaluateMechanical(pr({ changedFilePaths: ["package.json"] }), [
+      "package.json",
+    ]);
+    expect(declared.kind).toBe("sensitive_surface");
+  });
+
+  it("catches the lockfile Gate 5 merged by hand", () => {
+    const verdict = evaluateMechanical(
+      pr({ changedFilePaths: ["src/index.ts", "package-lock.json"] }),
+      ["src/index.ts"],
+    );
+    expect(verdict.kind).toBe("sensitive_surface");
+    if (verdict.kind !== "sensitive_surface") throw new Error("unreachable");
+    expect(verdict.files.map((f) => f.path)).toEqual(["package-lock.json"]);
+  });
+
+  it("does not fire on ordinary source and test files", () => {
+    expect(
+      sensitiveSurfaceFiles(
+        pr({ changedFilePaths: ["src/a.ts", "test/a.test.ts", "docs/x.md"] }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("lets a failing check outrank it, so real defects still retry", () => {
+    // A sensitive diff whose CI is red is still just a failed attempt; it
+    // should not consume a human's attention before the tests even pass.
+    expect(
+      evaluateMechanical(
+        pr({ changedFilePaths: [".github/workflows/ci.yml"], checks: "FAILURE" }),
+        [".github/workflows/ci.yml"],
+      ),
+    ).toEqual({ kind: "checks_failed" });
+  });
+});
+
+/**
+ * `files(first: 100)` beside an authoritative `changedFiles` means a big pull
+ * request arrives with a silently partial list, and every scope judgment is
+ * unsound on one.
+ */
+describe("partial file lists", () => {
+  const big = (paths: string[]) => pr({ changedFilePaths: paths, changedFiles: 150 });
+
+  it("refuses to call a PR untouched from an incomplete list", () => {
+    // The in-scope file may simply be on page 2. This verdict closes the pull
+    // request, so guessing here destroys correct work.
+    expect(isUntouched(big(["src/other.ts"]), ["src/slugify.ts"])).toBe(false);
+  });
+
+  it("still reports untouched when the whole list was seen", () => {
+    expect(isUntouched(pr({ changedFilePaths: ["src/other.ts"] }), ["src/slugify.ts"])).toBe(
+      true,
+    );
+  });
+
+  it("marks the ready verdict so a caller knows scope creep is a lower bound", () => {
+    const verdict = evaluateMechanical(big(["src/slugify.ts"]), ["src/slugify.ts"]);
+    expect(verdict).toEqual({
+      kind: "ready",
+      outOfScopeFiles: [],
+      fileListComplete: false,
+    });
   });
 });

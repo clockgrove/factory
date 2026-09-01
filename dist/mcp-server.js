@@ -25292,9 +25292,27 @@ var Dispatcher = class {
    * wrongly modelled two items as independent ⇒ replan"), and escalating with
    * that diagnosis is how a human is told to replan.
    *
-   * Unmeasured live: every gate before Gate 4 produced Work Items with
-   * disjoint file scope, so no rehearsal has yet reached a real conflicting
-   * pull request.
+   * Measured live at last (Gate 5, `factory-gate2` #22, 2026-09-02). Three Work
+   * Items were deliberately compiled with overlapping scope — each had to create
+   * the same new `src/index.ts` barrel — with no edges between them, producing a
+   * guaranteed add/add conflict. The first merged; the other two then hit this
+   * method, and **`updatePullRequestBranch` threw**. So the catch below is the
+   * branch a real content conflict takes, and it is bounded. Both pull requests
+   * were closed with the audit comment and re-dispatched, and because the base
+   * had by then moved to include the barrel, the replacement attempts modified
+   * the existing file instead of creating it — the conflict resolved itself in
+   * one retry, exactly as §6 intends.
+   *
+   * That measurement also settles the success path, which had looked unbounded.
+   * It is unbounded, and that is correct rather than a defect: GitHub refuses
+   * the mutation outright when the merge would conflict, so success means the
+   * conflict is gone. For this method to run again the base must have moved
+   * *again* between the update and the next read — in which case rebasing again
+   * is the right response, each pass does real work against a genuinely newer
+   * base, and it terminates as soon as the base stops moving. The loop only
+   * persists while the repository is under continuous merge, consumes no
+   * attempt, opens no pull request, and its writes are paced by the same
+   * breaker as everything else. A counter here would abort legitimate work.
    */
   async #resolveConflict(wi, pr) {
     try {

@@ -657,9 +657,27 @@ export class Dispatcher {
    * wrongly modelled two items as independent ⇒ replan"), and escalating with
    * that diagnosis is how a human is told to replan.
    *
-   * Unmeasured live: every gate before Gate 4 produced Work Items with
-   * disjoint file scope, so no rehearsal has yet reached a real conflicting
-   * pull request.
+   * Measured live at last (Gate 5, `factory-gate2` #22, 2026-09-02). Three Work
+   * Items were deliberately compiled with overlapping scope — each had to create
+   * the same new `src/index.ts` barrel — with no edges between them, producing a
+   * guaranteed add/add conflict. The first merged; the other two then hit this
+   * method, and **`updatePullRequestBranch` threw**. So the catch below is the
+   * branch a real content conflict takes, and it is bounded. Both pull requests
+   * were closed with the audit comment and re-dispatched, and because the base
+   * had by then moved to include the barrel, the replacement attempts modified
+   * the existing file instead of creating it — the conflict resolved itself in
+   * one retry, exactly as §6 intends.
+   *
+   * That measurement also settles the success path, which had looked unbounded.
+   * It is unbounded, and that is correct rather than a defect: GitHub refuses
+   * the mutation outright when the merge would conflict, so success means the
+   * conflict is gone. For this method to run again the base must have moved
+   * *again* between the update and the next read — in which case rebasing again
+   * is the right response, each pass does real work against a genuinely newer
+   * base, and it terminates as soon as the base stops moving. The loop only
+   * persists while the repository is under continuous merge, consumes no
+   * attempt, opens no pull request, and its writes are paced by the same
+   * breaker as everything else. A counter here would abort legitimate work.
    */
   async #resolveConflict(
     wi: DerivedWorkItem,
@@ -667,11 +685,12 @@ export class Dispatcher {
   ): Promise<void> {
     try {
       await this.#call(() => this.#writer.updatePullRequestBranch(pr.id));
-      // Success: the branch was updated. The next cycle's snapshot rereads
-      // `mergeable`; if it is now MERGEABLE, `integrate()` proceeds normally,
-      // and if GitHub still reports CONFLICTING, this method runs again.
-      // A successful rebase consumes no attempt: it opens no new pull request,
-      // so it cannot be the thing that spins.
+      // Success: the branch was updated, which GitHub only permits when the
+      // merge applies cleanly — so the conflict is resolved and the next
+      // cycle's snapshot reads MERGEABLE (or UNKNOWN while it recomputes,
+      // which `mergeability_unknown` holds on). Reaching here again means the
+      // base moved a second time; see the note above for why re-rebasing then
+      // is correct and deliberately unbounded.
     } catch (error) {
       if (error instanceof PlatformUnavailableError) throw error;
 

@@ -25,7 +25,11 @@ Objective needs replanning or a human needs to be asked.
 - `owner`, `repo` — the target repository.
 - `number` — the Objective issue's number.
 - `escalateTo` — the GitHub login of the human who owns this Objective, to hand a Work Item to when
-  a cycle decides escalation is warranted (§7.2). Ask if you were not told this.
+  a cycle decides escalation is warranted (§7.2). Ask if you were not told this. **Pass it to your
+  first `read_objective` so it gets validated while nothing is at stake.** It is otherwise not
+  checked until the first call that actually uses it, and if that call is an escalation, it throws
+  at the exact moment you are trying to reach a human. Do not infer this login from your working
+  branch's prefix — that is a plausible-looking guess that has already been wrong once (§10.2, F4).
 - `GITHUB_TOKEN` (or `GH_TOKEN`) must already be set in the MCP server's environment — you cannot set
   it yourself; if `read_objective` fails with a missing-token error, stop and tell the human.
 
@@ -44,6 +48,13 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
      server has tripped repeatedly (§7.3: "attempts are exhausted and no graph change looks likely to
      succeed" is a human question, not a retry). Do not keep cycling hoping it clears.
    - If the Objective is `closed`, stop; there is nothing to do.
+   - **On an Objective with more than a handful of Work Items, pass `minimal: true`.** The coding
+     agent quotes the entire Work Item issue back into its pull request body, so the response grows
+     with both graph size and agent verbosity — a ten-item Objective overflowed the tool output
+     limit outright (§10.2, F3). `minimal` drops only prose no derivation reads (each PR body and
+     the Objective body, each replaced by a `bodyLength`); states, `ready`, `blockedBy` and
+     `changedFilePaths` all survive. You need the Objective body only on the compile cycle, so a
+     reasonable habit is: full read on cycle 1, `minimal: true` every cycle after.
 
 2. **Compile, if this Objective has no Work Items yet.** `read_objective`'s `objective.items` will be
    empty. Invoke the `objective-compilation` skill against this Objective's title and body to produce
@@ -93,8 +104,9 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
    deciding whether to integrate at all (it never mutates anything on its own).
 
    **Mechanical checks are necessary, not sufficient.** Before treating a `ready` verdict as
-   confidence to proceed, read the Work Item's diff yourself and check it against §7.3's bar:
-   acceptance criteria satisfied and nothing more, no deleted/rewritten behavior the Work Item did not
+   confidence to proceed, read the Work Item's diff yourself — **call `read_pull_request_diff` with
+   the pull request's number** — and check it against §7.3's bar: acceptance criteria satisfied and
+   nothing more, no deleted/rewritten behavior the Work Item did not
    name, nothing touching workflows/permissions/secrets/release configuration, and the change is a
    single reversible commit. `dispatch_integrate` will still merge a mechanically-clean PR that fails
    this bar — the semantic judgment (§5.2, §7.3) is yours, not the tool's. If it fails the bar, do not
@@ -132,9 +144,28 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
 Act autonomously, including merging, only when **all** hold:
 
 - mechanical checks pass (the tool's own `verdict.kind === "ready"`)
-- the diff satisfies the Work Item's acceptance criteria and nothing more (your own read of the diff)
+- the diff satisfies the Work Item's acceptance criteria and nothing more — **your own read of the
+  actual patch text, via `read_pull_request_diff`.** `evaluate_mechanical` deliberately does not
+  make this judgment (§5.1 is mechanical only), and `read_objective` reports `changedFilePaths`
+  but no content. A `ready` verdict therefore means "open, touches the expected files, mergeable" —
+  considerably weaker than it reads. It is not a substitute for this line.
 - the change is reversible: one squash commit on a branch, revertible without coordination
 - nothing touches auth, secrets, permissions, CI configuration, or dependency sources
+
+**Any acceptance criterion about what the code *does* requires the diff read, not file paths.**
+"Must import and actually call `truncate` rather than reimplement it" is invisible in
+`changedFilePaths` — both the correct and the incorrect implementation touch exactly the same file.
+The pull request body will usually claim the criterion was met; §15.7 forbids treating that
+self-report as evidence. Gate 2 merged four Work Items with exactly this criterion unverified,
+because the tool to check it did not exist yet (§10.2, F1). It exists now — use it.
+
+Two honest limits on that read, so you don't over-trust it either:
+
+- If `truncated` is `true`, you did not see the whole change. Re-read the file you care about with
+  a larger `maxPatchBytes` before concluding anything, or treat the criterion as unverified.
+- Reading the diff tells you the code *says* the right thing, not that it *runs*. Where the
+  repository has no CI, `checks` is `null` and nothing has executed the tests (§10.2, F2) — so
+  "the tests pass" is an assumption, not an observation. Say so when you report.
 
 Stop and ask a human (via `dispatch_retry_or_escalate` if the Work Item is `failed`, or by directly
 telling the operator otherwise — there is no tool for "escalate a `for_review` or `dispatched` item
@@ -202,3 +233,6 @@ in per-run kickoff wording that has to be reinvented (and re-forgotten) each tim
   share nothing but the same MCP server process (and therefore the same underlying circuit
   breaker/pacer/concurrency limiter — a refusal on one Objective's dispatch legitimately slows down
   another's, by design, §15.3's "one process allowed to write").
+- **A merged pull request reports `mergeable: "UNKNOWN"`.** Expected, and not a problem: GitHub
+  stops computing mergeability once a PR is closed. Never treat `mergeable` as evidence about a PR
+  that is already merged, and never gate anything on it (§10.2, F5).

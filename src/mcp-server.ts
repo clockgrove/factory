@@ -155,30 +155,42 @@ function findWorkItem(
   return item;
 }
 
-function serializePr(pr: LinkedPullRequest) {
-  return { ...pr, createdAt: pr.createdAt.toISOString() };
+function serializePr(pr: LinkedPullRequest, minimal = false) {
+  const base = { ...pr, createdAt: pr.createdAt.toISOString() };
+  if (!minimal) return base;
+  // The coding agent quotes the whole Work Item issue back into the PR body, so
+  // `body` alone dominates the response at scale (§10.2, F3: ten items overflowed
+  // the tool output limit outright). Drop it and keep everything else —
+  // especially `changedFilePaths`, which is a handful of short strings and is
+  // the primary evidence the confidence bar reasons about. Trading it away to
+  // save bytes would defeat the purpose of the read.
+  const { body: _body, ...rest } = base;
+  return { ...rest, bodyLength: pr.body.length };
 }
 
-function serializeWorkItem(wi: DerivedWorkItem) {
+function serializeWorkItem(wi: DerivedWorkItem, minimal = false) {
   return {
     ...wi,
-    linkedPullRequests: wi.linkedPullRequests.map(serializePr),
+    linkedPullRequests: wi.linkedPullRequests.map((pr) => serializePr(pr, minimal)),
     copilotAssignments: wi.copilotAssignments.map((d) => d.toISOString()),
   };
 }
 
-function serializeObjective(o: DerivedObjective) {
+function serializeObjective(o: DerivedObjective, minimal = false) {
   return {
     id: o.id,
     number: o.number,
     title: o.title,
-    body: o.body,
+    // The Objective body is only needed on the compile cycle. Every later cycle
+    // (confirm / retry / integrate / replan-check) re-reads the same unchanged
+    // prose for nothing, so `minimal` reports its size instead of its content.
+    ...(minimal ? { bodyLength: o.body.length } : { body: o.body }),
     closed: o.closed,
     readAt: o.readAt.toISOString(),
     repositoryId: o.repositoryId,
     defaultBranch: o.defaultBranch,
     copilotBotId: o.copilotBotId,
-    items: o.items.map(serializeWorkItem),
+    items: o.items.map((i) => serializeWorkItem(i, minimal)),
   };
 }
 
@@ -286,18 +298,61 @@ server.registerTool(
     inputSchema: {
       ...RepoShape,
       number: z.number().int().positive().describe("Objective issue number"),
+      minimal: z
+        .boolean()
+        .optional()
+        .describe(
+          "Drop prose that no derivation reads: each pull request's `body` and the Objective's " +
+            "own `body`, each replaced by a `bodyLength`. Everything the state machine and the " +
+            "confidence bar reason about is retained — including `changedFilePaths`. Use this on " +
+            "large Objectives: the coding agent quotes the entire Work Item issue into its PR " +
+            "body, so a ten-item graph can exceed the tool output limit outright (§10.2, F3). " +
+            "Read a specific pull request's contents with `read_pull_request_diff` rather than " +
+            "carrying every body through every cycle.",
+        ),
+      escalateTo: z
+        .string()
+        .optional()
+        .describe(
+          "The GitHub login you intend to escalate to later. Supplying it here validates it now, " +
+            "against the live API, while nothing is at stake. It is otherwise not checked until " +
+            "the first dispatch or escalation that uses it — and an escalation is precisely the " +
+            "moment you cannot afford it to throw (§10.2, F4). Note the login is a GitHub " +
+            "account name, which is not always the prefix of your working branch.",
+        ),
     },
   },
-  tool(async ({ owner, repo, number }: { owner: string; repo: string; number: number }) => {
-    const reader = readerFor(owner, repo);
-    const snapshot = await reader.readObjective(number);
-    const objective = derive(snapshot);
-    return {
-      objective: serializeObjective(objective),
-      ready: ready(objective).map((i) => i.number),
-      platformExhausted: breaker.exhausted(),
-    };
-  }),
+  tool(
+    async ({
+      owner,
+      repo,
+      number,
+      minimal,
+      escalateTo,
+    }: {
+      owner: string;
+      repo: string;
+      number: number;
+      minimal?: boolean | undefined;
+      escalateTo?: string | undefined;
+    }) => {
+      const reader = readerFor(owner, repo);
+      const snapshot = await reader.readObjective(number);
+      const objective = derive(snapshot);
+      // Resolve eagerly and let it throw. Surfacing a bad login as a failed read
+      // on cycle one is the whole point: it is recoverable here and is not
+      // recoverable at the moment an escalation is trying to reach a human.
+      const escalation = escalateTo
+        ? { login: escalateTo, resolved: Boolean(await resolveUserIdCached(reader, escalateTo)) }
+        : undefined;
+      return {
+        objective: serializeObjective(objective, minimal ?? false),
+        ready: ready(objective).map((i) => i.number),
+        platformExhausted: breaker.exhausted(),
+        ...(escalation ? { escalateTo: escalation } : {}),
+      };
+    },
+  ),
 );
 
 server.registerTool(
@@ -342,6 +397,53 @@ server.registerTool(
         verdict: evaluateMechanical(pr, expectedFiles),
         pullRequest: { number: pr.number, title: pr.title },
       };
+    },
+  ),
+);
+
+server.registerTool(
+  "read_pull_request_diff",
+  {
+    title: "Read pull request diff",
+    description:
+      "Read the actual patch text of a Work Item's pull request, per file. This is what makes the " +
+      "*semantic* half of §7.3's confidence bar performable — 'the diff satisfies the Work Item's " +
+      "acceptance criteria and nothing more' is a judgment about content, which `evaluate_mechanical` " +
+      "deliberately does not make (§5.1 is mechanical only) and which `read_objective` cannot support, " +
+      "since it reports `changedFilePaths` but no content. Call this before `dispatch_integrate` on " +
+      "any Work Item whose acceptance criteria say something about what the code *does* (e.g. 'must " +
+      "import and actually call X rather than reimplement it') — a criterion you cannot check from " +
+      "file paths alone must not be waved through on the agent's own say-so (§15.7). Read-only. " +
+      "Patches are capped by `maxPatchBytes`; `truncated` reports whether anything was shortened or " +
+      "withheld, so a partial read is never mistaken for a complete one.",
+    inputSchema: {
+      ...RepoShape,
+      pullNumber: z.number().int().positive().describe("Pull request number to read"),
+      maxPatchBytes: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(
+          "Total patch-text budget across all files (default 60000). Lower it on large Objectives " +
+            "where per-cycle context is scarce; raise it to inspect one big file.",
+        ),
+    },
+  },
+  tool(
+    async ({
+      owner,
+      repo,
+      pullNumber,
+      maxPatchBytes,
+    }: {
+      owner: string;
+      repo: string;
+      pullNumber: number;
+      maxPatchBytes?: number | undefined;
+    }) => {
+      const reader = readerFor(owner, repo);
+      return await reader.readPullRequestDiff(pullNumber, maxPatchBytes);
     },
   ),
 );

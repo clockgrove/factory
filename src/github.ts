@@ -21,6 +21,8 @@ import type {
   LinkedPullRequest,
   MergeableState,
   ObjectiveSnapshot,
+  PullRequestDiff,
+  PullRequestDiffFile,
   WorkItemSnapshot,
 } from "./types.js";
 import { COPILOT_LOGIN } from "./types.js";
@@ -262,6 +264,68 @@ export function createOctokit(opts: GitHubOptions): Octokit {
   });
 }
 
+/**
+ * Apply a total size budget across a pull request's file patches (§7.3).
+ *
+ * Pure, so the budgeting rules are testable without touching the network —
+ * `readPullRequestDiff` is then a thin fetch around this. Files are consumed in
+ * order and each one either fits, is cut short, or is dropped once the budget
+ * is gone; every case that withholds content sets `patchOmitted`, so a caller
+ * can always distinguish "this file changed nothing worth showing" from "this
+ * file's changes were withheld from you".
+ */
+export function budgetPatches(
+  files: RawDiffFile[],
+  maxPatchBytes: number,
+): { files: PullRequestDiffFile[]; truncated: boolean } {
+  let budget = maxPatchBytes;
+  let truncated = false;
+
+  const out = files.map((f): PullRequestDiffFile => {
+    const base = {
+      path: f.filename,
+      status: f.status,
+      additions: f.additions,
+      deletions: f.deletions,
+    };
+
+    if (f.patch === null || f.patch === undefined) {
+      return {
+        ...base,
+        patch: null,
+        patchOmitted: "binary, or too large for GitHub to return a patch",
+      };
+    }
+    if (budget <= 0) {
+      truncated = true;
+      return {
+        ...base,
+        patch: null,
+        patchOmitted: "read budget exhausted; re-read this file with a larger maxPatchBytes",
+      };
+    }
+
+    const slice = f.patch.length > budget ? f.patch.slice(0, budget) : f.patch;
+    budget -= slice.length;
+    if (slice.length < f.patch.length) {
+      truncated = true;
+      return { ...base, patch: slice, patchOmitted: "truncated mid-file" };
+    }
+    return { ...base, patch: slice };
+  });
+
+  return { files: out, truncated };
+}
+
+/** The subset of GitHub's PR-files REST payload that `budgetPatches` reads. */
+export interface RawDiffFile {
+  filename: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  patch?: string | null | undefined;
+}
+
 export class GitHubReader {
   readonly #octokit: Octokit;
   readonly #owner: string;
@@ -271,6 +335,42 @@ export class GitHubReader {
     this.#owner = opts.owner;
     this.#repo = opts.repo;
     this.#octokit = createOctokit(opts);
+  }
+
+  /**
+   * Read the actual patch text of a pull request, per file (§7.3).
+   *
+   * This exists because the confidence bar requires Director to judge that
+   * "the diff satisfies the Work Item's acceptance criteria and nothing more"
+   * — a *semantic* check that `evaluate_mechanical` deliberately does not make
+   * (§5.1 is mechanical only). Before this method the snapshot exposed
+   * `changedFilePaths` but no content, so that half of the bar was unmet by
+   * construction: a criterion like "must import and actually call `truncate`,
+   * not reimplement it" was uncheckable, and Gate 2 merged four such Work
+   * Items on file-path evidence alone (see IMPLEMENTATION-PLAN.md §10.2, F1).
+   *
+   * Uses the REST files endpoint rather than the `.diff` media type because it
+   * returns per-file `additions`/`deletions`/`status` alongside the patch,
+   * which is what the bar actually reasons about. GitHub omits `patch` for
+   * binary files and for individual files above its own size limit; those come
+   * back with `patch: null`, reported honestly rather than silently dropped.
+   */
+  async readPullRequestDiff(
+    pullNumber: number,
+    maxPatchBytes = 60_000,
+  ): Promise<PullRequestDiff> {
+    const files = await this.#octokit.request(
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/files",
+      {
+        owner: this.#owner,
+        repo: this.#repo,
+        pull_number: pullNumber,
+        per_page: 100,
+      },
+    );
+
+    const { files: entries, truncated } = budgetPatches(files.data, maxPatchBytes);
+    return { pullNumber, files: entries, truncated };
   }
 
   /** Read one Objective and everything derivable about its Work Items. */
@@ -324,7 +424,10 @@ export class GitHubReader {
       { login },
     );
     if (!data.user) {
-      throw new Error(`GitHub user '${login}' not found`);
+      throw new Error(
+        `GitHub user '${login}' not found. Check the exact account login — it is not ` +
+          `necessarily the prefix of a branch name, an email local-part, or a display name.`,
+      );
     }
     return data.user.id;
   }

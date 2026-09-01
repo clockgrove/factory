@@ -53,6 +53,29 @@ export type CheckRollup = "PENDING" | "SUCCESS" | "FAILURE" | null;
  */
 export type MergeableState = "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
 
+/**
+ * One file's worth of a pull request's actual patch, for the semantic half of
+ * the confidence bar (§7.3). `patch` is null when GitHub declined to return it
+ * (binary/oversized) or when this read's size budget was exhausted — in both
+ * cases `patchOmitted` says which, so a reader can tell "no changes worth
+ * showing" apart from "changes withheld".
+ */
+export interface PullRequestDiffFile {
+  path: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  patch: string | null;
+  patchOmitted?: string;
+}
+
+export interface PullRequestDiff {
+  pullNumber: number;
+  files: PullRequestDiffFile[];
+  /** True when any patch was shortened or withheld for size. */
+  truncated: boolean;
+}
+
 export interface LinkedPullRequest {
   /** GraphQL node ID, needed to address `closePullRequest` at retry time. */
   id: string;

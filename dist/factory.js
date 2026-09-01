@@ -2798,6 +2798,41 @@ function createOctokit(opts) {
     }
   });
 }
+function budgetPatches(files, maxPatchBytes) {
+  let budget = maxPatchBytes;
+  let truncated = false;
+  const out = files.map((f) => {
+    const base = {
+      path: f.filename,
+      status: f.status,
+      additions: f.additions,
+      deletions: f.deletions
+    };
+    if (f.patch === null || f.patch === void 0) {
+      return {
+        ...base,
+        patch: null,
+        patchOmitted: "binary, or too large for GitHub to return a patch"
+      };
+    }
+    if (budget <= 0) {
+      truncated = true;
+      return {
+        ...base,
+        patch: null,
+        patchOmitted: "read budget exhausted; re-read this file with a larger maxPatchBytes"
+      };
+    }
+    const slice = f.patch.length > budget ? f.patch.slice(0, budget) : f.patch;
+    budget -= slice.length;
+    if (slice.length < f.patch.length) {
+      truncated = true;
+      return { ...base, patch: slice, patchOmitted: "truncated mid-file" };
+    }
+    return { ...base, patch: slice };
+  });
+  return { files: out, truncated };
+}
 var GitHubReader = class {
   #octokit;
   #owner;
@@ -2806,6 +2841,37 @@ var GitHubReader = class {
     this.#owner = opts.owner;
     this.#repo = opts.repo;
     this.#octokit = createOctokit(opts);
+  }
+  /**
+   * Read the actual patch text of a pull request, per file (§7.3).
+   *
+   * This exists because the confidence bar requires Director to judge that
+   * "the diff satisfies the Work Item's acceptance criteria and nothing more"
+   * — a *semantic* check that `evaluate_mechanical` deliberately does not make
+   * (§5.1 is mechanical only). Before this method the snapshot exposed
+   * `changedFilePaths` but no content, so that half of the bar was unmet by
+   * construction: a criterion like "must import and actually call `truncate`,
+   * not reimplement it" was uncheckable, and Gate 2 merged four such Work
+   * Items on file-path evidence alone (see IMPLEMENTATION-PLAN.md §10.2, F1).
+   *
+   * Uses the REST files endpoint rather than the `.diff` media type because it
+   * returns per-file `additions`/`deletions`/`status` alongside the patch,
+   * which is what the bar actually reasons about. GitHub omits `patch` for
+   * binary files and for individual files above its own size limit; those come
+   * back with `patch: null`, reported honestly rather than silently dropped.
+   */
+  async readPullRequestDiff(pullNumber, maxPatchBytes = 6e4) {
+    const files = await this.#octokit.request(
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/files",
+      {
+        owner: this.#owner,
+        repo: this.#repo,
+        pull_number: pullNumber,
+        per_page: 100
+      }
+    );
+    const { files: entries, truncated } = budgetPatches(files.data, maxPatchBytes);
+    return { pullNumber, files: entries, truncated };
   }
   /** Read one Objective and everything derivable about its Work Items. */
   async readObjective(number) {
@@ -2853,7 +2919,9 @@ var GitHubReader = class {
       { login }
     );
     if (!data.user) {
-      throw new Error(`GitHub user '${login}' not found`);
+      throw new Error(
+        `GitHub user '${login}' not found. Check the exact account login \u2014 it is not necessarily the prefix of a branch name, an email local-part, or a display name.`
+      );
     }
     return data.user.id;
   }

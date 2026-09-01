@@ -24191,6 +24191,41 @@ function createOctokit(opts) {
     }
   });
 }
+function budgetPatches(files, maxPatchBytes) {
+  let budget = maxPatchBytes;
+  let truncated = false;
+  const out = files.map((f) => {
+    const base = {
+      path: f.filename,
+      status: f.status,
+      additions: f.additions,
+      deletions: f.deletions
+    };
+    if (f.patch === null || f.patch === void 0) {
+      return {
+        ...base,
+        patch: null,
+        patchOmitted: "binary, or too large for GitHub to return a patch"
+      };
+    }
+    if (budget <= 0) {
+      truncated = true;
+      return {
+        ...base,
+        patch: null,
+        patchOmitted: "read budget exhausted; re-read this file with a larger maxPatchBytes"
+      };
+    }
+    const slice = f.patch.length > budget ? f.patch.slice(0, budget) : f.patch;
+    budget -= slice.length;
+    if (slice.length < f.patch.length) {
+      truncated = true;
+      return { ...base, patch: slice, patchOmitted: "truncated mid-file" };
+    }
+    return { ...base, patch: slice };
+  });
+  return { files: out, truncated };
+}
 var GitHubReader = class {
   #octokit;
   #owner;
@@ -24199,6 +24234,37 @@ var GitHubReader = class {
     this.#owner = opts.owner;
     this.#repo = opts.repo;
     this.#octokit = createOctokit(opts);
+  }
+  /**
+   * Read the actual patch text of a pull request, per file (§7.3).
+   *
+   * This exists because the confidence bar requires Director to judge that
+   * "the diff satisfies the Work Item's acceptance criteria and nothing more"
+   * — a *semantic* check that `evaluate_mechanical` deliberately does not make
+   * (§5.1 is mechanical only). Before this method the snapshot exposed
+   * `changedFilePaths` but no content, so that half of the bar was unmet by
+   * construction: a criterion like "must import and actually call `truncate`,
+   * not reimplement it" was uncheckable, and Gate 2 merged four such Work
+   * Items on file-path evidence alone (see IMPLEMENTATION-PLAN.md §10.2, F1).
+   *
+   * Uses the REST files endpoint rather than the `.diff` media type because it
+   * returns per-file `additions`/`deletions`/`status` alongside the patch,
+   * which is what the bar actually reasons about. GitHub omits `patch` for
+   * binary files and for individual files above its own size limit; those come
+   * back with `patch: null`, reported honestly rather than silently dropped.
+   */
+  async readPullRequestDiff(pullNumber, maxPatchBytes = 6e4) {
+    const files = await this.#octokit.request(
+      "GET /repos/{owner}/{repo}/pulls/{pull_number}/files",
+      {
+        owner: this.#owner,
+        repo: this.#repo,
+        pull_number: pullNumber,
+        per_page: 100
+      }
+    );
+    const { files: entries, truncated } = budgetPatches(files.data, maxPatchBytes);
+    return { pullNumber, files: entries, truncated };
   }
   /** Read one Objective and everything derivable about its Work Items. */
   async readObjective(number3) {
@@ -24246,7 +24312,9 @@ var GitHubReader = class {
       { login }
     );
     if (!data.user) {
-      throw new Error(`GitHub user '${login}' not found`);
+      throw new Error(
+        `GitHub user '${login}' not found. Check the exact account login \u2014 it is not necessarily the prefix of a branch name, an email local-part, or a display name.`
+      );
     }
     return data.user.id;
   }
@@ -25094,28 +25162,34 @@ function findWorkItem(objective, workItemNumber) {
   }
   return item;
 }
-function serializePr(pr) {
-  return { ...pr, createdAt: pr.createdAt.toISOString() };
+function serializePr(pr, minimal = false) {
+  const base = { ...pr, createdAt: pr.createdAt.toISOString() };
+  if (!minimal) return base;
+  const { body: _body, ...rest } = base;
+  return { ...rest, bodyLength: pr.body.length };
 }
-function serializeWorkItem(wi) {
+function serializeWorkItem(wi, minimal = false) {
   return {
     ...wi,
-    linkedPullRequests: wi.linkedPullRequests.map(serializePr),
+    linkedPullRequests: wi.linkedPullRequests.map((pr) => serializePr(pr, minimal)),
     copilotAssignments: wi.copilotAssignments.map((d) => d.toISOString())
   };
 }
-function serializeObjective(o) {
+function serializeObjective(o, minimal = false) {
   return {
     id: o.id,
     number: o.number,
     title: o.title,
-    body: o.body,
+    // The Objective body is only needed on the compile cycle. Every later cycle
+    // (confirm / retry / integrate / replan-check) re-reads the same unchanged
+    // prose for nothing, so `minimal` reports its size instead of its content.
+    ...minimal ? { bodyLength: o.body.length } : { body: o.body },
     closed: o.closed,
     readAt: o.readAt.toISOString(),
     repositoryId: o.repositoryId,
     defaultBranch: o.defaultBranch,
     copilotBotId: o.copilotBotId,
-    items: o.items.map(serializeWorkItem)
+    items: o.items.map((i) => serializeWorkItem(i, minimal))
   };
 }
 async function dispatcherFor(owner, repo, objective, escalateTo, reader) {
@@ -25193,19 +25267,35 @@ server.registerTool(
     description: "Read one GitHub Objective issue and every Work Item sub-issue beneath it, and derive each one's state (\xA71, \xA73.2). This is the one-snapshot-per-cycle read (\xA74.1) \u2014 call it once at the start of a cycle, then act on its `items[].number` via the other tools. The returned `objective.title`/`objective.body` are the human's stated intent, verbatim, for the compile-if-needed step (skills/objective-compilation) \u2014 never invent scope beyond them. Also reports whether the platform circuit breaker has tripped enough times to need a human (\xA77.3) via `platformExhausted`.",
     inputSchema: {
       ...RepoShape,
-      number: external_exports.number().int().positive().describe("Objective issue number")
+      number: external_exports.number().int().positive().describe("Objective issue number"),
+      minimal: external_exports.boolean().optional().describe(
+        "Drop prose that no derivation reads: each pull request's `body` and the Objective's own `body`, each replaced by a `bodyLength`. Everything the state machine and the confidence bar reason about is retained \u2014 including `changedFilePaths`. Use this on large Objectives: the coding agent quotes the entire Work Item issue into its PR body, so a ten-item graph can exceed the tool output limit outright (\xA710.2, F3). Read a specific pull request's contents with `read_pull_request_diff` rather than carrying every body through every cycle."
+      ),
+      escalateTo: external_exports.string().optional().describe(
+        "The GitHub login you intend to escalate to later. Supplying it here validates it now, against the live API, while nothing is at stake. It is otherwise not checked until the first dispatch or escalation that uses it \u2014 and an escalation is precisely the moment you cannot afford it to throw (\xA710.2, F4). Note the login is a GitHub account name, which is not always the prefix of your working branch."
+      )
     }
   },
-  tool(async ({ owner, repo, number: number3 }) => {
-    const reader = readerFor(owner, repo);
-    const snapshot = await reader.readObjective(number3);
-    const objective = derive(snapshot);
-    return {
-      objective: serializeObjective(objective),
-      ready: ready(objective).map((i) => i.number),
-      platformExhausted: breaker.exhausted()
-    };
-  })
+  tool(
+    async ({
+      owner,
+      repo,
+      number: number3,
+      minimal,
+      escalateTo
+    }) => {
+      const reader = readerFor(owner, repo);
+      const snapshot = await reader.readObjective(number3);
+      const objective = derive(snapshot);
+      const escalation = escalateTo ? { login: escalateTo, resolved: Boolean(await resolveUserIdCached(reader, escalateTo)) } : void 0;
+      return {
+        objective: serializeObjective(objective, minimal ?? false),
+        ready: ready(objective).map((i) => i.number),
+        platformExhausted: breaker.exhausted(),
+        ...escalation ? { escalateTo: escalation } : {}
+      };
+    }
+  )
 );
 server.registerTool(
   "evaluate_mechanical",
@@ -25236,6 +25326,31 @@ server.registerTool(
         verdict: evaluateMechanical(pr, expectedFiles),
         pullRequest: { number: pr.number, title: pr.title }
       };
+    }
+  )
+);
+server.registerTool(
+  "read_pull_request_diff",
+  {
+    title: "Read pull request diff",
+    description: "Read the actual patch text of a Work Item's pull request, per file. This is what makes the *semantic* half of \xA77.3's confidence bar performable \u2014 'the diff satisfies the Work Item's acceptance criteria and nothing more' is a judgment about content, which `evaluate_mechanical` deliberately does not make (\xA75.1 is mechanical only) and which `read_objective` cannot support, since it reports `changedFilePaths` but no content. Call this before `dispatch_integrate` on any Work Item whose acceptance criteria say something about what the code *does* (e.g. 'must import and actually call X rather than reimplement it') \u2014 a criterion you cannot check from file paths alone must not be waved through on the agent's own say-so (\xA715.7). Read-only. Patches are capped by `maxPatchBytes`; `truncated` reports whether anything was shortened or withheld, so a partial read is never mistaken for a complete one.",
+    inputSchema: {
+      ...RepoShape,
+      pullNumber: external_exports.number().int().positive().describe("Pull request number to read"),
+      maxPatchBytes: external_exports.number().int().positive().optional().describe(
+        "Total patch-text budget across all files (default 60000). Lower it on large Objectives where per-cycle context is scarce; raise it to inspect one big file."
+      )
+    }
+  },
+  tool(
+    async ({
+      owner,
+      repo,
+      pullNumber,
+      maxPatchBytes
+    }) => {
+      const reader = readerFor(owner, repo);
+      return await reader.readPullRequestDiff(pullNumber, maxPatchBytes);
     }
   )
 );

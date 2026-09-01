@@ -381,6 +381,12 @@ authoring any Objective against a freshly seeded rehearsal repo:
   `package.json`/`tsconfig.json` — never in a follow-up.
 - If a Work Item's PR shows up with hundreds of unexpected changed files, check for exactly this
   before treating it as a Director finding.
+- **Ship a CI workflow that runs the tests and the typecheck on `pull_request`.** Without one,
+  GitHub reports no check runs, `evaluate_mechanical`'s `checks_pending`/`checks_failed` branches
+  can never fire, and a `ready` verdict silently narrows to "open, touches the expected files,
+  mergeable" — nothing has actually executed the code. Gate 2 ran all 10 Work Items this way (see
+  §10.3, F2). A rehearsal without CI leaves a whole branch of the evaluate layer untested, and
+  makes the mechanical verdict weaker than it reads.
 
 **A Director session must keep its automation interval short enough that its own message queue
 never meaningfully backs up**, and must not proactively report on every healthy cycle — both fixed
@@ -451,6 +457,65 @@ an `outOfScope` restatement carrying the *reason* produced 10/10. Captured in
 `skills/objective-compilation/SKILL.md`. The general lesson — state the constraint, its exact expected
 value, and why it matters, rather than describing the desired end state — is the compiler's job, not
 something Director's judgment layer should have to absorb per-cycle.
+
+### 10.3 Gate 2's findings against Factory's own tool surface
+
+Gate 2 passed on the criteria it was designed to test, but the Director driving it reported five
+defects in the surface it was driving. They are recorded here because four of them were invisible
+at Gates 0 and 1 — they only appear at scale, which is what Gate 2 was for. All are now addressed.
+
+- **F1 — Director could not read a diff through Factory's own tools.** `read_objective` exposed
+  `changedFilePaths`, `changedLines` and `commitSubjects`, but no patch content, while the director
+  skill mandated checking the diff against §7.3's bar. That step was **not performable on Factory's
+  surface**, so the semantic half of the confidence bar was unmet *by construction, not by choice*.
+  It bit concretely: this Objective required combinators to "import and actually use the named
+  functions, not reimplement their logic" — a criterion invisible in file paths, since both the
+  correct and incorrect implementation touch the same file. Four Work Items merged with it
+  unverified, on file-path, size and reversibility evidence alone. The PR bodies asserted
+  compliance, but §15.7 forbids treating an agent's self-report as evidence.
+
+  *Fixed* by a ninth tool, `read_pull_request_diff`, returning per-file patch text with
+  `additions`/`deletions`/`status`. It uses the REST files endpoint rather than the `.diff` media
+  type precisely because the bar reasons about per-file counts, not one flat patch. A total
+  `maxPatchBytes` budget keeps it compatible with F3's constraint, and any file whose patch is
+  shortened or withheld says so via `patchOmitted`, with `truncated` set — a partial read must
+  never be mistaken for a clean one. The budgeting rules are a pure function (`budgetPatches`) so
+  they are tested without the network.
+
+- **F2 — with no CI in the target repo, `checks` is always `null`.** `checks_pending`/`checks_failed`
+  never fired on any of the 10 PRs, so nothing independently confirmed the tests passed, or even
+  that vitest discovered them. Combined with F1, a mechanical `ready` verdict meant only "open,
+  touches the expected files, mergeable" — considerably weaker than the word `ready` suggests.
+  *Addressed* in two places: §10.1's checklist now requires rehearsal repos to ship a workflow, and
+  the director skill now states plainly that where `checks` is `null`, "the tests pass" is an
+  assumption rather than an observation, and must be reported as one.
+
+- **F3 — `read_objective` did not scale with graph size.** It inlines every linked PR's full body,
+  and the coding agent quotes the entire Work Item issue back into that body. At ten items the
+  response reached 20.6 KB and **exceeded the tool output limit outright**; Director had to spill it
+  to a file and extract fields with `jq`. Since Director re-reads every cycle, per-cycle context
+  cost grew with both Objective size and agent verbosity. *Fixed* with a `minimal` flag that drops
+  only prose no derivation reads — each PR body and the Objective body, each replaced by a
+  `bodyLength`. `changedFilePaths` is deliberately **kept**: it is a handful of short strings and is
+  the primary evidence the bar reasons about, so dropping it to save bytes would defeat the read.
+
+- **F4 — `escalateTo` was not validated until first use.** Director passed `kirkmarple`, taken from
+  the session's branch prefix; the real login is `kirkmarple-clockgrove`. It happened to fail on the
+  first `dispatch_start`, before any state change, so it was harmless — but the same typo on an
+  *escalation* path would have thrown at the exact moment a human was needed. A branch prefix that
+  looks like a login is a false friend. *Fixed* by accepting an optional `escalateTo` on
+  `read_objective` and resolving it eagerly, so a bad login fails loudly on cycle one while nothing
+  is at stake; the resolver's error now also says what the login is not.
+
+- **F5 — `mergeable` reads `UNKNOWN` on merged PRs.** Cosmetic: GitHub stops computing mergeability
+  once a PR closes. *Addressed* as a documented edge case — never gate on `mergeable` post-merge.
+
+**The pattern worth keeping.** F1 and F3 are both cases where the tool surface was shaped by what
+was easy to query rather than by what the judgment layer actually needed, and neither was
+detectable at three Work Items. A skill instruction that cannot be carried out on the available
+surface does not degrade loudly — it degrades into the agent quietly substituting weaker evidence
+and merging anyway. That is the failure mode to watch for in later gates: not a tool that errors,
+but an instruction that silently has no way to be followed.
 
 ---
 

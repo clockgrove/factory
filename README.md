@@ -57,6 +57,15 @@ and replans — unattended.
 > constraint naming the exact path plus an `outOfScope` restatement giving the reason, and got
 > **10 of 10** correct. Recorded in `skills/objective-compilation/SKILL.md`.
 >
+> Gate 2 also surfaced five defects in Factory's *own* tool surface, none of which were visible at
+> three Work Items — all now fixed, in `docs/IMPLEMENTATION-PLAN.md` §10.3. The significant one:
+> Director had no way to read a pull request's diff through Factory's tools, only its changed file
+> *paths*, so the director skill's instruction to check the diff against §7.3's confidence bar was
+> not performable — and four Work Items merged with a semantic acceptance criterion ("must import
+> and actually use these functions, not reimplement them") unverified. The MCP surface is now nine
+> tools, adding `read_pull_request_diff`, and `read_objective` takes a `minimal` flag because at ten
+> Work Items its response exceeded the tool output limit outright.
+>
 > Per PRD §8, Gate 3 is one real Clockgrove Objective. See [`docs/PRD.md`](docs/PRD.md) and
 > [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md).
 

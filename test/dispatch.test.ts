@@ -599,7 +599,7 @@ describe("Dispatcher.integrate", () => {
     const writer = new FakeWriter();
     const d = makeDispatcher(writer);
     const outcome = await d.integrate(derivedWi(), pr({ isDraft: false }), READY);
-    expect(outcome).toEqual({ merged: true });
+    expect(outcome).toEqual({ merged: true, action: "merged" });
   });
 
   it("escalates a sensitive surface instead of merging or retrying it", async () => {
@@ -670,13 +670,19 @@ describe("Dispatcher.integrate", () => {
     ).rejects.toBeInstanceOf(PlatformUnavailableError);
   });
 
+  // The three §6 conflict branches — rebase, close-and-redispatch, escalate —
+  // all used to return a bare `{ merged: false }`. Gate 5 (§10.13) could only
+  // tell them apart by diffing the *next* `read_objective` for PR state, which
+  // is exactly how a rebase that resolves nothing would hide a repeat forever.
+  // `action` is what makes the branch taken visible to the caller.
   it("resolves a conflict by updating the branch when GitHub accepts it", async () => {
     const writer = new FakeWriter();
     const d = makeDispatcher(writer);
     const item = derivedWi();
     const p = pr({ id: "PR_conflict" });
-    await d.integrate(item, p, { kind: "conflict" });
+    const outcome = await d.integrate(item, p, { kind: "conflict" });
     expect(writer.calls).toEqual(["updatePullRequestBranch:PR_conflict"]);
+    expect(outcome.action).toBe("rebased");
   });
 
   it("closes and re-dispatches when the branch update is rejected as unresolvable", async () => {
@@ -685,7 +691,8 @@ describe("Dispatcher.integrate", () => {
     const d = makeDispatcher(writer);
     const item = derivedWi();
     const p = pr({ id: "PR_conflict" });
-    await d.integrate(item, p, { kind: "conflict" });
+    const outcome = await d.integrate(item, p, { kind: "conflict" });
+    expect(outcome.action).toBe("redispatched");
     expect(writer.calls).toEqual([
       "updatePullRequestBranch:PR_conflict",
       "addComment:PR_conflict",
@@ -705,8 +712,9 @@ describe("Dispatcher.integrate", () => {
     const item = derivedWi({
       linkedPullRequests: [pr({ id: "PR_1" }), pr({ id: "PR_2" }), pr({ id: "PR_3" })],
     });
-    await d.integrate(item, pr({ id: "PR_3" }), { kind: "conflict" });
+    const outcome = await d.integrate(item, pr({ id: "PR_3" }), { kind: "conflict" });
 
+    expect(outcome.action).toBe("escalated");
     expect(writer.calls).toEqual([
       "updatePullRequestBranch:PR_3",
       `assignHumanOnly:${item.id}:U_human`,
@@ -793,7 +801,7 @@ describe("Dispatcher.integrate", () => {
       pr({ id: "PR_held", checks: "FAILURE", checksNeverStarted: true }),
       { kind: "checks_held" },
     );
-    expect(outcome).toEqual({ merged: false });
+    expect(outcome).toEqual({ merged: false, action: "escalated" });
     expect(writer.calls).toEqual([
       `assignHumanOnly:${item.id}:U_human`,
       `addComment:${item.id}`,

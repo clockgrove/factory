@@ -159,6 +159,13 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
      the item that merges last in a four-way collision can exhaust its attempts and escalate having
      done nothing wrong. So repeated `conflict` on one file is your cue to look at the graph, not at
      the agent.
+
+     **Read `action` to know which of the three §6 branches actually fired** — `rebased`,
+     `redispatched` or `escalated`. Gate 5 could not: all three returned an identical
+     `{"verdict":{"kind":"conflict"},"merged":false}` (§10.13), and the failure mode worth catching
+     here is a rebase that succeeds without resolving anything, which leaves *no* trace in the next
+     `read_objective` — no closed pull request, no consumed attempt, no new assignment. Repeated
+     `rebased` on one Work Item is that bug; escalate it rather than letting it cycle.
    - `checks_pending` — usually settles within a cycle, so leave it. But if it persists and the pull
      request's checks have *never* started, GitHub is probably holding the run awaiting approval:
      call `approve_held_workflow_runs` rather than waiting indefinitely (see "CI that GitHub is
@@ -262,6 +269,14 @@ Two honest limits on that read, so you don't over-trust it either:
 
 - If `truncated` is `true`, you did not see the whole change. Re-read the file you care about with
   a larger `maxPatchBytes` before concluding anything, or treat the criterion as unverified.
+- **Pass `paths` when the pull request contains anything generated.** The budget is
+  first-come-first-served, so a `package-lock.json` (or a `dist/` bundle, or vendored code) sorting
+  ahead of the files you care about will eat the whole allowance and hand you `patch: null` for
+  everything you actually needed to read — silently, looking like ordinary truncation (§10.13).
+  Pass the Work Item's `scope` plus anything in `outOfScopeFiles` you want to inspect; entries match
+  scope semantics (trailing `/` = directory, otherwise exact). Filtered files stay listed with their
+  `additions`/`deletions`, and a filter does **not** set `truncated`, so a filtered read that reports
+  `truncated: false` really did give you everything you asked for.
 - Reading the diff tells you the code *says* the right thing, not that it *runs*. Where the
   repository has no CI, `checks` is `null` and nothing has executed the tests (§10.2, F2) — so
   "the tests pass" is an assumption, not an observation. Say so when you report.

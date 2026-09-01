@@ -428,12 +428,26 @@ export function interpretContentsResponse(
   };
 }
 
+/**
+ * Whether `path` was asked for. Mirrors the Work Item `scope` matching in
+ * `evaluate.ts` so a caller can pass a Work Item's declared scope straight
+ * through: an entry ending in `/` selects a directory, anything else must match
+ * exactly.
+ */
+function isRequested(path: string, paths: string[]): boolean {
+  return paths.some((entry) =>
+    entry.endsWith("/") ? path.startsWith(entry) : path === entry,
+  );
+}
+
 export function budgetPatches(
   files: RawDiffFile[],
   maxPatchBytes: number,
+  paths?: string[],
 ): { files: PullRequestDiffFile[]; truncated: boolean } {
   let budget = maxPatchBytes;
   let truncated = false;
+  const filtering = paths !== undefined && paths.length > 0;
 
   const out = files.map((f): PullRequestDiffFile => {
     const base = {
@@ -442,6 +456,24 @@ export function budgetPatches(
       additions: f.additions,
       deletions: f.deletions,
     };
+
+    // Spend no budget on a file the caller did not ask for. Gate 5 (§10.13):
+    // `package-lock.json` sorts first and consumed the entire allowance, so the
+    // three files actually under review came back `patch: null` — on any pull
+    // request carrying a lockfile, generated file or vendored bundle, the
+    // review-critical files are precisely the ones you cannot see.
+    //
+    // Deliberately still *listed*, with `additions`/`deletions` intact: the
+    // blast-radius review and the scope checks reason about the complete file
+    // list, and silently dropping entries here would tell them the pull request
+    // is smaller than it is.
+    if (filtering && !isRequested(f.filename, paths)) {
+      return {
+        ...base,
+        patch: null,
+        patchOmitted: "not requested; add this path to `paths` to read it",
+      };
+    }
 
     if (f.patch === null || f.patch === undefined) {
       return {
@@ -513,10 +545,26 @@ export class GitHubReader {
    * which is what the bar actually reasons about. GitHub omits `patch` for
    * binary files and for individual files above its own size limit; those come
    * back with `patch: null`, reported honestly rather than silently dropped.
+   *
+   * `paths` restricts which files spend the byte budget (Gate 5, §10.13). The
+   * budget is otherwise first-come-first-served in GitHub's ordering, so one
+   * large file early in the alphabet starves every file after it —
+   * `package-lock.json` consumed a 4000-byte allowance whole and left the three
+   * files under review with `patch: null`. Pass a Work Item's declared `scope`
+   * (the matching rules are the same: a trailing `/` selects a directory) to
+   * spend the whole budget on the files the review is about.
+   *
+   * Filtered-out files are still listed, with `status`, `additions` and
+   * `deletions` intact and `patchOmitted` explaining why — the complete file
+   * list is what the blast-radius review and the scope checks reason about, and
+   * shortening it would misreport the size of the change. For the same reason
+   * `truncated` stays `false` when content is withheld only by `paths`: it means
+   * "content you asked for was cut", and a filtered file was not asked for.
    */
   async readPullRequestDiff(
     pullNumber: number,
     maxPatchBytes = 60_000,
+    paths?: string[],
   ): Promise<PullRequestDiff> {
     // Paginated, not a single page. A one-page read made `truncated: false`
     // assert only "you have every patch I fetched" while callers — the
@@ -547,7 +595,7 @@ export class GitHubReader {
       if (page === maxPages) incomplete = true;
     }
 
-    const { files: entries, truncated } = budgetPatches(raw, maxPatchBytes);
+    const { files: entries, truncated } = budgetPatches(raw, maxPatchBytes, paths);
     return { pullNumber, files: entries, truncated: truncated || incomplete };
   }
 

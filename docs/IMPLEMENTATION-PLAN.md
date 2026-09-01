@@ -1126,6 +1126,67 @@ being *told to do something else* and noticing that a rule it had just tripped c
 enforced. Gate 5's mandate was the conflict path; this arrived in the margin. Worth remembering when
 deciding whether a rehearsal that "passed" produced its full value.
 
+## 10.13 Two ways the tool surface lied by omission
+
+Gate 5's other two margin findings. Neither is a wrong answer; both are *absent* answers, which is
+harder to notice because nothing looks broken.
+
+### The diff budget was first-come-first-served, so generated files starved the review
+
+A replacement pull request added `package-lock.json` (+1454/−0). It sorts first alphabetically, so
+`budgetPatches` spent the entire allowance on it and returned `patch: null` for the three files
+actually under review. At `maxPatchBytes: 4000` the reviewer saw the lockfile and nothing else; at
+60000 the result was 53 KB and had to be written to a temp file and grepped.
+
+Generalise it and it is worse than one awkward pull request: **on any diff containing a lockfile, a
+generated file or a vendored bundle, the files a reviewer most needs are exactly the ones withheld**,
+and they are withheld silently — `patch: null` with a budget message reads like an incidental
+truncation, not like the review being blinded. §7.3's semantic bar ("the diff satisfies the
+acceptance criteria and nothing more") is unperformable in that state, which is the same failure
+§10.2's F1 was supposed to have closed.
+
+`readPullRequestDiff` / `read_pull_request_diff` now take an optional `paths`, matching Work Item
+`scope` semantics exactly (a trailing `/` selects a directory, anything else is an exact match) so a
+Director can pass a Work Item's declared scope straight through. Three properties are deliberate:
+
+- **Unrequested files spend no budget.** That is the entire fix; everything else is about not
+  breaking something while applying it.
+- **Unrequested files are still listed**, with `status`/`additions`/`deletions` intact. The
+  blast-radius review and the §5.1 scope checks reason about the *complete* file list — dropping
+  entries would tell them the pull request is smaller than it is, which is how the scope-creep bug in
+  §10.12 was possible in the first place. Filtering patch text is safe; filtering the list is not.
+- **A `paths` filter does not set `truncated`.** `truncated` means "content you asked for was cut"
+  and drives the decision to re-read with a bigger budget. Setting it on a deliberate filter would
+  make every targeted read look incomplete.
+
+An empty `paths` array means *no filter*, not *nothing*: a caller that computed an empty scope gets
+the whole diff rather than an all-`null` one it might read as "this pull request changes nothing".
+
+### `dispatch_integrate` reported the verdict but never the branch it took
+
+On a conflict the tool returned `{"verdict":{"kind":"conflict"},"merged":false}` — identical for all
+three §6 branches: rebase succeeded, closed-and-redispatched, or escalated. Gate 5 could only tell
+them apart by diffing the *next* `read_objective` for pull request state and assignment counts.
+
+This matters because of what that gate was sent to look for. The suspected bug was a rebase that
+succeeds without resolving anything, looping forever — and **a repeated successful rebase is exactly
+the case that leaves no trace in the next snapshot**: no PR closed, no attempt consumed, no new
+assignment. The one outcome the result most needed to distinguish was the one it could not. Gate 5
+observed 3/3 conflicts throwing, and reasonably inferred the loop may be unreachable for a genuine
+content conflict, but it never once exercised the success path, so the inference stands untested.
+
+`IntegrateOutcome` now carries `action`: `merged`, `rebased`, `redispatched`, `escalated` or
+`waiting`. A rebase loop is now visible as repeated `rebased` on one Work Item.
+
+`dispatch_retry_or_escalate` had a quieter version of the same defect, found while fixing this one:
+it computed `attemptAction(item)` itself and returned *that* as `action`, so the caller was told a
+prediction rather than an observation. The two agree today only because `retryOrEscalate` recomputes
+the same predicate. It now returns what actually happened, in the same vocabulary.
+
+The shared lesson: a tool that reports *what it decided* rather than *what it did* is untestable
+from the outside, and the gap only becomes visible when someone is hunting a bug whose signature is
+"nothing changed".
+
 ## 11. Risks
 
 | Risk | Mitigation |

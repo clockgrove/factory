@@ -2904,9 +2904,15 @@ function interpretContentsResponse(path, body, maxBytes) {
     truncated: clipped
   };
 }
-function budgetPatches(files, maxPatchBytes) {
+function isRequested(path, paths) {
+  return paths.some(
+    (entry) => entry.endsWith("/") ? path.startsWith(entry) : path === entry
+  );
+}
+function budgetPatches(files, maxPatchBytes, paths) {
   let budget = maxPatchBytes;
   let truncated = false;
+  const filtering = paths !== void 0 && paths.length > 0;
   const out = files.map((f) => {
     const base = {
       path: f.filename,
@@ -2914,6 +2920,13 @@ function budgetPatches(files, maxPatchBytes) {
       additions: f.additions,
       deletions: f.deletions
     };
+    if (filtering && !isRequested(f.filename, paths)) {
+      return {
+        ...base,
+        patch: null,
+        patchOmitted: "not requested; add this path to `paths` to read it"
+      };
+    }
     if (f.patch === null || f.patch === void 0) {
       return {
         ...base,
@@ -2970,8 +2983,23 @@ var GitHubReader = class {
    * which is what the bar actually reasons about. GitHub omits `patch` for
    * binary files and for individual files above its own size limit; those come
    * back with `patch: null`, reported honestly rather than silently dropped.
+   *
+   * `paths` restricts which files spend the byte budget (Gate 5, §10.13). The
+   * budget is otherwise first-come-first-served in GitHub's ordering, so one
+   * large file early in the alphabet starves every file after it —
+   * `package-lock.json` consumed a 4000-byte allowance whole and left the three
+   * files under review with `patch: null`. Pass a Work Item's declared `scope`
+   * (the matching rules are the same: a trailing `/` selects a directory) to
+   * spend the whole budget on the files the review is about.
+   *
+   * Filtered-out files are still listed, with `status`, `additions` and
+   * `deletions` intact and `patchOmitted` explaining why — the complete file
+   * list is what the blast-radius review and the scope checks reason about, and
+   * shortening it would misreport the size of the change. For the same reason
+   * `truncated` stays `false` when content is withheld only by `paths`: it means
+   * "content you asked for was cut", and a filtered file was not asked for.
    */
-  async readPullRequestDiff(pullNumber, maxPatchBytes = 6e4) {
+  async readPullRequestDiff(pullNumber, maxPatchBytes = 6e4, paths) {
     const raw = [];
     let incomplete = false;
     const maxPages = 30;
@@ -2990,7 +3018,7 @@ var GitHubReader = class {
       if (response.data.length < 100) break;
       if (page === maxPages) incomplete = true;
     }
-    const { files: entries, truncated } = budgetPatches(raw, maxPatchBytes);
+    const { files: entries, truncated } = budgetPatches(raw, maxPatchBytes, paths);
     return { pullNumber, files: entries, truncated: truncated || incomplete };
   }
   /**

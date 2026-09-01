@@ -75,7 +75,6 @@ import { z } from "zod";
 import {
   Dispatcher,
   GithubOctokitWriter,
-  attemptAction,
   confirmAction,
 } from "./dispatch.js";
 import { evaluateMechanical } from "./evaluate.js";
@@ -447,10 +446,26 @@ server.registerTool(
       "import and actually call X rather than reimplement it') — a criterion you cannot check from " +
       "file paths alone must not be waved through on the agent's own say-so (§15.7). Read-only. " +
       "Patches are capped by `maxPatchBytes`; `truncated` reports whether anything was shortened or " +
-      "withheld, so a partial read is never mistaken for a complete one.",
+      "withheld, so a partial read is never mistaken for a complete one. " +
+      "Pass `paths` to spend that budget only on the files you are reviewing — usually the Work " +
+      "Item's declared `scope`, plus anything `evaluate_mechanical` reported in `outOfScopeFiles`. " +
+      "Without it the budget is first-come-first-served in GitHub's own ordering, so one big file " +
+      "early in the alphabet starves the rest: Gate 5 asked for 4000 bytes on a pull request " +
+      "containing `package-lock.json` and got the lockfile plus `patch: null` for all three files " +
+      "it actually needed to review (§10.13). Filtered files are still listed with their " +
+      "`status`/`additions`/`deletions`, so the file list stays complete and you can still see " +
+      "*that* something changed even when you chose not to read it.",
     inputSchema: {
       ...RepoShape,
       pullNumber: z.number().int().positive().describe("Pull request number to read"),
+      paths: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Only spend the patch budget on these paths; an entry ending in `/` selects a " +
+            "directory. Other files are still listed, but without patch text. Omit to read " +
+            "every file in GitHub's order until the budget runs out.",
+        ),
       maxPatchBytes: z
         .number()
         .int()
@@ -468,14 +483,16 @@ server.registerTool(
       repo,
       pullNumber,
       maxPatchBytes,
+      paths,
     }: {
       owner: string;
       repo: string;
       pullNumber: number;
       maxPatchBytes?: number | undefined;
+      paths?: string[] | undefined;
     }) => {
       const reader = readerFor(owner, repo);
-      return await reader.readPullRequestDiff(pullNumber, maxPatchBytes);
+      return await reader.readPullRequestDiff(pullNumber, maxPatchBytes, paths);
     },
   ),
 );
@@ -668,7 +685,9 @@ server.registerTool(
     description:
       "§4.4/§5.1: act on a `failed` Work Item — close its unusable PR and retry, or escalate to a " +
       "human once attempts are exhausted (3 linked PRs). A no-op on a Work Item that is not " +
-      "currently `failed`.",
+      "currently `failed`. Returns `action`: `redispatched` (PR closed, Copilot reassigned), " +
+      "`escalated` (attempts exhausted, handed to a human), or `no-op`. This is the branch that " +
+      "actually fired, not a prediction — same vocabulary as `dispatch_integrate`'s `action`.",
     inputSchema: {
       ...WorkItemLocatorShape,
       ...EscalateToShape,
@@ -703,14 +722,17 @@ server.registerTool(
           reason: `Work Item #${workItemNumber} is '${item.state}', not 'failed'`,
         };
       }
-      const decision = attemptAction(item);
       const dispatcher = await dispatcherFor(owner, repo, objective, escalateTo, reader);
-      if (reason) {
-        await dispatcher.retryOrEscalate(item, reason);
-      } else {
-        await dispatcher.retryOrEscalate(item);
-      }
-      return { action: decision, workItem: workItemNumber };
+      // Report what actually happened, not what we predicted would happen.
+      // `attemptAction` was computed here and returned as the answer, which is
+      // the same shape of defect Gate 5 found in `dispatch_integrate` (§10.13):
+      // the caller was told a decision rather than an outcome. The two agree
+      // today because `retryOrEscalate` recomputes the same predicate, but a
+      // caller should never have to rely on that.
+      const action = reason
+        ? await dispatcher.retryOrEscalate(item, reason)
+        : await dispatcher.retryOrEscalate(item);
+      return { action, workItem: workItemNumber };
     },
   ),
 );

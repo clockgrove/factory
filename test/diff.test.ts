@@ -129,3 +129,71 @@ describe("budgetPatches", () => {
     expect(truncated).toBe(true);
   });
 });
+
+/**
+ * Gate 5 (§10.13): a replacement PR added `package-lock.json` (+1454/-0). It
+ * sorts first, so at a 4 KB budget it ate the whole allowance and the three
+ * files actually under review came back `patch: null`. The budget is
+ * first-come-first-served, so *any* PR carrying a lockfile, generated file or
+ * vendored bundle hides exactly the files a reviewer needs. `paths` is the
+ * cheap fix: spend the budget only on what was asked for.
+ */
+describe("budgetPatches with a paths filter", () => {
+  const lockfile = file({
+    filename: "package-lock.json",
+    patch: "@@ -0,0 +1,1454 @@\n" + "+lock\n".repeat(400),
+  });
+
+  it("spends no budget on a file the caller did not ask for", () => {
+    const { files } = budgetPatches(
+      [lockfile, file({ filename: "src/a.ts" })],
+      100,
+      ["src/a.ts"],
+    );
+
+    expect(at(files, 0).patch).toBeNull();
+    // The whole point: the requested file survives a budget the lockfile would
+    // otherwise have exhausted on its own.
+    expect(at(files, 1).patch).toBe(file().patch);
+    expect(at(files, 1).patchOmitted).toBeUndefined();
+  });
+
+  it("still lists the filtered file, with its counts, so scope checks stay honest", () => {
+    const { files } = budgetPatches([lockfile, file()], 10_000, ["src/a.ts"]);
+
+    expect(files.map((f) => f.path)).toEqual(["package-lock.json", "src/a.ts"]);
+    expect(at(files, 0).additions).toBe(3);
+    expect(at(files, 0).patchOmitted).toMatch(/not requested/);
+  });
+
+  it("does not report truncation, because a deliberate filter is not a loss", () => {
+    // `truncated` means "content you asked for was cut" — it drives the
+    // Director skill's decision to re-read. Setting it here would make every
+    // filtered read look incomplete and defeat the filter.
+    const { truncated } = budgetPatches([lockfile, file()], 10_000, ["src/a.ts"]);
+    expect(truncated).toBe(false);
+  });
+
+  it("selects a whole directory with a trailing slash, matching Work Item scope", () => {
+    const { files } = budgetPatches(
+      [file({ filename: "src/deep/a.ts" }), file({ filename: "docs/x.md" })],
+      10_000,
+      ["src/"],
+    );
+
+    expect(at(files, 0).patch).not.toBeNull();
+    expect(at(files, 1).patch).toBeNull();
+  });
+
+  it("does not let a prefix match a file without the trailing slash", () => {
+    const { files } = budgetPatches([file({ filename: "src/ab.ts" })], 10_000, ["src/a"]);
+    expect(at(files, 0).patchOmitted).toMatch(/not requested/);
+  });
+
+  it("treats an empty paths array as no filter, rather than as blinding the caller", () => {
+    // A caller that computed an empty scope should get the whole diff, not an
+    // all-null one it might read as "this pull request changes nothing".
+    const { files } = budgetPatches([file()], 10_000, []);
+    expect(at(files, 0).patch).not.toBeNull();
+  });
+});

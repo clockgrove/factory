@@ -160,6 +160,16 @@ and replans — unattended.
 > let the safety property certify itself. Writing it turned up one more bug nobody had reported —
 > the scope check read a file list capped at 100 entries as if it were complete, so a large pull
 > request could be closed as "touched nothing in scope" when the file was merely on page 2.
+>
+> Two smaller findings from the same margin were about the tool surface *withholding* answers rather
+> than getting them wrong. The diff reader's byte budget was first-come-first-served, so that same
+> lockfile — sorting first alphabetically — consumed the entire allowance and returned `patch: null`
+> for the three files actually under review; on any pull request carrying a lockfile or a generated
+> bundle, the files a reviewer most needs were precisely the ones it hid. `read_pull_request_diff`
+> now takes `paths`. And `dispatch_integrate` reported the verdict but never which of the three
+> conflict branches it took, so a rebase that succeeded without resolving anything — the exact bug
+> Gate 5 was sent to look for, and the one that leaves no trace anywhere else — was invisible from
+> its output. It now returns `action`.
 
 ## Design in one picture
 

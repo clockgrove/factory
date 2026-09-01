@@ -103,6 +103,11 @@ class FakeWriter implements GitHubWriter {
     if (this.failing.closePullRequest) throw this.failing.closePullRequest;
   }
 
+  async closeIssue(issueId: string): Promise<void> {
+    this.calls.push(`closeIssue:${issueId}`);
+    if (this.failing.closeIssue) throw this.failing.closeIssue;
+  }
+
   async markPullRequestReady(pullRequestId: string): Promise<void> {
     this.calls.push(`markPullRequestReady:${pullRequestId}`);
     if (this.failing.markPullRequestReady) throw this.failing.markPullRequestReady;
@@ -195,6 +200,15 @@ describe("Dispatcher.start", () => {
     const item = derivedWi();
     await d.start(item);
     expect(writer.calls).toEqual([`assignCopilot:${item.id}:BOT_1`]);
+  });
+});
+
+describe("Dispatcher.closeObjective", () => {
+  it("closes the Objective issue", async () => {
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    await d.closeObjective("OBJECTIVE_1");
+    expect(writer.calls).toEqual(["closeIssue:OBJECTIVE_1"]);
   });
 });
 

@@ -91,6 +91,7 @@ import {
   currentOpenPullRequest,
   derive,
   ready,
+  allDone,
   type DerivedObjective,
   type DerivedWorkItem,
 } from "./state.js";
@@ -533,6 +534,55 @@ server.registerTool(
       const dispatcher = await dispatcherFor(owner, repo, objective, escalateTo, reader);
       await dispatcher.integrate(item, pr, verdict);
       return { verdict, workItem: workItemNumber, pullRequest: pr.number };
+    },
+  ),
+);
+
+server.registerTool(
+  "close_objective",
+  {
+    title: "Close Objective",
+    description:
+      "§4: close the Objective issue itself once every Work Item is `done`. Gate 0 finding " +
+      "(2026-09-01, clockgrove/factory-gate0#6): GitHub does NOT auto-close a parent issue just " +
+      "because all its sub-issues closed — an Objective can sit open forever with a 100% complete " +
+      "graph unless something closes it explicitly. A no-op if the Objective is already closed, or " +
+      "if any Work Item is not yet `done` (the same check `allDone()` in state.ts makes).",
+    inputSchema: {
+      ...RepoShape,
+      objectiveNumber: z.number().int().positive().describe("Objective issue number"),
+      escalateTo: z
+        .string()
+        .min(1)
+        .describe("GitHub login used only to build the Dispatcher this tool reuses; not otherwise acted on here"),
+    },
+  },
+  tool(
+    async ({
+      owner,
+      repo,
+      objectiveNumber,
+      escalateTo,
+    }: {
+      owner: string;
+      repo: string;
+      objectiveNumber: number;
+      escalateTo: string;
+    }) => {
+      const reader = readerFor(owner, repo);
+      const objective = derive(await reader.readObjective(objectiveNumber));
+      if (objective.closed) {
+        return { action: "no-op", reason: `Objective #${objectiveNumber} is already closed` };
+      }
+      if (!allDone(objective)) {
+        return {
+          action: "no-op",
+          reason: `Objective #${objectiveNumber} has Work Items that are not yet 'done'`,
+        };
+      }
+      const dispatcher = await dispatcherFor(owner, repo, objective, escalateTo, reader);
+      await dispatcher.closeObjective(objective.id);
+      return { action: "closed", objective: objectiveNumber };
     },
   ),
 );

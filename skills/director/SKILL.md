@@ -111,10 +111,12 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
    some, stop and tell the human what the revised graph should be rather than inventing a write path
    that does not exist.
 
-8. **Decide whether to continue.** If every Work Item is `done`, the Objective closes on its own once
-   its last Work Item's PR merges (closing a Work Item's issue is the natural side effect of merging
-   the PR that closes it, not a step Director performs — GitHub does this, not a tool call here).
-   Otherwise, wait an interval appropriate to the harness you are running in (§4.1's `POLL_INTERVAL`
+8. **Decide whether to continue.** If every Work Item is `done`, call `close_objective`. (Gate 0
+   finding, 2026-09-01: GitHub does *not* auto-close a parent issue just because every sub-issue
+   under it closed — an Objective with a 100%-complete Work Item graph was confirmed live to sit
+   `OPEN` forever with no tool call here. `close_objective` is a no-op if the Objective is already
+   closed or if any Work Item is not yet `done`, so it is always safe to call once you observe
+   `allDone`.) Otherwise, wait an interval appropriate to the harness you are running in (§4.1's `POLL_INTERVAL`
    of 30s is calibrated for a tight bare-metal loop; a Director running inside an interactive or
    scheduled session should instead wait for its next natural invocation) and repeat from step 1 with
    a fresh read.

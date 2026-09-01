@@ -137,6 +137,22 @@ mutation ClosePullRequest($pullRequestId: ID!) {
 }`;
 
 /**
+ * Closes the Objective issue itself once every Work Item is `done` (§4,
+ * Gate 0 finding: GitHub does not auto-close a parent issue just because all
+ * its sub-issues closed — `subIssuesSummary` reaching 100% on a live
+ * Objective left it OPEN with an empty `closedByPullRequestsReferences`,
+ * confirmed 2026-09-01 against clockgrove/factory-gate0#6. `CloseIssueInput`
+ * and its `stateReason` enum (`COMPLETED`/`NOT_PLANNED`/`DUPLICATE`) verified
+ * live via GraphQL introspection the same day.
+ */
+const CLOSE_ISSUE_MUTATION = `
+mutation CloseIssue($issueId: ID!) {
+  closeIssue(input: { issueId: $issueId, stateReason: COMPLETED }) {
+    clientMutationId
+  }
+}`;
+
+/**
  * Integration mutations (§6), verified against
  * docs.github.com/en/graphql/reference/pulls (2026-08-30). Not yet exercised
  * live — same known gap noted above for the retry/escalate mutations.
@@ -193,6 +209,8 @@ export interface GitHubWriter {
   addHumanAssignee(issueId: string, userId: string): Promise<void>;
   addComment(subjectId: string, body: string): Promise<void>;
   closePullRequest(pullRequestId: string): Promise<void>;
+  /** §4: close the Objective issue itself once every Work Item is `done`. */
+  closeIssue(issueId: string): Promise<void>;
   /** Convert a draft PR to ready-for-review; a precondition for merging (§6). */
   markPullRequestReady(pullRequestId: string): Promise<void>;
   /** Squash-merge. GitHub auto-closes the linked issue (§6, PROBE-001 §12). */
@@ -249,6 +267,10 @@ export class GithubOctokitWriter implements GitHubWriter {
     await this.#octokit.graphql(CLOSE_PULL_REQUEST_MUTATION, {
       pullRequestId,
     });
+  }
+
+  async closeIssue(issueId: string): Promise<void> {
+    await this.#octokit.graphql(CLOSE_ISSUE_MUTATION, { issueId });
   }
 
   async markPullRequestReady(pullRequestId: string): Promise<void> {
@@ -459,6 +481,15 @@ export class Dispatcher {
       await this.#call(() => this.#writer.clearActors(wi.id));
       await this.#assign(wi.id);
     }
+  }
+
+  /**
+   * §4: close the Objective issue once `allDone()` (state.ts) confirms every
+   * Work Item is `done`. Routed through `#call` like every other write here
+   * — same breaker/pacer/concurrency discipline, no special case.
+   */
+  async closeObjective(objectiveId: string): Promise<void> {
+    await this.#call(() => this.#writer.closeIssue(objectiveId));
   }
 
   async #assign(issueId: string): Promise<void> {

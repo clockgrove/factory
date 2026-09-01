@@ -539,6 +539,44 @@ work too: typechecking and unit tests confirmed the code did what it said, and n
 that what it said was based on a wrong belief about the platform. Only exercising it against the
 real API could.
 
+### 10.4 Gate 3 fixture (`clockgrove/factory-gate3`) — designed, not yet run
+
+**Deviation to note up front:** PRD §8 defines Gate 3 as *one real Clockgrove Objective*. This
+fixture is synthetic. It is a dress rehearsal for that gate, not the gate itself — the PRD's bar is
+unchanged, and Gate 3 is not green until a real Clockgrove Objective closes.
+
+The fixture exists because Gates 0–2 shared a property that production work does not have: **every
+Work Item was purely additive**. All 10 of Gate 2's PRs added two brand-new files and touched
+nothing existing. That makes several real risks structurally impossible, so the loop has never been
+tested against them. `factory-gate3` seeds a small but genuine library (`appconfig`: `parse`,
+`merge`, `validate`, a barrel, 11 passing tests, green CI) whose README documents three deliberate
+design defects, and Objective #1 asks for those defects to be fixed.
+
+What this fixture exercises that no previous gate did:
+
+- **Modifying existing code and existing tests.** Each Work Item changes behavior that current
+  tests assert, so the agent must update those tests rather than only adding new ones — and must
+  not quietly delete an inconvenient assertion. Nothing in Gates 0–2 could catch that.
+- **The conflict/rebase path (§6), still untested after Gate 2.** Gate 2 saw zero conflicts because
+  the compiler's non-overlapping-`scope` invariant made them impossible. Here the barrel
+  `src/index.ts` is genuinely shared: at least three Work Items must add exports to it. The
+  invariant and the Objective are in direct tension, which is the point — either the compiler
+  serializes that work with edges (correct, and worth confirming it notices), or concurrent items
+  collide and §6's rebase path finally runs. Both outcomes are informative; silently producing
+  overlapping scopes with no edge would be a compiler defect.
+- **CI that actually reports.** Per §10.1 the repo ships a workflow running `npm test` and
+  `npm run typecheck` on every PR, so `checks_pending`/`checks_failed` can fire for the first time
+  (§10.3, F2). Strict compiler options plus a "do not relax `tsconfig.json`" constraint give the
+  agent a tempting shortcut that CI will catch.
+- **Semantic criteria that need `read_pull_request_diff`.** `loadConfig` "must be built out of the
+  three functions above — not a fourth reimplementation" is invisible in `changedFilePaths`. This is
+  the same criterion Gate 2 merged unverified four times (F1); now it is checkable, so the fixture
+  also tests whether Director actually performs the read now that it can.
+- **Constraints stated as prose, not as a compiled scope.** The Objective is written as a product
+  owner would write it, including negative constraints ("do not add runtime dependencies", "do not
+  change the input format"). Compiling that into Work Packets with honest `outOfScope` entries is
+  itself the test of `objective-compilation` against realistic input.
+
 ---
 
 ## 11. Risks

@@ -85,6 +85,7 @@ export type MechanicalVerdict =
   | { kind: "no_op" }
   | { kind: "untouched"; touchedFiles: string[] }
   | { kind: "conflict" }
+  | { kind: "mergeability_unknown" }
   | { kind: "checks_pending" }
   | { kind: "checks_missing" }
   | { kind: "checks_held" }
@@ -139,5 +140,13 @@ export function evaluateMechanical(
   // zero checks to the head commit, leaving the rollup null rather than
   // failing. Merging on that is merging with no CI evidence whatsoever.
   if (pr.checks === null && ciExpected) return { kind: "checks_missing" };
+  // Last, so a real check failure is still reported decisively rather than
+  // delayed a cycle. `UNKNOWN` is GitHub still computing mergeability, not a
+  // clean merge — and everything above has already passed, so without this the
+  // verdict would be `ready`, which Director reads as "the mechanical half is
+  // satisfied, only judgment remains". The merge itself is safe (a genuinely
+  // conflicting merge is refused and deferred), so this is about not claiming
+  // evidence that does not exist yet. It resolves within a cycle.
+  if (pr.mergeable === "UNKNOWN") return { kind: "mergeability_unknown" };
   return { kind: "ready" };
 }

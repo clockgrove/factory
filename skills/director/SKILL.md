@@ -119,6 +119,11 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
      workflow awaiting approval. Not a failure. `dispatch_integrate` escalates it to a human on
      sight and never retries it; call `approve_held_workflow_runs` first (and read the
      `not_approvable` warning below before deciding what to do with the answer).
+   - `mergeability_unknown` — GitHub has not finished computing whether the branch merges cleanly.
+     Not a conflict, not a failure, and not `ready`: nothing is known yet. `dispatch_integrate`
+     waits without writing anything, and GitHub settles it within a cycle. Simply come back next
+     cycle; if it persists across several, push activity on the base branch is repeatedly
+     invalidating the computation and that is worth reporting.
    - `checks_failed` / `untouched` / `no_op` / `declined` — the tool already closed the unusable PR
      and queued a retry (which the *next* cycle's step 5 will pick up as `failed`, or step 3 will
      redispatch once unassigned) — you do not need to act on the verdict directly, only read it to
@@ -220,32 +225,28 @@ returns `no_runs_held` and writes nothing. If it returns `escalated`, do not try
 the review found something that genuinely needs a human, and merging on `mergeable` alone would be
 the CI bypass this tool exists to close.
 
-**Expect `policy_cleared` rather than `approved`.** GitHub's per-run approve endpoint covers only
-*fork* pull requests. A coding-agent pull request is a same-repo branch held by the repository's
-Copilot Actions workflow-approval requirement, and the per-run call is refused outright (Gate 4,
-§10.7 — GitHub's verbatim reply: *"This run is not from a fork pull request or queued by the Actions
-bot"*). The only mechanism that releases it is clearing that repository setting, so the tool falls
-back to doing exactly that and then restarting the held runs. When it reports `policy_cleared`:
-
-- **Say so when you report.** This changed the repository, not just this run — every future
-  coding-agent run there now starts without waiting for a human. The tool records the reasoning on
-  the Work Item; surface it to the operator too, along with the fact that it is reversible in
-  Settings → Copilot → Coding agent.
-- Give CI a cycle to actually run before evaluating again. The restarted runs report normally from
-  here, so the next `evaluate_mechanical` is a real verdict rather than another hold.
-
-**And `not_approvable` means a human is genuinely required.** You get it when the repository-scoped
-half of the review failed — a write-scoped default token, a pull-request workflow that reaches a
-secret, a self-hosted runner — so Factory declined to relax a repository-wide setting on evidence
-that only covers one diff, or when clearing it failed outright. The tool has already escalated. When
-you see it:
+**Expect `not_approvable` on a coding-agent pull request.** GitHub's per-run approve endpoint covers
+only *fork* pull requests. A coding-agent pull request is a same-repo branch held by the repository's
+Copilot Actions workflow-approval requirement, and the per-run call is refused outright (Gates 4 and
+4b, §10.7 — GitHub's verbatim reply: *"This run is not from a fork pull request or queued by the
+Actions bot"*). The only mechanism that releases that hold is the repository setting itself, which is
+readable over REST and **has no write API** — so Factory cannot clear it, and a human must. The tool
+has already escalated by the time you see this. When you do:
 
 - **Do not retry it.** The refusal is deterministic; a second call returns byte-identically.
 - **Do not merge without CI to get moving.** That is precisely Gate 3's flaw.
 - **Do not close and re-dispatch.** The replacement pull request will be held identically, and you
   will have destroyed correct work for nothing.
-- Report that the fix is a human approving on the pull request, or an owner clearing the setting by
-  hand, and include the review's blockers — they are exactly what the human needs in order to decide.
+- **Report the two things a human can actually do**: click *Approve and run workflows* on the pull
+  request, or turn the requirement off in Settings → Copilot → Coding agent so later Work Items are
+  not blocked the same way. Include the review's repository-scoped finding — `repoScopeSafe` with no
+  blockers means turning it off is low-risk for that repository; blockers listed means it is not, and
+  approving the single run is the narrower action. That evidence is exactly what the human needs in
+  order to decide, and the tool has already written it to the Work Item.
+
+`not_approvable` is also what you get when the per-run approve fails for any other permanent reason.
+Either way it carries a `failures[]` array naming each run and GitHub's own message — read that
+rather than inferring the cause.
 
 A `checks_held` verdict says the same thing from the evaluator's side: the check suite concluded
 having emitted zero runs. It is *not* a test failure and must never be treated as one — `integrate`

@@ -802,49 +802,57 @@ The held run's shape is worth recording, because it is not what the name suggest
 `status: "completed"`, `conclusion: "action_required"`, actor `Copilot`, event `pull_request`. The
 REST `status=action_required` *filter* still matches it, which is why the read half works.
 
-**The first conclusion drawn from this — that no API exists — was wrong, and the correction matters
-more than the finding.** There is one:
+**The mechanism that does hold this pull request is a repository setting, and it is read-only.**
 
 ```
-PATCH /repos/{owner}/{repo}/copilot/cloud-agent/configuration
-{ "require_actions_workflow_approval": false }
+GET /repos/{owner}/{repo}/copilot/cloud-agent/configuration
+→ { "require_actions_workflow_approval": true, ... }
 ```
 
-Verified live against the fixture, which reported `require_actions_workflow_approval: true` —
-precisely the hold. It is public preview at the time of writing, hence a raw request path rather than
-a typed Octokit method. This is worth dwelling on as a process failure: "there is no API" had been
-written into the plan, the skill and a commit message on the strength of a documentation title and a
-plausible mechanism story, without a single call against the endpoint that would have settled it.
-That is the exact error this repository's standing rule about verifying API claims live exists to
-prevent, and it survived because the claim was *negative* — nothing failed, so nothing prompted a
-check. A negative capability claim needs the same live evidence as a positive one.
+That GET is real and was called live against the fixture, which returned `true` — precisely the
+hold. The REST reference for that path documents **only** the GET; the changelog introducing the
+setting describes changing it as an administrator action in repository settings. Factory's own
+`PATCH` against the same path returned a route-level `404 Not Found` — the path exists, the method is
+not routed. So the hold has a readable cause and no write, and Factory cannot release it.
 
-**Which action is authorised by which evidence.** Clearing that requirement is not a bigger version
-of approving one run; it is a different act, because it outlives the pull request and governs every
-future coding-agent run in the repository. So the review's findings are now split:
+**This section previously claimed that `PATCH` worked, and that is the finding worth keeping.** The
+sequence was: "there is no API" written into the plan, the skill and a commit message on the strength
+of a documentation *title* — never a call. That was corrected here with some ceremony, and a lesson
+recorded: *a negative capability claim needs the same live evidence as a positive one.* Then, within
+the hour, a `PATCH` endpoint asserted by a web search was accepted, only its sibling `GET` was
+verified live, and the invented `PATCH` was implemented, documented, tested against a fake, committed
+and shipped — inside the very commit that documented the lesson. It failed on first contact with
+GitHub, in Gate 4b, exactly as the reverted code could not have failed against a `FakeWriter` that
+was written to believe it.
+
+The generalisation is narrower and sharper than the first attempt: **a test against a fake proves
+that the caller handles a response; it proves nothing about whether the endpoint exists.** Any new
+endpoint — positive or negative, read or write — is unverified until a real call has been made
+against a real repository and its status code read. Doc titles, search results and plausible
+mechanism stories are all the same grade of evidence, which is none.
+
+**What Factory does instead.** `approveChecks` tries the per-run endpoint, and on GitHub's fork-only
+refusal reports `not_approvable` with a populated `failures[]` and escalates to a human. It does not
+retry (the refusal is deterministic — Gate 4 and 4b each confirmed byte-identical repeats), does not
+merge past the hold (Gate 3's flaw), and does not close and re-dispatch (the replacement would be
+held identically, destroying correct work to no purpose). The audit comment names the two things a
+human can actually do: click *Approve and run workflows* on the pull request, or turn the requirement
+off in Settings → Copilot → Coding agent.
+
+**The split review survives, in a smaller role.** The findings are still separated into:
 
 - **Diff-scoped** — does this change touch workflow definitions, actions, manifests, lockfiles or
   registry config? This is what justifies approving *this run*, and it says nothing about the next
   diff.
 - **Repository-scoped** (`repoScopeSafe`) — is the default workflow token read-only, is every
   pull-request workflow free of secrets, is no job on a self-hosted runner? These are properties of
-  the repository that hold for *every* run, and they are the only thing that can justify relaxing a
-  repository-wide setting.
+  the repository that hold for *every* run.
 
-`approveChecks` therefore tries the per-run endpoint first, and only on GitHub's fork-only refusal
-falls back to clearing the requirement — never on a verdict carrying any blocker, because releasing
-the hold reruns *that* diff, so a diff the review declined must not reach a runner through the
-repository-wide door either. Clearing the requirement does not restart runs already parked in
-`action_required`, so each held run is asked again; without that the pull request stays check-less
-and nothing has been achieved. The action is reported as `policy_cleared` and written to the Work
-Item in those terms — that this changed the repository, not just this run, what evidence authorised
-it, and how to put it back.
-
-Where the repository-scoped evidence does not hold, Factory declines and escalates rather than
-trading the control for a green run. That preserves §10.6's original instinct while acknowledging its
-factual premise was wrong: with the per-run endpoint unavailable, this setting is not "a fixture
-workaround" but the actual mechanism, and the honest question is what evidence should be required
-before touching it — not whether touching it is ever legitimate.
+Factory no longer acts on the second half, because it cannot. But the human it escalates to is now
+being asked to make exactly that repository-wide decision, so the escalation states the recommendation
+rather than leaving them to re-derive it: low-risk *for this repository* when `repoScopeSafe`, and
+otherwise a specific warning naming the blockers. The evidence was worth gathering even though the
+action it was gathered for turned out not to exist.
 
 **And a destructive bug found on the way.** `evaluateMechanical` returned `checks_failed` for a run
 that never started, without consulting `checksNeverStarted` — which the reader had already been

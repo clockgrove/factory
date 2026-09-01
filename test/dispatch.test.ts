@@ -130,18 +130,6 @@ class FakeWriter implements GitHubWriter {
     this.calls.push(`updatePullRequestBranch:${pullRequestId}`);
     if (this.failing.updatePullRequestBranch) throw this.failing.updatePullRequestBranch;
   }
-
-  async setCopilotWorkflowApprovalRequired(required: boolean): Promise<void> {
-    this.calls.push(`setCopilotWorkflowApprovalRequired:${required}`);
-    if (this.failing.setCopilotWorkflowApprovalRequired) {
-      throw this.failing.setCopilotWorkflowApprovalRequired;
-    }
-  }
-
-  async rerunWorkflowRun(runId: number): Promise<void> {
-    this.calls.push(`rerunWorkflowRun:${runId}`);
-    if (this.failing.rerunWorkflowRun) throw this.failing.rerunWorkflowRun;
-  }
 }
 
 /** Shape `classifyRefusal` (platform.ts) recognizes as a secondary rate limit. */
@@ -347,83 +335,55 @@ describe("Dispatcher.approveChecks", () => {
     expect(writer.comments.join("\n")).toContain("none were approved");
   });
 
-  // Gate 4, §10.7 F1/F2. GitHub's approve endpoint is scoped to fork pull
-  // requests and refuses a coding-agent branch with this exact message. The only
-  // mechanism that releases this hold is clearing the repository's Copilot
-  // workflow-approval requirement, so that is the fallback — authorised by the
-  // repository-scoped review alone, because it relaxes a repository-wide setting.
+  // Gate 4/4b, §10.7. GitHub's approve endpoint is scoped to fork pull requests
+  // and refuses a coding-agent branch with this exact message. There is no
+  // second endpoint: the repository setting that governs the hold is readable
+  // over REST and has no write, so Factory genuinely cannot release it. What
+  // matters is that it says so instead of reporting a permanent, total failure
+  // as a success-shaped `partially_approved` with an empty `approvedRunIds` —
+  // which is how Gate 4 first met it, detectable only by diffing two arrays.
   const FORK_ONLY = new Error(
     "This run is not from a fork pull request or queued by the Actions bot.",
   );
 
-  it("clears the repository requirement when the per-run approve is fork-only", async () => {
+  it("reports a fork-only refusal as permanent and escalates", async () => {
     const writer = new FakeWriter({ approveWorkflowRun: FORK_ONLY });
-    const d = makeDispatcher(writer);
-    const item = derivedWi();
-    const outcome = await d.approveChecks(item, RUNS, SAFE);
-
-    expect(outcome.action).toBe("policy_cleared");
-    expect(writer.calls).toContain("setCopilotWorkflowApprovalRequired:false");
-    // Clearing the requirement does not restart runs already parked.
-    expect(outcome.rerunRunIds).toEqual([42, 43]);
-    expect(writer.calls).toContain("rerunWorkflowRun:42");
-    expect(writer.calls).toContain("rerunWorkflowRun:43");
-    // Never silently: this outlives the run and the Objective must say so.
-    const comment = writer.comments.join("\n");
-    expect(comment).toContain("changed a repository setting, not just this run");
-    expect(writer.calls).not.toContain(`assignHumanOnly:${item.id}:U_human`);
-  });
-
-  it("refuses to clear the requirement on diff-scoped evidence alone", async () => {
-    const writer = new FakeWriter({ approveWorkflowRun: FORK_ONLY });
-    const d = makeDispatcher(writer);
-    const item = derivedWi();
-    // A blocker of any kind stops this before an approval is even attempted.
-    // That matters especially for the policy clear: releasing the hold reruns
-    // *this* diff, so a diff the review declined must not reach a runner by the
-    // repository-wide door either.
-    const outcome = await d.approveChecks(item, RUNS, UNSAFE);
-
-    expect(outcome.action).toBe("escalated");
-    expect(writer.calls).not.toContain("setCopilotWorkflowApprovalRequired:false");
-    expect(writer.calls).not.toContain("approveWorkflowRun:42");
-    expect(writer.calls).toContain(`assignHumanOnly:${item.id}:U_human`);
-  });
-
-  it("never clears the requirement without repository-wide evidence", async () => {
-    const writer = new FakeWriter({ approveWorkflowRun: FORK_ONLY });
-    const d = makeDispatcher(writer);
-    const outcome = await d.approveChecks(derivedWi(), RUNS, REPO_UNSAFE);
-
-    expect(outcome.action).toBe("escalated");
-    expect(writer.calls).not.toContain("setCopilotWorkflowApprovalRequired:false");
-  });
-
-  it("escalates when clearing the requirement itself fails", async () => {
-    const writer = new FakeWriter({
-      approveWorkflowRun: FORK_ONLY,
-      setCopilotWorkflowApprovalRequired: new Error("403 forbidden"),
-    });
     const d = makeDispatcher(writer);
     const item = derivedWi();
     const outcome = await d.approveChecks(item, RUNS, SAFE);
 
     expect(outcome.action).toBe("not_approvable");
+    expect(outcome.approvedRunIds).toEqual([]);
+    expect(outcome.failures).toEqual(
+      RUNS.map((r) => ({ runId: r.id, message: FORK_ONLY.message })),
+    );
     expect(writer.calls).toContain(`assignHumanOnly:${item.id}:U_human`);
-    expect(writer.comments.join("\n")).toContain("403 forbidden");
+    expect(writer.comments.join("\n")).toContain("has no write API");
   });
 
-  it("still reports policy_cleared when no held run could be restarted", async () => {
-    const writer = new FakeWriter({
-      approveWorkflowRun: FORK_ONLY,
-      rerunWorkflowRun: new Error("run is not rerunnable"),
-    });
+  // The repository-scoped findings are the input to the decision the human now
+  // has to make, so the escalation states a recommendation rather than leaving
+  // them to re-derive one from a bullet list.
+  it("tells the human the setting is low-risk when the repository is bounded", async () => {
+    const writer = new FakeWriter({ approveWorkflowRun: FORK_ONLY });
     const d = makeDispatcher(writer);
-    const outcome = await d.approveChecks(derivedWi(), RUNS, SAFE);
+    await d.approveChecks(derivedWi(), RUNS, SAFE);
+    expect(writer.comments.join("\n")).toContain("low-risk *for this repository*");
+  });
 
-    expect(outcome.action).toBe("policy_cleared");
-    expect(outcome.rerunRunIds).toEqual([]);
-    expect(writer.comments.join("\n")).toContain("next push will start CI normally");
+  it("warns instead when the repository is not bounded", async () => {
+    const writer = new FakeWriter({ approveWorkflowRun: FORK_ONLY });
+    const d = makeDispatcher(writer);
+    // `safe` is false here, so this exercises the record's repo-scope branch via
+    // a verdict that still reached the approve attempt.
+    await d.approveChecks(derivedWi(), RUNS, {
+      ...REPO_UNSAFE,
+      safe: true,
+      blockers: [],
+    });
+    const comment = writer.comments.join("\n");
+    expect(comment).toContain("Be careful before turning that requirement off");
+    expect(comment).toContain("write-scoped GITHUB_TOKEN");
   });
 
   it("reports an ordinary failure as retryable rather than permanent", async () => {
@@ -562,8 +522,19 @@ describe("Dispatcher.integrate", () => {
     expect(outcome.merged).toBe(false);
   });
 
-  it("reports a successful merge", async () => {
+  // Acting on a guess would either merge something conflicting or rebase
+  // something clean. GitHub settles this on its own within a cycle.
+  it("waits on mergeability_unknown without writing anything", async () => {
     const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    const outcome = await d.integrate(derivedWi(), pr({ mergeable: "UNKNOWN" }), {
+      kind: "mergeability_unknown",
+    });
+    expect(writer.calls).toEqual([]);
+    expect(outcome.merged).toBe(false);
+  });
+
+  it("reports a successful merge", async () => {    const writer = new FakeWriter();
     const d = makeDispatcher(writer);
     const outcome = await d.integrate(derivedWi(), pr({ isDraft: false }), { kind: "ready" });
     expect(outcome).toEqual({ merged: true });

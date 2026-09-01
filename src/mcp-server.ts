@@ -526,20 +526,17 @@ server.registerTool(
       "pull-request workflow may reference a secret. If any of that fails it escalates to a human " +
       "instead, with the specific reasons. Approving is a write; the decision and its reasoning are " +
       "recorded as a comment on the Work Item. " +
-      "IMPORTANT (Gate 4, §10.7): GitHub's per-run approve endpoint covers only *fork* pull " +
+      "IMPORTANT (Gates 4 and 4b, §10.7): GitHub's per-run approve endpoint covers only *fork* pull " +
       "requests and refuses a same-repo coding-agent branch outright with \"not from a fork pull " +
-      "request or queued by the Actions bot\". " +
-      "The only mechanism that releases it is clearing the repository's Copilot " +
-      "Actions workflow-approval requirement, so on that refusal this tool falls back to doing " +
-      "exactly that — but only when the *repository-scoped* half of the review passes (read-only " +
-      "default token, no secrets reachable from a pull-request workflow, no self-hosted runner), " +
-      "because that setting governs every future run and a clean diff is not evidence about the next " +
-      "one. It then restarts the held runs, since clearing the requirement does not restart runs " +
-      "already parked, and reports `action: 'policy_cleared'` with `rerunRunIds`. Tell the operator: " +
-      "this changed the repository, not just this run. Where the repository-scoped evidence does not " +
-      "hold, or clearing fails, it returns `not_approvable` with GitHub's reason in `failures` and " +
-      "escalates to a human — that refusal is deterministic, so do not retry it, and do not merge " +
-      "without CI.",
+      "request or queued by the Actions bot\". That hold comes from the repository's Copilot Actions " +
+      "workflow-approval requirement, which is readable over REST but has NO write API, so Factory " +
+      "cannot release it. On that refusal this tool returns `action: 'not_approvable'` with GitHub's " +
+      "reason in `failures[]` and escalates to a human. The refusal is deterministic, so do not " +
+      "retry it, do not merge without CI, and do not close and re-dispatch — the replacement pull " +
+      "request is held identically. Report the two fixes a human can actually apply: approve the run " +
+      "on the pull request, or turn the requirement off in Settings > Copilot > Coding agent. The " +
+      "review's `repoScopeSafe` flag and `repoScopeBlockers` are what that human needs in order to " +
+      "decide, and are already recorded on the Work Item.",
     inputSchema: {
       ...WorkItemLocatorShape,
       escalateTo: z

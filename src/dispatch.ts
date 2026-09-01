@@ -46,7 +46,6 @@ import {
 export interface ApprovalOutcome {
   action:
     | "approved"
-    | "policy_cleared"
     | "partially_approved"
     | "not_approvable"
     | "escalated"
@@ -54,14 +53,6 @@ export interface ApprovalOutcome {
   approvedRunIds: number[];
   /** Present only when the review declined; the reasons it declined. */
   blockers?: string[];
-  /**
-   * Runs restarted after clearing the repository's approval requirement.
-   *
-   * Only meaningful with `action: "policy_cleared"`. Clearing the requirement
-   * does not retroactively start runs already parked in `action_required`, so
-   * they have to be asked again or the pull request stays check-less.
-   */
-  rerunRunIds?: number[];
   /**
    * Every run that was held and did not get approved, with GitHub's own reason.
    *
@@ -333,8 +324,6 @@ export interface GitHubWriter {
    * on a held run.
    */
   approveWorkflowRun(runId: number): Promise<void>;
-  setCopilotWorkflowApprovalRequired(required: boolean): Promise<void>;
-  rerunWorkflowRun(runId: number): Promise<void>;
 }
 
 /** `GitHubWriter` backed by a real Octokit GraphQL client. */
@@ -413,46 +402,14 @@ export class GithubOctokitWriter implements GitHubWriter {
 
   async approveWorkflowRun(runId: number): Promise<void> {
     // REST-only: there is no GraphQL mutation for run approval.
+    //
+    // This covers *fork* pull requests only. It is kept because that case is
+    // real, but it cannot release the hold Factory actually meets on a
+    // coding-agent branch — see §10.7, and note that the repository setting
+    // which governs that hold is readable over REST and not writable, so there
+    // is deliberately no second call attempted here.
     await this.#octokit.request(
       "POST /repos/{owner}/{repo}/actions/runs/{run_id}/approve",
-      { owner: this.#owner, repo: this.#repo, run_id: runId },
-    );
-  }
-
-  /**
-   * Turn off the repository's requirement that a maintainer approve workflow
-   * runs on coding-agent pull requests.
-   *
-   * This is the *only* mechanism that clears that hold class. The per-run
-   * approve endpoint above covers fork pull requests exclusively and refuses a
-   * same-repo coding-agent branch outright (§10.7), so without this Factory
-   * deadlocks on the first Work Item of any repository left at GitHub's default.
-   *
-   * Public preview at the time of writing, hence the raw request path rather
-   * than a typed Octokit method.
-   */
-  async setCopilotWorkflowApprovalRequired(required: boolean): Promise<void> {
-    await this.#octokit.request(
-      "PATCH /repos/{owner}/{repo}/copilot/cloud-agent/configuration",
-      {
-        owner: this.#owner,
-        repo: this.#repo,
-        require_actions_workflow_approval: required,
-      },
-    );
-  }
-
-  /**
-   * Re-run a workflow run that was held and is now releasable.
-   *
-   * Clearing the repository requirement does not retroactively start runs that
-   * were already parked: they stay `completed`/`action_required` forever. The
-   * held run has to be asked again, or the pull request carries no checks and
-   * the Work Item stalls exactly as it did before.
-   */
-  async rerunWorkflowRun(runId: number): Promise<void> {
-    await this.#octokit.request(
-      "POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun",
       { owner: this.#owner, repo: this.#repo, run_id: runId },
     );
   }
@@ -626,6 +583,11 @@ export class Dispatcher {
         return { merged: false };
       case "checks_pending":
         return { merged: false }; // wait for the next cycle; nothing to do yet
+      case "mergeability_unknown":
+        // GitHub has not finished computing mergeability. Waiting is the whole
+        // response: there is nothing to act on, and acting on a guess would
+        // either merge something conflicting or rebase something clean.
+        return { merged: false };
       case "checks_missing":
         // The repository runs CI on pull requests but this PR carries no checks
         // at all (§10.5, F1). Usually a timing race that resolves within a
@@ -825,99 +787,52 @@ export class Dispatcher {
       failure instanceof Error ? failure.message : failure ? String(failure) : "";
     // GitHub refuses the per-run endpoint outright for a coding-agent branch:
     // it is scoped to fork pull requests, while this hold comes from the
-    // repository's Copilot workflow-approval requirement (§10.7). The run can
-    // never be released one at a time — only by clearing that requirement.
-    const forkOnlyRefusal =
-      /not from a fork pull request|queued by the Actions bot/i.test(failureMessage);
-
-    // The fallback, and the only thing that actually works here. Authorised by
-    // the *repository-wide* half of the review: this relaxes a setting that
-    // governs every future run, so a clean diff is not evidence for it — only
-    // "a run in this repository is bounded regardless of its diff" is.
+    // repository's Copilot Actions workflow-approval requirement (§10.7).
     //
-    // `verdict.safe` already implies `repoScopeSafe` (repo-scope blockers are a
-    // subset of all blockers) and an unsafe verdict escalated above, so this
-    // condition is belt-and-braces. It is stated anyway because the invariant
-    // that matters — a repository-wide relaxation needs repository-wide
-    // evidence — should be legible here rather than inferred from a guard forty
-    // lines up, and because the escalation message below branches on it.
-    let policyCleared = false;
-    let rerunRunIds: number[] = [];
-    let policyFailure = "";
-    if (forkOnlyRefusal && verdict.repoScopeSafe) {
-      try {
-        await this.#call(() =>
-          this.#writer.setCopilotWorkflowApprovalRequired(false),
-        );
-        policyCleared = true;
-        // Clearing the requirement does not restart runs already parked, so ask
-        // each held run again. Best-effort per run: a rerun that fails leaves
-        // the pull request without checks, which the next cycle reports honestly
-        // rather than merging past.
-        for (const run of runs) {
-          try {
-            await this.#call(() => this.#writer.rerunWorkflowRun(run.id));
-            rerunRunIds.push(run.id);
-          } catch {
-            /* reported via rerunRunIds being short; next cycle re-reads */
-          }
-        }
-      } catch (error) {
-        policyFailure = error instanceof Error ? error.message : String(error);
-      }
-    }
-
-    const notApprovable = forkOnlyRefusal && !policyCleared;
+    // There is no second endpoint to fall back to. The REST surface exposes a
+    // GET for `copilot/cloud-agent/configuration` and no write of any kind, and
+    // the setting is documented as an administrator action in the UI. An
+    // invented `PATCH` against that path returns a route-level 404, which is
+    // how this was established (§10.7). So Factory cannot release the hold, and
+    // saying so plainly is the whole job here.
+    const notApprovable =
+      /not from a fork pull request|queued by the Actions bot/i.test(failureMessage);
 
     const record = [
       approvedRunIds.length > 0
         ? `Approved ${approvedRunIds.length} held workflow run(s) so CI can execute (§10.6).`
-        : policyCleared
-          ? "Cleared this repository's Copilot Actions workflow-approval requirement so held CI can execute (§10.7)."
-          : "Attempted to approve held workflow runs (§10.6); none were approved.",
+        : "Attempted to approve held workflow runs (§10.6); none were approved.",
       "",
       "GitHub holds workflow runs on coding-agent pull requests until a maintainer approves them. Blast-radius review passed before approving:",
       ...verdict.assurances.map((a) => `- ${a}`),
       "",
       `Runs considered: ${runs.map((r) => `${r.name} (#${r.id})`).join(", ")}.`,
       approvedRunIds.length > 0 ? `Approved: ${approvedRunIds.join(", ")}.` : "",
-      policyCleared
-        ? "**This changed a repository setting, not just this run.** GitHub's per-run approve endpoint " +
-          "covers only fork pull requests and refused this branch, so the requirement itself had to be " +
-          "cleared — it is the only mechanism that releases a coding-agent hold. Every future " +
-          "coding-agent run in this repository now starts without waiting for a human. That is " +
-          "authorised here by the repository-scoped findings above and nothing else: the default " +
-          "workflow token is read-only, no pull-request workflow reaches a secret, and no job runs on " +
-          "a self-hosted runner, so any run — not merely this diff — is bounded to reporting a result. " +
-          "Re-enable it in Settings → Copilot → Coding agent if that ceases to hold." +
-          (rerunRunIds.length > 0
-            ? ` Restarted run(s): ${rerunRunIds.join(", ")}.`
-            : " No held run could be restarted; the next push will start CI normally.")
-        : "",
-      policyFailure
-        ? `Could not clear the repository's workflow-approval requirement: ${policyFailure}`
-        : "",
       notApprovable
         ? `GitHub refused: ${failureMessage} The approve endpoint only covers fork pull requests, and ` +
           "this is a coding-agent branch held by the repository's Copilot Actions workflow-approval " +
-          "requirement. " +
-          (verdict.repoScopeSafe
-            ? "Clearing that requirement is the only remaining mechanism and it failed, so a human must act."
-            : "Factory will not clear that requirement, because the repository-scoped review did not " +
-              `pass: ${verdict.repoScopeBlockers.join("; ")}. Relaxing a repository-wide setting needs ` +
-              "repository-wide evidence, which is absent.") +
-          " Retrying will not help. Escalating."
+          "requirement, which has no write API — so Factory cannot release it and a human must. " +
+          "Either click \"Approve and run workflows\" on the pull request, or turn the requirement " +
+          "off in Settings → Copilot → Coding agent so future Work Items are not blocked the same way."
         : failure
           ? `Stopped early: ${failureMessage} Remaining runs are still held and will be retried next cycle.`
           : "",
+      // The repository-scoped findings are the input to the decision the human
+      // now has to make, so state the recommendation rather than leaving them
+      // to re-derive it from a bullet list.
+      notApprovable
+        ? verdict.repoScopeSafe
+          ? "On the evidence above, turning that requirement off is low-risk *for this repository*: " +
+            "the default workflow token is read-only, no pull-request workflow reaches a secret, and " +
+            "no job runs on a self-hosted runner, so any run here is bounded to reporting a result. " +
+            "That is a judgement about the repository, and it stops holding if any of those change."
+          : "Be careful before turning that requirement off in this repository: " +
+            `${verdict.repoScopeBlockers.join("; ")}. Approving this one run is the narrower action.`
+        : "",
     ]
       .filter((line) => line !== "")
       .join("\n");
     await this.#call(() => this.#writer.addComment(wi.id, record));
-
-    if (policyCleared) {
-      return { action: "policy_cleared", approvedRunIds, rerunRunIds };
-    }
 
     if (notApprovable) {
       // Permanent, not transient. Returning a success-shaped `partially_approved`
@@ -925,13 +840,15 @@ export class Dispatcher {
       // might fix, when in fact nothing in the loop can ever fix it.
       await this.#escalate(
         wi,
-        verdict.repoScopeSafe
-          ? "workflow runs are held, the per-run approve endpoint refuses coding-agent branches, and " +
-            "clearing the repository's Copilot Actions workflow-approval requirement also failed. A " +
-            "human must approve the runs or clear that setting by hand"
-          : "workflow runs are held and only clearing the repository's Copilot Actions " +
-            "workflow-approval requirement can release them, which Factory will not do here because " +
-            `the repository-scoped review did not pass: ${verdict.repoScopeBlockers.join("; ")}`,
+        "workflow runs are held and Factory cannot release them: the per-run approve endpoint " +
+          "covers only fork pull requests and refuses coding-agent branches, and the repository " +
+          "setting that governs this hold has no write API. A human must click \"Approve and run " +
+          "workflows\" on the pull request, or turn the requirement off in Settings → Copilot → " +
+          "Coding agent" +
+          (verdict.repoScopeSafe
+            ? " — which the repository-scoped review found low-risk here: read-only default " +
+              "workflow token, no secrets reachable from a pull-request workflow, no self-hosted runner"
+            : `. Note before doing so: ${verdict.repoScopeBlockers.join("; ")}`),
       );
       return {
         action: "not_approvable",

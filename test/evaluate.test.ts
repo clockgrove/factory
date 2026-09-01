@@ -240,8 +240,33 @@ describe("evaluateMechanical", () => {
     });
   });
 
-  it("prioritizes a no-op over missing checks", () => {
+  // `UNKNOWN` is GitHub still computing mergeability, not a clean merge. Without
+  // this the verdict falls through to `ready`, which Director reads as "the
+  // mechanical half is satisfied" — claiming evidence that does not exist yet.
+  it("reports unresolved mergeability rather than claiming ready", () => {
+    expect(evaluateMechanical(pr({ mergeable: "UNKNOWN" }))).toEqual({
+      kind: "mergeability_unknown",
+    });
+  });
+
+  // Last in precedence deliberately: a real check failure is decisive and
+  // should be reported now, not delayed a cycle behind a value GitHub will
+  // settle on its own.
+  it("reports a check failure ahead of unresolved mergeability", () => {
     expect(
+      evaluateMechanical(pr({ mergeable: "UNKNOWN", checks: "FAILURE" })),
+    ).toEqual({ kind: "checks_failed" });
+  });
+
+  it("reports held checks ahead of unresolved mergeability", () => {
+    expect(
+      evaluateMechanical(
+        pr({ mergeable: "UNKNOWN", checks: "FAILURE", checksNeverStarted: true }),
+      ),
+    ).toEqual({ kind: "checks_held" });
+  });
+
+  it("prioritizes a no-op over missing checks", () => {    expect(
       evaluateMechanical(
         pr({
           changedLines: 0,

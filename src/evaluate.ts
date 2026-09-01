@@ -109,12 +109,14 @@ export type MechanicalVerdict =
  * so a PR carrying *no* checks in a repository that demonstrably runs CI on
  * pull requests is reported as `checks_missing` rather than `ready`. Omitting
  * it reproduces the pre-Gate-3 behaviour, where absent checks were silently
- * treated as "this repository has no CI" (§10.5, F1).
+ * treated as "this repository has no CI" (§10.5, F1). `"unknown"` — the probe
+ * failed rather than answered — blocks exactly as `true` does, because a
+ * network error is not evidence that a repository has no CI.
  */
 export function evaluateMechanical(
   pr: LinkedPullRequest,
   expectedFiles?: string[],
-  ciExpected = false,
+  ciExpected: boolean | "unknown" = false,
 ): MechanicalVerdict {
   if (isDeclined(pr)) return { kind: "declined" };
   if (isNoOp(pr)) return { kind: "no_op" };
@@ -139,7 +141,7 @@ export function evaluateMechanical(
   // GitHub creates the run, it produces zero jobs, and it therefore attaches
   // zero checks to the head commit, leaving the rollup null rather than
   // failing. Merging on that is merging with no CI evidence whatsoever.
-  if (pr.checks === null && ciExpected) return { kind: "checks_missing" };
+  if (pr.checks === null && ciExpected !== false) return { kind: "checks_missing" };
   // Last, so a real check failure is still reported decisively rather than
   // delayed a cycle. `UNKNOWN` is GitHub still computing mergeability, not a
   // clean merge — and everything above has already passed, so without this the

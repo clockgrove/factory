@@ -783,8 +783,21 @@ export class Dispatcher {
       }
     }
 
+    // Platform exhaustion is not an approval verdict, and every other write
+    // path here re-throws it (`#resolveConflict` does so explicitly). Swallowed,
+    // a secondary rate limit would be classified below as a permanent refusal
+    // and escalated to a human as though GitHub had declined — the exact
+    // "misreading a refusal as work failure" that platform.ts exists to prevent.
+    //
+    // Nothing is recorded on the way out: the breaker is open, so the audit
+    // comment would itself be refused. That trades a lost trace for not
+    // escalating a rate limit, which is the right way round — the next cycle
+    // re-reads GitHub, which is the source of truth for what was approved.
+    if (failure instanceof PlatformUnavailableError) throw failure;
+
     const failureMessage =
       failure instanceof Error ? failure.message : failure ? String(failure) : "";
+    const failureStatus = (failure as { status?: number } | undefined)?.status;
     // GitHub refuses the per-run endpoint outright for a coding-agent branch:
     // it is scoped to fork pull requests, while this hold comes from the
     // repository's Copilot Actions workflow-approval requirement (§10.7).
@@ -795,8 +808,20 @@ export class Dispatcher {
     // invented `PATCH` against that path returns a route-level 404, which is
     // how this was established (§10.7). So Factory cannot release the hold, and
     // saying so plainly is the whole job here.
-    const notApprovable =
+    //
+    // An authorization failure is equally permanent and was previously reported
+    // as `partially_approved`, which Director reads as retryable: it would
+    // re-approve every cycle forever, writing a fresh audit comment each time,
+    // against a token that will never be permitted. A 403 reaching this point
+    // is definitely a permission problem rather than a rate limit, because
+    // `classifyRefusal` routes rate-limit 403s to the branch above.
+    const forkOnly =
       /not from a fork pull request|queued by the Actions bot/i.test(failureMessage);
+    const notApprovable =
+      forkOnly ||
+      failureStatus === 401 ||
+      failureStatus === 403 ||
+      failureStatus === 404;
 
     const record = [
       approvedRunIds.length > 0
@@ -809,18 +834,25 @@ export class Dispatcher {
       `Runs considered: ${runs.map((r) => `${r.name} (#${r.id})`).join(", ")}.`,
       approvedRunIds.length > 0 ? `Approved: ${approvedRunIds.join(", ")}.` : "",
       notApprovable
-        ? `GitHub refused: ${failureMessage} The approve endpoint only covers fork pull requests, and ` +
-          "this is a coding-agent branch held by the repository's Copilot Actions workflow-approval " +
-          "requirement, which has no write API — so Factory cannot release it and a human must. " +
-          "Either click \"Approve and run workflows\" on the pull request, or turn the requirement " +
-          "off in Settings → Copilot → Coding agent so future Work Items are not blocked the same way."
+        ? forkOnly
+          ? `GitHub refused: ${failureMessage} The approve endpoint only covers fork pull requests, and ` +
+            "this is a coding-agent branch held by the repository's Copilot Actions workflow-approval " +
+            "requirement, which has no write API — so Factory cannot release it and a human must. " +
+            "Either click \"Approve and run workflows\" on the pull request, or turn the requirement " +
+            "off in Settings → Copilot → Coding agent so future Work Items are not blocked the same way."
+          : `GitHub refused with HTTP ${failureStatus}: ${failureMessage} That is an authorization ` +
+            "failure, not a rate limit, so it will return the identical answer on every retry. The " +
+            "token Factory is running under needs write access to Actions on this repository, or a " +
+            "human must approve the runs on the pull request by hand."
         : failure
           ? `Stopped early: ${failureMessage} Remaining runs are still held and will be retried next cycle.`
           : "",
       // The repository-scoped findings are the input to the decision the human
       // now has to make, so state the recommendation rather than leaving them
-      // to re-derive it from a bullet list.
-      notApprovable
+      // to re-derive it from a bullet list. Only meaningful for the fork-only
+      // refusal: an authorization failure is fixed by granting the token
+      // Actions write access, not by relaxing a repository-wide control.
+      notApprovable && forkOnly
         ? verdict.repoScopeSafe
           ? "On the evidence above, turning that requirement off is low-risk *for this repository*: " +
             "the default workflow token is read-only, no pull-request workflow reaches a secret, and " +
@@ -840,15 +872,20 @@ export class Dispatcher {
       // might fix, when in fact nothing in the loop can ever fix it.
       await this.#escalate(
         wi,
-        "workflow runs are held and Factory cannot release them: the per-run approve endpoint " +
-          "covers only fork pull requests and refuses coding-agent branches, and the repository " +
-          "setting that governs this hold has no write API. A human must click \"Approve and run " +
-          "workflows\" on the pull request, or turn the requirement off in Settings → Copilot → " +
-          "Coding agent" +
-          (verdict.repoScopeSafe
-            ? " — which the repository-scoped review found low-risk here: read-only default " +
-              "workflow token, no secrets reachable from a pull-request workflow, no self-hosted runner"
-            : `. Note before doing so: ${verdict.repoScopeBlockers.join("; ")}`),
+        forkOnly
+          ? "workflow runs are held and Factory cannot release them: the per-run approve endpoint " +
+            "covers only fork pull requests and refuses coding-agent branches, and the repository " +
+            "setting that governs this hold has no write API. A human must click \"Approve and run " +
+            "workflows\" on the pull request, or turn the requirement off in Settings → Copilot → " +
+            "Coding agent" +
+            (verdict.repoScopeSafe
+              ? " — which the repository-scoped review found low-risk here: read-only default " +
+                "workflow token, no secrets reachable from a pull-request workflow, no self-hosted runner"
+              : `. Note before doing so: ${verdict.repoScopeBlockers.join("; ")}`)
+          : `workflow runs are held and GitHub refused to approve them with HTTP ${failureStatus}: ` +
+            `${failureMessage} This is an authorization failure rather than a rate limit, so every ` +
+            "retry returns the same answer. Grant the token Factory runs under write access to " +
+            "Actions on this repository, or approve the runs on the pull request by hand",
       );
       return {
         action: "not_approvable",

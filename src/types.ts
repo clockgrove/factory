@@ -203,6 +203,14 @@ export interface ObjectiveSnapshot {
    * byte-for-byte indistinguishable from a repository with no CI, and the
    * evaluator merged straight through it. This flag is the missing
    * distinction; see `evaluateMechanical`'s `checks_missing` verdict.
+   *
+   * Tri-state, because "I could not find out" is not the same answer as "no".
+   * The probe is a REST call, and a 5xx, a rate-limit or a dropped connection
+   * used to be caught and reported as `false` — which reads as "this repository
+   * has no CI" and lets a pull request carrying zero checks merge unverified.
+   * That is Gate 3's flaw re-entering through a network error rather than a
+   * timing race. `"unknown"` therefore blocks like `true` does: the cost of
+   * being wrong is a stall a human resolves, against merging untested code.
    */
-  ciExpectedOnPullRequests: boolean;
+  ciExpectedOnPullRequests: boolean | "unknown";
 }

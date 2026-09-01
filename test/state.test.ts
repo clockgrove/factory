@@ -7,6 +7,7 @@ import {
   attemptCount,
   confirmFailureStreak,
   counts,
+  currentOpenPullRequest,
   derive,
   deriveState,
   isNoOp,
@@ -325,6 +326,60 @@ describe("deriveState", () => {
       ],
     });
     expect(deriveState(item, NOW)).toBe("for_review");
+  });
+});
+
+describe("currentOpenPullRequest", () => {
+  const older = pr({
+    id: "PR_old",
+    number: 10,
+    createdAt: new Date("2026-01-01T00:00:00Z"),
+  });
+  const newer = pr({
+    id: "PR_new",
+    number: 11,
+    createdAt: new Date("2026-01-02T00:00:00Z"),
+  });
+
+  it("picks the newest open pull request by createdAt, not array position", () => {
+    // GitHub does not document an ordering for `closedByPullRequestsReferences`,
+    // so the newest is not reliably last. This matters most on the retry path,
+    // which closes whichever pull request this returns: choosing the older one
+    // kills live work and leaves the stale attempt open to be merged.
+    expect(currentOpenPullRequest(wi({ linkedPullRequests: [newer, older] }))?.id).toBe(
+      "PR_new",
+    );
+    expect(currentOpenPullRequest(wi({ linkedPullRequests: [older, newer] }))?.id).toBe(
+      "PR_new",
+    );
+  });
+
+  it("breaks createdAt ties on the higher number", () => {
+    const a = pr({ id: "PR_a", number: 20, createdAt: NOW });
+    const b = pr({ id: "PR_b", number: 21, createdAt: NOW });
+    expect(currentOpenPullRequest(wi({ linkedPullRequests: [b, a] }))?.id).toBe("PR_b");
+    expect(currentOpenPullRequest(wi({ linkedPullRequests: [a, b] }))?.id).toBe("PR_b");
+  });
+
+  it("ignores closed pull requests even when they are newer", () => {
+    const closedNewer = pr({
+      id: "PR_closed",
+      number: 12,
+      state: "CLOSED",
+      createdAt: new Date("2026-02-01T00:00:00Z"),
+    });
+    expect(
+      currentOpenPullRequest(wi({ linkedPullRequests: [older, closedNewer] }))?.id,
+    ).toBe("PR_old");
+  });
+
+  it("returns null when nothing is open", () => {
+    expect(currentOpenPullRequest(wi({ linkedPullRequests: [] }))).toBeNull();
+    expect(
+      currentOpenPullRequest(
+        wi({ linkedPullRequests: [pr({ state: "MERGED" })] }),
+      ),
+    ).toBeNull();
   });
 });
 

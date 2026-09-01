@@ -24517,6 +24517,14 @@ var GitHubReader = class {
    * gracefully — the run created for the PR under review counts, so even the
    * first pull request a repository ever receives is covered as soon as its own
    * run is created, which is exactly the window Gate 3 merged through.
+   *
+   * Returns `"unknown"` rather than `false` when the probe itself fails. A 5xx,
+   * a rate-limit or a dropped connection says nothing about whether CI exists,
+   * and reporting it as `false` told the evaluator "this repository has no CI"
+   * — merging a pull request with zero checks on the strength of a network
+   * error. `"unknown"` is not latched: the next cycle asks again, so a
+   * transient failure costs one cycle of caution rather than poisoning the
+   * process.
    */
   async #ciExpectedOnPullRequests() {
     if (this.#ciExpected) return true;
@@ -24531,8 +24539,10 @@ var GitHubReader = class {
         }
       );
       if (runs.data.total_count > 0) this.#ciExpected = true;
-    } catch {
-      return false;
+    } catch (error2) {
+      const status = error2?.status;
+      if (status === 404 || status === 403) return false;
+      return "unknown";
     }
     return this.#ciExpected;
   }
@@ -24892,7 +24902,10 @@ function attemptCount(wi) {
 }
 function currentOpenPullRequest(wi) {
   const open = wi.linkedPullRequests.filter((p) => p.state === "OPEN");
-  return open.length > 0 ? open[open.length - 1] : null;
+  if (open.length === 0) return null;
+  return open.reduce(
+    (newest, p) => p.createdAt.getTime() !== newest.createdAt.getTime() ? p.createdAt > newest.createdAt ? p : newest : p.number > newest.number ? p : newest
+  );
 }
 function deriveState(wi, now) {
   if (wi.closed) return "done";
@@ -25372,8 +25385,11 @@ var Dispatcher = class {
         break;
       }
     }
+    if (failure instanceof PlatformUnavailableError) throw failure;
     const failureMessage = failure instanceof Error ? failure.message : failure ? String(failure) : "";
-    const notApprovable = /not from a fork pull request|queued by the Actions bot/i.test(failureMessage);
+    const failureStatus = failure?.status;
+    const forkOnly = /not from a fork pull request|queued by the Actions bot/i.test(failureMessage);
+    const notApprovable = forkOnly || failureStatus === 401 || failureStatus === 403 || failureStatus === 404;
     const record2 = [
       approvedRunIds.length > 0 ? `Approved ${approvedRunIds.length} held workflow run(s) so CI can execute (\xA710.6).` : "Attempted to approve held workflow runs (\xA710.6); none were approved.",
       "",
@@ -25382,17 +25398,19 @@ var Dispatcher = class {
       "",
       `Runs considered: ${runs.map((r) => `${r.name} (#${r.id})`).join(", ")}.`,
       approvedRunIds.length > 0 ? `Approved: ${approvedRunIds.join(", ")}.` : "",
-      notApprovable ? `GitHub refused: ${failureMessage} The approve endpoint only covers fork pull requests, and this is a coding-agent branch held by the repository's Copilot Actions workflow-approval requirement, which has no write API \u2014 so Factory cannot release it and a human must. Either click "Approve and run workflows" on the pull request, or turn the requirement off in Settings \u2192 Copilot \u2192 Coding agent so future Work Items are not blocked the same way.` : failure ? `Stopped early: ${failureMessage} Remaining runs are still held and will be retried next cycle.` : "",
+      notApprovable ? forkOnly ? `GitHub refused: ${failureMessage} The approve endpoint only covers fork pull requests, and this is a coding-agent branch held by the repository's Copilot Actions workflow-approval requirement, which has no write API \u2014 so Factory cannot release it and a human must. Either click "Approve and run workflows" on the pull request, or turn the requirement off in Settings \u2192 Copilot \u2192 Coding agent so future Work Items are not blocked the same way.` : `GitHub refused with HTTP ${failureStatus}: ${failureMessage} That is an authorization failure, not a rate limit, so it will return the identical answer on every retry. The token Factory is running under needs write access to Actions on this repository, or a human must approve the runs on the pull request by hand.` : failure ? `Stopped early: ${failureMessage} Remaining runs are still held and will be retried next cycle.` : "",
       // The repository-scoped findings are the input to the decision the human
       // now has to make, so state the recommendation rather than leaving them
-      // to re-derive it from a bullet list.
-      notApprovable ? verdict.repoScopeSafe ? "On the evidence above, turning that requirement off is low-risk *for this repository*: the default workflow token is read-only, no pull-request workflow reaches a secret, and no job runs on a self-hosted runner, so any run here is bounded to reporting a result. That is a judgement about the repository, and it stops holding if any of those change." : `Be careful before turning that requirement off in this repository: ${verdict.repoScopeBlockers.join("; ")}. Approving this one run is the narrower action.` : ""
+      // to re-derive it from a bullet list. Only meaningful for the fork-only
+      // refusal: an authorization failure is fixed by granting the token
+      // Actions write access, not by relaxing a repository-wide control.
+      notApprovable && forkOnly ? verdict.repoScopeSafe ? "On the evidence above, turning that requirement off is low-risk *for this repository*: the default workflow token is read-only, no pull-request workflow reaches a secret, and no job runs on a self-hosted runner, so any run here is bounded to reporting a result. That is a judgement about the repository, and it stops holding if any of those change." : `Be careful before turning that requirement off in this repository: ${verdict.repoScopeBlockers.join("; ")}. Approving this one run is the narrower action.` : ""
     ].filter((line) => line !== "").join("\n");
     await this.#call(() => this.#writer.addComment(wi.id, record2));
     if (notApprovable) {
       await this.#escalate(
         wi,
-        'workflow runs are held and Factory cannot release them: the per-run approve endpoint covers only fork pull requests and refuses coding-agent branches, and the repository setting that governs this hold has no write API. A human must click "Approve and run workflows" on the pull request, or turn the requirement off in Settings \u2192 Copilot \u2192 Coding agent' + (verdict.repoScopeSafe ? " \u2014 which the repository-scoped review found low-risk here: read-only default workflow token, no secrets reachable from a pull-request workflow, no self-hosted runner" : `. Note before doing so: ${verdict.repoScopeBlockers.join("; ")}`)
+        forkOnly ? 'workflow runs are held and Factory cannot release them: the per-run approve endpoint covers only fork pull requests and refuses coding-agent branches, and the repository setting that governs this hold has no write API. A human must click "Approve and run workflows" on the pull request, or turn the requirement off in Settings \u2192 Copilot \u2192 Coding agent' + (verdict.repoScopeSafe ? " \u2014 which the repository-scoped review found low-risk here: read-only default workflow token, no secrets reachable from a pull-request workflow, no self-hosted runner" : `. Note before doing so: ${verdict.repoScopeBlockers.join("; ")}`) : `workflow runs are held and GitHub refused to approve them with HTTP ${failureStatus}: ${failureMessage} This is an authorization failure rather than a rate limit, so every retry returns the same answer. Grant the token Factory runs under write access to Actions on this repository, or approve the runs on the pull request by hand`
       );
       return {
         action: "not_approvable",
@@ -25481,7 +25499,7 @@ function evaluateMechanical(pr, expectedFiles, ciExpected = false) {
   if (pr.checks === "PENDING") return { kind: "checks_pending" };
   if (pr.checksNeverStarted) return { kind: "checks_held" };
   if (pr.checks === "FAILURE") return { kind: "checks_failed" };
-  if (pr.checks === null && ciExpected) return { kind: "checks_missing" };
+  if (pr.checks === null && ciExpected !== false) return { kind: "checks_missing" };
   if (pr.mergeable === "UNKNOWN") return { kind: "mergeability_unknown" };
   return { kind: "ready" };
 }

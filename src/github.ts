@@ -529,8 +529,16 @@ export class GitHubReader {
    * gracefully — the run created for the PR under review counts, so even the
    * first pull request a repository ever receives is covered as soon as its own
    * run is created, which is exactly the window Gate 3 merged through.
+   *
+   * Returns `"unknown"` rather than `false` when the probe itself fails. A 5xx,
+   * a rate-limit or a dropped connection says nothing about whether CI exists,
+   * and reporting it as `false` told the evaluator "this repository has no CI"
+   * — merging a pull request with zero checks on the strength of a network
+   * error. `"unknown"` is not latched: the next cycle asks again, so a
+   * transient failure costs one cycle of caution rather than poisoning the
+   * process.
    */
-  async #ciExpectedOnPullRequests(): Promise<boolean> {
+  async #ciExpectedOnPullRequests(): Promise<boolean | "unknown"> {
     if (this.#ciExpected) return true;
     try {
       const runs = await this.#octokit.request(
@@ -543,11 +551,17 @@ export class GitHubReader {
         },
       );
       if (runs.data.total_count > 0) this.#ciExpected = true;
-    } catch {
-      // Actions disabled, or no permission to read them. Either way there is no
-      // evidence CI is expected, so the flag stays false and the evaluator
-      // behaves exactly as it did before this check existed.
-      return false;
+    } catch (error) {
+      // 404 and 403 are the API answering: Actions is disabled for this
+      // repository, or this token may not read it. Both are settled facts about
+      // what evidence is obtainable, and a repository with Actions off genuinely
+      // has no pull-request CI — so `false` is honest and the loop proceeds.
+      //
+      // Anything else — 5xx, a rate limit, a socket error — is the probe
+      // failing, not an answer. Those become `"unknown"`, which blocks.
+      const status = (error as { status?: number } | null)?.status;
+      if (status === 404 || status === 403) return false;
+      return "unknown";
     }
     return this.#ciExpected;
   }

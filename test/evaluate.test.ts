@@ -228,6 +228,22 @@ describe("evaluateMechanical", () => {
     expect(evaluateMechanical(pr({ checks: null }))).toEqual({ kind: "ready" });
   });
 
+  // The probe is a REST call. Catching a 5xx or a rate limit and reporting
+  // `false` reads as "this repository has no CI", which merges a pull request
+  // carrying zero checks on the strength of a network error — Gate 3's flaw
+  // arriving through a different door. Not knowing must block like knowing does.
+  it("blocks on absent checks when CI expectation is unknown", () => {
+    expect(evaluateMechanical(pr({ checks: null }), undefined, "unknown")).toEqual({
+      kind: "checks_missing",
+    });
+  });
+
+  it("does not let an unknown CI expectation override settled checks", () => {
+    expect(
+      evaluateMechanical(pr({ checks: "SUCCESS" }), undefined, "unknown"),
+    ).toEqual({ kind: "ready" });
+  });
+
   it("reports settled checks even when CI is expected", () => {
     expect(evaluateMechanical(pr({ checks: "SUCCESS" }), undefined, true)).toEqual({
       kind: "ready",

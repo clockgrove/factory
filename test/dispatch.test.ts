@@ -386,8 +386,53 @@ describe("Dispatcher.approveChecks", () => {
     expect(comment).toContain("write-scoped GITHUB_TOKEN");
   });
 
-  it("reports an ordinary failure as retryable rather than permanent", async () => {
-    const writer = new FakeWriter({ approveWorkflowRun: new Error("502 bad gateway") });
+  // A permission failure is as permanent as the fork refusal, and used to be
+  // reported as `partially_approved` — which Director reads as retryable, so it
+  // would re-approve every cycle forever against a token that will never be
+  // allowed, writing a fresh audit comment each time.
+  it("treats an authorization failure as permanent, not retryable", async () => {
+    const denied = Object.assign(new Error("Resource not accessible by integration"), {
+      status: 403,
+    });
+    const writer = new FakeWriter({ approveWorkflowRun: denied });
+    const d = makeDispatcher(writer);
+    const item = derivedWi();
+    const outcome = await d.approveChecks(item, RUNS, SAFE);
+
+    expect(outcome.action).toBe("not_approvable");
+    expect(writer.calls).toContain(`assignHumanOnly:${item.id}:U_human`);
+    const comment = writer.comments.join("\n");
+    // Named for what it is: the fork story would send the human to the wrong
+    // setting entirely.
+    expect(comment).toContain("HTTP 403");
+    expect(comment).toContain("write access to Actions");
+    expect(comment).not.toContain("only covers fork pull requests");
+    expect(comment).not.toContain("low-risk *for this repository*");
+  });
+
+  // platform.ts routes rate-limit 403s to PlatformUnavailableError, so a 403
+  // reaching the classifier really is a permission problem. But the loop used
+  // to swallow PlatformUnavailableError itself, which would have classified a
+  // secondary rate limit as a permanent refusal and escalated it to a human —
+  // the precise "refusal misread as work failure" platform.ts exists to stop.
+  it("lets platform exhaustion propagate instead of escalating it", async () => {
+    const writer = new FakeWriter({
+      approveWorkflowRun: new PlatformUnavailableError(
+        { kind: "rate_limit", retryAfterMs: 1000 },
+        new Error("secondary rate limit"),
+      ),
+    });
+    const d = makeDispatcher(writer);
+    const item = derivedWi();
+
+    await expect(d.approveChecks(item, RUNS, SAFE)).rejects.toBeInstanceOf(
+      PlatformUnavailableError,
+    );
+    expect(writer.calls).not.toContain(`assignHumanOnly:${item.id}:U_human`);
+    expect(writer.comments).toEqual([]);
+  });
+
+  it("reports an ordinary failure as retryable rather than permanent", async () => {    const writer = new FakeWriter({ approveWorkflowRun: new Error("502 bad gateway") });
     const d = makeDispatcher(writer);
     const item = derivedWi();
     const outcome = await d.approveChecks(item, RUNS, SAFE);

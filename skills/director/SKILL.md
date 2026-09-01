@@ -110,7 +110,8 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
      request's checks have *never* started, GitHub is probably holding the run awaiting approval:
      call `approve_held_workflow_runs` rather than waiting indefinitely (see "CI that GitHub is
      holding" below).
-   - `checks_missing` — the repository is known to run CI on pull requests, but this PR carries no
+   - `checks_missing` — the repository is known to run CI on pull requests (or Factory could not
+     determine whether it does, which is treated the same way), but this PR carries no
      checks at all. Usually a timing race that clears within a cycle, so leave it. If the *same*
      Work Item reports `checks_missing` for several consecutive cycles, call
      `approve_held_workflow_runs`; only escalate if that reports nothing was held, which means the

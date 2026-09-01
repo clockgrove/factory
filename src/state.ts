@@ -185,12 +185,33 @@ export function attemptCount(wi: WorkItemSnapshot): number {
  * The PR judged as the current attempt: the newest open one, if any.
  * `deriveState` and `dispatch.ts`'s retry path (§4.4, which needs to close
  * this exact PR) both need this same judgment, so it lives in one place.
+ *
+ * "Newest" is resolved by `createdAt`, not by array position. GitHub does not
+ * document an ordering for `closedByPullRequestsReferences`, so the last
+ * element is not the newest by any guarantee — it only looked like one because
+ * every gate so far produced at most one open pull request per Work Item, which
+ * makes any ordering bug invisible. It stops being invisible on the retry path,
+ * where this function chooses which pull request gets *closed*: picking the
+ * wrong one closes live work and leaves the stale attempt open to be merged.
+ *
+ * Ties break on `number` descending, so the answer is total and deterministic
+ * rather than dependent on sort stability — two pull requests can share a
+ * `createdAt` at second granularity, and issue numbers are monotonic.
  */
 export function currentOpenPullRequest(
   wi: WorkItemSnapshot,
 ): LinkedPullRequest | null {
   const open = wi.linkedPullRequests.filter((p) => p.state === "OPEN");
-  return open.length > 0 ? open[open.length - 1]! : null;
+  if (open.length === 0) return null;
+  return open.reduce((newest, p) =>
+    p.createdAt.getTime() !== newest.createdAt.getTime()
+      ? p.createdAt > newest.createdAt
+        ? p
+        : newest
+      : p.number > newest.number
+        ? p
+        : newest,
+  );
 }
 
 /**
@@ -258,7 +279,7 @@ export interface DerivedObjective {
   repositoryId: string;
   defaultBranch: string;
   copilotBotId: string | null;
-  ciExpectedOnPullRequests: boolean;
+  ciExpectedOnPullRequests: boolean | "unknown";
   items: DerivedWorkItem[];
 }
 

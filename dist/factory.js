@@ -3005,6 +3005,14 @@ var GitHubReader = class {
    * gracefully — the run created for the PR under review counts, so even the
    * first pull request a repository ever receives is covered as soon as its own
    * run is created, which is exactly the window Gate 3 merged through.
+   *
+   * Returns `"unknown"` rather than `false` when the probe itself fails. A 5xx,
+   * a rate-limit or a dropped connection says nothing about whether CI exists,
+   * and reporting it as `false` told the evaluator "this repository has no CI"
+   * — merging a pull request with zero checks on the strength of a network
+   * error. `"unknown"` is not latched: the next cycle asks again, so a
+   * transient failure costs one cycle of caution rather than poisoning the
+   * process.
    */
   async #ciExpectedOnPullRequests() {
     if (this.#ciExpected) return true;
@@ -3019,8 +3027,10 @@ var GitHubReader = class {
         }
       );
       if (runs.data.total_count > 0) this.#ciExpected = true;
-    } catch {
-      return false;
+    } catch (error) {
+      const status = error?.status;
+      if (status === 404 || status === 403) return false;
+      return "unknown";
     }
     return this.#ciExpected;
   }
@@ -3212,7 +3222,10 @@ function attemptCount(wi) {
 }
 function currentOpenPullRequest(wi) {
   const open = wi.linkedPullRequests.filter((p) => p.state === "OPEN");
-  return open.length > 0 ? open[open.length - 1] : null;
+  if (open.length === 0) return null;
+  return open.reduce(
+    (newest, p) => p.createdAt.getTime() !== newest.createdAt.getTime() ? p.createdAt > newest.createdAt ? p : newest : p.number > newest.number ? p : newest
+  );
 }
 function deriveState(wi, now) {
   if (wi.closed) return "done";

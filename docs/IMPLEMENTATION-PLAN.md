@@ -369,6 +369,19 @@ independent Work Items.
 **Instrumentation.** Log every cycle's derived state, dispatch, and decision. When Gate 0 fails, the
 question "what did Director believe and why" must be answerable from the log alone.
 
+### 10.1 Rehearsal repo setup checklist (applies to every gate, not just Gate 0)
+
+Gate 1's setup hit a real, if mundane, failure mode: a freshly seeded disposable repo with no
+`.gitignore` let the coding agent's `npm install` commit all of `node_modules` (800+ files) into a
+Work Item's PR. This is not a Director/state-machine defect — Director evaluated and merged it
+correctly once cleaned up — it is an operator setup gap that a checklist prevents cheaply. Before
+authoring any Objective against a freshly seeded rehearsal repo:
+
+- Seed a `.gitignore` (at minimum `node_modules/`, `dist/`, `*.log`) in the same commit as
+  `package.json`/`tsconfig.json` — never in a follow-up.
+- If a Work Item's PR shows up with hundreds of unexpected changed files, check for exactly this
+  before treating it as a Director finding.
+
 ---
 
 ## 11. Risks

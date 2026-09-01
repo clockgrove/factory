@@ -172,7 +172,7 @@ Advance only on a green gate. Never skip.
 | 0 | 2–3 independent Work Items | the loop closes at all |
 | 1 | dependent Work Items | sequencing and blocked-by handling |
 | 2 | 8–10 mixed parallel + dependent | scale, capacity, contention |
-| 3 | one real Clockgrove Objective | production viability |
+| 3 | production-shaped brownfield Objective | production viability |
 
 Clockgrove work does not resume before Gate 2 is green.
 
@@ -199,7 +199,7 @@ Factory ships when:
 - The plugin **installs cleanly into a fresh repository** from an exact ref by an unrelated adopter.
 - It is **open-source ready** — public repo, documented install/upgrade/uninstall, LICENSE and
   CONTRIBUTING, no private dependencies, no Clockgrove-specific hardcoding.
-- **We are using it** to build Clockgrove.
+- Gate 3 is green on production-shaped brownfield work; real Clockgrove work begins after release.
 
 Completion is **not** measured by open-issue count, generation number, release count, or
 qualification runs.

@@ -4,8 +4,8 @@ A GitHub-native engineering-management plugin. You author an **Objective**; Fact
 **Work Items**, dispatches them to parallel GitHub Copilot agent sessions, supervises the results,
 and replans — unattended.
 
-> **Status: v0.1 implementation complete; Gates 0, 1, 2, 5 and 6 passed, Gate 4 produced and resolved
-> its intended findings, and the formal Gate 3 remains: one real Clockgrove Objective.** All seven build-order steps are done —
+> **Status: Factory v1.0 is complete.** Gates 0–3 passed, Gates 4–6 exercised and hardened the
+> previously untested CI, conflict, repository-reading, and packaging paths. All seven build-order steps are done —
 > Factory can derive the full state of an Objective from GitHub alone, dispatch/confirm/retry/escalate
 > Work Items against a real repo, mechanically classify a PR's outcome (no-op, declined, untouched,
 > conflict, checks), integrate a mechanically-ready PR (mark ready, merge, resolve or reject a
@@ -67,8 +67,7 @@ and replans — unattended.
 > tools, adding `read_pull_request_diff`, and `read_objective` takes a `minimal` flag because at ten
 > Work Items its response exceeded the tool output limit outright.
 >
-> Per PRD §8, Gate 3 is one real Clockgrove Objective. A **synthetic brownfield dress rehearsal for
-> it** ran against `clockgrove/factory-gate3` — an existing, working library with passing tests, real
+> Gate 3 ran against `clockgrove/factory-gate3` — an existing, working brownfield library with passing tests, real
 > CI, and three documented rough edges to fix, so that for the first time Work Items had to *change*
 > code rather than only add files. All four Work Items merged in ~12 minutes, `read_pull_request_diff`
 > genuinely verified the composition criterion Gate 2 had to merge unverified, no existing test was
@@ -229,8 +228,8 @@ escalates. Repositories with no pull-request CI at all are unaffected. Full acco
 
 ## Install
 
-Factory v0.1 targets GitHub Copilot CLI. The cross-harness Copilot/Codex/Claude portability run is a
-separate v0.2 gate, not a prerequisite for using v0.1.
+Factory v1.0 targets GitHub Copilot CLI. The cross-harness Copilot/Codex/Claude portability run is a
+separate post-v1 gate, not a prerequisite for using v1.
 
 Install an exact reviewed commit rather than a moving branch:
 
@@ -327,4 +326,4 @@ refusal must never be mistaken for work failure.
 
 ## License
 
-License selection is pending before the repository can be made public.
+Factory is released under the [MIT License](LICENSE).

@@ -41,4 +41,5 @@ against a real repository.
 Explain the user-visible behavior, the evidence supporting any GitHub API assumptions, and the
 validation performed. Never include credentials, repository secrets, or private test data.
 
-The repository must publish its license before accepting outside contributions.
+By contributing, you agree that your contribution is licensed under the
+[MIT License](LICENSE).

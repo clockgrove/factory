@@ -4,7 +4,7 @@ A GitHub-native engineering-management plugin. You author an **Objective**; Fact
 **Work Items**, dispatches them to parallel GitHub Copilot agent sessions, supervises the results,
 and replans — unattended.
 
-> **Status: build order (§9) complete; Gate 0 (§10) and Gate 1 (PRD §8) both passed.** All seven build-order steps are done —
+> **Status: build order (§9) complete; Gate 0 (§10) and Gate 1 (PRD §8) both passed; Gate 2 in flight.** All seven build-order steps are done —
 > Factory can derive the full state of an Objective from GitHub alone, dispatch/confirm/retry/escalate
 > Work Items against a real repo, mechanically classify a PR's outcome (no-op, declined, untouched,
 > conflict, checks), integrate a mechanically-ready PR (mark ready, merge, resolve or reject a
@@ -35,6 +35,17 @@ and replans — unattended.
 > blocked-by handling per the scope ladder (PRD §8). Three merged PRs, three closed Work Items,
 > Objective closed, no escalations, one continuous run. See [`docs/PRD.md`](docs/PRD.md) and
 > [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md).
+>
+> **Gate 2 (8–10 mixed parallel + dependent Work Items — scale, capacity, contention) is in flight**
+> against `clockgrove/factory-gate2`: Objective #1 is a text-processing toolkit shaped as a deliberate
+> diamond — six fully independent Layer 1 primitives, three Layer 2 combinators each depending on two
+> of them, one Layer 3 assembly depending on all three. That gives a six-wide parallel dispatch burst
+> (secondary-rate-limit pressure, six PRs branching from one base = real merge contention) plus
+> two-hop fan-in. Per PRD §8, Clockgrove work does not resume before this gate is green. The repo's
+> `vitest.config.ts` deliberately discovers tests **only** under `test/`, making the declared test
+> path load-bearing rather than cosmetic — a direct empirical test of the acceptance-criteria phrasing
+> fix in `skills/objective-compilation/SKILL.md` (Gate 1 saw the coding agent colocate tests under
+> `src/` in 3 of 3 Work Items when the path was stated only descriptively).
 
 ## Design in one picture
 

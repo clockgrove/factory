@@ -400,6 +400,22 @@ idempotent/no-op-safe against a terminal state — but both sides need short, si
 that yield control back often, so messages in either direction get processed close to when they
 arrive rather than queuing.
 
+**The skills a running Director actually loads are not automatically the ones in this repo — verify
+they are in sync before every rehearsal.** Caught at the start of Gate 2: `~/.copilot/skills/director/SKILL.md`
+was 3,169 characters shorter than this repo's committed copy, missing *both* Gate 1 fixes (the
+"Reporting discipline" section and the settled test-path guidance). `~/.copilot/installed-plugins/`
+was empty, and `~/.copilot/mcp-config.json` points the `factory` MCP server at a built artifact — so
+the skill files are hand-copied to `~/.copilot/skills/`, and a committed-and-pushed fix to
+`skills/**/SKILL.md` in this repo has **no effect on the next rehearsal** until it is copied across.
+Gate 1's own fix would have silently not applied. Before authoring a rehearsal Objective, diff
+`skills/*/SKILL.md` against `~/.copilot/skills/*/SKILL.md` and copy any drift over.
+
+This is a **finding against §9/§15's packaging claim**, not just an operator slip: the rehearsals to
+date have exercised hand-synced skill copies, not the real plugin-install path an unrelated adopter
+would get. Gate 3 (or shipping) needs the install path itself exercised end-to-end — installing from
+an exact Git ref and confirming Director loads *those* skills — otherwise "installable from an exact
+Git ref by an unrelated adopter" is untested.
+
 ---
 
 ## 11. Risks

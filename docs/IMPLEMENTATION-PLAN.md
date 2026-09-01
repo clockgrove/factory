@@ -653,15 +653,14 @@ probe also exercised the green path for the first time in any gate — `statusCh
 `SUCCESS` and the rollup is preferred over the suites, so a genuinely passing PR still evaluates
 `ready`.
 
-**Open question this leaves.** Requiring a human click makes an unattended Objective impossible on
-any repository with CI and default settings, which is squarely against PRD §1's premise. Three
-possible answers, none chosen here: make disabling the toggle a documented install precondition (the
-current, conservative position); have Factory approve its own agent's runs, if an API for *this*
-approval exists at all — the documented `POST /actions/runs/{run_id}/approve` covers public-fork
-pull requests, and whether it applies to a coding-agent run is unverified and must be checked live
-before anything is built on it; or accept that CI-gated repositories always need one human gesture
-per Objective. This should be settled before Factory is pointed at a real Clockgrove repository,
-because it decides whether "unattended" is achievable there at all.
+**Open question this leaves — now answered in §10.6.** Requiring a human click makes an unattended
+Objective impossible on any repository with CI and default settings, which is squarely against PRD
+§1's premise. Three possible answers were on the table: make disabling the toggle a documented
+install precondition; have Factory approve its own agent's runs; or accept that CI-gated repositories
+always need one human gesture per Objective. **Resolved in favour of the second**, with the operator's
+explicit condition that Factory perform a blast-radius review first and understand that it is causing
+no data loss or bad impact. The first option was rejected as what it is — a fixture workaround that
+trades a real security control for a green rehearsal. See §10.6.
 
 **F3 — `failed` fired while the agent was still writing.** A Work Item derived `failed` during the
 window where the coding agent had opened its draft PR but pushed only `Initial plan`. Following the

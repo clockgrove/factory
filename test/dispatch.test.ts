@@ -52,6 +52,7 @@ function wi(over: Partial<WorkItemSnapshot> = {}): WorkItemSnapshot {
     title: "Add slugify",
     closed: false,
     assignees: [COPILOT_ASSIGNEE_LOGIN],
+    labels: [],
     blockedBy: [],
     linkedPullRequests: [],
     copilotAssignments: [],

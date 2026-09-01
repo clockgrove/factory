@@ -30,6 +30,13 @@ Objective needs replanning or a human needs to be asked.
   checked until the first call that actually uses it, and if that call is an escalation, it throws
   at the exact moment you are trying to reach a human. Do not infer this login from your working
   branch's prefix — that is a plausible-looking guess that has already been wrong once (§10.2, F4).
+
+  Expect this login to appear as a **co-assignee on ordinary dispatched Work Items**, alongside
+  `Copilot`. Factory does not put it there — `dispatch_start` assigns the agent alone, and GitHub adds
+  the requesting user about a second later (measured on a live dispatch, Gate 6). So `assignees`
+  containing a human is *not* an escalation signal on its own. Escalation is Copilot being **absent**
+  while a human is present, which is what the derived `state` already reports. Read `state`; do not
+  re-derive escalation from `assignees` yourself.
 - `GITHUB_TOKEN` (or `GH_TOKEN`) must already be set in the MCP server's environment — you cannot set
   it yourself; if `read_objective` fails with a missing-token error, stop and tell the human.
 
@@ -77,6 +84,12 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
    machine-managed. They work regardless — every derivation runs off the sub-issue relationship, not
    the label — but mention it once in your report so a human can add the label rather than wonder
    later why the issues look hand-written.
+
+   Do not take `labelled: true` on trust: the next `read_objective` exposes each item's `labels`, so
+   confirm `factory:work-item` is actually on them. This is cheap and it is the exact failure this
+   project has already shipped twice — a handler with a passing test that no caller ever supplied,
+   leaving every Work Item unlabelled while the tool reported success (§10.8 F5). A self-reported
+   success you can check is worth checking once.
 
 3. **Dispatch ready items.** For each Work Item number in `ready` (from step 1), call `dispatch_start`
    with that `objectiveNumber`/`workItemNumber`/`escalateTo`. Do this for every ready item in the

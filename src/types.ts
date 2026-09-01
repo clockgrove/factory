@@ -104,6 +104,17 @@ export interface RepositoryFile {
   /** False means the path is simply not in the repository — not an error. */
   exists: boolean;
   content?: string;
+  /**
+   * True when there is more text than `content` holds — either this reader
+   * clipped it at `maxBytes`, or the file is over the contents API's 1 MB limit
+   * and GitHub returned none of it.
+   *
+   * Deliberately false when the path is not a file at all (Gate 6 finding). A
+   * directory has no text to truncate, and reporting one as truncated conflates
+   * "I refused to read this" with "there is more of it" — which would send a
+   * caller that pages or retries on `truncated` into a loop that can never make
+   * progress. Check `unreadable` first; `content` is absent whenever it is set.
+   */
   truncated: boolean;
   /** Why content is absent despite the path existing (directory, symlink, >1MB). */
   unreadable?: string;
@@ -179,6 +190,14 @@ export interface WorkItemSnapshot {
   title: string;
   closed: boolean;
   assignees: string[];
+  /**
+   * The issue's label names. Carried so that `graph_apply`'s `labelled: true`
+   * is checkable rather than merely self-reported (Gate 6 finding): a caller
+   * that could not observe labels had no way to tell a successful labelling
+   * from a silently unlabelled one — the same shape as F5, where a green test
+   * proved a handler applied a label nothing ever passed it.
+   */
+  labels: string[];
   blockedBy: IssueRef[];
   /** PRs that would close this issue, via `closedByPullRequestsReferences`. */
   linkedPullRequests: LinkedPullRequest[];

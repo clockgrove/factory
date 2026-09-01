@@ -57,6 +57,33 @@ describe("interpretContentsResponse", () => {
     expect(result.exists).toBe(true);
     expect(result.content).toBeUndefined();
     expect(result.unreadable).toContain("directory with 2 entries");
+    expect(result.truncated).toBe(false);
+  });
+
+  // Gate 6 finding. `truncated: true` here meant "I refused to read this", but
+  // every other use of the flag means "there is more of it" — so a caller that
+  // pages or retries on `truncated` would loop forever against a directory that
+  // will never yield file content.
+  it("does not call a directory truncated, because nothing was truncated", () => {
+    for (const body of [
+      [{ name: "a.ts" }],
+      { type: "symlink", size: 11, content: null, target: "../include/" },
+      { type: "submodule", size: 0, content: null },
+    ]) {
+      const result = interpretContentsResponse("x", body, 40_000);
+      expect(result.unreadable).toBeDefined();
+      expect(result.truncated).toBe(false);
+    }
+  });
+
+  // The opposite case, kept true: the file exists and has bytes this reader did
+  // not get, which is exactly what `truncated` is for.
+  it("still calls a file too large to send truncated", () => {
+    const result = interpretContentsResponse(
+      "assets/huge.bin",
+      { type: "file", size: 2_000_000, content: "" },
+      40_000,
+    );
     expect(result.truncated).toBe(true);
   });
 
@@ -144,7 +171,7 @@ describe("interpretContentsResponse", () => {
       const result = interpretContentsResponse("x", body, 40_000);
       expect(result.content).toBeUndefined();
       expect(result.unreadable).toBeDefined();
-      expect(result.truncated).toBe(true);
+      expect(result.truncated).toBe(false);
     }
   });
 });

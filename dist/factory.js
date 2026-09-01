@@ -2733,6 +2733,7 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
           title
           state
           assignees(first: 10) { nodes { login } }
+          labels(first: 20) { nodes { name } }
           blockedBy(first: 50) { nodes { number state } }
           closedByPullRequestsReferences(first: 20, includeClosedPrs: true) {
             nodes {
@@ -2844,6 +2845,7 @@ function toWorkItem(wi) {
     title: wi.title,
     closed: wi.state === "CLOSED",
     assignees: wi.assignees.nodes.map((a) => a.login),
+    labels: wi.labels?.nodes.map((l) => l.name) ?? [],
     blockedBy,
     linkedPullRequests: wi.closedByPullRequestsReferences.nodes.map(toPullRequest),
     copilotAssignments: copilotAssignments(wi)
@@ -2871,7 +2873,7 @@ function interpretContentsResponse(path, body, maxBytes) {
     return {
       path,
       exists: true,
-      truncated: true,
+      truncated: false,
       unreadable: `not a file (directory with ${body.length} entries) \u2014 use read_repository_layout with pathPrefix instead`
     };
   }
@@ -2881,7 +2883,7 @@ function interpretContentsResponse(path, body, maxBytes) {
     return {
       path,
       exists: true,
-      truncated: true,
+      truncated: false,
       unreadable: `not a file (${data.type ?? "unknown"})${where ? ` \u2014 points at ${where}` : ""}`
     };
   }

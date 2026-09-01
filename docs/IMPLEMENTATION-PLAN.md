@@ -1408,6 +1408,12 @@ have to be bypassed to answer a question about what it did.**
 "finished at", because a closed-unmerged PR is the signature of an abandoned or superseded attempt
 and collapsing the two would make it indistinguishable from an integration.
 
+That is measured, not hypothetical. Gate 5's conflict run produced six pull requests for three Work
+Items, of which **three (#27, #28, #30) were closed unmerged** by the §6 conflict path. A single
+"finished at" timestamp would have rendered that run as six integrations — erasing the entire
+conflict-and-recovery story the gate existed to produce, in the one repository where it has ever
+been observed.
+
 **No derivation reads either field, and that is the point of note.** §1 says state is derived from
 the present, and neither timestamp changes any decision — Factory looks at what *is*, not at when it
 became so. They exist for the observer: for a Director reconstructing a cycle, and for a human
@@ -1447,6 +1453,14 @@ in front of a real Objective.
   tool sequence was the skill's; the pacing was a human-shaped loop. Nothing in a gate report
   distinguishes these two, so "the loop closed unattended" should be read as a claim about the loop's
   *logic*, not about a timer having driven it, unless a specific gate says otherwise.
+
+  **This is a gate objective, not a footnote, and it is now written into the ship criteria (PRD
+  §10).** Unattended-within-one-turn and unattended-across-turn-boundaries are different failure
+  surfaces: the second has to survive a session waking with no working memory, reconstructing state
+  from GitHub alone, and being re-entered by a timer rather than by its own control flow. That is
+  precisely the property §1's derived-state design exists to provide, which makes it the one gap on
+  this list that tests the central architectural claim rather than a branch of the code. The next
+  gate should be run by an actual automation across at least two wake-ups and should say so.
 - **The rebase-success path is still unobserved.** Gate 5 reached §6 for the first time, but every
   collision it produced was a real content conflict, which throws. A rebase that succeeds cleanly —
   the branch that leaves no trace anywhere else, and the reason `dispatch_integrate` now returns

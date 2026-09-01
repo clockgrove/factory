@@ -201,7 +201,10 @@ and replans — unattended.
 > **never executed** in any gate; the rebase-*success* path has never been observed; no fixture repo
 > has ever run its own tests, so "the tests pass" in a gate report is always static analysis of the
 > diff; and "unattended" should be read as a claim about the loop's logic rather than about a timer,
-> since at least one gate paced its own cycles by hand and said so.
+> since at least one gate paced its own cycles by hand and said so. That last one is now a ship
+> criterion rather than a caveat: unattended-*across turn boundaries* — a session waking with no
+> working memory and reconstructing everything from GitHub — is the property the derived-state design
+> exists to provide, and it is the next thing to prove.
 
 ## Design in one picture
 

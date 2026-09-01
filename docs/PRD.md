@@ -196,6 +196,19 @@ recorded as a finding against the thesis.
 Factory ships when:
 
 - **Gate 2 is green** — the loop closes unattended on parallel + dependent work.
+
+  **"Unattended" means across turn boundaries, and on that reading it is not yet demonstrated.**
+  Every gate to date — Gate 2 included — was paced by a session that stayed awake for the whole run,
+  and at least one (Gate 5) has confirmed explicitly that it set an automation interval and then ran
+  every cycle inline in a single long turn, clearing the automation before finishing. That proves the
+  loop's *logic*: read → confirm → retry → integrate → replan, in the right order, against a real
+  repository. It does not prove the thing this criterion is actually claiming, because
+  unattended-within-one-turn and unattended-across-turn-boundaries are different failure surfaces —
+  the second has to survive a session waking with no working memory, reconstructing state from
+  GitHub alone, and being re-entered by a timer rather than by its own control flow. That is the
+  claim §1's derived-state design exists to support, and it is the one still untested. Satisfying
+  this criterion requires a run driven by an actual scheduled automation across at least two
+  wake-ups, not a run that could have been.
 - The plugin **installs cleanly into a fresh repository** from an exact ref by an unrelated adopter.
 - It is **open-source ready** — public repo, documented install/upgrade/uninstall, LICENSE and
   CONTRIBUTING, no private dependencies, no Clockgrove-specific hardcoding.

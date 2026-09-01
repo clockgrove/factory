@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   DISPATCH_CONFIRM_WINDOW_MS,
   EMPTY_PULL_REQUEST_GRACE_MS,
+  WIP_INACTIVITY_GRACE_MS,
   allDone,
   attemptCount,
   confirmFailureStreak,
@@ -10,6 +11,7 @@ import {
   currentOpenPullRequest,
   derive,
   deriveState,
+  isAbandonedAttempt,
   isNoOp,
   isStalled,
   ready,
@@ -40,6 +42,10 @@ function pr(over: Partial<LinkedPullRequest> = {}): LinkedPullRequest {
     mergeable: "MERGEABLE",
     createdAt: NOW,
     headSha: "deadbeef",
+    // Normal is an agent that has just pushed. Staleness is the exceptional
+    // case a test has to ask for explicitly, so that no test asserts "we judge
+    // an abandoned draft" by accident (§10.15).
+    headCommittedAt: NOW,
     ...over,
   };
 }
@@ -328,6 +334,107 @@ describe("deriveState", () => {
       ],
     });
     expect(deriveState(item, NOW)).toBe("for_review");
+  });
+});
+
+describe("abandoned attempts", () => {
+  // Once Factory stopped merging unfinished work (§10.15), an unfinished pull
+  // request became something it waits on — so an agent that pushes a partial
+  // commit and then dies would wait forever: not empty (so the empty-PR grace
+  // never fires), never finished, never retried, never escalated.
+  const stale = new Date(NOW.getTime() - WIP_INACTIVITY_GRACE_MS - 1);
+
+  it("fails work whose agent has stopped pushing", () => {
+    const item = wi({
+      assignees: [COPILOT_ASSIGNEE_LOGIN],
+      linkedPullRequests: [
+        pr({ title: "[WIP] Add slugify", checks: "SUCCESS", headCommittedAt: stale }),
+      ],
+    });
+    expect(deriveState(item, NOW)).toBe("failed");
+  });
+
+  it("keeps waiting while the agent is still pushing", () => {
+    // The whole point of measuring inactivity rather than age: a Work Item may
+    // legitimately take longer to write than any useful age bound, and judging
+    // it early closes live work (§10.5, F3).
+    const item = wi({
+      assignees: [COPILOT_ASSIGNEE_LOGIN],
+      linkedPullRequests: [
+        pr({
+          title: "[WIP] Add slugify",
+          checks: "SUCCESS",
+          // Opened long ago, pushed to a moment ago.
+          createdAt: new Date(NOW.getTime() - WIP_INACTIVITY_GRACE_MS * 10),
+          headCommittedAt: new Date(NOW.getTime() - 1000),
+        }),
+      ],
+    });
+    expect(deriveState(item, NOW)).toBe("in_flight");
+  });
+
+  it("never judges finished work on inactivity", () => {
+    // A finished pull request waiting on the integrator is not a dead attempt,
+    // however long it sits. Closing it would destroy work that is complete.
+    const item = wi({
+      assignees: [COPILOT_ASSIGNEE_LOGIN],
+      linkedPullRequests: [
+        pr({ title: "Add slugify", checks: "SUCCESS", headCommittedAt: stale }),
+      ],
+    });
+    expect(deriveState(item, NOW)).toBe("for_review");
+  });
+
+  it("ignores the draft flag entirely, since the agent never clears it", () => {
+    // gate3 PR #16: renamed away from `[WIP]` but still a draft. If draftness
+    // meant "unfinished" this would be retried forever instead of merged.
+    const item = wi({
+      assignees: [COPILOT_ASSIGNEE_LOGIN],
+      linkedPullRequests: [
+        pr({ isDraft: true, title: "Add slugify", checks: "SUCCESS" }),
+      ],
+    });
+    expect(deriveState(item, NOW)).toBe("for_review");
+  });
+
+  it("treats the grace boundary itself as abandoned", () => {
+    const item = wi({
+      assignees: [COPILOT_ASSIGNEE_LOGIN],
+      linkedPullRequests: [
+        pr({
+          title: "[WIP] Add slugify",
+          checks: "SUCCESS",
+          headCommittedAt: new Date(NOW.getTime() - WIP_INACTIVITY_GRACE_MS),
+        }),
+      ],
+    });
+    expect(deriveState(item, NOW)).toBe("failed");
+  });
+
+  describe("isAbandonedAttempt", () => {
+    it("is false for finished work no matter how old", () => {
+      expect(
+        isAbandonedAttempt(pr({ title: "Add slugify", headCommittedAt: stale }), NOW),
+      ).toBe(false);
+    });
+
+    it("is false for a freshly pushed attempt", () => {
+      expect(
+        isAbandonedAttempt(
+          pr({ title: "[WIP] Add slugify", headCommittedAt: NOW }),
+          NOW,
+        ),
+      ).toBe(false);
+    });
+
+    it("is true past the window", () => {
+      expect(
+        isAbandonedAttempt(
+          pr({ title: "[WIP] Add slugify", headCommittedAt: stale }),
+          NOW,
+        ),
+      ).toBe(true);
+    });
   });
 });
 

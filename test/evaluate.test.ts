@@ -39,6 +39,7 @@ function pr(over: Partial<LinkedPullRequest> = {}): LinkedPullRequest {
     mergeable: "MERGEABLE" as const,
     createdAt: NOW,
     headSha: "deadbeef",
+    headCommittedAt: NOW,
     ...over,
   };
   // Keep the count consistent with the paths unless a test is deliberately
@@ -482,59 +483,73 @@ describe("partial file lists", () => {
 });
 
 /**
- * §10.14. A draft is the coding agent's own statement that it has not finished,
- * and it was the one signal `evaluate.ts` ignored: `ready` never consulted it,
- * so Factory merged pull requests the agent still had marked `[WIP]` — observed
- * twice, in two different gates, on real merge commits.
+ * §10.15. The agent's own "I am not finished" signal was the one thing
+ * `evaluate.ts` ignored, so Factory merged work in progress — measured on real
+ * merge commits in two different gates (gate2 #26 and #36, gate3 #7).
+ *
+ * The signal is the `[WIP]` title prefix, not the draft flag. The agent opens
+ * every pull request as `[WIP] <title>` and renames the prefix away when it
+ * finishes; it never clears `isDraft`, so keying on the draft flag would wait
+ * for an event that never arrives and stall every Work Item permanently.
  *
  * The interesting half is not "don't merge". It is that a half-finished pull
  * request legitimately looks *broken* to every other check here — it touches
  * nothing in scope yet, or fails its own tests — and those verdicts close the
  * pull request. Judging work in progress destroys it.
  */
-describe("draft pull requests", () => {
-  it("does not merge a pull request the agent has not marked ready", () => {
-    expect(evaluateMechanical(pr({ isDraft: true }), ["src/slugify.ts"])).toEqual({
-      kind: "draft",
-    });
+describe("work the agent has not finished", () => {
+  it("does not merge a pull request the agent still calls [WIP]", () => {
+    expect(
+      evaluateMechanical(pr({ title: "[WIP] Add slugify" }), ["src/slugify.ts"]),
+    ).toEqual({ kind: "in_progress" });
   });
 
-  it("is not confused by a draft that is otherwise perfectly mergeable", () => {
+  it("is not confused by unfinished work that is otherwise perfectly mergeable", () => {
     // Exactly the Gate 6 shape: green, mergeable, in scope — and still not
     // ours to merge, because the author says it is not done.
     const verdict = evaluateMechanical(
-      pr({ isDraft: true, checks: "SUCCESS", mergeable: "MERGEABLE" }),
+      pr({ title: "[WIP] Add slugify", checks: "SUCCESS", mergeable: "MERGEABLE" }),
       ["src/slugify.ts"],
     );
-    expect(verdict.kind).toBe("draft");
+    expect(verdict.kind).toBe("in_progress");
   });
 
-  it("does not report a half-written draft as untouched, which would close it", () => {
-    // The agent pushed its test file first and has not written the source yet.
-    // `untouched` routes to retryOrEscalate, which closes the pull request —
-    // so without the draft check this deletes a session's work mid-flight.
-    const verdict = evaluateMechanical(
-      pr({ isDraft: true, changedFilePaths: ["test/slugify.test.ts"] }),
-      ["src/slugify.ts"],
-    );
-    expect(verdict.kind).toBe("draft");
-  });
-
-  it("does not report a draft's failing checks as a failed attempt", () => {
-    // An unfinished change failing its own tests is expected, not a defect.
-    const verdict = evaluateMechanical(pr({ isDraft: true, checks: "FAILURE" }), [
+  it("ignores the draft flag, which the agent never clears", () => {
+    // gate3 PR #16: renamed away from `[WIP]` (finished) but still a draft,
+    // hours later. Treating draft as unfinished would wait on it forever.
+    const verdict = evaluateMechanical(pr({ isDraft: true, title: "Add slugify" }), [
       "src/slugify.ts",
     ]);
-    expect(verdict.kind).toBe("draft");
+    expect(verdict.kind).toBe("ready");
   });
 
-  it("still retries a draft the agent declined, rather than waiting forever", () => {
-    // Ordering guard: `declined` and `no_op` stay ahead of `draft` so an agent
-    // that died or refused is still retried on the existing schedule. Without
-    // this, adding the draft check would have introduced a new way to hang.
+  it("does not report half-written work as untouched, which would close it", () => {
+    // The agent pushed its test file first and has not written the source yet.
+    // `untouched` routes to retryOrEscalate, which closes the pull request —
+    // so without this check that deletes a session's work mid-flight.
+    const verdict = evaluateMechanical(
+      pr({ title: "[WIP] Add slugify", changedFilePaths: ["test/slugify.test.ts"] }),
+      ["src/slugify.ts"],
+    );
+    expect(verdict.kind).toBe("in_progress");
+  });
+
+  it("does not report unfinished work's failing checks as a failed attempt", () => {
+    // An unfinished change failing its own tests is expected, not a defect.
+    const verdict = evaluateMechanical(
+      pr({ title: "[WIP] Add slugify", checks: "FAILURE" }),
+      ["src/slugify.ts"],
+    );
+    expect(verdict.kind).toBe("in_progress");
+  });
+
+  it("still retries work the agent declined, rather than waiting forever", () => {
+    // Ordering guard: `declined` and `no_op` stay ahead of `in_progress` so an
+    // agent that died or refused is still retried on the existing schedule.
+    // Without this, adding the check would have introduced a new way to hang.
     const verdict = evaluateMechanical(
       pr({
-        isDraft: true,
+        title: "[WIP] Add slugify",
         changedLines: 0,
         changedFiles: 0,
         changedFilePaths: [],
@@ -545,8 +560,24 @@ describe("draft pull requests", () => {
     expect(verdict.kind).toBe("no_op");
   });
 
-  it("merges normally once the agent marks it ready for review", () => {
-    const verdict = evaluateMechanical(pr({ isDraft: false }), ["src/slugify.ts"]);
+  it("merges normally once the agent renames away the prefix", () => {
+    const verdict = evaluateMechanical(pr({ title: "Add slugify" }), [
+      "src/slugify.ts",
+    ]);
     expect(verdict.kind).toBe("ready");
+  });
+
+  it("matches the prefix case-insensitively and with leading space", () => {
+    expect(evaluateMechanical(pr({ title: "  [wip] Add slugify" })).kind).toBe(
+      "in_progress",
+    );
+  });
+
+  it("does not treat an incidental mention of WIP as unfinished", () => {
+    // Only the prefix is the signal. A title merely containing the word must
+    // not stall the item.
+    expect(evaluateMechanical(pr({ title: "Add wip-status helper" })).kind).toBe(
+      "ready",
+    );
   });
 });

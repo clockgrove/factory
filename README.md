@@ -173,16 +173,23 @@ and replans — unattended.
 >
 > **Gate 6's margin finding was the worst one yet, and it was six gates old.** Sent to exercise a
 > dependency chain, it mentioned in passing that a pull request had merged while still marked draft.
-> It had: `for_review` never consulted `isDraft`, and the merge path actively called
-> `markPullRequestReady` to clear it first. Two merge commits on `main` in the fixture repo still
-> carry the agent's `[WIP]` title, from two different gates. A draft is the coding agent saying it
-> has not finished — the most authoritative completion signal available, and the one Factory
-> overrode. It survived because fixture tasks are small enough that the agent's first push is also
-> its last; on any change that arrives in pieces, Factory merges the half and closes the Work Item as
-> done. Drafts are now a `draft` verdict that waits. The placement matters more than the merge: it is
-> checked *before* the scope, conflict and checks verdicts, because a half-written pull request
-> legitimately touches nothing in scope yet and legitimately fails its own tests — and each of those
-> verdicts closes the pull request, so judging work in progress deletes it.
+> Factory was merging work the coding agent had not finished: three pull requests across two gates
+> merged before the agent announced completion, one of them 98 seconds early — Factory's own token
+> un-drafting and merging three seconds apart, the agent's completion rename arriving after. It
+> survived because fixture tasks are small enough that the agent usually finishes before the next
+> poll; on any change that arrives in pieces, Factory merges the half and closes the Work Item as
+> done.
+>
+> **The first fix was wrong and measuring caught it.** Reading "draft" as the agent's not-finished
+> signal is the obvious move, and it would have stalled every Work Item forever: across 12/12 pull
+> requests in the fixture, the agent opens as a draft titled `[WIP] …`, renames the prefix away when
+> it finishes, and **never clears the draft flag** — every ready-for-review event was Factory's own.
+> The signal is the title prefix. Unfinished work is now an `in_progress` verdict that waits, bounded
+> by a twenty-minute no-push window so a dead agent escalates instead of hanging. The placement
+> matters more than the merge: it is checked *before* the scope, conflict and checks verdicts,
+> because a half-written pull request legitimately touches nothing in scope yet and legitimately
+> fails its own tests — and each of those verdicts closes the pull request, so judging work in
+> progress deletes it.
 
 ## Design in one picture
 

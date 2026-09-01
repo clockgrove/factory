@@ -109,6 +109,7 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
                 nodes {
                   commit {
                     oid
+                    committedDate
                     statusCheckRollup { state }
                     checkSuites(first: 20) {
                       nodes {
@@ -161,6 +162,7 @@ interface GqlPr {
     nodes: {
       commit: {
         oid: string;
+        committedDate: string;
         statusCheckRollup: { state: string } | null;
         checkSuites: {
           nodes: {
@@ -285,6 +287,13 @@ function toPullRequest(pr: GqlPr): LinkedPullRequest {
     mergeable: pr.mergeable,
     createdAt: new Date(pr.createdAt),
     headSha: commit?.oid ?? "",
+    // Falling back to the PR's own creation time keeps the field a real Date
+    // even for the (unobserved) case of a pull request with no commits: a
+    // brand-new PR is then trivially "recently active", which errs toward
+    // waiting rather than toward closing something live.
+    headCommittedAt: commit?.committedDate
+      ? new Date(commit.committedDate)
+      : new Date(pr.createdAt),
   };
 }
 

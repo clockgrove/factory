@@ -1209,36 +1209,94 @@ request title *at the moment of merge*, and two of them read:
 
 Two gates, two runs, two merges of work the coding agent had not declared finished — after which the
 agent renamed both pull requests, which is why they read clean in the API today and why nothing
-noticed. **A draft is the agent's own statement that it is still working, and it is the most
-authoritative completion signal available: the agent knows, and nothing else in `evaluate.ts` does.**
-Factory read it, overrode it, and merged.
+noticed.
 
-Six gates missed this because fixture Work Items are small enough that the agent's first push is
-usually also its last, so "merge the draft" and "merge the finished work" coincide. They stop
+The timeline API makes it exact. For #36:
+
+| time | event | actor |
+|---|---|---|
+| 17:40:15 | pull request opened, `[WIP] Add slugFromText composed from…` | `copilot-swe-agent` |
+| 17:41:41 | head commit | `copilot-swe-agent` |
+| 17:43:35 | `ReadyForReviewEvent` | **Factory's token** |
+| 17:43:38 | `MergedEvent` | **Factory's token** |
+| 17:45:16 | `RenamedTitleEvent` dropping `[WIP]` | `copilot-swe-agent` |
+
+Factory un-drafted and merged three seconds apart, and the agent announced completion **98 seconds
+after the merge**. `factory-gate3` #7 and `factory-gate2` #26 show the same ordering. Three of the
+nine coding-agent merges measured across the fixtures landed before the agent said it was done.
+
+Six gates missed this because fixture Work Items are small enough that the agent usually finishes
+before the next poll, so "merge now" and "merge the finished work" nearly always coincide. They stop
 coinciding the moment a change arrives in pieces — source file first, tests second — which is the
 normal shape of anything real. There the failure is silent and complete: Factory merges the half,
 marks the Work Item `done`, and the Objective closes reporting success.
 
-The fix is a `draft` verdict, and its placement is the whole design:
+**The first fix was wrong, and §10.15 records why.** It read the draft flag as the agent's voice.
+The agent does not speak through it.
 
-- **After `declined` and `no_op`.** Those are the paths that handle an agent that refused or died,
-  and they retry on an existing bounded schedule. Putting `draft` ahead of them would have swapped a
-  merge-too-early bug for a hang, since a stalled agent leaves its pull request in draft forever.
-- **Before `untouched`, `conflict` and `checks_failed`.** This is the half that is easy to miss.
-  Not merging a draft is only the obvious harm; the subtler one is that **a half-written pull request
-  legitimately looks broken to every other check** — it touches nothing in scope yet because the
-  source file is still coming, or it fails its own tests because they are written against code that
-  does not exist yet. Each of those verdicts closes or rebases the pull request. Judging work in
-  progress does not merely merge it too early, it *deletes* it out from under a running session.
-- **`#mergeReady` no longer un-drafts.** With the verdict in place that call was unreachable in the
-  normal path, and removing it means GitHub's own refusal to merge a draft is the backstop if it
-  ever is reached — failing loudly rather than quietly doing the wrong thing.
-- **`draft` waits** (`action: "waiting"`), and never retries. The work in the draft is probably fine
-  and simply unfinished; closing it discards a session still writing into it. A draft that never
-  resolves means the agent stalled, which the Director skill escalates after several cycles — the
-  same shape as `checks_missing`.
+## 10.15 The completion signal is `[WIP]`, not the draft flag
 
-Four tests fail when the guard is reverted, two of them the destructive paths rather than the merge.
+The obvious reading of §10.14 is "a draft is the agent saying it has not finished, so don't merge
+drafts." That was the first fix: a `draft` verdict, plus removing `#mergeReady`'s un-draft call.
+
+**It would have stalled every Work Item permanently.** Measured live before shipping it, across
+every coding-agent pull request in `factory-gate2` (12/12) and `factory-gate3`:
+
+- The agent opens each pull request as a **draft** titled `[WIP] <title>`.
+- When it finishes it emits a `RenamedTitleEvent` dropping the `[WIP]` prefix.
+- **It never clears the draft flag.** Every `ReadyForReviewEvent` in every fixture repository was
+  Factory's own token. `factory-gate3` #16 sits finished — renamed by the agent — and still
+  `isDraft: true` hours later, because Factory never merged it.
+
+So draftness is not a completion signal at all: it is the state every coding-agent pull request is
+born in and dies in. Waiting on it waits for an event that never arrives. Removing the un-draft call
+was worse than useless — GitHub refuses to merge a draft, so it would have broken *every* merge.
+
+The signal Factory can actually use is the `[WIP]` title prefix, and the corrected fix is:
+
+- **`evaluate.ts` returns `in_progress`** when the title still starts with `[WIP]`, in the same slot
+  the `draft` verdict occupied. The placement argument from §10.14 is unchanged and is still the
+  interesting half: it sits *after* `declined`/`no_op` so a dead or refusing agent still retries on
+  its existing bounded schedule, and *before* `untouched`/`conflict`/`checks_failed` because **a
+  half-written pull request legitimately looks broken to every one of those** — it touches nothing in
+  scope yet because the source file is still coming, or fails its own tests because they are written
+  against code that does not exist yet — and each of those verdicts closes or rebases the pull
+  request. Judging work in progress does not merely merge it too early, it *deletes* it out from
+  under a running session.
+- **`deriveState` returns `in_flight`** for the same condition, so the integrator is never handed a
+  half-written change in the first place.
+- **`#mergeReady` keeps un-drafting.** It is required, not optional, and it is safe precisely because
+  the completion signal is now the prefix rather than the flag: nothing unfinished reaches it.
+- **Absence of the prefix means finished.** A pull request that never used the convention is judged
+  on its diff exactly as before, rather than waiting forever for a rename that was never coming.
+
+**And the wait is bounded, which the draft version was not.** Once Factory waits on unfinished work,
+an agent that pushes a partial commit and then dies leaves a pull request that is neither empty (so
+`EMPTY_PULL_REQUEST_GRACE_MS` never fires) nor ever finished: no merge, no retry, no escalation, and
+no human told. A silent stall is worse than a loud escalation. `deriveState` now derives `failed` for
+a pull request still marked `[WIP]` whose head commit is older than `WIP_INACTIVITY_GRACE_MS`, which
+routes into the existing retry path rather than inventing a fourth outcome for the same fact.
+
+That window is measured from the **head commit**, not from the pull request's creation, and the
+distinction is load-bearing. Age alone reproduces the §10.5 F3 false negative: a real Work Item can
+legitimately take longer to write than any age bound short enough to be useful, and judging it early
+closes live work. Inactivity is the honest signal — an agent that is still working pushes, and one
+that has died does not. Twenty minutes is deliberately generous because the two errors are not
+symmetric: judging early destroys a live session's work, judging late delays a human by minutes.
+
+`headCommittedAt` comes from the head commit's `committedDate`, on the `commits(last: 1)` node the
+query already fetched for `oid` — no extra request. Deliberately not the pull request's `updatedAt`,
+which comments, labels and **Factory's own §6 comments** all refresh, so a dead attempt would look
+alive forever. Also not `pushedDate`: verified live, it returns `null`.
+
+Four mutations, four failures: dropping the `in_progress` verdict fails 5 tests, dropping the
+inactivity bound fails 2, dropping the `in_flight` derivation fails 1, and removing the un-draft call
+fails 1.
+
+**The lesson is the repo's own rule paying for itself.** The first fix was internally coherent, fully
+tested, mutation-checked, and would have broken Factory completely the first time it ran. What caught
+it was refusing to ship a behavioural claim about GitHub without measuring it — and the measurement
+took one query.
 
 **The test fixture had been asserting the bug, again.** `pr()` in `test/evaluate.test.ts` defaulted
 to `isDraft: true`, so every test asserting `ready` was quietly asserting that Factory merges drafts;

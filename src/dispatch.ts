@@ -621,14 +621,14 @@ export class Dispatcher {
         return { merged: false, action: await this.retryOrEscalate(wi) };
       case "checks_pending":
         return { merged: false, action: "waiting" }; // nothing to do yet
-      case "draft":
-        // Wait. The agent has not marked the pull request ready, so there is
-        // nothing to integrate and nothing has gone wrong. Deliberately not a
-        // retry: the work in the draft is probably fine and simply unfinished,
-        // and closing it would throw away a session still writing into it.
-        // If a draft never resolves the agent has stalled, which the Director
-        // skill escalates after several cycles — the same shape as
-        // `checks_missing`.
+      case "in_progress":
+        // Wait. The agent still calls this `[WIP]`, so there is nothing to
+        // integrate and nothing has gone wrong. Deliberately not a retry: the
+        // work is probably fine and simply unfinished, and closing it would
+        // throw away a session still writing into it. If it never resolves,
+        // `deriveState` bounds the wait — a pull request still marked `[WIP]`
+        // with no push inside the inactivity window derives `failed`, which
+        // retries and then escalates (§10.15).
         return { merged: false, action: "waiting" };
       case "mergeability_unknown":
         // GitHub has not finished computing mergeability. Waiting is the whole
@@ -670,13 +670,21 @@ export class Dispatcher {
    * surfaces instead of being retried silently forever.
    */
   async #mergeReady(pr: LinkedPullRequest): Promise<IntegrateOutcome> {
-    // Deliberately does *not* un-draft. This used to call
-    // `markPullRequestReady` first, which silently overrode the coding agent's
-    // own "I am not finished" signal and merged work in progress (§10.14).
-    // `evaluate.ts` now returns `draft` before anything reaches here, so this
-    // is unreachable for a draft in the normal path — and leaving it out means
-    // GitHub's own refusal to merge a draft is the backstop if it ever is
-    // reached, which fails loudly instead of quietly doing the wrong thing.
+    // Un-drafting is required, not optional: the coding agent never clears the
+    // draft flag itself. Every `ReadyForReviewEvent` across every fixture
+    // repository was Factory's own token, and factory-gate3 PR #16 sits
+    // finished — renamed away from `[WIP]` by the agent — while still
+    // `isDraft: true`. GitHub refuses to merge a draft, so without this call
+    // every single merge fails.
+    //
+    // This is safe *because* the completion signal is the `[WIP]` prefix rather
+    // than the draft flag (§10.15). Nothing unfinished reaches here: `evaluate`
+    // returns `in_progress` first. Removing this call was the wrong half of the
+    // §10.14 fix — it read the draft flag as the agent's voice when the agent
+    // does not speak through it.
+    if (pr.isDraft) {
+      await this.#call(() => this.#writer.markPullRequestReady(pr.id));
+    }
     try {
       await this.#call(() => this.#writer.mergePullRequest(pr.id));
     } catch (error) {

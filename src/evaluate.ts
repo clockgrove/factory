@@ -14,7 +14,7 @@
  * network.
  */
 
-import { DECLINE_TITLE_PATTERN, isNoOp } from "./state.js";
+import { DECLINE_TITLE_PATTERN, isNoOp, isWorkInProgress } from "./state.js";
 import { executionAffectingReason } from "./approval.js";
 import type { LinkedPullRequest } from "./types.js";
 
@@ -161,7 +161,7 @@ export type MechanicalVerdict =
   | { kind: "checks_missing" }
   | { kind: "checks_held" }
   | { kind: "checks_failed" }
-  | { kind: "draft" }
+  | { kind: "in_progress" }
   | { kind: "sensitive_surface"; files: { path: string; reason: string }[] }
   | {
       kind: "ready";
@@ -210,18 +210,26 @@ export function evaluateMechanical(
 ): MechanicalVerdict {
   if (isDeclined(pr)) return { kind: "declined" };
   if (isNoOp(pr)) return { kind: "no_op" };
-  // Third, and ahead of every check that can *act* on the pull request. A draft
-  // is the coding agent's own statement that it has not finished, and it is the
-  // most authoritative completion signal available — the agent knows, and
-  // nothing else here does.
+  // Third, and ahead of every check that can *act* on the pull request. The
+  // agent's own statement that it has not finished is the most authoritative
+  // completion signal available — the agent knows, and nothing else here does.
   //
-  // Gate 6 (§10.14) found Factory merging drafts: `for_review` never consulted
-  // `isDraft`, `#mergeReady` called `markPullRequestReady` to clear the flag,
-  // and two merge commits across two gates still carry the agent's `[WIP]`
-  // title. It survived six gates only because fixture Work Items are small
-  // enough that the agent's first push is usually its last. On any change large
-  // enough to arrive in pieces — source first, tests second — this merges half
-  // the work and closes the Work Item as done.
+  // That signal is the `[WIP]` title prefix, **not** `isDraft`. Measured across
+  // every coding-agent pull request in the fixture repositories (12/12 in
+  // factory-gate2, plus factory-gate3), the agent opens as `[WIP] <title>` and
+  // renames the prefix away when it finishes. It never clears the draft flag:
+  // every `ReadyForReviewEvent` observed was Factory's own token, and gate3 PR
+  // #16 sits finished-and-renamed while still `isDraft: true`. Keying on
+  // `isDraft` would therefore wait for an event that never arrives and stall
+  // every Work Item permanently (§10.15).
+  //
+  // Gate 6 (§10.14) found this merging unfinished work for real: gate2 #36 was
+  // merged at 17:43:38 and the agent renamed away its `[WIP]` at 17:45:16, 98
+  // seconds later; gate2 #26 and gate3 #7 merged early the same way. It survived
+  // six gates only because fixture Work Items are small enough that the agent
+  // usually finishes before the next poll. On any change large enough to arrive
+  // in pieces — source first, tests second — this merges half the work and
+  // closes the Work Item as done.
   //
   // Ordered *after* `declined`/`no_op` deliberately, so an agent that died or
   // refused still retries on the existing schedule and this introduces no new
@@ -230,7 +238,7 @@ export function evaluateMechanical(
   // progress does not merely merge too early, it destroys work that was still
   // being written. A half-pushed change legitimately touches nothing in scope
   // yet, and legitimately fails its own tests.
-  if (pr.isDraft) return { kind: "draft" };
+  if (isWorkInProgress(pr)) return { kind: "in_progress" };
   if (isUntouched(pr, expectedFiles)) {
     return { kind: "untouched", touchedFiles: pr.changedFilePaths };
   }

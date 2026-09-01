@@ -156,7 +156,11 @@ function findWorkItem(
 }
 
 function serializePr(pr: LinkedPullRequest, minimal = false) {
-  const base = { ...pr, createdAt: pr.createdAt.toISOString() };
+  const base = {
+    ...pr,
+    createdAt: pr.createdAt.toISOString(),
+    headCommittedAt: pr.headCommittedAt.toISOString(),
+  };
   if (!minimal) return base;
   // The coding agent quotes the whole Work Item issue back into the PR body, so
   // `body` alone dominates the response at scale (§10.2, F3: ten items overflowed
@@ -380,7 +384,7 @@ server.registerTool(
     description:
       "Run §5.1's cheap, deterministic checks against a Work Item's current open pull request: " +
       "no-op, declined, untouched scope, merge conflict, checks pending/failed, sensitive surface, " +
-      "draft, or ready. Pure and " +
+      "in progress, or ready. Pure and " +
       "read-only — call this before `dispatch_integrate` to see the verdict it would act on, or on " +
       "its own to inspect a Work Item without taking any action. " +
       "Two fields on a `ready` verdict still need your judgment (Gate 5, §10.12). `outOfScopeFiles` " +
@@ -395,12 +399,13 @@ server.registerTool(
       "lockfiles, registry config). §7.3 reserves those for a human regardless of declared scope, " +
       "so `dispatch_integrate` escalates rather than retrying — the work is not wrong, it is just " +
       "not Factory's to merge unattended. " +
-      "A `draft` verdict means the coding agent has not marked the pull request ready for review, " +
+      "An `in_progress` verdict means the coding agent still has the pull request titled `[WIP]`, " +
       "so it is not finished and nothing here should act on it — not merge it, and equally not " +
       "close or rebase it. Checked ahead of scope, conflict and check verdicts on purpose: a " +
       "half-pushed change legitimately touches nothing in scope yet and legitimately fails its own " +
-      "tests, and those verdicts close the pull request (§10.14). Wait for the agent to mark it " +
-      "ready.",
+      "tests, and those verdicts close the pull request (§10.15). Wait for the agent to rename it. " +
+      "Note the signal is the title prefix, not the draft flag: the agent opens every pull request " +
+      "as a draft and never clears it, so draftness means nothing here.",
     inputSchema: {
       ...WorkItemLocatorShape,
       expectedFiles: z

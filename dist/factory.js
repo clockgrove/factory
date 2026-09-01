@@ -2758,6 +2758,7 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
                 nodes {
                   commit {
                     oid
+                    committedDate
                     statusCheckRollup { state }
                     checkSuites(first: 20) {
                       nodes {
@@ -2828,7 +2829,12 @@ function toPullRequest(pr) {
     checksNeverStarted: checks === "FAILURE" && !commit?.statusCheckRollup?.state,
     mergeable: pr.mergeable,
     createdAt: new Date(pr.createdAt),
-    headSha: commit?.oid ?? ""
+    headSha: commit?.oid ?? "",
+    // Falling back to the PR's own creation time keeps the field a real Date
+    // even for the (unobserved) case of a pull request with no commits: a
+    // brand-new PR is then trivially "recently active", which errs toward
+    // waiting rather than toward closing something live.
+    headCommittedAt: commit?.committedDate ? new Date(commit.committedDate) : new Date(pr.createdAt)
   };
 }
 function copilotAssignments(wi) {
@@ -3361,10 +3367,19 @@ function isAssignedToCopilot(wi) {
 }
 var DISPATCH_CONFIRM_WINDOW_MS = 9e4;
 var DECLINE_TITLE_PATTERN = /^\s*no-?op\s*:/i;
+var WIP_TITLE_PATTERN = /^\s*\[wip\]/i;
+function isWorkInProgress(pr) {
+  return WIP_TITLE_PATTERN.test(pr.title);
+}
 var EMPTY_PULL_REQUEST_GRACE_MS = 6e5;
 function withinEmptyPullRequestGrace(pr, now) {
   if (DECLINE_TITLE_PATTERN.test(pr.title)) return false;
   return now.getTime() - pr.createdAt.getTime() < EMPTY_PULL_REQUEST_GRACE_MS;
+}
+var WIP_INACTIVITY_GRACE_MS = 12e5;
+function isAbandonedAttempt(pr, now) {
+  if (!isWorkInProgress(pr)) return false;
+  return now.getTime() - pr.headCommittedAt.getTime() >= WIP_INACTIVITY_GRACE_MS;
 }
 function latestCopilotAssignment(wi) {
   if (wi.copilotAssignments.length === 0) return null;
@@ -3401,6 +3416,8 @@ function deriveState(wi, now) {
       const stillPlausiblyWorking = withinConfirmWindow(wi, now) || withinEmptyPullRequestGrace(current, now);
       return stillPlausiblyWorking ? "in_flight" : "failed";
     }
+    if (isAbandonedAttempt(current, now)) return "failed";
+    if (isWorkInProgress(current)) return "in_flight";
     if (checksSettled(current)) return "for_review";
     return "in_flight";
   }

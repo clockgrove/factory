@@ -46,6 +46,7 @@ function pr(over: Partial<LinkedPullRequest> = {}): LinkedPullRequest {
     mergeable: "UNKNOWN",
     createdAt: NOW,
     headSha: "deadbeef",
+    headCommittedAt: NOW,
     ...over,
   };
 }
@@ -565,30 +566,33 @@ describe("Dispatcher.integrate", () => {
     expect(writer.calls).toEqual(["mergePullRequest:PR_ready"]);
   });
 
-  it("never un-drafts a pull request on its way to merging it", async () => {
-    // This test used to assert the opposite — that `integrate` calls
-    // `markPullRequestReady` first — and that assertion was pinning a real
-    // bug (§10.14). A draft is the coding agent's own "not finished" signal;
-    // clearing it to merge overrides the one party that knows. Two merge
-    // commits in factory-gate2 still carry the agent's `[WIP]` title because
-    // of it. `evaluate.ts` now returns `draft` before anything reaches here,
-    // and with the un-draft gone GitHub's own refusal to merge a draft is the
-    // backstop if it ever does.
+  it("un-drafts before merging, because the agent never does", async () => {
+    // The agent opens every pull request as a draft and never clears the flag:
+    // every `ReadyForReviewEvent` in every fixture repository was Factory's own
+    // token, and gate3 PR #16 sits finished-and-renamed while still a draft.
+    // GitHub refuses to merge a draft, so without this call every merge fails.
+    // Safe because the completion signal is the `[WIP]` prefix, not draftness
+    // (§10.15) — nothing unfinished reaches here.
     const writer = new FakeWriter();
     const d = makeDispatcher(writer);
     const item = derivedWi();
     const p = pr({ id: "PR_draft", isDraft: true });
     await d.integrate(item, p, READY);
-    expect(writer.calls).not.toContain("markPullRequestReady:PR_draft");
+    expect(writer.calls).toEqual([
+      "markPullRequestReady:PR_draft",
+      "mergePullRequest:PR_draft",
+    ]);
   });
 
-  it("waits on a draft without closing, retrying or merging it", async () => {
+  it("waits on unfinished work without closing, retrying or merging it", async () => {
     const writer = new FakeWriter();
     const d = makeDispatcher(writer);
     const item = derivedWi();
-    const outcome = await d.integrate(item, pr({ id: "PR_wip", isDraft: true }), {
-      kind: "draft",
-    });
+    const outcome = await d.integrate(
+      item,
+      pr({ id: "PR_wip", title: "[WIP] Add slugify" }),
+      { kind: "in_progress" },
+    );
     expect(outcome).toEqual({ merged: false, action: "waiting" });
     // Nothing at all: no merge, and crucially no close/reassign, because the
     // agent is plausibly still writing into this pull request.

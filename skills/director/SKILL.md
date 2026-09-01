@@ -110,9 +110,10 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
 
    `failed` is a settled judgment, not a guess: a pull request that exists but has no diff is left
    `in_flight` until it is past *both* the dispatch confirm window and its own ten-minute grace
-   period, because the agent opens its draft PR within seconds and then works for minutes. You do
-   not need to second-guess a `failed` verdict or "wait one more interval" to see if it self-corrects
-   — if it says `failed`, the windows have already elapsed.
+   period, because the agent opens its draft PR within seconds and then works for minutes. The same
+   applies to work still titled `[WIP]`: it stays `in_flight` until twenty minutes pass with no new
+   push. You do not need to second-guess a `failed` verdict or "wait one more interval" to see if it
+   self-corrects — if it says `failed`, the windows have already elapsed.
 
 6. **Integrate reviewable items.** For each Work Item currently `for_review`, call
    `dispatch_integrate`, passing `expectedFiles` when the Work Item declared a `scope` (this is what
@@ -170,14 +171,15 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
      request's checks have *never* started, GitHub is probably holding the run awaiting approval:
      call `approve_held_workflow_runs` rather than waiting indefinitely (see "CI that GitHub is
      holding" below).
-   - `draft` — the coding agent has not marked the pull request ready for review, so it is still
-     working. **Wait.** Do not merge it, and equally do not close or retry it: the work in a draft is
-     usually fine and merely unfinished, and closing it discards a session still writing into it.
-     Factory used to un-draft and merge these, and merged at least two pull requests the agent still
-     had titled `[WIP]` before anyone noticed (§10.14). It no longer does, and it will not un-draft
-     on your behalf — only the agent clears that flag. If the *same* Work Item reports `draft` for
-     several consecutive cycles with an unchanging `headSha`, the agent has stalled rather than is
-     working; escalate it, the same way you would a persistent `checks_missing`.
+   - `in_progress` — the coding agent still has the pull request titled `[WIP]`, so it is still
+     working. **Wait.** Do not merge it, and equally do not close or retry it: the work is usually
+     fine and merely unfinished, and closing it discards a session still writing into it. Factory
+     used to merge these — three pull requests across two gates were merged before the agent
+     announced completion, one of them 98 seconds early (§10.14/§10.15). The signal is the `[WIP]`
+     title prefix, **not** the draft flag: the agent opens every pull request as a draft and never
+     clears it, so draftness tells you nothing. You do not need to act on a stall here either —
+     Factory bounds it, deriving `failed` once a `[WIP]` pull request stops receiving pushes for
+     twenty minutes, which retries and then escalates on the usual schedule.
    - `checks_missing` — the repository is known to run CI on pull requests (or Factory could not
      determine whether it does, which is treated the same way), but this PR carries no
      checks at all. Usually a timing race that clears within a cycle, so leave it. If the *same*

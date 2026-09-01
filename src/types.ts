@@ -171,6 +171,21 @@ export interface LinkedPullRequest {
    * request, which the REST API filters by `head_sha` rather than by PR number.
    */
   headSha: string;
+  /**
+   * When the head commit was authored — the closest available proxy for "when
+   * did the coding agent last push".
+   *
+   * Deliberately *not* the pull request's `updatedAt`. A PR is touched by
+   * comments, labels and review requests, and Factory itself comments on pull
+   * requests (§6), so `updatedAt` would be refreshed by Factory's own activity
+   * and a dead attempt would look alive forever. The head commit moves only
+   * when the agent actually pushes.
+   *
+   * Also not `pushedDate`: verified live against the GraphQL API on 2026-09-01
+   * (clockgrove/factory-gate2 PR #36) it returns `null`, so depending on it
+   * would have silently produced no timestamp at all.
+   */
+  headCommittedAt: Date;
 }
 
 export interface IssueRef {

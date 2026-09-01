@@ -4,23 +4,29 @@ A GitHub-native engineering-management plugin. You author an **Objective**; Fact
 **Work Items**, dispatches them to parallel GitHub Copilot agent sessions, supervises the results,
 and replans — unattended.
 
-> **Status: in implementation.** The PRD is accepted and build order steps 1–6 are complete — Factory
-> can derive the full state of an Objective from GitHub alone, dispatch/confirm/retry/escalate Work
-> Items against a real repo, mechanically classify a PR's outcome (no-op, declined, untouched,
+> **Status: build order (§9) complete; Gate 0 (§10) passed.** All seven build-order steps are done —
+> Factory can derive the full state of an Objective from GitHub alone, dispatch/confirm/retry/escalate
+> Work Items against a real repo, mechanically classify a PR's outcome (no-op, declined, untouched,
 > conflict, checks), integrate a mechanically-ready PR (mark ready, merge, resolve or reject a
-> conflict) back through the same retry/escalate machinery, compile a human-authored Objective into a
-> validated Work Item graph (`skills/objective-compilation/SKILL.md`,
-> `schemas/objective.schema.json`, `schemas/work-item.schema.json`), and apply that graph to GitHub as
-> sub-issues plus native `blocked by` edges (`src/graph.ts`), through the same
-> breaker/pacer/concurrency discipline as dispatch. Step 7 is now in progress: `src/mcp-server.ts`
-> bundles that whole library as a portable stdio MCP server (Director's only write path,
-> IMPLEMENTATION-PLAN.md §15.3), and `skills/director/SKILL.md` assembles §4's loop entirely through
-> its tools. Root `plugin.json`/`mcp.json` (Agent Plugins 1.0 — read natively by both Copilot CLI and
-> Codex CLI) and `.claude-plugin/plugin.json`/`.mcp.json` (Claude Code's own manifest/MCP format) are
-> in place. Remaining before step 7 is done: a live check of the not-yet-exercised write mutations
-> (`dispatch.ts`/`graph.ts`'s `addHumanAssignee`/`addComment`/`closePullRequest`/`addBlockedBy`/
-> `createIssue`), then Gate 0's full-loop rehearsal against `clockgrove/factory-gate0` (§10).
-> See [`docs/PRD.md`](docs/PRD.md) and [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md).
+> conflict, close the Objective once every Work Item is done) back through the same retry/escalate
+> machinery, compile a human-authored Objective into a validated Work Item graph
+> (`skills/objective-compilation/SKILL.md`, `schemas/objective.schema.json`,
+> `schemas/work-item.schema.json`), apply that graph to GitHub as sub-issues plus native `blocked by`
+> edges (`src/graph.ts`), and assemble the whole loop behind `src/mcp-server.ts` (a portable stdio MCP
+> server — Director's only write path, IMPLEMENTATION-PLAN.md §15.3) plus `skills/director/SKILL.md`.
+> Root `plugin.json`/`mcp.json` (Agent Plugins 1.0 — read natively by both Copilot CLI and Codex CLI)
+> and `.claude-plugin/plugin.json`/`.mcp.json` (Claude Code's own manifest/MCP format) are in place.
+>
+> Gate 0's rehearsal ran end-to-end against `clockgrove/factory-gate0`: Objective #6 ("Add three pure
+> utility functions") was compiled, dispatched as three independent Work Items, and closed — three
+> merged PRs, three closed Work Items, Objective closed, matching §10's pass bar. The rehearsal itself
+> is exactly what caught three real defects that no unit test had (each fixed live, not routed around):
+> `read_objective` never exposed the Objective's `body`, the coding agent's assignee login
+> (`"Copilot"`) differs from its suggested-actor login (`"copilot-swe-agent"`) and was misread as a
+> human co-assignee — misclassifying every dispatch as an immediate escalation until fixed — and
+> GitHub does not auto-close a parent issue just because every sub-issue closed, which needed a new
+> `close_objective` tool. See [`docs/PRD.md`](docs/PRD.md) and
+> [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md).
 
 ## Design in one picture
 

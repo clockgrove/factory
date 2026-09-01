@@ -1293,6 +1293,31 @@ Four mutations, four failures: dropping the `in_progress` verdict fails 5 tests,
 inactivity bound fails 2, dropping the `in_flight` derivation fails 1, and removing the un-draft call
 fails 1.
 
+**The fix was then validated against evidence collected before anyone knew the prefix mattered.**
+Gate 6 had recorded a PR title in every `read_objective` snapshot of its run, for unrelated reasons.
+Replaying the `[WIP]` rule against those snapshots is a clean natural experiment, because nothing
+about how they were gathered was shaped by the hypothesis they now test:
+
+| snapshot | PR | title as recorded | rule says | what happened |
+|---|---|---|---|---|
+| 17:35:47 | #35 | `[WIP] Add summarizeText composed from…` | `in_progress` | held (0 files) |
+| 17:39:07 | #35 | `Add summarizeText utility composing …` | finished → merge | merged ✅ |
+| 17:43:14 | #36 | `[WIP] Add slugFromText composed from…` | `in_progress` → hold | **merged** ❌ |
+| 17:45:16 | #36 | agent renames | finished → merge | — |
+
+The rule reproduces the one correct merge, catches the one premature merge, and produces **no false
+holds**. #35's prefix disappeared between 17:35:47 and 17:39:07, exactly spanning the agent
+finishing — independent confirmation that the rename tracks completion, from snapshots that were not
+looking for it. The measured cost of the hold: #36 would have merged on the next cycle after
+17:45:16, about two minutes later on a three-minute loop. No stall, no extra attempt.
+
+**The same snapshots rule out the obvious alternative signal.** "Has a diff yet" is not completion:
+#35 read `changedFiles: 0` while `[WIP]` and `3` after the rename, but **#36 read `changedFiles: 3`
+while still `[WIP]`** — its full three files were on disk 92 seconds before the agent considered
+itself done. Anything keyed on diff presence merges #36 exactly as Factory did. Of the three
+candidate signals — draft flag, diff presence, title prefix — only the prefix separates those two
+cases, which is why the fix is keyed on it rather than on the more natural-looking alternatives.
+
 **Why six gates missed it: the live API rewrites the evidence.** Re-reading PR #36 after the fact,
 Gate 6 found `title: "Add \`slugFromText\` as summarized slug composition"` and `isDraft: false` —
 a clean, finished-looking pull request. At the moment Factory evaluated and merged it, the same
@@ -1313,10 +1338,21 @@ write, and cannot be edited by the agent afterwards.
 
 If the body was still growing, nothing guaranteed the code was not.
 
-**The lesson is the repo's own rule paying for itself.** The first fix was internally coherent, fully
-tested, mutation-checked, and would have broken Factory completely the first time it ran. What caught
-it was refusing to ship a behavioural claim about GitHub without measuring it — and the measurement
-took one query.
+**The lesson is the repo's own rule paying for itself, and it needs widening.** The first fix was
+internally coherent, fully tested, mutation-checked, and would have broken Factory completely the
+first time it ran. What caught it was refusing to ship a behavioural claim about GitHub without
+measuring it — and the measurement took one query.
+
+The widening: the standing rule about verifying platform claims live has always read as being about
+**schemas** — field names, mutation shapes, response envelopes — because those are visibly things
+one might misremember. This was a **behavioural** claim, and behavioural claims are the expensive
+ones precisely because they do not look like claims. "A draft pull request means the author is not
+finished" never presented itself as an assumption requiring verification; it presented itself as
+background knowledge about how GitHub is used. It was wrong for this one agent, which uses the
+title instead, and nothing about its phrasing would ever have flagged it for checking. Both sides of
+this exchange made the same error from opposite directions — one inferring that *something* must
+have un-drafted a merged PR, one inferring that draftness was the agent's voice — and both were
+reasoning correctly from an unmeasured assumption about platform behaviour.
 
 **The test fixture had been asserting the bug, again.** `pr()` in `test/evaluate.test.ts` defaulted
 to `isDraft: true`, so every test asserting `ready` was quietly asserting that Factory merges drafts;

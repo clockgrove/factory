@@ -164,6 +164,15 @@ export function withinEmptyPullRequestGrace(
  * too late merely delays a human by minutes. It is set well beyond the largest
  * gap measured between an agent's first push and its completion rename (gate2
  * PR #21: ~6 minutes; most complete in under 3).
+ *
+ * **If this ever needs tuning, tune it upward.** The dangerous case is a pull
+ * request that is *finished but not yet renamed*: it derives `failed`, gets
+ * retried, and the retry closes correct completed work. Shrinking this bound to
+ * catch dead agents sooner buys minutes and risks destroying a finished Work
+ * Item; growing it costs only the delay before a human hears about a genuinely
+ * dead one. The measured push-to-rename gap on gate2 PR #36 was ~100 seconds,
+ * so the current value carries roughly a twelvefold margin over the observed
+ * worst case — there is no evidence-backed reason to reduce it.
  */
 export const WIP_INACTIVITY_GRACE_MS = 1_200_000;
 

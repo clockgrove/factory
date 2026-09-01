@@ -115,6 +115,12 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
    push. You do not need to second-guess a `failed` verdict or "wait one more interval" to see if it
    self-corrects — if it says `failed`, the windows have already elapsed.
 
+   If you are ever tempted to argue that twenty-minute bound is too long, argue the other way. The
+   case it can get wrong is a pull request that is *finished but not yet renamed*, which derives
+   `failed` and is then retried — and a retry closes correct, completed work. Waiting longer only
+   delays a human; waiting less can destroy a Work Item. The largest push-to-rename gap measured so
+   far is about 100 seconds.
+
 6. **Integrate reviewable items.** For each Work Item currently `for_review`, call
    `dispatch_integrate`, passing `expectedFiles` when the Work Item declared a `scope` (this is what
    lets `evaluate_mechanical`'s untouched-scope check run at all). Read the returned `verdict` kind:

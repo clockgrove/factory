@@ -382,6 +382,28 @@ authoring any Objective against a freshly seeded rehearsal repo:
 - If a Work Item's PR shows up with hundreds of unexpected changed files, check for exactly this
   before treating it as a Director finding.
 
+**A Director session must keep its automation interval short enough that its own message queue
+never meaningfully backs up.** Keep the interval closer to 1 minute than 5 for a small Objective
+(§4.1's 30s bare-metal `POLL_INTERVAL` is the right instinct) and keep each cycle's own work minimal
+(one `read_objective`, act on exactly what it returns, stop) so a human message arriving between
+cycles is picked up promptly rather than sitting behind a long-running turn. A Director must be able
+to process interleaved messages alongside its real work — that is a basic harness requirement, not
+something to design around.
+
+**Whoever is monitoring a running Director session (human or another agent) must interleave
+message-processing with its own tool calls too — this is not just a Director-side requirement.**
+Gate 1's actual backlog (a dozen-plus messages, visible in the app under the monitoring session)
+turned out to be the *monitoring* session's own inbox: the Director session correctly sent one
+cross-session report per cycle exactly as instructed, but the parent/monitoring session kept
+chaining long, uninterrupted sequences of its own tool calls (repo edits, `gh` checks, commits)
+without ending a turn to let those incoming reports be delivered and read. The reports were never
+lost or corrupted — every tool involved is idempotent/no-op-safe against a terminal state — but they
+went unread for far longer than necessary, and re-deriving the same status via direct `gh` polling
+instead of reading the cross-session messages that already said so is wasted, redundant work. The
+lesson is symmetric: both the Director and whatever is watching it need short, single-purpose turns
+that yield control back often, not long batched ones, so messages in either direction get processed
+close to when they arrive rather than queuing.
+
 ---
 
 ## 11. Risks

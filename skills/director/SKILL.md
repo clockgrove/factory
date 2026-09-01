@@ -116,10 +116,16 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
    under it closed — an Objective with a 100%-complete Work Item graph was confirmed live to sit
    `OPEN` forever with no tool call here. `close_objective` is a no-op if the Objective is already
    closed or if any Work Item is not yet `done`, so it is always safe to call once you observe
-   `allDone`.) Otherwise, wait an interval appropriate to the harness you are running in (§4.1's `POLL_INTERVAL`
-   of 30s is calibrated for a tight bare-metal loop; a Director running inside an interactive or
-   scheduled session should instead wait for its next natural invocation) and repeat from step 1 with
-   a fresh read.
+   `allDone`.) Otherwise, if you are self-scheduling via a session automation, keep the interval
+   short — closer to 1 minute than 5 for a small Objective (§4.1's 30s bare-metal `POLL_INTERVAL` is
+   the right instinct; scale up only for a genuinely large Objective where a tight interval would
+   just waste cycles reading unchanged state). A running Director must stay responsive to messages
+   arriving between cycles — a human checking in, a correction, a nudge — not just to its own timer
+   (Gate 1 finding, 2026-09-01: a 5-minute interval combined with a human messaging the same session
+   directly queued a backlog of a dozen-plus messages behind long-running cycles). Keep each cycle's
+   own work to exactly this loop — one `read_objective`, act on what it returns, stop — so the next
+   queued message is always picked up promptly rather than sitting behind an oversized turn. Repeat
+   from step 1 with a fresh read.
 
 ## The confidence bar (§7.3) — read this before calling any dispatch/integrate tool
 

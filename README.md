@@ -178,7 +178,11 @@ and replans — unattended.
 > un-drafting and merging three seconds apart, the agent's completion rename arriving after. It
 > survived because fixture tasks are small enough that the agent usually finishes before the next
 > poll; on any change that arrives in pieces, Factory merges the half and closes the Work Item as
-> done.
+> done. Re-reading one of those pull requests later caught the agent in the act: its body had roughly
+> doubled and its `[WIP]` prefix had vanished **after** Factory merged it. That is also why six gates
+> missed this — a pull request's title, body and draft flag are mutable, so auditing a finished run
+> through the API shows what is true now, not what Factory decided on. Only the squash subject on
+> `main` preserved the evidence.
 >
 > **The first fix was wrong and measuring caught it.** Reading "draft" as the agent's not-finished
 > signal is the obvious move, and it would have stalled every Work Item forever: across 12/12 pull

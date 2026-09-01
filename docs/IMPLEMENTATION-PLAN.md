@@ -1293,6 +1293,26 @@ Four mutations, four failures: dropping the `in_progress` verdict fails 5 tests,
 inactivity bound fails 2, dropping the `in_flight` derivation fails 1, and removing the un-draft call
 fails 1.
 
+**Why six gates missed it: the live API rewrites the evidence.** Re-reading PR #36 after the fact,
+Gate 6 found `title: "Add \`slugFromText\` as summarized slug composition"` and `isDraft: false` —
+a clean, finished-looking pull request. At the moment Factory evaluated and merged it, the same
+fields read `[WIP] Add slugFromText composed from summarizeText and slugify`, and its body was 463
+bytes against 931 today. **The agent renamed the pull request and roughly doubled its body after
+Factory had already merged it** — the "arrives in pieces" failure caught in the act on the run
+itself, rather than reasoned about from a squash subject.
+
+The general point is worth more than the instance. **A pull request's `title`, `body` and `isDraft`
+are mutable, and reading them later tells you what is true now, not what Factory decided on.** Every
+gate that audited its own run after finishing was therefore looking at evidence the agent had since
+overwritten, which is why a bug present since the first gate survived six of them plus a green test
+suite. The one artifact that *did* survive is the squash commit subject on `main`, because Factory
+merges with the title as it stood at merge time — which is how the `[WIP]` prefixes were found at
+all. That makes git history, not the API, the authoritative record of what Factory acted on, and it
+is the reason no merge-time audit comment is being added here: the record already exists, costs no
+write, and cannot be edited by the agent afterwards.
+
+If the body was still growing, nothing guaranteed the code was not.
+
 **The lesson is the repo's own rule paying for itself.** The first fix was internally coherent, fully
 tested, mutation-checked, and would have broken Factory completely the first time it ran. What caught
 it was refusing to ship a behavioural claim about GitHub without measuring it — and the measurement
@@ -1403,6 +1423,12 @@ in front of a real Objective.
   onto its `main` under the §7.3 override. Any later gate treating that repo as pristine inherits it
   — and, specifically, a later run seeing no lockfile scope creep is **not** evidence that the
   `outOfScopeFiles` reporting works, because there is no longer a lockfile for an agent to generate.
+- **A gate cannot audit its own run from the API afterwards.** A pull request's `title`, `body` and
+  `isDraft` are mutable and the coding agent keeps editing them after Factory acts — measured in
+  §10.15, where a merged pull request's body doubled and its `[WIP]` prefix vanished *after* the
+  merge. Any post-hoc read describes the present, not the decision. Merge-time evidence survives only
+  in the squash commit subject on `main`, so a gate report reconstructing "what Factory saw" from a
+  later API read is describing something else.
 
 ## 11. Risks
 

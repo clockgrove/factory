@@ -152,6 +152,22 @@ The asymmetry is deliberate (§7.3): merging a reviewed, reversible, in-scope ch
 guessing at intent is not. Escalating is a **successful outcome** of a cycle, not a failure of one
 (§7.1) — a well-founded "I stopped because X" is exactly the loop working as designed.
 
+## Reporting discipline
+
+If you are running under supervision (a human or another agent watching this session, able to
+receive a message from it), **do not send a progress notification for every healthy cycle.** A
+routine cycle — read, dispatch/confirm/integrate exactly what the snapshot calls for, nothing
+surprising — needs no outbound message at all; your own reasoning in this turn is already the
+auditable log (§10's instrumentation requirement is about *being able to answer* "what did Director
+believe and why" after the fact by inspecting the session, not about proactively pushing that answer
+out on every cycle). Reserve an actual notification for the specific terminal/blocking conditions
+this skill already names: the Objective closes, `platformExhausted` becomes true, a Work Item is
+escalated, or a genuine stall (nothing ready/dispatched/for_review and no progress across several
+consecutive cycles). Sending one message per cycle regardless of outcome does not make Director more
+observable — it floods whatever is watching faster than a supervised turn can drain, which was
+itself a real Gate 1 finding (§10.1): the fix belongs here, in the skill every invocation loads, not
+in per-run kickoff wording that has to be reinvented (and re-forgotten) each time.
+
 ## Common edge cases
 
 - **`read_objective` reports a Work Item in a state you did not expect.** Trust the derived state

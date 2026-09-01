@@ -48,6 +48,26 @@ design and should not be reconciled with, second-guessed against, or drifted tow
   see IMPLEMENTATION-PLAN.md §12 item 1 and `README.md`'s status line). If a future rehearsal (Gate 1
   or a re-run) needs a disposable repo again, create a fresh one — there is nothing to reuse anymore.
 
+## Staying steerable while orchestrating a child session (Gate rehearsals, any multi-session work)
+
+Gate 1 finding, 2026-09-01: when driving or monitoring a child session (e.g. a Director rehearsal),
+**do not chain long, uninterrupted sequences of your own tool calls** (doc edits, `git` commits,
+`gh` polling, `powershell` sleeps) for minutes at a stretch. Cross-session messages the child sends
+back, and redirections the user sends to *this* session, only get delivered/processed between your
+turns — a long unbroken run of tool calls is exactly the same failure mode as an over-eager child
+flooding its own queue (see `skills/director/SKILL.md`'s "Reporting discipline"), just on the
+receiving end. A dozen-plus messages queued unread in this exact session because tool-call chaining
+never yielded a turn boundary for them to land in.
+
+- Prefer several short responses over one long one when coordinating a child session: do a small
+  batch of checks/edits, then stop and let the next turn happen, rather than trying to resolve
+  everything in one uninterrupted pass.
+- Re-deriving status you could instead just *read* (e.g. re-polling `gh` for state a child already
+  reported via `send_session_message`) is redundant work and a sign you have not actually processed
+  your own inbox yet — read what already arrived before doing more independent verification.
+- Being steerable means a human correction should be actionable within your next turn, not stuck
+  behind several more minutes of self-directed work you had already decided to do.
+
 ## When resuming after a gap (new session, compaction, etc.)
 
 1. `git log --oneline -15` and diff against `README.md`'s status line to find the real current step.

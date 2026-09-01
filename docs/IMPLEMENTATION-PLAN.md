@@ -383,26 +383,22 @@ authoring any Objective against a freshly seeded rehearsal repo:
   before treating it as a Director finding.
 
 **A Director session must keep its automation interval short enough that its own message queue
-never meaningfully backs up.** Keep the interval closer to 1 minute than 5 for a small Objective
-(§4.1's 30s bare-metal `POLL_INTERVAL` is the right instinct) and keep each cycle's own work minimal
-(one `read_objective`, act on exactly what it returns, stop) so a human message arriving between
-cycles is picked up promptly rather than sitting behind a long-running turn. A Director must be able
-to process interleaved messages alongside its real work — that is a basic harness requirement, not
-something to design around.
+never meaningfully backs up**, and must not proactively report on every healthy cycle — both fixed
+directly in `skills/director/SKILL.md` (the cadence guidance in step 8, and the new "Reporting
+discipline" section) so every future invocation inherits them regardless of kickoff wording.
 
-**Whoever is monitoring a running Director session (human or another agent) must interleave
-message-processing with its own tool calls too — this is not just a Director-side requirement.**
-Gate 1's actual backlog (a dozen-plus messages, visible in the app under the monitoring session)
-turned out to be the *monitoring* session's own inbox: the Director session correctly sent one
-cross-session report per cycle exactly as instructed, but the parent/monitoring session kept
-chaining long, uninterrupted sequences of its own tool calls (repo edits, `gh` checks, commits)
-without ending a turn to let those incoming reports be delivered and read. The reports were never
-lost or corrupted — every tool involved is idempotent/no-op-safe against a terminal state — but they
-went unread for far longer than necessary, and re-deriving the same status via direct `gh` polling
-instead of reading the cross-session messages that already said so is wasted, redundant work. The
-lesson is symmetric: both the Director and whatever is watching it need short, single-purpose turns
-that yield control back often, not long batched ones, so messages in either direction get processed
-close to when they arrive rather than queuing.
+**Whoever is monitoring a running Director session (human or another agent) must stay steerable and
+process its own inbox too — this is not just a Director-side requirement.** Gate 1's actual backlog
+(a dozen-plus messages, visible in the app under the *monitoring* session, not the Director session)
+came from the parent/monitoring session chaining long, uninterrupted sequences of its own tool calls
+(repo edits, `gh` checks, commits) without ending a turn to let the Director's incoming reports be
+delivered and read — and then re-deriving the same status via direct `gh` polling instead of reading
+what had already arrived. Fixed directly in this repo's `AGENTS.md` ("Staying steerable while
+orchestrating a child session"), since that is what shapes the orchestrating agent's own behavior,
+not a Factory skill. Nothing was lost or corrupted either way — every tool here is
+idempotent/no-op-safe against a terminal state — but both sides need short, single-purpose turns
+that yield control back often, so messages in either direction get processed close to when they
+arrive rather than queuing.
 
 ---
 

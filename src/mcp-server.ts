@@ -380,7 +380,7 @@ server.registerTool(
     description:
       "Run §5.1's cheap, deterministic checks against a Work Item's current open pull request: " +
       "no-op, declined, untouched scope, merge conflict, checks pending/failed, sensitive surface, " +
-      "or ready. Pure and " +
+      "draft, or ready. Pure and " +
       "read-only — call this before `dispatch_integrate` to see the verdict it would act on, or on " +
       "its own to inspect a Work Item without taking any action. " +
       "Two fields on a `ready` verdict still need your judgment (Gate 5, §10.12). `outOfScopeFiles` " +
@@ -394,7 +394,13 @@ server.registerTool(
       "redefines what CI runs or what it can reach (workflows, actions, dependency manifests and " +
       "lockfiles, registry config). §7.3 reserves those for a human regardless of declared scope, " +
       "so `dispatch_integrate` escalates rather than retrying — the work is not wrong, it is just " +
-      "not Factory's to merge unattended.",
+      "not Factory's to merge unattended. " +
+      "A `draft` verdict means the coding agent has not marked the pull request ready for review, " +
+      "so it is not finished and nothing here should act on it — not merge it, and equally not " +
+      "close or rebase it. Checked ahead of scope, conflict and check verdicts on purpose: a " +
+      "half-pushed change legitimately touches nothing in scope yet and legitimately fails its own " +
+      "tests, and those verdicts close the pull request (§10.14). Wait for the agent to mark it " +
+      "ready.",
     inputSchema: {
       ...WorkItemLocatorShape,
       expectedFiles: z

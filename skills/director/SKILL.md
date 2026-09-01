@@ -170,6 +170,14 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
      request's checks have *never* started, GitHub is probably holding the run awaiting approval:
      call `approve_held_workflow_runs` rather than waiting indefinitely (see "CI that GitHub is
      holding" below).
+   - `draft` — the coding agent has not marked the pull request ready for review, so it is still
+     working. **Wait.** Do not merge it, and equally do not close or retry it: the work in a draft is
+     usually fine and merely unfinished, and closing it discards a session still writing into it.
+     Factory used to un-draft and merge these, and merged at least two pull requests the agent still
+     had titled `[WIP]` before anyone noticed (§10.14). It no longer does, and it will not un-draft
+     on your behalf — only the agent clears that flag. If the *same* Work Item reports `draft` for
+     several consecutive cycles with an unchanging `headSha`, the agent has stalled rather than is
+     working; escalate it, the same way you would a persistent `checks_missing`.
    - `checks_missing` — the repository is known to run CI on pull requests (or Factory could not
      determine whether it does, which is treated the same way), but this PR carries no
      checks at all. Usually a timing race that clears within a cycle, so leave it. If the *same*

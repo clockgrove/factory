@@ -565,13 +565,34 @@ describe("Dispatcher.integrate", () => {
     expect(writer.calls).toEqual(["mergePullRequest:PR_ready"]);
   });
 
-  it("marks a draft PR ready before merging", async () => {
+  it("never un-drafts a pull request on its way to merging it", async () => {
+    // This test used to assert the opposite — that `integrate` calls
+    // `markPullRequestReady` first — and that assertion was pinning a real
+    // bug (§10.14). A draft is the coding agent's own "not finished" signal;
+    // clearing it to merge overrides the one party that knows. Two merge
+    // commits in factory-gate2 still carry the agent's `[WIP]` title because
+    // of it. `evaluate.ts` now returns `draft` before anything reaches here,
+    // and with the un-draft gone GitHub's own refusal to merge a draft is the
+    // backstop if it ever does.
     const writer = new FakeWriter();
     const d = makeDispatcher(writer);
     const item = derivedWi();
     const p = pr({ id: "PR_draft", isDraft: true });
     await d.integrate(item, p, READY);
-    expect(writer.calls).toEqual(["markPullRequestReady:PR_draft", "mergePullRequest:PR_draft"]);
+    expect(writer.calls).not.toContain("markPullRequestReady:PR_draft");
+  });
+
+  it("waits on a draft without closing, retrying or merging it", async () => {
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    const item = derivedWi();
+    const outcome = await d.integrate(item, pr({ id: "PR_wip", isDraft: true }), {
+      kind: "draft",
+    });
+    expect(outcome).toEqual({ merged: false, action: "waiting" });
+    // Nothing at all: no merge, and crucially no close/reassign, because the
+    // agent is plausibly still writing into this pull request.
+    expect(writer.calls).toEqual([]);
   });
 
   it("waits on checks_pending without writing anything", async () => {

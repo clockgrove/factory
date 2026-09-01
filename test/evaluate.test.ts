@@ -24,7 +24,11 @@ function pr(over: Partial<LinkedPullRequest> = {}): LinkedPullRequest {
     id: "PR_1",
     number: 1,
     state: "OPEN" as const,
-    isDraft: true,
+    // A pull request the agent has marked ready for review. This defaulted to
+    // `true` while nothing read the flag, so every test asserting `ready` was
+    // quietly asserting that Factory merges drafts (§10.14). Draft is now an
+    // explicit choice a test has to make.
+    isDraft: false,
     title: "Add slugify",
     body: "",
     changedLines: 40,
@@ -474,5 +478,75 @@ describe("partial file lists", () => {
       outOfScopeFiles: [],
       fileListComplete: false,
     });
+  });
+});
+
+/**
+ * §10.14. A draft is the coding agent's own statement that it has not finished,
+ * and it was the one signal `evaluate.ts` ignored: `ready` never consulted it,
+ * so Factory merged pull requests the agent still had marked `[WIP]` — observed
+ * twice, in two different gates, on real merge commits.
+ *
+ * The interesting half is not "don't merge". It is that a half-finished pull
+ * request legitimately looks *broken* to every other check here — it touches
+ * nothing in scope yet, or fails its own tests — and those verdicts close the
+ * pull request. Judging work in progress destroys it.
+ */
+describe("draft pull requests", () => {
+  it("does not merge a pull request the agent has not marked ready", () => {
+    expect(evaluateMechanical(pr({ isDraft: true }), ["src/slugify.ts"])).toEqual({
+      kind: "draft",
+    });
+  });
+
+  it("is not confused by a draft that is otherwise perfectly mergeable", () => {
+    // Exactly the Gate 6 shape: green, mergeable, in scope — and still not
+    // ours to merge, because the author says it is not done.
+    const verdict = evaluateMechanical(
+      pr({ isDraft: true, checks: "SUCCESS", mergeable: "MERGEABLE" }),
+      ["src/slugify.ts"],
+    );
+    expect(verdict.kind).toBe("draft");
+  });
+
+  it("does not report a half-written draft as untouched, which would close it", () => {
+    // The agent pushed its test file first and has not written the source yet.
+    // `untouched` routes to retryOrEscalate, which closes the pull request —
+    // so without the draft check this deletes a session's work mid-flight.
+    const verdict = evaluateMechanical(
+      pr({ isDraft: true, changedFilePaths: ["test/slugify.test.ts"] }),
+      ["src/slugify.ts"],
+    );
+    expect(verdict.kind).toBe("draft");
+  });
+
+  it("does not report a draft's failing checks as a failed attempt", () => {
+    // An unfinished change failing its own tests is expected, not a defect.
+    const verdict = evaluateMechanical(pr({ isDraft: true, checks: "FAILURE" }), [
+      "src/slugify.ts",
+    ]);
+    expect(verdict.kind).toBe("draft");
+  });
+
+  it("still retries a draft the agent declined, rather than waiting forever", () => {
+    // Ordering guard: `declined` and `no_op` stay ahead of `draft` so an agent
+    // that died or refused is still retried on the existing schedule. Without
+    // this, adding the draft check would have introduced a new way to hang.
+    const verdict = evaluateMechanical(
+      pr({
+        isDraft: true,
+        changedLines: 0,
+        changedFiles: 0,
+        changedFilePaths: [],
+        commitSubjects: [INITIAL_PLAN_COMMIT],
+      }),
+      ["src/slugify.ts"],
+    );
+    expect(verdict.kind).toBe("no_op");
+  });
+
+  it("merges normally once the agent marks it ready for review", () => {
+    const verdict = evaluateMechanical(pr({ isDraft: false }), ["src/slugify.ts"]);
+    expect(verdict.kind).toBe("ready");
   });
 });

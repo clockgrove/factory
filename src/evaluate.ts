@@ -161,6 +161,7 @@ export type MechanicalVerdict =
   | { kind: "checks_missing" }
   | { kind: "checks_held" }
   | { kind: "checks_failed" }
+  | { kind: "draft" }
   | { kind: "sensitive_surface"; files: { path: string; reason: string }[] }
   | {
       kind: "ready";
@@ -183,13 +184,15 @@ export type MechanicalVerdict =
  *
  *  1. `declined` / `no_op` — no usable diff exists at all; nothing else
  *     about the PR (its checks, its mergeability) is worth inspecting.
- *  2. `untouched` — a real diff exists but not where the Work Item scoped it.
- *  3. `conflict` — GitHub cannot merge this cleanly against the base branch.
- *  4. `checks_pending` / `checks_missing` / `checks_failed` — required checks
+ *  2. `draft` — the agent says it has not finished. Nothing below is meaningful
+ *     yet, and several of those branches close or rebase the pull request.
+ *  3. `untouched` — a real diff exists but not where the Work Item scoped it.
+ *  4. `conflict` — GitHub cannot merge this cleanly against the base branch.
+ *  5. `checks_pending` / `checks_missing` / `checks_failed` — required checks
  *     have not yet cleared, never arrived, or failed.
- *  5. `sensitive_surface` — mergeable, but the diff changes what CI executes or
+ *  6. `sensitive_surface` — mergeable, but the diff changes what CI executes or
  *     what it can reach, which §7.3 reserves for a human.
- *  6. `ready` — passed every mechanical check; only the semantic check (§5.2)
+ *  7. `ready` — passed every mechanical check; only the semantic check (§5.2)
  *     remains before merge.
  *
  * `ciExpected` is the Objective snapshot's `ciExpectedOnPullRequests`: pass it
@@ -207,6 +210,27 @@ export function evaluateMechanical(
 ): MechanicalVerdict {
   if (isDeclined(pr)) return { kind: "declined" };
   if (isNoOp(pr)) return { kind: "no_op" };
+  // Third, and ahead of every check that can *act* on the pull request. A draft
+  // is the coding agent's own statement that it has not finished, and it is the
+  // most authoritative completion signal available — the agent knows, and
+  // nothing else here does.
+  //
+  // Gate 6 (§10.14) found Factory merging drafts: `for_review` never consulted
+  // `isDraft`, `#mergeReady` called `markPullRequestReady` to clear the flag,
+  // and two merge commits across two gates still carry the agent's `[WIP]`
+  // title. It survived six gates only because fixture Work Items are small
+  // enough that the agent's first push is usually its last. On any change large
+  // enough to arrive in pieces — source first, tests second — this merges half
+  // the work and closes the Work Item as done.
+  //
+  // Ordered *after* `declined`/`no_op` deliberately, so an agent that died or
+  // refused still retries on the existing schedule and this introduces no new
+  // way to hang. Ordered *before* `untouched`, `conflict` and `checks_failed`
+  // because each of those closes or rebases the pull request: judging work in
+  // progress does not merely merge too early, it destroys work that was still
+  // being written. A half-pushed change legitimately touches nothing in scope
+  // yet, and legitimately fails its own tests.
+  if (pr.isDraft) return { kind: "draft" };
   if (isUntouched(pr, expectedFiles)) {
     return { kind: "untouched", touchedFiles: pr.changedFilePaths };
   }

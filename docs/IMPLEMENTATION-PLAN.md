@@ -1187,6 +1187,83 @@ The shared lesson: a tool that reports *what it decided* rather than *what it di
 from the outside, and the gap only becomes visible when someone is hunting a bug whose signature is
 "nothing changed".
 
+## 10.14 Factory was merging the agent's unfinished work, and had been all along
+
+Gate 6's phase B ran a two-item dependency chain in `factory-gate2` (Objective #32). It passed
+cleanly — but it noted, as an aside it was not sent to look for, that `dispatch_integrate` had
+merged pull request #36 while the snapshot still showed `isDraft: true` and the title still read
+`[WIP]`, and that it could not tell from tool output whether Factory had un-drafted it or the agent
+had flipped it in the gap.
+
+Factory had un-drafted it. `#mergeReady` opened with `if (pr.isDraft) await markPullRequestReady(…)`,
+and `derive()` never consulted `isDraft` at all, so a draft pull request reached `for_review` and
+`ready` like any other.
+
+The evidence is on `main` and is not ambiguous. A squash merge's commit subject preserves the pull
+request title *at the moment of merge*, and two of them read:
+
+```
+[WIP] Add slugFromText composed from summarizeText and slugify (#36)
+[WIP] Add collapseWhitespace transform and export from barrel (#26)
+```
+
+Two gates, two runs, two merges of work the coding agent had not declared finished — after which the
+agent renamed both pull requests, which is why they read clean in the API today and why nothing
+noticed. **A draft is the agent's own statement that it is still working, and it is the most
+authoritative completion signal available: the agent knows, and nothing else in `evaluate.ts` does.**
+Factory read it, overrode it, and merged.
+
+Six gates missed this because fixture Work Items are small enough that the agent's first push is
+usually also its last, so "merge the draft" and "merge the finished work" coincide. They stop
+coinciding the moment a change arrives in pieces — source file first, tests second — which is the
+normal shape of anything real. There the failure is silent and complete: Factory merges the half,
+marks the Work Item `done`, and the Objective closes reporting success.
+
+The fix is a `draft` verdict, and its placement is the whole design:
+
+- **After `declined` and `no_op`.** Those are the paths that handle an agent that refused or died,
+  and they retry on an existing bounded schedule. Putting `draft` ahead of them would have swapped a
+  merge-too-early bug for a hang, since a stalled agent leaves its pull request in draft forever.
+- **Before `untouched`, `conflict` and `checks_failed`.** This is the half that is easy to miss.
+  Not merging a draft is only the obvious harm; the subtler one is that **a half-written pull request
+  legitimately looks broken to every other check** — it touches nothing in scope yet because the
+  source file is still coming, or it fails its own tests because they are written against code that
+  does not exist yet. Each of those verdicts closes or rebases the pull request. Judging work in
+  progress does not merely merge it too early, it *deletes* it out from under a running session.
+- **`#mergeReady` no longer un-drafts.** With the verdict in place that call was unreachable in the
+  normal path, and removing it means GitHub's own refusal to merge a draft is the backstop if it
+  ever is reached — failing loudly rather than quietly doing the wrong thing.
+- **`draft` waits** (`action: "waiting"`), and never retries. The work in the draft is probably fine
+  and simply unfinished; closing it discards a session still writing into it. A draft that never
+  resolves means the agent stalled, which the Director skill escalates after several cycles — the
+  same shape as `checks_missing`.
+
+Four tests fail when the guard is reverted, two of them the destructive paths rather than the merge.
+
+**The test fixture had been asserting the bug, again.** `pr()` in `test/evaluate.test.ts` defaulted
+to `isDraft: true`, so every test asserting `ready` was quietly asserting that Factory merges drafts;
+and `test/dispatch.test.ts` carried a test named *"marks a draft PR ready before merging"* that
+pinned the un-drafting as intended behaviour. This is the second time in two findings (§10.12 was
+`changedFiles: 2` beside one path) that the fixture encoded the defect and the suite passed happily
+around it. A fixture default is a claim about what normal looks like, and a wrong one buys agreement
+from every test that touches it.
+
+Two smaller notes from the same report, both already closed in `8fbad6a` before it arrived — it was
+running an older build:
+
+- `interpretContentsResponse` reported a directory as `truncated: true`, conflating "refused" with
+  "there is more of it", so a caller that retries on truncation would loop forever on a path that
+  will never yield file content.
+- `read_objective` exposed no labels, leaving `graph_apply`'s `labelled: true` as self-report that
+  nothing on the tool surface could contradict — the §15.7 shape exactly.
+
+And one non-defect worth recording because it will mislead again: **`dispatch_start` appears to
+assign the escalation human alongside Copilot, and Factory does not do it.** `assignCopilot` sends a
+single `replaceActorsForAssignable` with `actorIds: [botId]`; the issue timeline shows GitHub adding
+the requesting user about a second later. Derivation is unaffected (escalation is Copilot's
+*absence*, and `assignHumanOnly` replaces all actors), but "who is assigned" is a tempting and wrong
+signal for a human auditing the repository from outside.
+
 ## 11. Risks
 
 | Risk | Mitigation |

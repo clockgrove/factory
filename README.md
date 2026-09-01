@@ -170,6 +170,19 @@ and replans — unattended.
 > conflict branches it took, so a rebase that succeeded without resolving anything — the exact bug
 > Gate 5 was sent to look for, and the one that leaves no trace anywhere else — was invisible from
 > its output. It now returns `action`.
+>
+> **Gate 6's margin finding was the worst one yet, and it was six gates old.** Sent to exercise a
+> dependency chain, it mentioned in passing that a pull request had merged while still marked draft.
+> It had: `for_review` never consulted `isDraft`, and the merge path actively called
+> `markPullRequestReady` to clear it first. Two merge commits on `main` in the fixture repo still
+> carry the agent's `[WIP]` title, from two different gates. A draft is the coding agent saying it
+> has not finished — the most authoritative completion signal available, and the one Factory
+> overrode. It survived because fixture tasks are small enough that the agent's first push is also
+> its last; on any change that arrives in pieces, Factory merges the half and closes the Work Item as
+> done. Drafts are now a `draft` verdict that waits. The placement matters more than the merge: it is
+> checked *before* the scope, conflict and checks verdicts, because a half-written pull request
+> legitimately touches nothing in scope yet and legitimately fails its own tests — and each of those
+> verdicts closes the pull request, so judging work in progress deletes it.
 
 ## Design in one picture
 

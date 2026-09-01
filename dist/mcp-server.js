@@ -25407,6 +25407,8 @@ var Dispatcher = class {
       case "checks_pending":
         return { merged: false, action: "waiting" };
       // nothing to do yet
+      case "draft":
+        return { merged: false, action: "waiting" };
       case "mergeability_unknown":
         return { merged: false, action: "waiting" };
       case "checks_missing":
@@ -25435,9 +25437,6 @@ var Dispatcher = class {
    * surfaces instead of being retried silently forever.
    */
   async #mergeReady(pr) {
-    if (pr.isDraft) {
-      await this.#call(() => this.#writer.markPullRequestReady(pr.id));
-    }
     try {
       await this.#call(() => this.#writer.mergePullRequest(pr.id));
     } catch (error2) {
@@ -25710,6 +25709,7 @@ function hasConflict(pr) {
 function evaluateMechanical(pr, expectedFiles, ciExpected = false) {
   if (isDeclined(pr)) return { kind: "declined" };
   if (isNoOp(pr)) return { kind: "no_op" };
+  if (pr.isDraft) return { kind: "draft" };
   if (isUntouched(pr, expectedFiles)) {
     return { kind: "untouched", touchedFiles: pr.changedFilePaths };
   }
@@ -26100,7 +26100,7 @@ server.registerTool(
   "evaluate_mechanical",
   {
     title: "Evaluate mechanical checks",
-    description: "Run \xA75.1's cheap, deterministic checks against a Work Item's current open pull request: no-op, declined, untouched scope, merge conflict, checks pending/failed, sensitive surface, or ready. Pure and read-only \u2014 call this before `dispatch_integrate` to see the verdict it would act on, or on its own to inspect a Work Item without taking any action. Two fields on a `ready` verdict still need your judgment (Gate 5, \xA710.12). `outOfScopeFiles` lists changed paths the Work Item never declared: the scope check only fails when *nothing* in scope was touched, so a pull request that does its job **and** edits whatever else it likes is still `ready`. That is deliberate \u2014 extra files are often legitimate (updating a test the change broke) \u2014 but it is yours to confirm via `read_pull_request_diff`, not to assume. `fileListComplete: false` means the pull request changed more than 100 files, so `outOfScopeFiles` is a lower bound and the scope checks saw only part of the diff. A `sensitive_surface` verdict means the diff is mergeable but touches something that redefines what CI runs or what it can reach (workflows, actions, dependency manifests and lockfiles, registry config). \xA77.3 reserves those for a human regardless of declared scope, so `dispatch_integrate` escalates rather than retrying \u2014 the work is not wrong, it is just not Factory's to merge unattended.",
+    description: "Run \xA75.1's cheap, deterministic checks against a Work Item's current open pull request: no-op, declined, untouched scope, merge conflict, checks pending/failed, sensitive surface, draft, or ready. Pure and read-only \u2014 call this before `dispatch_integrate` to see the verdict it would act on, or on its own to inspect a Work Item without taking any action. Two fields on a `ready` verdict still need your judgment (Gate 5, \xA710.12). `outOfScopeFiles` lists changed paths the Work Item never declared: the scope check only fails when *nothing* in scope was touched, so a pull request that does its job **and** edits whatever else it likes is still `ready`. That is deliberate \u2014 extra files are often legitimate (updating a test the change broke) \u2014 but it is yours to confirm via `read_pull_request_diff`, not to assume. `fileListComplete: false` means the pull request changed more than 100 files, so `outOfScopeFiles` is a lower bound and the scope checks saw only part of the diff. A `sensitive_surface` verdict means the diff is mergeable but touches something that redefines what CI runs or what it can reach (workflows, actions, dependency manifests and lockfiles, registry config). \xA77.3 reserves those for a human regardless of declared scope, so `dispatch_integrate` escalates rather than retrying \u2014 the work is not wrong, it is just not Factory's to merge unattended. A `draft` verdict means the coding agent has not marked the pull request ready for review, so it is not finished and nothing here should act on it \u2014 not merge it, and equally not close or rebase it. Checked ahead of scope, conflict and check verdicts on purpose: a half-pushed change legitimately touches nothing in scope yet and legitimately fails its own tests, and those verdicts close the pull request (\xA710.14). Wait for the agent to mark it ready.",
     inputSchema: {
       ...WorkItemLocatorShape,
       expectedFiles: external_exports.array(external_exports.string()).optional().describe("The Work Item's declared file scope (\xA78); omit to skip the untouched-scope check")

@@ -58,7 +58,18 @@ GitHub issue numbers exist; nothing in the output is stored anywhere once `graph
    - `goal` — one sentence, what this Work Item accomplishes.
    - `acceptance` — criteria checkable **from the diff alone**. Outcome-evaluation (§5.2) verifies
      these against the PR, never against the agent's self-report (§15.7) — if a criterion can only
-     be confirmed by trusting what the agent says it did, rewrite it or drop it.
+     be confirmed by trusting what the agent says it did, rewrite it or drop it. **When a criterion
+     names an exact file path, state it as a hard requirement, not a description** — a bullet like
+     "`test/foo.test.ts` exists" reads as informative, not binding, and loses to the executing
+     agent's own habits. Gate 1 evidence: this exact wording ("test/parseLine.test.ts exists and
+     covers...") was used verbatim across 3 Work Items, and the executing coding agent colocated the
+     test file under `src/` instead in all 3 — a real, reproducible instruction-following miss, not
+     an isolated fluke. Prefer explicit, negatively-stated phrasing when the path is load-bearing:
+     put the path in `scope` *and* restate it as a constraint in `outOfScope` (e.g. "the test file
+     must be at exactly `test/foo.test.ts`; do not colocate it next to the source file or place it
+     anywhere else"). If the exact path genuinely does not matter (many test runners discover tests
+     anywhere), do not assert one — a criterion the compiler doesn't actually need enforced is scope
+     creep waiting to become a false escalation.
    - `scope` — concrete file or directory paths (trailing `/` for a directory), never glob
      patterns. PROBE-001 measured a one-line scope constraint holding 11/11 times; this field is
      also `evaluate.ts`'s `isUntouched` input, which does exact/prefix matching only.

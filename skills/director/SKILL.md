@@ -152,6 +152,18 @@ The asymmetry is deliberate (§7.3): merging a reviewed, reversible, in-scope ch
 guessing at intent is not. Escalating is a **successful outcome** of a cycle, not a failure of one
 (§7.1) — a well-founded "I stopped because X" is exactly the loop working as designed.
 
+**A settled example, so this does not have to be re-derived every cycle:** a compiled acceptance
+criterion naming an exact test file path (e.g. `test/foo.test.ts`) is a common convention statement,
+not a load-bearing scope boundary. Gate 1 observed the GitHub coding agent colocate test files next
+to their source under `src/` instead of the declared `test/` path in 3 of 3 Work Items, consistently
+— not a one-off mistake. Treat a test file that exists, is real (not empty/stubbed), and actually
+covers the function as satisfying the criterion's substance even if its exact path differs from what
+was declared, *provided* nothing about the repo's actual tooling depends on the literal path (e.g. a
+test runner configured to glob only `test/`, which would make this a real functional break, not a
+convention variance — check the repo's `conventions`/config before assuming it doesn't matter). This
+is intent-is-ambiguous territory only if the Work Item's scope treats the path as load-bearing on its
+own terms; do not manufacture that ambiguity by default.
+
 ## Reporting discipline
 
 If you are running under supervision (a human or another agent watching this session, able to

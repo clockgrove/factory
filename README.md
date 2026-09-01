@@ -4,7 +4,7 @@ A GitHub-native engineering-management plugin. You author an **Objective**; Fact
 **Work Items**, dispatches them to parallel GitHub Copilot agent sessions, supervises the results,
 and replans — unattended.
 
-> **Status: build order (§9) complete; Gates 0, 1, 2 and 5 (PRD §8) passed, plus a synthetic
+> **Status: build order (§9) complete; Gates 0, 1, 2, 5 and 6 (PRD §8) passed, plus a synthetic
 > brownfield rehearsal for Gate 3.** All seven build-order steps are done —
 > Factory can derive the full state of an Objective from GitHub alone, dispatch/confirm/retry/escalate
 > Work Items against a real repo, mechanically classify a PR's outcome (no-op, declined, untouched,
@@ -122,6 +122,29 @@ and replans — unattended.
 > not at compile time but several cycles later, as an `untouched` verdict with an agent run already
 > spent. **`read_repository_layout`** and **`read_repository_file`** close that, and
 > `objective-compilation` now reads the repository before naming a single path.
+>
+> **Gate 6 passed**, live-verifying both of those fixes rather than trusting the unit tests behind
+> them — a distinction this project has been burned by twice, most recently when two of
+> `readRepositoryFile`'s response-shape branches turned out to be wrong against the real API despite
+> green tests. Against `clockgrove/factory-gate2` #32, compilation read the repository first and both
+> Work Items were created carrying `factory:work-item`, the first labelled Work Items Factory has ever
+> produced. Both merged; the Objective closed.
+>
+> Reviewing that work surfaced two further defects, both now fixed. `readRepositoryFile` treated
+> **every** 404 as "this path is not in the repository", but the contents API also answers 404 for a
+> repository that does not exist or that the token cannot see — so a typo'd `owner`/`repo` returned a
+> confident `exists: false` for *every* path, and compilation would plan to create files that were
+> already there. A 404 now only means "missing" once the repository is confirmed readable. And
+> `npm run verify:package` read `mcp.json`, checked it, then launched the server from a hard-coded
+> path — so the one check that claims to run the shipped artifact could not have caught a wrong
+> `command` or a reordered argument. It now launches through the manifest's own values, and both
+> failure modes were confirmed to fail.
+>
+> A third reported defect did not survive contact with the API: symlinks and submodules were said to
+> arrive as `type: "file"` and be misread as empty files. Probing GitHub live showed a submodule is
+> `type: "submodule"`, a symlink to a directory is `type: "symlink"`, and a symlink to a file is
+> resolved into real content — all three already handled correctly. Those exact response bodies are
+> now pinned as tests.
 
 ## Design in one picture
 

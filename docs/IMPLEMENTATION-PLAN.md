@@ -932,6 +932,78 @@ fixed location, so there is no manifest field to declare skills in (`additionalP
 would reject one); and `${PLUGIN_ROOT}` is the spec's own variable, appearing in the schema's `cwd`
 pattern and reserved against use as an env key.
 
+## 10.11 Gate 6 — verifying the fixes rather than the tests behind them
+
+Gates 4 and 5 produced two fixes whose correctness no unit test could establish: automatic Work Item
+labelling, and the two repository-reading tools. Both had green tests. This project has twice shipped
+green tests over wrong assumptions — F5 was a *passing* test proving `workItemLabelId` reached
+`createIssue`, while nothing ever supplied it, so every Work Item Factory had ever made was
+unlabelled; and two of `readRepositoryFile`'s branches were wrong against the real contents API. So
+Gate 6 existed to observe both fixes against live GitHub.
+
+Against `clockgrove/factory-gate2` #32 — chosen because it has no CI workflow, and so does not
+deadlock on the account-wide `require_actions_workflow_approval` default (§10.6). Compilation read
+the repository before naming paths; two Work Items, #33 and #34, the second composing the first.
+**Both were created carrying `factory:work-item`** — the first labelled Work Items in the project's
+history. Both pull requests merged; the Objective closed.
+
+### Review findings
+
+Reviewing the Gate 5/6 commits surfaced two real defects, both fixed:
+
+**A 404 does not mean the file is missing.** The contents API answers 404 both to "no such path" and
+to "no such repository, or none you can see". `readRepositoryFile` collapsed them, so a typo'd
+`owner`/`repo` or a token without access returned a confident `exists: false` for *every* path — and
+compilation, grounded in that, would plan to create files that already existed, surfacing cycles later
+as an `untouched` verdict with an agent run spent. A 404 is now only reported as missing once the
+repository is confirmed readable, via the already-cached `#defaultBranch()`. Note `readRepositoryLayout`
+never had this bug: it resolves the default branch first, so an unreadable repository already threw.
+
+**`verify:package` did not launch through the manifest it verifies.** It read `mcp.json`, checked its
+fields, then spawned `process.execPath` against a hard-coded bundle path — so the one check claiming
+to run the shipped artifact the way it ships would have passed a wrong `command`, a missing argument
+or a reordered one. It now substitutes `${PLUGIN_ROOT}` and launches those exact values. Confirmed by
+breaking it both ways: a manifest pointing at a non-existent bundle fails three checks, and a
+`command` not on `PATH` now reports `could not launch ...: ENOENT` immediately instead of surfacing
+twenty seconds later as an unrelated-looking timeout.
+
+### A finding that did not survive contact with the API
+
+The same review reported, with high stated confidence, that GitHub returns symlinks and submodules as
+`type: "file"` — a symlink carrying `target`, a submodule carrying `submodule_git_url` — and that
+`interpretContentsResponse` would therefore report a submodule as an empty file. Probed live rather
+than accepted (2026-09-02, `nodejs/node` and `git/git`):
+
+| Case | Actual response | Handled correctly before the review? |
+|---|---|---|
+| symlink → directory | `type: "symlink"`, `content: null`, `target: "../include/"` | yes — reported as a symlink |
+| submodule | `type: "submodule"`, `size: 0`, `submodule_git_url` set | yes — reported as a submodule |
+| symlink → file | `type: "file"` with the **target's** real content and size, `target: null` | yes — GitHub resolves it, and returning that content is what a caller wants |
+
+All three were already right. The useful residue was a better message — `target` and
+`submodule_git_url` are now surfaced — and three new tests pinning the exact live bodies.
+
+The lesson generalises the one this document already records, and it cuts both ways: **an asserted API
+shape is worth nothing until it is observed, whoever asserts it.** The earlier failures came from
+trusting training data about an endpoint; this one would have come from trusting a confident reviewer.
+The remedy is identical and cheap — one live request.
+
+### One finding declined, deliberately
+
+The review also called `doneWithoutMergedPullRequest` blocking, on the grounds that a pull request
+could merge, the issue be reopened, and the issue then be closed by hand — leaving the flag `false`
+even though the last closure was manual. That is true and the flag is still correct, because it
+computes exactly what it is named: *done, with no merged pull request*. In that scenario a merged pull
+request does exist and code was delivered; reporting it as delivered is not a false claim. The skill
+is scoped to match — it asserts only that `true` implies someone outside the loop closed the item,
+never that `false` implies a merge auto-closed it.
+
+Recovering "how was this closed, most recently" would mean reading close/reopen timeline events, which
+buys a distinction no caller currently acts on, and reverts remain untrackable regardless. The
+pagination worry (`closedByPullRequestsReferences(first: 20)`) needs a Work Item with more than twenty
+linked pull requests, against a three-attempt cap plus a few conflict re-dispatches. Declined on both
+counts; recorded here so it is not relitigated.
+
 ## 11. Risks
 
 | Risk | Mitigation |

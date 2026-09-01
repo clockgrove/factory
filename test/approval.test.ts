@@ -29,6 +29,51 @@ describe("assessBlastRadius", () => {
     expect(verdict.assurances.length).toBeGreaterThan(0);
   });
 
+  // Gate 4, §10.7. The review answers two questions that authorise two
+  // different actions: "does this diff change what CI executes" justifies
+  // approving one run, while "is a run in this repository bounded at all"
+  // justifies relaxing the repository-wide approval requirement — the only
+  // mechanism that releases a coding-agent hold. Conflating them would let a
+  // clean diff buy a permanent setting change it says nothing about.
+  describe("separating repository-wide evidence from diff-scoped evidence", () => {
+    it("reports repo scope safe when only the diff is at fault", () => {
+      const verdict = assess(["src/ok.ts", ".github/workflows/ci.yml"]);
+      expect(verdict.safe).toBe(false);
+      expect(verdict.repoScopeSafe).toBe(true);
+      expect(verdict.repoScopeBlockers).toEqual([]);
+    });
+
+    it("reports repo scope unsafe when the token is write-scoped", () => {
+      const verdict = assess(["src/ok.ts"], {
+        defaultWorkflowPermissions: "write",
+        referencedSecrets: [],
+      });
+      expect(verdict.repoScopeSafe).toBe(false);
+      expect(verdict.repoScopeBlockers).toHaveLength(1);
+    });
+
+    it("reports repo scope unsafe when a pull-request workflow reaches a secret", () => {
+      const verdict = assess(["src/ok.ts"], {
+        defaultWorkflowPermissions: "read",
+        referencedSecrets: ["NPM_TOKEN"],
+      });
+      expect(verdict.repoScopeSafe).toBe(false);
+      expect(verdict.repoScopeBlockers.join(" ")).toContain("NPM_TOKEN");
+    });
+
+    it("keeps repo-scope blockers a subset of all blockers", () => {
+      const verdict = assess(["src/ok.ts", ".github/workflows/ci.yml"], {
+        defaultWorkflowPermissions: "write",
+        referencedSecrets: ["NPM_TOKEN"],
+      });
+      for (const blocker of verdict.repoScopeBlockers) {
+        expect(verdict.blockers).toContain(blocker);
+      }
+      // So `safe` can never be true while `repoScopeSafe` is false.
+      expect(verdict.safe).toBe(false);
+    });
+  });
+
   describe("changes that would let the diff redefine what CI executes", () => {
     it.each([
       [".github/workflows/ci.yml", "workflow definition"],

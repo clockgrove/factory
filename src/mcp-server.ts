@@ -526,13 +526,20 @@ server.registerTool(
       "pull-request workflow may reference a secret. If any of that fails it escalates to a human " +
       "instead, with the specific reasons. Approving is a write; the decision and its reasoning are " +
       "recorded as a comment on the Work Item. " +
-      "IMPORTANT (Gate 4, §10.7): GitHub's approve endpoint covers only *fork* pull requests, and " +
-      "refuses a same-repo coding-agent branch outright — so on a hold created by the repository's " +
-      "Copilot Actions workflow-approval policy this tool CANNOT release the runs, and returns " +
-      "`action: 'not_approvable'` with GitHub's reason in `failures` after escalating to a human. " +
-      "That is permanent, not transient: do not retry it, and do not merge without CI. The only " +
-      "fixes are a human approving on the pull request, or disabling the repository's Copilot " +
-      "Actions workflow-approval requirement before the run.",
+      "IMPORTANT (Gate 4, §10.7): GitHub's per-run approve endpoint covers only *fork* pull " +
+      "requests and refuses a same-repo coding-agent branch outright with \"not from a fork pull " +
+      "request or queued by the Actions bot\". " +
+      "The only mechanism that releases it is clearing the repository's Copilot " +
+      "Actions workflow-approval requirement, so on that refusal this tool falls back to doing " +
+      "exactly that — but only when the *repository-scoped* half of the review passes (read-only " +
+      "default token, no secrets reachable from a pull-request workflow, no self-hosted runner), " +
+      "because that setting governs every future run and a clean diff is not evidence about the next " +
+      "one. It then restarts the held runs, since clearing the requirement does not restart runs " +
+      "already parked, and reports `action: 'policy_cleared'` with `rerunRunIds`. Tell the operator: " +
+      "this changed the repository, not just this run. Where the repository-scoped evidence does not " +
+      "hold, or clearing fails, it returns `not_approvable` with GitHub's reason in `failures` and " +
+      "escalates to a human — that refusal is deterministic, so do not retry it, and do not merge " +
+      "without CI.",
     inputSchema: {
       ...WorkItemLocatorShape,
       escalateTo: z

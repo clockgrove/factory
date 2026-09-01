@@ -130,6 +130,18 @@ class FakeWriter implements GitHubWriter {
     this.calls.push(`updatePullRequestBranch:${pullRequestId}`);
     if (this.failing.updatePullRequestBranch) throw this.failing.updatePullRequestBranch;
   }
+
+  async setCopilotWorkflowApprovalRequired(required: boolean): Promise<void> {
+    this.calls.push(`setCopilotWorkflowApprovalRequired:${required}`);
+    if (this.failing.setCopilotWorkflowApprovalRequired) {
+      throw this.failing.setCopilotWorkflowApprovalRequired;
+    }
+  }
+
+  async rerunWorkflowRun(runId: number): Promise<void> {
+    this.calls.push(`rerunWorkflowRun:${runId}`);
+    if (this.failing.rerunWorkflowRun) throw this.failing.rerunWorkflowRun;
+  }
 }
 
 /** Shape `classifyRefusal` (platform.ts) recognizes as a secondary rate limit. */
@@ -221,11 +233,30 @@ describe("Dispatcher.closeObjective", () => {
 });
 
 describe("Dispatcher.approveChecks", () => {
-  const SAFE = { safe: true, blockers: [], assurances: ["read-only token"] };
+  const SAFE = {
+    safe: true,
+    blockers: [],
+    assurances: ["read-only token"],
+    repoScopeSafe: true,
+    repoScopeBlockers: [],
+  };
   const UNSAFE = {
     safe: false,
     blockers: ["the diff edits .github/workflows/ci.yml"],
     assurances: [],
+    // Diff-scoped only: the repository itself is still bounded, which is what
+    // makes this distinct from REPO_UNSAFE below.
+    repoScopeSafe: true,
+    repoScopeBlockers: [],
+  };
+  const REPO_UNSAFE = {
+    safe: false,
+    blockers: ["workflow runs in this repository get a write-scoped GITHUB_TOKEN by default"],
+    assurances: [],
+    repoScopeSafe: false,
+    repoScopeBlockers: [
+      "workflow runs in this repository get a write-scoped GITHUB_TOKEN by default",
+    ],
   };
   const RUNS = [
     { id: 42, name: "CI", event: "pull_request" },
@@ -317,33 +348,82 @@ describe("Dispatcher.approveChecks", () => {
   });
 
   // Gate 4, §10.7 F1/F2. GitHub's approve endpoint is scoped to fork pull
-  // requests and refuses a coding-agent branch with this exact message, so the
-  // hold created by the repository's Copilot workflow-approval policy can never
-  // be cleared here. The old code reported that as `partially_approved` with no
-  // error attached: a total, permanent failure shaped like a success that a
-  // caller could only detect by diffing two arrays.
-  it("reports a fork-only refusal as permanent and escalates", async () => {
+  // requests and refuses a coding-agent branch with this exact message. The only
+  // mechanism that releases this hold is clearing the repository's Copilot
+  // workflow-approval requirement, so that is the fallback — authorised by the
+  // repository-scoped review alone, because it relaxes a repository-wide setting.
+  const FORK_ONLY = new Error(
+    "This run is not from a fork pull request or queued by the Actions bot.",
+  );
+
+  it("clears the repository requirement when the per-run approve is fork-only", async () => {
+    const writer = new FakeWriter({ approveWorkflowRun: FORK_ONLY });
+    const d = makeDispatcher(writer);
+    const item = derivedWi();
+    const outcome = await d.approveChecks(item, RUNS, SAFE);
+
+    expect(outcome.action).toBe("policy_cleared");
+    expect(writer.calls).toContain("setCopilotWorkflowApprovalRequired:false");
+    // Clearing the requirement does not restart runs already parked.
+    expect(outcome.rerunRunIds).toEqual([42, 43]);
+    expect(writer.calls).toContain("rerunWorkflowRun:42");
+    expect(writer.calls).toContain("rerunWorkflowRun:43");
+    // Never silently: this outlives the run and the Objective must say so.
+    const comment = writer.comments.join("\n");
+    expect(comment).toContain("changed a repository setting, not just this run");
+    expect(writer.calls).not.toContain(`assignHumanOnly:${item.id}:U_human`);
+  });
+
+  it("refuses to clear the requirement on diff-scoped evidence alone", async () => {
+    const writer = new FakeWriter({ approveWorkflowRun: FORK_ONLY });
+    const d = makeDispatcher(writer);
+    const item = derivedWi();
+    // A blocker of any kind stops this before an approval is even attempted.
+    // That matters especially for the policy clear: releasing the hold reruns
+    // *this* diff, so a diff the review declined must not reach a runner by the
+    // repository-wide door either.
+    const outcome = await d.approveChecks(item, RUNS, UNSAFE);
+
+    expect(outcome.action).toBe("escalated");
+    expect(writer.calls).not.toContain("setCopilotWorkflowApprovalRequired:false");
+    expect(writer.calls).not.toContain("approveWorkflowRun:42");
+    expect(writer.calls).toContain(`assignHumanOnly:${item.id}:U_human`);
+  });
+
+  it("never clears the requirement without repository-wide evidence", async () => {
+    const writer = new FakeWriter({ approveWorkflowRun: FORK_ONLY });
+    const d = makeDispatcher(writer);
+    const outcome = await d.approveChecks(derivedWi(), RUNS, REPO_UNSAFE);
+
+    expect(outcome.action).toBe("escalated");
+    expect(writer.calls).not.toContain("setCopilotWorkflowApprovalRequired:false");
+  });
+
+  it("escalates when clearing the requirement itself fails", async () => {
     const writer = new FakeWriter({
-      approveWorkflowRun: new Error(
-        "This run is not from a fork pull request or queued by the Actions bot.",
-      ),
+      approveWorkflowRun: FORK_ONLY,
+      setCopilotWorkflowApprovalRequired: new Error("403 forbidden"),
     });
     const d = makeDispatcher(writer);
     const item = derivedWi();
     const outcome = await d.approveChecks(item, RUNS, SAFE);
 
     expect(outcome.action).toBe("not_approvable");
-    expect(outcome.approvedRunIds).toEqual([]);
-    expect(outcome.failures).toEqual(
-      RUNS.map((r) => ({
-        runId: r.id,
-        message: "This run is not from a fork pull request or queued by the Actions bot.",
-      })),
-    );
-    // The Work Item must land on a human: nothing in the loop can release it.
     expect(writer.calls).toContain(`assignHumanOnly:${item.id}:U_human`);
-    const comment = writer.comments.join("\n");
-    expect(comment).toContain("Retrying will not help");
+    expect(writer.comments.join("\n")).toContain("403 forbidden");
+  });
+
+  it("still reports policy_cleared when no held run could be restarted", async () => {
+    const writer = new FakeWriter({
+      approveWorkflowRun: FORK_ONLY,
+      rerunWorkflowRun: new Error("run is not rerunnable"),
+    });
+    const d = makeDispatcher(writer);
+    const outcome = await d.approveChecks(derivedWi(), RUNS, SAFE);
+
+    expect(outcome.action).toBe("policy_cleared");
+    expect(outcome.rerunRunIds).toEqual([]);
+    expect(writer.comments.join("\n")).toContain("next push will start CI normally");
   });
 
   it("reports an ordinary failure as retryable rather than permanent", async () => {

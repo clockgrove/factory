@@ -149,6 +149,25 @@ export interface BlastRadiusVerdict {
   blockers: string[];
   /** What was affirmatively checked, for the audit trail on the issue. */
   assurances: string[];
+  /**
+   * True when the *repository-wide* half of the review passed, regardless of
+   * what this particular diff does.
+   *
+   * The review answers two different questions, and they justify two different
+   * actions. "Does this diff change what CI executes?" justifies approving
+   * *this run*. "Is a run in this repository bounded at all?" — read-only
+   * default token, no secrets reachable from a pull-request workflow, no
+   * self-hosted runner — is a property of the repository that holds for every
+   * run, and is the only thing that can justify relaxing a repository-wide
+   * setting (§10.7).
+   *
+   * Kept separate so the broader action cannot be authorised by the narrower
+   * evidence: a diff that happens to be clean says nothing about whether the
+   * *next* one will be.
+   */
+  repoScopeSafe: boolean;
+  /** The subset of `blockers` that are properties of the repository. */
+  repoScopeBlockers: string[];
 }
 
 /**
@@ -160,6 +179,7 @@ export interface BlastRadiusVerdict {
  */
 export function assessBlastRadius(input: BlastRadiusInput): BlastRadiusVerdict {
   const blockers: string[] = [];
+  const repoScopeBlockers: string[] = [];
   const assurances: string[] = [];
 
   if (input.truncated) {
@@ -188,7 +208,7 @@ export function assessBlastRadius(input: BlastRadiusInput): BlastRadiusVerdict {
   }
 
   if (input.profile.defaultWorkflowPermissions === "write") {
-    blockers.push(
+    repoScopeBlockers.push(
       "workflow runs in this repository get a write-scoped GITHUB_TOKEN by default, so an approved run could push commits or move refs rather than merely reporting a result",
     );
   } else if (input.profile.defaultWorkflowPermissions === "read") {
@@ -196,13 +216,13 @@ export function assessBlastRadius(input: BlastRadiusInput): BlastRadiusVerdict {
       "workflow runs get a read-only GITHUB_TOKEN by default, so the job can report a result but cannot write to the repository",
     );
   } else {
-    blockers.push(
+    repoScopeBlockers.push(
       "the repository's default workflow permissions could not be read, so the token scope an approved run would receive is unknown",
     );
   }
 
   if (input.profile.referencedSecrets.length > 0) {
-    blockers.push(
+    repoScopeBlockers.push(
       `pull-request workflows reference ${input.profile.referencedSecrets.length} secret(s) (${input.profile.referencedSecrets.join(", ")}), so an approved run would have real credentials available to exfiltrate`,
     );
   } else {
@@ -211,7 +231,14 @@ export function assessBlastRadius(input: BlastRadiusInput): BlastRadiusVerdict {
     );
   }
 
-  return { safe: blockers.length === 0, blockers, assurances };
+  blockers.push(...repoScopeBlockers);
+  return {
+    safe: blockers.length === 0,
+    blockers,
+    assurances,
+    repoScopeSafe: repoScopeBlockers.length === 0,
+    repoScopeBlockers,
+  };
 }
 
 /**

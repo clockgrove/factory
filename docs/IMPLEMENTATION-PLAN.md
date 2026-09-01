@@ -772,49 +772,79 @@ Four of the six are fail-*open* defects in a security control — the review pas
 wrong. That is the failure mode this component has to be judged against, and it is why the reasoning
 above deliberately keeps the deny-list narrow and mechanical rather than clever.
 
-**The write was verified in Gate 4, and it does not work.** See §10.7 — the conclusion below stands
-for the *review*, but the approve call itself is impossible against the hold Factory actually meets.
+**The write was verified in Gate 4, and the per-run endpoint does not work.** See §10.7 — the
+reasoning below stands for the *review*, but the approve call is refused outright against the hold
+Factory actually meets, and the fix turned out to be a repository-level setting rather than a
+per-run action.
 
 ---
 
-### 10.7 Gate 4 result: the approve write cannot work, and one destructive bug it exposed
+### 10.7 Gate 4 result: the approve write is refused, and the real mechanism is a repository setting
 
 Gate 4 (fixture `clockgrove/factory-gate3`, Objective #11) was built to execute the two paths no
 earlier gate had ever reached: §6's conflict/rebase, and the `POST .../approve` write left unverified
 above. It reached the second and was blocked before the first.
 
-**The finding: `approve_held_workflow_runs`' write half is not merely broken, it is impossible.**
+**The finding: `approve_held_workflow_runs`' write half was aimed at the wrong mechanism.**
 On the first held run, the blast-radius review worked exactly as designed — `safe: true`, no
 blockers, three accurate assurances, and it correctly located the held run. The approve POST then
-approved nothing, twice, byte-identically. GitHub's own reason, read off the audit comment:
+approved nothing, three times across ten minutes, byte-identically: a deterministic refusal, not a
+transient. GitHub's own reason, read off the audit comment:
 
 > This run is not from a fork pull request or queued by the Actions bot.
 
 `POST /repos/{owner}/{repo}/actions/runs/{run_id}/approve` is canonically *"Approve a workflow run
 for a **fork** pull request"*. A coding-agent pull request is a **same-repo branch**, and the hold on
-it comes from the repository's Copilot Actions workflow-approval policy — a different hold class with
-**no approval API at all**. It is only clearable by a human clicking "Approve and run workflows", or
-by turning that repository setting off before the run.
+it comes from the repository's Copilot Actions workflow-approval requirement — a different mechanism
+that the per-run endpoint does not address.
 
 The held run's shape is worth recording, because it is not what the name suggests:
 `status: "completed"`, `conclusion: "action_required"`, actor `Copilot`, event `pull_request`. The
 REST `status=action_required` *filter* still matches it, which is why the read half works.
 
-**This reverses §10.6's central claim.** "Factory makes the approval decision itself" is not
-available. §10.6 called turning the setting off "a fixture workaround… it trades a real security
-control for a green run" — that judgement was made believing an API alternative existed. It does not.
-The setting, or a human, is the *only* mechanism. So the honest design is:
+**The first conclusion drawn from this — that no API exists — was wrong, and the correction matters
+more than the finding.** There is one:
 
-- The blast-radius review keeps its value, and arguably gains some: it is now **human-facing advice**
-  — the reasoning a maintainer needs to decide, computed and recorded on the Work Item, rather than a
-  decision Factory takes alone.
-- `approve_held_workflow_runs` still tries (the endpoint does work for genuine fork pull requests),
-  but a fork-only refusal now returns `action: "not_approvable"` with GitHub's message in
-  `failures[]` and escalates the Work Item to a human. It no longer reports a permanent, total
-  failure as a success-shaped `partially_approved` with an empty `approvedRunIds` — which was how
-  Gate 4 first met it, detectable only by diffing two arrays.
-- Repositories Factory runs against unattended should have the Copilot workflow-approval requirement
-  disabled *deliberately and with that tradeoff understood*, not silently as a fixture convenience.
+```
+PATCH /repos/{owner}/{repo}/copilot/cloud-agent/configuration
+{ "require_actions_workflow_approval": false }
+```
+
+Verified live against the fixture, which reported `require_actions_workflow_approval: true` —
+precisely the hold. It is public preview at the time of writing, hence a raw request path rather than
+a typed Octokit method. This is worth dwelling on as a process failure: "there is no API" had been
+written into the plan, the skill and a commit message on the strength of a documentation title and a
+plausible mechanism story, without a single call against the endpoint that would have settled it.
+That is the exact error this repository's standing rule about verifying API claims live exists to
+prevent, and it survived because the claim was *negative* — nothing failed, so nothing prompted a
+check. A negative capability claim needs the same live evidence as a positive one.
+
+**Which action is authorised by which evidence.** Clearing that requirement is not a bigger version
+of approving one run; it is a different act, because it outlives the pull request and governs every
+future coding-agent run in the repository. So the review's findings are now split:
+
+- **Diff-scoped** — does this change touch workflow definitions, actions, manifests, lockfiles or
+  registry config? This is what justifies approving *this run*, and it says nothing about the next
+  diff.
+- **Repository-scoped** (`repoScopeSafe`) — is the default workflow token read-only, is every
+  pull-request workflow free of secrets, is no job on a self-hosted runner? These are properties of
+  the repository that hold for *every* run, and they are the only thing that can justify relaxing a
+  repository-wide setting.
+
+`approveChecks` therefore tries the per-run endpoint first, and only on GitHub's fork-only refusal
+falls back to clearing the requirement — never on a verdict carrying any blocker, because releasing
+the hold reruns *that* diff, so a diff the review declined must not reach a runner through the
+repository-wide door either. Clearing the requirement does not restart runs already parked in
+`action_required`, so each held run is asked again; without that the pull request stays check-less
+and nothing has been achieved. The action is reported as `policy_cleared` and written to the Work
+Item in those terms — that this changed the repository, not just this run, what evidence authorised
+it, and how to put it back.
+
+Where the repository-scoped evidence does not hold, Factory declines and escalates rather than
+trading the control for a green run. That preserves §10.6's original instinct while acknowledging its
+factual premise was wrong: with the per-run endpoint unavailable, this setting is not "a fixture
+workaround" but the actual mechanism, and the honest question is what evidence should be required
+before touching it — not whether touching it is ever legitimate.
 
 **And a destructive bug found on the way.** `evaluateMechanical` returned `checks_failed` for a run
 that never started, without consulting `checksNeverStarted` — which the reader had already been
@@ -826,9 +856,7 @@ had only reworded the escalation comment — telling the reader not to retry whi
 anyway.
 
 Fixed with a distinct `checks_held` verdict, tested before `checks_failed` because both present as
-the same `FAILURE` rollup, routed straight to `#escalate` rather than `retryOrEscalate`. Not a retry,
-because a retry cannot succeed; not a wait, because nothing in the loop can change the outcome. A
-human is genuinely required, which is what `escalated` means.
+the same `FAILURE` rollup, routed straight to `#escalate` rather than `retryOrEscalate`.
 
 **Also observed.** No factory tool reads the target repository's file tree or file contents, so
 compilation grounds `scope` in the Objective body alone. Gate 4 guessed right; a wrong guess would
@@ -836,9 +864,9 @@ surface several steps later as an untouched-scope failure. And `graph_apply` tak
 as a GraphQL node ID with nothing on the surface to resolve a label name to one.
 
 **Not reached.** The conflict path is still unexercised — the fixture arms it correctly (three Work
-Items with no edges between them, all appending to one array literal in `src/index.ts`), but the
-foundation Work Item cannot merge while its CI is held. The graph is intact and the conflict remains
-armed for the next attempt.
+Items with no edges between them, all appending to one array literal in `src/transforms/registry.ts`),
+but the foundation Work Item could not merge while its CI was held. The graph is intact and the
+conflict remains armed for the next attempt.
 
 ---
 

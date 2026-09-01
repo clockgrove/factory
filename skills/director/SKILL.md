@@ -171,6 +171,14 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
    queued message is always picked up promptly rather than sitting behind an oversized turn. Repeat
    from step 1 with a fresh read.
 
+   **Check `doneWithoutMergedPullRequest` before you report success.** `done` means "this issue is
+   closed", which is usually "the pull request merged and GitHub auto-closed it" but is sometimes
+   "a human closed it by hand". Factory never closes a Work Item itself, so this flag being true
+   always means someone outside the loop decided that item was finished — legitimately or by
+   mistake. Honour the closure either way; do not reopen it and do not re-dispatch. But say so
+   explicitly in your report, name the items, and never describe them as delivered work. An
+   Objective every one of whose items carries this flag closed successfully and shipped nothing.
+
 ## The confidence bar (§7.3) — read this before calling any dispatch/integrate tool
 
 Act autonomously, including merging, only when **all** hold:

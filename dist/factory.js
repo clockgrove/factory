@@ -3259,11 +3259,15 @@ function derive(snapshot) {
     defaultBranch: snapshot.defaultBranch,
     copilotBotId: snapshot.copilotBotId,
     ciExpectedOnPullRequests: snapshot.ciExpectedOnPullRequests,
-    items: snapshot.workItems.map((wi) => ({
-      ...wi,
-      state: deriveState(wi, snapshot.readAt),
-      attempts: attemptCount(wi)
-    }))
+    items: snapshot.workItems.map((wi) => {
+      const state = deriveState(wi, snapshot.readAt);
+      return {
+        ...wi,
+        state,
+        attempts: attemptCount(wi),
+        doneWithoutMergedPullRequest: state === "done" && !wi.linkedPullRequests.some((p) => p.state === "MERGED")
+      };
+    })
   };
 }
 function inState(o, ...states) {

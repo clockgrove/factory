@@ -267,6 +267,23 @@ export function deriveState(wi: WorkItemSnapshot, now: Date): WorkItemState {
 export interface DerivedWorkItem extends WorkItemSnapshot {
   state: WorkItemState;
   attempts: number;
+  /**
+   * True when this item is `done` purely because its issue is closed, with no
+   * merged pull request to show for it.
+   *
+   * `done` deliberately conflates two things — "the work landed" and "someone
+   * decided this is finished" — and honouring a closed issue is correct: GitHub
+   * is the source of truth (§1), and a loop that reopened items a human closed
+   * would be fighting its operator. Factory itself never closes a Work Item, so
+   * this can only arrive from outside the loop.
+   *
+   * What is *not* correct is reporting it as delivered work. Without this flag,
+   * an Objective every one of whose items was closed by hand closes itself and
+   * reports success, and nothing in the output distinguishes that from code
+   * that actually shipped. The behaviour is unchanged; the claim is now
+   * checkable.
+   */
+  doneWithoutMergedPullRequest: boolean;
 }
 
 export interface DerivedObjective {
@@ -295,11 +312,17 @@ export function derive(snapshot: ObjectiveSnapshot): DerivedObjective {
     defaultBranch: snapshot.defaultBranch,
     copilotBotId: snapshot.copilotBotId,
     ciExpectedOnPullRequests: snapshot.ciExpectedOnPullRequests,
-    items: snapshot.workItems.map((wi) => ({
-      ...wi,
-      state: deriveState(wi, snapshot.readAt),
-      attempts: attemptCount(wi),
-    })),
+    items: snapshot.workItems.map((wi) => {
+      const state = deriveState(wi, snapshot.readAt);
+      return {
+        ...wi,
+        state,
+        attempts: attemptCount(wi),
+        doneWithoutMergedPullRequest:
+          state === "done" &&
+          !wi.linkedPullRequests.some((p) => p.state === "MERGED"),
+      };
+    }),
   };
 }
 

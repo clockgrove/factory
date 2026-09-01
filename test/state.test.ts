@@ -329,8 +329,57 @@ describe("deriveState", () => {
   });
 });
 
-describe("currentOpenPullRequest", () => {
-  const older = pr({
+describe("doneWithoutMergedPullRequest", () => {
+  function objective(items: WorkItemSnapshot[]): ObjectiveSnapshot {
+    return {
+      id: "I_obj",
+      number: 1,
+      title: "Objective",
+      body: "",
+      closed: false,
+      workItems: items,
+      readAt: NOW,
+      repositoryId: "R_1",
+      defaultBranch: "main",
+      copilotBotId: "BOT_1",
+      ciExpectedOnPullRequests: false,
+    };
+  }
+
+  it("is false when the work actually landed", () => {
+    const merged = derive(
+      objective([wi({ closed: true, linkedPullRequests: [pr({ state: "MERGED" })] })]),
+    );
+    expect(merged.items[0]!.state).toBe("done");
+    expect(merged.items[0]!.doneWithoutMergedPullRequest).toBe(false);
+  });
+
+  // Honouring a closed issue is correct — GitHub is the source of truth and
+  // Factory must not fight a human who closed something deliberately. But
+  // `done` then means "someone decided this is finished", not "the code
+  // shipped", and an Objective whose items were all closed by hand would close
+  // itself and report success with nothing to show for it.
+  it("is true when the issue was closed with nothing merged", () => {
+    const byHand = derive(objective([wi({ closed: true, linkedPullRequests: [] })]));
+    expect(byHand.items[0]!.state).toBe("done");
+    expect(byHand.items[0]!.doneWithoutMergedPullRequest).toBe(true);
+  });
+
+  it("is true when the only pull request was closed unmerged", () => {
+    const abandoned = derive(
+      objective([wi({ closed: true, linkedPullRequests: [pr({ state: "CLOSED" })] })]),
+    );
+    expect(abandoned.items[0]!.doneWithoutMergedPullRequest).toBe(true);
+  });
+
+  it("is false for anything not done", () => {
+    const open = derive(objective([wi({ closed: false, linkedPullRequests: [] })]));
+    expect(open.items[0]!.state).not.toBe("done");
+    expect(open.items[0]!.doneWithoutMergedPullRequest).toBe(false);
+  });
+});
+
+describe("currentOpenPullRequest", () => {  const older = pr({
     id: "PR_old",
     number: 10,
     createdAt: new Date("2026-01-01T00:00:00Z"),

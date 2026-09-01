@@ -62,7 +62,14 @@ function wi(over: Partial<WorkItemSnapshot> = {}): WorkItemSnapshot {
 /** Builds a `DerivedWorkItem` without going through a full `ObjectiveSnapshot`. */
 function derivedWi(over: Partial<WorkItemSnapshot> = {}, now = NOW): DerivedWorkItem {
   const snap = wi(over);
-  return { ...snap, state: deriveState(snap, now), attempts: attemptCount(snap) };
+  const state = deriveState(snap, now);
+  return {
+    ...snap,
+    state,
+    attempts: attemptCount(snap),
+    doneWithoutMergedPullRequest:
+      state === "done" && !snap.linkedPullRequests.some((p) => p.state === "MERGED"),
+  };
 }
 
 /** Records every call made to it, and can be configured to reject on a given method. */

@@ -190,6 +190,7 @@ function serializeObjective(o: DerivedObjective, minimal = false) {
     repositoryId: o.repositoryId,
     defaultBranch: o.defaultBranch,
     copilotBotId: o.copilotBotId,
+    ciExpectedOnPullRequests: o.ciExpectedOnPullRequests,
     items: o.items.map((i) => serializeWorkItem(i, minimal)),
   };
 }
@@ -411,7 +412,7 @@ server.registerTool(
         throw new Error(`Work Item #${workItemNumber} has no open pull request`);
       }
       return {
-        verdict: evaluateMechanical(pr, expectedFiles),
+        verdict: evaluateMechanical(pr, expectedFiles, objective.ciExpectedOnPullRequests),
         pullRequest: { number: pr.number, title: pr.title },
       };
     },
@@ -649,7 +650,7 @@ server.registerTool(
       if (!pr) {
         throw new Error(`Work Item #${workItemNumber} has no open pull request`);
       }
-      const verdict = evaluateMechanical(pr, expectedFiles);
+      const verdict = evaluateMechanical(pr, expectedFiles, objective.ciExpectedOnPullRequests);
       const dispatcher = await dispatcherFor(owner, repo, objective, escalateTo, reader);
       await dispatcher.integrate(item, pr, verdict);
       return { verdict, workItem: workItemNumber, pullRequest: pr.number };

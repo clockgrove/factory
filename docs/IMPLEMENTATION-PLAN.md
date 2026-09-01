@@ -387,6 +387,14 @@ authoring any Objective against a freshly seeded rehearsal repo:
   mergeable" — nothing has actually executed the code. Gate 2 ran all 10 Work Items this way (see
   §10.3, F2). A rehearsal without CI leaves a whole branch of the evaluate layer untested, and
   makes the mechanical verdict weaker than it reads.
+- **Turn off "Require approval for workflow runs" (Settings → Copilot → Coding agent), or plan to
+  approve every run by hand.** Shipping the workflow is not sufficient. GitHub requires a maintainer
+  to click "Approve and run workflows" on a pull request authored by the coding agent, so by default
+  every `pull_request` run is created, executes nothing, and concludes `failure` — while the
+  identical workflow succeeds on `push` to `main`, which makes the problem look repo-specific rather
+  than structural. Gate 3 shipped CI, satisfied the bullet above, and still never ran a single job
+  (§10.5, F1). Verify by opening the first PR of a rehearsal and confirming its checks actually
+  execute, before compiling the rest of the graph.
 
 **A Director session must keep its automation interval short enough that its own message queue
 never meaningfully backs up**, and must not proactively report on every healthy cycle — both fixed
@@ -576,6 +584,82 @@ What this fixture exercises that no previous gate did:
   owner would write it, including negative constraints ("do not add runtime dependencies", "do not
   change the input format"). Compiling that into Work Packets with honest `outOfScope` entries is
   itself the test of `objective-compilation` against realistic input.
+
+---
+
+### 10.5 Gate 3 result (brownfield) and its one serious finding
+
+Ran against `clockgrove/factory-gate3`, Objective #1, ~12 minutes end to end. All four Work Items
+closed, all four PRs merged, `platformExhausted` never true, no unresolved escalation. The things the
+fixture was built to test mostly worked:
+
+- **The diff read did real work.** `read_pull_request_diff` confirmed `loadConfig` genuinely imports
+  and calls `parse`/`merge`/`validate` rather than reimplementing them — the exact criterion Gate 2
+  merged unverified four times, and one that is invisible in `changedFilePaths`. `truncated` was
+  false on all four reads. F1 from §10.3 is closed by evidence, not by assertion.
+- **Existing behavior was amended, not deleted.** Every item rewrote the existing test to the new
+  behavior instead of weakening or removing it, and nothing relaxed `tsconfig.json`. The brownfield
+  temptations the fixture was designed to bait did not materialize.
+- **The base-moved path fired and self-healed.** `dispatch_integrate` on #2 threw "Base branch was
+  modified" after two siblings merged; the next read showed the PR back at `for_review` and
+  `MERGEABLE`, and a retry merged it cleanly. §6's recovery path is real.
+- **The shared-file conflict path was avoided again, not exercised.** Director funnelled every
+  `src/index.ts` edit into the one dependent item and forbade the other three from touching it. That
+  is the correct engineering choice and it follows from the compiler's non-overlapping-`scope`
+  invariant — which is precisely why no gate has yet reproduced §6's content-conflict path. Doing so
+  requires deliberately compiling two concurrent items onto one file, against the invariant.
+
+**F1 — CI never ran, and Factory could not tell that apart from a repository with no CI.** The
+serious one. All four PRs merged with `checks: null` despite the fixture shipping a real workflow.
+The Director's own explanation (the PRs were drafts) was wrong — they were not drafts at merge — so
+the cause was chased down against the live API afterwards, and it is worse than reported:
+
+1. GitHub requires a maintainer to click **"Approve and run workflows"** on a pull request authored
+   by the coding agent (verified against docs.github.com, 2026-09-02; the toggle is Settings →
+   Copilot → Coding agent). Unapproved, every `pull_request` run was created and then concluded
+   `failure` having executed nothing. Every `push`-to-`main` run on the identical workflow succeeded,
+   which is what made the failure look repo-specific rather than structural.
+2. Those runs produced **zero jobs**, so their check suites concluded `FAILURE` with
+   `latest_check_runs_count: 0`. `statusCheckRollup` is computed from check *runs*, so it stayed
+   `null`.
+3. `evaluateMechanical` read `null` as "no checks configured" and fell through to `ready`.
+
+So GitHub said *CI failed*, and Factory read *this repository has no CI*, and merged. Three fixes,
+all live-verified against the two rehearsal repos afterwards:
+
+- `normalizeChecks` now consults the head commit's check **suites** when the rollup is silent. A
+  suite that concluded without emitting a run reports `FAILURE`; one still in flight reports
+  `PENDING`; a benign runless conclusion stays silent so ordinary repositories do not deadlock.
+  Verified: gate3's four PRs flipped `null` → `FAILURE`, gate2's ten (genuinely no CI) stayed `null`.
+- A new `checks_missing` verdict covers the remaining window — the repository is known to run CI on
+  pull requests (`ObjectiveSnapshot.ciExpectedOnPullRequests`, one cached REST call asking whether a
+  `pull_request` run has ever existed) but this PR has no checks yet. It waits rather than merging,
+  and never auto-retries: a repository whose CI cannot attach checks is a human problem.
+- `LinkedPullRequest.checksNeverStarted` distinguishes *CI that ran and failed* from *CI that never
+  ran*, so the escalation names the approval setting instead of sending someone hunting for a
+  phantom test failure.
+
+**This makes the approval toggle a setup precondition, now in §10.1.** Without it, a repository with
+CI cannot complete an Objective at all: every item would correctly stall at `checks_failed`. Gate 3
+"passed" only because the bug and the misconfiguration cancelled out.
+
+**F3 — `failed` fired while the agent was still writing.** A Work Item derived `failed` during the
+window where the coding agent had opened its draft PR but pushed only `Initial plan`. Following the
+skill's "retry every failed item" instruction would have closed a live session's PR; the Director
+happened to wait a cycle and it self-corrected. The cause was measuring an *empty pull request*
+against `DISPATCH_CONFIRM_WINDOW_MS`, which answers a different question. The confirm window asks
+"did dispatch take?", and its evidence is a PR appearing at all — so it is rightly 90 seconds from
+assignment. Once a PR exists, dispatch demonstrably took, and the live question is "is the agent
+still working?", which must be measured from the PR's own creation: agents open the draft within
+seconds and then work for minutes. Fixed with `EMPTY_PULL_REQUEST_GRACE_MS` (10 minutes, from the
+PR's `createdAt`), with an explicit decline exempted since that is a final answer rather than
+silence. `failed` is now a settled judgment, and the skill says so.
+
+**F2 — compilation still infers repository layout instead of reading it.** No tool exposes the target
+repository's file tree, so `objective-compilation` derived `src/parse.ts` / `test/parse.test.ts` from
+conventional layout alone. It was right here, but a wrong guess surfaces several steps later as an
+untouched-scope failure, which is an expensive way to learn a path is wrong. Not fixed; a read-only
+repo-tree/file-contents tool is the obvious answer and is deferred rather than dismissed.
 
 ---
 

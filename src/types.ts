@@ -96,6 +96,22 @@ export interface LinkedPullRequest {
   /** Commit subjects, oldest first. */
   commitSubjects: string[];
   checks: CheckRollup;
+  /**
+   * True when `checks` is `FAILURE` only because a check *suite* concluded
+   * badly without ever producing a check run — CI that never started, rather
+   * than CI that ran and failed.
+   *
+   * Worth distinguishing because the two demand opposite responses from a
+   * human, and the overwhelmingly common cause is not a bug at all: GitHub
+   * requires a maintainer to click "Approve and run workflows" on a pull
+   * request authored by the coding agent before any workflow executes
+   * (verified against docs.github.com, 2026-09-02; the setting lives under
+   * Settings → Copilot → Coding agent). Unapproved, the run is created,
+   * executes nothing, and concludes `failure`. Reporting that as "required
+   * checks failed" sends a human hunting for a broken test that does not
+   * exist, so escalation names the real cause instead (§10.5, F1).
+   */
+  checksNeverStarted?: boolean;
   mergeable: MergeableState;
   createdAt: Date;
 }
@@ -161,4 +177,19 @@ export interface ObjectiveSnapshot {
    * 2026-08-30). `null` if the repository has no assignable coding agent.
    */
   copilotBotId: string | null;
+  /**
+   * Whether this repository is known to run CI on pull requests, so a PR with
+   * *no* checks at all should be read as "CI has not reported yet", not as
+   * "this repository has no CI".
+   *
+   * Gate 3 finding (2026-09-02, clockgrove/factory-gate3): all four PRs merged
+   * with `checks: null` even though the repository ships a real workflow. The
+   * workflow runs were created and then failed at *startup* — zero jobs — so
+   * they never attached a check to the head commit, and `statusCheckRollup`
+   * stayed null with zero contexts. A CI that cannot start is therefore
+   * byte-for-byte indistinguishable from a repository with no CI, and the
+   * evaluator merged straight through it. This flag is the missing
+   * distinction; see `evaluateMechanical`'s `checks_missing` verdict.
+   */
+  ciExpectedOnPullRequests: boolean;
 }

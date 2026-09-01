@@ -182,6 +182,55 @@ describe("evaluateMechanical", () => {
     expect(evaluateMechanical(pr())).toEqual({ kind: "ready" });
   });
 
+  // Gate 3 (§10.5, F1). All four PRs merged with a null rollup even though the
+  // repository shipped a real workflow: the runs failed at startup, produced
+  // zero jobs, and so attached zero checks to the head commit. Absent checks
+  // must not read as "no CI configured" when the repository is known to run CI
+  // on pull requests.
+  it("classifies absent checks as missing when CI is expected", () => {
+    expect(evaluateMechanical(pr({ checks: null }), undefined, true)).toEqual({
+      kind: "checks_missing",
+    });
+  });
+
+  it("still treats absent checks as ready when no CI is expected", () => {
+    expect(evaluateMechanical(pr({ checks: null }), undefined, false)).toEqual({
+      kind: "ready",
+    });
+  });
+
+  it("defaults to the pre-Gate-3 behaviour when ciExpected is omitted", () => {
+    expect(evaluateMechanical(pr({ checks: null }))).toEqual({ kind: "ready" });
+  });
+
+  it("reports settled checks even when CI is expected", () => {
+    expect(evaluateMechanical(pr({ checks: "SUCCESS" }), undefined, true)).toEqual({
+      kind: "ready",
+    });
+    expect(evaluateMechanical(pr({ checks: "FAILURE" }), undefined, true)).toEqual({
+      kind: "checks_failed",
+    });
+    expect(evaluateMechanical(pr({ checks: "PENDING" }), undefined, true)).toEqual({
+      kind: "checks_pending",
+    });
+  });
+
+  it("prioritizes a no-op over missing checks", () => {
+    expect(
+      evaluateMechanical(
+        pr({
+          changedLines: 0,
+          changedFiles: 0,
+          changedFilePaths: [],
+          commitSubjects: [INITIAL_PLAN_COMMIT],
+          checks: null,
+        }),
+        undefined,
+        true,
+      ),
+    ).toEqual({ kind: "no_op" });
+  });
+
   it("prioritizes no-op over conflict and checks", () => {
     expect(
       evaluateMechanical(

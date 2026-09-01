@@ -84,6 +84,12 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
    Attempts are counted from linked PRs, not a stored counter (§4.4); after 3, the tool escalates
    instead of retrying, on its own.
 
+   `failed` is a settled judgment, not a guess: a pull request that exists but has no diff is left
+   `in_flight` until it is past *both* the dispatch confirm window and its own ten-minute grace
+   period, because the agent opens its draft PR within seconds and then works for minutes. You do
+   not need to second-guess a `failed` verdict or "wait one more interval" to see if it self-corrects
+   — if it says `failed`, the windows have already elapsed.
+
 6. **Integrate reviewable items.** For each Work Item currently `for_review`, call
    `dispatch_integrate`, passing `expectedFiles` when the Work Item declared a `scope` (this is what
    lets `evaluate_mechanical`'s untouched-scope check run at all). Read the returned `verdict` kind:
@@ -93,6 +99,10 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
      Work Item conflicts repeatedly, that is itself replanning evidence (step 7), not something to
      keep retrying past.
    - `checks_pending` — leave it; it will show up again next cycle once checks settle.
+   - `checks_missing` — the repository is known to run CI on pull requests, but this PR carries no
+     checks at all. Usually a timing race that clears within a cycle, so leave it. If the *same*
+     Work Item reports `checks_missing` for several consecutive cycles, stop waiting and escalate:
+     the repository's CI is failing to attach checks, which no retry can fix.
    - `checks_failed` / `untouched` / `no_op` / `declined` — the tool already closed the unusable PR
      and queued a retry (which the *next* cycle's step 5 will pick up as `failed`, or step 3 will
      redispatch once unassigned) — you do not need to act on the verdict directly, only read it to
@@ -166,6 +176,20 @@ Two honest limits on that read, so you don't over-trust it either:
 - Reading the diff tells you the code *says* the right thing, not that it *runs*. Where the
   repository has no CI, `checks` is `null` and nothing has executed the tests (§10.2, F2) — so
   "the tests pass" is an assumption, not an observation. Say so when you report.
+- `checks: null` now means only one thing: nothing at all reported. If the repository *does* run CI
+  on pull requests, an absent result surfaces as `checks_missing`, and CI that concluded without
+  executing anything surfaces as `checks_failed` — neither will silently merge. Read
+  `ciExpectedOnPullRequests` on the Objective to know which world you are in, and say which one when
+  you report on the merge.
+
+**A repository whose CI never runs on agent pull requests is a setup problem, not a Work Item
+problem.** GitHub requires a maintainer to click "Approve and run workflows" on a pull request
+authored by the coding agent, so by default the run is created, executes nothing, and concludes
+`failure` — Gate 3 hit exactly this on all four items (§10.5, F1). Factory reports it as
+`checks_failed` with an explanation naming the approval setting rather than a phantom test failure.
+If you see that reason on the *first* item of an Objective, do not burn three retries discovering it
+applies to every item: escalate immediately and tell the human to turn off "Require approval for
+workflow runs" under Settings → Copilot → Coding agent, or to approve the runs.
 
 Stop and ask a human (via `dispatch_retry_or_escalate` if the Work Item is `failed`, or by directly
 telling the operator otherwise — there is no tool for "escalate a `for_review` or `dispatched` item

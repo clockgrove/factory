@@ -14,7 +14,7 @@
  * network.
  */
 
-import { isNoOp } from "./state.js";
+import { DECLINE_TITLE_PATTERN, isNoOp } from "./state.js";
 import type { LinkedPullRequest } from "./types.js";
 
 /**
@@ -31,9 +31,11 @@ import type { LinkedPullRequest } from "./types.js";
  * conservative: free-text alone is not trusted as primary evidence, since
  * PROBE-001 also found `[WIP]` titles appear on both genuine work and empty
  * failures.
+ *
+ * The pattern itself lives in `state.ts`, which needs it to exempt an explicit
+ * decline from the empty-PR grace period (§10.5, F3) — there is nothing to
+ * wait for once the agent has given its final answer.
  */
-const DECLINE_TITLE_PATTERN = /^\s*no-?op\s*:/i;
-
 export function isDeclined(pr: LinkedPullRequest): boolean {
   return isNoOp(pr) && DECLINE_TITLE_PATTERN.test(pr.title);
 }
@@ -84,6 +86,7 @@ export type MechanicalVerdict =
   | { kind: "untouched"; touchedFiles: string[] }
   | { kind: "conflict" }
   | { kind: "checks_pending" }
+  | { kind: "checks_missing" }
   | { kind: "checks_failed" }
   | { kind: "ready" };
 
@@ -95,14 +98,21 @@ export type MechanicalVerdict =
  *     about the PR (its checks, its mergeability) is worth inspecting.
  *  2. `untouched` — a real diff exists but not where the Work Item scoped it.
  *  3. `conflict` — GitHub cannot merge this cleanly against the base branch.
- *  4. `checks_pending` / `checks_failed` — required checks have not yet
- *     cleared.
+ *  4. `checks_pending` / `checks_missing` / `checks_failed` — required checks
+ *     have not yet cleared, never arrived, or failed.
  *  5. `ready` — passed every mechanical check; only the semantic check (§5.2)
  *     remains before merge.
+ *
+ * `ciExpected` is the Objective snapshot's `ciExpectedOnPullRequests`: pass it
+ * so a PR carrying *no* checks in a repository that demonstrably runs CI on
+ * pull requests is reported as `checks_missing` rather than `ready`. Omitting
+ * it reproduces the pre-Gate-3 behaviour, where absent checks were silently
+ * treated as "this repository has no CI" (§10.5, F1).
  */
 export function evaluateMechanical(
   pr: LinkedPullRequest,
   expectedFiles?: string[],
+  ciExpected = false,
 ): MechanicalVerdict {
   if (isDeclined(pr)) return { kind: "declined" };
   if (isNoOp(pr)) return { kind: "no_op" };
@@ -112,5 +122,11 @@ export function evaluateMechanical(
   if (hasConflict(pr)) return { kind: "conflict" };
   if (pr.checks === "PENDING") return { kind: "checks_pending" };
   if (pr.checks === "FAILURE") return { kind: "checks_failed" };
+  // Gate 3 (§10.5, F1): `null` is not "no CI" when the repository is known to
+  // run CI on pull requests. It also covers a workflow that fails to *start* —
+  // GitHub creates the run, it produces zero jobs, and it therefore attaches
+  // zero checks to the head commit, leaving the rollup null rather than
+  // failing. Merging on that is merging with no CI evidence whatsoever.
+  if (pr.checks === null && ciExpected) return { kind: "checks_missing" };
   return { kind: "ready" };
 }

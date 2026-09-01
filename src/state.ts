@@ -68,6 +68,53 @@ export function isAssignedToCopilot(wi: WorkItemSnapshot): boolean {
  */
 export const DISPATCH_CONFIRM_WINDOW_MS = 90_000;
 
+/**
+ * A PR title that explicitly declines the Work Item as not actionable. Lives
+ * here, next to the no-op classification it qualifies, so `deriveState` can
+ * tell "the agent said no" apart from "the agent has not spoken yet" without
+ * importing from `evaluate.ts` and creating a cycle. `evaluate.ts` owns the
+ * `isDeclined` predicate built on it.
+ */
+export const DECLINE_TITLE_PATTERN = /^\s*no-?op\s*:/i;
+
+/**
+ * How long a pull request that exists but carries no diff is given before it
+ * is judged, measured from the *pull request's* creation rather than from the
+ * assignment.
+ *
+ * Gate 3 finding F3 (§10.5): a Work Item was derived `failed` while the coding
+ * agent was actively writing it, because `DISPATCH_CONFIRM_WINDOW_MS` had
+ * elapsed since assignment. Following the skill's "retry every failed item"
+ * guidance would have closed a live session's PR. The two windows answer
+ * different questions, and conflating them is what caused the false negative:
+ *
+ *  - The confirm window asks *did dispatch take?* Its evidence is a PR
+ *    appearing at all, so it is rightly short and measured from assignment.
+ *  - Once a PR exists, dispatch demonstrably took. The remaining question is
+ *    *is the agent still working?* — and the agent opens its draft PR within
+ *    seconds and then works for minutes (Gate 2: PRs opened 5–40s after
+ *    dispatch; the Objective took ~17 minutes end to end). Judging that from
+ *    the assignment clock declares failure while work is visibly in progress.
+ *
+ * Ten minutes is comfortably beyond every session measured so far while still
+ * bounding a genuinely dead attempt. The clock restarts naturally on retry,
+ * because a retry closes the old PR and the next attempt opens a new one.
+ */
+export const EMPTY_PULL_REQUEST_GRACE_MS = 600_000;
+
+/**
+ * Whether an evidence-free pull request is young enough that its emptiness is
+ * not yet meaningful. An explicit decline is exempt: the agent has given its
+ * final answer, so there is nothing to wait for (§5.1).
+ */
+export function withinEmptyPullRequestGrace(
+  pr: LinkedPullRequest,
+  now: Date,
+): boolean {
+  if (DECLINE_TITLE_PATTERN.test(pr.title)) return false;
+  return now.getTime() - pr.createdAt.getTime() < EMPTY_PULL_REQUEST_GRACE_MS;
+}
+
 /** The most recent time the coding agent was assigned, or `null` if never. */
 export function latestCopilotAssignment(wi: WorkItemSnapshot): Date | null {
   if (wi.copilotAssignments.length === 0) return null;
@@ -177,10 +224,13 @@ export function deriveState(wi: WorkItemSnapshot, now: Date): WorkItemState {
   const current = currentOpenPullRequest(wi);
   if (current) {
     if (isNoOp(current)) {
-      // No diff yet is not evidence of failure while the session may still
-      // be pushing commits (§4.2) — only call it once the confirm window
-      // has elapsed without a real diff appearing.
-      return withinConfirmWindow(wi, now) ? "in_flight" : "failed";
+      // No diff yet is not evidence of failure while the session may still be
+      // pushing commits (§4.2). Two independent reasons to keep waiting: the
+      // dispatch is too fresh to judge at all, or the PR itself is young
+      // enough that the agent is plausibly still writing into it (§10.5, F3).
+      const stillPlausiblyWorking =
+        withinConfirmWindow(wi, now) || withinEmptyPullRequestGrace(current, now);
+      return stillPlausiblyWorking ? "in_flight" : "failed";
     }
     if (checksSettled(current)) return "for_review";
     return "in_flight";
@@ -208,6 +258,7 @@ export interface DerivedObjective {
   repositoryId: string;
   defaultBranch: string;
   copilotBotId: string | null;
+  ciExpectedOnPullRequests: boolean;
   items: DerivedWorkItem[];
 }
 
@@ -222,6 +273,7 @@ export function derive(snapshot: ObjectiveSnapshot): DerivedObjective {
     repositoryId: snapshot.repositoryId,
     defaultBranch: snapshot.defaultBranch,
     copilotBotId: snapshot.copilotBotId,
+    ciExpectedOnPullRequests: snapshot.ciExpectedOnPullRequests,
     items: snapshot.workItems.map((wi) => ({
       ...wi,
       state: deriveState(wi, snapshot.readAt),

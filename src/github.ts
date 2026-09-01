@@ -89,7 +89,18 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
                 nodes { commit { messageHeadline } }
               }
               statusCheckRollup: commits(last: 1) {
-                nodes { commit { statusCheckRollup { state } } }
+                nodes {
+                  commit {
+                    statusCheckRollup { state }
+                    checkSuites(first: 20) {
+                      nodes {
+                        status
+                        conclusion
+                        checkRuns { totalCount }
+                      }
+                    }
+                  }
+                }
               }
             }
           }
@@ -129,7 +140,18 @@ interface GqlPr {
   files: { nodes: { path: string }[] };
   commits: { nodes: { commit: { messageHeadline: string } }[] };
   statusCheckRollup: {
-    nodes: { commit: { statusCheckRollup: { state: string } | null } }[];
+    nodes: {
+      commit: {
+        statusCheckRollup: { state: string } | null;
+        checkSuites: {
+          nodes: {
+            status: string;
+            conclusion: string | null;
+            checkRuns: { totalCount: number };
+          }[];
+        };
+      };
+    }[];
   };
 }
 
@@ -172,23 +194,59 @@ interface GqlResponse {
 /**
  * GitHub reports a rich set of rollup states; the loop only needs to know
  * whether checks have settled and, if so, whether they passed.
+ *
+ * `statusCheckRollup` alone is not sufficient, and Gate 3 proved it the
+ * expensive way. It is computed from the head commit's check *runs* and status
+ * contexts, so a check *suite* that concludes without ever producing a run
+ * contributes nothing to it and leaves it `null` — indistinguishable from a
+ * repository that has no CI at all. That is not hypothetical: every one of
+ * clockgrove/factory-gate3's four pull requests had a `github-actions` check
+ * suite with `conclusion: FAILURE` and `latest_check_runs_count: 0` (the
+ * workflow failed at startup, so it produced zero jobs), a null rollup, and was
+ * merged as `ready`. GitHub had explicitly said "CI failed"; Factory read
+ * "no CI". So the suites are consulted whenever the rollup is silent.
  */
 function normalizeChecks(pr: GqlPr): CheckRollup {
-  const raw = pr.statusCheckRollup.nodes[0]?.commit.statusCheckRollup?.state;
-  if (!raw) return null;
-  switch (raw) {
-    case "PENDING":
-    case "EXPECTED":
-      return "PENDING";
-    case "SUCCESS":
-      return "SUCCESS";
-    default:
-      // FAILURE, ERROR — terminal and unsuccessful.
-      return "FAILURE";
+  const commit = pr.statusCheckRollup.nodes[0]?.commit;
+  const raw = commit?.statusCheckRollup?.state;
+  if (raw) {
+    switch (raw) {
+      case "PENDING":
+      case "EXPECTED":
+        return "PENDING";
+      case "SUCCESS":
+        return "SUCCESS";
+      default:
+        // FAILURE, ERROR — terminal and unsuccessful.
+        return "FAILURE";
+    }
   }
+  return runlessSuiteVerdict(commit?.checkSuites.nodes ?? []);
+}
+
+/**
+ * The verdict implied by check suites the rollup could not see — those that
+ * produced no check runs. A suite still in flight means checks are coming; a
+ * suite that finished badly without emitting a run means CI broke before it
+ * could report, which is a failure and must never be read as an absence.
+ */
+export function runlessSuiteVerdict(
+  suites: { status: string; conclusion: string | null; checkRuns: { totalCount: number } }[],
+): CheckRollup {
+  const runless = suites.filter((s) => s.checkRuns.totalCount === 0);
+  if (runless.length === 0) return null;
+  if (runless.some((s) => s.status !== "COMPLETED")) return "PENDING";
+  // `SUCCESS`/`NEUTRAL`/`SKIPPED` with no runs means nothing was required of
+  // this commit — genuinely nothing to report, so stay silent. Anything else
+  // (FAILURE, STARTUP_FAILURE, CANCELLED, TIMED_OUT, ACTION_REQUIRED) is CI
+  // telling us it did not pass.
+  const benign = new Set(["SUCCESS", "NEUTRAL", "SKIPPED", null]);
+  return runless.some((s) => !benign.has(s.conclusion)) ? "FAILURE" : null;
 }
 
 function toPullRequest(pr: GqlPr): LinkedPullRequest {
+  const commit = pr.statusCheckRollup.nodes[0]?.commit;
+  const checks = normalizeChecks(pr);
   return {
     id: pr.id,
     number: pr.number,
@@ -200,7 +258,9 @@ function toPullRequest(pr: GqlPr): LinkedPullRequest {
     changedFiles: pr.changedFiles,
     changedFilePaths: pr.files.nodes.map((n) => n.path),
     commitSubjects: pr.commits.nodes.map((n) => n.commit.messageHeadline),
-    checks: normalizeChecks(pr),
+    checks,
+    checksNeverStarted:
+      checks === "FAILURE" && !commit?.statusCheckRollup?.state,
     mergeable: pr.mergeable,
     createdAt: new Date(pr.createdAt),
   };
@@ -330,6 +390,8 @@ export class GitHubReader {
   readonly #octokit: Octokit;
   readonly #owner: string;
   readonly #repo: string;
+  /** Latched once true by `#ciExpectedOnPullRequests`. */
+  #ciExpected = false;
 
   constructor(opts: GitHubOptions) {
     this.#owner = opts.owner;
@@ -410,7 +472,47 @@ export class GitHubReader {
       repositoryId: repository.id,
       defaultBranch: repository.defaultBranchRef.name,
       copilotBotId: bot?.id ?? null,
+      ciExpectedOnPullRequests: await this.#ciExpectedOnPullRequests(),
     };
+  }
+
+  /**
+   * Whether this repository has ever run a workflow on a `pull_request` event.
+   *
+   * One cheap REST call (`per_page=1`, only `total_count` is read), and the
+   * answer is latched once true — a repository that runs CI on pull requests
+   * does not stop being one mid-Objective, so the call is made at most once per
+   * process after the first positive.
+   *
+   * Deliberately evidence-based rather than configuration-based: listing
+   * workflows would say a repository *has* Actions, but not whether any of them
+   * apply to pull requests (a release-only or schedule-only workflow would then
+   * block every merge forever). Asking whether a `pull_request` run has ever
+   * existed answers the question that actually matters. It also degrades
+   * gracefully — the run created for the PR under review counts, so even the
+   * first pull request a repository ever receives is covered as soon as its own
+   * run is created, which is exactly the window Gate 3 merged through.
+   */
+  async #ciExpectedOnPullRequests(): Promise<boolean> {
+    if (this.#ciExpected) return true;
+    try {
+      const runs = await this.#octokit.request(
+        "GET /repos/{owner}/{repo}/actions/runs",
+        {
+          owner: this.#owner,
+          repo: this.#repo,
+          event: "pull_request",
+          per_page: 1,
+        },
+      );
+      if (runs.data.total_count > 0) this.#ciExpected = true;
+    } catch {
+      // Actions disabled, or no permission to read them. Either way there is no
+      // evidence CI is expected, so the flag stays false and the evaluator
+      // behaves exactly as it did before this check existed.
+      return false;
+    }
+    return this.#ciExpected;
   }
 
   /**

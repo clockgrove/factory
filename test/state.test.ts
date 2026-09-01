@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   DISPATCH_CONFIRM_WINDOW_MS,
+  EMPTY_PULL_REQUEST_GRACE_MS,
   allDone,
   attemptCount,
   confirmFailureStreak,
@@ -69,6 +70,7 @@ function objective(items: WorkItemSnapshot[]): ObjectiveSnapshot {
     repositoryId: "R_1",
     defaultBranch: "main",
     copilotBotId: "BOT_1",
+    ciExpectedOnPullRequests: false,
   };
 }
 
@@ -186,7 +188,58 @@ describe("deriveState", () => {
         new Date(NOW.getTime() - DISPATCH_CONFIRM_WINDOW_MS - 1),
       ],
       linkedPullRequests: [
-        pr({ changedLines: 0, changedFiles: 0, commitSubjects: [INITIAL_PLAN_COMMIT] }),
+        pr({
+          changedLines: 0,
+          changedFiles: 0,
+          commitSubjects: [INITIAL_PLAN_COMMIT],
+          // The PR must also be past its own grace period; an empty PR that is
+          // merely older than the *dispatch* confirm window is not yet
+          // evidence of failure (§10.5, F3).
+          createdAt: new Date(NOW.getTime() - EMPTY_PULL_REQUEST_GRACE_MS - 1),
+        }),
+      ],
+    });
+    expect(deriveState(item, NOW)).toBe("failed");
+  });
+
+  // Gate 3, F3 (§10.5). The agent opens its draft PR within seconds and then
+  // works for minutes. Judging that PR on the assignment clock declared a live
+  // session failed, and the skill's "retry every failed item" guidance would
+  // have closed a PR that was actively being written.
+  it("is in_flight when an empty PR is past the confirm window but still young", () => {
+    const item = wi({
+      assignees: [COPILOT_ASSIGNEE_LOGIN],
+      copilotAssignments: [
+        new Date(NOW.getTime() - DISPATCH_CONFIRM_WINDOW_MS - 1),
+      ],
+      linkedPullRequests: [
+        pr({
+          changedLines: 0,
+          changedFiles: 0,
+          commitSubjects: [INITIAL_PLAN_COMMIT],
+          createdAt: new Date(NOW.getTime() - DISPATCH_CONFIRM_WINDOW_MS - 1),
+        }),
+      ],
+    });
+    expect(deriveState(item, NOW)).toBe("in_flight");
+  });
+
+  it("does not extend the grace to a PR that explicitly declined", () => {
+    // An explicit decline is the agent's final answer, not silence, so there
+    // is nothing to wait for.
+    const item = wi({
+      assignees: [COPILOT_ASSIGNEE_LOGIN],
+      copilotAssignments: [
+        new Date(NOW.getTime() - DISPATCH_CONFIRM_WINDOW_MS - 1),
+      ],
+      linkedPullRequests: [
+        pr({
+          title: "No-op: impossible task — target file does not exist",
+          changedLines: 0,
+          changedFiles: 0,
+          commitSubjects: [INITIAL_PLAN_COMMIT],
+          createdAt: NOW,
+        }),
       ],
     });
     expect(deriveState(item, NOW)).toBe("failed");
@@ -199,7 +252,12 @@ describe("deriveState", () => {
     const item = wi({
       assignees: [COPILOT_ASSIGNEE_LOGIN],
       linkedPullRequests: [
-        pr({ changedLines: 0, changedFiles: 0, commitSubjects: [INITIAL_PLAN_COMMIT] }),
+        pr({
+          changedLines: 0,
+          changedFiles: 0,
+          commitSubjects: [INITIAL_PLAN_COMMIT],
+          createdAt: new Date(NOW.getTime() - EMPTY_PULL_REQUEST_GRACE_MS - 1),
+        }),
       ],
     });
     expect(deriveState(item, NOW)).toBe("failed");

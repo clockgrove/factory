@@ -423,7 +423,15 @@ export class Dispatcher {
         );
         return;
       case "checks_failed":
-        await this.retryOrEscalate(wi, "required checks failed");
+        await this.retryOrEscalate(
+          wi,
+          pr.checksNeverStarted
+            ? "CI concluded without running a single job. On a pull request authored by " +
+              "the coding agent this normally means workflow runs are awaiting a " +
+              "maintainer's 'Approve and run workflows' click, not that a test failed — " +
+              "see Settings → Copilot → Coding agent"
+            : "required checks failed",
+        );
         return;
       case "declined":
         await this.retryOrEscalate(
@@ -436,6 +444,16 @@ export class Dispatcher {
         return;
       case "checks_pending":
         return; // wait for the next cycle; nothing to do yet
+      case "checks_missing":
+        // The repository runs CI on pull requests but this PR carries no checks
+        // at all (§10.5, F1). Usually a timing race that resolves within a
+        // cycle, so waiting is right — but if it persists, the repository's CI
+        // is failing to attach checks (e.g. a workflow that fails at startup
+        // produces zero jobs and therefore zero checks) and no amount of waiting
+        // will fix it. That is a human problem, not a Work Item problem, so it
+        // is deliberately never auto-merged and never auto-retried; the Director
+        // skill escalates it after it survives several cycles.
+        return;
     }
   }
 

@@ -66,8 +66,25 @@ and replans — unattended.
 > tools, adding `read_pull_request_diff`, and `read_objective` takes a `minimal` flag because at ten
 > Work Items its response exceeded the tool output limit outright.
 >
-> Per PRD §8, Gate 3 is one real Clockgrove Objective. See [`docs/PRD.md`](docs/PRD.md) and
-> [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md).
+> Per PRD §8, Gate 3 is one real Clockgrove Objective. A **synthetic brownfield dress rehearsal for
+> it** ran against `clockgrove/factory-gate3` — an existing, working library with passing tests, real
+> CI, and three documented rough edges to fix, so that for the first time Work Items had to *change*
+> code rather than only add files. All four Work Items merged in ~12 minutes, `read_pull_request_diff`
+> genuinely verified the composition criterion Gate 2 had to merge unverified, no existing test was
+> deleted or weakened, and §6's "base branch was modified" recovery path fired and self-healed.
+>
+> It also caught the most serious defect found so far. All four PRs merged with `checks: null` even
+> though the repo ships CI. GitHub requires a maintainer to click **"Approve and run workflows"** on a
+> coding-agent pull request, so every run was created, executed nothing, and concluded `failure` with
+> zero jobs — and because `statusCheckRollup` is computed from check *runs*, it stayed `null`, which
+> Factory read as "this repository has no CI" and merged straight through. GitHub said *CI failed*;
+> Factory heard *there is no CI*. Now fixed three ways: check **suites** are consulted when the rollup
+> is silent, a new `checks_missing` verdict covers a PR that has no checks in a repo known to run them,
+> and escalation names the approval setting instead of reporting a phantom test failure. Live-verified
+> against both rehearsal repos — gate3's four PRs now report `FAILURE`, gate2's ten (which genuinely
+> have no CI) still report `null`. Gate 3 also fixed a false `failed` verdict that fired while the
+> agent was still writing its PR. Details in [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md)
+> §10.5; see also [`docs/PRD.md`](docs/PRD.md).
 
 ## Design in one picture
 

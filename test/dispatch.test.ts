@@ -67,6 +67,7 @@ function derivedWi(over: Partial<WorkItemSnapshot> = {}, now = NOW): DerivedWork
 /** Records every call made to it, and can be configured to reject on a given method. */
 class FakeWriter implements GitHubWriter {
   calls: string[] = [];
+  comments: string[] = [];
   failing: Partial<Record<keyof GitHubWriter, unknown>>;
 
   constructor(failing: Partial<Record<keyof GitHubWriter, unknown>> = {}) {
@@ -95,6 +96,7 @@ class FakeWriter implements GitHubWriter {
 
   async addComment(subjectId: string, body: string): Promise<void> {
     this.calls.push(`addComment:${subjectId}`);
+    this.comments.push(body);
     if (this.failing.addComment) throw this.failing.addComment;
   }
 
@@ -400,6 +402,36 @@ describe("Dispatcher.integrate", () => {
       `clearActors:${item.id}`,
       `assignCopilot:${item.id}:BOT_1`,
     ]);
+    expect(writer.comments.join("\n")).toContain("required checks failed");
+  });
+
+  // Gate 3, §10.5 F1. GitHub requires a maintainer to click "Approve and run
+  // workflows" on a coding-agent PR, so an unapproved run concludes `failure`
+  // having executed nothing. Reporting that as a failed test sends whoever
+  // reads the escalation hunting for a bug that does not exist.
+  it("names the real cause when CI concluded without running a job", async () => {
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    const item = derivedWi({ linkedPullRequests: [pr({ id: "PR_failed" })] });
+    await d.integrate(
+      item,
+      pr({ id: "PR_failed", checks: "FAILURE", checksNeverStarted: true }),
+      { kind: "checks_failed" },
+    );
+    const comment = writer.comments.join("\n");
+    expect(comment).toContain("without running a single job");
+    expect(comment).toContain("Approve and run workflows");
+    expect(comment).not.toContain("required checks failed");
+  });
+
+  it("waits rather than acting when checks are expected but absent", async () => {
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    const item = derivedWi({ linkedPullRequests: [pr({ id: "PR_missing" })] });
+    await d.integrate(item, pr({ id: "PR_missing", checks: null }), {
+      kind: "checks_missing",
+    });
+    expect(writer.calls).toEqual([]);
   });
 });
 

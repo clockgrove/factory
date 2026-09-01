@@ -24105,7 +24105,18 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
                 nodes { commit { messageHeadline } }
               }
               statusCheckRollup: commits(last: 1) {
-                nodes { commit { statusCheckRollup { state } } }
+                nodes {
+                  commit {
+                    statusCheckRollup { state }
+                    checkSuites(first: 20) {
+                      nodes {
+                        status
+                        conclusion
+                        checkRuns { totalCount }
+                      }
+                    }
+                  }
+                }
               }
             }
           }
@@ -24126,19 +24137,31 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
   }
 }`;
 function normalizeChecks(pr) {
-  const raw = pr.statusCheckRollup.nodes[0]?.commit.statusCheckRollup?.state;
-  if (!raw) return null;
-  switch (raw) {
-    case "PENDING":
-    case "EXPECTED":
-      return "PENDING";
-    case "SUCCESS":
-      return "SUCCESS";
-    default:
-      return "FAILURE";
+  const commit = pr.statusCheckRollup.nodes[0]?.commit;
+  const raw = commit?.statusCheckRollup?.state;
+  if (raw) {
+    switch (raw) {
+      case "PENDING":
+      case "EXPECTED":
+        return "PENDING";
+      case "SUCCESS":
+        return "SUCCESS";
+      default:
+        return "FAILURE";
+    }
   }
+  return runlessSuiteVerdict(commit?.checkSuites.nodes ?? []);
+}
+function runlessSuiteVerdict(suites) {
+  const runless = suites.filter((s) => s.checkRuns.totalCount === 0);
+  if (runless.length === 0) return null;
+  if (runless.some((s) => s.status !== "COMPLETED")) return "PENDING";
+  const benign = /* @__PURE__ */ new Set(["SUCCESS", "NEUTRAL", "SKIPPED", null]);
+  return runless.some((s) => !benign.has(s.conclusion)) ? "FAILURE" : null;
 }
 function toPullRequest(pr) {
+  const commit = pr.statusCheckRollup.nodes[0]?.commit;
+  const checks = normalizeChecks(pr);
   return {
     id: pr.id,
     number: pr.number,
@@ -24150,7 +24173,8 @@ function toPullRequest(pr) {
     changedFiles: pr.changedFiles,
     changedFilePaths: pr.files.nodes.map((n) => n.path),
     commitSubjects: pr.commits.nodes.map((n) => n.commit.messageHeadline),
-    checks: normalizeChecks(pr),
+    checks,
+    checksNeverStarted: checks === "FAILURE" && !commit?.statusCheckRollup?.state,
     mergeable: pr.mergeable,
     createdAt: new Date(pr.createdAt)
   };
@@ -24230,6 +24254,8 @@ var GitHubReader = class {
   #octokit;
   #owner;
   #repo;
+  /** Latched once true by `#ciExpectedOnPullRequests`. */
+  #ciExpected = false;
   constructor(opts) {
     this.#owner = opts.owner;
     this.#repo = opts.repo;
@@ -24298,8 +24324,44 @@ var GitHubReader = class {
       readAt: /* @__PURE__ */ new Date(),
       repositoryId: repository.id,
       defaultBranch: repository.defaultBranchRef.name,
-      copilotBotId: bot?.id ?? null
+      copilotBotId: bot?.id ?? null,
+      ciExpectedOnPullRequests: await this.#ciExpectedOnPullRequests()
     };
+  }
+  /**
+   * Whether this repository has ever run a workflow on a `pull_request` event.
+   *
+   * One cheap REST call (`per_page=1`, only `total_count` is read), and the
+   * answer is latched once true — a repository that runs CI on pull requests
+   * does not stop being one mid-Objective, so the call is made at most once per
+   * process after the first positive.
+   *
+   * Deliberately evidence-based rather than configuration-based: listing
+   * workflows would say a repository *has* Actions, but not whether any of them
+   * apply to pull requests (a release-only or schedule-only workflow would then
+   * block every merge forever). Asking whether a `pull_request` run has ever
+   * existed answers the question that actually matters. It also degrades
+   * gracefully — the run created for the PR under review counts, so even the
+   * first pull request a repository ever receives is covered as soon as its own
+   * run is created, which is exactly the window Gate 3 merged through.
+   */
+  async #ciExpectedOnPullRequests() {
+    if (this.#ciExpected) return true;
+    try {
+      const runs = await this.#octokit.request(
+        "GET /repos/{owner}/{repo}/actions/runs",
+        {
+          owner: this.#owner,
+          repo: this.#repo,
+          event: "pull_request",
+          per_page: 1
+        }
+      );
+      if (runs.data.total_count > 0) this.#ciExpected = true;
+    } catch {
+      return false;
+    }
+    return this.#ciExpected;
   }
   /**
    * Resolve a login to its GraphQL node ID, needed once at startup to
@@ -24496,6 +24558,12 @@ function isAssignedToCopilot(wi) {
   return wi.assignees.includes(COPILOT_ASSIGNEE_LOGIN);
 }
 var DISPATCH_CONFIRM_WINDOW_MS = 9e4;
+var DECLINE_TITLE_PATTERN = /^\s*no-?op\s*:/i;
+var EMPTY_PULL_REQUEST_GRACE_MS = 6e5;
+function withinEmptyPullRequestGrace(pr, now) {
+  if (DECLINE_TITLE_PATTERN.test(pr.title)) return false;
+  return now.getTime() - pr.createdAt.getTime() < EMPTY_PULL_REQUEST_GRACE_MS;
+}
 function latestCopilotAssignment(wi) {
   if (wi.copilotAssignments.length === 0) return null;
   return wi.copilotAssignments[wi.copilotAssignments.length - 1];
@@ -24541,7 +24609,8 @@ function deriveState(wi, now) {
   const current = currentOpenPullRequest(wi);
   if (current) {
     if (isNoOp(current)) {
-      return withinConfirmWindow(wi, now) ? "in_flight" : "failed";
+      const stillPlausiblyWorking = withinConfirmWindow(wi, now) || withinEmptyPullRequestGrace(current, now);
+      return stillPlausiblyWorking ? "in_flight" : "failed";
     }
     if (checksSettled(current)) return "for_review";
     return "in_flight";
@@ -24561,6 +24630,7 @@ function derive(snapshot) {
     repositoryId: snapshot.repositoryId,
     defaultBranch: snapshot.defaultBranch,
     copilotBotId: snapshot.copilotBotId,
+    ciExpectedOnPullRequests: snapshot.ciExpectedOnPullRequests,
     items: snapshot.workItems.map((wi) => ({
       ...wi,
       state: deriveState(wi, snapshot.readAt),
@@ -24793,7 +24863,10 @@ var Dispatcher = class {
         );
         return;
       case "checks_failed":
-        await this.retryOrEscalate(wi, "required checks failed");
+        await this.retryOrEscalate(
+          wi,
+          pr.checksNeverStarted ? "CI concluded without running a single job. On a pull request authored by the coding agent this normally means workflow runs are awaiting a maintainer's 'Approve and run workflows' click, not that a test failed \u2014 see Settings \u2192 Copilot \u2192 Coding agent" : "required checks failed"
+        );
         return;
       case "declined":
         await this.retryOrEscalate(
@@ -24805,6 +24878,9 @@ var Dispatcher = class {
         await this.retryOrEscalate(wi);
         return;
       case "checks_pending":
+        return;
+      // wait for the next cycle; nothing to do yet
+      case "checks_missing":
         return;
     }
   }
@@ -24912,7 +24988,6 @@ var Dispatcher = class {
 };
 
 // src/evaluate.ts
-var DECLINE_TITLE_PATTERN = /^\s*no-?op\s*:/i;
 function isDeclined(pr) {
   return isNoOp(pr) && DECLINE_TITLE_PATTERN.test(pr.title);
 }
@@ -24929,7 +25004,7 @@ function isUntouched(pr, expectedFiles) {
 function hasConflict(pr) {
   return pr.mergeable === "CONFLICTING";
 }
-function evaluateMechanical(pr, expectedFiles) {
+function evaluateMechanical(pr, expectedFiles, ciExpected = false) {
   if (isDeclined(pr)) return { kind: "declined" };
   if (isNoOp(pr)) return { kind: "no_op" };
   if (isUntouched(pr, expectedFiles)) {
@@ -24938,6 +25013,7 @@ function evaluateMechanical(pr, expectedFiles) {
   if (hasConflict(pr)) return { kind: "conflict" };
   if (pr.checks === "PENDING") return { kind: "checks_pending" };
   if (pr.checks === "FAILURE") return { kind: "checks_failed" };
+  if (pr.checks === null && ciExpected) return { kind: "checks_missing" };
   return { kind: "ready" };
 }
 
@@ -25197,6 +25273,7 @@ function serializeObjective(o, minimal = false) {
     repositoryId: o.repositoryId,
     defaultBranch: o.defaultBranch,
     copilotBotId: o.copilotBotId,
+    ciExpectedOnPullRequests: o.ciExpectedOnPullRequests,
     items: o.items.map((i) => serializeWorkItem(i, minimal))
   };
 }
@@ -25334,7 +25411,7 @@ server.registerTool(
         throw new Error(`Work Item #${workItemNumber} has no open pull request`);
       }
       return {
-        verdict: evaluateMechanical(pr, expectedFiles),
+        verdict: evaluateMechanical(pr, expectedFiles, objective.ciExpectedOnPullRequests),
         pullRequest: { number: pr.number, title: pr.title }
       };
     }
@@ -25500,7 +25577,7 @@ server.registerTool(
       if (!pr) {
         throw new Error(`Work Item #${workItemNumber} has no open pull request`);
       }
-      const verdict = evaluateMechanical(pr, expectedFiles);
+      const verdict = evaluateMechanical(pr, expectedFiles, objective.ciExpectedOnPullRequests);
       const dispatcher = await dispatcherFor(owner, repo, objective, escalateTo, reader);
       await dispatcher.integrate(item, pr, verdict);
       return { verdict, workItem: workItemNumber, pullRequest: pr.number };

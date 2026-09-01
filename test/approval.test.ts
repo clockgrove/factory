@@ -4,6 +4,7 @@ import {
   assessBlastRadius,
   referencedSecretNames,
   triggersOnPullRequest,
+  usesSelfHostedRunner,
   type WorkflowSafetyProfile,
 } from "../src/approval.js";
 
@@ -140,6 +141,21 @@ describe("assessBlastRadius", () => {
 });
 
 describe("referencedSecretNames", () => {
+  it("treats `secrets: inherit` as an unbounded secret reference", () => {
+    // The caller names no secret and the callee is a workflow_call workflow that
+    // triggersOnPullRequest skips, so both halves evade a name-based scan.
+    const yaml = [
+      "on: pull_request",
+      "jobs:",
+      "  build:",
+      "    uses: ./.github/workflows/build.yml",
+      "    secrets: inherit",
+    ].join("\n");
+    expect(referencedSecretNames(yaml)).toEqual([
+      "<inherit: every repository secret>",
+    ]);
+  });
+
   it("finds dotted references", () => {
     expect(referencedSecretNames("token: ${{ secrets.NPM_TOKEN }}")).toEqual([
       "NPM_TOKEN",
@@ -186,11 +202,65 @@ describe("triggersOnPullRequest", () => {
     expect(triggersOnPullRequest("on:\n  pull_request_target:")).toBe(true);
   });
 
+  it("detects the flow-sequence form, which is idiomatic and was previously missed", () => {
+    // The original regex required a colon after the trigger name, so this
+    // extremely common spelling was judged not PR-triggered and its secrets
+    // were dropped from the scan entirely.
+    expect(triggersOnPullRequest("on: [push, pull_request]\njobs: {}")).toBe(true);
+  });
+
+  it("detects the bare scalar form", () => {
+    expect(triggersOnPullRequest("on: pull_request\njobs: {}")).toBe(true);
+  });
+
+  it("detects the block-sequence form", () => {
+    expect(triggersOnPullRequest("on:\n  - push\n  - pull_request\njobs: {}")).toBe(
+      true,
+    );
+  });
+
+  it("detects a quoted `on` key, which YAML permits", () => {
+    expect(triggersOnPullRequest('"on": [pull_request]')).toBe(true);
+  });
+
   it("ignores a workflow that only runs on a schedule or release", () => {
     // Approving a PR run cannot start these, so their secrets are out of scope.
     expect(triggersOnPullRequest("on:\n  schedule:\n    - cron: '0 0 * * *'")).toBe(
       false,
     );
     expect(triggersOnPullRequest("on:\n  release:\n    types: [published]")).toBe(false);
+  });
+
+  it("does not treat a later top-level key as part of the trigger block", () => {
+    // `pull_request` appears in a job condition, not in `on:`. Reading past the
+    // block would misclassify a push-only workflow as PR-triggered.
+    const yaml = [
+      "on:",
+      "  push:",
+      "jobs:",
+      "  build:",
+      "    if: github.event_name == 'pull_request'",
+    ].join("\n");
+    expect(triggersOnPullRequest(yaml)).toBe(false);
+  });
+
+  it("assumes pull-request-triggered when the triggers cannot be determined", () => {
+    // Deny-side default: a false negative here silently drops a workflow's
+    // secrets from the review, which is the dangerous direction.
+    expect(triggersOnPullRequest("jobs:\n  build:\n    steps: []")).toBe(true);
+  });
+});
+
+describe("usesSelfHostedRunner", () => {
+  it("flags an explicit self-hosted runner", () => {
+    // A read-only token and no secrets do not make a self-hosted runner a
+    // sandbox: persistent state and network position are reachable from it.
+    expect(usesSelfHostedRunner("jobs:\n  b:\n    runs-on: [self-hosted, linux]")).toBe(
+      true,
+    );
+  });
+
+  it("does not flag GitHub-hosted runners", () => {
+    expect(usesSelfHostedRunner("jobs:\n  b:\n    runs-on: ubuntu-latest")).toBe(false);
   });
 });

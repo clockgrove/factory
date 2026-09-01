@@ -228,6 +228,14 @@ export function assessBlastRadius(input: BlastRadiusInput): BlastRadiusVerdict {
  */
 export function referencedSecretNames(workflowYaml: string): string[] {
   const found = new Set<string>();
+  // `secrets: inherit` hands a called workflow every repository and environment
+  // secret without naming one, so neither pattern below would see it. The callee
+  // is invisible too: a reusable workflow is triggered by `workflow_call`, so it
+  // is skipped as not pull-request-triggered. Both halves evade the scan by
+  // construction rather than by coincidence, so match the caller's syntax.
+  if (/^\s*secrets\s*:\s*inherit\s*$/m.test(workflowYaml)) {
+    found.add("<inherit: every repository secret>");
+  }
   const patterns = [
     /secrets\.([A-Za-z_][A-Za-z0-9_]*)/g,
     /secrets\[\s*['"]([^'"]+)['"]\s*\]/g,
@@ -242,10 +250,62 @@ export function referencedSecretNames(workflowYaml: string): string[] {
 }
 
 /**
+ * Extract the body of a workflow's `on:` key, whatever syntax it uses.
+ *
+ * Returns the inline value for `on: pull_request` and `on: [push, pull_request]`,
+ * or the indented block for the mapping and sequence forms. Returns `null` when
+ * no `on:` key can be found at all, which callers must treat as "undetermined"
+ * rather than "no".
+ */
+function extractOnSection(workflowYaml: string): string | null {
+  const lines = workflowYaml.split(/\r?\n/);
+  const index = lines.findIndex((line) => /^["']?on["']?\s*:/.test(line));
+  if (index === -1) return null;
+
+  const header = lines[index] ?? "";
+  const inline = header.slice(header.indexOf(":") + 1).trim();
+  if (inline && !inline.startsWith("#")) return inline;
+
+  const block: string[] = [];
+  for (const line of lines.slice(index + 1)) {
+    // A non-indented, non-empty line starts the next top-level key.
+    if (/^\S/.test(line)) break;
+    block.push(line);
+  }
+  return block.join("\n");
+}
+
+/**
  * True when a workflow can be triggered by a pull request, and is therefore in
  * scope for this review. Anything else (a release or cron workflow) is not
  * something approving a PR run can start.
+ *
+ * Handles all three legal spellings — `on: pull_request`, `on: [push,
+ * pull_request]` and the indented mapping or sequence forms. An earlier version
+ * required a colon directly after the trigger name, which silently missed the
+ * two most common syntaxes and caused those workflows' secrets to be ignored
+ * entirely. The false negative is the dangerous direction here, so a workflow
+ * whose triggers cannot be determined is treated as pull-request-triggered.
  */
 export function triggersOnPullRequest(workflowYaml: string): boolean {
-  return /^\s*(pull_request|pull_request_target)\s*:/m.test(workflowYaml);
+  const section = extractOnSection(workflowYaml);
+  if (section === null) return true;
+  return /\bpull_request(_target)?\b/.test(section);
+}
+
+/**
+ * True when a workflow explicitly asks for a self-hosted runner.
+ *
+ * "A sandbox holding nothing worth stealing" is false on a self-hosted runner
+ * regardless of token scope or secrets: persistent state, network position and
+ * previous jobs' residue are all reachable from it.
+ *
+ * Deliberately narrow — it matches the literal `self-hosted` label rather than
+ * trying to decide whether an arbitrary `runs-on` expression resolves to a
+ * GitHub-hosted image. Treating every `${{ matrix.os }}` as suspect would deny
+ * on ordinary repositories, and the residual risk is a repository that reaches a
+ * self-hosted runner through an indirection, which is rare and visible.
+ */
+export function usesSelfHostedRunner(workflowYaml: string): boolean {
+  return /\bself-hosted\b/.test(workflowYaml);
 }

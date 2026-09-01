@@ -555,32 +555,41 @@ server.registerTool(
         throw new Error(`Work Item #${workItemNumber} has no open pull request`);
       }
 
-      const runs = await reader.listRunsAwaitingApproval(pr.headSha);
-      if (runs.length === 0) {
+      const held = await reader.listRunsAwaitingApproval(pr.headSha);
+      if (held.approvable.length === 0) {
         return {
           action: "no_runs_held",
           reason:
-            "no workflow run for this pull request's head commit is awaiting approval, so there is nothing to approve",
+            held.otherEvents.length > 0
+              ? "held runs exist for this commit but none are pull-request runs; approving them is outside what the blast-radius review covers, so a human must decide"
+              : "no workflow run for this pull request's head commit is awaiting approval, so there is nothing to approve",
           pullRequest: { number: pr.number, headSha: pr.headSha },
+          heldNonPullRequestRuns: held.otherEvents,
         };
       }
 
       // Review the real patch, not the path list: `changedFilePaths` is a first
       // page and can silently omit exactly the workflow file that matters.
       const diff = await reader.readPullRequestDiff(pr.number);
+      // Cross-check against GitHub's own file count. `truncated` reports what
+      // the byte budget withheld; it cannot report a file the API never
+      // returned, and the review's deny-by-default guarantee rests on knowing
+      // the list is complete.
+      const incomplete = diff.truncated || diff.files.length < pr.changedFiles;
       const profile = await reader.readWorkflowSafetyProfile();
       const verdict = assessBlastRadius({
         changedFilePaths: diff.files.map((f) => f.path),
-        truncated: diff.truncated,
+        truncated: incomplete,
         profile,
       });
 
       const dispatcher = await dispatcherFor(owner, repo, objective, escalateTo, reader);
-      const outcome = await dispatcher.approveChecks(item, runs, verdict);
+      const outcome = await dispatcher.approveChecks(item, held.approvable, verdict);
       return {
         ...outcome,
         pullRequest: { number: pr.number, headSha: pr.headSha },
-        runsHeld: runs,
+        runsHeld: held.approvable,
+        heldNonPullRequestRuns: held.otherEvents,
         review: verdict,
       };
     },

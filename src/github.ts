@@ -27,7 +27,11 @@ import type {
 } from "./types.js";
 import { COPILOT_LOGIN } from "./types.js";
 import type { WorkflowSafetyProfile } from "./approval.js";
-import { referencedSecretNames, triggersOnPullRequest } from "./approval.js";
+import {
+  referencedSecretNames,
+  triggersOnPullRequest,
+  usesSelfHostedRunner,
+} from "./approval.js";
 
 /** A workflow run parked in `action_required`, awaiting a maintainer's approval. */
 export interface PendingApprovalRun {
@@ -435,18 +439,37 @@ export class GitHubReader {
     pullNumber: number,
     maxPatchBytes = 60_000,
   ): Promise<PullRequestDiff> {
-    const files = await this.#octokit.request(
-      "GET /repos/{owner}/{repo}/pulls/{pull_number}/files",
-      {
-        owner: this.#owner,
-        repo: this.#repo,
-        pull_number: pullNumber,
-        per_page: 100,
-      },
-    );
+    // Paginated, not a single page. A one-page read made `truncated: false`
+    // assert only "you have every patch I fetched" while callers — the
+    // blast-radius review above all — read it as "you have every file in the
+    // pull request". A PR with 101 files, all patches small enough to stay
+    // inside the byte budget, would then be reported as complete with the 101st
+    // file silently absent.
+    const raw: RawDiffFile[] = [];
+    let incomplete = false;
+    // GitHub caps this endpoint at 3000 files however hard you paginate, so 30
+    // pages is the real ceiling rather than an arbitrary one. A pull request
+    // larger than that cannot be enumerated, which is exactly the case a
+    // deny-by-default caller must be told about.
+    const maxPages = 30;
+    for (let page = 1; page <= maxPages; page++) {
+      const response = await this.#octokit.request(
+        "GET /repos/{owner}/{repo}/pulls/{pull_number}/files",
+        {
+          owner: this.#owner,
+          repo: this.#repo,
+          pull_number: pullNumber,
+          per_page: 100,
+          page,
+        },
+      );
+      raw.push(...response.data);
+      if (response.data.length < 100) break;
+      if (page === maxPages) incomplete = true;
+    }
 
-    const { files: entries, truncated } = budgetPatches(files.data, maxPatchBytes);
-    return { pullNumber, files: entries, truncated };
+    const { files: entries, truncated } = budgetPatches(raw, maxPatchBytes);
+    return { pullNumber, files: entries, truncated: truncated || incomplete };
   }
 
   /** Read one Objective and everything derivable about its Work Items. */
@@ -565,11 +588,16 @@ export class GitHubReader {
 
     const referencedSecrets = new Set<string>();
     try {
-      const workflows = await this.#octokit.request(
-        "GET /repos/{owner}/{repo}/actions/workflows",
-        { owner: this.#owner, repo: this.#repo, per_page: 100 },
-      );
-      for (const workflow of workflows.data.workflows) {
+      const workflows: { state: string; path: string }[] = [];
+      for (let page = 1; page <= 10; page++) {
+        const response = await this.#octokit.request(
+          "GET /repos/{owner}/{repo}/actions/workflows",
+          { owner: this.#owner, repo: this.#repo, per_page: 100, page },
+        );
+        workflows.push(...response.data.workflows);
+        if (response.data.workflows.length < 100) break;
+      }
+      for (const workflow of workflows) {
         // A disabled workflow cannot be started by approving a run.
         if (workflow.state !== "active") continue;
         // Not every listed workflow is a file in the repository. GitHub reports
@@ -586,8 +614,19 @@ export class GitHubReader {
             { owner: this.#owner, repo: this.#repo, path: workflow.path },
           );
           const data = file.data as { content?: string };
-          if (!data.content) continue;
+          if (!data.content) {
+            // Not a success case. The contents API returns 200 with empty
+            // content for files over 1 MB, and omits the field entirely for
+            // submodules and symlinks — none of which reach the catch below. A
+            // `continue` here would drop a real workflow from the scan while
+            // still reporting "no secrets found".
+            referencedSecrets.add(`<unreadable: ${workflow.path}>`);
+            continue;
+          }
           const yaml = Buffer.from(data.content, "base64").toString("utf8");
+          if (usesSelfHostedRunner(yaml)) {
+            referencedSecrets.add(`<self-hosted runner: ${workflow.path}>`);
+          }
           if (!triggersOnPullRequest(yaml)) continue;
           for (const name of referencedSecretNames(yaml)) referencedSecrets.add(name);
         } catch {
@@ -613,13 +652,30 @@ export class GitHubReader {
    * List workflow runs for a head commit that are parked awaiting approval.
    *
    * Filtered by `head_sha` because that is the only handle the REST API offers
-   * for "runs belonging to this pull request" — runs carry no PR number.
+   * for "runs belonging to this pull request" — runs carry no PR number. An
+   * empty SHA is refused rather than sent: GitHub treats an empty `head_sha` as
+   * an absent filter, which would return every held run in the repository and
+   * turn "unknown head commit" into "match everything" inside a write path.
    *
    * The `action_required` status is the whole signal: it is what GitHub sets on
    * a run it created but refuses to start until a maintainer approves it. A run
    * in any other state needs nothing from us.
+   *
+   * Only pull-request events are returned. `readWorkflowSafetyProfile` scopes
+   * its secret scan to pull-request-triggered workflows, so approving a `push`
+   * or `workflow_dispatch` run would act on a wider set than the review covered
+   * — the two must describe the same set or the assurances are false. Held runs
+   * from other events are reported separately so Director can escalate them.
    */
-  async listRunsAwaitingApproval(headSha: string): Promise<PendingApprovalRun[]> {
+  async listRunsAwaitingApproval(headSha: string): Promise<{
+    approvable: PendingApprovalRun[];
+    otherEvents: PendingApprovalRun[];
+  }> {
+    if (!headSha) {
+      throw new Error(
+        "cannot list held workflow runs without a head commit SHA; an empty SHA would match every held run in the repository",
+      );
+    }
     const runs = await this.#octokit.request(
       "GET /repos/{owner}/{repo}/actions/runs",
       {
@@ -627,14 +683,22 @@ export class GitHubReader {
         repo: this.#repo,
         head_sha: headSha,
         status: "action_required",
-        per_page: 50,
+        per_page: 100,
       },
     );
-    return runs.data.workflow_runs.map((run) => ({
+    const all = runs.data.workflow_runs.map((run) => ({
       id: run.id,
       name: run.name ?? String(run.id),
       event: run.event,
     }));
+    return {
+      approvable: all.filter(
+        (r) => r.event === "pull_request" || r.event === "pull_request_target",
+      ),
+      otherEvents: all.filter(
+        (r) => r.event !== "pull_request" && r.event !== "pull_request_target",
+      ),
+    };
   }
 
   /**

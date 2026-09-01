@@ -2668,6 +2668,9 @@ var INITIAL_PLAN_COMMIT = "Initial plan";
 // src/approval.ts
 function referencedSecretNames(workflowYaml) {
   const found = /* @__PURE__ */ new Set();
+  if (/^\s*secrets\s*:\s*inherit\s*$/m.test(workflowYaml)) {
+    found.add("<inherit: every repository secret>");
+  }
   const patterns = [
     /secrets\.([A-Za-z_][A-Za-z0-9_]*)/g,
     /secrets\[\s*['"]([^'"]+)['"]\s*\]/g
@@ -2680,8 +2683,27 @@ function referencedSecretNames(workflowYaml) {
   }
   return [...found].sort();
 }
+function extractOnSection(workflowYaml) {
+  const lines = workflowYaml.split(/\r?\n/);
+  const index = lines.findIndex((line) => /^["']?on["']?\s*:/.test(line));
+  if (index === -1) return null;
+  const header = lines[index] ?? "";
+  const inline = header.slice(header.indexOf(":") + 1).trim();
+  if (inline && !inline.startsWith("#")) return inline;
+  const block = [];
+  for (const line of lines.slice(index + 1)) {
+    if (/^\S/.test(line)) break;
+    block.push(line);
+  }
+  return block.join("\n");
+}
 function triggersOnPullRequest(workflowYaml) {
-  return /^\s*(pull_request|pull_request_target)\s*:/m.test(workflowYaml);
+  const section = extractOnSection(workflowYaml);
+  if (section === null) return true;
+  return /\bpull_request(_target)?\b/.test(section);
+}
+function usesSelfHostedRunner(workflowYaml) {
+  return /\bself-hosted\b/.test(workflowYaml);
 }
 
 // src/github.ts
@@ -2910,17 +2932,26 @@ var GitHubReader = class {
    * back with `patch: null`, reported honestly rather than silently dropped.
    */
   async readPullRequestDiff(pullNumber, maxPatchBytes = 6e4) {
-    const files = await this.#octokit.request(
-      "GET /repos/{owner}/{repo}/pulls/{pull_number}/files",
-      {
-        owner: this.#owner,
-        repo: this.#repo,
-        pull_number: pullNumber,
-        per_page: 100
-      }
-    );
-    const { files: entries, truncated } = budgetPatches(files.data, maxPatchBytes);
-    return { pullNumber, files: entries, truncated };
+    const raw = [];
+    let incomplete = false;
+    const maxPages = 30;
+    for (let page = 1; page <= maxPages; page++) {
+      const response = await this.#octokit.request(
+        "GET /repos/{owner}/{repo}/pulls/{pull_number}/files",
+        {
+          owner: this.#owner,
+          repo: this.#repo,
+          pull_number: pullNumber,
+          per_page: 100,
+          page
+        }
+      );
+      raw.push(...response.data);
+      if (response.data.length < 100) break;
+      if (page === maxPages) incomplete = true;
+    }
+    const { files: entries, truncated } = budgetPatches(raw, maxPatchBytes);
+    return { pullNumber, files: entries, truncated: truncated || incomplete };
   }
   /** Read one Objective and everything derivable about its Work Items. */
   async readObjective(number) {
@@ -3025,11 +3056,16 @@ var GitHubReader = class {
     }
     const referencedSecrets = /* @__PURE__ */ new Set();
     try {
-      const workflows = await this.#octokit.request(
-        "GET /repos/{owner}/{repo}/actions/workflows",
-        { owner: this.#owner, repo: this.#repo, per_page: 100 }
-      );
-      for (const workflow of workflows.data.workflows) {
+      const workflows = [];
+      for (let page = 1; page <= 10; page++) {
+        const response = await this.#octokit.request(
+          "GET /repos/{owner}/{repo}/actions/workflows",
+          { owner: this.#owner, repo: this.#repo, per_page: 100, page }
+        );
+        workflows.push(...response.data.workflows);
+        if (response.data.workflows.length < 100) break;
+      }
+      for (const workflow of workflows) {
         if (workflow.state !== "active") continue;
         if (!workflow.path.startsWith(".github/")) continue;
         try {
@@ -3038,8 +3074,14 @@ var GitHubReader = class {
             { owner: this.#owner, repo: this.#repo, path: workflow.path }
           );
           const data = file.data;
-          if (!data.content) continue;
+          if (!data.content) {
+            referencedSecrets.add(`<unreadable: ${workflow.path}>`);
+            continue;
+          }
           const yaml = Buffer.from(data.content, "base64").toString("utf8");
+          if (usesSelfHostedRunner(yaml)) {
+            referencedSecrets.add(`<self-hosted runner: ${workflow.path}>`);
+          }
           if (!triggersOnPullRequest(yaml)) continue;
           for (const name of referencedSecretNames(yaml)) referencedSecrets.add(name);
         } catch {
@@ -3059,13 +3101,27 @@ var GitHubReader = class {
    * List workflow runs for a head commit that are parked awaiting approval.
    *
    * Filtered by `head_sha` because that is the only handle the REST API offers
-   * for "runs belonging to this pull request" — runs carry no PR number.
+   * for "runs belonging to this pull request" — runs carry no PR number. An
+   * empty SHA is refused rather than sent: GitHub treats an empty `head_sha` as
+   * an absent filter, which would return every held run in the repository and
+   * turn "unknown head commit" into "match everything" inside a write path.
    *
    * The `action_required` status is the whole signal: it is what GitHub sets on
    * a run it created but refuses to start until a maintainer approves it. A run
    * in any other state needs nothing from us.
+   *
+   * Only pull-request events are returned. `readWorkflowSafetyProfile` scopes
+   * its secret scan to pull-request-triggered workflows, so approving a `push`
+   * or `workflow_dispatch` run would act on a wider set than the review covered
+   * — the two must describe the same set or the assurances are false. Held runs
+   * from other events are reported separately so Director can escalate them.
    */
   async listRunsAwaitingApproval(headSha) {
+    if (!headSha) {
+      throw new Error(
+        "cannot list held workflow runs without a head commit SHA; an empty SHA would match every held run in the repository"
+      );
+    }
     const runs = await this.#octokit.request(
       "GET /repos/{owner}/{repo}/actions/runs",
       {
@@ -3073,14 +3129,22 @@ var GitHubReader = class {
         repo: this.#repo,
         head_sha: headSha,
         status: "action_required",
-        per_page: 50
+        per_page: 100
       }
     );
-    return runs.data.workflow_runs.map((run) => ({
+    const all = runs.data.workflow_runs.map((run) => ({
       id: run.id,
       name: run.name ?? String(run.id),
       event: run.event
     }));
+    return {
+      approvable: all.filter(
+        (r) => r.event === "pull_request" || r.event === "pull_request_target"
+      ),
+      otherEvents: all.filter(
+        (r) => r.event !== "pull_request" && r.event !== "pull_request_target"
+      )
+    };
   }
   /**
    * Resolve a login to its GraphQL node ID, needed once at startup to

@@ -746,6 +746,23 @@ GitHub-managed (a pull request cannot edit them anyway) and per-workflow read fa
 that workflow. This is the second time in this area that a plausible, tested implementation was wrong
 in a way only a live call could show.
 
+**Adversarial review of the first implementation.** Because the approve write could not be
+exercised live, the diff was instead put through a dedicated review pass. It found six ways the
+control could be made to pass while being wrong, all of which are now fixed and covered by tests:
+
+| Hole | Why it mattered |
+| --- | --- |
+| `readPullRequestDiff` read only the first page of files | A pull request touching more than 100 files could hide a `.github/workflows` edit past the page boundary and still present as a complete, safe file list. Now paginated, and the MCP tool cross-checks the returned count against the pull request's own `changedFiles` before reporting `truncated: false`. |
+| `triggersOnPullRequest` matched only block mappings | `on: [push, pull_request]` — the most common shorthand — read as *not* pull-request-triggered, so that workflow's secrets were excluded from the review. Now parses the `on:` section in all four syntaxes, and answers `true` when it cannot tell. |
+| `secrets: inherit` was invisible | A reusable-workflow call that hands the callee every repository secret referenced no secret *by name*, so the scan found none. Now reported as `<inherit: every repository secret>`. |
+| Held runs were not filtered by event | `listRunsAwaitingApproval` returned every held run on the SHA. A `workflow_dispatch` or `schedule` run held for an unrelated reason is not the thing the blast-radius review reasoned about. Non-pull-request runs are now returned separately for Director to escalate. |
+| An unreadable workflow file was skipped silently | The safest possible reading of a file it could not read. Now inserts an `<unreadable: path>` sentinel, which blocks. |
+| Self-hosted runners were not considered | The whole argument rests on "a sandbox holding nothing worth stealing"; a self-hosted runner is not that. Now a blocker. |
+
+Four of the six are fail-*open* defects in a security control — the review passes, and nothing looks
+wrong. That is the failure mode this component has to be judged against, and it is why the reasoning
+above deliberately keeps the deny-list narrow and mechanical rather than clever.
+
 **Still unverified.** The `POST /repos/{owner}/{repo}/actions/runs/{run_id}/approve` call itself has
 not been executed against a live held run — gate3 has none left, and creating a fresh one requires a
 new coding-agent pull request. Every read in the path is live-verified; the write is not. Confirm it

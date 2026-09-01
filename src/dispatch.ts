@@ -44,7 +44,7 @@ import {
 
 /** Result of `Dispatcher.approveChecks`, reported verbatim to Director. */
 export interface ApprovalOutcome {
-  action: "approved" | "escalated" | "no_runs_held";
+  action: "approved" | "partially_approved" | "escalated" | "no_runs_held";
   approvedRunIds: number[];
   /** Present only when the review declined; the reasons it declined. */
   blockers?: string[];
@@ -602,25 +602,44 @@ export class Dispatcher {
     }
 
     const approvedRunIds: number[] = [];
+    let failure: unknown;
     for (const run of runs) {
-      // Approve one at a time through the guarded path. A failure here leaves
-      // the remaining runs held, which is simply the state we started in — the
-      // next cycle sees them still `action_required` and tries again.
-      await this.#call(() => this.#writer.approveWorkflowRun(run.id));
-      approvedRunIds.push(run.id);
+      try {
+        await this.#call(() => this.#writer.approveWorkflowRun(run.id));
+        approvedRunIds.push(run.id);
+      } catch (error) {
+        // Stop, but do not throw past the record below. Approval is
+        // irreversible: any run already approved is running now, and the next
+        // cycle will not see it as held, so if the throw escaped here those
+        // approvals would exist with no trace on the Work Item and Director
+        // would believe nothing had been approved.
+        failure = error;
+        break;
+      }
     }
 
     const record = [
-      `Approved ${approvedRunIds.length} held workflow run(s) so CI can execute (§10.6).`,
+      approvedRunIds.length > 0
+        ? `Approved ${approvedRunIds.length} held workflow run(s) so CI can execute (§10.6).`
+        : "Attempted to approve held workflow runs (§10.6); none were approved.",
       "",
       "GitHub holds workflow runs on coding-agent pull requests until a maintainer approves them. Blast-radius review passed before approving:",
       ...verdict.assurances.map((a) => `- ${a}`),
       "",
-      `Runs approved: ${runs.map((r) => `${r.name} (#${r.id})`).join(", ")}.`,
-    ].join("\n");
+      `Runs considered: ${runs.map((r) => `${r.name} (#${r.id})`).join(", ")}.`,
+      approvedRunIds.length > 0 ? `Approved: ${approvedRunIds.join(", ")}.` : "",
+      failure
+        ? `Stopped early: ${failure instanceof Error ? failure.message : String(failure)}. Remaining runs are still held and will be retried next cycle.`
+        : "",
+    ]
+      .filter((line) => line !== "")
+      .join("\n");
     await this.#call(() => this.#writer.addComment(wi.id, record));
 
-    return { action: "approved", approvedRunIds };
+    return {
+      action: failure ? "partially_approved" : "approved",
+      approvedRunIds,
+    };
   }
 
   async #escalate(wi: DerivedWorkItem, reason: string): Promise<void> {

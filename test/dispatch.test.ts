@@ -284,6 +284,37 @@ describe("Dispatcher.approveChecks", () => {
     expect(outcome.action).toBe("no_runs_held");
     expect(writer.calls).toEqual([]);
   });
+
+  it("still records what it did when approval fails partway through", async () => {
+    // Approval is irreversible: run 42 is already executing. If the throw
+    // escaped, that approval would exist with no trace on the Work Item.
+    class HalfFailingWriter extends FakeWriter {
+      override async approveWorkflowRun(runId: number): Promise<void> {
+        this.calls.push(`approveWorkflowRun:${runId}`);
+        if (runId === 43) throw new Error("boom");
+      }
+    }
+    const writer = new HalfFailingWriter();
+    const d = makeDispatcher(writer);
+    const outcome = await d.approveChecks(derivedWi(), RUNS, SAFE);
+
+    expect(outcome.action).toBe("partially_approved");
+    expect(outcome.approvedRunIds).toEqual([42]);
+
+    const comment = writer.comments.join("\n");
+    expect(comment).toContain("Approved: 42.");
+    expect(comment).toContain("boom");
+    expect(comment).toContain("still held");
+  });
+
+  it("records the attempt even when no run could be approved at all", async () => {
+    const writer = new FakeWriter({ approveWorkflowRun: new Error("403 forbidden") });
+    const d = makeDispatcher(writer);
+    const outcome = await d.approveChecks(derivedWi(), RUNS, SAFE);
+
+    expect(outcome.approvedRunIds).toEqual([]);
+    expect(writer.comments.join("\n")).toContain("none were approved");
+  });
 });
 
 describe("Dispatcher.confirm", () => {

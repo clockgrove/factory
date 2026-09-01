@@ -42,8 +42,11 @@ design and should not be reconciled with, second-guessed against, or drifted tow
 - **Push convention**: this repo has no PR flow (yet) for this rewrite — push directly with
   `git push origin HEAD:main`, then `git fetch origin main` + compare SHAs to confirm it landed.
   Single, deliberate pushes — never bursts.
-- **`clockgrove/factory-gate0`** is the disposable target repo for the Gate 0 rehearsal
-  (IMPLEMENTATION-PLAN.md §10). Reuse it; do not create another.
+- **`clockgrove/factory-gate0`** was the disposable target repo for the Gate 0 rehearsal
+  (IMPLEMENTATION-PLAN.md §10) and no longer exists — it was deleted 2026-09-01 after Gate 0 passed
+  (three merged PRs, three closed Work Items, Objective #6 closed via the new `close_objective` tool;
+  see IMPLEMENTATION-PLAN.md §12 item 1 and `README.md`'s status line). If a future rehearsal (Gate 1
+  or a re-run) needs a disposable repo again, create a fresh one — there is nothing to reuse anymore.
 
 ## When resuming after a gap (new session, compaction, etc.)
 

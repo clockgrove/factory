@@ -400,8 +400,12 @@ is that non-goals are falsification evidence rather than obstacles to route arou
    Escalation is a first-class outcome (§7.1) with an explicit confidence bar (§7.3). Gate 0 still
    runs in a foreground session; a scheduled or long-lived session remains the production shape, but
    nothing depends on it existing before Gate 2.
-3. **Harness targets** (PRD Q5). Copilot CLI first. The portability boundary is that `factory/` is
-   plain Python driven by markdown skills — but this needs one non-Copilot dry run to be credible.
+3. **Harness targets** (PRD Q5). Copilot CLI is proven — Gate 0 (§10) ran on it, live, this session.
+   The portable boundary is skills + the bundled `dist/mcp-server.js` (TypeScript/Node, esbuild
+   bundled, no Python — the plan's language decision moved on since this question was first written).
+   Codex and Claude Code are unverified in a live run; that's §15.6's separate, deferred v0.2 check
+   (run one identical Objective on all three), not a prerequisite for Gate 1 or Gate 2 — neither of
+   those gates is tied to any specific harness.
 4. ~~**Language.**~~ **Decided: TypeScript / Node.** See §13.
 
 ---
@@ -635,9 +639,8 @@ tested are the exact bytes that run.
 
 ### 15.6 How portability gets proven
 
-The claim is only credible if it is exercised. Gate 0 (§10) runs on **one** harness — the Codex
-desktop app, chosen for available usage limits, not for architectural primacy. Portability is then
-verified by a deliberate, minimal check:
+The claim is only credible if it is exercised. Portability is verified by a deliberate, minimal check,
+independent of and not a prerequisite for any numbered Gate:
 
 **Install Factory on all three harnesses and run one identical Objective to terminal state.**
 

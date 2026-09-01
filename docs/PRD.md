@@ -343,8 +343,10 @@ supervisor. It is *not* a permit protocol, a serialization fence, or a terminal 
 2. ~~What is the actual concurrency ceiling?~~ **Partially resolved** (§12, wave 3): no queueing
    ceiling to 24 concurrent, but ~85% first-pass success under burst with silent dispatch loss.
    Remaining unknown: whether the ceiling is a hard cap or purely capacity-dependent.
-3. **Is a trivial Objective enough to exercise the compiler**, or does decomposition only become
-   meaningful at Gate 1+?
+3. ~~**Is a trivial Objective enough to exercise the compiler**, or does decomposition only become
+   meaningful at Gate 1+?~~ **Resolved by running it (2026-09-01):** Gate 0 caught three real defects
+   no unit test had, closed cleanly once fixed — see `IMPLEMENTATION-PLAN.md` §12 item 1. Real
+   decomposition remains Gate 1's job, not tied to any particular harness.
 4. ~~What is the harness's unattended story?~~ **Resolved: unattended operation is a goal, not a
    mandate.** Some decisions legitimately require a human. Escalation is a first-class outcome with
    an explicit confidence bar, not a failure — see `IMPLEMENTATION-PLAN.md` §7. A well-founded
@@ -353,9 +355,10 @@ supervisor. It is *not* a permit protocol, a serialization fence, or a terminal 
    three, with no architectural primacy for any.** Factory is authored as an **Agent Plugins 1.0**
    package (open, vendor-neutral standard; TSC includes Amazon, Cursor, Microsoft, OpenAI, Vercel),
    whose portable surface is *skills + MCP servers only*. Agents, hooks, and commands are
-   client-specific and therefore cannot be load-bearing. Gate 0 runs on the Codex desktop app for
-   usage-limit reasons alone; portability is proven in `v0.2` by running one identical Objective on
-   all three. See `IMPLEMENTATION-PLAN.md` §15.
+   client-specific and therefore cannot be load-bearing. Gate 0 ran on GitHub Copilot CLI
+   (2026-09-01) — no gate is tied to a specific harness by design; cross-harness portability is
+   proven separately, in `v0.2`, by running one identical Objective on all three. See
+   `IMPLEMENTATION-PLAN.md` §15.
 6. ~~Public from day one, or public at Gate 2?~~ **Decided: private for now.** Public is a
    one-command change; published history is not recallable. The open-source-ready criteria in §10
    still bind from day one so nothing has to be retrofitted — no private dependencies, no

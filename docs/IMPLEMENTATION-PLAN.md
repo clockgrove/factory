@@ -517,6 +517,28 @@ surface does not degrade loudly — it degrades into the agent quietly substitut
 and merging anyway. That is the failure mode to watch for in later gates: not a tool that errors,
 but an instruction that silently has no way to be followed.
 
+**Two of these fixes were themselves wrong, and only live testing found it.** After the F1–F5 work
+typechecked and passed 130 unit tests, an end-to-end run against `clockgrove/factory-gate2` through
+the real MCP stdio server (22 checks) exposed two defects in the fixes:
+
+- **F4's improved error message was dead code.** GitHub does not return `user: null` for an unknown
+  login — it fails the entire GraphQL request with a NOT_FOUND error — so the null branch carrying
+  the guidance was never reached, and the caller saw only GitHub's raw error. Exactly the class of
+  assumption AGENTS.md's "verify live, never assume a schema from training data" rule exists to
+  catch, and a unit test with a mocked client would have happily confirmed the wrong behavior. Now
+  caught and re-thrown with the guidance, GitHub's own message appended.
+- **F3's fix left 40% of the win on the table.** Measuring the trimmed payload showed 5.4 KB of the
+  remaining 13.3 KB was pretty-print indentation — 41% of a response that had just been shrunk for
+  size. `textResult` now drops indentation above a threshold, which is a *general* size guard
+  benefiting every tool rather than just `read_objective`. Net effect on Gate 2's Objective:
+  minimal 13.3 KB → **7.7 KB**, and the full read 25.9 KB → **20.5 KB**, i.e. the unflagged read
+  that originally blew the limit now fits under it.
+
+The wider lesson is that the semantic-verification gap F1 describes applies to this repo's own
+work too: typechecking and unit tests confirmed the code did what it said, and neither could tell
+that what it said was based on a wrong belief about the platform. Only exercising it against the
+real API could.
+
 ---
 
 ## 11. Risks

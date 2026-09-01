@@ -24307,18 +24307,26 @@ var GitHubReader = class {
    * `user(login:)` lookup — not part of the per-cycle snapshot.
    */
   async resolveUserId(login) {
-    const data = await this.#octokit.graphql(
-      `query ResolveUser($login: String!) { user(login: $login) { id } }`,
-      { login }
-    );
-    if (!data.user) {
-      throw new Error(
-        `GitHub user '${login}' not found. Check the exact account login \u2014 it is not necessarily the prefix of a branch name, an email local-part, or a display name.`
+    let data;
+    try {
+      data = await this.#octokit.graphql(
+        `query ResolveUser($login: String!) { user(login: $login) { id } }`,
+        { login }
       );
+    } catch (error2) {
+      const message = error2 instanceof Error ? error2.message : String(error2);
+      if (/Could not resolve to a User/i.test(message)) {
+        throw new Error(`${notFoundMessage(login)} (GitHub said: ${message.trim()})`);
+      }
+      throw error2;
     }
+    if (!data.user) throw new Error(notFoundMessage(login));
     return data.user.id;
   }
 };
+function notFoundMessage(login) {
+  return `GitHub user '${login}' not found. Check the exact account login: it is not necessarily the prefix of a branch name, an email local-part, or a display name. If this login was going to be used as an escalation target, it would have failed at the moment a human was needed \u2014 resolve it now instead.`;
+}
 
 // src/platform.ts
 var FACTORY_PACING = {
@@ -25211,8 +25219,11 @@ async function dispatcherFor(owner, repo, objective, escalateTo, reader) {
     concurrency
   });
 }
+var PRETTY_PRINT_LIMIT_BYTES = 8e3;
 function textResult(value) {
-  return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
+  const pretty = JSON.stringify(value, null, 2);
+  const text = pretty.length > PRETTY_PRINT_LIMIT_BYTES ? JSON.stringify(value) : pretty;
+  return { content: [{ type: "text", text }] };
 }
 function errorResult(error2) {
   const message = error2 instanceof Error ? error2.message : String(error2);

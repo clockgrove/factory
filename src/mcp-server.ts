@@ -220,8 +220,25 @@ async function dispatcherFor(
   });
 }
 
+/**
+ * Indentation is free to read and expensive to send. Below the threshold it
+ * stays pretty-printed, because most results are small and a human debugging
+ * the server benefits; above it, indentation is dropped.
+ *
+ * This is a size guard, not a formatting preference. Gate 2's ten-item read
+ * exceeded the tool output limit outright (§10.2, F3), and measurement after
+ * the `minimal` flag landed showed 5.4 KB of the remaining 13.3 KB was pure
+ * indentation — 41% of a payload that had just been trimmed for size. The
+ * output is identical JSON either way, so no caller can tell the difference
+ * except by byte count.
+ */
+const PRETTY_PRINT_LIMIT_BYTES = 8_000;
+
 function textResult(value: unknown) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] };
+  const pretty = JSON.stringify(value, null, 2);
+  const text =
+    pretty.length > PRETTY_PRINT_LIMIT_BYTES ? JSON.stringify(value) : pretty;
+  return { content: [{ type: "text" as const, text }] };
 }
 
 function errorResult(error: unknown) {

@@ -419,16 +419,35 @@ export class GitHubReader {
    * `user(login:)` lookup — not part of the per-cycle snapshot.
    */
   async resolveUserId(login: string): Promise<string> {
-    const data = await this.#octokit.graphql<{ user: { id: string } | null }>(
-      `query ResolveUser($login: String!) { user(login: $login) { id } }`,
-      { login },
-    );
-    if (!data.user) {
-      throw new Error(
-        `GitHub user '${login}' not found. Check the exact account login — it is not ` +
-          `necessarily the prefix of a branch name, an email local-part, or a display name.`,
+    // GitHub does not return `user: null` for an unknown login — it fails the
+    // whole GraphQL request with a NOT_FOUND error, so the guidance below has
+    // to be attached to a thrown error, not to a null check. (Verified live:
+    // an unknown login yields "Could not resolve to a User with the login of
+    // '<x>'." rather than a null field.) The null branch is kept anyway, since
+    // it costs nothing and the schema does declare the field nullable.
+    let data: { user: { id: string } | null };
+    try {
+      data = await this.#octokit.graphql<{ user: { id: string } | null }>(
+        `query ResolveUser($login: String!) { user(login: $login) { id } }`,
+        { login },
       );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/Could not resolve to a User/i.test(message)) {
+        throw new Error(`${notFoundMessage(login)} (GitHub said: ${message.trim()})`);
+      }
+      throw error;
     }
+    if (!data.user) throw new Error(notFoundMessage(login));
     return data.user.id;
   }
+}
+
+function notFoundMessage(login: string): string {
+  return (
+    `GitHub user '${login}' not found. Check the exact account login: it is not necessarily ` +
+    `the prefix of a branch name, an email local-part, or a display name. If this login was ` +
+    `going to be used as an escalation target, it would have failed at the moment a human was ` +
+    `needed — resolve it now instead.`
+  );
 }

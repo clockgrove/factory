@@ -190,6 +190,14 @@ and replans — unattended.
 > because a half-written pull request legitimately touches nothing in scope yet and legitimately
 > fails its own tests — and each of those verdicts closes the pull request, so judging work in
 > progress deletes it.
+>
+> **What six passing gates have not proved** is now written down too, in
+> [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) §10.17, because a page of successes
+> lets absence of evidence read as evidence of absence. The `>= 3 attempts → escalate` branch has
+> **never executed** in any gate; the rebase-*success* path has never been observed; no fixture repo
+> has ever run its own tests, so "the tests pass" in a gate report is always static analysis of the
+> diff; and "unattended" should be read as a claim about the loop's logic rather than about a timer,
+> since at least one gate paced its own cycles by hand and said so.
 
 ## Design in one picture
 

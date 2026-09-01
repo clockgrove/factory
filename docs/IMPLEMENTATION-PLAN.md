@@ -1329,11 +1329,18 @@ exposed no merge or close timestamp anywhere.** Pull requests carried `createdAt
 
 The consequence is narrow and sharp. Ordering questions of the form *"was this Work Item dispatched
 only after its dependency merged?"* — the question that decides whether a `dependsOn` edge did
-anything at all — were **literally unanswerable after the fact from inside Factory**. Gate 5 had to
-reconstruct the answer by reading diff *context* lines (an `export` line appearing as unchanged
-context proves the merge base already contained it) and by comparing assignment gaps: 4m36s between
-two dependent items against 8s between three independent ones. That reasoning was correct, and it
-should not have been necessary.
+anything at all — were **literally unanswerable after the fact from inside Factory**. Gate 5 tried
+anyway, reconstructing from diff *context* lines (an `export` line appearing as unchanged context
+proves the merge base already contained it) and from assignment gaps: 4m36s between two dependent
+items against 8s between three independent ones.
+
+**That reconstruction did not settle the question, and its own author retracted it.** Diff context
+proves only what the *merge base* contained; a rebase produces identical evidence. Assignment gaps
+are consistent with a gated dispatch and equally consistent with a lucky one. So the honest verdict
+on "did the edge gate anything?" is *not established* — which is a stronger argument for the fix
+than a right answer arrived at the hard way would have been. When the timestamps are missing, even
+careful forensics on end-state artifacts cannot distinguish a mechanism from a coincidence. The only
+firsthand evidence for sequencing remains a direct base-SHA comparison made while the run was live.
 
 It is not a hypothetical cost. Diagnosing §10.15 required knowing that Factory merged PR #36 at
 17:43:38 and the agent renamed it at 17:45:16 — a 98-second ordering that is the entire finding.
@@ -1365,6 +1372,37 @@ Two related items from the same report:
   for any deployment running more than one Director, and it is recorded here rather than fixed
   because the fix is a design question (attribution in comment bodies? a per-Director marker?) rather
   than a missing field.
+
+## 10.17 What the gates have never exercised
+
+Six gates have passed and this document records what each one proved. It has never recorded what
+they *failed to reach*, which lets absence of evidence quietly read as evidence of absence. The list
+is short and it is worth keeping honest, because every item on it is a path that will first execute
+in front of a real Objective.
+
+- **The `>= 3 attempts → escalate` branch has never run.** Not once, in any gate. The closest
+  approach was a Work Item that reached exactly three attempts and then *succeeded* on the third. So
+  `attemptAction`'s escalation branch and the graph-level diagnosis message it emits are unexercised
+  code, not verified behaviour — including in gates whose reports say "no escalations", which is
+  true and means only that nothing needed one.
+- **The scheduled-automation path is weaker than the gate reports imply.** Gate 5 disclosed
+  voluntarily that its run was Director-loop-driven but **not** automation-driven: it set an interval,
+  then paced every cycle inline in one long turn and cleared the automation before finishing. The
+  tool sequence was the skill's; the pacing was a human-shaped loop. Nothing in a gate report
+  distinguishes these two, so "the loop closed unattended" should be read as a claim about the loop's
+  *logic*, not about a timer having driven it, unless a specific gate says otherwise.
+- **The rebase-success path is still unobserved.** Gate 5 reached §6 for the first time, but every
+  collision it produced was a real content conflict, which throws. A rebase that succeeds cleanly —
+  the branch that leaves no trace anywhere else, and the reason `dispatch_integrate` now returns
+  `action` — has not been seen.
+- **No fixture repository has ever run its own tests.** `checks` is `null` across every gate repo, so
+  "the tests pass" in any gate report is static analysis of the diff, never an observed run. The
+  `checks_failed` verdict is consequently unexercised against real CI, and `require_actions_workflow_approval`
+  being enabled account-wide (§10.6) is what keeps it that way.
+- **`factory-gate2` is no longer a clean fixture.** Gate 5 merged a 1454-line `package-lock.json`
+  onto its `main` under the §7.3 override. Any later gate treating that repo as pristine inherits it
+  — and, specifically, a later run seeing no lockfile scope creep is **not** evidence that the
+  `outOfScopeFiles` reporting works, because there is no longer a lockfile for an agent to generate.
 
 ## 11. Risks
 

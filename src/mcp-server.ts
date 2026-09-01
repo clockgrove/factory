@@ -821,6 +821,96 @@ server.registerTool(
 );
 
 server.registerTool(
+  "read_repository_layout",
+  {
+    title: "Read repository layout",
+    description:
+      "List every file on the target repository's default branch. Call this *before* compiling an " +
+      "Objective into Work Items, so each item's `scope` names paths that actually exist. Without " +
+      "it, compilation can only infer structure from the Objective's prose — where tests live, " +
+      "whether a barrel file is already there, what a module is called — and a wrong guess does not " +
+      "fail at compile time. It fails several steps later as an `untouched` verdict, after an agent " +
+      "run has been spent, and looks like the agent ignored its brief rather than like the brief " +
+      "named a path that was never there (Gate 3 F2, Gate 4 F4). Read-only. Narrow large " +
+      "repositories with `pathPrefix` rather than raising `maxEntries`; `truncated` reports any " +
+      "incompleteness, and `treeTruncatedByGitHub` distinguishes a repository too large for GitHub " +
+      "to return whole from a list this tool capped itself.",
+    inputSchema: {
+      ...RepoShape,
+      pathPrefix: z
+        .string()
+        .optional()
+        .describe("Only return paths starting with this prefix, e.g. 'src/' or 'test/'"),
+      maxEntries: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Maximum paths to return (default 2000)"),
+    },
+  },
+  tool(
+    async ({
+      owner,
+      repo,
+      pathPrefix,
+      maxEntries,
+    }: {
+      owner: string;
+      repo: string;
+      pathPrefix?: string | undefined;
+      maxEntries?: number | undefined;
+    }) => {
+      const reader = readerFor(owner, repo);
+      return await reader.readRepositoryLayout(pathPrefix, maxEntries);
+    },
+  ),
+);
+
+server.registerTool(
+  "read_repository_file",
+  {
+    title: "Read repository file",
+    description:
+      "Read one file's text from the target repository's default branch — for the questions " +
+      "`read_repository_layout` cannot answer: whether a helper already exists and what its " +
+      "signature is, what conventions an existing test file follows, which runner `package.json` " +
+      "declares. Use it while compiling an Objective to write acceptance criteria against the code " +
+      "that is really there, and before `dispatch_integrate` when a criterion turns on how a Work " +
+      "Item's change fits code the pull request did not touch. Read-only, and never writes. A path " +
+      "that is not in the repository returns `exists: false` rather than failing — that is a normal " +
+      "answer during compilation. `truncated` reports clipping, and `unreadable` explains a path " +
+      "that exists but has no returnable text (a directory, a symlink, or a file over 1 MB).",
+    inputSchema: {
+      ...RepoShape,
+      path: z.string().describe("Repo-relative file path, e.g. 'src/index.ts'"),
+      maxBytes: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("Maximum characters of file text to return (default 40000)"),
+    },
+  },
+  tool(
+    async ({
+      owner,
+      repo,
+      path,
+      maxBytes,
+    }: {
+      owner: string;
+      repo: string;
+      path: string;
+      maxBytes?: number | undefined;
+    }) => {
+      const reader = readerFor(owner, repo);
+      return await reader.readRepositoryFile(path, maxBytes);
+    },
+  ),
+);
+
+server.registerTool(
   "graph_apply",
   {
     title: "Apply compiled graph",

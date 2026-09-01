@@ -22,6 +22,8 @@ import type {
   MergeableState,
   ObjectiveSnapshot,
   PullRequestDiff,
+  RepositoryLayout,
+  RepositoryFile,
   PullRequestDiffFile,
   WorkItemSnapshot,
 } from "./types.js";
@@ -352,6 +354,63 @@ export function createOctokit(opts: GitHubOptions): Octokit {
  * can always distinguish "this file changed nothing worth showing" from "this
  * file's changes were withheld from you".
  */
+/**
+ * Decide what one contents-API response actually says, separated from the fetch
+ * so every branch is testable — the reader builds its own Octokit and cannot be
+ * exercised from a unit test.
+ *
+ * Each branch here is a live-verified response shape rather than an assumed one
+ * (checked against the real API, 2026-09-02). The distinctions matter because
+ * two of them were wrong on the first attempt:
+ *
+ *   - A **directory** comes back as a JSON *array* of entries, with no `type`
+ *     field on the response at all. Checking `type` first misreports it.
+ *   - A **genuinely empty file** returns `type: "file"`, `content: ""` and
+ *     `size: 0`. A file **over 1 MB** returns `type: "file"` and `content: ""`
+ *     as well — `size` is the only thing separating "this file is empty" from
+ *     "this file was too big to send you", and conflating them would report a
+ *     large file's contents as empty.
+ */
+export function interpretContentsResponse(
+  path: string,
+  body: unknown,
+  maxBytes: number,
+): RepositoryFile {
+  if (Array.isArray(body)) {
+    return {
+      path,
+      exists: true,
+      truncated: true,
+      unreadable: `not a file (directory with ${body.length} entries) — use read_repository_layout with pathPrefix instead`,
+    };
+  }
+  const data = (body ?? {}) as { content?: string; type?: string; size?: number };
+  if (data.type !== "file" || typeof data.content !== "string") {
+    return {
+      path,
+      exists: true,
+      truncated: true,
+      unreadable: `not a file (${data.type ?? "unknown"})`,
+    };
+  }
+  if (data.content === "" && (data.size ?? 0) > 0) {
+    return {
+      path,
+      exists: true,
+      truncated: true,
+      unreadable: `no content returned for a ${data.size}-byte file — the contents API omits it above 1 MB`,
+    };
+  }
+  const text = Buffer.from(data.content, "base64").toString("utf8");
+  const clipped = text.length > maxBytes;
+  return {
+    path,
+    exists: true,
+    content: clipped ? text.slice(0, maxBytes) : text,
+    truncated: clipped,
+  };
+}
+
 export function budgetPatches(
   files: RawDiffFile[],
   maxPatchBytes: number,
@@ -412,6 +471,7 @@ export class GitHubReader {
   #ciExpected = false;
   /** Cached for the process lifetime by `readWorkflowSafetyProfile`. */
   #safetyProfile: WorkflowSafetyProfile | undefined;
+  #cachedDefaultBranch: string | undefined;
 
   constructor(opts: GitHubOptions) {
     this.#owner = opts.owner;
@@ -472,6 +532,94 @@ export class GitHubReader {
 
     const { files: entries, truncated } = budgetPatches(raw, maxPatchBytes);
     return { pullNumber, files: entries, truncated: truncated || incomplete };
+  }
+
+  /**
+   * List every file on the default branch, so compilation can ground a Work
+   * Item's `scope` in the repository as it actually is.
+   *
+   * Gate 3 (F2) and Gate 4 (F4) both reported the same gap from the other side:
+   * no tool exposed the target repository's layout, so `scope` was compiled
+   * purely by inferring conventional structure from the Objective's prose.
+   * Gate 3 guessed right. A wrong guess does not fail at compile time — it
+   * fails several steps later as an `untouched` verdict, after an agent run has
+   * been spent, and reads like the agent ignored its brief rather than like the
+   * brief named a path that was never there.
+   *
+   * One recursive tree request rather than walking directories: `truncated`
+   * here is GitHub's own flag, raised on repositories too large to return in
+   * one response, and is reported rather than worked around. Blobs only —
+   * directory entries are implied by the paths and would only spend budget.
+   */
+  async readRepositoryLayout(
+    pathPrefix?: string,
+    maxEntries = 2_000,
+  ): Promise<RepositoryLayout> {
+    const branch = await this.#defaultBranch();
+    const tree = await this.#octokit.request(
+      "GET /repos/{owner}/{repo}/git/trees/{tree_sha}",
+      {
+        owner: this.#owner,
+        repo: this.#repo,
+        tree_sha: branch,
+        recursive: "1",
+      },
+    );
+    const all = tree.data.tree
+      .filter((e) => e.type === "blob" && typeof e.path === "string")
+      .map((e) => e.path as string);
+    const matched = pathPrefix ? all.filter((p) => p.startsWith(pathPrefix)) : all;
+    matched.sort();
+    const files = matched.slice(0, maxEntries);
+    return {
+      defaultBranch: branch,
+      files,
+      totalFiles: matched.length,
+      // Either GitHub could not return the whole tree, or we cut it ourselves.
+      // Collapsing both into one flag would let a caller believe it had seen
+      // every file when it had not, which is the mistake this whole method
+      // exists to prevent.
+      truncated: Boolean(tree.data.truncated) || files.length < matched.length,
+      treeTruncatedByGitHub: Boolean(tree.data.truncated),
+    };
+  }
+
+  /**
+   * Read one file's text from the default branch, for the questions a layout
+   * cannot answer — whether a helper already exists, what a test file's
+   * conventions are, which runner `package.json` declares.
+   *
+   * Returns `exists: false` rather than throwing on 404, because "this path is
+   * not in the repository" is a normal, informative answer during compilation
+   * and not an error worth aborting a cycle over.
+   */
+  async readRepositoryFile(
+    path: string,
+    maxBytes = 40_000,
+  ): Promise<RepositoryFile> {
+    let response;
+    try {
+      response = await this.#octokit.request(
+        "GET /repos/{owner}/{repo}/contents/{path}",
+        { owner: this.#owner, repo: this.#repo, path },
+      );
+    } catch (error) {
+      if ((error as { status?: number }).status === 404) {
+        return { path, exists: false, truncated: false };
+      }
+      throw error;
+    }
+    return interpretContentsResponse(path, response.data, maxBytes);
+  }
+
+  async #defaultBranch(): Promise<string> {
+    if (this.#cachedDefaultBranch) return this.#cachedDefaultBranch;
+    const repo = await this.#octokit.request("GET /repos/{owner}/{repo}", {
+      owner: this.#owner,
+      repo: this.#repo,
+    });
+    this.#cachedDefaultBranch = repo.data.default_branch;
+    return this.#cachedDefaultBranch;
   }
 
   /** Read one Objective and everything derivable about its Work Items. */

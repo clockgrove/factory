@@ -4,7 +4,8 @@ A GitHub-native engineering-management plugin. You author an **Objective**; Fact
 **Work Items**, dispatches them to parallel GitHub Copilot agent sessions, supervises the results,
 and replans — unattended.
 
-> **Status: build order (§9) complete; Gates 0, 1 and 2 (PRD §8) all passed.** All seven build-order steps are done —
+> **Status: build order (§9) complete; Gates 0, 1, 2 and 5 (PRD §8) passed, plus a synthetic
+> brownfield rehearsal for Gate 3.** All seven build-order steps are done —
 > Factory can derive the full state of an Objective from GitHub alone, dispatch/confirm/retry/escalate
 > Work Items against a real repo, mechanically classify a PR's outcome (no-op, declined, untouched,
 > conflict, checks), integrate a mechanically-ready PR (mark ready, merge, resolve or reject a
@@ -95,6 +96,32 @@ and replans — unattended.
 > and that the job has nothing worth stealing (read-only token, no secrets); otherwise it escalates
 > with reasons. Details in [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) §10.5–§10.6;
 > see also [`docs/PRD.md`](docs/PRD.md).
+>
+> **Gate 5 (the merge-conflict path — §6) passed**, closing the one branch of the design that five
+> earlier rehearsals had never reached, because every one of them produced Work Items with disjoint
+> file scope. The fixture forced the collision instead of hoping for it: three Work Items against
+> `clockgrove/factory-gate2` #22, each required to create the *same* new `src/index.ts` barrel, with
+> no dependency edges between them. The first merged; the other two conflicted, and §6 recovered
+> both — `updatePullRequestBranch` throws on a real content conflict, so the tool closed each pull
+> request with an audit comment and re-dispatched, and since the base by then contained the barrel,
+> each replacement modified the existing file and merged in a single retry. The Objective closed with
+> all three Work Items done.
+>
+> That measurement also retired an open worry. `#resolveConflict`'s success path had looked like an
+> unbounded loop; it is unbounded and correct, because GitHub refuses the mutation outright when the
+> merge would conflict, so reaching it again means the base genuinely moved again. The real cost is
+> elsewhere and is now documented in both skills: **each conflict re-dispatch spends one of the Work
+> Item's three attempts**, on work that was not defective, so a four-way collision on one file can
+> exhaust the item that merges last.
+>
+> Gate 5 also confirmed two gaps reported by earlier gates and now fixed. Work Items were being
+> created **unlabelled** — `graph_apply` took the `factory:work-item` label as a GraphQL node ID that
+> nothing on the tool surface could produce, so every caller omitted it, in repositories that defined
+> the label; the label is now resolved by name and applied automatically. And nothing could read the
+> target repository, so compilation guessed `scope` from an Objective's prose — a wrong guess fails
+> not at compile time but several cycles later, as an `untouched` verdict with an agent run already
+> spent. **`read_repository_layout`** and **`read_repository_file`** close that, and
+> `objective-compilation` now reads the repository before naming a single path.
 
 ## Design in one picture
 

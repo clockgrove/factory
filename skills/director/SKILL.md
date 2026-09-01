@@ -67,6 +67,17 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
    same Objective; if you think the graph itself is wrong, that is replanning (step 6), not
    recompilation.
 
+   The compilation skill will read the target repository with `read_repository_layout` and
+   `read_repository_file` before naming paths. Let it — a `scope` guessed from the Objective's prose
+   does not fail here, it fails several cycles later as an `untouched` verdict with an agent run
+   already spent (§10.5 F2, §10.8 F4).
+
+   Check `graph_apply`'s result for `labelled: false`. It means the repository has no
+   `factory:work-item` label, so the Work Items it just created carry nothing marking them as
+   machine-managed. They work regardless — every derivation runs off the sub-issue relationship, not
+   the label — but mention it once in your report so a human can add the label rather than wonder
+   later why the issues look hand-written.
+
 3. **Dispatch ready items.** For each Work Item number in `ready` (from step 1), call `dispatch_start`
    with that `objectiveNumber`/`workItemNumber`/`escalateTo`. Do this for every ready item in the
    snapshot — the MCP server's own pacing (`ContentCreationPacer`) staggers and rate-limits the actual
@@ -106,6 +117,16 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
      keep retrying past. The tool now stops on its own once attempts are exhausted, escalating with
      the *graph* diagnosis — a conflict a rebase cannot fix usually means two Work Items are editing
      one file with no dependency edge between them, which only replanning fixes.
+
+     Gate 5 exercised this live, twice, and it recovers cleanly: `updatePullRequestBranch` throws on
+     a real content conflict, the tool closes the pull request with an audit comment and
+     re-dispatches, and because the base has meanwhile moved to include whatever it collided with,
+     the replacement attempt comes back mergeable in one retry. Expect that, and do not intervene
+     while it is happening. What to *notice* is the cost: each of those re-dispatches spends one of
+     the Work Item's three attempts, on work that was not defective. Two items colliding is fine;
+     the item that merges last in a four-way collision can exhaust its attempts and escalate having
+     done nothing wrong. So repeated `conflict` on one file is your cue to look at the graph, not at
+     the agent.
    - `checks_pending` — usually settles within a cycle, so leave it. But if it persists and the pull
      request's checks have *never* started, GitHub is probably holding the run awaiting approval:
      call `approve_held_workflow_runs` rather than waiting indefinitely (see "CI that GitHub is

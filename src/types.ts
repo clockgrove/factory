@@ -76,6 +76,39 @@ export interface PullRequestDiff {
   truncated: boolean;
 }
 
+/**
+ * The default branch's file list, used to ground a compiled Work Item's `scope`
+ * in the repository as it actually is rather than as its Objective's prose
+ * implies (Gate 3 F2, Gate 4 F4).
+ */
+export interface RepositoryLayout {
+  defaultBranch: string;
+  /** Blob paths only, sorted. Directories are implied. */
+  files: string[];
+  /** How many files matched before any cap was applied. */
+  totalFiles: number;
+  /** True if this list is incomplete for any reason. */
+  truncated: boolean;
+  /**
+   * True when GitHub itself could not return the whole tree, as distinct from
+   * this reader having capped it. Kept separate because the remedies differ: a
+   * caller can lower its own scope with `pathPrefix`, but cannot make a
+   * repository small enough for GitHub to return whole.
+   */
+  treeTruncatedByGitHub: boolean;
+}
+
+/** One file's text from the default branch. */
+export interface RepositoryFile {
+  path: string;
+  /** False means the path is simply not in the repository — not an error. */
+  exists: boolean;
+  content?: string;
+  truncated: boolean;
+  /** Why content is absent despite the path existing (directory, symlink, >1MB). */
+  unreadable?: string;
+}
+
 export interface LinkedPullRequest {
   /** GraphQL node ID, needed to address `closePullRequest` at retry time. */
   id: string;

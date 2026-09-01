@@ -47,14 +47,32 @@ GitHub issue numbers exist; nothing in the output is stored anywhere once `graph
    (§5.3 extends here: frequent declines are a compiler defect, not an execution defect, and an
    Objective the compiler had to guess at is exactly how those get created).
 
-2. **Find independent seams.** Default to maximum independence. Gate 0 (PRD §7) is explicitly 2–3
+2. **Read the repository before you name a single path.** Call `read_repository_layout` on the
+   target repository, and `read_repository_file` on anything the Objective turns on — the existing
+   test file you are about to change, `package.json` for the test runner, a barrel like
+   `src/index.ts` to see whether it already exists. Every path you later put in `scope` should be
+   one you have either seen in the layout or deliberately decided to create.
+
+   This step exists because it was missing. Gate 3 (F2) and Gate 4 (F4) both compiled `scope` by
+   inferring conventional structure from the Objective's prose, since no tool could read the
+   repository. Gate 3 guessed right, which is the dangerous outcome — a wrong guess does not fail
+   here. It fails several steps later as an `untouched` verdict, after an agent run has been spent,
+   and it reads like the agent ignored its brief rather than like the brief named a path that never
+   existed. Checking is one cheap call; not checking is a defect that surfaces somewhere it cannot
+   be diagnosed.
+
+   Note what the layout tells you beyond paths: whether tests sit beside sources or in a `test/`
+   directory, whether a shared barrel exists that several Work Items would all have to edit (see
+   step 5's overlap rule), and whether the thing the Objective asks for is already there.
+
+3. **Find independent seams.** Default to maximum independence. Gate 0 (PRD §7) is explicitly 2–3
    *independent* Work Items — bias toward splitting work so items do not depend on each other,
    and only introduce `dependsOn` when work genuinely cannot proceed in parallel (one item's output
    is literally the input to another, or two items would otherwise modify the same file). Prefer
    splitting `scope` to avoid a dependency over introducing one. A single Work Item is a valid
    output for an Objective that genuinely does not decompose — do not force an artificial split.
 
-3. **Draft each Work Item's fields** (`schemas/work-item.schema.json`):
+4. **Draft each Work Item's fields** (`schemas/work-item.schema.json`):
    - `goal` — one sentence, what this Work Item accomplishes.
    - `acceptance` — criteria checkable **from the diff alone**. Outcome-evaluation (§5.2) verifies
      these against the PR, never against the agent's self-report (§15.7) — if a criterion can only
@@ -86,13 +104,14 @@ GitHub issue numbers exist; nothing in the output is stored anywhere once `graph
      silently assumed.
    - `outOfScope` — explicit non-goals, guarding against scope creep beyond `scope`.
    - `conventions` — repo-specific constraints (test/build commands, commit style) pulled from the
-     repo's own documentation, never invented.
+     repo's own documentation, never invented. `read_repository_file` on `package.json`,
+     `CONTRIBUTING.md` or the CI workflow is how you pull them rather than inventing them.
    - `dependsOn` — other Work Items' `id` values that must be `done` first. Empty by default.
 
-4. **Assign each Work Item a short, kebab-case `id`**, unique within this graph
+5. **Assign each Work Item a short, kebab-case `id`**, unique within this graph
    (`schemas/work-item.schema.json`'s pattern: lowercase letters, digits, hyphens).
 
-5. **Self-check before emitting.** `objective.schema.json` validates shape only; these graph-level
+6. **Self-check before emitting.** `objective.schema.json` validates shape only; these graph-level
    invariants are this skill's responsibility, not the schema's:
    - Every `id` is unique within the graph.
    - Every `dependsOn` entry resolves to another Work Item's `id` in the same output.
@@ -101,6 +120,18 @@ GitHub issue numbers exist; nothing in the output is stored anywhere once `graph
      undetected overlap here is precisely the "parallel PRs branch from the same base and collide
      at merge" finding (§6, PROBE-001 finding 3) — catching it at compile time is cheaper than
      discovering it as a merge conflict.
+
+     Gate 5 measured what that costs, and it is not free even though §6 recovers. Three items were
+     compiled to overlap deliberately, each having to create the same `src/index.ts`. Every one of
+     them that lost the race had its pull request **closed and re-dispatched**, and each of those
+     re-dispatches **consumed one of the item's three attempts** — the last item burned two attempts
+     before it ever got a clean base. Four overlapping items would have exhausted it and escalated,
+     with correct-but-wasted work thrown away each time. So the rule is not a stylistic preference:
+     an overlap you leave in is a budget you are spending on the item that merges last.
+
+     The common shape is a shared barrel or registry file that several items must all export from.
+     Handle it by giving *one* item the barrel edit and having the others `dependsOn` it, which
+     serialises the write behind a dependency edge instead of racing.
 
 ## Worked example
 

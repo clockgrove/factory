@@ -185,6 +185,25 @@ export interface ObjectiveSnapshot {
   /** The repository's default branch, used as `agentAssignment.baseRef`. */
   defaultBranch: string;
   /**
+   * GraphQL node ID of the repository's `factory:work-item` label, or null when
+   * the repository has no such label.
+   *
+   * Resolved here rather than asked of the caller. The label is structural
+   * identity — it is how a Work Item is recognisable as one to anything reading
+   * the repository from outside Factory — so it belongs on every Work Item
+   * automatically rather than on request. `graph_apply` originally took this
+   * node ID as an optional tool parameter, which was unusable in practice:
+   * nothing on the tool surface could turn the name `factory:work-item` into a
+   * node ID, so every Director omitted it and every Work Item was created
+   * unlabelled (observed live in Gate 4, and again in Gate 5 after the first
+   * report).
+   *
+   * Null is reported rather than repaired: creating the label here would put
+   * Factory in the business of defining a repository's taxonomy behind the
+   * operator's back. `graph_apply` says so in its result instead.
+   */
+  workItemLabelId: string | null;
+  /**
    * Node ID of the coding agent's bot actor, discovered via
    * `suggestedActors(capabilities: [CAN_BE_ASSIGNED])` (verified live,
    * 2026-08-30). `null` if the repository has no assignable coding agent.

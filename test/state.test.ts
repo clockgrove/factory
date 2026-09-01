@@ -71,6 +71,7 @@ function objective(items: WorkItemSnapshot[]): ObjectiveSnapshot {
     readAt: NOW,
     repositoryId: "R_1",
     defaultBranch: "main",
+    workItemLabelId: "LA_1",
     copilotBotId: "BOT_1",
     ciExpectedOnPullRequests: false,
   };
@@ -341,6 +342,7 @@ describe("doneWithoutMergedPullRequest", () => {
       readAt: NOW,
       repositoryId: "R_1",
       defaultBranch: "main",
+      workItemLabelId: "LA_1",
       copilotBotId: "BOT_1",
       ciExpectedOnPullRequests: false,
     };

@@ -24225,6 +24225,7 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
     id
     defaultBranchRef { name }
+    workItemLabel: label(name: "factory:work-item") { id }
     suggestedActors(capabilities: [CAN_BE_ASSIGNED], first: 10) {
       nodes {
         login
@@ -24497,6 +24498,7 @@ var GitHubReader = class {
       readAt: /* @__PURE__ */ new Date(),
       repositoryId: repository.id,
       defaultBranch: repository.defaultBranchRef.name,
+      workItemLabelId: repository.workItemLabel?.id ?? null,
       copilotBotId: bot?.id ?? null,
       ciExpectedOnPullRequests: await this.#ciExpectedOnPullRequests()
     };
@@ -26195,12 +26197,11 @@ server.registerTool(
   "graph_apply",
   {
     title: "Apply compiled graph",
-    description: "\xA79 build order step 6: apply a compiled Objective (skills/objective-compilation's output) to GitHub as Work Item sub-issues plus native `blocked by` dependency edges. Refuses (a no-op) if the Objective already has Work Item sub-issues \u2014 this call is not idempotent, and a caller must not re-apply a graph onto an Objective that already has one (graph.ts's own contract).",
+    description: "\xA79 build order step 6: apply a compiled Objective (skills/objective-compilation's output) to GitHub as Work Item sub-issues plus native `blocked by` dependency edges. Every created issue is labelled `factory:work-item` automatically when the repository defines that label; if it does not, the issues are still created and the result says the label was missing. Refuses (a no-op) if the Objective already has Work Item sub-issues \u2014 this call is not idempotent, and a caller must not re-apply a graph onto an Objective that already has one (graph.ts's own contract).",
     inputSchema: {
       ...RepoShape,
       objectiveNumber: external_exports.number().int().positive().describe("Objective issue number"),
-      compiledObjective: CompiledObjectiveSchema,
-      workItemLabelId: external_exports.string().optional().describe("GraphQL node ID of a label (e.g. factory:work-item) to apply to every created issue")
+      compiledObjective: CompiledObjectiveSchema
     }
   },
   tool(
@@ -26208,8 +26209,7 @@ server.registerTool(
       owner,
       repo,
       objectiveNumber,
-      compiledObjective,
-      workItemLabelId
+      compiledObjective
     }) => {
       const reader = readerFor(owner, repo);
       const snapshot = await reader.readObjective(objectiveNumber);
@@ -26229,9 +26229,15 @@ server.registerTool(
       const created = await applier.apply(compiledObjective, {
         repositoryId: snapshot.repositoryId,
         objectiveIssueId: snapshot.id,
-        ...workItemLabelId ? { workItemLabelId } : {}
+        ...snapshot.workItemLabelId ? { workItemLabelId: snapshot.workItemLabelId } : {}
       });
-      return { created: Object.fromEntries(created) };
+      return {
+        created: Object.fromEntries(created),
+        labelled: snapshot.workItemLabelId !== null,
+        ...snapshot.workItemLabelId ? {} : {
+          labelWarning: `${owner}/${repo} has no \`factory:work-item\` label, so the ${created.size} Work Item(s) were created without it. They still function \u2014 Factory derives everything from the sub-issue relationship, not from the label \u2014 but nothing reading the repository from outside Factory can tell these issues apart from hand-written ones. Create the label in the repository and it will be applied to future Work Items.`
+        }
+      };
     }
   )
 );

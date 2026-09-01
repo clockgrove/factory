@@ -826,17 +826,16 @@ server.registerTool(
     title: "Apply compiled graph",
     description:
       "§9 build order step 6: apply a compiled Objective (skills/objective-compilation's output) to " +
-      "GitHub as Work Item sub-issues plus native `blocked by` dependency edges. Refuses (a no-op) " +
-      "if the Objective already has Work Item sub-issues — this call is not idempotent, and a caller " +
-      "must not re-apply a graph onto an Objective that already has one (graph.ts's own contract).",
+      "GitHub as Work Item sub-issues plus native `blocked by` dependency edges. Every created issue " +
+      "is labelled `factory:work-item` automatically when the repository defines that label; if it " +
+      "does not, the issues are still created and the result says the label was missing. Refuses (a " +
+      "no-op) if the Objective already has Work Item sub-issues — this call is not idempotent, and a " +
+      "caller must not re-apply a graph onto an Objective that already has one (graph.ts's own " +
+      "contract).",
     inputSchema: {
       ...RepoShape,
       objectiveNumber: z.number().int().positive().describe("Objective issue number"),
       compiledObjective: CompiledObjectiveSchema,
-      workItemLabelId: z
-        .string()
-        .optional()
-        .describe("GraphQL node ID of a label (e.g. factory:work-item) to apply to every created issue"),
     },
   },
   tool(
@@ -845,13 +844,11 @@ server.registerTool(
       repo,
       objectiveNumber,
       compiledObjective,
-      workItemLabelId,
     }: {
       owner: string;
       repo: string;
       objectiveNumber: number;
       compiledObjective: z.infer<typeof CompiledObjectiveSchema>;
-      workItemLabelId?: string | undefined;
     }) => {
       const reader = readerFor(owner, repo);
       const snapshot = await reader.readObjective(objectiveNumber);
@@ -873,9 +870,22 @@ server.registerTool(
       const created = await applier.apply(compiledObjective, {
         repositoryId: snapshot.repositoryId,
         objectiveIssueId: snapshot.id,
-        ...(workItemLabelId ? { workItemLabelId } : {}),
+        ...(snapshot.workItemLabelId ? { workItemLabelId: snapshot.workItemLabelId } : {}),
       });
-      return { created: Object.fromEntries(created) };
+      return {
+        created: Object.fromEntries(created),
+        labelled: snapshot.workItemLabelId !== null,
+        ...(snapshot.workItemLabelId
+          ? {}
+          : {
+              labelWarning:
+                `${owner}/${repo} has no \`factory:work-item\` label, so the ${created.size} Work Item(s) ` +
+                "were created without it. They still function — Factory derives everything from the " +
+                "sub-issue relationship, not from the label — but nothing reading the repository from " +
+                "outside Factory can tell these issues apart from hand-written ones. Create the label " +
+                "in the repository and it will be applied to future Work Items.",
+            }),
+      };
     },
   ),
 );

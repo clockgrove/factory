@@ -62,6 +62,7 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
     id
     defaultBranchRef { name }
+    workItemLabel: label(name: "factory:work-item") { id }
     suggestedActors(capabilities: [CAN_BE_ASSIGNED], first: 10) {
       nodes {
         login
@@ -194,6 +195,7 @@ interface GqlResponse {
   repository: {
     id: string;
     defaultBranchRef: { name: string } | null;
+    workItemLabel: { id: string } | null;
     suggestedActors: { nodes: GqlSuggestedActor[] };
     issue: {
       id: string;
@@ -508,6 +510,7 @@ export class GitHubReader {
       readAt: new Date(),
       repositoryId: repository.id,
       defaultBranch: repository.defaultBranchRef.name,
+      workItemLabelId: repository.workItemLabel?.id ?? null,
       copilotBotId: bot?.id ?? null,
       ciExpectedOnPullRequests: await this.#ciExpectedOnPullRequests(),
     };

@@ -2713,6 +2713,7 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
     id
     defaultBranchRef { name }
+    workItemLabel: label(name: "factory:work-item") { id }
     suggestedActors(capabilities: [CAN_BE_ASSIGNED], first: 10) {
       nodes {
         login
@@ -2985,6 +2986,7 @@ var GitHubReader = class {
       readAt: /* @__PURE__ */ new Date(),
       repositoryId: repository.id,
       defaultBranch: repository.defaultBranchRef.name,
+      workItemLabelId: repository.workItemLabel?.id ?? null,
       copilotBotId: bot?.id ?? null,
       ciExpectedOnPullRequests: await this.#ciExpectedOnPullRequests()
     };

@@ -868,13 +868,40 @@ the same `FAILURE` rollup, routed straight to `#escalate` rather than `retryOrEs
 
 **Also observed.** No factory tool reads the target repository's file tree or file contents, so
 compilation grounds `scope` in the Objective body alone. Gate 4 guessed right; a wrong guess would
-surface several steps later as an untouched-scope failure. And `graph_apply` takes `workItemLabelId`
-as a GraphQL node ID with nothing on the surface to resolve a label name to one.
+surface several steps later as an untouched-scope failure. And `graph_apply` took `workItemLabelId`
+as a GraphQL node ID with nothing on the surface to resolve a label name to one — so every Director
+omitted it and every Work Item was created unlabelled, in repositories that *did* define the label.
+`graph.ts` had a passing test proving the ID flows through to `createIssue`; what was never tested
+was that anything supplied it. The same shape as §10.7's lesson: a green test on the handler says
+nothing about whether the caller is wired. Fixed by resolving the label by name in `OBJECTIVE_QUERY`
+(`repository.label(name:)`, both the found and not-found branches verified live, 2026-09-02) and
+dropping the parameter from the tool surface, since structural identity should not be optional.
 
-**Not reached.** The conflict path is still unexercised — the fixture arms it correctly (three Work
-Items with no edges between them, all appending to one array literal in `src/transforms/registry.ts`),
-but the foundation Work Item could not merge while its CI was held. The graph is intact and the
-conflict remains armed for the next attempt.
+## 10.9 Gate 5 — the conflict path, finally exercised
+
+`clockgrove/factory-gate2` #22. Three Work Items compiled with deliberately *overlapping* scope —
+each had to create the same new `src/index.ts` barrel, with no dependency edges between them — which
+guarantees an add/add conflict rather than hoping for one. Every gate before this produced disjoint
+scope, so §6 had never once run. The fixture needs no pre-seeded file and no foundation item, which
+is what made it reachable after Gate 4b deadlocked on held CI; `factory-gate2` also runs no CI
+workflow, so nothing could be held.
+
+**§6 works.** The first item merged. The other two then read `CONFLICTING`, and
+`updatePullRequestBranch` **threw** — so the *catch* branch is what a real content conflict takes,
+and that branch is bounded by the ordinary attempt count. Both pull requests were closed with the
+audit comment ("could not automatically resolve a merge conflict against the base branch (§6).
+Re-dispatching.") and re-dispatched. Because the base by then contained the barrel, the replacement
+attempts *modified* the existing file instead of creating it and came back `mergeable: clean` in a
+single retry. The path self-heals in one attempt without ever reaching escalation.
+
+**This also settles the open question about `#resolveConflict`'s success path**, which had been
+flagged as an unbounded loop. It is unbounded, and that is correct: GitHub refuses the mutation
+outright when the merge would conflict, so success means the conflict is gone. Reaching the method
+again requires the base to have moved *again*, and rebasing against a genuinely newer base is the
+right response — it terminates when the base stops moving, consumes no attempt, opens no pull
+request, and is paced like every other write. A bound there would abort legitimate work. Recorded
+rather than "fixed".
+
 
 ---
 

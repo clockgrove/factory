@@ -24261,6 +24261,8 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
               body
               mergeable
               createdAt
+              mergedAt
+              closedAt
               additions
               deletions
               changedFiles
@@ -24345,6 +24347,8 @@ function toPullRequest(pr) {
     checksNeverStarted: checks === "FAILURE" && !commit?.statusCheckRollup?.state,
     mergeable: pr.mergeable,
     createdAt: new Date(pr.createdAt),
+    mergedAt: pr.mergedAt ? new Date(pr.mergedAt) : null,
+    closedAt: pr.closedAt ? new Date(pr.closedAt) : null,
     headSha: commit?.oid ?? "",
     // Falling back to the PR's own creation time keeps the field a real Date
     // even for the (unobserved) case of a pull request with no commits: a
@@ -25981,7 +25985,9 @@ function serializePr(pr, minimal = false) {
   const base = {
     ...pr,
     createdAt: pr.createdAt.toISOString(),
-    headCommittedAt: pr.headCommittedAt.toISOString()
+    headCommittedAt: pr.headCommittedAt.toISOString(),
+    mergedAt: pr.mergedAt ? pr.mergedAt.toISOString() : null,
+    closedAt: pr.closedAt ? pr.closedAt.toISOString() : null
   };
   if (!minimal) return base;
   const { body: _body, ...rest } = base;
@@ -26087,7 +26093,7 @@ server.registerTool(
   "read_objective",
   {
     title: "Read Objective",
-    description: "Read one GitHub Objective issue and every Work Item sub-issue beneath it, and derive each one's state (\xA71, \xA73.2). This is the one-snapshot-per-cycle read (\xA74.1) \u2014 call it once at the start of a cycle, then act on its `items[].number` via the other tools. The returned `objective.title`/`objective.body` are the human's stated intent, verbatim, for the compile-if-needed step (skills/objective-compilation) \u2014 never invent scope beyond them. Also reports whether the platform circuit breaker has tripped enough times to need a human (\xA77.3) via `platformExhausted`.",
+    description: "Read one GitHub Objective issue and every Work Item sub-issue beneath it, and derive each one's state (\xA71, \xA73.2). This is the one-snapshot-per-cycle read (\xA74.1) \u2014 call it once at the start of a cycle, then act on its `items[].number` via the other tools. The returned `objective.title`/`objective.body` are the human's stated intent, verbatim, for the compile-if-needed step (skills/objective-compilation) \u2014 never invent scope beyond them. Also reports whether the platform circuit breaker has tripped enough times to need a human (\xA77.3) via `platformExhausted`. Two item-level fields are worth knowing before you need them. `doneWithoutMergedPullRequest` is true when a Work Item is closed but no pull request linked to it was ever merged \u2014 the signature of an item closed by hand, or closed by an agent that decided the work was unnecessary, rather than one Factory integrated. It is an observation, not a decision: nothing acts on it, and it exists so that 'done' is never taken at face value. Each linked pull request also carries `mergedAt` and `closedAt` (ISO 8601, or null), which make ordering reconstructable after the fact \u2014 for instance whether a dependent item was dispatched only after its dependency actually merged.",
     inputSchema: {
       ...RepoShape,
       number: external_exports.number().int().positive().describe("Objective issue number"),

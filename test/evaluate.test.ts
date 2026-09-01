@@ -40,6 +40,8 @@ function pr(over: Partial<LinkedPullRequest> = {}): LinkedPullRequest {
     createdAt: NOW,
     headSha: "deadbeef",
     headCommittedAt: NOW,
+    mergedAt: null,
+    closedAt: null,
     ...over,
   };
   // Keep the count consistent with the paths unless a test is deliberately

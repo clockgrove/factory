@@ -1322,6 +1322,50 @@ the requesting user about a second later. Derivation is unaffected (escalation i
 *absence*, and `assignHumanOnly` replaces all actors), but "who is assigned" is a tempting and wrong
 signal for a human auditing the repository from outside.
 
+## 10.16 A Director could not reconstruct its own history
+
+Gate 5's closing finding, and the one that cost real work before it was reported: **the tool surface
+exposed no merge or close timestamp anywhere.** Pull requests carried `createdAt` and nothing else.
+
+The consequence is narrow and sharp. Ordering questions of the form *"was this Work Item dispatched
+only after its dependency merged?"* — the question that decides whether a `dependsOn` edge did
+anything at all — were **literally unanswerable after the fact from inside Factory**. Gate 5 had to
+reconstruct the answer by reading diff *context* lines (an `export` line appearing as unchanged
+context proves the merge base already contained it) and by comparing assignment gaps: 4m36s between
+two dependent items against 8s between three independent ones. That reasoning was correct, and it
+should not have been necessary.
+
+It is not a hypothetical cost. Diagnosing §10.15 required knowing that Factory merged PR #36 at
+17:43:38 and the agent renamed it at 17:45:16 — a 98-second ordering that is the entire finding.
+Factory could not supply either timestamp about its own action, so the diagnosis went around Factory
+to raw GraphQL. **A system whose central design claim is that state is derived from GitHub should not
+have to be bypassed to answer a question about what it did.**
+
+`mergedAt` and `closedAt` are now on every linked pull request. Both are recorded rather than one
+"finished at", because a closed-unmerged PR is the signature of an abandoned or superseded attempt
+and collapsing the two would make it indistinguishable from an integration.
+
+**No derivation reads either field, and that is the point of note.** §1 says state is derived from
+the present, and neither timestamp changes any decision — Factory looks at what *is*, not at when it
+became so. They exist for the observer: for a Director reconstructing a cycle, and for a human
+auditing a repository after everyone has stopped running. That also makes them the kind of field
+that rots silently, since no failing derivation would ever announce that they had stopped
+populating, which is why `toPullRequest` is now exported and directly tested.
+
+Two related items from the same report:
+
+- **`doneWithoutMergedPullRequest` was undocumented**, showing a Director a decided value with no
+  account of what produces it — the exact pattern §15.7 exists to prevent, reintroduced by omission.
+  `read_objective`'s description now states what it means and, more importantly, that *nothing acts
+  on it*: it is an observation offered so that "done" is never taken at face value.
+- **Factory has no actor provenance, and this is not fixed.** Every write from every Director carries
+  the same token, so when two Directors ran against one fixture repo seven minutes apart, a coherent
+  and entirely wrong account of who did what could be — and was — assembled from GitHub state alone.
+  §1 gives faithful Objective *state*; it says nothing about agency. This is a real observability gap
+  for any deployment running more than one Director, and it is recorded here rather than fixed
+  because the fix is a design question (attribution in comment bodies? a per-Director marker?) rather
+  than a missing field.
+
 ## 11. Risks
 
 | Risk | Mitigation |

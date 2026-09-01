@@ -2745,6 +2745,8 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
               body
               mergeable
               createdAt
+              mergedAt
+              closedAt
               additions
               deletions
               changedFiles
@@ -2829,6 +2831,8 @@ function toPullRequest(pr) {
     checksNeverStarted: checks === "FAILURE" && !commit?.statusCheckRollup?.state,
     mergeable: pr.mergeable,
     createdAt: new Date(pr.createdAt),
+    mergedAt: pr.mergedAt ? new Date(pr.mergedAt) : null,
+    closedAt: pr.closedAt ? new Date(pr.closedAt) : null,
     headSha: commit?.oid ?? "",
     // Falling back to the PR's own creation time keeps the field a real Date
     // even for the (unobserved) case of a pull request with no commits: a

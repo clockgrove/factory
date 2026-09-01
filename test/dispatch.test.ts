@@ -47,6 +47,8 @@ function pr(over: Partial<LinkedPullRequest> = {}): LinkedPullRequest {
     createdAt: NOW,
     headSha: "deadbeef",
     headCommittedAt: NOW,
+    mergedAt: null,
+    closedAt: null,
     ...over,
   };
 }

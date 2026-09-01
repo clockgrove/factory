@@ -160,6 +160,8 @@ function serializePr(pr: LinkedPullRequest, minimal = false) {
     ...pr,
     createdAt: pr.createdAt.toISOString(),
     headCommittedAt: pr.headCommittedAt.toISOString(),
+    mergedAt: pr.mergedAt ? pr.mergedAt.toISOString() : null,
+    closedAt: pr.closedAt ? pr.closedAt.toISOString() : null,
   };
   if (!minimal) return base;
   // The coding agent quotes the whole Work Item issue back into the PR body, so
@@ -316,7 +318,15 @@ server.registerTool(
       "`objective.title`/`objective.body` are the human's stated intent, verbatim, for the " +
       "compile-if-needed step (skills/objective-compilation) — never invent scope beyond them. Also " +
       "reports whether the platform circuit breaker has tripped enough times to need a human (§7.3) " +
-      "via `platformExhausted`.",
+      "via `platformExhausted`. " +
+      "Two item-level fields are worth knowing before you need them. `doneWithoutMergedPullRequest` " +
+      "is true when a Work Item is closed but no pull request linked to it was ever merged — the " +
+      "signature of an item closed by hand, or closed by an agent that decided the work was " +
+      "unnecessary, rather than one Factory integrated. It is an observation, not a decision: nothing " +
+      "acts on it, and it exists so that 'done' is never taken at face value. Each linked pull " +
+      "request also carries `mergedAt` and `closedAt` (ISO 8601, or null), which make ordering " +
+      "reconstructable after the fact — for instance whether a dependent item was dispatched only " +
+      "after its dependency actually merged.",
     inputSchema: {
       ...RepoShape,
       number: z.number().int().positive().describe("Objective issue number"),

@@ -46,6 +46,11 @@ function pr(over: Partial<LinkedPullRequest> = {}): LinkedPullRequest {
     // case a test has to ask for explicitly, so that no test asserts "we judge
     // an abandoned draft" by accident (§10.15).
     headCommittedAt: NOW,
+    // The default PR is OPEN, so it is neither merged nor closed. Keeping these
+    // null by default means no test can assert a merge-time behaviour by
+    // accident — the way `isDraft: true` and `changedFiles: 2` once did.
+    mergedAt: null,
+    closedAt: null,
     ...over,
   };
 }

@@ -96,6 +96,8 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
               body
               mergeable
               createdAt
+              mergedAt
+              closedAt
               additions
               deletions
               changedFiles
@@ -153,6 +155,8 @@ interface GqlPr {
   body: string;
   mergeable: MergeableState;
   createdAt: string;
+  mergedAt: string | null;
+  closedAt: string | null;
   additions: number;
   deletions: number;
   changedFiles: number;
@@ -267,7 +271,13 @@ export function runlessSuiteVerdict(
   return runless.some((s) => !benign.has(s.conclusion)) ? "FAILURE" : null;
 }
 
-function toPullRequest(pr: GqlPr): LinkedPullRequest {
+/**
+ * Map GitHub's GraphQL pull request shape onto Factory's own. Exported for
+ * tests: every field here is either read by a derivation or reported to a
+ * Director, and a silently wrong mapping (a timestamp that never populates, a
+ * fallback that never fires) is invisible until it matters.
+ */
+export function toPullRequest(pr: GqlPr): LinkedPullRequest {
   const commit = pr.statusCheckRollup.nodes[0]?.commit;
   const checks = normalizeChecks(pr);
   return {
@@ -286,6 +296,8 @@ function toPullRequest(pr: GqlPr): LinkedPullRequest {
       checks === "FAILURE" && !commit?.statusCheckRollup?.state,
     mergeable: pr.mergeable,
     createdAt: new Date(pr.createdAt),
+    mergedAt: pr.mergedAt ? new Date(pr.mergedAt) : null,
+    closedAt: pr.closedAt ? new Date(pr.closedAt) : null,
     headSha: commit?.oid ?? "",
     // Falling back to the PR's own creation time keeps the field a real Date
     // even for the (unobserved) case of a pull request with no commits: a

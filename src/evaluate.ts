@@ -87,6 +87,7 @@ export type MechanicalVerdict =
   | { kind: "conflict" }
   | { kind: "checks_pending" }
   | { kind: "checks_missing" }
+  | { kind: "checks_held" }
   | { kind: "checks_failed" }
   | { kind: "ready" };
 
@@ -121,6 +122,16 @@ export function evaluateMechanical(
   }
   if (hasConflict(pr)) return { kind: "conflict" };
   if (pr.checks === "PENDING") return { kind: "checks_pending" };
+  // Before `checks_failed`, because these are the same `FAILURE` rollup and
+  // only this branch can tell them apart. A check suite that concluded without
+  // ever emitting a run did not test anything and did not fail: on a
+  // coding-agent pull request it means GitHub held the workflow awaiting a
+  // maintainer's approval (§10.6). Reporting that as `checks_failed` sent it to
+  // the retry path, which closes the pull request and re-dispatches — destroying
+  // correct work because CI was never allowed to start, and producing a fresh
+  // pull request held in exactly the same way. Gate 4 caught this before it
+  // fired.
+  if (pr.checksNeverStarted) return { kind: "checks_held" };
   if (pr.checks === "FAILURE") return { kind: "checks_failed" };
   // Gate 3 (§10.5, F1): `null` is not "no CI" when the repository is known to
   // run CI on pull requests. It also covers a workflow that fails to *start* —

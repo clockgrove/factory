@@ -95,9 +95,9 @@ class FakeWriter implements GitHubWriter {
     if (this.failing.approveWorkflowRun) throw this.failing.approveWorkflowRun;
   }
 
-  async addHumanAssignee(issueId: string, userId: string): Promise<void> {
-    this.calls.push(`addHumanAssignee:${issueId}:${userId}`);
-    if (this.failing.addHumanAssignee) throw this.failing.addHumanAssignee;
+  async assignHumanOnly(issueId: string, userId: string): Promise<void> {
+    this.calls.push(`assignHumanOnly:${issueId}:${userId}`);
+    if (this.failing.assignHumanOnly) throw this.failing.assignHumanOnly;
   }
 
   async addComment(subjectId: string, body: string): Promise<void> {
@@ -270,7 +270,7 @@ describe("Dispatcher.approveChecks", () => {
     const item = derivedWi();
     await d.approveChecks(item, RUNS, UNSAFE);
 
-    expect(writer.calls).toContain(`addHumanAssignee:${item.id}:U_human`);
+    expect(writer.calls).toContain(`assignHumanOnly:${item.id}:U_human`);
     expect(writer.comments.join("\n")).toContain(".github/workflows/ci.yml");
   });
 
@@ -315,6 +315,47 @@ describe("Dispatcher.approveChecks", () => {
     expect(outcome.approvedRunIds).toEqual([]);
     expect(writer.comments.join("\n")).toContain("none were approved");
   });
+
+  // Gate 4, §10.7 F1/F2. GitHub's approve endpoint is scoped to fork pull
+  // requests and refuses a coding-agent branch with this exact message, so the
+  // hold created by the repository's Copilot workflow-approval policy can never
+  // be cleared here. The old code reported that as `partially_approved` with no
+  // error attached: a total, permanent failure shaped like a success that a
+  // caller could only detect by diffing two arrays.
+  it("reports a fork-only refusal as permanent and escalates", async () => {
+    const writer = new FakeWriter({
+      approveWorkflowRun: new Error(
+        "This run is not from a fork pull request or queued by the Actions bot.",
+      ),
+    });
+    const d = makeDispatcher(writer);
+    const item = derivedWi();
+    const outcome = await d.approveChecks(item, RUNS, SAFE);
+
+    expect(outcome.action).toBe("not_approvable");
+    expect(outcome.approvedRunIds).toEqual([]);
+    expect(outcome.failures).toEqual(
+      RUNS.map((r) => ({
+        runId: r.id,
+        message: "This run is not from a fork pull request or queued by the Actions bot.",
+      })),
+    );
+    // The Work Item must land on a human: nothing in the loop can release it.
+    expect(writer.calls).toContain(`assignHumanOnly:${item.id}:U_human`);
+    const comment = writer.comments.join("\n");
+    expect(comment).toContain("Retrying will not help");
+  });
+
+  it("reports an ordinary failure as retryable rather than permanent", async () => {
+    const writer = new FakeWriter({ approveWorkflowRun: new Error("502 bad gateway") });
+    const d = makeDispatcher(writer);
+    const item = derivedWi();
+    const outcome = await d.approveChecks(item, RUNS, SAFE);
+
+    expect(outcome.action).toBe("partially_approved");
+    expect(outcome.failures?.[0]?.message).toContain("502");
+    expect(writer.calls).not.toContain(`assignHumanOnly:${item.id}:U_human`);
+  });
 });
 
 describe("Dispatcher.confirm", () => {
@@ -348,8 +389,7 @@ describe("Dispatcher.confirm", () => {
     });
     await d.confirm(item, NOW);
     expect(writer.calls).toEqual([
-      `addHumanAssignee:${item.id}:U_human`,
-      `clearActors:${item.id}`,
+      `assignHumanOnly:${item.id}:U_human`,
       `addComment:${item.id}`,
     ]);
   });
@@ -408,8 +448,7 @@ describe("Dispatcher.retryOrEscalate", () => {
     });
     await d.retryOrEscalate(item);
     expect(writer.calls).toEqual([
-      `addHumanAssignee:${item.id}:U_human`,
-      `clearActors:${item.id}`,
+      `assignHumanOnly:${item.id}:U_human`,
       `addComment:${item.id}`,
     ]);
   });
@@ -438,8 +477,62 @@ describe("Dispatcher.integrate", () => {
     const writer = new FakeWriter();
     const d = makeDispatcher(writer);
     const item = derivedWi();
-    await d.integrate(item, pr(), { kind: "checks_pending" });
+    const outcome = await d.integrate(item, pr(), { kind: "checks_pending" });
     expect(writer.calls).toEqual([]);
+    expect(outcome.merged).toBe(false);
+  });
+
+  it("reports a successful merge", async () => {
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    const outcome = await d.integrate(derivedWi(), pr({ isDraft: false }), { kind: "ready" });
+    expect(outcome).toEqual({ merged: true });
+  });
+
+  it("defers rather than throwing when the base branch moved under the merge", async () => {
+    // Observed live in Gate 3 (§10.5): a sibling PR merged in the same window.
+    // Throwing here invites a Director to read it as the Work Item failing and
+    // close a perfectly good pull request.
+    const writer = new FakeWriter({
+      mergePullRequest: new Error("Base branch was modified. Review and try the merge again."),
+    });
+    const d = makeDispatcher(writer);
+    const outcome = await d.integrate(derivedWi(), pr({ isDraft: false }), { kind: "ready" });
+
+    expect(outcome.merged).toBe(false);
+    expect(outcome.deferred).toContain("base branch moved");
+    // Critically: no retry, no close, no re-dispatch. The PR stays open.
+    expect(writer.calls).toEqual(["mergePullRequest:PR_1"]);
+  });
+
+  it("defers while GitHub is still recomputing mergeability", async () => {
+    const writer = new FakeWriter({
+      mergePullRequest: new Error("Pull Request is not mergeable"),
+    });
+    const d = makeDispatcher(writer);
+    const outcome = await d.integrate(derivedWi(), pr({ isDraft: false }), { kind: "ready" });
+    expect(outcome.merged).toBe(false);
+    expect(outcome.deferred).toBeTruthy();
+  });
+
+  it("still throws a merge refusal that a human must see", async () => {
+    // Branch protection, a missing permission, or a required review are not
+    // races. Swallowing them would make the loop retry silently forever.
+    const writer = new FakeWriter({
+      mergePullRequest: new Error("At least 1 approving review is required by reviewers."),
+    });
+    const d = makeDispatcher(writer);
+    await expect(
+      d.integrate(derivedWi(), pr({ isDraft: false }), { kind: "ready" }),
+    ).rejects.toThrow("approving review");
+  });
+
+  it("rethrows a platform refusal from the merge rather than deferring it", async () => {
+    const writer = new FakeWriter({ mergePullRequest: rateLimitError() });
+    const d = makeDispatcher(writer);
+    await expect(
+      d.integrate(derivedWi(), pr({ isDraft: false }), { kind: "ready" }),
+    ).rejects.toBeInstanceOf(PlatformUnavailableError);
   });
 
   it("resolves a conflict by updating the branch when GitHub accepts it", async () => {
@@ -481,8 +574,7 @@ describe("Dispatcher.integrate", () => {
 
     expect(writer.calls).toEqual([
       "updatePullRequestBranch:PR_3",
-      `addHumanAssignee:${item.id}:U_human`,
-      `clearActors:${item.id}`,
+      `assignHumanOnly:${item.id}:U_human`,
       `addComment:${item.id}`,
     ]);
     expect(writer.calls.some((c) => c.startsWith("assignCopilot"))).toBe(false);
@@ -553,22 +645,28 @@ describe("Dispatcher.integrate", () => {
     expect(writer.comments.join("\n")).toContain("required checks failed");
   });
 
-  // Gate 3, §10.5 F1. GitHub requires a maintainer to click "Approve and run
-  // workflows" on a coding-agent PR, so an unapproved run concludes `failure`
-  // having executed nothing. Reporting that as a failed test sends whoever
-  // reads the escalation hunting for a bug that does not exist.
-  it("names the real cause when CI concluded without running a job", async () => {
+  // Gate 4, §10.7 F3. The Gate 3 fix only reworded the escalation comment: the
+  // code still ran the retry path, which closes the pull request. Held CI must
+  // never cost the work — a replacement pull request is held identically, so a
+  // retry cannot succeed and only discards a correct diff.
+  it("escalates held checks instead of closing the pull request", async () => {
     const writer = new FakeWriter();
     const d = makeDispatcher(writer);
-    const item = derivedWi({ linkedPullRequests: [pr({ id: "PR_failed" })] });
-    await d.integrate(
+    const item = derivedWi({ linkedPullRequests: [pr({ id: "PR_held" })] });
+    const outcome = await d.integrate(
       item,
-      pr({ id: "PR_failed", checks: "FAILURE", checksNeverStarted: true }),
-      { kind: "checks_failed" },
+      pr({ id: "PR_held", checks: "FAILURE", checksNeverStarted: true }),
+      { kind: "checks_held" },
     );
+    expect(outcome).toEqual({ merged: false });
+    expect(writer.calls).toEqual([
+      `assignHumanOnly:${item.id}:U_human`,
+      `addComment:${item.id}`,
+    ]);
+    expect(writer.calls).not.toContain("closePullRequest:PR_held");
     const comment = writer.comments.join("\n");
-    expect(comment).toContain("without running a single job");
     expect(comment).toContain("Approve and run workflows");
+    expect(comment).toContain("fork-only");
     expect(comment).not.toContain("required checks failed");
   });
 

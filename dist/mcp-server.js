@@ -24942,6 +24942,32 @@ function confirmAction(wi, now) {
 function attemptAction(wi) {
   return attemptCount(wi) >= 3 ? "escalate" : "retry";
 }
+var MERGE_DEFERRALS = [
+  [
+    "base branch was modified",
+    "the base branch moved between GitHub computing mergeability and the merge itself, which happens when a sibling pull request merges in the same window"
+  ],
+  [
+    "head branch was modified",
+    "the agent pushed to the branch between the snapshot and the merge"
+  ],
+  [
+    "not mergeable",
+    "GitHub had not finished recomputing mergeability when the merge was attempted"
+  ],
+  [
+    "base branch modified",
+    "the base branch moved between GitHub computing mergeability and the merge itself"
+  ]
+];
+function mergeDeferral(error2) {
+  const message = error2?.message?.toLowerCase() ?? "";
+  if (message === "") return null;
+  for (const [needle, because] of MERGE_DEFERRALS) {
+    if (message.includes(needle)) return because;
+  }
+  return null;
+}
 var COPILOT_ASSIGNMENT_HEADERS = {
   "GraphQL-Features": "issues_copilot_assignment_api_support,coding_agent_model_selection"
 };
@@ -24961,9 +24987,9 @@ mutation ClearActors($assignableId: ID!) {
     clientMutationId
   }
 }`;
-var ADD_HUMAN_ASSIGNEE_MUTATION = `
-mutation AddAssignee($assignableId: ID!, $userId: ID!) {
-  addAssigneesToAssignable(input: { assignableId: $assignableId, assigneeIds: [$userId] }) {
+var ASSIGN_HUMAN_ONLY_MUTATION = `
+mutation AssignHumanOnly($assignableId: ID!, $userId: ID!) {
+  replaceActorsForAssignable(input: { assignableId: $assignableId, actorIds: [$userId] }) {
     clientMutationId
   }
 }`;
@@ -25027,10 +25053,11 @@ var GithubOctokitWriter = class {
       headers: COPILOT_ASSIGNMENT_HEADERS
     });
   }
-  async addHumanAssignee(issueId, userId) {
-    await this.#octokit.graphql(ADD_HUMAN_ASSIGNEE_MUTATION, {
+  async assignHumanOnly(issueId, userId) {
+    await this.#octokit.graphql(ASSIGN_HUMAN_ONLY_MUTATION, {
       assignableId: issueId,
-      userId
+      userId,
+      headers: COPILOT_ASSIGNMENT_HEADERS
     });
   }
   async addComment(subjectId, body) {
@@ -25148,45 +25175,75 @@ var Dispatcher = class {
   async integrate(wi, pr, verdict) {
     switch (verdict.kind) {
       case "ready":
-        await this.#mergeReady(pr);
-        return;
+        return await this.#mergeReady(pr);
       case "conflict":
         await this.#resolveConflict(wi, pr);
-        return;
+        return { merged: false };
       case "untouched":
         await this.retryOrEscalate(
           wi,
           "the diff did not touch the Work Item's declared file scope"
         );
-        return;
+        return { merged: false };
       case "checks_failed":
-        await this.retryOrEscalate(
+        await this.retryOrEscalate(wi, "required checks failed");
+        return { merged: false };
+      case "checks_held":
+        await this.#escalate(
           wi,
-          pr.checksNeverStarted ? "CI concluded without running a single job. On a pull request authored by the coding agent this normally means workflow runs were held awaiting a maintainer's 'Approve and run workflows' click and were then cancelled, not that a test failed. Call `approve_held_workflow_runs` while the pull request is open rather than retrying \u2014 a retry produces a fresh pull request whose runs are held in exactly the same way" : "required checks failed"
+          "CI never ran: GitHub is holding this pull request's workflow runs awaiting a maintainer's 'Approve and run workflows'. No API can release a coding-agent hold (the approve endpoint is fork-only), so Factory cannot clear it and must not merge without CI evidence. Either approve the runs on the pull request, or disable the repository's Copilot Actions workflow-approval requirement so future Work Items are not blocked the same way"
         );
-        return;
+        return { merged: false };
       case "declined":
         await this.retryOrEscalate(
           wi,
           "the agent declined the task as not actionable"
         );
-        return;
+        return { merged: false };
       case "no_op":
         await this.retryOrEscalate(wi);
-        return;
+        return { merged: false };
       case "checks_pending":
-        return;
+        return { merged: false };
       // wait for the next cycle; nothing to do yet
       case "checks_missing":
-        return;
+        return { merged: false };
     }
   }
-  /** §6: "mark ready → checks green → squash merge → issue auto-closes". */
+  /**
+   * §6: "mark ready → checks green → squash merge → issue auto-closes".
+   *
+   * GitHub refuses a merge whose base moved between the mergeability
+   * computation and the merge itself, with "Base branch was modified. Review
+   * and try the merge again." Observed live in Gate 3 (§10.5) when a sibling
+   * pull request merged in the same window. That is a benign race, not a
+   * failure: nothing is wrong with this pull request, and the next cycle
+   * re-reads and merges it. Letting it escape as a thrown tool error invites
+   * the exact misreading it caused in Gate 3 — a Director that treats a throw
+   * from `dispatch_integrate` as the Work Item failing would close a perfectly
+   * good pull request and re-dispatch it.
+   *
+   * Deferring is safe for the whole family of "not right now" merge refusals,
+   * including a mergeability recompute still in flight, because deferring
+   * decides nothing: the next cycle re-derives state and re-evaluates from a
+   * fresh snapshot, so a race resolves into a merge and a genuine conflict
+   * resolves into `conflict` and the §6 rebase path. Anything not recognised
+   * here is still thrown, so a real permission or branch-protection failure
+   * surfaces instead of being retried silently forever.
+   */
   async #mergeReady(pr) {
     if (pr.isDraft) {
       await this.#call(() => this.#writer.markPullRequestReady(pr.id));
     }
-    await this.#call(() => this.#writer.mergePullRequest(pr.id));
+    try {
+      await this.#call(() => this.#writer.mergePullRequest(pr.id));
+    } catch (error2) {
+      if (error2 instanceof PlatformUnavailableError) throw error2;
+      const deferral = mergeDeferral(error2);
+      if (!deferral) throw error2;
+      return { merged: false, deferred: deferral };
+    }
+    return { merged: true };
   }
   /**
    * §6: "attempt rebase; if clean, proceed; if not, close the PR and
@@ -25305,6 +25362,8 @@ var Dispatcher = class {
         break;
       }
     }
+    const failureMessage = failure instanceof Error ? failure.message : failure ? String(failure) : "";
+    const notApprovable = /not from a fork pull request|queued by the Actions bot/i.test(failureMessage);
     const record2 = [
       approvedRunIds.length > 0 ? `Approved ${approvedRunIds.length} held workflow run(s) so CI can execute (\xA710.6).` : "Attempted to approve held workflow runs (\xA710.6); none were approved.",
       "",
@@ -25313,19 +25372,41 @@ var Dispatcher = class {
       "",
       `Runs considered: ${runs.map((r) => `${r.name} (#${r.id})`).join(", ")}.`,
       approvedRunIds.length > 0 ? `Approved: ${approvedRunIds.join(", ")}.` : "",
-      failure ? `Stopped early: ${failure instanceof Error ? failure.message : String(failure)}. Remaining runs are still held and will be retried next cycle.` : ""
+      notApprovable ? `GitHub refused: ${failureMessage} There is no API that releases this hold \u2014 the approve endpoint only covers fork pull requests, and a coding-agent hold is a different mechanism. A human with write access must approve the runs on the pull request, or the repository's Copilot Actions workflow-approval requirement must be turned off. Retrying will not help. Escalating.` : failure ? `Stopped early: ${failureMessage} Remaining runs are still held and will be retried next cycle.` : ""
     ].filter((line) => line !== "").join("\n");
     await this.#call(() => this.#writer.addComment(wi.id, record2));
+    if (notApprovable) {
+      await this.#escalate(
+        wi,
+        "workflow runs are held and Factory cannot release them: GitHub's approve endpoint covers only fork pull requests and refuses a coding-agent branch. A human must approve the runs, or the repository's Copilot Actions workflow-approval requirement must be disabled"
+      );
+      return {
+        action: "not_approvable",
+        approvedRunIds,
+        failures: runs.filter((r) => !approvedRunIds.includes(r.id)).map((r) => ({ runId: r.id, message: failureMessage }))
+      };
+    }
     return {
       action: failure ? "partially_approved" : "approved",
-      approvedRunIds
+      approvedRunIds,
+      ...failure ? {
+        failures: runs.filter((r) => !approvedRunIds.includes(r.id)).map((r) => ({ runId: r.id, message: failureMessage }))
+      } : {}
     };
   }
+  /**
+   * §7.2. One assignment write, then the record.
+   *
+   * The assignment is what makes `escalated` terminal (`deriveState` reads
+   * "no Copilot, at least one human"), so it goes first: if the comment then
+   * fails, the Work Item is still correctly parked for a human and the loop
+   * has stopped touching it. The reverse order would leave a Work Item that
+   * announces an escalation it is not actually in, and keeps being retried.
+   */
   async #escalate(wi, reason) {
     await this.#call(
-      () => this.#writer.addHumanAssignee(wi.id, this.#escalateToId)
+      () => this.#writer.assignHumanOnly(wi.id, this.#escalateToId)
     );
-    await this.#call(() => this.#writer.clearActors(wi.id));
     await this.#call(
       () => this.#writer.addComment(wi.id, `Escalating to a human: ${reason} (\xA77.2).`)
     );
@@ -25384,6 +25465,7 @@ function evaluateMechanical(pr, expectedFiles, ciExpected = false) {
   }
   if (hasConflict(pr)) return { kind: "conflict" };
   if (pr.checks === "PENDING") return { kind: "checks_pending" };
+  if (pr.checksNeverStarted) return { kind: "checks_held" };
   if (pr.checks === "FAILURE") return { kind: "checks_failed" };
   if (pr.checks === null && ciExpected) return { kind: "checks_missing" };
   return { kind: "ready" };
@@ -25849,7 +25931,7 @@ server.registerTool(
   "approve_held_workflow_runs",
   {
     title: "Approve held workflow runs",
-    description: "Resolve the deadlock where CI never runs because GitHub is holding it (\xA710.6). GitHub parks workflow runs on coding-agent pull requests in `action_required` until a maintainer clicks 'Approve and run workflows'. Unattended, those runs never start, `evaluate_mechanical` correctly reports `checks_pending` forever, and the Work Item stalls \u2014 while merging anyway would bypass CI entirely. Call this whenever a verdict of `checks_pending` or `checks_missing` persists across cycles on a pull request whose checks have never started. It performs a blast-radius review first and only approves if the change cannot escalate what CI is allowed to do: the diff must leave workflow definitions, actions, dependency manifests, lockfiles and registry config untouched, the repository's default workflow token must be read-only, and no pull-request workflow may reference a secret. If any of that fails it escalates to a human instead, with the specific reasons. Approving is a write; the decision and its reasoning are recorded as a comment on the Work Item.",
+    description: "Resolve the deadlock where CI never runs because GitHub is holding it (\xA710.6). GitHub parks workflow runs on coding-agent pull requests in `action_required` until a maintainer clicks 'Approve and run workflows'. Unattended, those runs never start, `evaluate_mechanical` reports `checks_held`, and the Work Item stalls \u2014 while merging anyway would bypass CI entirely. Call this on a `checks_held` verdict, or when `checks_pending`/`checks_missing` persists across cycles on a pull request whose checks have never started. It performs a blast-radius review first and only approves if the change cannot escalate what CI is allowed to do: the diff must leave workflow definitions, actions, dependency manifests, lockfiles and registry config untouched, the repository's default workflow token must be read-only, and no pull-request workflow may reference a secret. If any of that fails it escalates to a human instead, with the specific reasons. Approving is a write; the decision and its reasoning are recorded as a comment on the Work Item. IMPORTANT (Gate 4, \xA710.7): GitHub's approve endpoint covers only *fork* pull requests, and refuses a same-repo coding-agent branch outright \u2014 so on a hold created by the repository's Copilot Actions workflow-approval policy this tool CANNOT release the runs, and returns `action: 'not_approvable'` with GitHub's reason in `failures` after escalating to a human. That is permanent, not transient: do not retry it, and do not merge without CI. The only fixes are a human approving on the pull request, or disabling the repository's Copilot Actions workflow-approval requirement before the run.",
     inputSchema: {
       ...WorkItemLocatorShape,
       escalateTo: external_exports.string().describe("Login of the human to assign if the review declines to approve")
@@ -26005,8 +26087,17 @@ server.registerTool(
       }
       const verdict = evaluateMechanical(pr, expectedFiles, objective.ciExpectedOnPullRequests);
       const dispatcher = await dispatcherFor(owner, repo, objective, escalateTo, reader);
-      await dispatcher.integrate(item, pr, verdict);
-      return { verdict, workItem: workItemNumber, pullRequest: pr.number };
+      const outcome = await dispatcher.integrate(item, pr, verdict);
+      return {
+        verdict,
+        workItem: workItemNumber,
+        pullRequest: pr.number,
+        merged: outcome.merged,
+        ...outcome.deferred ? {
+          deferred: outcome.deferred,
+          guidance: "This is a transient merge race, not a failure of the Work Item. Do NOT retry or escalate it: leave the pull request open and call this tool again on the next cycle, which re-reads a fresh snapshot and will merge it."
+        } : {}
+      };
     }
   )
 );

@@ -772,10 +772,73 @@ Four of the six are fail-*open* defects in a security control — the review pas
 wrong. That is the failure mode this component has to be judged against, and it is why the reasoning
 above deliberately keeps the deny-list narrow and mechanical rather than clever.
 
-**Still unverified.** The `POST /repos/{owner}/{repo}/actions/runs/{run_id}/approve` call itself has
-not been executed against a live held run — gate3 has none left, and creating a fresh one requires a
-new coding-agent pull request. Every read in the path is live-verified; the write is not. Confirm it
-on the first held run of the next rehearsal before trusting it.
+**The write was verified in Gate 4, and it does not work.** See §10.7 — the conclusion below stands
+for the *review*, but the approve call itself is impossible against the hold Factory actually meets.
+
+---
+
+### 10.7 Gate 4 result: the approve write cannot work, and one destructive bug it exposed
+
+Gate 4 (fixture `clockgrove/factory-gate3`, Objective #11) was built to execute the two paths no
+earlier gate had ever reached: §6's conflict/rebase, and the `POST .../approve` write left unverified
+above. It reached the second and was blocked before the first.
+
+**The finding: `approve_held_workflow_runs`' write half is not merely broken, it is impossible.**
+On the first held run, the blast-radius review worked exactly as designed — `safe: true`, no
+blockers, three accurate assurances, and it correctly located the held run. The approve POST then
+approved nothing, twice, byte-identically. GitHub's own reason, read off the audit comment:
+
+> This run is not from a fork pull request or queued by the Actions bot.
+
+`POST /repos/{owner}/{repo}/actions/runs/{run_id}/approve` is canonically *"Approve a workflow run
+for a **fork** pull request"*. A coding-agent pull request is a **same-repo branch**, and the hold on
+it comes from the repository's Copilot Actions workflow-approval policy — a different hold class with
+**no approval API at all**. It is only clearable by a human clicking "Approve and run workflows", or
+by turning that repository setting off before the run.
+
+The held run's shape is worth recording, because it is not what the name suggests:
+`status: "completed"`, `conclusion: "action_required"`, actor `Copilot`, event `pull_request`. The
+REST `status=action_required` *filter* still matches it, which is why the read half works.
+
+**This reverses §10.6's central claim.** "Factory makes the approval decision itself" is not
+available. §10.6 called turning the setting off "a fixture workaround… it trades a real security
+control for a green run" — that judgement was made believing an API alternative existed. It does not.
+The setting, or a human, is the *only* mechanism. So the honest design is:
+
+- The blast-radius review keeps its value, and arguably gains some: it is now **human-facing advice**
+  — the reasoning a maintainer needs to decide, computed and recorded on the Work Item, rather than a
+  decision Factory takes alone.
+- `approve_held_workflow_runs` still tries (the endpoint does work for genuine fork pull requests),
+  but a fork-only refusal now returns `action: "not_approvable"` with GitHub's message in
+  `failures[]` and escalates the Work Item to a human. It no longer reports a permanent, total
+  failure as a success-shaped `partially_approved` with an empty `approvedRunIds` — which was how
+  Gate 4 first met it, detectable only by diffing two arrays.
+- Repositories Factory runs against unattended should have the Copilot workflow-approval requirement
+  disabled *deliberately and with that tradeoff understood*, not silently as a fixture convenience.
+
+**And a destructive bug found on the way.** `evaluateMechanical` returned `checks_failed` for a run
+that never started, without consulting `checksNeverStarted` — which the reader had already been
+computing since §10.5. `integrate`'s `checks_failed` arm calls `retryOrEscalate`, which **closes the
+pull request**. So a semantically correct Work Item whose CI was never *allowed* to start would have
+had its work destroyed and been re-dispatched to produce a fresh pull request held in exactly the
+same way. Gate 3's flaw was merging past held CI; this is its mirror image, and worse. The Gate 3 fix
+had only reworded the escalation comment — telling the reader not to retry while the code retried
+anyway.
+
+Fixed with a distinct `checks_held` verdict, tested before `checks_failed` because both present as
+the same `FAILURE` rollup, routed straight to `#escalate` rather than `retryOrEscalate`. Not a retry,
+because a retry cannot succeed; not a wait, because nothing in the loop can change the outcome. A
+human is genuinely required, which is what `escalated` means.
+
+**Also observed.** No factory tool reads the target repository's file tree or file contents, so
+compilation grounds `scope` in the Objective body alone. Gate 4 guessed right; a wrong guess would
+surface several steps later as an untouched-scope failure. And `graph_apply` takes `workItemLabelId`
+as a GraphQL node ID with nothing on the surface to resolve a label name to one.
+
+**Not reached.** The conflict path is still unexercised — the fixture arms it correctly (three Work
+Items with no edges between them, all appending to one array literal in `src/index.ts`), but the
+foundation Work Item cannot merge while its CI is held. The graph is intact and the conflict remains
+armed for the next attempt.
 
 ---
 

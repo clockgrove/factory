@@ -44,10 +44,24 @@ import {
 
 /** Result of `Dispatcher.approveChecks`, reported verbatim to Director. */
 export interface ApprovalOutcome {
-  action: "approved" | "partially_approved" | "escalated" | "no_runs_held";
+  action:
+    | "approved"
+    | "partially_approved"
+    | "not_approvable"
+    | "escalated"
+    | "no_runs_held";
   approvedRunIds: number[];
   /** Present only when the review declined; the reasons it declined. */
   blockers?: string[];
+  /**
+   * Every run that was held and did not get approved, with GitHub's own reason.
+   *
+   * Reporting only `approvedRunIds` made a total failure look like a success:
+   * Gate 4 saw `{action: "partially_approved", approvedRunIds: []}` with one run
+   * held and no error anywhere, and could only detect the failure by comparing
+   * two arrays. GitHub's message is the diagnosis, so it has to reach the caller.
+   */
+  failures?: { runId: number; message: string }[];
 }
 import {
   CircuitBreaker,
@@ -93,6 +107,55 @@ export function attemptAction(wi: DerivedWorkItem): "retry" | "escalate" {
   return attemptCount(wi) >= 3 ? "escalate" : "retry";
 }
 
+/** The result of one `integrate` call, so a caller can tell a merge from a wait. */
+export interface IntegrateOutcome {
+  merged: boolean;
+  /** Set when a merge was attempted and GitHub declined for a transient reason. */
+  deferred?: string;
+}
+
+/**
+ * Merge refusals that mean "not right now" rather than "not ever".
+ *
+ * Matched on message text because GitHub returns these through GraphQL, where
+ * there is no distinguishing status code — a `GraphqlResponseError` carries no
+ * numeric `status`, so `classifyRefusal` correctly reports `not_refusal` and
+ * the error would otherwise propagate as a hard failure.
+ *
+ * Kept to an explicit list rather than a catch-all: a merge that fails because
+ * of branch protection, a missing permission, or a required review is a real
+ * problem a human must see, and swallowing it would make the loop retry
+ * silently forever.
+ */
+const MERGE_DEFERRALS: ReadonlyArray<readonly [needle: string, because: string]> = [
+  [
+    "base branch was modified",
+    "the base branch moved between GitHub computing mergeability and the merge itself, " +
+      "which happens when a sibling pull request merges in the same window",
+  ],
+  [
+    "head branch was modified",
+    "the agent pushed to the branch between the snapshot and the merge",
+  ],
+  [
+    "not mergeable",
+    "GitHub had not finished recomputing mergeability when the merge was attempted",
+  ],
+  [
+    "base branch modified",
+    "the base branch moved between GitHub computing mergeability and the merge itself",
+  ],
+];
+
+export function mergeDeferral(error: unknown): string | null {
+  const message = (error as { message?: string } | null)?.message?.toLowerCase() ?? "";
+  if (message === "") return null;
+  for (const [needle, because] of MERGE_DEFERRALS) {
+    if (message.includes(needle)) return because;
+  }
+  return null;
+}
+
 /**
  * The GraphQL mutations `Dispatcher` needs, each verified against the
  * current schema (docs.github.com/en/graphql/reference/input-objects,
@@ -128,9 +191,24 @@ mutation ClearActors($assignableId: ID!) {
   }
 }`;
 
-const ADD_HUMAN_ASSIGNEE_MUTATION = `
-mutation AddAssignee($assignableId: ID!, $userId: ID!) {
-  addAssigneesToAssignable(input: { assignableId: $assignableId, assigneeIds: [$userId] }) {
+/**
+ * Escalation (§7.2) must leave the human as the *only* assignee, in one write.
+ *
+ * `addAssigneesToAssignable` followed by `clearActors` looks equivalent and is
+ * not: "actors" and "assignees" are one list on GitHub, so `actorIds: []`
+ * removes the human that was just added along with Copilot. That left the Work
+ * Item with no assignees at all, which `deriveState` reads as `unstarted`
+ * (or `failed`, if the pull request is still open) rather than the terminal
+ * `escalated` — so the loop re-dispatched the item to Copilot on the very next
+ * cycle instead of stopping for a human. The safety valve inverted into an
+ * infinite retry.
+ *
+ * A single replace expresses the actual intent — "Copilot off, human on" — and
+ * has no intermediate state to be interrupted in.
+ */
+const ASSIGN_HUMAN_ONLY_MUTATION = `
+mutation AssignHumanOnly($assignableId: ID!, $userId: ID!) {
+  replaceActorsForAssignable(input: { assignableId: $assignableId, actorIds: [$userId] }) {
     clientMutationId
   }
 }`;
@@ -218,8 +296,15 @@ export interface GitHubWriter {
    * measured to trigger a fresh session (PRD F8).
    */
   clearActors(issueId: string): Promise<void>;
-  /** Add a human assignee via the standard, non-preview assignment mutation. */
-  addHumanAssignee(issueId: string, userId: string): Promise<void>;
+  /**
+   * Make the human the sole assignee, replacing Copilot in the same write.
+   *
+   * Deliberately not "add the human": actors and assignees are one list, so an
+   * add followed by a clear removes the human too (see
+   * `ASSIGN_HUMAN_ONLY_MUTATION`), and a bare add would leave Copilot assigned,
+   * which `deriveState` reads as `dispatched` rather than `escalated`.
+   */
+  assignHumanOnly(issueId: string, userId: string): Promise<void>;
   addComment(subjectId: string, body: string): Promise<void>;
   closePullRequest(pullRequestId: string): Promise<void>;
   /** §4: close the Objective issue itself once every Work Item is `done`. */
@@ -275,10 +360,11 @@ export class GithubOctokitWriter implements GitHubWriter {
     });
   }
 
-  async addHumanAssignee(issueId: string, userId: string): Promise<void> {
-    await this.#octokit.graphql(ADD_HUMAN_ASSIGNEE_MUTATION, {
+  async assignHumanOnly(issueId: string, userId: string): Promise<void> {
+    await this.#octokit.graphql(ASSIGN_HUMAN_ONLY_MUTATION, {
       assignableId: issueId,
       userId,
+      headers: COPILOT_ASSIGNMENT_HEADERS,
     });
   }
 
@@ -439,44 +525,58 @@ export class Dispatcher {
     wi: DerivedWorkItem,
     pr: LinkedPullRequest,
     verdict: MechanicalVerdict,
-  ): Promise<void> {
+  ): Promise<IntegrateOutcome> {
     switch (verdict.kind) {
       case "ready":
-        await this.#mergeReady(pr);
-        return;
+        return await this.#mergeReady(pr);
       case "conflict":
         await this.#resolveConflict(wi, pr);
-        return;
+        return { merged: false };
       case "untouched":
         await this.retryOrEscalate(
           wi,
           "the diff did not touch the Work Item's declared file scope",
         );
-        return;
+        return { merged: false };
       case "checks_failed":
-        await this.retryOrEscalate(
+        await this.retryOrEscalate(wi, "required checks failed");
+        return { merged: false };
+      case "checks_held":
+        // GitHub held this pull request's workflow runs awaiting a maintainer's
+        // "Approve and run workflows", and there is no API that clears this
+        // hold class: `POST /actions/runs/{id}/approve` is scoped to fork pull
+        // requests and refuses a coding-agent branch outright with "This run is
+        // not from a fork pull request or queued by the Actions bot" (observed
+        // live in Gate 4, §10.7). Only a human with write access can release it,
+        // or the repository's Copilot workflow-approval setting must be turned
+        // off up front.
+        //
+        // So this escalates rather than retrying or waiting. Retrying would
+        // close good work and produce an identically-held pull request; waiting
+        // would wait forever, because nothing in the loop can change the
+        // outcome. A human is genuinely required, which is what `escalated`
+        // means.
+        await this.#escalate(
           wi,
-          pr.checksNeverStarted
-            ? "CI concluded without running a single job. On a pull request authored by " +
-              "the coding agent this normally means workflow runs were held awaiting a " +
-              "maintainer's 'Approve and run workflows' click and were then cancelled, " +
-              "not that a test failed. Call `approve_held_workflow_runs` while the pull " +
-              "request is open rather than retrying — a retry produces a fresh pull " +
-              "request whose runs are held in exactly the same way"
-            : "required checks failed",
+          "CI never ran: GitHub is holding this pull request's workflow runs awaiting a " +
+            "maintainer's 'Approve and run workflows'. No API can release a coding-agent " +
+            "hold (the approve endpoint is fork-only), so Factory cannot clear it and " +
+            "must not merge without CI evidence. Either approve the runs on the pull " +
+            "request, or disable the repository's Copilot Actions workflow-approval " +
+            "requirement so future Work Items are not blocked the same way",
         );
-        return;
+        return { merged: false };
       case "declined":
         await this.retryOrEscalate(
           wi,
           "the agent declined the task as not actionable",
         );
-        return;
+        return { merged: false };
       case "no_op":
         await this.retryOrEscalate(wi);
-        return;
+        return { merged: false };
       case "checks_pending":
-        return; // wait for the next cycle; nothing to do yet
+        return { merged: false }; // wait for the next cycle; nothing to do yet
       case "checks_missing":
         // The repository runs CI on pull requests but this PR carries no checks
         // at all (§10.5, F1). Usually a timing race that resolves within a
@@ -486,16 +586,44 @@ export class Dispatcher {
         // will fix it. That is a human problem, not a Work Item problem, so it
         // is deliberately never auto-merged and never auto-retried; the Director
         // skill escalates it after it survives several cycles.
-        return;
+        return { merged: false };
     }
   }
 
-  /** §6: "mark ready → checks green → squash merge → issue auto-closes". */
-  async #mergeReady(pr: LinkedPullRequest): Promise<void> {
+  /**
+   * §6: "mark ready → checks green → squash merge → issue auto-closes".
+   *
+   * GitHub refuses a merge whose base moved between the mergeability
+   * computation and the merge itself, with "Base branch was modified. Review
+   * and try the merge again." Observed live in Gate 3 (§10.5) when a sibling
+   * pull request merged in the same window. That is a benign race, not a
+   * failure: nothing is wrong with this pull request, and the next cycle
+   * re-reads and merges it. Letting it escape as a thrown tool error invites
+   * the exact misreading it caused in Gate 3 — a Director that treats a throw
+   * from `dispatch_integrate` as the Work Item failing would close a perfectly
+   * good pull request and re-dispatch it.
+   *
+   * Deferring is safe for the whole family of "not right now" merge refusals,
+   * including a mergeability recompute still in flight, because deferring
+   * decides nothing: the next cycle re-derives state and re-evaluates from a
+   * fresh snapshot, so a race resolves into a merge and a genuine conflict
+   * resolves into `conflict` and the §6 rebase path. Anything not recognised
+   * here is still thrown, so a real permission or branch-protection failure
+   * surfaces instead of being retried silently forever.
+   */
+  async #mergeReady(pr: LinkedPullRequest): Promise<IntegrateOutcome> {
     if (pr.isDraft) {
       await this.#call(() => this.#writer.markPullRequestReady(pr.id));
     }
-    await this.#call(() => this.#writer.mergePullRequest(pr.id));
+    try {
+      await this.#call(() => this.#writer.mergePullRequest(pr.id));
+    } catch (error) {
+      if (error instanceof PlatformUnavailableError) throw error;
+      const deferral = mergeDeferral(error);
+      if (!deferral) throw error;
+      return { merged: false, deferred: deferral };
+    }
+    return { merged: true };
   }
 
   /**
@@ -644,6 +772,15 @@ export class Dispatcher {
       }
     }
 
+    const failureMessage =
+      failure instanceof Error ? failure.message : failure ? String(failure) : "";
+    // GitHub refuses this endpoint outright for a coding-agent branch: the
+    // approve API is scoped to fork pull requests, and a Copilot hold is a
+    // different mechanism with no API at all (Gate 4, §10.7). That is permanent,
+    // so it must not be reported as something a retry might fix.
+    const notApprovable =
+      /not from a fork pull request|queued by the Actions bot/i.test(failureMessage);
+
     const record = [
       approvedRunIds.length > 0
         ? `Approved ${approvedRunIds.length} held workflow run(s) so CI can execute (§10.6).`
@@ -654,25 +791,66 @@ export class Dispatcher {
       "",
       `Runs considered: ${runs.map((r) => `${r.name} (#${r.id})`).join(", ")}.`,
       approvedRunIds.length > 0 ? `Approved: ${approvedRunIds.join(", ")}.` : "",
-      failure
-        ? `Stopped early: ${failure instanceof Error ? failure.message : String(failure)}. Remaining runs are still held and will be retried next cycle.`
-        : "",
+      notApprovable
+        ? `GitHub refused: ${failureMessage} There is no API that releases this hold — the ` +
+          "approve endpoint only covers fork pull requests, and a coding-agent hold is a " +
+          "different mechanism. A human with write access must approve the runs on the pull " +
+          "request, or the repository's Copilot Actions workflow-approval requirement must be " +
+          "turned off. Retrying will not help. Escalating."
+        : failure
+          ? `Stopped early: ${failureMessage} Remaining runs are still held and will be retried next cycle.`
+          : "",
     ]
       .filter((line) => line !== "")
       .join("\n");
     await this.#call(() => this.#writer.addComment(wi.id, record));
 
+    if (notApprovable) {
+      // Permanent, not transient. Returning a success-shaped `partially_approved`
+      // here let Gate 4 read "1 held, 0 approved" as something a later cycle
+      // might fix, when in fact nothing in the loop can ever fix it.
+      await this.#escalate(
+        wi,
+        "workflow runs are held and Factory cannot release them: GitHub's approve endpoint " +
+          "covers only fork pull requests and refuses a coding-agent branch. A human must " +
+          "approve the runs, or the repository's Copilot Actions workflow-approval " +
+          "requirement must be disabled",
+      );
+      return {
+        action: "not_approvable",
+        approvedRunIds,
+        failures: runs
+          .filter((r) => !approvedRunIds.includes(r.id))
+          .map((r) => ({ runId: r.id, message: failureMessage })),
+      };
+    }
+
     return {
       action: failure ? "partially_approved" : "approved",
       approvedRunIds,
+      ...(failure
+        ? {
+            failures: runs
+              .filter((r) => !approvedRunIds.includes(r.id))
+              .map((r) => ({ runId: r.id, message: failureMessage })),
+          }
+        : {}),
     };
   }
 
+  /**
+   * §7.2. One assignment write, then the record.
+   *
+   * The assignment is what makes `escalated` terminal (`deriveState` reads
+   * "no Copilot, at least one human"), so it goes first: if the comment then
+   * fails, the Work Item is still correctly parked for a human and the loop
+   * has stopped touching it. The reverse order would leave a Work Item that
+   * announces an escalation it is not actually in, and keeps being retried.
+   */
   async #escalate(wi: DerivedWorkItem, reason: string): Promise<void> {
     await this.#call(() =>
-      this.#writer.addHumanAssignee(wi.id, this.#escalateToId),
+      this.#writer.assignHumanOnly(wi.id, this.#escalateToId),
     );
-    await this.#call(() => this.#writer.clearActors(wi.id));
     await this.#call(() =>
       this.#writer.addComment(wi.id, `Escalating to a human: ${reason} (§7.2).`),
     );

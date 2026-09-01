@@ -517,15 +517,22 @@ server.registerTool(
       "Resolve the deadlock where CI never runs because GitHub is holding it (§10.6). GitHub parks " +
       "workflow runs on coding-agent pull requests in `action_required` until a maintainer clicks " +
       "'Approve and run workflows'. Unattended, those runs never start, `evaluate_mechanical` " +
-      "correctly reports `checks_pending` forever, and the Work Item stalls — while merging anyway " +
-      "would bypass CI entirely. Call this whenever a verdict of `checks_pending` or `checks_missing` " +
+      "reports `checks_held`, and the Work Item stalls — while merging anyway would bypass CI " +
+      "entirely. Call this on a `checks_held` verdict, or when `checks_pending`/`checks_missing` " +
       "persists across cycles on a pull request whose checks have never started. It performs a " +
       "blast-radius review first and only approves if the change cannot escalate what CI is allowed " +
       "to do: the diff must leave workflow definitions, actions, dependency manifests, lockfiles and " +
       "registry config untouched, the repository's default workflow token must be read-only, and no " +
       "pull-request workflow may reference a secret. If any of that fails it escalates to a human " +
       "instead, with the specific reasons. Approving is a write; the decision and its reasoning are " +
-      "recorded as a comment on the Work Item.",
+      "recorded as a comment on the Work Item. " +
+      "IMPORTANT (Gate 4, §10.7): GitHub's approve endpoint covers only *fork* pull requests, and " +
+      "refuses a same-repo coding-agent branch outright — so on a hold created by the repository's " +
+      "Copilot Actions workflow-approval policy this tool CANNOT release the runs, and returns " +
+      "`action: 'not_approvable'` with GitHub's reason in `failures` after escalating to a human. " +
+      "That is permanent, not transient: do not retry it, and do not merge without CI. The only " +
+      "fixes are a human approving on the pull request, or disabling the repository's Copilot " +
+      "Actions workflow-approval requirement before the run.",
     inputSchema: {
       ...WorkItemLocatorShape,
       escalateTo: z
@@ -740,8 +747,22 @@ server.registerTool(
       }
       const verdict = evaluateMechanical(pr, expectedFiles, objective.ciExpectedOnPullRequests);
       const dispatcher = await dispatcherFor(owner, repo, objective, escalateTo, reader);
-      await dispatcher.integrate(item, pr, verdict);
-      return { verdict, workItem: workItemNumber, pullRequest: pr.number };
+      const outcome = await dispatcher.integrate(item, pr, verdict);
+      return {
+        verdict,
+        workItem: workItemNumber,
+        pullRequest: pr.number,
+        merged: outcome.merged,
+        ...(outcome.deferred
+          ? {
+              deferred: outcome.deferred,
+              guidance:
+                "This is a transient merge race, not a failure of the Work Item. Do NOT retry or " +
+                "escalate it: leave the pull request open and call this tool again on the next " +
+                "cycle, which re-reads a fresh snapshot and will merge it.",
+            }
+          : {}),
+      };
     },
   ),
 );

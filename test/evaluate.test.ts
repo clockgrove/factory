@@ -183,6 +183,30 @@ describe("evaluateMechanical", () => {
     expect(evaluateMechanical(pr())).toEqual({ kind: "ready" });
   });
 
+  // Gate 4 (§10.7, F3). A held run reports the same `FAILURE` rollup as a real
+  // test failure, and `checks_failed` sends the Work Item to `retryOrEscalate`,
+  // which closes the pull request. That destroys correct work for a suite that
+  // never ran, and the replacement pull request is held identically.
+  it("distinguishes held checks from failed checks", () => {
+    expect(
+      evaluateMechanical(pr({ checks: "FAILURE", checksNeverStarted: true })),
+    ).toEqual({ kind: "checks_held" });
+  });
+
+  it("still reports a genuine failure when checks did start", () => {
+    expect(
+      evaluateMechanical(pr({ checks: "FAILURE", checksNeverStarted: false })),
+    ).toEqual({ kind: "checks_failed" });
+  });
+
+  it("prefers a conflict over held checks", () => {
+    expect(
+      evaluateMechanical(
+        pr({ mergeable: "CONFLICTING", checks: "FAILURE", checksNeverStarted: true }),
+      ),
+    ).toEqual({ kind: "conflict" });
+  });
+
   // Gate 3 (§10.5, F1). All four PRs merged with a null rollup even though the
   // repository shipped a real workflow: the runs failed at startup, produced
   // zero jobs, and so attached zero checks to the head commit. Absent checks

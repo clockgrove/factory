@@ -94,10 +94,18 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
    `dispatch_integrate`, passing `expectedFiles` when the Work Item declared a `scope` (this is what
    lets `evaluate_mechanical`'s untouched-scope check run at all). Read the returned `verdict` kind:
 
-   - `ready` — merged. Nothing further to do for this item this cycle.
+   - `ready` — the pull request passed every mechanical check and a merge was attempted. Read
+     `merged` in the result to know whether it actually landed. If `merged` is `false` there will be
+     a `deferred` field explaining why: GitHub declined the merge for a transient reason, almost
+     always that the base branch moved because a sibling pull request merged in the same window.
+     **That is a race, not a failure.** Leave the pull request open, do not retry it, do not escalate
+     it, and simply call `dispatch_integrate` again next cycle — the fresh snapshot will merge it.
+     (Observed live in Gate 3, §10.5, where it surfaced as a thrown tool error; it no longer throws.)
    - `conflict` — the tool already attempted a rebase or closed-and-redispatched, per §6. If the same
      Work Item conflicts repeatedly, that is itself replanning evidence (step 7), not something to
-     keep retrying past.
+     keep retrying past. The tool now stops on its own once attempts are exhausted, escalating with
+     the *graph* diagnosis — a conflict a rebase cannot fix usually means two Work Items are editing
+     one file with no dependency edge between them, which only replanning fixes.
    - `checks_pending` — usually settles within a cycle, so leave it. But if it persists and the pull
      request's checks have *never* started, GitHub is probably holding the run awaiting approval:
      call `approve_held_workflow_runs` rather than waiting indefinitely (see "CI that GitHub is
@@ -107,6 +115,10 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
      Work Item reports `checks_missing` for several consecutive cycles, call
      `approve_held_workflow_runs`; only escalate if that reports nothing was held, which means the
      repository's CI is failing to attach checks and no retry can fix it.
+   - `checks_held` — the check suite concluded having run nothing, which means GitHub held the
+     workflow awaiting approval. Not a failure. `dispatch_integrate` escalates it to a human on
+     sight and never retries it; call `approve_held_workflow_runs` first (and read the
+     `not_approvable` warning below before deciding what to do with the answer).
    - `checks_failed` / `untouched` / `no_op` / `declined` — the tool already closed the unusable PR
      and queued a retry (which the *next* cycle's step 5 will pick up as `failed`, or step 3 will
      redispatch once unassigned) — you do not need to act on the verdict directly, only read it to
@@ -202,11 +214,31 @@ untouched, the repository's default workflow token must be read-only, and no pul
 may reference a secret. If any of those fail it escalates to a human with the specific reason
 instead. Either way you get a decision rather than a stall.
 
-Call it as soon as `checks_pending` or `checks_missing` persists past one cycle on a pull request
-whose checks have never started. It is safe to call speculatively: with nothing held it returns
-`no_runs_held` and writes nothing. If it returns `escalated`, do not try to route around it — the
-review found something that genuinely needs a human, and merging on `mergeable` alone would be the
-CI bypass this tool exists to close.
+Call it as soon as `checks_held`, `checks_pending` or `checks_missing` persists past one cycle on a
+pull request whose checks have never started. It is safe to call speculatively: with nothing held it
+returns `no_runs_held` and writes nothing. If it returns `escalated`, do not try to route around it —
+the review found something that genuinely needs a human, and merging on `mergeable` alone would be
+the CI bypass this tool exists to close.
+
+**But expect `not_approvable`, and know that it is final.** GitHub's approve endpoint covers only
+*fork* pull requests. A coding-agent pull request is a same-repo branch held by the repository's
+Copilot Actions workflow-approval policy, which has no approval API at all (Gate 4, §10.7 — GitHub's
+verbatim refusal: *"This run is not from a fork pull request or queued by the Actions bot"*). The
+tool detects that refusal, returns `action: "not_approvable"` with the reason in `failures[]`, and
+escalates the Work Item itself. When you see it:
+
+- **Do not retry it, ever.** It is permanent, not transient. A second call returns byte-identically.
+- **Do not merge without CI to get moving.** That is precisely Gate 3's flaw.
+- **Do not close and re-dispatch.** The replacement pull request will be held identically, and you
+  will have destroyed correct work for nothing.
+- Report to the operator that the only two fixes are a human clicking "Approve and run workflows" on
+  the pull request, or the repository disabling its Copilot Actions workflow-approval requirement.
+  Include the blast-radius review's assurances — the reasoning is exactly what the human needs to
+  decide, and computing it is now this tool's main value.
+
+A `checks_held` verdict says the same thing from the evaluator's side: the check suite concluded
+having emitted zero runs. It is *not* a test failure and must never be treated as one — `integrate`
+escalates it directly rather than retrying, for the reason above.
 
 Stop and ask a human (via `dispatch_retry_or_escalate` if the Work Item is `failed`, or by directly
 telling the operator otherwise — there is no tool for "escalate a `for_review` or `dispatched` item

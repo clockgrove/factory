@@ -35,7 +35,20 @@
 import { Octokit } from "@octokit/core";
 
 import type { MechanicalVerdict } from "./evaluate.js";
-import { createOctokit, type GitHubOptions } from "./github.js";
+import type { BlastRadiusVerdict } from "./approval.js";
+import {
+  createOctokit,
+  type GitHubOptions,
+  type PendingApprovalRun,
+} from "./github.js";
+
+/** Result of `Dispatcher.approveChecks`, reported verbatim to Director. */
+export interface ApprovalOutcome {
+  action: "approved" | "escalated" | "no_runs_held";
+  approvedRunIds: number[];
+  /** Present only when the review declined; the reasons it declined. */
+  blockers?: string[];
+}
 import {
   CircuitBreaker,
   ConcurrencyLimiter,
@@ -220,14 +233,24 @@ export interface GitHubWriter {
    * if GitHub cannot apply it — a real conflict, not merely being behind.
    */
   updatePullRequestBranch(pullRequestId: string): Promise<void>;
+  /**
+   * Approve a workflow run held in `action_required` (§10.6). The API
+   * equivalent of a maintainer clicking "Approve and run workflows"; valid only
+   * on a held run.
+   */
+  approveWorkflowRun(runId: number): Promise<void>;
 }
 
 /** `GitHubWriter` backed by a real Octokit GraphQL client. */
 export class GithubOctokitWriter implements GitHubWriter {
   readonly #octokit: Octokit;
+  readonly #owner: string;
+  readonly #repo: string;
 
   constructor(opts: GitHubOptions) {
     this.#octokit = createOctokit(opts);
+    this.#owner = opts.owner;
+    this.#repo = opts.repo;
   }
 
   async assignCopilot(args: {
@@ -289,6 +312,14 @@ export class GithubOctokitWriter implements GitHubWriter {
     await this.#octokit.graphql(UPDATE_PULL_REQUEST_BRANCH_MUTATION, {
       pullRequestId,
     });
+  }
+
+  async approveWorkflowRun(runId: number): Promise<void> {
+    // REST-only: there is no GraphQL mutation for run approval.
+    await this.#octokit.request(
+      "POST /repos/{owner}/{repo}/actions/runs/{run_id}/approve",
+      { owner: this.#owner, repo: this.#repo, run_id: runId },
+    );
   }
 }
 
@@ -427,9 +458,11 @@ export class Dispatcher {
           wi,
           pr.checksNeverStarted
             ? "CI concluded without running a single job. On a pull request authored by " +
-              "the coding agent this normally means workflow runs are awaiting a " +
-              "maintainer's 'Approve and run workflows' click, not that a test failed — " +
-              "see Settings → Copilot → Coding agent"
+              "the coding agent this normally means workflow runs were held awaiting a " +
+              "maintainer's 'Approve and run workflows' click and were then cancelled, " +
+              "not that a test failed. Call `approve_held_workflow_runs` while the pull " +
+              "request is open rather than retrying — a retry produces a fresh pull " +
+              "request whose runs are held in exactly the same way"
             : "required checks failed",
         );
         return;
@@ -532,6 +565,64 @@ export class Dispatcher {
    * Copilot-absent + human-present as `escalated`), which the loop stops
    * revisiting — an acceptable, visible degradation rather than a stuck loop.
    */
+  /**
+   * §10.6: decide whether to approve workflow runs that GitHub is holding, and
+   * act on that decision.
+   *
+   * GitHub parks runs on coding-agent pull requests in `action_required` until
+   * a maintainer clicks "Approve and run workflows". Left alone this deadlocks
+   * Factory: the evaluator correctly reports `checks_pending` forever, because
+   * the checks genuinely never arrive. Merging anyway is worse — it is the
+   * CI-bypass this whole area exists to prevent.
+   *
+   * So Factory makes the call itself, but only behind a blast-radius review
+   * (`assessBlastRadius`) proving that approving cannot escalate privilege
+   * beyond "run the tests". The verdict is computed by the caller and passed in
+   * whole, so this method is purely the act-and-record half.
+   *
+   * Both outcomes are written down on the Work Item. An approval is a decision
+   * a human would otherwise have made by hand, so the reasoning has to survive
+   * in the record rather than only in Director's context.
+   */
+  async approveChecks(
+    wi: DerivedWorkItem,
+    runs: PendingApprovalRun[],
+    verdict: BlastRadiusVerdict,
+  ): Promise<ApprovalOutcome> {
+    if (runs.length === 0) {
+      return { action: "no_runs_held", approvedRunIds: [] };
+    }
+
+    if (!verdict.safe) {
+      await this.#escalate(
+        wi,
+        `workflow runs are held awaiting approval, and the blast-radius review declined to approve them automatically: ${verdict.blockers.join("; ")}`,
+      );
+      return { action: "escalated", approvedRunIds: [], blockers: verdict.blockers };
+    }
+
+    const approvedRunIds: number[] = [];
+    for (const run of runs) {
+      // Approve one at a time through the guarded path. A failure here leaves
+      // the remaining runs held, which is simply the state we started in — the
+      // next cycle sees them still `action_required` and tries again.
+      await this.#call(() => this.#writer.approveWorkflowRun(run.id));
+      approvedRunIds.push(run.id);
+    }
+
+    const record = [
+      `Approved ${approvedRunIds.length} held workflow run(s) so CI can execute (§10.6).`,
+      "",
+      "GitHub holds workflow runs on coding-agent pull requests until a maintainer approves them. Blast-radius review passed before approving:",
+      ...verdict.assurances.map((a) => `- ${a}`),
+      "",
+      `Runs approved: ${runs.map((r) => `${r.name} (#${r.id})`).join(", ")}.`,
+    ].join("\n");
+    await this.#call(() => this.#writer.addComment(wi.id, record));
+
+    return { action: "approved", approvedRunIds };
+  }
+
   async #escalate(wi: DerivedWorkItem, reason: string): Promise<void> {
     await this.#call(() =>
       this.#writer.addHumanAssignee(wi.id, this.#escalateToId),

@@ -75,16 +75,26 @@ and replans — unattended.
 >
 > It also caught the most serious defect found so far. All four PRs merged with `checks: null` even
 > though the repo ships CI. GitHub requires a maintainer to click **"Approve and run workflows"** on a
-> coding-agent pull request, so every run was created, executed nothing, and concluded `failure` with
-> zero jobs — and because `statusCheckRollup` is computed from check *runs*, it stayed `null`, which
-> Factory read as "this repository has no CI" and merged straight through. GitHub said *CI failed*;
+> coding-agent pull request, so every run was created and then *waited*, executing nothing — and
+> because `statusCheckRollup` is computed from check *runs*, it stayed `null`, which Factory read as
+> "this repository has no CI" and merged straight through. GitHub said *CI is waiting on you*;
 > Factory heard *there is no CI*. Now fixed three ways: check **suites** are consulted when the rollup
 > is silent, a new `checks_missing` verdict covers a PR that has no checks in a repo known to run them,
 > and escalation names the approval setting instead of reporting a phantom test failure. Live-verified
 > against both rehearsal repos — gate3's four PRs now report `FAILURE`, gate2's ten (which genuinely
 > have no CI) still report `null`. Gate 3 also fixed a false `failed` verdict that fired while the
-> agent was still writing its PR. Details in [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md)
-> §10.5; see also [`docs/PRD.md`](docs/PRD.md).
+> agent was still writing its PR.
+>
+> Following that thread further showed the held runs never failed at all — they were **cancelled by
+> the merge**. Every run on a branch shares one `updated_at`, 1–2s after that branch's `merged_at`,
+> however many minutes apart they were created. So the honest verdict is `checks_pending`, forever,
+> and the checklist's old advice — turn the approval requirement off — was a fixture workaround
+> trading a real security control for a green run. Factory now makes the call itself:
+> **`approve_held_workflow_runs`** approves held runs only behind a blast-radius review proving the
+> diff cannot redefine what CI executes (workflows, actions, manifests, lockfiles, registry config)
+> and that the job has nothing worth stealing (read-only token, no secrets); otherwise it escalates
+> with reasons. Details in [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) §10.5–§10.6;
+> see also [`docs/PRD.md`](docs/PRD.md).
 
 ## Design in one picture
 

@@ -38,6 +38,7 @@ function pr(over: Partial<LinkedPullRequest> = {}): LinkedPullRequest {
     checks: "PENDING",
     mergeable: "UNKNOWN",
     createdAt: NOW,
+    headSha: "deadbeef",
     ...over,
   };
 }
@@ -87,6 +88,11 @@ class FakeWriter implements GitHubWriter {
   async clearActors(issueId: string): Promise<void> {
     this.calls.push(`clearActors:${issueId}`);
     if (this.failing.clearActors) throw this.failing.clearActors;
+  }
+
+  async approveWorkflowRun(runId: number): Promise<void> {
+    this.calls.push(`approveWorkflowRun:${runId}`);
+    if (this.failing.approveWorkflowRun) throw this.failing.approveWorkflowRun;
   }
 
   async addHumanAssignee(issueId: string, userId: string): Promise<void> {
@@ -211,6 +217,72 @@ describe("Dispatcher.closeObjective", () => {
     const d = makeDispatcher(writer);
     await d.closeObjective("OBJECTIVE_1");
     expect(writer.calls).toEqual(["closeIssue:OBJECTIVE_1"]);
+  });
+});
+
+describe("Dispatcher.approveChecks", () => {
+  const SAFE = { safe: true, blockers: [], assurances: ["read-only token"] };
+  const UNSAFE = {
+    safe: false,
+    blockers: ["the diff edits .github/workflows/ci.yml"],
+    assurances: [],
+  };
+  const RUNS = [
+    { id: 42, name: "CI", event: "pull_request" },
+    { id: 43, name: "Lint", event: "pull_request" },
+  ];
+
+  it("approves every held run when the review passes", async () => {
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    const item = derivedWi();
+    const outcome = await d.approveChecks(item, RUNS, SAFE);
+
+    expect(outcome.action).toBe("approved");
+    expect(outcome.approvedRunIds).toEqual([42, 43]);
+    expect(writer.calls).toContain("approveWorkflowRun:42");
+    expect(writer.calls).toContain("approveWorkflowRun:43");
+  });
+
+  it("records the reasoning on the Work Item, so the decision outlives the session", async () => {
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    await d.approveChecks(derivedWi(), RUNS, SAFE);
+
+    const comment = writer.comments.join("\n");
+    expect(comment).toContain("read-only token");
+    expect(comment).toContain("#42");
+  });
+
+  it("does not approve anything when the review declines", async () => {
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    const outcome = await d.approveChecks(derivedWi(), RUNS, UNSAFE);
+
+    expect(outcome.action).toBe("escalated");
+    expect(outcome.approvedRunIds).toEqual([]);
+    expect(writer.calls.some((c) => c.startsWith("approveWorkflowRun"))).toBe(false);
+  });
+
+  it("escalates to a human, naming the specific blocker", async () => {
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    const item = derivedWi();
+    await d.approveChecks(item, RUNS, UNSAFE);
+
+    expect(writer.calls).toContain(`addHumanAssignee:${item.id}:U_human`);
+    expect(writer.comments.join("\n")).toContain(".github/workflows/ci.yml");
+  });
+
+  it("is a no-op when nothing is held, rather than escalating", async () => {
+    // An unsafe verdict is irrelevant if GitHub is not waiting on us: there is
+    // no decision to make, so neither approving nor escalating is warranted.
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    const outcome = await d.approveChecks(derivedWi(), [], UNSAFE);
+
+    expect(outcome.action).toBe("no_runs_held");
+    expect(writer.calls).toEqual([]);
   });
 });
 

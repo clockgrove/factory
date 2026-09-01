@@ -98,11 +98,15 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
    - `conflict` — the tool already attempted a rebase or closed-and-redispatched, per §6. If the same
      Work Item conflicts repeatedly, that is itself replanning evidence (step 7), not something to
      keep retrying past.
-   - `checks_pending` — leave it; it will show up again next cycle once checks settle.
+   - `checks_pending` — usually settles within a cycle, so leave it. But if it persists and the pull
+     request's checks have *never* started, GitHub is probably holding the run awaiting approval:
+     call `approve_held_workflow_runs` rather than waiting indefinitely (see "CI that GitHub is
+     holding" below).
    - `checks_missing` — the repository is known to run CI on pull requests, but this PR carries no
      checks at all. Usually a timing race that clears within a cycle, so leave it. If the *same*
-     Work Item reports `checks_missing` for several consecutive cycles, stop waiting and escalate:
-     the repository's CI is failing to attach checks, which no retry can fix.
+     Work Item reports `checks_missing` for several consecutive cycles, call
+     `approve_held_workflow_runs`; only escalate if that reports nothing was held, which means the
+     repository's CI is failing to attach checks and no retry can fix it.
    - `checks_failed` / `untouched` / `no_op` / `declined` — the tool already closed the unusable PR
      and queued a retry (which the *next* cycle's step 5 will pick up as `failed`, or step 3 will
      redispatch once unassigned) — you do not need to act on the verdict directly, only read it to
@@ -182,14 +186,27 @@ Two honest limits on that read, so you don't over-trust it either:
   `ciExpectedOnPullRequests` on the Objective to know which world you are in, and say which one when
   you report on the merge.
 
-**A repository whose CI never runs on agent pull requests is a setup problem, not a Work Item
-problem.** GitHub requires a maintainer to click "Approve and run workflows" on a pull request
-authored by the coding agent, so by default the run is created, executes nothing, and concludes
-`failure` — Gate 3 hit exactly this on all four items (§10.5, F1). Factory reports it as
-`checks_failed` with an explanation naming the approval setting rather than a phantom test failure.
-If you see that reason on the *first* item of an Objective, do not burn three retries discovering it
-applies to every item: escalate immediately and tell the human to turn off "Require approval for
-workflow runs" under Settings → Copilot → Coding agent, or to approve the runs.
+**CI that GitHub is holding is Factory's problem to resolve, not a human's to babysit.** GitHub
+parks workflow runs on coding-agent pull requests in `action_required` until a maintainer clicks
+"Approve and run workflows". While the pull request is open those runs sit there executing nothing,
+so `evaluate_mechanical` honestly reports `checks_pending` — and it will report it forever, because
+the checks genuinely never arrive. Gate 3 hit exactly this on all four items and merged through it
+(§10.5, F1). Note the trap in the evidence: an unapproved run only flips to `failure` when the pull
+request is *closed or merged*, which cancels it, so a post-mortem shows "CI failed" for something
+that was never allowed to start.
+
+Do not wait it out, and do not merge past it. Call **`approve_held_workflow_runs`**. It performs a
+blast-radius review and only approves if approving cannot escalate what CI is permitted to do — the
+diff must leave workflow definitions, actions, dependency manifests, lockfiles and registry config
+untouched, the repository's default workflow token must be read-only, and no pull-request workflow
+may reference a secret. If any of those fail it escalates to a human with the specific reason
+instead. Either way you get a decision rather than a stall.
+
+Call it as soon as `checks_pending` or `checks_missing` persists past one cycle on a pull request
+whose checks have never started. It is safe to call speculatively: with nothing held it returns
+`no_runs_held` and writes nothing. If it returns `escalated`, do not try to route around it — the
+review found something that genuinely needs a human, and merging on `mergeable` alone would be the
+CI bypass this tool exists to close.
 
 Stop and ask a human (via `dispatch_retry_or_escalate` if the Work Item is `failed`, or by directly
 telling the operator otherwise — there is no tool for "escalate a `for_review` or `dispatched` item

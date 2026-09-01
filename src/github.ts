@@ -26,6 +26,15 @@ import type {
   WorkItemSnapshot,
 } from "./types.js";
 import { COPILOT_LOGIN } from "./types.js";
+import type { WorkflowSafetyProfile } from "./approval.js";
+import { referencedSecretNames, triggersOnPullRequest } from "./approval.js";
+
+/** A workflow run parked in `action_required`, awaiting a maintainer's approval. */
+export interface PendingApprovalRun {
+  id: number;
+  name: string;
+  event: string;
+}
 
 const FactoryOctokit = Octokit.plugin(retry, throttling);
 
@@ -91,6 +100,7 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
               statusCheckRollup: commits(last: 1) {
                 nodes {
                   commit {
+                    oid
                     statusCheckRollup { state }
                     checkSuites(first: 20) {
                       nodes {
@@ -142,6 +152,7 @@ interface GqlPr {
   statusCheckRollup: {
     nodes: {
       commit: {
+        oid: string;
         statusCheckRollup: { state: string } | null;
         checkSuites: {
           nodes: {
@@ -263,6 +274,7 @@ function toPullRequest(pr: GqlPr): LinkedPullRequest {
       checks === "FAILURE" && !commit?.statusCheckRollup?.state,
     mergeable: pr.mergeable,
     createdAt: new Date(pr.createdAt),
+    headSha: commit?.oid ?? "",
   };
 }
 
@@ -392,6 +404,8 @@ export class GitHubReader {
   readonly #repo: string;
   /** Latched once true by `#ciExpectedOnPullRequests`. */
   #ciExpected = false;
+  /** Cached for the process lifetime by `readWorkflowSafetyProfile`. */
+  #safetyProfile: WorkflowSafetyProfile | undefined;
 
   constructor(opts: GitHubOptions) {
     this.#owner = opts.owner;
@@ -513,6 +527,114 @@ export class GitHubReader {
       return false;
     }
     return this.#ciExpected;
+  }
+
+  /**
+   * Read the facts a blast-radius review needs about what an approved workflow
+   * run would be *allowed* to do (§10.6).
+   *
+   * Two questions, two sources: the repo's default token scope, and whether any
+   * pull-request workflow pulls in a real secret. Both are properties of the
+   * base branch, not of the pull request, which is the point — they describe the
+   * job the diff would be run *by*, and the review separately proves the diff
+   * cannot change that job.
+   *
+   * Cached for the process lifetime: these are settings, they do not move
+   * within a cycle, and re-reading them per Work Item would burn rate limit for
+   * no new information.
+   *
+   * Fails closed. Any error leaves `defaultWorkflowPermissions: "unknown"`,
+   * which `assessBlastRadius` treats as a blocker — a review that cannot see the
+   * token scope has not established anything.
+   */
+  async readWorkflowSafetyProfile(): Promise<WorkflowSafetyProfile> {
+    if (this.#safetyProfile) return this.#safetyProfile;
+
+    let defaultWorkflowPermissions: WorkflowSafetyProfile["defaultWorkflowPermissions"] =
+      "unknown";
+    try {
+      const perms = await this.#octokit.request(
+        "GET /repos/{owner}/{repo}/actions/permissions/workflow",
+        { owner: this.#owner, repo: this.#repo },
+      );
+      const value = perms.data.default_workflow_permissions;
+      if (value === "read" || value === "write") defaultWorkflowPermissions = value;
+    } catch {
+      // Leave it "unknown" so the assessor denies rather than assuming "read".
+    }
+
+    const referencedSecrets = new Set<string>();
+    try {
+      const workflows = await this.#octokit.request(
+        "GET /repos/{owner}/{repo}/actions/workflows",
+        { owner: this.#owner, repo: this.#repo, per_page: 100 },
+      );
+      for (const workflow of workflows.data.workflows) {
+        // A disabled workflow cannot be started by approving a run.
+        if (workflow.state !== "active") continue;
+        // Not every listed workflow is a file in the repository. GitHub reports
+        // its own managed workflows — the Copilot coding agent and the Copilot
+        // reviewer — with synthetic `dynamic/...` paths that 404 on the contents
+        // API (verified live against a Copilot-enabled repo). They are also not
+        // interesting: a pull request cannot edit them, and they are not what an
+        // approved `pull_request` run executes. Skipping them by path is what
+        // keeps this method from failing closed on every repo Factory works on.
+        if (!workflow.path.startsWith(".github/")) continue;
+        try {
+          const file = await this.#octokit.request(
+            "GET /repos/{owner}/{repo}/contents/{path}",
+            { owner: this.#owner, repo: this.#repo, path: workflow.path },
+          );
+          const data = file.data as { content?: string };
+          if (!data.content) continue;
+          const yaml = Buffer.from(data.content, "base64").toString("utf8");
+          if (!triggersOnPullRequest(yaml)) continue;
+          for (const name of referencedSecretNames(yaml)) referencedSecrets.add(name);
+        } catch {
+          // Scoped to this one workflow: a real repository workflow we cannot
+          // read is a genuine gap in the review, so it denies — but it must not
+          // be conflated with the managed-workflow case handled above.
+          referencedSecrets.add(`<unreadable: ${workflow.path}>`);
+        }
+      }
+    } catch {
+      // Cannot even list the workflows, so cannot claim they hold no secrets.
+      referencedSecrets.add("<unreadable: workflows could not be listed>");
+    }
+
+    this.#safetyProfile = {
+      defaultWorkflowPermissions,
+      referencedSecrets: [...referencedSecrets].sort(),
+    };
+    return this.#safetyProfile;
+  }
+
+  /**
+   * List workflow runs for a head commit that are parked awaiting approval.
+   *
+   * Filtered by `head_sha` because that is the only handle the REST API offers
+   * for "runs belonging to this pull request" — runs carry no PR number.
+   *
+   * The `action_required` status is the whole signal: it is what GitHub sets on
+   * a run it created but refuses to start until a maintainer approves it. A run
+   * in any other state needs nothing from us.
+   */
+  async listRunsAwaitingApproval(headSha: string): Promise<PendingApprovalRun[]> {
+    const runs = await this.#octokit.request(
+      "GET /repos/{owner}/{repo}/actions/runs",
+      {
+        owner: this.#owner,
+        repo: this.#repo,
+        head_sha: headSha,
+        status: "action_required",
+        per_page: 50,
+      },
+    );
+    return runs.data.workflow_runs.map((run) => ({
+      id: run.id,
+      name: run.name ?? String(run.id),
+      event: run.event,
+    }));
   }
 
   /**

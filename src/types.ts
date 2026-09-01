@@ -106,14 +106,27 @@ export interface LinkedPullRequest {
    * requires a maintainer to click "Approve and run workflows" on a pull
    * request authored by the coding agent before any workflow executes
    * (verified against docs.github.com, 2026-09-02; the setting lives under
-   * Settings → Copilot → Coding agent). Unapproved, the run is created,
-   * executes nothing, and concludes `failure`. Reporting that as "required
-   * checks failed" sends a human hunting for a broken test that does not
-   * exist, so escalation names the real cause instead (§10.5, F1).
+   * Settings → Copilot → Coding agent). Unapproved, the run is created and
+   * then *waits* in `action_required`, executing nothing. It only concludes
+   * `failure` when the pull request is closed or merged, which cancels it.
+   *
+   * That ordering is load-bearing and was verified live on the Gate 3 fixture:
+   * every run on a branch shares one `updated_at` 1–2s after that branch's
+   * `merged_at`, regardless of having been created minutes apart. So while the
+   * pull request is open the honest reading is "checks expected, awaiting
+   * approval" (`PENDING`) — `FAILURE` here is an artifact observable only after
+   * the fact. Reporting either as "required checks failed" sends a human
+   * hunting for a broken test that does not exist, so escalation names the real
+   * cause instead (§10.5, F1).
    */
   checksNeverStarted?: boolean;
   mergeable: MergeableState;
   createdAt: Date;
+  /**
+   * Head commit SHA. Needed to address the workflow runs belonging to this pull
+   * request, which the REST API filters by `head_sha` rather than by PR number.
+   */
+  headSha: string;
 }
 
 export interface IssueRef {

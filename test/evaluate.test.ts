@@ -25,6 +25,7 @@ function pr(over: Partial<LinkedPullRequest> = {}): LinkedPullRequest {
     checks: "SUCCESS",
     mergeable: "MERGEABLE",
     createdAt: NOW,
+    headSha: "deadbeef",
     ...over,
   };
 }

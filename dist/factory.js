@@ -2665,6 +2665,25 @@ var COPILOT_LOGIN = "copilot-swe-agent";
 var COPILOT_ASSIGNEE_LOGIN = "Copilot";
 var INITIAL_PLAN_COMMIT = "Initial plan";
 
+// src/approval.ts
+function referencedSecretNames(workflowYaml) {
+  const found = /* @__PURE__ */ new Set();
+  const patterns = [
+    /secrets\.([A-Za-z_][A-Za-z0-9_]*)/g,
+    /secrets\[\s*['"]([^'"]+)['"]\s*\]/g
+  ];
+  for (const pattern of patterns) {
+    for (const match of workflowYaml.matchAll(pattern)) {
+      const name = match[1];
+      if (name && name.toUpperCase() !== "GITHUB_TOKEN") found.add(name);
+    }
+  }
+  return [...found].sort();
+}
+function triggersOnPullRequest(workflowYaml) {
+  return /^\s*(pull_request|pull_request_target)\s*:/m.test(workflowYaml);
+}
+
 // src/github.ts
 var FactoryOctokit = Octokit.plugin(retry, throttling);
 var OBJECTIVE_QUERY = `
@@ -2714,6 +2733,7 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
               statusCheckRollup: commits(last: 1) {
                 nodes {
                   commit {
+                    oid
                     statusCheckRollup { state }
                     checkSuites(first: 20) {
                       nodes {
@@ -2783,7 +2803,8 @@ function toPullRequest(pr) {
     checks,
     checksNeverStarted: checks === "FAILURE" && !commit?.statusCheckRollup?.state,
     mergeable: pr.mergeable,
-    createdAt: new Date(pr.createdAt)
+    createdAt: new Date(pr.createdAt),
+    headSha: commit?.oid ?? ""
   };
 }
 function copilotAssignments(wi) {
@@ -2863,6 +2884,8 @@ var GitHubReader = class {
   #repo;
   /** Latched once true by `#ciExpectedOnPullRequests`. */
   #ciExpected = false;
+  /** Cached for the process lifetime by `readWorkflowSafetyProfile`. */
+  #safetyProfile;
   constructor(opts) {
     this.#owner = opts.owner;
     this.#repo = opts.repo;
@@ -2969,6 +2992,95 @@ var GitHubReader = class {
       return false;
     }
     return this.#ciExpected;
+  }
+  /**
+   * Read the facts a blast-radius review needs about what an approved workflow
+   * run would be *allowed* to do (§10.6).
+   *
+   * Two questions, two sources: the repo's default token scope, and whether any
+   * pull-request workflow pulls in a real secret. Both are properties of the
+   * base branch, not of the pull request, which is the point — they describe the
+   * job the diff would be run *by*, and the review separately proves the diff
+   * cannot change that job.
+   *
+   * Cached for the process lifetime: these are settings, they do not move
+   * within a cycle, and re-reading them per Work Item would burn rate limit for
+   * no new information.
+   *
+   * Fails closed. Any error leaves `defaultWorkflowPermissions: "unknown"`,
+   * which `assessBlastRadius` treats as a blocker — a review that cannot see the
+   * token scope has not established anything.
+   */
+  async readWorkflowSafetyProfile() {
+    if (this.#safetyProfile) return this.#safetyProfile;
+    let defaultWorkflowPermissions = "unknown";
+    try {
+      const perms = await this.#octokit.request(
+        "GET /repos/{owner}/{repo}/actions/permissions/workflow",
+        { owner: this.#owner, repo: this.#repo }
+      );
+      const value = perms.data.default_workflow_permissions;
+      if (value === "read" || value === "write") defaultWorkflowPermissions = value;
+    } catch {
+    }
+    const referencedSecrets = /* @__PURE__ */ new Set();
+    try {
+      const workflows = await this.#octokit.request(
+        "GET /repos/{owner}/{repo}/actions/workflows",
+        { owner: this.#owner, repo: this.#repo, per_page: 100 }
+      );
+      for (const workflow of workflows.data.workflows) {
+        if (workflow.state !== "active") continue;
+        if (!workflow.path.startsWith(".github/")) continue;
+        try {
+          const file = await this.#octokit.request(
+            "GET /repos/{owner}/{repo}/contents/{path}",
+            { owner: this.#owner, repo: this.#repo, path: workflow.path }
+          );
+          const data = file.data;
+          if (!data.content) continue;
+          const yaml = Buffer.from(data.content, "base64").toString("utf8");
+          if (!triggersOnPullRequest(yaml)) continue;
+          for (const name of referencedSecretNames(yaml)) referencedSecrets.add(name);
+        } catch {
+          referencedSecrets.add(`<unreadable: ${workflow.path}>`);
+        }
+      }
+    } catch {
+      referencedSecrets.add("<unreadable: workflows could not be listed>");
+    }
+    this.#safetyProfile = {
+      defaultWorkflowPermissions,
+      referencedSecrets: [...referencedSecrets].sort()
+    };
+    return this.#safetyProfile;
+  }
+  /**
+   * List workflow runs for a head commit that are parked awaiting approval.
+   *
+   * Filtered by `head_sha` because that is the only handle the REST API offers
+   * for "runs belonging to this pull request" — runs carry no PR number.
+   *
+   * The `action_required` status is the whole signal: it is what GitHub sets on
+   * a run it created but refuses to start until a maintainer approves it. A run
+   * in any other state needs nothing from us.
+   */
+  async listRunsAwaitingApproval(headSha) {
+    const runs = await this.#octokit.request(
+      "GET /repos/{owner}/{repo}/actions/runs",
+      {
+        owner: this.#owner,
+        repo: this.#repo,
+        head_sha: headSha,
+        status: "action_required",
+        per_page: 50
+      }
+    );
+    return runs.data.workflow_runs.map((run) => ({
+      id: run.id,
+      name: run.name ?? String(run.id),
+      event: run.event
+    }));
   }
   /**
    * Resolve a login to its GraphQL node ID, needed once at startup to

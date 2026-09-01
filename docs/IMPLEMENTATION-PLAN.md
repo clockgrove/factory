@@ -387,14 +387,17 @@ authoring any Objective against a freshly seeded rehearsal repo:
   mergeable" — nothing has actually executed the code. Gate 2 ran all 10 Work Items this way (see
   §10.3, F2). A rehearsal without CI leaves a whole branch of the evaluate layer untested, and
   makes the mechanical verdict weaker than it reads.
-- **Turn off "Require approval for workflow runs" (Settings → Copilot → Coding agent), or plan to
-  approve every run by hand.** Shipping the workflow is not sufficient. GitHub requires a maintainer
-  to click "Approve and run workflows" on a pull request authored by the coding agent, so by default
-  every `pull_request` run is created, executes nothing, and concludes `failure` — while the
-  identical workflow succeeds on `push` to `main`, which makes the problem look repo-specific rather
-  than structural. Gate 3 shipped CI, satisfied the bullet above, and still never ran a single job
-  (§10.5, F1). Verify by opening the first PR of a rehearsal and confirming its checks actually
-  execute, before compiling the rest of the graph.
+- **Leave "Require approval for workflow runs" alone — Factory now handles it (§10.6).** Shipping
+  the workflow is not sufficient on its own: GitHub requires a maintainer to click "Approve and run
+  workflows" on a pull request authored by the coding agent, so by default every `pull_request` run
+  is created and then *waits*, executing nothing, while the identical workflow succeeds on `push` to
+  `main` — which makes the problem look repo-specific rather than structural. Gate 3 shipped CI,
+  satisfied the bullet above, and still never ran a single job (§10.5, F1). The earlier version of
+  this bullet told operators to disable the setting; that was a fixture workaround for a Factory bug,
+  and it traded a real security control for a green rehearsal. `approve_held_workflow_runs` now makes
+  the approval decision behind a blast-radius review, so the setting can stay on. Still verify by
+  opening the first PR of a rehearsal and confirming its checks actually execute before compiling the
+  rest of the graph.
 
 **A Director session must keep its automation interval short enough that its own message queue
 never meaningfully backs up**, and must not proactively report on every healthy cycle — both fixed
@@ -677,6 +680,77 @@ repository's file tree, so `objective-compilation` derived `src/parse.ts` / `tes
 conventional layout alone. It was right here, but a wrong guess surfaces several steps later as an
 untouched-scope failure, which is an expensive way to learn a path is wrong. Not fixed; a read-only
 repo-tree/file-contents tool is the obvious answer and is deferred rather than dismissed.
+
+### 10.6 Self-approving held workflow runs
+
+Gate 3's F1 was reported as "the PRs were draft when I integrated, so no check had attached yet".
+That diagnosis was wrong twice over, and the corrections matter more than the original finding.
+
+**The PRs were not draft.** All four merged with `isDraft: false`. The real mechanism was that
+`statusCheckRollup` is computed from check *runs*, and a check *suite* that concludes without ever
+emitting a run contributes nothing — leaving the rollup `null`, byte-identical to a repository with
+no CI at all. That is the bug fixed in §10.5.
+
+**And the runs did not fail — they were held, then killed.** The check suites read
+`conclusion: failure`, which invites the reading that CI ran and failed. It did not. GitHub parks
+workflow runs on coding-agent pull requests in `action_required` until a maintainer clicks "Approve
+and run workflows"; unapproved, a run simply waits. It only flips to `failure` when the pull request
+is closed or merged, which cancels it.
+
+The evidence is unambiguous and came from the fixture's own history: every run on a branch shares a
+single `updated_at`, 1–2 seconds after that branch's `merged_at`, regardless of having been created
+minutes apart.
+
+| Branch | `merged_at` | runs' shared `updated_at` |
+|---|---|---|
+| `copilot/load-config-entry-point` | 06:33:22 | 06:33:23 |
+| `copilot/update-validate-reporting-behavior` | 06:26:18 | 06:26:19 |
+| `copilot/parse-collect-every-malformed-line` | 06:26:39 | 06:26:41 |
+
+Four runs on `parse-collect...`, created between 06:23:41 and 06:26:40, all concluded at 06:26:41.
+Runs do not fail in unison on a schedule set by an unrelated merge; they were cancelled by it.
+
+**Why this needed a fix rather than a setting.** With §10.5 in place the honest verdict while the PR
+is open is `checks_pending` — and it stays pending forever, because the checks genuinely never
+arrive. The rehearsal checklist's original answer was to turn the approval requirement off. That is
+a fixture workaround: it trades a real security control for a green run, and it does nothing for any
+repository Factory is pointed at in anger.
+
+So Factory makes the approval decision itself, behind a **blast-radius review** (`src/approval.ts`,
+exposed as `approve_held_workflow_runs`). The review is deliberately not "is this a good change" —
+running the agent's code is the entire point of CI, and a test file can `fetch()` as easily as any
+other file. It asks the narrower question the maintainer's click actually asks: *does approving
+escalate privilege beyond "run the tests in a sandbox holding nothing worth stealing"?* Two halves:
+
+- **What the run would execute.** Deny if the diff touches workflow definitions, composite actions,
+  any `action.yml`, anything under `.github/`, dependency manifests, lockfiles, or registry config.
+  A lockfile edit is not configuration — `npm ci` executes the dependency tree's lifecycle scripts,
+  with the job's full permissions, before a single test runs.
+- **What the run could reach.** Require the repository's `default_workflow_permissions` to be `read`,
+  and require that no `pull_request`-triggered workflow references any secret beyond the automatic
+  `GITHUB_TOKEN`. A read-only, secretless job's worst case is a wasted runner minute.
+
+Deny-by-default throughout: a truncated file list, an empty diff, or an unreadable permissions
+setting all block, because none of them are evidence of safety. The review reads real patch text via
+`read_pull_request_diff` rather than `changedFilePaths`, which is a first page and could silently
+omit the one workflow file that matters. Approvals are written to the Work Item with their reasoning,
+since this is a decision a human would otherwise have made by hand.
+
+**A live-verification catch worth recording.** `GET /actions/workflows` does not return only files.
+On any Copilot-enabled repository it also lists GitHub's own managed workflows under synthetic
+`dynamic/...` paths (`dynamic/copilot-swe-agent/copilot`,
+`dynamic/agents/copilot-pull-request-reviewer`) which 404 on the contents API. The first
+implementation caught that failure at the loop level and poisoned the whole profile — meaning
+self-approval would have refused on *every repository Factory is designed to work on*, and the unit
+tests, which never saw a `dynamic/` path, all passed. Paths outside `.github/` are now skipped as
+GitHub-managed (a pull request cannot edit them anyway) and per-workflow read failures are scoped to
+that workflow. This is the second time in this area that a plausible, tested implementation was wrong
+in a way only a live call could show.
+
+**Still unverified.** The `POST /repos/{owner}/{repo}/actions/runs/{run_id}/approve` call itself has
+not been executed against a live held run — gate3 has none left, and creating a fresh one requires a
+new coding-agent pull request. Every read in the path is live-verified; the write is not. Confirm it
+on the first held run of the next rehearsal before trusting it.
 
 ---
 

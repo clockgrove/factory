@@ -79,6 +79,7 @@ import {
   confirmAction,
 } from "./dispatch.js";
 import { evaluateMechanical } from "./evaluate.js";
+import { assessBlastRadius } from "./approval.js";
 import { GithubOctokitGraphWriter, GraphApplier } from "./graph.js";
 import type { GitHubOptions } from "./github.js";
 import { GitHubReader } from "./github.js";
@@ -504,6 +505,84 @@ server.registerTool(
       const dispatcher = await dispatcherFor(owner, repo, objective, escalateTo, reader);
       await dispatcher.start(item);
       return { action: "started", workItem: workItemNumber };
+    },
+  ),
+);
+
+server.registerTool(
+  "approve_held_workflow_runs",
+  {
+    title: "Approve held workflow runs",
+    description:
+      "Resolve the deadlock where CI never runs because GitHub is holding it (§10.6). GitHub parks " +
+      "workflow runs on coding-agent pull requests in `action_required` until a maintainer clicks " +
+      "'Approve and run workflows'. Unattended, those runs never start, `evaluate_mechanical` " +
+      "correctly reports `checks_pending` forever, and the Work Item stalls — while merging anyway " +
+      "would bypass CI entirely. Call this whenever a verdict of `checks_pending` or `checks_missing` " +
+      "persists across cycles on a pull request whose checks have never started. It performs a " +
+      "blast-radius review first and only approves if the change cannot escalate what CI is allowed " +
+      "to do: the diff must leave workflow definitions, actions, dependency manifests, lockfiles and " +
+      "registry config untouched, the repository's default workflow token must be read-only, and no " +
+      "pull-request workflow may reference a secret. If any of that fails it escalates to a human " +
+      "instead, with the specific reasons. Approving is a write; the decision and its reasoning are " +
+      "recorded as a comment on the Work Item.",
+    inputSchema: {
+      ...WorkItemLocatorShape,
+      escalateTo: z
+        .string()
+        .describe("Login of the human to assign if the review declines to approve"),
+    },
+  },
+  tool(
+    async ({
+      owner,
+      repo,
+      objectiveNumber,
+      workItemNumber,
+      escalateTo,
+    }: {
+      owner: string;
+      repo: string;
+      objectiveNumber: number;
+      workItemNumber: number;
+      escalateTo: string;
+    }) => {
+      const reader = readerFor(owner, repo);
+      const objective = derive(await reader.readObjective(objectiveNumber));
+      const item = findWorkItem(objective, workItemNumber);
+      const pr = currentOpenPullRequest(item);
+      if (!pr) {
+        throw new Error(`Work Item #${workItemNumber} has no open pull request`);
+      }
+
+      const runs = await reader.listRunsAwaitingApproval(pr.headSha);
+      if (runs.length === 0) {
+        return {
+          action: "no_runs_held",
+          reason:
+            "no workflow run for this pull request's head commit is awaiting approval, so there is nothing to approve",
+          pullRequest: { number: pr.number, headSha: pr.headSha },
+        };
+      }
+
+      // Review the real patch, not the path list: `changedFilePaths` is a first
+      // page and can silently omit exactly the workflow file that matters.
+      const diff = await reader.readPullRequestDiff(pr.number);
+      const profile = await reader.readWorkflowSafetyProfile();
+      const verdict = assessBlastRadius({
+        changedFilePaths: diff.files.map((f) => f.path),
+        truncated: diff.truncated,
+        profile,
+      });
+
+      const dispatcher = await dispatcherFor(owner, repo, objective, escalateTo, reader);
+      const outcome = await dispatcher.approveChecks(item, runs, verdict);
+      return {
+        ...outcome,
+        pullRequest: { number: pr.number, headSha: pr.headSha },
+        runsHeld: runs,
+        review: verdict,
+      };
     },
   ),
 );

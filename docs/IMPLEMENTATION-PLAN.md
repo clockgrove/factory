@@ -905,6 +905,33 @@ rather than "fixed".
 
 ---
 
+## 10.10 The plugin-install path, and why nothing had tested it
+
+Every test in this repository exercises `src/`. Nothing exercised the artifact a plugin client
+actually installs, which meant §15's whole portability argument rested on properties no unit test can
+observe: that `plugin.json`/`mcp.json` match the Agent Plugins 1.0 spec, that `${PLUGIN_ROOT}`
+resolves to a bundle that exists, and that the bundle starts and serves its tools standalone with no
+install step and no token.
+
+The gap was operational, not theoretical. Throughout Gates 0–6 the skills were hand-copied into
+`~/.copilot/skills/` and the MCP server was launched from a hard-coded absolute path in a local
+config file. `~/.copilot/installed-plugins/` was empty the entire time. So the manifests were never
+read by anything, and a broken one would have gone unnoticed indefinitely.
+
+`npm run verify:package` (`scripts/verify-package.mjs`) closes it: build, then check both manifest
+pairs — Agent Plugins *and* Claude Code, including that the two have not drifted apart — then the
+skill frontmatter each client routes on, then speak MCP over stdio to the built server and assert the
+tool surface. Deliberately dependency-free so it runs from a fresh clone.
+
+Verified passing (23 checks) *and* verified failing: removing `dist/mcp-server.js` turns two checks
+red and exits non-zero. A check nobody has ever seen fail is not evidence of anything.
+
+Confirmed live against the specification rather than from memory (2026-09-02): `plugin.json` and
+`mcp.json` validate against the published 1.0.0 JSON schemas; `skills/` is auto-discovered from a
+fixed location, so there is no manifest field to declare skills in (`additionalProperties: false`
+would reject one); and `${PLUGIN_ROOT}` is the spec's own variable, appearing in the schema's `cwd`
+pattern and reserved against use as an env key.
+
 ## 11. Risks
 
 | Risk | Mitigation |

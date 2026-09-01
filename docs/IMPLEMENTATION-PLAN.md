@@ -416,6 +416,42 @@ would get. Gate 3 (or shipping) needs the install path itself exercised end-to-e
 an exact Git ref and confirming Director loads *those* skills — otherwise "installable from an exact
 Git ref by an unrelated adopter" is untested.
 
+### 10.2 Gate 2 result (scale, capacity, contention)
+
+Ran against `clockgrove/factory-gate2`, Objective #1, compiled to a deliberate diamond: six
+independent Layer 1 primitives → three Layer 2 combinators (each depending on exactly two Layer 1
+items) → one Layer 3 assembly depending on all three Layer 2 items. Ten Work Items, ten merged PRs,
+Objective closed `COMPLETED` in ~22 minutes, unattended.
+
+What the gate actually established, beyond "it closed":
+
+- **Capacity held at a six-wide burst.** Six Work Items dispatched concurrently, six PRs open at
+  once, no `platformExhausted` and no secondary rate limit. The `ContentCreationPacer` /
+  `CircuitBreaker` path in `platform.ts` was exercised at real burst width for the first time.
+- **Contention never materialised — by construction, not by recovery.** Six PRs branched from the
+  same base and all merged without a conflict, because the compiler's non-overlapping-`scope`
+  invariant (objective-compilation §5 self-check) meant no two items could touch the same file. This
+  is the intended mitigation for PROBE-001 finding 3, and it is worth being explicit that the gate
+  therefore did **not** exercise the conflict/rebase path. Deliberately inducing a conflict remains
+  untested and should be covered before relying on it in anger.
+- **Two-hop fan-in sequenced correctly.** Each Layer 2 item stayed `blocked` until *both* upstreams
+  closed; Layer 3 until all three did. No premature dispatch at either hop.
+- **`dependsOn` produced composable work, not just ordered work.** Verified by reading the merged
+  source directly: every combinator imports its declared upstreams rather than reimplementing them.
+  This is the property that actually distinguishes a dependency graph from a schedule, and it had not
+  been checked at Gate 1.
+- **Verified independently of Director's own reporting.** The merged result was cloned and run:
+  41 tests across 10 files pass, `tsc --noEmit` clean, and all 10 test files are *discovered* by
+  vitest — i.e. the path constraint was satisfied functionally, not merely string-matched.
+
+**The acceptance-phrasing fix is now measured.** Gate 2's repo deliberately made the test path
+load-bearing (`vitest.config.ts` includes only `test/**`, so a colocated test silently never runs).
+Gate 1's descriptive phrasing produced 0/3 correct placements; Gate 2's hard `REQUIRED:` phrasing plus
+an `outOfScope` restatement carrying the *reason* produced 10/10. Captured in
+`skills/objective-compilation/SKILL.md`. The general lesson — state the constraint, its exact expected
+value, and why it matters, rather than describing the desired end state — is the compiler's job, not
+something Director's judgment layer should have to absorb per-cycle.
+
 ---
 
 ## 11. Risks

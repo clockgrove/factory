@@ -4,7 +4,7 @@ A GitHub-native engineering-management plugin. You author an **Objective**; Fact
 **Work Items**, dispatches them to parallel GitHub Copilot agent sessions, supervises the results,
 and replans — unattended.
 
-> **Status: build order (§9) complete; Gate 0 (§10) and Gate 1 (PRD §8) both passed; Gate 2 in flight.** All seven build-order steps are done —
+> **Status: build order (§9) complete; Gates 0, 1 and 2 (PRD §8) all passed.** All seven build-order steps are done —
 > Factory can derive the full state of an Objective from GitHub alone, dispatch/confirm/retry/escalate
 > Work Items against a real repo, mechanically classify a PR's outcome (no-op, declined, untouched,
 > conflict, checks), integrate a mechanically-ready PR (mark ready, merge, resolve or reject a
@@ -36,16 +36,29 @@ and replans — unattended.
 > Objective closed, no escalations, one continuous run. See [`docs/PRD.md`](docs/PRD.md) and
 > [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md).
 >
-> **Gate 2 (8–10 mixed parallel + dependent Work Items — scale, capacity, contention) is in flight**
-> against `clockgrove/factory-gate2`: Objective #1 is a text-processing toolkit shaped as a deliberate
-> diamond — six fully independent Layer 1 primitives, three Layer 2 combinators each depending on two
-> of them, one Layer 3 assembly depending on all three. That gives a six-wide parallel dispatch burst
-> (secondary-rate-limit pressure, six PRs branching from one base = real merge contention) plus
-> two-hop fan-in. Per PRD §8, Clockgrove work does not resume before this gate is green. The repo's
-> `vitest.config.ts` deliberately discovers tests **only** under `test/`, making the declared test
-> path load-bearing rather than cosmetic — a direct empirical test of the acceptance-criteria phrasing
-> fix in `skills/objective-compilation/SKILL.md` (Gate 1 saw the coding agent colocate tests under
-> `src/` in 3 of 3 Work Items when the path was stated only descriptively).
+> **Gate 2 (8–10 mixed parallel + dependent Work Items — scale, capacity, contention) passed**
+> against `clockgrove/factory-gate2`. Objective #1, a text-processing toolkit, compiled to a
+> deliberate diamond: six fully independent Layer 1 primitives, three Layer 2 combinators each
+> depending on two of them, one Layer 3 assembly depending on all three. Ten Work Items, ten merged
+> PRs, Objective closed `COMPLETED` in roughly 22 minutes, unattended — no escalations, no
+> `platformExhausted`, and no merge conflicts despite a six-wide parallel dispatch burst branching
+> from one base (the compiler's non-overlapping-`scope` invariant, §5 of the compilation skill,
+> prevented the contention rather than the loop having to recover from it). Verified independently of
+> Director's own reporting by cloning the merged result: **41 tests across 10 files pass and
+> `tsc --noEmit` is clean**, and each combinator genuinely *imports* its declared upstreams
+> (`summarize` ← `truncate`+`wordCount`, `formatHeading` ← `slugify`+`titleCase`, `sanitize` ←
+> `stripHtml`+`escapeRegex`, `buildArticleMeta` ← all three Layer 2) rather than reimplementing them
+> — so `dependsOn` produced composable work, not merely correctly-ordered independent work.
+>
+> Gate 2 also served as a controlled test of an acceptance-criteria phrasing fix. The repo's
+> `vitest.config.ts` discovers tests **only** under `test/`, making the declared path load-bearing: a
+> colocated test silently never runs. Gate 1 had stated that path descriptively and the coding agent
+> colocated the test under `src/` in **3 of 3** Work Items; Gate 2 restated it as a hard `REQUIRED:`
+> constraint naming the exact path plus an `outOfScope` restatement giving the reason, and got
+> **10 of 10** correct. Recorded in `skills/objective-compilation/SKILL.md`.
+>
+> Per PRD §8, Gate 3 is one real Clockgrove Objective. See [`docs/PRD.md`](docs/PRD.md) and
+> [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md).
 
 ## Design in one picture
 

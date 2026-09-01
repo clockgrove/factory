@@ -41,6 +41,4 @@ against a real repository.
 Explain the user-visible behavior, the evidence supporting any GitHub API assumptions, and the
 validation performed. Never include credentials, repository secrets, or private test data.
 
-By contributing, you agree that your contribution will be licensed under the repository's selected
-license once that license is added. Do not submit contributions until that license is published if
-those terms are unacceptable.
+The repository must publish its license before accepting outside contributions.

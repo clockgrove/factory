@@ -235,17 +235,15 @@ separate v0.2 gate, not a prerequisite for using v0.1.
 Install an exact reviewed commit rather than a moving branch:
 
 ```bash
-git clone https://github.com/clockgrove/factory.git
-git -C factory checkout --detach FACTORY_COMMIT_SHA
-test "$(git -C factory rev-parse HEAD)" = "FACTORY_COMMIT_SHA"
-copilot plugin install "$(pwd)/factory"
+FACTORY_COMMIT_SHA=0123456789abcdef0123456789abcdef01234567 # replace with the reviewed SHA
+copilot plugin marketplace add "clockgrove/factory#$FACTORY_COMMIT_SHA"
+copilot plugin install factory@clockgrove
 copilot plugin list
 ```
 
-The repository must be public, or the adopter must independently have read access. The local-path
-install is a documented Copilot CLI source and keeps the checked-out SHA explicit and inspectable.
-Factory does not run an install script and does not need `node_modules`; the committed bundle is the
-artifact the plugin launches.
+The repository must be public, or the adopter must independently have read access. The marketplace's
+Git source is pinned to the reviewed SHA. Factory does not run an install script and does not need
+`node_modules`; the committed bundle is the artifact the plugin launches.
 
 Start a new Copilot CLI session, invoke the `director` skill, and provide an Objective repository,
 issue number, and escalation login. The MCP server reads `GITHUB_TOKEN` or `GH_TOKEN` from the
@@ -253,13 +251,14 @@ harness environment when its first tool is called.
 
 ### Upgrade
 
-Review and check out the new exact SHA, then reinstall to refresh Copilot CLI's cached copy:
+Review the new exact SHA, then replace the pinned marketplace and reinstall:
 
 ```bash
-git -C factory fetch origin
-git -C factory checkout --detach NEW_FACTORY_COMMIT_SHA
-test "$(git -C factory rev-parse HEAD)" = "NEW_FACTORY_COMMIT_SHA"
-copilot plugin install "$(pwd)/factory"
+copilot plugin uninstall factory
+copilot plugin marketplace remove clockgrove
+NEW_FACTORY_COMMIT_SHA=0123456789abcdef0123456789abcdef01234567 # replace with the reviewed SHA
+copilot plugin marketplace add "clockgrove/factory#$NEW_FACTORY_COMMIT_SHA"
+copilot plugin install factory@clockgrove
 ```
 
 Restart the Copilot CLI session after upgrading. Objective state lives in GitHub, so upgrading or
@@ -269,7 +268,7 @@ restarting Factory does not require a migration.
 
 ```bash
 copilot plugin uninstall factory
-rm -rf factory
+copilot plugin marketplace remove clockgrove
 ```
 
 Uninstalling removes the local plugin only. It does not delete or mutate Objectives, Work Items, pull

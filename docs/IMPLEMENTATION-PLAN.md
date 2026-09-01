@@ -1055,6 +1055,38 @@ pagination worry (`closedByPullRequestsReferences(first: 20)`) needs a Work Item
 linked pull requests, against a three-attempt cap plus a few conflict re-dispatches. Declined on both
 counts; recorded here so it is not relitigated.
 
+## 10.12 v0.1 release readiness and the formal Gate 3
+
+Gates 4–6 close the synthetic rehearsal backlog, but they do not replace PRD §8's Gate 3: one real
+Clockgrove Objective. Factory is deliberately not declared complete before that work starts. The
+first genuine Clockgrove Objective is both the start of product work and the final v0.1 gate.
+
+Before that run, the release-readiness pass must establish:
+
+- the committed bundle starts from the shipped manifests in a clean directory with no `node_modules`;
+- an adopter can check out and verify an exact commit SHA, install that local checkout with Copilot
+  CLI, see both skills and the MCP server, and uninstall it cleanly;
+- install, upgrade and uninstall instructions are public;
+- tests, typecheck, build, package verification and dependency audit are green;
+- a project license and contribution terms are published; and
+- the repository is public and contains no private dependency or Clockgrove-specific runtime
+  behavior.
+
+The package-level half is automated by `npm run verify:package` and has also passed from a fresh
+`git archive` extraction with no dependency installation. That does **not** count as the unrelated
+adopter test: a real Copilot CLI must consume the checkout through its supported local-path install
+flow. Do not collapse those two claims.
+
+The remaining external prerequisites are intentionally visible rather than routed around. A license
+must be selected by the project owner; choosing legal terms is not an implementation detail. A real
+Clockgrove repository and Objective must exist before Gate 3 can start. When both are available,
+install the reviewed Factory SHA through the documented flow, run Director on a small genuine
+Objective, and declare v0.1 ready only if it closes correctly or makes a well-founded escalation
+under PRD §7.3.
+
+Running the identical Objective on Copilot CLI, Codex and Claude Code remains the v0.2 portability
+gate (§15.6). It does not delay the first Clockgrove Objective or v0.1.
+
 ## 11. Risks
 
 | Risk | Mitigation |

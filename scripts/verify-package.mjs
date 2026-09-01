@@ -100,6 +100,16 @@ check(
   "both manifests point at the same bundle path",
 );
 
+const marketplace = readJson(".github/plugin/marketplace.json");
+const marketplacePlugin = marketplace.plugins?.find((entry) => entry.name === plugin.name);
+check(marketplace.name === "clockgrove", "the Copilot marketplace has a stable name");
+check(Boolean(marketplacePlugin), "the Copilot marketplace lists the factory plugin");
+check(marketplacePlugin?.source === ".", "the marketplace points at the repository-root plugin");
+check(
+  marketplacePlugin?.version === plugin.version,
+  "the marketplace and plugin manifests agree on the version",
+);
+
 console.log("\n# skills\n");
 
 for (const skill of ["director", "objective-compilation"]) {

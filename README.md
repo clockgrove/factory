@@ -4,7 +4,7 @@ A GitHub-native engineering-management plugin. You author an **Objective**; Fact
 **Work Items**, dispatches them to parallel GitHub Copilot agent sessions, supervises the results,
 and replans — unattended.
 
-> **Status: build order (§9) complete; Gate 0 (§10) passed.** All seven build-order steps are done —
+> **Status: build order (§9) complete; Gate 0 (§10) and Gate 1 (PRD §8) both passed.** All seven build-order steps are done —
 > Factory can derive the full state of an Objective from GitHub alone, dispatch/confirm/retry/escalate
 > Work Items against a real repo, mechanically classify a PR's outcome (no-op, declined, untouched,
 > conflict, checks), integrate a mechanically-ready PR (mark ready, merge, resolve or reject a
@@ -25,7 +25,15 @@ and replans — unattended.
 > (`"Copilot"`) differs from its suggested-actor login (`"copilot-swe-agent"`) and was misread as a
 > human co-assignee — misclassifying every dispatch as an immediate escalation until fixed — and
 > GitHub does not auto-close a parent issue just because every sub-issue closed, which needed a new
-> `close_objective` tool. See [`docs/PRD.md`](docs/PRD.md) and
+> `close_objective` tool.
+>
+> Gate 1's rehearsal ran against `clockgrove/factory-gate1`: Objective #1, a three-function CSV
+> pipeline authored with a genuine dependency chain (`parseLine` → `validateRecord` → `formatRow`,
+> each depending on the previous), compiled to native `blocked by` edges instead of Gate 0's
+> independent items. Director correctly held each dependent Work Item unassigned/blocked until its
+> dependency's PR merged and issue closed, then dispatched it immediately — proving sequencing and
+> blocked-by handling per the scope ladder (PRD §8). Three merged PRs, three closed Work Items,
+> Objective closed, no escalations, one continuous run. See [`docs/PRD.md`](docs/PRD.md) and
 > [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md).
 
 ## Design in one picture

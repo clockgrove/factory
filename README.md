@@ -144,6 +144,32 @@ Factory stores nothing. Every Work Item's state is a pure function of what GitHu
 There is no status label, no sidecar file, and no lease. Nothing stored can go stale or diverge,
 crash recovery is free, and "resume" and "start" are the same code path.
 
+## Before you point it at a repository
+
+One setting will otherwise stop Factory dead on its first Work Item.
+
+GitHub ships repositories with **"Require approval for workflow runs"** enabled for the Copilot
+coding agent, so every workflow run on an agent-authored pull request parks in `action_required`
+until a human clicks *Approve and run workflows*. Factory sees a check suite that concluded having
+run nothing, correctly refuses to merge without CI evidence, and escalates. It cannot clear the hold
+itself: the REST approve endpoint covers *fork* pull requests only and refuses a same-repo agent
+branch outright, and the repository setting that governs the hold is readable over REST with no
+write. This is the account-wide default, so a fresh repository does not avoid it.
+
+If the repository runs CI on pull requests, turn it off before starting:
+**Settings → Copilot → Coding agent → Require approval for workflow runs.**
+
+```bash
+# check the current value
+gh api repos/OWNER/REPO/copilot/cloud-agent/configuration --jq .require_actions_workflow_approval
+```
+
+Decide it deliberately — it governs every future agent run in that repository, not one pull request.
+Factory's blast-radius review reports the evidence you need (read-only default workflow token, no
+secrets reachable from a pull-request workflow, no self-hosted runner) on the Work Item when it
+escalates. Repositories with no pull-request CI at all are unaffected. Full account in
+[`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) §10.7.
+
 ## Try it
 
 Read-only. Prints the derived state of an Objective and exits.

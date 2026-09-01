@@ -78,6 +78,14 @@ check(Boolean(arg), "mcp.json addresses the bundle through ${PLUGIN_ROOT}");
 const bundle = arg?.replace("${PLUGIN_ROOT}", root);
 check(Boolean(bundle) && existsSync(bundle), `the path in mcp.json exists: ${arg}`);
 
+// Substitute ${PLUGIN_ROOT} the way a plugin client would, and launch through
+// *these* values below rather than a hard-coded path. Otherwise the manifest is
+// read, checked, and then ignored — and a wrong `command`, a missing argument or
+// a reordered one would sail through the only check that claims to run the
+// shipped artifact the way it actually ships.
+const launchCommand = server?.command;
+const launchArgs = (server?.args ?? []).map((a) => a.replace("${PLUGIN_ROOT}", root));
+
 // Claude Code reads its own manifest pair; they must not drift apart.
 const claude = readJson(".claude-plugin/plugin.json");
 check(claude.name === plugin.name, "the Claude manifest agrees on the plugin name");
@@ -118,7 +126,7 @@ for (const skill of ["director", "objective-compilation"]) {
 console.log("\n# the bundle actually runs\n");
 
 const tools = await listTools();
-check(tools !== null, "the built server completes an MCP handshake over stdio");
+check(tools !== null, "the built server starts from mcp.json's own command and args");
 
 if (tools) {
   const names = tools.map((t) => t.name).sort();
@@ -145,15 +153,32 @@ if (problems.length) {
 console.log("package verified");
 
 /**
- * Speak just enough MCP to get a tool list. Deliberately launched with no
- * credentials: a server that cannot start without a token would be unusable at
- * plugin-install time, when no tool has been called yet.
+ * Speak just enough MCP to get a tool list.
+ *
+ * Launched from `mcp.json`'s own `command` and substituted `args` — not from a
+ * path this script picks — so that the manifest is genuinely under test and not
+ * merely parsed. Deliberately given no credentials: a server that cannot start
+ * without a token would be unusable at plugin-install time, when no tool has
+ * been called yet.
  */
 async function listTools() {
-  const child = spawn(process.execPath, [resolve(root, "dist/mcp-server.js")], {
+  if (!launchCommand || launchArgs.length === 0) return null;
+
+  const child = spawn(launchCommand, launchArgs, {
     stdio: ["pipe", "pipe", "pipe"],
     env: { ...process.env, GITHUB_TOKEN: "", GH_TOKEN: "" },
   });
+
+  // Without this, a `command` that is not on PATH surfaces as a 20-second
+  // timeout and an unrelated-looking message instead of the real cause.
+  let spawnFailure = null;
+  const failed = new Promise((_, rej) => {
+    child.on("error", (error) => {
+      spawnFailure = error;
+      rej(new Error(`could not launch \`${launchCommand}\`: ${error.message}`));
+    });
+  });
+  failed.catch(() => {});
 
   const pending = new Map();
   let buffer = "";
@@ -178,15 +203,19 @@ async function listTools() {
 
   let id = 0;
   const send = (method, params) =>
-    new Promise((res, rej) => {
-      const mine = ++id;
-      const timer = setTimeout(() => rej(new Error(`timed out waiting for ${method}`)), 20_000);
-      pending.set(mine, (msg) => {
-        clearTimeout(timer);
-        res(msg);
-      });
-      child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: mine, method, params })}\n`);
-    });
+    Promise.race([
+      failed,
+      new Promise((res, rej) => {
+        const mine = ++id;
+        const timer = setTimeout(() => rej(new Error(`timed out waiting for ${method}`)), 20_000);
+        pending.set(mine, (msg) => {
+          clearTimeout(timer);
+          res(msg);
+        });
+        if (spawnFailure) return;
+        child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: mine, method, params })}\n`);
+      }),
+    ]);
 
   try {
     await send("initialize", {

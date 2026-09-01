@@ -384,13 +384,27 @@ export function interpretContentsResponse(
       unreadable: `not a file (directory with ${body.length} entries) — use read_repository_layout with pathPrefix instead`,
     };
   }
-  const data = (body ?? {}) as { content?: string; type?: string; size?: number };
+  const data = (body ?? {}) as {
+    content?: string;
+    type?: string;
+    size?: number;
+    target?: string | null;
+    submodule_git_url?: string | null;
+  };
   if (data.type !== "file" || typeof data.content !== "string") {
+    // Verified live (2026-09-02, nodejs/node and git/git): a symlink to a
+    // *directory* comes back `type: "symlink"` with `content: null` and the link
+    // in `target`; a submodule comes back `type: "submodule"` with
+    // `submodule_git_url`. Both land here rather than being mistaken for files.
+    // A symlink to a *file* never reaches this branch at all — GitHub resolves
+    // it and returns `type: "file"` with the target's real content and size,
+    // which is what a caller wants.
+    const where = data.target ?? data.submodule_git_url;
     return {
       path,
       exists: true,
       truncated: true,
-      unreadable: `not a file (${data.type ?? "unknown"})`,
+      unreadable: `not a file (${data.type ?? "unknown"})${where ? ` — points at ${where}` : ""}`,
     };
   }
   if (data.content === "" && (data.size ?? 0) > 0) {
@@ -592,6 +606,14 @@ export class GitHubReader {
    * Returns `exists: false` rather than throwing on 404, because "this path is
    * not in the repository" is a normal, informative answer during compilation
    * and not an error worth aborting a cycle over.
+   *
+   * But the contents API answers 404 to two very different questions — "no such
+   * path" and "no such repository, or none you can see" — and compilation acts
+   * on the difference. A bad `owner`/`repo` or a token without access would
+   * otherwise return a confident `exists: false` for every path asked about, and
+   * the graph would be compiled to create files that already exist. So a 404 is
+   * only reported as a missing path once the repository itself is confirmed
+   * readable; `#defaultBranch()` caches, so this costs one request per reader.
    */
   async readRepositoryFile(
     path: string,
@@ -605,6 +627,15 @@ export class GitHubReader {
       );
     } catch (error) {
       if ((error as { status?: number }).status === 404) {
+        try {
+          await this.#defaultBranch();
+        } catch {
+          throw new Error(
+            `cannot read ${this.#owner}/${this.#repo} — the repository does not ` +
+              `exist or this token cannot see it. Not reporting "${path}" as ` +
+              `missing, because every path would look missing.`,
+          );
+        }
         return { path, exists: false, truncated: false };
       }
       throw error;

@@ -94,6 +94,51 @@ describe("interpretContentsResponse", () => {
     expect(result.content).toBeUndefined();
   });
 
+  // Exact response bodies from nodejs/node and git/git (2026-09-02). A review
+  // claimed both of these arrive as `type: "file"` — a symlink carrying `target`
+  // and a submodule carrying `submodule_git_url` — which would have meant this
+  // function reported a submodule as an empty file. Probing the live API showed
+  // otherwise, and these cases exist so that stays true.
+  it("reports a symlink to a directory as a symlink, and says where it points", () => {
+    const result = interpretContentsResponse(
+      "deps/v8/third_party/ittapi/ittapi-rs/include",
+      { type: "symlink", size: 11, content: null, target: "../include/" },
+      40_000,
+    );
+    expect(result.unreadable).toBe("not a file (symlink) — points at ../include/");
+    expect(result.content).toBeUndefined();
+  });
+
+  it("reports a submodule as a submodule, not as an empty file", () => {
+    const result = interpretContentsResponse(
+      "sha1collisiondetection",
+      {
+        type: "submodule",
+        size: 0,
+        content: null,
+        submodule_git_url: "https://github.com/cr-marcstevens/sha1collisiondetection.git",
+      },
+      40_000,
+    );
+    expect(result.unreadable).toContain("not a file (submodule)");
+    expect(result.unreadable).toContain("sha1collisiondetection.git");
+    expect(result.content).toBeUndefined();
+  });
+
+  // The other half of the same live check: GitHub *resolves* a symlink that
+  // points at a file, returning the target's real content and size with
+  // `target: null`. Treating that as unreadable would refuse a file the caller
+  // can perfectly well have.
+  it("returns the resolved content of a symlink to a file", () => {
+    const result = interpretContentsResponse(
+      "deps/v8/third_party/ittapi/ittapi-rs/CMakeLists.txt",
+      { type: "file", size: 2513, content: b64("cmake_minimum_required"), target: null },
+      40_000,
+    );
+    expect(result.content).toBe("cmake_minimum_required");
+    expect(result.unreadable).toBeUndefined();
+  });
+
   it("never claims content it does not have, whatever the shape", () => {
     for (const body of [null, undefined, {}, { type: "submodule" }]) {
       const result = interpretContentsResponse("x", body, 40_000);

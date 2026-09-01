@@ -24389,11 +24389,12 @@ function interpretContentsResponse(path, body, maxBytes) {
   }
   const data = body ?? {};
   if (data.type !== "file" || typeof data.content !== "string") {
+    const where = data.target ?? data.submodule_git_url;
     return {
       path,
       exists: true,
       truncated: true,
-      unreadable: `not a file (${data.type ?? "unknown"})`
+      unreadable: `not a file (${data.type ?? "unknown"})${where ? ` \u2014 points at ${where}` : ""}`
     };
   }
   if (data.content === "" && (data.size ?? 0) > 0) {
@@ -24554,6 +24555,14 @@ var GitHubReader = class {
    * Returns `exists: false` rather than throwing on 404, because "this path is
    * not in the repository" is a normal, informative answer during compilation
    * and not an error worth aborting a cycle over.
+   *
+   * But the contents API answers 404 to two very different questions — "no such
+   * path" and "no such repository, or none you can see" — and compilation acts
+   * on the difference. A bad `owner`/`repo` or a token without access would
+   * otherwise return a confident `exists: false` for every path asked about, and
+   * the graph would be compiled to create files that already exist. So a 404 is
+   * only reported as a missing path once the repository itself is confirmed
+   * readable; `#defaultBranch()` caches, so this costs one request per reader.
    */
   async readRepositoryFile(path, maxBytes = 4e4) {
     let response;
@@ -24564,6 +24573,13 @@ var GitHubReader = class {
       );
     } catch (error2) {
       if (error2.status === 404) {
+        try {
+          await this.#defaultBranch();
+        } catch {
+          throw new Error(
+            `cannot read ${this.#owner}/${this.#repo} \u2014 the repository does not exist or this token cannot see it. Not reporting "${path}" as missing, because every path would look missing.`
+          );
+        }
         return { path, exists: false, truncated: false };
       }
       throw error2;

@@ -322,6 +322,31 @@ Director **stops and asks** when **any** of these hold:
 The asymmetry is deliberate. Merging a reviewed, reversible, in-scope change is cheap to undo.
 Guessing at intent is not.
 
+### 7.4 Replanning has no write path, and that is a decision
+
+§7 describes replanning as editing the graph. The tool surface cannot do it. `graph_apply` refuses
+outright when an Objective already has Work Items, and nothing else adds an item, adds an edge, or
+edits acceptance criteria. So a Director that concludes the graph is wrong can only stop and say so —
+which `skills/director/SKILL.md` step 7 instructs it to do explicitly, rather than leaving it to be
+discovered.
+
+This is deliberate, on F7's discipline: *measured limits bound the scope of a response; desiderata do
+not*. Across seven rehearsals nothing has yet needed it. Gate 5's conflicts — the case §7 names as
+replanning evidence — self-healed in one retry each, and no Work Item has ever legitimately exhausted
+its attempts. Building a graph-mutation write path now would be building against a hypothesis, and it
+is the expensive kind: editing an in-flight Work Item races the agent already working from its body,
+and re-parenting or splitting an item breaks the stable identity F4 identifies as the root cause of
+the prior design's replan deadlock.
+
+The fallback is not a degradation. §7.1 makes escalation a first-class successful outcome, so "the
+graph is wrong and I cannot fix it" is a well-founded stop, not a failure to be engineered away.
+
+**Revisit trigger:** an Objective that genuinely stalls — attempts exhausted, or repeated declines or
+conflicts on one item — where a specific graph edit would demonstrably have unblocked it, and a human
+had to make that edit by hand. Record it as a measured limit per F7, with the smallest write path that
+would have sufficed. Adding new Work Items to an existing Objective is a strictly smaller change than
+editing existing ones, and is the likely first step if the trigger fires.
+
 ---
 
 ## 8. Work Packet → prompt

@@ -4,8 +4,8 @@ A GitHub-native engineering-management plugin. You author an **Objective**; Fact
 **Work Items**, dispatches them to parallel GitHub Copilot agent sessions, supervises the results,
 and replans — unattended.
 
-> **Status: build order (§9) complete; Gates 0, 1, 2, 5 and 6 (PRD §8) passed, plus a synthetic
-> brownfield rehearsal for Gate 3.** All seven build-order steps are done —
+> **Status: v0.1 implementation complete; Gates 0, 1, 2, 5 and 6 passed, Gate 4 produced and resolved
+> its intended findings, and the formal Gate 3 remains: one real Clockgrove Objective.** All seven build-order steps are done —
 > Factory can derive the full state of an Objective from GitHub alone, dispatch/confirm/retry/escalate
 > Work Items against a real repo, mechanically classify a PR's outcome (no-op, declined, untouched,
 > conflict, checks), integrate a mechanically-ready PR (mark ready, merge, resolve or reject a
@@ -96,6 +96,13 @@ and replans — unattended.
 > and that the job has nothing worth stealing (read-only token, no secrets); otherwise it escalates
 > with reasons. Details in [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) §10.5–§10.6;
 > see also [`docs/PRD.md`](docs/PRD.md).
+>
+> **Gate 4 found that held coding-agent CI cannot be approved through GitHub's per-run approval
+> endpoint.** That endpoint covers fork pull requests; coding-agent pull requests use same-repository
+> branches and are held by a repository setting whose public API is read-only. Factory now reports the
+> deterministic refusal and escalates rather than merging untested work, retrying forever, or closing
+> correct work as if its tests had failed. Gate 4 also exposed that destructive last behavior:
+> `checksNeverStarted` is now a distinct `checks_held` verdict routed directly to escalation.
 >
 > **Gate 5 (the merge-conflict path — §6) passed**, closing the one branch of the design that five
 > earlier rehearsals had never reached, because every one of them produced Work Items with disjoint
@@ -220,9 +227,57 @@ secrets reachable from a pull-request workflow, no self-hosted runner) on the Wo
 escalates. Repositories with no pull-request CI at all are unaffected. Full account in
 [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) §10.7.
 
-## Try it
+## Install
 
-Read-only. Prints the derived state of an Objective and exits.
+Factory v0.1 targets GitHub Copilot CLI. The cross-harness Copilot/Codex/Claude portability run is a
+separate v0.2 gate, not a prerequisite for using v0.1.
+
+Install an exact reviewed commit rather than a moving branch:
+
+```bash
+git clone https://github.com/clockgrove/factory.git
+git -C factory checkout --detach FACTORY_COMMIT_SHA
+test "$(git -C factory rev-parse HEAD)" = "FACTORY_COMMIT_SHA"
+copilot plugin install "$(pwd)/factory"
+copilot plugin list
+```
+
+The repository must be public, or the adopter must independently have read access. The local-path
+install is a documented Copilot CLI source and keeps the checked-out SHA explicit and inspectable.
+Factory does not run an install script and does not need `node_modules`; the committed bundle is the
+artifact the plugin launches.
+
+Start a new Copilot CLI session, invoke the `director` skill, and provide an Objective repository,
+issue number, and escalation login. The MCP server reads `GITHUB_TOKEN` or `GH_TOKEN` from the
+harness environment when its first tool is called.
+
+### Upgrade
+
+Review and check out the new exact SHA, then reinstall to refresh Copilot CLI's cached copy:
+
+```bash
+git -C factory fetch origin
+git -C factory checkout --detach NEW_FACTORY_COMMIT_SHA
+test "$(git -C factory rev-parse HEAD)" = "NEW_FACTORY_COMMIT_SHA"
+copilot plugin install "$(pwd)/factory"
+```
+
+Restart the Copilot CLI session after upgrading. Objective state lives in GitHub, so upgrading or
+restarting Factory does not require a migration.
+
+### Uninstall
+
+```bash
+copilot plugin uninstall factory
+rm -rf factory
+```
+
+Uninstalling removes the local plugin only. It does not delete or mutate Objectives, Work Items, pull
+requests, labels, repository settings, environments, or secrets.
+
+## Verify the package
+
+For a source checkout, the CLI entry point is read-only and prints the derived state of an Objective:
 
 ```bash
 npm install && npm run build
@@ -273,4 +328,4 @@ refusal must never be mistaken for work failure.
 
 ## License
 
-TBD before public release.
+License selection is pending before the repository can be made public.

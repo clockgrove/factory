@@ -1013,6 +1013,32 @@ shape is worth nothing until it is observed, whoever asserts it.** The earlier f
 trusting training data about an endpoint; this one would have come from trusting a confident reviewer.
 The remedy is identical and cheap — one live request.
 
+### What the gate itself found
+
+Three things, none of which the unit tests could have surfaced:
+
+**`truncated` meant two incompatible things.** `interpretContentsResponse` returned `truncated: true`
+for a directory. Everywhere else the flag means "there is more of this than you got" — so a caller
+that pages or retries on truncation would loop forever against a path that will never yield file
+content. The flag now means only that: a file exists and has bytes we did not get, whether clipped at
+`maxBytes` or refused above 1 MB. A directory, symlink or submodule is not truncated, it is
+`unreadable`, and `unreadable` already says so.
+
+**`labelled: true` was unfalsifiable.** `read_objective` exposed no labels, so nothing on the tool
+surface could contradict `graph_apply`'s claim to have applied one. That is F5's exact shape a second
+time — a success reported by the component responsible for it, with no independent observation
+anywhere. Work Items now carry `labels`, and `skills/director/SKILL.md` spends the one read confirming
+it. The GraphQL selection was verified live before being relied on.
+
+**The escalation login appears as a co-assignee on ordinary dispatched items.** Factory does not put
+it there: `ASSIGN_COPILOT_MUTATION` sets `actorIds: [$botId]` alone. GitHub adds the requesting user
+roughly a second later — measured on the live dispatch of Work Item #33, where the timeline reads
+`17:35:32 assigned → Copilot` then `17:35:33 assigned → kirkmarple-clockgrove`. Harmless as it
+stands, because `escalated` is derived from Copilot being *absent* while a human is present, so a
+co-assigned human still reads as `dispatched`. But it makes `assignees` a tempting and wrong signal to
+read escalation from, and the `!isAssignedToCopilot` guard in `deriveState` is now known to be
+load-bearing rather than merely defensive. Recorded in the skill so nobody "simplifies" it away.
+
 ### One finding declined, deliberately
 
 The review also called `doneWithoutMergedPullRequest` blocking, on the grounds that a pull request

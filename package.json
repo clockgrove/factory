@@ -9,7 +9,8 @@
   "scripts": {
     "build": "esbuild src/cli.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/factory.js && esbuild src/mcp-server.ts --bundle --platform=node --format=esm --target=node20 --outfile=dist/mcp-server.js",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "verify:package": "npm run build && node scripts/verify-package.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

@@ -206,6 +206,19 @@ npm install && npm run build
 GITHUB_TOKEN=$(gh auth token) node dist/factory.js owner/repo 42
 ```
 
+To check the thing that actually ships — the manifests, the skills, and the bundled MCP server
+starting and serving its tools over stdio with no install step and no token:
+
+```bash
+npm run verify:package
+```
+
+Worth running after any change to `mcp.json`, `plugin.json`, the skill frontmatter, or the tool
+surface. It is the only check that exercises the plugin-install path rather than the source: it
+catches a manifest pointing at a bundle that was never built, the two manifest pairs (Agent Plugins
+and Claude Code) drifting apart, a tool silently disappearing, and a tool shipped without a
+description a model can route on.
+
 ## Why this design starts from a clean slate
 
 An earlier attempt at this same idea inverted both halves of this design: it put the orchestration

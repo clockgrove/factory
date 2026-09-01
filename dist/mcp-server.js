@@ -25198,14 +25198,32 @@ var Dispatcher = class {
    * an unresolvable conflict, so platform pacing is never mistaken for a
    * graph defect.
    *
-   * Unmeasured live: Gate 0's Work Items are independent by design (PRD §7),
-   * so this path has not yet been exercised against a real conflicting PR.
+   * Re-dispatch is bounded by the same attempt count as every other retry
+   * (§4.4). Without that bound this path never terminates: a conflict that a
+   * rebase cannot fix is almost always a *graph* defect rather than a bad
+   * attempt — two Work Items editing one file with no edge between them — so
+   * the agent's next attempt branches from the same base and conflicts the
+   * same way, forever, burning an agent run and a pull request each cycle.
+   * §6 names the correct exit ("repeated conflict on one file ⇒ the graph
+   * wrongly modelled two items as independent ⇒ replan"), and escalating with
+   * that diagnosis is how a human is told to replan.
+   *
+   * Unmeasured live: every gate before Gate 4 produced Work Items with
+   * disjoint file scope, so no rehearsal has yet reached a real conflicting
+   * pull request.
    */
   async #resolveConflict(wi, pr) {
     try {
       await this.#call(() => this.#writer.updatePullRequestBranch(pr.id));
     } catch (error2) {
       if (error2 instanceof PlatformUnavailableError) throw error2;
+      if (attemptAction(wi) === "escalate") {
+        await this.#escalate(
+          wi,
+          `${attemptCount(wi)} attempts have each ended in a merge conflict that a rebase could not resolve. Per \xA76 a conflict that survives re-dispatch is a graph defect, not a bad attempt: another Work Item is almost certainly editing the same file with no dependency edge between them. Retrying cannot fix that \u2014 the fix is to replan (add the missing edge, or merge the two items) before dispatching this one again.`
+        );
+        return;
+      }
       await this.#call(
         () => this.#writer.addComment(
           pr.id,

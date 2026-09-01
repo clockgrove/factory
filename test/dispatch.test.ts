@@ -467,6 +467,51 @@ describe("Dispatcher.integrate", () => {
     ]);
   });
 
+  it("stops re-dispatching a conflict once attempts are exhausted, and blames the graph", async () => {
+    // Without this bound the conflict path never terminates: a rebase that
+    // cannot fix the conflict means the next attempt branches from the same
+    // base and conflicts identically, forever.
+    const boom = new Error("merge conflict between base and head");
+    const writer = new FakeWriter({ updatePullRequestBranch: boom });
+    const d = makeDispatcher(writer);
+    const item = derivedWi({
+      linkedPullRequests: [pr({ id: "PR_1" }), pr({ id: "PR_2" }), pr({ id: "PR_3" })],
+    });
+    await d.integrate(item, pr({ id: "PR_3" }), { kind: "conflict" });
+
+    expect(writer.calls).toEqual([
+      "updatePullRequestBranch:PR_3",
+      `addHumanAssignee:${item.id}:U_human`,
+      `clearActors:${item.id}`,
+      `addComment:${item.id}`,
+    ]);
+    expect(writer.calls.some((c) => c.startsWith("assignCopilot"))).toBe(false);
+    expect(writer.comments.join("\n")).toContain("replan");
+  });
+
+  it("still re-dispatches a conflict while attempts remain", async () => {
+    const boom = new Error("merge conflict between base and head");
+    const writer = new FakeWriter({ updatePullRequestBranch: boom });
+    const d = makeDispatcher(writer);
+    const item = derivedWi({ linkedPullRequests: [pr({ id: "PR_1" }), pr({ id: "PR_2" })] });
+    await d.integrate(item, pr({ id: "PR_2" }), { kind: "conflict" });
+
+    expect(writer.calls).toContain(`assignCopilot:${item.id}:BOT_1`);
+  });
+
+  it("does not consume an attempt when the rebase succeeds", async () => {
+    // A successful rebase opens no new pull request, so an item that keeps
+    // rebasing cleanly must never be escalated for exhausting attempts.
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    const item = derivedWi({
+      linkedPullRequests: [pr({ id: "PR_1" }), pr({ id: "PR_2" }), pr({ id: "PR_3" })],
+    });
+    await d.integrate(item, pr({ id: "PR_3" }), { kind: "conflict" });
+
+    expect(writer.calls).toEqual(["updatePullRequestBranch:PR_3"]);
+  });
+
   it("rethrows a platform refusal from the branch update rather than treating it as unresolvable", async () => {
     const writer = new FakeWriter({ updatePullRequestBranch: rateLimitError() });
     const d = makeDispatcher(writer);

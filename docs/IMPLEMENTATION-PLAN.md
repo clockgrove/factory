@@ -250,6 +250,15 @@ only collide at the second merge):
 - if not, close the PR and re-dispatch against the new base
 - repeated conflict on one file ⇒ the graph wrongly modelled two items as independent ⇒ replan
 
+That third bullet is a **termination condition, not advice.** Re-dispatch on conflict is bounded by
+the same derived attempt count as every other retry (§4.4): a rebase that cannot fix a conflict
+means the next attempt branches from the same base and conflicts identically, so an unbounded
+conflict path spins forever, spending one coding-agent run and one pull request per cycle and never
+reaching a human. When attempts are exhausted the Work Item escalates with the *graph* diagnosis
+rather than the usual "the agent failed" one — the fix is an added dependency edge or a merged pair
+of items, which only replanning can supply. A successful rebase deliberately consumes no attempt,
+since it opens no new pull request and therefore cannot be the thing that spins.
+
 Merging one at a time per cycle keeps conflicts rare without a serialization protocol.
 
 ---

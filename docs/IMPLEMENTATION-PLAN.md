@@ -389,9 +389,13 @@ is that non-goals are falsification evidence rather than obstacles to route arou
 
 ## 12. Open questions
 
-1. **Is a 3-function Objective enough to exercise the compiler** (PRD Q3), or is it so trivial that
-   compilation is nearly free and Gate 0 proves only execution? Leaning: fine — Gate 0 is meant to
-   prove *the loop closes*, and Gate 1 introduces real decomposition.
+1. ~~**Is a 3-function Objective enough to exercise the compiler** (PRD Q3)?~~ **Resolved by running
+   it (2026-09-01, clockgrove/factory-gate0#6):** not "nearly free" at all — the rehearsal surfaced
+   three real defects unit tests never caught (missing `objective.body`, the coding agent's
+   assignee-login mismatch misclassifying every dispatch as an escalation, and no mechanism closing
+   the Objective once every Work Item was done), each fixed live, after which the loop closed
+   end-to-end with three merged PRs and zero further escalations. Gate 0 proved *the loop closes*
+   exactly as intended; Gate 1 remains the place for real decomposition.
 2. ~~**Unattended trigger** (PRD Q4).~~ **Resolved:** unattended operation is a goal, not a mandate.
    Escalation is a first-class outcome (§7.1) with an explicit confidence bar (§7.3). Gate 0 still
    runs in a foreground session; a scheduled or long-lived session remains the production shape, but

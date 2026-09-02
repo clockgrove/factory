@@ -4,9 +4,12 @@ A GitHub-native engineering-management plugin. You author an **Objective**; Fact
 **Work Items**, dispatches them to parallel GitHub Copilot agent sessions, supervises the results,
 and replans — unattended.
 
-> **Status: Factory v1.0 is released and feature-complete; two claims about it are still open.**
+> **Status: Factory v1.0.1 is released and feature-complete; two claims about it are still open.**
 > Gates 0–3 passed, Gates 4–6 exercised and hardened the
-> previously untested CI, conflict, repository-reading, and packaging paths. All seven build-order steps are done —
+> previously untested CI, conflict, repository-reading, and packaging paths. Gate 7 completed its
+> Objective cleanly and was the first run against the **installed public plugin**, but is not a pass —
+> the timer-driven re-entry it exists to prove was never exercised (see below). All seven build-order
+> steps are done —
 > Factory can derive the full state of an Objective from GitHub alone, dispatch/confirm/retry/escalate
 > Work Items against a real repo, mechanically classify a PR's outcome (no-op, declined, untouched,
 > conflict, checks), integrate a mechanically-ready PR (mark ready, merge, resolve or reject a
@@ -211,12 +214,15 @@ and replans — unattended.
 > since at least one gate paced its own cycles by hand and said so. That last one is now a ship
 > criterion rather than a caveat: unattended-*across turn boundaries* — a session waking with no
 > working memory and reconstructing everything from GitHub — is the property the derived-state design
-> exists to provide, and it is the next thing to prove. A first attempt (Gate 7, `clockgrove/factory-gate7`)
-> compiled and dispatched correctly but was **stopped after three turns, none of them timer-started,
-> and is recorded as void rather than passed** — it was halted to switch the harness onto the
-> installed public plugin, which is now a standing requirement for every gate. Its one usable result
-> is a negative: a "you have not marked the task complete" nudge is a non-timer re-entry that a
-> re-run must not count as a wake-up.
+> exists to provide, and it is the next thing to prove. **Gate 7 was created to prove it and did
+> not.** Its first attempt was stopped after three turns, none timer-started, to move the harness
+> onto the installed public plugin; the Objective was then completed by hand — three merged pull
+> requests, four closed issues, a clean `slug.ts` genuinely composing its two dependencies, and the
+> first gate ever run end-to-end against the published plugin rather than a local bundle. That makes
+> it a real integration result and **not** a pass on its own terms, because the property under test
+> is timer-driven re-entry and a human-paced session tests the loop's logic instead. The fixture is
+> consumed; a re-run needs a fresh repository. Full account, including the two verdicts that fired
+> live for the first time, in [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) §10.20.
 >
 > **The second open claim closed itself badly the first time it was tested.** §10.18 singled out one
 > thing the automated package checks could not stand in for: that a real Copilot CLI can install the

@@ -410,10 +410,17 @@ server.registerTool(
     title: "Evaluate mechanical checks",
     description:
       "Run §5.1's cheap, deterministic checks against a Work Item's current open pull request: " +
-      "no-op, declined, untouched scope, merge conflict, checks pending/failed, sensitive surface, " +
-      "in progress, or ready. Pure and " +
+      "no-op, declined, untouched scope, merge conflict, checks pending/failed/missing/held, " +
+      "sensitive surface, in progress, mergeability unknown, or ready. Pure and " +
       "read-only — call this before `dispatch_integrate` to see the verdict it would act on, or on " +
       "its own to inspect a Work Item without taking any action. " +
+      "A `mergeability_unknown` verdict means GitHub has not finished recomputing whether the " +
+      "branch merges cleanly and is reporting `mergeable: null`, which must not be read as either " +
+      "clean or conflicting. Expect it routinely rather than rarely: merging any pull request " +
+      "invalidates the computation for every other open pull request against that base, so the " +
+      "second and later merges of a batch of ready siblings will often hit it (measured in Gate 7, " +
+      "§10.20). Nothing is wrong and nothing should be closed — GitHub settles in seconds and the " +
+      "next cycle merges normally. " +
       "Two fields on a `ready` verdict still need your judgment (Gate 5, §10.12). `outOfScopeFiles` " +
       "lists changed paths the Work Item never declared: the scope check only fails when *nothing* " +
       "in scope was touched, so a pull request that does its job **and** edits whatever else it " +

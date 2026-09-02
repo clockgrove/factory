@@ -230,6 +230,7 @@ in_progress  title still carries the `[WIP]` prefix — the agent is not finishe
 untouched    diff does not touch any file the Work Item names
 checks       required checks concluded
 conflict     PR not mergeable against base
+unknown      GitHub has not finished computing mergeability — wait, do not guess
 sensitive    diff changes what CI runs or what it can reach
 ```
 
@@ -1545,6 +1546,14 @@ in front of a real Objective.
   added: between the transcript snapshot and the squash subject the record already exists in two
   places, and neither costs a write.
 
+**Gate 7 (§10.20) retired two entries from this list and confirmed a third.** `in_progress` and
+`mergeability_unknown` both fired against live pull requests for the first time and behaved
+correctly, so they are no longer unit-tested-only. The `>= 3 attempts → escalate` branch, the
+rebase-success path, and real CI remain untouched. **The scheduled-automation entry above is
+unchanged and is now the oldest open item on this list** — Gate 7 was created to close it, was
+stopped before its first timer fire, and was then completed by hand, so the run proves the loop's
+logic once more and the timer claim not at all. Read that entry as still fully open.
+
 ## 10.18 v1 release readiness
 
 The project owner accepted the completed production-shaped brownfield Gate 3 as the production
@@ -1626,6 +1635,58 @@ the install block for plausibility rather than running it, and it read plausibly
 possible guard is to install the published artifact the way a stranger would, once, before claiming
 a release is real — which is now a required step of any release, not an optional courtesy.
 
+## 10.20 Gate 7: the first run on the published plugin
+
+Gate 7 ran against `clockgrove/factory-gate7` — Objective #1, a three-function text-normalisation
+toolkit with a genuine dependency chain (`collapseSpaces` and `toKebab` in parallel, then `slug`
+composing both). It closed: three merged pull requests, four closed issues, no open pull requests,
+and `slug.ts` on `main` genuinely importing and calling its two dependencies rather than
+reimplementing them. It is also the first gate run entirely against the **installed public plugin**
+(`copilot plugin marketplace add clockgrove/factory`) rather than a hand-written MCP config pointing
+at a local worktree — now the standing requirement, because a local bundle tests something no
+adopter will ever run and a worktree can change underneath a live gate.
+
+**It does not pass on its own terms, and the reason is worth stating plainly.** The property Gate 7
+exists to test is *timer-driven re-entry* — a session waking with no working memory and being
+re-entered by an automation rather than by its own control flow (§10.17). The first attempt was
+stopped after three turns, none of them timer-started, to move the harness onto the public plugin;
+the completion recorded here was then driven by hand, across turns of a session that had full
+context throughout. That is unattended-*within*-a-turn again. **The central architectural claim
+remains unproven, the fixture is now consumed, and a re-run needs a fresh repository.** One usable
+negative result survives from the void attempt: a "you have not marked the task complete" system
+nudge is a non-timer re-entry, and a re-run must not count it as a wake-up.
+
+**What the run did prove, by executing paths that had only ever been unit-tested:**
+
+- **`mergeability_unknown` fired live for the first time, and it is not an edge case.** Merging the
+  first of two ready sibling pull requests invalidated GitHub's mergeability computation for the
+  second, which came back `mergeable: null`. Factory refused to read that as either clean or
+  conflicting, wrote nothing, and merged normally on the next cycle ~20 s later. The generalisation
+  matters more than the instance: *any* Objective with parallel Work Items will hit this on its
+  second and later merges, so it is a common path, not a rarity. It was correctly handled in
+  `evaluate.ts`, `dispatch.ts`, the tests and `skills/director/SKILL.md` — and missing from both the
+  `evaluate_mechanical` tool description and §5.1's own verdict list, the two places a Director
+  actually reads. Both fixed here. That is the fixture-default pattern again (§10.17): the verdict
+  nothing named was the one that drifted, and this time it drifted in the documentation rather than
+  the code.
+- **`in_progress` held a real pull request for the first time outside a test.** PR #7 sat at
+  `[WIP] Add slug function in src/slug.ts` for roughly two minutes with a complete diff already
+  pushed, then renamed to a finished title. Pre-§10.15 Factory would have merged it — the diff was
+  present and the checks were absent, so every other signal said go.
+- **All three pull requests merged with `isDraft: true`.** The coding agent never cleared the flag on
+  any of them; `#mergeReady` un-drafted each at merge time. Third independent repository, same
+  measurement (§10.15).
+- **`escalateTo` validation earned its keep.** The login `kirkmarple` was passed from a branch
+  prefix; the real account is `kirkmarple-clockgrove`. `read_objective` rejected it immediately with
+  the exact diagnosis — F4 (§10.2) reproduced by a different operator and caught by the guard written
+  for it, rather than at the moment a human was first needed.
+- **Dependency serialisation held without supervision.** Work Item #4 derived `blocked` from two
+  native `blocked by` edges, became `ready` only once both dependencies had actually merged, and was
+  never dispatchable in between.
+
+---
+
+## 11. Risks
 
 | Risk | Mitigation |
 |---|---|

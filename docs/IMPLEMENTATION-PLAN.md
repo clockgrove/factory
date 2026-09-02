@@ -1787,6 +1787,21 @@ own write timestamps on the fixture.** If the session only writes during timer w
 request events cluster at the automation's interval, and the parent — which sent nothing — can read
 that clustering directly. Two independent records, one of which the subject cannot forge.
 
+**The token design was subtly wrong on first use, and the correction is the reusable part.** The
+parent's kickoff brief has to state the automation prompt verbatim — that is how the session knows
+what to arm — so the brief necessarily *contains* the token too. Measured on Gate 8's own transcript:
+the kickoff turn matches "contains `GATE8-TICK-4f19c7`" just as a real wake does. A marker that the
+setup instructions must quote is present in the setup turn **by construction**, so "contains the
+token" is not a discriminator at all; it false-positives on exactly the turn a human drove.
+
+What survives is structural: a scheduled wake delivers the automation prompt *and nothing else*, so
+its turn **begins** with the token, while the kickoff has it buried 4954 characters into a longer
+brief. `substr(ltrim(user_message),1,17) = 'GATE8-TICK-4f19c7'` separates them cleanly where
+`instr(...) > 0` does not. The better design, for any future gate, is for the **session itself to
+generate a random token when it arms the timer** and report it afterwards — then the parent's brief
+never contains it, and presence alone is sufficient. This is the §10.17 fixture-default lesson
+wearing different clothes: the check nobody ran against the *negative* case looked like it worked.
+
 The interval is 4 minutes. That is short enough that a stalled loop is obvious quickly, and long
 enough that a cycle's dispatches have usually produced something by the next fire.
 

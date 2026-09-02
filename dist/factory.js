@@ -2776,6 +2776,18 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
                   }
                 }
               }
+              agentWorkEvents: timelineItems(last: 20, itemTypes: [
+                COPILOT_WORK_STARTED_EVENT,
+                COPILOT_WORK_FINISHED_EVENT,
+                COPILOT_WORK_FINISHED_FAILURE_EVENT
+              ]) {
+                nodes {
+                  __typename
+                  ... on CopilotWorkStartedEvent { createdAt }
+                  ... on CopilotWorkFinishedEvent { createdAt }
+                  ... on CopilotWorkFinishedFailureEvent { createdAt failureMessage }
+                }
+              }
             }
           }
           timelineItems(last: 10, itemTypes: [ASSIGNED_EVENT]) {
@@ -2842,8 +2854,21 @@ function toPullRequest(pr) {
     // even for the (unobserved) case of a pull request with no commits: a
     // brand-new PR is then trivially "recently active", which errs toward
     // waiting rather than toward closing something live.
-    headCommittedAt: commit?.committedDate ? new Date(commit.committedDate) : new Date(pr.createdAt)
+    headCommittedAt: commit?.committedDate ? new Date(commit.committedDate) : new Date(pr.createdAt),
+    agentWorkEvents: toAgentWorkEvents(pr.agentWorkEvents?.nodes ?? [])
   };
+}
+var AGENT_EVENT_KINDS = {
+  CopilotWorkStartedEvent: "started",
+  CopilotWorkFinishedEvent: "finished",
+  CopilotWorkFinishedFailureEvent: "failed"
+};
+function toAgentWorkEvents(nodes) {
+  return nodes.flatMap((n) => {
+    const kind = AGENT_EVENT_KINDS[n.__typename];
+    if (!kind) return [];
+    return [{ kind, at: new Date(n.createdAt), message: n.failureMessage ?? null }];
+  }).sort((a, b) => a.at.getTime() - b.at.getTime());
 }
 function copilotAssignments(wi) {
   return wi.timelineItems.nodes.filter((e) => e.assignee?.login === COPILOT_LOGIN).map((e) => new Date(e.createdAt)).sort((a, b) => a.getTime() - b.getTime());
@@ -3386,6 +3411,15 @@ function isAbandonedAttempt(pr, now) {
   if (!isWorkInProgress(pr)) return false;
   return now.getTime() - pr.headCommittedAt.getTime() >= WIP_INACTIVITY_GRACE_MS;
 }
+function agentFailure(pr) {
+  let last = null;
+  for (const event of pr.agentWorkEvents) {
+    if (!last || event.at.getTime() >= last.at.getTime()) last = event;
+  }
+  if (!last || last.kind !== "failed") return null;
+  if (pr.headCommittedAt.getTime() > last.at.getTime()) return null;
+  return last;
+}
 function latestCopilotAssignment(wi) {
   if (wi.copilotAssignments.length === 0) return null;
   return wi.copilotAssignments[wi.copilotAssignments.length - 1];
@@ -3417,10 +3451,12 @@ function deriveState(wi, now) {
   }
   const current = currentOpenPullRequest(wi);
   if (current) {
+    const failure = agentFailure(current);
     if (isNoOp(current)) {
-      const stillPlausiblyWorking = withinConfirmWindow(wi, now) || withinEmptyPullRequestGrace(current, now);
+      const stillPlausiblyWorking = !failure && (withinConfirmWindow(wi, now) || withinEmptyPullRequestGrace(current, now));
       return stillPlausiblyWorking ? "in_flight" : "failed";
     }
+    if (failure && isWorkInProgress(current)) return "failed";
     if (isAbandonedAttempt(current, now)) return "failed";
     if (isWorkInProgress(current)) return "in_flight";
     if (checksSettled(current)) return "for_review";

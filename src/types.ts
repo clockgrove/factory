@@ -199,6 +199,44 @@ export interface LinkedPullRequest {
    * whole point of recording both.
    */
   closedAt: Date | null;
+  /**
+   * The coding agent's own account of how its sessions on this pull request
+   * began and ended, oldest first, from GitHub's `CopilotWork*` timeline
+   * events. Empty when GitHub has published none.
+   *
+   * This is the only *authoritative* liveness signal available. Everything else
+   * Factory reads about an in-flight attempt is a proxy — a `[WIP]` title
+   * prefix, an absent diff, a stale head commit — and each proxy costs a grace
+   * window to interpret, because a proxy cannot distinguish "still working"
+   * from "died quietly". These events say which it is, in GitHub's own words,
+   * at the moment it happens.
+   *
+   * A `failed` event carries `message`, GitHub's plain-English reason. That
+   * matters beyond latency: some failures are not the Work Item's fault and no
+   * number of retries can fix them (an exhausted request quota being the
+   * measured case). Retrying those burns the attempt budget and then escalates
+   * with a misleading reason, sending a human to debug a brief when the real
+   * fix is a billing page.
+   */
+  agentWorkEvents: AgentWorkEvent[];
+}
+
+/** What the coding agent reported about one of its sessions. */
+export type AgentWorkEventKind = "started" | "finished" | "failed";
+
+/**
+ * One `CopilotWorkStartedEvent` / `CopilotWorkFinishedEvent` /
+ * `CopilotWorkFinishedFailureEvent` from a pull request's timeline.
+ */
+export interface AgentWorkEvent {
+  kind: AgentWorkEventKind;
+  at: Date;
+  /**
+   * GitHub's stated reason, present only on `failed` (`failureMessage`), and
+   * `null` otherwise. Quoted verbatim into close and escalation comments — a
+   * paraphrase would lose the request ID and the settings URL a human needs.
+   */
+  message: string | null;
 }
 
 export interface IssueRef {

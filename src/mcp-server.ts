@@ -395,7 +395,7 @@ server.registerTool(
     title: "Evaluate mechanical checks",
     description:
       "Run §5.1's cheap, deterministic checks against a Work Item's current open pull request: " +
-      "no-op, declined, untouched scope, merge conflict, checks pending/failed, sensitive surface, " +
+      "no-op, declined, untouched scope, merge conflict, mergeability unknown, checks pending/failed, sensitive surface, " +
       "in progress, or ready. Pure and " +
       "read-only — call this before `dispatch_integrate` to see the verdict it would act on, or on " +
       "its own to inspect a Work Item without taking any action. " +
@@ -417,7 +417,14 @@ server.registerTool(
       "half-pushed change legitimately touches nothing in scope yet and legitimately fails its own " +
       "tests, and those verdicts close the pull request. Wait for the agent to rename it. " +
       "Note the signal is the title prefix, not the draft flag: the agent opens every pull request " +
-      "as a draft and never clears it, so draftness means nothing here.",
+      "as a draft and never clears it, so draftness means nothing here. " +
+      "A `mergeability_unknown` verdict means GitHub has not finished recomputing whether the pull " +
+      "request merges cleanly, so nothing is known yet — it is not a conflict, not a failure and not " +
+      "`ready`. Expect it routinely on a healthy Objective: merging any pull request changes the base " +
+      "branch and invalidates the cached mergeability of every other open one, so integrating N ready " +
+      "items typically takes N cycles rather than one. That is the correct cost, not a stall. Do not " +
+      "act on the guess; simply call `dispatch_integrate` again next cycle, when the fresh snapshot " +
+      "will carry a real answer.",
     inputSchema: {
       ...WorkItemLocatorShape,
       expectedFiles: z
@@ -710,7 +717,12 @@ server.registerTool(
       "human once attempts are exhausted (3 linked PRs). A no-op on a Work Item that is not " +
       "currently `failed`. Returns `action`: `redispatched` (PR closed, Copilot reassigned), " +
       "`escalated` (attempts exhausted, handed to a human), or `no-op`. This is the branch that " +
-      "actually fired, not a prediction — same vocabulary as `dispatch_integrate`'s `action`.",
+      "actually fired, not a prediction — same vocabulary as `dispatch_integrate`'s `action`. " +
+      "One failure escalates on the *first* attempt rather than waiting for the third: when the " +
+      "coding agent's own `CopilotWorkFinishedFailureEvent` names a cause no retry can address — " +
+      "an exhausted request quota is the measured case — the remaining attempts would fail " +
+      "identically within seconds. That escalation quotes GitHub's message verbatim, including " +
+      "its request ID and settings URL, because the fix is a billing page and not the Work Item.",
     inputSchema: {
       ...WorkItemLocatorShape,
       ...EscalateToShape,

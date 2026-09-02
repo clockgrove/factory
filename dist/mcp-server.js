@@ -24294,6 +24294,18 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
                   }
                 }
               }
+              agentWorkEvents: timelineItems(last: 20, itemTypes: [
+                COPILOT_WORK_STARTED_EVENT,
+                COPILOT_WORK_FINISHED_EVENT,
+                COPILOT_WORK_FINISHED_FAILURE_EVENT
+              ]) {
+                nodes {
+                  __typename
+                  ... on CopilotWorkStartedEvent { createdAt }
+                  ... on CopilotWorkFinishedEvent { createdAt }
+                  ... on CopilotWorkFinishedFailureEvent { createdAt failureMessage }
+                }
+              }
             }
           }
           timelineItems(last: 10, itemTypes: [ASSIGNED_EVENT]) {
@@ -24360,8 +24372,21 @@ function toPullRequest(pr) {
     // even for the (unobserved) case of a pull request with no commits: a
     // brand-new PR is then trivially "recently active", which errs toward
     // waiting rather than toward closing something live.
-    headCommittedAt: commit?.committedDate ? new Date(commit.committedDate) : new Date(pr.createdAt)
+    headCommittedAt: commit?.committedDate ? new Date(commit.committedDate) : new Date(pr.createdAt),
+    agentWorkEvents: toAgentWorkEvents(pr.agentWorkEvents?.nodes ?? [])
   };
+}
+var AGENT_EVENT_KINDS = {
+  CopilotWorkStartedEvent: "started",
+  CopilotWorkFinishedEvent: "finished",
+  CopilotWorkFinishedFailureEvent: "failed"
+};
+function toAgentWorkEvents(nodes) {
+  return nodes.flatMap((n) => {
+    const kind = AGENT_EVENT_KINDS[n.__typename];
+    if (!kind) return [];
+    return [{ kind, at: new Date(n.createdAt), message: n.failureMessage ?? null }];
+  }).sort((a, b) => a.at.getTime() - b.at.getTime());
 }
 function copilotAssignments(wi) {
   return wi.timelineItems.nodes.filter((e) => e.assignee?.login === COPILOT_LOGIN).map((e) => new Date(e.createdAt)).sort((a, b) => a.getTime() - b.getTime());
@@ -25060,6 +25085,25 @@ function isAbandonedAttempt(pr, now) {
   if (!isWorkInProgress(pr)) return false;
   return now.getTime() - pr.headCommittedAt.getTime() >= WIP_INACTIVITY_GRACE_MS;
 }
+function agentFailure(pr) {
+  let last = null;
+  for (const event of pr.agentWorkEvents) {
+    if (!last || event.at.getTime() >= last.at.getTime()) last = event;
+  }
+  if (!last || last.kind !== "failed") return null;
+  if (pr.headCommittedAt.getTime() > last.at.getTime()) return null;
+  return last;
+}
+var NON_RETRYABLE_FAILURE_PATTERNS = [
+  /exceeded your .*\bquota\b/i,
+  /\busage limit\b/i,
+  /\bpremium request/i,
+  /\bquota\b.*\bexceeded\b/i
+];
+function isNonRetryableFailure(message) {
+  if (!message) return false;
+  return NON_RETRYABLE_FAILURE_PATTERNS.some((p) => p.test(message));
+}
 function latestCopilotAssignment(wi) {
   if (wi.copilotAssignments.length === 0) return null;
   return wi.copilotAssignments[wi.copilotAssignments.length - 1];
@@ -25107,10 +25151,12 @@ function deriveState(wi, now) {
   }
   const current = currentOpenPullRequest(wi);
   if (current) {
+    const failure = agentFailure(current);
     if (isNoOp(current)) {
-      const stillPlausiblyWorking = withinConfirmWindow(wi, now) || withinEmptyPullRequestGrace(current, now);
+      const stillPlausiblyWorking = !failure && (withinConfirmWindow(wi, now) || withinEmptyPullRequestGrace(current, now));
       return stillPlausiblyWorking ? "in_flight" : "failed";
     }
+    if (failure && isWorkInProgress(current)) return "failed";
     if (isAbandonedAttempt(current, now)) return "failed";
     if (isWorkInProgress(current)) return "in_flight";
     if (checksSettled(current)) return "for_review";
@@ -25158,7 +25204,15 @@ function confirmAction(wi, now) {
   return confirmFailureStreak(wi) >= 2 ? "escalate" : "retry";
 }
 function attemptAction(wi) {
+  if (nonRetryableFailure(wi)) return "escalate";
   return attemptCount(wi) >= 3 ? "escalate" : "retry";
+}
+function nonRetryableFailure(wi) {
+  const current = currentOpenPullRequest(wi);
+  if (!current) return null;
+  const failure = agentFailure(current);
+  if (!failure || !isNonRetryableFailure(failure.message)) return null;
+  return failure.message;
 }
 var MERGE_DEFERRALS = [
   [
@@ -25367,9 +25421,10 @@ var Dispatcher = class {
    */
   async retryOrEscalate(wi, reason = "no diff appeared before the confirm window elapsed") {
     if (attemptAction(wi) === "escalate") {
+      const blocked = nonRetryableFailure(wi);
       await this.#escalate(
         wi,
-        `${attemptCount(wi)} attempts produced no usable result (${reason})`
+        blocked ? `the coding agent could not run, and retrying cannot fix it. GitHub reported: "${blocked}"` : `${attemptCount(wi)} attempts produced no usable result (${reason})`
       );
       return "escalated";
     }
@@ -26133,7 +26188,7 @@ server.registerTool(
   "evaluate_mechanical",
   {
     title: "Evaluate mechanical checks",
-    description: "Run \xA75.1's cheap, deterministic checks against a Work Item's current open pull request: no-op, declined, untouched scope, merge conflict, checks pending/failed, sensitive surface, in progress, or ready. Pure and read-only \u2014 call this before `dispatch_integrate` to see the verdict it would act on, or on its own to inspect a Work Item without taking any action. Two fields on a `ready` verdict still need your judgment. `outOfScopeFiles` lists changed paths the Work Item never declared: the scope check only fails when *nothing* in scope was touched, so a pull request that does its job **and** edits whatever else it likes is still `ready`. That is deliberate \u2014 extra files are often legitimate (updating a test the change broke) \u2014 but it is yours to confirm via `read_pull_request_diff`, not to assume. `fileListComplete: false` means the pull request changed more than 100 files, so `outOfScopeFiles` is a lower bound and the scope checks saw only part of the diff. A `sensitive_surface` verdict means the diff is mergeable but touches something that redefines what CI runs or what it can reach (workflows, actions, dependency manifests and lockfiles, registry config). \xA77.3 reserves those for a human regardless of declared scope, so `dispatch_integrate` escalates rather than retrying \u2014 the work is not wrong, it is just not Factory's to merge unattended. An `in_progress` verdict means the coding agent still has the pull request titled `[WIP]`, so it is not finished and nothing here should act on it \u2014 not merge it, and equally not close or rebase it. Checked ahead of scope, conflict and check verdicts on purpose: a half-pushed change legitimately touches nothing in scope yet and legitimately fails its own tests, and those verdicts close the pull request. Wait for the agent to rename it. Note the signal is the title prefix, not the draft flag: the agent opens every pull request as a draft and never clears it, so draftness means nothing here.",
+    description: "Run \xA75.1's cheap, deterministic checks against a Work Item's current open pull request: no-op, declined, untouched scope, merge conflict, mergeability unknown, checks pending/failed, sensitive surface, in progress, or ready. Pure and read-only \u2014 call this before `dispatch_integrate` to see the verdict it would act on, or on its own to inspect a Work Item without taking any action. Two fields on a `ready` verdict still need your judgment. `outOfScopeFiles` lists changed paths the Work Item never declared: the scope check only fails when *nothing* in scope was touched, so a pull request that does its job **and** edits whatever else it likes is still `ready`. That is deliberate \u2014 extra files are often legitimate (updating a test the change broke) \u2014 but it is yours to confirm via `read_pull_request_diff`, not to assume. `fileListComplete: false` means the pull request changed more than 100 files, so `outOfScopeFiles` is a lower bound and the scope checks saw only part of the diff. A `sensitive_surface` verdict means the diff is mergeable but touches something that redefines what CI runs or what it can reach (workflows, actions, dependency manifests and lockfiles, registry config). \xA77.3 reserves those for a human regardless of declared scope, so `dispatch_integrate` escalates rather than retrying \u2014 the work is not wrong, it is just not Factory's to merge unattended. An `in_progress` verdict means the coding agent still has the pull request titled `[WIP]`, so it is not finished and nothing here should act on it \u2014 not merge it, and equally not close or rebase it. Checked ahead of scope, conflict and check verdicts on purpose: a half-pushed change legitimately touches nothing in scope yet and legitimately fails its own tests, and those verdicts close the pull request. Wait for the agent to rename it. Note the signal is the title prefix, not the draft flag: the agent opens every pull request as a draft and never clears it, so draftness means nothing here. A `mergeability_unknown` verdict means GitHub has not finished recomputing whether the pull request merges cleanly, so nothing is known yet \u2014 it is not a conflict, not a failure and not `ready`. Expect it routinely on a healthy Objective: merging any pull request changes the base branch and invalidates the cached mergeability of every other open one, so integrating N ready items typically takes N cycles rather than one. That is the correct cost, not a stall. Do not act on the guess; simply call `dispatch_integrate` again next cycle, when the fresh snapshot will carry a real answer.",
     inputSchema: {
       ...WorkItemLocatorShape,
       expectedFiles: external_exports.array(external_exports.string()).optional().describe("The Work Item's declared file scope (\xA78); omit to skip the untouched-scope check")
@@ -26310,7 +26365,7 @@ server.registerTool(
   "dispatch_retry_or_escalate",
   {
     title: "Dispatch: retry or escalate",
-    description: "\xA74.4/\xA75.1: act on a `failed` Work Item \u2014 close its unusable PR and retry, or escalate to a human once attempts are exhausted (3 linked PRs). A no-op on a Work Item that is not currently `failed`. Returns `action`: `redispatched` (PR closed, Copilot reassigned), `escalated` (attempts exhausted, handed to a human), or `no-op`. This is the branch that actually fired, not a prediction \u2014 same vocabulary as `dispatch_integrate`'s `action`.",
+    description: "\xA74.4/\xA75.1: act on a `failed` Work Item \u2014 close its unusable PR and retry, or escalate to a human once attempts are exhausted (3 linked PRs). A no-op on a Work Item that is not currently `failed`. Returns `action`: `redispatched` (PR closed, Copilot reassigned), `escalated` (attempts exhausted, handed to a human), or `no-op`. This is the branch that actually fired, not a prediction \u2014 same vocabulary as `dispatch_integrate`'s `action`. One failure escalates on the *first* attempt rather than waiting for the third: when the coding agent's own `CopilotWorkFinishedFailureEvent` names a cause no retry can address \u2014 an exhausted request quota is the measured case \u2014 the remaining attempts would fail identically within seconds. That escalation quotes GitHub's message verbatim, including its request ID and settings URL, because the fix is a billing page and not the Work Item.",
     inputSchema: {
       ...WorkItemLocatorShape,
       ...EscalateToShape,

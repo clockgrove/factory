@@ -99,7 +99,18 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
    not being wired into the call path, leaving every Work Item unlabelled while the tool reports
    success. A self-reported success you can check is worth checking once.
 
-3. **Dispatch ready items.** For each Work Item number in `ready` (from step 1), call `dispatch_start`
+   **Take that read immediately, in this cycle, and use it for the rest of the cycle.** `graph_apply`
+   is a write that invalidates the snapshot step 1 gave you: that snapshot was taken when the
+   Objective had no Work Items, so its `ready` list is empty and will stay empty no matter how many
+   items you just created. Dispatching from it means a freshly compiled graph sits untouched until the
+   *next* cycle — a full interval of dead time on every Objective, and on a timer-driven Director
+   that interval is wall-clock minutes, not milliseconds. This is the one sanctioned exception to
+   §4.1's one-snapshot-per-cycle rule, and it is the same principle as `mergeability_unknown`: a write
+   you just made is exactly the thing your derived state no longer reflects. It costs one read and
+   pays for the label check at the same time.
+
+3. **Dispatch ready items.** For each Work Item number in `ready` — from step 2's post-apply read if
+   you compiled a graph this cycle, otherwise from step 1 — call `dispatch_start`
    with that `objectiveNumber`/`workItemNumber`/`escalateTo`. Do this for every ready item in the
    snapshot — the MCP server's own pacing (`ContentCreationPacer`) staggers and rate-limits the actual
    GitHub calls underneath you (§4.1); you do not need to add your own delay between calls.

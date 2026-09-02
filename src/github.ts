@@ -16,6 +16,8 @@ import { retry } from "@octokit/plugin-retry";
 import { throttling } from "@octokit/plugin-throttling";
 
 import type {
+  AgentWorkEvent,
+  AgentWorkEventKind,
   CheckRollup,
   IssueRef,
   LinkedPullRequest,
@@ -123,6 +125,18 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
                   }
                 }
               }
+              agentWorkEvents: timelineItems(last: 20, itemTypes: [
+                COPILOT_WORK_STARTED_EVENT,
+                COPILOT_WORK_FINISHED_EVENT,
+                COPILOT_WORK_FINISHED_FAILURE_EVENT
+              ]) {
+                nodes {
+                  __typename
+                  ... on CopilotWorkStartedEvent { createdAt }
+                  ... on CopilotWorkFinishedEvent { createdAt }
+                  ... on CopilotWorkFinishedFailureEvent { createdAt failureMessage }
+                }
+              }
             }
           }
           timelineItems(last: 10, itemTypes: [ASSIGNED_EVENT]) {
@@ -178,6 +192,17 @@ interface GqlPr {
       };
     }[];
   };
+  agentWorkEvents: { nodes: GqlAgentWorkEvent[] };
+}
+
+/**
+ * A `CopilotWork*` timeline node. `__typename` is the discriminator; only the
+ * failure variant carries `failureMessage`.
+ */
+interface GqlAgentWorkEvent {
+  __typename: string;
+  createdAt: string;
+  failureMessage?: string | null;
 }
 
 interface GqlAssignedEvent {
@@ -303,7 +328,35 @@ export function toPullRequest(pr: GqlPr): LinkedPullRequest {
     headCommittedAt: commit?.committedDate
       ? new Date(commit.committedDate)
       : new Date(pr.createdAt),
+    agentWorkEvents: toAgentWorkEvents(pr.agentWorkEvents?.nodes ?? []),
   };
+}
+
+/** GraphQL `__typename` to the kind `state.ts` reasons about. */
+const AGENT_EVENT_KINDS: Record<string, AgentWorkEventKind> = {
+  CopilotWorkStartedEvent: "started",
+  CopilotWorkFinishedEvent: "finished",
+  CopilotWorkFinishedFailureEvent: "failed",
+};
+
+/**
+ * Map the `CopilotWork*` timeline nodes to `AgentWorkEvent`s, oldest first.
+ *
+ * Unrecognised `__typename`s are dropped rather than guessed at: GitHub may add
+ * event types, and a node whose meaning Factory does not know must not be
+ * allowed to look like a completion or a failure. Sorted explicitly rather than
+ * trusting GitHub's ordering, because "which event came last" is the entire
+ * basis of the liveness read (§5.1) and must not depend on an unstated
+ * guarantee.
+ */
+export function toAgentWorkEvents(nodes: GqlAgentWorkEvent[]): AgentWorkEvent[] {
+  return nodes
+    .flatMap((n) => {
+      const kind = AGENT_EVENT_KINDS[n.__typename];
+      if (!kind) return [];
+      return [{ kind, at: new Date(n.createdAt), message: n.failureMessage ?? null }];
+    })
+    .sort((a, b) => a.at.getTime() - b.at.getTime());
 }
 
 /**

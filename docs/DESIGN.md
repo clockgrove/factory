@@ -237,6 +237,17 @@ These are dials with measured origins, not guesses, and each should be re-measur
 raised. Every write additionally passes through `platform.ts`'s pacing, concurrency and
 circuit-breaker controls (§14).
 
+**One-snapshot-per-cycle has exactly one sanctioned exception: `graph_apply`.** Compiling an
+Objective is a write that invalidates the very snapshot that authorised it — the snapshot was taken
+when the Objective had no Work Items, so its `ready` list is empty and stays empty however many
+items the call just created. A Director that dispatches from it leaves a freshly compiled graph
+untouched until the next cycle, which on a timer-driven loop is wall-clock minutes of dead time, not
+milliseconds. So a Director re-reads immediately after `graph_apply` and uses *that* snapshot for the
+rest of the cycle. The exception is narrow and it generalises: the one thing derived state cannot
+reflect is a write you have just made yourself. `mergeability_unknown` (§5.1) is the same principle
+seen from the other end — there the stale signal is GitHub's, and the answer is to wait a cycle
+rather than to re-read, because the recomputation is not ours to trigger.
+
 ### 4.2 Dispatch confirmation
 
 Assignment success does not mean work started: assignments are accepted that never produce a session,
@@ -281,6 +292,16 @@ Attempt count = **number of linked pull requests**. No counter is stored.
 - a failed attempt's pull request is closed before retry, so counting stays honest
 - a platform refusal (§14) creates no pull request, so it cannot inflate the count
 
+**One cause escalates on the first attempt instead of the third.** The coding agent publishes
+`CopilotWorkStartedEvent` / `CopilotWorkFinishedEvent` / `CopilotWorkFinishedFailureEvent` on the
+pull request's timeline, and the failure variant states its reason. When that reason lies outside
+the Work Item — an exhausted request quota is the measured case — the budget has nothing to absorb:
+the remaining attempts fail identically within seconds, and the eventual escalation would blame the
+brief for a billing limit. Such an attempt escalates immediately, quoting GitHub's message verbatim
+so its request ID and settings URL reach the human who can act on them. The match is deliberately
+narrow; an unrecognised message retries as before, because a missed pattern costs only latency
+whereas an over-broad one escalates work a retry would have fixed.
+
 ---
 
 ## 5. Evaluation
@@ -294,17 +315,18 @@ its diff, its commits, and its body.
 Cheap, deterministic, and run before anything expensive:
 
 ```
-no_op             empty diff, OR no commit beyond "Initial plan"
-declined          PR body states the task is not actionable
-in_progress       title still carries the `[WIP]` prefix — the agent is not finished
-untouched         diff does not touch any file the Work Item names
-conflict          PR not mergeable against base
-checks_pending    checks exist and have not concluded
-checks_failed     checks ran and concluded failure
-checks_held       runs were created but never allowed to execute (§9.2)
-checks_missing    no checks at all, in a repository known to run them
-sensitive_surface diff changes what CI runs or what it can reach
-ready             none of the above
+no_op                 empty diff, OR no commit beyond "Initial plan"
+declined              PR body states the task is not actionable
+in_progress           title still carries the `[WIP]` prefix — the agent is not finished
+untouched             diff does not touch any file the Work Item names
+conflict              PR not mergeable against base
+mergeability_unknown  GitHub has not finished recomputing mergeability (`mergeable === "UNKNOWN"`)
+checks_pending        checks exist and have not concluded
+checks_failed         checks ran and concluded failure
+checks_held           runs were created but never allowed to execute (§9.2)
+checks_missing        no checks at all, in a repository known to run them
+sensitive_surface     diff changes what CI runs or what it can reach
+ready                 none of the above
 ```
 
 A no-op or a decline is a **failed attempt**, not a result.
@@ -324,6 +346,15 @@ prefix is gone, judge the diff entirely on its merits. The wait is bounded by an
 request's `updatedAt`, which comments and Factory's own audit comments refresh — so a dead agent
 escalates rather than hanging. Tune that bound **upward only**: too short closes finished work, too
 long merely wastes time.
+
+That window, and the empty-pull-request grace beside it, exist only because a proxy cannot separate
+"still working" from "died quietly". Where the agent has answered that question itself — a
+`CopilotWorkFinishedFailureEvent` with no later session start and no later commit — the graces are
+skipped and the attempt fails at once; waiting them out cost 27m50s across one Work Item's two dead
+attempts, 80% of its elapsed life.
+The events are *not* used the other way round. Completion is still the `[WIP]` rename, because a
+fresh `copilot_work_started` can follow a `copilot_work_finished` on an already-merged pull request,
+so "latest event wins" would misread a restart as unfinished work.
 
 **`untouched` is a deliberately weak check.** It fires only when the diff touches *nothing* the Work
 Item declared, because it routes to close-and-retry and a false positive there destroys correct work.
@@ -884,15 +915,16 @@ Stated plainly, because a list of things that work invites absence of evidence t
 absence.
 
 - **The attempts-exhausted escalation branch (§4.4) has not executed in a real run.** It is tested
-  code, not observed behavior.
+  code, not observed behavior. A run came within one attempt of it — two consecutive attempts died
+  at an exhausted request quota — but the limit was raised while the second was in flight and the
+  third succeeded, so the branch still has not fired.
 - **The rebase-success path (§6) has not been observed.** Every conflict encountered so far threw, so
   the branch that recovers without a re-dispatch is untested against the live API.
-- **Unattended across turn boundaries is not the same claim as unattended within one turn.** Runs to
-  date have been paced by a session that stayed awake throughout. That establishes the loop's logic —
-  read, confirm, retry, integrate, replan, in the right order, against a real repository. It does not
-  establish the property the derived-state design exists to provide: a session waking with no working
-  memory, reconstructing everything from GitHub, and being re-entered by a timer rather than by its
-  own control flow. A re-entry that is not timer-started does not count as a wake-up.
+- **Unattended across turn boundaries** was established by a timer-driven run: a three-item Objective
+  completed with the loop re-entered only by a five-minute automation, each cycle reconstructing
+  state from GitHub with no working memory carried across. What that run did *not* exercise is a
+  wake-up separated from the previous one by hours or days, or a graph large enough for two Work
+  Items to be in flight in genuinely different states at the same wake.
 - **Cross-harness portability is verified by construction, not by a run.** The published package has
   been installed and exercised on GitHub Copilot CLI. Running one identical Objective on Codex and
   Claude Code is a separate check; any divergence would be a bug or a hidden client-specific

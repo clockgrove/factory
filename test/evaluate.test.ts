@@ -40,6 +40,7 @@ function pr(over: Partial<LinkedPullRequest> = {}): LinkedPullRequest {
     createdAt: NOW,
     headSha: "deadbeef",
     headCommittedAt: NOW,
+    agentWorkEvents: [],
     mergedAt: null,
     closedAt: null,
     ...over,

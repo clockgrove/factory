@@ -151,6 +151,66 @@ and replans — unattended.
 > `type: "submodule"`, a symlink to a directory is `type: "symlink"`, and a symlink to a file is
 > resolved into real content — all three already handled correctly. Those exact response bodies are
 > now pinned as tests.
+>
+> **Gate 5 left a finding in its margin that outlasted the gate.** It was run to exercise the merge
+> conflict path, which it did — but it also noticed that both replacement pull requests had added a
+> 1454-line `package-lock.json` no Work Item asked for, and that nothing could have stopped them.
+> The scope check fired only when a pull request touched *nothing* it was asked to, so doing the job
+> **and** editing whatever else it liked passed every mechanical check — while §7.3 claimed
+> "declared scope respected" the whole time. Extra files are now reported as `outOfScopeFiles` for
+> the semantic review to weigh (blocking them would be wrong: an agent updating a test its change
+> broke is behaving correctly). Files that redefine what CI runs — workflows, actions, dependency
+> manifests and lockfiles — do block, as `sensitive_surface`, and escalate to a human rather than
+> retrying, since the work is usually right and a replacement would carry the same diff. That check
+> ignores the declared scope deliberately: scope is written by the compiler, so honouring it would
+> let the safety property certify itself. Writing it turned up one more bug nobody had reported —
+> the scope check read a file list capped at 100 entries as if it were complete, so a large pull
+> request could be closed as "touched nothing in scope" when the file was merely on page 2.
+>
+> Two smaller findings from the same margin were about the tool surface *withholding* answers rather
+> than getting them wrong. The diff reader's byte budget was first-come-first-served, so that same
+> lockfile — sorting first alphabetically — consumed the entire allowance and returned `patch: null`
+> for the three files actually under review; on any pull request carrying a lockfile or a generated
+> bundle, the files a reviewer most needs were precisely the ones it hid. `read_pull_request_diff`
+> now takes `paths`. And `dispatch_integrate` reported the verdict but never which of the three
+> conflict branches it took, so a rebase that succeeded without resolving anything — the exact bug
+> Gate 5 was sent to look for, and the one that leaves no trace anywhere else — was invisible from
+> its output. It now returns `action`.
+>
+> **Gate 6's margin finding was the worst one yet, and it was six gates old.** Sent to exercise a
+> dependency chain, it mentioned in passing that a pull request had merged while still marked draft.
+> Factory was merging work the coding agent had not finished: three pull requests across two gates
+> merged before the agent announced completion, one of them 98 seconds early — Factory's own token
+> un-drafting and merging three seconds apart, the agent's completion rename arriving after. It
+> survived because fixture tasks are small enough that the agent usually finishes before the next
+> poll; on any change that arrives in pieces, Factory merges the half and closes the Work Item as
+> done. Re-reading one of those pull requests later caught the agent in the act: its body had roughly
+> doubled and its `[WIP]` prefix had vanished **after** Factory merged it. That is also why six gates
+> missed this — a pull request's title, body and draft flag are mutable, so auditing a finished run
+> through the API shows what is true now, not what Factory decided on. Only the squash subject on
+> `main` preserved the evidence.
+>
+> **The first fix was wrong and measuring caught it.** Reading "draft" as the agent's not-finished
+> signal is the obvious move, and it would have stalled every Work Item forever: across 12/12 pull
+> requests in the fixture, the agent opens as a draft titled `[WIP] …`, renames the prefix away when
+> it finishes, and **never clears the draft flag** — every ready-for-review event was Factory's own.
+> The signal is the title prefix. Unfinished work is now an `in_progress` verdict that waits, bounded
+> by a twenty-minute no-push window so a dead agent escalates instead of hanging. The placement
+> matters more than the merge: it is checked *before* the scope, conflict and checks verdicts,
+> because a half-written pull request legitimately touches nothing in scope yet and legitimately
+> fails its own tests — and each of those verdicts closes the pull request, so judging work in
+> progress deletes it.
+>
+> **What six passing gates have not proved** is now written down too, in
+> [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) §10.17, because a page of successes
+> lets absence of evidence read as evidence of absence. The `>= 3 attempts → escalate` branch has
+> **never executed** in any gate; the rebase-*success* path has never been observed; no fixture repo
+> has ever run its own tests, so "the tests pass" in a gate report is always static analysis of the
+> diff; and "unattended" should be read as a claim about the loop's logic rather than about a timer,
+> since at least one gate paced its own cycles by hand and said so. That last one is now a ship
+> criterion rather than a caveat: unattended-*across turn boundaries* — a session waking with no
+> working memory and reconstructing everything from GitHub — is the property the derived-state design
+> exists to provide, and it is the next thing to prove.
 
 ## Design in one picture
 

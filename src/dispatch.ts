@@ -112,6 +112,24 @@ export interface IntegrateOutcome {
   merged: boolean;
   /** Set when a merge was attempted and GitHub declined for a transient reason. */
   deferred?: string;
+  /**
+   * Which branch actually fired, for a verdict that has more than one.
+   *
+   * Gate 5 (§10.13) could not tell a successful rebase from a
+   * close-and-redispatch from an escalation: all three returned
+   * `{"verdict":{"kind":"conflict"},"merged":false}`, and the only way to
+   * distinguish them was to diff the *next* `read_objective` for pull request
+   * state and assignment counts. The bug that gate was sent to look for — a
+   * rebase that succeeds without resolving anything, looping forever — is
+   * invisible from that output, which is the one thing the result most needed
+   * to show.
+   */
+  action?:
+    | "merged"
+    | "rebased"
+    | "redispatched"
+    | "escalated"
+    | "waiting";
 }
 
 /**
@@ -496,13 +514,13 @@ export class Dispatcher {
   async retryOrEscalate(
     wi: DerivedWorkItem,
     reason = "no diff appeared before the confirm window elapsed",
-  ): Promise<void> {
+  ): Promise<"escalated" | "redispatched"> {
     if (attemptAction(wi) === "escalate") {
       await this.#escalate(
         wi,
         `${attemptCount(wi)} attempts produced no usable result (${reason})`,
       );
-      return;
+      return "escalated";
     }
 
     const current = currentOpenPullRequest(wi);
@@ -518,6 +536,7 @@ export class Dispatcher {
 
     await this.#call(() => this.#writer.clearActors(wi.id));
     await this.#assign(wi.id);
+    return "redispatched";
   }
 
   /**
@@ -536,17 +555,20 @@ export class Dispatcher {
       case "ready":
         return await this.#mergeReady(pr);
       case "conflict":
-        await this.#resolveConflict(wi, pr);
-        return { merged: false };
+        return { merged: false, action: await this.#resolveConflict(wi, pr) };
       case "untouched":
-        await this.retryOrEscalate(
-          wi,
-          "the diff did not touch the Work Item's declared file scope",
-        );
-        return { merged: false };
+        return {
+          merged: false,
+          action: await this.retryOrEscalate(
+            wi,
+            "the diff did not touch the Work Item's declared file scope",
+          ),
+        };
       case "checks_failed":
-        await this.retryOrEscalate(wi, "required checks failed");
-        return { merged: false };
+        return {
+          merged: false,
+          action: await this.retryOrEscalate(wi, "required checks failed"),
+        };
       case "checks_held":
         // GitHub held this pull request's workflow runs awaiting a maintainer's
         // "Approve and run workflows", and there is no API that clears this
@@ -571,23 +593,48 @@ export class Dispatcher {
             "request, or disable the repository's Copilot Actions workflow-approval " +
             "requirement so future Work Items are not blocked the same way",
         );
-        return { merged: false };
+        return { merged: false, action: "escalated" };
       case "declined":
-        await this.retryOrEscalate(
+        return {
+          merged: false,
+          action: await this.retryOrEscalate(
+            wi,
+            "the agent declined the task as not actionable",
+          ),
+        };
+      case "sensitive_surface":
+        // Mergeable and green, but the diff changes what CI executes or what it
+        // can reach. §7.3 bars autonomous merges of "auth, secrets,
+        // permissions, CI configuration, dependency sources" outright, so a
+        // human confirms this one. Escalating rather than retrying is
+        // deliberate: nothing is wrong with the work, and a replacement pull
+        // request would touch the same surface.
+        await this.#escalate(
           wi,
-          "the agent declined the task as not actionable",
+          "this pull request is mergeable but changes a security-sensitive surface, " +
+            "which §7.3 reserves for a human even when the work looks correct: " +
+            verdict.files.map((f) => f.reason).join("; ") +
+            ". Review the diff and merge it by hand if the change is intended",
         );
-        return { merged: false };
+        return { merged: false, action: "escalated" };
       case "no_op":
-        await this.retryOrEscalate(wi);
-        return { merged: false };
+        return { merged: false, action: await this.retryOrEscalate(wi) };
       case "checks_pending":
-        return { merged: false }; // wait for the next cycle; nothing to do yet
+        return { merged: false, action: "waiting" }; // nothing to do yet
+      case "in_progress":
+        // Wait. The agent still calls this `[WIP]`, so there is nothing to
+        // integrate and nothing has gone wrong. Deliberately not a retry: the
+        // work is probably fine and simply unfinished, and closing it would
+        // throw away a session still writing into it. If it never resolves,
+        // `deriveState` bounds the wait — a pull request still marked `[WIP]`
+        // with no push inside the inactivity window derives `failed`, which
+        // retries and then escalates (§10.15).
+        return { merged: false, action: "waiting" };
       case "mergeability_unknown":
         // GitHub has not finished computing mergeability. Waiting is the whole
         // response: there is nothing to act on, and acting on a guess would
         // either merge something conflicting or rebase something clean.
-        return { merged: false };
+        return { merged: false, action: "waiting" };
       case "checks_missing":
         // The repository runs CI on pull requests but this PR carries no checks
         // at all (§10.5, F1). Usually a timing race that resolves within a
@@ -597,7 +644,7 @@ export class Dispatcher {
         // will fix it. That is a human problem, not a Work Item problem, so it
         // is deliberately never auto-merged and never auto-retried; the Director
         // skill escalates it after it survives several cycles.
-        return { merged: false };
+        return { merged: false, action: "waiting" };
     }
   }
 
@@ -623,6 +670,18 @@ export class Dispatcher {
    * surfaces instead of being retried silently forever.
    */
   async #mergeReady(pr: LinkedPullRequest): Promise<IntegrateOutcome> {
+    // Un-drafting is required, not optional: the coding agent never clears the
+    // draft flag itself. Every `ReadyForReviewEvent` across every fixture
+    // repository was Factory's own token, and factory-gate3 PR #16 sits
+    // finished — renamed away from `[WIP]` by the agent — while still
+    // `isDraft: true`. GitHub refuses to merge a draft, so without this call
+    // every single merge fails.
+    //
+    // This is safe *because* the completion signal is the `[WIP]` prefix rather
+    // than the draft flag (§10.15). Nothing unfinished reaches here: `evaluate`
+    // returns `in_progress` first. Removing this call was the wrong half of the
+    // §10.14 fix — it read the draft flag as the agent's voice when the agent
+    // does not speak through it.
     if (pr.isDraft) {
       await this.#call(() => this.#writer.markPullRequestReady(pr.id));
     }
@@ -632,9 +691,9 @@ export class Dispatcher {
       if (error instanceof PlatformUnavailableError) throw error;
       const deferral = mergeDeferral(error);
       if (!deferral) throw error;
-      return { merged: false, deferred: deferral };
+      return { merged: false, deferred: deferral, action: "waiting" };
     }
-    return { merged: true };
+    return { merged: true, action: "merged" };
   }
 
   /**
@@ -682,7 +741,7 @@ export class Dispatcher {
   async #resolveConflict(
     wi: DerivedWorkItem,
     pr: LinkedPullRequest,
-  ): Promise<void> {
+  ): Promise<"rebased" | "escalated" | "redispatched"> {
     try {
       await this.#call(() => this.#writer.updatePullRequestBranch(pr.id));
       // Success: the branch was updated, which GitHub only permits when the
@@ -691,6 +750,13 @@ export class Dispatcher {
       // which `mergeability_unknown` holds on). Reaching here again means the
       // base moved a second time; see the note above for why re-rebasing then
       // is correct and deliberately unbounded.
+      //
+      // Gate 5 never once reached this branch: `updatePullRequestBranch` threw
+      // on all 3 genuine conflicts, which is consistent with GitHub refusing to
+      // update a branch *because* it cannot merge. So the unbounded loop this
+      // return value makes observable remains unexercised rather than disproved
+      // (§10.13) — report it and let the caller notice a repeat.
+      return "rebased";
     } catch (error) {
       if (error instanceof PlatformUnavailableError) throw error;
 
@@ -703,7 +769,7 @@ export class Dispatcher {
             "between them. Retrying cannot fix that — the fix is to replan (add the missing edge, " +
             "or merge the two items) before dispatching this one again.",
         );
-        return;
+        return "escalated";
       }
 
       await this.#call(() =>
@@ -715,6 +781,7 @@ export class Dispatcher {
       await this.#call(() => this.#writer.closePullRequest(pr.id));
       await this.#call(() => this.#writer.clearActors(wi.id));
       await this.#assign(wi.id);
+      return "redispatched";
     }
   }
 

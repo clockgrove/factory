@@ -2749,6 +2749,8 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
               body
               mergeable
               createdAt
+              mergedAt
+              closedAt
               additions
               deletions
               changedFiles
@@ -2762,6 +2764,7 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
                 nodes {
                   commit {
                     oid
+                    committedDate
                     statusCheckRollup { state }
                     checkSuites(first: 20) {
                       nodes {
@@ -2832,7 +2835,14 @@ function toPullRequest(pr) {
     checksNeverStarted: checks === "FAILURE" && !commit?.statusCheckRollup?.state,
     mergeable: pr.mergeable,
     createdAt: new Date(pr.createdAt),
-    headSha: commit?.oid ?? ""
+    mergedAt: pr.mergedAt ? new Date(pr.mergedAt) : null,
+    closedAt: pr.closedAt ? new Date(pr.closedAt) : null,
+    headSha: commit?.oid ?? "",
+    // Falling back to the PR's own creation time keeps the field a real Date
+    // even for the (unobserved) case of a pull request with no commits: a
+    // brand-new PR is then trivially "recently active", which errs toward
+    // waiting rather than toward closing something live.
+    headCommittedAt: commit?.committedDate ? new Date(commit.committedDate) : new Date(pr.createdAt)
   };
 }
 function copilotAssignments(wi) {
@@ -2908,9 +2918,15 @@ function interpretContentsResponse(path, body, maxBytes) {
     truncated: clipped
   };
 }
-function budgetPatches(files, maxPatchBytes) {
+function isRequested(path, paths) {
+  return paths.some(
+    (entry) => entry.endsWith("/") ? path.startsWith(entry) : path === entry
+  );
+}
+function budgetPatches(files, maxPatchBytes, paths) {
   let budget = maxPatchBytes;
   let truncated = false;
+  const filtering = paths !== void 0 && paths.length > 0;
   const out = files.map((f) => {
     const base = {
       path: f.filename,
@@ -2918,6 +2934,13 @@ function budgetPatches(files, maxPatchBytes) {
       additions: f.additions,
       deletions: f.deletions
     };
+    if (filtering && !isRequested(f.filename, paths)) {
+      return {
+        ...base,
+        patch: null,
+        patchOmitted: "not requested; add this path to `paths` to read it"
+      };
+    }
     if (f.patch === null || f.patch === void 0) {
       return {
         ...base,
@@ -2974,8 +2997,23 @@ var GitHubReader = class {
    * which is what the bar actually reasons about. GitHub omits `patch` for
    * binary files and for individual files above its own size limit; those come
    * back with `patch: null`, reported honestly rather than silently dropped.
+   *
+   * `paths` restricts which files spend the byte budget (Gate 5, §10.13). The
+   * budget is otherwise first-come-first-served in GitHub's ordering, so one
+   * large file early in the alphabet starves every file after it —
+   * `package-lock.json` consumed a 4000-byte allowance whole and left the three
+   * files under review with `patch: null`. Pass a Work Item's declared `scope`
+   * (the matching rules are the same: a trailing `/` selects a directory) to
+   * spend the whole budget on the files the review is about.
+   *
+   * Filtered-out files are still listed, with `status`, `additions` and
+   * `deletions` intact and `patchOmitted` explaining why — the complete file
+   * list is what the blast-radius review and the scope checks reason about, and
+   * shortening it would misreport the size of the change. For the same reason
+   * `truncated` stays `false` when content is withheld only by `paths`: it means
+   * "content you asked for was cut", and a filtered file was not asked for.
    */
-  async readPullRequestDiff(pullNumber, maxPatchBytes = 6e4) {
+  async readPullRequestDiff(pullNumber, maxPatchBytes = 6e4, paths) {
     const raw = [];
     let incomplete = false;
     const maxPages = 30;
@@ -2994,7 +3032,7 @@ var GitHubReader = class {
       if (response.data.length < 100) break;
       if (page === maxPages) incomplete = true;
     }
-    const { files: entries, truncated } = budgetPatches(raw, maxPatchBytes);
+    const { files: entries, truncated } = budgetPatches(raw, maxPatchBytes, paths);
     return { pullNumber, files: entries, truncated: truncated || incomplete };
   }
   /**
@@ -3337,10 +3375,19 @@ function isAssignedToCopilot(wi) {
 }
 var DISPATCH_CONFIRM_WINDOW_MS = 9e4;
 var DECLINE_TITLE_PATTERN = /^\s*no-?op\s*:/i;
+var WIP_TITLE_PATTERN = /^\s*\[wip\]/i;
+function isWorkInProgress(pr) {
+  return WIP_TITLE_PATTERN.test(pr.title);
+}
 var EMPTY_PULL_REQUEST_GRACE_MS = 6e5;
 function withinEmptyPullRequestGrace(pr, now) {
   if (DECLINE_TITLE_PATTERN.test(pr.title)) return false;
   return now.getTime() - pr.createdAt.getTime() < EMPTY_PULL_REQUEST_GRACE_MS;
+}
+var WIP_INACTIVITY_GRACE_MS = 12e5;
+function isAbandonedAttempt(pr, now) {
+  if (!isWorkInProgress(pr)) return false;
+  return now.getTime() - pr.headCommittedAt.getTime() >= WIP_INACTIVITY_GRACE_MS;
 }
 function latestCopilotAssignment(wi) {
   if (wi.copilotAssignments.length === 0) return null;
@@ -3377,6 +3424,8 @@ function deriveState(wi, now) {
       const stillPlausiblyWorking = withinConfirmWindow(wi, now) || withinEmptyPullRequestGrace(current, now);
       return stillPlausiblyWorking ? "in_flight" : "failed";
     }
+    if (isAbandonedAttempt(current, now)) return "failed";
+    if (isWorkInProgress(current)) return "in_flight";
     if (checksSettled(current)) return "for_review";
     return "in_flight";
   }

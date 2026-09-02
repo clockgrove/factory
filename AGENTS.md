@@ -30,6 +30,15 @@ design and should not be reconciled with, second-guessed against, or drifted tow
 - **Verify GitHub/API claims live** against current docs (docs.github.com, agent-plugins.org,
   modelcontextprotocol.io, npm registry) before writing code that depends on them. Never assume a
   mutation/field shape from training data — schemas change.
+- **This applies to *behavioural* claims too, and those are the expensive ones.** A wrong field name
+  is visibly the sort of thing you might misremember; a wrong belief about how GitHub or the coding
+  agent *behaves* does not look like a claim at all, it looks like background knowledge — so it never
+  triggers the instinct to check. "A draft pull request means the author is not finished" was assumed
+  for six gates, is false for the coding agent (it signals completion by renaming away a `[WIP]`
+  title prefix and never clears the draft flag), and a fix built on it was fully typechecked, fully
+  tested and mutation-checked before one GraphQL query showed it would have broken every merge
+  (§10.15). If a design rests on *what something will do* rather than *what shape it returns*, that
+  is the claim to go and measure.
 - **State is derived, never stored.** No sidecar files, counters, or status labels representing
   state a fresh read of GitHub can reconstruct (§1). Labels `factory:objective` /
   `factory:work-item` are structural identity, not state.

@@ -24125,6 +24125,10 @@ var PATH_RULES = [
     reason: (p) => `${p} controls where dependency code is fetched from, so it can redirect installs to an untrusted source`
   }
 ];
+function executionAffectingReason(path) {
+  const rule = PATH_RULES.find((candidate) => candidate.test(path));
+  return rule ? rule.reason(path) : null;
+}
 function assessBlastRadius(input) {
   const blockers = [];
   const repoScopeBlockers = [];
@@ -24141,8 +24145,8 @@ function assessBlastRadius(input) {
   }
   const flagged = [];
   for (const path of input.changedFilePaths) {
-    const rule = PATH_RULES.find((candidate) => candidate.test(path));
-    if (rule) flagged.push(rule.reason(path));
+    const reason = executionAffectingReason(path);
+    if (reason !== null) flagged.push(reason);
   }
   blockers.push(...flagged);
   if (flagged.length === 0 && input.changedFilePaths.length > 0 && !input.truncated) {
@@ -24260,6 +24264,8 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
               body
               mergeable
               createdAt
+              mergedAt
+              closedAt
               additions
               deletions
               changedFiles
@@ -24273,6 +24279,7 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
                 nodes {
                   commit {
                     oid
+                    committedDate
                     statusCheckRollup { state }
                     checkSuites(first: 20) {
                       nodes {
@@ -24343,7 +24350,14 @@ function toPullRequest(pr) {
     checksNeverStarted: checks === "FAILURE" && !commit?.statusCheckRollup?.state,
     mergeable: pr.mergeable,
     createdAt: new Date(pr.createdAt),
-    headSha: commit?.oid ?? ""
+    mergedAt: pr.mergedAt ? new Date(pr.mergedAt) : null,
+    closedAt: pr.closedAt ? new Date(pr.closedAt) : null,
+    headSha: commit?.oid ?? "",
+    // Falling back to the PR's own creation time keeps the field a real Date
+    // even for the (unobserved) case of a pull request with no commits: a
+    // brand-new PR is then trivially "recently active", which errs toward
+    // waiting rather than toward closing something live.
+    headCommittedAt: commit?.committedDate ? new Date(commit.committedDate) : new Date(pr.createdAt)
   };
 }
 function copilotAssignments(wi) {
@@ -24419,9 +24433,15 @@ function interpretContentsResponse(path, body, maxBytes) {
     truncated: clipped
   };
 }
-function budgetPatches(files, maxPatchBytes) {
+function isRequested(path, paths) {
+  return paths.some(
+    (entry) => entry.endsWith("/") ? path.startsWith(entry) : path === entry
+  );
+}
+function budgetPatches(files, maxPatchBytes, paths) {
   let budget = maxPatchBytes;
   let truncated = false;
+  const filtering = paths !== void 0 && paths.length > 0;
   const out = files.map((f) => {
     const base = {
       path: f.filename,
@@ -24429,6 +24449,13 @@ function budgetPatches(files, maxPatchBytes) {
       additions: f.additions,
       deletions: f.deletions
     };
+    if (filtering && !isRequested(f.filename, paths)) {
+      return {
+        ...base,
+        patch: null,
+        patchOmitted: "not requested; add this path to `paths` to read it"
+      };
+    }
     if (f.patch === null || f.patch === void 0) {
       return {
         ...base,
@@ -24485,8 +24512,23 @@ var GitHubReader = class {
    * which is what the bar actually reasons about. GitHub omits `patch` for
    * binary files and for individual files above its own size limit; those come
    * back with `patch: null`, reported honestly rather than silently dropped.
+   *
+   * `paths` restricts which files spend the byte budget (Gate 5, §10.13). The
+   * budget is otherwise first-come-first-served in GitHub's ordering, so one
+   * large file early in the alphabet starves every file after it —
+   * `package-lock.json` consumed a 4000-byte allowance whole and left the three
+   * files under review with `patch: null`. Pass a Work Item's declared `scope`
+   * (the matching rules are the same: a trailing `/` selects a directory) to
+   * spend the whole budget on the files the review is about.
+   *
+   * Filtered-out files are still listed, with `status`, `additions` and
+   * `deletions` intact and `patchOmitted` explaining why — the complete file
+   * list is what the blast-radius review and the scope checks reason about, and
+   * shortening it would misreport the size of the change. For the same reason
+   * `truncated` stays `false` when content is withheld only by `paths`: it means
+   * "content you asked for was cut", and a filtered file was not asked for.
    */
-  async readPullRequestDiff(pullNumber, maxPatchBytes = 6e4) {
+  async readPullRequestDiff(pullNumber, maxPatchBytes = 6e4, paths) {
     const raw = [];
     let incomplete = false;
     const maxPages = 30;
@@ -24505,7 +24547,7 @@ var GitHubReader = class {
       if (response.data.length < 100) break;
       if (page === maxPages) incomplete = true;
     }
-    const { files: entries, truncated } = budgetPatches(raw, maxPatchBytes);
+    const { files: entries, truncated } = budgetPatches(raw, maxPatchBytes, paths);
     return { pullNumber, files: entries, truncated: truncated || incomplete };
   }
   /**
@@ -25004,10 +25046,19 @@ function isAssignedToCopilot(wi) {
 }
 var DISPATCH_CONFIRM_WINDOW_MS = 9e4;
 var DECLINE_TITLE_PATTERN = /^\s*no-?op\s*:/i;
+var WIP_TITLE_PATTERN = /^\s*\[wip\]/i;
+function isWorkInProgress(pr) {
+  return WIP_TITLE_PATTERN.test(pr.title);
+}
 var EMPTY_PULL_REQUEST_GRACE_MS = 6e5;
 function withinEmptyPullRequestGrace(pr, now) {
   if (DECLINE_TITLE_PATTERN.test(pr.title)) return false;
   return now.getTime() - pr.createdAt.getTime() < EMPTY_PULL_REQUEST_GRACE_MS;
+}
+var WIP_INACTIVITY_GRACE_MS = 12e5;
+function isAbandonedAttempt(pr, now) {
+  if (!isWorkInProgress(pr)) return false;
+  return now.getTime() - pr.headCommittedAt.getTime() >= WIP_INACTIVITY_GRACE_MS;
 }
 function latestCopilotAssignment(wi) {
   if (wi.copilotAssignments.length === 0) return null;
@@ -25060,6 +25111,8 @@ function deriveState(wi, now) {
       const stillPlausiblyWorking = withinConfirmWindow(wi, now) || withinEmptyPullRequestGrace(current, now);
       return stillPlausiblyWorking ? "in_flight" : "failed";
     }
+    if (isAbandonedAttempt(current, now)) return "failed";
+    if (isWorkInProgress(current)) return "in_flight";
     if (checksSettled(current)) return "for_review";
     return "in_flight";
   }
@@ -25318,7 +25371,7 @@ var Dispatcher = class {
         wi,
         `${attemptCount(wi)} attempts produced no usable result (${reason})`
       );
-      return;
+      return "escalated";
     }
     const current = currentOpenPullRequest(wi);
     if (current) {
@@ -25329,6 +25382,7 @@ var Dispatcher = class {
     }
     await this.#call(() => this.#writer.clearActors(wi.id));
     await this.#assign(wi.id);
+    return "redispatched";
   }
   /**
    * §6: act on `evaluate.ts`'s mechanical verdict for a Work Item's current
@@ -25342,39 +25396,51 @@ var Dispatcher = class {
       case "ready":
         return await this.#mergeReady(pr);
       case "conflict":
-        await this.#resolveConflict(wi, pr);
-        return { merged: false };
+        return { merged: false, action: await this.#resolveConflict(wi, pr) };
       case "untouched":
-        await this.retryOrEscalate(
-          wi,
-          "the diff did not touch the Work Item's declared file scope"
-        );
-        return { merged: false };
+        return {
+          merged: false,
+          action: await this.retryOrEscalate(
+            wi,
+            "the diff did not touch the Work Item's declared file scope"
+          )
+        };
       case "checks_failed":
-        await this.retryOrEscalate(wi, "required checks failed");
-        return { merged: false };
+        return {
+          merged: false,
+          action: await this.retryOrEscalate(wi, "required checks failed")
+        };
       case "checks_held":
         await this.#escalate(
           wi,
           "CI never ran: GitHub is holding this pull request's workflow runs awaiting a maintainer's 'Approve and run workflows'. No API can release a coding-agent hold (the approve endpoint is fork-only), so Factory cannot clear it and must not merge without CI evidence. Either approve the runs on the pull request, or disable the repository's Copilot Actions workflow-approval requirement so future Work Items are not blocked the same way"
         );
-        return { merged: false };
+        return { merged: false, action: "escalated" };
       case "declined":
-        await this.retryOrEscalate(
+        return {
+          merged: false,
+          action: await this.retryOrEscalate(
+            wi,
+            "the agent declined the task as not actionable"
+          )
+        };
+      case "sensitive_surface":
+        await this.#escalate(
           wi,
-          "the agent declined the task as not actionable"
+          "this pull request is mergeable but changes a security-sensitive surface, which \xA77.3 reserves for a human even when the work looks correct: " + verdict.files.map((f) => f.reason).join("; ") + ". Review the diff and merge it by hand if the change is intended"
         );
-        return { merged: false };
+        return { merged: false, action: "escalated" };
       case "no_op":
-        await this.retryOrEscalate(wi);
-        return { merged: false };
+        return { merged: false, action: await this.retryOrEscalate(wi) };
       case "checks_pending":
-        return { merged: false };
-      // wait for the next cycle; nothing to do yet
+        return { merged: false, action: "waiting" };
+      // nothing to do yet
+      case "in_progress":
+        return { merged: false, action: "waiting" };
       case "mergeability_unknown":
-        return { merged: false };
+        return { merged: false, action: "waiting" };
       case "checks_missing":
-        return { merged: false };
+        return { merged: false, action: "waiting" };
     }
   }
   /**
@@ -25408,9 +25474,9 @@ var Dispatcher = class {
       if (error2 instanceof PlatformUnavailableError) throw error2;
       const deferral = mergeDeferral(error2);
       if (!deferral) throw error2;
-      return { merged: false, deferred: deferral };
+      return { merged: false, deferred: deferral, action: "waiting" };
     }
-    return { merged: true };
+    return { merged: true, action: "merged" };
   }
   /**
    * §6: "attempt rebase; if clean, proceed; if not, close the PR and
@@ -25457,6 +25523,7 @@ var Dispatcher = class {
   async #resolveConflict(wi, pr) {
     try {
       await this.#call(() => this.#writer.updatePullRequestBranch(pr.id));
+      return "rebased";
     } catch (error2) {
       if (error2 instanceof PlatformUnavailableError) throw error2;
       if (attemptAction(wi) === "escalate") {
@@ -25464,7 +25531,7 @@ var Dispatcher = class {
           wi,
           `${attemptCount(wi)} attempts have each ended in a merge conflict that a rebase could not resolve. Per \xA76 a conflict that survives re-dispatch is a graph defect, not a bad attempt: another Work Item is almost certainly editing the same file with no dependency edge between them. Retrying cannot fix that \u2014 the fix is to replan (add the missing edge, or merge the two items) before dispatching this one again.`
         );
-        return;
+        return "escalated";
       }
       await this.#call(
         () => this.#writer.addComment(
@@ -25475,6 +25542,7 @@ var Dispatcher = class {
       await this.#call(() => this.#writer.closePullRequest(pr.id));
       await this.#call(() => this.#writer.clearActors(wi.id));
       await this.#assign(wi.id);
+      return "redispatched";
     }
   }
   /**
@@ -25641,12 +25709,30 @@ function isDeclined(pr) {
 function inScope(path, scope) {
   return scope.endsWith("/") ? path.startsWith(scope) : path === scope;
 }
+function fileListComplete(pr) {
+  return pr.changedFilePaths.length >= pr.changedFiles;
+}
 function isUntouched(pr, expectedFiles) {
   if (!expectedFiles || expectedFiles.length === 0) return false;
   if (isNoOp(pr)) return false;
+  if (!fileListComplete(pr)) return false;
   return !pr.changedFilePaths.some(
     (path) => expectedFiles.some((scope) => inScope(path, scope))
   );
+}
+function outOfScopeFiles(pr, expectedFiles) {
+  if (!expectedFiles || expectedFiles.length === 0) return [];
+  return pr.changedFilePaths.filter(
+    (path) => !expectedFiles.some((scope) => inScope(path, scope))
+  );
+}
+function sensitiveSurfaceFiles(pr) {
+  const found = [];
+  for (const path of pr.changedFilePaths) {
+    const reason = executionAffectingReason(path);
+    if (reason !== null) found.push({ path, reason });
+  }
+  return found;
 }
 function hasConflict(pr) {
   return pr.mergeable === "CONFLICTING";
@@ -25654,6 +25740,7 @@ function hasConflict(pr) {
 function evaluateMechanical(pr, expectedFiles, ciExpected = false) {
   if (isDeclined(pr)) return { kind: "declined" };
   if (isNoOp(pr)) return { kind: "no_op" };
+  if (isWorkInProgress(pr)) return { kind: "in_progress" };
   if (isUntouched(pr, expectedFiles)) {
     return { kind: "untouched", touchedFiles: pr.changedFilePaths };
   }
@@ -25663,7 +25750,13 @@ function evaluateMechanical(pr, expectedFiles, ciExpected = false) {
   if (pr.checks === "FAILURE") return { kind: "checks_failed" };
   if (pr.checks === null && ciExpected !== false) return { kind: "checks_missing" };
   if (pr.mergeable === "UNKNOWN") return { kind: "mergeability_unknown" };
-  return { kind: "ready" };
+  const sensitive = sensitiveSurfaceFiles(pr);
+  if (sensitive.length > 0) return { kind: "sensitive_surface", files: sensitive };
+  return {
+    kind: "ready",
+    outOfScopeFiles: outOfScopeFiles(pr, expectedFiles),
+    fileListComplete: fileListComplete(pr)
+  };
 }
 
 // src/graph.ts
@@ -25896,7 +25989,13 @@ function findWorkItem(objective, workItemNumber) {
   return item;
 }
 function serializePr(pr, minimal = false) {
-  const base = { ...pr, createdAt: pr.createdAt.toISOString() };
+  const base = {
+    ...pr,
+    createdAt: pr.createdAt.toISOString(),
+    headCommittedAt: pr.headCommittedAt.toISOString(),
+    mergedAt: pr.mergedAt ? pr.mergedAt.toISOString() : null,
+    closedAt: pr.closedAt ? pr.closedAt.toISOString() : null
+  };
   if (!minimal) return base;
   const { body: _body, ...rest } = base;
   return { ...rest, bodyLength: pr.body.length };
@@ -26001,7 +26100,7 @@ server.registerTool(
   "read_objective",
   {
     title: "Read Objective",
-    description: "Read one GitHub Objective issue and every Work Item sub-issue beneath it, and derive each one's state (\xA71, \xA73.2). This is the one-snapshot-per-cycle read (\xA74.1) \u2014 call it once at the start of a cycle, then act on its `items[].number` via the other tools. The returned `objective.title`/`objective.body` are the human's stated intent, verbatim, for the compile-if-needed step (skills/objective-compilation) \u2014 never invent scope beyond them. Also reports whether the platform circuit breaker has tripped enough times to need a human (\xA77.3) via `platformExhausted`.",
+    description: "Read one GitHub Objective issue and every Work Item sub-issue beneath it, and derive each one's state (\xA71, \xA73.2). This is the one-snapshot-per-cycle read (\xA74.1) \u2014 call it once at the start of a cycle, then act on its `items[].number` via the other tools. The returned `objective.title`/`objective.body` are the human's stated intent, verbatim, for the compile-if-needed step (skills/objective-compilation) \u2014 never invent scope beyond them. Also reports whether the platform circuit breaker has tripped enough times to need a human (\xA77.3) via `platformExhausted`. Two item-level fields are worth knowing before you need them. `doneWithoutMergedPullRequest` is true when a Work Item is closed but no pull request linked to it was ever merged \u2014 the signature of an item closed by hand, or closed by an agent that decided the work was unnecessary, rather than one Factory integrated. It is an observation, not a decision: nothing acts on it, and it exists so that 'done' is never taken at face value. Each linked pull request also carries `mergedAt` and `closedAt` (ISO 8601, or null), which make ordering reconstructable after the fact \u2014 for instance whether a dependent item was dispatched only after its dependency actually merged.",
     inputSchema: {
       ...RepoShape,
       number: external_exports.number().int().positive().describe("Objective issue number"),
@@ -26038,7 +26137,7 @@ server.registerTool(
   "evaluate_mechanical",
   {
     title: "Evaluate mechanical checks",
-    description: "Run \xA75.1's cheap, deterministic checks against a Work Item's current open pull request: no-op, declined, untouched scope, merge conflict, checks pending/failed, or ready. Pure and read-only \u2014 call this before `dispatch_integrate` to see the verdict it would act on, or on its own to inspect a Work Item without taking any action.",
+    description: "Run \xA75.1's cheap, deterministic checks against a Work Item's current open pull request: no-op, declined, untouched scope, merge conflict, checks pending/failed, sensitive surface, in progress, or ready. Pure and read-only \u2014 call this before `dispatch_integrate` to see the verdict it would act on, or on its own to inspect a Work Item without taking any action. Two fields on a `ready` verdict still need your judgment (Gate 5, \xA710.12). `outOfScopeFiles` lists changed paths the Work Item never declared: the scope check only fails when *nothing* in scope was touched, so a pull request that does its job **and** edits whatever else it likes is still `ready`. That is deliberate \u2014 extra files are often legitimate (updating a test the change broke) \u2014 but it is yours to confirm via `read_pull_request_diff`, not to assume. `fileListComplete: false` means the pull request changed more than 100 files, so `outOfScopeFiles` is a lower bound and the scope checks saw only part of the diff. A `sensitive_surface` verdict means the diff is mergeable but touches something that redefines what CI runs or what it can reach (workflows, actions, dependency manifests and lockfiles, registry config). \xA77.3 reserves those for a human regardless of declared scope, so `dispatch_integrate` escalates rather than retrying \u2014 the work is not wrong, it is just not Factory's to merge unattended. An `in_progress` verdict means the coding agent still has the pull request titled `[WIP]`, so it is not finished and nothing here should act on it \u2014 not merge it, and equally not close or rebase it. Checked ahead of scope, conflict and check verdicts on purpose: a half-pushed change legitimately touches nothing in scope yet and legitimately fails its own tests, and those verdicts close the pull request (\xA710.15). Wait for the agent to rename it. Note the signal is the title prefix, not the draft flag: the agent opens every pull request as a draft and never clears it, so draftness means nothing here.",
     inputSchema: {
       ...WorkItemLocatorShape,
       expectedFiles: external_exports.array(external_exports.string()).optional().describe("The Work Item's declared file scope (\xA78); omit to skip the untouched-scope check")
@@ -26070,10 +26169,13 @@ server.registerTool(
   "read_pull_request_diff",
   {
     title: "Read pull request diff",
-    description: "Read the actual patch text of a Work Item's pull request, per file. This is what makes the *semantic* half of \xA77.3's confidence bar performable \u2014 'the diff satisfies the Work Item's acceptance criteria and nothing more' is a judgment about content, which `evaluate_mechanical` deliberately does not make (\xA75.1 is mechanical only) and which `read_objective` cannot support, since it reports `changedFilePaths` but no content. Call this before `dispatch_integrate` on any Work Item whose acceptance criteria say something about what the code *does* (e.g. 'must import and actually call X rather than reimplement it') \u2014 a criterion you cannot check from file paths alone must not be waved through on the agent's own say-so (\xA715.7). Read-only. Patches are capped by `maxPatchBytes`; `truncated` reports whether anything was shortened or withheld, so a partial read is never mistaken for a complete one.",
+    description: "Read the actual patch text of a Work Item's pull request, per file. This is what makes the *semantic* half of \xA77.3's confidence bar performable \u2014 'the diff satisfies the Work Item's acceptance criteria and nothing more' is a judgment about content, which `evaluate_mechanical` deliberately does not make (\xA75.1 is mechanical only) and which `read_objective` cannot support, since it reports `changedFilePaths` but no content. Call this before `dispatch_integrate` on any Work Item whose acceptance criteria say something about what the code *does* (e.g. 'must import and actually call X rather than reimplement it') \u2014 a criterion you cannot check from file paths alone must not be waved through on the agent's own say-so (\xA715.7). Read-only. Patches are capped by `maxPatchBytes`; `truncated` reports whether anything was shortened or withheld, so a partial read is never mistaken for a complete one. Pass `paths` to spend that budget only on the files you are reviewing \u2014 usually the Work Item's declared `scope`, plus anything `evaluate_mechanical` reported in `outOfScopeFiles`. Without it the budget is first-come-first-served in GitHub's own ordering, so one big file early in the alphabet starves the rest: Gate 5 asked for 4000 bytes on a pull request containing `package-lock.json` and got the lockfile plus `patch: null` for all three files it actually needed to review (\xA710.13). Filtered files are still listed with their `status`/`additions`/`deletions`, so the file list stays complete and you can still see *that* something changed even when you chose not to read it.",
     inputSchema: {
       ...RepoShape,
       pullNumber: external_exports.number().int().positive().describe("Pull request number to read"),
+      paths: external_exports.array(external_exports.string()).optional().describe(
+        "Only spend the patch budget on these paths; an entry ending in `/` selects a directory. Other files are still listed, but without patch text. Omit to read every file in GitHub's order until the budget runs out."
+      ),
       maxPatchBytes: external_exports.number().int().positive().optional().describe(
         "Total patch-text budget across all files (default 60000). Lower it on large Objectives where per-cycle context is scarce; raise it to inspect one big file."
       )
@@ -26084,10 +26186,11 @@ server.registerTool(
       owner,
       repo,
       pullNumber,
-      maxPatchBytes
+      maxPatchBytes,
+      paths
     }) => {
       const reader = readerFor(owner, repo);
-      return await reader.readPullRequestDiff(pullNumber, maxPatchBytes);
+      return await reader.readPullRequestDiff(pullNumber, maxPatchBytes, paths);
     }
   )
 );
@@ -26211,7 +26314,7 @@ server.registerTool(
   "dispatch_retry_or_escalate",
   {
     title: "Dispatch: retry or escalate",
-    description: "\xA74.4/\xA75.1: act on a `failed` Work Item \u2014 close its unusable PR and retry, or escalate to a human once attempts are exhausted (3 linked PRs). A no-op on a Work Item that is not currently `failed`.",
+    description: "\xA74.4/\xA75.1: act on a `failed` Work Item \u2014 close its unusable PR and retry, or escalate to a human once attempts are exhausted (3 linked PRs). A no-op on a Work Item that is not currently `failed`. Returns `action`: `redispatched` (PR closed, Copilot reassigned), `escalated` (attempts exhausted, handed to a human), or `no-op`. This is the branch that actually fired, not a prediction \u2014 same vocabulary as `dispatch_integrate`'s `action`.",
     inputSchema: {
       ...WorkItemLocatorShape,
       ...EscalateToShape,
@@ -26236,14 +26339,9 @@ server.registerTool(
           reason: `Work Item #${workItemNumber} is '${item.state}', not 'failed'`
         };
       }
-      const decision = attemptAction(item);
       const dispatcher = await dispatcherFor(owner, repo, objective, escalateTo, reader);
-      if (reason) {
-        await dispatcher.retryOrEscalate(item, reason);
-      } else {
-        await dispatcher.retryOrEscalate(item);
-      }
-      return { action: decision, workItem: workItemNumber };
+      const action = reason ? await dispatcher.retryOrEscalate(item, reason) : await dispatcher.retryOrEscalate(item);
+      return { action, workItem: workItemNumber };
     }
   )
 );
@@ -26251,7 +26349,7 @@ server.registerTool(
   "dispatch_integrate",
   {
     title: "Dispatch: integrate",
-    description: "\xA76: act on a `for_review` Work Item's mechanical verdict (\xA75.1) \u2014 merge if ready, attempt a rebase or close-and-redispatch on conflict, or close-and-retry on untouched scope/failed checks. Runs `evaluate_mechanical` internally; call that tool first if you only want to see the verdict without acting on it. A no-op on a Work Item that is not currently `for_review`.",
+    description: "\xA76: act on a `for_review` Work Item's mechanical verdict (\xA75.1) \u2014 merge if ready, attempt a rebase or close-and-redispatch on conflict, or close-and-retry on untouched scope/failed checks. Escalates rather than retries on `sensitive_surface`: a mergeable diff that touches workflows, actions, dependency manifests or registry config is correct work that \xA77.3 still reserves for a human, and re-dispatching it would only produce the same diff again. Runs `evaluate_mechanical` internally; call that tool first if you only want to see the verdict without acting on it \u2014 in particular to see `outOfScopeFiles` on a `ready` verdict, which this tool merges straight through. A no-op on a Work Item that is not currently `for_review`.",
     inputSchema: {
       ...WorkItemLocatorShape,
       ...EscalateToShape,

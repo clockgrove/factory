@@ -213,10 +213,30 @@ declined     PR body states the task is not actionable
 untouched    diff does not touch any file the Work Item names
 checks       required checks concluded
 conflict     PR not mergeable against base
+sensitive    diff changes what CI runs or what it can reach
 ```
 
 A no-op or a decline is a **failed attempt**, not a result. Critically, `[WIP]` titles are *not* a
 signal — PROBE-001 saw `[WIP]` on both genuine work and empty failures.
+
+`untouched` is a deliberately weak check: it fires only when the diff touches *nothing* the Work
+Item declared, because it routes to close-and-retry and a false positive there destroys correct
+work. The consequence is that it says nothing about extra files, so `evaluateMechanical` reports
+them separately as `outOfScopeFiles` on the `ready` verdict — evidence for §5.2's semantic review
+rather than a failing verdict, since scope creep is frequently legitimate (a Work Item correctly
+updating a test its change broke). See §10.12.
+
+`sensitive` is the exception that does block, because §7.3 makes CI configuration and dependency
+sources an unconditional bar on autonomy. It escalates rather than retrying — the work is usually
+correct, so a replacement pull request would carry the same diff — and it ignores the declared
+scope on purpose: scope is written by the compiler, so honouring it here would let the safety
+property certify itself. It shares its path rules with the CI blast-radius review (`approval.ts`),
+which asks the same question about the same paths.
+
+Every scope judgment additionally requires the *whole* file list. GraphQL returns `files(first:
+100)` beside an authoritative `changedFiles`, so a large pull request arrives partial; `untouched`
+declines to fire on a partial list (it cannot prove a negative from page 1), and the `ready` verdict
+carries `fileListComplete` so a caller knows whether `outOfScopeFiles` is exhaustive.
 
 ### 5.2 Semantic check (skill)
 
@@ -1054,7 +1074,444 @@ pagination worry (`closedByPullRequestsReferences(first: 20)`) needs a Work Item
 linked pull requests, against a three-attempt cap plus a few conflict re-dispatches. Declined on both
 counts; recorded here so it is not relitigated.
 
-## 10.12 v1 release readiness
+## 10.12 Scope creep was invisible, and the check that should have caught it could not
+
+Gate 5's session reported it as an aside, after the conflict-path result it was actually run to
+test. Both replacement pull requests on `factory-gate2` added **`package-lock.json` (+1454/−0)** —
+a file no Work Item declared. Every mechanical check passed. The Director merged one anyway, flagged
+the override honestly, and named the cause exactly:
+
+> `isUntouched()` in `evaluate.ts` is `!changedFilePaths.some(inScope)` — it fires only when **no**
+> declared file is touched. A PR that touches its whole declared scope **plus** arbitrary extra
+> files passes every mechanical check.
+
+That is right, and §7.3 had been claiming otherwise the whole time: "mechanical checks pass (§5.1):
+real diff, **declared scope respected**, checks green, mergeable". Scope was never respected, only
+*visited*. Six gates ran against that gap.
+
+**The fix is deliberately asymmetric**, because the two halves of it fail in opposite directions:
+
+- **Ordinary extra files are reported, not enforced.** `outOfScopeFiles` rides on the `ready`
+  verdict and feeds §5.2. Blocking them would have been wrong twice over on evidence already in
+  hand: Gate 3's Work Item correctly updated a test outside its scope rather than leaving it broken,
+  and `untouched` — the one scope verdict that *does* block — routes to close-and-retry, so a false
+  positive does not stall work, it deletes it.
+- **Files that redefine what CI runs do block**, as `sensitive_surface`, and escalate rather than
+  retry. Retrying would close correct work and produce an identical diff. This ignores the declared
+  scope on purpose: scope is authored by the compiler, itself a model reading an issue body, so a
+  Work Item that declared `.github/workflows/ci.yml` would otherwise have bought an autonomous merge
+  of it — the F5 self-certifying shape again. The rules are shared with `approval.ts` rather than
+  copied, since "can this diff change what CI executes" is the same question the blast-radius review
+  already answers before approving a held run.
+
+Two things fell out of writing it that were not in the report:
+
+- **`isUntouched` could fire on a partial file list.** The GraphQL selection asks for `files(first:
+  100)` while `changedFiles` carries the true total, so a pull request touching more than 100 files
+  arrives with a silently partial list — and a verdict that closes pull requests was reading it as
+  proof that nothing in scope was touched. The in-scope file may simply have sorted onto page 2. It
+  now declines to fire, and `ready` carries `fileListComplete` so `outOfScopeFiles` is never
+  mistaken for exhaustive.
+- **The test fixture had been asserting the bug.** `pr()` in `test/evaluate.test.ts` set
+  `changedFiles: 2` beside a single path — internally inconsistent, and harmless only because
+  nothing compared the two. The builder now derives the count from the paths unless a test is
+  deliberately exercising a partial list.
+
+Four tests fail when either new guard is reverted, so they are load-bearing rather than decorative.
+
+The general lesson is about where the finding came from. This was not caught by a reviewer reading
+the code, and not by any of the six gates that ran through this function — it was caught by an agent
+being *told to do something else* and noticing that a rule it had just tripped could not have been
+enforced. Gate 5's mandate was the conflict path; this arrived in the margin. Worth remembering when
+deciding whether a rehearsal that "passed" produced its full value.
+
+## 10.13 Two ways the tool surface lied by omission
+
+Gate 5's other two margin findings. Neither is a wrong answer; both are *absent* answers, which is
+harder to notice because nothing looks broken.
+
+### The diff budget was first-come-first-served, so generated files starved the review
+
+A replacement pull request added `package-lock.json` (+1454/−0). It sorts first alphabetically, so
+`budgetPatches` spent the entire allowance on it and returned `patch: null` for the three files
+actually under review. At `maxPatchBytes: 4000` the reviewer saw the lockfile and nothing else; at
+60000 the result was 53 KB and had to be written to a temp file and grepped.
+
+Generalise it and it is worse than one awkward pull request: **on any diff containing a lockfile, a
+generated file or a vendored bundle, the files a reviewer most needs are exactly the ones withheld**,
+and they are withheld silently — `patch: null` with a budget message reads like an incidental
+truncation, not like the review being blinded. §7.3's semantic bar ("the diff satisfies the
+acceptance criteria and nothing more") is unperformable in that state, which is the same failure
+§10.2's F1 was supposed to have closed.
+
+`readPullRequestDiff` / `read_pull_request_diff` now take an optional `paths`, matching Work Item
+`scope` semantics exactly (a trailing `/` selects a directory, anything else is an exact match) so a
+Director can pass a Work Item's declared scope straight through. Three properties are deliberate:
+
+- **Unrequested files spend no budget.** That is the entire fix; everything else is about not
+  breaking something while applying it.
+- **Unrequested files are still listed**, with `status`/`additions`/`deletions` intact. The
+  blast-radius review and the §5.1 scope checks reason about the *complete* file list — dropping
+  entries would tell them the pull request is smaller than it is, which is how the scope-creep bug in
+  §10.12 was possible in the first place. Filtering patch text is safe; filtering the list is not.
+- **A `paths` filter does not set `truncated`.** `truncated` means "content you asked for was cut"
+  and drives the decision to re-read with a bigger budget. Setting it on a deliberate filter would
+  make every targeted read look incomplete.
+
+An empty `paths` array means *no filter*, not *nothing*: a caller that computed an empty scope gets
+the whole diff rather than an all-`null` one it might read as "this pull request changes nothing".
+
+### `dispatch_integrate` reported the verdict but never the branch it took
+
+On a conflict the tool returned `{"verdict":{"kind":"conflict"},"merged":false}` — identical for all
+three §6 branches: rebase succeeded, closed-and-redispatched, or escalated. Gate 5 could only tell
+them apart by diffing the *next* `read_objective` for pull request state and assignment counts.
+
+This matters because of what that gate was sent to look for. The suspected bug was a rebase that
+succeeds without resolving anything, looping forever — and **a repeated successful rebase is exactly
+the case that leaves no trace in the next snapshot**: no PR closed, no attempt consumed, no new
+assignment. The one outcome the result most needed to distinguish was the one it could not. Gate 5
+observed 3/3 conflicts throwing, and reasonably inferred the loop may be unreachable for a genuine
+content conflict, but it never once exercised the success path, so the inference stands untested.
+
+`IntegrateOutcome` now carries `action`: `merged`, `rebased`, `redispatched`, `escalated` or
+`waiting`. A rebase loop is now visible as repeated `rebased` on one Work Item.
+
+`dispatch_retry_or_escalate` had a quieter version of the same defect, found while fixing this one:
+it computed `attemptAction(item)` itself and returned *that* as `action`, so the caller was told a
+prediction rather than an observation. The two agree today only because `retryOrEscalate` recomputes
+the same predicate. It now returns what actually happened, in the same vocabulary.
+
+The shared lesson: a tool that reports *what it decided* rather than *what it did* is untestable
+from the outside, and the gap only becomes visible when someone is hunting a bug whose signature is
+"nothing changed".
+
+## 10.14 Factory was merging the agent's unfinished work, and had been all along
+
+Gate 6's phase B ran a two-item dependency chain in `factory-gate2` (Objective #32). It passed
+cleanly — but it noted, as an aside it was not sent to look for, that `dispatch_integrate` had
+merged pull request #36 while the snapshot still showed `isDraft: true` and the title still read
+`[WIP]`, and that it could not tell from tool output whether Factory had un-drafted it or the agent
+had flipped it in the gap.
+
+Factory had un-drafted it. `#mergeReady` opened with `if (pr.isDraft) await markPullRequestReady(…)`,
+and `derive()` never consulted `isDraft` at all, so a draft pull request reached `for_review` and
+`ready` like any other.
+
+The evidence is on `main` and is not ambiguous. A squash merge's commit subject preserves the pull
+request title *at the moment of merge*, and two of them read:
+
+```
+[WIP] Add slugFromText composed from summarizeText and slugify (#36)
+[WIP] Add collapseWhitespace transform and export from barrel (#26)
+```
+
+Two gates, two runs, two merges of work the coding agent had not declared finished — after which the
+agent renamed both pull requests, which is why they read clean in the API today and why nothing
+noticed.
+
+The timeline API makes it exact. For #36:
+
+| time | event | actor |
+|---|---|---|
+| 17:40:15 | pull request opened, `[WIP] Add slugFromText composed from…` | `copilot-swe-agent` |
+| 17:41:41 | head commit | `copilot-swe-agent` |
+| 17:43:35 | `ReadyForReviewEvent` | **Factory's token** |
+| 17:43:38 | `MergedEvent` | **Factory's token** |
+| 17:45:16 | `RenamedTitleEvent` dropping `[WIP]` | `copilot-swe-agent` |
+
+Factory un-drafted and merged three seconds apart, and the agent announced completion **98 seconds
+after the merge**. `factory-gate3` #7 and `factory-gate2` #26 show the same ordering. Three of the
+nine coding-agent merges measured across the fixtures landed before the agent said it was done.
+
+Six gates missed this because fixture Work Items are small enough that the agent usually finishes
+before the next poll, so "merge now" and "merge the finished work" nearly always coincide. They stop
+coinciding the moment a change arrives in pieces — source file first, tests second — which is the
+normal shape of anything real. There the failure is silent and complete: Factory merges the half,
+marks the Work Item `done`, and the Objective closes reporting success.
+
+**The first fix was wrong, and §10.15 records why.** It read the draft flag as the agent's voice.
+The agent does not speak through it.
+
+## 10.15 The completion signal is `[WIP]`, not the draft flag
+
+The obvious reading of §10.14 is "a draft is the agent saying it has not finished, so don't merge
+drafts." That was the first fix: a `draft` verdict, plus removing `#mergeReady`'s un-draft call.
+
+**It would have stalled every Work Item permanently.** Measured live before shipping it, across
+every coding-agent pull request in `factory-gate2` (12/12) and `factory-gate3`:
+
+- The agent opens each pull request as a **draft** titled `[WIP] <title>`.
+- When it finishes it emits a `RenamedTitleEvent` dropping the `[WIP]` prefix.
+- **It never clears the draft flag.** Every `ReadyForReviewEvent` in every fixture repository was
+  Factory's own token. `factory-gate3` #16 sits finished — renamed by the agent — and still
+  `isDraft: true` hours later, because Factory never merged it.
+
+So draftness is not a completion signal at all: it is the state every coding-agent pull request is
+born in and dies in. Waiting on it waits for an event that never arrives. Removing the un-draft call
+was worse than useless — GitHub refuses to merge a draft, so it would have broken *every* merge.
+
+The signal Factory can actually use is the `[WIP]` title prefix, and the corrected fix is:
+
+- **`evaluate.ts` returns `in_progress`** when the title still starts with `[WIP]`, in the same slot
+  the `draft` verdict occupied. The placement argument from §10.14 is unchanged and is still the
+  interesting half: it sits *after* `declined`/`no_op` so a dead or refusing agent still retries on
+  its existing bounded schedule, and *before* `untouched`/`conflict`/`checks_failed` because **a
+  half-written pull request legitimately looks broken to every one of those** — it touches nothing in
+  scope yet because the source file is still coming, or fails its own tests because they are written
+  against code that does not exist yet — and each of those verdicts closes or rebases the pull
+  request. Judging work in progress does not merely merge it too early, it *deletes* it out from
+  under a running session.
+- **`deriveState` returns `in_flight`** for the same condition, so the integrator is never handed a
+  half-written change in the first place.
+- **`#mergeReady` keeps un-drafting.** It is required, not optional, and it is safe precisely because
+  the completion signal is now the prefix rather than the flag: nothing unfinished reaches it.
+- **Absence of the prefix means finished.** A pull request that never used the convention is judged
+  on its diff exactly as before, rather than waiting forever for a rename that was never coming.
+
+**And the wait is bounded, which the draft version was not.** Once Factory waits on unfinished work,
+an agent that pushes a partial commit and then dies leaves a pull request that is neither empty (so
+`EMPTY_PULL_REQUEST_GRACE_MS` never fires) nor ever finished: no merge, no retry, no escalation, and
+no human told. A silent stall is worse than a loud escalation. `deriveState` now derives `failed` for
+a pull request still marked `[WIP]` whose head commit is older than `WIP_INACTIVITY_GRACE_MS`, which
+routes into the existing retry path rather than inventing a fourth outcome for the same fact.
+
+That window is measured from the **head commit**, not from the pull request's creation, and the
+distinction is load-bearing. Age alone reproduces the §10.5 F3 false negative: a real Work Item can
+legitimately take longer to write than any age bound short enough to be useful, and judging it early
+closes live work. Inactivity is the honest signal — an agent that is still working pushes, and one
+that has died does not. Twenty minutes is deliberately generous because the two errors are not
+symmetric: judging early destroys a live session's work, judging late delays a human by minutes.
+
+`headCommittedAt` comes from the head commit's `committedDate`, on the `commits(last: 1)` node the
+query already fetched for `oid` — no extra request. Deliberately not the pull request's `updatedAt`,
+which comments, labels and **Factory's own §6 comments** all refresh, so a dead attempt would look
+alive forever. Also not `pushedDate`: verified live, it returns `null`.
+
+Four mutations, four failures: dropping the `in_progress` verdict fails 5 tests, dropping the
+inactivity bound fails 2, dropping the `in_flight` derivation fails 1, and removing the un-draft call
+fails 1.
+
+**The fix was then validated against evidence collected before anyone knew the prefix mattered.**
+Gate 6 had recorded a PR title in every `read_objective` snapshot of its run, for unrelated reasons.
+Replaying the `[WIP]` rule against those snapshots is a clean natural experiment, because nothing
+about how they were gathered was shaped by the hypothesis they now test:
+
+| snapshot | PR | title as recorded | rule says | what happened |
+|---|---|---|---|---|
+| 17:35:47 | #35 | `[WIP] Add summarizeText composed from…` | `in_progress` | held (0 files) |
+| 17:39:07 | #35 | `Add summarizeText utility composing …` | finished → merge | merged ✅ |
+| 17:43:14 | #36 | `[WIP] Add slugFromText composed from…` | `in_progress` → hold | **merged** ❌ |
+| 17:45:16 | #36 | agent renames | finished → merge | — |
+
+The rule reproduces the one correct merge, catches the one premature merge, and produces **no false
+holds**. #35's prefix disappeared between 17:35:47 and 17:39:07, exactly spanning the agent
+finishing — independent confirmation that the rename tracks completion, from snapshots that were not
+looking for it. The measured cost of the hold: #36 would have merged on the next cycle after
+17:45:16, about two minutes later on a three-minute loop. No stall, no extra attempt.
+
+**The same snapshots rule out the obvious alternative signal.** "Has a diff yet" is not completion:
+#35 read `changedFiles: 0` while `[WIP]` and `3` after the rename, but **#36 read `changedFiles: 3`
+while still `[WIP]`** — its full three files were on disk 92 seconds before the agent considered
+itself done. Anything keyed on diff presence merges #36 exactly as Factory did. Of the three
+candidate signals — draft flag, diff presence, title prefix — only the prefix separates those two
+cases, which is why the fix is keyed on it rather than on the more natural-looking alternatives.
+
+**Why six gates missed it: the live API rewrites the evidence.** Re-reading PR #36 after the fact,
+Gate 6 found `title: "Add \`slugFromText\` as summarized slug composition"` and `isDraft: false` —
+a clean, finished-looking pull request. At the moment Factory evaluated and merged it, the same
+fields read `[WIP] Add slugFromText composed from summarizeText and slugify`, and its body was 463
+bytes against 931 today. **The agent renamed the pull request and roughly doubled its body after
+Factory had already merged it** — the "arrives in pieces" failure caught in the act on the run
+itself, rather than reasoned about from a squash subject.
+
+The general point is worth more than the instance. **A pull request's `title`, `body` and `isDraft`
+are mutable, and reading them later tells you what is true now, not what Factory decided on.** Every
+gate that audited its own run after finishing was therefore looking at evidence the agent had since
+overwritten, which is why a bug present since the first gate survived six of them plus a green test
+suite. The one artifact that *did* survive is the squash commit subject on `main`, because Factory
+merges with the title as it stood at merge time — which is how the `[WIP]` prefixes were found at
+all. That makes git history, not the API, the authoritative record of what Factory acted on, and it
+is the reason no merge-time audit comment is being added here: the record already exists, costs no
+write, and cannot be edited by the agent afterwards.
+
+If the body was still growing, nothing guaranteed the code was not.
+
+**The lesson is the repo's own rule paying for itself, and it needs widening.** The first fix was
+internally coherent, fully tested, mutation-checked, and would have broken Factory completely the
+first time it ran. What caught it was refusing to ship a behavioural claim about GitHub without
+measuring it — and the measurement took one query.
+
+The widening: the standing rule about verifying platform claims live has always read as being about
+**schemas** — field names, mutation shapes, response envelopes — because those are visibly things
+one might misremember. This was a **behavioural** claim, and behavioural claims are the expensive
+ones precisely because they do not look like claims. "A draft pull request means the author is not
+finished" never presented itself as an assumption requiring verification; it presented itself as
+background knowledge about how GitHub is used. It was wrong for this one agent, which uses the
+title instead, and nothing about its phrasing would ever have flagged it for checking. Both sides of
+this exchange made the same error from opposite directions — one inferring that *something* must
+have un-drafted a merged PR, one inferring that draftness was the agent's voice — and both were
+reasoning correctly from an unmeasured assumption about platform behaviour.
+
+**The test fixture had been asserting the bug, again.** `pr()` in `test/evaluate.test.ts` defaulted
+to `isDraft: true`, so every test asserting `ready` was quietly asserting that Factory merges drafts;
+and `test/dispatch.test.ts` carried a test named *"marks a draft PR ready before merging"* that
+pinned the un-drafting as intended behaviour. This is the second time in two findings (§10.12 was
+`changedFiles: 2` beside one path) that the fixture encoded the defect and the suite passed happily
+around it. A fixture default is a claim about what normal looks like, and a wrong one buys agreement
+from every test that touches it.
+
+**So the remaining fixture defaults were audited deliberately rather than waiting for a third
+instance. Nothing further was found**, and the negative result is worth recording so the audit is
+not repeated from scratch. Every default across the four builders is either measured reality, a
+neutral empty value, or explicitly pinned by a test that names it:
+
+- `state.test.ts`'s `pr()` keeps `isDraft: true`, which is now the *measured* normal — the agent
+  never clears the flag — and `headCommittedAt`, `mergedAt`, `closedAt` each carry a comment saying
+  why their default is what it is.
+- `wi()`'s `labels: []` is inert: no derivation reads `labels`; it exists only to be reported.
+- `objective()`'s `ciExpectedOnPullRequests: false` is the one that *looks* like the same trap, since
+  `false` suppresses the missing-checks block. It is not: `evaluate.test.ts` exercises all three
+  states explicitly — `true`, `false` and `"unknown"` — and the parameter default is pinned by a test
+  named *"defaults to the pre-Gate-3 behaviour when ciExpected is omitted"*, which is the opposite of
+  an unexamined claim.
+- `dispatch.test.ts`'s `pr()` describes a freshly opened attempt (`Initial plan`, `PENDING`, no
+  files), which is exactly what that file tests against.
+
+The distinguishing property is worth stating, because it is the cheap thing to check next time: **a
+dangerous default is one no test ever names.** Both defects were defaults that every test relied on
+and none asserted; the survivors are defaults that at least one test exists specifically to pin.
+
+Two smaller notes from the same report, both already closed in `8fbad6a` before it arrived — it was
+running an older build:
+
+- `interpretContentsResponse` reported a directory as `truncated: true`, conflating "refused" with
+  "there is more of it", so a caller that retries on truncation would loop forever on a path that
+  will never yield file content.
+- `read_objective` exposed no labels, leaving `graph_apply`'s `labelled: true` as self-report that
+  nothing on the tool surface could contradict — the §15.7 shape exactly.
+
+And one non-defect worth recording because it will mislead again: **`dispatch_start` appears to
+assign the escalation human alongside Copilot, and Factory does not do it.** `assignCopilot` sends a
+single `replaceActorsForAssignable` with `actorIds: [botId]`; the issue timeline shows GitHub adding
+the requesting user about a second later. Derivation is unaffected (escalation is Copilot's
+*absence*, and `assignHumanOnly` replaces all actors), but "who is assigned" is a tempting and wrong
+signal for a human auditing the repository from outside.
+
+## 10.16 A Director could not reconstruct its own history
+
+Gate 5's closing finding, and the one that cost real work before it was reported: **the tool surface
+exposed no merge or close timestamp anywhere.** Pull requests carried `createdAt` and nothing else.
+
+The consequence is narrow and sharp. Ordering questions of the form *"was this Work Item dispatched
+only after its dependency merged?"* — the question that decides whether a `dependsOn` edge did
+anything at all — were **literally unanswerable after the fact from inside Factory**. Gate 5 tried
+anyway, reconstructing from diff *context* lines (an `export` line appearing as unchanged context
+proves the merge base already contained it) and from assignment gaps: 4m36s between two dependent
+items against 8s between three independent ones.
+
+**That reconstruction did not settle the question, and its own author retracted it.** Diff context
+proves only what the *merge base* contained; a rebase produces identical evidence. Assignment gaps
+are consistent with a gated dispatch and equally consistent with a lucky one. So the honest verdict
+on "did the edge gate anything?" is *not established* — which is a stronger argument for the fix
+than a right answer arrived at the hard way would have been. When the timestamps are missing, even
+careful forensics on end-state artifacts cannot distinguish a mechanism from a coincidence. The only
+firsthand evidence for sequencing remains a direct base-SHA comparison made while the run was live.
+
+It is not a hypothetical cost. Diagnosing §10.15 required knowing that Factory merged PR #36 at
+17:43:38 and the agent renamed it at 17:45:16 — a 98-second ordering that is the entire finding.
+Factory could not supply either timestamp about its own action, so the diagnosis went around Factory
+to raw GraphQL. **A system whose central design claim is that state is derived from GitHub should not
+have to be bypassed to answer a question about what it did.**
+
+`mergedAt` and `closedAt` are now on every linked pull request. Both are recorded rather than one
+"finished at", because a closed-unmerged PR is the signature of an abandoned or superseded attempt
+and collapsing the two would make it indistinguishable from an integration.
+
+That is measured, not hypothetical. Gate 5's conflict run produced six pull requests for three Work
+Items, of which **three (#27, #28, #30) were closed unmerged** by the §6 conflict path. A single
+"finished at" timestamp would have rendered that run as six integrations — erasing the entire
+conflict-and-recovery story the gate existed to produce, in the one repository where it has ever
+been observed.
+
+**No derivation reads either field, and that is the point of note.** §1 says state is derived from
+the present, and neither timestamp changes any decision — Factory looks at what *is*, not at when it
+became so. They exist for the observer: for a Director reconstructing a cycle, and for a human
+auditing a repository after everyone has stopped running. That also makes them the kind of field
+that rots silently, since no failing derivation would ever announce that they had stopped
+populating, which is why `toPullRequest` is now exported and directly tested.
+
+Two related items from the same report:
+
+- **`doneWithoutMergedPullRequest` was undocumented**, showing a Director a decided value with no
+  account of what produces it — the exact pattern §15.7 exists to prevent, reintroduced by omission.
+  `read_objective`'s description now states what it means and, more importantly, that *nothing acts
+  on it*: it is an observation offered so that "done" is never taken at face value.
+- **Factory has no actor provenance, and this is not fixed.** Every write from every Director carries
+  the same token, so when two Directors ran against one fixture repo seven minutes apart, a coherent
+  and entirely wrong account of who did what could be — and was — assembled from GitHub state alone.
+  §1 gives faithful Objective *state*; it says nothing about agency. This is a real observability gap
+  for any deployment running more than one Director, and it is recorded here rather than fixed
+  because the fix is a design question (attribution in comment bodies? a per-Director marker?) rather
+  than a missing field.
+
+## 10.17 What the gates have never exercised
+
+Six gates have passed and this document records what each one proved. It has never recorded what
+they *failed to reach*, which lets absence of evidence quietly read as evidence of absence. The list
+is short and it is worth keeping honest, because every item on it is a path that will first execute
+in front of a real Objective.
+
+- **The `>= 3 attempts → escalate` branch has never run.** Not once, in any gate. The closest
+  approach was a Work Item that reached exactly three attempts and then *succeeded* on the third. So
+  `attemptAction`'s escalation branch and the graph-level diagnosis message it emits are unexercised
+  code, not verified behaviour — including in gates whose reports say "no escalations", which is
+  true and means only that nothing needed one.
+- **The scheduled-automation path is weaker than the gate reports imply.** Gate 5 disclosed
+  voluntarily that its run was Director-loop-driven but **not** automation-driven: it set an interval,
+  then paced every cycle inline in one long turn and cleared the automation before finishing. The
+  tool sequence was the skill's; the pacing was a human-shaped loop. Nothing in a gate report
+  distinguishes these two, so "the loop closed unattended" should be read as a claim about the loop's
+  *logic*, not about a timer having driven it, unless a specific gate says otherwise.
+
+  **This is a gate objective, not a footnote, and it is now written into the ship criteria (PRD
+  §10).** Unattended-within-one-turn and unattended-across-turn-boundaries are different failure
+  surfaces: the second has to survive a session waking with no working memory, reconstructing state
+  from GitHub alone, and being re-entered by a timer rather than by its own control flow. That is
+  precisely the property §1's derived-state design exists to provide, which makes it the one gap on
+  this list that tests the central architectural claim rather than a branch of the code. The next
+  gate should be run by an actual automation across at least two wake-ups and should say so.
+- **The rebase-success path is still unobserved.** Gate 5 reached §6 for the first time, but every
+  collision it produced was a real content conflict, which throws. A rebase that succeeds cleanly —
+  the branch that leaves no trace anywhere else, and the reason `dispatch_integrate` now returns
+  `action` — has not been seen.
+- **No fixture repository has ever run its own tests.** `checks` is `null` across every gate repo, so
+  "the tests pass" in any gate report is static analysis of the diff, never an observed run. The
+  `checks_failed` verdict is consequently unexercised against real CI, and `require_actions_workflow_approval`
+  being enabled account-wide (§10.6) is what keeps it that way.
+- **`factory-gate2` is no longer a clean fixture.** Gate 5 merged a 1454-line `package-lock.json`
+  onto its `main` under the §7.3 override. Any later gate treating that repo as pristine inherits it
+  — and, specifically, a later run seeing no lockfile scope creep is **not** evidence that the
+  `outOfScopeFiles` reporting works, because there is no longer a lockfile for an agent to generate.
+- **A gate cannot audit its own run from the API afterwards.** A pull request's `title`, `body` and
+  `isDraft` are mutable and the coding agent keeps editing them after Factory acts — measured in
+  §10.15, where a merged pull request's body doubled and its `[WIP]` prefix vanished *after* the
+  merge. Any post-hoc read describes the present, not the decision. Merge-time evidence survives only
+  in the squash commit subject on `main`, so a gate report reconstructing "what Factory saw" from a
+  later API read is describing something else.
+
+  **The corollary is a rule, and it is now in the skill: the snapshot you acted on is the evidence —
+  capture it at decision time or lose it.** Gate 6 could corroborate the early-merge bug only because
+  Director's loop happens to make one `read_objective` call per cycle *before* acting, leaving
+  merge-time `title`, `bodyLength` and `changedFiles` sitting in its transcript. Nothing designed
+  that. A Director that batched its reads differently, or read less often, would have had the same
+  immutable git evidence and none of the mutable-field evidence. That per-cycle read is therefore
+  load-bearing beyond the decision it feeds, and step 1 of the skill now says so, so that nobody
+  optimises it away as redundant re-reading. It is also why no merge-time audit comment is being
+  added: between the transcript snapshot and the squash subject the record already exists in two
+  places, and neither costs a write.
+
+## 10.18 v1 release readiness
 
 The project owner accepted the completed production-shaped brownfield Gate 3 as the production
 viability bar for v1. Real Clockgrove work starts after release rather than blocking release.

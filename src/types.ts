@@ -171,6 +171,41 @@ export interface LinkedPullRequest {
    * request, which the REST API filters by `head_sha` rather than by PR number.
    */
   headSha: string;
+  /**
+   * When the head commit was authored — the closest available proxy for "when
+   * did the coding agent last push".
+   *
+   * Deliberately *not* the pull request's `updatedAt`. A PR is touched by
+   * comments, labels and review requests, and Factory itself comments on pull
+   * requests (§6), so `updatedAt` would be refreshed by Factory's own activity
+   * and a dead attempt would look alive forever. The head commit moves only
+   * when the agent actually pushes.
+   *
+   * Also not `pushedDate`: verified live against the GraphQL API on 2026-09-01
+   * (clockgrove/factory-gate2 PR #36) it returns `null`, so depending on it
+   * would have silently produced no timestamp at all.
+   */
+  headCommittedAt: Date;
+  /**
+   * When this pull request was merged, or `null` if it never was.
+   *
+   * Factory does not read this — every decision it makes is about the *present*
+   * state, per §1. It exists because without it the tool surface cannot answer
+   * ordering questions after the fact: "was this Work Item dispatched only
+   * after its dependency merged?" was literally unanswerable from a Director's
+   * own tools, and reconstructing it meant inferring order from diff context
+   * lines and assignment gaps. Diagnosing the §10.15 early-merge bug needed
+   * exactly this timestamp and had to go around Factory to get it.
+   */
+  mergedAt: Date | null;
+  /**
+   * When this pull request was closed, merged or not, or `null` if it is open.
+   *
+   * Distinct from `mergedAt`: a closed-unmerged PR is the signature of an
+   * abandoned or superseded attempt, and telling that apart from a merge is the
+   * whole point of recording both.
+   */
+  closedAt: Date | null;
 }
 
 export interface IssueRef {

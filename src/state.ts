@@ -78,6 +78,32 @@ export const DISPATCH_CONFIRM_WINDOW_MS = 90_000;
 export const DECLINE_TITLE_PATTERN = /^\s*no-?op\s*:/i;
 
 /**
+ * The coding agent's "I am not finished" marker.
+ *
+ * Measured, not assumed. Across every coding-agent pull request in the fixture
+ * repositories (12/12 in clockgrove/factory-gate2 on 2026-09-01, plus every one
+ * in factory-gate3) the agent opens its pull request titled `[WIP] <title>` and
+ * emits a `RenamedTitleEvent` dropping the prefix at the moment it finishes.
+ *
+ * This is the completion signal Factory has to use, because the obvious
+ * candidate does not work: **the agent never clears the draft flag.** Every
+ * `ReadyForReviewEvent` observed in any fixture repository was Factory's own
+ * token, and factory-gate3 PR #16 sits renamed-and-finished while still
+ * `isDraft: true`. Waiting on `isDraft` waits for something that never happens.
+ *
+ * Absence of the prefix is treated as "finished", which is the safe default in
+ * the one direction that matters: a pull request that never used the convention
+ * is judged on its diff as before, rather than waiting forever for a rename
+ * that was never coming.
+ */
+export const WIP_TITLE_PATTERN = /^\s*\[wip\]/i;
+
+/** Whether the coding agent still considers `pr` unfinished (§10.15). */
+export function isWorkInProgress(pr: LinkedPullRequest): boolean {
+  return WIP_TITLE_PATTERN.test(pr.title);
+}
+
+/**
  * How long a pull request that exists but carries no diff is given before it
  * is judged, measured from the *pull request's* creation rather than from the
  * assignment.
@@ -113,6 +139,50 @@ export function withinEmptyPullRequestGrace(
 ): boolean {
   if (DECLINE_TITLE_PATTERN.test(pr.title)) return false;
   return now.getTime() - pr.createdAt.getTime() < EMPTY_PULL_REQUEST_GRACE_MS;
+}
+
+/**
+ * How long a pull request the agent still calls `[WIP]` may go without a push
+ * before its attempt is judged dead.
+ *
+ * This window exists because of the fix in §10.15. Once Factory stopped merging
+ * work the agent had not finished, an unfinished pull request became something
+ * it *waits* on — and an agent that pushes a partial commit and then dies
+ * leaves a pull request that is neither empty (so the empty-PR grace never
+ * applies) nor ever finished. Without a bound, that item waits forever: no
+ * merge, no retry, no escalation, and no human is told. A silent stall is worse
+ * than a loud escalation, so the wait has to end.
+ *
+ * Measured from the head commit, not from the pull request's creation. Age
+ * alone would close live work — exactly the §10.5 F3 false negative — because
+ * a real Work Item can legitimately take longer to write than any age bound
+ * short enough to be useful. Inactivity is the honest signal: an agent that is
+ * still working pushes, and one that has died does not.
+ *
+ * Twenty minutes is deliberately generous. The two errors are not symmetric:
+ * judging too early closes a live session's work irrecoverably, while judging
+ * too late merely delays a human by minutes. It is set well beyond the largest
+ * gap measured between an agent's first push and its completion rename (gate2
+ * PR #21: ~6 minutes; most complete in under 3).
+ *
+ * **If this ever needs tuning, tune it upward.** The dangerous case is a pull
+ * request that is *finished but not yet renamed*: it derives `failed`, gets
+ * retried, and the retry closes correct completed work. Shrinking this bound to
+ * catch dead agents sooner buys minutes and risks destroying a finished Work
+ * Item; growing it costs only the delay before a human hears about a genuinely
+ * dead one. The measured push-to-rename gap on gate2 PR #36 was ~100 seconds,
+ * so the current value carries roughly a twelvefold margin over the observed
+ * worst case — there is no evidence-backed reason to reduce it.
+ */
+export const WIP_INACTIVITY_GRACE_MS = 1_200_000;
+
+/**
+ * Whether `pr` is work the agent appears to have abandoned: still marked
+ * `[WIP]`, with no push for longer than the grace window.
+ */
+export function isAbandonedAttempt(pr: LinkedPullRequest, now: Date): boolean {
+  if (!isWorkInProgress(pr)) return false;
+  return now.getTime() - pr.headCommittedAt.getTime() >= WIP_INACTIVITY_GRACE_MS;
 }
 
 /** The most recent time the coding agent was assigned, or `null` if never. */
@@ -253,6 +323,16 @@ export function deriveState(wi: WorkItemSnapshot, now: Date): WorkItemState {
         withinConfirmWindow(wi, now) || withinEmptyPullRequestGrace(current, now);
       return stillPlausiblyWorking ? "in_flight" : "failed";
     }
+    // Work the agent still calls `[WIP]` but has stopped pushing to is a dead
+    // attempt. Since §10.15 Factory no longer merges unfinished work, so
+    // without this the item would wait on a pull request nobody is writing —
+    // forever. Routing it to `failed` reuses the existing retry path (close,
+    // re-dispatch, escalate on the third attempt) rather than inventing a
+    // fourth outcome for the same underlying fact: dispatch died.
+    if (isAbandonedAttempt(current, now)) return "failed";
+    // Still `[WIP]` and still being pushed to: the agent is working. Not
+    // `for_review` — that would hand a half-written change to the integrator.
+    if (isWorkInProgress(current)) return "in_flight";
     if (checksSettled(current)) return "for_review";
     return "in_flight";
   }

@@ -1,5 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+/** A clean mechanical verdict: in scope, whole file list seen. */
+const READY = {
+  kind: "ready" as const,
+  outOfScopeFiles: [] as string[],
+  fileListComplete: true,
+};
+
 import {
   Dispatcher,
   attemptAction,
@@ -39,6 +46,9 @@ function pr(over: Partial<LinkedPullRequest> = {}): LinkedPullRequest {
     mergeable: "UNKNOWN",
     createdAt: NOW,
     headSha: "deadbeef",
+    headCommittedAt: NOW,
+    mergedAt: null,
+    closedAt: null,
     ...over,
   };
 }
@@ -440,7 +450,8 @@ describe("Dispatcher.approveChecks", () => {
     expect(writer.comments).toEqual([]);
   });
 
-  it("reports an ordinary failure as retryable rather than permanent", async () => {    const writer = new FakeWriter({ approveWorkflowRun: new Error("502 bad gateway") });
+  it("reports an ordinary failure as retryable rather than permanent", async () => {
+    const writer = new FakeWriter({ approveWorkflowRun: new Error("502 bad gateway") });
     const d = makeDispatcher(writer);
     const item = derivedWi();
     const outcome = await d.approveChecks(item, RUNS, SAFE);
@@ -553,17 +564,41 @@ describe("Dispatcher.integrate", () => {
     const d = makeDispatcher(writer);
     const item = derivedWi();
     const p = pr({ id: "PR_ready", isDraft: false });
-    await d.integrate(item, p, { kind: "ready" });
+    await d.integrate(item, p, READY);
     expect(writer.calls).toEqual(["mergePullRequest:PR_ready"]);
   });
 
-  it("marks a draft PR ready before merging", async () => {
+  it("un-drafts before merging, because the agent never does", async () => {
+    // The agent opens every pull request as a draft and never clears the flag:
+    // every `ReadyForReviewEvent` in every fixture repository was Factory's own
+    // token, and gate3 PR #16 sits finished-and-renamed while still a draft.
+    // GitHub refuses to merge a draft, so without this call every merge fails.
+    // Safe because the completion signal is the `[WIP]` prefix, not draftness
+    // (§10.15) — nothing unfinished reaches here.
     const writer = new FakeWriter();
     const d = makeDispatcher(writer);
     const item = derivedWi();
     const p = pr({ id: "PR_draft", isDraft: true });
-    await d.integrate(item, p, { kind: "ready" });
-    expect(writer.calls).toEqual(["markPullRequestReady:PR_draft", "mergePullRequest:PR_draft"]);
+    await d.integrate(item, p, READY);
+    expect(writer.calls).toEqual([
+      "markPullRequestReady:PR_draft",
+      "mergePullRequest:PR_draft",
+    ]);
+  });
+
+  it("waits on unfinished work without closing, retrying or merging it", async () => {
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    const item = derivedWi();
+    const outcome = await d.integrate(
+      item,
+      pr({ id: "PR_wip", title: "[WIP] Add slugify" }),
+      { kind: "in_progress" },
+    );
+    expect(outcome).toEqual({ merged: false, action: "waiting" });
+    // Nothing at all: no merge, and crucially no close/reassign, because the
+    // agent is plausibly still writing into this pull request.
+    expect(writer.calls).toEqual([]);
   });
 
   it("waits on checks_pending without writing anything", async () => {
@@ -587,10 +622,33 @@ describe("Dispatcher.integrate", () => {
     expect(outcome.merged).toBe(false);
   });
 
-  it("reports a successful merge", async () => {    const writer = new FakeWriter();
+  it("reports a successful merge", async () => {
+    const writer = new FakeWriter();
     const d = makeDispatcher(writer);
-    const outcome = await d.integrate(derivedWi(), pr({ isDraft: false }), { kind: "ready" });
-    expect(outcome).toEqual({ merged: true });
+    const outcome = await d.integrate(derivedWi(), pr({ isDraft: false }), READY);
+    expect(outcome).toEqual({ merged: true, action: "merged" });
+  });
+
+  it("escalates a sensitive surface instead of merging or retrying it", async () => {
+    // Gate 5 measured agents adding files nobody asked for. When the extra file
+    // is one that redefines what CI runs, §7.3 makes it a human's call — and
+    // retrying would be actively wrong: the work is correct, so a replacement
+    // pull request would arrive with the same diff and burn an attempt.
+    const writer = new FakeWriter();
+    const d = makeDispatcher(writer);
+    const item = derivedWi();
+    const outcome = await d.integrate(item, pr({ isDraft: false }), {
+      kind: "sensitive_surface",
+      files: [{ path: "package-lock.json", reason: "controls the dependency tree" }],
+    });
+
+    expect(outcome.merged).toBe(false);
+    // Not merged, and above all not closed.
+    expect(writer.calls).toEqual([
+      `assignHumanOnly:${item.id}:U_human`,
+      `addComment:${item.id}`,
+    ]);
+    expect(writer.comments.join("\n")).toContain("dependency tree");
   });
 
   it("defers rather than throwing when the base branch moved under the merge", async () => {
@@ -601,7 +659,7 @@ describe("Dispatcher.integrate", () => {
       mergePullRequest: new Error("Base branch was modified. Review and try the merge again."),
     });
     const d = makeDispatcher(writer);
-    const outcome = await d.integrate(derivedWi(), pr({ isDraft: false }), { kind: "ready" });
+    const outcome = await d.integrate(derivedWi(), pr({ isDraft: false }), READY);
 
     expect(outcome.merged).toBe(false);
     expect(outcome.deferred).toContain("base branch moved");
@@ -614,7 +672,7 @@ describe("Dispatcher.integrate", () => {
       mergePullRequest: new Error("Pull Request is not mergeable"),
     });
     const d = makeDispatcher(writer);
-    const outcome = await d.integrate(derivedWi(), pr({ isDraft: false }), { kind: "ready" });
+    const outcome = await d.integrate(derivedWi(), pr({ isDraft: false }), READY);
     expect(outcome.merged).toBe(false);
     expect(outcome.deferred).toBeTruthy();
   });
@@ -627,7 +685,7 @@ describe("Dispatcher.integrate", () => {
     });
     const d = makeDispatcher(writer);
     await expect(
-      d.integrate(derivedWi(), pr({ isDraft: false }), { kind: "ready" }),
+      d.integrate(derivedWi(), pr({ isDraft: false }), READY),
     ).rejects.toThrow("approving review");
   });
 
@@ -635,17 +693,23 @@ describe("Dispatcher.integrate", () => {
     const writer = new FakeWriter({ mergePullRequest: rateLimitError() });
     const d = makeDispatcher(writer);
     await expect(
-      d.integrate(derivedWi(), pr({ isDraft: false }), { kind: "ready" }),
+      d.integrate(derivedWi(), pr({ isDraft: false }), READY),
     ).rejects.toBeInstanceOf(PlatformUnavailableError);
   });
 
+  // The three §6 conflict branches — rebase, close-and-redispatch, escalate —
+  // all used to return a bare `{ merged: false }`. Gate 5 (§10.13) could only
+  // tell them apart by diffing the *next* `read_objective` for PR state, which
+  // is exactly how a rebase that resolves nothing would hide a repeat forever.
+  // `action` is what makes the branch taken visible to the caller.
   it("resolves a conflict by updating the branch when GitHub accepts it", async () => {
     const writer = new FakeWriter();
     const d = makeDispatcher(writer);
     const item = derivedWi();
     const p = pr({ id: "PR_conflict" });
-    await d.integrate(item, p, { kind: "conflict" });
+    const outcome = await d.integrate(item, p, { kind: "conflict" });
     expect(writer.calls).toEqual(["updatePullRequestBranch:PR_conflict"]);
+    expect(outcome.action).toBe("rebased");
   });
 
   it("closes and re-dispatches when the branch update is rejected as unresolvable", async () => {
@@ -654,7 +718,8 @@ describe("Dispatcher.integrate", () => {
     const d = makeDispatcher(writer);
     const item = derivedWi();
     const p = pr({ id: "PR_conflict" });
-    await d.integrate(item, p, { kind: "conflict" });
+    const outcome = await d.integrate(item, p, { kind: "conflict" });
+    expect(outcome.action).toBe("redispatched");
     expect(writer.calls).toEqual([
       "updatePullRequestBranch:PR_conflict",
       "addComment:PR_conflict",
@@ -674,8 +739,9 @@ describe("Dispatcher.integrate", () => {
     const item = derivedWi({
       linkedPullRequests: [pr({ id: "PR_1" }), pr({ id: "PR_2" }), pr({ id: "PR_3" })],
     });
-    await d.integrate(item, pr({ id: "PR_3" }), { kind: "conflict" });
+    const outcome = await d.integrate(item, pr({ id: "PR_3" }), { kind: "conflict" });
 
+    expect(outcome.action).toBe("escalated");
     expect(writer.calls).toEqual([
       "updatePullRequestBranch:PR_3",
       `assignHumanOnly:${item.id}:U_human`,
@@ -762,7 +828,7 @@ describe("Dispatcher.integrate", () => {
       pr({ id: "PR_held", checks: "FAILURE", checksNeverStarted: true }),
       { kind: "checks_held" },
     );
-    expect(outcome).toEqual({ merged: false });
+    expect(outcome).toEqual({ merged: false, action: "escalated" });
     expect(writer.calls).toEqual([
       `assignHumanOnly:${item.id}:U_human`,
       `addComment:${item.id}`,

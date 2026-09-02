@@ -75,7 +75,6 @@ import { z } from "zod";
 import {
   Dispatcher,
   GithubOctokitWriter,
-  attemptAction,
   confirmAction,
 } from "./dispatch.js";
 import { evaluateMechanical } from "./evaluate.js";
@@ -157,7 +156,13 @@ function findWorkItem(
 }
 
 function serializePr(pr: LinkedPullRequest, minimal = false) {
-  const base = { ...pr, createdAt: pr.createdAt.toISOString() };
+  const base = {
+    ...pr,
+    createdAt: pr.createdAt.toISOString(),
+    headCommittedAt: pr.headCommittedAt.toISOString(),
+    mergedAt: pr.mergedAt ? pr.mergedAt.toISOString() : null,
+    closedAt: pr.closedAt ? pr.closedAt.toISOString() : null,
+  };
   if (!minimal) return base;
   // The coding agent quotes the whole Work Item issue back into the PR body, so
   // `body` alone dominates the response at scale (§10.2, F3: ten items overflowed
@@ -313,7 +318,15 @@ server.registerTool(
       "`objective.title`/`objective.body` are the human's stated intent, verbatim, for the " +
       "compile-if-needed step (skills/objective-compilation) — never invent scope beyond them. Also " +
       "reports whether the platform circuit breaker has tripped enough times to need a human (§7.3) " +
-      "via `platformExhausted`.",
+      "via `platformExhausted`. " +
+      "Two item-level fields are worth knowing before you need them. `doneWithoutMergedPullRequest` " +
+      "is true when a Work Item is closed but no pull request linked to it was ever merged — the " +
+      "signature of an item closed by hand, or closed by an agent that decided the work was " +
+      "unnecessary, rather than one Factory integrated. It is an observation, not a decision: nothing " +
+      "acts on it, and it exists so that 'done' is never taken at face value. Each linked pull " +
+      "request also carries `mergedAt` and `closedAt` (ISO 8601, or null), which make ordering " +
+      "reconstructable after the fact — for instance whether a dependent item was dispatched only " +
+      "after its dependency actually merged.",
     inputSchema: {
       ...RepoShape,
       number: z.number().int().positive().describe("Objective issue number"),
@@ -380,9 +393,29 @@ server.registerTool(
     title: "Evaluate mechanical checks",
     description:
       "Run §5.1's cheap, deterministic checks against a Work Item's current open pull request: " +
-      "no-op, declined, untouched scope, merge conflict, checks pending/failed, or ready. Pure and " +
+      "no-op, declined, untouched scope, merge conflict, checks pending/failed, sensitive surface, " +
+      "in progress, or ready. Pure and " +
       "read-only — call this before `dispatch_integrate` to see the verdict it would act on, or on " +
-      "its own to inspect a Work Item without taking any action.",
+      "its own to inspect a Work Item without taking any action. " +
+      "Two fields on a `ready` verdict still need your judgment (Gate 5, §10.12). `outOfScopeFiles` " +
+      "lists changed paths the Work Item never declared: the scope check only fails when *nothing* " +
+      "in scope was touched, so a pull request that does its job **and** edits whatever else it " +
+      "likes is still `ready`. That is deliberate — extra files are often legitimate (updating a " +
+      "test the change broke) — but it is yours to confirm via `read_pull_request_diff`, not to " +
+      "assume. `fileListComplete: false` means the pull request changed more than 100 files, so " +
+      "`outOfScopeFiles` is a lower bound and the scope checks saw only part of the diff. " +
+      "A `sensitive_surface` verdict means the diff is mergeable but touches something that " +
+      "redefines what CI runs or what it can reach (workflows, actions, dependency manifests and " +
+      "lockfiles, registry config). §7.3 reserves those for a human regardless of declared scope, " +
+      "so `dispatch_integrate` escalates rather than retrying — the work is not wrong, it is just " +
+      "not Factory's to merge unattended. " +
+      "An `in_progress` verdict means the coding agent still has the pull request titled `[WIP]`, " +
+      "so it is not finished and nothing here should act on it — not merge it, and equally not " +
+      "close or rebase it. Checked ahead of scope, conflict and check verdicts on purpose: a " +
+      "half-pushed change legitimately touches nothing in scope yet and legitimately fails its own " +
+      "tests, and those verdicts close the pull request (§10.15). Wait for the agent to rename it. " +
+      "Note the signal is the title prefix, not the draft flag: the agent opens every pull request " +
+      "as a draft and never clears it, so draftness means nothing here.",
     inputSchema: {
       ...WorkItemLocatorShape,
       expectedFiles: z
@@ -434,10 +467,26 @@ server.registerTool(
       "import and actually call X rather than reimplement it') — a criterion you cannot check from " +
       "file paths alone must not be waved through on the agent's own say-so (§15.7). Read-only. " +
       "Patches are capped by `maxPatchBytes`; `truncated` reports whether anything was shortened or " +
-      "withheld, so a partial read is never mistaken for a complete one.",
+      "withheld, so a partial read is never mistaken for a complete one. " +
+      "Pass `paths` to spend that budget only on the files you are reviewing — usually the Work " +
+      "Item's declared `scope`, plus anything `evaluate_mechanical` reported in `outOfScopeFiles`. " +
+      "Without it the budget is first-come-first-served in GitHub's own ordering, so one big file " +
+      "early in the alphabet starves the rest: Gate 5 asked for 4000 bytes on a pull request " +
+      "containing `package-lock.json` and got the lockfile plus `patch: null` for all three files " +
+      "it actually needed to review (§10.13). Filtered files are still listed with their " +
+      "`status`/`additions`/`deletions`, so the file list stays complete and you can still see " +
+      "*that* something changed even when you chose not to read it.",
     inputSchema: {
       ...RepoShape,
       pullNumber: z.number().int().positive().describe("Pull request number to read"),
+      paths: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Only spend the patch budget on these paths; an entry ending in `/` selects a " +
+            "directory. Other files are still listed, but without patch text. Omit to read " +
+            "every file in GitHub's order until the budget runs out.",
+        ),
       maxPatchBytes: z
         .number()
         .int()
@@ -455,14 +504,16 @@ server.registerTool(
       repo,
       pullNumber,
       maxPatchBytes,
+      paths,
     }: {
       owner: string;
       repo: string;
       pullNumber: number;
       maxPatchBytes?: number | undefined;
+      paths?: string[] | undefined;
     }) => {
       const reader = readerFor(owner, repo);
-      return await reader.readPullRequestDiff(pullNumber, maxPatchBytes);
+      return await reader.readPullRequestDiff(pullNumber, maxPatchBytes, paths);
     },
   ),
 );
@@ -655,7 +706,9 @@ server.registerTool(
     description:
       "§4.4/§5.1: act on a `failed` Work Item — close its unusable PR and retry, or escalate to a " +
       "human once attempts are exhausted (3 linked PRs). A no-op on a Work Item that is not " +
-      "currently `failed`.",
+      "currently `failed`. Returns `action`: `redispatched` (PR closed, Copilot reassigned), " +
+      "`escalated` (attempts exhausted, handed to a human), or `no-op`. This is the branch that " +
+      "actually fired, not a prediction — same vocabulary as `dispatch_integrate`'s `action`.",
     inputSchema: {
       ...WorkItemLocatorShape,
       ...EscalateToShape,
@@ -690,14 +743,17 @@ server.registerTool(
           reason: `Work Item #${workItemNumber} is '${item.state}', not 'failed'`,
         };
       }
-      const decision = attemptAction(item);
       const dispatcher = await dispatcherFor(owner, repo, objective, escalateTo, reader);
-      if (reason) {
-        await dispatcher.retryOrEscalate(item, reason);
-      } else {
-        await dispatcher.retryOrEscalate(item);
-      }
-      return { action: decision, workItem: workItemNumber };
+      // Report what actually happened, not what we predicted would happen.
+      // `attemptAction` was computed here and returned as the answer, which is
+      // the same shape of defect Gate 5 found in `dispatch_integrate` (§10.13):
+      // the caller was told a decision rather than an outcome. The two agree
+      // today because `retryOrEscalate` recomputes the same predicate, but a
+      // caller should never have to rely on that.
+      const action = reason
+        ? await dispatcher.retryOrEscalate(item, reason)
+        : await dispatcher.retryOrEscalate(item);
+      return { action, workItem: workItemNumber };
     },
   ),
 );
@@ -709,8 +765,13 @@ server.registerTool(
     description:
       "§6: act on a `for_review` Work Item's mechanical verdict (§5.1) — merge if ready, attempt a " +
       "rebase or close-and-redispatch on conflict, or close-and-retry on untouched scope/failed " +
-      "checks. Runs `evaluate_mechanical` internally; call that tool first if you only want to see " +
-      "the verdict without acting on it. A no-op on a Work Item that is not currently `for_review`.",
+      "checks. Escalates rather than retries on `sensitive_surface`: a mergeable diff that touches " +
+      "workflows, actions, dependency manifests or registry config is correct work that §7.3 still " +
+      "reserves for a human, and re-dispatching it would only produce the same diff again. " +
+      "Runs `evaluate_mechanical` internally; call that tool first if you only want to see " +
+      "the verdict without acting on it — in particular to see `outOfScopeFiles` on a `ready` " +
+      "verdict, which this tool merges straight through. A no-op on a Work Item that is not " +
+      "currently `for_review`.",
     inputSchema: {
       ...WorkItemLocatorShape,
       ...EscalateToShape,

@@ -63,6 +63,16 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
      `changedFilePaths` all survive. You need the Objective body only on the compile cycle, so a
      reasonable habit is: full read on cycle 1, `minimal: true` every cycle after.
 
+   **Do not optimise this read away as redundant, and do not summarise its result out of your
+   report.** A pull request's `title`, `body` and `isDraft` are mutable, and the coding agent keeps
+   editing them after Factory acts — one merged pull request's body doubled and its `[WIP]` prefix
+   vanished *after* the merge (§10.15). So a later read of the API tells you what is true now, not
+   what you decided on, and a run cannot be audited backwards from it. This snapshot, sitting in your
+   transcript, is the only record of the evidence you actually acted on; the squash commit subject on
+   `main` is the only other one, and it captures just the title. Gate 6 could confirm a real bug only
+   because those per-cycle snapshots happened to be there — nothing had designed for it. `minimal:
+   true` is safe here: it keeps `bodyLength`, so growth is still visible.
+
 2. **Compile, if this Objective has no Work Items yet.** `read_objective`'s `objective.items` will be
    empty. Invoke the `objective-compilation` skill against this Objective's title and body to produce
    a validated Work Item graph, then call `graph_apply` with it (plus `objectiveNumber`). Re-read
@@ -110,9 +120,16 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
 
    `failed` is a settled judgment, not a guess: a pull request that exists but has no diff is left
    `in_flight` until it is past *both* the dispatch confirm window and its own ten-minute grace
-   period, because the agent opens its draft PR within seconds and then works for minutes. You do
-   not need to second-guess a `failed` verdict or "wait one more interval" to see if it self-corrects
-   — if it says `failed`, the windows have already elapsed.
+   period, because the agent opens its draft PR within seconds and then works for minutes. The same
+   applies to work still titled `[WIP]`: it stays `in_flight` until twenty minutes pass with no new
+   push. You do not need to second-guess a `failed` verdict or "wait one more interval" to see if it
+   self-corrects — if it says `failed`, the windows have already elapsed.
+
+   If you are ever tempted to argue that twenty-minute bound is too long, argue the other way. The
+   case it can get wrong is a pull request that is *finished but not yet renamed*, which derives
+   `failed` and is then retried — and a retry closes correct, completed work. Waiting longer only
+   delays a human; waiting less can destroy a Work Item. The largest push-to-rename gap measured so
+   far is about 100 seconds.
 
 6. **Integrate reviewable items.** For each Work Item currently `for_review`, call
    `dispatch_integrate`, passing `expectedFiles` when the Work Item declared a `scope` (this is what
@@ -125,6 +142,25 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
      **That is a race, not a failure.** Leave the pull request open, do not retry it, do not escalate
      it, and simply call `dispatch_integrate` again next cycle — the fresh snapshot will merge it.
      (Observed live in Gate 3, §10.5, where it surfaced as a thrown tool error; it no longer throws.)
+
+     A `ready` verdict also carries **`outOfScopeFiles`** — changed paths the Work Item never
+     declared. `dispatch_integrate` merges straight through them, so this is yours to check, not
+     the tool's to block on. The scope check only fails when *nothing* in scope was touched, which
+     means a pull request that does exactly what was asked **and also** edits whatever else it likes
+     passes every mechanical check. Gate 5 measured precisely that: two pull requests each added a
+     1454-line `package-lock.json` no Work Item mentioned (§10.12). Extra files are often perfectly
+     legitimate — updating a test the change broke, for instance — so treat this as something to
+     confirm in the diff rather than a fault. If `fileListComplete` is `false` the pull request
+     changed more than 100 files and `outOfScopeFiles` is a lower bound, so read the diff before
+     merging.
+   - `sensitive_surface` — mergeable and green, but the diff changes something that redefines what
+     CI executes or what it can reach: a workflow, a composite action, a dependency manifest or
+     lockfile, registry configuration. §7.3 reserves these for a human whatever the Work Item
+     declared in `scope` — scope is written by the compiler, which is a model reading an issue body,
+     so letting a declared path buy an autonomous merge would let the safety property certify
+     itself. The tool has **escalated, not retried**, and deliberately: the work is very likely
+     correct, and a replacement pull request would contain the same diff and burn an attempt. Tell
+     the operator what the file is and why it was flagged; the fix is a human merging it by hand.
    - `conflict` — the tool already attempted a rebase or closed-and-redispatched, per §6. If the same
      Work Item conflicts repeatedly, that is itself replanning evidence (step 7), not something to
      keep retrying past. The tool now stops on its own once attempts are exhausted, escalating with
@@ -140,10 +176,26 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
      the item that merges last in a four-way collision can exhaust its attempts and escalate having
      done nothing wrong. So repeated `conflict` on one file is your cue to look at the graph, not at
      the agent.
+
+     **Read `action` to know which of the three §6 branches actually fired** — `rebased`,
+     `redispatched` or `escalated`. Gate 5 could not: all three returned an identical
+     `{"verdict":{"kind":"conflict"},"merged":false}` (§10.13), and the failure mode worth catching
+     here is a rebase that succeeds without resolving anything, which leaves *no* trace in the next
+     `read_objective` — no closed pull request, no consumed attempt, no new assignment. Repeated
+     `rebased` on one Work Item is that bug; escalate it rather than letting it cycle.
    - `checks_pending` — usually settles within a cycle, so leave it. But if it persists and the pull
      request's checks have *never* started, GitHub is probably holding the run awaiting approval:
      call `approve_held_workflow_runs` rather than waiting indefinitely (see "CI that GitHub is
      holding" below).
+   - `in_progress` — the coding agent still has the pull request titled `[WIP]`, so it is still
+     working. **Wait.** Do not merge it, and equally do not close or retry it: the work is usually
+     fine and merely unfinished, and closing it discards a session still writing into it. Factory
+     used to merge these — three pull requests across two gates were merged before the agent
+     announced completion, one of them 98 seconds early (§10.14/§10.15). The signal is the `[WIP]`
+     title prefix, **not** the draft flag: the agent opens every pull request as a draft and never
+     clears it, so draftness tells you nothing. You do not need to act on a stall here either —
+     Factory bounds it, deriving `failed` once a `[WIP]` pull request stops receiving pushes for
+     twenty minutes, which retries and then escalates on the usual schedule.
    - `checks_missing` — the repository is known to run CI on pull requests (or Factory could not
      determine whether it does, which is treated the same way), but this PR carries no
      checks at all. Usually a timing race that clears within a cycle, so leave it. If the *same*
@@ -221,10 +273,16 @@ Act autonomously, including merging, only when **all** hold:
 - the diff satisfies the Work Item's acceptance criteria and nothing more — **your own read of the
   actual patch text, via `read_pull_request_diff`.** `evaluate_mechanical` deliberately does not
   make this judgment (§5.1 is mechanical only), and `read_objective` reports `changedFilePaths`
-  but no content. A `ready` verdict therefore means "open, touches the expected files, mergeable" —
-  considerably weaker than it reads. It is not a substitute for this line.
+  but no content. A `ready` verdict therefore means "open, touches **at least one** expected file,
+  mergeable" — considerably weaker than it reads, and note the "at least one": it does not mean the
+  pull request stayed inside its scope. Check `outOfScopeFiles` for what else it touched. This is
+  not a substitute for reading the diff.
 - the change is reversible: one squash commit on a branch, revertible without coordination
-- nothing touches auth, secrets, permissions, CI configuration, or dependency sources
+- nothing touches auth, secrets, permissions, CI configuration, or dependency sources. The
+  `sensitive_surface` verdict now enforces the mechanically visible part of this line (workflows,
+  actions, dependency manifests and lockfiles, registry config), so you will not reach a `ready`
+  verdict on one of those. It does **not** cover auth or application-level permissions, which have
+  no reliable path signature — those remain your read of the diff.
 
 **Any acceptance criterion about what the code *does* requires the diff read, not file paths.**
 "Must import and actually call `truncate` rather than reimplement it" is invisible in
@@ -237,6 +295,14 @@ Two honest limits on that read, so you don't over-trust it either:
 
 - If `truncated` is `true`, you did not see the whole change. Re-read the file you care about with
   a larger `maxPatchBytes` before concluding anything, or treat the criterion as unverified.
+- **Pass `paths` when the pull request contains anything generated.** The budget is
+  first-come-first-served, so a `package-lock.json` (or a `dist/` bundle, or vendored code) sorting
+  ahead of the files you care about will eat the whole allowance and hand you `patch: null` for
+  everything you actually needed to read — silently, looking like ordinary truncation (§10.13).
+  Pass the Work Item's `scope` plus anything in `outOfScopeFiles` you want to inspect; entries match
+  scope semantics (trailing `/` = directory, otherwise exact). Filtered files stay listed with their
+  `additions`/`deletions`, and a filter does **not** set `truncated`, so a filtered read that reports
+  `truncated: false` really did give you everything you asked for.
 - Reading the diff tells you the code *says* the right thing, not that it *runs*. Where the
   repository has no CI, `checks` is `null` and nothing has executed the tests (§10.2, F2) — so
   "the tests pass" is an assumption, not an observation. Say so when you report.

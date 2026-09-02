@@ -115,6 +115,22 @@ const PATH_RULES: PathRule[] = [
   },
 ];
 
+/**
+ * The reason `path` can redefine what CI executes, or `null` if it is an
+ * ordinary source or test file.
+ *
+ * Exported because two different decisions need exactly this classification and
+ * must not drift apart: whether it is safe to *approve* a held workflow run
+ * (this file), and whether it is safe to *merge* without a human (§7.3's "no
+ * security-sensitive surface: auth, secrets, permissions, CI configuration,
+ * dependency sources"). Both questions reduce to "does the diff change what
+ * runs, or what it can reach", so both read the same rules.
+ */
+export function executionAffectingReason(path: string): string | null {
+  const rule = PATH_RULES.find((candidate) => candidate.test(path));
+  return rule ? rule.reason(path) : null;
+}
+
 export interface WorkflowSafetyProfile {
   /**
    * The repo-wide default token permission granted to workflow runs
@@ -196,8 +212,8 @@ export function assessBlastRadius(input: BlastRadiusInput): BlastRadiusVerdict {
 
   const flagged: string[] = [];
   for (const path of input.changedFilePaths) {
-    const rule = PATH_RULES.find((candidate) => candidate.test(path));
-    if (rule) flagged.push(rule.reason(path));
+    const reason = executionAffectingReason(path);
+    if (reason !== null) flagged.push(reason);
   }
   blockers.push(...flagged);
 

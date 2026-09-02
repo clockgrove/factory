@@ -305,17 +305,18 @@ its diff, its commits, and its body.
 Cheap, deterministic, and run before anything expensive:
 
 ```
-no_op             empty diff, OR no commit beyond "Initial plan"
-declined          PR body states the task is not actionable
-in_progress       title still carries the `[WIP]` prefix — the agent is not finished
-untouched         diff does not touch any file the Work Item names
-conflict          PR not mergeable against base
-checks_pending    checks exist and have not concluded
-checks_failed     checks ran and concluded failure
-checks_held       runs were created but never allowed to execute (§9.2)
-checks_missing    no checks at all, in a repository known to run them
-sensitive_surface diff changes what CI runs or what it can reach
-ready             none of the above
+no_op                 empty diff, OR no commit beyond "Initial plan"
+declined              PR body states the task is not actionable
+in_progress           title still carries the `[WIP]` prefix — the agent is not finished
+untouched             diff does not touch any file the Work Item names
+conflict              PR not mergeable against base
+mergeability_unknown  GitHub has not finished recomputing mergeability (`mergeable === "UNKNOWN"`)
+checks_pending        checks exist and have not concluded
+checks_failed         checks ran and concluded failure
+checks_held           runs were created but never allowed to execute (§9.2)
+checks_missing        no checks at all, in a repository known to run them
+sensitive_surface     diff changes what CI runs or what it can reach
+ready                 none of the above
 ```
 
 A no-op or a decline is a **failed attempt**, not a result.

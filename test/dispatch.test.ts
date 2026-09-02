@@ -353,13 +353,12 @@ describe("Dispatcher.approveChecks", () => {
     expect(writer.comments.join("\n")).toContain("none were approved");
   });
 
-  // Gate 4/4b, §10.7. GitHub's approve endpoint is scoped to fork pull requests
+  // GitHub's approve endpoint is scoped to fork pull requests (§9)
   // and refuses a coding-agent branch with this exact message. There is no
   // second endpoint: the repository setting that governs the hold is readable
   // over REST and has no write, so Factory genuinely cannot release it. What
   // matters is that it says so instead of reporting a permanent, total failure
-  // as a success-shaped `partially_approved` with an empty `approvedRunIds` —
-  // which is how Gate 4 first met it, detectable only by diffing two arrays.
+  // as a success-shaped `partially_approved` with an empty `approvedRunIds`.
   const FORK_ONLY = new Error(
     "This run is not from a fork pull request or queued by the Actions bot.",
   );
@@ -478,7 +477,7 @@ describe("Dispatcher.confirm", () => {
       copilotAssignments: [new Date(NOW.getTime() - DISPATCH_CONFIRM_WINDOW_MS - 1)],
     });
     await d.confirm(item, NOW);
-    // Order matters: a bare reassignment is not a transition (PRD F8).
+    // Order matters: a bare reassignment is not a transition.
     expect(writer.calls).toEqual([`clearActors:${item.id}`, `assignCopilot:${item.id}:BOT_1`]);
   });
 
@@ -570,11 +569,11 @@ describe("Dispatcher.integrate", () => {
 
   it("un-drafts before merging, because the agent never does", async () => {
     // The agent opens every pull request as a draft and never clears the flag:
-    // every `ReadyForReviewEvent` in every fixture repository was Factory's own
-    // token, and gate3 PR #16 sits finished-and-renamed while still a draft.
+    // observed `ReadyForReviewEvent`s are Factory's own token, and a finished
+    // pull request can remain a draft.
     // GitHub refuses to merge a draft, so without this call every merge fails.
     // Safe because the completion signal is the `[WIP]` prefix, not draftness
-    // (§10.15) — nothing unfinished reaches here.
+    // (§5.1) — nothing unfinished reaches here.
     const writer = new FakeWriter();
     const d = makeDispatcher(writer);
     const item = derivedWi();
@@ -630,10 +629,10 @@ describe("Dispatcher.integrate", () => {
   });
 
   it("escalates a sensitive surface instead of merging or retrying it", async () => {
-    // Gate 5 measured agents adding files nobody asked for. When the extra file
-    // is one that redefines what CI runs, §7.3 makes it a human's call — and
-    // retrying would be actively wrong: the work is correct, so a replacement
-    // pull request would arrive with the same diff and burn an attempt.
+    // Agents can add files nobody asked for. When the extra file is one that
+    // redefines what CI runs, §7.3 makes it a human's call — and retrying would
+    // be actively wrong: the work is correct, so a replacement pull request
+    // would arrive with the same diff and burn an attempt.
     const writer = new FakeWriter();
     const d = makeDispatcher(writer);
     const item = derivedWi();
@@ -652,9 +651,9 @@ describe("Dispatcher.integrate", () => {
   });
 
   it("defers rather than throwing when the base branch moved under the merge", async () => {
-    // Observed live in Gate 3 (§10.5): a sibling PR merged in the same window.
-    // Throwing here invites a Director to read it as the Work Item failing and
-    // close a perfectly good pull request.
+    // This happens when a sibling PR merges in the same window. Throwing here
+    // invites a Director to read it as the Work Item failing and close a
+    // perfectly good pull request.
     const writer = new FakeWriter({
       mergePullRequest: new Error("Base branch was modified. Review and try the merge again."),
     });
@@ -698,10 +697,10 @@ describe("Dispatcher.integrate", () => {
   });
 
   // The three §6 conflict branches — rebase, close-and-redispatch, escalate —
-  // all used to return a bare `{ merged: false }`. Gate 5 (§10.13) could only
-  // tell them apart by diffing the *next* `read_objective` for PR state, which
-  // is exactly how a rebase that resolves nothing would hide a repeat forever.
-  // `action` is what makes the branch taken visible to the caller.
+  // would all look like a bare `{ merged: false }` without `action`. A caller
+  // would have to diff the *next* `read_objective` for PR state, which is
+  // exactly how a rebase that resolves nothing would hide a repeat forever.
+  // `action` is what makes the branch taken visible to the caller (§10).
   it("resolves a conflict by updating the branch when GitHub accepts it", async () => {
     const writer = new FakeWriter();
     const d = makeDispatcher(writer);
@@ -815,10 +814,9 @@ describe("Dispatcher.integrate", () => {
     expect(writer.comments.join("\n")).toContain("required checks failed");
   });
 
-  // Gate 4, §10.7 F3. The Gate 3 fix only reworded the escalation comment: the
-  // code still ran the retry path, which closes the pull request. Held CI must
-  // never cost the work — a replacement pull request is held identically, so a
-  // retry cannot succeed and only discards a correct diff.
+  // Held CI must never cost the work: a replacement pull request is held
+  // identically, so a retry cannot succeed and only discards a correct diff
+  // (§9).
   it("escalates held checks instead of closing the pull request", async () => {
     const writer = new FakeWriter();
     const d = makeDispatcher(writer);

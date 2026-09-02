@@ -1,12 +1,12 @@
 /**
  * Mechanical, pre-merge checks on a Work Item's current pull request (§5.1).
  *
- * PROBE-001's headline finding: `conclusion: success` does not mean the work
- * was done. These are the cheap, deterministic checks that run before any
- * model reads the diff (§5.2) — most failures never reach a model, because
- * they are already visible in the PR's own artifacts. A no-op or a decline is
- * a **failed attempt, not a result** (§5.1): `evaluateMechanical` classifies
- * it as such rather than as something ready to merge.
+ * `conclusion: success` does not mean the work was done. These are the cheap,
+ * deterministic checks that run before any model reads the diff (§5.2) — most
+ * failures never reach a model, because they are already visible in the PR's
+ * own artifacts. A no-op or a decline is a **failed attempt, not a result**
+ * (§5.1): `evaluateMechanical` classifies it as such rather than as something
+ * ready to merge.
  *
  * Every function here is pure, takes only a `LinkedPullRequest` (plus, for
  * `isUntouched`, the Work Item's declared file scope), and performs no I/O —
@@ -21,21 +21,20 @@ import type { LinkedPullRequest } from "./types.js";
 /**
  * A PR that explicitly declines the Work Item as not actionable.
  *
- * PROBE-001's only measured decline — an impossible task ("target file does
- * not exist") — produced the *same* artifact as a plain no-op: empty diff,
- * only the `Initial plan` commit, with the explanation appearing solely in
- * the PR title (`No-op: impossible task — target file does not exist`).
- * `isNoOp` alone already catches that case. This check exists so the reason
- * is distinguishable in logs and escalation messages (§10's "what did
- * Director believe and why" must be answerable from the log alone) — it is
- * layered on top of `isNoOp`, never a replacement for it, and deliberately
- * conservative: free-text alone is not trusted as primary evidence, since
- * PROBE-001 also found `[WIP]` titles appear on both genuine work and empty
+ * An impossible task ("target file does not exist") produces the *same*
+ * artifact as a plain no-op: empty diff, only the `Initial plan` commit, with
+ * the explanation appearing solely in the PR title (`No-op: impossible task —
+ * target file does not exist`). `isNoOp` alone already catches that case. This
+ * check exists so the reason is distinguishable in logs and escalation
+ * messages (§10's "what did Director believe and why" must be answerable from
+ * the log alone) — it is layered on top of `isNoOp`, never a replacement for
+ * it, and deliberately conservative: free-text alone is not trusted as primary
+ * evidence, since `[WIP]` titles appear on both genuine work and empty
  * failures.
  *
  * The pattern itself lives in `state.ts`, which needs it to exempt an explicit
- * decline from the empty-PR grace period (§10.5, F3) — there is nothing to
- * wait for once the agent has given its final answer.
+ * decline from the empty-PR grace period — there is nothing to wait for once
+ * the agent has given its final answer.
  */
 export function isDeclined(pr: LinkedPullRequest): boolean {
   return isNoOp(pr) && DECLINE_TITLE_PATTERN.test(pr.title);
@@ -45,9 +44,9 @@ export function isDeclined(pr: LinkedPullRequest): boolean {
  * Whether `path` falls inside a Work Item's declared file scope (§8's Work
  * Packet "Scope: files that may be modified"). An entry ending in `/` scopes
  * a whole directory; anything else must match exactly — deliberately no glob
- * engine, since PROBE-001 measured agents given a one-line scope constraint
- * touching only the named file, 11/11 times, so scope entries are expected to
- * be concrete paths or directories, not patterns.
+ * engine, since agents given a one-line scope constraint have been measured
+ * touching only the named file 11/11 times (docs/PLATFORM-BEHAVIOR.md), so
+ * scope entries are expected to be concrete paths or directories, not patterns.
  */
 function inScope(path: string, scope: string): boolean {
   return scope.endsWith("/") ? path.startsWith(scope) : path === scope;
@@ -70,7 +69,7 @@ export function fileListComplete(pr: LinkedPullRequest): boolean {
 /**
  * A PR that changed real files but none of the Work Item's declared scope
  * (§5.1 "untouched"). `expectedFiles` is the compiled Work Packet's scope
- * list; omit it (e.g. before the compiler exists, §9 build order) to skip
+ * list; omit it before the compiler exists to skip
  * this check entirely rather than fail closed on an item with no declared
  * scope yet.
  */
@@ -95,14 +94,14 @@ export function isUntouched(
  *
  * `isUntouched` fires only when *no* declared file was touched, so a pull
  * request that does everything it was asked **plus** anything else it likes has
- * always passed every mechanical check. Gate 5 measured exactly that: both
- * replacement pull requests added a 1454-line `package-lock.json` that no Work
- * Item declared, and nothing in the pipeline could see it.
+ * always passed every mechanical check. Replacement pull requests can add files
+ * such as a 1454-line `package-lock.json` that no Work Item declared; this is
+ * where the pipeline makes that visible.
  *
  * This is reported rather than enforced. Scope creep is frequently legitimate —
- * Gate 3's Work Item correctly updated a test outside its scope rather than
- * leaving it broken — and the `untouched` precedent shows what over-enforcing
- * costs: that verdict closes the pull request. So this feeds §5.2's semantic
+ * a Work Item may correctly update a test outside its scope rather than leaving
+ * it broken — and the `untouched` precedent shows what over-enforcing costs:
+ * that verdict closes the pull request. So this feeds §5.2's semantic
  * review, where a model reads the diff, instead of mechanically failing the
  * item. The genuinely dangerous subset is handled separately and does block;
  * see `sensitiveSurfaceFiles`.
@@ -126,9 +125,8 @@ export function outOfScopeFiles(
  * Deliberately **not** filtered by declared scope. Scope is written by the
  * compiler, which is itself a model reading an Objective body; letting a Work
  * Item declare `.github/workflows/ci.yml` in scope and thereby buy an
- * autonomous merge of it would make the safety property self-certifying —
- * exactly the F5 shape this project keeps finding. A human confirms these
- * whether or not someone wrote them down in advance.
+ * autonomous merge of it would make the safety property self-certifying. A
+ * human confirms these whether or not someone wrote them down in advance.
  */
 export function sensitiveSurfaceFiles(
   pr: LinkedPullRequest,
@@ -184,7 +182,7 @@ export type MechanicalVerdict =
  *
  *  1. `declined` / `no_op` — no usable diff exists at all; nothing else
  *     about the PR (its checks, its mergeability) is worth inspecting.
- *  2. `draft` — the agent says it has not finished. Nothing below is meaningful
+ *  2. `in_progress` — the agent says it has not finished. Nothing below is meaningful
  *     yet, and several of those branches close or rebase the pull request.
  *  3. `untouched` — a real diff exists but not where the Work Item scoped it.
  *  4. `conflict` — GitHub cannot merge this cleanly against the base branch.
@@ -198,9 +196,8 @@ export type MechanicalVerdict =
  * `ciExpected` is the Objective snapshot's `ciExpectedOnPullRequests`: pass it
  * so a PR carrying *no* checks in a repository that demonstrably runs CI on
  * pull requests is reported as `checks_missing` rather than `ready`. Omitting
- * it reproduces the pre-Gate-3 behaviour, where absent checks were silently
- * treated as "this repository has no CI" (§10.5, F1). `"unknown"` — the probe
- * failed rather than answered — blocks exactly as `true` does, because a
+ * it treats absent checks as "this repository has no CI". `"unknown"` — the
+ * probe failed rather than answered — blocks exactly as `true` does, because a
  * network error is not evidence that a repository has no CI.
  */
 export function evaluateMechanical(
@@ -214,22 +211,20 @@ export function evaluateMechanical(
   // agent's own statement that it has not finished is the most authoritative
   // completion signal available — the agent knows, and nothing else here does.
   //
-  // That signal is the `[WIP]` title prefix, **not** `isDraft`. Measured across
-  // every coding-agent pull request in the fixture repositories (12/12 in
-  // factory-gate2, plus factory-gate3), the agent opens as `[WIP] <title>` and
-  // renames the prefix away when it finishes. It never clears the draft flag:
-  // every `ReadyForReviewEvent` observed was Factory's own token, and gate3 PR
-  // #16 sits finished-and-renamed while still `isDraft: true`. Keying on
-  // `isDraft` would therefore wait for an event that never arrives and stall
-  // every Work Item permanently (§10.15).
+  // That signal is the `[WIP]` title prefix, **not** `isDraft`. Across observed
+  // coding-agent pull requests (12/12 in one representative batch, plus
+  // additional repositories), the agent opens as `[WIP] <title>` and renames the
+  // prefix away when it finishes. It never clears the draft flag: observed
+  // `ReadyForReviewEvent`s are Factory's own token, and finished-and-renamed
+  // coding-agent pull requests can remain `isDraft: true`. Keying on `isDraft`
+  // would therefore wait for an event that never arrives and stall every Work
+  // Item permanently (§5.1).
   //
-  // Gate 6 (§10.14) found this merging unfinished work for real: gate2 #36 was
-  // merged at 17:43:38 and the agent renamed away its `[WIP]` at 17:45:16, 98
-  // seconds later; gate2 #26 and gate3 #7 merged early the same way. It survived
-  // six gates only because fixture Work Items are small enough that the agent
-  // usually finishes before the next poll. On any change large enough to arrive
-  // in pieces — source first, tests second — this merges half the work and
-  // closes the Work Item as done.
+  // This prevents merging unfinished work. One measured late rename happened 98
+  // seconds after merge eligibility; other early-merge shapes matched it. On any
+  // change large enough to arrive in pieces — source first, tests second — a
+  // merge before the completion signal lands half the work and closes the Work
+  // Item as done.
   //
   // Ordered *after* `declined`/`no_op` deliberately, so an agent that died or
   // refused still retries on the existing schedule and this introduces no new
@@ -248,18 +243,17 @@ export function evaluateMechanical(
   // only this branch can tell them apart. A check suite that concluded without
   // ever emitting a run did not test anything and did not fail: on a
   // coding-agent pull request it means GitHub held the workflow awaiting a
-  // maintainer's approval (§10.6). Reporting that as `checks_failed` sent it to
+  // maintainer's approval (§9). Reporting that as `checks_failed` sends it to
   // the retry path, which closes the pull request and re-dispatches — destroying
   // correct work because CI was never allowed to start, and producing a fresh
-  // pull request held in exactly the same way. Gate 4 caught this before it
-  // fired.
+  // pull request held in exactly the same way.
   if (pr.checksNeverStarted) return { kind: "checks_held" };
   if (pr.checks === "FAILURE") return { kind: "checks_failed" };
-  // Gate 3 (§10.5, F1): `null` is not "no CI" when the repository is known to
-  // run CI on pull requests. It also covers a workflow that fails to *start* —
-  // GitHub creates the run, it produces zero jobs, and it therefore attaches
-  // zero checks to the head commit, leaving the rollup null rather than
-  // failing. Merging on that is merging with no CI evidence whatsoever.
+  // `null` is not "no CI" when the repository is known to run CI on pull
+  // requests. It also covers a workflow that fails to *start* — GitHub creates
+  // the run, it produces zero jobs, and it therefore attaches zero checks to the
+  // head commit, leaving the rollup null rather than failing. Merging on that is
+  // merging with no CI evidence whatsoever.
   if (pr.checks === null && ciExpected !== false) return { kind: "checks_missing" };
   // Last, so a real check failure is still reported decisively rather than
   // delayed a cycle. `UNKNOWN` is GitHub still computing mergeability, not a

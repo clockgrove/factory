@@ -21,10 +21,9 @@ import {
 /**
  * A PR that changed nothing (§5.1).
  *
- * PROBE-001 measured the failure this defends against: an impossible task
- * returned `conclusion: success`. The agent's self-report is not evidence, so a
- * no-op is detected from the artifact instead — an empty diff and no commit
- * beyond the agent's automatic "Initial plan".
+ * The agent's self-report is not evidence, so a no-op is detected from the
+ * artifact instead — an empty diff and no commit beyond the agent's automatic
+ * "Initial plan".
  */
 export function isNoOp(pr: LinkedPullRequest): boolean {
   const hasDiff = pr.changedLines > 0 || pr.changedFiles > 0;
@@ -58,13 +57,12 @@ export function isAssignedToCopilot(wi: WorkItemSnapshot): boolean {
  * the benefit of the doubt before an evidence-free attempt is treated as
  * failed rather than merely slow.
  *
- * There is no reliable, per-issue session-status API to poll instead (PRD
- * F8, measured live 2026-08-30): the Agent Tasks REST API's task objects
- * carry no issue reference, so a task cannot be matched back to the issue
- * that triggered it once more than one Work Item is dispatched concurrently.
- * PROBE-001 measured 8 trivial parallel sessions completing in ~80s wall
- * clock; 90s gives a single session headroom beyond that without letting a
- * genuinely stuck attempt sit unaddressed for long.
+ * There is no reliable, per-issue session-status API to poll instead: the
+ * Agent Tasks REST API's task objects carry no issue reference, so a task
+ * cannot be matched back to the issue that triggered it once more than one Work
+ * Item is dispatched concurrently. Measured trivial parallel sessions complete
+ * in ~80s wall clock; 90s gives a single session headroom beyond that without
+ * letting a genuinely stuck attempt sit unaddressed for long.
  */
 export const DISPATCH_CONFIRM_WINDOW_MS = 90_000;
 
@@ -80,15 +78,15 @@ export const DECLINE_TITLE_PATTERN = /^\s*no-?op\s*:/i;
 /**
  * The coding agent's "I am not finished" marker.
  *
- * Measured, not assumed. Across every coding-agent pull request in the fixture
- * repositories (12/12 in clockgrove/factory-gate2 on 2026-09-01, plus every one
- * in factory-gate3) the agent opens its pull request titled `[WIP] <title>` and
- * emits a `RenamedTitleEvent` dropping the prefix at the moment it finishes.
+ * Measured, not assumed. Across observed coding-agent pull requests (12/12 in a
+ * representative batch, plus additional repositories) the agent opens its pull
+ * request titled `[WIP] <title>` and emits a `RenamedTitleEvent` dropping the
+ * prefix at the moment it finishes.
  *
  * This is the completion signal Factory has to use, because the obvious
  * candidate does not work: **the agent never clears the draft flag.** Every
- * `ReadyForReviewEvent` observed in any fixture repository was Factory's own
- * token, and factory-gate3 PR #16 sits renamed-and-finished while still
+ * observed `ReadyForReviewEvent`s are emitted by Factory's own token, not by
+ * the agent; finished-and-renamed coding-agent pull requests can remain
  * `isDraft: true`. Waiting on `isDraft` waits for something that never happens.
  *
  * Absence of the prefix is treated as "finished", which is the safe default in
@@ -98,7 +96,7 @@ export const DECLINE_TITLE_PATTERN = /^\s*no-?op\s*:/i;
  */
 export const WIP_TITLE_PATTERN = /^\s*\[wip\]/i;
 
-/** Whether the coding agent still considers `pr` unfinished (§10.15). */
+/** Whether the coding agent still considers `pr` unfinished (§5.1). */
 export function isWorkInProgress(pr: LinkedPullRequest): boolean {
   return WIP_TITLE_PATTERN.test(pr.title);
 }
@@ -108,19 +106,19 @@ export function isWorkInProgress(pr: LinkedPullRequest): boolean {
  * is judged, measured from the *pull request's* creation rather than from the
  * assignment.
  *
- * Gate 3 finding F3 (§10.5): a Work Item was derived `failed` while the coding
- * agent was actively writing it, because `DISPATCH_CONFIRM_WINDOW_MS` had
- * elapsed since assignment. Following the skill's "retry every failed item"
- * guidance would have closed a live session's PR. The two windows answer
- * different questions, and conflating them is what caused the false negative:
+ * The two windows answer different questions. Conflating them can derive
+ * `failed` while the coding agent is actively writing, because
+ * `DISPATCH_CONFIRM_WINDOW_MS` may have elapsed since assignment even though an
+ * existing pull request is still receiving work:
  *
  *  - The confirm window asks *did dispatch take?* Its evidence is a PR
  *    appearing at all, so it is rightly short and measured from assignment.
  *  - Once a PR exists, dispatch demonstrably took. The remaining question is
  *    *is the agent still working?* — and the agent opens its draft PR within
- *    seconds and then works for minutes (Gate 2: PRs opened 5–40s after
- *    dispatch; the Objective took ~17 minutes end to end). Judging that from
- *    the assignment clock declares failure while work is visibly in progress.
+ *    seconds and then works for minutes (PRs opened 5–40s after dispatch in a
+ *    measured batch; one Objective took ~17 minutes end to end). Judging that
+ *    from the assignment clock declares failure while work is visibly in
+ *    progress.
  *
  * Ten minutes is comfortably beyond every session measured so far while still
  * bounding a genuinely dead attempt. The clock restarts naturally on retry,
@@ -145,7 +143,7 @@ export function withinEmptyPullRequestGrace(
  * How long a pull request the agent still calls `[WIP]` may go without a push
  * before its attempt is judged dead.
  *
- * This window exists because of the fix in §10.15. Once Factory stopped merging
+ * This window exists because of the ordering in §5.1. Once Factory stopped merging
  * work the agent had not finished, an unfinished pull request became something
  * it *waits* on — and an agent that pushes a partial commit and then dies
  * leaves a pull request that is neither empty (so the empty-PR grace never
@@ -154,25 +152,25 @@ export function withinEmptyPullRequestGrace(
  * than a loud escalation, so the wait has to end.
  *
  * Measured from the head commit, not from the pull request's creation. Age
- * alone would close live work — exactly the §10.5 F3 false negative — because
- * a real Work Item can legitimately take longer to write than any age bound
+ * alone would close live work because a real Work Item can legitimately take
+ * longer to write than any age bound
  * short enough to be useful. Inactivity is the honest signal: an agent that is
  * still working pushes, and one that has died does not.
  *
  * Twenty minutes is deliberately generous. The two errors are not symmetric:
  * judging too early closes a live session's work irrecoverably, while judging
  * too late merely delays a human by minutes. It is set well beyond the largest
- * gap measured between an agent's first push and its completion rename (gate2
- * PR #21: ~6 minutes; most complete in under 3).
+ * gap measured between an agent's first push and its completion rename
+ * (~6 minutes; most complete in under 3).
  *
  * **If this ever needs tuning, tune it upward.** The dangerous case is a pull
  * request that is *finished but not yet renamed*: it derives `failed`, gets
  * retried, and the retry closes correct completed work. Shrinking this bound to
  * catch dead agents sooner buys minutes and risks destroying a finished Work
  * Item; growing it costs only the delay before a human hears about a genuinely
- * dead one. The measured push-to-rename gap on gate2 PR #36 was ~100 seconds,
- * so the current value carries roughly a twelvefold margin over the observed
- * worst case — there is no evidence-backed reason to reduce it.
+ * dead one. A measured late push-to-rename gap was ~100 seconds, so the current
+ * value carries roughly a twelvefold margin over that case — there is no
+ * evidence-backed reason to reduce it.
  */
 export const WIP_INACTIVITY_GRACE_MS = 1_200_000;
 
@@ -258,9 +256,8 @@ export function attemptCount(wi: WorkItemSnapshot): number {
  *
  * "Newest" is resolved by `createdAt`, not by array position. GitHub does not
  * document an ordering for `closedByPullRequestsReferences`, so the last
- * element is not the newest by any guarantee — it only looked like one because
- * every gate so far produced at most one open pull request per Work Item, which
- * makes any ordering bug invisible. It stops being invisible on the retry path,
+ * element is not the newest by any guarantee. Ordering bugs become dangerous on
+ * the retry path,
  * where this function chooses which pull request gets *closed*: picking the
  * wrong one closes live work and leaves the stale attempt open to be merged.
  *
@@ -318,13 +315,13 @@ export function deriveState(wi: WorkItemSnapshot, now: Date): WorkItemState {
       // No diff yet is not evidence of failure while the session may still be
       // pushing commits (§4.2). Two independent reasons to keep waiting: the
       // dispatch is too fresh to judge at all, or the PR itself is young
-      // enough that the agent is plausibly still writing into it (§10.5, F3).
+      // enough that the agent is plausibly still writing into it.
       const stillPlausiblyWorking =
         withinConfirmWindow(wi, now) || withinEmptyPullRequestGrace(current, now);
       return stillPlausiblyWorking ? "in_flight" : "failed";
     }
     // Work the agent still calls `[WIP]` but has stopped pushing to is a dead
-    // attempt. Since §10.15 Factory no longer merges unfinished work, so
+    // attempt. Since §5.1 Factory no longer merges unfinished work, so
     // without this the item would wait on a pull request nobody is writing —
     // forever. Routing it to `failed` reuses the existing retry path (close,
     // re-dispatch, escalate on the third attempt) rather than inventing a
@@ -419,7 +416,7 @@ export function inState(
  *
  * `deriveState` already folds the dependency and escalation checks into the
  * `blocked` and `escalated` states, so readiness reduces to `unstarted`.
- * Dependencies are re-asserted here anyway: this predicate gates dispatch, and
+ * Dependencies are re-asserted here anyway: this predicate controls dispatch, and
  * a silent change to precedence upstream should not silently start work.
  */
 export function ready(o: DerivedObjective): DerivedWorkItem[] {
@@ -456,7 +453,7 @@ export interface StateCounts {
   done: number;
 }
 
-/** One-line cycle summary for the log Gate 0 depends on (§10). */
+/** One-line cycle summary for the log (§10). */
 export function counts(o: DerivedObjective): StateCounts {
   const c: StateCounts = {
     unstarted: 0,

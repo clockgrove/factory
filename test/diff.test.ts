@@ -3,15 +3,13 @@ import { describe, expect, it } from "vitest";
 import { budgetPatches, type RawDiffFile } from "../src/github.js";
 
 /**
- * Tests for the diff-read budgeting introduced to close Gate 2's finding F1
- * (IMPLEMENTATION-PLAN.md §10.2): Director could see `changedFilePaths` but no
- * patch content, so the semantic half of the §7.3 confidence bar — "the diff
- * satisfies the acceptance criteria and nothing more" — was unperformable.
+ * Tests for diff-read budgeting (§10): Director can see `changedFilePaths`, but
+ * semantic review needs patch content to decide whether "the diff satisfies the
+ * acceptance criteria and nothing more" (§7.3).
  *
- * The budget exists because F3 showed the tool surface can overflow its own
- * output limit on a large Objective. So the rule under test is really: never
- * exceed the budget, and never let the caller mistake a withheld patch for an
- * empty one.
+ * The budget exists because the tool surface can overflow its own output limit
+ * on a large Objective. So the rule under test is really: never exceed the
+ * budget, and never let the caller mistake a withheld patch for an empty one.
  */
 
 function file(overrides: Partial<RawDiffFile> = {}): RawDiffFile {
@@ -131,12 +129,12 @@ describe("budgetPatches", () => {
 });
 
 /**
- * Gate 5 (§10.13): a replacement PR added `package-lock.json` (+1454/-0). It
- * sorts first, so at a 4 KB budget it ate the whole allowance and the three
- * files actually under review came back `patch: null`. The budget is
- * first-come-first-served, so *any* PR carrying a lockfile, generated file or
- * vendored bundle hides exactly the files a reviewer needs. `paths` is the
- * cheap fix: spend the budget only on what was asked for.
+ * A replacement PR can add `package-lock.json` (+1454/-0). It sorts first, so at
+ * a 4 KB budget it eats the whole allowance and the files actually under review
+ * come back `patch: null`. The budget is first-come-first-served, so *any* PR
+ * carrying a lockfile, generated file or vendored bundle hides exactly the
+ * files a reviewer needs. `paths` is the cheap fix: spend the budget only on
+ * what was asked for.
  */
 describe("budgetPatches with a paths filter", () => {
   const lockfile = file({

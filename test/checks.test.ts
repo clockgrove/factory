@@ -3,18 +3,13 @@ import { describe, expect, it } from "vitest";
 import { runlessSuiteVerdict } from "../src/github.js";
 
 /**
- * Tests for Gate 3's finding F1 (IMPLEMENTATION-PLAN.md §10.5).
+ * Tests for runless check suites (§9).
  *
- * All four of clockgrove/factory-gate3's pull requests merged with
- * `checks: null` even though the fixture ships a real CI workflow. The cause,
- * confirmed against the live API afterwards: the `pull_request` workflow runs
- * failed at *startup* and produced zero jobs, so their check suites concluded
- * `FAILURE` with `latest_check_runs_count: 0`. `statusCheckRollup` is derived
- * from check *runs*, so it stayed `null` — and `null` meant "no CI configured",
- * which merged straight through. GitHub had said CI failed; Factory read that
- * as CI being absent.
- *
- * These cases are transcribed from that live evidence, not invented.
+ * A `pull_request` workflow can fail at *startup* and produce zero jobs, so its
+ * check suite concludes `FAILURE` with `latest_check_runs_count: 0`.
+ * `statusCheckRollup` is derived from check *runs*, so it stays `null` — the
+ * same shape as "no CI configured". Suites are therefore consulted whenever the
+ * rollup is silent.
  */
 function suite(
   conclusion: string | null,
@@ -35,7 +30,7 @@ describe("runlessSuiteVerdict", () => {
     expect(runlessSuiteVerdict([suite("FAILURE", 3), suite("SUCCESS", 1)])).toBeNull();
   });
 
-  // The exact shape observed on clockgrove/factory-gate3 check suite 90713435751.
+  // The exact shape of a workflow that fails at startup before producing jobs.
   it("reports FAILURE for a completed suite that produced no check runs", () => {
     expect(runlessSuiteVerdict([suite("FAILURE")])).toBe("FAILURE");
   });

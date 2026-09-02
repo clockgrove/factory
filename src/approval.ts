@@ -1,5 +1,5 @@
 /**
- * Blast-radius review for self-approving workflow runs (§10.6).
+ * Blast-radius review for self-approving workflow runs (§9).
  *
  * GitHub holds workflow runs on coding-agent pull requests in `action_required`
  * until a maintainer clicks "Approve and run workflows". That click is a
@@ -175,7 +175,7 @@ export interface BlastRadiusVerdict {
    * default token, no secrets reachable from a pull-request workflow, no
    * self-hosted runner — is a property of the repository that holds for every
    * run, and is the only thing that can justify relaxing a repository-wide
-   * setting (§10.7).
+   * setting (§9).
    *
    * Kept separate so the broader action cannot be authorised by the narrower
    * evidence: a diff that happens to be clean says nothing about whether the

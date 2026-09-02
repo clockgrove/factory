@@ -32,7 +32,7 @@ const check = (ok, label, detail) => {
 const readJson = (rel) => JSON.parse(readFileSync(resolve(root, rel), "utf8"));
 
 // The tools Director is documented to have. A tool vanishing from this list
-// silently is exactly the kind of regression that only shows up mid-rehearsal.
+// silently is exactly the kind of regression that only shows up in live use.
 const EXPECTED_TOOLS = [
   "approve_held_workflow_runs",
   "close_objective",
@@ -139,11 +139,10 @@ const started = await listTools();
 const tools = started?.tools ?? null;
 check(tools !== null, "the built server starts from mcp.json's own command and args");
 
-// The server's own claim about its version was the one version nothing compared
-// against the others. It said 0.1.0 while every manifest said 1.0.0, and that
-// survived until a human read the handshake banner after a real plugin install
-// (§10.19). Manifest-to-manifest agreement is necessary but not sufficient:
-// the running artifact has to agree with them too.
+// The server's own claim about its version is the one version nothing else
+// compares against, so a stale value can survive until a human reads the
+// handshake banner after a real plugin install. Manifest-to-manifest agreement
+// is necessary but not sufficient: the running artifact has to agree too.
 if (started?.serverInfo) {
   check(
     started.serverInfo.version === plugin.version,

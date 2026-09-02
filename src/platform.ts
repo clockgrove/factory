@@ -1,5 +1,5 @@
 /**
- * Platform refusal vs. work failure (PROBE-001, Finding 4).
+ * Platform refusal vs. work failure.
  *
  * The distinction this module draws is small and load-bearing. When GitHub
  * refuses a request, that is a property of the *substrate*, not of the Work
@@ -14,13 +14,12 @@
  */
 
 /**
- * Documented GitHub secondary rate limit thresholds (verified live against
- * docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api,
- * 2026-08-30) — not assumed, not carried over from the original PROBE-001
- * framing. "There is not a way to check the status of your secondary rate
- * limit" (same page): the only signal a limit is close is a refusal, by
- * which point the request has already counted against it. Factory paces
- * itself well under these (`FACTORY_PACING`), not up to them.
+ * Documented GitHub secondary rate limit thresholds
+ * (docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api).
+ * "There is not a way to check the status of your secondary rate limit" (same
+ * page): the only signal a limit is close is a refusal, by which point the
+ * request has already counted against it. Factory paces itself well under these
+ * (`FACTORY_PACING`), not up to them.
  */
 export const GITHUB_SECONDARY_LIMITS = {
   /** Shared across REST + GraphQL. */
@@ -170,7 +169,7 @@ const DEFAULT_CIRCUIT_OPTS: Required<CircuitBreakerOptions> = {
  *
  * It sits above the per-Work-Item confirm/retry logic (§4.2) and must never
  * itself consume an attempt or mark an item failed (Finding 4) — it only
- * gates *when* the loop may make any GitHub call at all.
+ * controls *when* the loop may make any GitHub call at all.
  */
 export class CircuitBreaker {
   readonly #opts: Required<CircuitBreakerOptions>;

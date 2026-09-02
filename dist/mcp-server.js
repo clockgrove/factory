@@ -24504,11 +24504,10 @@ var GitHubReader = class {
    * This exists because the confidence bar requires Director to judge that
    * "the diff satisfies the Work Item's acceptance criteria and nothing more"
    * — a *semantic* check that `evaluate_mechanical` deliberately does not make
-   * (§5.1 is mechanical only). Before this method the snapshot exposed
-   * `changedFilePaths` but no content, so that half of the bar was unmet by
+   * (§5.1 is mechanical only). Without patch text the snapshot exposes
+   * `changedFilePaths` but no content, so that half of the bar is unmet by
    * construction: a criterion like "must import and actually call `truncate`,
-   * not reimplement it" was uncheckable, and Gate 2 merged four such Work
-   * Items on file-path evidence alone (see IMPLEMENTATION-PLAN.md §10.2, F1).
+   * not reimplement it" is uncheckable from file-path evidence alone (§10).
    *
    * Uses the REST files endpoint rather than the `.diff` media type because it
    * returns per-file `additions`/`deletions`/`status` alongside the patch,
@@ -24516,7 +24515,7 @@ var GitHubReader = class {
    * binary files and for individual files above its own size limit; those come
    * back with `patch: null`, reported honestly rather than silently dropped.
    *
-   * `paths` restricts which files spend the byte budget (Gate 5, §10.13). The
+   * `paths` restricts which files spend the byte budget (§10). The
    * budget is otherwise first-come-first-served in GitHub's ordering, so one
    * large file early in the alphabet starves every file after it —
    * `package-lock.json` consumed a 4000-byte allowance whole and left the three
@@ -24557,13 +24556,11 @@ var GitHubReader = class {
    * List every file on the default branch, so compilation can ground a Work
    * Item's `scope` in the repository as it actually is.
    *
-   * Gate 3 (F2) and Gate 4 (F4) both reported the same gap from the other side:
-   * no tool exposed the target repository's layout, so `scope` was compiled
-   * purely by inferring conventional structure from the Objective's prose.
-   * Gate 3 guessed right. A wrong guess does not fail at compile time — it
-   * fails several steps later as an `untouched` verdict, after an agent run has
-   * been spent, and reads like the agent ignored its brief rather than like the
-   * brief named a path that was never there.
+   * Without this, `scope` is compiled purely by inferring conventional
+   * structure from the Objective's prose. A wrong guess does not fail at compile
+   * time — it fails several steps later as an `untouched` verdict, after an
+   * agent run has been spent, and reads like the agent ignored its brief rather
+   * than like the brief named a path that was never there.
    *
    * One recursive tree request rather than walking directories: `truncated`
    * here is GitHub's own flag, raised on repositories too large to return in
@@ -24697,7 +24694,7 @@ var GitHubReader = class {
    * existed answers the question that actually matters. It also degrades
    * gracefully — the run created for the PR under review counts, so even the
    * first pull request a repository ever receives is covered as soon as its own
-   * run is created, which is exactly the window Gate 3 merged through.
+   * run is created, which is the window before checks attach to the commit.
    *
    * Returns `"unknown"` rather than `false` when the probe itself fails. A 5xx,
    * a rate-limit or a dropped connection says nothing about whether CI exists,
@@ -24729,7 +24726,7 @@ var GitHubReader = class {
   }
   /**
    * Read the facts a blast-radius review needs about what an approved workflow
-   * run would be *allowed* to do (§10.6).
+   * run would be *allowed* to do (§9).
    *
    * Two questions, two sources: the repo's default token scope, and whether any
    * pull-request workflow pulls in a real secret. Both are properties of the
@@ -25451,12 +25448,11 @@ var Dispatcher = class {
    *
    * GitHub refuses a merge whose base moved between the mergeability
    * computation and the merge itself, with "Base branch was modified. Review
-   * and try the merge again." Observed live in Gate 3 (§10.5) when a sibling
-   * pull request merged in the same window. That is a benign race, not a
-   * failure: nothing is wrong with this pull request, and the next cycle
-   * re-reads and merges it. Letting it escape as a thrown tool error invites
-   * the exact misreading it caused in Gate 3 — a Director that treats a throw
-   * from `dispatch_integrate` as the Work Item failing would close a perfectly
+   * and try the merge again." This happens when a sibling pull request merges
+   * in the same window. That is a benign race, not a failure: nothing is wrong
+   * with this pull request, and the next cycle re-reads and merges it. Letting
+   * it escape as a thrown tool error invites a Director that treats a throw
+   * from `dispatch_integrate` as the Work Item failing to close a perfectly
    * good pull request and re-dispatch it.
    *
    * Deferring is safe for the whole family of "not right now" merge refusals,
@@ -25484,8 +25480,8 @@ var Dispatcher = class {
   /**
    * §6: "attempt rebase; if clean, proceed; if not, close the PR and
    * re-dispatch against the new base." `updatePullRequestBranch`'s payload
-   * carries no success flag (verified live against the schema, 2026-08-30),
-   * so a thrown, non-refusal error is the only same-cycle signal that GitHub
+   * carries no success flag, so a thrown, non-refusal error is the only
+   * same-cycle signal that GitHub
    * could not apply it — a genuine content conflict, not merely being
    * behind. A refusal (rate limit, etc.) is rethrown rather than treated as
    * an unresolvable conflict, so platform pacing is never mistaken for a
@@ -25501,16 +25497,13 @@ var Dispatcher = class {
    * wrongly modelled two items as independent ⇒ replan"), and escalating with
    * that diagnosis is how a human is told to replan.
    *
-   * Measured live at last (Gate 5, `factory-gate2` #22, 2026-09-02). Three Work
-   * Items were deliberately compiled with overlapping scope — each had to create
-   * the same new `src/index.ts` barrel — with no edges between them, producing a
-   * guaranteed add/add conflict. The first merged; the other two then hit this
-   * method, and **`updatePullRequestBranch` threw**. So the catch below is the
-   * branch a real content conflict takes, and it is bounded. Both pull requests
-   * were closed with the audit comment and re-dispatched, and because the base
-   * had by then moved to include the barrel, the replacement attempts modified
-   * the existing file instead of creating it — the conflict resolved itself in
-   * one retry, exactly as §6 intends.
+   * In overlapping-scope conflicts — for example, multiple Work Items creating
+   * the same new `src/index.ts` barrel with no edges between them —
+   * `updatePullRequestBranch` throws on the losing pull requests. So the catch
+   * below is the branch a real content conflict takes, and it is bounded. Once
+   * the first pull request lands and the base includes the shared file,
+   * replacement attempts modify the existing file instead of creating it, so
+   * the conflict can resolve itself in one retry, exactly as §6 intends.
    *
    * That measurement also settles the success path, which had looked unbounded.
    * It is unbounded, and that is correct rather than a defect: GitHub refuses
@@ -25578,7 +25571,7 @@ var Dispatcher = class {
    * revisiting — an acceptable, visible degradation rather than a stuck loop.
    */
   /**
-   * §10.6: decide whether to approve workflow runs that GitHub is holding, and
+   * §9: decide whether to approve workflow runs that GitHub is holding, and
    * act on that decision.
    *
    * GitHub parks runs on coding-agent pull requests in `action_required` until
@@ -25624,7 +25617,7 @@ var Dispatcher = class {
     const forkOnly = /not from a fork pull request|queued by the Actions bot/i.test(failureMessage);
     const notApprovable = forkOnly || failureStatus === 401 || failureStatus === 403 || failureStatus === 404;
     const record2 = [
-      approvedRunIds.length > 0 ? `Approved ${approvedRunIds.length} held workflow run(s) so CI can execute (\xA710.6).` : "Attempted to approve held workflow runs (\xA710.6); none were approved.",
+      approvedRunIds.length > 0 ? `Approved ${approvedRunIds.length} held workflow run(s) so CI can execute.` : "Attempted to approve held workflow runs; none were approved.",
       "",
       "GitHub holds workflow runs on coding-agent pull requests until a maintainer approves them. Blast-radius review passed before approving:",
       ...verdict.assurances.map((a) => `- ${a}`),
@@ -26108,10 +26101,10 @@ server.registerTool(
       ...RepoShape,
       number: external_exports.number().int().positive().describe("Objective issue number"),
       minimal: external_exports.boolean().optional().describe(
-        "Drop prose that no derivation reads: each pull request's `body` and the Objective's own `body`, each replaced by a `bodyLength`. Everything the state machine and the confidence bar reason about is retained \u2014 including `changedFilePaths`. Use this on large Objectives: the coding agent quotes the entire Work Item issue into its PR body, so a ten-item graph can exceed the tool output limit outright (\xA710.2, F3). Read a specific pull request's contents with `read_pull_request_diff` rather than carrying every body through every cycle."
+        "Drop prose that no derivation reads: each pull request's `body` and the Objective's own `body`, each replaced by a `bodyLength`. Everything the state machine and the confidence bar reason about is retained \u2014 including `changedFilePaths`. Use this on large Objectives: the coding agent quotes the entire Work Item issue into its PR body, so a ten-item graph can exceed the tool output limit outright. Read a specific pull request's contents with `read_pull_request_diff` rather than carrying every body through every cycle."
       ),
       escalateTo: external_exports.string().optional().describe(
-        "The GitHub login you intend to escalate to later. Supplying it here validates it now, against the live API, while nothing is at stake. It is otherwise not checked until the first dispatch or escalation that uses it \u2014 and an escalation is precisely the moment you cannot afford it to throw (\xA710.2, F4). Note the login is a GitHub account name, which is not always the prefix of your working branch."
+        "The GitHub login you intend to escalate to later. Supplying it here validates it now, against the live API, while nothing is at stake. It is otherwise not checked until the first dispatch or escalation that uses it \u2014 and an escalation is precisely the moment you cannot afford it to throw. Note the login is a GitHub account name, which is not always the prefix of your working branch."
       )
     }
   },
@@ -26140,7 +26133,7 @@ server.registerTool(
   "evaluate_mechanical",
   {
     title: "Evaluate mechanical checks",
-    description: "Run \xA75.1's cheap, deterministic checks against a Work Item's current open pull request: no-op, declined, untouched scope, merge conflict, checks pending/failed/missing/held, sensitive surface, in progress, mergeability unknown, or ready. Pure and read-only \u2014 call this before `dispatch_integrate` to see the verdict it would act on, or on its own to inspect a Work Item without taking any action. A `mergeability_unknown` verdict means GitHub has not finished recomputing whether the branch merges cleanly and is reporting `mergeable: null`, which must not be read as either clean or conflicting. Expect it routinely rather than rarely: merging any pull request invalidates the computation for every other open pull request against that base, so the second and later merges of a batch of ready siblings will often hit it (measured in Gate 7, \xA710.20). Nothing is wrong and nothing should be closed \u2014 GitHub settles in seconds and the next cycle merges normally. Two fields on a `ready` verdict still need your judgment (Gate 5, \xA710.12). `outOfScopeFiles` lists changed paths the Work Item never declared: the scope check only fails when *nothing* in scope was touched, so a pull request that does its job **and** edits whatever else it likes is still `ready`. That is deliberate \u2014 extra files are often legitimate (updating a test the change broke) \u2014 but it is yours to confirm via `read_pull_request_diff`, not to assume. `fileListComplete: false` means the pull request changed more than 100 files, so `outOfScopeFiles` is a lower bound and the scope checks saw only part of the diff. A `sensitive_surface` verdict means the diff is mergeable but touches something that redefines what CI runs or what it can reach (workflows, actions, dependency manifests and lockfiles, registry config). \xA77.3 reserves those for a human regardless of declared scope, so `dispatch_integrate` escalates rather than retrying \u2014 the work is not wrong, it is just not Factory's to merge unattended. An `in_progress` verdict means the coding agent still has the pull request titled `[WIP]`, so it is not finished and nothing here should act on it \u2014 not merge it, and equally not close or rebase it. Checked ahead of scope, conflict and check verdicts on purpose: a half-pushed change legitimately touches nothing in scope yet and legitimately fails its own tests, and those verdicts close the pull request (\xA710.15). Wait for the agent to rename it. Note the signal is the title prefix, not the draft flag: the agent opens every pull request as a draft and never clears it, so draftness means nothing here.",
+    description: "Run \xA75.1's cheap, deterministic checks against a Work Item's current open pull request: no-op, declined, untouched scope, merge conflict, mergeability unknown, checks pending/failed, sensitive surface, in progress, or ready. Pure and read-only \u2014 call this before `dispatch_integrate` to see the verdict it would act on, or on its own to inspect a Work Item without taking any action. Two fields on a `ready` verdict still need your judgment. `outOfScopeFiles` lists changed paths the Work Item never declared: the scope check only fails when *nothing* in scope was touched, so a pull request that does its job **and** edits whatever else it likes is still `ready`. That is deliberate \u2014 extra files are often legitimate (updating a test the change broke) \u2014 but it is yours to confirm via `read_pull_request_diff`, not to assume. `fileListComplete: false` means the pull request changed more than 100 files, so `outOfScopeFiles` is a lower bound and the scope checks saw only part of the diff. A `sensitive_surface` verdict means the diff is mergeable but touches something that redefines what CI runs or what it can reach (workflows, actions, dependency manifests and lockfiles, registry config). \xA77.3 reserves those for a human regardless of declared scope, so `dispatch_integrate` escalates rather than retrying \u2014 the work is not wrong, it is just not Factory's to merge unattended. An `in_progress` verdict means the coding agent still has the pull request titled `[WIP]`, so it is not finished and nothing here should act on it \u2014 not merge it, and equally not close or rebase it. Checked ahead of scope, conflict and check verdicts on purpose: a half-pushed change legitimately touches nothing in scope yet and legitimately fails its own tests, and those verdicts close the pull request. Wait for the agent to rename it. Note the signal is the title prefix, not the draft flag: the agent opens every pull request as a draft and never clears it, so draftness means nothing here. A `mergeability_unknown` verdict means GitHub has not finished recomputing whether the pull request merges cleanly, so nothing is known yet \u2014 it is not a conflict, not a failure and not `ready`. Expect it routinely on a healthy Objective: merging any pull request changes the base branch and invalidates the cached mergeability of every other open one, so integrating N ready items typically takes N cycles rather than one. That is the correct cost, not a stall. Do not act on the guess; simply call `dispatch_integrate` again next cycle, when the fresh snapshot will carry a real answer.",
     inputSchema: {
       ...WorkItemLocatorShape,
       expectedFiles: external_exports.array(external_exports.string()).optional().describe("The Work Item's declared file scope (\xA78); omit to skip the untouched-scope check")
@@ -26172,7 +26165,7 @@ server.registerTool(
   "read_pull_request_diff",
   {
     title: "Read pull request diff",
-    description: "Read the actual patch text of a Work Item's pull request, per file. This is what makes the *semantic* half of \xA77.3's confidence bar performable \u2014 'the diff satisfies the Work Item's acceptance criteria and nothing more' is a judgment about content, which `evaluate_mechanical` deliberately does not make (\xA75.1 is mechanical only) and which `read_objective` cannot support, since it reports `changedFilePaths` but no content. Call this before `dispatch_integrate` on any Work Item whose acceptance criteria say something about what the code *does* (e.g. 'must import and actually call X rather than reimplement it') \u2014 a criterion you cannot check from file paths alone must not be waved through on the agent's own say-so (\xA715.7). Read-only. Patches are capped by `maxPatchBytes`; `truncated` reports whether anything was shortened or withheld, so a partial read is never mistaken for a complete one. Pass `paths` to spend that budget only on the files you are reviewing \u2014 usually the Work Item's declared `scope`, plus anything `evaluate_mechanical` reported in `outOfScopeFiles`. Without it the budget is first-come-first-served in GitHub's own ordering, so one big file early in the alphabet starves the rest: Gate 5 asked for 4000 bytes on a pull request containing `package-lock.json` and got the lockfile plus `patch: null` for all three files it actually needed to review (\xA710.13). Filtered files are still listed with their `status`/`additions`/`deletions`, so the file list stays complete and you can still see *that* something changed even when you chose not to read it.",
+    description: "Read the actual patch text of a Work Item's pull request, per file. This is what makes the *semantic* half of \xA77.3's confidence bar performable \u2014 'the diff satisfies the Work Item's acceptance criteria and nothing more' is a judgment about content, which `evaluate_mechanical` deliberately does not make (\xA75.1 is mechanical only) and which `read_objective` cannot support, since it reports `changedFilePaths` but no content. Call this before `dispatch_integrate` on any Work Item whose acceptance criteria say something about what the code *does* (e.g. 'must import and actually call X rather than reimplement it') \u2014 a criterion you cannot check from file paths alone must not be waved through on the agent's own say-so (\xA711.7). Read-only. Patches are capped by `maxPatchBytes`; `truncated` reports whether anything was shortened or withheld, so a partial read is never mistaken for a complete one. Pass `paths` to spend that budget only on the files you are reviewing \u2014 usually the Work Item's declared `scope`, plus anything `evaluate_mechanical` reported in `outOfScopeFiles`. Without it the budget is first-come-first-served in GitHub's own ordering, so one big file early in the alphabet starves the rest: a small budget spent on a pull request containing a lockfile returns the lockfile and `patch: null` for the files you actually needed to review. Filtered files are still listed with their `status`/`additions`/`deletions`, so the file list stays complete and you can still see *that* something changed even when you chose not to read it.",
     inputSchema: {
       ...RepoShape,
       pullNumber: external_exports.number().int().positive().describe("Pull request number to read"),
@@ -26232,7 +26225,7 @@ server.registerTool(
   "approve_held_workflow_runs",
   {
     title: "Approve held workflow runs",
-    description: "Resolve the deadlock where CI never runs because GitHub is holding it (\xA710.6). GitHub parks workflow runs on coding-agent pull requests in `action_required` until a maintainer clicks 'Approve and run workflows'. Unattended, those runs never start, `evaluate_mechanical` reports `checks_held`, and the Work Item stalls \u2014 while merging anyway would bypass CI entirely. Call this on a `checks_held` verdict, or when `checks_pending`/`checks_missing` persists across cycles on a pull request whose checks have never started. It performs a blast-radius review first and only approves if the change cannot escalate what CI is allowed to do: the diff must leave workflow definitions, actions, dependency manifests, lockfiles and registry config untouched, the repository's default workflow token must be read-only, and no pull-request workflow may reference a secret. If any of that fails it escalates to a human instead, with the specific reasons. Approving is a write; the decision and its reasoning are recorded as a comment on the Work Item. IMPORTANT (Gates 4 and 4b, \xA710.7): GitHub's per-run approve endpoint covers only *fork* pull requests and refuses a same-repo coding-agent branch outright with \"not from a fork pull request or queued by the Actions bot\". That hold comes from the repository's Copilot Actions workflow-approval requirement, which is readable over REST but has NO write API, so Factory cannot release it. On that refusal this tool returns `action: 'not_approvable'` with GitHub's reason in `failures[]` and escalates to a human. The refusal is deterministic, so do not retry it, do not merge without CI, and do not close and re-dispatch \u2014 the replacement pull request is held identically. Report the two fixes a human can actually apply: approve the run on the pull request, or turn the requirement off in Settings > Copilot > Coding agent. The review's `repoScopeSafe` flag and `repoScopeBlockers` are what that human needs in order to decide, and are already recorded on the Work Item.",
+    description: "Resolve the deadlock where CI never runs because GitHub is holding it (\xA79.2). GitHub parks workflow runs on coding-agent pull requests in `action_required` until a maintainer clicks 'Approve and run workflows'. Unattended, those runs never start, `evaluate_mechanical` reports `checks_held`, and the Work Item stalls \u2014 while merging anyway would bypass CI entirely. Call this on a `checks_held` verdict, or when `checks_pending`/`checks_missing` persists across cycles on a pull request whose checks have never started. It performs a blast-radius review first and only approves if the change cannot escalate what CI is allowed to do: the diff must leave workflow definitions, actions, dependency manifests, lockfiles and registry config untouched, the repository's default workflow token must be read-only, and no pull-request workflow may reference a secret. If any of that fails it escalates to a human instead, with the specific reasons. Approving is a write; the decision and its reasoning are recorded as a comment on the Work Item. IMPORTANT: GitHub's per-run approve endpoint covers only *fork* pull requests and refuses a same-repo coding-agent branch outright with \"not from a fork pull request or queued by the Actions bot\". That hold comes from the repository's Copilot Actions workflow-approval requirement, which is readable over REST but has NO write API, so Factory cannot release it. On that refusal this tool returns `action: 'not_approvable'` with GitHub's reason in `failures[]` and escalates to a human. The refusal is deterministic, so do not retry it, do not merge without CI, and do not close and re-dispatch \u2014 the replacement pull request is held identically. Report the two fixes a human can actually apply: approve the run on the pull request, or turn the requirement off in Settings > Copilot > Coding agent. The review's `repoScopeSafe` flag and `repoScopeBlockers` are what that human needs in order to decide, and are already recorded on the Work Item.",
     inputSchema: {
       ...WorkItemLocatorShape,
       escalateTo: external_exports.string().describe("Login of the human to assign if the review declines to approve")
@@ -26401,7 +26394,7 @@ server.registerTool(
   "close_objective",
   {
     title: "Close Objective",
-    description: "\xA74: close the Objective issue itself once every Work Item is `done`. Gate 0 finding (2026-09-01, clockgrove/factory-gate0#6): GitHub does NOT auto-close a parent issue just because all its sub-issues closed \u2014 an Objective can sit open forever with a 100% complete graph unless something closes it explicitly. A no-op if the Objective is already closed, or if any Work Item is not yet `done` (the same check `allDone()` in state.ts makes).",
+    description: "\xA74: close the Objective issue itself once every Work Item is `done`. GitHub does NOT auto-close a parent issue just because all its sub-issues closed \u2014 an Objective can sit open forever with a 100% complete graph unless something closes it explicitly. A no-op if the Objective is already closed, or if any Work Item is not yet `done` (the same check `allDone()` in state.ts makes).",
     inputSchema: {
       ...RepoShape,
       objectiveNumber: external_exports.number().int().positive().describe("Objective issue number"),
@@ -26436,7 +26429,7 @@ server.registerTool(
   "read_repository_layout",
   {
     title: "Read repository layout",
-    description: "List every file on the target repository's default branch. Call this *before* compiling an Objective into Work Items, so each item's `scope` names paths that actually exist. Without it, compilation can only infer structure from the Objective's prose \u2014 where tests live, whether a barrel file is already there, what a module is called \u2014 and a wrong guess does not fail at compile time. It fails several steps later as an `untouched` verdict, after an agent run has been spent, and looks like the agent ignored its brief rather than like the brief named a path that was never there (Gate 3 F2, Gate 4 F4). Read-only. Narrow large repositories with `pathPrefix` rather than raising `maxEntries`; `truncated` reports any incompleteness, and `treeTruncatedByGitHub` distinguishes a repository too large for GitHub to return whole from a list this tool capped itself.",
+    description: "List every file on the target repository's default branch. Call this *before* compiling an Objective into Work Items, so each item's `scope` names paths that actually exist. Without it, compilation can only infer structure from the Objective's prose \u2014 where tests live, whether a barrel file is already there, what a module is called \u2014 and a wrong guess does not fail at compile time. It fails several steps later as an `untouched` verdict, after an agent run has been spent, and looks like the agent ignored its brief rather than like the brief named a path that was never there. Read-only. Narrow large repositories with `pathPrefix` rather than raising `maxEntries`; `truncated` reports any incompleteness, and `treeTruncatedByGitHub` distinguishes a repository too large for GitHub to return whole from a list this tool capped itself.",
     inputSchema: {
       ...RepoShape,
       pathPrefix: external_exports.string().optional().describe("Only return paths starting with this prefix, e.g. 'src/' or 'test/'"),
@@ -26482,7 +26475,7 @@ server.registerTool(
   "graph_apply",
   {
     title: "Apply compiled graph",
-    description: "\xA79 build order step 6: apply a compiled Objective (skills/objective-compilation's output) to GitHub as Work Item sub-issues plus native `blocked by` dependency edges. Every created issue is labelled `factory:work-item` automatically when the repository defines that label; if it does not, the issues are still created and the result says the label was missing. Refuses (a no-op) if the Objective already has Work Item sub-issues \u2014 this call is not idempotent, and a caller must not re-apply a graph onto an Objective that already has one (graph.ts's own contract).",
+    description: "Apply a compiled Objective (skills/objective-compilation's output) to GitHub as Work Item sub-issues plus native `blocked by` dependency edges. Every created issue is labelled `factory:work-item` automatically when the repository defines that label; if it does not, the issues are still created and the result says the label was missing. Refuses (a no-op) if the Objective already has Work Item sub-issues \u2014 this call is not idempotent, and a caller must not re-apply a graph onto an Objective that already has one (graph.ts's own contract).",
     inputSchema: {
       ...RepoShape,
       objectiveNumber: external_exports.number().int().positive().describe("Objective issue number"),

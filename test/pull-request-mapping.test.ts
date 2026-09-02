@@ -5,11 +5,9 @@ import { toPullRequest } from "../src/github.js";
 /**
  * Tests for the GraphQL-to-Factory pull request mapping.
  *
- * Added after Gate 5 pointed out that a Director cannot reconstruct ordering
- * after the fact — "was this Work Item dispatched only after its dependency
- * merged?" was unanswerable from the tool surface, because no merge or close
- * timestamp was exposed anywhere (§10.16). Diagnosing the §10.15 early-merge
- * bug needed exactly that timestamp and had to go outside Factory to get it.
+ * Director must be able to reconstruct ordering after the fact — "was this
+ * Work Item dispatched only after its dependency merged?" needs merge and close
+ * timestamps from the tool surface (§10).
  *
  * These are deliberately mapping tests rather than derivation tests: nothing in
  * the state machine reads `mergedAt`/`closedAt`, which is precisely why they
@@ -90,7 +88,7 @@ describe("head commit time", () => {
     expect(pr.createdAt.toISOString()).toBe("2026-01-01T09:00:00.000Z");
   });
 
-  // The abandoned-attempt bound (§10.15) measures staleness from this field, so
+  // The abandoned-attempt bound (§5.1) measures staleness from this field, so
   // a pull request with no commits must still produce a real Date. Falling back
   // to the PR's own creation time makes a brand-new empty PR trivially "recently
   // active", which errs toward waiting rather than toward judging live work.

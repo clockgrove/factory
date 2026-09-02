@@ -1,8 +1,7 @@
 /**
- * Factory's bundled MCP server (§9 build order step 7; IMPLEMENTATION-PLAN.md
- * §15.2/§15.3).
+ * Factory's bundled MCP server (docs/DESIGN.md §11.2/§11.3).
  *
- * This is Director's *only* write path. §15.3's guarantee is not a policy
+ * This is Director's *only* write path. §11.3's guarantee is not a policy
  * Director is asked to follow — it is a fact about which functions exist in
  * this process: every tool below is a thin wrapper over an existing,
  * already-mechanical library function (`state.ts`'s `derive`, `dispatch.ts`'s
@@ -13,42 +12,30 @@
  * no such call exists anywhere in this file for a tool to expose. A Director
  * skill talking only to this server cannot route around that by construction,
  * which is the whole point of putting enforcement in the tool surface rather
- * than in an instruction (§14 is superseded by this file for exactly that
- * reason).
+ * than in an instruction.
  *
- * SDK choice (§15's open item a, decided): the legacy, stable
- * `@modelcontextprotocol/sdk` (v1.30.0), not the v2 split
- * (`@modelcontextprotocol/server`/`@modelcontextprotocol/client`, v2.0.0).
- * Verified live, 2026-08-30/31, against primary sources rather than assumed:
+ * SDK choice: the legacy, stable `@modelcontextprotocol/sdk` (v1.x), not the
+ * v2 split (`@modelcontextprotocol/server`/`@modelcontextprotocol/client`).
+ * The reasons are about client reach, not preference:
  *
- *   - v2's own migration guide states plainly that "nothing in v2 puts a
- *     2026-07-28 byte on the wire by default" — a hand-constructed v2 Server
- *     speaks the identical 2025-era protocol v1 does unless the caller
- *     explicitly opts into `versionNegotiation`
- *     (typescript-sdk `docs/migration/support-2026-07-28.md`). So there is no
- *     compatibility upside to v2 today, only its own freshness risk: v1.30.0
- *     and v2.0.0 were cut the same day (2026-07-27), and v1 is the one with a
- *     multi-year track record.
- *   - Client support for the *new* wire protocol is real but inconsistent
- *     across the three target harnesses: Copilot CLI shipped it broadly in
- *     1.0.81 ("Ship MCP 2026-07-28 support to CLI, SDK, IDE, and in-memory
- *     clients", github/copilot-cli changelog.md); Codex CLI's is explicitly
- *     opt-in and defaults to the legacy `initialize` handshake as of
- *     rust-v0.147.0 ("Support the opt-in MCP 2026-07-28 protocol",
- *     openai/codex release notes); Claude Code's rollout announcement
- *     (claude.com/blog/bringing-mcp-2026-07-28-to-claude) does not commit to a
- *     default-on date. The legacy protocol this server speaks is the one
- *     every current default configuration of all three already understands.
- *   - Also verified live: Codex CLI now installs "portable Agent Plugins"
- *     natively (rust-v0.147.0 changelog: "Support portable Agent Plugins
- *     throughout installation", "Add Agent Plugins MCP config parsing") —
- *     resolving §15.8's open question. Codex reads root `plugin.json` +
- *     `mcp.json` directly; no `.codex-plugin/plugin.json` adapter is needed.
- *     (Claude Code still needs its own `.claude-plugin/plugin.json` +
- *     `.mcp.json`, confirmed live against code.claude.com/docs/en/plugins and
- *     .../plugins-reference — its native MCP config key and placeholder
- *     (`${CLAUDE_PLUGIN_ROOT}`) differ from the Agent Plugins 1.0 format this
- *     server is declared under in the portable root `mcp.json`.)
+ *   - v2's own migration guide states plainly that nothing in v2 puts a
+ *     newer protocol byte on the wire by default — a hand-constructed v2
+ *     Server speaks the identical protocol v1 does unless the caller
+ *     explicitly opts into `versionNegotiation`. So there is no compatibility
+ *     upside to v2 today, only its own freshness risk: the two lines were cut
+ *     the same day, and v1 is the one with a multi-year track record.
+ *   - Client support for the *newer* wire protocol is real but inconsistent
+ *     across the three target harnesses: Copilot CLI ships it broadly, Codex
+ *     CLI's is explicitly opt-in and defaults to the legacy `initialize`
+ *     handshake, and Claude Code's rollout does not commit to a default-on
+ *     date. The legacy protocol this server speaks is the one every current
+ *     default configuration of all three already understands.
+ *   - Codex CLI installs portable Agent Plugins natively, reading root
+ *     `plugin.json` + `mcp.json` directly, so no Codex-specific adapter is
+ *     needed. Claude Code still needs its own `.claude-plugin/plugin.json` +
+ *     `.mcp.json`: its native MCP config key and placeholder
+ *     (`${CLAUDE_PLUGIN_ROOT}`) differ from the Agent Plugins format this
+ *     server is declared under in the portable root `mcp.json`.
  *
  * Every tool re-reads and re-derives the Objective from GitHub rather than
  * accepting a previously-returned Work Item back as an argument (§1: state is
@@ -167,8 +154,8 @@ function serializePr(pr: LinkedPullRequest, minimal = false) {
   };
   if (!minimal) return base;
   // The coding agent quotes the whole Work Item issue back into the PR body, so
-  // `body` alone dominates the response at scale (§10.2, F3: ten items overflowed
-  // the tool output limit outright). Drop it and keep everything else —
+  // `body` alone dominates the response at scale — a ten-item Objective can
+  // overflow the tool output limit outright. Drop it and keep everything else —
   // especially `changedFilePaths`, which is a handful of short strings and is
   // the primary evidence the confidence bar reasons about. Trading it away to
   // save bytes would defeat the purpose of the read.
@@ -234,12 +221,11 @@ async function dispatcherFor(
  * stays pretty-printed, because most results are small and a human debugging
  * the server benefits; above it, indentation is dropped.
  *
- * This is a size guard, not a formatting preference. Gate 2's ten-item read
- * exceeded the tool output limit outright (§10.2, F3), and measurement after
- * the `minimal` flag landed showed 5.4 KB of the remaining 13.3 KB was pure
- * indentation — 41% of a payload that had just been trimmed for size. The
- * output is identical JSON either way, so no caller can tell the difference
- * except by byte count.
+ * This is a size guard, not a formatting preference. A ten-item read can exceed
+ * the tool output limit outright, and even after the `minimal` flag trims a
+ * payload, indentation can account for roughly 40% of what remains. The output
+ * is identical JSON either way, so no caller can tell the difference except by
+ * byte count.
  */
 const PRETTY_PRINT_LIMIT_BYTES = 8_000;
 
@@ -311,12 +297,11 @@ const CompiledObjectiveSchema = z.object({
  * The version this server advertises in its MCP `initialize` handshake.
  *
  * Read from `package.json` rather than written here, because a literal drifts
- * silently: the plugin shipped as v1.0.0 while this handshake still said
- * `0.1.0`, and nothing noticed until someone installed the plugin for real and
- * read the banner (§10.19). Manifest-to-manifest agreement was already checked
- * by `verify:package`; the *server's own* claim about itself was the one
- * version no check compared against the others. `verify:package` now asserts it
- * too, so re-hardcoding this would fail the build rather than ship quietly.
+ * silently: the server's own claim about itself is the one version nothing else
+ * compares against, so a stale hardcoded string is only visible to someone who
+ * installs the plugin and reads the handshake banner. `verify:package` asserts
+ * manifest-to-manifest agreement *and* that the running server matches, so
+ * re-hardcoding this would fail the build rather than ship quietly.
  *
  * Imported as a named binding so esbuild tree-shakes the rest of the manifest
  * away. A default import inlines the whole file, which put `devDependencies`
@@ -355,7 +340,7 @@ server.registerTool(
             "own `body`, each replaced by a `bodyLength`. Everything the state machine and the " +
             "confidence bar reason about is retained — including `changedFilePaths`. Use this on " +
             "large Objectives: the coding agent quotes the entire Work Item issue into its PR " +
-            "body, so a ten-item graph can exceed the tool output limit outright (§10.2, F3). " +
+            "body, so a ten-item graph can exceed the tool output limit outright. " +
             "Read a specific pull request's contents with `read_pull_request_diff` rather than " +
             "carrying every body through every cycle.",
         ),
@@ -366,7 +351,7 @@ server.registerTool(
           "The GitHub login you intend to escalate to later. Supplying it here validates it now, " +
             "against the live API, while nothing is at stake. It is otherwise not checked until " +
             "the first dispatch or escalation that uses it — and an escalation is precisely the " +
-            "moment you cannot afford it to throw (§10.2, F4). Note the login is a GitHub " +
+            "moment you cannot afford it to throw. Note the login is a GitHub " +
             "account name, which is not always the prefix of your working branch.",
         ),
     },
@@ -410,18 +395,11 @@ server.registerTool(
     title: "Evaluate mechanical checks",
     description:
       "Run §5.1's cheap, deterministic checks against a Work Item's current open pull request: " +
-      "no-op, declined, untouched scope, merge conflict, checks pending/failed/missing/held, " +
-      "sensitive surface, in progress, mergeability unknown, or ready. Pure and " +
+      "no-op, declined, untouched scope, merge conflict, mergeability unknown, checks pending/failed, sensitive surface, " +
+      "in progress, or ready. Pure and " +
       "read-only — call this before `dispatch_integrate` to see the verdict it would act on, or on " +
       "its own to inspect a Work Item without taking any action. " +
-      "A `mergeability_unknown` verdict means GitHub has not finished recomputing whether the " +
-      "branch merges cleanly and is reporting `mergeable: null`, which must not be read as either " +
-      "clean or conflicting. Expect it routinely rather than rarely: merging any pull request " +
-      "invalidates the computation for every other open pull request against that base, so the " +
-      "second and later merges of a batch of ready siblings will often hit it (measured in Gate 7, " +
-      "§10.20). Nothing is wrong and nothing should be closed — GitHub settles in seconds and the " +
-      "next cycle merges normally. " +
-      "Two fields on a `ready` verdict still need your judgment (Gate 5, §10.12). `outOfScopeFiles` " +
+      "Two fields on a `ready` verdict still need your judgment. `outOfScopeFiles` " +
       "lists changed paths the Work Item never declared: the scope check only fails when *nothing* " +
       "in scope was touched, so a pull request that does its job **and** edits whatever else it " +
       "likes is still `ready`. That is deliberate — extra files are often legitimate (updating a " +
@@ -437,9 +415,16 @@ server.registerTool(
       "so it is not finished and nothing here should act on it — not merge it, and equally not " +
       "close or rebase it. Checked ahead of scope, conflict and check verdicts on purpose: a " +
       "half-pushed change legitimately touches nothing in scope yet and legitimately fails its own " +
-      "tests, and those verdicts close the pull request (§10.15). Wait for the agent to rename it. " +
+      "tests, and those verdicts close the pull request. Wait for the agent to rename it. " +
       "Note the signal is the title prefix, not the draft flag: the agent opens every pull request " +
-      "as a draft and never clears it, so draftness means nothing here.",
+      "as a draft and never clears it, so draftness means nothing here. " +
+      "A `mergeability_unknown` verdict means GitHub has not finished recomputing whether the pull " +
+      "request merges cleanly, so nothing is known yet — it is not a conflict, not a failure and not " +
+      "`ready`. Expect it routinely on a healthy Objective: merging any pull request changes the base " +
+      "branch and invalidates the cached mergeability of every other open one, so integrating N ready " +
+      "items typically takes N cycles rather than one. That is the correct cost, not a stall. Do not " +
+      "act on the guess; simply call `dispatch_integrate` again next cycle, when the fresh snapshot " +
+      "will carry a real answer.",
     inputSchema: {
       ...WorkItemLocatorShape,
       expectedFiles: z
@@ -489,15 +474,15 @@ server.registerTool(
       "since it reports `changedFilePaths` but no content. Call this before `dispatch_integrate` on " +
       "any Work Item whose acceptance criteria say something about what the code *does* (e.g. 'must " +
       "import and actually call X rather than reimplement it') — a criterion you cannot check from " +
-      "file paths alone must not be waved through on the agent's own say-so (§15.7). Read-only. " +
+      "file paths alone must not be waved through on the agent's own say-so (§11.7). Read-only. " +
       "Patches are capped by `maxPatchBytes`; `truncated` reports whether anything was shortened or " +
       "withheld, so a partial read is never mistaken for a complete one. " +
       "Pass `paths` to spend that budget only on the files you are reviewing — usually the Work " +
       "Item's declared `scope`, plus anything `evaluate_mechanical` reported in `outOfScopeFiles`. " +
       "Without it the budget is first-come-first-served in GitHub's own ordering, so one big file " +
-      "early in the alphabet starves the rest: Gate 5 asked for 4000 bytes on a pull request " +
-      "containing `package-lock.json` and got the lockfile plus `patch: null` for all three files " +
-      "it actually needed to review (§10.13). Filtered files are still listed with their " +
+      "early in the alphabet starves the rest: a small budget spent on a pull request containing a " +
+      "lockfile returns the lockfile and `patch: null` for the files you actually needed to " +
+      "review. Filtered files are still listed with their " +
       "`status`/`additions`/`deletions`, so the file list stays complete and you can still see " +
       "*that* something changed even when you chose not to read it.",
     inputSchema: {
@@ -589,7 +574,7 @@ server.registerTool(
   {
     title: "Approve held workflow runs",
     description:
-      "Resolve the deadlock where CI never runs because GitHub is holding it (§10.6). GitHub parks " +
+      "Resolve the deadlock where CI never runs because GitHub is holding it (§9.2). GitHub parks " +
       "workflow runs on coding-agent pull requests in `action_required` until a maintainer clicks " +
       "'Approve and run workflows'. Unattended, those runs never start, `evaluate_mechanical` " +
       "reports `checks_held`, and the Work Item stalls — while merging anyway would bypass CI " +
@@ -601,7 +586,7 @@ server.registerTool(
       "pull-request workflow may reference a secret. If any of that fails it escalates to a human " +
       "instead, with the specific reasons. Approving is a write; the decision and its reasoning are " +
       "recorded as a comment on the Work Item. " +
-      "IMPORTANT (Gates 4 and 4b, §10.7): GitHub's per-run approve endpoint covers only *fork* pull " +
+      "IMPORTANT: GitHub's per-run approve endpoint covers only *fork* pull " +
       "requests and refuses a same-repo coding-agent branch outright with \"not from a fork pull " +
       "request or queued by the Actions bot\". That hold comes from the repository's Copilot Actions " +
       "workflow-approval requirement, which is readable over REST but has NO write API, so Factory " +
@@ -768,12 +753,11 @@ server.registerTool(
         };
       }
       const dispatcher = await dispatcherFor(owner, repo, objective, escalateTo, reader);
-      // Report what actually happened, not what we predicted would happen.
-      // `attemptAction` was computed here and returned as the answer, which is
-      // the same shape of defect Gate 5 found in `dispatch_integrate` (§10.13):
-      // the caller was told a decision rather than an outcome. The two agree
-      // today because `retryOrEscalate` recomputes the same predicate, but a
-      // caller should never have to rely on that.
+      // Report what actually happened, not what we predicted would happen: a
+      // caller told a *decision* instead of an *outcome* has to trust that the
+      // two never diverge. They agree today because `retryOrEscalate`
+      // recomputes the same predicate, but a caller should never have to rely
+      // on that.
       const action = reason
         ? await dispatcher.retryOrEscalate(item, reason)
         : await dispatcher.retryOrEscalate(item);
@@ -861,8 +845,8 @@ server.registerTool(
   {
     title: "Close Objective",
     description:
-      "§4: close the Objective issue itself once every Work Item is `done`. Gate 0 finding " +
-      "(2026-09-01, clockgrove/factory-gate0#6): GitHub does NOT auto-close a parent issue just " +
+      "§4: close the Objective issue itself once every Work Item is `done`. GitHub does NOT " +
+      "auto-close a parent issue just " +
       "because all its sub-issues closed — an Objective can sit open forever with a 100% complete " +
       "graph unless something closes it explicitly. A no-op if the Objective is already closed, or " +
       "if any Work Item is not yet `done` (the same check `allDone()` in state.ts makes).",
@@ -916,7 +900,7 @@ server.registerTool(
       "whether a barrel file is already there, what a module is called — and a wrong guess does not " +
       "fail at compile time. It fails several steps later as an `untouched` verdict, after an agent " +
       "run has been spent, and looks like the agent ignored its brief rather than like the brief " +
-      "named a path that was never there (Gate 3 F2, Gate 4 F4). Read-only. Narrow large " +
+      "named a path that was never there. Read-only. Narrow large " +
       "repositories with `pathPrefix` rather than raising `maxEntries`; `truncated` reports any " +
       "incompleteness, and `treeTruncatedByGitHub` distinguishes a repository too large for GitHub " +
       "to return whole from a list this tool capped itself.",
@@ -1000,7 +984,7 @@ server.registerTool(
   {
     title: "Apply compiled graph",
     description:
-      "§9 build order step 6: apply a compiled Objective (skills/objective-compilation's output) to " +
+      "Apply a compiled Objective (skills/objective-compilation's output) to " +
       "GitHub as Work Item sub-issues plus native `blocked by` dependency edges. Every created issue " +
       "is labelled `factory:work-item` automatically when the repository defines that label; if it " +
       "does not, the issues are still created and the result says the label was missing. Refuses (a " +

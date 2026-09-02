@@ -1,248 +1,13 @@
-# Clockgrove Factory
+# Factory
 
 A GitHub-native engineering-management plugin. You author an **Objective**; Factory compiles it into
-**Work Items**, dispatches them to parallel GitHub Copilot agent sessions, supervises the results,
-and replans — unattended.
+**Work Items**, dispatches them to parallel GitHub Copilot coding-agent sessions, supervises the
+results, integrates what is good, and asks a human about what is not.
 
-> **Status: Factory v1.0.1 is released and feature-complete; two claims about it are still open.**
-> Gates 0–3 passed, Gates 4–6 exercised and hardened the
-> previously untested CI, conflict, repository-reading, and packaging paths. Gate 7 completed its
-> Objective cleanly and was the first run against the **installed public plugin**, but is not a pass —
-> the timer-driven re-entry it exists to prove was never exercised (see below). All seven build-order
-> steps are done —
-> Factory can derive the full state of an Objective from GitHub alone, dispatch/confirm/retry/escalate
-> Work Items against a real repo, mechanically classify a PR's outcome (no-op, declined, untouched,
-> conflict, checks), integrate a mechanically-ready PR (mark ready, merge, resolve or reject a
-> conflict, close the Objective once every Work Item is done) back through the same retry/escalate
-> machinery, compile a human-authored Objective into a validated Work Item graph
-> (`skills/objective-compilation/SKILL.md`, `schemas/objective.schema.json`,
-> `schemas/work-item.schema.json`), apply that graph to GitHub as sub-issues plus native `blocked by`
-> edges (`src/graph.ts`), and assemble the whole loop behind `src/mcp-server.ts` (a portable stdio MCP
-> server — Director's only write path, IMPLEMENTATION-PLAN.md §15.3) plus `skills/director/SKILL.md`.
-> Root `plugin.json`/`mcp.json` (Agent Plugins 1.0 — read natively by both Copilot CLI and Codex CLI)
-> and `.claude-plugin/plugin.json`/`.mcp.json` (Claude Code's own manifest/MCP format) are in place.
->
-> Gate 0's rehearsal ran end-to-end against `clockgrove/factory-gate0`: Objective #6 ("Add three pure
-> utility functions") was compiled, dispatched as three independent Work Items, and closed — three
-> merged PRs, three closed Work Items, Objective closed, matching §10's pass bar. The rehearsal itself
-> is exactly what caught three real defects that no unit test had (each fixed live, not routed around):
-> `read_objective` never exposed the Objective's `body`, the coding agent's assignee login
-> (`"Copilot"`) differs from its suggested-actor login (`"copilot-swe-agent"`) and was misread as a
-> human co-assignee — misclassifying every dispatch as an immediate escalation until fixed — and
-> GitHub does not auto-close a parent issue just because every sub-issue closed, which needed a new
-> `close_objective` tool.
->
-> Gate 1's rehearsal ran against `clockgrove/factory-gate1`: Objective #1, a three-function CSV
-> pipeline authored with a genuine dependency chain (`parseLine` → `validateRecord` → `formatRow`,
-> each depending on the previous), compiled to native `blocked by` edges instead of Gate 0's
-> independent items. Director correctly held each dependent Work Item unassigned/blocked until its
-> dependency's PR merged and issue closed, then dispatched it immediately — proving sequencing and
-> blocked-by handling per the scope ladder (PRD §8). Three merged PRs, three closed Work Items,
-> Objective closed, no escalations, one continuous run. See [`docs/PRD.md`](docs/PRD.md) and
-> [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md).
->
-> **Gate 2 (8–10 mixed parallel + dependent Work Items — scale, capacity, contention) passed**
-> against `clockgrove/factory-gate2`. Objective #1, a text-processing toolkit, compiled to a
-> deliberate diamond: six fully independent Layer 1 primitives, three Layer 2 combinators each
-> depending on two of them, one Layer 3 assembly depending on all three. Ten Work Items, ten merged
-> PRs, Objective closed `COMPLETED` in roughly 22 minutes, unattended — no escalations, no
-> `platformExhausted`, and no merge conflicts despite a six-wide parallel dispatch burst branching
-> from one base (the compiler's non-overlapping-`scope` invariant, §5 of the compilation skill,
-> prevented the contention rather than the loop having to recover from it). Verified independently of
-> Director's own reporting by cloning the merged result: **41 tests across 10 files pass and
-> `tsc --noEmit` is clean**, and each combinator genuinely *imports* its declared upstreams
-> (`summarize` ← `truncate`+`wordCount`, `formatHeading` ← `slugify`+`titleCase`, `sanitize` ←
-> `stripHtml`+`escapeRegex`, `buildArticleMeta` ← all three Layer 2) rather than reimplementing them
-> — so `dependsOn` produced composable work, not merely correctly-ordered independent work.
->
-> Gate 2 also served as a controlled test of an acceptance-criteria phrasing fix. The repo's
-> `vitest.config.ts` discovers tests **only** under `test/`, making the declared path load-bearing: a
-> colocated test silently never runs. Gate 1 had stated that path descriptively and the coding agent
-> colocated the test under `src/` in **3 of 3** Work Items; Gate 2 restated it as a hard `REQUIRED:`
-> constraint naming the exact path plus an `outOfScope` restatement giving the reason, and got
-> **10 of 10** correct. Recorded in `skills/objective-compilation/SKILL.md`.
->
-> Gate 2 also surfaced five defects in Factory's *own* tool surface, none of which were visible at
-> three Work Items — all now fixed, in `docs/IMPLEMENTATION-PLAN.md` §10.3. The significant one:
-> Director had no way to read a pull request's diff through Factory's tools, only its changed file
-> *paths*, so the director skill's instruction to check the diff against §7.3's confidence bar was
-> not performable — and four Work Items merged with a semantic acceptance criterion ("must import
-> and actually use these functions, not reimplement them") unverified. The MCP surface is now nine
-> tools, adding `read_pull_request_diff`, and `read_objective` takes a `minimal` flag because at ten
-> Work Items its response exceeded the tool output limit outright.
->
-> Gate 3 ran against `clockgrove/factory-gate3` — an existing, working brownfield library with passing tests, real
-> CI, and three documented rough edges to fix, so that for the first time Work Items had to *change*
-> code rather than only add files. All four Work Items merged in ~12 minutes, `read_pull_request_diff`
-> genuinely verified the composition criterion Gate 2 had to merge unverified, no existing test was
-> deleted or weakened, and §6's "base branch was modified" recovery path fired and self-healed.
->
-> It also caught the most serious defect found so far. All four PRs merged with `checks: null` even
-> though the repo ships CI. GitHub requires a maintainer to click **"Approve and run workflows"** on a
-> coding-agent pull request, so every run was created and then *waited*, executing nothing — and
-> because `statusCheckRollup` is computed from check *runs*, it stayed `null`, which Factory read as
-> "this repository has no CI" and merged straight through. GitHub said *CI is waiting on you*;
-> Factory heard *there is no CI*. Now fixed three ways: check **suites** are consulted when the rollup
-> is silent, a new `checks_missing` verdict covers a PR that has no checks in a repo known to run them,
-> and escalation names the approval setting instead of reporting a phantom test failure. Live-verified
-> against both rehearsal repos — gate3's four PRs now report `FAILURE`, gate2's ten (which genuinely
-> have no CI) still report `null`. Gate 3 also fixed a false `failed` verdict that fired while the
-> agent was still writing its PR.
->
-> Following that thread further showed the held runs never failed at all — they were **cancelled by
-> the merge**. Every run on a branch shares one `updated_at`, 1–2s after that branch's `merged_at`,
-> however many minutes apart they were created. So the honest verdict is `checks_pending`, forever,
-> and the checklist's old advice — turn the approval requirement off — was a fixture workaround
-> trading a real security control for a green run. Factory now makes the call itself:
-> **`approve_held_workflow_runs`** approves held runs only behind a blast-radius review proving the
-> diff cannot redefine what CI executes (workflows, actions, manifests, lockfiles, registry config)
-> and that the job has nothing worth stealing (read-only token, no secrets); otherwise it escalates
-> with reasons. Details in [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) §10.5–§10.6;
-> see also [`docs/PRD.md`](docs/PRD.md).
->
-> **Gate 4 found that held coding-agent CI cannot be approved through GitHub's per-run approval
-> endpoint.** That endpoint covers fork pull requests; coding-agent pull requests use same-repository
-> branches and are held by a repository setting whose public API is read-only. Factory now reports the
-> deterministic refusal and escalates rather than merging untested work, retrying forever, or closing
-> correct work as if its tests had failed. Gate 4 also exposed that destructive last behavior:
-> `checksNeverStarted` is now a distinct `checks_held` verdict routed directly to escalation.
->
-> **Gate 5 (the merge-conflict path — §6) passed**, closing the one branch of the design that five
-> earlier rehearsals had never reached, because every one of them produced Work Items with disjoint
-> file scope. The fixture forced the collision instead of hoping for it: three Work Items against
-> `clockgrove/factory-gate2` #22, each required to create the *same* new `src/index.ts` barrel, with
-> no dependency edges between them. The first merged; the other two conflicted, and §6 recovered
-> both — `updatePullRequestBranch` throws on a real content conflict, so the tool closed each pull
-> request with an audit comment and re-dispatched, and since the base by then contained the barrel,
-> each replacement modified the existing file and merged in a single retry. The Objective closed with
-> all three Work Items done.
->
-> That measurement also retired an open worry. `#resolveConflict`'s success path had looked like an
-> unbounded loop; it is unbounded and correct, because GitHub refuses the mutation outright when the
-> merge would conflict, so reaching it again means the base genuinely moved again. The real cost is
-> elsewhere and is now documented in both skills: **each conflict re-dispatch spends one of the Work
-> Item's three attempts**, on work that was not defective, so a four-way collision on one file can
-> exhaust the item that merges last.
->
-> Gate 5 also confirmed two gaps reported by earlier gates and now fixed. Work Items were being
-> created **unlabelled** — `graph_apply` took the `factory:work-item` label as a GraphQL node ID that
-> nothing on the tool surface could produce, so every caller omitted it, in repositories that defined
-> the label; the label is now resolved by name and applied automatically. And nothing could read the
-> target repository, so compilation guessed `scope` from an Objective's prose — a wrong guess fails
-> not at compile time but several cycles later, as an `untouched` verdict with an agent run already
-> spent. **`read_repository_layout`** and **`read_repository_file`** close that, and
-> `objective-compilation` now reads the repository before naming a single path.
->
-> **Gate 6 passed**, live-verifying both of those fixes rather than trusting the unit tests behind
-> them — a distinction this project has been burned by twice, most recently when two of
-> `readRepositoryFile`'s response-shape branches turned out to be wrong against the real API despite
-> green tests. Against `clockgrove/factory-gate2` #32, compilation read the repository first and both
-> Work Items were created carrying `factory:work-item`, the first labelled Work Items Factory has ever
-> produced. Both merged; the Objective closed.
->
-> Reviewing that work surfaced two further defects, both now fixed. `readRepositoryFile` treated
-> **every** 404 as "this path is not in the repository", but the contents API also answers 404 for a
-> repository that does not exist or that the token cannot see — so a typo'd `owner`/`repo` returned a
-> confident `exists: false` for *every* path, and compilation would plan to create files that were
-> already there. A 404 now only means "missing" once the repository is confirmed readable. And
-> `npm run verify:package` read `mcp.json`, checked it, then launched the server from a hard-coded
-> path — so the one check that claims to run the shipped artifact could not have caught a wrong
-> `command` or a reordered argument. It now launches through the manifest's own values, and both
-> failure modes were confirmed to fail.
->
-> A third reported defect did not survive contact with the API: symlinks and submodules were said to
-> arrive as `type: "file"` and be misread as empty files. Probing GitHub live showed a submodule is
-> `type: "submodule"`, a symlink to a directory is `type: "symlink"`, and a symlink to a file is
-> resolved into real content — all three already handled correctly. Those exact response bodies are
-> now pinned as tests.
->
-> **Gate 5 left a finding in its margin that outlasted the gate.** It was run to exercise the merge
-> conflict path, which it did — but it also noticed that both replacement pull requests had added a
-> 1454-line `package-lock.json` no Work Item asked for, and that nothing could have stopped them.
-> The scope check fired only when a pull request touched *nothing* it was asked to, so doing the job
-> **and** editing whatever else it liked passed every mechanical check — while §7.3 claimed
-> "declared scope respected" the whole time. Extra files are now reported as `outOfScopeFiles` for
-> the semantic review to weigh (blocking them would be wrong: an agent updating a test its change
-> broke is behaving correctly). Files that redefine what CI runs — workflows, actions, dependency
-> manifests and lockfiles — do block, as `sensitive_surface`, and escalate to a human rather than
-> retrying, since the work is usually right and a replacement would carry the same diff. That check
-> ignores the declared scope deliberately: scope is written by the compiler, so honouring it would
-> let the safety property certify itself. Writing it turned up one more bug nobody had reported —
-> the scope check read a file list capped at 100 entries as if it were complete, so a large pull
-> request could be closed as "touched nothing in scope" when the file was merely on page 2.
->
-> Two smaller findings from the same margin were about the tool surface *withholding* answers rather
-> than getting them wrong. The diff reader's byte budget was first-come-first-served, so that same
-> lockfile — sorting first alphabetically — consumed the entire allowance and returned `patch: null`
-> for the three files actually under review; on any pull request carrying a lockfile or a generated
-> bundle, the files a reviewer most needs were precisely the ones it hid. `read_pull_request_diff`
-> now takes `paths`. And `dispatch_integrate` reported the verdict but never which of the three
-> conflict branches it took, so a rebase that succeeded without resolving anything — the exact bug
-> Gate 5 was sent to look for, and the one that leaves no trace anywhere else — was invisible from
-> its output. It now returns `action`.
->
-> **Gate 6's margin finding was the worst one yet, and it was six gates old.** Sent to exercise a
-> dependency chain, it mentioned in passing that a pull request had merged while still marked draft.
-> Factory was merging work the coding agent had not finished: three pull requests across two gates
-> merged before the agent announced completion, one of them 98 seconds early — Factory's own token
-> un-drafting and merging three seconds apart, the agent's completion rename arriving after. It
-> survived because fixture tasks are small enough that the agent usually finishes before the next
-> poll; on any change that arrives in pieces, Factory merges the half and closes the Work Item as
-> done. Re-reading one of those pull requests later caught the agent in the act: its body had roughly
-> doubled and its `[WIP]` prefix had vanished **after** Factory merged it. That is also why six gates
-> missed this — a pull request's title, body and draft flag are mutable, so auditing a finished run
-> through the API shows what is true now, not what Factory decided on. Only the squash subject on
-> `main` preserved the evidence.
->
-> **The first fix was wrong and measuring caught it.** Reading "draft" as the agent's not-finished
-> signal is the obvious move, and it would have stalled every Work Item forever: across 12/12 pull
-> requests in the fixture, the agent opens as a draft titled `[WIP] …`, renames the prefix away when
-> it finishes, and **never clears the draft flag** — every ready-for-review event was Factory's own.
-> The signal is the title prefix. Unfinished work is now an `in_progress` verdict that waits, bounded
-> by a twenty-minute no-push window so a dead agent escalates instead of hanging. The placement
-> matters more than the merge: it is checked *before* the scope, conflict and checks verdicts,
-> because a half-written pull request legitimately touches nothing in scope yet and legitimately
-> fails its own tests — and each of those verdicts closes the pull request, so judging work in
-> progress deletes it.
->
-> **What six passing gates have not proved** is now written down too, in
-> [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) §10.17, because a page of successes
-> lets absence of evidence read as evidence of absence. The `>= 3 attempts → escalate` branch has
-> **never executed** in any gate; the rebase-*success* path has never been observed; no fixture repo
-> has ever run its own tests, so "the tests pass" in a gate report is always static analysis of the
-> diff; and "unattended" should be read as a claim about the loop's logic rather than about a timer,
-> since at least one gate paced its own cycles by hand and said so. That last one is now a ship
-> criterion rather than a caveat: unattended-*across turn boundaries* — a session waking with no
-> working memory and reconstructing everything from GitHub — is the property the derived-state design
-> exists to provide, and it is the next thing to prove. **Gate 7 was created to prove it and did
-> not.** Its first attempt was stopped after three turns, none timer-started, to move the harness
-> onto the installed public plugin; the Objective was then completed by hand — three merged pull
-> requests, four closed issues, a clean `slug.ts` genuinely composing its two dependencies, and the
-> first gate ever run end-to-end against the published plugin rather than a local bundle. That makes
-> it a real integration result and **not** a pass on its own terms, because the property under test
-> is timer-driven re-entry and a human-paced session tests the loop's logic instead. The fixture is
-> consumed; a re-run needs a fresh repository, and must not count a "you have not marked the task
-> complete" nudge as a wake-up — that is a non-timer re-entry. Full account, including the two
-> verdicts that fired live for the first time, in
-> [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) §10.20.
->
-> **The second open claim closed itself badly the first time it was tested.** §10.18 singled out one
-> thing the automated package checks could not stand in for: that a real Copilot CLI can install the
-> published plugin the way a stranger would. Run for the first time on 2026-09-02 against the public
-> repository, it found the README's headline install command could not work at all (the CLI clones
-> `--branch <ref>`, which rejects the commit SHA the instructions told you to pin), that the
-> documented four-step upgrade dance reimplemented the CLI's own one-command `plugin update`, and
-> that pinning should never have been the default posture — documenting an unusual path means the
-> normal path is the one nobody tests. A fourth defect fell out of the same act: the installed
-> server's handshake announced `factory v0.1.0` while every manifest said `1.0.0`, because
-> `verify:package` compared the manifests to each other but never to the version the running server
-> claims. All four are fixed and the last is now asserted by `npm run verify:package`; the account is
-> [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) §10.19. The general rule, and the
-> reason this is in the status line rather than a changelog: **prose is the only part of a release
-> with no CI**, so a documented flow nobody has executed is an untested claim, and reviewing an
-> install block for plausibility is not the same as running it.
+Factory targets GitHub Copilot CLI today. Manifests for Codex and Claude Code ship in the same tree;
+running an identical Objective on all three is a separate check, not something the design assumes.
 
-## Design in one picture
+## How it works
 
 ```
   Objective (human)
@@ -271,8 +36,8 @@ Two constraints shape everything:
 1. **No deployed infrastructure.** No database, queue, dashboard, or service. GitHub holds the
    durable state; the harness holds the loop.
 2. **Harness- and model-agnostic.** Packaged as an [Agent Plugins 1.0](https://agent-plugins.org)
-   package — an open, vendor-neutral standard — targeting Codex, GitHub Copilot, and Claude Code
-   with no architectural primacy for any. Factory selects no model anywhere.
+   package — an open, vendor-neutral standard — targeting Codex, GitHub Copilot, and Claude Code with
+   no architectural primacy for any. Factory selects no model anywhere.
 
 ### Derived state
 
@@ -290,36 +55,7 @@ Factory stores nothing. Every Work Item's state is a pure function of what GitHu
 There is no status label, no sidecar file, and no lease. Nothing stored can go stale or diverge,
 crash recovery is free, and "resume" and "start" are the same code path.
 
-## Before you point it at a repository
-
-One setting will otherwise stop Factory dead on its first Work Item.
-
-GitHub ships repositories with **"Require approval for workflow runs"** enabled for the Copilot
-coding agent, so every workflow run on an agent-authored pull request parks in `action_required`
-until a human clicks *Approve and run workflows*. Factory sees a check suite that concluded having
-run nothing, correctly refuses to merge without CI evidence, and escalates. It cannot clear the hold
-itself: the REST approve endpoint covers *fork* pull requests only and refuses a same-repo agent
-branch outright, and the repository setting that governs the hold is readable over REST with no
-write. This is the account-wide default, so a fresh repository does not avoid it.
-
-If the repository runs CI on pull requests, turn it off before starting:
-**Settings → Copilot → Coding agent → Require approval for workflow runs.**
-
-```bash
-# check the current value
-gh api repos/OWNER/REPO/copilot/cloud-agent/configuration --jq .require_actions_workflow_approval
-```
-
-Decide it deliberately — it governs every future agent run in that repository, not one pull request.
-Factory's blast-radius review reports the evidence you need (read-only default workflow token, no
-secrets reachable from a pull-request workflow, no self-hosted runner) on the Work Item when it
-escalates. Repositories with no pull-request CI at all are unaffected. Full account in
-[`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) §10.7.
-
 ## Install
-
-Factory v1.0 targets GitHub Copilot CLI. The cross-harness Copilot/Codex/Claude portability run is a
-separate post-v1 gate, not a prerequisite for using v1.
 
 ```bash
 copilot plugin marketplace add clockgrove/factory
@@ -327,13 +63,13 @@ copilot plugin install factory@clockgrove
 copilot plugin list
 ```
 
-The repository must be public, or the adopter must independently have read access. Factory does not
-run an install script and does not need `node_modules`; the committed bundle is the artifact the
-plugin launches.
+Factory runs no install script and does not need `node_modules`; the committed bundle is the artifact
+the plugin launches. The repository must be public, or the adopter must independently have read
+access.
 
-Start a new Copilot CLI session, invoke the `director` skill, and provide an Objective repository,
-issue number, and escalation login. The MCP server reads `GITHUB_TOKEN` or `GH_TOKEN` from the
-harness environment when its first tool is called.
+Start a new Copilot CLI session, invoke the `director` skill, and give it an Objective repository,
+issue number, and escalation login. The MCP server reads `GITHUB_TOKEN` or `GH_TOKEN` from the harness
+environment when its first tool is called.
 
 ### Upgrade
 
@@ -341,31 +77,25 @@ harness environment when its first tool is called.
 copilot plugin update factory@clockgrove
 ```
 
-Restart the Copilot CLI session after upgrading. Objective state lives in GitHub, so upgrading or
-restarting Factory does not require a migration.
+Restart the session afterwards. Objective state lives in GitHub, so upgrading or restarting Factory
+requires no migration.
 
-### Pinning to a fixed version
+### Pinning
 
-Tracking the default branch is the normal path and the one these instructions assume. Two situations
-warrant pinning instead, and they are different arguments — do not conflate them:
-
-- **A run whose result has to mean something.** A gate, a rehearsal, or any experiment must not have
-  its own instrument change underneath it mid-run. Pin for the duration, then unpin.
-- **A deliberate review posture.** Factory holds a token and merges pull requests unattended, so
-  `plugin update` adopts code that will act on your repositories. Pinning trades staleness for
-  reviewing each version before it gains that authority.
+Tracking the default branch is the normal path and the one these instructions assume. Pin when a run's
+result has to mean something — an experiment must not have its instrument change underneath it — or as
+a review posture, since Factory holds a token and merges pull requests unattended, so adopting new
+code grants it that authority.
 
 Pin by appending a `#<ref>` to the marketplace source:
 
 ```bash
-copilot plugin marketplace add "clockgrove/factory#v1.0.0"
+copilot plugin marketplace add "clockgrove/factory#some-ref"
 ```
 
-**`<ref>` must be a tag or branch name, never a commit SHA.** The CLI resolves the fragment with
-`git clone --depth 1 --branch <ref>`, and `--branch` accepts only tags and branches — a raw SHA fails
-with `fatal: Remote branch <sha> not found in upstream origin`. Pin to a release tag, which is
-immutable in practice and names a reviewed commit exactly as well. To change versions, `marketplace
-remove` and re-add at the new tag.
+**`<ref>` must be a branch or tag name, never a commit SHA.** The CLI resolves the fragment with
+`git clone --depth 1 --branch <ref>`, which accepts only branches and tags. To move, `marketplace
+remove` and re-add at the new ref.
 
 ### Uninstall
 
@@ -377,7 +107,47 @@ copilot plugin marketplace remove clockgrove
 Uninstalling removes the local plugin only. It does not delete or mutate Objectives, Work Items, pull
 requests, labels, repository settings, environments, or secrets.
 
-## Verify the package
+## Before you point it at a repository
+
+Factory creates no environments and requires no repository secrets — it acts with the operator's own
+harness credentials. Two things about the target repository do matter:
+
+- **Ship a CI workflow that runs on `pull_request`.** Without one, GitHub reports no check runs and a
+  `ready` verdict silently narrows to "open, mergeable, touches the expected files" — nothing has
+  actually executed the code.
+- **Decide how the workflow-approval hold is set.** GitHub ships repositories with *"Require approval
+  for workflow runs"* enabled for the Copilot coding agent, so every workflow run on an agent-authored
+  pull request parks in `action_required` until a human clicks *Approve and run workflows*. Factory
+  refuses to merge without CI evidence and escalates. It cannot clear the hold itself: the REST
+  approve endpoint covers *fork* pull requests only and refuses a same-repo agent branch, and the
+  repository setting that governs the hold is readable over REST with no write.
+
+```bash
+# check the current value
+gh api repos/OWNER/REPO/copilot/cloud-agent/configuration --jq .require_actions_workflow_approval
+```
+
+Either approve runs as they arrive, or turn the requirement off at **Settings → Copilot → Coding
+agent → Require approval for workflow runs**. Decide it deliberately — it governs every future agent
+run in that repository, not one pull request. When Factory escalates, it attaches the blast-radius
+evidence a human needs in order to decide: whether the default workflow token is read-only, whether
+any pull-request workflow can reach a secret, and whether a self-hosted runner is involved.
+Repositories with no pull-request CI are unaffected. Full account in
+[`docs/DESIGN.md`](docs/DESIGN.md) §9.
+
+## What Factory does on its own, and what it refuses to
+
+Factory merges autonomously only when the mechanical checks pass, a semantic review of the actual diff
+says it satisfies the Work Item's acceptance criteria and nothing more, the change is reversible, and
+it touches no security-sensitive surface.
+
+It stops and asks a human when intent is ambiguous, when the diff touches workflows, permissions,
+secrets or release configuration, when behavior not named in the Work Item is deleted or rewritten,
+when a conflict needs a judgment about intent, or when an action would be irreversible. Escalation is
+a first-class successful outcome, not a failure — the measure is whether escalations are well-founded,
+not whether they are rare. The full bar is [`docs/DESIGN.md`](docs/DESIGN.md) §7.3.
+
+## Development
 
 For a source checkout, the CLI entry point is read-only and prints the derived state of an Objective:
 
@@ -394,51 +164,20 @@ npm run verify:package
 ```
 
 Worth running after any change to `mcp.json`, `plugin.json`, the skill frontmatter, or the tool
-surface. It catches a manifest pointing at a bundle that was never built, the two manifest pairs
-(Agent Plugins and Claude Code) drifting apart, the running server's advertised version disagreeing
-with the manifests, a tool silently disappearing, and a tool shipped without a description a model
-can route on.
+surface. Note that it is **not** an install test: it starts the committed bundle the way the manifest
+says to, which is a strictly weaker claim than "a real Copilot CLI can install this". Before claiming
+a change is installable, install the published artifact the way a stranger would.
 
-**It is not an install test, and treating it as one is how four defects shipped.** It starts the
-committed bundle the way the manifest says to, which is a strictly weaker claim than "a real Copilot
-CLI can install this." `verify:package` was green on a release whose documented install command
-could not work at all (§10.19). Prose is the only part of a release with no CI, so before claiming a
-version is installable, install the published artifact the way a stranger would:
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full validation loop.
 
-```bash
-copilot plugin marketplace add clockgrove/factory
-copilot plugin install factory@clockgrove
-copilot plugin list
-```
+## Documentation
 
-## Why this design starts from a clean slate
-
-An earlier attempt at this same idea inverted both halves of this design: it put the orchestration
-loop *inside* CI, and moved work execution *out* of GitHub onto self-hosted infrastructure. Those two
-choices compounded, producing a large amount of distributed-systems machinery — reconciliation,
-recovery, ownership takeover — to recreate guarantees the platform already offers, and no product
-code was ever shipped by it.
-
-This is a clean-room rewrite, not an evolution of that codebase. Rationale in [`docs/PRD.md`](docs/PRD.md) §3.
-
-## Measured platform evidence
-
-Before writing any code, the load-bearing assumption was tested directly
-([`docs/PROBE-001-agent-parallelism.md`](docs/PROBE-001-agent-parallelism.md)):
-
-| | Measured |
-|---|---|
-| Concurrent agent sessions | **24, no queueing ceiling reached** |
-| 8 parallel tasks, wall clock | ~80 s (vs ~10 min serial) |
-| First-pass success at burst (26) | **85%** |
-| Work correctness | 11/11 actionable tasks correct and minimal |
-| Terminal status | **must be read from the PR, not the run conclusion** |
-| Throttle planes | **3, only 1 visible to `/rate_limit`** |
-
-The last two rows are the important ones. A workflow run reports that the *session finished*, never
-that the *work was done* — an impossible task returned `conclusion: success`. And GitHub will refuse
-requests with `403 API rate limit exceeded` while `/rate_limit` reports full quota, so platform
-refusal must never be mistaken for work failure.
+- [`docs/DESIGN.md`](docs/DESIGN.md) — goals, scope, non-goals, the loop, evaluation and integration
+  rules, the confidence bar, packaging, and stated limitations.
+- [`docs/PLATFORM-BEHAVIOR.md`](docs/PLATFORM-BEHAVIOR.md) — measured behavior of GitHub's coding
+  agent and API that the design rests on.
+- [`docs/CREDENTIALS.md`](docs/CREDENTIALS.md) — what Factory needs in order to run, and what it
+  deliberately does not.
 
 ## License
 

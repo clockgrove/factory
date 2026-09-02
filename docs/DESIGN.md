@@ -292,6 +292,16 @@ Attempt count = **number of linked pull requests**. No counter is stored.
 - a failed attempt's pull request is closed before retry, so counting stays honest
 - a platform refusal (§14) creates no pull request, so it cannot inflate the count
 
+**One cause escalates on the first attempt instead of the third.** The coding agent publishes
+`CopilotWorkStartedEvent` / `CopilotWorkFinishedEvent` / `CopilotWorkFinishedFailureEvent` on the
+pull request's timeline, and the failure variant states its reason. When that reason lies outside
+the Work Item — an exhausted request quota is the measured case — the budget has nothing to absorb:
+the remaining attempts fail identically within seconds, and the eventual escalation would blame the
+brief for a billing limit. Such an attempt escalates immediately, quoting GitHub's message verbatim
+so its request ID and settings URL reach the human who can act on them. The match is deliberately
+narrow; an unrecognised message retries as before, because a missed pattern costs only latency
+whereas an over-broad one escalates work a retry would have fixed.
+
 ---
 
 ## 5. Evaluation
@@ -336,6 +346,14 @@ prefix is gone, judge the diff entirely on its merits. The wait is bounded by an
 request's `updatedAt`, which comments and Factory's own audit comments refresh — so a dead agent
 escalates rather than hanging. Tune that bound **upward only**: too short closes finished work, too
 long merely wastes time.
+
+That window, and the empty-pull-request grace beside it, exist only because a proxy cannot separate
+"still working" from "died quietly". Where the agent has answered that question itself — a
+`CopilotWorkFinishedFailureEvent` with no later session start and no later commit — the graces are
+skipped and the attempt fails at once; waiting them out measured 13m49s of dead time per attempt.
+The events are *not* used the other way round. Completion is still the `[WIP]` rename, because a
+fresh `copilot_work_started` can follow a `copilot_work_finished` on an already-merged pull request,
+so "latest event wins" would misread a restart as unfinished work.
 
 **`untouched` is a deliberately weak check.** It fires only when the diff touches *nothing* the Work
 Item declared, because it routes to close-and-retry and a false positive there destroys correct work.

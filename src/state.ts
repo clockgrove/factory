@@ -12,6 +12,7 @@
 import {
   COPILOT_ASSIGNEE_LOGIN,
   INITIAL_PLAN_COMMIT,
+  type AgentWorkEvent,
   type LinkedPullRequest,
   type ObjectiveSnapshot,
   type WorkItemSnapshot,
@@ -183,6 +184,65 @@ export function isAbandonedAttempt(pr: LinkedPullRequest, now: Date): boolean {
   return now.getTime() - pr.headCommittedAt.getTime() >= WIP_INACTIVITY_GRACE_MS;
 }
 
+/**
+ * The agent's failure event for the *current* session on `pr`, or `null` if its
+ * latest word is anything else.
+ *
+ * "Latest event wins" would be wrong in the other direction: a `finished` event
+ * can be followed by a fresh `started` when the agent is re-invoked on the same
+ * pull request (measured on two merged pull requests, both restarted minutes
+ * after completing). So this asks only the narrow question the graces exist to
+ * answer — *has the current session ended in failure* — and reports nothing
+ * when the answer is no. Completion is still read from the `[WIP]` rename,
+ * which is what the integrator has always keyed on.
+ *
+ * A push after the failure also clears it: commits are ground truth about work
+ * having happened, and an event contradicted by a later commit is stale.
+ */
+export function agentFailure(pr: LinkedPullRequest): AgentWorkEvent | null {
+  // Ordered here rather than trusting the caller: "which event came last" is
+  // the whole basis of this read, so it must not depend on an upstream mapper
+  // preserving an ordering GitHub never promised. Ties break toward the later
+  // array position, matching GitHub's own timeline order.
+  let last: AgentWorkEvent | null = null;
+  for (const event of pr.agentWorkEvents) {
+    if (!last || event.at.getTime() >= last.at.getTime()) last = event;
+  }
+  if (!last || last.kind !== "failed") return null;
+  if (pr.headCommittedAt.getTime() > last.at.getTime()) return null;
+  return last;
+}
+
+/**
+ * Failure reasons no retry can fix.
+ *
+ * The retry loop assumes a failed attempt is *this attempt's* misfortune — a
+ * confused session, a transient platform fault — so another dispatch is worth
+ * a try. An exhausted request quota breaks that assumption: the next two
+ * attempts fail identically and in seconds, and the Work Item then escalates
+ * citing "no usable result", which points a human at the brief instead of at
+ * the billing page GitHub already named. Measured on Gate 8, where both
+ * attempts died ~40s in with exactly these messages.
+ *
+ * Matched on GitHub's prose because there is no machine-readable code on the
+ * event. Kept deliberately narrow: an unmatched message simply retries as
+ * before, so a missed pattern costs latency, while an over-broad one would
+ * escalate genuinely retryable failures to a human. Anchored on the two
+ * measured messages plus the entitlement vocabulary around them.
+ */
+const NON_RETRYABLE_FAILURE_PATTERNS: RegExp[] = [
+  /exceeded your .*\bquota\b/i,
+  /\busage limit\b/i,
+  /\bpremium request/i,
+  /\bquota\b.*\bexceeded\b/i,
+];
+
+/** Whether GitHub's stated failure reason is one no further attempt can fix. */
+export function isNonRetryableFailure(message: string | null | undefined): boolean {
+  if (!message) return false;
+  return NON_RETRYABLE_FAILURE_PATTERNS.some((p) => p.test(message));
+}
+
 /** The most recent time the coding agent was assigned, or `null` if never. */
 export function latestCopilotAssignment(wi: WorkItemSnapshot): Date | null {
   if (wi.copilotAssignments.length === 0) return null;
@@ -311,15 +371,25 @@ export function deriveState(wi: WorkItemSnapshot, now: Date): WorkItemState {
 
   const current = currentOpenPullRequest(wi);
   if (current) {
+    // The agent's own report that its session died outranks every grace below.
+    // Those windows exist only because a proxy cannot tell "still working" from
+    // "died quietly"; once GitHub has answered that question there is nothing
+    // left to wait for, and waiting anyway cost a measured 13m49s per attempt.
+    const failure = agentFailure(current);
     if (isNoOp(current)) {
       // No diff yet is not evidence of failure while the session may still be
       // pushing commits (§4.2). Two independent reasons to keep waiting: the
       // dispatch is too fresh to judge at all, or the PR itself is young
       // enough that the agent is plausibly still writing into it.
       const stillPlausiblyWorking =
-        withinConfirmWindow(wi, now) || withinEmptyPullRequestGrace(current, now);
+        !failure &&
+        (withinConfirmWindow(wi, now) || withinEmptyPullRequestGrace(current, now));
       return stillPlausiblyWorking ? "in_flight" : "failed";
     }
+    // Same reasoning for a partially-written attempt: if the agent has said it
+    // failed and pushed nothing since, the inactivity bound is measuring a
+    // question already answered.
+    if (failure && isWorkInProgress(current)) return "failed";
     // Work the agent still calls `[WIP]` but has stopped pushing to is a dead
     // attempt. Since §5.1 Factory no longer merges unfinished work, so
     // without this the item would wait on a pull request nobody is writing —

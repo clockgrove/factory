@@ -47,6 +47,7 @@ function pr(over: Partial<LinkedPullRequest> = {}): LinkedPullRequest {
     createdAt: NOW,
     headSha: "deadbeef",
     headCommittedAt: NOW,
+    agentWorkEvents: [],
     mergedAt: null,
     closedAt: null,
     ...over,
@@ -216,6 +217,41 @@ describe("attemptAction", () => {
       ],
     });
     expect(attemptAction(item)).toBe("escalate");
+  });
+
+  // The attempt budget absorbs variance. A quota GitHub says is exhausted has
+  // none to absorb: the remaining attempts fail identically, in seconds, and
+  // only delay the human who has to top it up (Gate 8).
+  const quotaFailure = {
+    kind: "failed" as const,
+    at: new Date(NOW.getTime() - 60_000),
+    message: "You have exceeded your monthly quota",
+  };
+  const earlierCommit = { headCommittedAt: new Date(NOW.getTime() - 120_000) };
+
+  it("escalates on the first attempt when GitHub says retrying cannot help", () => {
+    const item = derivedWi({
+      linkedPullRequests: [
+        pr({ number: 1, ...earlierCommit, agentWorkEvents: [quotaFailure] }),
+      ],
+    });
+    expect(attemptCount(item)).toBe(1);
+    expect(attemptAction(item)).toBe("escalate");
+  });
+
+  it("still retries an ordinary failure the agent reported", () => {
+    const item = derivedWi({
+      linkedPullRequests: [
+        pr({
+          number: 1,
+          ...earlierCommit,
+          agentWorkEvents: [
+            { ...quotaFailure, message: "The session ended unexpectedly." },
+          ],
+        }),
+      ],
+    });
+    expect(attemptAction(item)).toBe("retry");
   });
 });
 

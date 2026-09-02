@@ -71,9 +71,11 @@ import {
   classifyRefusal,
 } from "./platform.js";
 import {
+  agentFailure,
   attemptCount,
   confirmFailureStreak,
   currentOpenPullRequest,
+  isNonRetryableFailure,
   withinConfirmWindow,
 } from "./state.js";
 import type { DerivedWorkItem } from "./state.js";
@@ -102,9 +104,29 @@ export function confirmAction(
 /**
  * What to do about a Work Item sitting in `failed` state (§4.4): an open PR
  * that turned out to be a no-op once the confirm window elapsed.
+ *
+ * A failure GitHub has told us no retry can fix escalates immediately, without
+ * spending the remaining attempts. The budget exists to absorb *variance* — a
+ * confused session, a transient fault — and there is none to absorb when the
+ * cause is an exhausted quota: the next attempts fail identically, in seconds,
+ * and only delay the human who has to act.
  */
 export function attemptAction(wi: DerivedWorkItem): "retry" | "escalate" {
+  if (nonRetryableFailure(wi)) return "escalate";
   return attemptCount(wi) >= 3 ? "escalate" : "retry";
+}
+
+/**
+ * GitHub's failure message for the current attempt when it names a cause no
+ * retry can fix, else `null`. Read from the open pull request, which is the one
+ * the caller is about to close.
+ */
+export function nonRetryableFailure(wi: DerivedWorkItem): string | null {
+  const current = currentOpenPullRequest(wi);
+  if (!current) return null;
+  const failure = agentFailure(current);
+  if (!failure || !isNonRetryableFailure(failure.message)) return null;
+  return failure.message;
 }
 
 /** The result of one `integrate` call, so a caller can tell a merge from a wait. */
@@ -508,9 +530,18 @@ export class Dispatcher {
     reason = "no diff appeared before the confirm window elapsed",
   ): Promise<"escalated" | "redispatched"> {
     if (attemptAction(wi) === "escalate") {
+      // Two different escalations share this branch, and they must not read
+      // alike. An exhausted budget genuinely means "the work was attempted and
+      // did not come out right"; a non-retryable platform failure means the
+      // work was never attempted at all. Quoting GitHub verbatim keeps the
+      // request ID and settings URL that make the second one actionable —
+      // paraphrasing it would send a human to debug a brief that is fine.
+      const blocked = nonRetryableFailure(wi);
       await this.#escalate(
         wi,
-        `${attemptCount(wi)} attempts produced no usable result (${reason})`,
+        blocked
+          ? `the coding agent could not run, and retrying cannot fix it. GitHub reported: "${blocked}"`
+          : `${attemptCount(wi)} attempts produced no usable result (${reason})`,
       );
       return "escalated";
     }

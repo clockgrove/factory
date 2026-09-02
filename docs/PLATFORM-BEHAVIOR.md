@@ -133,11 +133,70 @@ The documented secondary-limit triggers, any one of which is sufficient:
 A 26-issue burst in ~35 s sits directly on the concurrent-request and content-creation triggers. This
 is a consequence of wave shape, not a platform anomaly.
 
+## Finding 5 — the agent *does* publish an outcome signal, on the pull request timeline
+
+Finding 1 concluded that outcome must be read from the pull request rather than the run conclusion.
+That is right, but it is not the whole picture: GitHub also publishes the agent's own verdict as
+timeline events on the pull request, which Factory did not read for its first eight gates.
+
+| Event | GraphQL type | Meaning |
+|---|---|---|
+| `copilot_work_started` | `CopilotWorkStartedEvent` | A session began |
+| `copilot_work_finished` | `CopilotWorkFinishedEvent` | It completed |
+| `copilot_work_finished_failure` | `CopilotWorkFinishedFailureEvent` | It stopped on an error |
+
+The failure variant carries a `failureMessage` and a `sessionUrl`. Measured on Gate 8, where two
+consecutive attempts on one Work Item produced a valid pull request with a single `Initial plan`
+commit and an empty diff:
+
+| Attempt | Started | Failed | `failureMessage` |
+|---|---|---|---|
+| 1 (PR #7) | 03:14:44Z | 03:15:24Z | `You have exceeded your monthly quota (Request ID: ...)` |
+| 2 (PR #8) | 03:29:24Z | 03:30:13Z | `You've reached your additional usage limit for your plan. Go to https://github.com/settings/copilot/features ... (Request ID: ...)` |
+
+Two things follow, and the second is the expensive one.
+
+**The empty pull request was not the agent's doing.** GitHub opens the pull request and pushes
+`Initial plan` *before* the first model call, so a denial at the quota gate leaves exactly the
+artifact Finding 1 describes as a considered no-op — same shape, entirely different cause. The
+`[WIP]`-plus-empty-diff heuristic cannot tell them apart. The timeline can.
+
+**Reading liveness from proxies costs real time.** Without these events, an attempt's death is
+only inferable from an absent diff or a stale head commit, and each proxy needs a grace window to
+interpret — a window that is, by construction, waiting to answer a question GitHub has already
+answered. Attempt 1 reported failure at 03:15:24Z and Factory closed it at 03:29:13Z: **13m49s** of
+avoidable dead time, repeated on attempt 2.
+
+**Some failures no retry can fix.** A quota is not a property of the Work Item, so the attempt
+budget — which exists to absorb the variance of a confused session — has nothing to absorb. Three
+attempts would fail identically and then escalate citing "no usable result", pointing a human at a
+brief that was never read instead of at the billing page GitHub named in the message.
+
+**Consequence:** read the timeline events, treat a failure with no later `started` and no later
+commit as immediately failed, and escalate a non-retryable cause on the first attempt rather than
+the third, quoting GitHub's message verbatim so the request ID and settings URL survive.
+
+Two cautions found while implementing this:
+
+- **"Latest event wins" is unsafe as a completion rule.** Two merged pull requests each show a
+  `copilot_work_started` *after* their `copilot_work_finished`, minutes post-merge. Completion is
+  still read from the `[WIP]` rename; these events are used only to detect that the current session
+  has *died*.
+- **Escalating a quota failure immediately is a deliberate trade, not a free win.** In Gate 8 the
+  limit was raised while attempt 2 was in flight, so attempt 3 succeeded on its own. An immediate
+  escalation would have been early in hindsight. It is still the right default: the run recovered
+  because a human topped up the quota, which is precisely the action an escalation would have
+  prompted — Factory simply was not the one to tell them.
+
 ## Design requirements this imposes
 
 - **Confirm dispatch; never assume it.** Assignment success ≠ session started. Verify a session
   exists and re-dispatch when it does not.
 - **Treat `[WIP]` + empty diff as a failed attempt** to retry, not a result to evaluate.
+- **Prefer the agent's own timeline events to any proxy for liveness**, and never let a grace window
+  outlive a question GitHub has already answered.
+- **Separate "this attempt failed" from "no attempt can succeed."** A stated cause outside the Work
+  Item's control must not consume the attempt budget, and must reach a human in GitHub's own words.
 - **Make retry idempotent.** Transient infrastructure failure is normal at burst.
 - **Budget ~85% first-pass success**; design retry as routine.
 - **Throttle both dispatch and polling.** Both directions rate-limit.

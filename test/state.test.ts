@@ -13,6 +13,8 @@ import {
   deriveState,
   isAbandonedAttempt,
   isNoOp,
+  isNonRetryableFailure,
+  agentFailure,
   isStalled,
   ready,
 } from "../src/state.js";
@@ -46,6 +48,7 @@ function pr(over: Partial<LinkedPullRequest> = {}): LinkedPullRequest {
     // case a test has to ask for explicitly, so that no test asserts "we judge
     // an abandoned draft" by accident (§5.1).
     headCommittedAt: NOW,
+    agentWorkEvents: [],
     // The default PR is OPEN, so it is neither merged nor closed. Keeping these
     // null by default means no test can assert a merge-time behaviour by
     // accident — the way `isDraft: true` and `changedFiles: 2` once did.
@@ -438,6 +441,183 @@ describe("abandoned attempts", () => {
           NOW,
         ),
       ).toBe(true);
+    });
+  });
+
+  // GitHub publishes the coding agent's own verdict on its session. Before
+  // these, Factory inferred liveness from proxies alone and paid a grace window
+  // to do it: a measured 13m49s of waiting after the agent had already said it
+  // failed (Gate 8, PR #7).
+  describe("agentFailure", () => {
+    const failed = (over = {}) => ({
+      kind: "failed" as const,
+      at: new Date(NOW.getTime() - 60_000),
+      message: "You have exceeded your monthly quota",
+      ...over,
+    });
+
+    // GitHub pushes "Initial plan" when it opens the pull request, before the
+    // agent's first model call, so a real failure always postdates the head
+    // commit. The default fixture's `headCommittedAt: NOW` would instead look
+    // like a push that outlived the failure.
+    const beforeFailure = { headCommittedAt: new Date(NOW.getTime() - 120_000) };
+
+    it("reports the failure when it is the agent's last word", () => {
+      expect(
+        agentFailure(pr({ ...beforeFailure, agentWorkEvents: [failed()] }))?.message,
+      ).toBe("You have exceeded your monthly quota");
+    });
+
+    it("reports nothing when the agent never spoke", () => {
+      expect(agentFailure(pr())).toBeNull();
+    });
+
+    it("reports nothing when the session finished", () => {
+      expect(
+        agentFailure(
+          pr({ agentWorkEvents: [{ kind: "finished", at: NOW, message: null }] }),
+        ),
+      ).toBeNull();
+    });
+
+    // The dangerous misreading: a restart after a failure means the agent is
+    // alive again. "Latest event wins" would be right here but wrong in the
+    // other direction, which is why the rule is narrow rather than general.
+    it("reports nothing once the agent restarts after failing", () => {
+      expect(
+        agentFailure(
+          pr({
+            agentWorkEvents: [failed(), { kind: "started", at: NOW, message: null }],
+          }),
+        ),
+      ).toBeNull();
+    });
+
+    // A commit is ground truth; an event contradicted by later work is stale.
+    it("reports nothing when a push followed the failure", () => {
+      expect(
+        agentFailure(pr({ agentWorkEvents: [failed()], headCommittedAt: NOW })),
+      ).toBeNull();
+    });
+
+    it("orders by time, not by array position", () => {
+      expect(
+        agentFailure(
+          pr({
+            ...beforeFailure,
+            agentWorkEvents: [
+              failed(),
+              { kind: "started", at: new Date(NOW.getTime() - 180_000), message: null },
+            ],
+          }),
+        ),
+      ).not.toBeNull();
+    });
+  });
+
+  describe("isNonRetryableFailure", () => {
+    // Both strings are verbatim from Gate 8's two attempts.
+    it("matches an exhausted monthly quota", () => {
+      expect(
+        isNonRetryableFailure(
+          "You have exceeded your monthly quota (Request ID: 0410:3CB8D6)",
+        ),
+      ).toBe(true);
+    });
+
+    it("matches an exhausted plan usage limit", () => {
+      expect(
+        isNonRetryableFailure(
+          "You've reached your additional usage limit for your plan. Go to https://github.com/settings/copilot/features for more details.",
+        ),
+      ).toBe(true);
+    });
+
+    // Deliberately narrow: an unmatched message costs latency, an over-broad
+    // one escalates a retryable failure to a human who cannot help.
+    it("does not match an ordinary session failure", () => {
+      expect(isNonRetryableFailure("The session ended unexpectedly.")).toBe(false);
+    });
+
+    it("does not match an absent message", () => {
+      expect(isNonRetryableFailure(null)).toBe(false);
+    });
+  });
+
+  describe("an agent that reports failure short-circuits the graces", () => {
+    const quotaFailure = {
+      kind: "failed" as const,
+      at: new Date(NOW.getTime() - 60_000),
+      message: "You have exceeded your monthly quota",
+    };
+
+    // The regression guard for the fix: this is exactly Gate 8's PR #7 nine
+    // minutes in — empty, well inside the empty-PR grace, and already dead.
+    it("fails an empty pull request still inside its grace", () => {
+      const item = wi({
+        assignees: [COPILOT_ASSIGNEE_LOGIN],
+        copilotAssignments: [NOW],
+        linkedPullRequests: [
+          pr({
+            title: "[WIP] Copilot Request",
+            changedFiles: 0,
+            changedLines: 0,
+            changedFilePaths: [],
+            commitSubjects: [INITIAL_PLAN_COMMIT],
+            headCommittedAt: new Date(NOW.getTime() - 120_000),
+            agentWorkEvents: [quotaFailure],
+          }),
+        ],
+      });
+      expect(deriveState(item, NOW)).toBe("failed");
+    });
+
+    // The counterpart, so the test above cannot pass for the wrong reason.
+    it("still waits on an empty pull request when the agent has said nothing", () => {
+      const item = wi({
+        assignees: [COPILOT_ASSIGNEE_LOGIN],
+        copilotAssignments: [NOW],
+        linkedPullRequests: [
+          pr({
+            title: "[WIP] Copilot Request",
+            changedFiles: 0,
+            changedLines: 0,
+            changedFilePaths: [],
+            commitSubjects: [INITIAL_PLAN_COMMIT],
+          }),
+        ],
+      });
+      expect(deriveState(item, NOW)).toBe("in_flight");
+    });
+
+    it("fails a partially written attempt without waiting out the inactivity bound", () => {
+      const item = wi({
+        assignees: [COPILOT_ASSIGNEE_LOGIN],
+        linkedPullRequests: [
+          pr({
+            title: "[WIP] Add slugify",
+            headCommittedAt: new Date(NOW.getTime() - 120_000),
+            agentWorkEvents: [quotaFailure],
+          }),
+        ],
+      });
+      expect(deriveState(item, NOW)).toBe("failed");
+    });
+
+    // Completion is still read from the rename (§5.1). A failure event must not
+    // reach back and condemn work the agent went on to finish.
+    it("does not override a pull request the agent renamed to finished", () => {
+      const item = wi({
+        assignees: [COPILOT_ASSIGNEE_LOGIN],
+        linkedPullRequests: [
+          pr({
+            title: "Add slugify",
+            checks: "SUCCESS",
+            agentWorkEvents: [quotaFailure],
+          }),
+        ],
+      });
+      expect(deriveState(item, NOW)).toBe("for_review");
     });
   });
 });

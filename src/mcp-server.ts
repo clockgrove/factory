@@ -717,7 +717,12 @@ server.registerTool(
       "human once attempts are exhausted (3 linked PRs). A no-op on a Work Item that is not " +
       "currently `failed`. Returns `action`: `redispatched` (PR closed, Copilot reassigned), " +
       "`escalated` (attempts exhausted, handed to a human), or `no-op`. This is the branch that " +
-      "actually fired, not a prediction — same vocabulary as `dispatch_integrate`'s `action`.",
+      "actually fired, not a prediction — same vocabulary as `dispatch_integrate`'s `action`. " +
+      "One failure escalates on the *first* attempt rather than waiting for the third: when the " +
+      "coding agent's own `CopilotWorkFinishedFailureEvent` names a cause no retry can address — " +
+      "an exhausted request quota is the measured case — the remaining attempts would fail " +
+      "identically within seconds. That escalation quotes GitHub's message verbatim, including " +
+      "its request ID and settings URL, because the fix is a billing page and not the Work Item.",
     inputSchema: {
       ...WorkItemLocatorShape,
       ...EscalateToShape,

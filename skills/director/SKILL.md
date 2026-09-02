@@ -63,6 +63,16 @@ continue. Every step below is a tool call; nothing here is inline GitHub access.
      `changedFilePaths` all survive. You need the Objective body only on the compile cycle, so a
      reasonable habit is: full read on cycle 1, `minimal: true` every cycle after.
 
+   **Do not optimise this read away as redundant, and do not summarise its result out of your
+   report.** A pull request's `title`, `body` and `isDraft` are mutable, and the coding agent keeps
+   editing them after Factory acts — one merged pull request's body doubled and its `[WIP]` prefix
+   vanished *after* the merge (§10.15). So a later read of the API tells you what is true now, not
+   what you decided on, and a run cannot be audited backwards from it. This snapshot, sitting in your
+   transcript, is the only record of the evidence you actually acted on; the squash commit subject on
+   `main` is the only other one, and it captures just the title. Gate 6 could confirm a real bug only
+   because those per-cycle snapshots happened to be there — nothing had designed for it. `minimal:
+   true` is safe here: it keeps `bodyLength`, so growth is still visible.
+
 2. **Compile, if this Objective has no Work Items yet.** `read_objective`'s `objective.items` will be
    empty. Invoke the `objective-compilation` skill against this Objective's title and body to produce
    a validated Work Item graph, then call `graph_apply` with it (plus `objectiveNumber`). Re-read

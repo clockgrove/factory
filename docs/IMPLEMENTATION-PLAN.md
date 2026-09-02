@@ -1362,6 +1362,27 @@ pinned the un-drafting as intended behaviour. This is the second time in two fin
 around it. A fixture default is a claim about what normal looks like, and a wrong one buys agreement
 from every test that touches it.
 
+**So the remaining fixture defaults were audited deliberately rather than waiting for a third
+instance. Nothing further was found**, and the negative result is worth recording so the audit is
+not repeated from scratch. Every default across the four builders is either measured reality, a
+neutral empty value, or explicitly pinned by a test that names it:
+
+- `state.test.ts`'s `pr()` keeps `isDraft: true`, which is now the *measured* normal — the agent
+  never clears the flag — and `headCommittedAt`, `mergedAt`, `closedAt` each carry a comment saying
+  why their default is what it is.
+- `wi()`'s `labels: []` is inert: no derivation reads `labels`; it exists only to be reported.
+- `objective()`'s `ciExpectedOnPullRequests: false` is the one that *looks* like the same trap, since
+  `false` suppresses the missing-checks block. It is not: `evaluate.test.ts` exercises all three
+  states explicitly — `true`, `false` and `"unknown"` — and the parameter default is pinned by a test
+  named *"defaults to the pre-Gate-3 behaviour when ciExpected is omitted"*, which is the opposite of
+  an unexamined claim.
+- `dispatch.test.ts`'s `pr()` describes a freshly opened attempt (`Initial plan`, `PENDING`, no
+  files), which is exactly what that file tests against.
+
+The distinguishing property is worth stating, because it is the cheap thing to check next time: **a
+dangerous default is one no test ever names.** Both defects were defaults that every test relied on
+and none asserted; the survivors are defaults that at least one test exists specifically to pin.
+
 Two smaller notes from the same report, both already closed in `8fbad6a` before it arrived — it was
 running an older build:
 
@@ -1479,6 +1500,17 @@ in front of a real Objective.
   merge. Any post-hoc read describes the present, not the decision. Merge-time evidence survives only
   in the squash commit subject on `main`, so a gate report reconstructing "what Factory saw" from a
   later API read is describing something else.
+
+  **The corollary is a rule, and it is now in the skill: the snapshot you acted on is the evidence —
+  capture it at decision time or lose it.** Gate 6 could corroborate the early-merge bug only because
+  Director's loop happens to make one `read_objective` call per cycle *before* acting, leaving
+  merge-time `title`, `bodyLength` and `changedFiles` sitting in its transcript. Nothing designed
+  that. A Director that batched its reads differently, or read less often, would have had the same
+  immutable git evidence and none of the mutable-field evidence. That per-cycle read is therefore
+  load-bearing beyond the decision it feeds, and step 1 of the skill now says so, so that nobody
+  optimises it away as redundant re-reading. It is also why no merge-time audit comment is being
+  added: between the transcript snapshot and the squash subject the record already exists in two
+  places, and neither costs a write.
 
 ## 11. Risks
 

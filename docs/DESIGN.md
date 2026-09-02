@@ -350,7 +350,8 @@ long merely wastes time.
 That window, and the empty-pull-request grace beside it, exist only because a proxy cannot separate
 "still working" from "died quietly". Where the agent has answered that question itself — a
 `CopilotWorkFinishedFailureEvent` with no later session start and no later commit — the graces are
-skipped and the attempt fails at once; waiting them out measured 13m49s of dead time per attempt.
+skipped and the attempt fails at once; waiting them out cost 27m50s across one Work Item's two dead
+attempts, 80% of its elapsed life.
 The events are *not* used the other way round. Completion is still the `[WIP]` rename, because a
 fresh `copilot_work_started` can follow a `copilot_work_finished` on an already-merged pull request,
 so "latest event wins" would misread a restart as unfinished work.

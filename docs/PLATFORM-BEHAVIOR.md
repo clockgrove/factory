@@ -164,13 +164,31 @@ artifact Finding 1 describes as a considered no-op — same shape, entirely diff
 **Reading liveness from proxies costs real time.** Without these events, an attempt's death is
 only inferable from an absent diff or a stale head commit, and each proxy needs a grace window to
 interpret — a window that is, by construction, waiting to answer a question GitHub has already
-answered. Attempt 1 reported failure at 03:15:24Z and Factory closed it at 03:29:13Z: **13m49s** of
-avoidable dead time, repeated on attempt 2.
+answered.
+
+| Attempt | Agent reported failure | Factory closed the pull request | Waited |
+|---|---|---|---|
+| 1 (PR #7) | 03:15:24Z | 03:29:13Z | 13m49s |
+| 2 (PR #8) | 03:30:13Z | 03:43:14Z | 13m01s |
+
+The Work Item ran 33m26s from its first dispatch to its merge. **27m50s of that — 80% — was spent
+waiting on a question already answered.**
 
 **Some failures no retry can fix.** A quota is not a property of the Work Item, so the attempt
 budget — which exists to absorb the variance of a confused session — has nothing to absorb. Three
 attempts would fail identically and then escalate citing "no usable result", pointing a human at a
 brief that was never read instead of at the billing page GitHub named in the message.
+
+That is not hypothetical. The two close comments Factory actually wrote were:
+
+> Closing: The coding agent's session ended without producing any changes: PR #7 remained titled
+> `[WIP] ...` with 0 changed files and only the initial-plan commit
+
+> Closing: Second consecutive attempt produced no work: PR #8 stayed at 0 changed files ...
+
+Both are accurate descriptions of the symptom and both imply the agent was at fault, on pull
+requests where GitHub had already recorded the real cause and the URL to fix it. A human reading
+either one would go and inspect a brief that was never read.
 
 **Consequence:** read the timeline events, treat a failure with no later `started` and no later
 commit as immediately failed, and escalate a non-retryable cause on the first attempt rather than

@@ -374,7 +374,8 @@ export function deriveState(wi: WorkItemSnapshot, now: Date): WorkItemState {
     // The agent's own report that its session died outranks every grace below.
     // Those windows exist only because a proxy cannot tell "still working" from
     // "died quietly"; once GitHub has answered that question there is nothing
-    // left to wait for, and waiting anyway cost a measured 13m49s per attempt.
+    // left to wait for, and waiting anyway cost a measured 27m50s across one
+    // Work Item's two dead attempts — 80% of its elapsed life.
     const failure = agentFailure(current);
     if (isNoOp(current)) {
       // No diff yet is not evidence of failure while the session may still be

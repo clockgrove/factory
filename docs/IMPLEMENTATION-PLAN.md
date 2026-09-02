@@ -171,6 +171,17 @@ was 85% and *my own polling triggered a 429*.
 These are dials with measured origins, not guesses — and each should be re-measured before being
 raised.
 
+**One snapshot per cycle has exactly one sanctioned exception: a `graph_apply` in the same cycle.**
+The rule exists to stop a Director re-reading GitHub to *watch* for change, which is what triggered
+PROBE-001's 429. It is not meant to stop it re-reading after a write it made itself. The snapshot
+that precedes `graph_apply` was taken when the Objective had no Work Items, so its `ready` list is
+empty and stays empty however many items the apply just created — a Director that dispatches from it
+leaves the whole graph untouched until the next cycle. Observed live in Gate 8's first cycle
+(2026-09-02), where it cost a full 4-minute interval before anything was dispatched. The cost of the
+exception is one read per Objective, once, and it pays for `graph_apply`'s label check
+(§10.8 F5) at the same time. The general principle is the one `mergeability_unknown` teaches: the
+derived state you most need to refresh is the part your own last write invalidated.
+
 ### 4.2 Dispatch confirmation
 
 **PROBE-001's most important operational finding: 2 of 26 assignments were accepted and never
@@ -1531,10 +1542,13 @@ in front of a real Objective.
   "the tests pass" in any gate report is static analysis of the diff, never an observed run. The
   `checks_failed` verdict is consequently unexercised against real CI, and `require_actions_workflow_approval`
   being enabled account-wide (§10.6) is what keeps it that way.
-- **`factory-gate2` is no longer a clean fixture.** Gate 5 merged a 1454-line `package-lock.json`
-  onto its `main` under the §7.3 override. Any later gate treating that repo as pristine inherits it
-  — and, specifically, a later run seeing no lockfile scope creep is **not** evidence that the
-  `outOfScopeFiles` reporting works, because there is no longer a lockfile for an agent to generate.
+- **`factory-gate2` is no longer a clean fixture** — and as of 2026-09-02 it no longer exists at all,
+  along with the gate 0 and gate 3–6 fixtures. Gate 5 had merged a 1454-line `package-lock.json` onto
+  its `main` under the §7.3 override, so any later gate treating it as pristine would have inherited
+  that. The warning is kept because the *shape* recurs: a reused fixture accumulates state, and a run
+  that sees no lockfile scope creep is **not** evidence that `outOfScopeFiles` works if there is no
+  longer a lockfile for an agent to generate. **The rule that follows is to create a fresh fixture per
+  gate rather than reuse one**, which is now what happens.
 - **A gate cannot audit its own run from the API afterwards.** A pull request's `title`, `body` and
   `isDraft` are mutable and the coding agent keeps editing them after Factory acts — measured in
   §10.15, where a merged pull request's body doubled and its `[WIP]` prefix vanished *after* the
@@ -1690,6 +1704,23 @@ nudge is a non-timer re-entry, and a re-run must not count it as a wake-up.
 - **Dependency serialisation held without supervision.** Work Item #4 derived `blocked` from two
   native `blocked by` edges, became `ready` only once both dependencies had actually merged, and was
   never dispatchable in between.
+
+**The fixture's immutable record, copied here so the repository can be deleted.** §10.17 notes that
+merge-time evidence survives only in the squash subjects on the fixture's `main`, because every other
+field the coding agent touches is mutable. Deleting the repository would therefore destroy the one
+record that cannot be re-derived — so it is transcribed before that happens
+(`clockgrove/factory-gate7`, read 2026-09-02):
+
+```
+2026-09-02T00:46:13Z  Initial commit
+2026-09-02T01:18:12Z  Add `collapseSpaces` whitespace normalizer in `src/trim.ts` (#5)
+2026-09-02T01:19:06Z  Add dependency-free `toKebab` utility in `src/case.ts` (#6)
+2026-09-02T01:24:10Z  Add `slug` helper by composing `collapseSpaces` and `toKebab` (#7)
+```
+
+Three merges in 6 minutes, in dependency order, with `slug` last and named in its own subject as
+composing the other two. `src/` on `main` held exactly `trim.ts`, `case.ts` and `slug.ts` — no
+lockfile, no config, nothing out of scope.
 
 **What it did not prove: that anyone else can install Factory.** Running *on* the installed plugin is
 not the same test as installing it, and the two got conflated. The install itself happened in a

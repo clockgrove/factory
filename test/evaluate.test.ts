@@ -26,7 +26,7 @@ function pr(over: Partial<LinkedPullRequest> = {}): LinkedPullRequest {
     state: "OPEN" as const,
     // A pull request the agent has marked ready for review. This defaulted to
     // `true` while nothing read the flag, so every test asserting `ready` was
-    // quietly asserting that Factory merges drafts (§10.14). Draft is now an
+    // quietly asserting that Factory merges drafts (§5.1). Draft is now an
     // explicit choice a test has to make.
     isDraft: false,
     title: "Add slugify",
@@ -47,7 +47,7 @@ function pr(over: Partial<LinkedPullRequest> = {}): LinkedPullRequest {
   // Keep the count consistent with the paths unless a test is deliberately
   // exercising a partial file list. GraphQL returns `files(first: 100)` beside
   // an authoritative `changedFiles`, so `changedFiles > paths.length` means
-  // "page 2 exists" — a fixture that says so accidentally is claiming the
+  // "page 2 exists" — a test helper that says so accidentally is claiming the
   // scope checks cannot see the whole diff, which suppresses them.
   return {
     ...merged,
@@ -56,9 +56,9 @@ function pr(over: Partial<LinkedPullRequest> = {}): LinkedPullRequest {
 }
 
 /**
- * PROBE-001's measured decline: an impossible task ("target file does not
- * exist") produced an empty diff, only the `Initial plan` commit, and a
- * title of `No-op: impossible task — target file does not exist`.
+ * An impossible task ("target file does not exist") produces an empty diff,
+ * only the `Initial plan` commit, and a title of
+ * `No-op: impossible task — target file does not exist`.
  */
 function declinedPr(over: Partial<LinkedPullRequest> = {}): LinkedPullRequest {
   return pr({
@@ -73,13 +73,13 @@ function declinedPr(over: Partial<LinkedPullRequest> = {}): LinkedPullRequest {
 }
 
 describe("isDeclined", () => {
-  it("recognizes PROBE-001's measured decline artifact", () => {
+  it("recognizes an explicit decline artifact", () => {
     expect(isDeclined(declinedPr())).toBe(true);
   });
 
   it("does not treat a real diff with a similar title as declined", () => {
-    // Guards against a false positive from title text alone (§5.1: PROBE-001
-    // found title text like `[WIP]` is not a reliable signal on its own).
+    // Guards against a false positive from title text alone (§5.1): title text
+    // like `[WIP]` is not a reliable signal on its own.
     expect(
       isDeclined(
         pr({ title: "No-op: refactor internals", changedLines: 12 }),
@@ -161,7 +161,7 @@ describe("hasConflict", () => {
 });
 
 describe("evaluateMechanical", () => {
-  it("classifies PROBE-001's measured decline before anything else", () => {
+  it("classifies an explicit decline before anything else", () => {
     expect(evaluateMechanical(declinedPr())).toEqual({ kind: "declined" });
   });
 
@@ -208,10 +208,10 @@ describe("evaluateMechanical", () => {
     expect(evaluateMechanical(pr())).toEqual(READY);
   });
 
-  // Gate 4 (§10.7, F3). A held run reports the same `FAILURE` rollup as a real
-  // test failure, and `checks_failed` sends the Work Item to `retryOrEscalate`,
-  // which closes the pull request. That destroys correct work for a suite that
-  // never ran, and the replacement pull request is held identically.
+  // A held run reports the same `FAILURE` rollup as a real test failure, and
+  // `checks_failed` sends the Work Item to `retryOrEscalate`, which closes the
+  // pull request. That destroys correct work for a suite that never ran, and
+  // the replacement pull request is held identically (§9).
   it("distinguishes held checks from failed checks", () => {
     expect(
       evaluateMechanical(pr({ checks: "FAILURE", checksNeverStarted: true })),
@@ -232,11 +232,10 @@ describe("evaluateMechanical", () => {
     ).toEqual({ kind: "conflict" });
   });
 
-  // Gate 3 (§10.5, F1). All four PRs merged with a null rollup even though the
-  // repository shipped a real workflow: the runs failed at startup, produced
-  // zero jobs, and so attached zero checks to the head commit. Absent checks
-  // must not read as "no CI configured" when the repository is known to run CI
-  // on pull requests.
+  // A null rollup does not prove "no CI configured": workflow runs can fail at
+  // startup, produce zero jobs, and attach zero checks to the head commit.
+  // Absent checks must not read as "no CI configured" when the repository is
+  // known to run CI on pull requests.
   it("classifies absent checks as missing when CI is expected", () => {
     expect(evaluateMechanical(pr({ checks: null }), undefined, true)).toEqual({
       kind: "checks_missing",
@@ -247,14 +246,14 @@ describe("evaluateMechanical", () => {
     expect(evaluateMechanical(pr({ checks: null }), undefined, false)).toEqual(READY);
   });
 
-  it("defaults to the pre-Gate-3 behaviour when ciExpected is omitted", () => {
+  it("defaults to treating absent checks as ready when ciExpected is omitted", () => {
     expect(evaluateMechanical(pr({ checks: null }))).toEqual(READY);
   });
 
   // The probe is a REST call. Catching a 5xx or a rate limit and reporting
   // `false` reads as "this repository has no CI", which merges a pull request
-  // carrying zero checks on the strength of a network error — Gate 3's flaw
-  // arriving through a different door. Not knowing must block like knowing does.
+  // carrying zero checks on the strength of a network error. Not knowing must
+  // block like knowing does.
   it("blocks on absent checks when CI expectation is unknown", () => {
     expect(evaluateMechanical(pr({ checks: null }), undefined, "unknown")).toEqual({
       kind: "checks_missing",
@@ -354,11 +353,10 @@ describe("evaluateMechanical", () => {
 });
 
 /**
- * Gate 5's finding. `isUntouched` fires only when *no* declared file is
- * touched, so a pull request that did everything asked of it **plus** anything
- * else passed every mechanical check. Measured live: both replacement pull
- * requests on `factory-gate2` added a 1454-line `package-lock.json` that no
- * Work Item declared, and nothing in the pipeline could see it.
+ * `isUntouched` fires only when *no* declared file is touched, so a pull
+ * request that did everything asked of it **plus** anything else passed every
+ * mechanical check. Replacement pull requests can add files such as a 1454-line
+ * `package-lock.json` that no Work Item declared; this makes them visible.
  */
 describe("scope creep", () => {
   it("reports extra files on an otherwise clean PR without blocking it", () => {
@@ -389,9 +387,9 @@ describe("scope creep", () => {
   });
 
   it("still merges in-scope work, so a legitimate extra file is not fatal", () => {
-    // Gate 3's Work Item correctly updated a test outside its declared scope
-    // rather than leaving it broken. Blocking that would have been wrong, which
-    // is why this is evidence for §5.2 rather than a failing verdict.
+    // A Work Item may correctly update a test outside its declared scope rather
+    // than leaving it broken. Blocking that would be wrong, which is why this
+    // is evidence for §5.2 rather than a failing verdict.
     const verdict = evaluateMechanical(
       pr({ changedFilePaths: ["src/pipeline.ts", "test/loadConfig.test.ts"] }),
       ["src/pipeline.ts"],
@@ -424,7 +422,7 @@ describe("sensitive surfaces", () => {
     expect(declared.kind).toBe("sensitive_surface");
   });
 
-  it("catches the lockfile Gate 5 merged by hand", () => {
+  it("catches lockfile scope creep as a sensitive surface", () => {
     const verdict = evaluateMechanical(
       pr({ changedFilePaths: ["src/index.ts", "package-lock.json"] }),
       ["src/index.ts"],
@@ -485,9 +483,8 @@ describe("partial file lists", () => {
 });
 
 /**
- * §10.15. The agent's own "I am not finished" signal was the one thing
- * `evaluate.ts` ignored, so Factory merged work in progress — measured on real
- * merge commits in two different gates (gate2 #26 and #36, gate3 #7).
+ * §5.1. The agent's own "I am not finished" signal is the `[WIP]` title
+ * prefix.
  *
  * The signal is the `[WIP]` title prefix, not the draft flag. The agent opens
  * every pull request as `[WIP] <title>` and renames the prefix away when it
@@ -507,8 +504,8 @@ describe("work the agent has not finished", () => {
   });
 
   it("is not confused by unfinished work that is otherwise perfectly mergeable", () => {
-    // Exactly the Gate 6 shape: green, mergeable, in scope — and still not
-    // ours to merge, because the author says it is not done.
+    // Green, mergeable, in scope — and still not ours to merge, because the
+    // author says it is not done.
     const verdict = evaluateMechanical(
       pr({ title: "[WIP] Add slugify", checks: "SUCCESS", mergeable: "MERGEABLE" }),
       ["src/slugify.ts"],
@@ -517,8 +514,8 @@ describe("work the agent has not finished", () => {
   });
 
   it("ignores the draft flag, which the agent never clears", () => {
-    // gate3 PR #16: renamed away from `[WIP]` (finished) but still a draft,
-    // hours later. Treating draft as unfinished would wait on it forever.
+    // A pull request can be renamed away from `[WIP]` (finished) but still be a
+    // draft hours later. Treating draft as unfinished would wait on it forever.
     const verdict = evaluateMechanical(pr({ isDraft: true, title: "Add slugify" }), [
       "src/slugify.ts",
     ]);

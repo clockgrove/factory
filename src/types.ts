@@ -16,14 +16,13 @@ export const COPILOT_LOGIN = "copilot-swe-agent";
 /**
  * The coding agent's login as it appears in the *current* `assignees`
  * connection once actually assigned — a distinct, `User`-typed identity from
- * `COPILOT_LOGIN`, not a typo (verified live against a real assignment,
- * 2026-08-31, clockgrove/factory-gate0: `suggestedActors`/`AssignedEvent`
- * both report `{login: "copilot-swe-agent", __typename: "Bot"}` for the same
- * actor that `issue.assignees` reports back as `{login: "Copilot",
- * __typename: "User"}`). `state.ts`'s `isAssignedToCopilot`/`humanAssignees`
- * — which read `assignees`, not the timeline or `suggestedActors` — must use
- * this constant, or every dispatched Work Item misclassifies as `escalated`
- * the moment it has any assignee at all (Gate 0 finding, 2026-08-31).
+ * `COPILOT_LOGIN`, not a typo. GitHub reports the same actor as
+ * `{login: "copilot-swe-agent", __typename: "Bot"}` through
+ * `suggestedActors`/`AssignedEvent`, but as `{login: "Copilot",
+ * __typename: "User"}` through `issue.assignees`. `state.ts`'s
+ * `isAssignedToCopilot`/`humanAssignees` — which read `assignees`, not the
+ * timeline or `suggestedActors` — must use this constant, or every dispatched
+ * Work Item misclassifies as `escalated` the moment it has any assignee at all.
  */
 export const COPILOT_ASSIGNEE_LOGIN = "Copilot";
 
@@ -46,8 +45,7 @@ export type PullRequestState = "OPEN" | "CLOSED" | "MERGED";
 export type CheckRollup = "PENDING" | "SUCCESS" | "FAILURE" | null;
 
 /**
- * GitHub's own three-way mergeability verdict (schema: `PullRequest.mergeable`,
- * verified against docs.github.com/en/graphql/reference/pulls, 2026-08-30).
+ * GitHub's own three-way mergeability verdict (schema: `PullRequest.mergeable`).
  * `UNKNOWN` is not a failure — GitHub computes this asynchronously and has not
  * finished yet, so it must not be read as `CONFLICTING` (§5.1 "conflict").
  */
@@ -79,7 +77,7 @@ export interface PullRequestDiff {
 /**
  * The default branch's file list, used to ground a compiled Work Item's `scope`
  * in the repository as it actually is rather than as its Objective's prose
- * implies (Gate 3 F2, Gate 4 F4).
+ * implies.
  */
 export interface RepositoryLayout {
   defaultBranch: string;
@@ -109,8 +107,8 @@ export interface RepositoryFile {
    * clipped it at `maxBytes`, or the file is over the contents API's 1 MB limit
    * and GitHub returned none of it.
    *
-   * Deliberately false when the path is not a file at all (Gate 6 finding). A
-   * directory has no text to truncate, and reporting one as truncated conflates
+   * Deliberately false when the path is not a file at all. A directory has no
+   * text to truncate, and reporting one as truncated conflates
    * "I refused to read this" with "there is more of it" — which would send a
    * caller that pages or retries on `truncated` into a loop that can never make
    * progress. Check `unreadable` first; `content` is absent whenever it is set.
@@ -128,8 +126,8 @@ export interface LinkedPullRequest {
   isDraft: boolean;
   title: string;
   /** PR description. Used only as a secondary signal (§5.1 "declined") — the
-   * diff and commit list remain the primary evidence, per PROBE-001's finding
-   * that PR text (e.g. `[WIP]` titles) is not reliable on its own. */
+   * diff and commit list remain the primary evidence because PR text (e.g.
+   * `[WIP]` titles) is not reliable on its own. */
   body: string;
   /** Total lines added + deleted across the PR. */
   changedLines: number;
@@ -149,19 +147,17 @@ export interface LinkedPullRequest {
    * human, and the overwhelmingly common cause is not a bug at all: GitHub
    * requires a maintainer to click "Approve and run workflows" on a pull
    * request authored by the coding agent before any workflow executes
-   * (verified against docs.github.com, 2026-09-02; the setting lives under
-   * Settings → Copilot → Coding agent). Unapproved, the run is created and
+   * (Settings → Copilot → Coding agent). Unapproved, the run is created and
    * then *waits* in `action_required`, executing nothing. It only concludes
    * `failure` when the pull request is closed or merged, which cancels it.
    *
-   * That ordering is load-bearing and was verified live on the Gate 3 fixture:
-   * every run on a branch shares one `updated_at` 1–2s after that branch's
-   * `merged_at`, regardless of having been created minutes apart. So while the
-   * pull request is open the honest reading is "checks expected, awaiting
-   * approval" (`PENDING`) — `FAILURE` here is an artifact observable only after
-   * the fact. Reporting either as "required checks failed" sends a human
-   * hunting for a broken test that does not exist, so escalation names the real
-   * cause instead (§10.5, F1).
+   * That ordering is load-bearing: runs on a held branch share one `updated_at`
+   * 1–2s after that branch's `merged_at`, regardless of having been created
+   * minutes apart. So while the pull request is open the honest reading is
+   * "checks expected, awaiting approval" (`PENDING`) — `FAILURE` here is an
+   * artifact observable only after the fact. Reporting either as "required
+   * checks failed" sends a human hunting for a broken test that does not exist,
+   * so escalation names the real cause instead (§9).
    */
   checksNeverStarted?: boolean;
   mergeable: MergeableState;
@@ -181,9 +177,8 @@ export interface LinkedPullRequest {
    * and a dead attempt would look alive forever. The head commit moves only
    * when the agent actually pushes.
    *
-   * Also not `pushedDate`: verified live against the GraphQL API on 2026-09-01
-   * (clockgrove/factory-gate2 PR #36) it returns `null`, so depending on it
-   * would have silently produced no timestamp at all.
+   * Also not `pushedDate`: GitHub's GraphQL API can return `null` there, so
+   * depending on it would silently produce no timestamp at all.
    */
   headCommittedAt: Date;
   /**
@@ -192,10 +187,8 @@ export interface LinkedPullRequest {
    * Factory does not read this — every decision it makes is about the *present*
    * state, per §1. It exists because without it the tool surface cannot answer
    * ordering questions after the fact: "was this Work Item dispatched only
-   * after its dependency merged?" was literally unanswerable from a Director's
-   * own tools, and reconstructing it meant inferring order from diff context
-   * lines and assignment gaps. Diagnosing the §10.15 early-merge bug needed
-   * exactly this timestamp and had to go around Factory to get it.
+   * after its dependency merged?" requires the merge timestamp rather than
+   * inference from diff context lines and assignment gaps (§10).
    */
   mergedAt: Date | null;
   /**
@@ -227,10 +220,9 @@ export interface WorkItemSnapshot {
   assignees: string[];
   /**
    * The issue's label names. Carried so that `graph_apply`'s `labelled: true`
-   * is checkable rather than merely self-reported (Gate 6 finding): a caller
-   * that could not observe labels had no way to tell a successful labelling
-   * from a silently unlabelled one — the same shape as F5, where a green test
-   * proved a handler applied a label nothing ever passed it.
+   * is checkable rather than merely self-reported: a caller that cannot observe
+   * labels has no way to tell a successful labelling from a silently unlabelled
+   * one.
    */
   labels: string[];
   blockedBy: IssueRef[];
@@ -240,9 +232,9 @@ export interface WorkItemSnapshot {
    * Every time the coding agent was assigned, from the issue's `AssignedEvent`
    * timeline (§4.2), oldest first. Empty when it has never been assigned.
    *
-   * There is no queryable, per-issue session-status API (verified live,
-   * 2026-08-30 — see PRD F8): the Agent Tasks REST API exposes a task `state`
-   * but no issue-reference field, so a task cannot be matched back to the
+   * There is no queryable, per-issue session-status API: the Agent Tasks REST
+   * API exposes a task `state` but no issue-reference field, so a task cannot be
+   * matched back to the
    * issue that triggered it once more than one Work Item is in flight. This
    * history is the load-bearing signal instead: `state.ts` derives both "is a
    * still-evidence-free attempt within its grace period" and "how many
@@ -255,7 +247,7 @@ export interface WorkItemSnapshot {
 export interface ObjectiveSnapshot {
   /** GraphQL node ID of the Objective issue itself, needed to address it as
    * `graph.ts`'s `objectiveIssueId` (`CreateIssueInput.parentIssueId`) when
-   * applying a compiled Work Item graph (§9 build order step 6). */
+   * applying a compiled Work Item graph (§3). */
   id: string;
   number: number;
   title: string;
@@ -278,12 +270,9 @@ export interface ObjectiveSnapshot {
    * Resolved here rather than asked of the caller. The label is structural
    * identity — it is how a Work Item is recognisable as one to anything reading
    * the repository from outside Factory — so it belongs on every Work Item
-   * automatically rather than on request. `graph_apply` originally took this
-   * node ID as an optional tool parameter, which was unusable in practice:
-   * nothing on the tool surface could turn the name `factory:work-item` into a
-   * node ID, so every Director omitted it and every Work Item was created
-   * unlabelled (observed live in Gate 4, and again in Gate 5 after the first
-   * report).
+   * automatically rather than on request. The reader resolves the node ID
+   * because callers should not have to know how to turn the name
+   * `factory:work-item` into a label ID before applying a graph.
    *
    * Null is reported rather than repaired: creating the label here would put
    * Factory in the business of defining a repository's taxonomy behind the
@@ -292,8 +281,8 @@ export interface ObjectiveSnapshot {
   workItemLabelId: string | null;
   /**
    * Node ID of the coding agent's bot actor, discovered via
-   * `suggestedActors(capabilities: [CAN_BE_ASSIGNED])` (verified live,
-   * 2026-08-30). `null` if the repository has no assignable coding agent.
+   * `suggestedActors(capabilities: [CAN_BE_ASSIGNED])`. `null` if the
+   * repository has no assignable coding agent.
    */
   copilotBotId: string | null;
   /**
@@ -301,22 +290,19 @@ export interface ObjectiveSnapshot {
    * *no* checks at all should be read as "CI has not reported yet", not as
    * "this repository has no CI".
    *
-   * Gate 3 finding (2026-09-02, clockgrove/factory-gate3): all four PRs merged
-   * with `checks: null` even though the repository ships a real workflow. The
-   * workflow runs were created and then failed at *startup* — zero jobs — so
-   * they never attached a check to the head commit, and `statusCheckRollup`
-   * stayed null with zero contexts. A CI that cannot start is therefore
-   * byte-for-byte indistinguishable from a repository with no CI, and the
-   * evaluator merged straight through it. This flag is the missing
-   * distinction; see `evaluateMechanical`'s `checks_missing` verdict.
+   * `statusCheckRollup` is computed from check *runs*, so workflow runs that
+   * fail at *startup* — zero jobs — never attach a check to the head commit and
+   * leave the rollup null with zero contexts. A CI run that cannot start is
+   * therefore byte-for-byte indistinguishable from a repository with no CI.
+   * This flag supplies the missing distinction; see `evaluateMechanical`'s
+   * `checks_missing` verdict.
    *
    * Tri-state, because "I could not find out" is not the same answer as "no".
    * The probe is a REST call, and a 5xx, a rate-limit or a dropped connection
-   * used to be caught and reported as `false` — which reads as "this repository
-   * has no CI" and lets a pull request carrying zero checks merge unverified.
-   * That is Gate 3's flaw re-entering through a network error rather than a
-   * timing race. `"unknown"` therefore blocks like `true` does: the cost of
-   * being wrong is a stall a human resolves, against merging untested code.
+   * says nothing about whether CI exists. Reporting that as `false` reads as
+   * "this repository has no CI" and lets a pull request carrying zero checks
+   * merge unverified. `"unknown"` therefore blocks like `true` does: the cost
+   * of being wrong is a stall a human resolves, against merging untested code.
    */
   ciExpectedOnPullRequests: boolean | "unknown";
 }

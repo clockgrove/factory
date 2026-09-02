@@ -2986,11 +2986,10 @@ var GitHubReader = class {
    * This exists because the confidence bar requires Director to judge that
    * "the diff satisfies the Work Item's acceptance criteria and nothing more"
    * — a *semantic* check that `evaluate_mechanical` deliberately does not make
-   * (§5.1 is mechanical only). Before this method the snapshot exposed
-   * `changedFilePaths` but no content, so that half of the bar was unmet by
+   * (§5.1 is mechanical only). Without patch text the snapshot exposes
+   * `changedFilePaths` but no content, so that half of the bar is unmet by
    * construction: a criterion like "must import and actually call `truncate`,
-   * not reimplement it" was uncheckable, and Gate 2 merged four such Work
-   * Items on file-path evidence alone (see IMPLEMENTATION-PLAN.md §10.2, F1).
+   * not reimplement it" is uncheckable from file-path evidence alone (§10).
    *
    * Uses the REST files endpoint rather than the `.diff` media type because it
    * returns per-file `additions`/`deletions`/`status` alongside the patch,
@@ -2998,7 +2997,7 @@ var GitHubReader = class {
    * binary files and for individual files above its own size limit; those come
    * back with `patch: null`, reported honestly rather than silently dropped.
    *
-   * `paths` restricts which files spend the byte budget (Gate 5, §10.13). The
+   * `paths` restricts which files spend the byte budget (§10). The
    * budget is otherwise first-come-first-served in GitHub's ordering, so one
    * large file early in the alphabet starves every file after it —
    * `package-lock.json` consumed a 4000-byte allowance whole and left the three
@@ -3039,13 +3038,11 @@ var GitHubReader = class {
    * List every file on the default branch, so compilation can ground a Work
    * Item's `scope` in the repository as it actually is.
    *
-   * Gate 3 (F2) and Gate 4 (F4) both reported the same gap from the other side:
-   * no tool exposed the target repository's layout, so `scope` was compiled
-   * purely by inferring conventional structure from the Objective's prose.
-   * Gate 3 guessed right. A wrong guess does not fail at compile time — it
-   * fails several steps later as an `untouched` verdict, after an agent run has
-   * been spent, and reads like the agent ignored its brief rather than like the
-   * brief named a path that was never there.
+   * Without this, `scope` is compiled purely by inferring conventional
+   * structure from the Objective's prose. A wrong guess does not fail at compile
+   * time — it fails several steps later as an `untouched` verdict, after an
+   * agent run has been spent, and reads like the agent ignored its brief rather
+   * than like the brief named a path that was never there.
    *
    * One recursive tree request rather than walking directories: `truncated`
    * here is GitHub's own flag, raised on repositories too large to return in
@@ -3179,7 +3176,7 @@ var GitHubReader = class {
    * existed answers the question that actually matters. It also degrades
    * gracefully — the run created for the PR under review counts, so even the
    * first pull request a repository ever receives is covered as soon as its own
-   * run is created, which is exactly the window Gate 3 merged through.
+   * run is created, which is the window before checks attach to the commit.
    *
    * Returns `"unknown"` rather than `false` when the probe itself fails. A 5xx,
    * a rate-limit or a dropped connection says nothing about whether CI exists,
@@ -3211,7 +3208,7 @@ var GitHubReader = class {
   }
   /**
    * Read the facts a blast-radius review needs about what an approved workflow
-   * run would be *allowed* to do (§10.6).
+   * run would be *allowed* to do (§9).
    *
    * Two questions, two sources: the repo's default token scope, and whether any
    * pull-request workflow pulls in a real secret. Both are properties of the

@@ -9,8 +9,8 @@
  *     I/O, so the decision boundaries are unit-tested without a network.
  *   - `Dispatcher` performs the GitHub writes those decisions call for. Every
  *     one is routed through `platform.ts`'s `CircuitBreaker`,
- *     `ContentCreationPacer`, and `ConcurrencyLimiter` (Finding 4; GitHub's
- *     own rate-limit guidance) — no call site may reach the network directly.
+ *     `ContentCreationPacer`, and `ConcurrencyLimiter` (GitHub's own
+ *     rate-limit guidance) — no call site may reach the network directly.
  *
  * Nothing here stores a retry count. §4.2's "on second confirm failure,
  * escalate" is answered by `confirmFailureStreak` (state.ts), recomputed
@@ -56,10 +56,10 @@ export interface ApprovalOutcome {
   /**
    * Every run that was held and did not get approved, with GitHub's own reason.
    *
-   * Reporting only `approvedRunIds` made a total failure look like a success:
-   * Gate 4 saw `{action: "partially_approved", approvedRunIds: []}` with one run
-   * held and no error anywhere, and could only detect the failure by comparing
-   * two arrays. GitHub's message is the diagnosis, so it has to reach the caller.
+   * Reporting only `approvedRunIds` makes a total failure look like a success:
+   * `{action: "partially_approved", approvedRunIds: []}` with held runs and no
+   * error anywhere is indistinguishable from progress unless the caller compares
+   * arrays. GitHub's message is the diagnosis, so it has to reach the caller.
    */
   failures?: { runId: number; message: string }[];
 }
@@ -87,7 +87,7 @@ import type { LinkedPullRequest } from "./types.js";
  *  - `retry`: the window elapsed with zero PRs, and this is the first such
  *    failure for the current assignment. Unassign and reassign — the
  *    platform only starts a fresh session on an actual assignment
- *    *transition* (PRD F8), not a repeated assignment.
+ *    *transition*, not a repeated assignment.
  *  - `escalate`: this is the second consecutive PR-less assignment. §4.2
  *    caps the confirm mechanism at one retry.
  */
@@ -115,14 +115,13 @@ export interface IntegrateOutcome {
   /**
    * Which branch actually fired, for a verdict that has more than one.
    *
-   * Gate 5 (§10.13) could not tell a successful rebase from a
-   * close-and-redispatch from an escalation: all three returned
+   * Callers must be able to tell a successful rebase from a
+   * close-and-redispatch from an escalation. Without this, all three return
    * `{"verdict":{"kind":"conflict"},"merged":false}`, and the only way to
    * distinguish them was to diff the *next* `read_objective` for pull request
-   * state and assignment counts. The bug that gate was sent to look for — a
-   * rebase that succeeds without resolving anything, looping forever — is
-   * invisible from that output, which is the one thing the result most needed
-   * to show.
+   * state and assignment counts. A rebase that succeeds without resolving
+   * anything, looping forever, is invisible from that output, which is the one
+   * thing the result most needs to show (§10).
    */
   action?:
     | "merged"
@@ -175,16 +174,12 @@ export function mergeDeferral(error: unknown): string | null {
 }
 
 /**
- * The GraphQL mutations `Dispatcher` needs, each verified against the
- * current schema (docs.github.com/en/graphql/reference/input-objects,
- * 2026-08-30) except where noted.
+ * The GraphQL mutations `Dispatcher` needs, each matched against the current
+ * schema (docs.github.com/en/graphql/reference/input-objects).
  *
- * `replaceActorsForAssignable`/`agentAssignment` was confirmed live in an
- * earlier session (PRD F8). `addAssigneesToAssignable`, `addComment`, and
- * `closePullRequest` were each confirmed live this session too (2026-08-31,
- * against clockgrove/factory-gate0, ahead of Gate 0 itself) — every mutation
- * this file's escalate/retry paths depend on has now actually been exercised
- * against a real repository, not just verified against docs.
+ * `replaceActorsForAssignable`/`agentAssignment`,
+ * `addAssigneesToAssignable`, `addComment`, and `closePullRequest` are all
+ * exercised against real repositories, not just checked against docs.
  */
 const COPILOT_ASSIGNMENT_HEADERS = {
   "GraphQL-Features":
@@ -246,13 +241,11 @@ mutation ClosePullRequest($pullRequestId: ID!) {
 }`;
 
 /**
- * Closes the Objective issue itself once every Work Item is `done` (§4,
- * Gate 0 finding: GitHub does not auto-close a parent issue just because all
- * its sub-issues closed — `subIssuesSummary` reaching 100% on a live
- * Objective left it OPEN with an empty `closedByPullRequestsReferences`,
- * confirmed 2026-09-01 against clockgrove/factory-gate0#6. `CloseIssueInput`
- * and its `stateReason` enum (`COMPLETED`/`NOT_PLANNED`/`DUPLICATE`) verified
- * live via GraphQL introspection the same day.
+ * Closes the Objective issue itself once every Work Item is `done` (§4).
+ * GitHub does not auto-close a parent issue just because all its sub-issues
+ * closed: `subIssuesSummary` can reach 100% while the Objective remains OPEN
+ * with an empty `closedByPullRequestsReferences`. `CloseIssueInput` supports a
+ * `stateReason` enum (`COMPLETED`/`NOT_PLANNED`/`DUPLICATE`).
  */
 const CLOSE_ISSUE_MUTATION = `
 mutation CloseIssue($issueId: ID!) {
@@ -262,9 +255,8 @@ mutation CloseIssue($issueId: ID!) {
 }`;
 
 /**
- * Integration mutations (§6), verified against
- * docs.github.com/en/graphql/reference/pulls (2026-08-30). Not yet exercised
- * live — same known gap noted above for the retry/escalate mutations.
+ * Integration mutations (§6), matched against
+ * docs.github.com/en/graphql/reference/pulls.
  */
 const MARK_READY_FOR_REVIEW_MUTATION = `
 mutation MarkReady($pullRequestId: ID!) {
@@ -281,8 +273,8 @@ mutation MergePullRequest($pullRequestId: ID!) {
 }`;
 
 /**
- * `updatePullRequestBranch`'s payload carries no success flag (verified live
- * against the schema, 2026-08-30) — only `pullRequest`/`clientMutationId`.
+ * `updatePullRequestBranch`'s payload carries no success flag — only
+ * `pullRequest`/`clientMutationId`.
  * Whether the update actually resolved anything is read back on the *next*
  * cycle's snapshot (`mergeable` recomputed); a thrown error here is the only
  * same-cycle signal that GitHub could not apply it at all (§6).
@@ -310,8 +302,8 @@ export interface GitHubWriter {
   }): Promise<void>;
   /**
    * Remove every actor. Not optional cleanup: a bare reassignment onto an
-   * already-assigned issue is not a transition, and only a transition is
-   * measured to trigger a fresh session (PRD F8).
+   * already-assigned issue is not a transition, and only a transition triggers
+   * a fresh session.
    */
   clearActors(issueId: string): Promise<void>;
   /**
@@ -329,7 +321,7 @@ export interface GitHubWriter {
   closeIssue(issueId: string): Promise<void>;
   /** Convert a draft PR to ready-for-review; a precondition for merging (§6). */
   markPullRequestReady(pullRequestId: string): Promise<void>;
-  /** Squash-merge. GitHub auto-closes the linked issue (§6, PROBE-001 §12). */
+  /** Squash-merge. GitHub auto-closes the linked issue (§6). */
   mergePullRequest(pullRequestId: string): Promise<void>;
   /**
    * Merge the base branch into the PR branch (§6's "attempt rebase"). Throws
@@ -337,7 +329,7 @@ export interface GitHubWriter {
    */
   updatePullRequestBranch(pullRequestId: string): Promise<void>;
   /**
-   * Approve a workflow run held in `action_required` (§10.6). The API
+   * Approve a workflow run held in `action_required` (§9). The API
    * equivalent of a maintainer clicking "Approve and run workflows"; valid only
    * on a held run.
    */
@@ -423,7 +415,7 @@ export class GithubOctokitWriter implements GitHubWriter {
     //
     // This covers *fork* pull requests only. It is kept because that case is
     // real, but it cannot release the hold Factory actually meets on a
-    // coding-agent branch — see §10.7, and note that the repository setting
+    // coding-agent branch — see §9, and note that the repository setting
     // which governs that hold is readable over REST and not writable, so there
     // is deliberately no second call attempted here.
     await this.#octokit.request(
@@ -574,8 +566,8 @@ export class Dispatcher {
         // "Approve and run workflows", and there is no API that clears this
         // hold class: `POST /actions/runs/{id}/approve` is scoped to fork pull
         // requests and refuses a coding-agent branch outright with "This run is
-        // not from a fork pull request or queued by the Actions bot" (observed
-        // live in Gate 4, §10.7). Only a human with write access can release it,
+        // not from a fork pull request or queued by the Actions bot" (§9). Only
+        // a human with write access can release it,
         // or the repository's Copilot workflow-approval setting must be turned
         // off up front.
         //
@@ -628,7 +620,7 @@ export class Dispatcher {
         // throw away a session still writing into it. If it never resolves,
         // `deriveState` bounds the wait — a pull request still marked `[WIP]`
         // with no push inside the inactivity window derives `failed`, which
-        // retries and then escalates (§10.15).
+        // retries and then escalates (§5.1).
         return { merged: false, action: "waiting" };
       case "mergeability_unknown":
         // GitHub has not finished computing mergeability. Waiting is the whole
@@ -637,7 +629,7 @@ export class Dispatcher {
         return { merged: false, action: "waiting" };
       case "checks_missing":
         // The repository runs CI on pull requests but this PR carries no checks
-        // at all (§10.5, F1). Usually a timing race that resolves within a
+        // at all (§9). Usually a timing race that resolves within a
         // cycle, so waiting is right — but if it persists, the repository's CI
         // is failing to attach checks (e.g. a workflow that fails at startup
         // produces zero jobs and therefore zero checks) and no amount of waiting
@@ -653,12 +645,11 @@ export class Dispatcher {
    *
    * GitHub refuses a merge whose base moved between the mergeability
    * computation and the merge itself, with "Base branch was modified. Review
-   * and try the merge again." Observed live in Gate 3 (§10.5) when a sibling
-   * pull request merged in the same window. That is a benign race, not a
-   * failure: nothing is wrong with this pull request, and the next cycle
-   * re-reads and merges it. Letting it escape as a thrown tool error invites
-   * the exact misreading it caused in Gate 3 — a Director that treats a throw
-   * from `dispatch_integrate` as the Work Item failing would close a perfectly
+   * and try the merge again." This happens when a sibling pull request merges
+   * in the same window. That is a benign race, not a failure: nothing is wrong
+   * with this pull request, and the next cycle re-reads and merges it. Letting
+   * it escape as a thrown tool error invites a Director that treats a throw
+   * from `dispatch_integrate` as the Work Item failing to close a perfectly
    * good pull request and re-dispatch it.
    *
    * Deferring is safe for the whole family of "not right now" merge refusals,
@@ -671,17 +662,15 @@ export class Dispatcher {
    */
   async #mergeReady(pr: LinkedPullRequest): Promise<IntegrateOutcome> {
     // Un-drafting is required, not optional: the coding agent never clears the
-    // draft flag itself. Every `ReadyForReviewEvent` across every fixture
-    // repository was Factory's own token, and factory-gate3 PR #16 sits
-    // finished — renamed away from `[WIP]` by the agent — while still
-    // `isDraft: true`. GitHub refuses to merge a draft, so without this call
-    // every single merge fails.
+    // draft flag itself. Observed `ReadyForReviewEvent`s are Factory's own
+    // token, and a finished pull request — renamed away from `[WIP]` by the
+    // agent — can still be `isDraft: true`. GitHub refuses to merge a draft, so
+    // without this call every single merge fails.
     //
     // This is safe *because* the completion signal is the `[WIP]` prefix rather
-    // than the draft flag (§10.15). Nothing unfinished reaches here: `evaluate`
-    // returns `in_progress` first. Removing this call was the wrong half of the
-    // §10.14 fix — it read the draft flag as the agent's voice when the agent
-    // does not speak through it.
+    // than the draft flag (§5.1). Nothing unfinished reaches here: `evaluate`
+    // returns `in_progress` first. The draft flag is not the agent's voice; the
+    // agent does not speak through it.
     if (pr.isDraft) {
       await this.#call(() => this.#writer.markPullRequestReady(pr.id));
     }
@@ -699,8 +688,8 @@ export class Dispatcher {
   /**
    * §6: "attempt rebase; if clean, proceed; if not, close the PR and
    * re-dispatch against the new base." `updatePullRequestBranch`'s payload
-   * carries no success flag (verified live against the schema, 2026-08-30),
-   * so a thrown, non-refusal error is the only same-cycle signal that GitHub
+   * carries no success flag, so a thrown, non-refusal error is the only
+   * same-cycle signal that GitHub
    * could not apply it — a genuine content conflict, not merely being
    * behind. A refusal (rate limit, etc.) is rethrown rather than treated as
    * an unresolvable conflict, so platform pacing is never mistaken for a
@@ -716,16 +705,13 @@ export class Dispatcher {
    * wrongly modelled two items as independent ⇒ replan"), and escalating with
    * that diagnosis is how a human is told to replan.
    *
-   * Measured live at last (Gate 5, `factory-gate2` #22, 2026-09-02). Three Work
-   * Items were deliberately compiled with overlapping scope — each had to create
-   * the same new `src/index.ts` barrel — with no edges between them, producing a
-   * guaranteed add/add conflict. The first merged; the other two then hit this
-   * method, and **`updatePullRequestBranch` threw**. So the catch below is the
-   * branch a real content conflict takes, and it is bounded. Both pull requests
-   * were closed with the audit comment and re-dispatched, and because the base
-   * had by then moved to include the barrel, the replacement attempts modified
-   * the existing file instead of creating it — the conflict resolved itself in
-   * one retry, exactly as §6 intends.
+   * In overlapping-scope conflicts — for example, multiple Work Items creating
+   * the same new `src/index.ts` barrel with no edges between them —
+   * `updatePullRequestBranch` throws on the losing pull requests. So the catch
+   * below is the branch a real content conflict takes, and it is bounded. Once
+   * the first pull request lands and the base includes the shared file,
+   * replacement attempts modify the existing file instead of creating it, so
+   * the conflict can resolve itself in one retry, exactly as §6 intends.
    *
    * That measurement also settles the success path, which had looked unbounded.
    * It is unbounded, and that is correct rather than a defect: GitHub refuses
@@ -751,11 +737,9 @@ export class Dispatcher {
       // base moved a second time; see the note above for why re-rebasing then
       // is correct and deliberately unbounded.
       //
-      // Gate 5 never once reached this branch: `updatePullRequestBranch` threw
-      // on all 3 genuine conflicts, which is consistent with GitHub refusing to
-      // update a branch *because* it cannot merge. So the unbounded loop this
-      // return value makes observable remains unexercised rather than disproved
-      // (§10.13) — report it and let the caller notice a repeat.
+      // GitHub can refuse to update a branch *because* it cannot merge, but if
+      // this succeeds the unbounded loop this return value makes observable is
+      // still possible (§10) — report it and let the caller notice a repeat.
       return "rebased";
     } catch (error) {
       if (error instanceof PlatformUnavailableError) throw error;
@@ -817,7 +801,7 @@ export class Dispatcher {
    * revisiting — an acceptable, visible degradation rather than a stuck loop.
    */
   /**
-   * §10.6: decide whether to approve workflow runs that GitHub is holding, and
+   * §9: decide whether to approve workflow runs that GitHub is holding, and
    * act on that decision.
    *
    * GitHub parks runs on coding-agent pull requests in `action_required` until
@@ -886,14 +870,13 @@ export class Dispatcher {
     const failureStatus = (failure as { status?: number } | undefined)?.status;
     // GitHub refuses the per-run endpoint outright for a coding-agent branch:
     // it is scoped to fork pull requests, while this hold comes from the
-    // repository's Copilot Actions workflow-approval requirement (§10.7).
+    // repository's Copilot Actions workflow-approval requirement (§9).
     //
     // There is no second endpoint to fall back to. The REST surface exposes a
     // GET for `copilot/cloud-agent/configuration` and no write of any kind, and
     // the setting is documented as an administrator action in the UI. An
-    // invented `PATCH` against that path returns a route-level 404, which is
-    // how this was established (§10.7). So Factory cannot release the hold, and
-    // saying so plainly is the whole job here.
+    // invented `PATCH` against that path returns a route-level 404. So Factory
+    // cannot release the hold, and saying so plainly is the whole job here.
     //
     // An authorization failure is equally permanent and was previously reported
     // as `partially_approved`, which Director reads as retryable: it would
@@ -911,8 +894,8 @@ export class Dispatcher {
 
     const record = [
       approvedRunIds.length > 0
-        ? `Approved ${approvedRunIds.length} held workflow run(s) so CI can execute (§10.6).`
-        : "Attempted to approve held workflow runs (§10.6); none were approved.",
+        ? `Approved ${approvedRunIds.length} held workflow run(s) so CI can execute.`
+        : "Attempted to approve held workflow runs; none were approved.",
       "",
       "GitHub holds workflow runs on coding-agent pull requests until a maintainer approves them. Blast-radius review passed before approving:",
       ...verdict.assurances.map((a) => `- ${a}`),
@@ -954,7 +937,7 @@ export class Dispatcher {
 
     if (notApprovable) {
       // Permanent, not transient. Returning a success-shaped `partially_approved`
-      // here let Gate 4 read "1 held, 0 approved" as something a later cycle
+      // here would read "held runs, zero approved" as something a later cycle
       // might fix, when in fact nothing in the loop can ever fix it.
       await this.#escalate(
         wi,

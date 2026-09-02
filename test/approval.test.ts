@@ -29,11 +29,11 @@ describe("assessBlastRadius", () => {
     expect(verdict.assurances.length).toBeGreaterThan(0);
   });
 
-  // Gate 4, §10.7. The review answers two questions that authorise two
+  // The review answers two questions that authorise two
   // different actions: "does this diff change what CI executes" justifies
   // approving one run, while "is a run in this repository bounded at all"
   // justifies relaxing the repository-wide approval requirement — the only
-  // mechanism that releases a coding-agent hold. Conflating them would let a
+  // mechanism that releases a coding-agent hold (§9). Conflating them would let a
   // clean diff buy a permanent setting change it says nothing about.
   describe("separating repository-wide evidence from diff-scoped evidence", () => {
     it("reports repo scope safe when only the diff is at fault", () => {

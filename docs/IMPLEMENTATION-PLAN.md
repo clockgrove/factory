@@ -945,18 +945,25 @@ anyway.
 Fixed with a distinct `checks_held` verdict, tested before `checks_failed` because both present as
 the same `FAILURE` rollup, routed straight to `#escalate` rather than `retryOrEscalate`.
 
-**Also observed.** No factory tool reads the target repository's file tree or file contents, so
-compilation grounds `scope` in the Objective body alone. Gate 4 guessed right; a wrong guess would
-surface several steps later as an untouched-scope failure. And `graph_apply` took `workItemLabelId`
-as a GraphQL node ID with nothing on the surface to resolve a label name to one — so every Director
-omitted it and every Work Item was created unlabelled, in repositories that *did* define the label.
-`graph.ts` had a passing test proving the ID flows through to `createIssue`; what was never tested
-was that anything supplied it. The same shape as §10.7's lesson: a green test on the handler says
-nothing about whether the caller is wired. Fixed by resolving the label by name in `OBJECTIVE_QUERY`
-(`repository.label(name:)`, both the found and not-found branches verified live, 2026-09-02) and
-dropping the parameter from the tool surface, since structural identity should not be optional.
+**Also observed**, and written up as §10.8 below.
 
-## 10.9 Gate 5 — the conflict path, finally exercised
+### 10.8 Gate 4's two secondary findings
+
+**F4 — compilation grounds `scope` in the Objective body alone.** No factory tool reads the target
+repository's file tree or file contents. Gate 4 guessed right; a wrong guess would surface several
+steps later as an untouched-scope failure, with an agent run already spent. (Closed by
+`read_repository_layout`/`read_repository_file` — §10.10 onward.)
+
+**F5 — `graph_apply` took `workItemLabelId` as a GraphQL node ID** with nothing on the surface to
+resolve a label name to one, so every Director omitted it and every Work Item was created unlabelled,
+in repositories that *did* define the label. `graph.ts` had a passing test proving the ID flows
+through to `createIssue`; what was never tested was that anything supplied it. The same shape as
+§10.7's lesson: a green test on the handler says nothing about whether the caller is wired. Fixed by
+resolving the label by name in `OBJECTIVE_QUERY` (`repository.label(name:)`, both the found and
+not-found branches verified live, 2026-09-02) and dropping the parameter from the tool surface, since
+structural identity should not be optional.
+
+### 10.9 Gate 5 — the conflict path, finally exercised
 
 `clockgrove/factory-gate2` #22. Three Work Items compiled with deliberately *overlapping* scope —
 each had to create the same new `src/index.ts` barrel, with no dependency edges between them — which
@@ -984,7 +991,7 @@ rather than "fixed".
 
 ---
 
-## 10.10 The plugin-install path, and why nothing had tested it
+### 10.10 The plugin-install path, and why nothing had tested it
 
 Every test in this repository exercises `src/`. Nothing exercised the artifact a plugin client
 actually installs, which meant §15's whole portability argument rested on properties no unit test can
@@ -1011,7 +1018,7 @@ fixed location, so there is no manifest field to declare skills in (`additionalP
 would reject one); and `${PLUGIN_ROOT}` is the spec's own variable, appearing in the schema's `cwd`
 pattern and reserved against use as an env key.
 
-## 10.11 Gate 6 — verifying the fixes rather than the tests behind them
+### 10.11 Gate 6 — verifying the fixes rather than the tests behind them
 
 Gates 4 and 5 produced two fixes whose correctness no unit test could establish: automatic Work Item
 labelling, and the two repository-reading tools. Both had green tests. This project has twice shipped
@@ -1109,7 +1116,7 @@ pagination worry (`closedByPullRequestsReferences(first: 20)`) needs a Work Item
 linked pull requests, against a three-attempt cap plus a few conflict re-dispatches. Declined on both
 counts; recorded here so it is not relitigated.
 
-## 10.12 Scope creep was invisible, and the check that should have caught it could not
+### 10.12 Scope creep was invisible, and the check that should have caught it could not
 
 Gate 5's session reported it as an aside, after the conflict-path result it was actually run to
 test. Both replacement pull requests on `factory-gate2` added **`package-lock.json` (+1454/−0)** —
@@ -1160,7 +1167,7 @@ being *told to do something else* and noticing that a rule it had just tripped c
 enforced. Gate 5's mandate was the conflict path; this arrived in the margin. Worth remembering when
 deciding whether a rehearsal that "passed" produced its full value.
 
-## 10.13 Two ways the tool surface lied by omission
+### 10.13 Two ways the tool surface lied by omission
 
 Gate 5's other two margin findings. Neither is a wrong answer; both are *absent* answers, which is
 harder to notice because nothing looks broken.
@@ -1221,7 +1228,7 @@ The shared lesson: a tool that reports *what it decided* rather than *what it di
 from the outside, and the gap only becomes visible when someone is hunting a bug whose signature is
 "nothing changed".
 
-## 10.14 Factory was merging the agent's unfinished work, and had been all along
+### 10.14 Factory was merging the agent's unfinished work, and had been all along
 
 Gate 6's phase B ran a two-item dependency chain in `factory-gate2` (Objective #32). It passed
 cleanly — but it noted, as an aside it was not sent to look for, that `dispatch_integrate` had
@@ -1268,7 +1275,7 @@ marks the Work Item `done`, and the Objective closes reporting success.
 **The first fix was wrong, and §10.15 records why.** It read the draft flag as the agent's voice.
 The agent does not speak through it.
 
-## 10.15 The completion signal is `[WIP]`, not the draft flag
+### 10.15 The completion signal is `[WIP]`, not the draft flag
 
 The obvious reading of §10.14 is "a draft is the agent saying it has not finished, so don't merge
 drafts." That was the first fix: a `draft` verdict, plus removing `#mergeReady`'s un-draft call.
@@ -1433,7 +1440,7 @@ the requesting user about a second later. Derivation is unaffected (escalation i
 *absence*, and `assignHumanOnly` replaces all actors), but "who is assigned" is a tempting and wrong
 signal for a human auditing the repository from outside.
 
-## 10.16 A Director could not reconstruct its own history
+### 10.16 A Director could not reconstruct its own history
 
 Gate 5's closing finding, and the one that cost real work before it was reported: **the tool surface
 exposed no merge or close timestamp anywhere.** Pull requests carried `createdAt` and nothing else.
@@ -1490,7 +1497,7 @@ Two related items from the same report:
   because the fix is a design question (attribution in comment bodies? a per-Director marker?) rather
   than a missing field.
 
-## 10.17 What the gates have never exercised
+### 10.17 What the gates have never exercised
 
 Six gates have passed and this document records what each one proved. It has never recorded what
 they *failed to reach*, which lets absence of evidence quietly read as evidence of absence. The list
@@ -1554,7 +1561,7 @@ unchanged and is now the oldest open item on this list** — Gate 7 was created 
 stopped before its first timer fire, and was then completed by hand, so the run proves the loop's
 logic once more and the timer claim not at all. Read that entry as still fully open.
 
-## 10.18 v1 release readiness
+### 10.18 v1 release readiness
 
 The project owner accepted the completed production-shaped brownfield Gate 3 as the production
 viability bar for v1. Real Clockgrove work starts after release rather than blocking release.
@@ -1581,7 +1588,7 @@ tagged release are publication operations, not additional product gates.
 Running the identical Objective on Copilot CLI, Codex and Claude Code remains a post-v1 portability
 gate (§15.6). It does not delay the first Clockgrove Objective or v1.
 
-## 10.19 The install story was fiction until someone ran it
+### 10.19 The install story was fiction until someone ran it
 
 §10.18 named exactly one claim it refused to let the automated checks stand in for: that a real
 Copilot CLI can consume the package through its supported install flow. "Do not collapse those two
@@ -1635,7 +1642,7 @@ the install block for plausibility rather than running it, and it read plausibly
 possible guard is to install the published artifact the way a stranger would, once, before claiming
 a release is real — which is now a required step of any release, not an optional courtesy.
 
-## 10.20 Gate 7: the first run on the published plugin
+### 10.20 Gate 7: the first run on the published plugin
 
 Gate 7 ran against `clockgrove/factory-gate7` — Objective #1, a three-function text-normalisation
 toolkit with a genuine dependency chain (`collapseSpaces` and `toKebab` in parallel, then `slug`
@@ -1683,6 +1690,35 @@ nudge is a non-timer re-entry, and a re-run must not count it as a wake-up.
 - **Dependency serialisation held without supervision.** Work Item #4 derived `blocked` from two
   native `blocked by` edges, became `ready` only once both dependencies had actually merged, and was
   never dispatchable in between.
+
+**What it did not prove: that anyone else can install Factory.** Running *on* the installed plugin is
+not the same test as installing it, and the two got conflated. The install itself happened in a
+separate step before the gate — on the author's machine, under the author's credentials, as the
+repository's owner — so every permission the plugin needs was already held and any authorisation
+failure would have been invisible. Gate 7 then consumed the result. It is downstream evidence that
+the installed artifact *works*, and no evidence at all about who can obtain it.
+
+Measured afterwards, because the question deserved an answer rather than an assumption
+(2026-09-02). A stranger's path is an anonymous `git clone` of a public repository, so that is what
+was run: credential helper disabled, `GIT_TERMINAL_PROMPT=0`, no token in the environment. The clone
+succeeded and carried every artifact an install needs — `plugin.json`, `mcp.json`,
+`.claude-plugin/plugin.json`, `.mcp.json`, `.github/plugin/marketplace.json`, both `SKILL.md` files,
+and `dist/mcp-server.js`. With **no `node_modules` and no GitHub token**, that bundle started and
+served all 12 tools, reporting `{"name":"factory","version":"1.0.1"}`. That is the §13/§15.5
+no-install-step claim demonstrated rather than asserted, and it is the strongest available evidence
+short of a second account.
+
+Three gaps remain open, and none of them is closed by the above:
+
+- **No second account has ever installed Factory.** `copilot plugin marketplace add` reduces to the
+  anonymous clone just tested, so the residual risk is small — but "small and unmeasured" is exactly
+  the category §10.19 was written about, and it should be closed by a person who is not the owner.
+- **Only tool *startup* was exercised tokenless.** Every tool *call* needs credentials; the probe
+  established that the server initialises and advertises its surface, not that a stranger can
+  authenticate.
+- **Codex CLI and Claude Code have never installed it.** Both manifests ship and both are verified
+  structurally by `verify:package`, but structural validity is not an install. §15.6's portability
+  claim rests on one harness having actually run.
 
 ---
 

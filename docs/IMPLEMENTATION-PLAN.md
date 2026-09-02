@@ -1720,6 +1720,45 @@ Three gaps remain open, and none of them is closed by the above:
   structurally by `verify:package`, but structural validity is not an install. §15.6's portability
   claim rests on one harness having actually run.
 
+### 10.21 Gate 8: what a timer-driven pass actually requires
+
+"Gate 7 finished but did not pass" is confusing enough to be worth stating as a rule: **an Objective
+closing is not the gate's result.** Gate 7's Objective closed correctly and its loop behaved
+correctly, and neither fact bears on the property under test. A gate is an experiment with one
+independent variable, and Gate 7's is *what re-enters the session*. A hand-driven run holds that
+variable at the wrong value, so it produces no evidence about it however well the work goes. The
+trial is void, not failed — the patient recovered, but nobody administered the drug.
+
+Gate 8 (`clockgrove/factory-gate8`, Objective #1, a duration toolkit whose `formatDuration` must
+import and call `parseDuration` and `padUnit`) exists to hold that variable correctly. **A pass
+requires all six:**
+
+1. **At least two cycles are started by the scheduled automation.** One is not enough: the first
+   proves the timer fires, the second proves it keeps firing after a turn that ended without
+   completing anything.
+2. **No cycle is started by the session's own control flow.** No sleeping, polling or waiting inside
+   a turn; when a cycle's work is done, the turn ends.
+3. **No cycle is started by a human.** The parent session sends the child nothing after kickoff.
+4. **State is derived, never remembered.** The re-entrancy prompt is written to work with no working
+   memory, and instructs the session to read the Objective rather than recall it.
+5. **The Objective closes**, or reaches a legitimate escalation, without the loop being rescued.
+6. **Wake provenance is evidenced, not asserted.**
+
+Point 6 is the one that needed designing, because Gate 7's void run failed on exactly this: a system
+nudge saying the task was not yet complete re-entered the session, and nothing textually distinguished
+it from a timer fire. So the automation's prompt now carries a **unique token on its first line**
+(`GATE8-TICK-4f19c7`). A scheduled wake delivers that prompt verbatim, so a genuine wake is
+identifiable from the turn's own text; a nudge, a parent message, or anything else is not, and the
+brief instructs the session to decline and end the turn immediately when the token is absent.
+
+That is still self-report, so it is corroborated by something the session does not author: **GitHub's
+own write timestamps on the fixture.** If the session only writes during timer wakes, issue and pull
+request events cluster at the automation's interval, and the parent — which sent nothing — can read
+that clustering directly. Two independent records, one of which the subject cannot forge.
+
+The interval is 4 minutes. That is short enough that a stalled loop is obvious quickly, and long
+enough that a cycle's dispatches have usually produced something by the next fire.
+
 ---
 
 ## 11. Risks

@@ -1,6 +1,6 @@
 {
   "name": "factory",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Derived-state engineering management for GitHub: a Director skill plus an MCP server that dispatches, evaluates, and integrates GitHub-native Objectives and Work Items.",
   "author": {
     "name": "Clockgrove"

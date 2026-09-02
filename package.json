@@ -1,6 +1,6 @@
 {
   "name": "@clockgrove/factory",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Derived-state engineering management for GitHub.",
   "license": "MIT",
   "type": "module",

@@ -135,8 +135,27 @@ for (const skill of ["director", "objective-compilation"]) {
 
 console.log("\n# the bundle actually runs\n");
 
-const tools = await listTools();
+const started = await listTools();
+const tools = started?.tools ?? null;
 check(tools !== null, "the built server starts from mcp.json's own command and args");
+
+// The server's own claim about its version was the one version nothing compared
+// against the others. It said 0.1.0 while every manifest said 1.0.0, and that
+// survived until a human read the handshake banner after a real plugin install
+// (§10.19). Manifest-to-manifest agreement is necessary but not sufficient:
+// the running artifact has to agree with them too.
+if (started?.serverInfo) {
+  check(
+    started.serverInfo.version === plugin.version,
+    "the running server agrees with the plugin manifest on the version",
+    `server: ${started.serverInfo.version}, plugin.json: ${plugin.version}`,
+  );
+  check(
+    started.serverInfo.name === "factory",
+    "the running server identifies itself as factory",
+    `server: ${started.serverInfo.name}`,
+  );
+}
 
 if (tools) {
   const names = tools.map((t) => t.name).sort();
@@ -228,14 +247,17 @@ async function listTools() {
     ]);
 
   try {
-    await send("initialize", {
+    const initialized = await send("initialize", {
       protocolVersion: "2024-11-05",
       capabilities: {},
       clientInfo: { name: "factory-package-check", version: "0" },
     });
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
     const listed = await send("tools/list", {});
-    return listed.result?.tools ?? null;
+    return {
+      tools: listed.result?.tools ?? null,
+      serverInfo: initialized.result?.serverInfo ?? null,
+    };
   } catch (error) {
     console.log(`      ${error.message}`);
     return null;

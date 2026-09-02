@@ -72,6 +72,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
+import { version as packageVersion } from "../package.json";
+
 import {
   Dispatcher,
   GithubOctokitWriter,
@@ -305,7 +307,22 @@ const CompiledObjectiveSchema = z.object({
   workItems: z.array(CompiledWorkItemSchema),
 });
 
-const server = new McpServer({ name: "factory", version: "0.1.0" });
+/**
+ * The version this server advertises in its MCP `initialize` handshake.
+ *
+ * Read from `package.json` rather than written here, because a literal drifts
+ * silently: the plugin shipped as v1.0.0 while this handshake still said
+ * `0.1.0`, and nothing noticed until someone installed the plugin for real and
+ * read the banner (§10.19). Manifest-to-manifest agreement was already checked
+ * by `verify:package`; the *server's own* claim about itself was the one
+ * version no check compared against the others. `verify:package` now asserts it
+ * too, so re-hardcoding this would fail the build rather than ship quietly.
+ *
+ * Imported as a named binding so esbuild tree-shakes the rest of the manifest
+ * away. A default import inlines the whole file, which put `devDependencies`
+ * into the shipped bundle for no reason.
+ */
+const server = new McpServer({ name: "factory", version: packageVersion });
 
 server.registerTool(
   "read_objective",

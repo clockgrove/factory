@@ -2,8 +2,9 @@
 
 Peer document to [`PRD.md`](PRD.md). The PRD says *what and why*; this says *how*.
 
-Status: draft for review
-Date: 2026-08-30
+Status: accepted; v1.0 released. Later sections supersede earlier ones where they conflict —
+§15 supersedes §2 on packaging, and the §10.x findings supersede the original design text they cite.
+Date: 2026-08-30, amended through 2026-09-02
 Depends on: PRD (accepted), [`PROBE-001`](PROBE-001-agent-parallelism.md)
 
 ---
@@ -33,25 +34,40 @@ returning. Attempt counts are derived (§4.4), not recorded.
 ## 2. Component map
 
 ```
-plugin/
-├── agents/director.md            the loop; runs in the harness
-├── skills/                       management reasoning, invoked by Director
-│   ├── objective-compilation.md  Objective → Work Item graph
-│   ├── work-packet.md            Work Item → agent prompt
-│   ├── outcome-evaluation.md     did the PR actually do the work?
-│   └── replanning.md             repeated failure → graph change
+factory/
+├── plugin.json / mcp.json        Agent Plugins 1.0 manifests (Copilot CLI, Codex CLI)
+├── .claude-plugin/ + .mcp.json   Claude Code's equivalents (§15.4)
+├── skills/                       management reasoning, invoked by a harness
+│   ├── director/SKILL.md         the loop itself (§15.1)
+│   └── objective-compilation/SKILL.md   Objective → Work Item graph
 ├── schemas/                      validation contracts
 │   ├── work-item.schema.json
 │   └── objective.schema.json
-└── factory/                      deterministic TypeScript; no judgment
+├── dist/factory.js               committed bundle — the artifact the plugin launches
+└── src/                          deterministic TypeScript; no judgment
     ├── types.ts                  shared shapes (§3.1)
     ├── github.ts                 read-only GraphQL client → snapshot (§2)
     ├── state.ts                  GitHub → derived state (§3)
     ├── platform.ts               refusal vs. work-failure, pacing (Finding 4)
     ├── graph.ts                  apply Work Item graph to Issues
     ├── dispatch.ts               assign + confirm + retry (§4)
-    └── evaluate.ts               mechanical PR checks (§5)
+    ├── evaluate.ts               mechanical PR checks (§5)
+    ├── approval.ts               CI blast-radius review (§10.7)
+    ├── mcp-server.ts             Director's only write path (§15.3)
+    └── cli.ts / index.ts         read-only entry point; library surface
 ```
+
+**This map was revised once, and the original is worth knowing about** because a stale copy of it
+would send a reader building things that were deliberately not built. The first draft placed the loop
+in `agents/director.md` and split the reasoning across four skills — `work-packet`,
+`outcome-evaluation` and `replanning` alongside `objective-compilation`. Neither survived contact
+with the packaging research in §15: agent files are non-portable across harnesses (§15.6), so
+Director became a skill plus a bundled MCP server; and the other three skills were absorbed rather
+than dropped — Work Packet content is compiled into the Work Item issue body (§8), outcome evaluation
+split into mechanical checks in `evaluate.ts` (§5.1) and a semantic judgment made by Director itself
+(§5.2), and replanning became a branch of Director's own loop (§7). **`agents/director.md`,
+`skills/work-packet.md`, `skills/outcome-evaluation.md` and `skills/replanning.md` are not missing
+work. They are design history, and re-creating any of them would be a regression.**
 
 **The split between code and reasoning is load-bearing:**
 
@@ -96,7 +112,7 @@ label is stored state wearing a disguise.
 ```
 unstarted     open, no Copilot assignee, no linked PR
 dispatched    Copilot assigned, no session and no PR yet
-in_flight     session running, or draft PR with real commits
+in_flight     session running, or the PR still carries `[WIP]` and is being pushed to
 failed        session concluded failure, OR PR is a no-op (§5.1)
 for_review    PR has a real diff and checks have settled
 blocked       open, but some `blocked by` issue is still open
@@ -210,14 +226,32 @@ Cheap, deterministic, run first:
 ```
 no-op        empty diff, OR no commit beyond "Initial plan"
 declined     PR body states the task is not actionable
+in_progress  title still carries the `[WIP]` prefix — the agent is not finished
 untouched    diff does not touch any file the Work Item names
 checks       required checks concluded
 conflict     PR not mergeable against base
 sensitive    diff changes what CI runs or what it can reach
 ```
 
-A no-op or a decline is a **failed attempt**, not a result. Critically, `[WIP]` titles are *not* a
-signal — PROBE-001 saw `[WIP]` on both genuine work and empty failures.
+A no-op or a decline is a **failed attempt**, not a result.
+
+`[WIP]` is a **completion** signal, not a **quality** one, and conflating those two readings has
+caused a bug in each direction. PROBE-001 established the first half: the *presence* of `[WIP]` tells
+you nothing about whether the diff is any good, because the agent titles genuine work and empty
+failures alike that way — so `[WIP]` must never be read as "this attempt is bad." §10.15 established
+the second half the expensive way: the agent *removes* the prefix when it considers itself done, and
+that rename is the only completion announcement it ever makes. It opens every pull request as a draft
+and never clears the flag, so draftness says nothing; and a `[WIP]` pull request can already carry
+its full diff, so diff presence says nothing either. Of the three candidate signals the prefix is the
+only one that separates finished from unfinished.
+
+So the rule is: while the prefix is present, do not judge the attempt at all — that is `in_progress`,
+and it is checked *before* `untouched`, `conflict` and the checks verdicts, because a half-written
+change legitimately touches nothing in scope yet and legitimately fails its own tests, and each of
+those verdicts closes the pull request (§10.15). Once the prefix is gone, judge the diff entirely on
+its merits, exactly as PROBE-001 warned. The wait is bounded by an inactivity window
+(`WIP_INACTIVITY_GRACE_MS`) so a dead agent escalates rather than hanging; tune that bound **upward
+only**, since a too-short bound closes finished work and a too-long one merely wastes time.
 
 `untouched` is a deliberately weak check: it fires only when the diff touches *nothing* the Work
 Item declared, because it routes to close-and-retry and a false positive there destroys correct
@@ -401,7 +435,7 @@ Each step ends in something runnable. No step is "framework".
 | 4 | integration | merge a PR and close its issue |
 | 5 | `objective-compilation` skill + schema | Objective → validated Work Item graph |
 | 6 | `graph.ts` | apply graph as sub-issues + dependencies |
-| 7 | `director.md` | assemble the loop → **Gate 0** |
+| 7 | `director` skill + `mcp-server.ts` | assemble the loop → **Gate 0** |
 
 Steps 1–4 use a hand-written Work Item graph, so execution is proven before compilation is written.
 That ordering is deliberate: the prior design built compilation first and never proved execution.
@@ -1538,7 +1572,60 @@ tagged release are publication operations, not additional product gates.
 Running the identical Objective on Copilot CLI, Codex and Claude Code remains a post-v1 portability
 gate (§15.6). It does not delay the first Clockgrove Objective or v1.
 
-## 11. Risks
+## 10.19 The install story was fiction until someone ran it
+
+§10.18 named exactly one claim it refused to let the automated checks stand in for: that a real
+Copilot CLI can consume the package through its supported install flow. "Do not collapse those two
+claims," it said. The first time anyone actually ran that flow, on 2026-09-02 against the now-public
+repository, it produced three defects in a row — from a README that had been reviewed, merged,
+released and tagged.
+
+**1. The documented install command cannot work.** `README.md` told adopters to pin an exact
+reviewed commit:
+
+```bash
+copilot plugin marketplace add "clockgrove/factory#$FACTORY_COMMIT_SHA"
+```
+
+The CLI implements the `#<ref>` fragment as `git clone --depth 1 --branch <ref>`, and `--branch`
+accepts only branch and tag names. Every SHA fails with `fatal: Remote branch <sha> not found in
+upstream origin`. Confirmed by A/B against the same repository seconds apart: the SHA form failed,
+and the same commit reached through a freshly pushed `v1.0.0` tag succeeded. The headline install
+instruction had a 0% success rate and nobody could have known, because no test executes prose.
+
+**2. The upgrade flow hand-rolled a command that already exists.** The documented upgrade was
+uninstall → `marketplace remove` → re-add at a new SHA → reinstall. The CLI ships
+`copilot plugin update <name>@<marketplace>`, which its own `--help` describes as the way to fetch
+and install the latest version. Four brittle steps, one of which was defect 1, replacing one working
+command.
+
+**3. Pinning should never have been the default.** Both broken instructions descend from a posture
+decision made without stating its own premise: that adopters should pin. The CLI's own help
+documents `marketplace add owner/repo` with no ref, and does not mention the fragment form at all.
+Documenting an unusual path guarantees that the unusual path is the only one anyone tests, and the
+normal one — the one every real adopter will take — stays unexercised. It works; nobody had checked.
+The README now leads with the unpinned flow and demotes pinning to an option, with its two genuinely
+distinct motivations separated: freezing an instrument for the duration of a gate, and reviewing
+code before it gains authority to merge on your behalf.
+
+**A fourth defect fell out of the same act.** The freshly installed server's handshake announced
+`factory v0.1.0` while every manifest in the package said `1.0.0` — hardcoded at the `McpServer`
+constructor and never updated. `verify:package` compared the Claude manifest against the marketplace
+manifest against `plugin.json`, but never against the version the running server actually claims,
+despite already spawning it and completing an `initialize` whose `serverInfo` it discarded. This is
+the same shape as the fixture-default findings (§10.17): the one value nothing names is the one that
+drifts. Fixed by importing the version from `package.json` — as a *named* import, because a default
+import inlines the whole manifest including `devDependencies` into the shipped bundle — and
+`verify:package` now asserts the running server's `serverInfo` against `plugin.json`.
+
+**The rule.** A documented flow that nobody has executed is an untested claim, and it carries no
+more warrant than an unverified API shape (§10.15's behavioural-claim finding, one level up:
+that was about what a *platform* does, this is about what our *own instructions* do). Prose is the
+only part of a release with no CI. Three defects survived review precisely because reviewers read
+the install block for plausibility rather than running it, and it read plausibly. The cheapest
+possible guard is to install the published artifact the way a stranger would, once, before claiming
+a release is real — which is now a required step of any release, not an optional courtesy.
+
 
 | Risk | Mitigation |
 |---|---|

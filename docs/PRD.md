@@ -1,7 +1,7 @@
 # Clockgrove Factory — Product Requirements
 
-Status: draft for review
-Date: 2026-08-30
+Status: accepted; v1.0 released
+Date: 2026-08-30, amended through 2026-09-02
 
 ---
 

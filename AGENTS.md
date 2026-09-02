@@ -13,10 +13,15 @@ design and should not be reconciled with, second-guessed against, or drifted tow
 
 - **`docs/PRD.md`** — product decisions, non-goals, open questions. Read this first.
 - **`docs/IMPLEMENTATION-PLAN.md`** — the technical design and the build order (§9). This is *the*
-  plan; follow it in order. §15 is a later, accepted revision that **supersedes §2** on one point:
-  Director is packaged as a **skill** (`skills/director/SKILL.md`) plus a bundled **MCP server**, not
-  as an `agents/director.md` file — because only skills and MCP servers are portable across
-  Codex/Copilot/Claude Code (verified live against agent-plugins.org).
+  plan; follow it in order, but read later sections as superseding earlier ones where they conflict.
+  §15 supersedes §2 on packaging: Director is a **skill** (`skills/director/SKILL.md`) plus a bundled
+  **MCP server**, not an `agents/director.md` file, because only skills and MCP servers are portable
+  across Codex/Copilot/Claude Code (verified live against agent-plugins.org). §2's original component
+  map also named three skills — `work-packet`, `outcome-evaluation`, `replanning` — that were
+  deliberately absorbed into the Work Item body (§8), `evaluate.ts` + Director's own judgment (§5.1,
+  §5.2), and Director's replanning branch (§7) respectively. They are design history, not missing
+  work; §2 now says so inline. The §10.x findings likewise supersede the original design text they
+  cite — §5.1's evaluation rules were rewritten by §10.15.
 - **`README.md`**'s status line is the running, human-readable summary of build-order progress —
   check it first in any new session to know what's actually done vs. remaining.
 - **GitHub is the source of truth**, not this file, not session/checkpoint state, not any other
@@ -48,14 +53,23 @@ design and should not be reconciled with, second-guessed against, or drifted tow
   writes; never retry through an open circuit; a `403` with `5000/5000` on `/rate_limit` is the
   secondary limit working as documented, not a bug.
 - **Octokit only.** No raw `fetch`/`axios`/`gh`-CLI calls anywhere in `src/`.
-- **Push convention**: this repo has no PR flow (yet) for this rewrite — push directly with
-  `git push origin HEAD:main`, then `git fetch origin main` + compare SHAs to confirm it landed.
-  Single, deliberate pushes — never bursts.
-- **`clockgrove/factory-gate0`** was the disposable target repo for the Gate 0 rehearsal
-  (IMPLEMENTATION-PLAN.md §10) and no longer exists — it was deleted 2026-09-01 after Gate 0 passed
-  (three merged PRs, three closed Work Items, Objective #6 closed via the new `close_objective` tool;
-  see IMPLEMENTATION-PLAN.md §12 item 1 and `README.md`'s status line). If a future rehearsal (Gate 1
-  or a re-run) needs a disposable repo again, create a fresh one — there is nothing to reuse anymore.
+- **A documented flow nobody has executed is an untested claim.** Prose is the only part of a release
+  with no CI, and `npm run verify:package` does **not** cover it — it starts the committed bundle,
+  which is strictly weaker than "a real CLI can install this." v1.0.0 shipped green with a headline
+  install command that could not work at all, plus a four-step upgrade dance replacing one built-in
+  command and a server advertising the wrong version (§10.19). If you touch install/upgrade/uninstall
+  instructions, run them against the published artifact before claiming they work.
+- **Push convention**: this repo now has a normal PR flow, and it is public. Work on a branch, open a
+  pull request, and let it merge — do **not** push directly to `main`. (Direct pushes were the
+  convention only while the v2 rewrite was private and unreleased; that period is over, and PR #2 was
+  the first change to land the normal way.) Either way: single, deliberate pushes, never bursts, and
+  confirm what landed with `git fetch origin main` + a SHA comparison.
+- **Gate fixtures and any Clockgrove work must run against the installed public plugin**
+  (`copilot plugin marketplace add clockgrove/factory` → `copilot plugin install factory@clockgrove`),
+  never a hand-written `mcp-config.json` pointing at a local worktree and never hand-copied skills.
+  Testing a local bundle tests something no adopter will ever run, and a worktree can change
+  underneath a live gate. `clockgrove/factory-gate0` was the Gate 0 fixture and was deleted
+  2026-09-01; if a rehearsal needs a disposable repo, create a fresh one.
 
 ## Staying steerable while orchestrating a child session (Gate rehearsals, any multi-session work)
 

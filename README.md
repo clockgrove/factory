@@ -221,8 +221,10 @@ and replans — unattended.
 > first gate ever run end-to-end against the published plugin rather than a local bundle. That makes
 > it a real integration result and **not** a pass on its own terms, because the property under test
 > is timer-driven re-entry and a human-paced session tests the loop's logic instead. The fixture is
-> consumed; a re-run needs a fresh repository. Full account, including the two verdicts that fired
-> live for the first time, in [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) §10.20.
+> consumed; a re-run needs a fresh repository, and must not count a "you have not marked the task
+> complete" nudge as a wake-up — that is a non-timer re-entry. Full account, including the two
+> verdicts that fired live for the first time, in
+> [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) §10.20.
 >
 > **The second open claim closed itself badly the first time it was tested.** §10.18 singled out one
 > thing the automated package checks could not stand in for: that a real Copilot CLI can install the

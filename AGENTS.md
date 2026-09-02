@@ -57,6 +57,25 @@ so a long unbroken run of tool calls silently queues them.
 - A human correction should be actionable in your next turn, not stuck behind minutes of self-directed
   work you had already decided to do.
 
+## Cost discipline and context carry
+
+Billing is dominated by carried context, not just by model choice or request count. A large tool
+result produced early can be re-read on many later requests, so cost scales roughly with:
+`result size × number of later requests`.
+
+- Keep tool output intentionally small by default: narrow scope first (`view_range`, targeted `rg`
+  globs), cap rows/lines (`Select-Object -First`, `LIMIT`), and avoid full-file/full-log dumps
+  unless they are required for a decision.
+- Prefer precise reads over broad scans. Expand only when the prior slice is insufficient.
+- Avoid repeating the same large output in-thread; summarize once, then continue from the summary
+  or from deltas.
+- Treat sub-agents as context firebreaks for heavy exploration: pass tight prompts and require
+  concise, structured returns. Do not paste raw blobs back into the parent session unless necessary.
+- Be strict with high-AIU-per-call tools (for example, large task/read-agent outputs): use them
+  when they change a decision, not by default.
+- Front-load precision early in a session. Early oversized outputs are the most expensive because
+  they accumulate carrying cost over many downstream requests.
+
 ## When resuming after a gap
 
 1. `git log --oneline -15` and read the code to find the real current state.

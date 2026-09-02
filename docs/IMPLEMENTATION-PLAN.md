@@ -584,11 +584,10 @@ work too: typechecking and unit tests confirmed the code did what it said, and n
 that what it said was based on a wrong belief about the platform. Only exercising it against the
 real API could.
 
-### 10.4 Gate 3 fixture (`clockgrove/factory-gate3`) — designed, not yet run
+### 10.4 Gate 3 fixture (`clockgrove/factory-gate3`)
 
-**Deviation to note up front:** PRD §8 defines Gate 3 as *one real Clockgrove Objective*. This
-fixture is synthetic. It is a dress rehearsal for that gate, not the gate itself — the PRD's bar is
-unchanged, and Gate 3 is not green until a real Clockgrove Objective closes.
+This production-shaped brownfield fixture became Gate 3. It exercises changes to existing code,
+tests and CI rather than using a synthetic additive utility workload.
 
 The fixture exists because Gates 0–2 shared a property that production work does not have: **every
 Work Item was purely additive**. All 10 of Gate 2's PRs added two brand-new files and touched
@@ -1054,6 +1053,33 @@ buys a distinction no caller currently acts on, and reverts remain untrackable r
 pagination worry (`closedByPullRequestsReferences(first: 20)`) needs a Work Item with more than twenty
 linked pull requests, against a three-attempt cap plus a few conflict re-dispatches. Declined on both
 counts; recorded here so it is not relitigated.
+
+## 10.12 v1 release readiness
+
+The project owner accepted the completed production-shaped brownfield Gate 3 as the production
+viability bar for v1. Real Clockgrove work starts after release rather than blocking release.
+
+Before that run, the release-readiness pass must establish:
+
+- the committed bundle starts from the shipped manifests in a clean directory with no `node_modules`;
+- an adopter can check out and verify an exact commit SHA, install that local checkout with Copilot
+  CLI, see both skills and the MCP server, and uninstall it cleanly;
+- install, upgrade and uninstall instructions are public;
+- tests, typecheck, build, package verification and dependency audit are green;
+- a project license and contribution terms are published; and
+- the repository is public and contains no private dependency or Clockgrove-specific runtime
+  behavior.
+
+The package-level half is automated by `npm run verify:package` and has also passed from a fresh
+`git archive` extraction with no dependency installation. That does **not** count as the unrelated
+adopter test: a real Copilot CLI must consume the checkout through its supported local-path install
+flow. Do not collapse those two claims.
+
+The project owner selected MIT and accepted Gate 3 as complete. Public repository visibility and a
+tagged release are publication operations, not additional product gates.
+
+Running the identical Objective on Copilot CLI, Codex and Claude Code remains a post-v1 portability
+gate (§15.6). It does not delay the first Clockgrove Objective or v1.
 
 ## 11. Risks
 

@@ -914,15 +914,16 @@ Stated plainly, because a list of things that work invites absence of evidence t
 absence.
 
 - **The attempts-exhausted escalation branch (§4.4) has not executed in a real run.** It is tested
-  code, not observed behavior.
+  code, not observed behavior. A run came within one attempt of it — two consecutive attempts died
+  at an exhausted request quota — but the limit was raised while the second was in flight and the
+  third succeeded, so the branch still has not fired.
 - **The rebase-success path (§6) has not been observed.** Every conflict encountered so far threw, so
   the branch that recovers without a re-dispatch is untested against the live API.
-- **Unattended across turn boundaries is not the same claim as unattended within one turn.** Runs to
-  date have been paced by a session that stayed awake throughout. That establishes the loop's logic —
-  read, confirm, retry, integrate, replan, in the right order, against a real repository. It does not
-  establish the property the derived-state design exists to provide: a session waking with no working
-  memory, reconstructing everything from GitHub, and being re-entered by a timer rather than by its
-  own control flow. A re-entry that is not timer-started does not count as a wake-up.
+- **Unattended across turn boundaries** was established by a timer-driven run: a three-item Objective
+  completed with the loop re-entered only by a five-minute automation, each cycle reconstructing
+  state from GitHub with no working memory carried across. What that run did *not* exercise is a
+  wake-up separated from the previous one by hours or days, or a graph large enough for two Work
+  Items to be in flight in genuinely different states at the same wake.
 - **Cross-harness portability is verified by construction, not by a run.** The published package has
   been installed and exercised on GitHub Copilot CLI. Running one identical Objective on Codex and
   Claude Code is a separate check; any divergence would be a bug or a hidden client-specific

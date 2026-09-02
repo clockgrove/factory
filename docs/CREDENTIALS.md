@@ -60,3 +60,19 @@ An adopter installs a plugin and authors an Objective. They should not have to p
 environments, secrets, or tokens to make the loop run. Anything they must configure before first use
 is a portability defect, and the requirement in PRD §9 — that installation grants no workflow,
 settings, secret, or activation authority — depends on holding this line.
+
+**The zero-environments target holds; the zero-configuration one does not, and this is the finding
+that standard asks for.** Factory creates no environment, requires no repository secret, and needs
+no token beyond the operator's own harness credentials. But a repository whose pull requests run CI
+must have **Settings → Copilot → Coding agent → Require approval for workflow runs** turned off
+before the first Work Item, or every agent-authored run parks in `action_required` and Factory
+correctly refuses to merge without CI evidence. That is one mandatory pre-flight configuration step,
+and by this document's own standard it is a portability defect rather than a feature.
+
+It is recorded rather than fixed because it cannot be fixed from here: the REST approve endpoint
+covers fork pull requests only and refuses a same-repo agent branch outright, and the setting that
+governs the hold is readable over REST with no write (§10.7). It is also GitHub's account-wide
+default, so a fresh repository does not avoid it. Factory's response is to escalate with the
+blast-radius evidence a human needs to decide — which is the correct behavior for a bar §7.3 places
+outside autonomy anyway, but it should not be mistaken for the adopter experience this section
+describes.

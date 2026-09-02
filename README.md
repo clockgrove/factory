@@ -4,7 +4,8 @@ A GitHub-native engineering-management plugin. You author an **Objective**; Fact
 **Work Items**, dispatches them to parallel GitHub Copilot agent sessions, supervises the results,
 and replans — unattended.
 
-> **Status: Factory v1.0 is complete.** Gates 0–3 passed, Gates 4–6 exercised and hardened the
+> **Status: Factory v1.0 is released and feature-complete; two claims about it are still open.**
+> Gates 0–3 passed, Gates 4–6 exercised and hardened the
 > previously untested CI, conflict, repository-reading, and packaging paths. All seven build-order steps are done —
 > Factory can derive the full state of an Objective from GitHub alone, dispatch/confirm/retry/escalate
 > Work Items against a real repo, mechanically classify a PR's outcome (no-op, declined, untouched,
@@ -210,7 +211,28 @@ and replans — unattended.
 > since at least one gate paced its own cycles by hand and said so. That last one is now a ship
 > criterion rather than a caveat: unattended-*across turn boundaries* — a session waking with no
 > working memory and reconstructing everything from GitHub — is the property the derived-state design
-> exists to provide, and it is the next thing to prove.
+> exists to provide, and it is the next thing to prove. A first attempt (Gate 7, `clockgrove/factory-gate7`)
+> compiled and dispatched correctly but was **stopped after three turns, none of them timer-started,
+> and is recorded as void rather than passed** — it was halted to switch the harness onto the
+> installed public plugin, which is now a standing requirement for every gate. Its one usable result
+> is a negative: a "you have not marked the task complete" nudge is a non-timer re-entry that a
+> re-run must not count as a wake-up.
+>
+> **The second open claim closed itself badly the first time it was tested.** §10.18 singled out one
+> thing the automated package checks could not stand in for: that a real Copilot CLI can install the
+> published plugin the way a stranger would. Run for the first time on 2026-09-02 against the public
+> repository, it found the README's headline install command could not work at all (the CLI clones
+> `--branch <ref>`, which rejects the commit SHA the instructions told you to pin), that the
+> documented four-step upgrade dance reimplemented the CLI's own one-command `plugin update`, and
+> that pinning should never have been the default posture — documenting an unusual path means the
+> normal path is the one nobody tests. A fourth defect fell out of the same act: the installed
+> server's handshake announced `factory v0.1.0` while every manifest said `1.0.0`, because
+> `verify:package` compared the manifests to each other but never to the version the running server
+> claims. All four are fixed and the last is now asserted by `npm run verify:package`; the account is
+> [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) §10.19. The general rule, and the
+> reason this is in the status line rather than a changelog: **prose is the only part of a release
+> with no CI**, so a documented flow nobody has executed is an untested claim, and reviewing an
+> install block for plausibility is not the same as running it.
 
 ## Design in one picture
 
@@ -291,18 +313,15 @@ escalates. Repositories with no pull-request CI at all are unaffected. Full acco
 Factory v1.0 targets GitHub Copilot CLI. The cross-harness Copilot/Codex/Claude portability run is a
 separate post-v1 gate, not a prerequisite for using v1.
 
-Install an exact reviewed commit rather than a moving branch:
-
 ```bash
-FACTORY_COMMIT_SHA=0123456789abcdef0123456789abcdef01234567 # replace with the reviewed SHA
-copilot plugin marketplace add "clockgrove/factory#$FACTORY_COMMIT_SHA"
+copilot plugin marketplace add clockgrove/factory
 copilot plugin install factory@clockgrove
 copilot plugin list
 ```
 
-The repository must be public, or the adopter must independently have read access. The marketplace's
-Git source is pinned to the reviewed SHA. Factory does not run an install script and does not need
-`node_modules`; the committed bundle is the artifact the plugin launches.
+The repository must be public, or the adopter must independently have read access. Factory does not
+run an install script and does not need `node_modules`; the committed bundle is the artifact the
+plugin launches.
 
 Start a new Copilot CLI session, invoke the `director` skill, and provide an Objective repository,
 issue number, and escalation login. The MCP server reads `GITHUB_TOKEN` or `GH_TOKEN` from the
@@ -310,18 +329,35 @@ harness environment when its first tool is called.
 
 ### Upgrade
 
-Review the new exact SHA, then replace the pinned marketplace and reinstall:
-
 ```bash
-copilot plugin uninstall factory
-copilot plugin marketplace remove clockgrove
-NEW_FACTORY_COMMIT_SHA=0123456789abcdef0123456789abcdef01234567 # replace with the reviewed SHA
-copilot plugin marketplace add "clockgrove/factory#$NEW_FACTORY_COMMIT_SHA"
-copilot plugin install factory@clockgrove
+copilot plugin update factory@clockgrove
 ```
 
 Restart the Copilot CLI session after upgrading. Objective state lives in GitHub, so upgrading or
 restarting Factory does not require a migration.
+
+### Pinning to a fixed version
+
+Tracking the default branch is the normal path and the one these instructions assume. Two situations
+warrant pinning instead, and they are different arguments — do not conflate them:
+
+- **A run whose result has to mean something.** A gate, a rehearsal, or any experiment must not have
+  its own instrument change underneath it mid-run. Pin for the duration, then unpin.
+- **A deliberate review posture.** Factory holds a token and merges pull requests unattended, so
+  `plugin update` adopts code that will act on your repositories. Pinning trades staleness for
+  reviewing each version before it gains that authority.
+
+Pin by appending a `#<ref>` to the marketplace source:
+
+```bash
+copilot plugin marketplace add "clockgrove/factory#v1.0.0"
+```
+
+**`<ref>` must be a tag or branch name, never a commit SHA.** The CLI resolves the fragment with
+`git clone --depth 1 --branch <ref>`, and `--branch` accepts only tags and branches — a raw SHA fails
+with `fatal: Remote branch <sha> not found in upstream origin`. Pin to a release tag, which is
+immutable in practice and names a reviewed commit exactly as well. To change versions, `marketplace
+remove` and re-add at the new tag.
 
 ### Uninstall
 
@@ -350,10 +386,22 @@ npm run verify:package
 ```
 
 Worth running after any change to `mcp.json`, `plugin.json`, the skill frontmatter, or the tool
-surface. It is the only check that exercises the plugin-install path rather than the source: it
-catches a manifest pointing at a bundle that was never built, the two manifest pairs (Agent Plugins
-and Claude Code) drifting apart, a tool silently disappearing, and a tool shipped without a
-description a model can route on.
+surface. It catches a manifest pointing at a bundle that was never built, the two manifest pairs
+(Agent Plugins and Claude Code) drifting apart, the running server's advertised version disagreeing
+with the manifests, a tool silently disappearing, and a tool shipped without a description a model
+can route on.
+
+**It is not an install test, and treating it as one is how four defects shipped.** It starts the
+committed bundle the way the manifest says to, which is a strictly weaker claim than "a real Copilot
+CLI can install this." `verify:package` was green on a release whose documented install command
+could not work at all (§10.19). Prose is the only part of a release with no CI, so before claiming a
+version is installable, install the published artifact the way a stranger would:
+
+```bash
+copilot plugin marketplace add clockgrove/factory
+copilot plugin install factory@clockgrove
+copilot plugin list
+```
 
 ## Why this design starts from a clean slate
 

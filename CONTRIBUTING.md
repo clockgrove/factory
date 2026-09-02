@@ -36,6 +36,20 @@ endpoint or response shape exists. Any new GitHub API claim must also be checked
 official documentation and, where permissions allow, verified with a read or bounded rehearsal
 against a real repository.
 
+Two corollaries, each learned by shipping the mistake:
+
+- **Behavioral claims need this more than schema claims do, and get it less.** A wrong field name
+  looks like something you might misremember, so it prompts a check. A wrong belief about what
+  GitHub or the coding agent *does* does not look like a claim at all — it looks like background
+  knowledge. "A draft pull request means the author is not finished" was assumed for six gates, is
+  false, and the fix built on it was fully typechecked and tested before one live query showed it
+  would have broken every merge. If a change rests on *what something will do* rather than *what
+  shape it returns*, go and measure it.
+- **A documented flow nobody has executed is an untested claim.** Prose is the only part of a
+  release with no CI. If you change install, upgrade or uninstall instructions, run them end to end
+  against the published artifact before merging — reviewing them for plausibility is not the same
+  thing, and a release once shipped with a headline install command that could not work.
+
 ## Pull requests
 
 Explain the user-visible behavior, the evidence supporting any GitHub API assumptions, and the

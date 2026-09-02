@@ -1,15 +1,9 @@
 # Contributing to Factory
 
-Factory is a clean-room TypeScript/Node implementation. Do not copy architecture, documentation,
-skills, or vocabulary from `clockgrove/factory-legacy`.
-
 ## Before proposing a change
 
-Read, in order:
-
-1. [`docs/PRD.md`](docs/PRD.md) for product decisions and non-goals.
-2. [`docs/IMPLEMENTATION-PLAN.md`](docs/IMPLEMENTATION-PLAN.md) for the technical design.
-3. [`AGENTS.md`](AGENTS.md) for repository engineering rules.
+Read [`docs/DESIGN.md`](docs/DESIGN.md) first. It states the goals, the non-goals, and the rules that
+changes are judged against; [`AGENTS.md`](AGENTS.md) states the engineering conventions.
 
 Keep changes narrowly scoped. GitHub is Factory's durable state: do not add sidecar state, status
 labels, queues, services, or workflows that reconstruct the orchestration loop outside the harness.
@@ -31,24 +25,23 @@ npm run verify:package
 `verify:package` checks the committed plugin manifests and skills, starts the bundled MCP server
 through the manifest's own command and arguments, and verifies its public tool surface.
 
-Tests against fakes establish Factory's behavior for a response; they do not establish that a GitHub
-endpoint or response shape exists. Any new GitHub API claim must also be checked against current
-official documentation and, where permissions allow, verified with a read or bounded rehearsal
+## Verify platform claims against the platform
+
+Tests against fakes establish Factory's behavior for a given response; they do not establish that a
+GitHub endpoint or response shape exists. Any new GitHub API claim must also be checked against
+current official documentation and, where permissions allow, verified with a read or a bounded run
 against a real repository.
 
-Two corollaries, each learned by shipping the mistake:
+Two things this applies to more than it looks:
 
-- **Behavioral claims need this more than schema claims do, and get it less.** A wrong field name
-  looks like something you might misremember, so it prompts a check. A wrong belief about what
-  GitHub or the coding agent *does* does not look like a claim at all — it looks like background
-  knowledge. "A draft pull request means the author is not finished" was assumed for six gates, is
-  false, and the fix built on it was fully typechecked and tested before one live query showed it
-  would have broken every merge. If a change rests on *what something will do* rather than *what
-  shape it returns*, go and measure it.
-- **A documented flow nobody has executed is an untested claim.** Prose is the only part of a
-  release with no CI. If you change install, upgrade or uninstall instructions, run them end to end
-  against the published artifact before merging — reviewing them for plausibility is not the same
-  thing, and a release once shipped with a headline install command that could not work.
+- **Behavioral claims, not just schema claims.** A wrong field name looks like something you might
+  misremember, so it prompts a check. A belief about what GitHub or the coding agent *does* does not
+  look like a claim at all — it looks like background knowledge. If a change rests on *what something
+  will do* rather than *what shape it returns*, go and measure it.
+- **Documented flows.** Prose is the only part of a release with no CI, and `verify:package` does not
+  cover it — starting the committed bundle is strictly weaker than "a real CLI can install this". If
+  you change install, upgrade, or uninstall instructions, run them end to end against the published
+  artifact. Reviewing them for plausibility is not the same thing.
 
 ## Pull requests
 

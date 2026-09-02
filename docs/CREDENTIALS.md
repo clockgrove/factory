@@ -1,78 +1,54 @@
 # Credentials and environments
 
-## What the prior design accumulated
+## What Factory needs
 
-| Environment | Contents |
-|---|---|
-| `copilot` | empty |
-| `copilot-initial-assignment` | empty |
-| `copilot-initial-model` | `COPILOT_GITHUB_TOKEN` |
-| `factory-qualification-consumer` | `FACTORY_CONTROLLER_READ_TOKEN` |
+Factory runs in your agent harness with your own GitHub credentials. The bundled MCP server reads
+`GITHUB_TOKEN` or `GH_TOKEN` from the harness environment when its first tool is called. That is the
+whole requirement.
 
-Four environments, two credentials, two empty shells.
+It creates no GitHub environments, requires no repository secrets, and needs no token beyond the
+operator's own. Installing the plugin grants no workflow, settings, secret, or activation authority.
 
-## Why this happened
+## Policy on environments
 
-GitHub environments are a **deployment** primitive. They exist to gate a job behind approvals or
-branch restrictions and to scope secrets to a deployment target. They answer *"may this job run, and
-what may it see?"*
+GitHub environments are a **deployment** primitive. They gate a job behind approvals or branch
+restrictions and scope secrets to a deployment target. They answer *"may this job run, and what may
+it see?"*
 
-The prior design used them as a **configuration lookup keyed by workflow phase**. The names give it
-away: `-initial-assignment` and `-initial-model` are steps in a dispatch sequence, not trust
-boundaries. Two of them never held anything at all — created speculatively, then abandoned.
-
-This is not an isolated tidiness problem. It is the fossil record of Inversion B (PRD §3). The prior
-design was trying to pin a model and shape a session per dispatch, which finding F1 says GitHub Agent
-Tasks does not support. Unable to get per-session control through the API, it reached for the nearest
-primitive that *looked* like scoped configuration and bent it into that shape. The environment
-sprawl is what an unsupported requirement looks like after it has been routed around.
-
-The correct count of environments is the number of distinct **trust boundaries**, not the number of
-steps in a process.
-
-## This design's policy
-
-One rule:
+One rule follows:
 
 > An environment exists only to separate a credential that must not be visible to the rest of the
 > repository. Never to select behavior, pin a model, or mark a phase.
 
 Behavior selection belongs in configuration that is visible in the repository and reviewable in a
-diff. A secret store is a bad configuration file: invisible, unversioned, and unreviewable.
+diff. A secret store is a bad configuration file: invisible, unversioned, and unreviewable. An
+environment named after a step in a process — `-initial-assignment`, `-initial-model` — is
+configuration wearing a trust boundary's clothes, and the correct count of environments is the number
+of distinct trust boundaries, not the number of steps in a process.
 
-Applying that rule, this design's environment requirements mostly vanish as a consequence of
-decisions already taken:
+**Target: zero Factory-created environments.** If Factory ever appears to need one, that is a finding
+to record against the design, not a task to complete.
 
-| Prior environment | This design |
-|---|---|
-| `copilot` | **Keep if needed.** GitHub's Copilot coding agent reads runtime configuration from an environment of this name; it is platform convention, not a Factory invention. Create it only when there is something to put in it. |
-| `copilot-initial-assignment` | **Gone.** No phase-keyed configuration. |
-| `copilot-initial-model` | **Gone.** PRD §6 accepts F1 and drops per-session model pinning outright. |
-| `factory-qualification-consumer` | **Gone.** The independent release-approval service is discarded (PRD §11). |
+One environment may legitimately exist in a repository Factory works on: GitHub's Copilot coding
+agent reads runtime configuration from an environment named `copilot`. That is platform convention,
+not a Factory invention, and it should be created only when there is something to put in it.
 
-**Target: zero Factory-created environments.** The core loop runs in the harness with the operator's
-own credentials and needs no repository secrets at all. If Factory ever appears to need one, that is
-a finding to record against the thesis, not a task to complete.
+## The one configuration step an adopter cannot avoid
 
-## Consequence for adopters
+The zero-environments target holds. A zero-configuration adoption does not, and the gap is worth
+naming rather than hiding.
 
-An adopter installs a plugin and authors an Objective. They should not have to provision
-environments, secrets, or tokens to make the loop run. Anything they must configure before first use
-is a portability defect, and the requirement in PRD §9 — that installation grants no workflow,
-settings, secret, or activation authority — depends on holding this line.
+A repository whose pull requests run CI is subject to **Settings → Copilot → Coding agent → Require
+approval for workflow runs**. While that is on, every agent-authored run parks in `action_required`
+having executed nothing, and Factory correctly refuses to merge without CI evidence. Either a human
+approves runs as they arrive, or the requirement is turned off deliberately.
 
-**The zero-environments target holds; the zero-configuration one does not, and this is the finding
-that standard asks for.** Factory creates no environment, requires no repository secret, and needs
-no token beyond the operator's own harness credentials. But a repository whose pull requests run CI
-must have **Settings → Copilot → Coding agent → Require approval for workflow runs** turned off
-before the first Work Item, or every agent-authored run parks in `action_required` and Factory
-correctly refuses to merge without CI evidence. That is one mandatory pre-flight configuration step,
-and by this document's own standard it is a portability defect rather than a feature.
+That is one mandatory pre-flight decision, and by this document's own standard it is a portability
+defect rather than a feature. It is recorded rather than fixed because it cannot be fixed from here:
+the REST approve endpoint covers fork pull requests only and refuses a same-repository agent branch,
+and the setting that governs the hold is readable over REST with no write. It is also GitHub's
+account-wide default, so a fresh repository does not avoid it.
 
-It is recorded rather than fixed because it cannot be fixed from here: the REST approve endpoint
-covers fork pull requests only and refuses a same-repo agent branch outright, and the setting that
-governs the hold is readable over REST with no write (§10.7). It is also GitHub's account-wide
-default, so a fresh repository does not avoid it. Factory's response is to escalate with the
-blast-radius evidence a human needs to decide — which is the correct behavior for a bar §7.3 places
-outside autonomy anyway, but it should not be mistaken for the adopter experience this section
-describes.
+Factory's response is to escalate with the blast-radius evidence a human needs in order to decide,
+which is the correct behavior for a decision the confidence bar places outside autonomy anyway. See
+[`DESIGN.md`](DESIGN.md) §9.

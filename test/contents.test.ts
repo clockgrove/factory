@@ -3,19 +3,17 @@ import { describe, expect, it } from "vitest";
 import { interpretContentsResponse } from "../src/github.js";
 
 /**
- * Tests for reading a repository's own files, added to close Gate 3's finding
- * F2 and Gate 4's F4 (IMPLEMENTATION-PLAN.md §10.5, §10.8): no tool exposed the
- * target repository's layout or contents, so a Work Item's `scope` was compiled
+ * Tests for reading a repository's own files (§10): Work Item `scope` must be
+ * grounded in the target repository's actual layout and contents, not inferred
  * from the Objective's prose alone. A wrong guess there does not fail at compile
  * time — it fails later as an `untouched` verdict, after an agent run has been
  * spent.
  *
- * Every case below is a response shape verified live against the contents API
- * (2026-09-02) rather than assumed, because two of them were wrong on the first
- * attempt: a directory is an array with no `type` field at all, and an empty
- * file is indistinguishable from a >1 MB file except by `size`. The point of
- * these tests is that a caller can never mistake "I could not read this" for
- * "this was empty".
+ * Every case below is a contents API response shape rather than an assumption:
+ * a directory is an array with no `type` field at all, and an empty file is
+ * indistinguishable from a >1 MB file except by `size`. The point of these
+ * tests is that a caller can never mistake "I could not read this" for "this
+ * was empty".
  */
 
 const b64 = (s: string): string => Buffer.from(s, "utf8").toString("base64");
@@ -45,9 +43,8 @@ describe("interpretContentsResponse", () => {
     expect(result.truncated).toBe(true);
   });
 
-  // The first implementation checked `type` before checking for an array, so a
-  // directory fell through to the size branch and was reported as too large to
-  // read — wrong, and unactionable for the caller.
+  // Directories arrive as bare arrays. Checking `type` first would report them
+  // as too large to read, which is unactionable for the caller.
   it("recognises a directory, which the API returns as a bare array", () => {
     const result = interpretContentsResponse(
       "src",
@@ -60,10 +57,9 @@ describe("interpretContentsResponse", () => {
     expect(result.truncated).toBe(false);
   });
 
-  // Gate 6 finding. `truncated: true` here meant "I refused to read this", but
-  // every other use of the flag means "there is more of it" — so a caller that
-  // pages or retries on `truncated` would loop forever against a directory that
-  // will never yield file content.
+  // `truncated: true` means "there is more of it", not "I refused to read this";
+  // otherwise a caller that pages or retries on `truncated` would loop forever
+  // against a directory that will never yield file content.
   it("does not call a directory truncated, because nothing was truncated", () => {
     for (const body of [
       [{ name: "a.ts" }],
@@ -121,11 +117,9 @@ describe("interpretContentsResponse", () => {
     expect(result.content).toBeUndefined();
   });
 
-  // Exact response bodies from nodejs/node and git/git (2026-09-02). A review
-  // claimed both of these arrive as `type: "file"` — a symlink carrying `target`
-  // and a submodule carrying `submodule_git_url` — which would have meant this
-  // function reported a submodule as an empty file. Probing the live API showed
-  // otherwise, and these cases exist so that stays true.
+  // Symlinks and submodules do not arrive as `type: "file"`: a symlink carries
+  // `target`, and a submodule carries `submodule_git_url`. These cases ensure
+  // they cannot be reported as empty files.
   it("reports a symlink to a directory as a symlink, and says where it points", () => {
     const result = interpretContentsResponse(
       "deps/v8/third_party/ittapi/ittapi-rs/include",

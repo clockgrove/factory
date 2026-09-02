@@ -1,7 +1,6 @@
 /**
  * Graph application: apply a compiled Objective (`skills/objective-compilation`)
- * to GitHub as sub-issues plus native `blocked by` relationships (§3.1, §9
- * build order step 6).
+ * to GitHub as sub-issues plus native `blocked by` relationships (§3).
  *
  * This module is deliberately dumb. `objective-compilation` already decided
  * *what* the work is — every field on a `CompiledWorkItem` is final by the
@@ -10,20 +9,19 @@
  * the sub-issue relationship exists from creation — no separate `addSubIssue`
  * call needed for the common case) and one `addBlockedBy` per declared
  * dependency. Nothing here chooses scope, writes acceptance criteria, or
- * decides what should block what — see §2's component map: "Applying the
- * graph to Issues | code | mechanical".
+ * decides what should block what.
  *
- * `renderWorkPacket` is the one formatting decision this module makes, and
- * it is formatting, not judgment: PRD F1 already decided the Work Packet
- * *is* the prompt (Agent Tasks/`agentAssignment` takes no separate prompt
- * field), so a created issue's body is simply its already-compiled Work
- * Packet fields (§8) rendered as markdown. `dispatch.ts`'s `assignCopilot`
- * does not set `customInstructions` — the issue body this module writes is
- * the whole prompt the coding agent will read.
+ * `renderWorkPacket` is the one formatting decision this module makes, and it
+ * is formatting, not judgment: the Work Packet *is* the prompt (Agent
+ * Tasks/`agentAssignment` takes no separate prompt field), so a created issue's
+ * body is simply its already-compiled Work Packet fields (§8) rendered as
+ * markdown. `dispatch.ts`'s `assignCopilot` does not set
+ * `customInstructions` — the issue body this module writes is the whole prompt
+ * the coding agent will read.
  *
  * Deliberately does *not* assign Copilot at creation time, even though
- * `CreateIssueInput` accepts an `agentAssignment` field directly (verified
- * live against the schema, 2026-08-30): assignment must wait for `ready()`
+ * `CreateIssueInput` accepts an `agentAssignment` field directly: assignment
+ * must wait for `ready()`
  * (§3.2 — every `blocked by` issue closed), which a Work Item with
  * dependencies cannot satisfy at the moment its own issue is created.
  * Dispatch stays `dispatch.ts`'s job, driven by state derived fresh next
@@ -102,8 +100,8 @@ export function validateGraph(objective: CompiledObjective): void {
     }
   }
 
-  // Cycle check: a plain DFS over the dependsOn edges. Small graphs (Gate 0
-  // is 2-3 items; Gate 2 is 8-10), so no need for anything more clever.
+  // Cycle check: a plain DFS over the dependsOn edges. Objective graphs are
+  // small enough that there is no need for anything more clever.
   const byId = new Map(objective.workItems.map((wi) => [wi.id, wi]));
   const state = new Map<string, "visiting" | "done">();
   const visit = (id: string, path: string[]): void => {
@@ -162,13 +160,11 @@ export interface GraphWriter {
 }
 
 /**
- * Mutations verified live against docs.github.com/en/graphql/reference/issues
- * (2026-08-30). `CreateIssueInput.parentIssueId` and `AddBlockedByInput`'s
- * exact field names (`issueId` = the blocked issue, `blockingIssueId` = the
- * dependency) were both confirmed directly in the fetched schema reference,
- * not inferred from search results, and each was also confirmed *live*
- * (2026-08-31, against clockgrove/factory-gate0, ahead of Gate 0 itself) —
- * a sub-issue created with `parentIssueId` set, and `addBlockedBy` read back
+ * Mutations match docs.github.com/en/graphql/reference/issues.
+ * `CreateIssueInput.parentIssueId` and `AddBlockedByInput`'s exact field names
+ * (`issueId` = the blocked issue, `blockingIssueId` = the dependency) are
+ * checked against the schema reference, not inferred from search results. A
+ * sub-issue is created with `parentIssueId` set, and `addBlockedBy` reads back
  * afterward as an actual `blockedBy` edge on the dependent issue.
  */
 const CREATE_WORK_ITEM_ISSUE_MUTATION = `

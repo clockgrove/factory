@@ -27,13 +27,13 @@
     },
     "acceptance": {
       "type": "array",
-      "description": "Explicit, checkable criteria (§8). Each entry must be verifiable from the diff alone: outcome-evaluation (§5.2) checks these against the PR, never against the agent's self-report (§15.7).",
+      "description": "Explicit, checkable criteria (§8). Each entry must be verifiable from the diff alone: the semantic check (§5.2) tests these against the pull request, never against the agent's self-report (§11.7).",
       "items": { "type": "string", "minLength": 1 },
       "minItems": 1
     },
     "scope": {
       "type": "array",
-      "description": "Files or directories (trailing '/' scopes a whole directory) this Work Item may modify (§8). PROBE-001 measured a one-line scope constraint holding 11/11 times. This is also `evaluate.ts`'s `isUntouched` input -- keep entries concrete paths, not glob patterns.",
+      "description": "Files or directories (trailing '/' scopes a whole directory) this Work Item may modify (§8). A one-line scope constraint holds reliably in practice (docs/PLATFORM-BEHAVIOR.md). This is also `evaluate.ts`'s `isUntouched` input -- keep entries concrete paths, not glob patterns.",
       "items": { "type": "string", "minLength": 1 },
       "minItems": 1
     },

@@ -44,7 +44,7 @@ function pr(over: Partial<LinkedPullRequest> = {}): LinkedPullRequest {
     headSha: "deadbeef",
     // Normal is an agent that has just pushed. Staleness is the exceptional
     // case a test has to ask for explicitly, so that no test asserts "we judge
-    // an abandoned draft" by accident (§10.15).
+    // an abandoned draft" by accident (§5.1).
     headCommittedAt: NOW,
     // The default PR is OPEN, so it is neither merged nor closed. Keeping these
     // null by default means no test can assert a merge-time behaviour by
@@ -90,9 +90,8 @@ function objective(items: WorkItemSnapshot[]): ObjectiveSnapshot {
 }
 
 /**
- * The no-op detector is the single most important classifier in Factory:
- * PROBE-001 measured an impossible task returning `conclusion: success`, so
- * this is what stands between "the agent said it worked" and "it worked".
+ * The no-op detector is the single most important classifier in Factory: this
+ * is what stands between "the agent said it worked" and "it worked".
  */
 describe("isNoOp", () => {
   it("treats an empty PR containing only the agent's plan commit as a no-op", () => {
@@ -176,16 +175,16 @@ describe("deriveState", () => {
 
   it("is not escalated while Copilot is still an assignee", () => {
     // Escalation is defined as a handoff (§7.2): Copilot must be removed.
-    // GitHub also auto-assigns the requesting human alongside Copilot
-    // (verified live, 2026-08-30) — this is exactly that shape.
+    // GitHub also auto-assigns the requesting human alongside Copilot — this is
+    // exactly that shape.
     expect(
       deriveState(wi({ assignees: [COPILOT_ASSIGNEE_LOGIN, "kirkmarple"] }), NOW),
     ).toBe("dispatched");
   });
 
   it("is in_flight when a no-op PR is still within the confirm window", () => {
-    // No diff yet is not evidence of failure: the session (PRD F8 — there is
-    // no reliable per-issue session-status API) may still be pushing commits.
+    // No diff yet is not evidence of failure: there is no reliable per-issue
+    // session-status API, and the agent may still be pushing commits.
     const item = wi({
       assignees: [COPILOT_ASSIGNEE_LOGIN],
       copilotAssignments: [new Date(NOW.getTime() - 30_000)],
@@ -209,7 +208,7 @@ describe("deriveState", () => {
           commitSubjects: [INITIAL_PLAN_COMMIT],
           // The PR must also be past its own grace period; an empty PR that is
           // merely older than the *dispatch* confirm window is not yet
-          // evidence of failure (§10.5, F3).
+          // evidence of failure.
           createdAt: new Date(NOW.getTime() - EMPTY_PULL_REQUEST_GRACE_MS - 1),
         }),
       ],
@@ -217,10 +216,9 @@ describe("deriveState", () => {
     expect(deriveState(item, NOW)).toBe("failed");
   });
 
-  // Gate 3, F3 (§10.5). The agent opens its draft PR within seconds and then
-  // works for minutes. Judging that PR on the assignment clock declared a live
-  // session failed, and the skill's "retry every failed item" guidance would
-  // have closed a PR that was actively being written.
+  // The agent opens its draft PR within seconds and then works for minutes.
+  // Judging that PR on the assignment clock can declare a live session failed
+  // and close a PR that is actively being written.
   it("is in_flight when an empty PR is past the confirm window but still young", () => {
     const item = wi({
       assignees: [COPILOT_ASSIGNEE_LOGIN],
@@ -287,8 +285,8 @@ describe("deriveState", () => {
   });
 
   it("reaches for_review even while the PR is still a draft", () => {
-    // PROBE-001: agents never undraft and never self-merge. Requiring a
-    // ready-for-review PR here would stall every item forever.
+    // Agents never undraft and never self-merge. Requiring a ready-for-review PR
+    // here would stall every item forever.
     const item = wi({
       assignees: [COPILOT_ASSIGNEE_LOGIN],
       linkedPullRequests: [pr({ isDraft: true, checks: "SUCCESS" })],
@@ -343,7 +341,7 @@ describe("deriveState", () => {
 });
 
 describe("abandoned attempts", () => {
-  // Once Factory stopped merging unfinished work (§10.15), an unfinished pull
+  // Once Factory stopped merging unfinished work (§5.1), an unfinished pull
   // request became something it waits on — so an agent that pushes a partial
   // commit and then dies would wait forever: not empty (so the empty-PR grace
   // never fires), never finished, never retried, never escalated.
@@ -362,7 +360,7 @@ describe("abandoned attempts", () => {
   it("keeps waiting while the agent is still pushing", () => {
     // The whole point of measuring inactivity rather than age: a Work Item may
     // legitimately take longer to write than any useful age bound, and judging
-    // it early closes live work (§10.5, F3).
+    // it early closes live work.
     const item = wi({
       assignees: [COPILOT_ASSIGNEE_LOGIN],
       linkedPullRequests: [
@@ -391,8 +389,9 @@ describe("abandoned attempts", () => {
   });
 
   it("ignores the draft flag entirely, since the agent never clears it", () => {
-    // gate3 PR #16: renamed away from `[WIP]` but still a draft. If draftness
-    // meant "unfinished" this would be retried forever instead of merged.
+    // A pull request can be renamed away from `[WIP]` but still be a draft. If
+    // draftness meant "unfinished" this would be retried forever instead of
+    // merged.
     const item = wi({
       assignees: [COPILOT_ASSIGNEE_LOGIN],
       linkedPullRequests: [
@@ -568,7 +567,7 @@ describe("attemptCount", () => {
  * many assignments in a row produced zero pull requests. This is derived
  * purely from the assignment timeline and each PR's `createdAt` — no stored
  * retry counter, so it survives a restart and needs no coordination even if
- * more than one process ever evaluated it (2026-08-30 design decision).
+ * more than one process ever evaluates it.
  */
 describe("confirmFailureStreak", () => {
   it("is zero when Copilot has never been assigned", () => {

@@ -31,7 +31,7 @@ import type {
 } from "./backend.js";
 import { restrictedCodexArgs } from "../backends/codex-cli-policy.js";
 
-const COMPILED_SCHEMA = {
+export const CODEX_COMPILED_OBJECTIVE_SCHEMA = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   type: "object",
   additionalProperties: false,
@@ -65,7 +65,10 @@ const COMPILED_SCHEMA = {
           requirements: {
             type: "object",
             additionalProperties: false,
-            required: ["os", "architecture", "tools", "services", "networkDestinations", "permittedSecretNames", "trust"],
+            required: [
+              "os", "architecture", "cpu", "memoryMb", "diskMb", "timeoutMinutes",
+              "tools", "services", "networkDestinations", "permittedSecretNames", "trust",
+            ],
             properties: {
               os: { type: "array", maxItems: 12, items: { type: "string" } },
               architecture: { type: "array", maxItems: 8, items: { type: "string" } },
@@ -183,7 +186,11 @@ export class CodexCliManagementBackend implements ManagementBackend {
       `Repository: ${context.repository}\nDefault branch: ${context.defaultBranch}\nObjective #${context.objective.number}: ${context.objective.title}\n\n${context.objective.body}`,
       `Observed repository paths (may be capped):\n${context.repositoryFiles.join("\n")}`,
     ].join("\n\n");
-    const { value, usage } = await this.#run<CompiledObjective>(context.repository, COMPILED_SCHEMA, prompt);
+    const { value, usage } = await this.#run<CompiledObjective>(
+      context.repository,
+      CODEX_COMPILED_OBJECTIVE_SCHEMA,
+      prompt,
+    );
     const objective = value;
     if (objective.title !== context.objective.title) {
       throw new Error("compiler changed the Objective title");
@@ -251,7 +258,14 @@ export class CodexCliManagementBackend implements ManagementBackend {
         maxOutputBytes: 2 * 1024 * 1024,
       });
       if (result.exitCode !== 0) {
-        throw new Error(`management backend failed: ${result.stderr || result.stdout}`);
+        const streams = [
+          result.stderr.trim() ? `stderr:\n${result.stderr.trim()}` : "",
+          result.stdout.trim() ? `stdout:\n${result.stdout.trim()}` : "",
+        ].filter(Boolean).join("\n");
+        const diagnostic = streams.length <= 7_000
+          ? streams
+          : `[diagnostic truncated]\n${streams.slice(-6_900)}`;
+        throw new Error(`management backend failed: ${diagnostic || "Codex CLI exited without diagnostics"}`);
       }
       return parseOutput<T>(result.stdout);
     } finally {

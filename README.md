@@ -1,186 +1,157 @@
 # Factory
 
-A GitHub-native engineering-management plugin. You author an **Objective**; Factory compiles it into
-**Work Items**, dispatches them to parallel GitHub Copilot coding-agent sessions, supervises the
-results, integrates what is good, and asks a human about what is not.
+Factory is a GitHub-backed, local-first unattended software factory. A human writes an Objective;
+Factory compiles it into native GitHub sub-issues, schedules dependency-ready Work Items, runs coding
+workers, independently validates their artifacts, opens and integrates pull requests, and continues
+until the Objective ships or a specific human decision is required.
 
-Factory targets Codex, GitHub Copilot, and Claude Code through the same portable plugin. Each harness
-still needs a live install-and-run check; accepting the same manifest is not evidence that their
-credential and process boundaries behave identically.
+Factory does **not** require a Factory GitHub Action, workflow, server, database, queue, or sidecar
+state. The plugin supplies the orchestration code. GitHub supplies the durable control plane. A live
+local harness/CLI process supplies the scheduler.
 
-## How it works
-
-```
-  Objective (human)
-        │
-        ▼
-  ┌─────────────────────────────┐
-  │  Factory — runs in the      │   the loop lives in the agent harness,
-  │  agent harness              │   not in GitHub Actions
-  │                             │
-  │  compile → dispatch →       │
-  │  supervise → replan         │
-  └─────────────────────────────┘
-        │                ▲
-        │ Issues,        │ PRs, diffs,
-        │ assignment     │ terminal state
-        ▼                │
-  ┌─────────────────────────────┐
-  │  GitHub                     │   durable state + execution substrate
-  │  Issues · Copilot sessions  │
-  │  Pull Requests              │
-  └─────────────────────────────┘
+```text
+Objective issue
+      │
+      ▼
+Factory Supervisor ── compile / lease / schedule / budget / recover
+      │                                      │
+      │ durable receipts                     │ restricted Worker Packets
+      ▼                                      ▼
+GitHub issues, refs, PRs              local Codex CLI (default)
+and native dependencies               or opt-in sandbox/managed backends
+      ▲                                      │
+      └──── validate / publish / merge ──────┘
 ```
 
-Two constraints shape everything:
+## Product contract
 
-1. **No deployed infrastructure.** No database, queue, dashboard, or service. GitHub holds the
-   durable state; the harness holds the loop.
-2. **Harness- and model-agnostic.** Packaged as an [Agent Plugins 1.0](https://agent-plugins.org)
-   package — an open, vendor-neutral standard — targeting Codex, GitHub Copilot, and Claude Code with
-   no architectural primacy for any. Factory selects no model anywhere.
+- Work Items are GitHub sub-issues; dependencies are native `blocked by` relationships.
+- Versioned run, lease, graph, attempt, validation, and budget receipts are reconstructable from
+  GitHub. The full compiled graph is stored under an immutable custom ref before the first sub-issue
+  is created, so a partial graph application replays facts without another model call.
+- One compare-and-swap Director lease fences competing schedulers per Objective.
+- Workers receive no GitHub mutation or merge authority. The host publishes only a bounded,
+  content-addressed artifact after independent validation.
+- Trusted work runs in an exact-SHA local Git worktree by default.
+- Daytona, Vercel Sandbox, and GitHub's managed coding agent are explicit paid options. There is no
+  implicit cloud fallback.
+- Mechanical polling never calls a model. Model calls are bounded compilation and semantic-review
+  decisions.
+- Work Item count is derived from the work. It is never hard-coded.
 
-### Derived state
+The authoritative contract and failure model are in [docs/DESIGN.md](docs/DESIGN.md). The original
+GitHub-Copilot-specific protocol is preserved in [docs/PROTOCOL-V1.md](docs/PROTOCOL-V1.md) only for
+compatibility with already-running work.
 
-Factory stores nothing. Every Work Item's state is a pure function of what GitHub currently says:
+## Install and activate
 
-| Concept | GitHub primitive |
-|---|---|
-| Objective | Issue labelled `factory:objective` |
-| Work Item | **sub-issue** of the Objective |
-| Dependency | native **`blocked by`** relationship |
-| Assignment | `copilot-swe-agent` as assignee |
-| Attempt | a linked pull request |
-| Completion | PR merged → issue closed |
+Install Factory from `clockgrove/factory` using your Agent Plugins-compatible client, then restart the
+client so its skills and bundled MCP server are reloaded. Installation runs no lifecycle scripts and
+does not need `node_modules`; provider SDKs are included in the committed JavaScript bundle.
 
-There is no status label, no sidecar file, and no lease. Nothing stored can go stale or diverge,
-crash recovery is free, and "resume" and "start" are the same code path.
+Authenticate GitHub on the host with `gh auth login`, or expose `GITHUB_TOKEN`/`GH_TOKEN` to the
+plugin process. Installing the plugin does not install a GitHub Action and does not activate any
+repository.
 
-## Install
+In a supported harness, invoke the `director` skill with:
+
+- `OWNER/REPO#OBJECTIVE`
+- the absolute local checkout path
+- an optional complete run-policy object
+
+The skill makes one long-lived `factory_run` call. The default policy uses only
+`codex-cli/local-worktree`, never paid compute. The equivalent source-checkout command is:
 
 ```bash
-copilot plugin marketplace add clockgrove/factory
-copilot plugin install factory@clockgrove
-copilot plugin list
+npm ci
+npm run build
+node dist/factory.js run OWNER/REPO#OBJECTIVE --until-terminal --repo /absolute/repo/path
 ```
 
-Factory runs no install script and does not need `node_modules`; the committed bundle is the artifact
-the plugin launches. The repository must be public, or the adopter must independently have read
-access.
+The process survives ordinary worker failures and reconstructs interrupted work from GitHub when
+restarted. It cannot wake a powered-off machine; an optional user-authorized host scheduler may
+restart the same command at login or boot. See
+[docs/HOST-SCHEDULING.md](docs/HOST-SCHEDULING.md) for an opt-in Linux/WSL service template and the
+honest process-lifetime boundary.
 
-Start a new harness session, invoke the `director` skill, and give it an Objective repository, issue
-number, and escalation login. The MCP server first reads `GITHUB_TOKEN` or `GH_TOKEN` from its
-environment. If the harness sanitizes those variables, it falls back to the operator's existing
-`gh auth` session; run `gh auth login` once on that host.
-
-### Upgrade
+Request a fenced cancellation from another shell with:
 
 ```bash
-copilot plugin update factory@clockgrove
+node dist/factory.js cancel OWNER/REPO#OBJECTIVE --reason "operator request"
 ```
 
-Restart the session afterwards. Objective state lives in GitHub, so upgrading or restarting Factory
-requires no migration.
+The request is a durable GitHub event. The active Supervisor stops workers, records terminal attempt
+and run receipts, and releases the lease; killing a process is not used as the cancellation record.
 
-### Pinning
+## Policy and paid backends
 
-Tracking the default branch is the normal path and the one these instructions assume. Pin when a run's
-result has to mean something — an experiment must not have its instrument change underneath it — or as
-a review posture, since Factory holds a token and merges pull requests unattended, so adopting new
-code grants it that authority.
+The default policy is exported as `DEFAULT_RUN_POLICY`. A complete JSON override looks like:
 
-Pin by appending a `#<ref>` to the marketplace source:
+```json
+{
+  "backendOrder": ["codex-cli/local-worktree"],
+  "maxParallel": 2,
+  "workItemTimeoutMinutes": 30,
+  "objectiveTimeoutMinutes": 720,
+  "maxAttemptsPerItem": 3,
+  "allowedPaidBackends": [],
+  "cloudFallback": "never",
+  "maxSandboxMinutes": 0,
+  "maxManagedAgentSessions": 0,
+  "trust": "explicitly_activated_repo",
+  "managementBackend": "codex-cli/local",
+  "allowedNetworkDestinations": [
+    "registry.npmjs.org",
+    "*.npmjs.org",
+    "api.openai.com"
+  ]
+}
+```
+
+To use Daytona or Vercel Sandbox, put its backend ID in both `backendOrder` and
+`allowedPaidBackends`, set `cloudFallback` to `explicit`, and provide a nonzero sandbox-minute cap.
+Sandbox validation consumes its own reservation because it runs in a fresh resource, separate from
+the worker. See [docs/CREDENTIALS.md](docs/CREDENTIALS.md) for provider-specific credentials.
+
+Probe without creating paid resources:
 
 ```bash
-copilot plugin marketplace add "clockgrove/factory#some-ref"
+node dist/factory.js backends probe
 ```
 
-**`<ref>` must be a branch or tag name, never a commit SHA.** The CLI resolves the fragment with
-`git clone --depth 1 --branch <ref>`, which accepts only branches and tags. To move, `marketplace
-remove` and re-add at the new ref.
+## Safety and escalation
 
-### Uninstall
+Factory checks repository identity, Objective provenance, fork status, branch rules, backend
+capabilities, trust boundary, credentials, and remaining budget before launch. It rejects artifacts
+with a wrong base, out-of-scope paths, sensitive execution surfaces, suspected secrets, malformed
+evidence, or a validated tree that differs from the tree being published.
 
-```bash
-copilot plugin uninstall factory
-copilot plugin marketplace remove clockgrove
-```
+Local Codex workers never wait on an approval prompt. They stay inside `workspace-write`, run with
+web search and command networking off by default, and receive only the Work Packet's preflighted
+domain allowlist when command networking is required. Provider workers run inside an explicitly
+selected, separately metered outer sandbox with provider-enforced TTL and egress policy.
 
-Uninstalling removes the local plugin only. It does not delete or mutate Objectives, Work Items, pull
-requests, labels, repository settings, environments, or secrets.
+It escalates with evidence when autonomy would require human review, unavailable credentials,
+privileged/destructive changes, unsupported branch rules, exhausted budgets, repeated failure, or
+semantic judgment below the acceptance bar.
 
-## Before you point it at a repository
-
-Factory creates no environments and requires no repository secrets — it acts with the operator's own
-harness credentials. Two things about the target repository do matter:
-
-- **Ship a CI workflow that runs on `pull_request`.** Without one, GitHub reports no check runs and a
-  `ready` verdict silently narrows to "open, mergeable, touches the expected files" — nothing has
-  actually executed the code.
-- **Decide how the workflow-approval hold is set.** GitHub ships repositories with *"Require approval
-  for workflow runs"* enabled for the Copilot coding agent, so every workflow run on an agent-authored
-  pull request parks in `action_required` until a human clicks *Approve and run workflows*. Factory
-  refuses to merge without CI evidence and escalates. It cannot clear the hold itself: the REST
-  approve endpoint covers *fork* pull requests only and refuses a same-repo agent branch, and the
-  repository setting that governs the hold is readable over REST with no write.
-
-```bash
-# check the current value
-gh api repos/OWNER/REPO/copilot/cloud-agent/configuration --jq .require_actions_workflow_approval
-```
-
-Either approve runs as they arrive, or turn the requirement off at **Settings → Copilot → Coding
-agent → Require approval for workflow runs**. Decide it deliberately — it governs every future agent
-run in that repository, not one pull request. When Factory escalates, it attaches the blast-radius
-evidence a human needs in order to decide: whether the default workflow token is read-only, whether
-any pull-request workflow can reach a secret, and whether a self-hosted runner is involved.
-Repositories with no pull-request CI are unaffected. Full account in
-[`docs/DESIGN.md`](docs/DESIGN.md) §9.
-
-## What Factory does on its own, and what it refuses to
-
-Factory merges autonomously only when the mechanical checks pass, a semantic review of the actual diff
-says it satisfies the Work Item's acceptance criteria and nothing more, the change is reversible, and
-it touches no security-sensitive surface.
-
-It stops and asks a human when intent is ambiguous, when the diff touches workflows, permissions,
-secrets or release configuration, when behavior not named in the Work Item is deleted or rewritten,
-when a conflict needs a judgment about intent, or when an action would be irreversible. Escalation is
-a first-class successful outcome, not a failure — the measure is whether escalations are well-founded,
-not whether they are rare. The full bar is [`docs/DESIGN.md`](docs/DESIGN.md) §7.3.
+Retries receive the prior attempt's bounded failure evidence as explicitly untrusted diagnostic
+data. Factory never widens scope, trust, backend permissions, or budget to make a retry succeed.
 
 ## Development
 
-For a source checkout, the CLI entry point is read-only and prints the derived state of an Objective:
-
 ```bash
-npm install && npm run build
-GITHUB_TOKEN=$(gh auth token) node dist/factory.js owner/repo 42
-```
-
-To check the thing that actually ships — the manifests, the skills, and the bundled MCP server
-starting and serving its tools over stdio with no install step and no token:
-
-```bash
+npm ci
+npm run typecheck
+npm test
 npm run verify:package
 ```
 
-Worth running after any change to `mcp.json`, `plugin.json`, the skill frontmatter, or the tool
-surface. Note that it is **not** an install test: it starts the committed bundle the way the manifest
-says to, which is a strictly weaker claim than "a real Copilot CLI can install this". Before claiming
-a change is installable, install the published artifact the way a stranger would.
+`verify:package` rebuilds the committed bundles, validates every manifest/skill/schema, starts the
+bundled MCP server with no token, and verifies its public tool surface. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for contribution rules.
 
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the full validation loop.
+Current release evidence and the external gates that still require real provider credentials or a
+published installation are tracked in [docs/CONFORMANCE.md](docs/CONFORMANCE.md).
 
-## Documentation
-
-- [`docs/DESIGN.md`](docs/DESIGN.md) — goals, scope, non-goals, the loop, evaluation and integration
-  rules, the confidence bar, packaging, and stated limitations.
-- [`docs/PLATFORM-BEHAVIOR.md`](docs/PLATFORM-BEHAVIOR.md) — measured behavior of GitHub's coding
-  agent and API that the design rests on.
-- [`docs/CREDENTIALS.md`](docs/CREDENTIALS.md) — what Factory needs in order to run, and what it
-  deliberately does not.
-
-## License
-
-Factory is released under the [MIT License](LICENSE).
+Factory is MIT licensed.

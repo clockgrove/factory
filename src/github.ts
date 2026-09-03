@@ -36,6 +36,8 @@ import {
   triggersOnPullRequest,
   usesSelfHostedRunner,
 } from "./approval.js";
+import { decodeEventComments, latestSupportedRun } from "./control/receipts.js";
+import type { FactoryEvent } from "./protocol/events.js";
 
 /** A workflow run parked in `action_required`, awaiting a maintainer's approval. */
 export interface PendingApprovalRun {
@@ -79,15 +81,27 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
       title
       body
       state
+      author { login }
+      authorAssociation
+      comments(last: 100) {
+        totalCount
+        nodes { body author { login } authorAssociation }
+      }
       subIssues(first: 100) {
+        totalCount
         nodes {
           id
           number
           title
+          body
           state
+          comments(last: 100) {
+            totalCount
+            nodes { body author { login } authorAssociation }
+          }
           assignees(first: 10) { nodes { login } }
           labels(first: 20) { nodes { name } }
-          blockedBy(first: 50) { nodes { number state } }
+          blockedBy(first: 50) { totalCount nodes { number state } }
           closedByPullRequestsReferences(first: 20, includeClosedPrs: true) {
             nodes {
               id
@@ -203,11 +217,24 @@ interface GqlWorkItem extends GqlIssueState {
   id: string;
   number: number;
   title: string;
+  body?: string;
   assignees: { nodes: { login: string }[] };
   labels: { nodes: { name: string }[] } | null;
-  blockedBy: { nodes: ({ number: number } & GqlIssueState)[] };
+  blockedBy: { totalCount: number; nodes: ({ number: number } & GqlIssueState)[] };
   closedByPullRequestsReferences: { nodes: GqlPr[] };
   timelineItems: { nodes: GqlAssignedEvent[] };
+  comments?: GqlComments;
+}
+
+interface GqlComment {
+  body: string;
+  author?: { login?: string } | null;
+  authorAssociation?: string;
+}
+
+interface GqlComments {
+  totalCount: number;
+  nodes: GqlComment[];
 }
 
 interface GqlSuggestedActor {
@@ -227,7 +254,10 @@ interface GqlResponse {
       title: string;
       body: string;
       state: "OPEN" | "CLOSED";
-      subIssues: { nodes: GqlWorkItem[] };
+      author?: { login?: string } | null;
+      authorAssociation?: string;
+      comments?: GqlComments;
+      subIssues: { totalCount: number; nodes: GqlWorkItem[] };
     } | null;
   } | null;
 }
@@ -372,16 +402,23 @@ function copilotAssignments(wi: GqlWorkItem): Date[] {
 function toWorkItem(
   wi: GqlWorkItem,
   eventsByPullRequest: ReadonlyMap<number, AgentWorkEvent[]>,
+  v2: boolean,
+  actorsByRun: ReadonlyMap<string, string> = new Map(),
+  activeRunId?: string,
 ): WorkItemSnapshot {
+  if (wi.blockedBy.totalCount > wi.blockedBy.nodes.length) {
+    throw new Error(`Work Item #${wi.number} has too many dependencies for a complete snapshot`);
+  }
   const blockedBy: IssueRef[] = wi.blockedBy.nodes.map((d) => ({
     number: d.number,
     closed: d.state === "CLOSED",
   }));
 
-  return {
+  const result: WorkItemSnapshot = {
     id: wi.id,
     number: wi.number,
     title: wi.title,
+    body: wi.body ?? "",
     closed: wi.state === "CLOSED",
     assignees: wi.assignees.nodes.map((a) => a.login),
     labels: wi.labels?.nodes.map((l) => l.name) ?? [],
@@ -391,6 +428,56 @@ function toWorkItem(
     ),
     copilotAssignments: copilotAssignments(wi),
   };
+  if (v2) {
+    result.factoryEvents = factoryEvents(
+      wi.comments,
+      `Work Item #${wi.number}`,
+      actorsByRun,
+    ).filter((event) => !activeRunId || event.runId === activeRunId);
+  }
+  return result;
+}
+
+const TRUSTED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+
+function factoryEvents(
+  comments: GqlComments | undefined,
+  subject: string,
+  actorsByRun?: ReadonlyMap<string, string>,
+): FactoryEvent[] {
+  if (!comments) return [];
+  if (comments.totalCount > comments.nodes.length) {
+    throw new Error(`${subject} Factory event history is incomplete`);
+  }
+  const parsed = comments.nodes.flatMap((comment) => {
+    const events = decodeEventComments(comment.body);
+    if (events.length === 0) return [];
+    const login = comment.author?.login;
+    if (!login || !TRUSTED_ASSOCIATIONS.has(comment.authorAssociation ?? "")) {
+      return [];
+    }
+    return events.map((event) => ({ event, login }));
+  });
+
+  // The activating identity is authenticated by GitHub as the author of the
+  // RunStarted comment. Every later receipt must come from that same identity;
+  // an issue participant cannot forge state by pasting a Factory envelope.
+  const runActors = actorsByRun
+    ? new Map(actorsByRun)
+    : new Map(
+        parsed.flatMap(({ event, login }) =>
+          event.kind === "run" &&
+          event.event === "FactoryRunStarted" &&
+          event.actor.toLowerCase() === login.toLowerCase()
+            ? [[event.runId, login] as const]
+            : [],
+        ),
+      );
+  return parsed
+    .filter(({ event, login }) =>
+      runActors.get(event.runId)?.toLowerCase() === login.toLowerCase(),
+    )
+    .map(({ event }) => event);
 }
 
 /**
@@ -792,20 +879,47 @@ export class GitHubReader {
         `${this.#owner}/${this.#repo} has no default branch (empty repository?)`,
       );
     }
+    if (issue.subIssues.totalCount > issue.subIssues.nodes.length) {
+      throw new Error(`Objective #${number} has more than 100 Work Items`);
+    }
 
     const bot = repository.suggestedActors.nodes.find(
       (a) => a.login === COPILOT_LOGIN,
     );
+    const hydratedObjectiveComments = await this.#completeComments(
+      issue.number,
+      issue.comments,
+    );
+    if (hydratedObjectiveComments) issue.comments = hydratedObjectiveComments;
+    for (const workItem of issue.subIssues.nodes) {
+      const hydrated = await this.#completeComments(
+        workItem.number,
+        workItem.comments,
+      );
+      if (hydrated) workItem.comments = hydrated;
+    }
+    const objectiveEvents = factoryEvents(issue.comments, `Objective #${issue.number}`);
+    const v2 = objectiveEvents.some((event) => event.protocol === "clockgrove.factory/v2");
+    const actorsByRun = new Map(
+      objectiveEvents.flatMap((event) =>
+        event.kind === "run" && event.event === "FactoryRunStarted"
+          ? [[event.runId, event.actor] as const]
+          : [],
+      ),
+    );
+    const activeRun = latestSupportedRun(objectiveEvents);
     const agentWorkEvents = await this.#readAgentWorkEvents(issue.subIssues.nodes);
 
     return {
       id: issue.id,
       number: issue.number,
       title: issue.title,
+      ...(issue.author?.login ? { authorLogin: issue.author.login } : {}),
+      ...(issue.authorAssociation ? { authorAssociation: issue.authorAssociation } : {}),
       body: issue.body,
       closed: issue.state === "CLOSED",
       workItems: issue.subIssues.nodes.map((wi) =>
-        toWorkItem(wi, agentWorkEvents),
+        toWorkItem(wi, agentWorkEvents, v2, actorsByRun, activeRun?.runId),
       ),
       readAt: new Date(),
       repositoryId: repository.id,
@@ -813,7 +927,47 @@ export class GitHubReader {
       workItemLabelId: repository.workItemLabel?.id ?? null,
       copilotBotId: bot?.id ?? null,
       ciExpectedOnPullRequests: await this.#ciExpectedOnPullRequests(),
+      ...(v2 ? { factoryEvents: objectiveEvents } : {}),
     };
+  }
+
+  /**
+   * GraphQL keeps the common one-request snapshot fast. If a subject exceeds
+   * that bounded page, hydrate the complete durable event log through REST
+   * instead of failing or silently dropping older receipts.
+   */
+  async #completeComments(
+    issueNumber: number,
+    comments: GqlComments | undefined,
+  ): Promise<GqlComments | undefined> {
+    if (!comments || comments.totalCount <= comments.nodes.length) return comments;
+    const nodes: GqlComment[] = [];
+    for (let page = 1; ; page += 1) {
+      const response = await this.#octokit.request(
+        "GET /repos/{owner}/{repo}/issues/{issue_number}/comments",
+        {
+          owner: this.#owner,
+          repo: this.#repo,
+          issue_number: issueNumber,
+          per_page: 100,
+          page,
+        },
+      );
+      nodes.push(
+        ...response.data.map((comment) => ({
+          body: comment.body ?? "",
+          author: comment.user ? { login: comment.user.login } : null,
+          authorAssociation: comment.author_association,
+        })),
+      );
+      if (response.data.length < 100) break;
+    }
+    if (nodes.length !== comments.totalCount) {
+      throw new Error(
+        `Issue #${issueNumber} comment history changed during reconstruction; retry the snapshot`,
+      );
+    }
+    return { totalCount: nodes.length, nodes };
   }
 
   /**

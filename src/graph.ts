@@ -28,9 +28,20 @@
  * cycle, exactly as it already is for every other Work Item.
  */
 
+import { createHash } from "node:crypto";
+
 import { Octokit } from "@octokit/core";
+import { z } from "zod";
 
 import { createOctokit, type GitHubOptions } from "./github.js";
+import {
+  ExecutionRequirementsSchema,
+  RepositoryScopePathSchema,
+  parseWorkerPacket,
+  type ExecutionRequirements,
+  type WorkerPacket,
+} from "./protocol/worker-packet.js";
+import { assertWithinBytes } from "./protocol/limits.js";
 import {
   CircuitBreaker,
   ConcurrencyLimiter,
@@ -55,12 +66,44 @@ export interface CompiledWorkItem {
   outOfScope: string[];
   conventions: string[];
   dependsOn: string[];
+  /** V2 execution fields. Optional only while reading legacy v1 compiler output. */
+  baseSha?: string | undefined;
+  validationCommands?: string[] | undefined;
+  requirements?: ExecutionRequirements | undefined;
+  artifactContract?: "clockgrove.factory/artifact-v1" | undefined;
 }
 
 /** Matches `schemas/objective.schema.json` — the objective-compilation skill's output. */
 export interface CompiledObjective {
   title: string;
   workItems: CompiledWorkItem[];
+}
+
+const PersistedCompiledWorkItemSchema = z.object({
+  id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/).max(64),
+  title: z.string().min(1).max(256),
+  goal: z.string().min(1).max(4_000),
+  acceptance: z.array(z.string().min(1).max(2_000)).min(1).max(64),
+  scope: z.array(RepositoryScopePathSchema).min(1).max(64),
+  preconditions: z.array(z.string().min(1).max(2_000)).max(64),
+  outOfScope: z.array(z.string().min(1).max(2_000)).max(64),
+  conventions: z.array(z.string().min(1).max(2_000)).max(64),
+  dependsOn: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]*$/).max(64)).max(50),
+  baseSha: z.string().regex(/^[0-9a-f]{40}$/i),
+  validationCommands: z.array(z.string().min(1).max(1_000)).min(1).max(32),
+  requirements: ExecutionRequirementsSchema,
+  artifactContract: z.literal("clockgrove.factory/artifact-v1"),
+}).strict();
+
+const PersistedCompiledObjectiveSchema = z.object({
+  title: z.string().min(1).max(256),
+  workItems: z.array(PersistedCompiledWorkItemSchema).min(1).max(100),
+}).strict();
+
+export function parsePersistedCompiledObjective(input: unknown): CompiledObjective {
+  const objective = PersistedCompiledObjectiveSchema.parse(input);
+  validateGraph(objective);
+  return objective;
 }
 
 /** A created Work Item issue, keyed by the compiled graph's own `id`. */
@@ -81,6 +124,9 @@ export interface CreatedWorkItem {
  * never partially applies a graph it has rejected.
  */
 export function validateGraph(objective: CompiledObjective): void {
+  if (objective.workItems.length < 1 || objective.workItems.length > 100) {
+    throw new Error("compiled Objective must contain between 1 and 100 Work Items");
+  }
   const ids = new Set<string>();
   for (const wi of objective.workItems) {
     if (ids.has(wi.id)) {
@@ -117,6 +163,154 @@ export function validateGraph(objective: CompiledObjective): void {
     state.set(id, "done");
   };
   for (const wi of objective.workItems) visit(wi.id, []);
+
+  // Two scopes overlap when they name the same file/directory, when an exact
+  // file sits below a directory scope, or when two directory scopes nest. A
+  // dependency path in either direction serializes the pair. Without one,
+  // both items can enter the same wave and independently publish changes to
+  // the same path, so reject that graph before its first GitHub write.
+  const scopeOverlaps = (left: string, right: string): boolean => {
+    const leftDirectory = left.endsWith("/");
+    const rightDirectory = right.endsWith("/");
+    if (!leftDirectory && !rightDirectory) return left === right;
+    if (leftDirectory && rightDirectory) {
+      return left.startsWith(right) || right.startsWith(left);
+    }
+    return leftDirectory ? right.startsWith(left) : left.startsWith(right);
+  };
+  const dependsTransitivelyOn = (from: string, target: string): boolean => {
+    const pending = [...byId.get(from)!.dependsOn];
+    const seen = new Set<string>();
+    while (pending.length > 0) {
+      const current = pending.pop()!;
+      if (current === target) return true;
+      if (seen.has(current)) continue;
+      seen.add(current);
+      pending.push(...byId.get(current)!.dependsOn);
+    }
+    return false;
+  };
+  for (let leftIndex = 0; leftIndex < objective.workItems.length; leftIndex += 1) {
+    const left = objective.workItems[leftIndex]!;
+    for (let rightIndex = leftIndex + 1; rightIndex < objective.workItems.length; rightIndex += 1) {
+      const right = objective.workItems[rightIndex]!;
+      const overlapping = left.scope.some((leftPath) =>
+        right.scope.some((rightPath) => scopeOverlaps(leftPath, rightPath)),
+      );
+      if (
+        overlapping &&
+        !dependsTransitivelyOn(left.id, right.id) &&
+        !dependsTransitivelyOn(right.id, left.id)
+      ) {
+        throw new Error(
+          `Work Items ${left.id} and ${right.id} have overlapping scopes but no dependency path`,
+        );
+      }
+    }
+  }
+
+  for (const wi of objective.workItems) {
+    const v2Fields = [
+      wi.baseSha,
+      wi.validationCommands,
+      wi.requirements,
+      wi.artifactContract,
+    ];
+    if (v2Fields.some((value) => value !== undefined)) {
+      workerPacketFromCompiled(wi);
+    }
+  }
+}
+
+const WORKER_PACKET_MARKER = "clockgrove-factory:worker-packet";
+const GRAPH_ITEM_MARKER = "clockgrove-factory:graph-item";
+
+const GraphItemMetadataSchema = z.object({
+  protocol: z.literal("clockgrove.factory/graph-v1"),
+  id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/).max(64),
+  graphDigest: z.string().regex(/^[0-9a-f]{64}$/),
+  graphSize: z.number().int().positive().max(100),
+  index: z.number().int().nonnegative().max(99),
+  dependsOn: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]*$/).max(64)).max(50),
+});
+
+export type GraphItemMetadata = z.infer<typeof GraphItemMetadataSchema>;
+
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonical(record[key])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+export function serializeCompiledObjective(objective: CompiledObjective): Buffer {
+  const parsed = parsePersistedCompiledObjective(objective);
+  const serialized = Buffer.from(canonical(parsed), "utf8");
+  assertWithinBytes(serialized.toString("utf8"), 2 * 1024 * 1024, "compiled graph");
+  return serialized;
+}
+
+export function compiledGraphDigest(objective: CompiledObjective): string {
+  validateGraph(objective);
+  return createHash("sha256").update(canonical(objective)).digest("hex");
+}
+
+export function encodeGraphItemMetadata(metadata: GraphItemMetadata): string {
+  const value = GraphItemMetadataSchema.parse(metadata);
+  return `<!-- ${GRAPH_ITEM_MARKER} ${Buffer.from(JSON.stringify(value), "utf8").toString("base64url")} -->`;
+}
+
+export function parseGraphItemMetadata(body: string): GraphItemMetadata {
+  const pattern = new RegExp(`<!--\\s*${GRAPH_ITEM_MARKER}\\s+([A-Za-z0-9_-]+)\\s*-->`, "g");
+  const matches = [...body.matchAll(pattern)];
+  if (matches.length !== 1 || !matches[0]?.[1]) {
+    throw new Error("Work Item must contain exactly one graph-item envelope");
+  }
+  return GraphItemMetadataSchema.parse(
+    JSON.parse(Buffer.from(matches[0][1], "base64url").toString("utf8")),
+  );
+}
+
+export function workerPacketFromCompiled(wi: CompiledWorkItem): WorkerPacket {
+  if (
+    wi.baseSha === undefined ||
+    wi.validationCommands === undefined ||
+    wi.requirements === undefined ||
+    wi.artifactContract === undefined
+  ) {
+    throw new Error(`Work Item ${wi.id} has an incomplete v2 Worker Packet`);
+  }
+  return parseWorkerPacket({
+    goal: wi.goal,
+    acceptanceCriteria: wi.acceptance,
+    allowedPaths: wi.scope,
+    preconditions: wi.preconditions,
+    outOfScope: wi.outOfScope,
+    conventions: wi.conventions,
+    baseSha: wi.baseSha,
+    validationCommands: wi.validationCommands,
+    requirements: wi.requirements,
+    artifactContract: wi.artifactContract,
+  });
+}
+
+export function encodeWorkerPacket(packet: WorkerPacket): string {
+  const encoded = Buffer.from(JSON.stringify(parseWorkerPacket(packet)), "utf8").toString(
+    "base64url",
+  );
+  return `<!-- ${WORKER_PACKET_MARKER} ${encoded} -->`;
+}
+
+export function parseWorkerPacketFromIssue(body: string): WorkerPacket {
+  const pattern = new RegExp(`<!--\\s*${WORKER_PACKET_MARKER}\\s+([A-Za-z0-9_-]+)\\s*-->`, "g");
+  const matches = [...body.matchAll(pattern)];
+  if (matches.length !== 1 || !matches[0]?.[1]) {
+    throw new Error("Work Item must contain exactly one v2 Worker Packet envelope");
+  }
+  const raw = Buffer.from(matches[0][1], "base64url").toString("utf8");
+  return parseWorkerPacket(JSON.parse(raw));
 }
 
 /**
@@ -126,11 +320,14 @@ export function validateGraph(objective: CompiledObjective): void {
  * ever creates. Empty optional sections are omitted rather than rendered
  * with "(none)" — a missing section is not a signal worth an agent reading.
  */
-export function renderWorkPacket(wi: CompiledWorkItem): string {
+export function renderWorkPacket(
+  wi: CompiledWorkItem,
+  graphMetadata?: GraphItemMetadata,
+): string {
   const section = (heading: string, items: string[]): string =>
     items.length > 0 ? `## ${heading}\n\n${items.map((i) => `- ${i}`).join("\n")}\n` : "";
 
-  return [
+  const rendered = [
     `## Goal\n\n${wi.goal}\n`,
     section("Acceptance", wi.acceptance),
     section("Scope", wi.scope),
@@ -140,6 +337,16 @@ export function renderWorkPacket(wi: CompiledWorkItem): string {
   ]
     .filter((s) => s.length > 0)
     .join("\n");
+  const hasV2 =
+    wi.baseSha !== undefined ||
+    wi.validationCommands !== undefined ||
+    wi.requirements !== undefined ||
+    wi.artifactContract !== undefined;
+  return [
+    rendered,
+    hasV2 ? encodeWorkerPacket(workerPacketFromCompiled(wi)) : "",
+    graphMetadata ? encodeGraphItemMetadata(graphMetadata) : "",
+  ].filter(Boolean).join("\n\n");
 }
 
 /**
@@ -239,6 +446,18 @@ export interface GraphApplierOptions {
   circuitBreaker?: CircuitBreaker;
   pacer?: ContentCreationPacer;
   concurrency?: ConcurrencyLimiter;
+  beforeMutation?: () => Promise<void>;
+}
+
+export interface ExistingGraphWorkItem extends CreatedWorkItem {
+  compilerId: string;
+  graphDigest: string;
+  graphSize: number;
+  index: number;
+  dependsOn: string[];
+  title: string;
+  body: string;
+  blockedByNumbers: number[];
 }
 
 /**
@@ -256,6 +475,7 @@ export class GraphApplier {
   readonly #breaker: CircuitBreaker;
   readonly #pacer: ContentCreationPacer;
   readonly #concurrency: ConcurrencyLimiter;
+  readonly #beforeMutation: () => Promise<void>;
 
   constructor(opts: GraphApplierOptions) {
     this.#writer = opts.writer;
@@ -263,6 +483,7 @@ export class GraphApplier {
     this.#breaker = opts.circuitBreaker ?? new CircuitBreaker();
     this.#pacer = opts.pacer ?? new ContentCreationPacer();
     this.#concurrency = opts.concurrency ?? new ConcurrencyLimiter();
+    this.#beforeMutation = opts.beforeMutation ?? (async () => {});
   }
 
   /** True once the circuit has tripped repeatedly enough to need a human (§7.3). */
@@ -277,28 +498,88 @@ export class GraphApplier {
    * dependency edge is added, so a Work Item can depend on a sibling
    * regardless of which was created first.
    *
-   * Not idempotent, and deliberately not made so here: re-running this
-   * against an Objective that already has Work Items would create
-   * duplicates. Calling only once, guarded by "does this Objective already
-   * have sub-issues" (readable via `github.ts`'s existing `subIssues`
-   * query), is the caller's responsibility — the same "read GitHub before
-   * writing" discipline `dispatch.ts` already depends on for its own
-   * idempotency (§4.3).
+   * Replaying the same digested graph is idempotent when `existingWorkItems`
+   * comes from a fresh Objective snapshot: existing compiler IDs are reused,
+   * missing issues are created, and already-present dependency edges are
+   * skipped. A divergent digest fails before another issue is created.
    */
   async apply(
     objective: CompiledObjective,
-    ctx: { repositoryId: string; objectiveIssueId: string; workItemLabelId?: string },
+    ctx: {
+      repositoryId: string;
+      objectiveIssueId: string;
+      workItemLabelId?: string;
+      existingWorkItems?: ExistingGraphWorkItem[];
+    },
   ): Promise<Map<string, CreatedWorkItem>> {
     validateGraph(objective);
+    const digest = compiledGraphDigest(objective);
 
     const created = new Map<string, CreatedWorkItem>();
-    for (const wi of objective.workItems) {
+    const observedDependencies = new Map<string, Set<number>>();
+    const expectedById = new Map(objective.workItems.map((item) => [item.id, item]));
+    for (const existing of ctx.existingWorkItems ?? []) {
+      if (existing.graphDigest !== digest || existing.graphSize !== objective.workItems.length) {
+        throw new Error(`existing Work Item ${existing.compilerId} belongs to a different compiled graph`);
+      }
+      if (created.has(existing.compilerId)) {
+        throw new Error(`duplicate existing Work Item id: ${existing.compilerId}`);
+      }
+      const expected = expectedById.get(existing.compilerId);
+      if (!expected) {
+        throw new Error(`existing Work Item ${existing.compilerId} is absent from the durable graph`);
+      }
+      const expectedIndex = objective.workItems.indexOf(expected);
+      const metadata: GraphItemMetadata = {
+        protocol: "clockgrove.factory/graph-v1",
+        id: expected.id,
+        graphDigest: digest,
+        graphSize: objective.workItems.length,
+        index: expectedIndex,
+        dependsOn: expected.dependsOn,
+      };
+      if (
+        existing.index !== expectedIndex ||
+        JSON.stringify(existing.dependsOn) !== JSON.stringify(expected.dependsOn) ||
+        existing.title !== expected.title ||
+        existing.body.trim() !== renderWorkPacket(expected, metadata).trim()
+      ) {
+        throw new Error(`existing Work Item ${existing.compilerId} differs from the durable graph`);
+      }
+      created.set(existing.compilerId, { id: existing.id, number: existing.number });
+      observedDependencies.set(existing.compilerId, new Set(existing.blockedByNumbers));
+    }
+    for (const existing of ctx.existingWorkItems ?? []) {
+      const expectedDependencyNumbers = new Set(
+        existing.dependsOn.flatMap((id) => {
+          const dependency = created.get(id);
+          return dependency ? [dependency.number] : [];
+        }),
+      );
+      const unexpected = existing.blockedByNumbers.filter(
+        (number) => !expectedDependencyNumbers.has(number),
+      );
+      if (unexpected.length > 0) {
+        throw new Error(
+          `existing Work Item ${existing.compilerId} has unexpected blockers: ${unexpected.join(", ")}`,
+        );
+      }
+    }
+    for (const [index, wi] of objective.workItems.entries()) {
+      if (created.has(wi.id)) continue;
       const issue = await this.#call(() =>
         this.#writer.createWorkItemIssue({
           repositoryId: ctx.repositoryId,
           parentIssueId: ctx.objectiveIssueId,
           title: wi.title,
-          body: renderWorkPacket(wi),
+          body: renderWorkPacket(wi, {
+            protocol: "clockgrove.factory/graph-v1",
+            id: wi.id,
+            graphDigest: digest,
+            graphSize: objective.workItems.length,
+            index,
+            dependsOn: wi.dependsOn,
+          }),
           ...(ctx.workItemLabelId ? { labelIds: [ctx.workItemLabelId] } : {}),
         }),
       );
@@ -309,6 +590,7 @@ export class GraphApplier {
       const blocked = created.get(wi.id)!;
       for (const dep of wi.dependsOn) {
         const blocking = created.get(dep)!;
+        if (observedDependencies.get(wi.id)?.has(blocking.number)) continue;
         await this.#call(() => this.#writer.addBlockedBy(blocked.id, blocking.id));
       }
     }
@@ -324,6 +606,7 @@ export class GraphApplier {
    * have to import the other to get pacing right.
    */
   async #call<T>(fn: () => Promise<T>): Promise<T> {
+    await this.#beforeMutation();
     if (this.#breaker.isOpen()) {
       const wait = this.#breaker.waitMs();
       this.#notify(`circuit open; waiting ${wait}ms before the next call`);

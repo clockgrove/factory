@@ -62,14 +62,23 @@ import { z } from "zod";
 import { version as packageVersion } from "../package.json";
 
 import { resolveGitHubToken } from "./auth.js";
+import { CodexCliLocalBackend } from "./backends/codex-cli-local.js";
+import { DaytonaBackend } from "./backends/daytona.js";
+import { VercelSandboxBackend } from "./backends/vercel-sandbox.js";
 import {
   Dispatcher,
   GithubOctokitWriter,
   confirmAction,
 } from "./dispatch.js";
 import { evaluateMechanical } from "./evaluate.js";
+import { BackendRegistry } from "./execution/registry.js";
 import { assessBlastRadius } from "./approval.js";
-import { GithubOctokitGraphWriter, GraphApplier } from "./graph.js";
+import {
+  compiledGraphDigest,
+  GithubOctokitGraphWriter,
+  GraphApplier,
+  parseGraphItemMetadata,
+} from "./graph.js";
 import type { GitHubOptions } from "./github.js";
 import { GitHubReader } from "./github.js";
 import {
@@ -86,6 +95,12 @@ import {
   type DerivedWorkItem,
 } from "./state.js";
 import type { LinkedPullRequest } from "./types.js";
+import { DEFAULT_RUN_POLICY } from "./protocol/policy.js";
+import { ExecutionRequirementsSchema } from "./protocol/worker-packet.js";
+import { FactorySupervisor } from "./supervisor.js";
+import { GitHubControlStore } from "./control/github-store.js";
+import { nextEventSequence } from "./control/receipts.js";
+import { RunManager } from "./control/runs.js";
 
 /** Never write anything but JSON-RPC to stdout on the stdio transport. */
 function log(message: string): void {
@@ -247,10 +262,10 @@ function errorResult(error: unknown) {
 }
 
 /** Wraps a tool handler so a thrown error becomes an `isError` result rather than crashing the process. */
-function tool<T>(handler: (args: T) => Promise<unknown>) {
-  return async (args: T) => {
+function tool<T>(handler: (args: T, extra: { signal: AbortSignal }) => Promise<unknown>) {
+  return async (args: T, extra: { signal: AbortSignal }) => {
     try {
-      return textResult(await handler(args));
+      return textResult(await handler(args, extra));
     } catch (error) {
       return errorResult(error);
     }
@@ -279,7 +294,7 @@ const EscalateToShape = {
 };
 
 const CompiledWorkItemSchema = z.object({
-  id: z.string().describe("Compiler-local id; never sent to GitHub"),
+  id: z.string().describe("Compiler-local id stored in the v2 graph envelope, not used as an issue number"),
   title: z.string(),
   goal: z.string(),
   acceptance: z.array(z.string()),
@@ -288,6 +303,10 @@ const CompiledWorkItemSchema = z.object({
   outOfScope: z.array(z.string()),
   conventions: z.array(z.string()),
   dependsOn: z.array(z.string()),
+  baseSha: z.string().regex(/^[0-9a-fA-F]{40}$/),
+  validationCommands: z.array(z.string().min(1)).min(1),
+  requirements: ExecutionRequirementsSchema,
+  artifactContract: z.literal("clockgrove.factory/artifact-v1"),
 });
 
 const CompiledObjectiveSchema = z.object({
@@ -994,10 +1013,10 @@ server.registerTool(
       "Apply a compiled Objective (skills/objective-compilation's output) to " +
       "GitHub as Work Item sub-issues plus native `blocked by` dependency edges. Every created issue " +
       "is labelled `factory:work-item` automatically when the repository defines that label; if it " +
-      "does not, the issues are still created and the result says the label was missing. Refuses (a " +
-      "no-op) if the Objective already has Work Item sub-issues — this call is not idempotent, and a " +
-      "caller must not re-apply a graph onto an Objective that already has one (graph.ts's own " +
-      "contract).",
+      "does not, the issues are still created and the result says the label was missing. Replaying " +
+      "the identical graph repairs partial issue/dependency writes without duplicating Work Items; " +
+      "a divergent graph fails closed. This standalone compatibility tool does not authenticate or " +
+      "activate a v2 run; new unattended Objectives must use factory_run.",
     inputSchema: {
       ...RepoShape,
       objectiveNumber: z.number().int().positive().describe("Objective issue number"),
@@ -1018,14 +1037,28 @@ server.registerTool(
     }) => {
       const reader = readerFor(owner, repo);
       const snapshot = await reader.readObjective(objectiveNumber);
-      if (snapshot.workItems.length > 0) {
+      const digest = compiledGraphDigest(compiledObjective);
+      const existingWorkItems = snapshot.workItems.map((item) => {
+        const metadata = parseGraphItemMetadata(item.body ?? "");
+        if (
+          metadata.graphDigest !== digest ||
+          metadata.graphSize !== compiledObjective.workItems.length
+        ) {
+          throw new Error(`Work Item #${item.number} belongs to a different compiled graph`);
+        }
         return {
-          action: "no-op",
-          reason:
-            `Objective #${objectiveNumber} already has ${snapshot.workItems.length} Work Item(s); ` +
-            "refusing to re-apply the graph (not idempotent)",
+          compilerId: metadata.id,
+          graphDigest: metadata.graphDigest,
+          graphSize: metadata.graphSize,
+          index: metadata.index,
+          dependsOn: metadata.dependsOn,
+          id: item.id,
+          number: item.number,
+          title: item.title,
+          body: item.body ?? "",
+          blockedByNumbers: item.blockedBy.map((dependency) => dependency.number),
         };
-      }
+      });
       const applier = new GraphApplier({
         writer: new GithubOctokitGraphWriter({ token: getToken(), owner, repo, onThrottle: log }),
         onThrottle: log,
@@ -1037,6 +1070,7 @@ server.registerTool(
         repositoryId: snapshot.repositoryId,
         objectiveIssueId: snapshot.id,
         ...(snapshot.workItemLabelId ? { workItemLabelId: snapshot.workItemLabelId } : {}),
+        existingWorkItems,
       });
       return {
         created: Object.fromEntries(created),
@@ -1054,6 +1088,129 @@ server.registerTool(
       };
     },
   ),
+);
+
+server.registerTool(
+  "factory_run",
+  {
+    title: "Run Factory Objective",
+    description:
+      "Run one explicitly activated Objective to a terminal state using Factory v2: acquire the " +
+      "GitHub-backed Director lease, compile missing Work Items, schedule policy-approved workers, " +
+      "validate independently, publish and squash-merge acceptable work, retry bounded failures, " +
+      "and persist every decision in GitHub. The default policy is local-only and never falls back " +
+      "to paid compute. This call remains active until completion, cancellation, or evidenced escalation.",
+    inputSchema: {
+      ...RepoShape,
+      objectiveNumber: z.number().int().positive(),
+      repository: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Absolute local Git repository path; defaults to the MCP process working directory"),
+      untilTerminal: z.literal(true),
+      policy: z.record(z.unknown()).optional().describe("Complete v2 run policy; defaults to local-only"),
+    },
+  },
+  tool(
+    async ({
+      owner,
+      repo,
+      objectiveNumber,
+      repository,
+      policy,
+    }: {
+      owner: string;
+      repo: string;
+      objectiveNumber: number;
+      repository?: string | undefined;
+      untilTerminal: true;
+      policy?: Record<string, unknown> | undefined;
+    }, extra) => {
+      const supervisor = new FactorySupervisor({
+        token: getToken(),
+        owner,
+        repo,
+        objective: objectiveNumber,
+        repository: repository ?? process.cwd(),
+        policy: policy ?? DEFAULT_RUN_POLICY,
+        signal: extra.signal,
+        onStatus: log,
+      });
+      return supervisor.run();
+    },
+  ),
+);
+
+server.registerTool(
+  "probe_execution_backends",
+  {
+    title: "Probe Factory execution backends",
+    description:
+      "Read-only capability and authentication probe for the mandatory local Codex CLI backend " +
+      "and the optional Daytona and Vercel Sandbox backends. It creates no sandbox and spends no " +
+      "paid runtime; GitHub Copilot availability is repository-specific and is checked by factory_run.",
+    inputSchema: {
+      repository: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Local repository path used by future workers; defaults to the process directory"),
+    },
+  },
+  tool(async ({ repository }: { repository?: string | undefined }) => {
+    const path = repository ?? process.cwd();
+    const registry = new BackendRegistry();
+    registry.register(new CodexCliLocalBackend());
+    registry.register(new DaytonaBackend({ repository: path }));
+    registry.register(new VercelSandboxBackend({ repository: path }));
+    return registry.probeAll();
+  }),
+);
+
+server.registerTool(
+  "factory_cancel",
+  {
+    title: "Cancel Factory run",
+    description:
+      "Request cancellation of the active Factory v2 run through its authenticated GitHub event " +
+      "log. Only the activating GitHub identity may request it. The Supervisor observes the request, " +
+      "stops active workers at a fenced boundary, records terminal receipts, and releases its lease.",
+    inputSchema: {
+      ...RepoShape,
+      objectiveNumber: z.number().int().positive(),
+      reason: z.string().min(1).max(8_000).optional(),
+    },
+  },
+  tool(async ({
+    owner,
+    repo,
+    objectiveNumber,
+    reason,
+  }: {
+    owner: string;
+    repo: string;
+    objectiveNumber: number;
+    reason?: string | undefined;
+  }) => {
+    const token = getToken();
+    const snapshot = await readerFor(owner, repo).readObjective(objectiveNumber);
+    const store = new GitHubControlStore({ token, owner, repo, onThrottle: log });
+    const manager = new RunManager(store);
+    const run = manager.resume(snapshot.factoryEvents ?? []);
+    if (!run) throw new Error(`Objective #${objectiveNumber} has no active Factory v2 run`);
+    const actor = await store.getAuthenticatedLogin();
+    return manager.requestCancellation({
+      run,
+      objectiveNodeId: snapshot.id,
+      actor,
+      sequence: nextEventSequence(
+        snapshot.factoryEvents ?? [],
+        ...snapshot.workItems.map((item) => item.factoryEvents ?? []),
+      ),
+      ...(reason ? { reason } : {}),
+    });
+  }),
 );
 
 export async function main(): Promise<void> {

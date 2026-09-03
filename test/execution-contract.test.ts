@@ -13,6 +13,7 @@ import type {
 import { capabilityMismatch } from "../src/execution/backend.js";
 import {
   assertArtifactScope,
+  boundWorkerLogs,
   normalizeArtifact,
   verifyArtifact,
 } from "../src/execution/artifacts.js";
@@ -21,6 +22,7 @@ import {
   NoExecutionBackendError,
 } from "../src/execution/registry.js";
 import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
+import { byteLength, MAX_LOG_BYTES } from "../src/protocol/limits.js";
 import type { NormalizedArtifact } from "../src/execution/artifacts.js";
 
 const SHA = "a".repeat(40);
@@ -135,6 +137,40 @@ describe("normalized artifacts", () => {
         patch: "x",
         changedPaths: ["src/a.ts"],
         logs: `authorization: bearer ghp_${"x".repeat(40)}`,
+        outcome: "failed",
+      }),
+    ).toThrow(/suspected GitHub token|authorization header/);
+  });
+
+  it("bounds oversized Unicode logs by persisted bytes and retains their tail", () => {
+    const tail = "final diagnostic line";
+    const logs = `${"progress \"line\"\n".repeat(10_000)}${"🎮".repeat(10_000)}${tail}`;
+    const bounded = boundWorkerLogs(logs);
+    const artifact = normalizeArtifact({
+      baseSha: SHA,
+      patch: "x",
+      changedPaths: ["src/a.ts"],
+      logs,
+      outcome: "succeeded",
+    });
+
+    expect(bounded).toMatch(/^\[Factory truncated worker logs/);
+    expect(bounded.endsWith(tail)).toBe(true);
+    expect(byteLength(bounded)).toBeLessThanOrEqual(MAX_LOG_BYTES);
+    expect(artifact.logs).toBe(bounded);
+    expect(verifyArtifact(artifact)).toEqual(artifact);
+  });
+
+  it("scans discarded log output for credentials before truncation", () => {
+    const logs =
+      `authorization: bearer ghp_${"x".repeat(40)}\n` +
+      "later output\n".repeat(10_000);
+    expect(() =>
+      normalizeArtifact({
+        baseSha: SHA,
+        patch: "x",
+        changedPaths: ["src/a.ts"],
+        logs,
         outcome: "failed",
       }),
     ).toThrow(/suspected GitHub token|authorization header/);

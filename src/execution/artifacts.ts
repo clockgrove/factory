@@ -7,6 +7,7 @@ import {
   assertNoSecretMaterial,
   assertWithinBytes,
   boundedText,
+  byteLength,
   gitSha,
   isoDate,
   sha256Digest,
@@ -76,14 +77,47 @@ export function artifactDigest(input: {
     .digest("hex");
 }
 
+const TRUNCATED_LOG_PREFIX =
+  "[Factory truncated worker logs; retained final output]\n";
+
+/**
+ * Keep the diagnostically useful tail while satisfying the persisted JSON-byte
+ * limit. Array.from prevents the binary search from splitting surrogate pairs,
+ * and measuring JSON strings matches assertWithinBytes exactly.
+ */
+export function boundWorkerLogs(logs: string): string {
+  if (logs.length <= MAX_LOG_BYTES && byteLength(logs) <= MAX_LOG_BYTES) {
+    return logs;
+  }
+
+  const codePoints = Array.from(logs);
+  let low = 0;
+  let high = codePoints.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    const candidate = `${TRUNCATED_LOG_PREFIX}${codePoints.slice(middle).join("")}`;
+    if (candidate.length <= MAX_LOG_BYTES && byteLength(candidate) <= MAX_LOG_BYTES) {
+      high = middle;
+    } else {
+      low = middle + 1;
+    }
+  }
+
+  return `${TRUNCATED_LOG_PREFIX}${codePoints.slice(low).join("")}`;
+}
+
 export function normalizeArtifact(input: ArtifactInput): NormalizedArtifact {
+  const rawLogs = input.logs ?? "";
+  // Scan before truncation so a secret in discarded output cannot evade the
+  // durable artifact boundary.
+  assertNoSecretMaterial(rawLogs, "worker logs");
   const core = {
     protocol: "clockgrove.factory/artifact-v1" as const,
     baseSha: input.baseSha,
     patch: input.patch,
     changedPaths: [...new Set(input.changedPaths)].sort(),
     commands: input.commands ?? [],
-    logs: input.logs ?? "",
+    logs: boundWorkerLogs(rawLogs),
     outcome: input.outcome,
     ...(input.reason ? { reason: input.reason } : {}),
     createdAt: (input.createdAt ?? new Date()).toISOString(),
@@ -93,7 +127,6 @@ export function normalizeArtifact(input: ArtifactInput): NormalizedArtifact {
     digest: artifactDigest(core),
   });
   assertWithinBytes(artifact.logs, MAX_LOG_BYTES, "worker logs");
-  assertNoSecretMaterial(artifact.logs, "worker logs");
   return artifact;
 }
 
@@ -101,6 +134,7 @@ export function verifyArtifact(artifact: NormalizedArtifact): NormalizedArtifact
   const parsed = NormalizedArtifactSchema.parse(artifact);
   const expected = artifactDigest(parsed);
   if (parsed.digest !== expected) throw new Error("artifact digest does not match its contents");
+  assertWithinBytes(parsed.logs, MAX_LOG_BYTES, "worker logs");
   assertNoSecretMaterial(parsed.logs, "worker logs");
   return parsed;
 }

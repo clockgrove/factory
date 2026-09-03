@@ -110,6 +110,27 @@ check(
   "the marketplace and plugin manifests agree on the version",
 );
 
+// Codex resolves every component and asset path from the plugin root, not from
+// the .codex-plugin directory that contains its manifest.
+const codex = readJson(".codex-plugin/plugin.json");
+check(codex.name === plugin.name, "the Codex manifest agrees on the plugin name");
+check(codex.version === plugin.version, "the Codex manifest agrees on the version");
+for (const [field, expected] of [
+  ["skills", "./skills/"],
+  ["mcpServers", "./mcp.json"],
+]) {
+  check(codex[field] === expected, `the Codex ${field} path is plugin-root-relative`);
+  check(existsSync(resolve(root, codex[field] ?? "")), `the Codex ${field} path exists`);
+}
+for (const field of ["composerIcon", "logo"]) {
+  const path = codex.interface?.[field];
+  check(
+    typeof path === "string" && path.startsWith("./"),
+    `the Codex interface.${field} path is plugin-root-relative`,
+  );
+  check(Boolean(path) && existsSync(resolve(root, path)), `the Codex interface.${field} asset exists`);
+}
+
 console.log("\n# skills\n");
 
 for (const skill of ["director", "objective-compilation"]) {

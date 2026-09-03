@@ -22836,7 +22836,7 @@ var StdioServerTransport = class {
 };
 
 // package.json
-var version2 = "1.0.1";
+var version2 = "1.0.2";
 
 // node_modules/universal-user-agent/index.js
 function getUserAgent() {

@@ -1,13 +1,31 @@
 {
   "name": "factory",
-  "version": "1.0.1",
-  "description": "Engineering management for GitHub: compile Objectives into Work Items, dispatch them to agents, evaluate progress, and merge automatically when ready.",
+  "version": "1.0.2",
+  "description": "Derived-state engineering management for GitHub.",
   "author": {
-    "name": "Clockgrove"
+    "name": "Clockgrove",
+    "url": "https://github.com/clockgrove"
   },
   "homepage": "https://github.com/clockgrove/factory",
-  "icon": "../assets/logos/clockgrove-mark.png",
+  "repository": "https://github.com/clockgrove/factory",
+  "license": "MIT",
   "keywords": ["github", "engineering-management", "objectives", "work-items", "automation", "mcp"],
-  "skills": "../skills/",
-  "mcpServers": "../mcp.json"
+  "skills": "./skills/",
+  "mcpServers": "./mcp.json",
+  "interface": {
+    "displayName": "Factory",
+    "shortDescription": "GitHub-native engineering management",
+    "longDescription": "Factory compiles Objectives into Work Items, dispatches them to agents, evaluates progress, and integrates pull requests when ready.",
+    "developerName": "Clockgrove",
+    "category": "Productivity",
+    "capabilities": [
+      "Compile Objectives into Work Items",
+      "Dispatch Work Items to coding agents",
+      "Evaluate pull request readiness",
+      "Integrate completed work"
+    ],
+    "websiteURL": "https://github.com/clockgrove/factory",
+    "composerIcon": "./assets/logos/clockgrove-mark.png",
+    "logo": "./assets/logos/clockgrove-mark.png"
+  }
 }

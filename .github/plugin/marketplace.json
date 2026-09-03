@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "Open-source agent plugins from Clockgrove.",
-    "version": "1.0.1"
+    "version": "1.0.2"
   },
   "plugins": [
     {
       "name": "factory",
       "description": "Derived-state engineering management for GitHub.",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "source": "."
     }
   ]

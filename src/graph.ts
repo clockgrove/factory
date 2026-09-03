@@ -79,6 +79,67 @@ export interface CompiledObjective {
   workItems: CompiledWorkItem[];
 }
 
+function scopeOverlaps(left: string, right: string): boolean {
+  const leftDirectory = left.endsWith("/");
+  const rightDirectory = right.endsWith("/");
+  if (!leftDirectory && !rightDirectory) return left === right;
+  if (leftDirectory && rightDirectory) {
+    return left.startsWith(right) || right.startsWith(left);
+  }
+  return leftDirectory ? right.startsWith(left) : left.startsWith(right);
+}
+
+function dependsTransitivelyOn(
+  byId: Map<string, CompiledWorkItem>,
+  from: string,
+  target: string,
+): boolean {
+  const pending = [...(byId.get(from)?.dependsOn ?? [])];
+  const seen = new Set<string>();
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    if (current === target) return true;
+    if (seen.has(current)) continue;
+    seen.add(current);
+    pending.push(...(byId.get(current)?.dependsOn ?? []));
+  }
+  return false;
+}
+
+/**
+ * A compiler may correctly identify shared files while forgetting to order the
+ * affected Work Items. That omission has one safe mechanical repair: preserve
+ * compiler order by making the later item depend on the earlier item. All
+ * semantic graph errors remain validation failures.
+ */
+export function addScopeSerializationEdges(objective: CompiledObjective): CompiledObjective {
+  const normalized: CompiledObjective = {
+    ...objective,
+    workItems: objective.workItems.map((item) => ({
+      ...item,
+      dependsOn: [...item.dependsOn],
+    })),
+  };
+  const byId = new Map(normalized.workItems.map((item) => [item.id, item]));
+  for (let leftIndex = 0; leftIndex < normalized.workItems.length; leftIndex += 1) {
+    const left = normalized.workItems[leftIndex]!;
+    for (let rightIndex = leftIndex + 1; rightIndex < normalized.workItems.length; rightIndex += 1) {
+      const right = normalized.workItems[rightIndex]!;
+      const overlapping = left.scope.some((leftPath) =>
+        right.scope.some((rightPath) => scopeOverlaps(leftPath, rightPath)),
+      );
+      if (
+        overlapping &&
+        !dependsTransitivelyOn(byId, left.id, right.id) &&
+        !dependsTransitivelyOn(byId, right.id, left.id)
+      ) {
+        right.dependsOn.push(left.id);
+      }
+    }
+  }
+  return normalized;
+}
+
 const PersistedCompiledWorkItemSchema = z.object({
   id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/).max(64),
   title: z.string().min(1).max(256),
@@ -169,27 +230,6 @@ export function validateGraph(objective: CompiledObjective): void {
   // dependency path in either direction serializes the pair. Without one,
   // both items can enter the same wave and independently publish changes to
   // the same path, so reject that graph before its first GitHub write.
-  const scopeOverlaps = (left: string, right: string): boolean => {
-    const leftDirectory = left.endsWith("/");
-    const rightDirectory = right.endsWith("/");
-    if (!leftDirectory && !rightDirectory) return left === right;
-    if (leftDirectory && rightDirectory) {
-      return left.startsWith(right) || right.startsWith(left);
-    }
-    return leftDirectory ? right.startsWith(left) : left.startsWith(right);
-  };
-  const dependsTransitivelyOn = (from: string, target: string): boolean => {
-    const pending = [...byId.get(from)!.dependsOn];
-    const seen = new Set<string>();
-    while (pending.length > 0) {
-      const current = pending.pop()!;
-      if (current === target) return true;
-      if (seen.has(current)) continue;
-      seen.add(current);
-      pending.push(...byId.get(current)!.dependsOn);
-    }
-    return false;
-  };
   for (let leftIndex = 0; leftIndex < objective.workItems.length; leftIndex += 1) {
     const left = objective.workItems[leftIndex]!;
     for (let rightIndex = leftIndex + 1; rightIndex < objective.workItems.length; rightIndex += 1) {
@@ -199,8 +239,8 @@ export function validateGraph(objective: CompiledObjective): void {
       );
       if (
         overlapping &&
-        !dependsTransitivelyOn(left.id, right.id) &&
-        !dependsTransitivelyOn(right.id, left.id)
+        !dependsTransitivelyOn(byId, left.id, right.id) &&
+        !dependsTransitivelyOn(byId, right.id, left.id)
       ) {
         throw new Error(
           `Work Items ${left.id} and ${right.id} have overlapping scopes but no dependency path`,

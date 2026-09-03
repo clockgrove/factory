@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  addScopeSerializationEdges,
   compiledGraphDigest,
   GraphApplier,
   parseGraphItemMetadata,
@@ -173,6 +174,33 @@ describe("validateGraph", () => {
         ]),
       ),
     ).toThrow(/cycle/i);
+  });
+});
+
+describe("addScopeSerializationEdges", () => {
+  it("orders otherwise-independent overlapping work without mutating compiler output", () => {
+    const compiled = objective([
+      workItem({ id: "a", scope: ["src/"] }),
+      workItem({ id: "b", scope: ["src/slugify.ts"] }),
+      workItem({ id: "c", scope: ["docs/readme.md"] }),
+    ]);
+    const normalized = addScopeSerializationEdges(compiled);
+
+    expect(normalized.workItems[1]?.dependsOn).toEqual(["a"]);
+    expect(normalized.workItems[2]?.dependsOn).toEqual([]);
+    expect(compiled.workItems[1]?.dependsOn).toEqual([]);
+    expect(() => validateGraph(normalized)).not.toThrow();
+  });
+
+  it("preserves an existing dependency path in either direction", () => {
+    const normalized = addScopeSerializationEdges(objective([
+      workItem({ id: "a", scope: ["src/"], dependsOn: ["b"] }),
+      workItem({ id: "b", scope: ["src/slugify.ts"] }),
+    ]));
+
+    expect(normalized.workItems[0]?.dependsOn).toEqual(["b"]);
+    expect(normalized.workItems[1]?.dependsOn).toEqual([]);
+    expect(() => validateGraph(normalized)).not.toThrow();
   });
 });
 

@@ -39,9 +39,11 @@ and native dependencies               or opt-in sandbox/managed backends
   decisions.
 - Work Item count is derived from the work. It is never hard-coded.
 
-The authoritative contract and failure model are in [docs/DESIGN.md](docs/DESIGN.md). The original
-GitHub-Copilot-specific protocol is preserved in [docs/PROTOCOL-V1.md](docs/PROTOCOL-V1.md) only for
-compatibility with already-running work.
+The authoritative contract and failure model are in [docs/DESIGN.md](docs/DESIGN.md). The concrete
+priority and local-to-cloud burst implementation is specified in
+[docs/ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md](docs/ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md).
+The original GitHub-Copilot-specific protocol is preserved in
+[docs/PROTOCOL-V1.md](docs/PROTOCOL-V1.md) only for compatibility with already-running work.
 
 ## Install and activate
 

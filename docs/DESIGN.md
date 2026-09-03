@@ -277,6 +277,13 @@ Routing filters by requirements and trust, removes unavailable or unauthenticate
 policy- or budget-forbidden choices, then chooses the first permitted backend in operator order. No
 implicit paid fallback exists. If no backend remains, Factory escalates before launch.
 
+Adaptive priority, CPU/RAM-aware local admission, and explicitly budgeted local-to-cloud burst are
+specified in
+[`ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md`](ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md). Until its
+conformance gates pass, the implemented scheduler remains fixed at `maxParallel` and does not treat
+GitHub priority as an execution input. Paid backends remain explicit choices rather than automatic
+overflow.
+
 Network destinations are also operator policy, not compiler authority. A compiled Work Item may
 request only destinations already present in the run's immutable allowlist; the graph fails before
 its first issue write otherwise. Arbitrary task-secret injection is not enabled in this release.

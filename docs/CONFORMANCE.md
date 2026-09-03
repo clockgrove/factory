@@ -25,6 +25,7 @@ and the boundary around replanning are recorded in
 
 | Gate | Why it is open |
 |---|---|
+| Adaptive priority and burst scheduling | The implementation-ready plan exists, but the current Supervisor still takes a fixed `maxParallel` slice, does not ingest GitHub issue priority, and does not measure Linux/WSL CPU or memory for admission. The protocol, scheduler, recovery, provider, and live-host gates in [`ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md`](ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md) must pass before this is a support claim. |
 | Real Daytona Objective | No Daytona credentials are configured on the release host. The SDK adapter and fake sandbox contract are tested, but paid resource creation, TTL, egress, secret brokerage, host publication, and leak cleanup still need one real run. |
 | Real Vercel Sandbox Objective | No Vercel OIDC token or worker model credential is configured on the release host. The SDK adapter and fake sandbox contract are tested, but the real provider lifecycle still needs one run. |
 | Published-artifact install | Plugin development changes cannot be installed as the released artifact until they are reviewed and published. After publication, repeat package verification from a clean install and run a private-repository Objective through the installed plugin. |

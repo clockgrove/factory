@@ -157,6 +157,93 @@ describe("v2 event protocol", () => {
     });
     expect(latestSupportedRun([started, requested])?.event).toBe("FactoryRunStarted");
   });
+
+  it("accepts durable activation, queue, capacity, and attributed admission events", () => {
+    const activation = parseFactoryEvent({
+      protocol: PROTOCOL_V2,
+      kind: "run",
+      event: "ActivationRequested",
+      objective: 42,
+      runId: "activation-1",
+      sequence: 1,
+      at: "2026-09-03T00:00:00.000Z",
+      requestedBy: "operator",
+      requestId: "request-1",
+      repository: "clockgrove/factory",
+      baseSha: SHA,
+      policy: DEFAULT_RUN_POLICY,
+      policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+      controllerProtocolMin: "clockgrove.factory/v2",
+      controllerProtocolMax: "clockgrove.factory/v2",
+    });
+    const queued = parseFactoryEvent({
+      protocol: PROTOCOL_V2,
+      kind: "scheduling",
+      event: "WorkItemQueued",
+      objective: 42,
+      runId: "run-1",
+      sequence: 2,
+      at: "2026-09-03T00:01:00.000Z",
+      workItem: 43,
+      directorEpoch: 1,
+      policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+      reason: "local pressure",
+      observedPriorityRank: 10,
+      observedSubIssuePosition: 0,
+    });
+    const capacity = parseFactoryEvent({
+      protocol: PROTOCOL_V2,
+      kind: "capacity",
+      event: "CapacityReserved",
+      objective: 42,
+      runId: "run-1",
+      sequence: 3,
+      at: "2026-09-03T00:02:00.000Z",
+      workItem: 43,
+      attempt: 1,
+      phase: "validation",
+      backend: "codex-cli/daytona",
+      requestedCpu: 1,
+      requestedMemoryMb: 2_048,
+      directorEpoch: 1,
+      policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+    });
+    const admission = parseFactoryEvent({
+      protocol: PROTOCOL_V2,
+      kind: "attempt",
+      event: "AttemptReserved",
+      objective: 42,
+      runId: "run-1",
+      sequence: 4,
+      at: "2026-09-03T00:03:00.000Z",
+      workItem: 43,
+      attempt: 1,
+      backend: "codex-cli/local-worktree",
+      baseSha: SHA,
+      directorEpoch: 1,
+      policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+      admissionClass: "local",
+      admissionReason: "local-capacity",
+      requestedCpu: 1,
+      requestedMemoryMb: 2_048,
+      priorityRank: 10,
+      subIssuePosition: 0,
+      criticalPathLength: 2,
+      unfinishedDownstream: 1,
+      capacityMeasuredAt: "2026-09-03T00:02:59.000Z",
+      effectiveCpu: 8,
+      availableMemoryMb: 8_192,
+      loadRatio: 0.25,
+      memoryUsageRatio: 0.5,
+      sessionId: "thread-1",
+      modelProfile: "frontier",
+      reportedModelTokens: 123,
+    });
+    expect(activation.event).toBe("ActivationRequested");
+    expect(queued.kind).toBe("scheduling");
+    expect(capacity.kind).toBe("capacity");
+    expect(admission.kind).toBe("attempt");
+  });
 });
 
 describe("Worker Packet", () => {
@@ -209,5 +296,63 @@ describe("Worker Packet", () => {
     for (const path of ["/etc/passwd", "../outside", "src/*", "src\\file.ts"]) {
       expect(() => parseWorkerPacket({ ...base, allowedPaths: [path] })).toThrow(/scope/i);
     }
+  });
+
+  it("accepts bounded context, change-surface, delivery, and duration metadata", () => {
+    const packet = parseWorkerPacket({
+      goal: "Add the scheduler.",
+      acceptanceCriteria: ["Admissions are deterministic."],
+      allowedPaths: ["src/scheduling/"],
+      baseSha: SHA,
+      validationCommands: ["npm test -- scheduling"],
+      requirements: {
+        trust: "trusted_local",
+        estimatedDurationMinutes: 20,
+      },
+      context: {
+        mustRead: ["docs/DESIGN.md"],
+        searchSeeds: ["admission controller"],
+        dependencyEvidence: [{ workItem: "policy", commit: SHA }],
+      },
+      changeSurface: {
+        mergeClass: "exclusive",
+        exclusiveResources: ["scheduler-registry"],
+      },
+      delivery: {
+        group: "scheduler",
+        relationship: "continue-stack",
+        parentWorkItem: "policy",
+      },
+      artifactContract: "clockgrove.factory/artifact-v1",
+    });
+    expect(packet.context?.mustRead).toEqual(["docs/DESIGN.md"]);
+    expect(packet.requirements.estimatedDurationMinutes).toBe(20);
+  });
+
+  it("rejects contradictory change-surface and stack metadata", () => {
+    const base = {
+      goal: "Add one file.",
+      acceptanceCriteria: ["It is tested."],
+      allowedPaths: ["src/a.ts"],
+      baseSha: SHA,
+      validationCommands: ["npm test"],
+      requirements: { trust: "trusted_local" },
+      artifactContract: "clockgrove.factory/artifact-v1",
+    };
+    expect(() =>
+      parseWorkerPacket({
+        ...base,
+        changeSurface: {
+          mergeClass: "parallel-safe",
+          exclusiveResources: ["singleton-editor"],
+        },
+      }),
+    ).toThrow(/parallel-safe/);
+    expect(() =>
+      parseWorkerPacket({
+        ...base,
+        delivery: { group: "stack", relationship: "continue-stack" },
+      }),
+    ).toThrow(/parentWorkItem/);
   });
 });

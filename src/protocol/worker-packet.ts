@@ -42,6 +42,7 @@ export const ExecutionRequirementsSchema = z
     memoryMb: z.number().int().positive().max(1_048_576).optional(),
     diskMb: z.number().int().positive().max(10_485_760).optional(),
     timeoutMinutes: z.number().int().positive().max(24 * 60).optional(),
+    estimatedDurationMinutes: z.number().int().positive().max(24 * 60).optional(),
     tools: shortList(safeId).default([]),
     services: shortList(safeId).default([]),
     networkDestinations: shortList(NetworkDestinationSchema, 64).default([]),
@@ -59,6 +60,61 @@ export const RetryContextSchema = z.object({
   reason: boundedText(2_000),
 });
 
+export const ContextManifestSchema = z
+  .object({
+    mustRead: shortList(RepositoryScopePathSchema).default([]),
+    searchSeeds: shortList(boundedText(500)).default([]),
+    dependencyEvidence: shortList(
+      z
+        .object({
+          workItem: safeId,
+          commit: gitSha,
+        })
+        .strict(),
+    ).default([]),
+  })
+  .strict();
+
+export const ChangeSurfaceSchema = z
+  .object({
+    mergeClass: z.enum(["parallel-safe", "exclusive", "generated", "large-binary"]),
+    exclusiveResources: shortList(boundedText(200)).default([]),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.mergeClass === "parallel-safe" && value.exclusiveResources.length > 0) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["exclusiveResources"],
+        message: "parallel-safe work cannot claim an exclusive resource",
+      });
+    }
+  });
+
+export const DeliveryHintSchema = z
+  .object({
+    group: safeId,
+    relationship: z.enum(["root", "continue-stack", "sibling", "join-after-merge"]),
+    parentWorkItem: safeId.optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.relationship === "continue-stack" && !value.parentWorkItem) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["parentWorkItem"],
+        message: "is required when continuing a stack",
+      });
+    }
+    if (value.relationship !== "continue-stack" && value.parentWorkItem) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["parentWorkItem"],
+        message: "is only valid when continuing a stack",
+      });
+    }
+  });
+
 export const WorkerPacketSchema = z
   .object({
     goal: boundedText(4_000),
@@ -68,6 +124,9 @@ export const WorkerPacketSchema = z
     outOfScope: shortList(boundedText(2_000)).default([]),
     conventions: shortList(boundedText(2_000)).default([]),
     retryContext: RetryContextSchema.optional(),
+    context: ContextManifestSchema.optional(),
+    changeSurface: ChangeSurfaceSchema.optional(),
+    delivery: DeliveryHintSchema.optional(),
     baseSha: gitSha,
     validationCommands: shortList(boundedText(1_000), 32).min(1),
     requirements: ExecutionRequirementsSchema,

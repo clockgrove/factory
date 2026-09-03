@@ -6,7 +6,7 @@
     "name": "Clockgrove"
   },
   "homepage": "https://github.com/clockgrove/factory",
-  "icon": "https://raw.githubusercontent.com/clockgrove/clockgrove/main/assets/brand/clockgrove/master/clockgrove-mark-transparent-1024.png",
+  "icon": "../assets/logos/clockgrove-mark.png",
   "keywords": ["github", "engineering-management", "objectives", "work-items", "automation", "mcp"],
   "skills": "../skills/",
   "mcpServers": "../mcp.json"

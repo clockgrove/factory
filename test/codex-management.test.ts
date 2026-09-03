@@ -41,4 +41,14 @@ describe("Codex management backend", () => {
     expect(requirements.architecture.items.enum).not.toContain("x86_64");
     expect(requirements.os.items.enum).toEqual(["linux", "darwin", "win32"]);
   });
+
+  it("constrains compiler identifiers and paths before runtime validation", () => {
+    const item = CODEX_COMPILED_OBJECTIVE_SCHEMA.properties.workItems.items.properties;
+    const requirements = item.requirements.properties;
+    expect(item.scope.items.pattern).toBe("^(?:[A-Za-z0-9_@+ .-]+/)*[A-Za-z0-9_@+ .-]+/?$");
+    expect(item.dependsOn.items.pattern).toBe("^[a-z0-9][a-z0-9-]*$");
+    expect(requirements.tools.items.pattern).toBe("^[A-Za-z0-9._:/+-]+$");
+    expect(requirements.services.items.pattern).toBe("^[A-Za-z0-9._:/+-]+$");
+    expect(requirements.permittedSecretNames.items.pattern).toBe("^[A-Z][A-Z0-9_]{1,127}$");
+  });
 });

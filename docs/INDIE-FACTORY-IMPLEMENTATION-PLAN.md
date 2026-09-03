@@ -37,7 +37,7 @@ The optimization target is:
 
 ## Target user and primary scenario
 
-The primary user is an indie game developer or small startup team that:
+The primary user is an indie developer or small startup team that:
 
 - works in one GitHub repository at a time;
 - has a capable laptop or desktop with an existing local checkout and toolchain;
@@ -368,11 +368,11 @@ sessions, and doomed integration.
 Implement compilation as explicit stages with a strict intermediate representation:
 
 1. **Repository grounding** — inspect instructions, manifests, build and test commands, architecture
-   seams, generated paths, large-file rules, and engine/toolchain metadata.
+   seams, generated paths, large-file rules, and build/runtime toolchain metadata.
 2. **Objective contract** — turn the request into observable acceptance criteria and identify any
    product decision that cannot safely be delegated.
-3. **Change-surface analysis** — identify likely files/directories, shared registries, binary assets,
-   generated output, editor-owned resources, and validation boundaries.
+3. **Change-surface analysis** — identify likely files/directories, shared registries, large or
+   binary artifacts, generated output, exclusive tools/resources, and validation boundaries.
 4. **Vertical decomposition** — create the smallest set of independently valuable Work Items; never
    split only to increase parallelism.
 5. **Conflict analysis** — combine overlapping writers, declare exclusive resources, and add a
@@ -394,11 +394,13 @@ Retries reuse the original packet plus bounded failure evidence. Workers receive
 context manifests rather than copied repository dumps. They may search the local checkout when the
 packet indicates uncertainty; the compiler must not hallucinate exhaustive context.
 
-### Game-development repository profiles
+### Repository facts and execution profiles
 
-Add a small `RepositoryProfile` interface rather than baking one engine into the scheduler. Initial
-profiles may recognize Unity, Unreal, Godot, and the Clockgrove repository from files that are
-actually present.
+Add a small `RepositoryProfile` interface so the compiler can consume repository-specific facts
+without baking a framework, language, product category, or build system into the scheduler. The
+initial implementation uses generic discovery from files that are actually present. A specialized
+profile is added only when a real repository requirement cannot be represented by the generic
+contract.
 
 A profile contributes facts only:
 
@@ -406,12 +408,13 @@ A profile contributes facts only:
 - generated and ignored paths;
 - text versus binary or large-file classifications;
 - files that should be edited only by one worker at a time;
-- exclusive local resources such as an editor instance, GPU, platform SDK, or build cache;
-- evidence forms such as test output, logs, screenshots, or captured frames;
+- exclusive local resources such as a singleton build tool, GPU, platform SDK, emulator, or shared
+  build cache;
+- evidence forms such as test output, logs, screenshots, rendered output, or recorded traces;
 - known repository conventions and safe context seeds.
 
 Profiles never create authority, silently install an SDK, launch a paid service, or weaken
-validation. Unknown engines fall back to the general repository-grounding path.
+validation. An unknown repository always falls back to general repository grounding.
 
 ## Single-host adaptive scheduling
 
@@ -493,8 +496,8 @@ enhancement.
 - A Work Item with multiple unfinished parents does not invent a multi-base stack. It waits for the
   parents to merge, refreshes from trunk, and starts a new stack.
 - A dependency that expresses ordering but does not consume code need not share a stack.
-- Exclusive or binary-asset work is serialized even when Git could technically create parallel
-  branches.
+- Work targeting the same exclusive resource or non-mergeable large/binary path is serialized even
+  when Git could technically create parallel branches.
 - Stack identity, position, parent PR, base SHA, and GitHub capability version are recorded in the
   publication receipt.
 
@@ -642,7 +645,7 @@ Exit gate: activate two Objectives, kill the process during every meaningful lif
 restart it, and prove exactly-once admission/publication semantics, repository-wide caps, and clean
 service uninstall.
 
-### Phase 3 — cost-aware compiler and game repository facts
+### Phase 3 — cost-aware compiler and repository facts
 
 Add pure compiler stages, repository facts, context manifests, conflict classification, exclusive
 resources, validation tiers, stack hints, and bounded economic review. Keep management backends
@@ -657,9 +660,10 @@ Primary files:
 - new `src/repository-profiles/`
 - `skills/objective-compilation/SKILL.md`
 
-Use checked-in representative fixtures for a general TypeScript repository and the engines actually
-encountered while dogfooding the Clockgrove Worlds platform. Do not claim Unity, Unreal, or Godot
-support without an installable fixture and an exercised command path.
+Use checked-in representative fixtures for a general TypeScript repository and for the large/binary,
+generated-output, deterministic-simulation, and visual-validation cases actually encountered while
+dogfooding the Clockgrove Worlds platform. Do not claim specialized framework or engine support
+without an installable fixture and an exercised command path.
 
 Exit gate: golden Objectives compile deterministically into valid DAGs with no arbitrary item count,
 parallel scope overlap, invented command, unnecessary context dump, or impossible stack topology.
@@ -732,7 +736,7 @@ Clockgrove Worlds platform Objectives that cover, as the repository makes them a
 
 - a dependency-heavy platform feature;
 - parallel code and tests;
-- an asset or generated-file conflict;
+- a large/binary artifact or generated-file conflict;
 - an expensive build or validation resource;
 - a local-to-cloud burst decision;
 - a lower-layer change in a live PR stack;
@@ -873,12 +877,117 @@ critical path beyond keeping protocol records versioned and provider-neutral.
 | Frontier sessions repeatedly rediscover the repository | Bounded context manifests, dependency evidence, stored graph, and retry deltas. |
 | Concurrency makes the developer's machine unusable | Observed headroom, reserved CPU/memory, cooldown, hard worker caps, and no pressure-driven preemption. |
 | Paid burst becomes the easy fallback | Disabled default, local saturation prerequisite, minimum benefit gate, native-unit budgets, TTL, and atomic reservation. |
-| Binary game assets or editor resources corrupt parallel work | Repository profiles, exclusive resource claims, serialization, clean validation, and Git LFS awareness. |
+| Large/binary artifacts or exclusive tools corrupt parallel work | Repository facts, path/resource claims, serialization, content digests, and clean validation. |
 | GitHub stacked PR preview changes | Isolated adapter, capability probe, versioned receipts, live conformance, and recorded regular-PR fallback. |
 | Controller and foreground run race | Repository CAS lease plus per-Objective leases and deterministic attempt refs. |
 | Laptop sleeps or WSL is not started | Honest controller heartbeat/status and explicit service diagnostics; a later hosted coordinator is optional, not hidden. |
 | Provider/model usage lacks authoritative dollars | Enforce measurable tokens/minutes/sessions and label dollar values as estimates or unavailable. |
 | MCP tool surface causes accidental writes | Minimal schemas, accurate annotations, explicit mutating names, actor verification, idempotency, and negative selection evals. |
+
+## Appendix A — Game, simulation, and rich-media repositories
+
+This appendix applies the general Factory contracts to repositories that contain large media,
+generated content, deterministic simulations, visual behavior, or specialized authoring tools. It
+does not change Factory's general-purpose audience, require an engine-specific runtime, or add a
+game-development phase to the core roadmap.
+
+### Reusable capabilities that remain in core
+
+These are not game features. They solve common software-repository problems and therefore remain in
+the compiler, scheduler, artifact, and validation contracts.
+
+#### Large and binary artifacts
+
+- Classify a path from repository evidence as text, generated, large/binary, or otherwise
+  non-mergeable.
+- Represent a binary artifact by path, byte size, media type when known, executable mode, and content
+  digest. Never embed the content in a GitHub comment or model prompt.
+- Enforce Work Packet path and size ceilings before accepting or uploading it.
+- Serialize writers to the same non-mergeable path. Distinct binary paths may still run concurrently
+  when their manifests and build outputs do not collide.
+- Detect Git LFS pointers and required LFS tooling when a repository already uses them. Factory does
+  not enable LFS, rewrite attributes, or migrate files automatically.
+- Distinguish source assets from derived exports. Rebuild derived output through the repository's
+  declared command when possible instead of asking a model to manipulate opaque bytes.
+- Store oversized worker transfer artifacts in the selected backend's content-addressed artifact
+  channel, while GitHub retains the digest and lifecycle receipt.
+
+#### Generated outputs
+
+- The source and generated contracts, schemas, atlases, manifests, snapshots, or golden fixtures
+  belong to one Work Item unless the generator output is an explicitly versioned dependency.
+- Two parallel Work Items may not own the same generated tree, lockfile, registry, or aggregate
+  manifest.
+- Validation reruns the generator and fails on unexplained drift.
+- Generated size does not count as useful model-authored progress when measuring worker yield.
+
+#### Deterministic and simulation-heavy code
+
+- Work Packets pin seed, clock/time fixture, schema/protocol version, scenario identity, and expected
+  state/event hash when the repository exposes them.
+- Exact deterministic tests run before model-assisted semantic review.
+- Nondeterministic services use recorded or scripted fixtures for merge gates; live-provider checks
+  remain separately labeled qualification evidence.
+- A worker may update an expected golden result only when the Work Item explicitly owns the semantic
+  change and validation explains the before/after difference.
+
+#### Visual and experiential validation
+
+- A visual validation plan pins scenario, data/seed, viewport or output dimensions, environment,
+  tool version, and capture command.
+- Factory records capture digests and bounded diffs with the exact validated commit.
+- Mechanical comparison may accept unchanged or threshold-bounded output. A deliberate change in
+  visual intent remains a legitimate human review boundary unless the Objective pre-authorized an
+  exact replacement fixture.
+- Screenshots, rendered frames, audio summaries, and other evidence are attachments or artifact
+  references, not a reason to add a Factory-specific UI.
+
+#### Exclusive tools and constrained resources
+
+- Declare an editor, emulator, GPU, hardware device, singleton license, port, local service, or shared
+  cache as an exclusive resource only when repository/toolchain evidence requires it.
+- Resource claims participate in ordinary admission and are released through the same fenced
+  attempt lifecycle.
+- Factory never assumes that a game or media repository requires a GPU or editor. Headless commands
+  remain preferred when the repository provides them.
+
+### First-party dogfood contract
+
+Clockgrove Worlds is Factory's first-party dogfood project. Its role in this public plan is to
+exercise portable Factory behavior, not to define Factory internals or reproduce an adopter's
+architecture. Project-specific implementation facts, paths, and source documents remain in the
+adopter repository and enter Factory only through ordinary repository grounding.
+
+The public qualification scenarios are:
+
+- a repository may expose deterministic behavior whose Work Packets must pin seeds, fixtures,
+  versions, scenarios, and expected hashes;
+- versioned content may combine schemas, migrations, manifests, provenance, and expected output
+  without making Factory the authority for that content;
+- source, reviewed, and generated assets may require different ownership and validation rules;
+- large or binary artifacts may require content-addressed transfer while GitHub retains only bounded
+  metadata, digests, and lifecycle receipts;
+- visual or experiential changes may require reproducible captures and an explicit human review
+  boundary;
+- generated contracts and golden fixtures may require source-coupled ownership and drift checks;
+- browser, realtime, accessibility, replay, provider, and staging checks may require distinct
+  commands and evidence rather than one vague “tests pass” criterion; and
+- Factory must remain external development tooling: an adopter stays buildable and operable without
+  Factory installed, and Factory state never becomes product/runtime authority.
+
+### Promotion rule
+
+Dogfooding may reveal reusable Factory requirements, but no adopter receives hard-coded branches in
+Factory. Promote a project-specific observation into the core only when:
+
+1. the generic repository-facts, Work Packet, artifact, or validation contract cannot express it;
+2. an actual dogfood Work Item demonstrates the failure with bounded evidence;
+3. the proposed extension has a provider/framework-neutral contract;
+4. a second, unrelated fixture proves that the abstraction is reusable;
+5. the extension passes ordinary compatibility, recovery, cost, and security gates.
+
+Otherwise, keep the behavior in a repository-supplied profile, skill, or validation command rather
+than expanding Factory itself.
 
 ## References
 

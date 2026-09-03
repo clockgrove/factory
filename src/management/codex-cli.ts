@@ -90,6 +90,19 @@ export const CODEX_COMPILED_OBJECTIVE_SCHEMA = {
   },
 } as const;
 
+export function codexCompiledObjectiveSchema(title: string): unknown {
+  return {
+    ...CODEX_COMPILED_OBJECTIVE_SCHEMA,
+    properties: {
+      ...CODEX_COMPILED_OBJECTIVE_SCHEMA.properties,
+      title: {
+        ...CODEX_COMPILED_OBJECTIVE_SCHEMA.properties.title,
+        const: title,
+      },
+    },
+  };
+}
+
 const REVIEW_SCHEMA = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
   type: "object",
@@ -188,7 +201,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
     ].join("\n\n");
     const { value, usage } = await this.#run<CompiledObjective>(
       context.repository,
-      CODEX_COMPILED_OBJECTIVE_SCHEMA,
+      codexCompiledObjectiveSchema(context.objective.title),
       prompt,
     );
     const objective = value;

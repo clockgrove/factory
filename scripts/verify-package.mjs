@@ -185,6 +185,7 @@ console.log("\n# protocol schemas\n");
 
 const schemaFiles = [
   "objective.schema.json",
+  "controller-policy.schema.json",
   "work-item.schema.json",
   "worker-packet.schema.json",
   "run-policy.schema.json",

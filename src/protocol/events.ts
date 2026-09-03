@@ -52,6 +52,53 @@ const RunCancellationRequested = Common.extend({
   reason: boundedText(8_000).optional(),
 });
 
+const ActivationRequested = Common.extend({
+  kind: z.literal("run"),
+  event: z.literal("ActivationRequested"),
+  requestedBy: boundedText(160),
+  requestId: safeId,
+  repository: boundedText(300),
+  baseSha: gitSha,
+  policy: RunPolicySchema,
+  policyDigest: sha256Digest,
+  controllerProtocolMin: boundedText(80),
+  controllerProtocolMax: boundedText(80),
+});
+
+const RunControlRequested = Common.extend({
+  kind: z.literal("run"),
+  event: z.enum([
+    "RunPauseRequested",
+    "RunResumeRequested",
+    "RunDrainRequested",
+    "CloudPauseRequested",
+  ]),
+  requestedBy: boundedText(160),
+  requestId: safeId,
+  reason: boundedText(8_000).optional(),
+});
+
+const WorkItemControlRequested = Common.extend({
+  kind: z.literal("run"),
+  event: z.enum(["WorkItemRetryRequested", "WorkItemPriorityChanged"]),
+  requestedBy: boundedText(160),
+  requestId: safeId,
+  workItem: z.number().int().positive(),
+  priorityRank: z.number().int().min(0).max(1_000).optional(),
+  reason: boundedText(8_000).optional(),
+});
+
+const ControllerObserved = Common.extend({
+  kind: z.literal("controller"),
+  event: z.literal("ControllerObserved"),
+  controllerId: safeId,
+  epoch: z.number().int().positive(),
+  expiresAt: isoDate,
+  controllerPolicyDigest: sha256Digest,
+  protocolMin: boundedText(80),
+  protocolMax: boundedText(80),
+});
+
 const Lease = Common.extend({
   kind: z.literal("lease"),
   event: z.enum(["LeaseAcquired", "LeaseRenewed", "LeaseReleased"]),
@@ -90,7 +137,56 @@ const Attempt = Common.extend({
   providerResourceId: boundedText(500).optional(),
   artifactDigest: sha256Digest.optional(),
   headSha: gitSha.optional(),
+  sessionId: boundedText(500).optional(),
+  modelProfile: boundedText(160).optional(),
+  reportedModelTokens: z.number().int().nonnegative().optional(),
+  admissionClass: z.enum(["local", "remote-required", "burst"]).optional(),
+  admissionReason: z.enum([
+    "local-capacity",
+    "capability-required",
+    "local-saturated",
+    "queue-delay",
+    "deadline",
+  ]).optional(),
+  requestedCpu: z.number().positive().max(256).optional(),
+  requestedMemoryMb: z.number().int().positive().max(1_048_576).optional(),
+  priorityRank: z.number().int().min(0).max(1_000).optional(),
+  priorityFieldId: boundedText(200).optional(),
+  priorityOptionId: boundedText(200).optional(),
+  subIssuePosition: z.number().int().nonnegative().optional(),
+  criticalPathLength: z.number().int().nonnegative().optional(),
+  unfinishedDownstream: z.number().int().nonnegative().optional(),
+  capacityMeasuredAt: isoDate.optional(),
+  effectiveCpu: z.number().positive().max(256).optional(),
+  availableMemoryMb: z.number().int().nonnegative().max(1_048_576).optional(),
+  loadRatio: z.number().nonnegative().finite().optional(),
+  memoryUsageRatio: z.number().min(0).max(1).optional(),
   reason: boundedText(8_000).optional(),
+});
+
+const Scheduling = Common.extend({
+  kind: z.literal("scheduling"),
+  event: z.literal("WorkItemQueued"),
+  workItem: z.number().int().positive(),
+  directorEpoch: z.number().int().positive(),
+  policyDigest: sha256Digest,
+  reason: boundedText(2_000),
+  observedPriorityRank: z.number().int().min(0).max(1_000),
+  observedSubIssuePosition: z.number().int().nonnegative(),
+});
+
+const Capacity = Common.extend({
+  kind: z.literal("capacity"),
+  event: z.enum(["CapacityReserved", "CapacityReconciled"]),
+  workItem: z.number().int().positive(),
+  attempt: z.number().int().positive(),
+  phase: z.enum(["execution", "validation"]),
+  backend: safeId,
+  requestedCpu: z.number().positive().max(256),
+  requestedMemoryMb: z.number().int().positive().max(1_048_576),
+  directorEpoch: z.number().int().positive(),
+  policyDigest: sha256Digest,
+  reason: boundedText(2_000).optional(),
 });
 
 const Validation = Common.extend({
@@ -134,8 +230,14 @@ export const FactoryEventSchema = z.union([
   RunStarted,
   RunTerminal,
   RunCancellationRequested,
+  ActivationRequested,
+  RunControlRequested,
+  WorkItemControlRequested,
+  ControllerObserved,
   Lease,
   Attempt,
+  Scheduling,
+  Capacity,
   Validation,
   Graph,
   Budget,

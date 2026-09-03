@@ -4,7 +4,7 @@
     "displayName": "Clockgrove Factory",
     "shortDescription": "GitHub-native engineering management system",
     "description": "Automatically manage software projects on GitHub. Factory compiles Objectives into Work Items, dispatches them to AI agents, evaluates progress in real-time, and merges pull requests when ready—no infrastructure required.",
-    "icon": "https://raw.githubusercontent.com/clockgrove/factory/main/assets/logos/factory-logo.svg",
+    "icon": "https://raw.githubusercontent.com/clockgrove/clockgrove/main/assets/brand/clockgrove/master/clockgrove-mark-transparent-1024.png",
     "website": "https://github.com/clockgrove/factory",
     "repository": "https://github.com/clockgrove/factory"
   },
@@ -23,7 +23,7 @@
         "authentication": "ON_INSTALL"
       },
       "category": "Productivity",
-      "icon": "https://raw.githubusercontent.com/clockgrove/factory/main/assets/logos/factory-logo.svg",
+      "icon": "https://raw.githubusercontent.com/clockgrove/clockgrove/main/assets/brand/clockgrove/master/clockgrove-mark-transparent-1024.png",
       "capabilities": [
         "Compile Objectives into Work Items",
         "Dispatch to AI agents",

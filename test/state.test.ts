@@ -171,7 +171,7 @@ describe("deriveState", () => {
   });
 
   it("is escalated when a human holds it and Copilot does not", () => {
-    expect(deriveState(wi({ assignees: ["kirkmarple"] }), NOW)).toBe(
+    expect(deriveState(wi({ assignees: ["human-owner"] }), NOW)).toBe(
       "escalated",
     );
   });
@@ -181,7 +181,7 @@ describe("deriveState", () => {
     // GitHub also auto-assigns the requesting human alongside Copilot — this is
     // exactly that shape.
     expect(
-      deriveState(wi({ assignees: [COPILOT_ASSIGNEE_LOGIN, "kirkmarple"] }), NOW),
+      deriveState(wi({ assignees: [COPILOT_ASSIGNEE_LOGIN, "human-owner"] }), NOW),
     ).toBe("dispatched");
   });
 
@@ -831,7 +831,7 @@ describe("ready", () => {
   });
 
   it("excludes escalated items", () => {
-    const o = derive(objective([wi({ number: 1, assignees: ["kirkmarple"] })]));
+    const o = derive(objective([wi({ number: 1, assignees: ["human-owner"] })]));
     expect(ready(o)).toHaveLength(0);
   });
 });
@@ -865,7 +865,7 @@ describe("objective-level rollups", () => {
   it("detects a stall when nothing is moving and nothing is ready", () => {
     const o = derive(
       objective([
-        wi({ number: 1, assignees: ["kirkmarple"] }),
+        wi({ number: 1, assignees: ["human-owner"] }),
         wi({ number: 2, blockedBy: [{ number: 1, closed: false }] }),
       ]),
     );

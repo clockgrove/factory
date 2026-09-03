@@ -809,6 +809,13 @@ export class Dispatcher {
     await this.#call(() => this.#writer.closeIssue(objectiveId));
   }
 
+  /** Stop one managed compatibility attempt without scheduling a replacement. */
+  async cancel(wi: DerivedWorkItem): Promise<void> {
+    const pull = currentOpenPullRequest(wi);
+    if (pull) await this.#call(() => this.#writer.closePullRequest(pull.id));
+    await this.#call(() => this.#writer.clearActors(wi.id));
+  }
+
   async #assign(issueId: string): Promise<void> {
     await this.#call(() =>
       this.#writer.assignCopilot({

@@ -4,6 +4,28 @@ Factory's design rests on how GitHub's coding agent and API actually behave, not
 documented to behave. This document records what was measured, so that every design consequence in
 [`DESIGN.md`](DESIGN.md) can be traced to an observation rather than an assumption.
 
+## v2 control-plane and local-harness conformance (September 2026)
+
+- GitHub accepts custom refs under `refs/clockgrove-factory/...` through the Git data APIs.
+- REST `PATCH /git/refs` with `force: false` is **not** compare-and-swap for custom refs: a sibling
+  rewrite was accepted. Factory therefore uses GraphQL `updateRefs` with an exact `beforeOid`, which
+  rejected the stale writer in the live probe.
+- Codex CLI 0.153.0 supports the non-interactive flags Factory needs: ephemeral execution, ignored
+  user configuration/rules, JSONL events, strict output schema, explicit sandbox mode, and working
+  directory selection. A nested trivial worker completed successfully with the same contract. The
+  installed CLI also accepts the release's explicit no-approval, disabled-web-search, command-network,
+  network-proxy, and domain-policy overrides. Factory's argument-contract tests pin their exact
+  composition so an empty Work Packet network list cannot silently become unrestricted egress.
+- The optional Daytona SDK exposes ephemeral sandboxes, TTL, domain allow-listing, named secrets,
+  labels, file transfer, process execution, and deletion. The optional Vercel Sandbox SDK exposes
+  non-persistent microVMs, hard timeouts, network policy/header injection, tags, file transfer,
+  detached commands, and stop. Factory startup probes credentials without creating paid resources;
+  paid-resource creation remains an opt-in integration test.
+
+The remainder of this document records the original GitHub coding-agent measurements. Those findings
+still govern the explicit `github-copilot/github-managed` compatibility backend; they are no longer
+Factory's default execution architecture.
+
 The measurements were taken in a disposable repository, before implementation, across three waves of
 trivial independent tasks. Each task touched a distinct file, so any observed serialization would be
 the platform's rather than an artifact of conflict avoidance. Issues were assigned to

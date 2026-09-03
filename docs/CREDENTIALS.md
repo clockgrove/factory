@@ -1,57 +1,59 @@
-# Credentials and environments
+# Credentials and execution boundaries
 
-## What Factory needs
+Factory separates Director credentials from worker credentials. The Supervisor may use GitHub; an
+implementation worker may not.
 
-Factory runs in your agent harness with your own GitHub credentials. The bundled MCP server first
-reads `GITHUB_TOKEN` or `GH_TOKEN` from its environment. If the harness does not forward ambient
-variables into plugin subprocesses, Factory asks the already-authenticated GitHub CLI (`gh auth
-token`) instead. Set one of the variables or run `gh auth login` once on that host; Factory never
-stores or prints the resulting token.
+## Core local operation
 
-It creates no GitHub environments, requires no repository secrets, and needs no token beyond the
-operator's own. Installing the plugin grants no workflow, settings, secret, or activation authority.
-It also requires no repository-local credential configuration.
+Factory resolves GitHub authentication from `GITHUB_TOKEN`, then `GH_TOKEN`, then the existing
+`gh auth` session. It does not persist or print the token. The token needs access to the target
+repository's issues, pull requests, contents, and custom Git refs.
 
-## Policy on environments
+The local Codex CLI backend uses the operator's existing Codex login unless an explicitly configured
+model credential or local inference provider is selected. It creates a temporary `CODEX_HOME`, links
+only the auth file, removes GitHub and ambient secret variables, disables interactive Git credential
+helpers, and deletes the temporary home after the attempt. Every unattended invocation uses
+`--ask-for-approval never`: a request outside the configured sandbox fails instead of becoming an
+approval queue. Management calls are read-only with command networking and web search disabled.
+Implementation workers use `workspace-write`; command networking is off unless the preflighted Work
+Packet names destinations, in which case Factory enables Codex's network proxy with exactly those
+allow-first domain rules. Web search remains disabled because it is outside the command proxy.
 
-GitHub environments are a **deployment** primitive. They gate a job behind approvals or branch
-restrictions and scope secrets to a deployment target. They answer *"may this job run, and what may
-it see?"*
+Installing Factory creates no repository secret, environment, workflow, service account, or daemon.
 
-One rule follows:
+## Daytona
 
-> An environment exists only to separate a credential that must not be visible to the rest of the
-> repository. Never to select behavior, pin a model, or mark a phase.
+Daytona requires its normal SDK authentication (`DAYTONA_API_KEY`, or the documented JWT plus
+organization identity). The worker's model credential is not copied from the host environment.
+`FACTORY_DAYTONA_MODEL_SECRET` must name a Daytona organization Secret; Factory maps that named
+secret to `OPENAI_API_KEY` inside the ephemeral worker.
 
-Behavior selection belongs in configuration that is visible in the repository and reviewable in a
-diff. A secret store is a bad configuration file: invisible, unversioned, and unreviewable. An
-environment named after a step in a process — `-initial-assignment`, `-initial-model` — is
-configuration wearing a trust boundary's clothes, and the correct count of environments is the number
-of distinct trust boundaries, not the number of steps in a process.
+Independent validation creates a second ephemeral Daytona sandbox and receives no model credential.
+Both resources use hard TTLs, deterministic labels/names, an allow-listed domain policy, and
+best-effort deletion on completion. Codex runs without its inner OS sandbox only inside this outer,
+provider-enforced sandbox boundary. The configured provider-side spending cap remains the absolute
+limit during a host/network partition.
 
-**Target: zero Factory-created environments.** If Factory ever appears to need one, that is a finding
-to record against the design, not a task to complete.
+## Vercel Sandbox
 
-One environment may legitimately exist in a repository Factory works on: GitHub's Copilot coding
-agent reads runtime configuration from an environment named `copilot`. That is platform convention,
-not a Factory invention, and it should be created only when there is something to put in it.
+Vercel Sandbox requires `VERCEL_OIDC_TOKEN` and a host `OPENAI_API_KEY` for the worker. The worker
+process sees only a placeholder; Vercel's network-policy transformer injects the real Authorization
+header solely for `api.openai.com`.
 
-## The one configuration step an adopter cannot avoid
+Independent validation uses a fresh non-persistent microVM with no model key. Worker and validator
+resources have hard timeouts, deterministic tags/names, restricted egress, and are stopped after use.
 
-The zero-environments target holds. A zero-configuration adoption does not, and the gap is worth
-naming rather than hiding.
+## GitHub managed compatibility backend
 
-A repository whose pull requests run CI is subject to **Settings → Copilot → Coding agent → Require
-approval for workflow runs**. While that is on, every agent-authored run parks in `action_required`
-having executed nothing, and Factory correctly refuses to merge without CI evidence. Either a human
-approves runs as they arrive, or the requirement is turned off deliberately.
+`github-copilot/github-managed` uses the Director's GitHub identity and the repository's assignable
+coding-agent integration. It is an explicit paid compatibility backend, never the default. Because
+the managed worker publishes its own branch and pull request, Factory collects that exact diff,
+validates it independently, and refuses integration unless the remote head tree equals the validated
+tree.
 
-That is one mandatory pre-flight decision, and by this document's own standard it is a portability
-defect rather than a feature. It is recorded rather than fixed because it cannot be fixed from here:
-the REST approve endpoint covers fork pull requests only and refuses a same-repository agent branch,
-and the setting that governs the hold is readable over REST with no write. It is also GitHub's
-account-wide default, so a fresh repository does not avoid it.
+## Named secrets in Work Items
 
-Factory's response is to escalate with the blast-radius evidence a human needs in order to decide,
-which is the correct behavior for a decision the confidence bar places outside autonomy anyway. See
-[`DESIGN.md`](DESIGN.md) §9.
+A Worker Packet may declare secret names that policy could permit; it never contains values. Factory
+v2 currently brokers only the model credential mechanisms documented above. It does not inject
+arbitrary named application secrets. A Work Item requiring one therefore needs a future audited
+broker adapter or human handling; it must not receive ambient host credentials as a workaround.

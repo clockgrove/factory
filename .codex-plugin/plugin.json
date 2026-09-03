@@ -1,7 +1,7 @@
 {
   "name": "factory",
-  "version": "1.0.3",
-  "description": "Derived-state engineering management for GitHub.",
+  "version": "2.0.0",
+  "description": "GitHub-backed, local-first unattended software factory.",
   "author": {
     "name": "Clockgrove",
     "url": "https://github.com/clockgrove"
@@ -14,15 +14,16 @@
   "mcpServers": "./mcp.json",
   "interface": {
     "displayName": "Factory",
-    "shortDescription": "GitHub-native engineering management",
-    "longDescription": "Factory compiles Objectives into Work Items, dispatches them to agents, evaluates progress, and integrates pull requests when ready.",
+    "shortDescription": "Local-first unattended software factory",
+    "longDescription": "Factory compiles GitHub Objectives into Work Item sub-issues, runs policy-approved local or optional cloud workers, independently validates artifacts, and integrates safe pull requests.",
     "developerName": "Clockgrove",
     "category": "Productivity",
     "capabilities": [
       "Compile Objectives into Work Items",
-      "Dispatch Work Items to coding agents",
-      "Evaluate pull request readiness",
-      "Integrate completed work"
+      "Schedule dependency-ready Work Items",
+      "Run local or opt-in isolated coding workers",
+      "Validate and integrate completed work",
+      "Recover durable runs from GitHub"
     ],
     "websiteURL": "https://github.com/clockgrove/factory",
     "composerIcon": "./assets/logos/clockgrove-mark.png",

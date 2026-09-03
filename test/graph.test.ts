@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  compiledGraphDigest,
   GraphApplier,
+  parseGraphItemMetadata,
   renderWorkPacket,
   validateGraph,
   type CompiledObjective,
@@ -32,9 +34,39 @@ function objective(workItems: CompiledWorkItem[]): CompiledObjective {
   return { title: "Add three pure functions", workItems };
 }
 
+function existingItem(
+  graph: CompiledObjective,
+  index: number,
+  number: number,
+  blockedByNumbers: number[] = [],
+) {
+  const item = graph.workItems[index]!;
+  const graphDigest = compiledGraphDigest(graph);
+  return {
+    compilerId: item.id,
+    graphDigest,
+    graphSize: graph.workItems.length,
+    index,
+    dependsOn: item.dependsOn,
+    id: `I_${number}`,
+    number,
+    title: item.title,
+    body: renderWorkPacket(item, {
+      protocol: "clockgrove.factory/graph-v1" as const,
+      id: item.id,
+      graphDigest,
+      graphSize: graph.workItems.length,
+      index,
+      dependsOn: item.dependsOn,
+    }),
+    blockedByNumbers,
+  };
+}
+
 /** Records every call made to it, and can be configured to reject on a given method. */
 class FakeGraphWriter implements GraphWriter {
   calls: string[] = [];
+  bodies: string[] = [];
   #nextNumber = 100;
   failing: Partial<Record<keyof GraphWriter, unknown>>;
 
@@ -50,6 +82,7 @@ class FakeGraphWriter implements GraphWriter {
     labelIds?: string[];
   }): Promise<CreatedWorkItem> {
     this.calls.push(`createWorkItemIssue:${args.parentIssueId}:${args.title}`);
+    this.bodies.push(args.body);
     if (this.failing.createWorkItemIssue) throw this.failing.createWorkItemIssue;
     const number = this.#nextNumber++;
     return { id: `I_${number}`, number };
@@ -73,7 +106,12 @@ function rateLimitError(): unknown {
 describe("validateGraph", () => {
   it("accepts a graph of independent Work Items", () => {
     expect(() =>
-      validateGraph(objective([workItem({ id: "a" }), workItem({ id: "b" })])),
+      validateGraph(
+        objective([
+          workItem({ id: "a", scope: ["src/a.ts"] }),
+          workItem({ id: "b", scope: ["src/b.ts"] }),
+        ]),
+      ),
     ).not.toThrow();
   });
 
@@ -81,6 +119,29 @@ describe("validateGraph", () => {
     expect(() =>
       validateGraph(
         objective([workItem({ id: "a" }), workItem({ id: "b", dependsOn: ["a"] })]),
+      ),
+    ).not.toThrow();
+  });
+
+  it("rejects overlapping scopes that could run in the same wave", () => {
+    expect(() =>
+      validateGraph(
+        objective([
+          workItem({ id: "a", scope: ["src/"] }),
+          workItem({ id: "b", scope: ["src/slugify.ts"] }),
+        ]),
+      ),
+    ).toThrow(/overlapping scopes/i);
+  });
+
+  it("accepts overlapping scopes when a transitive dependency serializes them", () => {
+    expect(() =>
+      validateGraph(
+        objective([
+          workItem({ id: "a", scope: ["src/"] }),
+          workItem({ id: "middle", scope: ["test/middle.ts"], dependsOn: ["a"] }),
+          workItem({ id: "b", scope: ["src/slugify.ts"], dependsOn: ["middle"] }),
+        ]),
       ),
     ).not.toThrow();
   });
@@ -152,7 +213,10 @@ describe("GraphApplier.apply", () => {
     const applier = new GraphApplier({ writer });
 
     const created = await applier.apply(
-      objective([workItem({ id: "a", title: "Add slugify" }), workItem({ id: "b", title: "Add truncate" })]),
+      objective([
+        workItem({ id: "a", title: "Add slugify", scope: ["src/slugify.ts"] }),
+        workItem({ id: "b", title: "Add truncate", scope: ["src/truncate.ts"] }),
+      ]),
       ctx,
     );
 
@@ -183,6 +247,50 @@ describe("GraphApplier.apply", () => {
       "createWorkItemIssue:I_OBJ:Add slugify",
       `addBlockedBy:${b.id}:${a.id}`,
     ]);
+  });
+
+  it("repairs a partial graph without duplicating issues or dependency edges", async () => {
+    const writer = new FakeGraphWriter();
+    const applier = new GraphApplier({ writer });
+    const graph = objective([
+      workItem({ id: "a" }),
+      workItem({ id: "b", dependsOn: ["a"] }),
+    ]);
+    const digest = compiledGraphDigest(graph);
+    const created = await applier.apply(graph, {
+      ...ctx,
+      existingWorkItems: [existingItem(graph, 0, 90)],
+    });
+    expect(writer.calls).toEqual([
+      "createWorkItemIssue:I_OBJ:Add slugify",
+      `addBlockedBy:${created.get("b")!.id}:I_90`,
+    ]);
+    const metadata = parseGraphItemMetadata(writer.bodies[0]!);
+    expect(metadata).toMatchObject({ id: "b", graphDigest: digest, graphSize: 2, index: 1 });
+
+    const noWrites = new FakeGraphWriter();
+    await new GraphApplier({ writer: noWrites }).apply(graph, {
+      ...ctx,
+      existingWorkItems: [
+        existingItem(graph, 0, 90),
+        existingItem(graph, 1, 91, [90]),
+      ],
+    });
+    expect(noWrites.calls).toEqual([]);
+  });
+
+  it("rejects a modified partial Work Item before making another write", async () => {
+    const graph = objective([
+      workItem({ id: "a", scope: ["src/a.ts"] }),
+      workItem({ id: "b", scope: ["src/b.ts"] }),
+    ]);
+    const changed = { ...existingItem(graph, 0, 90), title: "Edited by hand" };
+    const writer = new FakeGraphWriter();
+    await expect(new GraphApplier({ writer }).apply(graph, {
+      ...ctx,
+      existingWorkItems: [changed],
+    })).rejects.toThrow(/differs from the durable graph/i);
+    expect(writer.calls).toEqual([]);
   });
 
   it("applies the optional Work Item label to every created issue", async () => {

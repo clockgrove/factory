@@ -18,7 +18,8 @@
  * anywhere, including from a fresh clone before dev dependencies are installed.
  */
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -41,20 +42,30 @@ const EXPECTED_TOOLS = [
   "dispatch_retry_or_escalate",
   "dispatch_start",
   "evaluate_mechanical",
+  "factory_run",
+  "factory_cancel",
   "graph_apply",
   "read_objective",
   "read_pull_request_diff",
   "read_repository_file",
   "read_repository_layout",
+  "probe_execution_backends",
 ].sort();
 
 console.log("\n# manifests\n");
 
 const plugin = readJson("plugin.json");
+const packageManifest = readJson("package.json");
 check(
   plugin.$schema === "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "plugin.json declares the Agent Plugins 1.0.0 schema",
 );
+for (const lifecycle of ["preinstall", "install", "postinstall", "prepare"]) {
+  check(
+    packageManifest.scripts?.[lifecycle] === undefined,
+    `package has no ${lifecycle} lifecycle script`,
+  );
+}
 check(typeof plugin.name === "string" && plugin.name.length > 0, "plugin.json has a name");
 check(
   /^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(plugin.name ?? ""),
@@ -170,6 +181,29 @@ for (const skill of ["director", "objective-compilation"]) {
   );
 }
 
+console.log("\n# protocol schemas\n");
+
+const schemaFiles = [
+  "objective.schema.json",
+  "work-item.schema.json",
+  "worker-packet.schema.json",
+  "run-policy.schema.json",
+  "factory-event.schema.json",
+  "artifact.schema.json",
+  "validation-evidence.schema.json",
+];
+const schemaIds = new Set();
+for (const name of schemaFiles) {
+  const path = resolve(root, "schemas", name);
+  check(existsSync(path), `schemas/${name} exists`);
+  if (!existsSync(path)) continue;
+  const schema = readJson(`schemas/${name}`);
+  check(typeof schema.$schema === "string", `schemas/${name} declares a JSON Schema dialect`);
+  check(typeof schema.$id === "string", `schemas/${name} has a stable id`);
+  if (schema.$id) schemaIds.add(schema.$id);
+}
+check(schemaIds.size === schemaFiles.length, "protocol schema ids are unique");
+
 console.log("\n# the bundle actually runs\n");
 
 const started = await listTools();
@@ -209,6 +243,22 @@ if (tools) {
   console.log(`\n      ${tools.length} tools: ${names.join(", ")}`);
 }
 
+if (bundle && existsSync(bundle)) {
+  const isolatedRoot = mkdtempSync(resolve(tmpdir(), "factory-package-"));
+  try {
+    const isolatedBundle = resolve(isolatedRoot, "mcp-server.js");
+    copyFileSync(bundle, isolatedBundle);
+    const isolatedArgs = launchArgs.map((value) => value === bundle ? isolatedBundle : value);
+    const isolated = await listTools(launchCommand, isolatedArgs, isolatedRoot);
+    check(
+      isolated?.tools?.length === EXPECTED_TOOLS.length,
+      "the MCP bundle starts outside the checkout with no node_modules",
+    );
+  } finally {
+    rmSync(isolatedRoot, { recursive: true, force: true });
+  }
+}
+
 console.log("");
 if (problems.length) {
   console.log(`FAILED (${problems.length})`);
@@ -226,12 +276,13 @@ console.log("package verified");
  * without a token would be unusable at plugin-install time, when no tool has
  * been called yet.
  */
-async function listTools() {
-  if (!launchCommand || launchArgs.length === 0) return null;
+async function listTools(command = launchCommand, args = launchArgs, cwd = root) {
+  if (!command || args.length === 0) return null;
 
-  const child = spawn(launchCommand, launchArgs, {
+  const child = spawn(command, args, {
     stdio: ["pipe", "pipe", "pipe"],
     env: { ...process.env, GITHUB_TOKEN: "", GH_TOKEN: "" },
+    cwd,
   });
 
   // Without this, a `command` that is not on PATH surfaces as a 20-second
@@ -240,7 +291,7 @@ async function listTools() {
   const failed = new Promise((_, rej) => {
     child.on("error", (error) => {
       spawnFailure = error;
-      rej(new Error(`could not launch \`${launchCommand}\`: ${error.message}`));
+      rej(new Error(`could not launch \`${command}\`: ${error.message}`));
     });
   });
   failed.catch(() => {});

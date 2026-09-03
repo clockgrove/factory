@@ -31,12 +31,15 @@ export const INITIAL_PLAN_COMMIT = "Initial plan";
 
 export type WorkItemState =
   | "unstarted"
+  | "reserved"
   | "dispatched"
   | "in_flight"
+  | "validating"
   | "failed"
   | "for_review"
   | "blocked"
   | "escalated"
+  | "inconsistent"
   | "done";
 
 export type PullRequestState = "OPEN" | "CLOSED" | "MERGED";
@@ -254,6 +257,8 @@ export interface WorkItemSnapshot {
   id: string;
   number: number;
   title: string;
+  /** Human-readable Work Packet plus its machine-readable envelope. */
+  body?: string;
   closed: boolean;
   assignees: string[];
   /**
@@ -280,6 +285,8 @@ export interface WorkItemSnapshot {
    * function of GitHub's own event log, needing no separate storage.
    */
   copilotAssignments: Date[];
+  /** Versioned v2 events decoded from trusted Factory comment envelopes. */
+  factoryEvents?: import("./protocol/events.js").FactoryEvent[];
 }
 
 export interface ObjectiveSnapshot {
@@ -289,6 +296,9 @@ export interface ObjectiveSnapshot {
   id: string;
   number: number;
   title: string;
+  /** GitHub-authenticated author identity and relationship to the repository. */
+  authorLogin?: string;
+  authorAssociation?: string;
   /** Issue description, exactly as the human wrote it. `objective-compilation`
    * reads this — and only this, plus `title` — as the stated intent (§2); the
    * compile-if-needed step of the loop cannot function without it. */
@@ -343,4 +353,6 @@ export interface ObjectiveSnapshot {
    * of being wrong is a stall a human resolves, against merging untested code.
    */
   ciExpectedOnPullRequests: boolean | "unknown";
+  /** Objective-level run/lease/budget events decoded from Factory comments. */
+  factoryEvents?: import("./protocol/events.js").FactoryEvent[];
 }

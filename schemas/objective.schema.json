@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/clockgrove/factory/schemas/objective.schema.json",
   "title": "Compiled Objective",
-  "description": "The output of the objective-compilation skill: one Objective decomposed into a validated Work Item graph, ready for graph.ts to apply to GitHub as an issue, sub-issues, and 'blocked by' dependencies (§3). This is a compiler artifact, not a stored Factory concept -- once graph.ts has applied it, GitHub is the only remaining source of truth (§3's 'no custom fields, no state labels, no sidecar files').",
+  "description": "The output of the objective-compilation skill: one Objective decomposed into a validated Work Item graph, ready for graph.ts to apply to GitHub as sub-issues and native 'blocked by' dependencies. Before issue creation, Factory stores this complete artifact under an immutable per-run GitHub custom ref so crash recovery can replay it without recompilation.",
   "type": "object",
   "additionalProperties": false,
   "required": ["title", "workItems"],
@@ -14,9 +14,10 @@
     },
     "workItems": {
       "type": "array",
-      "description": "Every Work Item this Objective decomposes into. Order is not meaningful -- readiness (§3) is derived from each item's `dependsOn`, not array position.",
+      "description": "Every Work Item this Objective decomposes into. Readiness is derived from each item's `dependsOn`; Factory also receipts the original order solely to reconstruct an identical graph digest after interruption.",
       "items": { "$ref": "work-item.schema.json" },
-      "minItems": 1
+      "minItems": 1,
+      "maxItems": 100
     }
   }
 }

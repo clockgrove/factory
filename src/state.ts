@@ -18,6 +18,7 @@ import {
   type WorkItemSnapshot,
   type WorkItemState,
 } from "./types.js";
+import { deriveV2State } from "./control/v2-state.js";
 
 /**
  * A PR that changed nothing (§5.1).
@@ -302,10 +303,23 @@ export function humanAssignees(wi: WorkItemSnapshot): string[] {
 }
 
 /**
- * Attempts are counted, never stored (§4.4): one linked PR is one attempt.
- * A failed attempt's PR is closed before retry, so the count stays honest.
+ * Attempts are counted, never stored (§4.4). A v2 infrastructure interruption
+ * is represented by AttemptDeferred: its immutable reservation remains useful
+ * audit evidence, but it does not spend the Work Item's implementation retry
+ * allowance. Real time/provider usage remains accounted in the budget ledger.
  */
 export function attemptCount(wi: WorkItemSnapshot): number {
+  if (wi.factoryEvents !== undefined) {
+    const attempts = new Map<string, Set<string>>();
+    for (const event of wi.factoryEvents) {
+      if (event.kind !== "attempt" || event.workItem !== wi.number) continue;
+      const key = `${event.runId}:${event.attempt}`;
+      const names = attempts.get(key) ?? new Set<string>();
+      names.add(event.event);
+      attempts.set(key, names);
+    }
+    return [...attempts.values()].filter((events) => !events.has("AttemptDeferred")).length;
+  }
   return wi.linkedPullRequests.length;
 }
 
@@ -357,6 +371,7 @@ export function currentOpenPullRequest(
  *     dependency-blocked item as ready.
  */
 export function deriveState(wi: WorkItemSnapshot, now: Date): WorkItemState {
+  if (wi.factoryEvents !== undefined) return deriveV2State(wi, now);
   if (wi.closed) return "done";
 
   const merged = wi.linkedPullRequests.filter((p) => p.state === "MERGED");
@@ -492,7 +507,10 @@ export function inState(
  */
 export function ready(o: DerivedObjective): DerivedWorkItem[] {
   return o.items.filter(
-    (i) => i.state === "unstarted" && i.blockedBy.every((d) => d.closed),
+    (i) =>
+      (i.state === "unstarted" ||
+        (i.factoryEvents !== undefined && i.state === "failed")) &&
+      i.blockedBy.every((d) => d.closed),
   );
 }
 
@@ -509,18 +527,29 @@ export function allDone(o: DerivedObjective): boolean {
 export function isStalled(o: DerivedObjective): boolean {
   if (allDone(o)) return false;
 
-  const moving = inState(o, "dispatched", "in_flight", "for_review", "failed");
+  const moving = inState(
+    o,
+    "reserved",
+    "dispatched",
+    "in_flight",
+    "validating",
+    "for_review",
+    "failed",
+  );
   return moving.length === 0 && ready(o).length === 0;
 }
 
 export interface StateCounts {
   unstarted: number;
+  reserved: number;
   dispatched: number;
   in_flight: number;
+  validating: number;
   failed: number;
   for_review: number;
   blocked: number;
   escalated: number;
+  inconsistent: number;
   done: number;
 }
 
@@ -528,12 +557,15 @@ export interface StateCounts {
 export function counts(o: DerivedObjective): StateCounts {
   const c: StateCounts = {
     unstarted: 0,
+    reserved: 0,
     dispatched: 0,
     in_flight: 0,
+    validating: 0,
     failed: 0,
     for_review: 0,
     blocked: 0,
     escalated: 0,
+    inconsistent: 0,
     done: 0,
   };
   for (const i of o.items) c[i.state] += 1;

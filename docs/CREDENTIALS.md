@@ -2,12 +2,15 @@
 
 ## What Factory needs
 
-Factory runs in your agent harness with your own GitHub credentials. The bundled MCP server reads
-`GITHUB_TOKEN` or `GH_TOKEN` from the harness environment when its first tool is called. That is the
-whole requirement.
+Factory runs in your agent harness with your own GitHub credentials. The bundled MCP server first
+reads `GITHUB_TOKEN` or `GH_TOKEN` from its environment. If the harness does not forward ambient
+variables into plugin subprocesses, Factory asks the already-authenticated GitHub CLI (`gh auth
+token`) instead. Set one of the variables or run `gh auth login` once on that host; Factory never
+stores or prints the resulting token.
 
 It creates no GitHub environments, requires no repository secrets, and needs no token beyond the
 operator's own. Installing the plugin grants no workflow, settings, secret, or activation authority.
+It also requires no repository-local credential configuration.
 
 ## Policy on environments
 

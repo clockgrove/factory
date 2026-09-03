@@ -225,8 +225,8 @@ export interface LinkedPullRequest {
 export type AgentWorkEventKind = "started" | "finished" | "failed";
 
 /**
- * One `CopilotWorkStartedEvent` / `CopilotWorkFinishedEvent` /
- * `CopilotWorkFinishedFailureEvent` from a pull request's timeline.
+ * One `copilot_work_started` / `copilot_work_finished` /
+ * `copilot_work_finished_failure` entry from a pull request's REST timeline.
  */
 export interface AgentWorkEvent {
   kind: AgentWorkEventKind;

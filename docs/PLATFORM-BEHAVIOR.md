@@ -139,13 +139,22 @@ Finding 1 concluded that outcome must be read from the pull request rather than 
 That is right, but it is not the whole picture: GitHub also publishes the agent's own verdict as
 timeline events on the pull request, which Factory did not read for its first eight gates.
 
-| Event | GraphQL type | Meaning |
-|---|---|---|
-| `copilot_work_started` | `CopilotWorkStartedEvent` | A session began |
-| `copilot_work_finished` | `CopilotWorkFinishedEvent` | It completed |
-| `copilot_work_finished_failure` | `CopilotWorkFinishedFailureEvent` | It stopped on an error |
+| REST timeline event | Meaning |
+|---|---|
+| `copilot_work_started` | A session began |
+| `copilot_work_finished` | It completed |
+| `copilot_work_finished_failure` | It stopped on an error |
 
-The failure variant carries a `failureMessage` and a `sessionUrl`. Measured on Gate 8, where two
+These were originally available as the GraphQL types `CopilotWorkStartedEvent`,
+`CopilotWorkFinishedEvent`, and `CopilotWorkFinishedFailureEvent`. A September 2026 live-schema
+check found that GitHub had removed all three types and their corresponding
+`PullRequestTimelineItemsItemType` enum values from the public GraphQL schema, although the REST issue
+timeline continued to return the events. Factory therefore reads this one portion of the snapshot
+through REST; leaving the old fragments in the query causes GitHub to reject the entire Objective
+read during validation, even when the Objective has no Work Items.
+
+The failure variant carries a failure message (historically `failureMessage` in GraphQL; represented
+as `failure_message` by REST) and a session URL. Measured on Gate 8, where two
 consecutive attempts on one Work Item produced a valid pull request with a single `Initial plan`
 commit and an empty diff:
 

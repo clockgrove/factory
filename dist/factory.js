@@ -2776,18 +2776,6 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
                   }
                 }
               }
-              agentWorkEvents: timelineItems(last: 20, itemTypes: [
-                COPILOT_WORK_STARTED_EVENT,
-                COPILOT_WORK_FINISHED_EVENT,
-                COPILOT_WORK_FINISHED_FAILURE_EVENT
-              ]) {
-                nodes {
-                  __typename
-                  ... on CopilotWorkStartedEvent { createdAt }
-                  ... on CopilotWorkFinishedEvent { createdAt }
-                  ... on CopilotWorkFinishedFailureEvent { createdAt failureMessage }
-                }
-              }
             }
           }
           timelineItems(last: 10, itemTypes: [ASSIGNED_EVENT]) {
@@ -2829,7 +2817,7 @@ function runlessSuiteVerdict(suites) {
   const benign = /* @__PURE__ */ new Set(["SUCCESS", "NEUTRAL", "SKIPPED", null]);
   return runless.some((s) => !benign.has(s.conclusion)) ? "FAILURE" : null;
 }
-function toPullRequest(pr) {
+function toPullRequest(pr, agentWorkEvents = []) {
   const commit = pr.statusCheckRollup.nodes[0]?.commit;
   const checks = normalizeChecks(pr);
   return {
@@ -2855,25 +2843,30 @@ function toPullRequest(pr) {
     // brand-new PR is then trivially "recently active", which errs toward
     // waiting rather than toward closing something live.
     headCommittedAt: commit?.committedDate ? new Date(commit.committedDate) : new Date(pr.createdAt),
-    agentWorkEvents: toAgentWorkEvents(pr.agentWorkEvents?.nodes ?? [])
+    agentWorkEvents
   };
 }
 var AGENT_EVENT_KINDS = {
-  CopilotWorkStartedEvent: "started",
-  CopilotWorkFinishedEvent: "finished",
-  CopilotWorkFinishedFailureEvent: "failed"
+  copilot_work_started: "started",
+  copilot_work_finished: "finished",
+  copilot_work_finished_failure: "failed"
 };
 function toAgentWorkEvents(nodes) {
   return nodes.flatMap((n) => {
-    const kind = AGENT_EVENT_KINDS[n.__typename];
-    if (!kind) return [];
-    return [{ kind, at: new Date(n.createdAt), message: n.failureMessage ?? null }];
+    const kind = n.event ? AGENT_EVENT_KINDS[n.event] : void 0;
+    const at = new Date(n.created_at ?? "");
+    if (!kind || !Number.isFinite(at.getTime())) return [];
+    return [{
+      kind,
+      at,
+      message: n.failure_message ?? n.message ?? null
+    }];
   }).sort((a, b) => a.at.getTime() - b.at.getTime());
 }
 function copilotAssignments(wi) {
   return wi.timelineItems.nodes.filter((e) => e.assignee?.login === COPILOT_LOGIN).map((e) => new Date(e.createdAt)).sort((a, b) => a.getTime() - b.getTime());
 }
-function toWorkItem(wi) {
+function toWorkItem(wi, eventsByPullRequest) {
   const blockedBy = wi.blockedBy.nodes.map((d) => ({
     number: d.number,
     closed: d.state === "CLOSED"
@@ -2886,7 +2879,9 @@ function toWorkItem(wi) {
     assignees: wi.assignees.nodes.map((a) => a.login),
     labels: wi.labels?.nodes.map((l) => l.name) ?? [],
     blockedBy,
-    linkedPullRequests: wi.closedByPullRequestsReferences.nodes.map(toPullRequest),
+    linkedPullRequests: wi.closedByPullRequestsReferences.nodes.map(
+      (pr) => toPullRequest(pr, eventsByPullRequest.get(pr.number) ?? [])
+    ),
     copilotAssignments: copilotAssignments(wi)
   };
 }
@@ -3171,13 +3166,16 @@ var GitHubReader = class {
     const bot = repository.suggestedActors.nodes.find(
       (a) => a.login === COPILOT_LOGIN
     );
+    const agentWorkEvents = await this.#readAgentWorkEvents(issue.subIssues.nodes);
     return {
       id: issue.id,
       number: issue.number,
       title: issue.title,
       body: issue.body,
       closed: issue.state === "CLOSED",
-      workItems: issue.subIssues.nodes.map(toWorkItem),
+      workItems: issue.subIssues.nodes.map(
+        (wi) => toWorkItem(wi, agentWorkEvents)
+      ),
       readAt: /* @__PURE__ */ new Date(),
       repositoryId: repository.id,
       defaultBranch: repository.defaultBranchRef.name,
@@ -3185,6 +3183,45 @@ var GitHubReader = class {
       copilotBotId: bot?.id ?? null,
       ciExpectedOnPullRequests: await this.#ciExpectedOnPullRequests()
     };
+  }
+  /**
+   * Read Copilot session events for current attempts through REST.
+   *
+   * GitHub's public GraphQL schema no longer contains the Copilot timeline
+   * types, so mentioning them makes the entire Objective query invalid even
+   * when there are no Work Items. The REST issue timeline still reports the
+   * measured event names. Only open linked pull requests can be a current
+   * attempt, which keeps the companion reads proportional to active work and
+   * avoids re-reading every closed historical attempt on every cycle.
+   */
+  async #readAgentWorkEvents(workItems) {
+    const openPullRequests = /* @__PURE__ */ new Set();
+    for (const workItem of workItems) {
+      for (const pullRequest of workItem.closedByPullRequestsReferences.nodes) {
+        if (pullRequest.state === "OPEN") openPullRequests.add(pullRequest.number);
+      }
+    }
+    const result = /* @__PURE__ */ new Map();
+    for (const pullNumber of openPullRequests) {
+      const timeline = [];
+      for (let page = 1; ; page++) {
+        const response = await this.#octokit.request(
+          "GET /repos/{owner}/{repo}/issues/{issue_number}/timeline",
+          {
+            owner: this.#owner,
+            repo: this.#repo,
+            issue_number: pullNumber,
+            per_page: 100,
+            page,
+            headers: { accept: "application/vnd.github+json" }
+          }
+        );
+        timeline.push(...response.data);
+        if (response.data.length < 100) break;
+      }
+      result.set(pullNumber, toAgentWorkEvents(timeline));
+    }
+    return result;
   }
   /**
    * Whether this repository has ever run a workflow on a `pull_request` event.
@@ -3380,6 +3417,25 @@ function notFoundMessage(login) {
   return `GitHub user '${login}' not found. Check the exact account login: it is not necessarily the prefix of a branch name, an email local-part, or a display name. If this login was going to be used as an escalation target, it would have failed at the moment a human was needed \u2014 resolve it now instead.`;
 }
 
+// src/auth.ts
+import { execFileSync } from "node:child_process";
+function resolveGitHubToken(env = process.env, readGhToken = () => execFileSync("gh", ["auth", "token"], {
+  encoding: "utf8",
+  stdio: ["ignore", "pipe", "ignore"],
+  timeout: 5e3
+})) {
+  const forwarded = env["GITHUB_TOKEN"]?.trim() || env["GH_TOKEN"]?.trim();
+  if (forwarded) return forwarded;
+  try {
+    const token = readGhToken().trim();
+    if (token) return token;
+  } catch {
+  }
+  throw new Error(
+    "GitHub authentication unavailable: set GITHUB_TOKEN or GH_TOKEN, or run `gh auth login`"
+  );
+}
+
 // src/state.ts
 function isNoOp(pr) {
   const hasDiff = pr.changedLines > 0 || pr.changedFiles > 0;
@@ -3536,8 +3592,12 @@ async function main(argv) {
   if (!owner || !repo || !Number.isInteger(number)) {
     fail(`bad arguments: ${slug} ${rawNumber}`);
   }
-  const token = process.env["GITHUB_TOKEN"] ?? process.env["GH_TOKEN"];
-  if (!token) fail("set GITHUB_TOKEN or GH_TOKEN");
+  let token;
+  try {
+    token = resolveGitHubToken();
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
   const reader = new GitHubReader({
     token,
     owner,

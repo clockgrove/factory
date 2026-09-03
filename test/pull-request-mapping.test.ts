@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { toPullRequest } from "../src/github.js";
+import { toAgentWorkEvents, toPullRequest } from "../src/github.js";
 
 /**
  * Tests for the GraphQL-to-Factory pull request mapping.
@@ -97,5 +97,37 @@ describe("head commit time", () => {
 
     expect(pr.headCommittedAt.toISOString()).toBe("2026-01-01T09:00:00.000Z");
     expect(pr.headSha).toBe("");
+  });
+});
+
+describe("Copilot REST timeline events", () => {
+  it("maps known events, preserves failure detail, and sorts them", () => {
+    const events = toAgentWorkEvents([
+      {
+        event: "copilot_work_finished_failure",
+        created_at: "2026-01-01T10:03:00Z",
+        failure_message: "quota exceeded",
+      },
+      { event: "copilot_work_started", created_at: "2026-01-01T10:00:00Z" },
+      { event: "copilot_work_finished", created_at: "2026-01-01T10:02:00Z" },
+    ]);
+
+    expect(events.map((event) => event.kind)).toEqual(["started", "finished", "failed"]);
+    expect(events[2]?.message).toBe("quota exceeded");
+  });
+
+  it("drops unknown events and entries without valid timestamps", () => {
+    expect(toAgentWorkEvents([
+      { event: "renamed", created_at: "2026-01-01T10:00:00Z" },
+      { event: "copilot_work_started", created_at: "not-a-date" },
+    ])).toEqual([]);
+  });
+
+  it("attaches separately hydrated events to a pull request", () => {
+    const events = toAgentWorkEvents([
+      { event: "copilot_work_started", created_at: "2026-01-01T10:00:00Z" },
+    ]);
+
+    expect(toPullRequest(gqlPr() as never, events).agentWorkEvents).toEqual(events);
   });
 });

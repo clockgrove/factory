@@ -125,18 +125,6 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
                   }
                 }
               }
-              agentWorkEvents: timelineItems(last: 20, itemTypes: [
-                COPILOT_WORK_STARTED_EVENT,
-                COPILOT_WORK_FINISHED_EVENT,
-                COPILOT_WORK_FINISHED_FAILURE_EVENT
-              ]) {
-                nodes {
-                  __typename
-                  ... on CopilotWorkStartedEvent { createdAt }
-                  ... on CopilotWorkFinishedEvent { createdAt }
-                  ... on CopilotWorkFinishedFailureEvent { createdAt failureMessage }
-                }
-              }
             }
           }
           timelineItems(last: 10, itemTypes: [ASSIGNED_EVENT]) {
@@ -192,17 +180,18 @@ interface GqlPr {
       };
     }[];
   };
-  agentWorkEvents: { nodes: GqlAgentWorkEvent[] };
 }
 
 /**
- * A `CopilotWork*` timeline node. `__typename` is the discriminator; only the
- * failure variant carries `failureMessage`.
+ * A Copilot event from the REST issue-timeline endpoint. GitHub removed the
+ * equivalent public GraphQL enum values and object types in September 2026,
+ * while retaining these REST events.
  */
-interface GqlAgentWorkEvent {
-  __typename: string;
-  createdAt: string;
-  failureMessage?: string | null;
+export interface RestAgentWorkEvent {
+  event?: string;
+  created_at?: string;
+  failure_message?: string | null;
+  message?: string | null;
 }
 
 interface GqlAssignedEvent {
@@ -299,7 +288,10 @@ export function runlessSuiteVerdict(
  * Director, and a silently wrong mapping (a timestamp that never populates, a
  * fallback that never fires) is invisible until it matters.
  */
-export function toPullRequest(pr: GqlPr): LinkedPullRequest {
+export function toPullRequest(
+  pr: GqlPr,
+  agentWorkEvents: AgentWorkEvent[] = [],
+): LinkedPullRequest {
   const commit = pr.statusCheckRollup.nodes[0]?.commit;
   const checks = normalizeChecks(pr);
   return {
@@ -328,33 +320,38 @@ export function toPullRequest(pr: GqlPr): LinkedPullRequest {
     headCommittedAt: commit?.committedDate
       ? new Date(commit.committedDate)
       : new Date(pr.createdAt),
-    agentWorkEvents: toAgentWorkEvents(pr.agentWorkEvents?.nodes ?? []),
+    agentWorkEvents,
   };
 }
 
-/** GraphQL `__typename` to the kind `state.ts` reasons about. */
+/** REST event name to the kind `state.ts` reasons about. */
 const AGENT_EVENT_KINDS: Record<string, AgentWorkEventKind> = {
-  CopilotWorkStartedEvent: "started",
-  CopilotWorkFinishedEvent: "finished",
-  CopilotWorkFinishedFailureEvent: "failed",
+  copilot_work_started: "started",
+  copilot_work_finished: "finished",
+  copilot_work_finished_failure: "failed",
 };
 
 /**
- * Map the `CopilotWork*` timeline nodes to `AgentWorkEvent`s, oldest first.
+ * Map REST issue-timeline entries to `AgentWorkEvent`s, oldest first.
  *
- * Unrecognised `__typename`s are dropped rather than guessed at: GitHub may add
+ * Unrecognised event names are dropped rather than guessed at: GitHub may add
  * event types, and a node whose meaning Factory does not know must not be
  * allowed to look like a completion or a failure. Sorted explicitly rather than
  * trusting GitHub's ordering, because "which event came last" is the entire
  * basis of the liveness read (§5.1) and must not depend on an unstated
  * guarantee.
  */
-export function toAgentWorkEvents(nodes: GqlAgentWorkEvent[]): AgentWorkEvent[] {
+export function toAgentWorkEvents(nodes: RestAgentWorkEvent[]): AgentWorkEvent[] {
   return nodes
     .flatMap((n) => {
-      const kind = AGENT_EVENT_KINDS[n.__typename];
-      if (!kind) return [];
-      return [{ kind, at: new Date(n.createdAt), message: n.failureMessage ?? null }];
+      const kind = n.event ? AGENT_EVENT_KINDS[n.event] : undefined;
+      const at = new Date(n.created_at ?? "");
+      if (!kind || !Number.isFinite(at.getTime())) return [];
+      return [{
+        kind,
+        at,
+        message: n.failure_message ?? n.message ?? null,
+      }];
     })
     .sort((a, b) => a.at.getTime() - b.at.getTime());
 }
@@ -372,7 +369,10 @@ function copilotAssignments(wi: GqlWorkItem): Date[] {
     .sort((a, b) => a.getTime() - b.getTime());
 }
 
-function toWorkItem(wi: GqlWorkItem): WorkItemSnapshot {
+function toWorkItem(
+  wi: GqlWorkItem,
+  eventsByPullRequest: ReadonlyMap<number, AgentWorkEvent[]>,
+): WorkItemSnapshot {
   const blockedBy: IssueRef[] = wi.blockedBy.nodes.map((d) => ({
     number: d.number,
     closed: d.state === "CLOSED",
@@ -386,8 +386,9 @@ function toWorkItem(wi: GqlWorkItem): WorkItemSnapshot {
     assignees: wi.assignees.nodes.map((a) => a.login),
     labels: wi.labels?.nodes.map((l) => l.name) ?? [],
     blockedBy,
-    linkedPullRequests:
-      wi.closedByPullRequestsReferences.nodes.map(toPullRequest),
+    linkedPullRequests: wi.closedByPullRequestsReferences.nodes.map((pr) =>
+      toPullRequest(pr, eventsByPullRequest.get(pr.number) ?? []),
+    ),
     copilotAssignments: copilotAssignments(wi),
   };
 }
@@ -795,6 +796,7 @@ export class GitHubReader {
     const bot = repository.suggestedActors.nodes.find(
       (a) => a.login === COPILOT_LOGIN,
     );
+    const agentWorkEvents = await this.#readAgentWorkEvents(issue.subIssues.nodes);
 
     return {
       id: issue.id,
@@ -802,7 +804,9 @@ export class GitHubReader {
       title: issue.title,
       body: issue.body,
       closed: issue.state === "CLOSED",
-      workItems: issue.subIssues.nodes.map(toWorkItem),
+      workItems: issue.subIssues.nodes.map((wi) =>
+        toWorkItem(wi, agentWorkEvents),
+      ),
       readAt: new Date(),
       repositoryId: repository.id,
       defaultBranch: repository.defaultBranchRef.name,
@@ -810,6 +814,49 @@ export class GitHubReader {
       copilotBotId: bot?.id ?? null,
       ciExpectedOnPullRequests: await this.#ciExpectedOnPullRequests(),
     };
+  }
+
+  /**
+   * Read Copilot session events for current attempts through REST.
+   *
+   * GitHub's public GraphQL schema no longer contains the Copilot timeline
+   * types, so mentioning them makes the entire Objective query invalid even
+   * when there are no Work Items. The REST issue timeline still reports the
+   * measured event names. Only open linked pull requests can be a current
+   * attempt, which keeps the companion reads proportional to active work and
+   * avoids re-reading every closed historical attempt on every cycle.
+   */
+  async #readAgentWorkEvents(
+    workItems: GqlWorkItem[],
+  ): Promise<Map<number, AgentWorkEvent[]>> {
+    const openPullRequests = new Set<number>();
+    for (const workItem of workItems) {
+      for (const pullRequest of workItem.closedByPullRequestsReferences.nodes) {
+        if (pullRequest.state === "OPEN") openPullRequests.add(pullRequest.number);
+      }
+    }
+
+    const result = new Map<number, AgentWorkEvent[]>();
+    for (const pullNumber of openPullRequests) {
+      const timeline: RestAgentWorkEvent[] = [];
+      for (let page = 1; ; page++) {
+        const response = await this.#octokit.request(
+          "GET /repos/{owner}/{repo}/issues/{issue_number}/timeline",
+          {
+            owner: this.#owner,
+            repo: this.#repo,
+            issue_number: pullNumber,
+            per_page: 100,
+            page,
+            headers: { accept: "application/vnd.github+json" },
+          },
+        );
+        timeline.push(...(response.data as RestAgentWorkEvent[]));
+        if (response.data.length < 100) break;
+      }
+      result.set(pullNumber, toAgentWorkEvents(timeline));
+    }
+    return result;
   }
 
   /**

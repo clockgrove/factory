@@ -77,6 +77,22 @@ const arg = (server?.args ?? []).find((a) => a.includes("${PLUGIN_ROOT}"));
 check(Boolean(arg), "mcp.json addresses the bundle through ${PLUGIN_ROOT}");
 const bundle = arg?.replace("${PLUGIN_ROOT}", root);
 check(Boolean(bundle) && existsSync(bundle), `the path in mcp.json exists: ${arg}`);
+if (bundle && existsSync(bundle)) {
+  const bundleText = readFileSync(bundle, "utf8");
+  for (const removedGraphqlType of [
+    "COPILOT_WORK_STARTED_EVENT",
+    "COPILOT_WORK_FINISHED_EVENT",
+    "COPILOT_WORK_FINISHED_FAILURE_EVENT",
+    "CopilotWorkStartedEvent",
+    "CopilotWorkFinishedEvent",
+    "CopilotWorkFinishedFailureEvent",
+  ]) {
+    check(
+      !bundleText.includes(removedGraphqlType),
+      `the bundle does not query removed GraphQL type ${removedGraphqlType}`,
+    );
+  }
+}
 
 // Substitute ${PLUGIN_ROOT} the way a plugin client would, and launch through
 // *these* values below rather than a hard-coded path. Otherwise the manifest is

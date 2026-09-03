@@ -38,8 +38,10 @@ Objective needs replanning or a human needs to be asked.
   containing a human is *not* an escalation signal on its own. Escalation is Copilot being **absent**
   while a human is present, which is what the derived `state` already reports. Read `state`; do not
   re-derive escalation from `assignees` yourself.
-- `GITHUB_TOKEN` (or `GH_TOKEN`) must already be set in the MCP server's environment — you cannot set
-  it yourself; if `read_objective` fails with a missing-token error, stop and tell the human.
+- GitHub authentication must already be available either as `GITHUB_TOKEN` / `GH_TOKEN` in the MCP
+  server's environment or through the operator's authenticated GitHub CLI. You cannot authenticate
+  it yourself; if `read_objective` reports that neither is available, stop and tell the human to run
+  `gh auth login` or forward one of those variables.
 
 ## The loop
 

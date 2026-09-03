@@ -9,6 +9,7 @@
  */
 
 import { GitHubReader } from "./github.js";
+import { resolveGitHubToken } from "./auth.js";
 import { allDone, counts, derive, isStalled, ready } from "./state.js";
 
 function fail(message: string): never {
@@ -28,8 +29,12 @@ export async function main(argv: string[]): Promise<void> {
     fail(`bad arguments: ${slug} ${rawNumber}`);
   }
 
-  const token = process.env["GITHUB_TOKEN"] ?? process.env["GH_TOKEN"];
-  if (!token) fail("set GITHUB_TOKEN or GH_TOKEN");
+  let token: string;
+  try {
+    token = resolveGitHubToken();
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
+  }
 
   const reader = new GitHubReader({
     token,

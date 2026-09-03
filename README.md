@@ -4,8 +4,9 @@ A GitHub-native engineering-management plugin. You author an **Objective**; Fact
 **Work Items**, dispatches them to parallel GitHub Copilot coding-agent sessions, supervises the
 results, integrates what is good, and asks a human about what is not.
 
-Factory targets GitHub Copilot CLI today. Manifests for Codex and Claude Code ship in the same tree;
-running an identical Objective on all three is a separate check, not something the design assumes.
+Factory targets Codex, GitHub Copilot, and Claude Code through the same portable plugin. Each harness
+still needs a live install-and-run check; accepting the same manifest is not evidence that their
+credential and process boundaries behave identically.
 
 ## How it works
 
@@ -67,9 +68,10 @@ Factory runs no install script and does not need `node_modules`; the committed b
 the plugin launches. The repository must be public, or the adopter must independently have read
 access.
 
-Start a new Copilot CLI session, invoke the `director` skill, and give it an Objective repository,
-issue number, and escalation login. The MCP server reads `GITHUB_TOKEN` or `GH_TOKEN` from the harness
-environment when its first tool is called.
+Start a new harness session, invoke the `director` skill, and give it an Objective repository, issue
+number, and escalation login. The MCP server first reads `GITHUB_TOKEN` or `GH_TOKEN` from its
+environment. If the harness sanitizes those variables, it falls back to the operator's existing
+`gh auth` session; run `gh auth login` once on that host.
 
 ### Upgrade
 

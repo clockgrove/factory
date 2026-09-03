@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "Open-source agent plugins from Clockgrove.",
-    "version": "2.0.0"
+    "version": "2.0.1"
   },
   "plugins": [
     {
       "name": "factory",
       "description": "GitHub-backed, local-first unattended software factory.",
-      "version": "2.0.0",
+      "version": "2.0.1",
       "source": "."
     }
   ]

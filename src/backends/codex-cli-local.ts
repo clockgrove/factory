@@ -1,6 +1,6 @@
-import { access, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
-import { homedir, platform, arch, tmpdir } from "node:os";
+import { platform, arch, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type {
@@ -21,6 +21,11 @@ import {
   type ContainedProcess,
   type ProcessResult,
 } from "../runtime/process-group.js";
+import {
+  createIsolatedCodexHome,
+  resolveCodexAuthFile,
+  type CodexHomeFactory,
+} from "../runtime/codex-home.js";
 import { restrictedCodexArgs } from "./codex-cli-policy.js";
 
 export const CODEX_WORKER_OUTPUT_SCHEMA = {
@@ -76,6 +81,7 @@ export interface CodexCliLocalOptions {
   localProvider?: "ollama" | "lmstudio";
   authFile?: string;
   permittedModelCredentials?: string[];
+  createCodexHome?: CodexHomeFactory;
 }
 
 export function workerPacketPrompt(context: AttemptContext): string {
@@ -207,7 +213,7 @@ export class CodexCliLocalBackend implements ExecutionBackend {
         };
       }
     }
-    const authFile = this.#options.authFile ?? join(homedir(), ".codex", "auth.json");
+    const authFile = resolveCodexAuthFile(this.#options.authFile);
     const hasAuthFile = await access(authFile, fsConstants.R_OK).then(
       () => true,
       () => false,
@@ -227,67 +233,72 @@ export class CodexCliLocalBackend implements ExecutionBackend {
 
   async launch(context: AttemptContext): Promise<BackendHandle> {
     if (Date.now() >= context.deadline.getTime()) throw new Error("attempt deadline already elapsed");
-    const codexHome = await mkdtemp(join(tmpdir(), "clockgrove-factory-codex-home-"));
-    const schemaPath = join(codexHome, "worker-output.schema.json");
-    await writeFile(schemaPath, JSON.stringify(CODEX_WORKER_OUTPUT_SCHEMA), { mode: 0o600 });
-    const authFile = this.#options.authFile ?? join(homedir(), ".codex", "auth.json");
-    const hasAuth = await access(authFile, fsConstants.R_OK).then(
-      () => true,
-      () => false,
-    );
-    if (hasAuth) await symlink(authFile, join(codexHome, "auth.json"));
+    const codexHome = await (this.#options.createCodexHome ?? createIsolatedCodexHome)("worker");
+    try {
+      const schemaPath = join(codexHome, "worker-output.schema.json");
+      await writeFile(schemaPath, JSON.stringify(CODEX_WORKER_OUTPUT_SCHEMA), { mode: 0o600 });
+      const authFile = resolveCodexAuthFile(this.#options.authFile);
+      const hasAuth = await access(authFile, fsConstants.R_OK).then(
+        () => true,
+        () => false,
+      );
+      if (hasAuth) await symlink(authFile, join(codexHome, "auth.json"));
 
-    const args = [
-      ...restrictedCodexArgs("workspace-write", context.packet.requirements.networkDestinations),
-      "exec",
-      "--ephemeral",
-      "--ignore-user-config",
-      "--ignore-rules",
-      "--json",
-      "--output-schema",
-      schemaPath,
-      "-C",
-      context.workspace,
-    ];
-    if (this.#options.profile) args.push("--profile", this.#options.profile);
-    if (this.#options.model) args.push("--model", this.#options.model);
-    if (this.#options.localProvider) {
-      args.push("--oss", "--local-provider", this.#options.localProvider);
+      const args = [
+        ...restrictedCodexArgs("workspace-write", context.packet.requirements.networkDestinations),
+        "exec",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--json",
+        "--output-schema",
+        schemaPath,
+        "-C",
+        context.workspace,
+      ];
+      if (this.#options.profile) args.push("--profile", this.#options.profile);
+      if (this.#options.model) args.push("--model", this.#options.model);
+      if (this.#options.localProvider) {
+        args.push("--oss", "--local-provider", this.#options.localProvider);
+      }
+      args.push(workerPacketPrompt(context));
+
+      const env = sanitizedWorkerEnvironment(
+        { ...process.env, CODEX_HOME: codexHome },
+        this.#options.permittedModelCredentials ?? [],
+      );
+      env.FACTORY_ATTEMPT_ID = attemptIdentity(context);
+      const processHandle = startContainedProcess({
+        command: this.#options.command ?? "codex",
+        args,
+        cwd: context.workspace,
+        env,
+        timeoutMs: Math.max(1, context.deadline.getTime() - Date.now()),
+        maxOutputBytes: 256 * 1024,
+      });
+      const resourceId = `local-${processHandle.pid}`;
+      const running: RunningAttempt = {
+        process: processHandle,
+        context,
+        codexHome,
+        result: null,
+        final: null,
+      };
+      this.#running.set(resourceId, running);
+      void processHandle.completed.then((result) => {
+        running.result = result;
+        running.final = parseFinal(result.stdout);
+      });
+      return {
+        backendId: this.capabilities.id,
+        resourceId,
+        startedAt: new Date().toISOString(),
+        metadata: { pid: String(processHandle.pid) },
+      };
+    } catch (error) {
+      await rm(codexHome, { recursive: true, force: true });
+      throw error;
     }
-    args.push(workerPacketPrompt(context));
-
-    const env = sanitizedWorkerEnvironment(
-      { ...process.env, CODEX_HOME: codexHome },
-      this.#options.permittedModelCredentials ?? [],
-    );
-    env.FACTORY_ATTEMPT_ID = attemptIdentity(context);
-    const processHandle = startContainedProcess({
-      command: this.#options.command ?? "codex",
-      args,
-      cwd: context.workspace,
-      env,
-      timeoutMs: Math.max(1, context.deadline.getTime() - Date.now()),
-      maxOutputBytes: 256 * 1024,
-    });
-    const resourceId = `local-${processHandle.pid}`;
-    const running: RunningAttempt = {
-      process: processHandle,
-      context,
-      codexHome,
-      result: null,
-      final: null,
-    };
-    this.#running.set(resourceId, running);
-    void processHandle.completed.then((result) => {
-      running.result = result;
-      running.final = parseFinal(result.stdout);
-    });
-    return {
-      backendId: this.capabilities.id,
-      resourceId,
-      startedAt: new Date().toISOString(),
-      metadata: { pid: String(processHandle.pid) },
-    };
   }
 
   async observe(handle: BackendHandle): Promise<BackendObservation> {

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { chmod, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -113,6 +113,11 @@ describe("Codex CLI local backend", () => {
     const backend = new CodexCliLocalBackend({
       command: source.fakeCodex,
       authFile: source.authFile,
+      createCodexHome: async (kind) => {
+        const root = join(source.repository, ".factory-test-codex-homes");
+        await mkdir(root, { recursive: true });
+        return mkdtemp(join(root, `${kind}-`));
+      },
     });
     expect(await backend.probe()).toMatchObject({
       available: true,

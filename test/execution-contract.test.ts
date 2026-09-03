@@ -10,6 +10,7 @@ import type {
   IsolatedValidationContext,
   IsolatedValidationResult,
 } from "../src/execution/backend.js";
+import { capabilityMismatch } from "../src/execution/backend.js";
 import {
   assertArtifactScope,
   normalizeArtifact,
@@ -141,6 +142,15 @@ describe("normalized artifacts", () => {
 });
 
 describe("backend registry", () => {
+  it("matches common operating-system and architecture aliases", () => {
+    expect(capabilityMismatch(capabilities(), {
+      os: ["gnu/linux"],
+      architecture: ["x86_64"],
+      tools: [], services: [], networkDestinations: [], permittedSecretNames: [],
+      trust: "trusted_local",
+    })).toEqual([]);
+  });
+
   it("rejects arbitrary agent/runtime identifiers", () => {
     const registry = new BackendRegistry();
     expect(() =>

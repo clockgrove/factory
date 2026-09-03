@@ -33,4 +33,12 @@ describe("Codex management backend", () => {
     expect(schema.properties.title.const).toBe(title);
     expect(CODEX_COMPILED_OBJECTIVE_SCHEMA.properties.title).not.toHaveProperty("const");
   });
+
+  it("constrains compiler platform names to backend-compatible identifiers", () => {
+    const requirements = CODEX_COMPILED_OBJECTIVE_SCHEMA.properties.workItems.items
+      .properties.requirements.properties;
+    expect(requirements.architecture.items.enum).toContain("x64");
+    expect(requirements.architecture.items.enum).not.toContain("x86_64");
+    expect(requirements.os.items.enum).toEqual(["linux", "darwin", "win32"]);
+  });
 });

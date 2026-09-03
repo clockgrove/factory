@@ -188,6 +188,31 @@ describe("backend registry", () => {
     expect(selected.backend.capabilities.id).toBe("codex-native/local-worktree");
   });
 
+  it("lets a backend discover requested capabilities before matching", async () => {
+    class DiscoveringBackend extends FakeBackend {
+      override async probe(
+        requirements?: Parameters<ExecutionBackend["probe"]>[0],
+      ): Promise<BackendProbe> {
+        if (requirements?.tools.includes("systemctl")) {
+          this.capabilities.supportedTools.push("systemctl");
+        }
+        return super.probe();
+      }
+    }
+    const registry = new BackendRegistry();
+    registry.register(new DiscoveringBackend(capabilities()));
+    const selected = await registry.select({
+      policy: DEFAULT_RUN_POLICY,
+      requirements: {
+        os: [], architecture: [], tools: ["systemctl"], services: [],
+        networkDestinations: [], permittedSecretNames: [], trust: "trusted_local",
+      },
+      budget: { sandboxMinutes: 0, managedAgentSessions: 0 },
+    });
+
+    expect(selected.backend.capabilities.supportedTools).toContain("systemctl");
+  });
+
   it("fails before launch when only an unapproved paid backend fits", async () => {
     const registry = new BackendRegistry();
     registry.register(

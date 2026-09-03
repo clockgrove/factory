@@ -88,7 +88,7 @@ export interface StaleAttemptIdentity {
 
 export interface ExecutionBackend {
   readonly capabilities: ExecutionBackendCapabilities;
-  probe(): Promise<BackendProbe>;
+  probe(requirements?: ExecutionRequirements): Promise<BackendProbe>;
   launch(context: AttemptContext): Promise<BackendHandle>;
   observe(handle: BackendHandle): Promise<BackendObservation>;
   cancel(handle: BackendHandle): Promise<void>;

@@ -82,7 +82,7 @@ export class BackendRegistry {
         rejections.push({ id, reasons: ["not registered"] });
         continue;
       }
-      const reasons = capabilityMismatch(backend.capabilities, args.requirements);
+      const reasons: string[] = [];
       if (
         backend.capabilities.requiresPaidRuntime &&
         !args.policy.allowedPaidBackends.includes(id)
@@ -103,7 +103,7 @@ export class BackendRegistry {
       }
       let probe: BackendProbe | null = null;
       if (reasons.length === 0) {
-        probe = await backend.probe().catch((error: unknown) => ({
+        probe = await backend.probe(args.requirements).catch((error: unknown) => ({
           available: false,
           authenticated: false,
           reason: error instanceof Error ? error.message : String(error),
@@ -111,6 +111,7 @@ export class BackendRegistry {
         }));
         if (!probe.available) reasons.push(probe.reason ?? "unavailable");
         else if (!probe.authenticated) reasons.push(probe.reason ?? "not authenticated");
+        else reasons.push(...capabilityMismatch(backend.capabilities, args.requirements));
       }
       if (reasons.length === 0 && probe) return { backend, probe };
       rejections.push({ id, reasons });

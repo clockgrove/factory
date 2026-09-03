@@ -4,14 +4,17 @@ Status: implementation-ready proposal
 
 Date: 2026-09-03
 
-Scope: Factory v2 Supervisor, local Codex workers, and explicitly authorized paid backends
+Scope: Factory v2 repository controller, local Codex workers, and explicitly authorized paid
+backends. This is the scheduling sub-plan of
+[`INDIE-FACTORY-IMPLEMENTATION-PLAN.md`](INDIE-FACTORY-IMPLEMENTATION-PLAN.md).
 
 ## Outcome
 
 Factory will remain local-first while using as much local CPU and memory as the host can safely
 offer. When local capacity is full, it may admit the highest-priority eligible Work Items to an
 explicitly authorized cloud backend, within immutable concurrency and cost ceilings. GitHub remains
-the durable control plane; no GitHub Action, workflow, queue, database, or Factory service is added.
+the durable control plane; no GitHub Action, workflow, hosted Factory service, queue, or database is
+added. One explicitly installed local repository controller owns the host capacity pool.
 
 Priority changes ordering only. It can never bypass a dependency, repository trust decision,
 capability check, isolation requirement, branch policy, validation requirement, backend allowlist,
@@ -140,9 +143,11 @@ output. They never drive ordering.
 - `adaptive-local` requires both a free worker slot and CPU/memory headroom before admitting a local
   attempt.
 
-`maxParallel` remains the global hard ceiling across execution attempts. Independent validation has
+`maxParallel` remains the per-Objective hard ceiling across execution attempts. The repository
+controller adds separate `maxLocalWorkers` and `maxPaidWorkers` ceilings across all active
+Objectives, and current measured host capacity may narrow them further. Independent validation has
 its own existing reservations and is counted while it occupies a runtime. `backendMaxParallel`
-provides a second hard ceiling per backend. Missing backend entries inherit `maxParallel`.
+provides a second per-run hard ceiling per backend. Missing backend entries inherit `maxParallel`.
 
 The three nested policy objects are strict so a misspelled safety control fails activation. Ranks
 are integers from 0 through 1,000; worker and backend counts are 1 through 32; CPU values are 0
@@ -707,7 +712,9 @@ This feature is done when all of the following are true:
 ## Explicitly out of scope
 
 - GitHub Actions or repository workflows as a scheduler.
-- A Factory-hosted service, database, or queue.
+- A required Factory-hosted service, database, or queue.
+- Coordinating capacity across multiple local computers.
+- Organization-wide quota or enterprise scheduling policy.
 - Priority-based preemption of a running coding or validation session.
 - Automatic purchase, credential creation, provider signup, or budget increases.
 - Compiler-selected paid execution or compiler-selected priority authority.

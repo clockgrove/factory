@@ -34,3 +34,12 @@ and the boundary around replanning are recorded in
 Until those gates pass, Factory v2 is a release candidate. The supported claim is limited to the
 measured GitHub control primitives and Codex CLI on Linux/WSL; Daytona, Vercel Sandbox, native harness
 workers, macOS, and Windows remain unclaimed even though some adapters or portable surfaces exist.
+
+## Accepted product plan, not yet a support claim
+
+[`INDIE-FACTORY-IMPLEMENTATION-PLAN.md`](INDIE-FACTORY-IMPLEMENTATION-PLAN.md) is the accepted roadmap
+for the indie-developer product: one local repository controller, agent-chat/MCP control, cost-aware
+compilation, adaptive single-host scheduling, bounded cloud burst, durable Codex sessions, and native
+stacked pull requests. Except for the current v2 foundations identified above, those capabilities
+remain planned until their individual phase and live-conformance gates pass. Product-direction
+documentation must not be interpreted as release evidence.

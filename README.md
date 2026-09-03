@@ -1,13 +1,21 @@
 # Factory
 
-Factory is a GitHub-backed, local-first unattended software factory. A human writes an Objective;
-Factory compiles it into native GitHub sub-issues, schedules dependency-ready Work Items, runs coding
-workers, independently validates their artifacts, opens and integrates pull requests, and continues
-until the Objective ships or a specific human decision is required.
+Factory is a catalyst and multiplier for an indie developer or small trusted team. It turns one
+developer, one computer, and the AI agents they already use into a coordinated software studio. A
+human writes an Objective; Factory compiles it into native GitHub sub-issues, schedules
+dependency-ready Work Items, runs coding workers, independently validates their artifacts, opens and
+integrates pull requests, and continues until the Objective ships or a specific human decision is
+required.
 
-Factory does **not** require a Factory GitHub Action, workflow, server, database, queue, or sidecar
-state. The plugin supplies the orchestration code. GitHub supplies the durable control plane. A live
-local harness/CLI process supplies the scheduler.
+Factory is not a coding-agent competitor. Codex, Claude Code, and other agent runtimes perform the
+engineering work; Factory supplies the cost-aware compiler, local-first scheduler, durable GitHub
+protocol, recovery loop, and pull-request integration that make those sessions work as one system.
+Its optimization target is validated progress per dollar and per hour, not raw concurrency.
+
+Factory does **not** require a Factory GitHub Action, workflow, hosted service, database, queue, or
+sidecar state. The plugin supplies the orchestration code. GitHub supplies the durable control plane.
+A local process supplies the scheduler; the implementation roadmap replaces one manually started
+process per Objective with one explicitly installed repository controller.
 
 ```text
 Objective issue
@@ -42,6 +50,9 @@ and native dependencies               or opt-in sandbox/managed backends
 The authoritative contract and failure model are in [docs/DESIGN.md](docs/DESIGN.md). The concrete
 priority and local-to-cloud burst implementation is specified in
 [docs/ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md](docs/ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md).
+The accepted product scope, chat/MCP boundary, repository controller, cost-aware compiler, durable
+Codex sessions, native stacked-PR delivery, and ordered release plan are specified in
+[docs/INDIE-FACTORY-IMPLEMENTATION-PLAN.md](docs/INDIE-FACTORY-IMPLEMENTATION-PLAN.md).
 The original GitHub-Copilot-specific protocol is preserved in
 [docs/PROTOCOL-V1.md](docs/PROTOCOL-V1.md) only for compatibility with already-running work.
 
@@ -71,10 +82,10 @@ node dist/factory.js run OWNER/REPO#OBJECTIVE --until-terminal --repo /absolute/
 ```
 
 The process survives ordinary worker failures and reconstructs interrupted work from GitHub when
-restarted. It cannot wake a powered-off machine; an optional user-authorized host scheduler may
-restart the same command at login or boot. See
-[docs/HOST-SCHEDULING.md](docs/HOST-SCHEDULING.md) for an opt-in Linux/WSL service template and the
-honest process-lifetime boundary.
+restarted. It cannot wake a powered-off machine. The current release can use an optional
+user-authorized host scheduler to restart the same command at login or boot; the planned repository
+controller will make that one service per checkout instead of one service per Objective. See
+[docs/HOST-SCHEDULING.md](docs/HOST-SCHEDULING.md) for the current Linux/WSL boundary.
 
 Request a fenced cancellation from another shell with:
 

@@ -5,19 +5,33 @@ GitHub Copilot execution protocol, which remains supported only as a compatibili
 
 ## Product contract
 
-Factory turns a human Objective into shipped software. It compiles the Objective into native GitHub
-Work Item sub-issues, records dependencies with native `blocked by` relationships, schedules ready
-work, executes it through policy-approved backends, independently validates the result, publishes and
-integrates acceptable pull requests, and releases newly unblocked work until the Objective is done.
+Factory is a catalyst and multiplier for an indie developer or small trusted team. It turns one
+developer, one computer, and the AI agents they already use into a coordinated software studio. It
+does not replace a coding agent: it compiles a human Objective into native GitHub Work Item
+sub-issues, records dependencies with native `blocked by` relationships, schedules ready work,
+executes it through policy-approved agent backends, independently validates the result, publishes
+and integrates acceptable pull requests, and releases newly unblocked work until the Objective is
+done.
+
+Factory optimizes validated progress per dollar and per hour. It saves frontier-model cost first by
+improving decomposition, bounding repeated context, avoiding conflicting work, reusing durable
+evidence, and making semantic calls only at judgment boundaries. Model downgrading is an optional
+policy lever, not the product premise.
 
 The contract is:
 
 - GitHub is the durable, versioned control plane: Objectives, Work Items, dependencies, run and
   attempt events, control refs, pull requests, checks, and audit evidence.
-- Factory has no private database, queue, lease service, webhook receiver, or deployed control plane.
-- The installed plugin and an operator-started harness process are sufficient. Factory orchestration
-  never requires a GitHub Action or repository-specific Factory configuration.
+- Factory has no required private database, queue, lease service, webhook receiver, or hosted
+  control plane.
+- The installed plugin and an explicitly started local process are sufficient. The target unattended
+  runtime is one deliberately installed repository controller on one laptop or desktop. Factory
+  orchestration never requires a GitHub Action or repository-specific Factory configuration.
 - Trusted local compute is the default. Paid sandboxes and GitHub-managed coding agents are opt-in.
+- Agent chat through skills and MCP tools is the Factory human interface. GitHub supplies the visual
+  issue, diff, evidence, review, and merge surface; Factory adds no custom UI.
+- Native GitHub stacked pull requests are the preferred delivery shape for linear code dependencies.
+  Independent work remains sibling PRs, and multi-parent joins wait and start a new stack.
 - Unchanged-state polling is mechanical and model-free. Model calls occur only for compilation and
   semantic review; retry and escalation boundaries remain mechanically policy-bounded.
 - Workers are untrusted producers of artifacts. They never own GitHub publication, integration, run
@@ -34,8 +48,8 @@ The contract is:
                                ▲
                                │ durable, versioned control state
                                │
-                     Factory Supervisor
-       lease / schedule / budget / retry / validate / publish / integrate
+               Local Factory repository controller
+      discover / lease / schedule / budget / retry / recover / integrate
                      │                    │
                      │ judgment           │ execution
                      ▼                    ▼
@@ -54,20 +68,34 @@ cross-products.
 
 ## Activation and restart
 
-The canonical unattended entry point is:
+The target unattended entry point is one controller per local checkout:
+
+```text
+factory controller run OWNER/REPO --repo /absolute/path/to/repository
+```
+
+An explicit chat/MCP activation writes a durable request and returns; the controller discovers it,
+acquires the repository and Objective leases, and continues without holding the chat turn open. The
+controller shares one CPU, memory, backend, and GitHub-rate-limit pool across active Objectives in
+that repository. Plugin installation never starts or installs it. Controller service installation is
+a separate explicit user action.
+
+The foreground compatibility entry point remains:
 
 ```text
 factory run OWNER/REPO#OBJECTIVE --until-terminal
 ```
 
-One invocation validates access, policy, branch rules, and backend capabilities; writes a run
-receipt; acquires the Objective lease; compiles an empty Objective; schedules and supervises work;
-validates and integrates results; and exits only on completion, cancellation, escalation, or an
-operational failure.
+It uses the same application services for one Objective and remains useful before the repository
+controller implementation lands, for diagnostics, and for clients that cannot install a local
+service.
 
-While the process is alive, no scheduler outside Factory is required. A powered-off host cannot wake
-itself; optional user-authorized `systemd`, `launchd`, Task Scheduler, or harness automation adapters
-may restart the same command. A new process reconstructs everything durable from GitHub.
+While the controller is alive, no scheduler outside Factory is required. A powered-off host cannot
+wake itself; optional user-authorized `systemd`, `launchd`, or Task Scheduler adapters may restart
+the controller. A new process reconstructs everything durable from GitHub.
+
+The ordered implementation and migration gates are in
+[`INDIE-FACTORY-IMPLEMENTATION-PLAN.md`](INDIE-FACTORY-IMPLEMENTATION-PLAN.md).
 
 ## Versioned GitHub protocol
 
@@ -203,11 +231,12 @@ branch rules and required checks before spending on implementation. If a require
 produced without repository configuration, Factory escalates before launch.
 
 Only branch-rule shapes whose autonomous semantics are proven are allowed. Unknown rule types fail
-closed. Human-approval, code-owner, last-push approval, merge-queue, and incompatible merge-method
-requirements escalate rather than being bypassed. Immediately before each merge, integration is
-serialized and Factory rechecks the exact validated head, unchanged base SHA, current branch rules,
-required checks, lease, and mergeability. Parallel workers therefore cannot merge sequentially from
-the same stale base.
+closed. Human-approval, code-owner, last-push approval, and incompatible merge-method requirements
+escalate rather than being bypassed. The target delivery adapter supports native GitHub stacks and
+merge queues only after their asynchronous and failure behavior passes live conformance. Immediately
+before each merge, integration is repository-fenced and Factory rechecks the exact validated head,
+current stack/base relationship, current branch rules, required checks, leases, and mergeability.
+Parallel workers therefore cannot merge sequentially from the same stale base.
 
 Immediately before merge, Factory rechecks lease epoch, policy digest, validated SHA, checks,
 mergeability, branch rules, scope, and semantic acceptance. Integration is a reversible squash merge.
@@ -329,6 +358,11 @@ Provider SDKs used by shipped adapters are bundled. Installation runs no lifecyc
 no `node_modules`. Client-native workers and startup hooks are optional adapters; the portable MCP
 server never assumes it can call back into its host.
 
+The MCP server is the agent-facing command and inspection surface, not the unattended process. A
+separately and explicitly installed local repository controller consumes the same GitHub protocol.
+No custom UI or hosted endpoint is required. A later paid hosted MCP/coordinator is a separate target
+and cannot become a dependency of the open-source product.
+
 The first v2 release claim is Codex CLI on Linux/WSL. Other harness-native routes are added to the
 supported matrix only after the same conformance suite passes. V1 GitHub Copilot execution remains
 resumable during migration.
@@ -339,9 +373,10 @@ Release evidence and deliberately unclaimed adapters are listed in
 
 ## Definition of done
 
-A clean adopter can install Factory, authenticate GitHub, explicitly start an Objective, compile it
-into native Work Item sub-issues, run trusted work locally by default, opt into supported sandboxes or
-GitHub-managed sessions, recover after crashes without duplicate valid work, validate independently,
+A clean adopter can install Factory, authenticate GitHub, deliberately install one local repository
+controller, activate an Objective through chat, compile it into native Work Item sub-issues, run
+trusted work locally by default, opt into bounded cloud burst, recover after crashes without
+duplicate valid work, validate independently, deliver correct sibling and stacked pull requests,
 integrate only evidence-backed reversible changes, and close the Objective without Factory Actions,
-a deployed service, a database, or a queue. Human attention occurs only for a specific, evidenced
-policy, safety, budget, platform, or correctness boundary.
+a hosted service, a database, a queue, or a custom UI. Human attention occurs only for a specific,
+evidenced product, policy, safety, budget, platform, or correctness boundary.

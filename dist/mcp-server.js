@@ -357,13 +357,14 @@ git diff --binary --no-ext-diff HEAD > "$factory_root/artifact.patch"
 git diff --name-only -z HEAD > "$factory_root/changed-paths"
 printf '%s' "$worker_status" > "$factory_root/exit-code"
 `;return[{path:"factory/source.tar",content:e},{path:"factory/output.schema.json",content:Buffer.from(JSON.stringify(aF),"utf8")},{path:"factory/prompt.txt",content:Buffer.from(cF(t),"utf8")},{path:"factory/run.sh",content:Buffer.from(r,"utf8"),mode:448}]}function nB(t,e){let r={expectedPaths:[...t.artifact.changedPaths].sort(),commands:t.packet.validationCommands,timeoutMsPerCommand:Math.min((t.packet.requirements.timeoutMinutes??30)*6e4,36e5)},n=String.raw`import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 
 const root = new URL(".", import.meta.url).pathname;
 const workspace = new URL("../workspace/", import.meta.url).pathname;
 const config = JSON.parse(readFileSync(new URL("config.json", import.meta.url), "utf8"));
 const startedAt = new Date().toISOString();
 const commands = [];
+const childEnv = { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", HOME: "/tmp/factory-home", CI: "true", FACTORY_SUPERVISED: "1" };
 
 function git(args) {
   return execFileSync("git", args, { cwd: workspace, encoding: "utf8", maxBuffer: 1024 * 1024 });
@@ -385,14 +386,30 @@ try {
     throw new Error("applied artifact paths do not match its manifest");
   }
   let failureReason;
-  for (const command of config.commands) {
+  if (existsSync(workspace + "package-lock.json") || existsSync(workspace + "npm-shrinkwrap.json")) {
+    const command = "npm ci --no-audit --no-fund";
+    const began = Date.now();
+    const install = spawnSync("npm", ["ci", "--no-audit", "--no-fund"], {
+      cwd: workspace,
+      timeout: config.timeoutMsPerCommand,
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+      env: childEnv,
+    });
+    const exitCode = install.status ?? (install.error?.code === "ETIMEDOUT" ? 124 : 1);
+    commands.push({ command, exitCode, durationMs: Date.now() - began });
+    if (exitCode !== 0) {
+      failureReason = exitCode === 124 ? "validation setup timed out: " + command : "validation setup failed (" + exitCode + "): " + command;
+    }
+  }
+  for (const command of failureReason ? [] : config.commands) {
     const began = Date.now();
     const result = spawnSync("/bin/sh", ["-lc", command], {
       cwd: workspace,
       timeout: config.timeoutMsPerCommand,
       encoding: "utf8",
       maxBuffer: 1024 * 1024,
-      env: { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", HOME: "/tmp/factory-home", CI: "true", FACTORY_SUPERVISED: "1" },
+      env: childEnv,
     });
     const exitCode = result.status ?? (result.error?.code === "ETIMEDOUT" ? 124 : 1);
     commands.push({ command, exitCode, durationMs: Date.now() - began });

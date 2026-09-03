@@ -65,6 +65,8 @@ describe("sandbox bootstrap contracts", () => {
     const rendered = sandboxValidationFiles(validation, Buffer.from("archive"))
       .map((file) => file.content.toString("utf8"))
       .join("\n");
+    expect(rendered).toContain("npm ci --no-audit --no-fund");
+    expect(rendered).toContain("package-lock.json");
     expect(rendered).toContain("npm test");
     expect(rendered).not.toContain("OPENAI_API_KEY");
     expect(rendered).not.toContain("GITHUB_TOKEN");

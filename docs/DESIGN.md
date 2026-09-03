@@ -244,7 +244,9 @@ Independent validation runs in a second fresh resource with no model credential,
 equal the host-applied artifact tree. The sandbox worker CLI package is version-pinned. Daytona and
 Vercel remain separate adapters wherever their real behavior differs. Inside those dedicated outer
 sandboxes, Codex uses its documented bypass mode; the provider boundary, TTL, and egress policy are
-therefore the security boundary rather than a nested CLI sandbox.
+therefore the security boundary rather than a nested CLI sandbox. A fresh validator with an npm
+lockfile runs `npm ci` before the declared checks and includes that setup result in its evidence; it
+does not rely on a worker's mutable dependency directory.
 
 ## Routing, costs, and budgets
 

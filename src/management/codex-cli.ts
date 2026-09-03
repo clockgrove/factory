@@ -1,6 +1,6 @@
-import { access, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { access, rm, symlink, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { z } from "zod";
@@ -15,6 +15,11 @@ import {
   runContainedProcess,
   sanitizedWorkerEnvironment,
 } from "../runtime/process-group.js";
+import {
+  createIsolatedCodexHome,
+  resolveCodexAuthFile,
+  type CodexHomeFactory,
+} from "../runtime/codex-home.js";
 import type {
   CompilationContext,
   CompilationResult,
@@ -108,6 +113,7 @@ interface CodexManagementOptions {
   model?: string;
   authFile?: string;
   permittedModelCredentials?: string[];
+  createCodexHome?: CodexHomeFactory;
 }
 
 function parseOutput<T>(stdout: string): { value: T; usage: ManagementUsage } {
@@ -155,7 +161,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
       timeoutMs: 10_000,
       maxOutputBytes: 8_000,
     }).catch((error: unknown) => ({ exitCode: 1, stderr: String(error) }));
-    const authFile = this.#options.authFile ?? join(homedir(), ".codex", "auth.json");
+    const authFile = resolveCodexAuthFile(this.#options.authFile);
     const authenticated = await access(authFile, fsConstants.R_OK).then(() => true, () => false);
     return result.exitCode === 0
       ? { available: true, authenticated, ...(!authenticated ? { reason: "Codex login not found" } : {}) }
@@ -217,11 +223,11 @@ export class CodexCliManagementBackend implements ManagementBackend {
   }
 
   async #run<T>(cwd: string, schema: unknown, prompt: string): Promise<{ value: T; usage: ManagementUsage }> {
-    const codexHome = await mkdtemp(join(tmpdir(), "clockgrove-factory-management-"));
+    const codexHome = await (this.#options.createCodexHome ?? createIsolatedCodexHome)("management");
     try {
       const schemaPath = join(codexHome, "output.schema.json");
       await writeFile(schemaPath, JSON.stringify(schema), { mode: 0o600 });
-      const authFile = this.#options.authFile ?? join(homedir(), ".codex", "auth.json");
+      const authFile = resolveCodexAuthFile(this.#options.authFile);
       if (await access(authFile, fsConstants.R_OK).then(() => true, () => false)) {
         await symlink(authFile, join(codexHome, "auth.json"));
       }

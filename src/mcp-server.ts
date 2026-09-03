@@ -61,6 +61,7 @@ import { z } from "zod";
 
 import { version as packageVersion } from "../package.json";
 
+import { resolveGitHubToken } from "./auth.js";
 import {
   Dispatcher,
   GithubOctokitWriter,
@@ -91,10 +92,11 @@ function log(message: string): void {
   process.stderr.write(`[factory-mcp] ${message}\n`);
 }
 
+let cachedToken: string | undefined;
+
 function getToken(): string {
-  const token = process.env["GITHUB_TOKEN"] ?? process.env["GH_TOKEN"];
-  if (!token) throw new Error("set GITHUB_TOKEN or GH_TOKEN");
-  return token;
+  cachedToken ??= resolveGitHubToken();
+  return cachedToken;
 }
 
 function readerFor(owner: string, repo: string): GitHubReader {
@@ -719,7 +721,7 @@ server.registerTool(
       "`escalated` (attempts exhausted, handed to a human), or `no-op`. This is the branch that " +
       "actually fired, not a prediction — same vocabulary as `dispatch_integrate`'s `action`. " +
       "One failure escalates on the *first* attempt rather than waiting for the third: when the " +
-      "coding agent's own `CopilotWorkFinishedFailureEvent` names a cause no retry can address — " +
+      "coding agent's own `copilot_work_finished_failure` event names a cause no retry can address — " +
       "an exhausted request quota is the measured case — the remaining attempts would fail " +
       "identically within seconds. That escalation quotes GitHub's message verbatim, including " +
       "its request ID and settings URL, because the fix is a billing page and not the Work Item.",

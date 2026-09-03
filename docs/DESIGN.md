@@ -107,7 +107,7 @@ factory/
 ├── dist/factory.js               committed bundle — the artifact the plugin launches
 └── src/                          deterministic TypeScript; no judgment
     ├── types.ts                  shared shapes (§3.1)
-    ├── github.ts                 read-only GraphQL client → snapshot
+    ├── github.ts                 read-only GraphQL + REST client → snapshot
     ├── state.ts                  GitHub → derived state (§3)
     ├── platform.ts               refusal vs. work-failure, pacing (§14)
     ├── graph.ts                  apply Work Item graph to Issues
@@ -293,8 +293,8 @@ Attempt count = **number of linked pull requests**. No counter is stored.
 - a platform refusal (§14) creates no pull request, so it cannot inflate the count
 
 **One cause escalates on the first attempt instead of the third.** The coding agent publishes
-`CopilotWorkStartedEvent` / `CopilotWorkFinishedEvent` / `CopilotWorkFinishedFailureEvent` on the
-pull request's timeline, and the failure variant states its reason. When that reason lies outside
+`copilot_work_started` / `copilot_work_finished` / `copilot_work_finished_failure` on the pull
+request's REST timeline, and the failure variant states its reason. When that reason lies outside
 the Work Item — an exhausted request quota is the measured case — the budget has nothing to absorb:
 the remaining attempts fail identically within seconds, and the eventual escalation would blame the
 brief for a billing limit. Such an attempt escalates immediately, quoting GitHub's message verbatim
@@ -349,7 +349,7 @@ long merely wastes time.
 
 That window, and the empty-pull-request grace beside it, exist only because a proxy cannot separate
 "still working" from "died quietly". Where the agent has answered that question itself — a
-`CopilotWorkFinishedFailureEvent` with no later session start and no later commit — the graces are
+`copilot_work_finished_failure` event with no later session start and no later commit — the graces are
 skipped and the attempt fails at once; waiting them out cost 27m50s across one Work Item's two dead
 attempts, 80% of its elapsed life.
 The events are *not* used the other way round. Completion is still the `[WIP]` rename, because a
@@ -925,10 +925,12 @@ absence.
   state from GitHub with no working memory carried across. What that run did *not* exercise is a
   wake-up separated from the previous one by hours or days, or a graph large enough for two Work
   Items to be in flight in genuinely different states at the same wake.
-- **Cross-harness portability is verified by construction, not by a run.** The published package has
-  been installed and exercised on GitHub Copilot CLI. Running one identical Objective on Codex and
-  Claude Code is a separate check; any divergence would be a bug or a hidden client-specific
-  dependency.
+- **Cross-harness portability still needs end-to-end runs.** The published package has been installed
+  and exercised on GitHub Copilot CLI. A Codex CLI install against a private repository exposed two
+  real divergences that construction alone missed: its plugin subprocess did not inherit the shell's
+  `GH_TOKEN`, and GitHub had removed the Copilot event types from its public GraphQL schema. Factory
+  now falls back to the operator's `gh auth` session and reads those retained events through REST.
+  Claude Code and full supervision through integration on Codex remain separate checks.
 - **"The tests pass" is often static analysis of a diff.** Where a repository has no CI, or where CI
   is held (§9.2), the checks verdict is `null` or `checks_held` and nothing has executed the code.
 - **A finished run cannot be audited from the API alone.** A pull request's title, body and draft flag

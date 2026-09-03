@@ -22836,7 +22836,26 @@ var StdioServerTransport = class {
 };
 
 // package.json
-var version2 = "1.0.2";
+var version2 = "1.0.3";
+
+// src/auth.ts
+import { execFileSync } from "node:child_process";
+function resolveGitHubToken(env = process.env, readGhToken = () => execFileSync("gh", ["auth", "token"], {
+  encoding: "utf8",
+  stdio: ["ignore", "pipe", "ignore"],
+  timeout: 5e3
+})) {
+  const forwarded = env["GITHUB_TOKEN"]?.trim() || env["GH_TOKEN"]?.trim();
+  if (forwarded) return forwarded;
+  try {
+    const token = readGhToken().trim();
+    if (token) return token;
+  } catch {
+  }
+  throw new Error(
+    "GitHub authentication unavailable: set GITHUB_TOKEN or GH_TOKEN, or run `gh auth login`"
+  );
+}
 
 // node_modules/universal-user-agent/index.js
 function getUserAgent() {
@@ -24294,18 +24313,6 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
                   }
                 }
               }
-              agentWorkEvents: timelineItems(last: 20, itemTypes: [
-                COPILOT_WORK_STARTED_EVENT,
-                COPILOT_WORK_FINISHED_EVENT,
-                COPILOT_WORK_FINISHED_FAILURE_EVENT
-              ]) {
-                nodes {
-                  __typename
-                  ... on CopilotWorkStartedEvent { createdAt }
-                  ... on CopilotWorkFinishedEvent { createdAt }
-                  ... on CopilotWorkFinishedFailureEvent { createdAt failureMessage }
-                }
-              }
             }
           }
           timelineItems(last: 10, itemTypes: [ASSIGNED_EVENT]) {
@@ -24347,7 +24354,7 @@ function runlessSuiteVerdict(suites) {
   const benign = /* @__PURE__ */ new Set(["SUCCESS", "NEUTRAL", "SKIPPED", null]);
   return runless.some((s) => !benign.has(s.conclusion)) ? "FAILURE" : null;
 }
-function toPullRequest(pr) {
+function toPullRequest(pr, agentWorkEvents = []) {
   const commit = pr.statusCheckRollup.nodes[0]?.commit;
   const checks = normalizeChecks(pr);
   return {
@@ -24373,25 +24380,30 @@ function toPullRequest(pr) {
     // brand-new PR is then trivially "recently active", which errs toward
     // waiting rather than toward closing something live.
     headCommittedAt: commit?.committedDate ? new Date(commit.committedDate) : new Date(pr.createdAt),
-    agentWorkEvents: toAgentWorkEvents(pr.agentWorkEvents?.nodes ?? [])
+    agentWorkEvents
   };
 }
 var AGENT_EVENT_KINDS = {
-  CopilotWorkStartedEvent: "started",
-  CopilotWorkFinishedEvent: "finished",
-  CopilotWorkFinishedFailureEvent: "failed"
+  copilot_work_started: "started",
+  copilot_work_finished: "finished",
+  copilot_work_finished_failure: "failed"
 };
 function toAgentWorkEvents(nodes) {
   return nodes.flatMap((n) => {
-    const kind = AGENT_EVENT_KINDS[n.__typename];
-    if (!kind) return [];
-    return [{ kind, at: new Date(n.createdAt), message: n.failureMessage ?? null }];
+    const kind = n.event ? AGENT_EVENT_KINDS[n.event] : void 0;
+    const at = new Date(n.created_at ?? "");
+    if (!kind || !Number.isFinite(at.getTime())) return [];
+    return [{
+      kind,
+      at,
+      message: n.failure_message ?? n.message ?? null
+    }];
   }).sort((a, b) => a.at.getTime() - b.at.getTime());
 }
 function copilotAssignments(wi) {
   return wi.timelineItems.nodes.filter((e) => e.assignee?.login === COPILOT_LOGIN).map((e) => new Date(e.createdAt)).sort((a, b) => a.getTime() - b.getTime());
 }
-function toWorkItem(wi) {
+function toWorkItem(wi, eventsByPullRequest) {
   const blockedBy = wi.blockedBy.nodes.map((d) => ({
     number: d.number,
     closed: d.state === "CLOSED"
@@ -24404,7 +24416,9 @@ function toWorkItem(wi) {
     assignees: wi.assignees.nodes.map((a) => a.login),
     labels: wi.labels?.nodes.map((l) => l.name) ?? [],
     blockedBy,
-    linkedPullRequests: wi.closedByPullRequestsReferences.nodes.map(toPullRequest),
+    linkedPullRequests: wi.closedByPullRequestsReferences.nodes.map(
+      (pr) => toPullRequest(pr, eventsByPullRequest.get(pr.number) ?? [])
+    ),
     copilotAssignments: copilotAssignments(wi)
   };
 }
@@ -24689,13 +24703,16 @@ var GitHubReader = class {
     const bot = repository.suggestedActors.nodes.find(
       (a) => a.login === COPILOT_LOGIN
     );
+    const agentWorkEvents = await this.#readAgentWorkEvents(issue2.subIssues.nodes);
     return {
       id: issue2.id,
       number: issue2.number,
       title: issue2.title,
       body: issue2.body,
       closed: issue2.state === "CLOSED",
-      workItems: issue2.subIssues.nodes.map(toWorkItem),
+      workItems: issue2.subIssues.nodes.map(
+        (wi) => toWorkItem(wi, agentWorkEvents)
+      ),
       readAt: /* @__PURE__ */ new Date(),
       repositoryId: repository.id,
       defaultBranch: repository.defaultBranchRef.name,
@@ -24703,6 +24720,45 @@ var GitHubReader = class {
       copilotBotId: bot?.id ?? null,
       ciExpectedOnPullRequests: await this.#ciExpectedOnPullRequests()
     };
+  }
+  /**
+   * Read Copilot session events for current attempts through REST.
+   *
+   * GitHub's public GraphQL schema no longer contains the Copilot timeline
+   * types, so mentioning them makes the entire Objective query invalid even
+   * when there are no Work Items. The REST issue timeline still reports the
+   * measured event names. Only open linked pull requests can be a current
+   * attempt, which keeps the companion reads proportional to active work and
+   * avoids re-reading every closed historical attempt on every cycle.
+   */
+  async #readAgentWorkEvents(workItems) {
+    const openPullRequests = /* @__PURE__ */ new Set();
+    for (const workItem of workItems) {
+      for (const pullRequest of workItem.closedByPullRequestsReferences.nodes) {
+        if (pullRequest.state === "OPEN") openPullRequests.add(pullRequest.number);
+      }
+    }
+    const result = /* @__PURE__ */ new Map();
+    for (const pullNumber of openPullRequests) {
+      const timeline = [];
+      for (let page = 1; ; page++) {
+        const response = await this.#octokit.request(
+          "GET /repos/{owner}/{repo}/issues/{issue_number}/timeline",
+          {
+            owner: this.#owner,
+            repo: this.#repo,
+            issue_number: pullNumber,
+            per_page: 100,
+            page,
+            headers: { accept: "application/vnd.github+json" }
+          }
+        );
+        timeline.push(...response.data);
+        if (response.data.length < 100) break;
+      }
+      result.set(pullNumber, toAgentWorkEvents(timeline));
+    }
+    return result;
   }
   /**
    * Whether this repository has ever run a workflow on a `pull_request` event.
@@ -26005,10 +26061,10 @@ function log(message) {
   process.stderr.write(`[factory-mcp] ${message}
 `);
 }
+var cachedToken;
 function getToken() {
-  const token = process.env["GITHUB_TOKEN"] ?? process.env["GH_TOKEN"];
-  if (!token) throw new Error("set GITHUB_TOKEN or GH_TOKEN");
-  return token;
+  cachedToken ??= resolveGitHubToken();
+  return cachedToken;
 }
 function readerFor(owner, repo) {
   const opts = {
@@ -26365,7 +26421,7 @@ server.registerTool(
   "dispatch_retry_or_escalate",
   {
     title: "Dispatch: retry or escalate",
-    description: "\xA74.4/\xA75.1: act on a `failed` Work Item \u2014 close its unusable PR and retry, or escalate to a human once attempts are exhausted (3 linked PRs). A no-op on a Work Item that is not currently `failed`. Returns `action`: `redispatched` (PR closed, Copilot reassigned), `escalated` (attempts exhausted, handed to a human), or `no-op`. This is the branch that actually fired, not a prediction \u2014 same vocabulary as `dispatch_integrate`'s `action`. One failure escalates on the *first* attempt rather than waiting for the third: when the coding agent's own `CopilotWorkFinishedFailureEvent` names a cause no retry can address \u2014 an exhausted request quota is the measured case \u2014 the remaining attempts would fail identically within seconds. That escalation quotes GitHub's message verbatim, including its request ID and settings URL, because the fix is a billing page and not the Work Item.",
+    description: "\xA74.4/\xA75.1: act on a `failed` Work Item \u2014 close its unusable PR and retry, or escalate to a human once attempts are exhausted (3 linked PRs). A no-op on a Work Item that is not currently `failed`. Returns `action`: `redispatched` (PR closed, Copilot reassigned), `escalated` (attempts exhausted, handed to a human), or `no-op`. This is the branch that actually fired, not a prediction \u2014 same vocabulary as `dispatch_integrate`'s `action`. One failure escalates on the *first* attempt rather than waiting for the third: when the coding agent's own `copilot_work_finished_failure` event names a cause no retry can address \u2014 an exhausted request quota is the measured case \u2014 the remaining attempts would fail identically within seconds. That escalation quotes GitHub's message verbatim, including its request ID and settings URL, because the fix is a billing page and not the Work Item.",
     inputSchema: {
       ...WorkItemLocatorShape,
       ...EscalateToShape,

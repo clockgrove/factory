@@ -107,6 +107,31 @@ describe("Codex CLI local backend", () => {
     expect(prompt).toContain("test failed");
   });
 
+  it("discovers required host tools and user services before capability matching", async () => {
+    const source = await fixture();
+    const backend = new CodexCliLocalBackend({
+      command: source.fakeCodex,
+      authFile: source.authFile,
+      capabilityProbe: async () => ({
+        tools: ["systemctl"],
+        services: ["systemd-user"],
+      }),
+    });
+    const result = await backend.probe({
+      os: [],
+      architecture: [],
+      tools: ["systemctl"],
+      services: ["systemd-user"],
+      networkDestinations: [],
+      permittedSecretNames: [],
+      trust: "trusted_local",
+    });
+
+    expect(result).toMatchObject({ available: true, authenticated: true });
+    expect(backend.capabilities.supportedTools).toContain("systemctl");
+    expect(backend.capabilities.supportedServices).toContain("systemd-user");
+  });
+
   it("probes, launches, observes, and collects without publishing", async () => {
     const source = await fixture();
     const worktree = await createLocalWorktree(source.repository, source.baseSha);

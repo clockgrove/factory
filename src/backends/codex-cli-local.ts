@@ -1,7 +1,7 @@
 import { access, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { platform, arch, tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 
 import type {
   AttemptContext,
@@ -13,6 +13,7 @@ import type {
   StaleAttemptIdentity,
 } from "../execution/backend.js";
 import { normalizeArtifact, type NormalizedArtifact } from "../execution/artifacts.js";
+import type { ExecutionRequirements } from "../protocol/worker-packet.js";
 import { collectLocalArtifact } from "../runtime/local-worktree.js";
 import {
   sanitizedWorkerEnvironment,
@@ -82,6 +83,58 @@ export interface CodexCliLocalOptions {
   authFile?: string;
   permittedModelCredentials?: string[];
   createCodexHome?: CodexHomeFactory;
+  capabilityProbe?: LocalCapabilityProbe;
+}
+
+export interface LocalCapabilities {
+  tools: string[];
+  services: string[];
+}
+
+export type LocalCapabilityProbe = (
+  requirements: ExecutionRequirements,
+) => Promise<LocalCapabilities>;
+
+async function executableOnPath(command: string): Promise<boolean> {
+  if (!command || command.includes("/") || command.includes("\\")) return false;
+  const directories = (process.env["PATH"] ?? "").split(delimiter).filter(Boolean);
+  const extensions = process.platform === "win32"
+    ? (process.env["PATHEXT"] ?? ".EXE;.CMD;.BAT;.COM").split(";")
+    : [""];
+  for (const directory of directories) {
+    for (const extension of extensions) {
+      const found = await access(join(directory, `${command}${extension}`), fsConstants.X_OK)
+        .then(() => true, () => false);
+      if (found) return true;
+    }
+  }
+  return false;
+}
+
+export async function probeLocalCapabilities(
+  requirements: ExecutionRequirements,
+): Promise<LocalCapabilities> {
+  const tools: string[] = [];
+  for (const tool of requirements.tools) {
+    if (await executableOnPath(tool)) tools.push(tool);
+  }
+  const services: string[] = [];
+  if (
+    requirements.services.includes("systemd-user") &&
+    process.platform !== "win32" &&
+    await executableOnPath("systemctl")
+  ) {
+    const systemd = await runContainedProcess({
+      command: "systemctl",
+      args: ["--user", "show-environment"],
+      cwd: tmpdir(),
+      env: sanitizedWorkerEnvironment(process.env),
+      timeoutMs: 10_000,
+      maxOutputBytes: 8_000,
+    }).catch(() => null);
+    if (systemd?.exitCode === 0) services.push("systemd-user");
+  }
+  return { tools, services };
 }
 
 export function workerPacketPrompt(context: AttemptContext): string {
@@ -166,9 +219,20 @@ export class CodexCliLocalBackend implements ExecutionBackend {
     this.capabilities.supportsLocalInference = Boolean(options.localProvider);
   }
 
-  async probe(): Promise<BackendProbe> {
+  async probe(requirements?: ExecutionRequirements): Promise<BackendProbe> {
     const command = this.#options.command ?? "codex";
     const measuredAt = new Date().toISOString();
+    if (requirements) {
+      const discovered = await (this.#options.capabilityProbe ?? probeLocalCapabilities)(
+        requirements,
+      );
+      this.capabilities.supportedTools = [
+        ...new Set([...this.capabilities.supportedTools, ...discovered.tools]),
+      ];
+      this.capabilities.supportedServices = [
+        ...new Set([...this.capabilities.supportedServices, ...discovered.services]),
+      ];
+    }
     const result = await runContainedProcess({
       command,
       args: ["--version"],

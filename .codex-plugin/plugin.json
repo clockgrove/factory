@@ -1,7 +1,13 @@
 {
   "name": "factory",
   "version": "1.0.1",
-  "description": "Derived-state engineering management for GitHub: dispatch, evaluate, and integrate Objectives and Work Items.",
+  "description": "Engineering management for GitHub: compile Objectives into Work Items, dispatch them to agents, evaluate progress, and merge automatically when ready.",
+  "author": {
+    "name": "Clockgrove"
+  },
+  "homepage": "https://github.com/clockgrove/factory",
+  "icon": "../assets/logos/factory-logo.svg",
+  "keywords": ["github", "engineering-management", "objectives", "work-items", "automation", "mcp"],
   "skills": "../skills/",
   "mcpServers": "../mcp.json"
 }

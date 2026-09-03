@@ -1,11 +1,18 @@
 {
   "name": "clockgrove-factory",
   "interface": {
-    "displayName": "Clockgrove Factory"
+    "displayName": "Clockgrove Factory",
+    "shortDescription": "GitHub-native engineering management system",
+    "description": "Automatically manage software projects on GitHub. Factory compiles Objectives into Work Items, dispatches them to AI agents, evaluates progress in real-time, and merges pull requests when ready—no infrastructure required.",
+    "icon": "https://raw.githubusercontent.com/clockgrove/factory/main/assets/logos/factory-logo.svg",
+    "website": "https://github.com/clockgrove/factory",
+    "repository": "https://github.com/clockgrove/factory"
   },
   "plugins": [
     {
       "name": "factory",
+      "displayName": "Factory",
+      "description": "Engineering management for GitHub using AI agents and MCP servers",
       "source": {
         "source": "url",
         "url": "https://github.com/clockgrove/factory.git",
@@ -15,7 +22,15 @@
         "installation": "AVAILABLE",
         "authentication": "ON_INSTALL"
       },
-      "category": "Productivity"
+      "category": "Productivity",
+      "icon": "https://raw.githubusercontent.com/clockgrove/factory/main/assets/logos/factory-logo.svg",
+      "capabilities": [
+        "Compile Objectives into Work Items",
+        "Dispatch to AI agents",
+        "Evaluate PR readiness",
+        "Merge when conditions met",
+        "GitHub-native state management"
+      ]
     }
   ]
 }

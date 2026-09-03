@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Background -->
+  <rect width="256" height="256" fill="#ffffff" rx="32"/>
+  
+  <!-- Factory building structure -->
+  <g fill="#0066cc">
+    <!-- Main factory tower -->
+    <rect x="60" y="100" width="30" height="100" rx="2"/>
+    <!-- Right tower -->
+    <rect x="140" y="100" width="30" height="100" rx="2"/>
+    <!-- Connecting beam -->
+    <rect x="40" y="95" width="176" height="12" rx="2" fill="#0052a3"/>
+  </g>
+  
+  <!-- Chimneys/outputs -->
+  <g stroke="#0066cc" stroke-width="6" fill="none" stroke-linecap="round">
+    <line x1="75" y1="40" x2="75" y2="100"/>
+    <line x1="155" y1="40" x2="155" y2="100"/>
+  </g>
+  
+  <!-- Gears (automation symbol) -->
+  <g fill="#ff6b35">
+    <!-- Left gear -->
+    <circle cx="85" cy="140" r="12"/>
+    <circle cx="85" cy="140" r="8" fill="#ffffff"/>
+    <rect x="83" y="128" width="4" height="24" rx="2"/>
+    <rect x="73" y="138" width="24" height="4" rx="2"/>
+    
+    <!-- Right gear -->
+    <circle cx="165" cy="160" r="12"/>
+    <circle cx="165" cy="160" r="8" fill="#ffffff"/>
+    <rect x="163" y="148" width="4" height="24" rx="2"/>
+    <rect x="153" y="158" width="24" height="4" rx="2"/>
+  </g>
+  
+  <!-- Workflow arrows -->
+  <g stroke="#0066cc" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M 100 155 Q 120 145 145 165"/>
+    <polygon points="145 165 140 158 148 152" fill="#0066cc"/>
+  </g>
+  
+  <!-- Bottom status indicators -->
+  <circle cx="70" cy="210" r="5" fill="#4ade80"/>
+  <circle cx="90" cy="210" r="5" fill="#4ade80"/>
+  <circle cx="110" cy="210" r="5" fill="#4ade80"/>
+  <circle cx="170" cy="210" r="5" fill="#4ade80"/>
+</svg>

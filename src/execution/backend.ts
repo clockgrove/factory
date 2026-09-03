@@ -110,6 +110,22 @@ const isolationRank: Record<IsolationKind, number> = {
   managed: 3,
 };
 
+export function canonicalArchitecture(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (["amd64", "x86-64", "x86_64"].includes(normalized)) return "x64";
+  if (["aarch64", "arm64-v8a"].includes(normalized)) return "arm64";
+  if (["x86", "i386", "i486", "i586", "i686"].includes(normalized)) return "ia32";
+  return normalized;
+}
+
+export function canonicalOperatingSystem(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (["windows", "windows_nt"].includes(normalized)) return "win32";
+  if (["mac", "macos", "osx"].includes(normalized)) return "darwin";
+  if (normalized === "gnu/linux") return "linux";
+  return normalized;
+}
+
 export function capabilityMismatch(
   capabilities: ExecutionBackendCapabilities,
   requirements: ExecutionRequirements,
@@ -126,14 +142,20 @@ export function capabilityMismatch(
   }
   if (
     requirements.os.length > 0 &&
-    !requirements.os.some((os) => capabilities.supportedOs.includes(os))
+    !requirements.os.some((os) =>
+      capabilities.supportedOs.some(
+        (supported) => canonicalOperatingSystem(supported) === canonicalOperatingSystem(os),
+      ),
+    )
   ) {
     reasons.push(`unsupported OS (${requirements.os.join(", ")})`);
   }
   if (
     requirements.architecture.length > 0 &&
     !requirements.architecture.some((arch) =>
-      capabilities.supportedArchitectures.includes(arch),
+      capabilities.supportedArchitectures.some(
+        (supported) => canonicalArchitecture(supported) === canonicalArchitecture(arch),
+      ),
     )
   ) {
     reasons.push(`unsupported architecture (${requirements.architecture.join(", ")})`);

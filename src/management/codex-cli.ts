@@ -74,8 +74,22 @@ export const CODEX_COMPILED_OBJECTIVE_SCHEMA = {
               "tools", "services", "networkDestinations", "permittedSecretNames", "trust",
             ],
             properties: {
-              os: { type: "array", maxItems: 12, items: { type: "string" } },
-              architecture: { type: "array", maxItems: 8, items: { type: "string" } },
+              os: {
+                type: "array",
+                maxItems: 12,
+                items: { type: "string", enum: ["linux", "darwin", "win32"] },
+              },
+              architecture: {
+                type: "array",
+                maxItems: 8,
+                items: {
+                  type: "string",
+                  enum: [
+                    "arm", "arm64", "ia32", "loong64", "mips", "mipsel", "ppc", "ppc64",
+                    "riscv64", "s390", "s390x", "x64",
+                  ],
+                },
+              },
               cpu: { type: "number", exclusiveMinimum: 0, maximum: 256 },
               memoryMb: { type: "integer", minimum: 1, maximum: 1048576 },
               diskMb: { type: "integer", minimum: 1, maximum: 10485760 },
@@ -198,6 +212,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
       "Any pair of Work Items with overlapping file or directory scope must have a dependency path. When no semantic ordering is required, make the later item depend on the earlier item.",
       "Every acceptance criterion must be observable. Every scope entry must be a concrete repository-relative file or a directory ending in '/'; never use globs.",
       "Choose authoritative validation commands from the repository's existing toolchain. Default trust to trusted_local. Request isolation or services only when the work truly requires them.",
+      "Use Node.js canonical platform identifiers in requirements: linux/darwin/win32 for OS and x64/arm64/etc. for architecture.",
       "Emit each validation step as one simple runner command. Do not use shell chaining, pipes, redirection, command substitution, shell wrappers, interpreter eval flags, Git commands, or on-demand package executors.",
       `networkDestinations may contain only operator-approved entries from this list: ${JSON.stringify(context.allowedNetworkDestinations)}. permittedSecretNames must be empty; arbitrary task-secret injection is not supported by this release.`,
       `Every Work Item baseSha must equal ${context.baseSha} and artifactContract must equal clockgrove.factory/artifact-v1.`,

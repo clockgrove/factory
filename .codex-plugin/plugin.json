@@ -1,0 +1,7 @@
+{
+  "name": "factory",
+  "version": "1.0.1",
+  "description": "Derived-state engineering management for GitHub: dispatch, evaluate, and integrate Objectives and Work Items.",
+  "skills": "../skills/",
+  "mcpServers": "../mcp.json"
+}

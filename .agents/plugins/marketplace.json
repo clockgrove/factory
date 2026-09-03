@@ -1,0 +1,21 @@
+{
+  "name": "clockgrove-factory",
+  "interface": {
+    "displayName": "Clockgrove Factory"
+  },
+  "plugins": [
+    {
+      "name": "factory",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/clockgrove/factory.git",
+        "ref": "main"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

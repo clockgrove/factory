@@ -30,7 +30,7 @@
 
 import { createHash } from "node:crypto";
 
-import { Octokit } from "@octokit/core";
+import type { Octokit } from "@octokit/core";
 import { z } from "zod";
 
 import { createOctokit, type GitHubOptions } from "./github.js";
@@ -134,18 +134,22 @@ function dependsTransitivelyOn(
  * compiler order by making the later item depend on the earlier item. All
  * semantic graph errors remain validation failures.
  */
-export function addScopeSerializationEdges(objective: CompiledObjective): CompiledObjective {
-  const normalized: CompiledObjective = {
+export function addScopeSerializationEdges<T extends CompiledObjective>(objective: T): T {
+  const normalized = {
     ...objective,
     workItems: objective.workItems.map((item) => ({
       ...item,
       dependsOn: [...item.dependsOn],
     })),
-  };
+  } as T;
   const byId = new Map(normalized.workItems.map((item) => [item.id, item]));
   for (let leftIndex = 0; leftIndex < normalized.workItems.length; leftIndex += 1) {
     const left = normalized.workItems[leftIndex]!;
-    for (let rightIndex = leftIndex + 1; rightIndex < normalized.workItems.length; rightIndex += 1) {
+    for (
+      let rightIndex = leftIndex + 1;
+      rightIndex < normalized.workItems.length;
+      rightIndex += 1
+    ) {
       const right = normalized.workItems[rightIndex]!;
       const overlapping = left.scope.some((leftPath) =>
         right.scope.some((rightPath) => scopeOverlaps(leftPath, rightPath)),
@@ -162,49 +166,63 @@ export function addScopeSerializationEdges(objective: CompiledObjective): Compil
   return normalized;
 }
 
-const PersistedCompiledWorkItemSchema = z.object({
-  id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/).max(64),
-  title: z.string().min(1).max(256),
-  goal: z.string().min(1).max(4_000),
-  acceptance: z.array(z.string().min(1).max(2_000)).min(1).max(64),
-  scope: z.array(RepositoryScopePathSchema).min(1).max(64),
-  preconditions: z.array(z.string().min(1).max(2_000)).max(64),
-  outOfScope: z.array(z.string().min(1).max(2_000)).max(64),
-  conventions: z.array(z.string().min(1).max(2_000)).max(64),
-  dependsOn: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]*$/).max(64)).max(50),
-  baseSha: z.string().regex(/^[0-9a-f]{40}$/i),
-  validationCommands: z.array(z.string().min(1).max(1_000)).min(1).max(32),
-  requirements: ExecutionRequirementsSchema,
-  artifactContract: z.literal("clockgrove.factory/artifact-v1"),
-  context: ContextManifestSchema.optional(),
-  changeSurface: ChangeSurfaceSchema.optional(),
-  validation: z
-    .array(
-      z
-        .object({
-          tier: z.enum(["mechanical", "semantic", "visual", "deterministic-simulation"]),
-          criteria: z.array(z.string().min(1).max(2_000)).min(1).max(64),
-        })
-        .strict(),
-    )
-    .min(1)
-    .max(4)
-    .optional(),
-  delivery: DeliveryHintSchema.optional(),
-  economicReview: z
-    .object({
-      conservative: z.boolean(),
-      rationale: z.string().min(1).max(2_000),
-      paidMeasurementRequired: z.boolean(),
-    })
-    .strict()
-    .optional(),
-}).strict();
+const PersistedCompiledWorkItemSchema = z
+  .object({
+    id: z
+      .string()
+      .regex(/^[a-z0-9][a-z0-9-]*$/)
+      .max(64),
+    title: z.string().min(1).max(256),
+    goal: z.string().min(1).max(4_000),
+    acceptance: z.array(z.string().min(1).max(2_000)).min(1).max(64),
+    scope: z.array(RepositoryScopePathSchema).min(1).max(64),
+    preconditions: z.array(z.string().min(1).max(2_000)).max(64),
+    outOfScope: z.array(z.string().min(1).max(2_000)).max(64),
+    conventions: z.array(z.string().min(1).max(2_000)).max(64),
+    dependsOn: z
+      .array(
+        z
+          .string()
+          .regex(/^[a-z0-9][a-z0-9-]*$/)
+          .max(64),
+      )
+      .max(50),
+    baseSha: z.string().regex(/^[0-9a-f]{40}$/i),
+    validationCommands: z.array(z.string().min(1).max(1_000)).min(1).max(32),
+    requirements: ExecutionRequirementsSchema,
+    artifactContract: z.literal("clockgrove.factory/artifact-v1"),
+    context: ContextManifestSchema.optional(),
+    changeSurface: ChangeSurfaceSchema.optional(),
+    validation: z
+      .array(
+        z
+          .object({
+            tier: z.enum(["mechanical", "semantic", "visual", "deterministic-simulation"]),
+            criteria: z.array(z.string().min(1).max(2_000)).min(1).max(64),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(4)
+      .optional(),
+    delivery: DeliveryHintSchema.optional(),
+    economicReview: z
+      .object({
+        conservative: z.boolean(),
+        rationale: z.string().min(1).max(2_000),
+        paidMeasurementRequired: z.boolean(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
 
-const PersistedCompiledObjectiveSchema = z.object({
-  title: z.string().min(1).max(256),
-  workItems: z.array(PersistedCompiledWorkItemSchema).min(1).max(100),
-}).strict();
+const PersistedCompiledObjectiveSchema = z
+  .object({
+    title: z.string().min(1).max(256),
+    workItems: z.array(PersistedCompiledWorkItemSchema).min(1).max(100),
+  })
+  .strict();
 
 export function parsePersistedCompiledObjective(input: unknown): CompiledObjective {
   const objective = PersistedCompiledObjectiveSchema.parse(input);
@@ -295,12 +313,7 @@ export function validateGraph(objective: CompiledObjective): void {
   }
 
   for (const wi of objective.workItems) {
-    const v2Fields = [
-      wi.baseSha,
-      wi.validationCommands,
-      wi.requirements,
-      wi.artifactContract,
-    ];
+    const v2Fields = [wi.baseSha, wi.validationCommands, wi.requirements, wi.artifactContract];
     if (v2Fields.some((value) => value !== undefined)) {
       workerPacketFromCompiled(wi);
     }
@@ -312,11 +325,21 @@ const GRAPH_ITEM_MARKER = "clockgrove-factory:graph-item";
 
 const GraphItemMetadataSchema = z.object({
   protocol: z.literal("clockgrove.factory/graph-v1"),
-  id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/).max(64),
+  id: z
+    .string()
+    .regex(/^[a-z0-9][a-z0-9-]*$/)
+    .max(64),
   graphDigest: z.string().regex(/^[0-9a-f]{64}$/),
   graphSize: z.number().int().positive().max(100),
   index: z.number().int().nonnegative().max(99),
-  dependsOn: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]*$/).max(64)).max(50),
+  dependsOn: z
+    .array(
+      z
+        .string()
+        .regex(/^[a-z0-9][a-z0-9-]*$/)
+        .max(64),
+    )
+    .max(50),
 });
 
 export type GraphItemMetadata = z.infer<typeof GraphItemMetadataSchema>;
@@ -325,7 +348,10 @@ function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value !== null && typeof value === "object") {
     const record = value as Record<string, unknown>;
-    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonical(record[key])}`).join(",")}}`;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonical(record[key])}`)
+      .join(",")}}`;
   }
   return JSON.stringify(value);
 }
@@ -408,10 +434,7 @@ export function parseWorkerPacketFromIssue(body: string): WorkerPacket {
  * ever creates. Empty optional sections are omitted rather than rendered
  * with "(none)" — a missing section is not a signal worth an agent reading.
  */
-export function renderWorkPacket(
-  wi: CompiledWorkItem,
-  graphMetadata?: GraphItemMetadata,
-): string {
+export function renderWorkPacket(wi: CompiledWorkItem, graphMetadata?: GraphItemMetadata): string {
   const section = (heading: string, items: string[]): string =>
     items.length > 0 ? `## ${heading}\n\n${items.map((i) => `- ${i}`).join("\n")}\n` : "";
 
@@ -434,7 +457,9 @@ export function renderWorkPacket(
     rendered,
     hasV2 ? encodeWorkerPacket(workerPacketFromCompiled(wi)) : "",
     graphMetadata ? encodeGraphItemMetadata(graphMetadata) : "",
-  ].filter(Boolean).join("\n\n");
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 /**
@@ -506,16 +531,13 @@ export class GithubOctokitGraphWriter implements GraphWriter {
     body: string;
     labelIds?: string[];
   }): Promise<CreatedWorkItem> {
-    const res = await this.#octokit.graphql<CreateIssueResponse>(
-      CREATE_WORK_ITEM_ISSUE_MUTATION,
-      {
-        repositoryId: args.repositoryId,
-        parentIssueId: args.parentIssueId,
-        title: args.title,
-        body: args.body,
-        labelIds: args.labelIds ?? [],
-      },
-    );
+    const res = await this.#octokit.graphql<CreateIssueResponse>(CREATE_WORK_ITEM_ISSUE_MUTATION, {
+      repositoryId: args.repositoryId,
+      parentIssueId: args.parentIssueId,
+      title: args.title,
+      body: args.body,
+      labelIds: args.labelIds ?? [],
+    });
     return { id: res.createIssue.issue.id, number: res.createIssue.issue.number };
   }
 
@@ -573,10 +595,12 @@ export class GraphApplier {
     this.#breaker = opts.circuitBreaker ?? new CircuitBreaker();
     this.#pacer = opts.pacer ?? new ContentCreationPacer();
     this.#concurrency = opts.concurrency ?? new ConcurrencyLimiter();
-    this.#mutations = opts.mutationScheduler ?? new MutationScheduler({
-      pacer: this.#pacer,
-      onThrottle: this.#notify,
-    });
+    this.#mutations =
+      opts.mutationScheduler ??
+      new MutationScheduler({
+        pacer: this.#pacer,
+        onThrottle: this.#notify,
+      });
     this.#beforeMutation = opts.beforeMutation ?? (async () => {});
   }
 
@@ -614,14 +638,18 @@ export class GraphApplier {
     const expectedById = new Map(objective.workItems.map((item) => [item.id, item]));
     for (const existing of ctx.existingWorkItems ?? []) {
       if (existing.graphDigest !== digest || existing.graphSize !== objective.workItems.length) {
-        throw new Error(`existing Work Item ${existing.compilerId} belongs to a different compiled graph`);
+        throw new Error(
+          `existing Work Item ${existing.compilerId} belongs to a different compiled graph`,
+        );
       }
       if (created.has(existing.compilerId)) {
         throw new Error(`duplicate existing Work Item id: ${existing.compilerId}`);
       }
       const expected = expectedById.get(existing.compilerId);
       if (!expected) {
-        throw new Error(`existing Work Item ${existing.compilerId} is absent from the durable graph`);
+        throw new Error(
+          `existing Work Item ${existing.compilerId} is absent from the durable graph`,
+        );
       }
       const expectedIndex = objective.workItems.indexOf(expected);
       const metadata: GraphItemMetadata = {

@@ -22,9 +22,7 @@ export function normalizeIssueFieldValues(
     );
   }
   return connection.nodes.flatMap((value) =>
-    value.field?.id &&
-    value.field.name &&
-    value.field.dataType === "SINGLE_SELECT"
+    value.field?.id && value.field.name && value.field.dataType === "SINGLE_SELECT"
       ? [
           {
             fieldId: value.field.id,
@@ -44,10 +42,7 @@ export function priorityPolicyFragment(field: PriorityFieldDefinition) {
       source: "issue-field-then-subissue-order" as const,
       issueFieldId: field.id,
       optionRanks: Object.fromEntries(
-        field.options.map((option) => [
-          option.id,
-          Math.min(1_000, option.position * 10),
-        ]),
+        field.options.map((option) => [option.id, Math.min(1_000, option.position * 10)]),
       ),
       unsetRank: Math.min(1_000, Math.max(100, field.options.length * 10)),
       onUnavailable: "fallback-to-subissue-order" as const,
@@ -55,9 +50,7 @@ export function priorityPolicyFragment(field: PriorityFieldDefinition) {
   };
 }
 
-export type PriorityFieldPreflight =
-  | { available: true }
-  | { available: false; reason: string };
+export type PriorityFieldPreflight = { available: true } | { available: false; reason: string };
 
 /** Validate immutable stable IDs without ever consulting display names. */
 export function validatePriorityFieldDefinition(

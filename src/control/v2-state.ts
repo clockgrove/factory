@@ -1,35 +1,22 @@
 import type { FactoryEvent } from "../protocol/events.js";
-import {
-  COPILOT_ASSIGNEE_LOGIN,
-  type WorkItemSnapshot,
-  type WorkItemState,
-} from "../types.js";
+import { COPILOT_ASSIGNEE_LOGIN, type WorkItemSnapshot, type WorkItemState } from "../types.js";
 
 export const RESERVATION_STALE_MS = 5 * 60_000;
-type WorkScopedEvent = Extract<
-  FactoryEvent,
-  { kind: "attempt" | "validation" | "budget" }
->;
+type WorkScopedEvent = Extract<FactoryEvent, { kind: "attempt" | "validation" | "budget" }>;
 
 const assignedToCopilot = (workItem: WorkItemSnapshot) =>
   workItem.assignees.includes(COPILOT_ASSIGNEE_LOGIN);
 const hasHumanAssignee = (workItem: WorkItemSnapshot) =>
   workItem.assignees.some((login) => login !== COPILOT_ASSIGNEE_LOGIN);
 
-function eventsForCurrentAttempt(
-  workItem: WorkItemSnapshot,
-): WorkScopedEvent[] {
+function eventsForCurrentAttempt(workItem: WorkItemSnapshot): WorkScopedEvent[] {
   const events = (workItem.factoryEvents ?? []).filter(
     (event): event is WorkScopedEvent =>
-      (event.kind === "attempt" ||
-        event.kind === "validation" ||
-        event.kind === "budget") &&
-      "workItem" in event && event.workItem === workItem.number,
+      (event.kind === "attempt" || event.kind === "validation" || event.kind === "budget") &&
+      "workItem" in event &&
+      event.workItem === workItem.number,
   );
-  const latestAttempt = events.reduce(
-    (max, event) => Math.max(max, event.attempt ?? 0),
-    0,
-  );
+  const latestAttempt = events.reduce((max, event) => Math.max(max, event.attempt ?? 0), 0);
   return events
     .filter((event) => (event.attempt ?? 0) === latestAttempt)
     .sort((a, b) => a.sequence - b.sequence);
@@ -64,11 +51,7 @@ export function deriveV2State(
     // state even when a maintainer integrated the work outside Factory. Do not
     // invent an attempt receipt, and do not rerun code already on the base.
     if (workItem.closed && merged) return "done";
-    if (
-      assignedToCopilot(workItem) ||
-      workItem.linkedPullRequests.length > 0 ||
-      workItem.closed
-    ) {
+    if (assignedToCopilot(workItem) || workItem.linkedPullRequests.length > 0 || workItem.closed) {
       return "inconsistent";
     }
     if (hasHumanAssignee(workItem)) return "escalated";
@@ -89,9 +72,7 @@ export function deriveV2State(
   // three durable facts agree.
   if (merged) return "for_review";
   const attemptEvents = events.filter((event) => event.kind === "attempt");
-  const deferred = [...attemptEvents]
-    .reverse()
-    .find((event) => event.event === "AttemptDeferred");
+  const deferred = [...attemptEvents].reverse().find((event) => event.event === "AttemptDeferred");
   if (deferred) {
     if (attemptEvents.some((event) => event.sequence > deferred.sequence)) {
       return "inconsistent";
@@ -106,25 +87,15 @@ export function deriveV2State(
       ["AttemptFailed", "AttemptTimedOut", "AttemptCancelled"].includes(event.event),
   );
   if (terminalFailure) return "failed";
-  const validation = [...events]
-    .reverse()
-    .find((event) => event.kind === "validation");
+  const validation = [...events].reverse().find((event) => event.kind === "validation");
   if (validation?.kind === "validation") {
     if (!validation.passed) return "failed";
-    if (
-      events.some(
-        (event) => event.kind === "attempt" && event.event === "AttemptPublished",
-      )
-    ) {
+    if (events.some((event) => event.kind === "attempt" && event.event === "AttemptPublished")) {
       return "for_review";
     }
     return "validating";
   }
-  if (
-    events.some(
-      (event) => event.kind === "attempt" && event.event === "AttemptValidated",
-    )
-  ) {
+  if (events.some((event) => event.kind === "attempt" && event.event === "AttemptValidated")) {
     return "validating";
   }
   if (
@@ -139,8 +110,7 @@ export function deriveV2State(
   if (
     events.some(
       (event) =>
-        event.kind === "attempt" &&
-        ["AttemptStarted", "AttemptProgressed"].includes(event.event),
+        event.kind === "attempt" && ["AttemptStarted", "AttemptProgressed"].includes(event.event),
     )
   ) {
     return "in_flight";

@@ -15,10 +15,7 @@ function positiveInteger(path: string, value: string): number {
   return parsed;
 }
 
-export function parseCgroupV2CpuMax(
-  value: string,
-  path = "cpu.max",
-): number | null {
+export function parseCgroupV2CpuMax(value: string, path = "cpu.max"): number | null {
   const parts = value.trim().split(/\s+/);
   if (parts.length !== 2) throw new MalformedCgroupValueError(path, value);
   const period = positiveInteger(path, parts[1]!);
@@ -36,11 +33,7 @@ export function parseCgroupV1Cpu(
   return positiveInteger(quotaPath, quota) / positiveInteger(periodPath, period);
 }
 
-export function parseCgroupBytes(
-  value: string,
-  path: string,
-  allowMax = true,
-): number | null {
+export function parseCgroupBytes(value: string, path: string, allowMax = true): number | null {
   const text = value.trim();
   if (allowMax && text === "max") return null;
   if (!/^\d+$/.test(text)) throw new MalformedCgroupValueError(path, value);

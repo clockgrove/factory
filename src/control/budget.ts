@@ -18,12 +18,15 @@ export function deriveBudgetUsage(events: FactoryEvent[]): BudgetUsage {
     validationMilliseconds: 0,
     modelTokens: 0,
   };
-  const ledger = new Map<string, { reserved: number; reconciled?: number; event: Extract<FactoryEvent, { kind: "budget" }> }>();
+  const ledger = new Map<
+    string,
+    { reserved: number; reconciled?: number; event: Extract<FactoryEvent, { kind: "budget" }> }
+  >();
   for (const event of deduplicateFactoryEvents(events).sort(
     (left, right) => left.sequence - right.sequence,
   )) {
     if (event.kind !== "budget") continue;
-    const key = `${event.runId}:${event.workItem}:${event.attempt}:${event.phase}:${event.unit}`;
+    const key = `${event.runId}:${event.workItem}:${event.attempt}:${event.phase}:${event.unit}:${event.usageId ?? "default"}`;
     const entry = ledger.get(key) ?? { reserved: 0, event };
     if (event.event === "BudgetReserved") entry.reserved += event.amount;
     else entry.reconciled = event.amount;
@@ -50,15 +53,18 @@ export function deriveBudgetUsage(events: FactoryEvent[]): BudgetUsage {
 export function unreconciledBudgetReservations(
   events: FactoryEvent[],
 ): Array<Extract<FactoryEvent, { kind: "budget" }>> {
-  const ledger = new Map<string, {
-    reserved: Extract<FactoryEvent, { kind: "budget" }>;
-    reconciled: boolean;
-  }>();
+  const ledger = new Map<
+    string,
+    {
+      reserved: Extract<FactoryEvent, { kind: "budget" }>;
+      reconciled: boolean;
+    }
+  >();
   for (const event of deduplicateFactoryEvents(events).sort(
     (left, right) => left.sequence - right.sequence,
   )) {
     if (event.kind !== "budget") continue;
-    const key = `${event.runId}:${event.workItem}:${event.attempt}:${event.phase}:${event.unit}`;
+    const key = `${event.runId}:${event.workItem}:${event.attempt}:${event.phase}:${event.unit}:${event.usageId ?? "default"}`;
     if (event.event === "BudgetReserved") {
       const prior = ledger.get(key);
       ledger.set(key, { reserved: event, reconciled: prior?.reconciled ?? false });
@@ -79,5 +85,9 @@ export function remainingBudget(policy: RunPolicy, usage: BudgetUsage) {
       0,
       policy.maxManagedAgentSessions - usage.managedSessionsReserved,
     ),
+    modelTokens:
+      policy.economics === undefined
+        ? null
+        : Math.max(0, policy.economics.maxModelTokens - usage.modelTokens),
   };
 }

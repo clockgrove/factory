@@ -36,7 +36,13 @@
     "priority": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["rank", "source", "subIssuePosition", "criticalPathLength", "unfinishedDownstream"],
+      "required": [
+        "rank",
+        "source",
+        "subIssuePosition",
+        "criticalPathLength",
+        "unfinishedDownstream"
+      ],
       "properties": {
         "rank": { "type": "number", "minimum": 0 },
         "source": { "$ref": "#/definitions/prioritySource" },
@@ -50,57 +56,139 @@
     "requirements": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["os", "architecture", "tools", "services", "networkDestinations", "permittedSecretNames", "trust"],
+      "required": [
+        "os",
+        "architecture",
+        "tools",
+        "services",
+        "networkDestinations",
+        "permittedSecretNames",
+        "trust"
+      ],
       "properties": {
         "os": { "type": "array", "maxItems": 12, "items": { "type": "string", "maxLength": 40 } },
-        "architecture": { "type": "array", "maxItems": 8, "items": { "type": "string", "maxLength": 40 } },
+        "architecture": {
+          "type": "array",
+          "maxItems": 8,
+          "items": { "type": "string", "maxLength": 40 }
+        },
         "cpu": { "type": "number", "exclusiveMinimum": 0, "maximum": 256 },
         "memoryMb": { "type": "integer", "minimum": 1, "maximum": 1048576 },
         "diskMb": { "type": "integer", "minimum": 1, "maximum": 10485760 },
         "timeoutMinutes": { "type": "integer", "minimum": 1, "maximum": 1440 },
         "estimatedDurationMinutes": { "type": "integer", "minimum": 1, "maximum": 1440 },
         "tools": { "type": "array", "maxItems": 64, "items": { "$ref": "#/definitions/safeId" } },
-        "services": { "type": "array", "maxItems": 64, "items": { "$ref": "#/definitions/safeId" } },
-        "networkDestinations": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 253 } },
-        "permittedSecretNames": { "type": "array", "maxItems": 32, "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,127}$" } },
+        "services": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/definitions/safeId" }
+        },
+        "networkDestinations": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "type": "string", "minLength": 1, "maxLength": 253 }
+        },
+        "permittedSecretNames": {
+          "type": "array",
+          "maxItems": 32,
+          "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,127}$" }
+        },
         "trust": { "enum": ["trusted_local", "isolated", "managed"] }
       }
     },
     "backendCandidate": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "registered", "costClass", "local", "paid", "permanentReasons", "transientReasons"],
+      "required": [
+        "id",
+        "registered",
+        "costClass",
+        "local",
+        "paid",
+        "reportsModelUsage",
+        "permanentReasons",
+        "transientReasons"
+      ],
       "properties": {
         "id": { "$ref": "#/definitions/backendId" },
         "registered": { "type": "boolean" },
         "costClass": { "enum": ["local", "sandbox", "managed"] },
         "local": { "type": "boolean" },
         "paid": { "type": "boolean" },
-        "permanentReasons": { "type": "array", "maxItems": 64, "items": { "$ref": "#/definitions/reasonCode" } },
-        "transientReasons": { "type": "array", "maxItems": 64, "items": { "$ref": "#/definitions/reasonCode" } }
+        "reportsModelUsage": { "type": "boolean" },
+        "permanentReasons": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/definitions/reasonCode" }
+        },
+        "transientReasons": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "$ref": "#/definitions/reasonCode" }
+        }
       }
     },
     "workItem": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["number", "priority", "requirements", "backends", "nextAttempt", "estimatedDurationMs", "paths", "exclusiveResources"],
+      "required": [
+        "number",
+        "priority",
+        "requirements",
+        "backends",
+        "nextAttempt",
+        "estimatedDurationMs",
+        "paths",
+        "exclusiveResources"
+      ],
       "properties": {
         "number": { "$ref": "#/definitions/positiveInteger" },
         "priority": { "$ref": "#/definitions/priority" },
         "requirements": { "$ref": "#/definitions/requirements" },
-        "backends": { "type": "array", "maxItems": 16, "items": { "$ref": "#/definitions/backendCandidate" } },
-        "validators": { "type": "array", "maxItems": 16, "items": { "$ref": "#/definitions/backendCandidate" } },
+        "backends": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/definitions/backendCandidate" }
+        },
+        "validators": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "$ref": "#/definitions/backendCandidate" }
+        },
         "nextAttempt": { "$ref": "#/definitions/positiveInteger" },
         "estimatedDurationMs": { "type": "number", "exclusiveMinimum": 0 },
-        "paths": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 500 } },
-        "exclusiveResources": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 200 } },
+        "estimatedCloudTimeSavedMs": { "$ref": "#/definitions/nonNegativeNumber" },
+        "paths": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+        },
+        "exclusiveResources": {
+          "type": "array",
+          "maxItems": 64,
+          "items": { "type": "string", "minLength": 1, "maxLength": 200 }
+        },
         "queuedSince": { "type": "string", "format": "date-time" }
       }
     },
     "reservation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["key", "objective", "workItem", "attempt", "phase", "backendId", "admissionClass", "local", "cpu", "memoryMb", "paidUnits", "paths", "exclusiveResources"],
+      "required": [
+        "key",
+        "objective",
+        "workItem",
+        "attempt",
+        "phase",
+        "backendId",
+        "admissionClass",
+        "local",
+        "cpu",
+        "memoryMb",
+        "paidUnits",
+        "paths",
+        "exclusiveResources"
+      ],
       "properties": {
         "key": { "type": "string", "minLength": 1, "maxLength": 1000 },
         "objective": { "$ref": "#/definitions/positiveInteger" },
@@ -120,7 +208,17 @@
     "capacity": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["generation", "reservations", "active", "local", "cloud", "cpu", "memoryMb", "paidUnits", "byBackend"],
+      "required": [
+        "generation",
+        "reservations",
+        "active",
+        "local",
+        "cloud",
+        "cpu",
+        "memoryMb",
+        "paidUnits",
+        "byBackend"
+      ],
       "properties": {
         "generation": { "$ref": "#/definitions/positiveInteger" },
         "reservations": { "type": "array", "items": { "$ref": "#/definitions/reservation" } },
@@ -130,13 +228,25 @@
         "cpu": { "$ref": "#/definitions/nonNegativeNumber" },
         "memoryMb": { "$ref": "#/definitions/nonNegativeNumber" },
         "paidUnits": { "$ref": "#/definitions/nonNegativeNumber" },
-        "byBackend": { "type": "object", "additionalProperties": { "$ref": "#/definitions/nonNegativeNumber" } }
+        "byBackend": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/definitions/nonNegativeNumber" }
+        }
       }
     },
     "resource": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["measuredAt", "logicalCpu", "effectiveCpu", "loadRatio", "totalMemoryMb", "availableMemoryMb", "memoryUsageRatio", "source"],
+      "required": [
+        "measuredAt",
+        "logicalCpu",
+        "effectiveCpu",
+        "loadRatio",
+        "totalMemoryMb",
+        "availableMemoryMb",
+        "memoryUsageRatio",
+        "source"
+      ],
       "properties": {
         "measuredAt": { "type": "string", "format": "date-time" },
         "logicalCpu": { "type": "number", "minimum": 1 },
@@ -151,11 +261,24 @@
     "input": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["objective", "policy", "workItems", "capacity", "budget", "resource", "nowMs", "objectiveDeadlineMs"],
+      "required": [
+        "objective",
+        "policy",
+        "workItems",
+        "capacity",
+        "budget",
+        "resource",
+        "nowMs",
+        "objectiveDeadlineMs"
+      ],
       "properties": {
         "objective": { "$ref": "#/definitions/positiveInteger" },
         "policy": { "$ref": "run-policy.schema.json" },
-        "workItems": { "type": "array", "maxItems": 100, "items": { "$ref": "#/definitions/workItem" } },
+        "workItems": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "$ref": "#/definitions/workItem" }
+        },
         "capacity": { "$ref": "#/definitions/capacity" },
         "budget": {
           "type": "object",
@@ -163,7 +286,10 @@
           "required": ["sandboxMinutes", "managedAgentSessions"],
           "properties": {
             "sandboxMinutes": { "$ref": "#/definitions/nonNegativeNumber" },
-            "managedAgentSessions": { "$ref": "#/definitions/nonNegativeNumber" }
+            "managedAgentSessions": { "$ref": "#/definitions/nonNegativeNumber" },
+            "modelTokens": {
+              "anyOf": [{ "$ref": "#/definitions/nonNegativeNumber" }, { "type": "null" }]
+            }
           }
         },
         "resource": { "anyOf": [{ "$ref": "#/definitions/resource" }, { "type": "null" }] },
@@ -195,12 +321,30 @@
     "admission": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["workItem", "backendId", "admissionClass", "admissionReason", "requirements", "priority", "capacityGeneration", "reservation", "reservedBudget"],
+      "required": [
+        "workItem",
+        "backendId",
+        "admissionClass",
+        "admissionReason",
+        "requirements",
+        "priority",
+        "capacityGeneration",
+        "reservation",
+        "reservedBudget"
+      ],
       "properties": {
         "workItem": { "$ref": "#/definitions/positiveInteger" },
         "backendId": { "$ref": "#/definitions/backendId" },
         "admissionClass": { "enum": ["local", "remote-required", "burst"] },
-        "admissionReason": { "enum": ["local-capacity", "capability-required", "local-saturated", "queue-delay", "deadline"] },
+        "admissionReason": {
+          "enum": [
+            "local-capacity",
+            "capability-required",
+            "local-saturated",
+            "queue-delay",
+            "deadline"
+          ]
+        },
         "requirements": {
           "type": "object",
           "additionalProperties": false,
@@ -214,7 +358,13 @@
         "capacity": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["measuredAt", "effectiveCpu", "availableMemoryMb", "loadRatio", "memoryUsageRatio"],
+          "required": [
+            "measuredAt",
+            "effectiveCpu",
+            "availableMemoryMb",
+            "loadRatio",
+            "memoryUsageRatio"
+          ],
           "properties": {
             "measuredAt": { "type": "string", "format": "date-time" },
             "effectiveCpu": { "type": "number", "exclusiveMinimum": 0 },
@@ -226,6 +376,15 @@
         "capacityGeneration": { "$ref": "#/definitions/positiveInteger" },
         "reservation": { "$ref": "#/definitions/reservation" },
         "reservedBudget": { "$ref": "#/definitions/reservedBudget" },
+        "economics": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["estimatedCloudTimeSavedMinutes", "minimumCloudTimeSavedMinutes"],
+          "properties": {
+            "estimatedCloudTimeSavedMinutes": { "$ref": "#/definitions/nonNegativeNumber" },
+            "minimumCloudTimeSavedMinutes": { "$ref": "#/definitions/nonNegativeNumber" }
+          }
+        },
         "validation": {
           "type": "object",
           "additionalProperties": false,
@@ -240,11 +399,51 @@
     "queued": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["workItem", "code", "gate", "reason", "observedPriorityRank", "observedSubIssuePosition", "prioritySource", "recordQueueStart", "permanent"],
+      "required": [
+        "workItem",
+        "code",
+        "gate",
+        "reason",
+        "observedPriorityRank",
+        "observedSubIssuePosition",
+        "prioritySource",
+        "recordQueueStart",
+        "permanent"
+      ],
       "properties": {
         "workItem": { "$ref": "#/definitions/positiveInteger" },
-        "code": { "enum": ["lease-unavailable", "policy-constraint", "backend-incompatible", "backend-unavailable", "backend-at-capacity", "global-capacity", "local-capacity", "local-pressure", "local-cooldown", "resource-sample-unavailable", "budget-exhausted", "burst-disabled", "burst-trigger-pending", "burst-priority", "path-conflict", "exclusive-resource-conflict"] },
-        "gate": { "enum": ["authority", "capacity", "priority", "scope", "trust", "backend", "validation", "economic"] },
+        "code": {
+          "enum": [
+            "lease-unavailable",
+            "policy-constraint",
+            "backend-incompatible",
+            "backend-unavailable",
+            "backend-at-capacity",
+            "global-capacity",
+            "local-capacity",
+            "local-pressure",
+            "local-cooldown",
+            "resource-sample-unavailable",
+            "budget-exhausted",
+            "burst-disabled",
+            "burst-trigger-pending",
+            "burst-priority",
+            "path-conflict",
+            "exclusive-resource-conflict"
+          ]
+        },
+        "gate": {
+          "enum": [
+            "authority",
+            "capacity",
+            "priority",
+            "scope",
+            "trust",
+            "backend",
+            "validation",
+            "economic"
+          ]
+        },
         "reason": { "type": "string", "minLength": 1, "maxLength": 2000 },
         "observedPriorityRank": { "type": "number", "minimum": 0 },
         "observedSubIssuePosition": { "type": "number", "minimum": 0 },
@@ -259,7 +458,11 @@
       "additionalProperties": false,
       "required": ["admissions", "queued"],
       "properties": {
-        "admissions": { "type": "array", "maxItems": 100, "items": { "$ref": "#/definitions/admission" } },
+        "admissions": {
+          "type": "array",
+          "maxItems": 100,
+          "items": { "$ref": "#/definitions/admission" }
+        },
         "queued": { "type": "array", "maxItems": 100, "items": { "$ref": "#/definitions/queued" } }
       }
     }

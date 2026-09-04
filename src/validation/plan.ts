@@ -9,6 +9,8 @@ export interface ValidationPlan {
   isolation: "local" | "isolated";
 }
 
+export const NPM_VALIDATION_SETUP_COMMAND = "npm ci --no-audit --no-fund";
+
 export interface ExactHeadValidationEvidence {
   protocol: "clockgrove.factory/exact-head-validation-v1";
   validationDigest: string;
@@ -18,9 +20,7 @@ export interface ExactHeadValidationEvidence {
   digest: string;
 }
 
-function exactHeadDigest(
-  evidence: Omit<ExactHeadValidationEvidence, "digest">,
-): string {
+function exactHeadDigest(evidence: Omit<ExactHeadValidationEvidence, "digest">): string {
   return createHash("sha256").update(JSON.stringify(evidence)).digest("hex");
 }
 
@@ -30,10 +30,7 @@ function exactHeadDigest(
  * avoiding a circular commit-SHA/evidence-digest dependency.
  */
 export function bindValidationToPublishedHead(args: {
-  validation: Pick<
-    ValidationEvidence,
-    "passed" | "digest" | "baseSha" | "outputTreeSha"
-  >;
+  validation: Pick<ValidationEvidence, "passed" | "digest" | "baseSha" | "outputTreeSha">;
   publishedHeadSha: string;
   publishedTreeSha: string;
   publishedBaseSha: string;
@@ -65,8 +62,8 @@ export function verifyExactHeadValidation(
   if (
     !/^[0-9a-f]{64}$/i.test(evidence.validationDigest) ||
     !/^[0-9a-f]{64}$/i.test(evidence.digest) ||
-    ![evidence.baseSha, evidence.outputTreeSha, evidence.publishedHeadSha].every(
-      (value) => /^[0-9a-f]{40}$/i.test(value),
+    ![evidence.baseSha, evidence.outputTreeSha, evidence.publishedHeadSha].every((value) =>
+      /^[0-9a-f]{40}$/i.test(value),
     )
   ) {
     throw new Error("exact-head validation evidence is malformed");
@@ -91,10 +88,7 @@ const FORBIDDEN_VALIDATION_RUNNERS = new Set([
   "zsh",
 ]);
 
-export function assertSafeValidationCommand(
-  command: string,
-  declaredTools: string[],
-): void {
+export function assertSafeValidationCommand(command: string, declaredTools: string[]): void {
   if (/[\n\r;&|<>`]/.test(command) || command.includes("$(")) {
     throw new Error(`validation command contains shell control syntax: ${command}`);
   }
@@ -122,7 +116,9 @@ export function assertSafeValidationCommand(
     ["npm", "pnpm", "yarn", "bun"].includes(executable) &&
     ["exec", "x", "dlx"].includes(tokens[1] ?? "")
   ) {
-    throw new Error(`validation command may not download or execute an arbitrary package: ${command}`);
+    throw new Error(
+      `validation command may not download or execute an arbitrary package: ${command}`,
+    );
   }
 }
 
@@ -135,10 +131,7 @@ export function validationPlanFromPacket(packet: WorkerPacket): ValidationPlan {
   }
   return {
     commands: [...packet.validationCommands],
-    timeoutMsPerCommand: Math.min(
-      (packet.requirements.timeoutMinutes ?? 30) * 60_000,
-      60 * 60_000,
-    ),
+    timeoutMsPerCommand: Math.min((packet.requirements.timeoutMinutes ?? 30) * 60_000, 60 * 60_000),
     isolation: packet.requirements.trust === "trusted_local" ? "local" : "isolated",
   };
 }

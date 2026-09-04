@@ -66,6 +66,7 @@ import { version as packageVersion } from "../package.json";
 
 import { resolveGitHubToken } from "./auth.js";
 import { CodexCliLocalBackend } from "./backends/codex-cli-local.js";
+import { CodexSdkLocalBackend } from "./backends/codex-sdk-local.js";
 import { CodexAppServerLocalBackend } from "./backends/codex-app-server.js";
 import { DaytonaBackend } from "./backends/daytona.js";
 import { VercelSandboxBackend } from "./backends/vercel-sandbox.js";
@@ -101,14 +102,8 @@ import { ExecutionRequirementsSchema } from "./protocol/worker-packet.js";
 import { priorityPolicyFragment } from "./scheduling/github-priority.js";
 import { runForegroundObjective } from "./controller/index.js";
 import { GitHubControlStore } from "./control/github-store.js";
-import {
-  APPLICATION_TOOL_DEFINITIONS,
-  FactoryApplicationService,
-} from "./application/index.js";
-import {
-  SystemdControllerLifecycle,
-  SystemdUserService,
-} from "./service/index.js";
+import { APPLICATION_TOOL_DEFINITIONS, FactoryApplicationService } from "./application/index.js";
+import { SystemdControllerLifecycle, SystemdUserService } from "./service/index.js";
 
 /** Never write anything but JSON-RPC to stdout on the stdio transport. */
 function log(message: string): void {
@@ -150,33 +145,33 @@ const concurrency = new ConcurrencyLimiter();
 const mutations = new MutationScheduler({ pacer, onThrottle: log });
 const controllerLifecycle = new SystemdControllerLifecycle(
   new SystemdUserService({
-    factoryCommand: [
-      process.execPath,
-      join(dirname(fileURLToPath(import.meta.url)), "factory.js"),
-    ],
+    factoryCommand: [process.execPath, join(dirname(fileURLToPath(import.meta.url)), "factory.js")],
   }),
 );
 
-function applicationFor(
-  owner: string,
-  repo: string,
-): FactoryApplicationService {
+function applicationFor(owner: string, repo: string): FactoryApplicationService {
   const token = getToken();
+  const store = new GitHubControlStore({
+    token,
+    owner,
+    repo,
+    onThrottle: log,
+    circuitBreaker: breaker,
+    pacer,
+    concurrency,
+    mutationScheduler: mutations,
+  });
   return new FactoryApplicationService({
     owner,
     repo,
     reader: readerFor(owner, repo),
-    store: new GitHubControlStore({
-      token,
-      owner,
-      repo,
-      onThrottle: log,
-      circuitBreaker: breaker,
-      pacer,
-      concurrency,
-      mutationScheduler: mutations,
-    }),
+    store,
     controller: controllerLifecycle,
+    readBaseSha: async (defaultBranch) => {
+      const sha = await store.readRef(`refs/heads/${defaultBranch}`);
+      if (!sha) throw new Error(`default branch ${defaultBranch} has no readable head`);
+      return sha;
+    },
   });
 }
 
@@ -188,10 +183,7 @@ function applicationFor(
  */
 const userIdCache = new Map<string, string>();
 
-async function resolveUserIdCached(
-  reader: GitHubReader,
-  login: string,
-): Promise<string> {
+async function resolveUserIdCached(reader: GitHubReader, login: string): Promise<string> {
   const cached = userIdCache.get(login);
   if (cached) return cached;
   const id = await reader.resolveUserId(login);
@@ -199,15 +191,10 @@ async function resolveUserIdCached(
   return id;
 }
 
-function findWorkItem(
-  objective: DerivedObjective,
-  workItemNumber: number,
-): DerivedWorkItem {
+function findWorkItem(objective: DerivedObjective, workItemNumber: number): DerivedWorkItem {
   const item = objective.items.find((i) => i.number === workItemNumber);
   if (!item) {
-    throw new Error(
-      `Work Item #${workItemNumber} not found on Objective #${objective.number}`,
-    );
+    throw new Error(`Work Item #${workItemNumber} not found on Objective #${objective.number}`);
   }
   return item;
 }
@@ -234,9 +221,7 @@ function serializePr(pr: LinkedPullRequest, minimal = false) {
 function serializeWorkItem(wi: DerivedWorkItem, minimal = false) {
   return {
     ...wi,
-    linkedPullRequests: wi.linkedPullRequests.map((pr) =>
-      serializePr(pr, minimal),
-    ),
+    linkedPullRequests: wi.linkedPullRequests.map((pr) => serializePr(pr, minimal)),
     copilotAssignments: wi.copilotAssignments.map((d) => d.toISOString()),
   };
 }
@@ -307,8 +292,7 @@ const PRETTY_PRINT_LIMIT_BYTES = 8_000;
 
 function textResult(value: unknown) {
   const pretty = JSON.stringify(value, null, 2);
-  const text =
-    pretty.length > PRETTY_PRINT_LIMIT_BYTES ? JSON.stringify(value) : pretty;
+  const text = pretty.length > PRETTY_PRINT_LIMIT_BYTES ? JSON.stringify(value) : pretty;
   return { content: [{ type: "text" as const, text }] };
 }
 
@@ -321,9 +305,7 @@ function errorResult(error: unknown) {
 }
 
 /** Wraps a tool handler so a thrown error becomes an `isError` result rather than crashing the process. */
-function tool<T>(
-  handler: (args: T, extra: { signal: AbortSignal }) => Promise<unknown>,
-) {
+function tool<T>(handler: (args: T, extra: { signal: AbortSignal }) => Promise<unknown>) {
   return async (args: T, extra: { signal: AbortSignal }) => {
     try {
       return textResult(await handler(args, extra));
@@ -340,16 +322,8 @@ const RepoShape = {
 
 const WorkItemLocatorShape = {
   ...RepoShape,
-  objectiveNumber: z
-    .number()
-    .int()
-    .positive()
-    .describe("Objective issue number"),
-  workItemNumber: z
-    .number()
-    .int()
-    .positive()
-    .describe("Work Item (sub-issue) number"),
+  objectiveNumber: z.number().int().positive().describe("Objective issue number"),
+  workItemNumber: z.number().int().positive().describe("Work Item (sub-issue) number"),
 };
 
 const EscalateToShape = {
@@ -365,9 +339,7 @@ const EscalateToShape = {
 const CompiledWorkItemSchema = z.object({
   id: z
     .string()
-    .describe(
-      "Compiler-local id stored in the v2 graph envelope, not used as an issue number",
-    ),
+    .describe("Compiler-local id stored in the v2 graph envelope, not used as an issue number"),
   title: z.string(),
   goal: z.string(),
   acceptance: z.array(z.string()),
@@ -403,10 +375,32 @@ const CompiledObjectiveSchema = z.object({
  */
 const server = new McpServer({ name: "factory", version: packageVersion });
 
+const READ_ONLY_TOOL_ANNOTATIONS = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: true,
+} as const;
+
+const WRITE_TOOL_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: true,
+} as const;
+
+const DESTRUCTIVE_WRITE_TOOL_ANNOTATIONS = {
+  readOnlyHint: false,
+  destructiveHint: true,
+  idempotentHint: true,
+  openWorldHint: true,
+} as const;
+
 server.registerTool(
   "read_objective",
   {
     title: "Read Objective",
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
     description:
       "Read one GitHub Objective issue and every Work Item sub-issue beneath it, and derive each " +
       "one's state (§1, §3.2). This is the one-snapshot-per-cycle read (§4.1) — call it once at the " +
@@ -490,6 +484,7 @@ server.registerTool(
   "evaluate_mechanical",
   {
     title: "Evaluate mechanical checks",
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
     description:
       "Run §5.1's cheap, deterministic checks against a Work Item's current open pull request: " +
       "no-op, declined, untouched scope, merge conflict, mergeability unknown, checks pending/failed, sensitive surface, " +
@@ -551,16 +546,10 @@ server.registerTool(
       const item = findWorkItem(objective, workItemNumber);
       const pr = currentOpenPullRequest(item);
       if (!pr) {
-        throw new Error(
-          `Work Item #${workItemNumber} has no open pull request`,
-        );
+        throw new Error(`Work Item #${workItemNumber} has no open pull request`);
       }
       return {
-        verdict: evaluateMechanical(
-          pr,
-          expectedFiles,
-          objective.ciExpectedOnPullRequests,
-        ),
+        verdict: evaluateMechanical(pr, expectedFiles, objective.ciExpectedOnPullRequests),
         pullRequest: { number: pr.number, title: pr.title },
       };
     },
@@ -571,6 +560,7 @@ server.registerTool(
   "read_pull_request_diff",
   {
     title: "Read pull request diff",
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
     description:
       "Read the actual patch text of a Work Item's pull request, per file. This is what makes the " +
       "*semantic* half of §7.3's confidence bar performable — 'the diff satisfies the Work Item's " +
@@ -592,11 +582,7 @@ server.registerTool(
       "*that* something changed even when you chose not to read it.",
     inputSchema: {
       ...RepoShape,
-      pullNumber: z
-        .number()
-        .int()
-        .positive()
-        .describe("Pull request number to read"),
+      pullNumber: z.number().int().positive().describe("Pull request number to read"),
       paths: z
         .array(z.string())
         .optional()
@@ -640,6 +626,7 @@ server.registerTool(
   "dispatch_start",
   {
     title: "Dispatch: start",
+    annotations: WRITE_TOOL_ANNOTATIONS,
     description:
       "§4: assign the coding agent to a ready Work Item for the first time. Refuses (a no-op, not " +
       "an error) unless the Work Item is `unstarted` with every `blockedBy` issue closed — the same " +
@@ -663,21 +650,14 @@ server.registerTool(
       const reader = readerFor(owner, repo);
       const objective = derive(await reader.readObjective(objectiveNumber));
       const item = findWorkItem(objective, workItemNumber);
-      const isReady =
-        item.state === "unstarted" && item.blockedBy.every((d) => d.closed);
+      const isReady = item.state === "unstarted" && item.blockedBy.every((d) => d.closed);
       if (!isReady) {
         return {
           action: "no-op",
           reason: `Work Item #${workItemNumber} is '${item.state}', not ready to start`,
         };
       }
-      const dispatcher = await dispatcherFor(
-        owner,
-        repo,
-        objective,
-        escalateTo,
-        reader,
-      );
+      const dispatcher = await dispatcherFor(owner, repo, objective, escalateTo, reader);
       await dispatcher.start(item);
       return { action: "started", workItem: workItemNumber };
     },
@@ -688,6 +668,7 @@ server.registerTool(
   "approve_held_workflow_runs",
   {
     title: "Approve held workflow runs",
+    annotations: DESTRUCTIVE_WRITE_TOOL_ANNOTATIONS,
     description:
       "Resolve the deadlock where CI never runs because GitHub is holding it (§9.2). GitHub parks " +
       "workflow runs on coding-agent pull requests in `action_required` until a maintainer clicks " +
@@ -716,9 +697,7 @@ server.registerTool(
       ...WorkItemLocatorShape,
       escalateTo: z
         .string()
-        .describe(
-          "Login of the human to assign if the review declines to approve",
-        ),
+        .describe("Login of the human to assign if the review declines to approve"),
     },
   },
   tool(
@@ -740,9 +719,7 @@ server.registerTool(
       const item = findWorkItem(objective, workItemNumber);
       const pr = currentOpenPullRequest(item);
       if (!pr) {
-        throw new Error(
-          `Work Item #${workItemNumber} has no open pull request`,
-        );
+        throw new Error(`Work Item #${workItemNumber} has no open pull request`);
       }
 
       const held = await reader.listRunsAwaitingApproval(pr.headSha);
@@ -773,18 +750,8 @@ server.registerTool(
         profile,
       });
 
-      const dispatcher = await dispatcherFor(
-        owner,
-        repo,
-        objective,
-        escalateTo,
-        reader,
-      );
-      const outcome = await dispatcher.approveChecks(
-        item,
-        held.approvable,
-        verdict,
-      );
+      const dispatcher = await dispatcherFor(owner, repo, objective, escalateTo, reader);
+      const outcome = await dispatcher.approveChecks(item, held.approvable, verdict);
       return {
         ...outcome,
         pullRequest: { number: pr.number, headSha: pr.headSha },
@@ -800,6 +767,7 @@ server.registerTool(
   "dispatch_confirm",
   {
     title: "Dispatch: confirm",
+    annotations: DESTRUCTIVE_WRITE_TOOL_ANNOTATIONS,
     description:
       "§4.2: check a `dispatched` Work Item against the 90s confirm window and act — wait, retry " +
       "(unassign/reassign), or escalate to a human after a second consecutive PR-less assignment. " +
@@ -830,13 +798,7 @@ server.registerTool(
         };
       }
       const decision = confirmAction(item, objective.readAt);
-      const dispatcher = await dispatcherFor(
-        owner,
-        repo,
-        objective,
-        escalateTo,
-        reader,
-      );
+      const dispatcher = await dispatcherFor(owner, repo, objective, escalateTo, reader);
       await dispatcher.confirm(item, objective.readAt);
       return { action: decision, workItem: workItemNumber };
     },
@@ -847,6 +809,7 @@ server.registerTool(
   "dispatch_retry_or_escalate",
   {
     title: "Dispatch: retry or escalate",
+    annotations: DESTRUCTIVE_WRITE_TOOL_ANNOTATIONS,
     description:
       "§4.4/§5.1: act on a `failed` Work Item — close its unusable PR and retry, or escalate to a " +
       "human once attempts are exhausted (3 linked PRs). A no-op on a Work Item that is not " +
@@ -864,9 +827,7 @@ server.registerTool(
       reason: z
         .string()
         .optional()
-        .describe(
-          "Why this attempt was judged unusable; surfaced in the close/escalation comment",
-        ),
+        .describe("Why this attempt was judged unusable; surfaced in the close/escalation comment"),
     },
   },
   tool(
@@ -894,13 +855,7 @@ server.registerTool(
           reason: `Work Item #${workItemNumber} is '${item.state}', not 'failed'`,
         };
       }
-      const dispatcher = await dispatcherFor(
-        owner,
-        repo,
-        objective,
-        escalateTo,
-        reader,
-      );
+      const dispatcher = await dispatcherFor(owner, repo, objective, escalateTo, reader);
       // Report what actually happened, not what we predicted would happen: a
       // caller told a *decision* instead of an *outcome* has to trust that the
       // two never diverge. They agree today because `retryOrEscalate`
@@ -918,6 +873,7 @@ server.registerTool(
   "dispatch_integrate",
   {
     title: "Dispatch: integrate",
+    annotations: DESTRUCTIVE_WRITE_TOOL_ANNOTATIONS,
     description:
       "§6: act on a `for_review` Work Item's mechanical verdict (§5.1) — merge if ready, attempt a " +
       "rebase or close-and-redispatch on conflict, or close-and-retry on untouched scope/failed " +
@@ -966,22 +922,10 @@ server.registerTool(
       }
       const pr = currentOpenPullRequest(item);
       if (!pr) {
-        throw new Error(
-          `Work Item #${workItemNumber} has no open pull request`,
-        );
+        throw new Error(`Work Item #${workItemNumber} has no open pull request`);
       }
-      const verdict = evaluateMechanical(
-        pr,
-        expectedFiles,
-        objective.ciExpectedOnPullRequests,
-      );
-      const dispatcher = await dispatcherFor(
-        owner,
-        repo,
-        objective,
-        escalateTo,
-        reader,
-      );
+      const verdict = evaluateMechanical(pr, expectedFiles, objective.ciExpectedOnPullRequests);
+      const dispatcher = await dispatcherFor(owner, repo, objective, escalateTo, reader);
       const outcome = await dispatcher.integrate(item, pr, verdict);
       return {
         verdict,
@@ -1006,6 +950,7 @@ server.registerTool(
   "close_objective",
   {
     title: "Close Objective",
+    annotations: DESTRUCTIVE_WRITE_TOOL_ANNOTATIONS,
     description:
       "§4: close the Objective issue itself once every Work Item is `done`. GitHub does NOT " +
       "auto-close a parent issue just " +
@@ -1014,11 +959,7 @@ server.registerTool(
       "if any Work Item is not yet `done` (the same check `allDone()` in state.ts makes).",
     inputSchema: {
       ...RepoShape,
-      objectiveNumber: z
-        .number()
-        .int()
-        .positive()
-        .describe("Objective issue number"),
+      objectiveNumber: z.number().int().positive().describe("Objective issue number"),
       escalateTo: z
         .string()
         .min(1)
@@ -1053,13 +994,7 @@ server.registerTool(
           reason: `Objective #${objectiveNumber} has Work Items that are not yet 'done'`,
         };
       }
-      const dispatcher = await dispatcherFor(
-        owner,
-        repo,
-        objective,
-        escalateTo,
-        reader,
-      );
+      const dispatcher = await dispatcherFor(owner, repo, objective, escalateTo, reader);
       await dispatcher.closeObjective(objective.id);
       return { action: "closed", objective: objectiveNumber };
     },
@@ -1070,6 +1005,7 @@ server.registerTool(
   "read_repository_layout",
   {
     title: "Read repository layout",
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
     description:
       "List every file on the target repository's default branch. Call this *before* compiling an " +
       "Objective into Work Items, so each item's `scope` names paths that actually exist. Without " +
@@ -1086,9 +1022,7 @@ server.registerTool(
       pathPrefix: z
         .string()
         .optional()
-        .describe(
-          "Only return paths starting with this prefix, e.g. 'src/' or 'test/'",
-        ),
+        .describe("Only return paths starting with this prefix, e.g. 'src/' or 'test/'"),
       maxEntries: z
         .number()
         .int()
@@ -1119,6 +1053,7 @@ server.registerTool(
   "read_repository_file",
   {
     title: "Read repository file",
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
     description:
       "Read one file's text from the target repository's default branch — for the questions " +
       "`read_repository_layout` cannot answer: whether a helper already exists and what its " +
@@ -1162,6 +1097,7 @@ server.registerTool(
   "graph_apply",
   {
     title: "Apply compiled graph",
+    annotations: WRITE_TOOL_ANNOTATIONS,
     description:
       "Apply a compiled Objective (skills/objective-compilation's output) to " +
       "GitHub as Work Item sub-issues plus native `blocked by` dependency edges. Every created issue " +
@@ -1172,11 +1108,7 @@ server.registerTool(
       "activate a v2 run; new unattended Objectives must use factory_run.",
     inputSchema: {
       ...RepoShape,
-      objectiveNumber: z
-        .number()
-        .int()
-        .positive()
-        .describe("Objective issue number"),
+      objectiveNumber: z.number().int().positive().describe("Objective issue number"),
       compiledObjective: CompiledObjectiveSchema,
     },
   },
@@ -1201,9 +1133,7 @@ server.registerTool(
           metadata.graphDigest !== digest ||
           metadata.graphSize !== compiledObjective.workItems.length
         ) {
-          throw new Error(
-            `Work Item #${item.number} belongs to a different compiled graph`,
-          );
+          throw new Error(`Work Item #${item.number} belongs to a different compiled graph`);
         }
         return {
           compilerId: metadata.id,
@@ -1215,9 +1145,7 @@ server.registerTool(
           number: item.number,
           title: item.title,
           body: item.body ?? "",
-          blockedByNumbers: item.blockedBy.map(
-            (dependency) => dependency.number,
-          ),
+          blockedByNumbers: item.blockedBy.map((dependency) => dependency.number),
         };
       });
       const applier = new GraphApplier({
@@ -1236,9 +1164,7 @@ server.registerTool(
       const created = await applier.apply(compiledObjective, {
         repositoryId: snapshot.repositoryId,
         objectiveIssueId: snapshot.id,
-        ...(snapshot.workItemLabelId
-          ? { workItemLabelId: snapshot.workItemLabelId }
-          : {}),
+        ...(snapshot.workItemLabelId ? { workItemLabelId: snapshot.workItemLabelId } : {}),
         existingWorkItems,
       });
       return {
@@ -1263,6 +1189,7 @@ server.registerTool(
   "factory_run",
   {
     title: "Run Factory Objective",
+    annotations: DESTRUCTIVE_WRITE_TOOL_ANNOTATIONS,
     description:
       "Run one explicitly activated Objective to a terminal state using Factory v2: acquire the " +
       "GitHub-backed Director lease, compile missing Work Items, schedule policy-approved workers, " +
@@ -1322,8 +1249,9 @@ server.registerTool(
   "probe_execution_backends",
   {
     title: "Probe Factory execution backends",
+    annotations: READ_ONLY_TOOL_ANNOTATIONS,
     description:
-      "Read-only capability and authentication probe for the local Codex App Server and CLI backends " +
+      "Read-only capability and authentication probe for the local Codex SDK, App Server, and CLI backends " +
       "and the optional Daytona and Vercel Sandbox backends. It creates no worker or sandbox and spends no " +
       "paid runtime; GitHub Copilot availability is repository-specific and is checked by factory_run.",
     inputSchema: {
@@ -1339,6 +1267,7 @@ server.registerTool(
   tool(async ({ repository }: { repository?: string | undefined }) => {
     const path = repository ?? process.cwd();
     const registry = new BackendRegistry();
+    registry.register(new CodexSdkLocalBackend());
     registry.register(new CodexAppServerLocalBackend());
     registry.register(new CodexCliLocalBackend());
     registry.register(new DaytonaBackend({ repository: path }));
@@ -1394,6 +1323,7 @@ type ApplicationToolInput = {
   priorityRank?: number;
   reason?: string;
   repository?: string;
+  policy?: Record<string, unknown>;
 };
 
 function registerApplicationTool(
@@ -1434,7 +1364,16 @@ function registerApplicationTool(
     : operation === "activate"
       ? {
           ...RequestToolShape,
-          baseSha: z.string().regex(/^[0-9a-fA-F]{40}$/),
+          baseSha: z
+            .string()
+            .regex(/^[0-9a-fA-F]{40}$/)
+            .optional(),
+          policy: z
+            .record(z.unknown())
+            .optional()
+            .describe(
+              "Complete immutable v2 run policy. Omit for adaptive local-only execution; paid backends are never inferred.",
+            ),
         }
       : ["doctor", "plan", "status", "explain", "replay"].includes(operation)
         ? {
@@ -1451,13 +1390,7 @@ function registerApplicationTool(
             ...(operation === "priority"
               ? { priorityRank: z.number().int().min(0).max(1_000) }
               : {}),
-            ...([
-              "pause",
-              "drain",
-              "cloud-pause",
-              "retry",
-              "cancel",
-            ].includes(operation)
+            ...(["pause", "drain", "cloud-pause", "retry", "cancel"].includes(operation)
               ? { reason: z.string().min(1).max(8_000).optional() }
               : {}),
           };
@@ -1481,12 +1414,12 @@ function registerApplicationTool(
         );
       }
       if (operation === "activate") {
-        if (!input.requestId || !input.baseSha)
-          throw new Error("requestId and baseSha are required");
+        if (!input.requestId) throw new Error("requestId is required");
         return service.activate({
           objective: input.objectiveNumber!,
           requestId: input.requestId,
-          baseSha: input.baseSha,
+          ...(input.baseSha ? { baseSha: input.baseSha } : {}),
+          ...(input.policy ? { policy: input.policy } : {}),
         });
       }
       if (operation.startsWith("controller-")) {
@@ -1509,22 +1442,13 @@ function registerApplicationTool(
       }
       if (!input.requestId) throw new Error("requestId is required");
       return service.command(
-        operation as
-          | "pause"
-          | "resume"
-          | "drain"
-          | "cloud-pause"
-          | "retry"
-          | "priority"
-          | "cancel",
+        operation as "pause" | "resume" | "drain" | "cloud-pause" | "retry" | "priority" | "cancel",
         {
           objective: input.objectiveNumber!,
           requestId: input.requestId,
           ...(input.reason ? { reason: input.reason } : {}),
           ...(input.workItemNumber ? { workItem: input.workItemNumber } : {}),
-          ...(input.priorityRank !== undefined
-            ? { priorityRank: input.priorityRank }
-            : {}),
+          ...(input.priorityRank !== undefined ? { priorityRank: input.priorityRank } : {}),
         },
       );
     }),

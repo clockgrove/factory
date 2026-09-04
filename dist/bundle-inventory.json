@@ -1,0 +1,1228 @@
+{
+  "protocol": "clockgrove.factory/bundle-inventory-v1",
+  "bundles": [
+    {
+      "file": "factory.js",
+      "bytes": 2603541,
+      "sha256": "5f51cf3fe939e7542cee49750804aba4ea6b11cf35753ab7db1086ec6b9a1525"
+    },
+    {
+      "file": "mcp-server.js",
+      "bytes": 2914036,
+      "sha256": "661cdf66870d95fe04da76cd5320459cdca46e25d0c6bb15ae21fa924a177908"
+    }
+  ],
+  "components": [
+    {
+      "name": "@daytona/analytics-api-client",
+      "version": "0.207.1",
+      "license": "Apache-2.0",
+      "author": "OpenAPI-Generator Contributors",
+      "repository": "https://github.com/daytona/clients.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "GENERATED-SPDX-Apache-2.0.txt"
+      ]
+    },
+    {
+      "name": "@daytona/api-client",
+      "version": "0.207.1",
+      "license": "Apache-2.0",
+      "author": "OpenAPI-Generator Contributors",
+      "repository": "https://github.com/daytona/clients.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "GENERATED-SPDX-Apache-2.0.txt"
+      ]
+    },
+    {
+      "name": "@daytona/sdk",
+      "version": "0.207.1",
+      "license": "Apache-2.0",
+      "author": "Daytona Platforms Inc.",
+      "repository": "git+https://github.com/daytona/clients.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "@daytona/toolbox-api-client",
+      "version": "0.207.1",
+      "license": "Apache-2.0",
+      "author": "OpenAPI-Generator Contributors",
+      "repository": "https://github.com/daytona/clients.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "GENERATED-SPDX-Apache-2.0.txt"
+      ]
+    },
+    {
+      "name": "@modelcontextprotocol/sdk",
+      "version": "1.30.0",
+      "license": "MIT",
+      "author": "Anthropic, PBC (https://anthropic.com)",
+      "repository": "git+https://github.com/modelcontextprotocol/typescript-sdk.git",
+      "bundles": [
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "@octokit/auth-token",
+      "version": "5.1.2",
+      "license": "MIT",
+      "author": "Gregor Martynus (https://github.com/gr2m)",
+      "repository": "github:octokit/auth-token.js",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "@octokit/core",
+      "version": "6.1.6",
+      "license": "MIT",
+      "author": "Gregor Martynus (https://github.com/gr2m)",
+      "repository": "github:octokit/core.js",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "@octokit/endpoint",
+      "version": "10.1.4",
+      "license": "MIT",
+      "author": "Gregor Martynus (https://github.com/gr2m)",
+      "repository": "github:octokit/endpoint.js",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "@octokit/graphql",
+      "version": "8.2.2",
+      "license": "MIT",
+      "author": "Gregor Martynus (https://github.com/gr2m)",
+      "repository": "github:octokit/graphql.js",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "@octokit/plugin-retry",
+      "version": "7.2.1",
+      "license": "MIT",
+      "author": "Simon Grondin (http://github.com/SGrondin)",
+      "repository": "github:octokit/plugin-retry.js",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "@octokit/plugin-throttling",
+      "version": "9.6.1",
+      "license": "MIT",
+      "author": "Simon Grondin (http://github.com/SGrondin)",
+      "repository": "github:octokit/plugin-throttling.js",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "@octokit/request-error",
+      "version": "6.1.8",
+      "license": "MIT",
+      "author": "Gregor Martynus (https://github.com/gr2m)",
+      "repository": "github:octokit/request-error.js",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "@octokit/request",
+      "version": "9.2.4",
+      "license": "MIT",
+      "author": "Gregor Martynus (https://github.com/gr2m)",
+      "repository": "github:octokit/request.js",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "@openai/codex-sdk",
+      "version": "0.153.2",
+      "license": "Apache-2.0",
+      "author": null,
+      "repository": "git+https://github.com/openai/codex.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "@opentelemetry/api",
+      "version": "1.9.1",
+      "license": "Apache-2.0",
+      "author": "OpenTelemetry Authors",
+      "repository": "open-telemetry/opentelemetry-js",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "@socket.io/component-emitter",
+      "version": "3.1.2",
+      "license": "MIT",
+      "author": null,
+      "repository": "https://github.com/socketio/emitter.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "@vercel/oidc",
+      "version": "3.2.0",
+      "license": "Apache-2.0",
+      "author": null,
+      "repository": "git+https://github.com/vercel/vercel.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "@vercel/sandbox",
+      "version": "3.2.1",
+      "license": "Apache-2.0",
+      "author": null,
+      "repository": "https://github.com/vercel/sandbox.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "@workflow/serde",
+      "version": "4.1.0-beta.2",
+      "license": "Apache-2.0",
+      "author": null,
+      "repository": "https://github.com/vercel/workflow.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE.md"
+      ]
+    },
+    {
+      "name": "agent-base",
+      "version": "6.0.2",
+      "license": "MIT",
+      "author": "Nathan Rajlich <nathan@tootallnate.net> (http://n8.io/)",
+      "repository": "git://github.com/TooTallNate/node-agent-base.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "GENERATED-SPDX-MIT.txt"
+      ]
+    },
+    {
+      "name": "ajv-formats",
+      "version": "3.0.1",
+      "license": "MIT",
+      "author": "Evgeny Poberezkin",
+      "repository": "git+https://github.com/ajv-validator/ajv-formats.git",
+      "bundles": [
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "ajv",
+      "version": "8.20.0",
+      "license": "MIT",
+      "author": "Evgeny Poberezkin",
+      "repository": "ajv-validator/ajv",
+      "bundles": [
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "async-retry",
+      "version": "1.3.3",
+      "license": "MIT",
+      "author": null,
+      "repository": "vercel/async-retry",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE.md"
+      ]
+    },
+    {
+      "name": "asynckit",
+      "version": "0.4.0",
+      "license": "MIT",
+      "author": "Alex Indigo <iam@alexindigo.com>",
+      "repository": "git+https://github.com/alexindigo/asynckit.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "axios",
+      "version": "1.20.0",
+      "license": "MIT",
+      "author": "Matt Zabriskie",
+      "repository": "https://github.com/axios/axios.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "b4a",
+      "version": "1.8.1",
+      "license": "Apache-2.0",
+      "author": "Holepunch",
+      "repository": "git+https://github.com/holepunchto/b4a.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "before-after-hook",
+      "version": "3.0.2",
+      "license": "Apache-2.0",
+      "author": "Gregor Martynus",
+      "repository": "github:gr2m/before-after-hook",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "bottleneck",
+      "version": "2.19.5",
+      "license": "MIT",
+      "author": "Simon Grondin",
+      "repository": "https://github.com/SGrondin/bottleneck",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "call-bind-apply-helpers",
+      "version": "1.0.2",
+      "license": "MIT",
+      "author": "Jordan Harband <ljharb@gmail.com>",
+      "repository": "git+https://github.com/ljharb/call-bind-apply-helpers.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "combined-stream",
+      "version": "1.0.8",
+      "license": "MIT",
+      "author": "Felix Geisendörfer <felix@debuggable.com> (http://debuggable.com/)",
+      "repository": "git://github.com/felixge/node-combined-stream.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "License"
+      ]
+    },
+    {
+      "name": "debug",
+      "version": "4.4.3",
+      "license": "MIT",
+      "author": "Josh Junon (https://github.com/qix-)",
+      "repository": "git://github.com/debug-js/debug.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "delayed-stream",
+      "version": "1.0.0",
+      "license": "MIT",
+      "author": "Felix Geisendörfer <felix@debuggable.com> (http://debuggable.com/)",
+      "repository": "git://github.com/felixge/node-delayed-stream.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "License"
+      ]
+    },
+    {
+      "name": "dotenv",
+      "version": "17.4.2",
+      "license": "BSD-2-Clause",
+      "author": null,
+      "repository": "git://github.com/motdotla/dotenv.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "dunder-proto",
+      "version": "1.0.1",
+      "license": "MIT",
+      "author": "Jordan Harband <ljharb@gmail.com>",
+      "repository": "git+https://github.com/es-shims/dunder-proto.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "engine.io-client",
+      "version": "6.6.6",
+      "license": "MIT",
+      "author": null,
+      "repository": "git+https://github.com/socketio/socket.io.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "engine.io-parser",
+      "version": "5.2.3",
+      "license": "MIT",
+      "author": null,
+      "repository": "https://github.com/socketio/socket.io.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "es-define-property",
+      "version": "1.0.1",
+      "license": "MIT",
+      "author": "Jordan Harband <ljharb@gmail.com>",
+      "repository": "git+https://github.com/ljharb/es-define-property.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "es-errors",
+      "version": "1.3.0",
+      "license": "MIT",
+      "author": "Jordan Harband <ljharb@gmail.com>",
+      "repository": "git+https://github.com/ljharb/es-errors.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "es-object-atoms",
+      "version": "1.1.2",
+      "license": "MIT",
+      "author": "Jordan Harband <ljharb@gmail.com>",
+      "repository": "git+https://github.com/ljharb/es-object-atoms.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "es-set-tostringtag",
+      "version": "2.1.0",
+      "license": "MIT",
+      "author": "Jordan Harband <ljharb@gmail.com>",
+      "repository": "git+https://github.com/es-shims/es-set-tostringtag.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "events-universal",
+      "version": "1.0.1",
+      "license": "Apache-2.0",
+      "author": "Holepunch",
+      "repository": "git+https://github.com/holepunchto/events-universal.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "fast-content-type-parse",
+      "version": "2.0.1",
+      "license": "MIT",
+      "author": "Aras Abbasi <aras.abbasi@gmail.com>",
+      "repository": "git+https://github.com/fastify/fast-content-type-parse.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "fast-deep-equal",
+      "version": "3.1.3",
+      "license": "MIT",
+      "author": "Evgeny Poberezkin",
+      "repository": "git+https://github.com/epoberezkin/fast-deep-equal.git",
+      "bundles": [
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "fast-fifo",
+      "version": "1.3.2",
+      "license": "MIT",
+      "author": "Mathias Buus (@mafintosh)",
+      "repository": "https://github.com/mafintosh/fast-fifo.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "fast-uri",
+      "version": "3.1.6",
+      "license": "BSD-3-Clause",
+      "author": "Vincent Le Goff <vince.legoff@gmail.com> (https://github.com/zekth)",
+      "repository": "git+https://github.com/fastify/fast-uri.git",
+      "bundles": [
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "follow-redirects",
+      "version": "1.16.0",
+      "license": "MIT",
+      "author": "Ruben Verborgh <ruben@verborgh.org> (https://ruben.verborgh.org/)",
+      "repository": "git+ssh://git@github.com/follow-redirects/follow-redirects.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "form-data",
+      "version": "4.0.6",
+      "license": "MIT",
+      "author": "Felix Geisendörfer <felix@debuggable.com> (http://debuggable.com/)",
+      "repository": "git://github.com/form-data/form-data.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "License"
+      ]
+    },
+    {
+      "name": "function-bind",
+      "version": "1.1.2",
+      "license": "MIT",
+      "author": "Raynos <raynos2@gmail.com>",
+      "repository": "https://github.com/Raynos/function-bind.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "get-intrinsic",
+      "version": "1.3.0",
+      "license": "MIT",
+      "author": "Jordan Harband <ljharb@gmail.com>",
+      "repository": "git+https://github.com/ljharb/get-intrinsic.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "get-proto",
+      "version": "1.0.1",
+      "license": "MIT",
+      "author": "Jordan Harband <ljharb@gmail.com>",
+      "repository": "git+https://github.com/ljharb/get-proto.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "gopd",
+      "version": "1.2.0",
+      "license": "MIT",
+      "author": "Jordan Harband <ljharb@gmail.com>",
+      "repository": "git+https://github.com/ljharb/gopd.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "has-flag",
+      "version": "4.0.0",
+      "license": "MIT",
+      "author": "Sindre Sorhus — sindresorhus@gmail.com — sindresorhus.com",
+      "repository": "sindresorhus/has-flag",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "license"
+      ]
+    },
+    {
+      "name": "has-symbols",
+      "version": "1.1.0",
+      "license": "MIT",
+      "author": "Jordan Harband — ljharb@gmail.com — http://ljharb.codes",
+      "repository": "git://github.com/inspect-js/has-symbols.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "has-tostringtag",
+      "version": "1.0.2",
+      "license": "MIT",
+      "author": "Jordan Harband — ljharb@gmail.com — http://ljharb.codes",
+      "repository": "git+https://github.com/inspect-js/has-tostringtag.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "hasown",
+      "version": "2.0.4",
+      "license": "MIT",
+      "author": "Jordan Harband <ljharb@gmail.com>",
+      "repository": "git+https://github.com/inspect-js/hasOwn.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "https-proxy-agent",
+      "version": "5.0.1",
+      "license": "MIT",
+      "author": "Nathan Rajlich <nathan@tootallnate.net> (http://n8.io/)",
+      "repository": "git://github.com/TooTallNate/node-https-proxy-agent.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "GENERATED-SPDX-MIT.txt"
+      ]
+    },
+    {
+      "name": "isomorphic-ws",
+      "version": "5.0.0",
+      "license": "MIT",
+      "author": "@heineiuo",
+      "repository": "git+https://github.com/heineiuo/isomorphic-ws.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "jose",
+      "version": "6.2.3",
+      "license": "MIT",
+      "author": "Filip Skokan <panva.ip@gmail.com>",
+      "repository": "panva/jose",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE.md"
+      ]
+    },
+    {
+      "name": "json-schema-traverse",
+      "version": "1.0.0",
+      "license": "MIT",
+      "author": "Evgeny Poberezkin",
+      "repository": "git+https://github.com/epoberezkin/json-schema-traverse.git",
+      "bundles": [
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "jsonlines",
+      "version": "0.1.1",
+      "license": "MIT",
+      "author": "Linus Unnebäck <linus@folkdatorn.se>",
+      "repository": "http://github.com/LinusU/node-jsonlines.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "GENERATED-SPDX-MIT.txt"
+      ]
+    },
+    {
+      "name": "lru-cache",
+      "version": "10.4.3",
+      "license": "ISC",
+      "author": "Isaac Z. Schlueter <i@izs.me>",
+      "repository": "git://github.com/isaacs/node-lru-cache.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "math-intrinsics",
+      "version": "1.1.0",
+      "license": "MIT",
+      "author": "Jordan Harband <ljharb@gmail.com>",
+      "repository": "git+https://github.com/es-shims/math-intrinsics.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "mime-db",
+      "version": "1.52.0",
+      "license": "MIT",
+      "author": null,
+      "repository": "jshttp/mime-db",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "mime-types",
+      "version": "2.1.35",
+      "license": "MIT",
+      "author": null,
+      "repository": "jshttp/mime-types",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "ms",
+      "version": "2.1.3",
+      "license": "MIT",
+      "author": null,
+      "repository": "vercel/ms",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "license.md"
+      ]
+    },
+    {
+      "name": "os-paths",
+      "version": "4.4.0",
+      "license": "MIT",
+      "author": "Roy Ivy III — rivy.dev@gmail.com",
+      "repository": "rivy/js.os-paths",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "pathe",
+      "version": "2.0.3",
+      "license": "MIT",
+      "author": null,
+      "repository": "unjs/pathe",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "picocolors",
+      "version": "1.1.1",
+      "license": "ISC",
+      "author": "Alexey Raspopov",
+      "repository": "alexeyraspopov/picocolors",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "proxy-from-env",
+      "version": "2.1.0",
+      "license": "MIT",
+      "author": "Rob Wu <rob@robwu.nl> (https://robwu.nl/)",
+      "repository": "git+https://github.com/Rob--W/proxy-from-env.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "retry",
+      "version": "0.13.1",
+      "license": "MIT",
+      "author": "Tim Koschützki <tim@debuggable.com> (http://debuggable.com/)",
+      "repository": "git://github.com/tim-kos/node-retry.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "License"
+      ]
+    },
+    {
+      "name": "shell-quote",
+      "version": "1.10.0",
+      "license": "MIT",
+      "author": "James Halliday — mail@substack.net — http://substack.net",
+      "repository": "http://github.com/ljharb/shell-quote.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "socket.io-client",
+      "version": "4.8.3",
+      "license": "MIT",
+      "author": null,
+      "repository": "git+https://github.com/socketio/socket.io.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "socket.io-parser",
+      "version": "4.2.7",
+      "license": "MIT",
+      "author": null,
+      "repository": "git+https://github.com/socketio/socket.io.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "streamx",
+      "version": "2.28.1",
+      "license": "MIT",
+      "author": "Mathias Buus (@mafintosh)",
+      "repository": "https://github.com/mafintosh/streamx.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "supports-color",
+      "version": "7.2.0",
+      "license": "MIT",
+      "author": "Sindre Sorhus — sindresorhus@gmail.com — sindresorhus.com",
+      "repository": "chalk/supports-color",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "license"
+      ]
+    },
+    {
+      "name": "tar-stream",
+      "version": "3.1.7",
+      "license": "MIT",
+      "author": "Mathias Buus <mathiasbuus@gmail.com>",
+      "repository": "git+https://github.com/mafintosh/tar-stream.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "text-decoder",
+      "version": "1.2.7",
+      "license": "Apache-2.0",
+      "author": "Holepunch",
+      "repository": "git+https://github.com/holepunchto/text-decoder.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "tslib",
+      "version": "2.8.1",
+      "license": "0BSD",
+      "author": "Microsoft Corp.",
+      "repository": "https://github.com/Microsoft/tslib.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE.txt"
+      ]
+    },
+    {
+      "name": "undici",
+      "version": "7.29.0",
+      "license": "MIT",
+      "author": null,
+      "repository": "git+https://github.com/nodejs/undici.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "universal-user-agent",
+      "version": "7.0.3",
+      "license": "ISC",
+      "author": "Gregor Martynus (https://github.com/gr2m)",
+      "repository": "github:gr2m/universal-user-agent",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE.md"
+      ]
+    },
+    {
+      "name": "ws",
+      "version": "8.21.3",
+      "license": "MIT",
+      "author": "Einar Otto Stangvik <einaros@gmail.com> (http://2x.io)",
+      "repository": "git+https://github.com/websockets/ws.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "xdg-app-paths",
+      "version": "5.1.0",
+      "license": "MIT",
+      "author": "Roy Ivy III — rivy.dev@gmail.com",
+      "repository": "rivy/js.xdg-app-paths",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "license"
+      ]
+    },
+    {
+      "name": "xdg-portable",
+      "version": "7.3.0",
+      "license": "MIT",
+      "author": "Roy Ivy III — rivy.dev@gmail.com",
+      "repository": "rivy/js.xdg-portable",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "xmlhttprequest-ssl",
+      "version": "2.1.2",
+      "license": "UNKNOWN",
+      "author": "Michael de Wit",
+      "repository": "git://github.com/mjwwit/node-XMLHttpRequest.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "zod-to-json-schema",
+      "version": "3.25.2",
+      "license": "ISC",
+      "author": "Stefan Terdell",
+      "repository": "https://github.com/StefanTerdell/zod-to-json-schema",
+      "bundles": [
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "zod",
+      "version": "3.25.76",
+      "license": "MIT",
+      "author": "Colin McDonnell <zod@colinhacks.com>",
+      "repository": "git+https://github.com/colinhacks/zod.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    },
+    {
+      "name": "zod",
+      "version": "4.5.4",
+      "license": "MIT",
+      "author": "Colin McDonnell <zod@colinhacks.com>",
+      "repository": "git+https://github.com/colinhacks/zod.git",
+      "bundles": [
+        "factory.js",
+        "mcp-server.js"
+      ],
+      "licenseFiles": [
+        "LICENSE"
+      ]
+    }
+  ]
+}

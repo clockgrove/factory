@@ -35,6 +35,7 @@ const shippedEntries = [
   "CONTRIBUTING.md",
   "LICENSE",
   "README.md",
+  "THIRD_PARTY_NOTICES.txt",
   "assets",
   "dist",
   "docs",
@@ -207,9 +208,7 @@ async function listTools(command, args, cwd) {
           clearTimeout(timer);
           resolveMessage(message);
         });
-        child.stdin.write(
-          `${JSON.stringify({ jsonrpc: "2.0", id: requestId, method, params })}\n`,
-        );
+        child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: requestId, method, params })}\n`);
       }),
     ]);
   };
@@ -260,12 +259,7 @@ async function main() {
     marketplaceRoot,
     "--json",
   ]);
-  const installed = json(codexCommand, [
-    "plugin",
-    "add",
-    "factory@factory-install-test",
-    "--json",
-  ]);
+  const installed = json(codexCommand, ["plugin", "add", "factory@factory-install-test", "--json"]);
   const listed = json(codexCommand, ["plugin", "list", "--json"]);
   const record = objects(listed).find(
     (value) => value.name === "factory" || value.plugin === "factory",
@@ -274,10 +268,7 @@ async function main() {
 
   const installedRoot = findInstalledRoot(addedMarketplace, installed, listed);
   if (!installedRoot) throw new Error("could not locate the installed Factory plugin root");
-  if (
-    installedRoot === sourceRoot ||
-    installedRoot.startsWith(`${sourceRoot}${sep}`)
-  ) {
+  if (installedRoot === sourceRoot || installedRoot.startsWith(`${sourceRoot}${sep}`)) {
     throw new Error("clean install resolved back to the development worktree");
   }
 
@@ -285,9 +276,7 @@ async function main() {
     readFileSync(join(installedRoot, ".codex-plugin", "plugin.json"), "utf8"),
   );
   const mcp = manifest.mcpServers?.factory;
-  const mcpArgs = (mcp?.args ?? []).map((value) =>
-    value.replace("${PLUGIN_ROOT}", installedRoot),
-  );
+  const mcpArgs = (mcp?.args ?? []).map((value) => value.replace("${PLUGIN_ROOT}", installedRoot));
   if (mcp?.command !== "node" || mcpArgs.length === 0) {
     throw new Error("installed Codex manifest has no runnable Factory MCP server");
   }
@@ -318,12 +307,21 @@ async function main() {
   });
   const probeIds = Array.isArray(probes) ? probes.map((probe) => probe.id) : [];
   for (const required of [
+    "codex-sdk/local-worktree",
     "codex-app-server/local-worktree",
     "codex-cli/local-worktree",
   ]) {
     if (!probeIds.includes(required)) {
       throw new Error(`installed controller entry point did not report ${required}`);
     }
+  }
+  const sdkProbe = Array.isArray(probes)
+    ? probes.find((probe) => probe.id === "codex-sdk/local-worktree")
+    : undefined;
+  if (sdkProbe?.probe?.available !== true) {
+    throw new Error(
+      `installed controller could not run its default Codex SDK backend: ${sdkProbe?.probe?.reason ?? "unknown reason"}`,
+    );
   }
 
   console.log(
@@ -334,6 +332,7 @@ async function main() {
       version: manifest.version,
       mcpTools: toolNames.length,
       controllerEntryPoint: "dist/factory.js",
+      sdkLocalAvailable: true,
     }),
   );
 }

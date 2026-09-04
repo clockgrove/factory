@@ -34,6 +34,7 @@ export type AsyncMergeResult =
       uuid: string;
       expectedHeadSha: string;
       mergeAction: "default" | "direct_merge" | "merge_queue";
+      mergeMethod: "merge" | "squash" | "rebase";
     }
   | { state: "queued"; expectedHeadSha: string }
   | { state: "merged"; mergeSha: string }
@@ -137,11 +138,16 @@ function normalizeAsyncMerge(data: unknown): AsyncMergeResult {
     if (!new Set(["default", "direct_merge", "merge_queue"]).has(action)) {
       throw new Error(`GitHub returned unknown asynchronous merge action ${action}`);
     }
+    const method = string(details.merge_method, "merge method");
+    if (!new Set(["merge", "squash", "rebase"]).has(method)) {
+      throw new Error(`GitHub returned unknown asynchronous merge method ${method}`);
+    }
     return {
       state: "pending",
       uuid: string(details.uuid, "asynchronous merge UUID"),
       expectedHeadSha: gitSha(details.expected_head_sha, "expected head SHA"),
       mergeAction: action as "default" | "direct_merge" | "merge_queue",
+      mergeMethod: method as "merge" | "squash" | "rebase",
     };
   }
   if (state === "queued") {
@@ -159,7 +165,7 @@ function normalizeAsyncMerge(data: unknown): AsyncMergeResult {
   throw new Error(`GitHub returned unknown asynchronous merge status ${state}`);
 }
 
-/** Isolates every public-preview route and schema from the rest of Factory. */
+/** Isolates every versioned stack route and schema from the rest of Factory. */
 export class GitHubStacks {
   constructor(
     private readonly transport: GitHubStackTransport,
@@ -227,7 +233,8 @@ export class GitHubStacks {
       "GET /repos/{owner}/{repo}/stacks/{stack_number}",
       this.#parameters({ stack_number: stackNumber }),
     );
-    if (response.status !== 200) throw new Error(`GitHub returned ${response.status} reading stack`);
+    if (response.status !== 200)
+      throw new Error(`GitHub returned ${response.status} reading stack`);
     return parseStack(response.data);
   }
 
@@ -252,7 +259,8 @@ export class GitHubStacks {
         this.#parameters({ pull_requests: [...pullRequests] }),
         true,
       );
-      if (response.status !== 201) throw new Error(`GitHub returned ${response.status} creating stack`);
+      if (response.status !== 201)
+        throw new Error(`GitHub returned ${response.status} creating stack`);
       const created = parseStack(response.data);
       if (!exactPulls(created, pullRequests)) {
         throw new Error("GitHub created a stack with unexpected pull request order");
@@ -291,7 +299,8 @@ export class GitHubStacks {
         }),
         true,
       );
-      if (response.status !== 200) throw new Error(`GitHub returned ${response.status} extending stack`);
+      if (response.status !== 200)
+        throw new Error(`GitHub returned ${response.status} extending stack`);
       const extended = parseStack(response.data);
       if (!exactPulls(extended, expected)) {
         throw new Error("GitHub extended a stack with unexpected pull request order");
@@ -325,8 +334,20 @@ export class GitHubStacks {
       throw new Error(`GitHub returned ${response.status} requesting asynchronous merge`);
     }
     const result = normalizeAsyncMerge(response.data);
-    if (result.state !== "failed" && result.state !== "merged" && result.expectedHeadSha !== args.expectedHeadSha) {
+    if (
+      result.state !== "failed" &&
+      result.state !== "merged" &&
+      result.expectedHeadSha !== args.expectedHeadSha
+    ) {
       throw new Error("asynchronous merge is bound to a stale pull request head");
+    }
+    if (
+      result.state === "pending" &&
+      (result.mergeAction !== args.action || result.mergeMethod !== "squash")
+    ) {
+      throw new Error(
+        "asynchronous merge recovery returned options that differ from the requested merge",
+      );
     }
     return result;
   }
@@ -368,7 +389,14 @@ export class GitHubStacks {
         this.#parameters({ stack_number: stackNumber }),
         true,
       );
-      if (![200, 204].includes(response.status)) {
+      if (response.status === 200) {
+        const remaining = parseStack(response.data);
+        const pullRequests = remaining.pullRequests.map((pull) => `#${pull.number}`).join(", ");
+        throw new Error(
+          `GitHub could not completely unstack stack ${stackNumber}; locked or unmergeable pull requests remain${pullRequests ? ` (${pullRequests})` : ""}`,
+        );
+      }
+      if (response.status !== 204) {
         throw new Error(`GitHub returned ${response.status} unstacking pull requests`);
       }
     } catch (error) {

@@ -1,16 +1,17 @@
 # Adaptive priority and burst scheduling implementation plan
 
-Status: implementation-ready proposal
+Status: implemented; v2 preview live qualification in progress
 
 Date: 2026-09-03
 
 Scope: Factory v2 repository controller, local Codex workers, and explicitly authorized paid
-backends. This is the scheduling sub-plan of
+backends. This document records the design and acceptance gates implemented by the scheduling
+subsystem; current evidence is tracked in [`CONFORMANCE.md`](CONFORMANCE.md). It is the scheduling sub-plan of
 [`INDIE-FACTORY-IMPLEMENTATION-PLAN.md`](INDIE-FACTORY-IMPLEMENTATION-PLAN.md).
 
 ## Outcome
 
-Factory will remain local-first while using as much local CPU and memory as the host can safely
+Factory remains local-first while using as much local CPU and memory as the host can safely
 offer. When local capacity is full, it may admit the highest-priority eligible Work Items to an
 explicitly authorized cloud backend, within immutable concurrency and cost ceilings. GitHub remains
 the durable control plane; no GitHub Action, workflow, hosted Factory service, queue, or database is
@@ -20,7 +21,7 @@ Priority changes ordering only. It can never bypass a dependency, repository tru
 capability check, isolation requirement, branch policy, validation requirement, backend allowlist,
 or budget ceiling.
 
-This plan replaces the current scheduling expression:
+The implemented admission controller replaced the original scheduling expression:
 
 ```ts
 ready(objective).slice(0, policy.maxParallel)
@@ -63,14 +64,13 @@ IDs and GitHub IDs are pinned values, not names discovered during a run.
 ```json
 {
   "backendOrder": [
+    "codex-sdk/local-worktree",
     "codex-cli/local-worktree",
-    "codex-cli/daytona",
-    "codex-cli/vercel-sandbox"
+    "codex-cli/daytona"
   ],
   "maxParallel": 8,
   "allowedPaidBackends": [
-    "codex-cli/daytona",
-    "codex-cli/vercel-sandbox"
+    "codex-cli/daytona"
   ],
   "cloudFallback": "explicit",
   "maxSandboxMinutes": 480,
@@ -103,17 +103,16 @@ IDs and GitHub IDs are pinned values, not names discovered during a run.
       "admissionCooldownSeconds": 10
     },
     "backendMaxParallel": {
+      "codex-sdk/local-worktree": 8,
       "codex-cli/local-worktree": 8,
-      "codex-cli/daytona": 2,
-      "codex-cli/vercel-sandbox": 2
+      "codex-cli/daytona": 2
     }
   },
 
   "burst": {
     "mode": "queue-or-deadline",
     "backendOrder": [
-      "codex-cli/daytona",
-      "codex-cli/vercel-sandbox"
+      "codex-cli/daytona"
     ],
     "maxCloudParallel": 3,
     "queueDelaySeconds": 120,
@@ -271,7 +270,7 @@ score that the Director actually observed, so the decision remains auditable aft
 ## Local capacity model
 
 Add `src/scheduling/resource-sampler.ts` with an injectable `ResourceSampler` interface and a
-Linux/WSL implementation. One sample contains:
+supported-Linux implementation. One sample contains:
 
 ```ts
 interface ResourceSnapshot {
@@ -320,7 +319,8 @@ fails, Factory admits no new local worker until a valid sample exists; it does n
 solely because the sampler failed. Normal queue/deadline burst rules may still become true later.
 
 Local worktrees do not provide a hard kernel resource boundary, so these are conservative admission
-controls, not CPU or memory enforcement. Daytona and Vercel resource limits remain provider-enforced.
+controls, not CPU or memory enforcement. Daytona and Labs-provider resource limits remain
+provider-enforced.
 
 ## Capacity and burst admission
 
@@ -540,7 +540,7 @@ Tests:
 Acceptance: randomized input order produces identical output; blocked items can never appear in the
 ranked ready set.
 
-### 4. Linux/WSL resource sampling
+### 4. Linux resource sampling
 
 Add:
 
@@ -650,7 +650,7 @@ responses.
 Acceptance: an operator can answer “why is #42 not running?” and “why did #43 use Daytona?” from one
 status call and the durable receipt.
 
-### 9. Live conformance and default flip
+### 9. Live conformance and release qualification
 
 Run these gates in disposable repositories and paid provider accounts with explicit spend approval:
 
@@ -658,19 +658,22 @@ Run these gates in disposable repositories and paid provider accounts with expli
    Factory admission follows it.
 2. Enable the organization Priority field, change an option while Factory runs, and verify the next
    admission observes its stable field/option IDs.
-3. Run CPU- and memory-heavy local fixtures on WSL2 and native Linux under host-only, cgroup v2, and
-   constrained cgroup configurations. Verify admissions stop before configured headroom is crossed.
+3. Run CPU- and memory-heavy local fixtures on native Linux, Windows WSL2, and a Linux guest hosted
+   by macOS under host-only, cgroup v2, and constrained cgroup configurations. Verify admissions stop
+   before configured headroom is crossed.
 4. Kill and restart the Supervisor with local and provider attempts in each lifecycle phase. Verify
    no duplicate worker, slot, attempt, or budget reservation.
-5. Burst a bounded Objective to Daytona and Vercel separately. Verify local-first placement, provider
-   concurrency, TTL, egress, credential brokerage, cost reconciliation, and cleanup.
+5. Burst a bounded Objective to Daytona. Verify local-first placement, provider concurrency, TTL,
+   egress, credential brokerage, cost reconciliation, and cleanup. Vercel Sandbox may run the same
+   matrix as a Labs qualification but does not block the v2 release.
 6. Exhaust sandbox minutes and cloud concurrency while local is full. Verify work remains queued and
    later returns to local rather than escalating or spending past the ceiling.
 7. Run two Directors against the same Objective. Verify the lease and attempt refs admit each Work
    Item once.
 
-Only after all seven pass does `DEFAULT_RUN_POLICY` switch new runs to `adaptive-local`. The default
-continues to contain no paid backend and `burst.mode: "never"`.
+`DEFAULT_RUN_POLICY` now uses `adaptive-local` with conservative headroom. It still contains no paid
+backend and keeps `burst.mode: "never"`. The live matrix qualifies that implemented default for the
+v2 preview; it never changes the default into paid execution.
 
 ## Implementation dependency graph
 
@@ -697,16 +700,17 @@ This feature is done when all of the following are true:
 
 - Dependency-ready work is deterministically ordered by configured GitHub priority with native
   sub-issue position as the zero-config fallback.
-- Local concurrency adapts downward and upward from effective Linux/WSL CPU and memory without
+- Local concurrency adapts downward and upward from effective Linux CPU and memory without
   exceeding the immutable global or per-backend caps.
 - Optional cloud burst starts only after its configured trigger and only inside explicit provider,
   trust, concurrency, and budget authority.
 - Temporary capacity never burns an implementation attempt or causes a false escalation.
 - Admission, restart, cancellation, lease-race, provider-ambiguity, and budget fault tests pass.
-- One live WSL/Linux local matrix and one real run on each claimed burst provider pass.
+- Native Linux, Windows WSL2, and a Linux guest hosted by macOS pass the live local matrix, and one
+  real Daytona burst run passes.
 - `npm run typecheck`, the full test suite, package verification, production audit, and clean-install
   MCP startup pass.
-- The conformance document records measured evidence and the draft release remains draft until the
+- The conformance document records measured evidence and the v2 preview is not published until the
   live gates are complete.
 
 ## Explicitly out of scope

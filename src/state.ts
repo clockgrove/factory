@@ -31,9 +31,7 @@ export function isNoOp(pr: LinkedPullRequest): boolean {
   const hasDiff = pr.changedLines > 0 || pr.changedFiles > 0;
   if (hasDiff) return false;
 
-  const realCommits = pr.commitSubjects.filter(
-    (s) => s.trim() !== INITIAL_PLAN_COMMIT,
-  );
+  const realCommits = pr.commitSubjects.filter((s) => s.trim() !== INITIAL_PLAN_COMMIT);
   return realCommits.length === 0;
 }
 
@@ -133,10 +131,7 @@ export const EMPTY_PULL_REQUEST_GRACE_MS = 600_000;
  * not yet meaningful. An explicit decline is exempt: the agent has given its
  * final answer, so there is nothing to wait for (§5.1).
  */
-export function withinEmptyPullRequestGrace(
-  pr: LinkedPullRequest,
-  now: Date,
-): boolean {
+export function withinEmptyPullRequestGrace(pr: LinkedPullRequest, now: Date): boolean {
   if (DECLINE_TITLE_PATTERN.test(pr.title)) return false;
   return now.getTime() - pr.createdAt.getTime() < EMPTY_PULL_REQUEST_GRACE_MS;
 }
@@ -281,9 +276,7 @@ export function withinConfirmWindow(wi: WorkItemSnapshot, now: Date): boolean {
 export function confirmFailureStreak(wi: WorkItemSnapshot): number {
   if (wi.copilotAssignments.length === 0) return 0;
 
-  const assigns = [...wi.copilotAssignments].sort(
-    (a, b) => a.getTime() - b.getTime(),
-  );
+  const assigns = [...wi.copilotAssignments].sort((a, b) => a.getTime() - b.getTime());
   const prCreatedAts = wi.linkedPullRequests.map((pr) => pr.createdAt.getTime());
 
   let streak = 0;
@@ -339,9 +332,7 @@ export function attemptCount(wi: WorkItemSnapshot): number {
  * rather than dependent on sort stability — two pull requests can share a
  * `createdAt` at second granularity, and issue numbers are monotonic.
  */
-export function currentOpenPullRequest(
-  wi: WorkItemSnapshot,
-): LinkedPullRequest | null {
+export function currentOpenPullRequest(wi: WorkItemSnapshot): LinkedPullRequest | null {
   const open = wi.linkedPullRequests.filter((p) => p.state === "OPEN");
   if (open.length === 0) return null;
   return open.reduce((newest, p) =>
@@ -398,8 +389,7 @@ export function deriveState(wi: WorkItemSnapshot, now: Date): WorkItemState {
       // dispatch is too fresh to judge at all, or the PR itself is young
       // enough that the agent is plausibly still writing into it.
       const stillPlausiblyWorking =
-        !failure &&
-        (withinConfirmWindow(wi, now) || withinEmptyPullRequestGrace(current, now));
+        !failure && (withinConfirmWindow(wi, now) || withinEmptyPullRequestGrace(current, now));
       return stillPlausiblyWorking ? "in_flight" : "failed";
     }
     // Same reasoning for a partially-written attempt: if the agent has said it
@@ -482,18 +472,14 @@ export function derive(snapshot: ObjectiveSnapshot): DerivedObjective {
         state,
         attempts: attemptCount(wi),
         doneWithoutMergedPullRequest:
-          state === "done" &&
-          !wi.linkedPullRequests.some((p) => p.state === "MERGED"),
+          state === "done" && !wi.linkedPullRequests.some((p) => p.state === "MERGED"),
       };
     }),
   };
 }
 
 /** Work Items in a given state. */
-export function inState(
-  o: DerivedObjective,
-  ...states: WorkItemState[]
-): DerivedWorkItem[] {
+export function inState(o: DerivedObjective, ...states: WorkItemState[]): DerivedWorkItem[] {
   return o.items.filter((i) => states.includes(i.state));
 }
 
@@ -508,26 +494,19 @@ export function inState(
 export function ready(o: DerivedObjective): DerivedWorkItem[] {
   return o.items.filter(
     (i) =>
-      (i.state === "unstarted" ||
-        (i.factoryEvents !== undefined && i.state === "failed")) &&
+      (i.state === "unstarted" || (i.factoryEvents !== undefined && i.state === "failed")) &&
       i.blockedBy.every((d) => d.closed),
   );
 }
 
 /** GitHub-server timestamp for the current durable ready-but-queued episode. */
-export function queuedSince(
-  item: DerivedWorkItem,
-  runId: string,
-): string | undefined {
+export function queuedSince(item: DerivedWorkItem, runId: string): string | undefined {
   const events = (item.factoryEvents ?? [])
     .filter((event) => event.runId === runId && "workItem" in event)
     .sort((left, right) => left.sequence - right.sequence);
   const latestAdmission = [...events]
     .reverse()
-    .find(
-      (event) =>
-        event.kind === "attempt" && event.event === "AttemptReserved",
-    );
+    .find((event) => event.kind === "attempt" && event.event === "AttemptReserved");
   const queued = [...events]
     .reverse()
     .find(

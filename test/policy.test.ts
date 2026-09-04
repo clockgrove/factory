@@ -8,6 +8,7 @@ import {
   parseControllerPolicy,
   parseRunPolicy,
   policyDigest,
+  resolveModelSelection,
 } from "../src/protocol/policy.js";
 
 const legacyPolicy = JSON.parse(
@@ -136,11 +137,72 @@ describe("extended run policy", () => {
     ).toThrow(/legacy sandbox budget/);
   });
 
+  it("resolves an explicit single model profile into every model phase", () => {
+    const parsed = parseRunPolicy({
+      ...DEFAULT_RUN_POLICY,
+      models: {
+        mode: "single-profile",
+        profiles: {
+          frontier: { model: "gpt-5", reasoning: "high" },
+        },
+        phaseProfiles: {
+          compile: "frontier",
+          implement: "frontier",
+          review: "frontier",
+          recover: "frontier",
+        },
+      },
+    });
+    expect(resolveModelSelection(parsed, "implement")).toEqual({
+      profile: "frontier",
+      model: "gpt-5",
+      reasoning: "high",
+    });
+    expect(resolveModelSelection(parsed, "review")?.profile).toBe("frontier");
+  });
+
+  it("rejects model routing modes and combinations v2 cannot honor", () => {
+    const profiles = {
+      frontier: { model: "gpt-5", reasoning: "high" as const },
+      fast: { model: "gpt-5-mini", reasoning: "low" as const },
+    };
+    expect(() =>
+      parseRunPolicy({
+        ...DEFAULT_RUN_POLICY,
+        models: {
+          mode: "task-class",
+          profiles,
+          phaseProfiles: {
+            compile: "frontier",
+            implement: "fast",
+            review: "frontier",
+            recover: "frontier",
+          },
+        },
+      }),
+    ).toThrow(/no durable task-class classifier/i);
+    expect(() =>
+      parseRunPolicy({
+        ...DEFAULT_RUN_POLICY,
+        models: {
+          mode: "single-profile",
+          profiles,
+          phaseProfiles: {
+            compile: "frontier",
+            implement: "fast",
+            review: "frontier",
+            recover: "frontier",
+          },
+        },
+      }),
+    ).toThrow(/every phase/i);
+  });
+
   it("validates repository controller safety ceilings independently", () => {
     expect(
       parseControllerPolicy({
         scope: "repository",
-        maxActiveObjectives: 2,
+        maxActiveObjectives: 1,
         maxLocalWorkers: 8,
         maxPaidWorkers: 0,
         pollIntervalSeconds: 15,
@@ -149,7 +211,7 @@ describe("extended run policy", () => {
     expect(() =>
       parseControllerPolicy({
         scope: "repository",
-        maxActiveObjectives: 2,
+        maxActiveObjectives: 1,
         maxLocalWorkers: 8,
         maxPaidWorkers: 0,
         pollIntervalSeconds: 15,

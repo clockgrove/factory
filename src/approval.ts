@@ -72,13 +72,7 @@ const DEPENDENCY_FILES = new Set([
 ]);
 
 /** Registry/proxy configuration — redirects where dependency code comes from. */
-const REGISTRY_FILES = new Set([
-  ".npmrc",
-  ".yarnrc",
-  ".yarnrc.yml",
-  ".pypirc",
-  "pip.conf",
-]);
+const REGISTRY_FILES = new Set([".npmrc", ".yarnrc", ".yarnrc.yml", ".pypirc", "pip.conf"]);
 
 const PATH_RULES: PathRule[] = [
   {
@@ -279,10 +273,7 @@ export function referencedSecretNames(workflowYaml: string): string[] {
   if (/^\s*secrets\s*:\s*inherit\s*$/m.test(workflowYaml)) {
     found.add("<inherit: every repository secret>");
   }
-  const patterns = [
-    /secrets\.([A-Za-z_][A-Za-z0-9_]*)/g,
-    /secrets\[\s*['"]([^'"]+)['"]\s*\]/g,
-  ];
+  const patterns = [/secrets\.([A-Za-z_][A-Za-z0-9_]*)/g, /secrets\[\s*['"]([^'"]+)['"]\s*\]/g];
   for (const pattern of patterns) {
     for (const match of workflowYaml.matchAll(pattern)) {
       const name = match[1];

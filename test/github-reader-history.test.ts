@@ -11,10 +11,7 @@ const HEAD_SHA = "b".repeat(40);
 const POLICY_DIGEST = policyDigest(DEFAULT_RUN_POLICY);
 const ACTOR = "operator";
 
-function trustedComment(
-  summary: string,
-  event: ReturnType<typeof parseFactoryEvent>,
-) {
+function trustedComment(summary: string, event: ReturnType<typeof parseFactoryEvent>) {
   return {
     body: encodeEventComment(summary, event),
     author: { login: ACTOR },
@@ -103,7 +100,13 @@ describe("GitHubReader Work Item history", () => {
         id: "R_1",
         defaultBranchRef: { name: "main" },
         workItemLabel: { id: "L_1" },
-        suggestedActors: { nodes: [] },
+        suggestedActors: {
+          nodes: [
+            { __typename: "Bot", id: "BOT_copilot", login: "copilot-swe-agent" },
+            { __typename: "Bot", id: "BOT_codex", login: "openai-code-agent[bot]" },
+            { __typename: "User", id: "U_operator", login: ACTOR },
+          ],
+        },
         issue: {
           id: "I_14",
           number: 14,
@@ -113,10 +116,15 @@ describe("GitHubReader Work Item history", () => {
           author: { login: ACTOR },
           authorAssociation: "OWNER",
           comments: {
-            totalCount: objectiveEvents.length,
-            nodes: objectiveEvents.map((event) =>
-              trustedComment("run event", event),
-            ),
+            totalCount: objectiveEvents.length + 1,
+            nodes: [
+              ...objectiveEvents.map((event) => trustedComment("run event", event)),
+              {
+                body: "<!-- clockgrove-factory:event\n{malformed",
+                author: { login: "outsider" },
+                authorAssociation: "CONTRIBUTOR",
+              },
+            ],
           },
           subIssues: {
             totalCount: 1,
@@ -129,9 +137,7 @@ describe("GitHubReader Work Item history", () => {
                 state: "CLOSED",
                 comments: {
                   totalCount: workItemEvents.length,
-                  nodes: workItemEvents.map((event) =>
-                    trustedComment("attempt event", event),
-                  ),
+                  nodes: workItemEvents.map((event) => trustedComment("attempt event", event)),
                 },
                 assignees: { nodes: [] },
                 labels: { nodes: [{ name: "factory:work-item" }] },
@@ -168,9 +174,7 @@ describe("GitHubReader Work Item history", () => {
                       changedFiles: 1,
                       files: { nodes: [{ path: "src/example.ts" }] },
                       commits: {
-                        nodes: [
-                          { commit: { messageHeadline: "Complete work" } },
-                        ],
+                        nodes: [{ commit: { messageHeadline: "Complete work" } }],
                       },
                       statusCheckRollup: {
                         nodes: [
@@ -206,9 +210,15 @@ describe("GitHubReader Work Item history", () => {
         throw new Error(`Unexpected request: ${request.method} ${request.url}`);
       }
       const body = (await request.json()) as { query: string };
-      const data = body.query.includes("ObjectiveCardinality")
-        ? { repository: { issue: { subIssues: { totalCount: 1 } } } }
-        : detail;
+      let data: unknown;
+      if (body.query.includes("ObjectiveCardinality")) {
+        data = { repository: { issue: { subIssues: { totalCount: 1 } } } };
+      } else {
+        expect(body.query).toContain(
+          "suggestedActors(capabilities: [CAN_BE_ASSIGNED], first: 100)",
+        );
+        data = detail;
+      }
       return Response.json(
         { data },
         {
@@ -225,16 +235,33 @@ describe("GitHubReader Work Item history", () => {
     }).readObjective(14);
     const [workItem] = snapshot.workItems;
 
-    expect(workItem?.factoryEvents?.map((event) => event.runId)).toEqual([
-      priorRun,
-      priorRun,
-    ]);
+    expect(workItem?.factoryEvents?.map((event) => event.runId)).toEqual([priorRun, priorRun]);
     expect(deriveV2State(workItem!, snapshot.readAt)).toBe("done");
+    expect(snapshot.copilotBotId).toBe("BOT_copilot");
+    expect(snapshot.managedAgentActors).toEqual([
+      { id: "BOT_copilot", login: "copilot-swe-agent", type: "Bot" },
+      { id: "BOT_codex", login: "openai-code-agent[bot]", type: "Bot" },
+    ]);
     expect(workItem).toMatchObject({
       subIssuePosition: 0,
-      issueFieldValues: [
-        { fieldId: "IF_priority", optionId: "urgent-option" },
-      ],
+      issueFieldValues: [{ fieldId: "IF_priority", optionId: "urgent-option" }],
     });
+
+    const wrongIssueEvent = parseFactoryEvent({
+      ...workItemEvents[0]!,
+      workItem: 999,
+    });
+    detail.repository.issue.subIssues.nodes[0]!.comments.nodes.push(
+      trustedComment("misplaced attempt", wrongIssueEvent),
+    );
+    detail.repository.issue.subIssues.nodes[0]!.comments.totalCount += 1;
+    await expect(
+      new GitHubReader({
+        token: "test-token",
+        owner: "clockgrove",
+        repo: "factory",
+        requestFetch,
+      }).readObjective(14),
+    ).rejects.toThrow(/event for another issue/);
   });
 });

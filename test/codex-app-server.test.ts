@@ -1,12 +1,5 @@
-import { execFileSync } from "node:child_process";
-import {
-  access,
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -16,10 +9,7 @@ import {
   codexAppServerArgs,
   codexAppServerThreadConfig,
 } from "../src/backends/codex-app-server.js";
-import type {
-  AttemptContext,
-  BackendHandle,
-} from "../src/execution/backend.js";
+import type { AttemptContext, BackendHandle } from "../src/execution/backend.js";
 import { durableAttemptId } from "../src/execution/session.js";
 import type {
   AppServerConnection,
@@ -43,9 +33,7 @@ class FakeConnection implements AppServerConnection {
     result?: unknown;
     error?: { code: number; message: string };
   }> = [];
-  readonly notificationListeners = new Set<
-    (event: AppServerNotification) => void
-  >();
+  readonly notificationListeners = new Set<(event: AppServerNotification) => void>();
   readonly requestListeners = new Set<(request: AppServerRequest) => void>();
   readonly closed: Promise<AppServerExit>;
   closedByClient = false;
@@ -69,8 +57,7 @@ class FakeConnection implements AppServerConnection {
       return { turn: { id: `turn-${this.name}` } } as T;
     }
     if (method === "thread/resume") {
-      if (this.options.failResume)
-        throw new Error("thread is no longer active");
+      if (this.options.failResume) throw new Error("thread is no longer active");
       const threadId = (params as { threadId: string }).threadId;
       return {
         thread: { id: threadId, turns: this.options.resumeTurns ?? [] },
@@ -112,11 +99,7 @@ class FakeConnection implements AppServerConnection {
     }
   }
 
-  requestFromServer(
-    id: AppServerRequestId,
-    method: string,
-    params: unknown,
-  ): void {
+  requestFromServer(id: AppServerRequestId, method: string, params: unknown): void {
     for (const listener of this.requestListeners) {
       listener({ id, method, params });
     }
@@ -130,18 +113,11 @@ class FakeConnection implements AppServerConnection {
 }
 
 const temporaryPaths = new Set<string>();
-const suiteRoot = join(
-  tmpdir(),
-  `factory-app-server-${process.pid}-${Date.now()}`,
-);
+const suiteRoot = join(tmpdir(), `factory-app-server-${process.pid}-${Date.now()}`);
 temporaryPaths.add(suiteRoot);
 
 afterAll(async () => {
-  await Promise.all(
-    [...temporaryPaths].map((path) =>
-      rm(path, { recursive: true, force: true }),
-    ),
-  );
+  await Promise.all([...temporaryPaths].map((path) => rm(path, { recursive: true, force: true })));
 });
 
 async function context(
@@ -165,6 +141,7 @@ async function context(
     encoding: "utf8",
   }).trim();
   return {
+    repository: "clockgrove/factory",
     objective: 1,
     workItem: number,
     attempt: 1,
@@ -208,10 +185,7 @@ function factory(
     connect: (home) => {
       const found = connections.get(home);
       if (found) return found;
-      const connection = new FakeConnection(
-        String(connections.size + 1),
-        options,
-      );
+      const connection = new FakeConnection(String(connections.size + 1), options);
       connections.set(home, connection);
       return connection;
     },
@@ -258,11 +232,20 @@ async function waitForState(
 }
 
 describe("Codex App Server local backend", () => {
+  it("advertises the Labs Linux runtime boundary", () => {
+    expect(new CodexAppServerLocalBackend().capabilities.supportedOs).toEqual(["linux"]);
+  });
+
   it("performs the negotiated handshake and applies the CLI-equivalent security boundary", async () => {
     const root = join(suiteRoot, "boundary");
     const connections = new Map<string, FakeConnection>();
     const backend = factory(root, connections);
     const ctx = await context(1, ["registry.npmjs.org", "*.example.com"]);
+    ctx.modelSelection = {
+      profile: "frontier",
+      model: "gpt-5",
+      reasoning: "high",
+    };
     await writeFile(join(ctx.workspace, "AGENTS.md"), "Use tabs for fixtures.\n");
     const handle = await backend.launch(ctx);
     const connection = connections.get(handle.metadata!.codexHome!)!;
@@ -285,20 +268,20 @@ describe("Codex App Server local backend", () => {
       method: "initialized",
       params: undefined,
     });
-    const thread = connection.calls.find(
-      (call) => call.method === "thread/start",
-    );
+    const thread = connection.calls.find((call) => call.method === "thread/start");
     expect(thread?.params).toMatchObject({
       cwd: ctx.workspace,
       runtimeWorkspaceRoots: [ctx.workspace],
       approvalPolicy: "never",
       sandbox: "workspace-write",
       ephemeral: false,
+      model: "gpt-5",
       developerInstructions: expect.stringMatching(
         /Use tabs for fixtures[\s\S]+Factory execution boundary/,
       ),
       config: {
         web_search: "disabled",
+        model_reasoning_effort: "high",
         sandbox_workspace_write: { network_access: true },
         features: {
           network_proxy: {
@@ -324,9 +307,9 @@ describe("Codex App Server local backend", () => {
       web_search: "disabled",
       sandbox_workspace_write: { network_access: false },
     });
-    expect(() =>
-      codexAppServerThreadConfig(["https://example.com/path"]),
-    ).toThrow("invalid Codex command-network destination");
+    expect(() => codexAppServerThreadConfig(["https://example.com/path"])).toThrow(
+      "invalid Codex command-network destination",
+    );
     expect(codexAppServerArgs("/tmp/factory-codex", "local")).toEqual([
       "-c",
       'sqlite_home="/tmp/factory-codex"',
@@ -370,10 +353,7 @@ describe("Codex App Server local backend", () => {
     ]);
     finish(ca, ha, { outcome: "succeeded", summary: "alpha done" });
     finish(cb, hb, { outcome: "succeeded", summary: "beta done" });
-    const [aa, ab] = await Promise.all([
-      backend.collect(ha),
-      backend.collect(hb),
-    ]);
+    const [aa, ab] = await Promise.all([backend.collect(ha), backend.collect(hb)]);
     expect(aa.patch).toContain("alpha");
     expect(ab.patch).toContain("beta");
     await Promise.all([backend.cleanup(ha), backend.cleanup(hb)]);
@@ -397,15 +377,9 @@ describe("Codex App Server local backend", () => {
     const resumed = await second.resume(ctx, structuredClone(handle));
     expect(await second.observe(resumed)).toMatchObject({ state: "running" });
     const connection = resumedConnections.get(resumed.metadata!.codexHome!)!;
-    expect(
-      connection.calls.filter((call) => call.method === "thread/resume"),
-    ).toHaveLength(1);
-    expect(
-      connection.calls.some((call) => call.method === "thread/start"),
-    ).toBe(false);
-    expect(connection.calls.some((call) => call.method === "turn/start")).toBe(
-      false,
-    );
+    expect(connection.calls.filter((call) => call.method === "thread/resume")).toHaveLength(1);
+    expect(connection.calls.some((call) => call.method === "thread/start")).toBe(false);
+    expect(connection.calls.some((call) => call.method === "turn/start")).toBe(false);
 
     await writeFile(join(ctx.workspace, "value.txt"), "resumed\n");
     finish(connection, resumed, { outcome: "succeeded", summary: "resumed" });
@@ -422,9 +396,7 @@ describe("Codex App Server local backend", () => {
     const handle = await backend.launch(ctx);
     const connection = connections.get(handle.metadata!.codexHome!)!;
     await backend.cancel(handle);
-    expect(
-      connection.calls.filter((call) => call.method === "turn/interrupt"),
-    ).toHaveLength(1);
+    expect(connection.calls.filter((call) => call.method === "turn/interrupt")).toHaveLength(1);
     expect(connection.closedByClient).toBe(true);
     expect(await backend.observe(handle)).toMatchObject({ state: "cancelled" });
     expect(handle.metadata).toMatchObject({
@@ -442,11 +414,10 @@ describe("Codex App Server local backend", () => {
     const ctx = await context(6);
     const handle = await backend.launch(ctx);
     const connection = connections.get(handle.metadata!.codexHome!)!;
-    connection.requestFromServer(
-      "approval-1",
-      "item/commandExecution/requestApproval",
-      { threadId: handle.resourceId, turnId: handle.metadata!.turnId },
-    );
+    connection.requestFromServer("approval-1", "item/commandExecution/requestApproval", {
+      threadId: handle.resourceId,
+      turnId: handle.metadata!.turnId,
+    });
     expect(connection.responses).toContainEqual({
       id: "approval-1",
       result: { decision: "decline" },
@@ -486,6 +457,56 @@ describe("Codex App Server local backend", () => {
   });
 
   it.skipIf(process.platform !== "linux")(
+    "reconciles only the App Server process marker for the selected repository",
+    async () => {
+      const root = await mkdtemp(join(tmpdir(), "factory-app-repo-scope-"));
+      const attemptA = {
+        repository: "clockgrove/repo-a",
+        objective: 1,
+        workItem: 2,
+        attempt: 1,
+        runId: "same-run",
+        directorEpoch: 7,
+      };
+      const attemptB = { ...attemptA, repository: "clockgrove/repo-b" };
+      let workerA: ChildProcess | undefined;
+      let workerB: ChildProcess | undefined;
+      try {
+        workerA = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+          detached: true,
+          env: { ...process.env, FACTORY_ATTEMPT_ID: durableAttemptId(attemptA) },
+          stdio: "ignore",
+        });
+        workerB = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+          detached: true,
+          env: { ...process.env, FACTORY_ATTEMPT_ID: durableAttemptId(attemptB) },
+          stdio: "ignore",
+        });
+        if (!workerA.pid || !workerB.pid) {
+          throw new Error("repository-scoped App Server fixtures did not start");
+        }
+        await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+        const backend = new CodexAppServerLocalBackend({
+          resolveCodexHome: (identity) => join(root, `home-${durableAttemptId(identity)}`),
+        });
+        await backend.reconcileStale(attemptA);
+        expect(() => process.kill(-workerA!.pid!, 0)).toThrow();
+        expect(() => process.kill(-workerB!.pid!, 0)).not.toThrow();
+      } finally {
+        for (const worker of [workerA, workerB]) {
+          if (!worker?.pid) continue;
+          try {
+            process.kill(-worker.pid, "SIGKILL");
+          } catch {
+            // A process group already fenced by the test is absent.
+          }
+        }
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
     "reconciles a stale process by durable attempt identity without launching duplicate work",
     async () => {
       const root = join(suiteRoot, "stale-process");
@@ -510,6 +531,7 @@ describe("Codex App Server local backend", () => {
         cancellationWaitMs: 50,
         authFile: join(root, "missing-auth"),
         resolveCodexHome: (identity: {
+          repository: string;
           runId: string;
           objective: number;
           workItem: number;
@@ -526,6 +548,7 @@ describe("Codex App Server local backend", () => {
 
       const replacement = new CodexAppServerLocalBackend(options);
       await replacement.reconcileStale({
+        repository: ctx.repository,
         objective: ctx.objective,
         workItem: ctx.workItem,
         attempt: ctx.attempt,
@@ -582,8 +605,7 @@ describe("Codex App Server local backend", () => {
       args: [stub],
       cancellationWaitMs: 100,
       authFile: join(root, "missing-auth"),
-      resolveCodexHome: (identity) =>
-        join(root, `home-${durableAttemptId(identity)}`),
+      resolveCodexHome: (identity) => join(root, `home-${durableAttemptId(identity)}`),
     });
     const ctx = await context(8);
     const handle = await backend.launch(ctx);

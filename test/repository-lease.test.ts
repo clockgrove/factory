@@ -28,9 +28,7 @@ class MemoryLeaseStore implements LeaseStore {
     return Promise.resolve(this.refs.get(ref) ?? null);
   }
 
-  readRefWithServerTime(
-    ref: string,
-  ): Promise<{ oid: string | null; serverTime: Date }> {
+  readRefWithServerTime(ref: string): Promise<{ oid: string | null; serverTime: Date }> {
     this.observations += 1;
     return Promise.resolve({
       oid: this.refs.get(ref) ?? null,
@@ -44,11 +42,7 @@ class MemoryLeaseStore implements LeaseStore {
     return Promise.resolve(commit);
   }
 
-  createCommit(input: {
-    treeOid: string;
-    parentOids: string[];
-    message: string;
-  }): Promise<string> {
+  createCommit(input: { treeOid: string; parentOids: string[]; message: string }): Promise<string> {
     const oid = this.#next.toString(16).padStart(40, "0");
     this.#next += 1;
     this.commits.set(oid, {
@@ -65,11 +59,7 @@ class MemoryLeaseStore implements LeaseStore {
     return Promise.resolve(true);
   }
 
-  compareAndSwapRef(input: {
-    ref: string;
-    beforeOid: string;
-    afterOid: string;
-  }): Promise<boolean> {
+  compareAndSwapRef(input: { ref: string; beforeOid: string; afterOid: string }): Promise<boolean> {
     if (this.refs.get(input.ref) !== input.beforeOid) {
       return Promise.resolve(false);
     }
@@ -102,10 +92,7 @@ describe("repository-controller lease", () => {
     expect(first).toMatchObject({ epoch: 1, sequence: 1 });
     expect(store.refs.has(REPOSITORY_LEASE_REF)).toBe(true);
     await expect(
-      manager.acquire(
-        { controllerId: "second", policyDigest: digest("b") },
-        store.base(),
-      ),
+      manager.acquire({ controllerId: "second", policyDigest: digest("b") }, store.base()),
     ).rejects.toBeInstanceOf(RepositoryLeaseLostError);
 
     store.now = new Date("2026-01-01T00:00:10.000Z");
@@ -116,9 +103,7 @@ describe("repository-controller lease", () => {
 
     const released = await manager.release(first);
     expect(released).toMatchObject({ epoch: 1, sequence: 3 });
-    await expect(manager.assertCurrent(released)).rejects.toBeInstanceOf(
-      RepositoryLeaseLostError,
-    );
+    await expect(manager.assertCurrent(released)).rejects.toBeInstanceOf(RepositoryLeaseLostError);
   });
 
   it("permits deterministic takeover only after authoritative server expiry", async () => {
@@ -137,8 +122,6 @@ describe("repository-controller lease", () => {
       store.base(),
     );
     expect(second).toMatchObject({ epoch: 2, sequence: 2 });
-    await expect(manager.assertCurrent(first)).rejects.toBeInstanceOf(
-      RepositoryLeaseLostError,
-    );
+    await expect(manager.assertCurrent(first)).rejects.toBeInstanceOf(RepositoryLeaseLostError);
   });
 });

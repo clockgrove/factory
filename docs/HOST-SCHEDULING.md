@@ -8,7 +8,25 @@ A plugin cannot start a stopped process or wake a powered-off host. Operators wh
 login or reboot can explicitly configure their operating system to restart the same command. Factory
 does not install or enable a daemon during plugin installation.
 
-## Linux and WSL with systemd
+## Supported environment boundary
+
+Factory's runtime target is Linux. The same `systemd` lifecycle applies in three supported host
+configurations:
+
+- native Linux;
+- a Linux distribution under Windows WSL2; and
+- a Linux VM or equivalent Linux guest hosted by macOS.
+
+In every case, run the controller, Git, Node.js, Codex SDK/CLI runtime, and validation tools inside
+Linux. Keep the repository, worktrees, Factory state, sockets, and locks on the Linux filesystem. On WSL2 this
+means a path such as `/home/alice/src/project`, not `/mnt/c/...`; Windows tools can still access it
+through `\\wsl$`. On macOS, the Linux guest must provide the repository filesystem and `systemd`
+user session rather than delegating lifecycle management to `launchd`.
+
+Native Win32 and native Darwin execution and lifecycle management are out of scope. Factory does
+not install Windows services, Task Scheduler entries, or `launchd` agents.
+
+## Linux with systemd
 
 Factory's explicit repository-service lifecycle creates one deterministic user unit per checkout.
 It never runs during plugin installation and never stores scheduler state. The managed command is:
@@ -16,6 +34,11 @@ It never runs during plugin installation and never stores scheduler state. The m
 ```text
 factory controller run OWNER/REPO --repo /absolute/path/to/repository
 ```
+
+The running process generates one controller identity and acquires the checkout's repository lease
+under that identity. Every Objective Supervisor shares it. A restarted service creates a new
+identity and must acquire a new fenced lease epoch; the unit name, PID, or an in-memory queue is never
+used as durable ownership evidence.
 
 It defaults to eight adaptive local workers and zero paid workers. Explicit controller ceilings are
 available through `--max-local-workers N` and `--max-paid-workers N`; the latter only permits capacity
@@ -63,6 +86,7 @@ systemctl --user enable --now factory-objective.service
 Use absolute paths. Confirm that the service account can read the repository, the policy file, the
 Codex login, and the `gh` login. Do not put tokens in the unit. On WSL, systemd must already be enabled
 for the distribution, and Windows must start that distribution before its user services can run.
+For a Linux guest on macOS, the guest must likewise be running before its user service can start.
 
 `Restart=on-failure` restarts operational crashes. A completed, cancelled, or durably escalated run
 is terminal and should not be looped. Factory reconstructs the active run from GitHub after a restart;
@@ -80,5 +104,5 @@ node /absolute/path/to/installed/factory/dist/factory.js cancel OWNER/REPO#123 -
 Then allow the active Supervisor to observe the request and exit. If it is unavailable, the next
 Supervisor observes the cancellation receipt before resuming work.
 
-Equivalent `launchd` or Windows Task Scheduler entries may run the same long-lived command. Those
-platforms are not part of the initial Codex CLI/Linux/WSL conformance claim.
+Host-native wrappers may start the supported Linux environment, but they are outside Factory's
+service contract. Once Linux is running, `systemd` owns the Factory controller lifecycle.

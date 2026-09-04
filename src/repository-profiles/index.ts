@@ -24,9 +24,7 @@ export type RepositoryFacts = {
 export type ContextManifest = { mustRead: string[]; searchSeeds: string[] };
 
 const cleanPath = (path: string): string => {
-  const normalized = posix
-    .normalize(path.replaceAll("\\", "/"))
-    .replace(/^\.\//, "");
+  const normalized = posix.normalize(path.replaceAll("\\", "/")).replace(/^\.\//, "");
   if (
     !normalized ||
     normalized === "." ||
@@ -37,12 +35,9 @@ const cleanPath = (path: string): string => {
   }
   return normalized;
 };
-const uniqueSorted = (values: Iterable<string>): string[] =>
-  [...new Set(values)].sort();
+const uniqueSorted = (values: Iterable<string>): string[] => [...new Set(values)].sort();
 
-export function normalizeRepositoryFacts(
-  input: RepositoryFacts,
-): RepositoryFacts {
+export function normalizeRepositoryFacts(input: RepositoryFacts): RepositoryFacts {
   if (input.files.length > MAX_REPOSITORY_FILES)
     throw new Error("repository file inventory exceeds bound");
   const byPath = new Map<string, RepositoryFile>();
@@ -70,9 +65,7 @@ export function normalizeRepositoryFacts(
   };
 }
 
-export function discoverValidationCommands(
-  factsInput: RepositoryFacts,
-): string[] {
+export function discoverValidationCommands(factsInput: RepositoryFacts): string[] {
   const facts = normalizeRepositoryFacts(factsInput);
   const scripts = facts.scripts ?? {};
   const priority = ["typecheck", "test", "lint", "check", "verify", "build"];
@@ -81,32 +74,21 @@ export function discoverValidationCommands(
     .map((name) => (name === "test" ? "npm test" : `npm run ${name}`));
 }
 
-export function profileRepository(
-  factsInput: RepositoryFacts,
-): ExecutionProfile {
+export function profileRepository(factsInput: RepositoryFacts): ExecutionProfile {
   const facts = normalizeRepositoryFacts(factsInput);
   const paths = facts.files.map((f) => f.path.toLowerCase());
   const languages: string[] = [];
-  if (paths.some((p) => /\.(?:ts|tsx|mts|cts)$/.test(p)))
-    languages.push("typescript");
-  if (paths.some((p) => /\.(?:js|jsx|mjs|cjs)$/.test(p)))
-    languages.push("javascript");
+  if (paths.some((p) => /\.(?:ts|tsx|mts|cts)$/.test(p))) languages.push("typescript");
+  if (paths.some((p) => /\.(?:js|jsx|mjs|cjs)$/.test(p))) languages.push("javascript");
   const generatedOutput = facts.files.some(
-    (f) =>
-      f.generated === true || /(^|\/)(?:dist|build|generated)\//i.test(f.path),
+    (f) => f.generated === true || /(^|\/)(?:dist|build|generated)\//i.test(f.path),
   );
   const binaryAssets = facts.files.some(
-    (f) =>
-      f.binary === true ||
-      /\.(?:png|jpe?g|gif|webp|pdf|zip|wasm|mp[34]|mov)$/i.test(f.path),
+    (f) => f.binary === true || /\.(?:png|jpe?g|gif|webp|pdf|zip|wasm|mp[34]|mov)$/i.test(f.path),
   );
-  const deterministicSimulation = paths.some((p) =>
-    /(?:simulation|simulator|replay|seed)/.test(p),
-  );
+  const deterministicSimulation = paths.some((p) => /(?:simulation|simulator|replay|seed)/.test(p));
   const visualValidation = paths.some(
-    (p) =>
-      /(?:screenshot|snapshot|visual|storybook)/.test(p) ||
-      /\.(?:png|jpe?g|webp)$/.test(p),
+    (p) => /(?:screenshot|snapshot|visual|storybook)/.test(p) || /\.(?:png|jpe?g|webp)$/.test(p),
   );
   return {
     languages: uniqueSorted(languages),
@@ -126,17 +108,12 @@ export function buildContextManifest(
   const scoped = facts.files
     .map((f) => f.path)
     .filter((path) =>
-      scope.some((entry) =>
-        entry.endsWith("/") ? path.startsWith(entry) : path === entry,
-      ),
+      scope.some((entry) => (entry.endsWith("/") ? path.startsWith(entry) : path === entry)),
     );
   const roots = ["AGENTS.md", "package.json", "tsconfig.json"].filter((p) =>
     facts.files.some((f) => f.path === p),
   );
-  const mustRead = uniqueSorted([...roots, ...scoped]).slice(
-    0,
-    MAX_MANIFEST_PATHS,
-  );
+  const mustRead = uniqueSorted([...roots, ...scoped]).slice(0, MAX_MANIFEST_PATHS);
   return {
     mustRead,
     searchSeeds: uniqueSorted(scope).slice(0, MAX_MANIFEST_PATHS),

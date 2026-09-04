@@ -26,7 +26,8 @@ function file(overrides: Partial<RawDiffFile> = {}): RawDiffFile {
 /** Index into a result, failing the test loudly if the entry isn't there. */
 function at<T>(items: T[], i: number): T {
   const item = items[i];
-  if (item === undefined) throw new Error(`expected an entry at index ${i}, got ${items.length} entries`);
+  if (item === undefined)
+    throw new Error(`expected an entry at index ${i}, got ${items.length} entries`);
   return item;
 }
 
@@ -110,7 +111,10 @@ describe("budgetPatches", () => {
   });
 
   it("treats an absent patch field the same as an explicit null", () => {
-    const { files } = budgetPatches([{ filename: "b.bin", status: "added", additions: 0, deletions: 0 }], 10_000);
+    const { files } = budgetPatches(
+      [{ filename: "b.bin", status: "added", additions: 0, deletions: 0 }],
+      10_000,
+    );
     expect(at(files, 0).patch).toBeNull();
     expect(at(files, 0).patchOmitted).toMatch(/binary/);
   });
@@ -143,11 +147,7 @@ describe("budgetPatches with a paths filter", () => {
   });
 
   it("spends no budget on a file the caller did not ask for", () => {
-    const { files } = budgetPatches(
-      [lockfile, file({ filename: "src/a.ts" })],
-      100,
-      ["src/a.ts"],
-    );
+    const { files } = budgetPatches([lockfile, file({ filename: "src/a.ts" })], 100, ["src/a.ts"]);
 
     expect(at(files, 0).patch).toBeNull();
     // The whole point: the requested file survives a budget the lockfile would

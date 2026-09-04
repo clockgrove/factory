@@ -61,6 +61,31 @@ describe("continuous refill and recovery", () => {
     expect(pool.size).toBe(0);
   });
 
+  it("retains a worker failure that settles before the caller begins draining", async () => {
+    const pool = new ContinuousExecutionPool<number>();
+    let settled!: () => void;
+    const didSettle = new Promise<void>((resolve) => {
+      settled = resolve;
+    });
+    pool.start(
+      1,
+      async () => {
+        throw new Error("unsafe paid cleanup remains unconfirmed");
+      },
+      settled,
+    );
+    await didSettle;
+
+    expect(pool.size).toBe(0);
+    await expect(pool.settle()).resolves.toEqual([
+      {
+        key: 1,
+        error: expect.objectContaining({ message: "unsafe paid cleanup remains unconfirmed" }),
+      },
+    ]);
+    await expect(pool.settle()).resolves.toEqual([]);
+  });
+
   it("preserves other Objectives while reconciling one durable generation", () => {
     const ledger = new CapacityLedger();
     ledger.reconcileObjective(1, []);

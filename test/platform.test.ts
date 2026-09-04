@@ -53,21 +53,25 @@ describe("classifyRefusal", () => {
     const reset = Math.floor(Date.now() / 1000) + 120;
     const refusal = classifyRefusal({
       message: "Request failed due to following response errors",
-      errors: [{
-        type: "RATE_LIMIT",
-        code: "graphql_rate_limit",
-        message: "API rate limit already exceeded for user ID 318831919.",
-      }],
+      errors: [
+        {
+          type: "RATE_LIMIT",
+          code: "graphql_rate_limit",
+          message: "API rate limit already exceeded for user ID 318831919.",
+        },
+      ],
       headers: {
         "x-ratelimit-remaining": "0",
         "x-ratelimit-reset": String(reset),
       },
       response: {
-        errors: [{
-          type: "RATE_LIMIT",
-          code: "graphql_rate_limit",
-          message: "API rate limit already exceeded for user ID 318831919.",
-        }],
+        errors: [
+          {
+            type: "RATE_LIMIT",
+            code: "graphql_rate_limit",
+            message: "API rate limit already exceeded for user ID 318831919.",
+          },
+        ],
       },
     });
     expect(refusal.kind).toBe("rate_limit");
@@ -117,9 +121,7 @@ describe("classifyRefusal", () => {
   });
 
   it("classifies the measured agent-engine 500 as a server error", () => {
-    expect(classifyRefusal(err(500, "Failed to fetch job details")).kind).toBe(
-      "server_error",
-    );
+    expect(classifyRefusal(err(500, "Failed to fetch job details")).kind).toBe("server_error");
   });
 
   it("classifies 502 and 503 as server errors", () => {
@@ -152,20 +154,25 @@ describe("GitHub client throttling", () => {
     const notices: string[] = [];
     const reset = Math.floor(Date.now() / 1000) + 3_600;
     const requestFetch: typeof globalThis.fetch = async () =>
-      new Response(JSON.stringify({
-        data: null,
-        errors: [{
-          type: "RATE_LIMITED",
-          message: "API rate limit exceeded for test user",
-        }],
-      }), {
-        status: 200,
-        headers: {
-          "content-type": "application/json",
-          "x-ratelimit-remaining": "76",
-          "x-ratelimit-reset": String(reset),
+      new Response(
+        JSON.stringify({
+          data: null,
+          errors: [
+            {
+              type: "RATE_LIMITED",
+              message: "API rate limit exceeded for test user",
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+            "x-ratelimit-remaining": "76",
+            "x-ratelimit-reset": String(reset),
+          },
         },
-      });
+      );
     const octokit = createOctokit({
       token: "test-token",
       owner: "clockgrove",
@@ -174,32 +181,35 @@ describe("GitHub client throttling", () => {
       onThrottle: (message) => notices.push(message),
     });
 
-    await expect(
-      octokit.graphql("query { viewer { login } }"),
-    ).rejects.toBeInstanceOf(PlatformUnavailableError);
-    expect(notices).toEqual([
-      expect.stringContaining("yielding to Factory"),
-    ]);
+    await expect(octokit.graphql("query { viewer { login } }")).rejects.toBeInstanceOf(
+      PlatformUnavailableError,
+    );
+    expect(notices).toEqual([expect.stringContaining("yielding to Factory")]);
   });
 
   it("wraps GitHub's RATE_LIMIT/graphql_rate_limit GraphqlResponseError shape", async () => {
     const reset = Math.floor(Date.now() / 1000) + 3_600;
     const requestFetch: typeof globalThis.fetch = async () =>
-      new Response(JSON.stringify({
-        data: null,
-        errors: [{
-          type: "RATE_LIMIT",
-          code: "graphql_rate_limit",
-          message: "API rate limit already exceeded for test user",
-        }],
-      }), {
-        status: 200,
-        headers: {
-          "content-type": "application/json",
-          "x-ratelimit-remaining": "0",
-          "x-ratelimit-reset": String(reset),
+      new Response(
+        JSON.stringify({
+          data: null,
+          errors: [
+            {
+              type: "RATE_LIMIT",
+              code: "graphql_rate_limit",
+              message: "API rate limit already exceeded for test user",
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+            "x-ratelimit-remaining": "0",
+            "x-ratelimit-reset": String(reset),
+          },
         },
-      });
+      );
     const octokit = createOctokit({
       token: "test-token",
       owner: "clockgrove",
@@ -207,9 +217,9 @@ describe("GitHub client throttling", () => {
       requestFetch,
     });
 
-    await expect(
-      octokit.graphql("query { viewer { login } }"),
-    ).rejects.toBeInstanceOf(PlatformUnavailableError);
+    await expect(octokit.graphql("query { viewer { login } }")).rejects.toBeInstanceOf(
+      PlatformUnavailableError,
+    );
   });
 });
 
@@ -330,9 +340,7 @@ describe("ContentCreationPacer", () => {
     for (let offset = 0; offset < 5; offset += 1) {
       p.recordCall(new Date(t0.getTime() + offset * 1_000));
     }
-    expect(
-      p.waitMs(new Date(t0.getTime() + 5_000), { hourlyReserve: 2 }),
-    ).toBe(3_597_000);
+    expect(p.waitMs(new Date(t0.getTime() + 5_000), { hourlyReserve: 2 })).toBe(3_597_000);
   });
 });
 
@@ -348,12 +356,13 @@ describe("MutationScheduler", () => {
       pacer,
       reservedLeaseMutationsPerHour: 1,
       now: () => now,
-      sleep: (ms) => new Promise<void>((resolve) => {
-        resumeSleep = () => {
-          now = new Date(now.getTime() + ms + 1);
-          resolve();
-        };
-      }),
+      sleep: (ms) =>
+        new Promise<void>((resolve) => {
+          resumeSleep = () => {
+            now = new Date(now.getTime() + ms + 1);
+            resolve();
+          };
+        }),
     });
 
     const normal = scheduler.acquire("normal");

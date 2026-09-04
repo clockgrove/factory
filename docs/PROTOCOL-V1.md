@@ -1,8 +1,10 @@
 # Factory v1 — GitHub Copilot compatibility protocol
 
-This is the single design document for Factory. It covers what Factory is for, the constraints it
-holds itself to, how the loop works, what it may and may not do on its own, how it is packaged, and
-what it has not established. Sections are numbered so that code comments and skills can cite them.
+This document preserves the historical Factory v1 GitHub Copilot compatibility protocol. It is not
+the current product contract or release plan; [`DESIGN.md`](DESIGN.md) is authoritative for v2.
+In particular, v1's optional coding-agent CI and workflow-approval behavior below is not a v2
+Factory dependency: v2 installs no workflow and uses a local Linux repository controller as its
+scheduler. Sections remain numbered so compatibility code and migration notes can cite them.
 
 ---
 
@@ -557,9 +559,9 @@ load-bearing and a colocated test silently never runs.
 
 ---
 
-## 9. Repository requirements
+## 9. Historical v1 repository requirements
 
-### 9.1 Before pointing Factory at a repository
+### 9.1 Before pointing the v1 compatibility path at a repository
 
 - **Seed a `.gitignore`** (at minimum `node_modules/`, `dist/`, `*.log`) in the same commit as
   `package.json`/`tsconfig.json`, never in a follow-up. Without it a coding agent's `npm install` can

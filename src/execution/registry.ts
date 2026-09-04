@@ -1,14 +1,13 @@
 import type { RunPolicy } from "../protocol/policy.js";
+import { isManagedAgentBackendId, isSandboxBackendId } from "../protocol/policy.js";
 import type { ExecutionRequirements } from "../protocol/worker-packet.js";
-import {
-  capabilityMismatch,
-  type BackendProbe,
-  type ExecutionBackend,
-} from "./backend.js";
+import { capabilityMismatch, type BackendProbe, type ExecutionBackend } from "./backend.js";
 
 export interface BudgetRemaining {
   sandboxMinutes: number;
   managedAgentSessions: number;
+  /** null means the immutable policy did not configure a token ceiling. */
+  modelTokens?: number | null;
 }
 
 export interface BackendSelection {
@@ -35,11 +34,7 @@ export interface BackendCandidate {
 }
 
 function backendCostClass(id: string): BackendCandidate["costClass"] {
-  return id === "github-copilot/github-managed"
-    ? "managed"
-    : id.includes("daytona") || id.includes("vercel-sandbox")
-      ? "sandbox"
-      : "local";
+  return isManagedAgentBackendId(id) ? "managed" : isSandboxBackendId(id) ? "sandbox" : "local";
 }
 
 export class NoExecutionBackendError extends Error {
@@ -58,10 +53,7 @@ export class NoExecutionBackendError extends Error {
 
 export class BackendRegistry {
   readonly #backends = new Map<string, ExecutionBackend>();
-  readonly #probeCache = new Map<
-    string,
-    { probe: BackendProbe; expiresAt: number }
-  >();
+  readonly #probeCache = new Map<string, { probe: BackendProbe; expiresAt: number }>();
 
   register(backend: ExecutionBackend): void {
     const id = backend.capabilities.id;
@@ -131,6 +123,16 @@ export class BackendRegistry {
       ) {
         permanentReasons.push("paid backend not allowed by run policy");
       }
+      if (args.policy.models && !backend.capabilities.supportsModelSelection) {
+        permanentReasons.push("backend cannot honor the immutable models/phaseProfiles selection");
+      }
+      permanentReasons.push(
+        ...(backend.policyRejectionReasons?.({
+          policy: args.policy,
+          requirements: args.requirements,
+          phase: "execution",
+        }) ?? []),
+      );
       let probe: BackendProbe | null = null;
       if (permanentReasons.length === 0) {
         const key = `${id}\n${requirementKey}`;
@@ -150,9 +152,7 @@ export class BackendRegistry {
         else if (!probe.authenticated) {
           transientReasons.push(probe.reason ?? "not authenticated");
         } else {
-          permanentReasons.push(
-            ...capabilityMismatch(backend.capabilities, args.requirements),
-          );
+          permanentReasons.push(...capabilityMismatch(backend.capabilities, args.requirements));
         }
       }
       candidates.push({
@@ -162,9 +162,7 @@ export class BackendRegistry {
         capabilities: backend.capabilities,
         probe,
         costClass,
-        local:
-          backend.capabilities.hostExecution &&
-          !backend.capabilities.requiresPaidRuntime,
+        local: backend.capabilities.hostExecution && !backend.capabilities.requiresPaidRuntime,
         paid: backend.capabilities.requiresPaidRuntime,
         permanentReasons,
         transientReasons,
@@ -210,14 +208,14 @@ export class BackendRegistry {
       if (!backend.validate || !backend.probeValidation) {
         permanentReasons.push("does not provide independent isolated validation");
       }
-      if (!(["container", "microvm", "managed"] as const).includes(
-        backend.capabilities.isolation as "container" | "microvm" | "managed",
-      )) {
+      if (
+        !(["container", "microvm", "managed"] as const).includes(
+          backend.capabilities.isolation as "container" | "microvm" | "managed",
+        )
+      ) {
         permanentReasons.push("validation boundary is weaker than a container");
       }
-      permanentReasons.push(
-        ...capabilityMismatch(backend.capabilities, validationRequirements),
-      );
+      permanentReasons.push(...capabilityMismatch(backend.capabilities, validationRequirements));
       if (
         backend.capabilities.requiresPaidRuntime &&
         !args.policy.allowedPaidBackends.includes(id)
@@ -227,6 +225,13 @@ export class BackendRegistry {
       if (costClass === "managed") {
         permanentReasons.push("managed-session backends cannot host validation");
       }
+      permanentReasons.push(
+        ...(backend.policyRejectionReasons?.({
+          policy: args.policy,
+          requirements: validationRequirements,
+          phase: "validation",
+        }) ?? []),
+      );
       let probe: BackendProbe | null = null;
       if (permanentReasons.length === 0) {
         const key = `validation\n${id}\n${requirementKey}`;
@@ -254,9 +259,7 @@ export class BackendRegistry {
         capabilities: backend.capabilities,
         probe,
         costClass,
-        local:
-          backend.capabilities.hostExecution &&
-          !backend.capabilities.requiresPaidRuntime,
+        local: backend.capabilities.hostExecution && !backend.capabilities.requiresPaidRuntime,
         paid: backend.capabilities.requiresPaidRuntime,
         permanentReasons,
         transientReasons,
@@ -270,6 +273,7 @@ export class BackendRegistry {
     requirements: ExecutionRequirements;
     budget: BudgetRemaining;
     estimatedDurationMs?: number;
+    requireHostExecution?: boolean;
   }): Promise<BackendSelection> {
     const rejections: BackendRejection[] = [];
     for (const candidate of await this.evaluate({
@@ -278,16 +282,26 @@ export class BackendRegistry {
     })) {
       const { id, backend, probe } = candidate;
       const reasons = [...candidate.permanentReasons, ...candidate.transientReasons];
+      if (args.requireHostExecution && !candidate.capabilities?.hostExecution) {
+        reasons.push(
+          "native stack members require host-owned local execution for cascading revalidation",
+        );
+      }
       if (
-        (id.includes("daytona") || id.includes("vercel-sandbox")) &&
+        candidate.capabilities?.reportsModelUsage &&
+        args.budget.modelTokens !== undefined &&
+        args.budget.modelTokens !== null &&
+        args.budget.modelTokens <= 0
+      ) {
+        reasons.push("model-token budget exhausted");
+      }
+      if (
+        isSandboxBackendId(id) &&
         args.budget.sandboxMinutes * 60_000 < (args.estimatedDurationMs ?? 1)
       ) {
         reasons.push("insufficient sandbox-minute budget for the bounded attempt");
       }
-      if (
-        id === "github-copilot/github-managed" &&
-        args.budget.managedAgentSessions <= 0
-      ) {
+      if (isManagedAgentBackendId(id) && args.budget.managedAgentSessions <= 0) {
         reasons.push("managed-session budget exhausted");
       }
       if (reasons.length === 0 && backend && probe) return { backend, probe };
@@ -308,10 +322,7 @@ export class BackendRegistry {
       requirements: args.requirements,
     })) {
       const { id, backend, probe } = candidate;
-      const reasons = [
-        ...candidate.permanentReasons,
-        ...candidate.transientReasons,
-      ];
+      const reasons = [...candidate.permanentReasons, ...candidate.transientReasons];
       if (
         candidate.costClass === "sandbox" &&
         args.budget.sandboxMinutes * 60_000 < args.estimatedDurationMs

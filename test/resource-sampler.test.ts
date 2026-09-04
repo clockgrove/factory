@@ -35,19 +35,10 @@ describe("Linux/WSL resource sampler", () => {
     expect(parseCgroupV2CpuMax("max 100000")).toBeNull();
     expect(parseCgroupV1Cpu("-1", "100000")).toBeNull();
     expect(parseCgroupBytes("max", "memory.max")).toBeNull();
-    expect(
-      parseCgroupBytes(
-        "9223372036854771712",
-        "memory.limit_in_bytes",
-      ),
-    ).toBeNull();
-    expect(() =>
-      parseCgroupBytes(
-        "9223372036854771712",
-        "memory.usage_in_bytes",
-        false,
-      ),
-    ).toThrow(/malformed cgroup/);
+    expect(parseCgroupBytes("9223372036854771712", "memory.limit_in_bytes")).toBeNull();
+    expect(() => parseCgroupBytes("9223372036854771712", "memory.usage_in_bytes", false)).toThrow(
+      /malformed cgroup/,
+    );
   });
 
   it("chooses the tightest cgroup v2 CPU and memory observations", async () => {
@@ -174,9 +165,6 @@ describe("Linux/WSL resource sampler", () => {
         maxLoadRatio: 0.9,
         maxMemoryUsageRatio: 0.85,
       }),
-    ).toEqual([
-      "load pressure exceeds policy ceiling",
-      "memory pressure exceeds policy ceiling",
-    ]);
+    ).toEqual(["load pressure exceeds policy ceiling", "memory pressure exceeds policy ceiling"]);
   });
 });

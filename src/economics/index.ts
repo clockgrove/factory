@@ -1,9 +1,6 @@
 import type { FactoryEvent } from "../protocol/events.js";
 import type { RunPolicy } from "../protocol/policy.js";
-import {
-  deduplicateFactoryEvents,
-  latestRunReceipts,
-} from "../control/receipts.js";
+import { deduplicateFactoryEvents, latestRunReceipts } from "../control/receipts.js";
 
 export type EvidenceMetric<T> =
   | {
@@ -47,10 +44,7 @@ function normalizedSet(values: readonly string[]): string[] {
   return [...new Set(values)].sort();
 }
 
-function sameFingerprint(
-  query: DurationFingerprint,
-  sample: DurationEvidenceSample,
-): boolean {
+function sameFingerprint(query: DurationFingerprint, sample: DurationEvidenceSample): boolean {
   return (
     query.taskClass === sample.taskClass &&
     query.backendId === sample.backendId &&
@@ -58,8 +52,7 @@ function sameFingerprint(
     JSON.stringify(normalizedSet(query.os)) === JSON.stringify(normalizedSet(sample.os)) &&
     JSON.stringify(normalizedSet(query.architecture)) ===
       JSON.stringify(normalizedSet(sample.architecture)) &&
-    JSON.stringify(normalizedSet(query.tools)) ===
-      JSON.stringify(normalizedSet(sample.tools))
+    JSON.stringify(normalizedSet(query.tools)) === JSON.stringify(normalizedSet(sample.tools))
   );
 }
 
@@ -87,7 +80,8 @@ export function estimateDuration(
     return {
       durationMs: {
         availability: "unavailable",
-        reason: "no durable successful sample matches task class, backend, trust, OS, architecture, and tools",
+        reason:
+          "no durable successful sample matches task class, backend, trust, OS, architecture, and tools",
       },
       matchingEvidenceIds: [],
     };
@@ -155,6 +149,7 @@ export function nativeUnitLedgers(
       event.attempt ?? "management",
       event.phase,
       event.unit,
+      event.usageId ?? "default",
     ].join(":");
     const ledger = ledgers.get(event.unit)!;
     const current = ledger.get(key) ?? { reserved: 0 };
@@ -171,14 +166,8 @@ export function nativeUnitLedgers(
   return units.map((unit) => {
     const entries = [...ledgers.get(unit)!.values()];
     const reserved = entries.reduce((sum, entry) => sum + entry.reserved, 0);
-    const reconciled = entries.reduce(
-      (sum, entry) => sum + (entry.reconciled ?? 0),
-      0,
-    );
-    const committed = entries.reduce(
-      (sum, entry) => sum + (entry.reconciled ?? entry.reserved),
-      0,
-    );
+    const reconciled = entries.reduce((sum, entry) => sum + (entry.reconciled ?? 0), 0);
+    const committed = entries.reduce((sum, entry) => sum + (entry.reconciled ?? entry.reserved), 0);
     return {
       unit,
       reserved,
@@ -268,18 +257,12 @@ export function summarizeEconomics(input: {
       sandboxMilliseconds: {
         configured: input.policy.maxSandboxMinutes * 60_000,
         committed: sandboxCommitted,
-        remaining: Math.max(
-          0,
-          input.policy.maxSandboxMinutes * 60_000 - sandboxCommitted,
-        ),
+        remaining: Math.max(0, input.policy.maxSandboxMinutes * 60_000 - sandboxCommitted),
       },
       managedSessions: {
         configured: input.policy.maxManagedAgentSessions,
         committed: managedCommitted,
-        remaining: Math.max(
-          0,
-          input.policy.maxManagedAgentSessions - managedCommitted,
-        ),
+        remaining: Math.max(0, input.policy.maxManagedAgentSessions - managedCommitted),
       },
       modelTokens:
         configuredTokens === undefined
@@ -388,9 +371,7 @@ export function summarizeRun(
   const finishMs = terminal ? Date.parse(terminal.at) : null;
   const effectivePolicy = policy ?? receiptSet.start.policy;
   const validations = runEvents.filter((event) => event.kind === "validation");
-  const delivery = [...runEvents]
-    .reverse()
-    .find((event) => event.kind === "delivery");
+  const delivery = [...runEvents].reverse().find((event) => event.kind === "delivery");
   const publications = runEvents.filter(
     (event) => event.kind === "publication" && event.event === "PublicationRecorded",
   );
@@ -423,17 +404,14 @@ export function summarizeRun(
     },
     validation: {
       recorded: validations.length,
-      passed: validations.filter((event) => event.kind === "validation" && event.passed)
-        .length,
-      failed: validations.filter((event) => event.kind === "validation" && !event.passed)
-        .length,
+      passed: validations.filter((event) => event.kind === "validation" && event.passed).length,
+      failed: validations.filter((event) => event.kind === "validation" && !event.passed).length,
     },
     delivery: {
       selected: delivery?.kind === "delivery" ? delivery.selected : "unavailable",
       publications: publications.length,
       integrationsCompleted: runEvents.filter(
-        (event) =>
-          event.kind === "publication" && event.event === "IntegrationCompleted",
+        (event) => event.kind === "publication" && event.event === "IntegrationCompleted",
       ).length,
     },
     economics: summarizeEconomics({

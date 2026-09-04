@@ -109,8 +109,12 @@ export function classifyRefusal(error: unknown): Refusal {
     const type = entry.type?.toUpperCase();
     const code = entry.code?.toLowerCase();
     const detail = entry.message?.toLowerCase() ?? "";
-    return type === "RATE_LIMITED" || type === "RATE_LIMIT" ||
-      code === "graphql_rate_limit" || detail.includes("rate limit");
+    return (
+      type === "RATE_LIMITED" ||
+      type === "RATE_LIMIT" ||
+      code === "graphql_rate_limit" ||
+      detail.includes("rate limit")
+    );
   });
   if (typeof status !== "number" && !graphQlRateLimited) {
     return { kind: "not_refusal" };
@@ -235,10 +239,7 @@ export class CircuitBreaker {
   }
 
   /** Trips the circuit once enough consecutive refusals accumulate. */
-  recordRefusal(
-    refusal: Exclude<Refusal, { kind: "not_refusal" }>,
-    now: Date = new Date(),
-  ): void {
+  recordRefusal(refusal: Exclude<Refusal, { kind: "not_refusal" }>, now: Date = new Date()): void {
     this.#consecutiveRefusals += 1;
     if (this.#consecutiveRefusals < this.#opts.openAfterConsecutiveRefusals) {
       return;
@@ -248,10 +249,7 @@ export class CircuitBreaker {
     this.#consecutiveRefusals = 0;
     // Exponentially increasing cooldown per the same GitHub guidance, capped
     // so a stuck breaker does not stall the loop indefinitely on its own.
-    const cooldown = Math.min(
-      this.#opts.baseCooldownMs * this.#opens,
-      this.#opts.maxCooldownMs,
-    );
+    const cooldown = Math.min(this.#opts.baseCooldownMs * this.#opens, this.#opts.maxCooldownMs);
     this.#openUntil = now.getTime() + Math.max(cooldown, refusal.retryAfterMs);
   }
 }
@@ -277,25 +275,16 @@ export class ContentCreationPacer {
    * Normal writes can reserve part of the hourly budget for lease traffic;
    * lease writes use the full configured limit.
    */
-  waitMs(
-    now: Date = new Date(),
-    options: { hourlyReserve?: number } = {},
-  ): number {
+  waitMs(now: Date = new Date(), options: { hourlyReserve?: number } = {}): number {
     const t = now.getTime();
     this.#prune(t);
     const hourlyReserve = options.hourlyReserve ?? 0;
-    if (
-      !Number.isInteger(hourlyReserve) ||
-      hourlyReserve < 0 ||
-      hourlyReserve >= this.perHour
-    ) {
+    if (!Number.isInteger(hourlyReserve) || hourlyReserve < 0 || hourlyReserve >= this.perHour) {
       throw new Error("hourly mutation reserve must leave at least one usable slot");
     }
     const hourlyLimit = this.perHour - hourlyReserve;
     const gapWait =
-      this.#lastCallAt === null
-        ? 0
-        : Math.max(0, this.#lastCallAt + this.minGapMs - t);
+      this.#lastCallAt === null ? 0 : Math.max(0, this.#lastCallAt + this.minGapMs - t);
     const minuteWait =
       this.#minute.length < this.perMinute
         ? 0
@@ -364,8 +353,7 @@ export class MutationScheduler implements MutationAdmission {
   constructor(options: MutationSchedulerOptions = {}) {
     this.#pacer = options.pacer ?? new ContentCreationPacer();
     this.#reservedLeaseMutationsPerHour =
-      options.reservedLeaseMutationsPerHour ??
-      FACTORY_PACING.reservedLeaseMutationsPerHour;
+      options.reservedLeaseMutationsPerHour ?? FACTORY_PACING.reservedLeaseMutationsPerHour;
     this.#notify = options.onThrottle ?? (() => {});
     this.#now = options.now ?? (() => new Date());
     this.#sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
@@ -380,8 +368,7 @@ export class MutationScheduler implements MutationAdmission {
       let wait: number;
       try {
         wait = this.#pacer.waitMs(now, {
-          hourlyReserve:
-            kind === "lease" ? 0 : this.#reservedLeaseMutationsPerHour,
+          hourlyReserve: kind === "lease" ? 0 : this.#reservedLeaseMutationsPerHour,
         });
       } catch (error) {
         release();
@@ -441,9 +428,7 @@ export class ConcurrencyLimiter {
   #inFlight = 0;
   #queue: Array<() => void> = [];
 
-  constructor(
-    private readonly limit: number = FACTORY_PACING.maxConcurrentRequests,
-  ) {}
+  constructor(private readonly limit: number = FACTORY_PACING.maxConcurrentRequests) {}
 
   /** Resolves once a slot is free; call the returned function to release it. */
   async acquire(): Promise<() => void> {

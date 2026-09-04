@@ -16,7 +16,7 @@
       "source": {
         "source": "url",
         "url": "https://github.com/clockgrove/factory.git",
-        "ref": "main"
+        "ref": "v2.0.26"
       },
       "policy": {
         "installation": "AVAILABLE",

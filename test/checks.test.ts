@@ -64,9 +64,7 @@ describe("runlessSuiteVerdict", () => {
   it("prefers PENDING over FAILURE when one suite is still running", () => {
     // Something is still coming, so the honest answer is "not settled" — the
     // loop waits a cycle rather than retrying against a half-reported result.
-    expect(runlessSuiteVerdict([suite("FAILURE"), suite(null, 0, "IN_PROGRESS")])).toBe(
-      "PENDING",
-    );
+    expect(runlessSuiteVerdict([suite("FAILURE"), suite(null, 0, "IN_PROGRESS")])).toBe("PENDING");
   });
 
   it("ignores run-producing suites when judging runless ones", () => {

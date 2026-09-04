@@ -9,6 +9,8 @@ import {
   CodexCliManagementBackend,
   parseManagementCompilerOutput,
 } from "../src/management/codex-cli.js";
+import { workerPacketFromCompiled } from "../src/graph.js";
+import { validationPlanFromPacket } from "../src/validation/plan.js";
 
 const sha = "a".repeat(40);
 const base: CompilerWorkItem = {
@@ -39,9 +41,7 @@ const base: CompilerWorkItem = {
     dependencyEvidence: [],
   },
   changeSurface: { mergeClass: "parallel-safe", exclusiveResources: [] },
-  validation: [
-    { tier: "mechanical", criteria: ["Tests pass", "Build output exists"] },
-  ],
+  validation: [{ tier: "mechanical", criteria: ["Tests pass", "Build output exists"] }],
   delivery: { group: "code", relationship: "root" },
   economicReview: {
     conservative: true,
@@ -59,16 +59,74 @@ const facts = {
   scripts: { test: "vitest run", typecheck: "tsc --noEmit" },
 };
 
+function providerWorkItem(id: string, dependsOn: string[], scope: string[]) {
+  return {
+    id,
+    title: `Implement ${id}`,
+    goal: `Implement ${id}`,
+    acceptance: ["Tests pass"],
+    scope,
+    preconditions: [],
+    outOfScope: [],
+    conventions: ["Use TypeScript"],
+    dependsOn,
+    baseSha: sha,
+    validationCommands: ["npm test"],
+    requirements: {
+      os: ["linux"],
+      architecture: ["x64"],
+      cpu: 1,
+      memoryMb: 2_048,
+      diskMb: 1_024,
+      timeoutMinutes: 30,
+      estimatedDurationMinutes: 10,
+      tools: ["node", "npm"],
+      services: [],
+      networkDestinations: [],
+      permittedSecretNames: [],
+      trust: "trusted_local",
+    },
+    artifactContract: "clockgrove.factory/artifact-v1" as const,
+  };
+}
+
+async function compileProviderOutput(
+  title: string,
+  workItems: ReturnType<typeof providerWorkItem>[],
+) {
+  const backend = new CodexCliManagementBackend({
+    runStructured: async () => ({
+      value: { title, workItems },
+      usage: { inputTokens: 10, outputTokens: 20 },
+    }),
+  });
+  return backend.compile(
+    {
+      repository: process.cwd(),
+      objective: { number: 1, title, body: title },
+      defaultBranch: "main",
+      baseSha: sha,
+      repositoryFiles: [
+        "package.json",
+        "src/shared.ts",
+        "src/a.ts",
+        "src/b.ts",
+        "src/c.ts",
+        "src/d.ts",
+      ],
+      allowedNetworkDestinations: [],
+    },
+    async () => {},
+  );
+}
+
 describe("bounded objective compiler", () => {
   it("is byte deterministic across enumeration order", () => {
     const a = compileObjective({
       title: "Ship",
       baseSha: sha,
       repositoryFacts: facts,
-      workItems: [
-        base,
-        { ...base, id: "docs", scope: ["docs/a.md"], dependsOn: [] },
-      ],
+      workItems: [base, { ...base, id: "docs", scope: ["docs/a.md"], dependsOn: [] }],
     });
     const b = compileObjective({
       title: "Ship",
@@ -86,7 +144,6 @@ describe("bounded objective compiler", () => {
           preconditions: [...base.preconditions].reverse(),
           outOfScope: [...base.outOfScope].reverse(),
           conventions: [...base.conventions].reverse(),
-          validationCommands: [...base.validationCommands].reverse(),
           requirements: {
             ...base.requirements,
             os: ["darwin", "linux"],
@@ -97,6 +154,21 @@ describe("bounded objective compiler", () => {
       ],
     });
     expect(serializeCompilerObjective(a)).toBe(serializeCompilerObjective(b));
+  });
+
+  it("preserves validation command order through compilation and execution planning", () => {
+    const objective = compileObjective({
+      title: "Ship",
+      baseSha: sha,
+      repositoryFacts: facts,
+      workItems: [base],
+    });
+    const compiled = objective.workItems[0]!;
+    expect(compiled.validationCommands).toEqual(["npm test", "npm run typecheck"]);
+    expect(validationPlanFromPacket(workerPacketFromCompiled(compiled)).commands).toEqual([
+      "npm test",
+      "npm run typecheck",
+    ]);
   });
   it("rejects cycles, unobservable criteria, overlap, invented commands, and topology", () => {
     expect(() =>
@@ -124,9 +196,7 @@ describe("bounded objective compiler", () => {
       }),
     ).toThrow(/overlapping unordered/);
     expect(() =>
-      validateCompiledObjective({ title: "x", workItems: [base] }, [
-        "npm run typecheck",
-      ]),
+      validateCompiledObjective({ title: "x", workItems: [base] }, ["npm run typecheck"]),
     ).toThrow(/invented/);
     expect(() =>
       validateCompiledObjective({
@@ -177,22 +247,84 @@ describe("bounded objective compiler", () => {
     ).toThrow();
   });
   it("makes the management backend reject malformed provider output before compiling", async () => {
+    let observedModel: unknown;
     const backend = new CodexCliManagementBackend({
-      runStructured: async () => ({
-        value: { title: "x", workItems: [{ id: "bad", unexpected: true }] },
-        usage: { inputTokens: 1, outputTokens: 1 },
-      }),
+      runStructured: async (_cwd, _schema, _prompt, modelSelection) => {
+        observedModel = modelSelection;
+        return {
+          value: { title: "x", workItems: [{ id: "bad", unexpected: true }] },
+          usage: { inputTokens: 1, outputTokens: 1 },
+        };
+      },
     });
     await expect(
-      backend.compile({
-        repository: process.cwd(),
-        objective: { number: 1, title: "x", body: "x" },
-        defaultBranch: "main",
-        baseSha: sha,
-        repositoryFiles: ["package.json", "src/a.ts"],
-        allowedNetworkDestinations: [],
-      }),
+      backend.compile(
+        {
+          repository: process.cwd(),
+          objective: { number: 1, title: "x", body: "x" },
+          defaultBranch: "main",
+          baseSha: sha,
+          repositoryFiles: ["package.json", "src/a.ts"],
+          allowedNetworkDestinations: [],
+          modelSelection: {
+            profile: "frontier",
+            model: "gpt-5",
+            reasoning: "high",
+          },
+        },
+        async () => {},
+      ),
     ).rejects.toThrow();
+    expect(observedModel).toEqual({
+      profile: "frontier",
+      model: "gpt-5",
+      reasoning: "high",
+    });
+  });
+  it("repairs unordered overlapping scopes before strict compiler validation", async () => {
+    const { objective } = await compileProviderOutput("Shared scope", [
+      providerWorkItem("first", [], ["src/shared.ts"]),
+      providerWorkItem("second", [], ["src/shared.ts"]),
+    ]);
+
+    expect(objective.workItems).toMatchObject([
+      {
+        id: "first",
+        dependsOn: [],
+        delivery: { group: "first", relationship: "root" },
+      },
+      {
+        id: "second",
+        dependsOn: ["first"],
+        delivery: {
+          group: "first",
+          relationship: "continue-stack",
+          parentWorkItem: "first",
+        },
+      },
+    ]);
+  });
+  it("turns provider diamond fan-out children into distinct delivery groups", async () => {
+    // Deliberately not topologically ordered: provider array order must not
+    // control child counting or delivery grouping.
+    const { objective } = await compileProviderOutput("Diamond", [
+      providerWorkItem("d", ["b", "c"], ["src/d.ts"]),
+      providerWorkItem("c", ["a"], ["src/c.ts"]),
+      providerWorkItem("a", [], ["src/a.ts"]),
+      providerWorkItem("b", ["a"], ["src/b.ts"]),
+    ]);
+
+    expect(
+      objective.workItems.map((item) => ({
+        id: item.id,
+        delivery: item.delivery,
+      })),
+    ).toEqual([
+      { id: "a", delivery: { group: "a", relationship: "root" } },
+      { id: "b", delivery: { group: "b", relationship: "sibling" } },
+      { id: "c", delivery: { group: "c", relationship: "sibling" } },
+      { id: "d", delivery: { group: "d", relationship: "join-after-merge" } },
+    ]);
   });
   it("rejects order-sensitive facts and impossible delivery groups", () => {
     const conflicting = {

@@ -14,10 +14,7 @@ import {
   type CapacitySnapshot,
 } from "./capacity-ledger.js";
 import type { RankedWorkItem } from "./priority.js";
-import {
-  resourcePressureReasons,
-  type ResourceSnapshot,
-} from "./resource-sampler.js";
+import { resourcePressureReasons, type ResourceSnapshot } from "./resource-sampler.js";
 
 export type AdmissionReasonCode =
   | "local-capacity"
@@ -40,6 +37,7 @@ export type QueuedReasonCode =
   | "budget-exhausted"
   | "burst-disabled"
   | "burst-trigger-pending"
+  | "burst-time-saved"
   | "burst-priority"
   | "path-conflict"
   | "exclusive-resource-conflict";
@@ -62,6 +60,8 @@ export interface AdmissionWorkItem {
   validators?: readonly BackendCandidate[];
   nextAttempt: number;
   estimatedDurationMs: number;
+  /** Conservative start-delay reduction if this item starts in cloud now. */
+  estimatedCloudTimeSavedMs?: number;
   paths: readonly string[];
   exclusiveResources: readonly string[];
   queuedSince?: string;
@@ -98,6 +98,10 @@ export interface AdmissionProposal {
       unit: "sandbox_milliseconds" | "managed_sessions" | "none";
       amount: number;
     };
+  };
+  economics?: {
+    estimatedCloudTimeSavedMinutes: number;
+    minimumCloudTimeSavedMinutes: number;
   };
 }
 
@@ -142,10 +146,8 @@ export function admissionCapacityLimits(
   repositoryLimits?: { maxLocalWorkers: number; maxPaidWorkers: number },
 ): CapacityLimits {
   const effective = normalizeSchedulingPolicy(policy);
-  const repositoryLocal =
-    repositoryLimits?.maxLocalWorkers ?? effective.capacity.local.maxWorkers;
-  const repositoryCloud =
-    repositoryLimits?.maxPaidWorkers ?? effective.burst.maxCloudParallel;
+  const repositoryLocal = repositoryLimits?.maxLocalWorkers ?? effective.capacity.local.maxWorkers;
+  const repositoryCloud = repositoryLimits?.maxPaidWorkers ?? effective.burst.maxCloudParallel;
   const repositoryParallel = repositoryLocal + repositoryCloud;
   return {
     maxParallel: repositoryParallel,
@@ -317,6 +319,7 @@ export function planAdmissions(input: AdmissionInput): AdmissionPlan {
   const budget = {
     sandboxMinutes: input.budget.sandboxMinutes,
     managedAgentSessions: input.budget.managedAgentSessions,
+    modelTokens: input.budget.modelTokens ?? null,
   };
   const observedReservationMemoryMb = input.capacity.memoryMb;
 
@@ -332,14 +335,14 @@ export function planAdmissions(input: AdmissionInput): AdmissionPlan {
     const number = item.priority.item.number;
     const requested = {
       cpu: item.requirements.cpu ?? effective.capacity.local.defaultCpu,
-      memoryMb:
-        item.requirements.memoryMb ?? effective.capacity.local.defaultMemoryMb,
+      memoryMb: item.requirements.memoryMb ?? effective.capacity.local.defaultMemoryMb,
     };
     const policyReasons = requirementsPolicyRejections(item.requirements, input.policy);
     if (input.leaseValid === false) {
       queued.push(queue(item, "lease-unavailable", "Director lease is not current"));
       continue;
     }
+    const modelBudgetExhausted = budget.modelTokens !== null && budget.modelTokens <= 0;
     if (policyReasons.length > 0) {
       queued.push(queue(item, "policy-constraint", policyReasons.join("; "), true));
       continue;
@@ -348,14 +351,14 @@ export function planAdmissions(input: AdmissionInput): AdmissionPlan {
     const candidates = item.backends.filter((candidate) =>
       input.policy.backendOrder.includes(candidate.id),
     );
-    const configuredLocal = candidates.filter(
-      (candidate) => candidate.costClass === "local",
-    );
+    const configuredLocal = candidates.filter((candidate) => candidate.costClass === "local");
     const locallyCompatible = candidates.filter(
       (candidate) => candidate.local && candidate.permanentReasons.length === 0,
     );
     const availableLocal = locallyCompatible.filter(
-      (candidate) => candidate.transientReasons.length === 0,
+      (candidate) =>
+        candidate.transientReasons.length === 0 &&
+        !(modelBudgetExhausted && candidate.capabilities?.reportsModelUsage),
     );
     const compatibleCloud = candidates.filter(
       (candidate) =>
@@ -364,13 +367,15 @@ export function planAdmissions(input: AdmissionInput): AdmissionPlan {
         input.policy.allowedPaidBackends.includes(candidate.id),
     );
     const availableCloud = compatibleCloud.filter(
-      (candidate) => candidate.transientReasons.length === 0,
+      (candidate) =>
+        candidate.transientReasons.length === 0 &&
+        !(modelBudgetExhausted && candidate.capabilities?.reportsModelUsage),
     );
 
-    let validation:
-      | NonNullable<AdmissionProposal["validation"]>
-      | undefined;
-    if (item.requirements.trust !== "trusted_local") {
+    const selectValidation = (): {
+      validation?: NonNullable<AdmissionProposal["validation"]>;
+      rejection?: QueuedDecision;
+    } => {
       const validators = item.validators ?? [];
       const compatibleValidators = validators.filter(
         (candidate) => candidate.permanentReasons.length === 0,
@@ -380,12 +385,10 @@ export function planAdmissions(input: AdmissionInput): AdmissionPlan {
       );
       const candidate = availableValidators[0];
       if (!candidate) {
-        const transient = compatibleValidators.flatMap(
-          (value) => value.transientReasons,
-        );
+        const transient = compatibleValidators.flatMap((value) => value.transientReasons);
         const permanent = validators.flatMap((value) => value.permanentReasons);
-        queued.push(
-          queue(
+        return {
+          rejection: queue(
             item,
             transient.length > 0 ? "backend-unavailable" : "backend-incompatible",
             [...transient, ...permanent].join("; ") ||
@@ -393,38 +396,43 @@ export function planAdmissions(input: AdmissionInput): AdmissionPlan {
             transient.length === 0,
             "validation",
           ),
-        );
-        continue;
+        };
       }
-      if (
-        candidate.paid &&
-        input.repositoryLimits?.maxPaidWorkers === 0
-      ) {
-        queued.push(
-          queue(
+      if (candidate.paid && input.repositoryLimits?.maxPaidWorkers === 0) {
+        return {
+          rejection: queue(
             item,
             "backend-at-capacity",
             "repository controller allows no paid validation workers",
             false,
             "validation",
           ),
-        );
-        continue;
+        };
       }
-      validation = {
+      const chosen = {
         backendId: candidate.id,
         reservedBudget: budgetFor(candidate, item.estimatedDurationMs),
       };
-      if (!canReserveNativeBudget(budget, [validation.reservedBudget])) {
-        queued.push(
-          queue(
+      if (!canReserveNativeBudget(budget, [chosen.reservedBudget])) {
+        return {
+          rejection: queue(
             item,
             "budget-exhausted",
             `budget exhausted for independent validation on ${candidate.id}`,
           ),
-        );
+        };
+      }
+      return { validation: chosen };
+    };
+
+    let validation: NonNullable<AdmissionProposal["validation"]> | undefined;
+    if (item.requirements.trust !== "trusted_local") {
+      const selectedValidation = selectValidation();
+      if (selectedValidation.rejection) {
+        queued.push(selectedValidation.rejection);
         continue;
       }
+      validation = selectedValidation.validation;
     }
 
     if (
@@ -435,24 +443,33 @@ export function planAdmissions(input: AdmissionInput): AdmissionPlan {
         queue(
           item,
           "backend-incompatible",
-          configuredLocal
-            .flatMap((candidate) => candidate.permanentReasons)
-            .join("; ") || "configured local backend could not be evaluated",
+          configuredLocal.flatMap((candidate) => candidate.permanentReasons).join("; ") ||
+            "configured local backend could not be evaluated",
           true,
         ),
       );
       continue;
     }
 
-    let localBlock:
-      | { code: QueuedReasonCode; reason: string }
-      | undefined;
+    let localBlock: { code: QueuedReasonCode; reason: string } | undefined;
     if (locallyCompatible.length > 0) {
       if (availableLocal.length === 0) {
-        localBlock = {
-          code: "backend-unavailable",
-          reason: locallyCompatible.flatMap((candidate) => candidate.transientReasons).join("; "),
-        };
+        const exhaustedReportingLocal = locallyCompatible.some(
+          (candidate) =>
+            candidate.transientReasons.length === 0 && candidate.capabilities?.reportsModelUsage,
+        );
+        localBlock =
+          exhaustedReportingLocal && modelBudgetExhausted
+            ? {
+                code: "budget-exhausted",
+                reason: "model-token budget is exhausted for reporting local workers",
+              }
+            : {
+                code: "backend-unavailable",
+                reason: locallyCompatible
+                  .flatMap((candidate) => candidate.transientReasons)
+                  .join("; "),
+              };
       } else if (effective.capacity.mode === "adaptive-local" && !input.resource) {
         localBlock = {
           code: "resource-sample-unavailable",
@@ -478,10 +495,7 @@ export function planAdmissions(input: AdmissionInput): AdmissionPlan {
           effective.capacity.mode === "adaptive-local" &&
           input.resource &&
           input.resource.availableMemoryMb -
-              Math.max(
-                0,
-                provisional.snapshot().memoryMb - observedReservationMemoryMb,
-              ) <
+            Math.max(0, provisional.snapshot().memoryMb - observedReservationMemoryMb) <
             requested.memoryMb + effective.capacity.local.minimumFreeMemoryMb
         ) {
           localCapacityCode = "memory-capacity";
@@ -572,17 +586,13 @@ export function planAdmissions(input: AdmissionInput): AdmissionPlan {
       queued.push(queue(item, localBlock.code, localBlock.reason));
       continue;
     }
-    const cloudOrder = remoteRequired
-      ? input.policy.backendOrder
-      : effective.burst.backendOrder;
+    const cloudOrder = remoteRequired ? input.policy.backendOrder : effective.burst.backendOrder;
     const orderedCloud = cloudOrder.flatMap((id) => {
       const candidate = availableCloud.find((value) => value.id === id);
       return candidate ? [candidate] : [];
     });
 
-    let admissionReason: AdmissionReasonCode | null = remoteRequired
-      ? "capability-required"
-      : null;
+    let admissionReason: AdmissionReasonCode | null = remoteRequired ? "capability-required" : null;
     if (!remoteRequired) {
       if (effective.burst.mode === "never") {
         queued.push(
@@ -605,25 +615,56 @@ export function planAdmissions(input: AdmissionInput): AdmissionPlan {
         continue;
       }
       const queuedAt = item.queuedSince ? Date.parse(item.queuedSince) : input.nowMs;
-      const queuedLongEnough =
-        input.nowMs - queuedAt >= effective.burst.queueDelaySeconds * 1_000;
+      const queuedLongEnough = input.nowMs - queuedAt >= effective.burst.queueDelaySeconds * 1_000;
       const deadlineReached =
-        input.objectiveDeadlineMs - input.nowMs <=
-        effective.burst.deadlineReserveMinutes * 60_000;
-      admissionReason = burstReason(
-        effective.burst.mode,
-        queuedLongEnough,
-        deadlineReached,
-      );
+        input.objectiveDeadlineMs - input.nowMs <= effective.burst.deadlineReserveMinutes * 60_000;
+      admissionReason = burstReason(effective.burst.mode, queuedLongEnough, deadlineReached);
       if (!admissionReason) {
         queued.push(
           queue(item, "burst-trigger-pending", localBlock?.reason ?? "burst trigger is not met"),
         );
         continue;
       }
+      const minimumTimeSavedMs = (input.policy.economics?.minCloudTimeSavedMinutes ?? 0) * 60_000;
+      if (
+        minimumTimeSavedMs > 0 &&
+        (item.estimatedCloudTimeSavedMs === undefined ||
+          item.estimatedCloudTimeSavedMs < minimumTimeSavedMs)
+      ) {
+        queued.push(
+          queue(
+            item,
+            "burst-time-saved",
+            item.estimatedCloudTimeSavedMs === undefined
+              ? `paid burst requires at least ${minimumTimeSavedMs / 60_000} estimated minutes saved, but no conservative estimate is available`
+              : `estimated cloud time saved ${Math.floor(item.estimatedCloudTimeSavedMs / 60_000)}m is below the required ${minimumTimeSavedMs / 60_000}m`,
+          ),
+        );
+        continue;
+      }
     }
 
     if (orderedCloud.length === 0) {
+      if (localBlock?.code === "budget-exhausted") {
+        queued.push(queue(item, localBlock.code, localBlock.reason));
+        continue;
+      }
+      if (
+        modelBudgetExhausted &&
+        compatibleCloud.some(
+          (candidate) =>
+            candidate.transientReasons.length === 0 && candidate.capabilities?.reportsModelUsage,
+        )
+      ) {
+        queued.push(
+          queue(
+            item,
+            "budget-exhausted",
+            "model-token budget is exhausted for reporting cloud workers",
+          ),
+        );
+        continue;
+      }
       const transient = compatibleCloud.flatMap((candidate) => candidate.transientReasons);
       const permanent = candidates.flatMap((candidate) => candidate.permanentReasons);
       queued.push(
@@ -635,6 +676,18 @@ export function planAdmissions(input: AdmissionInput): AdmissionPlan {
         ),
       );
       continue;
+    }
+
+    // Artifacts produced outside the host trust boundary are untrusted even
+    // when the Work Packet permits a local worker. Never run their tests on
+    // the developer account merely because local capacity happened to burst.
+    if (!validation) {
+      const selectedValidation = selectValidation();
+      if (selectedValidation.rejection) {
+        queued.push(selectedValidation.rejection);
+        continue;
+      }
+      validation = selectedValidation.validation;
     }
 
     let cloudFailure: QueuedDecision | undefined;
@@ -712,6 +765,14 @@ export function planAdmissions(input: AdmissionInput): AdmissionPlan {
         capacityGeneration: input.capacity.generation,
         reservation,
         reservedBudget,
+        ...(item.estimatedCloudTimeSavedMs === undefined
+          ? {}
+          : {
+              economics: {
+                estimatedCloudTimeSavedMinutes: item.estimatedCloudTimeSavedMs / 60_000,
+                minimumCloudTimeSavedMinutes: input.policy.economics?.minCloudTimeSavedMinutes ?? 0,
+              },
+            }),
         ...(validation ? { validation } : {}),
       });
       cloudFailure = undefined;

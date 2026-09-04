@@ -1,13 +1,10 @@
 import { createHash } from "node:crypto";
 
-import type {
-  AttemptContext,
-  BackendHandle,
-  ExecutionUsage,
-} from "./backend.js";
+import type { AttemptContext, BackendHandle, ExecutionUsage } from "./backend.js";
 
 export interface DurableSessionIdentity {
   attemptId: string;
+  repository: string;
   backendId: string;
   resourceId: string;
   threadId: string;
@@ -28,8 +25,31 @@ export type SessionRecovery =
 export function durableAttemptId(
   context: Pick<
     AttemptContext,
-    "runId" | "objective" | "workItem" | "attempt" | "directorEpoch"
+    "repository" | "runId" | "objective" | "workItem" | "attempt" | "directorEpoch"
   >,
+): string {
+  const repository = canonicalRepositoryIdentity(context.repository);
+  return createHash("sha256")
+    .update(
+      JSON.stringify([
+        "clockgrove.factory/attempt-v2",
+        repository,
+        context.runId,
+        context.objective,
+        context.workItem,
+        context.attempt,
+        context.directorEpoch,
+      ]),
+    )
+    .digest("hex");
+}
+
+/**
+ * Pre-repository-namespace identity, retained only to detect and fail closed
+ * around ambiguous workers created by an older Factory process.
+ */
+export function legacyDurableAttemptId(
+  context: Pick<AttemptContext, "runId" | "objective" | "workItem" | "attempt" | "directorEpoch">,
 ): string {
   return createHash("sha256")
     .update(
@@ -44,12 +64,25 @@ export function durableAttemptId(
     .digest("hex");
 }
 
+export function canonicalRepositoryIdentity(repository: string): string {
+  if (typeof repository !== "string") {
+    throw new Error("attempt repository identity must be OWNER/REPO");
+  }
+  const normalized = repository.trim().toLowerCase();
+  if (!/^[^/\s]+\/[^/\s]+$/.test(normalized)) {
+    throw new Error("attempt repository identity must be OWNER/REPO");
+  }
+  return normalized;
+}
+
 export function assertSessionIdentity(
   context: AttemptContext,
   session: DurableSessionIdentity,
 ): void {
   if (
     session.attemptId !== durableAttemptId(context) ||
+    canonicalRepositoryIdentity(session.repository) !==
+      canonicalRepositoryIdentity(context.repository) ||
     session.runId !== context.runId ||
     session.objective !== context.objective ||
     session.workItem !== context.workItem ||
@@ -58,9 +91,7 @@ export function assertSessionIdentity(
     session.workspace !== context.workspace ||
     session.baseSha !== context.packet.baseSha
   )
-    throw new Error(
-      "durable session identity does not match the fenced attempt",
-    );
+    throw new Error("durable session identity does not match the fenced attempt");
 }
 
 function counter(value: unknown): number | null {
@@ -70,21 +101,12 @@ function counter(value: unknown): number | null {
 }
 
 export function normalizeExecutionUsage(value: unknown): ExecutionUsage {
-  const usage =
-    value && typeof value === "object"
-      ? (value as Record<string, unknown>)
-      : {};
+  const usage = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
   return {
-    inputTokens: counter(
-      usage.inputTokens ?? usage.input_tokens ?? usage.prompt_tokens,
-    ),
-    outputTokens: counter(
-      usage.outputTokens ?? usage.output_tokens ?? usage.completion_tokens,
-    ),
+    inputTokens: counter(usage.inputTokens ?? usage.input_tokens ?? usage.prompt_tokens),
+    outputTokens: counter(usage.outputTokens ?? usage.output_tokens ?? usage.completion_tokens),
     cachedInputTokens: counter(
-      usage.cachedInputTokens ??
-        usage.cached_input_tokens ??
-        usage.cached_prompt_tokens,
+      usage.cachedInputTokens ?? usage.cached_input_tokens ?? usage.cached_prompt_tokens,
     ),
   };
 }

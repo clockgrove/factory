@@ -18,7 +18,8 @@ export const RepositoryScopePathSchema = boundedText(500).refine((value) => {
     value.includes("*") ||
     value.includes("?") ||
     value.includes("[")
-  ) return false;
+  )
+    return false;
   const withoutTrailingSlash = value.endsWith("/") ? value.slice(0, -1) : value;
   return (
     withoutTrailingSlash.length > 0 &&
@@ -41,15 +42,22 @@ export const ExecutionRequirementsSchema = z
     cpu: z.number().positive().max(256).optional(),
     memoryMb: z.number().int().positive().max(1_048_576).optional(),
     diskMb: z.number().int().positive().max(10_485_760).optional(),
-    timeoutMinutes: z.number().int().positive().max(24 * 60).optional(),
-    estimatedDurationMinutes: z.number().int().positive().max(24 * 60).optional(),
+    timeoutMinutes: z
+      .number()
+      .int()
+      .positive()
+      .max(24 * 60)
+      .optional(),
+    estimatedDurationMinutes: z
+      .number()
+      .int()
+      .positive()
+      .max(24 * 60)
+      .optional(),
     tools: shortList(safeId).default([]),
     services: shortList(safeId).default([]),
     networkDestinations: shortList(NetworkDestinationSchema, 64).default([]),
-    permittedSecretNames: shortList(
-      z.string().regex(/^[A-Z][A-Z0-9_]{1,127}$/),
-      32,
-    ).default([]),
+    permittedSecretNames: shortList(z.string().regex(/^[A-Z][A-Z0-9_]{1,127}$/), 32).default([]),
     trust: z.enum(["trusted_local", "isolated", "managed"]),
   })
   .passthrough();

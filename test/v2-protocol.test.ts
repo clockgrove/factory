@@ -1,9 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  type FactoryEvent,
-  parseFactoryEvent,
-} from "../src/protocol/events.js";
+import { type FactoryEvent, parseFactoryEvent } from "../src/protocol/events.js";
 import { PROTOCOL_V2 } from "../src/protocol/limits.js";
 import {
   DEFAULT_RUN_POLICY,
@@ -16,6 +13,7 @@ import { parseWorkerPacket } from "../src/protocol/worker-packet.js";
 import {
   decodeEventComments,
   decodeEventTrailer,
+  deduplicateFactoryEvents,
   encodeEventComment,
   encodeEventTrailer,
   latestSupportedRun,
@@ -45,7 +43,10 @@ function runStarted(over: Partial<FactoryEvent> = {}): FactoryEvent {
 
 describe("v2 run policy", () => {
   it("defaults to local-only execution with bounded parallelism", () => {
-    expect(DEFAULT_RUN_POLICY.backendOrder).toEqual(["codex-cli/local-worktree"]);
+    expect(DEFAULT_RUN_POLICY.backendOrder).toEqual([
+      "codex-sdk/local-worktree",
+      "codex-cli/local-worktree",
+    ]);
     expect(DEFAULT_RUN_POLICY.maxParallel).toBe(8);
     expect(DEFAULT_RUN_POLICY.allowedPaidBackends).toEqual([]);
     expect(DEFAULT_RUN_POLICY.cloudFallback).toBe("never");
@@ -88,8 +89,12 @@ describe("v2 run policy", () => {
       destinationAllowedByPolicy("npmjs.org", DEFAULT_RUN_POLICY.allowedNetworkDestinations),
     ).toBe(false);
     const requirements = {
-      os: [], architecture: [], tools: [], services: [],
-      networkDestinations: ["attacker.example"], permittedSecretNames: [],
+      os: [],
+      architecture: [],
+      tools: [],
+      services: [],
+      networkDestinations: ["attacker.example"],
+      permittedSecretNames: [],
       trust: "isolated" as const,
     };
     expect(() => assertRequirementsWithinPolicy(requirements, DEFAULT_RUN_POLICY)).toThrow(
@@ -107,9 +112,7 @@ describe("v2 run policy", () => {
 describe("v2 event protocol", () => {
   it("round-trips comment and commit-trailer envelopes", () => {
     const event = runStarted();
-    expect(decodeEventComments(encodeEventComment("Factory started.", event))).toEqual([
-      event,
-    ]);
+    expect(decodeEventComments(encodeEventComment("Factory started.", event))).toEqual([event]);
     expect(decodeEventTrailer(`subject\n\n${encodeEventTrailer(event)}`)).toEqual(event);
   });
 
@@ -158,6 +161,35 @@ describe("v2 event protocol", () => {
       requestId: "cancel-1",
     });
     expect(latestSupportedRun([started, requested])?.event).toBe("FactoryRunStarted");
+    expect(
+      deduplicateFactoryEvents([
+        { ...requested, sequence: 8, at: "2026-09-03T00:08:00.000Z" },
+        requested,
+      ]),
+    ).toEqual([requested]);
+  });
+
+  it("requires explicit rank evidence for a durable priority command", () => {
+    const command = {
+      protocol: PROTOCOL_V2,
+      kind: "run",
+      event: "WorkItemPriorityChanged",
+      objective: 42,
+      runId: "run-1",
+      sequence: 2,
+      at: "2026-09-03T00:01:00.000Z",
+      requestedBy: "operator",
+      requestId: "priority-1",
+      workItem: 43,
+    };
+    expect(() => parseFactoryEvent(command)).toThrow();
+    expect(
+      parseFactoryEvent({
+        ...command,
+        priorityRank: 7,
+        prioritySource: "operator-command",
+      }),
+    ).toMatchObject({ priorityRank: 7, prioritySource: "operator-command" });
   });
 
   it("accepts durable activation, queue, capacity, and attributed admission events", () => {
@@ -192,6 +224,20 @@ describe("v2 event protocol", () => {
       reason: "local pressure",
       observedPriorityRank: 10,
       observedSubIssuePosition: 0,
+    });
+    const rejection = parseFactoryEvent({
+      protocol: PROTOCOL_V2,
+      kind: "run",
+      event: "ActivationRejected",
+      objective: 42,
+      runId: "activation-1",
+      sequence: 2,
+      at: "2026-09-03T00:01:00.000Z",
+      activationRequestId: "request-1",
+      requestedBy: "operator",
+      baseSha: SHA,
+      policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+      reason: "base advanced",
     });
     const capacity = parseFactoryEvent({
       protocol: PROTOCOL_V2,
@@ -242,6 +288,7 @@ describe("v2 event protocol", () => {
       reportedModelTokens: 123,
     });
     expect(activation.event).toBe("ActivationRequested");
+    expect(rejection.event).toBe("ActivationRejected");
     expect(queued.kind).toBe("scheduling");
     expect(capacity.kind).toBe("capacity");
     expect(admission.kind).toBe("attempt");
@@ -312,15 +359,15 @@ describe("v2 event protocol", () => {
       validationDigest: "c".repeat(64),
       exactHeadValidationDigest: "d".repeat(64),
     };
-    expect(() =>
-      parseFactoryEvent({ ...publication, event: "StackLinked" }),
-    ).toThrow(/stack number/);
-    expect(() =>
-      parseFactoryEvent({ ...publication, event: "ValidationInvalidated" }),
-    ).toThrow(/head-change cause/);
-    expect(() =>
-      parseFactoryEvent({ ...publication, event: "IntegrationPending" }),
-    ).toThrow(/operation ID/);
+    expect(() => parseFactoryEvent({ ...publication, event: "StackLinked" })).toThrow(
+      /stack number/,
+    );
+    expect(() => parseFactoryEvent({ ...publication, event: "ValidationInvalidated" })).toThrow(
+      /head-change cause/,
+    );
+    expect(() => parseFactoryEvent({ ...publication, event: "IntegrationPending" })).toThrow(
+      /operation ID/,
+    );
   });
 });
 
@@ -354,12 +401,10 @@ describe("Worker Packet", () => {
       },
       artifactContract: "clockgrove.factory/artifact-v1",
     };
-    expect(parseWorkerPacket(base).requirements.permittedSecretNames).toEqual([
-      "OPENAI_API_KEY",
-    ]);
-    expect(() =>
-      parseWorkerPacket({ ...base, conventions: [`sk-${"x".repeat(40)}`] }),
-    ).toThrow(/suspected OpenAI API key/);
+    expect(parseWorkerPacket(base).requirements.permittedSecretNames).toEqual(["OPENAI_API_KEY"]);
+    expect(() => parseWorkerPacket({ ...base, conventions: [`sk-${"x".repeat(40)}`] })).toThrow(
+      /suspected OpenAI API key/,
+    );
   });
 
   it("rejects absolute, traversing, and glob scope entries", () => {

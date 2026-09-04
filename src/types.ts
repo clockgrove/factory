@@ -26,6 +26,20 @@ export const COPILOT_LOGIN = "copilot-swe-agent";
  */
 export const COPILOT_ASSIGNEE_LOGIN = "Copilot";
 
+/**
+ * One GitHub actor returned by the repository's bounded
+ * `suggestedActors(capabilities: [CAN_BE_ASSIGNED])` capability probe.
+ *
+ * Factory keeps the provider-assigned node ID opaque. Profiles identify a
+ * compatible actor from its observed login; no actor ID or installation ID is
+ * compiled into the package.
+ */
+export interface ManagedAgentActor {
+  id: string;
+  login: string;
+  type: "Bot";
+}
+
 /** The commit GitHub's coding agent pushes before doing any real work. */
 export const INITIAL_PLAN_COMMIT = "Initial plan";
 
@@ -359,6 +373,12 @@ export interface ObjectiveSnapshot {
    * repository has no assignable coding agent.
    */
   copilotBotId: string | null;
+  /**
+   * Assignable managed-agent bots discovered from GitHub for this repository.
+   * Optional for snapshots written by pre-v2 clients; `copilotBotId` remains
+   * the compatibility field for those readers.
+   */
+  managedAgentActors?: ManagedAgentActor[];
   /**
    * Whether this repository is known to run CI on pull requests, so a PR with
    * *no* checks at all should be read as "CI has not reported yet", not as

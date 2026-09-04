@@ -14,11 +14,7 @@ import {
   type DispatcherOptions,
   type GitHubWriter,
 } from "../src/dispatch.js";
-import {
-  CircuitBreaker,
-  ContentCreationPacer,
-  PlatformUnavailableError,
-} from "../src/platform.js";
+import { CircuitBreaker, ContentCreationPacer, PlatformUnavailableError } from "../src/platform.js";
 import { attemptCount, deriveState, DISPATCH_CONFIRM_WINDOW_MS } from "../src/state.js";
 import type { DerivedWorkItem } from "../src/state.js";
 import {
@@ -231,9 +227,7 @@ describe("attemptAction", () => {
 
   it("escalates on the first attempt when GitHub says retrying cannot help", () => {
     const item = derivedWi({
-      linkedPullRequests: [
-        pr({ number: 1, ...earlierCommit, agentWorkEvents: [quotaFailure] }),
-      ],
+      linkedPullRequests: [pr({ number: 1, ...earlierCommit, agentWorkEvents: [quotaFailure] })],
     });
     expect(attemptCount(item)).toBe(1);
     expect(attemptAction(item)).toBe("escalate");
@@ -245,9 +239,7 @@ describe("attemptAction", () => {
         pr({
           number: 1,
           ...earlierCommit,
-          agentWorkEvents: [
-            { ...quotaFailure, message: "The session ended unexpectedly." },
-          ],
+          agentWorkEvents: [{ ...quotaFailure, message: "The session ended unexpectedly." }],
         }),
       ],
     });
@@ -527,10 +519,7 @@ describe("Dispatcher.confirm", () => {
       ],
     });
     await d.confirm(item, NOW);
-    expect(writer.calls).toEqual([
-      `assignHumanOnly:${item.id}:U_human`,
-      `addComment:${item.id}`,
-    ]);
+    expect(writer.calls).toEqual([`assignHumanOnly:${item.id}:U_human`, `addComment:${item.id}`]);
   });
 
   it("stops after the failing call and never reaches the reassignment", async () => {
@@ -566,10 +555,7 @@ describe("Dispatcher.retryOrEscalate", () => {
     // Two closed attempts already, no currently open PR (an edge case, but
     // `retryOrEscalate` should still make forward progress).
     const item = derivedWi({
-      linkedPullRequests: [
-        pr({ number: 1, state: "CLOSED" }),
-        pr({ number: 2, state: "CLOSED" }),
-      ],
+      linkedPullRequests: [pr({ number: 1, state: "CLOSED" }), pr({ number: 2, state: "CLOSED" })],
     });
     await d.retryOrEscalate(item);
     expect(writer.calls).toEqual([`clearActors:${item.id}`, `assignCopilot:${item.id}:BOT_1`]);
@@ -586,10 +572,7 @@ describe("Dispatcher.retryOrEscalate", () => {
       ],
     });
     await d.retryOrEscalate(item);
-    expect(writer.calls).toEqual([
-      `assignHumanOnly:${item.id}:U_human`,
-      `addComment:${item.id}`,
-    ]);
+    expect(writer.calls).toEqual([`assignHumanOnly:${item.id}:U_human`, `addComment:${item.id}`]);
   });
 });
 
@@ -615,21 +598,16 @@ describe("Dispatcher.integrate", () => {
     const item = derivedWi();
     const p = pr({ id: "PR_draft", isDraft: true });
     await d.integrate(item, p, READY);
-    expect(writer.calls).toEqual([
-      "markPullRequestReady:PR_draft",
-      "mergePullRequest:PR_draft",
-    ]);
+    expect(writer.calls).toEqual(["markPullRequestReady:PR_draft", "mergePullRequest:PR_draft"]);
   });
 
   it("waits on unfinished work without closing, retrying or merging it", async () => {
     const writer = new FakeWriter();
     const d = makeDispatcher(writer);
     const item = derivedWi();
-    const outcome = await d.integrate(
-      item,
-      pr({ id: "PR_wip", title: "[WIP] Add slugify" }),
-      { kind: "in_progress" },
-    );
+    const outcome = await d.integrate(item, pr({ id: "PR_wip", title: "[WIP] Add slugify" }), {
+      kind: "in_progress",
+    });
     expect(outcome).toEqual({ merged: false, action: "waiting" });
     // Nothing at all: no merge, and crucially no close/reassign, because the
     // agent is plausibly still writing into this pull request.
@@ -679,10 +657,7 @@ describe("Dispatcher.integrate", () => {
 
     expect(outcome.merged).toBe(false);
     // Not merged, and above all not closed.
-    expect(writer.calls).toEqual([
-      `assignHumanOnly:${item.id}:U_human`,
-      `addComment:${item.id}`,
-    ]);
+    expect(writer.calls).toEqual([`assignHumanOnly:${item.id}:U_human`, `addComment:${item.id}`]);
     expect(writer.comments.join("\n")).toContain("dependency tree");
   });
 
@@ -719,17 +694,17 @@ describe("Dispatcher.integrate", () => {
       mergePullRequest: new Error("At least 1 approving review is required by reviewers."),
     });
     const d = makeDispatcher(writer);
-    await expect(
-      d.integrate(derivedWi(), pr({ isDraft: false }), READY),
-    ).rejects.toThrow("approving review");
+    await expect(d.integrate(derivedWi(), pr({ isDraft: false }), READY)).rejects.toThrow(
+      "approving review",
+    );
   });
 
   it("rethrows a platform refusal from the merge rather than deferring it", async () => {
     const writer = new FakeWriter({ mergePullRequest: rateLimitError() });
     const d = makeDispatcher(writer);
-    await expect(
-      d.integrate(derivedWi(), pr({ isDraft: false }), READY),
-    ).rejects.toBeInstanceOf(PlatformUnavailableError);
+    await expect(d.integrate(derivedWi(), pr({ isDraft: false }), READY)).rejects.toBeInstanceOf(
+      PlatformUnavailableError,
+    );
   });
 
   // The three §6 conflict branches — rebase, close-and-redispatch, escalate —
@@ -863,10 +838,7 @@ describe("Dispatcher.integrate", () => {
       { kind: "checks_held" },
     );
     expect(outcome).toEqual({ merged: false, action: "escalated" });
-    expect(writer.calls).toEqual([
-      `assignHumanOnly:${item.id}:U_human`,
-      `addComment:${item.id}`,
-    ]);
+    expect(writer.calls).toEqual([`assignHumanOnly:${item.id}:U_human`, `addComment:${item.id}`]);
     expect(writer.calls).not.toContain("closePullRequest:PR_held");
     const comment = writer.comments.join("\n");
     expect(comment).toContain("Approve and run workflows");

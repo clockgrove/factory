@@ -1,13 +1,18 @@
 # Factory for indie developers — implementation plan
 
-Status: implementation-ready product plan
+Status: core implementation complete; v2 preview finalization and live qualification in progress
 
 Date: 2026-09-03
 
-This document is the ordered implementation plan for Factory's target product. It narrows the
+This document records the ordered implementation plan that produced Factory v2. It narrows the
 audience and delivery model established in [`DESIGN.md`](DESIGN.md) and incorporates the detailed
 priority, capacity, and burst work in
 [`ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md`](ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md).
+
+Phases 0–7 have landed in the core implementation. Phase 8 and the release-finalization work remain
+active: formal npm publication, the complete Linux environment matrix, live native-stack coverage,
+one real Daytona Objective, two real GitHub-managed agents, and the adversarial installed-product
+run. [`CONFORMANCE.md`](CONFORMANCE.md) is the authoritative evidence ledger.
 
 When this plan changes a current v2 behavior, existing active runs keep their recorded protocol and
 policy. New behavior becomes a default only after its conformance gate passes.
@@ -73,8 +78,8 @@ The canonical success path is:
 | Human interface | Agent chat through a Factory skill and typed MCP tools. No custom Factory UI. |
 | Durable control plane | GitHub issues, native sub-issues and dependencies, custom refs, commits, comments, and pull requests. |
 | Scheduler | One deliberately installed local repository controller, plus a foreground compatibility command. MCP is not the scheduler. |
-| Default execution | Local Codex session in an exact-SHA Git worktree. |
-| Scaling target | One local laptop or desktop, with optional cloud burst. Multiple local hosts are not a target. |
+| Default execution | Official Codex SDK in an exact-SHA Git worktree, with Codex CLI as the supported portable fallback. |
+| Scaling target | One Linux environment on one laptop or desktop, with optional cloud burst. Supported environments are native Linux, Windows WSL2, and a Linux guest hosted by macOS. Multiple local hosts are not a target. |
 | Cost posture | Local-first, paid execution off by default, immutable native-unit budgets, no automatic budget increase. |
 | Model posture | Frontier models are supported throughout. Savings come first from precise compilation, bounded context, reuse, fewer retries, and selective semantic calls; cheaper model routing is optional. |
 | Delivery | Focused pull requests; native GitHub stacked pull requests are first-class for linear code dependencies. |
@@ -82,10 +87,14 @@ The canonical success path is:
 | Installation | Installing the plugin never installs a GitHub Action, changes a repository, or starts a daemon. Controller installation is a separate explicit action. |
 | Open-source boundary | No required hosted Factory server, database, queue, account, or telemetry service. |
 | Hosted boundary | A hosted MCP/coordinator may be a later paid target, but it cannot become a dependency of the open-source local product. |
+| Sandbox provider | Daytona is the v2 supported third-party sandbox. Vercel Sandbox is Labs. |
+| Managed agents | GitHub Copilot and OpenAI Codex are the two v2 managed-agent targets. Both are opt-in, budget-bounded, and publication-gated; Codex discovery stays fail-closed until live evidence records a stable provider-published identity. |
+| Labs | Vercel Sandbox, Codex App Server, and additional harness/provider adapters. |
+| Native host lifecycle | Win32 and Darwin execution and lifecycle are out of scope; Windows and macOS host supported Linux environments. |
 
 Official OpenAI plugin guidance supports skills plus an MCP server with structured, model-readable
-results and no custom UI. GitHub's stacked-pull-request surface is currently public preview, so it
-must remain behind a capability adapter and an explicitly recorded fallback policy.
+results and no custom UI. GitHub's stacked-pull-request surface remains behind a versioned capability
+adapter and an explicitly recorded fallback policy.
 
 ## System architecture
 
@@ -116,11 +125,13 @@ Local repository controller (factoryd)
    └── stacked/sibling PR publisher and integrator
 ```
 
-The MCP server and controller do not need a private IPC protocol. Chat commands write authenticated,
-idempotent control events to GitHub; the controller observes them through the same reconstructed
-snapshot used after a restart. Read tools derive status and explanations from GitHub. Local-only
-diagnostics may inspect the current checkout and controller process without becoming authoritative
-state.
+The MCP server and controller do not need a private IPC protocol. Authenticated Objective comments
+are the single atomic command journal. Every transport uses one semantic request-ID normalizer;
+response-loss retries may append an identical comment, but reconstruction applies at-least-once
+duplicates only once and rejects conflicting reuse. The controller observes those events through the
+same reconstructed snapshot used after a restart. Read tools derive status and explanations from
+GitHub. Local-only diagnostics may inspect the current checkout and controller process without
+becoming authoritative state.
 
 This split gives each component one job:
 
@@ -182,9 +193,9 @@ factory controller stop OWNER/REPO --repo DIR
 factory controller uninstall OWNER/REPO --repo DIR
 ```
 
-The initial conformance target is a systemd user service on Linux and WSL. `launchd` and Windows
-Task Scheduler follow only after platform-specific installation, restart, log, and uninstall flows
-have been exercised end to end.
+The lifecycle target is a `systemd` user service inside native Linux, Windows WSL2, or a Linux guest
+hosted by macOS. Native `launchd` and Windows Task Scheduler support is out of scope; host-native
+wrappers may start the Linux environment but do not own Factory's controller lifecycle.
 
 Installation must:
 
@@ -215,17 +226,19 @@ If the repository lease is lost, the controller stops new mutations and admissio
 local children, observes or cancels paid resources through deterministic provider identities, and
 reconciles before another controller admits work.
 
-### Multi-Objective behavior
+### Objective queue behavior
 
-Multiple active Objectives are supported because a developer can legitimately start a second
-feature while the first waits. This is not a multi-host or enterprise scheduler.
+Multiple durable activations are supported because a developer can legitimately queue a second
+feature while the first runs. V2 admits one Objective per repository controller so a trunk merge
+cannot invalidate another Objective's immutable base; concurrency is within its Work Item DAG. This
+is not a multi-host or enterprise scheduler.
 
 The controller:
 
 - maintains one repository-wide local and cloud capacity ledger;
 - enforces each Objective's immutable budget independently;
 - enforces repository-wide hard concurrency and provider ceilings;
-- selects among Objectives with deterministic round-robin after explicit priority class;
+- selects the next queued Objective deterministically after the active Objective finishes;
 - never lets one large, temporarily unplaceable item block smaller eligible work;
 - reconstructs active path and resource claims from attempt receipts after restart.
 
@@ -245,7 +258,7 @@ Keep local host safety separate from per-Objective execution authority. Add a lo
 ```json
 {
   "scope": "repository",
-  "maxActiveObjectives": 2,
+  "maxActiveObjectives": 1,
   "maxLocalWorkers": 8,
   "maxPaidWorkers": 3,
   "pollIntervalSeconds": 15
@@ -270,8 +283,8 @@ Extend `RunPolicySchema` with strict per-Objective blocks conceptually shaped as
     "mode": "single-profile",
     "profiles": {
       "default": {
-        "model": "operator-selected",
-        "reasoning": "operator-selected"
+        "model": "gpt-5",
+        "reasoning": "high"
       }
     },
     "phaseProfiles": {
@@ -300,23 +313,26 @@ policy, current measured capacity, backend capability, and remaining native-unit
 a controller ceiling never widens a run beyond the authority the user already recorded. Every
 admission receipt includes both policy digests and the effective caps it observed.
 
-The exact model identifiers are supplied by the operator or inherited from an explicitly selected
-Codex profile. Factory contains no fashionable model default. `single-profile` makes it valid to use
-one frontier model for every semantic phase. A later `task-class` mode may route bounded execution
-to different profiles, but the compiler can recommend only a task class; it cannot grant model,
-provider, or budget authority.
+The exact model identifier and supported reasoning effort are supplied by the operator. Factory
+contains no fashionable model default. V2 accepts `single-profile` only and requires every phase to
+name the same profile; that choice is routed into compile, implement, review, and retry/recover
+invocations. `task-class` is rejected until a durable classifier and mapping exist. GitHub managed
+agents do not expose model selection, so they cannot be combined with this explicit block.
 
-Budget ceilings use provider-native measurable units. If a configured unit is unavailable from a
-backend, activation must reject that budget mode or use an explicitly selected enforceable proxy
-such as wall time or sessions. A dollar estimate may be reported only when the provider supplies
-adequate price and usage data; it is never presented as a hard enforcement boundary when Factory can
-enforce only minutes, tokens, sessions, or concurrent resources.
+Budget controls use provider-native measurable units. `maxModelTokens` is deliberately a
+stop-before-next-call threshold over observed management and reporting local-worker usage, not a
+provider-enforced hard cap. Already-started concurrent calls can each overshoot it. Opaque sandbox
+and managed-agent token use remains unavailable and is bounded by sandbox minutes or managed
+sessions instead. A
+dollar estimate may be reported only when the provider supplies adequate price and usage data; it is
+never presented as an enforcement boundary.
 
 ### Durable control events
 
 Add authenticated, idempotent events:
 
 - `ActivationRequested`
+- `ActivationRejected`
 - `RunPauseRequested`
 - `RunResumeRequested`
 - `RunDrainRequested`
@@ -325,10 +341,43 @@ Add authenticated, idempotent events:
 - `WorkItemPriorityChanged`
 - `ControllerObserved`
 
+Commands apply only when GitHub authenticates the requester as the active run's activating actor and
+the receipt names that exact Objective and run. Request IDs are idempotency keys and replay derives
+the same state after a controller restart. Pause stops new admissions while already-admitted work is
+reconciled. Drain does the same, then releases the Objective lease without creating a terminal event;
+an open drained Objective remains undiscovered until that same run receives Resume. A closed active
+Objective remains discoverable so the controller can repair a close-before-terminal crash. Resume
+clears pause, drain, and cloud-pause together.
+
+Cloud-pause adds a transient gate to paid execution and paid validation candidates while leaving
+local work available. Retry is a one-shot permission for only the named failed or escalated Work
+Item. It is consumed by the next reservation and never revives terminal work, bypasses dependencies,
+preempts an open pull request, changes ownership, increases `maxAttempts`, or widens budget. The
+latest unambiguous priority command overrides only that Work Item's scheduling rank and never
+preempts an admitted worker. Controller observations are fenced by the Objective lease and emitted
+only when repository-controller identity, epoch, expiry, or policy digest changes.
+
+A stale activation base or other permanent rejection before `FactoryRunStarted` emits an
+actor-authenticated `ActivationRejected` receipt bound to the activation request, base SHA, and
+policy digest. Discovery suppresses that exact request on every later pass, avoiding an unattended
+hot loop. Platform rate limits and other classified transient failures never emit this terminal
+receipt; the controller retains the activation and observes the larger of its polling interval and
+the provider retry window before another attempt.
+
+Supported Daytona execution uses a bundled `@sha256`-pinned Node image index and rejects mutable tag
+overrides. Execution metadata, `AttemptStarted`, and isolated-validation evidence record that exact
+environment identity. This makes a replay name the environment that actually ran instead of
+silently inheriting a later provider image.
+
 Pause and drain are operational gates, not policy replacement. Resume may restore only authority
 already present in the immutable run policy. A command can tighten a remaining ceiling or disable a
 backend, but cannot add a backend, increase a budget, expand network access, change trust, or expand
 scope. Broader authority requires a new run.
+
+A pause/drain request is not itself proof that in-flight work is safe. The Supervisor records a
+command-bound pause acknowledgement or drain-completed receipt only after local and paid attempts,
+validation, and reviews are reconciled. Repository discovery suppresses the run only after that
+receipt, so restart recovery wins over operational idling after a crash.
 
 ### Work Packet extensions
 
@@ -423,8 +472,8 @@ The detailed scheduling algorithms and schemas live in
 them with these product-level constraints:
 
 - all capacity is scoped to one repository controller on one local host;
-- each run's `maxParallel` remains its per-Objective ceiling, while the controller's local/paid
-  worker limits and measured host capacity are repository-wide ceilings across active Objectives;
+- each run's `maxParallel` remains its Work Item ceiling, while the controller's local/paid worker
+  limits and measured host capacity are repository-wide ceilings;
 - native sub-issue order is the zero-configuration human priority mechanism;
 - critical-path length and unfinished downstream work improve ordering without overruling explicit
   priority;
@@ -444,24 +493,50 @@ passes:
 2. local execution cannot be admitted in the current cycle;
 3. the run explicitly allows the paid backend and trust class;
 4. the provider is authenticated, available, and capability-compatible;
-5. concurrency, sandbox-minute, token/session, TTL, and egress ceilings can be reserved atomically;
+5. concurrency, sandbox-minute or managed-session, TTL, and egress ceilings can be reserved
+   atomically, and any reporting model-token stop threshold still permits a new call;
 6. the item's priority is inside the burst threshold;
 7. queue delay, deadline pressure, or estimated critical-path time saved satisfies the recorded
    burst rule;
 8. the controller still owns the repository and Objective lease immediately before launch.
 
-The first release uses conservative configured duration estimates. Historical estimates may replace
-them only after Factory has enough comparable completed receipts, and their effect must be visible
-through `factory_explain`. An estimate can decline paid work; it cannot bypass a hard cap.
+The first release uses the Work Packet's explicit `estimatedDurationMinutes` as a configured
+one-local-queue-wave cloud-time-saved proxy. It is not an observed forecast. A nonzero minimum fails
+closed when that field is absent, and admitted receipts preserve both the estimate and threshold.
+Historical estimates may replace configured evidence only after Factory has enough comparable
+completed receipts, and their effect must be visible through `factory_explain`. An estimate can
+decline paid work; it cannot bypass a native-unit cap.
 
 Work that is incompatible with the local host may use a paid backend immediately only when that
 capability route was explicitly authorized. It is recorded as `remote-required`, not disguised as
 burst.
 
-## Durable Codex sessions
+### Managed-agent targets
 
-Add `codex-app-server/local-worktree` as the preferred local execution adapter after live
-conformance. Keep `codex-cli/local-worktree` as the portable fallback.
+Factory v2 includes GitHub Copilot and OpenAI Codex as publication-gated managed-agent targets. Both
+use the same provider-neutral execution contract: capability discovery, bounded session admission,
+durable identity, observation, cancellation/reconciliation, exact-head artifact collection,
+independent validation, and publication/integration fencing. A managed agent's self-published pull
+request is an artifact source, never validation or merge authority. Codex discovery stays
+unavailable until its live gate records a stable provider-published identity.
+
+Managed agents remain opt-in even though they are supported. A run must name the provider, allow it
+as a paid backend, and reserve a nonzero session ceiling. Missing repository enablement, provider
+policy, assignability, or session budget leaves work queued or follows the run's recorded fallback;
+Factory never changes to another paid agent implicitly.
+
+## Supported local Codex SDK
+
+`codex-sdk/local-worktree` is the preferred programmatic local backend. Factory, rather than the
+worker, owns the isolated Codex home, exact environment, Work Packet restrictions, cancellation
+signal, artifact collection, and cleanup. `codex-cli/local-worktree` implements the same contract as
+the supported portable fallback. Neither local route gains GitHub publication, validation, merge,
+Director, or budget authority.
+
+## Durable Codex sessions (Labs)
+
+`codex-app-server/local-worktree` is a Labs adapter for durable local sessions.
+The release baseline remains `codex-sdk/local-worktree` with `codex-cli/local-worktree` fallback.
 
 The adapter owns one supervised App Server process and starts one Codex thread per attempt in its
 exact-SHA worktree. Attempt receipts record the thread ID, model/profile identity, worktree, base
@@ -492,7 +567,8 @@ enhancement.
 
 - A maximal linear chain of code dependencies may become one stack.
 - The bottom PR targets the recorded trunk; each higher PR targets the branch immediately below it.
-- Independent Work Items produce sibling PRs and may validate concurrently.
+- When native-stack delivery is selected, independent Work Items produce sibling PRs and may
+  validate concurrently. Regular-PR delivery serializes complete Work Item pipelines.
 - A Work Item with multiple unfinished parents does not invent a multi-base stack. It waits for the
   parents to merge, refreshes from trunk, and starts a new stack.
 - A dependency that expresses ordering but does not consume code need not share a stack.
@@ -515,7 +591,7 @@ Add a `StackManager` behind a provider-neutral delivery interface. It:
 8. polls the asynchronous result and records the final outcome;
 9. reconciles partial link, rebase, push, and merge operations after restart.
 
-Because GitHub stacks are public preview, all API shapes are isolated in this adapter. At activation,
+Because GitHub's stack API is versioned and may change, all API shapes are isolated in this adapter. At activation,
 `delivery.onUnavailable` must be either `regular-prs` or `escalate`. Falling back later cannot change
 already-published PR topology. Existing runs retain regular independent PR behavior.
 
@@ -639,11 +715,12 @@ Add:
 
 Move the long-running loop behind a repository-scoped controller with shared GitHub pacing,
 capacity, budgets, path claims, and integration fencing. Implement explicit systemd user-service
-installation for Linux/WSL. Rewrite host-scheduling documentation around the repository controller.
+installation for the supported Linux environments. Rewrite host-scheduling documentation around the
+repository controller.
 
-Exit gate: activate two Objectives, kill the process during every meaningful lifecycle phase,
-restart it, and prove exactly-once admission/publication semantics, repository-wide caps, and clean
-service uninstall.
+Exit gate: activate two Objectives, prove only one becomes active while the second remains durably
+queued, kill the process during every meaningful lifecycle phase, restart it, and prove exactly-once
+admission/publication semantics, repository-wide caps, and clean service uninstall.
 
 ### Phase 3 — cost-aware compiler and repository facts
 
@@ -681,11 +758,11 @@ Primary additions:
 - `src/scheduling/graph-score.ts`
 - `src/scheduling/admission.ts`
 
-Exit gate: WSL/Linux pressure, cooldown, fairness, dependency, path collision, crash recovery,
-provider ambiguity, and budget fault matrices pass. A real run on every claimed cloud adapter proves
-TTL, egress, cancellation, cost reconciliation, and cleanup.
+Exit gate: native Linux, Windows WSL2, and a Linux guest on macOS pass pressure, cooldown, fairness,
+dependency, path collision, crash recovery, provider ambiguity, and budget fault matrices. A real
+Daytona run proves TTL, egress, cancellation, cost reconciliation, and cleanup.
 
-### Phase 5 — durable Codex execution adapter
+### Phase 5 — Labs durable Codex execution adapter
 
 Add the App Server-backed local adapter, durable thread identity, usage normalization, progress
 events, cancellation, and resume. Keep the CLI adapter and run the same backend conformance suite
@@ -698,9 +775,9 @@ Primary additions:
 - `src/execution/session.ts`
 - session protocol and recovery tests
 
-Exit gate: concurrent local threads stay isolated; process restart resumes or safely reconciles each
+Labs gate: concurrent local threads stay isolated; process restart resumes or safely reconciles each
 attempt; approval requests cannot hang unattended work; the artifact and validation contracts remain
-identical across adapters.
+identical across adapters. This gate does not block the v2 preview.
 
 ### Phase 6 — native stacked pull requests
 
@@ -729,7 +806,7 @@ Exit gate: replay reproduces every admission from a conformance run; `factory_ex
 exact dependency, capacity, authority, priority, or economic gate; unavailable billing data is
 reported as unavailable rather than estimated as fact.
 
-### Phase 8 — Clockgrove Worlds dogfood and release
+### Phase 8 — release qualification and Clockgrove Worlds dogfood
 
 Exercise Factory through an installed plugin, never a development worktree MCP configuration. Use
 Clockgrove Worlds platform Objectives that cover, as the repository makes them available:
@@ -747,9 +824,11 @@ The gate is scenario coverage, not a hard-coded number of Objectives or Work Ite
 successful and uneconomic decompositions, then adjust compiler and scheduler rules through versioned
 tests rather than hidden heuristics.
 
-Exit gate: from chat, a clean adopter can activate an Objective, end the chat turn, and later receive
-validated sibling/stacked PRs or one evidenced escalation. No Factory GitHub Action, custom UI,
-hosted service, manual per-Work-Item dispatch, or unrecorded state is required.
+Exit gate: the synchronized Agent Plugin and `@clockgrove/factory` artifacts install cleanly; the
+Linux environment, native-stack, Daytona, GitHub Copilot, and OpenAI Codex matrices pass; and from
+chat a clean adopter can activate an Objective, end the chat turn, and later receive validated
+sibling/stacked PRs or one evidenced escalation. No Factory GitHub Action, custom UI, hosted service,
+manual per-Work-Item dispatch, or unrecorded state is required.
 
 ## Dependency graph
 
@@ -770,9 +849,9 @@ Protocol baseline
                                       Clockgrove Worlds dogfood release
 ```
 
-Pure compiler, scheduler, GitHub-stack, and session-normalization modules may be developed in
-parallel after Phase 0. Controller integration waits for their schemas; default changes wait for
-live conformance.
+Pure compiler, scheduler, GitHub-stack, and session-normalization modules were developed in parallel
+after Phase 0. Controller integration followed their schemas; release claims wait for live
+conformance.
 
 ## Verification strategy
 
@@ -827,8 +906,9 @@ Factory satisfies this plan when:
   required repository configuration;
 - a user can install and manage one local repository controller through chat or mirrored CLI;
 - explicit activation is durable and execution continues after the initiating chat turn;
-- the controller safely shares one machine across active Objectives and never exceeds host or policy
-  ceilings;
+- the controller safely serializes Objectives on one machine, runs dependency-ready Work Items
+  concurrently when native-stack delivery supplies cascading revalidation, serializes complete
+  pipelines under regular-PR delivery, and never exceeds host or policy ceilings;
 - Work Item count, scope, dependencies, context, resources, validation, and stack topology are
   compiler outputs grounded in the repository;
 - local Codex sessions are isolated, recoverable, non-interactive, and attributable to exact Work
@@ -858,16 +938,16 @@ Factory satisfies this plan when:
 - silently changing an active graph, policy, model, backend, stack topology, or validation contract;
 - requiring a Clockgrove account or hosted service for the open-source plugin.
 
-## Hosted target, deliberately later
+## Hosted systems outside this repository
 
-A paid hosted offering may reuse the public protocol through a hosted MCP server, GitHub App,
-managed coordinator, and managed cloud workers. An optional local worker may connect outbound so the
-hosted coordinator can retain laptop-first economics without opening inbound access.
+A hypothetical hosted product could reuse the public protocol through a hosted MCP server, GitHub
+App, managed coordinator, and managed cloud workers. An optional local worker could connect outbound
+without opening inbound access.
 
-Hosted work starts only after the local release definition of done. It receives a separate threat
+That product is not planned or promised by this repository. It would require a separate threat
 model, authentication design, privacy contract, billing system, availability target, and
-implementation plan. No speculative hosted abstraction is allowed to complicate the open-source
-critical path beyond keeping protocol records versioned and provider-neutral.
+implementation plan. No speculative hosted abstraction may complicate the open-source critical path
+beyond keeping protocol records versioned and provider-neutral.
 
 ## Risks and mitigations
 
@@ -878,7 +958,7 @@ critical path beyond keeping protocol records versioned and provider-neutral.
 | Concurrency makes the developer's machine unusable | Observed headroom, reserved CPU/memory, cooldown, hard worker caps, and no pressure-driven preemption. |
 | Paid burst becomes the easy fallback | Disabled default, local saturation prerequisite, minimum benefit gate, native-unit budgets, TTL, and atomic reservation. |
 | Large/binary artifacts or exclusive tools corrupt parallel work | Repository facts, path/resource claims, serialization, content digests, and clean validation. |
-| GitHub stacked PR preview changes | Isolated adapter, capability probe, versioned receipts, live conformance, and recorded regular-PR fallback. |
+| GitHub stacked PR API changes | Isolated adapter, capability probe, versioned receipts, live conformance, and recorded regular-PR fallback. |
 | Controller and foreground run race | Repository CAS lease plus per-Objective leases and deterministic attempt refs. |
 | Laptop sleeps or WSL is not started | Honest controller heartbeat/status and explicit service diagnostics; a later hosted coordinator is optional, not hidden. |
 | Provider/model usage lacks authoritative dollars | Enforce measurable tokens/minutes/sessions and label dollar values as estimates or unavailable. |
@@ -891,12 +971,21 @@ generated content, deterministic simulations, visual behavior, or specialized au
 does not change Factory's general-purpose audience, require an engine-specific runtime, or add a
 game-development phase to the core roadmap.
 
-### Reusable capabilities that remain in core
+### Reusable capabilities and release boundary
 
 These are not game features. They solve common software-repository problems and therefore remain in
-the compiler, scheduler, artifact, and validation contracts.
+the generic design. The v2 preview implements repository-fact classification, `large-binary` and
+`generated` change-surface classes, exclusive-resource serialization, binary Git patches, artifact
+digests, and clean validation. Its normalized patch is capped at 5 MiB, and a Daytona source archive
+is capped at 64 MiB. Work that cannot be represented inside those bounds fails closed.
 
-#### Large and binary artifacts
+The preview does **not** ship Git LFS lifecycle management, an oversized content-addressed transfer
+service, media-type inspection, or a provider object-store artifact channel. The bullets below are
+forward-compatible design requirements for adding those capabilities after v2; they are not current
+support claims. A future implementation must add executable conformance evidence before changing
+that boundary.
+
+#### Future large and binary artifact extensions
 
 - Classify a path from repository evidence as text, generated, large/binary, or otherwise
   non-mergeable.
@@ -954,11 +1043,12 @@ the compiler, scheduler, artifact, and validation contracts.
 ### First-party dogfood contract
 
 Clockgrove Worlds is Factory's first-party dogfood project. Its role in this public plan is to
-exercise portable Factory behavior, not to define Factory internals or reproduce an adopter's
-architecture. Project-specific implementation facts, paths, and source documents remain in the
-adopter repository and enter Factory only through ordinary repository grounding.
+exercise portable Factory behavior, not to define Factory implementation details or reproduce an
+adopter's architecture. Project-specific implementation facts, paths, and source documents remain
+in the adopter repository and enter Factory only through ordinary repository grounding.
 
-The public qualification scenarios are:
+The public qualification scenarios below are design inputs for future qualification; they are not
+part of the v2 preview release matrix:
 
 - a repository may expose deterministic behavior whose Work Packets must pin seeds, fixtures,
   versions, scenarios, and expected hashes;

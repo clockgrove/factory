@@ -7,13 +7,9 @@ import {
   assertIntegrationHeads,
   type IntegrationLease,
 } from "./integration-lease.js";
-import {
-  verifyExactHeadValidation,
-  type ExactHeadValidationEvidence,
-} from "../validation/plan.js";
+import { verifyExactHeadValidation, type ExactHeadValidationEvidence } from "../validation/plan.js";
 
-export const PUBLICATION_RECEIPT_PROTOCOL =
-  "clockgrove.factory/publication-receipt-v1" as const;
+export const PUBLICATION_RECEIPT_PROTOCOL = "clockgrove.factory/publication-receipt-v1" as const;
 
 export interface PublicationReceipt {
   protocol: typeof PUBLICATION_RECEIPT_PROTOCOL;
@@ -60,10 +56,7 @@ export interface StackDeliveryProvider {
   unstack(stackNumber: number): Promise<void>;
 }
 
-function assertMergeResultHead(
-  result: AsyncMergeResult,
-  expectedHeadSha: string,
-): void {
+function assertMergeResultHead(result: AsyncMergeResult, expectedHeadSha: string): void {
   if (
     result.state !== "failed" &&
     result.state !== "merged" &&
@@ -115,7 +108,11 @@ function assertReceipt(receipt: PublicationReceipt): void {
   if (receipt.position > 0 && !receipt.parentItemId) {
     throw new Error("higher publication receipt must name its parent");
   }
-  if (receipt.state === "stack-linked" && receipt.mode === "native-stacks" && !receipt.stackNumber) {
+  if (
+    receipt.state === "stack-linked" &&
+    receipt.mode === "native-stacks" &&
+    !receipt.stackNumber
+  ) {
     throw new Error("linked native-stack receipt has no stack number");
   }
   if (
@@ -149,11 +146,7 @@ export function assertPublicationEventMatchesReceipt(
     ["headSha", event.headSha, receipt.headSha],
     ["pullRequest", event.pullRequest, receipt.pullRequest],
     ["capabilityVersion", event.capabilityVersion, receipt.capabilityVersion],
-    [
-      "validationDigest",
-      event.validationDigest,
-      receipt.exactHeadValidation.validationDigest,
-    ],
+    ["validationDigest", event.validationDigest, receipt.exactHeadValidation.validationDigest],
     [
       "exactHeadValidationDigest",
       event.exactHeadValidationDigest,
@@ -224,7 +217,9 @@ export class StackManager {
     }
     if (
       members.length !== expectedItems.length ||
-      members.some((member, index) => member.itemId !== expectedItems[index] || member.position !== index)
+      members.some(
+        (member, index) => member.itemId !== expectedItems[index] || member.position !== index,
+      )
     ) {
       throw new Error("publication unit receipt order differs from the immutable delivery plan");
     }
@@ -250,10 +245,7 @@ export class StackManager {
     const stack = await this.provider.ensureStack(members.map((member) => member.pullRequest));
     const updated: PublicationReceipt[] = [];
     for (const member of members) {
-      if (
-        member.state === "stack-linked" &&
-        member.stackNumber !== stack.number
-      ) {
+      if (member.state === "stack-linked" && member.stackNumber !== stack.number) {
         throw new Error("durable publication receipt names a different GitHub stack");
       }
       const linked: PublicationReceipt = {
@@ -266,10 +258,7 @@ export class StackManager {
         stackNumber: stack.number,
       };
       const current = await this.receipts.read(member.runId, member.itemId);
-      if (
-        current?.state !== "stack-linked" ||
-        current.stackNumber !== stack.number
-      ) {
+      if (current?.state !== "stack-linked" || current.stackNumber !== stack.number) {
         await this.receipts.write(linked);
       }
       updated.push(current?.state === "stack-linked" ? current : linked);
@@ -390,13 +379,20 @@ export class StackManager {
     return this.#applyMergeResult(args.lease, result, args.idempotencyKey);
   }
 
-  async rollback(lease: IntegrationLease, stackNumber: number, idempotencyKey: string): Promise<IntegrationLease> {
+  async rollback(
+    lease: IntegrationLease,
+    stackNumber: number,
+    idempotencyKey: string,
+  ): Promise<IntegrationLease> {
     if (lease.state === "rolled-back") return lease;
     await this.provider.unstack(stackNumber);
     const cancelled =
       lease.state === "cancelled"
         ? lease
-        : applyIntegrationCommand(lease, { kind: "cancel", idempotencyKey: `${idempotencyKey}/cancel` });
+        : applyIntegrationCommand(lease, {
+            kind: "cancel",
+            idempotencyKey: `${idempotencyKey}/cancel`,
+          });
     return applyIntegrationCommand(cancelled, { kind: "rollback", idempotencyKey });
   }
 

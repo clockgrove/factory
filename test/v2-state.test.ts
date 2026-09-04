@@ -1,11 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  attemptCount,
-  deriveState,
-  queuedSince,
-  type DerivedWorkItem,
-} from "../src/state.js";
+import { attemptCount, deriveState, queuedSince, type DerivedWorkItem } from "../src/state.js";
 import type { FactoryEvent } from "../src/protocol/events.js";
 import type { LinkedPullRequest, WorkItemSnapshot } from "../src/types.js";
 
@@ -61,10 +56,7 @@ function attempt(
   };
 }
 
-function queued(
-  sequence: number,
-  at: string,
-): Extract<FactoryEvent, { kind: "scheduling" }> {
+function queued(sequence: number, at: string): Extract<FactoryEvent, { kind: "scheduling" }> {
   return {
     protocol: "clockgrove.factory/v2",
     kind: "scheduling",
@@ -85,9 +77,7 @@ function queued(
 describe("provider-neutral v2 state", () => {
   it("restarts queue delay after a dependency was reopened and closed", () => {
     const receipt = queued(1, "2026-09-03T00:01:00.000Z");
-    expect(queuedSince(derivedItem({ factoryEvents: [receipt] }), "run-1")).toBe(
-      receipt.at,
-    );
+    expect(queuedSince(derivedItem({ factoryEvents: [receipt] }), "run-1")).toBe(receipt.at);
     expect(
       queuedSince(
         derivedItem({
@@ -107,28 +97,21 @@ describe("provider-neutral v2 state", () => {
 
   it("derives readiness and blocking before the first attempt", () => {
     expect(deriveState(item(), NOW)).toBe("unstarted");
-    expect(
-      deriveState(item({ blockedBy: [{ number: 1, closed: false }] }), NOW),
-    ).toBe("blocked");
+    expect(deriveState(item({ blockedBy: [{ number: 1, closed: false }] }), NOW)).toBe("blocked");
   });
 
   it("moves through reserved, in-flight, validating, and for-review", () => {
     const reserved = attempt("AttemptReserved");
     expect(deriveState(item({ factoryEvents: [reserved] }), NOW)).toBe("reserved");
     const started = attempt("AttemptStarted", { sequence: 2 });
-    expect(deriveState(item({ factoryEvents: [reserved, started] }), NOW)).toBe(
-      "in_flight",
-    );
+    expect(deriveState(item({ factoryEvents: [reserved, started] }), NOW)).toBe("in_flight");
     const collected = attempt("AttemptCollected", { sequence: 3 });
-    expect(
-      deriveState(item({ factoryEvents: [reserved, started, collected] }), NOW),
-    ).toBe("validating");
+    expect(deriveState(item({ factoryEvents: [reserved, started, collected] }), NOW)).toBe(
+      "validating",
+    );
     const validated = attempt("AttemptValidated", { sequence: 4 });
     expect(
-      deriveState(
-        item({ factoryEvents: [reserved, started, collected, validated] }),
-        NOW,
-      ),
+      deriveState(item({ factoryEvents: [reserved, started, collected, validated] }), NOW),
     ).toBe("validating");
     const validation: Extract<FactoryEvent, { kind: "validation" }> = {
       protocol: "clockgrove.factory/v2",
@@ -275,24 +258,14 @@ describe("provider-neutral v2 state", () => {
       deriveState(item({ closed: true, factoryEvents: [attempt("AttemptReserved")] }), NOW),
     ).toBe("inconsistent");
     expect(deriveState(item({ closed: true }), NOW)).toBe("inconsistent");
-    expect(deriveState(item({ linkedPullRequests: [mergedPull] }), NOW)).toBe(
-      "inconsistent",
-    );
-    expect(
-      deriveState(
-        item({ closed: true, linkedPullRequests: [mergedPull] }),
-        NOW,
-      ),
-    ).toBe("done");
+    expect(deriveState(item({ linkedPullRequests: [mergedPull] }), NOW)).toBe("inconsistent");
+    expect(deriveState(item({ closed: true, linkedPullRequests: [mergedPull] }), NOW)).toBe("done");
     expect(
       deriveState(
         item({
           closed: true,
           linkedPullRequests: [mergedPull],
-          factoryEvents: [
-            attempt("AttemptReserved"),
-            attempt("AttemptFailed", { sequence: 2 }),
-          ],
+          factoryEvents: [attempt("AttemptReserved"), attempt("AttemptFailed", { sequence: 2 })],
         }),
         NOW,
       ),

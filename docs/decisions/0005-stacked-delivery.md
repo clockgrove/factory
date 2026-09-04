@@ -8,7 +8,8 @@ Status: accepted behind capability probing
 
 Independent Work Items should remain independently reviewable, while a linear chain whose code is a
 real input to later work benefits from stacked pull requests. A dependency DAG cannot always be
-represented by a single stack, and GitHub's stack surface is versioned public-preview behavior.
+represented by a single stack, and GitHub's stack surface is a versioned external API whose behavior
+must be capability-probed and qualified live.
 
 ## Decision
 
@@ -19,8 +20,11 @@ position, parent, base, head, and capability version.
 
 The delivery adapter is isolated from the scheduler. A run records whether unavailable stack support
 falls back to regular pull requests or escalates; it never changes an already-published topology.
-The preview adapter is pinned to GitHub API version `2026-03-10`, creates and reads stacks through
+The versioned adapter is pinned to GitHub API version `2026-03-10`, creates and reads stacks through
 the Stacks REST API, and integrates them only through the exact-head asynchronous merge API.
+Native-stack mode retains dependency-ready execution concurrency and uses cascading revalidation to
+keep higher layers sound. The regular-PR mode and fallback instead admit one complete Work Item
+pipeline at a time because ordinary sibling pull requests have no equivalent cascade.
 
 ## Consequences
 

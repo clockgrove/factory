@@ -3,11 +3,7 @@ export interface RepositoryBranchRule {
   parameters?: unknown;
 }
 
-const SAFE_RULES = new Set([
-  "deletion",
-  "non_fast_forward",
-  "required_linear_history",
-]);
+const SAFE_RULES = new Set(["deletion", "non_fast_forward", "required_linear_history"]);
 
 const PULL_REQUEST_PARAMETERS = new Set([
   "allowed_merge_methods",
@@ -63,13 +59,10 @@ export function classicBranchProtectionRules(
       configured.set(`${context}\0*`, { context });
     }
     for (const check of protection.required_status_checks.checks) {
-      configured.set(
-        `${check.context}\0${check.app_id ?? "*"}`,
-        {
-          context: check.context,
-          ...(check.app_id === null ? {} : { integration_id: check.app_id }),
-        },
-      );
+      configured.set(`${check.context}\0${check.app_id ?? "*"}`, {
+        context: check.context,
+        ...(check.app_id === null ? {} : { integration_id: check.app_id }),
+      });
     }
     rules.push({
       type: "required_status_checks",
@@ -79,7 +72,10 @@ export function classicBranchProtectionRules(
       },
     });
   }
-  if (protection.required_pull_request_reviews || protection.required_conversation_resolution?.enabled) {
+  if (
+    protection.required_pull_request_reviews ||
+    protection.required_conversation_resolution?.enabled
+  ) {
     const reviews = protection.required_pull_request_reviews;
     rules.push({
       type: "pull_request",
@@ -248,10 +244,12 @@ export function missingRequiredChecks(
   rules: RepositoryBranchRule[],
   evidence: ObservedChecks,
 ): string[] {
-  const observations = evidence.observedChecks ?? evidence.observed.map((context) => ({
-    context,
-    integrationId: null,
-  }));
+  const observations =
+    evidence.observedChecks ??
+    evidence.observed.map((context) => ({
+      context,
+      integrationId: null,
+    }));
   return requiredChecks(rules)
     .filter(
       (required) =>

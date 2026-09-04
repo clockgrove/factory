@@ -13,7 +13,10 @@ cannot be recovered from GitHub.
 ## Decision
 
 The Factory skill guides intent and invokes small typed MCP tools. Mutating tools authenticate the
-actor and append idempotent durable command events, then return. Read tools reconstruct status,
+actor and append a protocol event to the Objective's GitHub issue-comment stream, which is the single
+atomic request journal, then return. Every transport uses the same semantic request-ID normalizer.
+An exact response-loss retry may leave an identical second comment, but reconstruction applies that
+at-least-once duplicate only once and rejects conflicting reuse. Read tools reconstruct status,
 plans, explanations, and replay from GitHub. The repository controller alone owns long-running
 mechanical scheduling and reconciliation.
 
@@ -26,4 +29,5 @@ not introduce a second protocol or scheduler.
 - Read-only calls are mutation-free and unchanged-state polling is model-free.
 - Every mutating tool needs an idempotency key, accurate MCP annotations, and authenticated actor
   verification.
+- No auxiliary Git commit, private IPC queue, or process-local cache may authorize a command.
 - The skill may sequence operations but cannot widen authority or bypass controller fencing.

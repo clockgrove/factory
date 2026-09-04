@@ -77,8 +77,7 @@ export function artifactDigest(input: {
     .digest("hex");
 }
 
-const TRUNCATED_LOG_PREFIX =
-  "[Factory truncated worker logs; retained final output]\n";
+const TRUNCATED_LOG_PREFIX = "[Factory truncated worker logs; retained final output]\n";
 
 /**
  * Keep the diagnostically useful tail while satisfying the persisted JSON-byte
@@ -139,17 +138,11 @@ export function verifyArtifact(artifact: NormalizedArtifact): NormalizedArtifact
   return parsed;
 }
 
-export function assertArtifactScope(
-  artifact: NormalizedArtifact,
-  allowedPaths: string[],
-): void {
+export function assertArtifactScope(artifact: NormalizedArtifact, allowedPaths: string[]): void {
   assertChangedPathScope(artifact.changedPaths, allowedPaths);
 }
 
-export function assertChangedPathScope(
-  changedPaths: string[],
-  allowedPaths: string[],
-): void {
+export function assertChangedPathScope(changedPaths: string[], allowedPaths: string[]): void {
   const permits = (path: string) =>
     allowedPaths.some((allowed) =>
       allowed.endsWith("/") ? path.startsWith(allowed) : path === allowed,

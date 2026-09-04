@@ -1,10 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { PriorityPolicy } from "../src/scheduling/priority.js";
-import {
-  PriorityUnavailableError,
-  rankReadyWorkItems,
-} from "../src/scheduling/priority.js";
+import { PriorityUnavailableError, rankReadyWorkItems } from "../src/scheduling/priority.js";
 import type { DerivedWorkItem } from "../src/state.js";
 import {
   normalizeIssueFieldValues,
@@ -74,9 +71,10 @@ const fieldPolicy: PriorityPolicy = {
 function permutations<T>(values: T[]): T[][] {
   if (values.length < 2) return [values];
   return values.flatMap((value, index) =>
-    permutations(values.filter((_, candidate) => candidate !== index)).map(
-      (rest) => [value, ...rest],
-    ),
+    permutations(values.filter((_, candidate) => candidate !== index)).map((rest) => [
+      value,
+      ...rest,
+    ]),
   );
 }
 
@@ -103,9 +101,9 @@ describe("deterministic Work Item priority", () => {
         optionName: "Urgent",
       },
     ]);
-    expect(() =>
-      normalizeIssueFieldValues(1, { totalCount: 2, nodes: [{}] }),
-    ).toThrow(/complete snapshot/);
+    expect(() => normalizeIssueFieldValues(1, { totalCount: 2, nodes: [{}] })).toThrow(
+      /complete snapshot/,
+    );
   });
 
   it("paginates organization fields and emits stable ready-to-paste ranks", async () => {
@@ -169,10 +167,7 @@ describe("deterministic Work Item priority", () => {
       ),
     ).toEqual({ available: true });
     expect(
-      validatePriorityFieldDefinition(
-        { ...fieldPolicy, optionRanks: { deleted: 0 } },
-        fields,
-      ),
+      validatePriorityFieldDefinition({ ...fieldPolicy, optionRanks: { deleted: 0 } }, fields),
     ).toMatchObject({ available: false, reason: expect.stringContaining("deleted") });
   });
 
@@ -182,10 +177,26 @@ describe("deterministic Work Item priority", () => {
       item(2, { position: 0 }),
       item(3, { position: 1, dependencies: [{ number: 1, closed: false }] }),
     ];
-    expect(rankReadyWorkItems(items, subIssuePolicy).map((x) => x.item.number)).toEqual([
-      2,
-      1,
-    ]);
+    expect(rankReadyWorkItems(items, subIssuePolicy).map((x) => x.item.number)).toEqual([2, 1]);
+  });
+
+  it("applies an operator priority override without changing other Work Items", () => {
+    const ranked = rankReadyWorkItems(
+      [item(1, { position: 0 }), item(2, { position: 1 })],
+      subIssuePolicy,
+      undefined,
+      new Set(),
+      new Map([[2, 1]]),
+    );
+    expect(ranked.map((value) => value.item.number)).toEqual([2, 1]);
+    expect(ranked[0]).toMatchObject({
+      rank: 1,
+      source: "operator-command",
+    });
+    expect(ranked[1]).toMatchObject({
+      rank: 100,
+      source: "subissue-order",
+    });
   });
 
   it("ranks an explicitly stack-ready child without treating every blocked item as ready", () => {
@@ -248,16 +259,13 @@ describe("deterministic Work Item priority", () => {
       item(1, { position: 0, optionId: "future-option" }),
       item(2, { position: 1, optionId: "urgent" }),
     ];
-    expect(rankReadyWorkItems(values, fieldPolicy).map((x) => x.item.number)).toEqual([
-      1,
-      2,
-    ]);
-    expect(rankReadyWorkItems(values, fieldPolicy).every((x) =>
-      x.source === "subissue-order-fallback",
-    )).toBe(true);
-    expect(() =>
-      rankReadyWorkItems(values, { ...fieldPolicy, onUnavailable: "escalate" }),
-    ).toThrow(PriorityUnavailableError);
+    expect(rankReadyWorkItems(values, fieldPolicy).map((x) => x.item.number)).toEqual([1, 2]);
+    expect(
+      rankReadyWorkItems(values, fieldPolicy).every((x) => x.source === "subissue-order-fallback"),
+    ).toBe(true);
+    expect(() => rankReadyWorkItems(values, { ...fieldPolicy, onUnavailable: "escalate" })).toThrow(
+      PriorityUnavailableError,
+    );
     expect(
       rankReadyWorkItems(values, fieldPolicy, "configured field was deleted").every(
         (value) =>

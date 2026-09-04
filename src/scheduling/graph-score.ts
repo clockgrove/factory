@@ -43,9 +43,7 @@ export function scoreUnfinishedGraph(
     visit.add(number);
     const downstream = children.get(number) ?? [];
     const value =
-      downstream.length === 0
-        ? 0
-        : 1 + Math.max(...downstream.map((child) => criticalPath(child)));
+      downstream.length === 0 ? 0 : 1 + Math.max(...downstream.map((child) => criticalPath(child)));
     visit.delete(number);
     pathMemo.set(number, value);
     return value;

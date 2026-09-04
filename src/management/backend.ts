@@ -2,6 +2,7 @@ import type { CompiledObjective } from "../graph.js";
 import type { NormalizedArtifact } from "../execution/artifacts.js";
 import type { WorkerPacket } from "../protocol/worker-packet.js";
 import type { ValidationEvidence } from "../validation/evidence.js";
+import type { ModelSelection } from "../protocol/policy.js";
 
 export interface ManagementUsage {
   inputTokens: number;
@@ -15,12 +16,19 @@ export interface CompilationContext {
   baseSha: string;
   repositoryFiles: string[];
   allowedNetworkDestinations: string[];
+  modelSelection?: ModelSelection;
 }
 
 export interface CompilationResult {
   objective: CompiledObjective;
   usage: ManagementUsage;
 }
+
+/**
+ * The management backend must not expose a paid compilation result to its
+ * caller until this callback has durably checkpointed that exact result.
+ */
+export type CompilationCheckpoint = (result: CompilationResult) => Promise<void>;
 
 export interface SemanticReview {
   accepted: boolean;
@@ -36,6 +44,7 @@ export interface ReviewContext {
   packet: WorkerPacket;
   artifact: NormalizedArtifact;
   evidence: ValidationEvidence;
+  modelSelection?: ModelSelection;
 }
 
 export interface ReviewResult {
@@ -43,9 +52,15 @@ export interface ReviewResult {
   usage: ManagementUsage;
 }
 
+/** Same paid-result durability boundary as Objective compilation. */
+export type ReviewCheckpoint = (result: ReviewResult) => Promise<void>;
+
 export interface ManagementBackend {
   readonly id: string;
   probe(): Promise<{ available: boolean; authenticated: boolean; reason?: string }>;
-  compile(context: CompilationContext): Promise<CompilationResult>;
-  review(context: ReviewContext): Promise<ReviewResult>;
+  compile(
+    context: CompilationContext,
+    checkpoint: CompilationCheckpoint,
+  ): Promise<CompilationResult>;
+  review(context: ReviewContext, checkpoint: ReviewCheckpoint): Promise<ReviewResult>;
 }

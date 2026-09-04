@@ -2,7 +2,7 @@
 
 Date: 2026-09-03
 
-Status: accepted for the Codex CLI / Linux / WSL release target
+Status: accepted for control refs and the Codex CLI fallback; default selection superseded by ADR 0008
 
 ## Decision
 
@@ -64,5 +64,6 @@ Version: `codex-cli 0.153.0` on WSL/Linux.
 - Attempt refs are immutable and never renewed.
 - A fallback control branch is not enabled automatically; inability to use GraphQL `updateRefs`
   blocks v2 activation rather than silently weakening single-Director safety.
-- The initial supported harness matrix is Codex CLI on Linux/WSL. Other clients remain unclaimed until
-  their full execution and interruption probes pass.
+- Codex CLI remains a supported fallback inside native Linux, Windows WSL2, or a Linux guest hosted
+  by macOS. ADR 0008 makes the official Codex SDK the preferred programmatic route. Additional
+  clients remain Labs until their full execution and interruption probes pass.

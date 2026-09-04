@@ -72,59 +72,46 @@ describe("systemd user service lifecycle", () => {
       run: async () => {},
     });
     const input = { repository: "Owner/Repo", checkout: "/work/repo" };
-    await writeFile(
-      service.unitPath(input),
-      "[Service]\nExecStart=/bin/false\n",
-    );
-    await expect(service.install(input)).rejects.toThrow(
-      "refusing to overwrite unmanaged unit",
-    );
-    expect(await readFile(service.unitPath(input), "utf8")).toContain(
-      "ExecStart=/bin/false",
-    );
+    await writeFile(service.unitPath(input), "[Service]\nExecStart=/bin/false\n");
+    await expect(service.install(input)).rejects.toThrow("refusing to overwrite unmanaged unit");
+    expect(await readFile(service.unitPath(input), "utf8")).toContain("ExecStart=/bin/false");
     await rm(directory, { recursive: true, force: true });
   });
 
-  const integration =
-    process.env.FACTORY_SYSTEMD_INTEGRATION === "1" ? it : it.skip;
-  integration(
-    "passes the live Linux/WSL systemd user lifecycle gate",
-    async () => {
-      const checkout = await mkdtemp(join(tmpdir(), "factory-systemd-live-"));
-      const executable = join(checkout, "factory-controller-fixture");
-      await writeFile(
-        executable,
-        "#!/bin/sh\ntrap 'exit 0' TERM INT\nwhile :; do sleep 1; done\n",
-        { mode: 0o700 },
-      );
-      await chmod(executable, 0o700);
-      const service = new SystemdUserService({ factoryExecutable: executable });
-      const input = { repository: "FactoryLifecycleGate/Fixture", checkout };
-      try {
-        expect(await service.install(input)).toMatchObject({
-          installed: true,
-          enabled: true,
-        });
-        expect(await service.install(input)).toMatchObject({
-          installed: true,
-          enabled: true,
-        });
-        expect(await service.start(input)).toMatchObject({ active: true });
-        expect(await service.stop(input)).toMatchObject({ active: false });
-        expect(await service.restart(input)).toMatchObject({ active: true });
-        expect(await service.status(input)).toMatchObject({
-          installed: true,
-          enabled: true,
-          active: true,
-        });
-      } finally {
-        expect(await service.uninstall(input)).toMatchObject({
-          installed: false,
-          enabled: false,
-          active: false,
-        });
-        await rm(checkout, { recursive: true, force: true });
-      }
-    },
-  );
+  const integration = process.env.FACTORY_SYSTEMD_INTEGRATION === "1" ? it : it.skip;
+  integration("passes the live Linux/WSL systemd user lifecycle gate", async () => {
+    const checkout = await mkdtemp(join(tmpdir(), "factory-systemd-live-"));
+    const executable = join(checkout, "factory-controller-fixture");
+    await writeFile(executable, "#!/bin/sh\ntrap 'exit 0' TERM INT\nwhile :; do sleep 1; done\n", {
+      mode: 0o700,
+    });
+    await chmod(executable, 0o700);
+    const service = new SystemdUserService({ factoryExecutable: executable });
+    const input = { repository: "FactoryLifecycleGate/Fixture", checkout };
+    try {
+      expect(await service.install(input)).toMatchObject({
+        installed: true,
+        enabled: true,
+      });
+      expect(await service.install(input)).toMatchObject({
+        installed: true,
+        enabled: true,
+      });
+      expect(await service.start(input)).toMatchObject({ active: true });
+      expect(await service.stop(input)).toMatchObject({ active: false });
+      expect(await service.restart(input)).toMatchObject({ active: true });
+      expect(await service.status(input)).toMatchObject({
+        installed: true,
+        enabled: true,
+        active: true,
+      });
+    } finally {
+      expect(await service.uninstall(input)).toMatchObject({
+        installed: false,
+        enabled: false,
+        active: false,
+      });
+      await rm(checkout, { recursive: true, force: true });
+    }
+  });
 });

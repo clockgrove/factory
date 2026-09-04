@@ -9,7 +9,8 @@ export type PriorityPolicy = z.infer<typeof PriorityPolicySchema>;
 export type ObservedPrioritySource =
   | "subissue-order"
   | "issue-field"
-  | "subissue-order-fallback";
+  | "subissue-order-fallback"
+  | "operator-command";
 
 export interface RankedWorkItem {
   item: DerivedWorkItem;
@@ -43,9 +44,7 @@ function isDependencyReady(item: DerivedWorkItem): boolean {
 function issueFieldPriority(
   item: DerivedWorkItem,
   policy: PriorityPolicy,
-):
-  | { rank: number; fieldId: string; optionId?: string }
-  | { unavailable: string } {
+): { rank: number; fieldId: string; optionId?: string } | { unavailable: string } {
   const fieldId = policy.issueFieldId!;
   if (!item.issueFieldValues) return { unavailable: "issue-field snapshot is absent" };
   const matching = item.issueFieldValues.filter((value) => value.fieldId === fieldId);
@@ -72,11 +71,10 @@ export function rankReadyWorkItems(
   policy: PriorityPolicy,
   configuredUnavailableReason?: string,
   additionalReady: ReadonlySet<number> = new Set(),
+  priorityOverrides: ReadonlyMap<number, number> = new Map(),
 ): RankedWorkItem[] {
   const scores = scoreUnfinishedGraph(items);
-  const ready = items.filter(
-    (item) => isDependencyReady(item) || additionalReady.has(item.number),
-  );
+  const ready = items.filter((item) => isDependencyReady(item) || additionalReady.has(item.number));
   const observations = new Map(
     policy.source === "issue-field-then-subissue-order"
       ? ready.map((item) => [item.number, issueFieldPriority(item, policy)] as const)
@@ -87,9 +85,7 @@ export function rankReadyWorkItems(
     throw new PriorityUnavailableError(
       unavailable?.[0] ?? ready[0]?.number ?? 1,
       configuredUnavailableReason ??
-        (unavailable && "unavailable" in unavailable[1]
-          ? unavailable[1].unavailable
-          : "unknown"),
+        (unavailable && "unavailable" in unavailable[1] ? unavailable[1].unavailable : "unknown"),
     );
   }
   const fallbackAll = configuredUnavailableReason !== undefined || unavailable !== undefined;
@@ -99,6 +95,16 @@ export function rankReadyWorkItems(
       criticalPathLength: 0,
       unfinishedDownstream: 0,
     };
+    const commandRank = priorityOverrides.get(item.number);
+    if (commandRank !== undefined) {
+      return {
+        item,
+        rank: commandRank,
+        source: "operator-command",
+        subIssuePosition,
+        ...score,
+      };
+    }
     if (policy.source === "subissue-order") {
       return {
         item,
@@ -138,10 +144,17 @@ export function rankReadyWorkItems(
   });
 
   return ranked.sort((left, right) => {
-    const issueFieldOrder =
-      left.source === "issue-field" && right.source === "issue-field";
-    if (issueFieldOrder && left.rank !== right.rank) return left.rank - right.rank;
-    if (!issueFieldOrder && left.subIssuePosition !== right.subIssuePosition) {
+    const operatorCommandOrder =
+      left.source === "operator-command" || right.source === "operator-command";
+    const issueFieldOrder = left.source === "issue-field" && right.source === "issue-field";
+    if ((operatorCommandOrder || issueFieldOrder) && left.rank !== right.rank) {
+      return left.rank - right.rank;
+    }
+    if (
+      !operatorCommandOrder &&
+      !issueFieldOrder &&
+      left.subIssuePosition !== right.subIssuePosition
+    ) {
       return left.subIssuePosition - right.subIssuePosition;
     }
     if (left.criticalPathLength !== right.criticalPathLength) {
@@ -150,7 +163,10 @@ export function rankReadyWorkItems(
     if (left.unfinishedDownstream !== right.unfinishedDownstream) {
       return right.unfinishedDownstream - left.unfinishedDownstream;
     }
-    if (issueFieldOrder && left.subIssuePosition !== right.subIssuePosition) {
+    if (
+      (operatorCommandOrder || issueFieldOrder) &&
+      left.subIssuePosition !== right.subIssuePosition
+    ) {
       return left.subIssuePosition - right.subIssuePosition;
     }
     return left.item.number - right.item.number;

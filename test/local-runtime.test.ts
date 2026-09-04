@@ -1,6 +1,6 @@
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -8,8 +8,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   PARENT_DEATH_WATCHDOG,
+  processGroupExists,
   runContainedProcess,
   sanitizedWorkerEnvironment,
+  terminateProcessGroup,
 } from "../src/runtime/process-group.js";
 import {
   cleanupLocalWorktree,
@@ -17,6 +19,7 @@ import {
   createLocalWorktree,
   seedLocalWorktree,
 } from "../src/runtime/local-worktree.js";
+import { isolateCodexEnvironment } from "../src/runtime/codex-home.js";
 
 describe("worker environment", () => {
   it("removes GitHub and unpermitted secret material", () => {
@@ -39,23 +42,56 @@ describe("worker environment", () => {
   });
 
   it("passes only explicitly named model credentials", () => {
-    const env = sanitizedWorkerEnvironment(
-      { OPENAI_API_KEY: "model", GH_TOKEN: "never" },
-      ["OPENAI_API_KEY"],
-    );
+    const env = sanitizedWorkerEnvironment({ OPENAI_API_KEY: "model", GH_TOKEN: "never" }, [
+      "OPENAI_API_KEY",
+    ]);
     expect(env.OPENAI_API_KEY).toBe("model");
     expect(env.GH_TOKEN).toBeUndefined();
+  });
+
+  it("redirects conventional host credential paths into the isolated Codex home", () => {
+    const home = "/isolated/factory-attempt";
+    const env = isolateCodexEnvironment(
+      sanitizedWorkerEnvironment({
+        HOME: "/host/home",
+        XDG_CONFIG_HOME: "/host/config",
+        KUBECONFIG: "/host/kube",
+        DOCKER_CONFIG: "/host/docker",
+        NPM_CONFIG_USERCONFIG: "/host/npmrc",
+      }),
+      home,
+    );
+    for (const value of [
+      env.HOME,
+      env.XDG_CONFIG_HOME,
+      env.KUBECONFIG,
+      env.DOCKER_CONFIG,
+      env.NPM_CONFIG_USERCONFIG,
+      env.AWS_SHARED_CREDENTIALS_FILE,
+    ]) {
+      expect(value).toMatch(/^\/isolated\/factory-attempt(?:\/|$)/);
+      expect(value).not.toContain("/host/");
+    }
   });
 });
 
 describe("contained processes", () => {
+  async function waitUntilGone(pid: number): Promise<void> {
+    for (let check = 0; check < 100; check += 1) {
+      try {
+        process.kill(pid, 0);
+      } catch {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error(`contained descendant ${pid} survived termination`);
+  }
+
   it("bounds output and terminates a timed-out process", async () => {
     const result = await runContainedProcess({
       command: process.execPath,
-      args: [
-        "-e",
-        "process.stdout.write('x'.repeat(10000)); setInterval(() => {}, 1000)",
-      ],
+      args: ["-e", "process.stdout.write('x'.repeat(10000)); setInterval(() => {}, 1000)"],
       cwd: tmpdir(),
       env: sanitizedWorkerEnvironment(process.env),
       timeoutMs: 50,
@@ -67,19 +103,81 @@ describe("contained processes", () => {
     expect(result.stdout).toContain("output truncated");
   });
 
+  it("treats EPERM as a present process group and fails closed on termination", async () => {
+    const denied = Object.assign(new Error("not permitted"), { code: "EPERM" });
+    const control = {
+      platform: "darwin" as const,
+      sendSignal: () => {
+        throw denied;
+      },
+    };
+
+    expect(processGroupExists(424_242, control)).toBe(true);
+    await expect(terminateProcessGroup(424_242, "SIGTERM", 10, control)).rejects.toMatchObject({
+      code: "EPERM",
+    });
+  });
+
+  it("falls back to a direct group probe when a procfs stat read races process exit", async () => {
+    const procRoot = await mkdtemp(join(tmpdir(), "factory-proc-race-"));
+    await mkdir(join(procRoot, "123"));
+    await writeFile(join(procRoot, "123", "stat"), "");
+    const probes: Array<[number, NodeJS.Signals | 0]> = [];
+    try {
+      expect(
+        processGroupExists(424_242, {
+          platform: "linux",
+          procRoot,
+          sendSignal: (pid, signal) => {
+            probes.push([pid, signal]);
+          },
+        }),
+      ).toBe(true);
+      expect(probes).toEqual([[-424_242, 0]]);
+    } finally {
+      await rm(procRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects secret material before bounded output can discard it", async () => {
+    const result = await runContainedProcess({
+      command: process.execPath,
+      args: [
+        "-e",
+        `process.stdout.write('authorization: bearer ghp_${"x".repeat(40)}\\n' + 'later\\n'.repeat(10000))`,
+      ],
+      cwd: tmpdir(),
+      env: sanitizedWorkerEnvironment(process.env),
+      timeoutMs: 10_000,
+      maxOutputBytes: 512,
+    });
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("stdout output contains suspected GitHub token");
+    expect(result.stderr).not.toContain("ghp_");
+  });
+
   it("kills the worker group when its recorded parent is gone", async () => {
     const directory = await mkdtemp(join(tmpdir(), "factory-parent-death-"));
     const marker = join(directory, "worker-survived");
     const child = spawn(
       "/bin/sh",
       [
-        "-c", PARENT_DEATH_WATCHDOG, "factory-parent-watchdog", "2147483647",
-        "/bin/sh", "-c", `sleep 4; touch '${marker}'`,
+        "-c",
+        PARENT_DEATH_WATCHDOG,
+        "factory-parent-watchdog",
+        "2147483647",
+        "/bin/sh",
+        "-c",
+        `sleep 4; touch '${marker}'`,
       ],
       { detached: true, stdio: "ignore" },
     );
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("parent-death watchdog did not stop")), 3_500);
+      const timer = setTimeout(
+        () => reject(new Error("parent-death watchdog did not stop")),
+        3_500,
+      );
       child.once("exit", () => {
         clearTimeout(timer);
         resolve();
@@ -88,6 +186,50 @@ describe("contained processes", () => {
     });
     expect(existsSync(marker)).toBe(false);
     await rm(directory, { recursive: true, force: true });
+  });
+
+  it("kills a resistant background descendant after a successful root exit", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-natural-exit-"));
+    const pidFile = join(directory, "descendant.pid");
+    const target = join(directory, "target.mjs");
+    const descendant = [
+      'const { writeFileSync } = require("node:fs");',
+      'process.on("SIGTERM", () => {});',
+      `writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));`,
+      "setInterval(() => {}, 1000);",
+    ].join(" ");
+    await writeFile(
+      target,
+      [
+        'import { spawn } from "node:child_process";',
+        'import { existsSync } from "node:fs";',
+        `spawn(process.execPath, ["-e", ${JSON.stringify(descendant)}], { stdio: "ignore" });`,
+        `const ready = setInterval(() => { if (existsSync(${JSON.stringify(pidFile)})) { clearInterval(ready); process.exit(0); } }, 10);`,
+      ].join("\n"),
+    );
+    let descendantPid = 0;
+    try {
+      const result = await runContainedProcess({
+        command: process.execPath,
+        args: [target],
+        cwd: directory,
+        env: sanitizedWorkerEnvironment(process.env),
+        timeoutMs: 5_000,
+        cancellationGraceMs: 50,
+      });
+      descendantPid = Number((await readFile(pidFile, "utf8")).trim());
+      expect(result.exitCode).toBe(0);
+      await waitUntilGone(descendantPid);
+    } finally {
+      if (descendantPid) {
+        try {
+          process.kill(descendantPid, "SIGKILL");
+        } catch {
+          // Already terminated by the runner.
+        }
+      }
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });
 
@@ -121,9 +263,7 @@ describe("local worktrees", () => {
     expect(artifact.outcome).toBe("succeeded");
     expect(artifact.changedPaths).toEqual(["new.txt", "tracked.txt"]);
     expect(artifact.patch).toContain("worker new file");
-    expect(await readFile(join(repository, "tracked.txt"), "utf8")).toBe(
-      "operator dirty change\n",
-    );
+    expect(await readFile(join(repository, "tracked.txt"), "utf8")).toBe("operator dirty change\n");
 
     const retry = await createLocalWorktree(repository, baseSha);
     await seedLocalWorktree(retry, artifact);

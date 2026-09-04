@@ -34,9 +34,7 @@ describe("repository controller interruption recovery", () => {
       const source = {
         discover: async () => [{ number: 1 }],
         admissions: async (): Promise<RepositoryAdmission[]> =>
-          durable.published.has(10)
-            ? []
-            : [{ objective: 1, workItem: 10, lease }],
+          durable.published.has(10) ? [] : [{ objective: 1, workItem: 10, lease }],
         reconcile: async (_objective: number, item: RepositoryAdmission) => {
           if (!durable.admitted.has(item.workItem)) {
             durable.admitted.add(item.workItem);

@@ -71,9 +71,7 @@ describe("pull request timestamps", () => {
   // indistinguishable from an integration, which is the whole reason both are
   // recorded rather than a single "finished at".
   it("distinguishes a closed-unmerged pull request from a merged one", () => {
-    const pr = toPullRequest(
-      gqlPr({ state: "CLOSED", closedAt: "2026-01-01T11:00:00Z" }) as never,
-    );
+    const pr = toPullRequest(gqlPr({ state: "CLOSED", closedAt: "2026-01-01T11:00:00Z" }) as never);
 
     expect(pr.mergedAt).toBeNull();
     expect(pr.closedAt?.toISOString()).toBe("2026-01-01T11:00:00.000Z");
@@ -117,10 +115,12 @@ describe("Copilot REST timeline events", () => {
   });
 
   it("drops unknown events and entries without valid timestamps", () => {
-    expect(toAgentWorkEvents([
-      { event: "renamed", created_at: "2026-01-01T10:00:00Z" },
-      { event: "copilot_work_started", created_at: "not-a-date" },
-    ])).toEqual([]);
+    expect(
+      toAgentWorkEvents([
+        { event: "renamed", created_at: "2026-01-01T10:00:00Z" },
+        { event: "copilot_work_started", created_at: "not-a-date" },
+      ]),
+    ).toEqual([]);
   });
 
   it("attaches separately hydrated events to a pull request", () => {

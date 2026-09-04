@@ -1,0 +1,9 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Support policy
+    url: https://github.com/clockgrove/factory/blob/main/SUPPORT.md
+    about: Read supported environments, diagnostics guidance, and version policy.
+  - name: Security report
+    url: https://github.com/clockgrove/factory/security/advisories/new
+    about: Report suspected vulnerabilities privately.
+

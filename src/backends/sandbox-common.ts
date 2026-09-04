@@ -1,8 +1,10 @@
 import { execFile } from "node:child_process";
-import { readFile, rm } from "node:fs/promises";
+import { open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+
+import { z } from "zod";
 
 import type {
   AttemptContext,
@@ -10,14 +12,64 @@ import type {
   IsolatedValidationResult,
   StaleAttemptIdentity,
 } from "../execution/backend.js";
-import {
-  CODEX_WORKER_OUTPUT_SCHEMA,
-  workerPacketPrompt,
-} from "./codex-cli-local.js";
+import { assertNoSecretMaterial } from "../protocol/limits.js";
+import { NPM_VALIDATION_SETUP_COMMAND } from "../validation/plan.js";
+import { CODEX_WORKER_OUTPUT_SCHEMA, workerPacketPrompt } from "./codex-cli-local.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_SOURCE_ARCHIVE_BYTES = 64 * 1024 * 1024;
+export const MAX_ISOLATED_VALIDATION_RESULT_BYTES = 64 * 1024;
 export const SANDBOX_CODEX_PACKAGE = "@openai/codex@0.153.0";
+
+const IsolatedValidationResultSchema = z
+  .object({
+    outputTreeSha: z.string().regex(/^[0-9a-f]{40}$/),
+    commands: z
+      .array(
+        z
+          .object({
+            command: z.string().min(1).max(1_000),
+            exitCode: z.number().int().min(0).max(255),
+            durationMs: z
+              .number()
+              .int()
+              .nonnegative()
+              .max(24 * 60 * 60 * 1_000),
+          })
+          .strict(),
+      )
+      .max(128),
+    passed: z.boolean(),
+    failureReason: z.string().min(1).max(8_000).optional(),
+    startedAt: z.string().datetime({ offset: true }),
+    completedAt: z.string().datetime({ offset: true }),
+    environmentIdentity: z.string().min(1).max(500).optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (Date.parse(value.completedAt) < Date.parse(value.startedAt)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["completedAt"],
+        message: "completedAt must not precede startedAt",
+      });
+    }
+    const hasFailedCommand = value.commands.some(({ exitCode }) => exitCode !== 0);
+    if (value.passed && (hasFailedCommand || value.failureReason !== undefined)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["passed"],
+        message: "passing evidence must contain only successful commands and no failure reason",
+      });
+    }
+    if (!value.passed && (!hasFailedCommand || value.failureReason === undefined)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["passed"],
+        message: "failing evidence must identify a failed command and a failure reason",
+      });
+    }
+  });
 
 export interface SandboxBootstrapFile {
   path: string;
@@ -27,18 +79,21 @@ export interface SandboxBootstrapFile {
 
 export function sandboxIdentity(context: AttemptContext | StaleAttemptIdentity): string {
   const raw = `factory-o${context.objective}-w${context.workItem}-a${context.attempt}-${context.runId.slice(0, 12)}`;
-  return raw.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-").slice(0, 63);
+  return raw
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "-")
+    .replace(/-+/g, "-")
+    .slice(0, 63);
 }
 
 export function sandboxResourceName(
   context: AttemptContext | StaleAttemptIdentity,
-  phase: "execution" | "validation" =
-    "phase" in context ? context.phase ?? "execution" : "execution",
+  phase: "execution" | "validation" = "phase" in context
+    ? (context.phase ?? "execution")
+    : "execution",
 ): string {
   const identity = sandboxIdentity(context);
-  return phase === "validation"
-    ? `${identity.slice(0, 54)}-validate`
-    : identity;
+  return phase === "validation" ? `${identity.slice(0, 54)}-validate` : identity;
 }
 
 export async function repositoryArchive(repository: string, baseSha: string): Promise<Buffer> {
@@ -47,16 +102,32 @@ export async function repositoryArchive(repository: string, baseSha: string): Pr
     `clockgrove-factory-source-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.tar`,
   );
   try {
-    await execFileAsync(
-      "git",
-      ["archive", "--format=tar", "-o", path, baseSha],
-      { cwd: repository, timeout: 120_000, maxBuffer: 256 * 1024 },
-    );
-    const archive = await readFile(path);
-    if (archive.byteLength > MAX_SOURCE_ARCHIVE_BYTES) {
-      throw new Error(`source archive exceeds ${MAX_SOURCE_ARCHIVE_BYTES} bytes`);
+    await execFileAsync("git", ["archive", "--format=tar", "-o", path, baseSha], {
+      cwd: repository,
+      timeout: 120_000,
+      maxBuffer: 256 * 1024,
+    });
+    const file = await open(path, "r");
+    try {
+      const before = await file.stat();
+      if (before.size > MAX_SOURCE_ARCHIVE_BYTES) {
+        throw new Error(`source archive exceeds ${MAX_SOURCE_ARCHIVE_BYTES} bytes`);
+      }
+      const archive = Buffer.alloc(before.size);
+      let offset = 0;
+      while (offset < archive.byteLength) {
+        const { bytesRead } = await file.read(archive, offset, archive.byteLength - offset, offset);
+        if (bytesRead === 0) throw new Error("source archive was truncated while reading");
+        offset += bytesRead;
+      }
+      const after = await file.stat();
+      if (after.size !== before.size) {
+        throw new Error("source archive changed while reading");
+      }
+      return archive;
+    } finally {
+      await file.close();
     }
-    return archive;
   } finally {
     await rm(path, { force: true });
   }
@@ -78,10 +149,18 @@ git config user.name clockgrove-factory
 git config user.email factory@invalid.local
 git add -A
 git commit -qm factory-base
+model_args=()
+if [[ -f "$factory_root/model.txt" ]]; then
+  model_args+=(--model "$(<"$factory_root/model.txt")")
+fi
+if [[ -f "$factory_root/reasoning-config.txt" ]]; then
+  model_args+=(-c "$(<"$factory_root/reasoning-config.txt")")
+fi
 set +e
-npx --yes ${SANDBOX_CODEX_PACKAGE} --dangerously-bypass-approvals-and-sandbox -c 'web_search="disabled"' exec --ephemeral --ignore-user-config --ignore-rules --json --output-schema "$factory_root/output.schema.json" -C "$workspace" - < "$factory_root/prompt.txt" > "$factory_root/worker.stdout" 2> "$factory_root/worker.stderr"
+npx --yes ${SANDBOX_CODEX_PACKAGE} --dangerously-bypass-approvals-and-sandbox -c 'web_search="disabled"' exec --ephemeral --ignore-user-config --ignore-rules --json --output-schema "$factory_root/output.schema.json" -C "$workspace" "\${model_args[@]}" - < "$factory_root/prompt.txt" > "$factory_root/worker.stdout" 2> "$factory_root/worker.stderr"
 worker_status=$?
 set -e
+git add --intent-to-add --all
 git diff --binary --no-ext-diff HEAD > "$factory_root/artifact.patch"
 git diff --name-only -z HEAD > "$factory_root/changed-paths"
 printf '%s' "$worker_status" > "$factory_root/exit-code"
@@ -96,6 +175,21 @@ printf '%s' "$worker_status" > "$factory_root/exit-code"
       path: "factory/prompt.txt",
       content: Buffer.from(workerPacketPrompt(context), "utf8"),
     },
+    ...(context.modelSelection
+      ? [
+          {
+            path: "factory/model.txt",
+            content: Buffer.from(context.modelSelection.model, "utf8"),
+          },
+          {
+            path: "factory/reasoning-config.txt",
+            content: Buffer.from(
+              `model_reasoning_effort=${JSON.stringify(context.modelSelection.reasoning)}`,
+              "utf8",
+            ),
+          },
+        ]
+      : []),
     { path: "factory/run.sh", content: Buffer.from(script, "utf8"), mode: 0o700 },
   ];
 }
@@ -143,7 +237,7 @@ try {
   }
   let failureReason;
   if (existsSync(workspace + "package-lock.json") || existsSync(workspace + "npm-shrinkwrap.json")) {
-    const command = "npm ci --no-audit --no-fund";
+    const command = ${JSON.stringify(NPM_VALIDATION_SETUP_COMMAND)};
     const began = Date.now();
     const install = spawnSync("npm", ["ci", "--no-audit", "--no-fund"], {
       cwd: workspace,
@@ -160,7 +254,7 @@ try {
   }
   for (const command of failureReason ? [] : config.commands) {
     const began = Date.now();
-    const result = spawnSync("/bin/sh", ["-lc", command], {
+    const result = spawnSync("/bin/sh", ["-c", command], {
       cwd: workspace,
       timeout: config.timeoutMsPerCommand,
       encoding: "utf8",
@@ -197,16 +291,27 @@ try {
 }
 
 export function parseIsolatedValidationResult(buffer: Buffer): IsolatedValidationResult {
-  const value = JSON.parse(buffer.toString("utf8")) as IsolatedValidationResult;
-  if (
-    !/^[0-9a-f]{40}$/.test(value.outputTreeSha) ||
-    !Array.isArray(value.commands) ||
-    typeof value.passed !== "boolean" ||
-    !Number.isFinite(Date.parse(value.startedAt)) ||
-    !Number.isFinite(Date.parse(value.completedAt))
-  ) {
+  if (buffer.byteLength > MAX_ISOLATED_VALIDATION_RESULT_BYTES) {
+    throw new Error("isolated validator result exceeds the maximum size");
+  }
+  let parsed: z.infer<typeof IsolatedValidationResultSchema>;
+  try {
+    parsed = IsolatedValidationResultSchema.parse(JSON.parse(buffer.toString("utf8")) as unknown);
+  } catch {
     throw new Error("isolated validator returned a malformed result");
   }
+  const value: IsolatedValidationResult = {
+    outputTreeSha: parsed.outputTreeSha,
+    commands: parsed.commands,
+    passed: parsed.passed,
+    ...(parsed.failureReason !== undefined ? { failureReason: parsed.failureReason } : {}),
+    startedAt: parsed.startedAt,
+    completedAt: parsed.completedAt,
+    ...(parsed.environmentIdentity !== undefined
+      ? { environmentIdentity: parsed.environmentIdentity }
+      : {}),
+  };
+  assertNoSecretMaterial(value, "isolated validator result");
   return value;
 }
 

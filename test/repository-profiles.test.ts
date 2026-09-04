@@ -22,21 +22,13 @@ describe("repository profiles", () => {
       { files: [{ path: "generated/a.js", generated: true }] },
       { generatedOutput: true },
     ],
-    [
-      "binary",
-      { files: [{ path: "assets/a.wasm", binary: true }] },
-      { binaryAssets: true },
-    ],
+    ["binary", { files: [{ path: "assets/a.wasm", binary: true }] }, { binaryAssets: true }],
     [
       "simulation",
       { files: [{ path: "test/deterministic-simulation.ts" }] },
       { deterministicSimulation: true },
     ],
-    [
-      "visual",
-      { files: [{ path: "test/visual-snapshot.ts" }] },
-      { visualValidation: true },
-    ],
+    ["visual", { files: [{ path: "test/visual-snapshot.ts" }] }, { visualValidation: true }],
   ];
   for (const [name, facts, expected] of cases)
     it(`normalizes bounded ${name} evidence`, () => {
@@ -54,10 +46,7 @@ describe("repository profiles", () => {
   it("profiles every checked-in repository fixture with a bounded manifest", async () => {
     const fixtures = JSON.parse(
       await readFile(
-        new URL(
-          "./fixtures/compiler/repository-profiles.json",
-          import.meta.url,
-        ),
+        new URL("./fixtures/compiler/repository-profiles.json", import.meta.url),
         "utf8",
       ),
     ) as Array<{

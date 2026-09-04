@@ -2,10 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { buildExplanationReport } from "../src/application/explain.js";
 import { buildReplayReport } from "../src/application/replay.js";
-import {
-  buildStatusReport,
-  type FactoryReadSnapshot,
-} from "../src/application/status.js";
+import { buildStatusReport, type FactoryReadSnapshot } from "../src/application/status.js";
 import { EXPLANATION_CODES } from "../src/explanations/index.js";
 import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js";
 import { DEFAULT_RUN_POLICY, policyDigest, type RunPolicy } from "../src/protocol/policy.js";
@@ -143,8 +140,7 @@ function snapshot(): FactoryReadSnapshot {
             workItem: 11,
             directorEpoch: 4,
             policyDigest: policyDigest(policy),
-            reason:
-              "burst-trigger-pending: raw provider OAuth response must never be returned",
+            reason: "burst-trigger-pending: raw provider OAuth response must never be returned",
             reasonCode: "burst-trigger-pending",
             gate: "economic",
             observedPriorityRank: 2,
@@ -223,9 +219,7 @@ describe("bounded status, explain, and replay output", () => {
     });
     expect(report.burst).toMatchObject({
       configured: { mode: "queue-delay", maxCloudParallel: 2 },
-      admitted: [
-        { workItem: 10, attempt: 1, trigger: "queue-delay", backendId: cloudId },
-      ],
+      admitted: [{ workItem: 10, attempt: 1, trigger: "queue-delay", backendId: cloudId }],
     });
     expect(report.summary?.economics.budgets.sandboxMilliseconds).toEqual({
       configured: 1_800_000,
@@ -294,5 +288,58 @@ describe("bounded status, explain, and replay output", () => {
     expect(report.run).toMatchObject({ state: "completed" });
     expect(report.capacity.observed.active).toBe(0);
     expect(report.capacity.activeReservations).toEqual([]);
+  });
+
+  it("reports replayed operational commands and priority overrides", () => {
+    const commanded = snapshot();
+    commanded.factoryEvents!.push(
+      event({
+        kind: "run",
+        event: "RunPauseRequested",
+        sequence: 6,
+        requestedBy: "private-operator-name",
+        requestId: "pause-status",
+      }),
+      event({
+        kind: "run",
+        event: "CloudPauseRequested",
+        sequence: 7,
+        requestedBy: "private-operator-name",
+        requestId: "pause-cloud-status",
+      }),
+      event({
+        kind: "run",
+        event: "WorkItemRetryRequested",
+        sequence: 8,
+        requestedBy: "private-operator-name",
+        requestId: "retry-status",
+        workItem: 11,
+      }),
+      event({
+        kind: "run",
+        event: "WorkItemPriorityChanged",
+        sequence: 9,
+        requestedBy: "private-operator-name",
+        requestId: "priority-status",
+        workItem: 11,
+        priorityRank: 3,
+        prioritySource: "operator-command",
+      }),
+    );
+    const report = buildStatusReport({
+      repository: "clockgrove/factory",
+      snapshot: commanded,
+    });
+
+    expect(report.run).toMatchObject({
+      state: "paused",
+      cloudPaused: true,
+      pendingRetries: [11],
+    });
+    expect(report.readyOrder[0]).toMatchObject({
+      workItem: 11,
+      rank: 3,
+      source: "operator-command",
+    });
   });
 });

@@ -23,11 +23,7 @@ export function byteLength(value: unknown): number {
   return Buffer.byteLength(JSON.stringify(value), "utf8");
 }
 
-export function assertWithinBytes(
-  value: unknown,
-  limit: number,
-  label: string,
-): void {
+export function assertWithinBytes(value: unknown, limit: number, label: string): void {
   const size = byteLength(value);
   if (size > limit) {
     throw new Error(`${label} is ${size} bytes; maximum is ${limit}`);

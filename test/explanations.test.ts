@@ -15,11 +15,7 @@ describe("stable explanations", () => {
       { gate: "dependency", openDependencies: [9, 3] },
       EXPLANATION_CODES.dependencyOpen,
     ],
-    [
-      "capacity",
-      { gate: "capacity", reason: "local-capacity" },
-      EXPLANATION_CODES.capacityLocal,
-    ],
+    ["capacity", { gate: "capacity", reason: "local-capacity" }, EXPLANATION_CODES.capacityLocal],
     [
       "authority",
       { gate: "authority", reason: "lease-unavailable" },
@@ -30,21 +26,13 @@ describe("stable explanations", () => {
       { gate: "priority", reason: "burst-threshold", rank: 80 },
       EXPLANATION_CODES.priorityBurstThreshold,
     ],
-    [
-      "scope",
-      { gate: "scope", reason: "path-conflict" },
-      EXPLANATION_CODES.scopePathConflict,
-    ],
+    ["scope", { gate: "scope", reason: "path-conflict" }, EXPLANATION_CODES.scopePathConflict],
     [
       "trust",
       { gate: "trust", reason: "isolation-required" },
       EXPLANATION_CODES.trustIsolationRequired,
     ],
-    [
-      "backend",
-      { gate: "backend", reason: "unavailable" },
-      EXPLANATION_CODES.backendUnavailable,
-    ],
+    ["backend", { gate: "backend", reason: "unavailable" }, EXPLANATION_CODES.backendUnavailable],
     [
       "validation",
       { gate: "validation", reason: "invalidated" },
@@ -84,9 +72,7 @@ describe("stable explanations", () => {
       const result = explainQueuedDecision({
         code,
         reason:
-          code === "policy-constraint"
-            ? "requests network destinations outside run policy"
-            : code,
+          code === "policy-constraint" ? "requests network destinations outside run policy" : code,
         observedPriorityRank: 7,
       });
       expect(result.code).toMatch(/^[a-z]+\.[a-z-]+$/);

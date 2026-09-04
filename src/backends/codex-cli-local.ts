@@ -1,6 +1,6 @@
 import { access, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
-import { platform, arch, tmpdir } from "node:os";
+import { arch, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
 import type {
@@ -12,19 +12,27 @@ import type {
   ExecutionBackendCapabilities,
   StaleAttemptIdentity,
 } from "../execution/backend.js";
-import { durableAttemptId, normalizeExecutionUsage } from "../execution/session.js";
+import {
+  durableAttemptId,
+  legacyDurableAttemptId,
+  normalizeExecutionUsage,
+} from "../execution/session.js";
 import { normalizeArtifact, type NormalizedArtifact } from "../execution/artifacts.js";
 import type { ExecutionRequirements } from "../protocol/worker-packet.js";
 import { collectLocalArtifact } from "../runtime/local-worktree.js";
+import { resolveCodexCommand } from "../runtime/codex-command.js";
 import {
+  linuxProcessGroupId,
   sanitizedWorkerEnvironment,
   startContainedProcess,
   runContainedProcess,
+  terminateProcessGroup,
   type ContainedProcess,
   type ProcessResult,
 } from "../runtime/process-group.js";
 import {
   createIsolatedCodexHome,
+  isolateCodexEnvironment,
   resolveCodexAuthFile,
   type CodexHomeFactory,
 } from "../runtime/codex-home.js";
@@ -71,7 +79,7 @@ interface RunningAttempt {
   cancelled: boolean;
 }
 
-function attemptIdentity(input: StaleAttemptIdentity | AttemptContext): string {
+function legacyCliAttemptIdentity(input: StaleAttemptIdentity | AttemptContext): string {
   return `factory-o${input.objective}-w${input.workItem}-a${input.attempt}-${input.runId.slice(0, 12)}`
     .toLowerCase()
     .replace(/[^a-z0-9-]/g, "-")
@@ -88,6 +96,7 @@ export interface CodexCliLocalOptions {
   permittedModelCredentials?: string[];
   createCodexHome?: CodexHomeFactory;
   capabilityProbe?: LocalCapabilityProbe;
+  staleTerminationGraceMs?: number;
 }
 
 export interface LocalCapabilities {
@@ -102,13 +111,16 @@ export type LocalCapabilityProbe = (
 async function executableOnPath(command: string): Promise<boolean> {
   if (!command || command.includes("/") || command.includes("\\")) return false;
   const directories = (process.env["PATH"] ?? "").split(delimiter).filter(Boolean);
-  const extensions = process.platform === "win32"
-    ? (process.env["PATHEXT"] ?? ".EXE;.CMD;.BAT;.COM").split(";")
-    : [""];
+  const extensions =
+    process.platform === "win32"
+      ? (process.env["PATHEXT"] ?? ".EXE;.CMD;.BAT;.COM").split(";")
+      : [""];
   for (const directory of directories) {
     for (const extension of extensions) {
-      const found = await access(join(directory, `${command}${extension}`), fsConstants.X_OK)
-        .then(() => true, () => false);
+      const found = await access(join(directory, `${command}${extension}`), fsConstants.X_OK).then(
+        () => true,
+        () => false,
+      );
       if (found) return true;
     }
   }
@@ -126,7 +138,7 @@ export async function probeLocalCapabilities(
   if (
     requirements.services.includes("systemd-user") &&
     process.platform !== "win32" &&
-    await executableOnPath("systemctl")
+    (await executableOnPath("systemctl"))
   ) {
     const systemd = await runContainedProcess({
       command: "systemctl",
@@ -226,11 +238,12 @@ function parseRuntimeDetails(stdout: string): {
 export class CodexCliLocalBackend implements ExecutionBackend {
   readonly capabilities: ExecutionBackendCapabilities = {
     id: "codex-cli/local-worktree",
+    supportTier: "supported",
     agentKind: "codex-cli",
     runtimeKind: "local-worktree",
     hostExecution: true,
     isolation: "process",
-    supportedOs: [platform()],
+    supportedOs: ["linux"],
     supportedArchitectures: [arch()],
     supportedTools: ["git", "node", "npm", "npx", "bash", "sh", "grep"],
     supportedServices: [],
@@ -238,6 +251,8 @@ export class CodexCliLocalBackend implements ExecutionBackend {
     supportsObservation: true,
     supportsResume: false,
     supportsLocalInference: false,
+    reportsModelUsage: true,
+    supportsModelSelection: true,
     requiresPaidRuntime: false,
     providerManagedPublication: false,
     requiredCredentials: ["codex-login-or-model-key"],
@@ -252,8 +267,16 @@ export class CodexCliLocalBackend implements ExecutionBackend {
   }
 
   async probe(requirements?: ExecutionRequirements): Promise<BackendProbe> {
-    const command = this.#options.command ?? "codex";
+    const target = await resolveCodexCommand(this.#options.command);
     const measuredAt = new Date().toISOString();
+    if (process.platform !== "linux") {
+      return {
+        available: false,
+        authenticated: false,
+        reason: "Factory local execution requires Linux (native, WSL2, or a Linux guest)",
+        measuredAt,
+      };
+    }
     if (requirements) {
       const discovered = await (this.#options.capabilityProbe ?? probeLocalCapabilities)(
         requirements,
@@ -266,13 +289,10 @@ export class CodexCliLocalBackend implements ExecutionBackend {
       ];
     }
     const result = await runContainedProcess({
-      command,
-      args: ["--version"],
+      command: target.command,
+      args: [...target.args, "--version"],
       cwd: tmpdir(),
-      env: sanitizedWorkerEnvironment(
-        process.env,
-        this.#options.permittedModelCredentials ?? [],
-      ),
+      env: sanitizedWorkerEnvironment(process.env, this.#options.permittedModelCredentials ?? []),
       timeoutMs: 10_000,
       maxOutputBytes: 8_000,
     }).catch((error: unknown) => ({
@@ -314,8 +334,8 @@ export class CodexCliLocalBackend implements ExecutionBackend {
       () => true,
       () => false,
     );
-    const hasModelCredential = (this.#options.permittedModelCredentials ?? []).some(
-      (name) => Boolean(process.env[name]),
+    const hasModelCredential = (this.#options.permittedModelCredentials ?? []).some((name) =>
+      Boolean(process.env[name]),
     );
     return {
       available: true,
@@ -328,7 +348,8 @@ export class CodexCliLocalBackend implements ExecutionBackend {
   }
 
   async launch(context: AttemptContext): Promise<BackendHandle> {
-    if (Date.now() >= context.deadline.getTime()) throw new Error("attempt deadline already elapsed");
+    if (Date.now() >= context.deadline.getTime())
+      throw new Error("attempt deadline already elapsed");
     const codexHome = await (this.#options.createCodexHome ?? createIsolatedCodexHome)("worker");
     try {
       const schemaPath = join(codexHome, "worker-output.schema.json");
@@ -353,20 +374,28 @@ export class CodexCliLocalBackend implements ExecutionBackend {
         context.workspace,
       ];
       if (this.#options.profile) args.push("--profile", this.#options.profile);
-      if (this.#options.model) args.push("--model", this.#options.model);
+      const model = context.modelSelection?.model ?? this.#options.model;
+      if (model) args.push("--model", model);
+      if (context.modelSelection?.reasoning) {
+        args.push(
+          "-c",
+          `model_reasoning_effort=${JSON.stringify(context.modelSelection.reasoning)}`,
+        );
+      }
       if (this.#options.localProvider) {
         args.push("--oss", "--local-provider", this.#options.localProvider);
       }
       args.push(workerPacketPrompt(context));
 
-      const env = sanitizedWorkerEnvironment(
-        { ...process.env, CODEX_HOME: codexHome },
-        this.#options.permittedModelCredentials ?? [],
+      const env = isolateCodexEnvironment(
+        sanitizedWorkerEnvironment(process.env, this.#options.permittedModelCredentials ?? []),
+        codexHome,
       );
-      env.FACTORY_ATTEMPT_ID = attemptIdentity(context);
+      env.FACTORY_ATTEMPT_ID = durableAttemptId(context);
+      const target = await resolveCodexCommand(this.#options.command);
       const processHandle = startContainedProcess({
-        command: this.#options.command ?? "codex",
-        args,
+        command: target.command,
+        args: [...target.args, ...args],
         cwd: context.workspace,
         env,
         timeoutMs: Math.max(1, context.deadline.getTime() - Date.now()),
@@ -508,38 +537,73 @@ export class CodexCliLocalBackend implements ExecutionBackend {
     if (process.platform === "win32") {
       throw new Error("stale local process reconciliation is supported only on Linux/WSL");
     }
-    const expected = `FACTORY_ATTEMPT_ID=${attemptIdentity(identity)}`;
-    const hinted = /^local-(\d+)$/.exec(identity.providerResourceId ?? "")?.[1];
-    const candidates = hinted
-      ? [hinted]
-      : (await readdir("/proc", { withFileTypes: true }))
-          .filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name))
-          .map((entry) => entry.name);
-    for (const candidate of candidates) {
-      const pid = Number(candidate);
-      const environment = await readFile(`/proc/${pid}/environ`).catch(() => null);
-      if (!environment || !environment.toString("utf8").split("\0").includes(expected)) {
-        continue;
+    const expected = `FACTORY_ATTEMPT_ID=${durableAttemptId(identity)}`;
+    const hintedPid = Number(/^local-(\d+)$/.exec(identity.providerResourceId ?? "")?.[1]);
+    const findGroups = async (marker: string): Promise<Set<number>> => {
+      const entries = await readdir("/proc", { withFileTypes: true });
+      const pids = entries
+        .filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name))
+        .map((entry) => Number(entry.name));
+      if (Number.isSafeInteger(hintedPid) && hintedPid > 0) {
+        const index = pids.indexOf(hintedPid);
+        if (index >= 0) pids.splice(index, 1);
+        pids.unshift(hintedPid);
       }
-      try {
-        process.kill(-pid, "SIGTERM");
-      } catch {
-        return;
-      }
-      for (let check = 0; check < 20; check += 1) {
-        await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+      const groups = new Set<number>();
+      for (const pid of pids) {
+        let environment: Buffer;
         try {
-          process.kill(pid, 0);
-        } catch {
-          return;
+          environment = await readFile(`/proc/${pid}/environ`);
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (["ENOENT", "ESRCH", "EACCES", "EPERM"].includes(code ?? "")) {
+            if (pid === hintedPid && ["EACCES", "EPERM"].includes(code ?? "")) {
+              throw new Error(`cannot inspect hinted stale worker ${pid}: ${code}`, {
+                cause: error,
+              });
+            }
+            continue;
+          }
+          throw error;
+        }
+        if (!environment.toString("utf8").split("\0").includes(marker)) continue;
+        const groupId = linuxProcessGroupId(pid);
+        if (groupId !== null) groups.add(groupId);
+      }
+      return groups;
+    };
+
+    const reconcileMarker = async (): Promise<void> => {
+      for (let pass = 0; pass < 3; pass += 1) {
+        const groups = await findGroups(expected);
+        if (groups.size === 0) return;
+        for (const groupId of groups) {
+          await terminateProcessGroup(
+            groupId,
+            "SIGTERM",
+            this.#options.staleTerminationGraceMs ?? 2_000,
+          );
         }
       }
-      try {
-        process.kill(-pid, "SIGKILL");
-      } catch {
-        return;
+      const survivors = await findGroups(expected);
+      if (survivors.size > 0) {
+        throw new Error(
+          `stale local reconciliation could not fence process groups ${[...survivors].join(", ")}`,
+        );
       }
-      return;
+    };
+    await reconcileMarker();
+
+    const legacyMarkers = new Set([
+      `FACTORY_ATTEMPT_ID=${legacyCliAttemptIdentity(identity)}`,
+      `FACTORY_ATTEMPT_ID=${legacyDurableAttemptId(identity)}`,
+    ]);
+    for (const legacyMarker of legacyMarkers) {
+      if ((await findGroups(legacyMarker)).size > 0) {
+        throw new Error(
+          "legacy local worker identity has no repository namespace; automated replacement is blocked",
+        );
+      }
     }
   }
 

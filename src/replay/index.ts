@@ -1,11 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type { BackendCandidate, BudgetRemaining } from "../execution/registry.js";
-import {
-  parseRunPolicy,
-  policyDigest,
-  type RunPolicy,
-} from "../protocol/policy.js";
+import { parseRunPolicy, policyDigest, type RunPolicy } from "../protocol/policy.js";
 import type { ExecutionRequirements } from "../protocol/worker-packet.js";
 import { ExecutionRequirementsSchema } from "../protocol/worker-packet.js";
 import { assertNoSecretMaterial } from "../protocol/limits.js";
@@ -27,6 +23,8 @@ export interface PinnedBackendCandidate {
   costClass: "local" | "sandbox" | "managed";
   local: boolean;
   paid: boolean;
+  /** Whether terminal observations carry model-token counters used by admission. */
+  reportsModelUsage: boolean;
   /** Stable, sanitized reasons only; never embed a raw provider response. */
   permanentReasons: readonly string[];
   /** Stable, sanitized reasons only; never embed a raw provider response. */
@@ -50,6 +48,8 @@ export interface PinnedAdmissionWorkItem {
   validators?: readonly PinnedBackendCandidate[];
   nextAttempt: number;
   estimatedDurationMs: number;
+  /** Deterministic burst-economics estimate, when the compiler supplied one. */
+  estimatedCloudTimeSavedMs?: number;
   paths: readonly string[];
   exclusiveResources: readonly string[];
   queuedSince?: string;
@@ -136,14 +136,9 @@ function pinnedCandidate(candidate: PinnedBackendCandidate): PinnedBackendCandid
     throw new Error(`invalid pinned backend id ${candidate.id}`);
   }
   const reasonCode = /^[a-z0-9][a-z0-9._-]{0,159}$/;
-  for (const reason of [
-    ...candidate.permanentReasons,
-    ...candidate.transientReasons,
-  ]) {
+  for (const reason of [...candidate.permanentReasons, ...candidate.transientReasons]) {
     if (!reasonCode.test(reason)) {
-      throw new Error(
-        `pinned backend ${candidate.id} reasons must be stable sanitized codes`,
-      );
+      throw new Error(`pinned backend ${candidate.id} reasons must be stable sanitized codes`);
     }
   }
   return {
@@ -152,6 +147,7 @@ function pinnedCandidate(candidate: PinnedBackendCandidate): PinnedBackendCandid
     costClass: candidate.costClass,
     local: candidate.local,
     paid: candidate.paid,
+    reportsModelUsage: candidate.reportsModelUsage,
     permanentReasons: [...candidate.permanentReasons],
     transientReasons: [...candidate.transientReasons],
   };
@@ -188,9 +184,7 @@ function pinnedRequirements(value: ExecutionRequirements): ExecutionRequirements
     os: [...requirements.os],
     architecture: [...requirements.architecture],
     ...(requirements.cpu === undefined ? {} : { cpu: requirements.cpu }),
-    ...(requirements.memoryMb === undefined
-      ? {}
-      : { memoryMb: requirements.memoryMb }),
+    ...(requirements.memoryMb === undefined ? {} : { memoryMb: requirements.memoryMb }),
     ...(requirements.diskMb === undefined ? {} : { diskMb: requirements.diskMb }),
     ...(requirements.timeoutMinutes === undefined
       ? {}
@@ -266,9 +260,7 @@ function pinnedResource(value: ResourceSnapshot | null): ResourceSnapshot | null
  * object properties are dropped here so a caller cannot accidentally publish a
  * backend client, credential, machine identifier, or raw probe payload.
  */
-export function normalizePinnedAdmissionInput(
-  value: PinnedAdmissionInput,
-): PinnedAdmissionInput {
+export function normalizePinnedAdmissionInput(value: PinnedAdmissionInput): PinnedAdmissionInput {
   const policy = pinnedPolicy(value.policy);
   positiveInteger(value.objective, "objective");
   finite(value.nowMs, "nowMs");
@@ -280,6 +272,9 @@ export function normalizePinnedAdmissionInput(
     positiveInteger(item.number, "work item number");
     positiveInteger(item.nextAttempt, `Work Item #${item.number} nextAttempt`);
     finite(item.estimatedDurationMs, "estimatedDurationMs", 1);
+    if (item.estimatedCloudTimeSavedMs !== undefined) {
+      finite(item.estimatedCloudTimeSavedMs, "estimatedCloudTimeSavedMs");
+    }
     finite(item.priority.rank, "priority rank");
     finite(item.priority.subIssuePosition, "sub-issue position");
     finite(item.priority.criticalPathLength, "critical-path length");
@@ -300,11 +295,12 @@ export function normalizePinnedAdmissionInput(
       },
       requirements: pinnedRequirements(item.requirements),
       backends: item.backends.map(pinnedCandidate),
-      ...(item.validators
-        ? { validators: item.validators.map(pinnedCandidate) }
-        : {}),
+      ...(item.validators ? { validators: item.validators.map(pinnedCandidate) } : {}),
       nextAttempt: item.nextAttempt,
       estimatedDurationMs: item.estimatedDurationMs,
+      ...(item.estimatedCloudTimeSavedMs === undefined
+        ? {}
+        : { estimatedCloudTimeSavedMs: item.estimatedCloudTimeSavedMs }),
       paths: [...item.paths],
       exclusiveResources: [...item.exclusiveResources],
       ...(item.queuedSince ? { queuedSince: item.queuedSince } : {}),
@@ -320,25 +316,25 @@ export function normalizePinnedAdmissionInput(
     capacity: pinnedCapacity(value.capacity),
     budget: {
       sandboxMinutes: finite(value.budget.sandboxMinutes, "sandbox budget"),
-      managedAgentSessions: finite(
-        value.budget.managedAgentSessions,
-        "managed-session budget",
-      ),
+      managedAgentSessions: finite(value.budget.managedAgentSessions, "managed-session budget"),
+      ...(value.budget.modelTokens === undefined
+        ? {}
+        : {
+            modelTokens:
+              value.budget.modelTokens === null
+                ? null
+                : finite(value.budget.modelTokens, "model-token budget"),
+          }),
     },
     resource: pinnedResource(value.resource),
     nowMs: value.nowMs,
     objectiveDeadlineMs: value.objectiveDeadlineMs,
-    ...(value.cooldownUntilMs === undefined
-      ? {}
-      : { cooldownUntilMs: value.cooldownUntilMs }),
+    ...(value.cooldownUntilMs === undefined ? {} : { cooldownUntilMs: value.cooldownUntilMs }),
     ...(value.leaseValid === undefined ? {} : { leaseValid: value.leaseValid }),
     ...(value.objectiveLocalMax === undefined
       ? {}
       : {
-          objectiveLocalMax: positiveInteger(
-            value.objectiveLocalMax,
-            "objectiveLocalMax",
-          ),
+          objectiveLocalMax: positiveInteger(value.objectiveLocalMax, "objectiveLocalMax"),
         }),
     ...(value.repositoryLimits
       ? {
@@ -363,7 +359,9 @@ function hydrate(input: PinnedAdmissionInput): AdmissionInput {
     permanentReasons: [...value.permanentReasons],
     transientReasons: [...value.transientReasons],
     backend: null,
-    capabilities: null,
+    capabilities: {
+      reportsModelUsage: value.reportsModelUsage,
+    } as NonNullable<BackendCandidate["capabilities"]>,
     probe: null,
   });
   return {
@@ -378,6 +376,9 @@ function hydrate(input: PinnedAdmissionInput): AdmissionInput {
       ...(item.validators ? { validators: item.validators.map(candidate) } : {}),
       nextAttempt: item.nextAttempt,
       estimatedDurationMs: item.estimatedDurationMs,
+      ...(item.estimatedCloudTimeSavedMs === undefined
+        ? {}
+        : { estimatedCloudTimeSavedMs: item.estimatedCloudTimeSavedMs }),
       paths: [...item.paths],
       exclusiveResources: [...item.exclusiveResources],
       ...(item.queuedSince ? { queuedSince: item.queuedSince } : {}),
@@ -390,9 +391,7 @@ function decisions(input: PinnedAdmissionInput): ReplayDecisionSet {
   return structuredClone({ admissions: result.admissions, queued: result.queued });
 }
 
-function snapshotPayload(
-  snapshot: Omit<PinnedAdmissionSnapshot, "snapshotDigest">,
-): unknown {
+function snapshotPayload(snapshot: Omit<PinnedAdmissionSnapshot, "snapshotDigest">): unknown {
   return {
     protocol: snapshot.protocol,
     capturedAt: snapshot.capturedAt,
@@ -442,9 +441,7 @@ function mismatchByWorkItem(
 }
 
 /** Pure replay: the same pinned snapshot always produces the same report. */
-export function replayAdmissions(
-  snapshot: PinnedAdmissionSnapshot,
-): AdmissionReplayResult {
+export function replayAdmissions(snapshot: PinnedAdmissionSnapshot): AdmissionReplayResult {
   if (snapshot.protocol !== REPLAY_PROTOCOL) {
     throw new Error(`unsupported replay protocol ${String(snapshot.protocol)}`);
   }

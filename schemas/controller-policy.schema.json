@@ -7,7 +7,7 @@
   "required": ["scope", "maxActiveObjectives", "maxLocalWorkers", "maxPaidWorkers", "pollIntervalSeconds"],
   "properties": {
     "scope": { "const": "repository" },
-    "maxActiveObjectives": { "type": "integer", "minimum": 1, "maximum": 32 },
+    "maxActiveObjectives": { "const": 1 },
     "maxLocalWorkers": { "type": "integer", "minimum": 1, "maximum": 32 },
     "maxPaidWorkers": { "type": "integer", "minimum": 0, "maximum": 32 },
     "pollIntervalSeconds": { "type": "integer", "minimum": 1, "maximum": 300 }

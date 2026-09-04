@@ -32,18 +32,12 @@ export class ObjectiveFairness {
     const base = Math.floor(totalSlots / objectives.length);
     const remainder = totalSlots % objectives.length;
     const shares = new Map(
-      objectives.map((number, index) => [
-        number,
-        base + (index < remainder ? 1 : 0),
-      ]),
+      objectives.map((number, index) => [number, base + (index < remainder ? 1 : 0)]),
     );
     const active = new Map<number, number>();
     for (const reservation of reservations) {
       if (!reservation.local) continue;
-      active.set(
-        reservation.objective,
-        (active.get(reservation.objective) ?? 0) + 1,
-      );
+      active.set(reservation.objective, (active.get(reservation.objective) ?? 0) + 1);
     }
     let unavailableToObjective = 0;
     for (const other of objectives) {
@@ -55,9 +49,6 @@ export class ObjectiveFairness {
       const guaranteed = Math.min(Math.max(0, share - running), wanted);
       unavailableToObjective += running + guaranteed;
     }
-    return Math.max(
-      active.get(objective) ?? 0,
-      totalSlots - unavailableToObjective,
-    );
+    return Math.max(active.get(objective) ?? 0, totalSlots - unavailableToObjective);
   }
 }

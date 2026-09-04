@@ -32,6 +32,7 @@ export const EXPLANATION_CODES = {
   economicBudgetExhausted: "economic.budget-exhausted",
   economicBurstDisabled: "economic.burst-disabled",
   economicBurstTriggerPending: "economic.burst-trigger-pending",
+  economicBurstTimeSaved: "economic.burst-time-saved",
   admissionLocal: "admission.local",
   admissionRemoteRequired: "admission.remote-required",
   admissionBurst: "admission.burst",
@@ -43,8 +44,7 @@ export const EXPLANATION_CODES = {
   stateComplete: "state.complete",
 } as const;
 
-export type ExplanationCode =
-  (typeof EXPLANATION_CODES)[keyof typeof EXPLANATION_CODES];
+export type ExplanationCode = (typeof EXPLANATION_CODES)[keyof typeof EXPLANATION_CODES];
 export type ExplanationCategory =
   | "dependency"
   | "capacity"
@@ -63,7 +63,14 @@ export type ExplanationCategory =
 export interface Explanation {
   code: ExplanationCode;
   category: ExplanationCategory;
-  disposition: "blocked" | "queued" | "admitted" | "running" | "failed" | "complete" | "informational";
+  disposition:
+    | "blocked"
+    | "queued"
+    | "admitted"
+    | "running"
+    | "failed"
+    | "complete"
+    | "informational";
   summary: string;
   evidence: Record<string, unknown>;
 }
@@ -88,7 +95,11 @@ export type GateEvidence =
     }
   | {
       gate: "scope";
-      reason: "path-conflict" | "exclusive-resource-conflict" | "network-policy" | "policy-constraint";
+      reason:
+        | "path-conflict"
+        | "exclusive-resource-conflict"
+        | "network-policy"
+        | "policy-constraint";
     }
   | {
       gate: "trust";
@@ -98,7 +109,7 @@ export type GateEvidence =
   | { gate: "validation"; reason: "unavailable" | "failed" | "invalidated" }
   | {
       gate: "economic";
-      reason: "budget-exhausted" | "burst-disabled" | "burst-trigger-pending";
+      reason: "budget-exhausted" | "burst-disabled" | "burst-trigger-pending" | "burst-time-saved";
     };
 
 function explanation(
@@ -249,6 +260,10 @@ export function explainGate(input: GateEvidence): Explanation {
           EXPLANATION_CODES.economicBurstTriggerPending,
           "The configured queue-delay, deadline, or time-saved burst trigger is not yet met.",
         ],
+        "burst-time-saved": [
+          EXPLANATION_CODES.economicBurstTimeSaved,
+          "The conservative cloud time-saved estimate is below the immutable economic threshold.",
+        ],
       } as const;
       const [code, summary] = values[input.reason];
       return explanation(code, "economic", "queued", summary);
@@ -340,6 +355,7 @@ export function explainQueuedDecision(
     case "budget-exhausted":
     case "burst-disabled":
     case "burst-trigger-pending":
+    case "burst-time-saved":
       return explainGate({ gate: "economic", reason: decision.code });
     case "burst-priority":
       return explainGate({
@@ -405,6 +421,7 @@ export function queuedReasonCode(reason: string): QueuedReasonCode | null {
     "budget-exhausted",
     "burst-disabled",
     "burst-trigger-pending",
+    "burst-time-saved",
     "burst-priority",
     "path-conflict",
     "exclusive-resource-conflict",

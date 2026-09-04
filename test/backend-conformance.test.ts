@@ -6,15 +6,8 @@ import { afterAll, describe, expect, it } from "vitest";
 
 import { CodexAppServerLocalBackend } from "../src/backends/codex-app-server.js";
 import { CodexCliLocalBackend } from "../src/backends/codex-cli-local.js";
-import type {
-  AttemptContext,
-  BackendHandle,
-  ExecutionBackend,
-} from "../src/execution/backend.js";
-import {
-  durableAttemptId,
-  normalizeExecutionUsage,
-} from "../src/execution/session.js";
+import type { AttemptContext, BackendHandle, ExecutionBackend } from "../src/execution/backend.js";
+import { durableAttemptId, normalizeExecutionUsage } from "../src/execution/session.js";
 import type {
   AppServerConnection,
   AppServerExit,
@@ -26,9 +19,7 @@ import type {
 class ConformanceConnection implements AppServerConnection {
   readonly pid = null;
   readonly closed: Promise<AppServerExit>;
-  readonly notificationListeners = new Set<
-    (event: AppServerNotification) => void
-  >();
+  readonly notificationListeners = new Set<(event: AppServerNotification) => void>();
   readonly requestListeners = new Set<(request: AppServerRequest) => void>();
   #resolveClosed!: (exit: AppServerExit) => void;
   #number = 0;
@@ -51,11 +42,7 @@ class ConformanceConnection implements AppServerConnection {
 
   notify(): void {}
   respond(_id: AppServerRequestId, _result: unknown): void {}
-  respondError(
-    _id: AppServerRequestId,
-    _code: number,
-    _message: string,
-  ): void {}
+  respondError(_id: AppServerRequestId, _code: number, _message: string): void {}
 
   onNotification(listener: (event: AppServerNotification) => void): () => void {
     this.notificationListeners.add(listener);
@@ -87,9 +74,7 @@ interface BackendHarness {
 const cleanupPaths = new Set<string>();
 
 afterAll(async () => {
-  await Promise.all(
-    [...cleanupPaths].map((path) => rm(path, { recursive: true, force: true })),
-  );
+  await Promise.all([...cleanupPaths].map((path) => rm(path, { recursive: true, force: true })));
 });
 
 async function repositoryFixture(name: string): Promise<{
@@ -126,6 +111,7 @@ function attemptContext(
   number: number,
 ): AttemptContext {
   return {
+    repository: "clockgrove/factory",
     objective: 1,
     workItem: number,
     attempt: 1,
@@ -244,9 +230,7 @@ async function appServerHarness(): Promise<BackendHarness> {
   };
 }
 
-async function assertLocalBackendContract(
-  harness: BackendHarness,
-): Promise<void> {
+async function assertLocalBackendContract(harness: BackendHarness): Promise<void> {
   const { backend, context } = harness;
   expect(backend.capabilities).toMatchObject({
     runtimeKind: "local-worktree",
@@ -263,11 +247,7 @@ async function assertLocalBackendContract(
   const handle = await backend.launch(context);
   await harness.complete(handle);
   let observation = await backend.observe(handle);
-  for (
-    let check = 0;
-    check < 100 && observation.state === "running";
-    check += 1
-  ) {
+  for (let check = 0; check < 100 && observation.state === "running"; check += 1) {
     await new Promise((resolveWait) => setTimeout(resolveWait, 10));
     observation = await backend.observe(handle);
   }
@@ -289,12 +269,9 @@ describe("local Codex backend conformance", () => {
   it.each([
     ["App Server", appServerHarness],
     ["CLI fallback", cliHarness],
-  ])(
-    "passes the same worker/artifact lifecycle for %s",
-    async (_name, createHarness) => {
-      await assertLocalBackendContract(await createHarness());
-    },
-  );
+  ])("passes the same worker/artifact lifecycle for %s", async (_name, createHarness) => {
+    await assertLocalBackendContract(await createHarness());
+  });
 
   it("normalizes representative adapter usage into one conservative public shape", () => {
     const appServer = normalizeExecutionUsage({

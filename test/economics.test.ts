@@ -176,8 +176,8 @@ describe("conservative economic feedback", () => {
 
   it("reports duration as unavailable when no exact evidence matches", () => {
     expect(
-      estimateDuration(query, [sample("other", 10_000, { os: ["darwin"] })])
-        .durationMs.availability,
+      estimateDuration(query, [sample("other", 10_000, { os: ["darwin"] })]).durationMs
+        .availability,
     ).toBe("unavailable");
   });
 

@@ -110,9 +110,7 @@ describe("isNoOp", () => {
   });
 
   it("treats a PR with no commits at all as a no-op", () => {
-    expect(
-      isNoOp(pr({ changedLines: 0, changedFiles: 0, commitSubjects: [] })),
-    ).toBe(true);
+    expect(isNoOp(pr({ changedLines: 0, changedFiles: 0, commitSubjects: [] }))).toBe(true);
   });
 
   it("does not treat a real diff as a no-op", () => {
@@ -153,36 +151,28 @@ describe("deriveState", () => {
   });
 
   it("is dispatched once Copilot is assigned but nothing exists yet", () => {
-    expect(deriveState(wi({ assignees: [COPILOT_ASSIGNEE_LOGIN] }), NOW)).toBe(
-      "dispatched",
-    );
+    expect(deriveState(wi({ assignees: [COPILOT_ASSIGNEE_LOGIN] }), NOW)).toBe("dispatched");
   });
 
   it("is blocked while a dependency is open", () => {
-    expect(
-      deriveState(wi({ blockedBy: [{ number: 9, closed: false }] }), NOW),
-    ).toBe("blocked");
+    expect(deriveState(wi({ blockedBy: [{ number: 9, closed: false }] }), NOW)).toBe("blocked");
   });
 
   it("is unstarted once every dependency is closed", () => {
-    expect(
-      deriveState(wi({ blockedBy: [{ number: 9, closed: true }] }), NOW),
-    ).toBe("unstarted");
+    expect(deriveState(wi({ blockedBy: [{ number: 9, closed: true }] }), NOW)).toBe("unstarted");
   });
 
   it("is escalated when a human holds it and Copilot does not", () => {
-    expect(deriveState(wi({ assignees: ["human-owner"] }), NOW)).toBe(
-      "escalated",
-    );
+    expect(deriveState(wi({ assignees: ["human-owner"] }), NOW)).toBe("escalated");
   });
 
   it("is not escalated while Copilot is still an assignee", () => {
     // Escalation is defined as a handoff (§7.2): Copilot must be removed.
     // GitHub also auto-assigns the requesting human alongside Copilot — this is
     // exactly that shape.
-    expect(
-      deriveState(wi({ assignees: [COPILOT_ASSIGNEE_LOGIN, "human-owner"] }), NOW),
-    ).toBe("dispatched");
+    expect(deriveState(wi({ assignees: [COPILOT_ASSIGNEE_LOGIN, "human-owner"] }), NOW)).toBe(
+      "dispatched",
+    );
   });
 
   it("is in_flight when a no-op PR is still within the confirm window", () => {
@@ -191,9 +181,7 @@ describe("deriveState", () => {
     const item = wi({
       assignees: [COPILOT_ASSIGNEE_LOGIN],
       copilotAssignments: [new Date(NOW.getTime() - 30_000)],
-      linkedPullRequests: [
-        pr({ changedLines: 0, changedFiles: 0, commitSubjects: [] }),
-      ],
+      linkedPullRequests: [pr({ changedLines: 0, changedFiles: 0, commitSubjects: [] })],
     });
     expect(deriveState(item, NOW)).toBe("in_flight");
   });
@@ -201,9 +189,7 @@ describe("deriveState", () => {
   it("is failed once the confirm window elapses with only a no-op PR", () => {
     const item = wi({
       assignees: [COPILOT_ASSIGNEE_LOGIN],
-      copilotAssignments: [
-        new Date(NOW.getTime() - DISPATCH_CONFIRM_WINDOW_MS - 1),
-      ],
+      copilotAssignments: [new Date(NOW.getTime() - DISPATCH_CONFIRM_WINDOW_MS - 1)],
       linkedPullRequests: [
         pr({
           changedLines: 0,
@@ -225,9 +211,7 @@ describe("deriveState", () => {
   it("is in_flight when an empty PR is past the confirm window but still young", () => {
     const item = wi({
       assignees: [COPILOT_ASSIGNEE_LOGIN],
-      copilotAssignments: [
-        new Date(NOW.getTime() - DISPATCH_CONFIRM_WINDOW_MS - 1),
-      ],
+      copilotAssignments: [new Date(NOW.getTime() - DISPATCH_CONFIRM_WINDOW_MS - 1)],
       linkedPullRequests: [
         pr({
           changedLines: 0,
@@ -245,9 +229,7 @@ describe("deriveState", () => {
     // is nothing to wait for.
     const item = wi({
       assignees: [COPILOT_ASSIGNEE_LOGIN],
-      copilotAssignments: [
-        new Date(NOW.getTime() - DISPATCH_CONFIRM_WINDOW_MS - 1),
-      ],
+      copilotAssignments: [new Date(NOW.getTime() - DISPATCH_CONFIRM_WINDOW_MS - 1)],
       linkedPullRequests: [
         pr({
           title: "No-op: impossible task — target file does not exist",
@@ -384,9 +366,7 @@ describe("abandoned attempts", () => {
     // however long it sits. Closing it would destroy work that is complete.
     const item = wi({
       assignees: [COPILOT_ASSIGNEE_LOGIN],
-      linkedPullRequests: [
-        pr({ title: "Add slugify", checks: "SUCCESS", headCommittedAt: stale }),
-      ],
+      linkedPullRequests: [pr({ title: "Add slugify", checks: "SUCCESS", headCommittedAt: stale })],
     });
     expect(deriveState(item, NOW)).toBe("for_review");
   });
@@ -397,9 +377,7 @@ describe("abandoned attempts", () => {
     // merged.
     const item = wi({
       assignees: [COPILOT_ASSIGNEE_LOGIN],
-      linkedPullRequests: [
-        pr({ isDraft: true, title: "Add slugify", checks: "SUCCESS" }),
-      ],
+      linkedPullRequests: [pr({ isDraft: true, title: "Add slugify", checks: "SUCCESS" })],
     });
     expect(deriveState(item, NOW)).toBe("for_review");
   });
@@ -420,26 +398,20 @@ describe("abandoned attempts", () => {
 
   describe("isAbandonedAttempt", () => {
     it("is false for finished work no matter how old", () => {
-      expect(
-        isAbandonedAttempt(pr({ title: "Add slugify", headCommittedAt: stale }), NOW),
-      ).toBe(false);
+      expect(isAbandonedAttempt(pr({ title: "Add slugify", headCommittedAt: stale }), NOW)).toBe(
+        false,
+      );
     });
 
     it("is false for a freshly pushed attempt", () => {
       expect(
-        isAbandonedAttempt(
-          pr({ title: "[WIP] Add slugify", headCommittedAt: NOW }),
-          NOW,
-        ),
+        isAbandonedAttempt(pr({ title: "[WIP] Add slugify", headCommittedAt: NOW }), NOW),
       ).toBe(false);
     });
 
     it("is true past the window", () => {
       expect(
-        isAbandonedAttempt(
-          pr({ title: "[WIP] Add slugify", headCommittedAt: stale }),
-          NOW,
-        ),
+        isAbandonedAttempt(pr({ title: "[WIP] Add slugify", headCommittedAt: stale }), NOW),
       ).toBe(true);
     });
   });
@@ -463,9 +435,9 @@ describe("abandoned attempts", () => {
     const beforeFailure = { headCommittedAt: new Date(NOW.getTime() - 120_000) };
 
     it("reports the failure when it is the agent's last word", () => {
-      expect(
-        agentFailure(pr({ ...beforeFailure, agentWorkEvents: [failed()] }))?.message,
-      ).toBe("You have exceeded your monthly quota");
+      expect(agentFailure(pr({ ...beforeFailure, agentWorkEvents: [failed()] }))?.message).toBe(
+        "You have exceeded your monthly quota",
+      );
     });
 
     it("reports nothing when the agent never spoke", () => {
@@ -474,9 +446,7 @@ describe("abandoned attempts", () => {
 
     it("reports nothing when the session finished", () => {
       expect(
-        agentFailure(
-          pr({ agentWorkEvents: [{ kind: "finished", at: NOW, message: null }] }),
-        ),
+        agentFailure(pr({ agentWorkEvents: [{ kind: "finished", at: NOW, message: null }] })),
       ).toBeNull();
     });
 
@@ -495,9 +465,7 @@ describe("abandoned attempts", () => {
 
     // A commit is ground truth; an event contradicted by later work is stale.
     it("reports nothing when a push followed the failure", () => {
-      expect(
-        agentFailure(pr({ agentWorkEvents: [failed()], headCommittedAt: NOW })),
-      ).toBeNull();
+      expect(agentFailure(pr({ agentWorkEvents: [failed()], headCommittedAt: NOW }))).toBeNull();
     });
 
     it("orders by time, not by array position", () => {
@@ -519,9 +487,7 @@ describe("abandoned attempts", () => {
     // Both strings are verbatim from Gate 8's two attempts.
     it("matches an exhausted monthly quota", () => {
       expect(
-        isNonRetryableFailure(
-          "You have exceeded your monthly quota (Request ID: 0410:3CB8D6)",
-        ),
+        isNonRetryableFailure("You have exceeded your monthly quota (Request ID: 0410:3CB8D6)"),
       ).toBe(true);
     });
 
@@ -673,7 +639,8 @@ describe("doneWithoutMergedPullRequest", () => {
   });
 });
 
-describe("currentOpenPullRequest", () => {  const older = pr({
+describe("currentOpenPullRequest", () => {
+  const older = pr({
     id: "PR_old",
     number: 10,
     createdAt: new Date("2026-01-01T00:00:00Z"),
@@ -689,12 +656,8 @@ describe("currentOpenPullRequest", () => {  const older = pr({
     // so the newest is not reliably last. This matters most on the retry path,
     // which closes whichever pull request this returns: choosing the older one
     // kills live work and leaves the stale attempt open to be merged.
-    expect(currentOpenPullRequest(wi({ linkedPullRequests: [newer, older] }))?.id).toBe(
-      "PR_new",
-    );
-    expect(currentOpenPullRequest(wi({ linkedPullRequests: [older, newer] }))?.id).toBe(
-      "PR_new",
-    );
+    expect(currentOpenPullRequest(wi({ linkedPullRequests: [newer, older] }))?.id).toBe("PR_new");
+    expect(currentOpenPullRequest(wi({ linkedPullRequests: [older, newer] }))?.id).toBe("PR_new");
   });
 
   it("breaks createdAt ties on the higher number", () => {
@@ -711,17 +674,15 @@ describe("currentOpenPullRequest", () => {  const older = pr({
       state: "CLOSED",
       createdAt: new Date("2026-02-01T00:00:00Z"),
     });
-    expect(
-      currentOpenPullRequest(wi({ linkedPullRequests: [older, closedNewer] }))?.id,
-    ).toBe("PR_old");
+    expect(currentOpenPullRequest(wi({ linkedPullRequests: [older, closedNewer] }))?.id).toBe(
+      "PR_old",
+    );
   });
 
   it("returns null when nothing is open", () => {
     expect(currentOpenPullRequest(wi({ linkedPullRequests: [] }))).toBeNull();
     expect(
-      currentOpenPullRequest(
-        wi({ linkedPullRequests: [pr({ state: "MERGED" })] }),
-      ),
+      currentOpenPullRequest(wi({ linkedPullRequests: [pr({ state: "MERGED" })] })),
     ).toBeNull();
   });
 });
@@ -729,10 +690,7 @@ describe("currentOpenPullRequest", () => {  const older = pr({
 describe("attemptCount", () => {
   it("derives attempts from linked PRs rather than a stored counter", () => {
     const item = wi({
-      linkedPullRequests: [
-        pr({ number: 1, state: "CLOSED" }),
-        pr({ number: 2, state: "OPEN" }),
-      ],
+      linkedPullRequests: [pr({ number: 1, state: "CLOSED" }), pr({ number: 2, state: "OPEN" })],
     });
     expect(attemptCount(item)).toBe(2);
   });
@@ -769,10 +727,7 @@ describe("confirmFailureStreak", () => {
 
   it("counts two consecutive PR-less assignments as a streak of two", () => {
     const item = wi({
-      copilotAssignments: [
-        new Date("2026-01-01T00:00:00Z"),
-        new Date("2026-01-01T01:00:00Z"),
-      ],
+      copilotAssignments: [new Date("2026-01-01T00:00:00Z"), new Date("2026-01-01T01:00:00Z")],
     });
     expect(confirmFailureStreak(item)).toBe(2);
   });
@@ -783,10 +738,7 @@ describe("confirmFailureStreak", () => {
     // count — conflating this with §4.4's separate attempt-count escalation
     // would escalate a fresh reassignment prematurely.
     const item = wi({
-      copilotAssignments: [
-        new Date("2026-01-01T00:00:00Z"),
-        new Date("2026-01-01T02:00:00Z"),
-      ],
+      copilotAssignments: [new Date("2026-01-01T00:00:00Z"), new Date("2026-01-01T02:00:00Z")],
       linkedPullRequests: [
         pr({
           number: 1,
@@ -802,10 +754,7 @@ describe("confirmFailureStreak", () => {
     // A PR from an even earlier attempt must not be misattributed to a later
     // assignment window it predates.
     const item = wi({
-      copilotAssignments: [
-        new Date("2026-01-01T00:00:00Z"),
-        new Date("2026-01-01T02:00:00Z"),
-      ],
+      copilotAssignments: [new Date("2026-01-01T00:00:00Z"), new Date("2026-01-01T02:00:00Z")],
       linkedPullRequests: [
         pr({
           number: 1,
@@ -852,9 +801,7 @@ describe("determinism", () => {
 describe("objective-level rollups", () => {
   it("reports allDone only when every item is done", () => {
     expect(allDone(derive(objective([wi({ closed: true })])))).toBe(true);
-    expect(
-      allDone(derive(objective([wi({ closed: true }), wi({ number: 2 })]))),
-    ).toBe(false);
+    expect(allDone(derive(objective([wi({ closed: true }), wi({ number: 2 })])))).toBe(false);
   });
 
   it("does not report allDone for an empty Objective", () => {

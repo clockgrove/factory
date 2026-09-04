@@ -494,6 +494,14 @@ function factoryEvents(
  */
 export function createOctokit(opts: GitHubOptions): Octokit {
   const notify = opts.onThrottle ?? (() => {});
+  const surfacePlatformFailure = (error: unknown): never => {
+    if (error instanceof PlatformUnavailableError) throw error;
+    const refusal = classifyRefusal(error);
+    if (refusal.kind !== "not_refusal") {
+      throw new PlatformUnavailableError(refusal, error);
+    }
+    throw error;
+  };
   const octokit = new FactoryOctokit({
     auth: opts.token,
     ...(opts.requestFetch ? { request: { fetch: opts.requestFetch } } : {}),
@@ -511,13 +519,26 @@ export function createOctokit(opts: GitHubOptions): Octokit {
       },
     },
   });
-  octokit.hook.error("request", async (error: unknown) => {
-    if (error instanceof PlatformUnavailableError) throw error;
-    const refusal = classifyRefusal(error);
-    if (refusal.kind !== "not_refusal") {
-      throw new PlatformUnavailableError(refusal, error);
-    }
-    throw error;
+  // The throttling plugin's wrapper is outside Octokit's public hook chain, so
+  // wrap the public callables themselves. Proxying retains `.defaults` and
+  // `.endpoint`, which other Octokit helpers rely on.
+  octokit.request = new Proxy(octokit.request, {
+    async apply(target, thisArg, args) {
+      try {
+        return await Reflect.apply(target, thisArg, args);
+      } catch (error) {
+        surfacePlatformFailure(error);
+      }
+    },
+  });
+  octokit.graphql = new Proxy(octokit.graphql, {
+    async apply(target, thisArg, args) {
+      try {
+        return await Reflect.apply(target, thisArg, args);
+      } catch (error) {
+        surfacePlatformFailure(error);
+      }
+    },
   });
   return octokit;
 }

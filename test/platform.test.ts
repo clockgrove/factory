@@ -124,11 +124,17 @@ describe("GitHub client throttling", () => {
     const notices: string[] = [];
     const reset = Math.floor(Date.now() / 1000) + 3_600;
     const requestFetch: typeof globalThis.fetch = async () =>
-      new Response(JSON.stringify({ message: "API rate limit exceeded" }), {
-        status: 403,
+      new Response(JSON.stringify({
+        data: null,
+        errors: [{
+          type: "RATE_LIMITED",
+          message: "API rate limit exceeded for test user",
+        }],
+      }), {
+        status: 200,
         headers: {
           "content-type": "application/json",
-          "x-ratelimit-remaining": "0",
+          "x-ratelimit-remaining": "76",
           "x-ratelimit-reset": String(reset),
         },
       });
@@ -140,9 +146,9 @@ describe("GitHub client throttling", () => {
       onThrottle: (message) => notices.push(message),
     });
 
-    await expect(octokit.request("GET /user")).rejects.toBeInstanceOf(
-      PlatformUnavailableError,
-    );
+    await expect(
+      octokit.graphql("query { viewer { login } }"),
+    ).rejects.toBeInstanceOf(PlatformUnavailableError);
     expect(notices).toEqual([
       expect.stringContaining("yielding to Factory"),
     ]);

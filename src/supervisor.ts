@@ -33,6 +33,7 @@ import {
   NoExecutionBackendError,
 } from "./execution/registry.js";
 import type { BackendHandle, ExecutionBackend } from "./execution/backend.js";
+import type { NormalizedArtifact } from "./execution/artifacts.js";
 import { Dispatcher, GithubOctokitWriter } from "./dispatch.js";
 import {
   compiledGraphDigest,
@@ -61,6 +62,7 @@ import {
 import {
   cleanupLocalWorktree,
   createLocalWorktree,
+  seedLocalWorktree,
   type LocalWorktree,
 } from "./runtime/local-worktree.js";
 import { runContainedProcess } from "./runtime/process-group.js";
@@ -484,6 +486,45 @@ function inspectCompiledGraph(snapshot: Snapshot): {
   };
 }
 
+const MAX_RETRY_CHECKPOINT_CACHE_BYTES = 32 * 1024 * 1024;
+
+class RetryArtifactCache {
+  readonly #entries = new Map<number, NormalizedArtifact>();
+  #bytes = 0;
+
+  get(workItem: number, baseSha: string): NormalizedArtifact | undefined {
+    const artifact = this.#entries.get(workItem);
+    if (!artifact) return undefined;
+    if (artifact.baseSha !== baseSha) {
+      this.delete(workItem);
+      return undefined;
+    }
+    this.#entries.delete(workItem);
+    this.#entries.set(workItem, artifact);
+    return artifact;
+  }
+
+  set(workItem: number, artifact: NormalizedArtifact): void {
+    this.delete(workItem);
+    const bytes = Buffer.byteLength(artifact.patch) + Buffer.byteLength(artifact.logs);
+    if (bytes > MAX_RETRY_CHECKPOINT_CACHE_BYTES) return;
+    while (this.#bytes + bytes > MAX_RETRY_CHECKPOINT_CACHE_BYTES) {
+      const oldest = this.#entries.keys().next().value;
+      if (oldest === undefined) break;
+      this.delete(oldest);
+    }
+    this.#entries.set(workItem, artifact);
+    this.#bytes += bytes;
+  }
+
+  delete(workItem: number): void {
+    const artifact = this.#entries.get(workItem);
+    if (!artifact) return;
+    this.#bytes -= Buffer.byteLength(artifact.patch) + Buffer.byteLength(artifact.logs);
+    this.#entries.delete(workItem);
+  }
+}
+
 export class FactorySupervisor {
   readonly #options: SupervisorOptions;
   #policy: RunPolicy;
@@ -505,6 +546,7 @@ export class FactorySupervisor {
   #baseBranch = "main";
   #budgetEvents: FactoryEvent[] = [];
   #integrationTail: Promise<void> = Promise.resolve();
+  readonly #retryArtifacts = new RetryArtifactCache();
 
   constructor(options: SupervisorOptions) {
     this.#options = { ...options, repository: resolve(options.repository) };
@@ -1043,6 +1085,7 @@ export class FactorySupervisor {
     let validationBudgetReserved = false;
     let validationBudgetReconciled = false;
     let validationStartedAt: number | undefined;
+    let retryableArtifact: NormalizedArtifact | undefined;
     const started = Date.now();
     try {
       const originalPacket = parseWorkerPacketFromIssue(item.body ?? "");
@@ -1155,7 +1198,16 @@ export class FactorySupervisor {
         }
       });
       if (!selected || !reservation) throw new Error("backend reservation did not complete");
+      const retryCheckpoint = selected.capabilities.providerManagedPublication
+        ? undefined
+        : this.#retryArtifacts.get(item.number, base.oid);
       worker = await createLocalWorktree(this.#options.repository, base.oid);
+      if (retryCheckpoint) {
+        await seedLocalWorktree(worker, retryCheckpoint);
+        this.#notify(
+          `reusing validated artifact ${retryCheckpoint.digest.slice(0, 12)} for Work Item #${item.number}`,
+        );
+      }
       await this.#lease.assert();
       handle = await selected.launch({
         objective: this.#run.objective,
@@ -1167,6 +1219,7 @@ export class FactorySupervisor {
         workspace: worker.path,
         packet,
         deadline: new Date(Date.now() + timeoutMs),
+        ...(retryCheckpoint ? { seededFromArtifact: true } : {}),
       });
       await this.#lease.use((lease) =>
         this.#attempts.record({
@@ -1206,6 +1259,7 @@ export class FactorySupervisor {
         await sleep(this.#options.pollIntervalMs ?? 2_000, this.#options.signal);
       }
       const artifact = await selected.collect(handle);
+      retryableArtifact = artifact;
       if (artifact.outcome !== "succeeded") {
         throw new Error(artifact.reason ?? `worker ${artifact.outcome}`);
       }
@@ -1386,7 +1440,16 @@ export class FactorySupervisor {
         }),
       );
       await this.#integrate(item, reservation, published, objectiveDeadline);
+      this.#retryArtifacts.delete(item.number);
     } catch (error) {
+      if (
+        retryableArtifact &&
+        validation &&
+        selected &&
+        !selected.capabilities.providerManagedPublication
+      ) {
+        this.#retryArtifacts.set(item.number, retryableArtifact);
+      }
       if (error instanceof PlatformUnavailableError) {
         if (handle && selected) await selected.cancel(handle).catch(() => {});
         throw error;

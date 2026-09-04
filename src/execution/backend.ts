@@ -40,6 +40,8 @@ export interface AttemptContext {
   workspace: string;
   packet: WorkerPacket;
   deadline: Date;
+  /** A prior host-validated patch is already present for an incremental retry. */
+  seededFromArtifact?: boolean;
 }
 
 export interface BackendHandle {

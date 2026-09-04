@@ -14,6 +14,7 @@ import {
 } from "../src/runtime/local-worktree.js";
 import {
   discardValidationResult,
+  validationFailureReason,
   validateArtifactClean,
 } from "../src/validation/clean-run.js";
 import { verifyValidationEvidence } from "../src/validation/evidence.js";
@@ -103,6 +104,23 @@ function packet(baseSha: string, over: Partial<WorkerPacket> = {}): WorkerPacket
 }
 
 describe("clean validation", () => {
+  it("retains bounded command diagnostics for the next retry", () => {
+    const reason = validationFailureReason("validation", "npm run typecheck", {
+      exitCode: 2,
+      timedOut: false,
+      stdout: "src/example.ts(4,2): error TS2322: Type string is not assignable",
+      stderr: "",
+    });
+    expect(reason).toContain("validation failed (2): npm run typecheck");
+    expect(reason).toContain("error TS2322");
+    expect(validationFailureReason("validation", "npm test", {
+      exitCode: 1,
+      timedOut: false,
+      stdout: "x".repeat(20_000),
+      stderr: "",
+    }).length).toBeLessThan(8_000);
+  });
+
   it("applies and tests an artifact in a fresh exact-SHA worktree", async () => {
     const fixture = await repositoryFixture();
     const worker = await createLocalWorktree(fixture.repository, fixture.baseSha);

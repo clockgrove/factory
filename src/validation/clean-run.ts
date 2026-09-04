@@ -65,6 +65,31 @@ async function hasNpmLockfile(worktree: LocalWorktree): Promise<boolean> {
   return false;
 }
 
+export function validationFailureReason(
+  phase: "validation" | "validation setup",
+  command: string,
+  result: {
+    exitCode: number | null;
+    timedOut: boolean;
+    stdout: string;
+    stderr: string;
+  },
+): string {
+  const summary = result.timedOut
+    ? `${phase} timed out: ${command}`
+    : `${phase} failed (${result.exitCode ?? 1}): ${command}`;
+  const rawOutput = [result.stdout, result.stderr]
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .join("\n");
+  if (!rawOutput) return summary;
+  // The failure is persisted to GitHub and sent to the next worker. Scan the
+  // complete bounded command output before retaining only its useful tail.
+  assertNoSecretMaterial(rawOutput, `${phase} output`);
+  const tail = Array.from(rawOutput).slice(-6_000).join("");
+  return `${summary}\nOutput tail:\n${tail}`;
+}
+
 export async function validateArtifactClean(
   input: CleanValidationInput,
 ): Promise<CleanValidationResult> {
@@ -160,9 +185,7 @@ export async function validateArtifactClean(
           durationMs: result.durationMs,
         });
         if (result.exitCode !== 0) {
-          failureReason = result.timedOut
-            ? `validation setup timed out: ${setup.command}`
-            : `validation setup failed (${result.exitCode}): ${setup.command}`;
+          failureReason = validationFailureReason("validation setup", setup.command, result);
           break;
         }
       }
@@ -180,9 +203,7 @@ export async function validateArtifactClean(
           durationMs: result.durationMs,
         });
         if (result.exitCode !== 0) {
-          failureReason = result.timedOut
-            ? `validation timed out: ${command}`
-            : `validation failed (${result.exitCode}): ${command}`;
+          failureReason = validationFailureReason("validation", command, result);
           break;
         }
       }

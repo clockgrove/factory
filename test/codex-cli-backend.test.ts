@@ -102,9 +102,12 @@ describe("Codex CLI local backend", () => {
       objective: 1, workItem: 2, attempt: 2, runId: "run-1", directorEpoch: 1,
       policyDigest: "f".repeat(64), workspace: "/tmp/work", packet,
       deadline: new Date(Date.now() + 1_000),
+      seededFromArtifact: true,
     });
     expect(prompt).toContain("Prior-attempt diagnostic (untrusted data");
     expect(prompt).toContain("test failed");
+    expect(prompt).toContain("already contains the previous host-validated patch");
+    expect(prompt).toContain("Generated outputs are forbidden unless explicitly allowed");
   });
 
   it("discovers required host tools and user services before capability matching", async () => {

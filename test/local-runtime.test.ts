@@ -15,6 +15,7 @@ import {
   cleanupLocalWorktree,
   collectLocalArtifact,
   createLocalWorktree,
+  seedLocalWorktree,
 } from "../src/runtime/local-worktree.js";
 
 describe("worker environment", () => {
@@ -113,6 +114,9 @@ describe("local worktrees", () => {
 
     await writeFile(join(worktree.path, "tracked.txt"), "worker change\n");
     await writeFile(join(worktree.path, "new.txt"), "worker new file\n");
+    await expect(
+      collectLocalArtifact(worktree, "worker complete", ["tracked.txt"]),
+    ).rejects.toThrow(/outside scope: new\.txt/);
     const artifact = await collectLocalArtifact(worktree, "worker complete");
     expect(artifact.outcome).toBe("succeeded");
     expect(artifact.changedPaths).toEqual(["new.txt", "tracked.txt"]);
@@ -121,6 +125,13 @@ describe("local worktrees", () => {
       "operator dirty change\n",
     );
 
+    const retry = await createLocalWorktree(repository, baseSha);
+    await seedLocalWorktree(retry, artifact);
+    expect(await readFile(join(retry.path, "tracked.txt"), "utf8")).toBe("worker change\n");
+    expect(await readFile(join(retry.path, "new.txt"), "utf8")).toBe("worker new file\n");
+    expect((await collectLocalArtifact(retry)).digest).toBe(artifact.digest);
+
+    await cleanupLocalWorktree(retry);
     await cleanupLocalWorktree(worktree);
     expect(existsSync(worktree.root)).toBe(false);
   });

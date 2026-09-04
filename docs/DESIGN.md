@@ -118,6 +118,14 @@ Both API surfaces still share Factory's circuit breaker, concurrency limiter, co
 and secondary-rate-limit handling. Unchanged idle state is polled no more often than once per minute
 by default, while active local-worker cancellation uses the cheaper REST comments path.
 
+Model quota is protected at retry boundaries as well. After an artifact has passed host scope,
+secret, clean-apply, and sensitive-path checks, the running Supervisor may retain it in a bounded
+32 MiB in-memory cache. A retry at the same base SHA is seeded with that complete patch and receives
+the bounded failure diagnostic, so it repairs prior work instead of recreating it. This cache is a
+non-authoritative optimization: it cannot change derived state, is lost on restart, is never used by
+a provider-managed publication backend, and every resulting complete patch is independently
+revalidated from the pinned base.
+
 ## Versioned GitHub protocol
 
 Every machine-readable v2 record contains at least:
@@ -239,6 +247,12 @@ The normalized artifact identifies its exact base SHA, changed paths, patch or b
 commands, bounded logs, optional checkpoints, and terminal outcome. The Supervisor rejects bad base
 SHAs, forbidden paths, malformed outputs, oversized fields, and suspected secrets before any GitHub
 publication.
+
+Local collection computes and validates the changed-path manifest before materializing a potentially
+large textual or binary patch. An out-of-scope generated bundle therefore produces a concise path
+diagnostic rather than an opaque size failure. Failed authoritative commands retain a secret-scanned,
+bounded output tail in validation evidence so the next worker can fix the actual compiler or test
+error without another discovery session.
 
 ## Independent validation and integration
 

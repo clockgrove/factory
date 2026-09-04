@@ -19,10 +19,17 @@ position, parent, base, head, and capability version.
 
 The delivery adapter is isolated from the scheduler. A run records whether unavailable stack support
 falls back to regular pull requests or escalates; it never changes an already-published topology.
+The preview adapter is pinned to GitHub API version `2026-03-10`, creates and reads stacks through
+the Stacks REST API, and integrates them only through the exact-head asynchronous merge API.
 
 ## Consequences
 
 - Lower-layer changes invalidate and revalidate affected higher heads.
 - Stack mutation and integration occur under a repository fence.
+- Pending merge UUIDs and partial terminal effects are reconstructed from GitHub and durable issue
+  events; response loss cannot authorize a different head or topology.
+- GitHub documents no REST endpoint for triggering a cascading stack rebase. Factory observes the
+  resulting base/head chain and fails closed within the Objective deadline rather than inventing an
+  undocumented mutation.
 - Unknown or changed GitHub behavior fails closed.
 - Existing runs retain their recorded regular-pull-request behavior.

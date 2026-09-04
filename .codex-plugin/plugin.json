@@ -1,6 +1,6 @@
 {
   "name": "factory",
-  "version": "2.0.24",
+  "version": "2.0.25",
   "description": "GitHub-backed, local-first unattended software factory.",
   "author": {
     "name": "Clockgrove",
@@ -11,7 +11,13 @@
   "license": "MIT",
   "keywords": ["github", "engineering-management", "objectives", "work-items", "automation", "mcp"],
   "skills": "./skills/",
-  "mcpServers": "./mcp.json",
+  "mcpServers": {
+    "factory": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${PLUGIN_ROOT}/dist/mcp-server.js"]
+    }
+  },
   "interface": {
     "displayName": "Factory",
     "shortDescription": "Local-first unattended software factory",
@@ -24,6 +30,11 @@
       "Run local or opt-in isolated coding workers",
       "Validate and integrate completed work",
       "Recover durable runs from GitHub"
+    ],
+    "defaultPrompt": [
+      "Run Factory for OWNER/REPO#OBJECTIVE using this checkout.",
+      "Show Factory status and explain what is blocking the Objective.",
+      "Plan an Objective into cost-aware, dependency-safe Work Items."
     ],
     "websiteURL": "https://github.com/clockgrove/factory",
     "composerIcon": "./assets/logos/clockgrove-mark.png",

@@ -273,11 +273,14 @@ produced without repository configuration, Factory escalates before launch.
 
 Only branch-rule shapes whose autonomous semantics are proven are allowed. Unknown rule types fail
 closed. Human-approval, code-owner, last-push approval, and incompatible merge-method requirements
-escalate rather than being bypassed. The target delivery adapter supports native GitHub stacks and
-merge queues only after their asynchronous and failure behavior passes live conformance. Immediately
-before each merge, integration is repository-fenced and Factory rechecks the exact validated head,
-current stack/base relationship, current branch rules, required checks, leases, and mergeability.
-Parallel workers therefore cannot merge sequentially from the same stale base.
+escalate rather than being bypassed. Regular sibling PRs are the default. Explicit stacked delivery
+uses GitHub's pinned preview REST surface only after an observed repository capability probe; an
+unavailable capability produces a durable configured fallback or escalation before publication.
+Immediately before each regular or stacked merge, integration is repository-fenced and Factory
+rechecks the exact validated head, current stack/base relationship, current branch rules, required
+checks, leases, and mergeability. A lower-layer rebase invalidates every affected descendant receipt
+before validation is rerun. Parallel workers therefore cannot merge sequentially from the same stale
+base. Native stacks remain an unclaimed release surface until their live conformance gate passes.
 
 Immediately before merge, Factory rechecks lease epoch, policy digest, validated SHA, checks,
 mergeability, branch rules, scope, and semantic acceptance. Integration is a reversible squash merge.

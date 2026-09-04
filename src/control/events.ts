@@ -4,6 +4,8 @@ import { encodeEventComment } from "./receipts.js";
 import type { AttemptReservation } from "./attempts.js";
 import type { LeaseManager, LeaseState } from "./lease.js";
 import type { ValidationEvidence } from "../validation/evidence.js";
+import type { DeliverySelection } from "../publication/delivery.js";
+import type { PublicationReceipt } from "../publication/stack-manager.js";
 
 export interface LifecycleEventStore {
   addIssueComment(issueNodeId: string, body: string): Promise<void>;
@@ -46,6 +48,107 @@ export class LifecycleRecorder {
       args.objectiveNodeId,
       encodeEventComment(
         `Factory compiled ${args.graphSize} Work Item${args.graphSize === 1 ? "" : "s"} at ${args.baseSha}.`,
+        event,
+      ),
+    );
+    return event;
+  }
+
+  async delivery(args: {
+    lease: LeaseState;
+    objectiveNodeId: string;
+    sequence: number;
+    selection: DeliverySelection;
+  }): Promise<FactoryEvent> {
+    await this.leases.assertCurrent(args.lease);
+    const now = await this.store.serverTime();
+    const event = parseFactoryEvent({
+      protocol: PROTOCOL_V2,
+      kind: "delivery",
+      event: "DeliverySelected",
+      objective: args.lease.objective,
+      runId: args.lease.runId,
+      sequence: args.sequence,
+      at: now.toISOString(),
+      ...args.selection,
+    });
+    await this.store.addIssueComment(
+      args.objectiveNodeId,
+      encodeEventComment(
+        `Factory selected ${args.selection.selected}: ${args.selection.reason}`,
+        event,
+      ),
+    );
+    return event;
+  }
+
+  async publication(args: {
+    lease: LeaseState;
+    workItemNodeId: string;
+    sequence: number;
+    receipt: PublicationReceipt;
+    event:
+      | "PublicationRecorded"
+      | "StackLinked"
+      | "ValidationInvalidated"
+      | "IntegrationPending"
+      | "IntegrationFailed"
+      | "IntegrationCompleted"
+      | "IntegrationCancelled"
+      | "IntegrationRolledBack";
+    operationId?: string;
+    asynchronousMergeUuid?: string;
+    reason?: string;
+  }): Promise<FactoryEvent> {
+    await this.leases.assertCurrent(args.lease);
+    if (args.receipt.runId !== args.lease.runId) {
+      throw new Error("publication receipt belongs to another run");
+    }
+    const now = await this.store.serverTime();
+    const event = parseFactoryEvent({
+      protocol: PROTOCOL_V2,
+      kind: "publication",
+      event: args.event,
+      objective: args.lease.objective,
+      runId: args.lease.runId,
+      sequence: args.sequence,
+      at: now.toISOString(),
+      workItem: args.receipt.workItem,
+      attempt: args.receipt.attempt,
+      unitId: args.receipt.unitId,
+      itemId: args.receipt.itemId,
+      mode: args.receipt.mode,
+      position: args.receipt.position,
+      ...(args.receipt.parentItemId
+        ? { parentItemId: args.receipt.parentItemId }
+        : {}),
+      branch: args.receipt.branch,
+      baseBranch: args.receipt.baseBranch,
+      baseSha: args.receipt.baseSha,
+      headSha: args.receipt.headSha,
+      pullRequest: args.receipt.pullRequest,
+      capabilityVersion: args.receipt.capabilityVersion,
+      validationDigest: args.receipt.exactHeadValidation.validationDigest,
+      exactHeadValidationDigest: args.receipt.exactHeadValidation.digest,
+      ...(args.receipt.stackNumber
+        ? { stackNumber: args.receipt.stackNumber }
+        : {}),
+      ...(args.receipt.invalidatedByItem
+        ? { invalidatedByItem: args.receipt.invalidatedByItem }
+        : {}),
+      ...(args.receipt.invalidatedByHeadSha
+        ? { invalidatedByHeadSha: args.receipt.invalidatedByHeadSha }
+        : {}),
+      ...(args.operationId ? { operationId: args.operationId } : {}),
+      ...(args.asynchronousMergeUuid
+        ? { asynchronousMergeUuid: args.asynchronousMergeUuid }
+        : {}),
+      ...(args.reason ? { reason: args.reason } : {}),
+    });
+    await this.store.addIssueComment(
+      args.workItemNodeId,
+      encodeEventComment(
+        `Factory recorded ${args.event} for pull request #${args.receipt.pullRequest}.`,
         event,
       ),
     );

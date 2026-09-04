@@ -5,9 +5,16 @@ import type { NormalizedArtifact } from "../execution/artifacts.js";
 import type { GitCommitObject } from "../control/lease.js";
 import type { CleanValidationResult } from "../validation/clean-run.js";
 import { verifyValidationEvidence } from "../validation/evidence.js";
+import {
+  bindValidationToPublishedHead,
+  verifyExactHeadValidation,
+  type ExactHeadValidationEvidence,
+} from "../validation/plan.js";
 import { runContainedProcess, sanitizedWorkerEnvironment } from "../runtime/process-group.js";
 
 export interface PublicationStore {
+  readRef(ref: string): Promise<string | null>;
+  readCommit(oid: string): Promise<GitCommitObject>;
   createBlob(content: Buffer): Promise<string>;
   createTree(args: {
     baseTreeOid: string;
@@ -45,6 +52,8 @@ export interface PublicationStore {
     draft: boolean;
     headSha: string;
     baseSha: string;
+    baseRef: string;
+    mergeCommitSha: string | null;
   }>;
   readChecks(sha: string): Promise<{ pending: string[]; failed: string[] }>;
   mergePullRequest(args: {
@@ -61,6 +70,7 @@ export interface PublishedPullRequest {
   commitSha: string;
   number: number;
   htmlUrl: string;
+  exactHeadValidation: ExactHeadValidationEvidence;
 }
 
 export type IntegrationReadiness =
@@ -123,49 +133,98 @@ export async function publishValidated(args: {
   if (args.base.oid !== args.artifact.baseSha) {
     throw new Error("publication base does not match the artifact");
   }
-
-  const entries: Array<{
-    path: string;
-    mode: "100644" | "100755" | "120000";
-    type: "blob";
-    sha: string | null;
-  }> = [];
-  for (const path of args.artifact.changedPaths) {
-    const mode = await indexMode(args.validation.worktree.path, path);
-    if (!mode) {
-      entries.push({ path, mode: "100644", type: "blob", sha: null });
-      continue;
-    }
-    const content = await blobContent(args.validation.worktree.path, path, mode);
-    await args.assertLease();
-    const sha = await args.store.createBlob(content);
-    entries.push({ path, mode, type: "blob", sha });
-  }
-  await args.assertLease();
-  const treeOid = await args.store.createTree({ baseTreeOid: args.base.treeOid, entries });
-  if (treeOid !== args.validation.evidence.outputTreeSha) {
-    throw new Error(
-      `uploaded tree ${treeOid} does not match validated tree ${args.validation.evidence.outputTreeSha}`,
-    );
-  }
-  await args.assertLease();
-  const commitSha = await args.store.createCommit({
-    treeOid,
-    parentOids: [args.base.oid],
-    message: `${args.title}\n\nCloses #${args.workItem}\nFactory-Artifact: ${args.artifact.digest}\nFactory-Validation: ${args.validation.evidence.digest}`,
-  });
   const branch = publicationBranch(args.objective, args.workItem, args.attempt);
-  await args.assertLease();
-  const branchCreated = await args.store.createRef(`refs/heads/${branch}`, commitSha);
-  if (!branchCreated) throw new Error(`publication branch ${branch} exists at a different commit`);
-
+  const expectedMessage = `${args.title}\n\nCloses #${args.workItem}\nFactory-Artifact: ${args.artifact.digest}\nFactory-Validation: ${args.validation.evidence.digest}`;
+  let commitSha = await args.store.readRef(`refs/heads/${branch}`);
+  let treeOid: string;
+  if (commitSha) {
+    const commit = await args.store.readCommit(commitSha);
+    if (
+      commit.treeOid !== args.validation.evidence.outputTreeSha ||
+      commit.parentOids.length !== 1 ||
+      commit.parentOids[0] !== args.base.oid ||
+      commit.message.trim() !== expectedMessage
+    ) {
+      throw new Error(`publication branch ${branch} exists with incompatible content`);
+    }
+    treeOid = commit.treeOid;
+  } else {
+    const entries: Array<{
+      path: string;
+      mode: "100644" | "100755" | "120000";
+      type: "blob";
+      sha: string | null;
+    }> = [];
+    for (const path of args.artifact.changedPaths) {
+      const mode = await indexMode(args.validation.worktree.path, path);
+      if (!mode) {
+        entries.push({ path, mode: "100644", type: "blob", sha: null });
+        continue;
+      }
+      const content = await blobContent(args.validation.worktree.path, path, mode);
+      await args.assertLease();
+      const sha = await args.store.createBlob(content);
+      entries.push({ path, mode, type: "blob", sha });
+    }
+    await args.assertLease();
+    treeOid = await args.store.createTree({ baseTreeOid: args.base.treeOid, entries });
+    if (treeOid !== args.validation.evidence.outputTreeSha) {
+      throw new Error(
+        `uploaded tree ${treeOid} does not match validated tree ${args.validation.evidence.outputTreeSha}`,
+      );
+    }
+    await args.assertLease();
+    commitSha = await args.store.createCommit({
+      treeOid,
+      parentOids: [args.base.oid],
+      message: expectedMessage,
+    });
+    await args.assertLease();
+    let branchCreated: boolean;
+    try {
+      branchCreated = await args.store.createRef(`refs/heads/${branch}`, commitSha);
+    } catch (error) {
+      const recoveredSha = await args.store.readRef(`refs/heads/${branch}`);
+      if (recoveredSha !== commitSha) throw error;
+      branchCreated = true;
+    }
+    if (!branchCreated) {
+      const recoveredSha = await args.store.readRef(`refs/heads/${branch}`);
+      if (!recoveredSha) throw new Error(`publication branch ${branch} was not created`);
+      const recovered = await args.store.readCommit(recoveredSha);
+      if (
+        recovered.treeOid !== treeOid ||
+        recovered.parentOids.length !== 1 ||
+        recovered.parentOids[0] !== args.base.oid ||
+        recovered.message.trim() !== expectedMessage
+      ) {
+        throw new Error(`publication branch ${branch} exists at a different commit`);
+      }
+      commitSha = recoveredSha;
+    }
+  }
+  const exactHeadValidation = bindValidationToPublishedHead({
+    validation: args.validation.evidence,
+    publishedHeadSha: commitSha,
+    publishedTreeSha: treeOid,
+    publishedBaseSha: args.base.oid,
+  });
   await args.assertLease();
   const existing = await args.store.findPullRequestForBranch(branch);
   if (existing) {
     if (existing.headSha !== commitSha) {
       throw new Error(`existing pull request #${existing.number} has an unexpected head`);
     }
-    return { branch, commitSha, number: existing.number, htmlUrl: existing.htmlUrl };
+    if (existing.state !== "open" && !existing.merged) {
+      throw new Error(`existing pull request #${existing.number} was closed without merge`);
+    }
+    return {
+      branch,
+      commitSha,
+      number: existing.number,
+      htmlUrl: existing.htmlUrl,
+      exactHeadValidation,
+    };
   }
   let pull;
   try {
@@ -193,7 +252,13 @@ export async function publishValidated(args: {
     };
   }
   if (pull.headSha !== commitSha) throw new Error("new pull request head changed during publication");
-  return { branch, commitSha, number: pull.number, htmlUrl: pull.htmlUrl };
+  return {
+    branch,
+    commitSha,
+    number: pull.number,
+    htmlUrl: pull.htmlUrl,
+    exactHeadValidation,
+  };
 }
 
 export async function integrationReadiness(
@@ -201,6 +266,7 @@ export async function integrationReadiness(
   pull: PublishedPullRequest,
   expectedBaseSha?: string,
 ): Promise<IntegrationReadiness> {
+  verifyExactHeadValidation(pull.exactHeadValidation, pull.commitSha);
   const current = await store.readPullRequest(pull.number);
   if (current.headSha !== pull.commitSha) return { state: "failed", reason: "pull request head changed after validation" };
   if (current.merged) return { state: "integrated", headSha: current.headSha };

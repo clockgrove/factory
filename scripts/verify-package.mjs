@@ -203,10 +203,7 @@ check(
   codex.version === plugin.version,
   "the Codex manifest agrees on the version",
 );
-for (const [field, expected] of [
-  ["skills", "./skills/"],
-  ["mcpServers", "./mcp.json"],
-]) {
+for (const [field, expected] of [["skills", "./skills/"]]) {
   check(
     codex[field] === expected,
     `the Codex ${field} path is plugin-root-relative`,
@@ -216,6 +213,25 @@ for (const [field, expected] of [
     `the Codex ${field} path exists`,
   );
 }
+const codexServer = codex.mcpServers?.factory;
+const codexBundleArg = (codexServer?.args ?? []).find((value) =>
+  value.includes("${PLUGIN_ROOT}"),
+);
+check(
+  codexServer?.type === "stdio" && codexServer?.command === "node",
+  "the Codex manifest declares the Factory stdio server inline",
+);
+check(
+  codexBundleArg?.replace("${PLUGIN_ROOT}", "") ===
+    arg?.replace("${PLUGIN_ROOT}", ""),
+  "the Codex and Agent Plugins manifests point at the same bundle",
+);
+check(
+  Array.isArray(codex.interface?.defaultPrompt) &&
+    codex.interface.defaultPrompt.length > 0 &&
+    codex.interface.defaultPrompt.length <= 3,
+  "the Codex manifest exposes bounded starter prompts",
+);
 for (const field of ["composerIcon", "logo"]) {
   const path = codex.interface?.[field];
   check(
@@ -277,6 +293,28 @@ for (const name of schemaFiles) {
   if (schema.$id) schemaIds.add(schema.$id);
 }
 check(schemaIds.size === schemaFiles.length, "protocol schema ids are unique");
+const factoryEventSchema = readJson("schemas/factory-event.schema.json");
+const eventKinds = factoryEventSchema.properties?.kind?.enum ?? [];
+for (const kind of ["delivery", "publication"]) {
+  check(
+    eventKinds.includes(kind),
+    `factory-event schema publishes the ${kind} event kind`,
+  );
+}
+for (const field of [
+  "capabilityVersion",
+  "unitId",
+  "itemId",
+  "headSha",
+  "validationDigest",
+  "exactHeadValidationDigest",
+  "operationId",
+]) {
+  check(
+    Boolean(factoryEventSchema.properties?.[field]),
+    `factory-event schema publishes ${field}`,
+  );
+}
 
 console.log("\n# the bundle actually runs\n");
 

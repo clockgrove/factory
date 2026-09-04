@@ -152,6 +152,22 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     this.#beforeMutation = options.beforeMutation ?? (async () => {});
   }
 
+  /** Public-preview routes still pass through Factory's shared safety controls. */
+  async stackRequest(
+    route: string,
+    parameters: Record<string, unknown>,
+    mutating = false,
+  ): Promise<{ status: number; data: unknown }> {
+    const request = this.#octokit.request as unknown as (
+      route: string,
+      parameters: Record<string, unknown>,
+    ) => Promise<{ status: number; data: unknown }>;
+    return this.#call(
+      () => request.call(this.#octokit, route, parameters),
+      mutating,
+    );
+  }
+
   async #call<T>(
     operation: () => Promise<T>,
     mutating = false,
@@ -738,6 +754,8 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     draft: boolean;
     headSha: string;
     baseSha: string;
+    baseRef: string;
+    mergeCommitSha: string | null;
   }> {
     const response = await this.#call(() =>
       this.#octokit.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
@@ -754,6 +772,8 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       draft: response.data.draft ?? false,
       headSha: response.data.head.sha,
       baseSha: response.data.base.sha,
+      baseRef: response.data.base.ref,
+      mergeCommitSha: response.data.merge_commit_sha,
     };
   }
 

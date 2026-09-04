@@ -396,6 +396,11 @@ reservation is reconciled and marked `AttemptDeferred`; it remains in the audit 
 does not consume a Work Item implementation attempt. A durable failed validation remains a real
 attempt failure.
 
+Immediately before each externally visible mutation, the Director re-observes the lease ref and
+GitHub server time in one REST request. An unchanged OID reuses the already-validated lease payload;
+only a concurrently renewed OID requires a second commit read. This keeps strict per-write fencing
+without the previous three-read assertion cost.
+
 ## Packaging and portability
 
 Factory remains an Agent Plugins 1.0 package: portable skills plus one bundled stdio MCP server.

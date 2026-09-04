@@ -285,18 +285,11 @@ export class LeaseController {
     await this.use((lease) => this.manager.assertCurrent(lease));
   };
 
-  /**
-   * Fence a mutation without paying for a GitHub read on every short, local
-   * admission. A delayed mutation must revalidate its lease because ownership
-   * may have changed while it was queued or paced. Fatal heartbeat failures
-   * and locally expired leases always fail closed.
-   */
+  /** Fence every externally visible mutation using a current ref observation. */
   async guardMutation(waitedMs: number): Promise<void> {
     if (this.#fatal) throw this.#fatal;
-    const expired = this.lease.expiresAt.getTime() <= Date.now();
-    if (expired || waitedMs >= 30_000) {
-      await this.manager.assertCurrent(this.lease);
-    }
+    void waitedMs;
+    await this.manager.assertCurrent(this.lease);
   }
 
   async renewIfNeeded(force = false): Promise<void> {

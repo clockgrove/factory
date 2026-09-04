@@ -11,6 +11,10 @@ export interface GitCommitObject {
 
 export interface LeaseStore {
   readRef(ref: string): Promise<string | null>;
+  /** Optional single-call ref observation carrying authoritative server time. */
+  readRefWithServerTime?(
+    ref: string,
+  ): Promise<{ oid: string | null; serverTime: Date }>;
   readCommit(oid: string): Promise<GitCommitObject>;
   createCommit(args: {
     treeOid: string;
@@ -226,10 +230,17 @@ export class LeaseManager {
   }
 
   async assertCurrent(lease: LeaseState): Promise<void> {
-    const oid = await this.#store.readRef(lease.ref);
+    const observation = this.#store.readRefWithServerTime
+      ? await this.#store.readRefWithServerTime(lease.ref)
+      : {
+          oid: await this.#store.readRef(lease.ref),
+          serverTime: await this.#store.serverTime(),
+        };
+    const { oid } = observation;
     if (!oid) throw new LeaseLostError();
-    const current = parseLease(await this.#store.readCommit(oid));
-    const now = await this.#store.serverTime();
+    const current = oid === lease.oid
+      ? lease
+      : parseLease(await this.#store.readCommit(oid));
     if (
       current.objective !== lease.objective ||
       current.epoch !== lease.epoch ||
@@ -238,7 +249,7 @@ export class LeaseManager {
       current.policyDigest !== lease.policyDigest ||
       current.sequence < lease.sequence ||
       (current.sequence === lease.sequence && current.oid !== lease.oid) ||
-      current.expiresAt.getTime() <= now.getTime()
+      current.expiresAt.getTime() <= observation.serverTime.getTime()
     ) {
       throw new LeaseLostError();
     }

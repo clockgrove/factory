@@ -205,7 +205,7 @@ describe("Director lease", () => {
     await operation;
   });
 
-  it("does not spend a lease read on an immediately admitted mutation", async () => {
+  it("rechecks the lease before every admitted mutation", async () => {
     const store = new MemoryStore();
     const manager = new LeaseManager({ store, durationMs: 7 * 86_400_000 });
     const base = await store.readCommit(BASE_SHA);
@@ -214,15 +214,15 @@ describe("Director lease", () => {
     store.readRefCalls = 0;
 
     await controller.guardMutation(0);
-    expect(store.readRefCalls).toBe(0);
+    expect(store.readRefCalls).toBe(1);
 
     await controller.guardMutation(30_000);
-    expect(store.readRefCalls).toBe(1);
+    expect(store.readRefCalls).toBe(2);
 
     const leaseFailure = new Error("heartbeat failed");
     controller.fail(leaseFailure);
     await expect(controller.guardMutation(0)).rejects.toBe(leaseFailure);
-    expect(store.readRefCalls).toBe(1);
+    expect(store.readRefCalls).toBe(2);
   });
 });
 
@@ -443,6 +443,31 @@ describe("Factory event comment routing", () => {
     );
     expect(await requests[0]!.text()).toBe(JSON.stringify({ body }));
     expect(mutationClasses).toEqual(["normal"]);
+  });
+
+  it("observes a ref and authoritative server time in one GitHub request", async () => {
+    let requests = 0;
+    const store = new GitHubControlStore({
+      token: "test-token",
+      owner: "clockgrove",
+      repo: "factory",
+      requestFetch: async () => {
+        requests += 1;
+        return new Response(JSON.stringify({ object: { sha: BASE_SHA } }), {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+            date: "Thu, 03 Sep 2026 00:00:00 GMT",
+          },
+        });
+      },
+    });
+
+    await expect(store.readRefWithServerTime("refs/heads/main")).resolves.toEqual({
+      oid: BASE_SHA,
+      serverTime: new Date("2026-09-03T00:00:00.000Z"),
+    });
+    expect(requests).toBe(1);
   });
 
   it("admits lease commits through the reserved mutation class", async () => {

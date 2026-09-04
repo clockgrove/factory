@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { cancellationRequestFromComments } from "../src/github.js";
+import {
+  cancellationRequestFromComments,
+  objectiveSubIssueQuerySize,
+} from "../src/github.js";
 
 import {
   AttemptManager,
@@ -291,5 +294,15 @@ describe("run cancellation", () => {
       sequence: 2,
     })).rejects.toThrow(/only activating actor/i);
     expect(store.comments).toEqual([]);
+  });
+});
+
+describe("Objective snapshot query sizing", () => {
+  it("prices nested connections for observed Work Items, not the protocol maximum", () => {
+    expect(objectiveSubIssueQuerySize(0)).toBe(1);
+    expect(objectiveSubIssueQuerySize(8)).toBe(8);
+    expect(objectiveSubIssueQuerySize(100)).toBe(100);
+    expect(() => objectiveSubIssueQuerySize(101)).toThrow(/more than 100/);
+    expect(() => objectiveSubIssueQuerySize(1.5)).toThrow(/invalid/);
   });
 });

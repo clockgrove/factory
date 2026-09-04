@@ -2,12 +2,63 @@ import { describe, expect, it } from "vitest";
 import { readFile } from "node:fs/promises";
 import {
   buildContextManifest,
+  discoverValidationCommands,
+  isGroundedValidationCommand,
   normalizeRepositoryFacts,
   profileRepository,
   type ExecutionProfile,
   type RepositoryFacts,
 } from "../src/repository-profiles/index.js";
 describe("repository profiles", () => {
+  it("grounds concrete Node test selection in an observed validation recipe and repository scope", () => {
+    const facts = { files: [{ path: "test/smoke.js" }], scripts: { test: "node --test" } };
+    expect(discoverValidationCommands(facts)).toEqual(["npm test", "node --test"]);
+    for (const command of [
+      "npm test",
+      "node --test",
+      "node --test test/smoke.js",
+      "node --test test/new.js",
+      "node --test test/smoke.js test/new.js",
+    ])
+      expect(isGroundedValidationCommand(command, facts, ["test/new.js"])).toBe(true);
+    expect(isGroundedValidationCommand("node --test test/new.mjs", facts, ["test/"])).toBe(true);
+    for (const command of [
+      "node --test test/unplanned.js",
+      "node --test ../escape.js",
+      "node --test /tmp/outside.js",
+      "node --test test/../outside.js",
+      "node --test test/*.js",
+      "node --test --import evil.js",
+      "node --test test/new.js && npm install evil",
+      "node --test test/new.js\nnode evil.js",
+      "node --eval process.exit(0)",
+      "npm install",
+      "npx vitest",
+      "sh test/new.js",
+    ])
+      expect(isGroundedValidationCommand(command, facts, ["test/new.js"])).toBe(false);
+    expect(
+      isGroundedValidationCommand(
+        "node --test test/new.js",
+        { ...facts, scripts: { test: "vitest" } },
+        ["test/new.js"],
+      ),
+    ).toBe(false);
+    const targeted = { ...facts, scripts: { test: "node --test test/smoke.js" } };
+    expect(discoverValidationCommands(targeted)).toEqual(["npm test", "node --test test/smoke.js"]);
+    expect(isGroundedValidationCommand("node --test test/new.js", targeted, ["test/new.js"])).toBe(
+      false,
+    );
+    for (const recipe of [
+      "node --test && npm install",
+      "node --test /tmp/external.js",
+      "node --eval '1'",
+      "node --test test/missing.js",
+    ])
+      expect(discoverValidationCommands({ ...facts, scripts: { test: recipe } })).toEqual([
+        "npm test",
+      ]);
+  });
   const cases: Array<[string, RepositoryFacts, Partial<ExecutionProfile>]> = [
     [
       "typescript",

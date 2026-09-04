@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ManagementOutputError } from "../src/management/backend.js";
 
 import {
@@ -18,46 +21,119 @@ function objectSchemas(value: unknown): Array<Record<string, unknown>> {
   ];
 }
 
+const temporaryRepositories: string[] = [];
+async function repositoryWithPackage(contents: string): Promise<string> {
+  const repository = await mkdtemp(join(tmpdir(), "factory-management-facts-"));
+  temporaryRepositories.push(repository);
+  await writeFile(join(repository, "package.json"), contents);
+  return repository;
+}
+afterEach(async () => {
+  await Promise.all(
+    temporaryRepositories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
+  );
+});
+
 describe("Codex management backend", () => {
+  it("grounds the model in declared scripts and shared validation recipes before invocation", async () => {
+    const repository = await repositoryWithPackage(
+      JSON.stringify({ scripts: { test: "node --test", dev: "node server.js" } }),
+    );
+    const runStructured = vi.fn(async (_cwd: string, _schema: unknown, prompt: string) => {
+      expect(prompt).toContain('"declaredScripts":{"test":"node --test","dev":"node server.js"}');
+      expect(prompt).toContain('"validationCommands":["npm test","node --test"]');
+      expect(prompt).toContain("created within this Work Item's declared scope");
+      throw new Error("prompt inspected");
+    });
+    await expect(
+      new CodexCliManagementBackend({ runStructured }).compile(
+        {
+          repository,
+          objective: { number: 1, title: "Test", body: "Test" },
+          defaultBranch: "main",
+          baseSha: "a".repeat(40),
+          repositoryFiles: ["package.json"],
+          allowedNetworkDestinations: [],
+        },
+        async () => {},
+      ),
+    ).rejects.toThrow("prompt inspected");
+    expect(runStructured).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["{invalid", "invalid JSON"],
+    [JSON.stringify({ scripts: { test: 42 } }), "invalid script facts"],
+    [" ".repeat(256 * 1024 + 1), "byte bound"],
+  ])(
+    "rejects unusable package facts before spending on compilation",
+    async (contents, expected) => {
+      const repository = await repositoryWithPackage(contents);
+      const runStructured = vi.fn();
+      await expect(
+        new CodexCliManagementBackend({ runStructured }).compile(
+          {
+            repository,
+            objective: { number: 1, title: "Test", body: "Test" },
+            defaultBranch: "main",
+            baseSha: "a".repeat(40),
+            repositoryFiles: ["package.json"],
+            allowedNetworkDestinations: [],
+          },
+          async () => {},
+        ),
+      ).rejects.toThrow(expected);
+      expect(runStructured).not.toHaveBeenCalled();
+    },
+  );
+
   it("retains valid compiler usage when durable checkpoint persistence fails", async () => {
+    const repository = await repositoryWithPackage(
+      JSON.stringify({ scripts: { test: "node --test" } }),
+    );
     const usage = { inputTokens: 30, outputTokens: 12 };
     const backend = new CodexCliManagementBackend({
-      runStructured: async () => ({
-        usage,
-        value: {
-          title: "Test",
-          workItems: [
-            {
-              id: "code",
-              title: "Implement code",
-              goal: "Implement code",
-              acceptance: ["Tests pass"],
-              scope: ["src/code.ts"],
-              preconditions: [],
-              outOfScope: [],
-              conventions: [],
-              dependsOn: [],
-              baseSha: "a".repeat(40),
-              validationCommands: ["npm test"],
-              requirements: {
-                os: ["linux"],
-                architecture: ["x64"],
-                cpu: 1,
-                memoryMb: 2048,
-                diskMb: 1024,
-                timeoutMinutes: 30,
-                estimatedDurationMinutes: 10,
-                tools: ["node", "npm"],
-                services: [],
-                networkDestinations: [],
-                permittedSecretNames: [],
-                trust: "trusted_local",
+      runStructured: async () => {
+        // Validation must reuse the facts supplied to this call, not reread a
+        // changed manifest and invalidate already-paid output.
+        await writeFile(join(repository, "package.json"), JSON.stringify({ scripts: {} }));
+        return {
+          usage,
+          value: {
+            title: "Test",
+            workItems: [
+              {
+                id: "code",
+                title: "Implement code",
+                goal: "Implement code",
+                acceptance: ["Tests pass"],
+                scope: ["src/code.ts"],
+                preconditions: [],
+                outOfScope: [],
+                conventions: [],
+                dependsOn: [],
+                baseSha: "a".repeat(40),
+                validationCommands: ["npm test"],
+                requirements: {
+                  os: ["linux"],
+                  architecture: ["x64"],
+                  cpu: 1,
+                  memoryMb: 2048,
+                  diskMb: 1024,
+                  timeoutMinutes: 30,
+                  estimatedDurationMinutes: 10,
+                  tools: ["node", "npm"],
+                  services: [],
+                  networkDestinations: [],
+                  permittedSecretNames: [],
+                  trust: "trusted_local",
+                },
+                artifactContract: "clockgrove.factory/artifact-v1",
               },
-              artifactContract: "clockgrove.factory/artifact-v1",
-            },
-          ],
-        },
-      }),
+            ],
+          },
+        };
+      },
     });
     const checkpoint = vi.fn(async () => {
       throw new Error("persistence unavailable");
@@ -65,7 +141,7 @@ describe("Codex management backend", () => {
     await expect(
       backend.compile(
         {
-          repository: process.cwd(),
+          repository,
           objective: { number: 1, title: "Test", body: "Test" },
           defaultBranch: "main",
           baseSha: "a".repeat(40),

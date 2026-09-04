@@ -121,6 +121,73 @@ async function compileProviderOutput(
 }
 
 describe("bounded objective compiler", () => {
+  it("compiles the complete local conformance graph with planned tests grounded in the observed runner", () => {
+    const workItems = [
+      {
+        ...base,
+        id: "clamp",
+        title: "Clamp values",
+        goal: "Implement clamp",
+        scope: ["src/clamp.js", "test/clamp.test.js"],
+        acceptance: [
+          "clamp(-1, 0, 10) returns 0; clamp(11, 0, 10) returns 10",
+          "RangeError is thrown when min exceeds max",
+        ],
+        validationCommands: ["node --test test/clamp.test.js"],
+      },
+      {
+        ...base,
+        id: "slugify",
+        title: "Slugify text",
+        goal: "Implement slugify",
+        scope: ["src/slugify.js", "test/slugify.test.js"],
+        acceptance: ["slugify(' Hello, WORLD!! ') returns 'hello-world'", "slugify('') returns ''"],
+        validationCommands: ["node --test test/slugify.test.js"],
+      },
+      {
+        ...base,
+        id: "describe",
+        title: "Describe bounded values",
+        goal: "Integrate both modules",
+        scope: ["src/describe.js", "test/describe.test.js"],
+        dependsOn: ["clamp", "slugify"],
+        acceptance: [
+          "describe(' Hello World ', 12, 0, 10) returns 'hello-world:10'",
+          "RangeError propagates for inverted bounds",
+        ],
+        validationCommands: ["npm test"],
+      },
+    ];
+    const repositoryFacts = {
+      files: [{ path: "package.json" }, { path: "test/smoke.test.js" }],
+      scripts: { test: "node --test" },
+    };
+    const compiled = compileObjective({
+      title: "Installed local conformance",
+      baseSha: sha,
+      repositoryFacts,
+      workItems,
+    });
+    expect(compiled.workItems).toHaveLength(3);
+    for (const item of compiled.workItems) {
+      expect(validationPlanFromPacket(workerPacketFromCompiled(item)).commands).toEqual(
+        workItems.find((source) => source.id === item.id)!.validationCommands,
+      );
+    }
+    expect(compiled.workItems.find((item) => item.id === "describe")?.delivery.relationship).toBe(
+      "join-after-merge",
+    );
+    expect(() =>
+      compileObjective({
+        title: "Invalid target",
+        baseSha: sha,
+        repositoryFacts,
+        workItems: [{ ...workItems[0]!, validationCommands: ["node --test test/unplanned.js"] }],
+      }),
+    ).toThrow(
+      /invented validation command in clamp: "node --test test\/unplanned.js"; repository-observed commands:.*node --test/,
+    );
+  });
   it("is byte deterministic across enumeration order", () => {
     const a = compileObjective({
       title: "Ship",

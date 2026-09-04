@@ -22,6 +22,11 @@ incorrect selection of an intermediate agent message as structured output. Faile
 did persist 29,407 model tokens in GitHub this time. This is live evidence for that accounting path,
 not successful compilation or execution.
 
+The [next retry](release-evidence/local-objective-command-failure-2026-09-04.json) reached command
+grounding and escalated before graph projection, recording 15,125 model tokens. The fixed npm-alias
+discovery list cannot express the fixture's scoped use of its observed test runner. This remains a
+failed Objective, not a passed compilation gate.
+
 | Surface | Evidence | Status |
 |---|---|---|
 | GitHub custom control refs | Live custom-ref, metadata-commit, workflow-side-effect, and GraphQL compare-and-swap probes against `clockgrove/factory` | Passed |

@@ -7,6 +7,7 @@ import { addScopeSerializationEdges } from "../graph.js";
 import {
   buildContextManifest,
   discoverValidationCommands,
+  isGroundedValidationCommand,
   normalizeRepositoryFacts,
   profileRepository,
   type RepositoryFacts,
@@ -150,7 +151,7 @@ function canonicalRequirements(value: unknown): ExecutionRequirements {
 
 export function validateCompiledObjective(
   objective: CompilerObjective,
-  observedCommands?: string[],
+  commandEvidence?: string[] | RepositoryFacts,
 ): void {
   if (objective.workItems.length < 1 || objective.workItems.length > 100)
     throw new Error("Work Item count is out of bounds");
@@ -169,8 +170,20 @@ export function validateCompiledObjective(
         );
     }
     if (w.validationCommands.length < 1) throw new Error(`missing validation command in ${w.id}`);
-    if (observedCommands && w.validationCommands.some((c) => !observedCommands.includes(c)))
-      throw new Error(`invented validation command in ${w.id}`);
+    if (commandEvidence) {
+      const observed = Array.isArray(commandEvidence)
+        ? commandEvidence
+        : discoverValidationCommands(commandEvidence);
+      const invalid = w.validationCommands.find((command) =>
+        Array.isArray(commandEvidence)
+          ? !commandEvidence.includes(command)
+          : !isGroundedValidationCommand(command, commandEvidence, w.scope),
+      );
+      if (invalid !== undefined)
+        throw new Error(
+          `invented validation command in ${w.id}: ${JSON.stringify(invalid.slice(0, 200))}; repository-observed commands: ${JSON.stringify(observed).slice(0, 600)}. Use an observed command or specialize an observed bare node --test with concrete existing or Work Item-scoped JavaScript test files; flags, shell syntax, and unplanned targets are not allowed.`,
+        );
+    }
     if (!w.context || !w.changeSurface || !w.validation || !w.delivery || !w.economicReview)
       throw new Error(`missing compiler analysis record in ${w.id}`);
     if (
@@ -412,7 +425,7 @@ export function compileObjective(input: CompileInput): CompilerObjective {
     title: input.title,
     workItems: items,
   });
-  validateCompiledObjective(result, commands);
+  validateCompiledObjective(result, facts);
   return result;
 }
 

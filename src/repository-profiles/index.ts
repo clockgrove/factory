@@ -36,6 +36,24 @@ const cleanPath = (path: string): string => {
   return normalized;
 };
 const uniqueSorted = (values: Iterable<string>): string[] => [...new Set(values)].sort();
+const VALIDATION_SCRIPT_NAMES = ["typecheck", "test", "lint", "check", "verify", "build"];
+
+// Only the documented Node test-runner recipe is specialized here. This is
+// deliberately not a shell parser or an arbitrary package-script interpreter.
+function nodeTestTargets(command: string): string[] | undefined {
+  if (command.length > 1_000 || !/^node --test(?: [A-Za-z0-9_][A-Za-z0-9_./-]*)*$/.test(command))
+    return undefined;
+  const targets = command.split(" ").slice(2);
+  if (
+    targets.some(
+      (target) =>
+        !/\.(?:js|mjs|cjs)$/.test(target) ||
+        target.split("/").some((part) => part === "." || part === ".." || part === ""),
+    )
+  )
+    return undefined;
+  return targets;
+}
 
 export function normalizeRepositoryFacts(input: RepositoryFacts): RepositoryFacts {
   if (input.files.length > MAX_REPOSITORY_FILES)
@@ -68,10 +86,38 @@ export function normalizeRepositoryFacts(input: RepositoryFacts): RepositoryFact
 export function discoverValidationCommands(factsInput: RepositoryFacts): string[] {
   const facts = normalizeRepositoryFacts(factsInput);
   const scripts = facts.scripts ?? {};
-  const priority = ["typecheck", "test", "lint", "check", "verify", "build"];
-  return priority
-    .filter((name) => Object.hasOwn(scripts, name))
-    .map((name) => (name === "test" ? "npm test" : `npm run ${name}`));
+  const names = VALIDATION_SCRIPT_NAMES.filter((name) => typeof scripts[name] === "string");
+  const observedPaths = new Set(facts.files.map((file) => file.path));
+  const recipes = names.flatMap((name) => {
+    const recipe = scripts[name]!;
+    const targets = nodeTestTargets(recipe);
+    return targets && targets.every((target) => observedPaths.has(target)) ? [recipe] : [];
+  });
+  return [
+    ...names.map((name) => (name === "test" ? "npm test" : `npm run ${name}`)),
+    ...uniqueSorted(recipes),
+  ];
+}
+
+export function isGroundedValidationCommand(
+  command: string,
+  facts: RepositoryFacts,
+  scope: string[],
+): boolean {
+  const observed = discoverValidationCommands(facts);
+  if (observed.includes(command)) return true;
+  // A bare observed runner permits selecting a concrete existing test, or a
+  // test the current Work Item is explicitly allowed to create. An observed
+  // targeted recipe does not authorize replacing its targets or adding flags.
+  if (!observed.includes("node --test")) return false;
+  const targets = nodeTestTargets(command);
+  if (!targets?.length) return false;
+  const observedPaths = new Set(normalizeRepositoryFacts(facts).files.map((file) => file.path));
+  return targets.every(
+    (target) =>
+      observedPaths.has(target) ||
+      scope.some((path) => (path.endsWith("/") ? target.startsWith(path) : target === path)),
+  );
 }
 
 export function profileRepository(factsInput: RepositoryFacts): ExecutionProfile {

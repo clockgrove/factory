@@ -514,6 +514,14 @@ contract. Earlier prose or JSON is not the final result; malformed final output 
 an earlier success-shaped message. Stream failures and messages after completion fail closed, while
 unambiguous terminal usage remains available for accounting.
 
+Compilation reads bounded package-script facts before invoking the model and reuses those same facts
+for command grounding. Discovery includes the observed `typecheck`, `test`, `lint`, `check`, `verify`,
+and `build` npm script entry points. Its Node test-runner profile also recognizes simple observed
+`node --test` recipes: a bare recipe may select concrete existing JavaScript test files or new files
+inside the Work Item's scope. An already targeted recipe cannot be broadened to different targets.
+This is not arbitrary shell-recipe interpretation; extra flags, traversal, unplanned targets, and
+unobserved runners do not acquire authority from compiler output.
+
 ## Security and activation
 
 Factory processes an Objective only after an authorized operator explicitly starts it, or when a

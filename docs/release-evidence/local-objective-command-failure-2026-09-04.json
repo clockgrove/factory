@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "scope": "installed-local-objective-failure",
+  "outcome": "failed",
+  "releaseGatesClosed": [],
+  "testedCommit": "e8eb36d41789ce8f0677ec265a662686d587d499",
+  "pluginVersion": "2.0.26",
+  "mcpBundleSha256": "fd025eabb97b815b0fdfa9100a3a34b0f38be06a5a8469f0f7a82ff377a3e948",
+  "objectiveUrl": "https://github.com/clockgrove/factory-conformance/issues/1",
+  "runId": "ae383734-6d6e-4efd-aeae-8aa904e00de9",
+  "retryOfRunId": "587e58b0-cbc6-4c23-851a-ea1744233aa2",
+  "startedAt": "2026-09-04T21:25:01.000Z",
+  "finishedAt": "2026-09-04T21:26:02.000Z",
+  "terminalState": "escalated",
+  "reason": "invented validation command in clamp",
+  "terminalReceipt": "https://github.com/clockgrove/factory-conformance/issues/1#issuecomment-5546630971",
+  "observedWorkItems": 0,
+  "observedAttempts": 0,
+  "observedPublications": 0,
+  "modelUsage": {
+    "availability": "observed",
+    "tokens": 15125,
+    "phase": "management",
+    "receipt": "https://github.com/clockgrove/factory-conformance/issues/1#issuecomment-5546630530"
+  },
+  "diagnosis": "The command grounding check admits only a fixed list of npm script aliases, not the actual runner recipes in those scripts. The fixture requests targeted node --test commands while its package test recipe is node --test. That valid specialization fails the exact-alias check. The exact generated command was not retained, so attributing this individual rejection to that specialization is an inference.",
+  "limitations": "Structured parsing reached compiler validation and failed-call usage was recorded. No graph projection, execution, stack publication, or integration success is established."
+}

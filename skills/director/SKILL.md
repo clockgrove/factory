@@ -44,10 +44,10 @@ It performs the same Supervisor workflow, but its process lifetime remains coupl
 Tell the user when this fallback removes unattended wake/resume behavior; never silently downgrade a
 request for durable operation.
 
-For a foreground restart, call `factory_run` the same way. For durable mode, inspect or restart the
-repository controller; do not submit a second activation. The recorded run policy wins over a newly
-supplied default, and GitHub receipts determine recovery. Do not create replacement issues or
-branches manually.
+For a foreground restart of an active, non-terminal run, call `factory_run` the same way. For durable
+mode, inspect or restart the repository controller; do not submit a second activation. The recorded
+run policy wins over a newly supplied default, and GitHub receipts determine recovery. Do not create
+replacement issues or branches manually.
 
 Report the terminal result:
 
@@ -58,6 +58,18 @@ Report the terminal result:
 If the user asks to stop an active Objective, call `factory_cancel` once. Only the GitHub identity
 that activated the run may request cancellation. Do not simulate cancellation by closing issues or
 pull requests.
+
+## After terminal escalation
+
+When the user asks to continue an escalated Objective or inspect its remaining work, call
+`factory_recovery_plan`. It inspects historical graph, reservation, PR, and accounting evidence
+without writing GitHub or launching workers. Report reusable candidates separately from missing
+evidence, required revalidation, resource reconciliation, and exhausted allowance.
+
+The assessment is not execution authority. Successor-run adoption is not yet implemented; do not
+use `factory_activate`, `factory_run`, or low-level dispatch to work around that boundary. Preserve
+existing issues, PRs, and budget history. A fixed check or newly available credential does not
+authorize additional spending. Resume/retry applies to non-terminal runs, not terminal revival.
 
 ## Status only
 
@@ -81,5 +93,5 @@ authorizes it.
 - A plugin cannot wake a stopped harness or powered-off host.
 - Missing credentials, unsupported branch rules/capabilities, sensitive changes, and exhausted
   budgets are escalation reasons, not invitations to bypass policy.
-- Old prototype dispatch tools are not an alternate product or a supported activation path. Use
+- Low-level dispatch tools are not a supported activation path. Use
   the Supervisor tools above for Factory Objectives; do not bypass their recorded authority.

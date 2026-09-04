@@ -10,7 +10,7 @@ import type {
   SemanticReview,
 } from "../management/backend.js";
 import { gitSha, sha256Digest } from "../protocol/limits.js";
-import type { CompiledGraphStore } from "./graphs.js";
+import type { CompiledGraphReadStore, CompiledGraphStore } from "./graphs.js";
 import type { LeaseManager, LeaseState } from "./lease.js";
 
 const REVIEW_PATH = ".clockgrove-factory/control/semantic-review.json";
@@ -164,6 +164,40 @@ function sameResult(left: ReviewCheckpointRecord, right: ReviewReceipt): boolean
   );
 }
 
+export async function loadReviewCheckpoint(
+  store: CompiledGraphReadStore,
+  identityInput: ReviewIdentity,
+): Promise<ReviewCheckpointRecord | null> {
+  const identity = ReviewIdentitySchema.parse(identityInput);
+  const identityDigest = reviewIdentityDigest(identity);
+  const ref = reviewCheckpointRef(identity);
+  const commitOid = await store.readRef(ref);
+  if (!commitOid) return null;
+  const commit = await store.readCommit(commitOid);
+  const blobOid = await store.readTreeEntry(commit.treeOid, REVIEW_PATH);
+  if (!blobOid) throw new Error(`${ref} has no semantic review receipt`);
+  const bytes = await store.readBlob(blobOid);
+  if (bytes.byteLength > 64 * 1024) {
+    throw new Error("persisted semantic review receipt exceeds 64 KiB");
+  }
+  const receipt = ReviewReceiptSchema.parse(JSON.parse(bytes.toString("utf8")));
+  if (
+    receipt.identityDigest !== identityDigest ||
+    canonical(receipt.identity) !== canonical(identity)
+  ) {
+    throw new Error("semantic review checkpoint has a different immutable identity");
+  }
+  return {
+    ref,
+    commitOid,
+    blobOid,
+    identityDigest,
+    identity,
+    review: receipt.review,
+    usage: receipt.usage,
+  };
+}
+
 export class ReviewCheckpointManager {
   constructor(
     private readonly store: CompiledGraphStore,
@@ -171,34 +205,7 @@ export class ReviewCheckpointManager {
   ) {}
 
   async load(identityInput: ReviewIdentity): Promise<ReviewCheckpointRecord | null> {
-    const identity = ReviewIdentitySchema.parse(identityInput);
-    const identityDigest = reviewIdentityDigest(identity);
-    const ref = reviewCheckpointRef(identity);
-    const commitOid = await this.store.readRef(ref);
-    if (!commitOid) return null;
-    const commit = await this.store.readCommit(commitOid);
-    const blobOid = await this.store.readTreeEntry(commit.treeOid, REVIEW_PATH);
-    if (!blobOid) throw new Error(`${ref} has no semantic review receipt`);
-    const bytes = await this.store.readBlob(blobOid);
-    if (bytes.byteLength > 64 * 1024) {
-      throw new Error("persisted semantic review receipt exceeds 64 KiB");
-    }
-    const receipt = ReviewReceiptSchema.parse(JSON.parse(bytes.toString("utf8")));
-    if (
-      receipt.identityDigest !== identityDigest ||
-      canonical(receipt.identity) !== canonical(identity)
-    ) {
-      throw new Error("semantic review checkpoint has a different immutable identity");
-    }
-    return {
-      ref,
-      commitOid,
-      blobOid,
-      identityDigest,
-      identity,
-      review: receipt.review,
-      usage: receipt.usage,
-    };
+    return loadReviewCheckpoint(this.store, identityInput);
   }
 
   async persist(args: {

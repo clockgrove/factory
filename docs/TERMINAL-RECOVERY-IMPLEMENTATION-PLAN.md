@@ -2,6 +2,26 @@
 
 Status: implementation in progress; successor execution is not yet available.
 
+## Available inspection
+
+Use `factory_recovery_plan` through MCP or `factory recovery-plan OWNER/REPO#NUMBER` through the
+CLI to inspect graph/projection bindings, attempt reservations, observed PR identities, and
+historical accounting. This is a bounded read-only assessment, not an immutable approved recovery
+plan. It grants no execution authority. Missing source identity, changed evidence, and unavailable
+observations remain blockers; provider resource cleanup is not inferred from terminal receipts.
+
+The accounting report aggregates the explicitly inspected history, not an authorized predecessor
+chain. It retains source run/usage identities and distinguishes recorded subtotals from unknown
+usage. Successor requests, increased allowance, adoption, and actual resource reconciliation remain
+implementation tasks below.
+
+The current classifier conservatively blocks multi-parent artifact ancestry and merged publications
+whose historical base identity cannot be proved. An exact rebase review checkpoint may establish
+semantic evidence without requiring a duplicate acceptance receipt. Static blocker codes explain
+missing evidence without returning issue bodies, review prose, or raw provider errors. The report's
+read counter measures cached logical evidence operations, not total HTTP requests; snapshot
+hydration has its own bounded inspection mode.
+
 ## Outcome and observed gap
 
 An operator can resolve an escalation and explicitly continue the same Objective, retaining its

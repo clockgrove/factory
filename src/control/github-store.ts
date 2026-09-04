@@ -853,6 +853,11 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
   }
 
   async readPullRequest(number: number): Promise<{
+    number?: number;
+    nodeId?: string;
+    baseRepository?: string;
+    headRepository?: string | null;
+    headRef?: string;
     state: string;
     merged: boolean;
     mergeable: boolean | null;
@@ -872,6 +877,11 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       }),
     );
     return {
+      number: response.data.number,
+      nodeId: response.data.node_id,
+      baseRepository: response.data.base.repo.full_name,
+      headRepository: response.data.head.repo?.full_name ?? null,
+      headRef: response.data.head.ref,
       state: response.data.state,
       merged: response.data.merged,
       mergeable: response.data.mergeable,
@@ -919,7 +929,9 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
             })),
           );
           if (result.length >= response.data.total_count) return result;
-          if (response.data.check_runs.length < 100) return result;
+          if (response.data.check_runs.length < 100) {
+            throw new Error("GitHub check-run history is incomplete; retry the snapshot");
+          }
         }
         throw new Error("check-run result exceeds GitHub's 3000-item snapshot limit");
       })(),

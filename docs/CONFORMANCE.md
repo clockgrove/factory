@@ -66,6 +66,9 @@ escalated run, and a fresh run cannot yet adopt its execution evidence. The
 [successor recovery plan](TERMINAL-RECOVERY-IMPLEMENTATION-PLAN.md) covers explicit authority,
 cumulative accounting, resource reconciliation, and reuse of validated publications. A startup
 guard blocks implicit reuse of executed work; it is containment, not a passed recovery gate.
+The read-only `factory_recovery_plan` assessment inspects graph, reservation, publication, and
+accounting evidence through a read-only store capability. Historical usage is not new spending
+authority, and an observed terminal resource receipt does not prove host/provider cleanup.
 
 This table maps every stable contract statement in [`DESIGN.md`](DESIGN.md#definition-of-done) to
 the executable evidence required on a release branch. “Implemented” does not promote an open live

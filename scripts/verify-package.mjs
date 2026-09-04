@@ -57,6 +57,7 @@ const EXPECTED_TOOLS = [
   "factory_pause",
   "factory_pause_cloud",
   "factory_plan",
+  "factory_recovery_plan",
   "factory_priority",
   "factory_replay",
   "factory_resume",
@@ -389,6 +390,13 @@ if (tools) {
   check(extra.length === 0, `no undocumented tool is exposed`, `unexpected: ${extra.join(", ")}`);
 
   const replayTool = tools.find((tool) => tool.name === "factory_replay");
+  const recoveryTool = tools.find((tool) => tool.name === "factory_recovery_plan");
+  check(
+    recoveryTool?.annotations?.readOnlyHint === true &&
+      recoveryTool?.annotations?.destructiveHint === false &&
+      !recoveryTool?.inputSchema?.properties?.requestId,
+    "factory_recovery_plan is a read-only observation without command authority",
+  );
   check(
     replayTool?.annotations?.readOnlyHint === true &&
       replayTool?.annotations?.destructiveHint === false,

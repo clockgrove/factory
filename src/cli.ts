@@ -17,6 +17,8 @@ import { GitHubControlStore } from "./control/github-store.js";
 import { DEFAULT_RUN_POLICY, parseRunPolicy } from "./protocol/policy.js";
 import { allDone, counts, derive, isStalled, ready } from "./state.js";
 import { FactoryApplicationService } from "./application/index.js";
+import { assessRecovery } from "./recovery/assessment.js";
+import { recoveryReadPort } from "./recovery/github-read-port.js";
 import { CodexCliManagementBackend } from "./management/codex-cli.js";
 import { runForegroundObjective, runGitHubRepositoryController } from "./controller/index.js";
 import { SystemdControllerLifecycle, SystemdUserService } from "./service/index.js";
@@ -35,6 +37,7 @@ const USAGE = [
   "  factory controller run OWNER/REPO --repo DIR [--max-active-objectives N] [--max-local-workers N] [--max-paid-workers N]",
   "  factory controller install|start|stop|restart|status|uninstall OWNER/REPO --repo DIR",
   "  factory doctor|plan|status|explain|replay OWNER/REPO#NUMBER [--work-item NUMBER]",
+  "  factory recovery-plan OWNER/REPO#NUMBER  (read-only; does not authorize execution)",
   "  factory pause|resume|drain|pause-cloud|cancel OWNER/REPO#NUMBER --request-id ID [--reason TEXT]",
   "  factory retry OWNER/REPO#NUMBER --request-id ID --work-item NUMBER [--reason TEXT]",
   "  factory priority OWNER/REPO#NUMBER --request-id ID --work-item NUMBER --priority RANK",
@@ -64,13 +67,23 @@ function parseRepository(value: string): { owner: string; repo: string } {
   return { owner: match[1]!, repo: match[2]! };
 }
 
-function applicationFor(owner: string, repo: string): FactoryApplicationService {
+function applicationFor(
+  owner: string,
+  repo: string,
+  recoveryInspection = false,
+): FactoryApplicationService {
   const token = resolveGitHubToken();
   const store = new GitHubControlStore({ token, owner, repo });
   return new FactoryApplicationService({
     owner,
     repo,
-    reader: new GitHubReader({ token, owner, repo }),
+    reader: new GitHubReader({ token, owner, repo, recoveryInspection }),
+    assessRecovery: (snapshot) =>
+      assessRecovery({
+        repository: `${owner}/${repo}`,
+        snapshot,
+        store: recoveryReadPort(store, owner, repo),
+      }),
     store,
     controller: controllerLifecycle,
     readBaseSha: async (defaultBranch) => {
@@ -97,12 +110,12 @@ function controllerApplicationFor(owner: string, repo: string): FactoryApplicati
 async function applicationCommand(command: string, args: string[]): Promise<void> {
   if (!args[0]) fail(`usage: factory ${command} OWNER/REPO#NUMBER`);
   const target = parseTarget(args[0]);
-  const service = applicationFor(target.owner, target.repo);
-  const read = ["doctor", "plan", "status", "explain", "replay"];
+  const service = applicationFor(target.owner, target.repo, command === "recovery-plan");
+  const read = ["doctor", "plan", "recovery-plan", "status", "explain", "replay"];
   if (read.includes(command)) {
     const workItem = option(args, "--work-item");
     const result = await service.inspect(
-      command as "doctor" | "plan" | "status" | "explain" | "replay",
+      command as "doctor" | "plan" | "recovery-plan" | "status" | "explain" | "replay",
       target.objective,
       workItem ? Number(workItem) : undefined,
     );
@@ -391,6 +404,7 @@ export async function main(argv: string[]): Promise<void> {
     [
       "doctor",
       "plan",
+      "recovery-plan",
       "status",
       "explain",
       "replay",

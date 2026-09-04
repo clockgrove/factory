@@ -287,6 +287,7 @@ async function main() {
     "factory_status",
     "factory_explain",
     "factory_replay",
+    "factory_recovery_plan",
     "factory_controller_start",
   ]) {
     if (!toolNames.includes(required)) {

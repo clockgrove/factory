@@ -11,10 +11,12 @@ import {
 import { buildExplanationReport } from "./explain.js";
 import { buildReplayReport } from "./replay.js";
 import { buildStatusReport, type FactoryReadSnapshot } from "./status.js";
+import type { RecoveryAssessment } from "../recovery/assessment.js";
 
 export const APPLICATION_OPERATIONS = [
   "doctor",
   "plan",
+  "recovery-plan",
   "status",
   "explain",
   "activate",
@@ -114,9 +116,10 @@ export interface ServiceContext {
   store?: ApplicationCommandStore;
   controller?: ControllerLifecycle;
   readBaseSha?: (defaultBranch: string) => Promise<string>;
+  assessRecovery?: (snapshot: ApplicationSnapshot) => Promise<RecoveryAssessment>;
 }
 
-export type ReadOperation = "doctor" | "plan" | "status" | "explain" | "replay";
+export type ReadOperation = "doctor" | "plan" | "recovery-plan" | "status" | "explain" | "replay";
 export type CommandOperation =
   | "pause"
   | "resume"
@@ -131,6 +134,20 @@ export class FactoryApplicationService {
   constructor(private readonly context: ServiceContext) {}
 
   async inspect(operation: ReadOperation, objective: number, workItem?: number): Promise<unknown> {
+    if (operation === "recovery-plan") {
+      if (workItem !== undefined) throw new Error("recovery-plan assesses the whole Objective");
+      if (!this.context.assessRecovery) {
+        throw new Error("recovery assessment reader is not configured");
+      }
+      try {
+        const snapshot = await this.context.reader.readObjective(objective);
+        return await this.context.assessRecovery(snapshot);
+      } catch {
+        throw new Error(
+          "Recovery assessment unavailable: complete authenticated GitHub observations could not be obtained within inspection bounds. No execution was authorized; raw provider and issue content is suppressed.",
+        );
+      }
+    }
     const snapshot = await this.context.reader.readObjective(objective);
     const repository = `${this.context.owner}/${this.context.repo}`;
     if (operation === "status") {

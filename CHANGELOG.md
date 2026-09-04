@@ -6,6 +6,9 @@ Notable changes to Factory. See [the delivery plan](docs/DELIVERY-PLAN.md) for u
 
 ### Added
 
+- Read-only recovery assessment through chat/MCP and CLI, with graph/PR identity checks and
+  historical cumulative accounting. Successor execution and additional spending still require
+  a separate implemented authorization path.
 - GitHub-only control protocol with immutable compiled graphs, compare-and-swap leases,
   deterministic attempts, and restart reconstruction.
 - Repository controller and explicit Linux `systemd` lifecycle.

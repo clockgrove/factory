@@ -55,6 +55,45 @@ export interface GitHubOptions {
   onThrottle?: (message: string) => void;
   /** Injectable transport for deterministic client-contract tests. */
   requestFetch?: typeof globalThis.fetch;
+  /** Fail closed on incomplete/beyond-bound history during read-only recovery assessment. */
+  recoveryInspection?: boolean;
+}
+
+export const RECOVERY_READER_LIMITS = Object.freeze({
+  hydrationRequests: 128,
+  hydratedRecords: 10_000,
+  hydratedBytes: 8 * 1024 * 1024,
+  commentsPerIssue: 2_000,
+  timelinePagesPerPullRequest: 10,
+});
+
+interface RecoveryHydrationBudget {
+  requests: number;
+  records: number;
+  bytes: number;
+}
+
+function reserveRecoveryPage(budget: RecoveryHydrationBudget | undefined): void {
+  if (!budget) return;
+  if (budget.requests >= RECOVERY_READER_LIMITS.hydrationRequests) {
+    throw new Error("Recovery snapshot exceeded its shared history-page request bound");
+  }
+  budget.requests++;
+}
+
+function accountRecoveryRecords(
+  budget: RecoveryHydrationBudget | undefined,
+  records: unknown[],
+): void {
+  if (!budget) return;
+  budget.records += records.length;
+  budget.bytes += Buffer.byteLength(JSON.stringify(records), "utf8");
+  if (
+    budget.records > RECOVERY_READER_LIMITS.hydratedRecords ||
+    budget.bytes > RECOVERY_READER_LIMITS.hydratedBytes
+  ) {
+    throw new Error("Recovery snapshot exceeded its shared hydrated-history size bound");
+  }
 }
 
 export type RunCancellationRequest = Extract<
@@ -243,6 +282,13 @@ query Objective($owner: String!, $repo: String!, $number: Int!, $subIssueCount: 
   }
 }`;
 
+// PullRequestConnection exposes totalCount/pageInfo in GitHub's current schema:
+// https://docs.github.com/en/graphql/reference/pulls#pullrequestconnection
+const RECOVERY_OBJECTIVE_QUERY = OBJECTIVE_QUERY.replace(
+  "closedByPullRequestsReferences(first: 20, includeClosedPrs: true) {",
+  "closedByPullRequestsReferences(first: 20, includeClosedPrs: true) { totalCount pageInfo { hasNextPage }",
+);
+
 const PRIORITY_FIELDS_QUERY = `
 query PriorityFields($owner: String!, $after: String) {
   organization(login: $owner) {
@@ -337,7 +383,11 @@ interface GqlWorkItem extends GqlIssueState {
     }>;
   };
   blockedBy: { totalCount: number; nodes: GqlDependency[] };
-  closedByPullRequestsReferences: { nodes: GqlPr[] };
+  closedByPullRequestsReferences: {
+    nodes: GqlPr[];
+    totalCount?: number;
+    pageInfo?: { hasNextPage: boolean };
+  };
   timelineItems: { nodes: GqlAssignedEvent[] };
   comments?: GqlComments;
 }
@@ -869,6 +919,7 @@ export class GitHubReader {
   readonly #octokit: Octokit;
   readonly #owner: string;
   readonly #repo: string;
+  readonly #recoveryInspection: boolean;
   /** Latched once true by `#ciExpectedOnPullRequests`. */
   #ciExpected = false;
   /** Cached for the process lifetime by `readWorkflowSafetyProfile`. */
@@ -880,6 +931,7 @@ export class GitHubReader {
   constructor(opts: GitHubOptions) {
     this.#owner = opts.owner;
     this.#repo = opts.repo;
+    this.#recoveryInspection = opts.recoveryInspection === true;
     this.#octokit = createOctokit(opts);
   }
 
@@ -1140,12 +1192,15 @@ export class GitHubReader {
       return objectiveSubIssueQuerySize(observedIssue.subIssues.totalCount);
     };
     const readDetail = (subIssueCount: number) =>
-      this.#octokit.graphql<GqlResponse>(OBJECTIVE_QUERY, {
-        owner: this.#owner,
-        repo: this.#repo,
-        number,
-        subIssueCount,
-      });
+      this.#octokit.graphql<GqlResponse>(
+        this.#recoveryInspection ? RECOVERY_OBJECTIVE_QUERY : OBJECTIVE_QUERY,
+        {
+          owner: this.#owner,
+          repo: this.#repo,
+          number,
+          subIssueCount,
+        },
+      );
 
     let subIssueCount = this.#objectiveSubIssueCounts.get(number) ?? (await readCardinality());
     let data = await readDetail(subIssueCount);
@@ -1187,10 +1242,36 @@ export class GitHubReader {
         ? [{ id: actor.id, login: actor.login, type: "Bot" as const }]
         : [],
     );
-    const hydratedObjectiveComments = await this.#completeComments(issue.number, issue.comments);
+    const historyBudget: RecoveryHydrationBudget | undefined = this.#recoveryInspection
+      ? { requests: 0, records: 0, bytes: 0 }
+      : undefined;
+    if (historyBudget) {
+      for (const item of issue.subIssues.nodes) {
+        const links = item.closedByPullRequestsReferences;
+        if (
+          !Number.isSafeInteger(links.totalCount) ||
+          links.totalCount !== links.nodes.length ||
+          links.nodes.length > 20 ||
+          links.pageInfo?.hasNextPage !== false
+        ) {
+          throw new Error(
+            "Recovery snapshot linked pull-request history is incomplete or exceeds its bound",
+          );
+        }
+      }
+    }
+    const hydratedObjectiveComments = await this.#completeComments(
+      issue.number,
+      issue.comments,
+      historyBudget,
+    );
     if (hydratedObjectiveComments) issue.comments = hydratedObjectiveComments;
     for (const workItem of issue.subIssues.nodes) {
-      const hydrated = await this.#completeComments(workItem.number, workItem.comments);
+      const hydrated = await this.#completeComments(
+        workItem.number,
+        workItem.comments,
+        historyBudget,
+      );
       if (hydrated) workItem.comments = hydrated;
     }
     const objectiveEvents = factoryEvents(issue.comments, `Objective #${issue.number}`, {
@@ -1204,7 +1285,7 @@ export class GitHubReader {
           : [],
       ),
     );
-    const agentWorkEvents = await this.#readAgentWorkEvents(issue.subIssues.nodes);
+    const agentWorkEvents = await this.#readAgentWorkEvents(issue.subIssues.nodes, historyBudget);
 
     return {
       id: issue.id,
@@ -1242,10 +1323,26 @@ export class GitHubReader {
   async #completeComments(
     issueNumber: number,
     comments: GqlComments | undefined,
+    budget?: RecoveryHydrationBudget,
   ): Promise<GqlComments | undefined> {
-    if (!comments || comments.totalCount <= comments.nodes.length) return comments;
+    if (
+      budget &&
+      (!comments ||
+        !Number.isSafeInteger(comments.totalCount) ||
+        comments.totalCount < comments.nodes.length ||
+        comments.totalCount > RECOVERY_READER_LIMITS.commentsPerIssue)
+    ) {
+      throw new Error(
+        "Recovery snapshot comment history is incomplete or exceeds its per-issue bound",
+      );
+    }
+    if (!comments || comments.totalCount <= comments.nodes.length) {
+      if (comments) accountRecoveryRecords(budget, comments.nodes);
+      return comments;
+    }
     const nodes: GqlComment[] = [];
     for (let page = 1; ; page += 1) {
+      reserveRecoveryPage(budget);
       const response = await this.#octokit.request(
         "GET /repos/{owner}/{repo}/issues/{issue_number}/comments",
         {
@@ -1256,6 +1353,7 @@ export class GitHubReader {
           page,
         },
       );
+      accountRecoveryRecords(budget, response.data);
       nodes.push(
         ...response.data.map((comment) => ({
           body: comment.body ?? "",
@@ -1263,6 +1361,9 @@ export class GitHubReader {
           authorAssociation: comment.author_association,
         })),
       );
+      if (budget && nodes.length > comments.totalCount) {
+        throw new Error("Recovery snapshot comment history changed during bounded hydration");
+      }
       if (response.data.length < 100) break;
     }
     if (nodes.length !== comments.totalCount) {
@@ -1283,7 +1384,10 @@ export class GitHubReader {
    * attempt, which keeps the companion reads proportional to active work and
    * avoids re-reading every closed historical attempt on every cycle.
    */
-  async #readAgentWorkEvents(workItems: GqlWorkItem[]): Promise<Map<number, AgentWorkEvent[]>> {
+  async #readAgentWorkEvents(
+    workItems: GqlWorkItem[],
+    budget?: RecoveryHydrationBudget,
+  ): Promise<Map<number, AgentWorkEvent[]>> {
     const openPullRequests = new Set<number>();
     for (const workItem of workItems) {
       for (const pullRequest of workItem.closedByPullRequestsReferences.nodes) {
@@ -1295,6 +1399,10 @@ export class GitHubReader {
     for (const pullNumber of openPullRequests) {
       const timeline: RestAgentWorkEvent[] = [];
       for (let page = 1; ; page++) {
+        if (budget && page > RECOVERY_READER_LIMITS.timelinePagesPerPullRequest) {
+          throw new Error("Recovery snapshot PR timeline exceeded its page bound");
+        }
+        reserveRecoveryPage(budget);
         const response = await this.#octokit.request(
           "GET /repos/{owner}/{repo}/issues/{issue_number}/timeline",
           {
@@ -1306,6 +1414,7 @@ export class GitHubReader {
             headers: { accept: "application/vnd.github+json" },
           },
         );
+        accountRecoveryRecords(budget, response.data);
         timeline.push(...(response.data as RestAgentWorkEvent[]));
         if (response.data.length < 100) break;
       }

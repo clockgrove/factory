@@ -103,6 +103,8 @@ import { priorityPolicyFragment } from "./scheduling/github-priority.js";
 import { runForegroundObjective } from "./controller/index.js";
 import { GitHubControlStore } from "./control/github-store.js";
 import { APPLICATION_TOOL_DEFINITIONS, FactoryApplicationService } from "./application/index.js";
+import { assessRecovery } from "./recovery/assessment.js";
+import { recoveryReadPort } from "./recovery/github-read-port.js";
 import { SystemdControllerLifecycle, SystemdUserService } from "./service/index.js";
 
 /** Never write anything but JSON-RPC to stdout on the stdio transport. */
@@ -149,7 +151,11 @@ const controllerLifecycle = new SystemdControllerLifecycle(
   }),
 );
 
-function applicationFor(owner: string, repo: string): FactoryApplicationService {
+function applicationFor(
+  owner: string,
+  repo: string,
+  recoveryInspection = false,
+): FactoryApplicationService {
   const token = getToken();
   const store = new GitHubControlStore({
     token,
@@ -164,7 +170,15 @@ function applicationFor(owner: string, repo: string): FactoryApplicationService 
   return new FactoryApplicationService({
     owner,
     repo,
-    reader: readerFor(owner, repo),
+    reader: recoveryInspection
+      ? new GitHubReader({ token, owner, repo, recoveryInspection: true })
+      : readerFor(owner, repo),
+    assessRecovery: (snapshot) =>
+      assessRecovery({
+        repository: `${owner}/${repo}`,
+        snapshot,
+        store: recoveryReadPort(store, owner, repo),
+      }),
     store,
     controller: controllerLifecycle,
     readBaseSha: async (defaultBranch) => {
@@ -1333,6 +1347,7 @@ function registerApplicationTool(
   operation:
     | "doctor"
     | "plan"
+    | "recovery-plan"
     | "status"
     | "explain"
     | "replay"
@@ -1377,7 +1392,7 @@ function registerApplicationTool(
               "Complete immutable run policy. Omit for adaptive local-only execution; paid backends are never inferred.",
             ),
         }
-      : ["doctor", "plan", "status", "explain", "replay"].includes(operation)
+      : ["doctor", "plan", "recovery-plan", "status", "explain", "replay"].includes(operation)
         ? {
             ...ObjectiveToolShape,
             ...(operation === "explain"
@@ -1400,17 +1415,20 @@ function registerApplicationTool(
     name,
     {
       title: name.replaceAll("_", " "),
-      description: `${operation} through Factory's shared application-service boundary.`,
+      description:
+        operation === "recovery-plan"
+          ? "Read-only assessment of historical work, graph and PR evidence, and cumulative usage. Does not authorize successor execution, reset budgets, or modify GitHub."
+          : `${operation} through Factory's shared application-service boundary.`,
       inputSchema,
       annotations,
     },
     tool(async (input: ApplicationToolInput) => {
-      const service = applicationFor(input.owner, input.repo);
+      const service = applicationFor(input.owner, input.repo, operation === "recovery-plan");
       if (!operation.startsWith("controller-") && !input.objectiveNumber)
         throw new Error("objectiveNumber is required");
-      if (["doctor", "plan", "status", "explain", "replay"].includes(operation)) {
+      if (["doctor", "plan", "recovery-plan", "status", "explain", "replay"].includes(operation)) {
         return service.inspect(
-          operation as "doctor" | "plan" | "status" | "explain" | "replay",
+          operation as "doctor" | "plan" | "recovery-plan" | "status" | "explain" | "replay",
           input.objectiveNumber!,
           input.workItemNumber,
         );

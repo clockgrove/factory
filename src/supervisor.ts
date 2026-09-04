@@ -1088,9 +1088,13 @@ export class FactorySupervisor {
         await this.#lease.renewIfNeeded();
         if (Date.now() - lastCancellationCheck >= 10_000) {
           lastCancellationCheck = Date.now();
-          const current = await this.#reader.readObjective(this.#run.objective);
-          this.#sequences.observe(snapshotEvents(current));
-          if (hasCancellationRequest(current, this.#run.runId)) {
+          const cancellation = await this.#reader.readRunCancellationRequest(
+            this.#run.objective,
+            this.#run.runId,
+            this.#run.actor,
+          );
+          if (cancellation) {
+            this.#sequences.observe([cancellation]);
             throw new RunCancellationRequestedError(
               "operator requested cancellation through GitHub",
             );

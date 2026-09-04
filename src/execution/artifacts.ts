@@ -143,11 +143,18 @@ export function assertArtifactScope(
   artifact: NormalizedArtifact,
   allowedPaths: string[],
 ): void {
+  assertChangedPathScope(artifact.changedPaths, allowedPaths);
+}
+
+export function assertChangedPathScope(
+  changedPaths: string[],
+  allowedPaths: string[],
+): void {
   const permits = (path: string) =>
     allowedPaths.some((allowed) =>
       allowed.endsWith("/") ? path.startsWith(allowed) : path === allowed,
     );
-  const outside = artifact.changedPaths.filter((path) => !permits(path));
+  const outside = changedPaths.filter((path) => !permits(path));
   if (outside.length > 0) {
     throw new Error(`artifact changes paths outside scope: ${outside.join(", ")}`);
   }

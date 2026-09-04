@@ -4,7 +4,9 @@ import { basename, join, resolve, sep } from "node:path";
 
 import {
   MAX_ARTIFACT_PATCH_BYTES,
+  assertChangedPathScope,
   normalizeArtifact,
+  verifyArtifact,
   type NormalizedArtifact,
 } from "../execution/artifacts.js";
 import { runContainedProcess, sanitizedWorkerEnvironment } from "./process-group.js";
@@ -71,6 +73,7 @@ function assertOwnedWorktree(worktree: LocalWorktree): void {
 export async function collectLocalArtifact(
   worktree: LocalWorktree,
   logs = "",
+  allowedPaths?: string[],
 ): Promise<NormalizedArtifact> {
   const untrackedRaw = await git(worktree.path, [
     "ls-files",
@@ -82,6 +85,14 @@ export async function collectLocalArtifact(
   if (untracked.length > 0) {
     await git(worktree.path, ["add", "--intent-to-add", "--", ...untracked]);
   }
+  const pathsRaw = await git(
+    worktree.path,
+    ["diff", "--name-only", "-z", worktree.baseSha],
+    120_000,
+    MAX_ARTIFACT_PATCH_BYTES + 1024,
+  );
+  const changedPaths = pathsRaw.split("\0").filter(Boolean);
+  if (allowedPaths) assertChangedPathScope(changedPaths, allowedPaths);
   // Allow the complete protocol-sized payload through the process collector.
   // A smaller generic command-output cap would silently turn a valid large
   // patch or manifest into an invalid tail fragment.
@@ -92,13 +103,6 @@ export async function collectLocalArtifact(
     120_000,
     artifactOutputLimit,
   );
-  const pathsRaw = await git(
-    worktree.path,
-    ["diff", "--name-only", "-z", worktree.baseSha],
-    120_000,
-    artifactOutputLimit,
-  );
-  const changedPaths = pathsRaw.split("\0").filter(Boolean);
   return normalizeArtifact({
     baseSha: worktree.baseSha,
     patch,
@@ -107,6 +111,31 @@ export async function collectLocalArtifact(
     outcome: patch.trim() ? "succeeded" : "declined",
     ...(patch.trim() ? {} : { reason: "worker produced no repository changes" }),
   });
+}
+
+/**
+ * Seed a fresh retry worktree with a previously host-validated artifact. The
+ * base remains unchanged, so later collection still emits one complete patch
+ * against the pinned GitHub SHA rather than a chain of private deltas.
+ */
+export async function seedLocalWorktree(
+  worktree: LocalWorktree,
+  artifact: NormalizedArtifact,
+): Promise<void> {
+  const verified = verifyArtifact(artifact);
+  if (verified.baseSha !== worktree.baseSha) {
+    throw new Error("retry checkpoint base SHA does not match the worktree");
+  }
+  const patchPath = join(worktree.root, "retry-checkpoint.patch");
+  await writeFile(patchPath, verified.patch, { mode: 0o600 });
+  try {
+    await git(
+      worktree.path,
+      ["apply", "--binary", "--whitespace=error-all", patchPath],
+    );
+  } finally {
+    await rm(patchPath, { force: true });
+  }
 }
 
 export async function cleanupLocalWorktree(worktree: LocalWorktree): Promise<void> {

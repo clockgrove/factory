@@ -143,6 +143,10 @@ export function workerPacketPrompt(context: AttemptContext): string {
     "You are a restricted Factory implementation worker.",
     "Edit only the supplied workspace. Do not create commits, branches, pull requests, issues, releases, or contact GitHub.",
     "Do not start Factory, invoke a Director, or delegate another agent. Do not reveal credentials.",
+    "Do not run build or packaging commands that write outside the Allowed paths. Generated outputs are forbidden unless explicitly allowed.",
+    context.seededFromArtifact
+      ? "This retry workspace already contains the previous host-validated patch. Preserve correct work and make the smallest changes needed to address the diagnostic."
+      : "The workspace starts at the pinned base SHA.",
     `Goal: ${packet.goal}`,
     `Acceptance criteria:\n${packet.acceptanceCriteria.map((item) => `- ${item}`).join("\n")}`,
     `Allowed paths:\n${packet.allowedPaths.map((item) => `- ${item}`).join("\n")}`,
@@ -409,6 +413,7 @@ export class CodexCliLocalBackend implements ExecutionBackend {
         baseSha: running.context.packet.baseSha,
       },
       `${result.stdout}\n${result.stderr}`,
+      running.context.packet.allowedPaths,
     );
     const outcome =
       result.exitCode === 0 && running.final?.outcome === "succeeded" && collected.patch.trim()

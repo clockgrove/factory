@@ -1,0 +1,60 @@
+{
+  "title": "Golden delivery",
+  "baseSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "repositoryFacts": {
+    "files": [
+      { "path": "package.json" },
+      { "path": "src/core.ts" },
+      { "path": "test/core.test.ts" }
+    ],
+    "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit" }
+  },
+  "workItems": [
+    {
+      "id": "implementation",
+      "title": "Implement core",
+      "goal": "Implement the core behavior",
+      "acceptance": ["Tests pass", "Build output exists"],
+      "scope": ["src/core.ts"],
+      "preconditions": [],
+      "outOfScope": [],
+      "conventions": ["Use TypeScript"],
+      "dependsOn": [],
+      "baseSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "validationCommands": ["npm test", "npm run typecheck"],
+      "requirements": {
+        "os": ["linux"],
+        "architecture": ["x64"],
+        "tools": ["node", "npm"],
+        "services": [],
+        "networkDestinations": [],
+        "permittedSecretNames": [],
+        "trust": "trusted_local"
+      },
+      "artifactContract": "clockgrove.factory/artifact-v1"
+    },
+    {
+      "id": "tests",
+      "title": "Test core",
+      "goal": "Test the core behavior",
+      "acceptance": ["Tests pass"],
+      "scope": ["test/core.test.ts"],
+      "preconditions": [],
+      "outOfScope": [],
+      "conventions": ["Use TypeScript"],
+      "dependsOn": ["implementation"],
+      "baseSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "validationCommands": ["npm test"],
+      "requirements": {
+        "os": ["linux"],
+        "architecture": ["x64"],
+        "tools": ["node", "npm"],
+        "services": [],
+        "networkDestinations": [],
+        "permittedSecretNames": [],
+        "trust": "trusted_local"
+      },
+      "artifactContract": "clockgrove.factory/artifact-v1"
+    }
+  ]
+}

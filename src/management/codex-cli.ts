@@ -1,4 +1,4 @@
-import { access, rm, symlink, writeFile } from "node:fs/promises";
+import { access, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -34,6 +34,8 @@ import type {
   SemanticReview,
 } from "./backend.js";
 import { restrictedCodexArgs } from "../backends/codex-cli-policy.js";
+import { canonicalizeObjective, compileObjective, validateCompiledObjective, type CompilerObjective } from "../compiler/index.js";
+import { discoverValidationCommands } from "../repository-profiles/index.js";
 
 export const CODEX_COMPILED_OBJECTIVE_SCHEMA = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -185,13 +187,40 @@ const ReviewSchema = z.object({
   risks: z.array(z.string().max(2_000)).max(64),
 });
 
-interface CodexManagementOptions {
+const ManagementCompilerWorkItemSchema = z.object({
+  id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/).max(64),
+  title: z.string().min(1).max(256), goal: z.string().min(1).max(4_000),
+  acceptance: z.array(z.string().min(1).max(2_000)).min(1).max(64),
+  scope: z.array(RepositoryScopePathSchema).min(1).max(64),
+  preconditions: z.array(z.string().min(1).max(2_000)).max(64),
+  outOfScope: z.array(z.string().min(1).max(2_000)).max(64),
+  conventions: z.array(z.string().min(1).max(2_000)).max(64),
+  dependsOn: z.array(z.string().regex(/^[a-z0-9][a-z0-9-]*$/).max(64)).max(50),
+  baseSha: z.string().regex(/^[0-9a-f]{40}$/i),
+  validationCommands: z.array(z.string().min(1).max(1_000)).min(1).max(32),
+  requirements: ExecutionRequirementsSchema.strict(),
+  artifactContract: z.literal("clockgrove.factory/artifact-v1"),
+}).strict();
+const ManagementCompilerObjectiveSchema = z.object({
+  title: z.string().min(1).max(256),
+  workItems: z.array(ManagementCompilerWorkItemSchema).min(1).max(100),
+}).strict();
+
+/** Runtime defense: provider-side output-schema enforcement is not trusted. */
+export function parseManagementCompilerOutput(value: unknown): z.infer<typeof ManagementCompilerObjectiveSchema> {
+  assertWithinBytes(value, 512 * 1024, "management compiler output");
+  return ManagementCompilerObjectiveSchema.parse(value);
+}
+
+export interface CodexManagementOptions {
   command?: string;
   profile?: string;
   model?: string;
   authFile?: string;
   permittedModelCredentials?: string[];
   createCodexHome?: CodexHomeFactory;
+  /** Testable provider boundary; production leaves this unset. */
+  runStructured?: (cwd: string, schema: unknown, prompt: string) => Promise<{ value: unknown; usage: ManagementUsage }>;
 }
 
 function parseOutput<T>(stdout: string): { value: T; usage: ManagementUsage } {
@@ -269,7 +298,8 @@ export class CodexCliManagementBackend implements ManagementBackend {
       codexCompiledObjectiveSchema(context.objective.title),
       prompt,
     );
-    let objective = value;
+    const providerObjective = parseManagementCompilerOutput(value);
+    let objective: CompiledObjective = providerObjective;
     if (objective.title !== context.objective.title) {
       throw new Error("compiler changed the Objective title");
     }
@@ -278,7 +308,25 @@ export class CodexCliManagementBackend implements ManagementBackend {
       item.scope = item.scope.map((path) => RepositoryScopePathSchema.parse(path));
       if (item.requirements) item.requirements = ExecutionRequirementsSchema.parse(item.requirements);
     }
+    const packageScripts = await readFile(join(context.repository, "package.json"), "utf8").then(
+      (text) => {
+        const parsed = JSON.parse(text) as { scripts?: unknown };
+        return parsed.scripts && typeof parsed.scripts === "object" ? parsed.scripts as Record<string,string> : {};
+      },
+      () => ({}),
+    );
+    const observedCommands = discoverValidationCommands({
+      files: context.repositoryFiles.map((path) => ({ path })), scripts: packageScripts,
+    });
+    objective = compileObjective({
+      title: context.objective.title,
+      baseSha: context.baseSha,
+      repositoryFacts: { files: context.repositoryFiles.map((path) => ({ path })), scripts: packageScripts },
+      workItems: providerObjective.workItems,
+    });
     objective = addScopeSerializationEdges(objective);
+    objective = canonicalizeObjective(objective as CompilerObjective) as unknown as CompiledObjective;
+    validateCompiledObjective(objective as CompilerObjective, observedCommands);
     validateGraph(objective);
     return { objective, usage };
   }
@@ -309,6 +357,9 @@ export class CodexCliManagementBackend implements ManagementBackend {
   }
 
   async #run<T>(cwd: string, schema: unknown, prompt: string): Promise<{ value: T; usage: ManagementUsage }> {
+    if (this.#options.runStructured) {
+      return await this.#options.runStructured(cwd, schema, prompt) as { value: T; usage: ManagementUsage };
+    }
     const codexHome = await (this.#options.createCodexHome ?? createIsolatedCodexHome)("management");
     try {
       const schemaPath = join(codexHome, "output.schema.json");

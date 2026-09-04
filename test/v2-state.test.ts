@@ -183,7 +183,7 @@ describe("provider-neutral v2 state", () => {
     ).toBe("inconsistent");
   });
 
-  it("requires merge, issue closure, and the integration receipt before done", () => {
+  it("accepts native merged-and-closed completion without inventing an integration receipt", () => {
     const published = attempt("AttemptPublished", {
       sequence: 2,
       artifactDigest: DIGEST,
@@ -220,6 +220,25 @@ describe("provider-neutral v2 state", () => {
     expect(deriveState(item({ linkedPullRequests: [mergedPull] }), NOW)).toBe(
       "inconsistent",
     );
+    expect(
+      deriveState(
+        item({ closed: true, linkedPullRequests: [mergedPull] }),
+        NOW,
+      ),
+    ).toBe("done");
+    expect(
+      deriveState(
+        item({
+          closed: true,
+          linkedPullRequests: [mergedPull],
+          factoryEvents: [
+            attempt("AttemptReserved"),
+            attempt("AttemptFailed", { sequence: 2 }),
+          ],
+        }),
+        NOW,
+      ),
+    ).toBe("done");
     expect(
       deriveState(item({ linkedPullRequests: [mergedPull], factoryEvents: [published] }), NOW),
     ).toBe("for_review");

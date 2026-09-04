@@ -58,7 +58,12 @@ export function deriveV2State(
   reservationStaleMs = RESERVATION_STALE_MS,
 ): WorkItemState {
   const events = eventsForCurrentAttempt(workItem);
+  const merged = workItem.linkedPullRequests.some((pr) => pr.state === "MERGED");
   if (events.length === 0) {
+    // A native closing reference plus the closed issue is conclusive GitHub
+    // state even when a maintainer integrated the work outside Factory. Do not
+    // invent an attempt receipt, and do not rerun code already on the base.
+    if (workItem.closed && merged) return "done";
     if (
       assignedToCopilot(workItem) ||
       workItem.linkedPullRequests.length > 0 ||
@@ -73,11 +78,10 @@ export function deriveV2State(
 
   if (inconsistentAttempt(events)) return "inconsistent";
   if (assignedToCopilot(workItem)) return "inconsistent";
-  const merged = workItem.linkedPullRequests.some((pr) => pr.state === "MERGED");
+  if (workItem.closed && merged) return "done";
   const integrated = events.some(
     (event) => event.kind === "attempt" && event.event === "AttemptIntegrated",
   );
-  if (workItem.closed && merged && integrated) return "done";
   if (workItem.closed && !merged) return "inconsistent";
   if (integrated && !merged) return "inconsistent";
   // A merge, issue close, and audit comment are separate GitHub mutations.

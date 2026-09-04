@@ -3,8 +3,11 @@ import {
   CircuitBreaker,
   ConcurrencyLimiter,
   ContentCreationPacer,
+  MutationScheduler,
   PlatformUnavailableError,
   classifyRefusal,
+  type MutationAdmission,
+  type MutationClass,
 } from "../platform.js";
 import type { AttemptStore } from "./attempts.js";
 import type { GitCommitObject, LeaseStore } from "./lease.js";
@@ -62,14 +65,12 @@ function responseDate(response: {
   return parsed;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 export interface GitHubControlStoreOptions extends GitHubOptions {
   circuitBreaker?: CircuitBreaker;
   pacer?: ContentCreationPacer;
   concurrency?: ConcurrencyLimiter;
+  mutationScheduler?: MutationAdmission;
+  beforeMutation?: (kind: MutationClass, waitedMs: number) => Promise<void>;
 }
 
 /** GitHub-backed v2 control store. Every mutation shares v1's pacing controls. */
@@ -80,6 +81,8 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
   readonly #breaker: CircuitBreaker;
   readonly #pacer: ContentCreationPacer;
   readonly #concurrency: ConcurrencyLimiter;
+  readonly #mutations: MutationAdmission;
+  readonly #beforeMutation: (kind: MutationClass, waitedMs: number) => Promise<void>;
   #repositoryId: string | null = null;
 
   constructor(options: GitHubControlStoreOptions) {
@@ -89,23 +92,39 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     this.#breaker = options.circuitBreaker ?? new CircuitBreaker();
     this.#pacer = options.pacer ?? new ContentCreationPacer();
     this.#concurrency = options.concurrency ?? new ConcurrencyLimiter();
+    this.#mutations = options.mutationScheduler ?? new MutationScheduler({
+      pacer: this.#pacer,
+      ...(options.onThrottle ? { onThrottle: options.onThrottle } : {}),
+    });
+    this.#beforeMutation = options.beforeMutation ?? (async () => {});
   }
 
-  async #call<T>(operation: () => Promise<T>, mutating = false): Promise<T> {
+  async #call<T>(
+    operation: () => Promise<T>,
+    mutating = false,
+    mutationClass: MutationClass = "normal",
+  ): Promise<T> {
     if (this.#breaker.isOpen()) {
       throw new PlatformUnavailableError(
         { kind: "rate_limit", retryAfterMs: this.#breaker.waitMs() },
         new Error("Factory GitHub circuit is open"),
       );
     }
-    if (mutating) {
-      const wait = this.#pacer.waitMs();
-      if (wait > 0) await sleep(wait);
-    }
+    const mutationPermit = mutating
+      ? await this.#mutations.acquire(mutationClass)
+      : undefined;
     const release = await this.#concurrency.acquire();
     try {
+      if (this.#breaker.isOpen()) {
+        throw new PlatformUnavailableError(
+          { kind: "rate_limit", retryAfterMs: this.#breaker.waitMs() },
+          new Error("Factory GitHub circuit opened while the request was queued"),
+        );
+      }
+      if (mutationPermit) {
+        await this.#beforeMutation(mutationClass, mutationPermit.waitedMs);
+      }
       const result = await operation();
-      if (mutating) this.#pacer.recordCall();
       this.#breaker.recordSuccess();
       return result;
     } catch (error) {
@@ -117,6 +136,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       throw error;
     } finally {
       release();
+      mutationPermit?.release();
     }
   }
 
@@ -179,6 +199,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
           parents: args.parentOids,
         }),
       true,
+      args.message.startsWith("Factory lease ") ? "lease" : "normal",
     );
     return response.data.sha;
   }
@@ -194,6 +215,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
             sha: oid,
           }),
         true,
+        ref.startsWith("refs/clockgrove-factory/leases/") ? "lease" : "normal",
       );
       return true;
     } catch (error) {
@@ -219,6 +241,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
             afterOid: args.afterOid,
           }),
         true,
+        args.ref.startsWith("refs/clockgrove-factory/leases/") ? "lease" : "normal",
       );
       return true;
     } catch (error) {

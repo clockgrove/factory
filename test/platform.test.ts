@@ -4,6 +4,7 @@ import {
   CircuitBreaker,
   ConcurrencyLimiter,
   ContentCreationPacer,
+  MutationScheduler,
   PlatformUnavailableError,
   classifyRefusal,
   isPlatformUnavailable,
@@ -311,6 +312,60 @@ describe("ContentCreationPacer", () => {
     const t0 = new Date("2026-01-01T00:00:00.000Z");
     p.recordCall(t0);
     expect(p.waitMs(new Date(t0.getTime() + 60_001))).toBe(0);
+  });
+
+  it("reserves hourly capacity for lease mutations", () => {
+    const p = new ContentCreationPacer(40, 5, 0);
+    const t0 = new Date("2026-01-01T00:00:00.000Z");
+    p.recordCall(t0);
+    p.recordCall(t0);
+    p.recordCall(t0);
+    expect(p.waitMs(t0, { hourlyReserve: 2 })).toBe(3_600_000);
+    expect(p.waitMs(t0)).toBe(0);
+  });
+
+  it("waits for enough samples to expire when lease traffic exceeds the normal cap", () => {
+    const p = new ContentCreationPacer(40, 5, 0);
+    const t0 = new Date("2026-01-01T00:00:00.000Z");
+    for (let offset = 0; offset < 5; offset += 1) {
+      p.recordCall(new Date(t0.getTime() + offset * 1_000));
+    }
+    expect(
+      p.waitMs(new Date(t0.getTime() + 5_000), { hourlyReserve: 2 }),
+    ).toBe(3_597_000);
+  });
+});
+
+describe("MutationScheduler", () => {
+  it("admits reserved lease traffic while a normal write waits", async () => {
+    const t0 = new Date("2026-01-01T00:00:00.000Z");
+    let now = t0;
+    let resumeSleep: (() => void) | undefined;
+    const pacer = new ContentCreationPacer(40, 3, 0);
+    pacer.recordCall(t0);
+    pacer.recordCall(t0);
+    const scheduler = new MutationScheduler({
+      pacer,
+      reservedLeaseMutationsPerHour: 1,
+      now: () => now,
+      sleep: (ms) => new Promise<void>((resolve) => {
+        resumeSleep = () => {
+          now = new Date(now.getTime() + ms + 1);
+          resolve();
+        };
+      }),
+    });
+
+    const normal = scheduler.acquire("normal");
+    await Promise.resolve();
+    expect(resumeSleep).toBeTypeOf("function");
+
+    const leasePermit = await scheduler.acquire("lease");
+    leasePermit.release();
+    resumeSleep!();
+    const normalPermit = await normal;
+    normalPermit.release();
+    expect(normalPermit.waitedMs).toBeGreaterThan(0);
   });
 });
 

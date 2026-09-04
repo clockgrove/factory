@@ -175,6 +175,12 @@ observed commit. The new commit records holder, run ID, monotonically increasing
 server-relative expiry, and policy digest. Launch, budget reservation, publication, validation, and
 integration all recheck current lease ownership and epoch.
 
+The default lease lasts ten minutes and renews with two minutes remaining. A renewal advances the
+lease commit and sequence but not its fencing epoch, so already-running operations from that same
+holder and epoch remain valid after re-reading the current ref. A different holder or epoch is still
+rejected. This cadence avoids spending two GitHub mutations roughly every 75 seconds merely to keep
+an active Director alive.
+
 This distinction is mandatory. Live conformance established that REST `force=false` prevents
 non-fast-forward updates on branch refs but permits sibling rewrites on custom refs. GraphQL
 `updateRefs.beforeOid` provides the required compare-and-swap on a custom ref without creating a
@@ -380,8 +386,12 @@ Local execution requires trusted repository and Objective provenance. External f
 authors, install-script changes, unrestricted network, secret-requiring tasks, and tests of newly
 supplied untrusted code route to an explicitly permitted sandbox or escalation.
 
-All GitHub writes continue through the shared circuit breaker, content-creation pacer, and concurrency
-limiter. A platform refusal stops mutation under the current lease. On recovery the interrupted
+All GitHub writes continue through the shared circuit breaker, mutation scheduler, content-creation
+pacer, and concurrency limiter. Mutations are issued serially and are priced at admission, including
+failed requests. Normal writes leave 24 hourly mutation slots reserved for lease acquisition and
+renewal. A paced normal write sleeps outside the priority gate and outside lease-renewal
+serialization, so a busy audit stream cannot starve the heartbeat. A platform refusal stops mutation
+under the current lease. On recovery the interrupted
 reservation is reconciled and marked `AttemptDeferred`; it remains in the audit and cost ledgers but
 does not consume a Work Item implementation attempt. A durable failed validation remains a real
 attempt failure.

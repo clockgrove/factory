@@ -46,8 +46,10 @@ import {
   CircuitBreaker,
   ConcurrencyLimiter,
   ContentCreationPacer,
+  MutationScheduler,
   PlatformUnavailableError,
   classifyRefusal,
+  type MutationAdmission,
 } from "./platform.js";
 
 /**
@@ -486,7 +488,8 @@ export interface GraphApplierOptions {
   circuitBreaker?: CircuitBreaker;
   pacer?: ContentCreationPacer;
   concurrency?: ConcurrencyLimiter;
-  beforeMutation?: () => Promise<void>;
+  mutationScheduler?: MutationAdmission;
+  beforeMutation?: (waitedMs: number) => Promise<void>;
 }
 
 export interface ExistingGraphWorkItem extends CreatedWorkItem {
@@ -515,7 +518,8 @@ export class GraphApplier {
   readonly #breaker: CircuitBreaker;
   readonly #pacer: ContentCreationPacer;
   readonly #concurrency: ConcurrencyLimiter;
-  readonly #beforeMutation: () => Promise<void>;
+  readonly #mutations: MutationAdmission;
+  readonly #beforeMutation: (waitedMs: number) => Promise<void>;
 
   constructor(opts: GraphApplierOptions) {
     this.#writer = opts.writer;
@@ -523,6 +527,10 @@ export class GraphApplier {
     this.#breaker = opts.circuitBreaker ?? new CircuitBreaker();
     this.#pacer = opts.pacer ?? new ContentCreationPacer();
     this.#concurrency = opts.concurrency ?? new ConcurrencyLimiter();
+    this.#mutations = opts.mutationScheduler ?? new MutationScheduler({
+      pacer: this.#pacer,
+      onThrottle: this.#notify,
+    });
     this.#beforeMutation = opts.beforeMutation ?? (async () => {});
   }
 
@@ -646,20 +654,23 @@ export class GraphApplier {
    * have to import the other to get pacing right.
    */
   async #call<T>(fn: () => Promise<T>): Promise<T> {
-    await this.#beforeMutation();
     if (this.#breaker.isOpen()) {
       const wait = this.#breaker.waitMs();
       this.#notify(`circuit open; waiting ${wait}ms before the next call`);
       await sleep(wait);
     }
 
-    const pacerWait = this.#pacer.waitMs();
-    if (pacerWait > 0) await sleep(pacerWait);
-
+    const mutationPermit = await this.#mutations.acquire("normal");
     const release = await this.#concurrency.acquire();
     try {
+      if (this.#breaker.isOpen()) {
+        throw new PlatformUnavailableError(
+          { kind: "rate_limit", retryAfterMs: this.#breaker.waitMs() },
+          new Error("Factory GitHub circuit opened while the graph write was queued"),
+        );
+      }
+      await this.#beforeMutation(mutationPermit.waitedMs);
       const result = await fn();
-      this.#pacer.recordCall();
       this.#breaker.recordSuccess();
       return result;
     } catch (error) {
@@ -669,6 +680,7 @@ export class GraphApplier {
       throw new PlatformUnavailableError(refusal, error);
     } finally {
       release();
+      mutationPermit.release();
     }
   }
 }

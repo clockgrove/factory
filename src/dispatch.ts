@@ -67,8 +67,10 @@ import {
   CircuitBreaker,
   ConcurrencyLimiter,
   ContentCreationPacer,
+  MutationScheduler,
   PlatformUnavailableError,
   classifyRefusal,
+  type MutationAdmission,
 } from "./platform.js";
 import {
   agentFailure,
@@ -458,6 +460,8 @@ export interface DispatcherOptions {
   circuitBreaker?: CircuitBreaker;
   pacer?: ContentCreationPacer;
   concurrency?: ConcurrencyLimiter;
+  mutationScheduler?: MutationAdmission;
+  beforeMutation?: (waitedMs: number) => Promise<void>;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -474,6 +478,8 @@ export class Dispatcher {
   readonly #breaker: CircuitBreaker;
   readonly #pacer: ContentCreationPacer;
   readonly #concurrency: ConcurrencyLimiter;
+  readonly #mutations: MutationAdmission;
+  readonly #beforeMutation: (waitedMs: number) => Promise<void>;
 
   constructor(opts: DispatcherOptions) {
     this.#writer = opts.writer;
@@ -485,6 +491,11 @@ export class Dispatcher {
     this.#breaker = opts.circuitBreaker ?? new CircuitBreaker();
     this.#pacer = opts.pacer ?? new ContentCreationPacer();
     this.#concurrency = opts.concurrency ?? new ConcurrencyLimiter();
+    this.#mutations = opts.mutationScheduler ?? new MutationScheduler({
+      pacer: this.#pacer,
+      onThrottle: this.#notify,
+    });
+    this.#beforeMutation = opts.beforeMutation ?? (async () => {});
   }
 
   /** True once the circuit has tripped repeatedly enough to need a human (§7.3). */
@@ -1046,13 +1057,17 @@ export class Dispatcher {
       await sleep(wait);
     }
 
-    const pacerWait = this.#pacer.waitMs();
-    if (pacerWait > 0) await sleep(pacerWait);
-
+    const mutationPermit = await this.#mutations.acquire("normal");
     const release = await this.#concurrency.acquire();
     try {
+      if (this.#breaker.isOpen()) {
+        throw new PlatformUnavailableError(
+          { kind: "rate_limit", retryAfterMs: this.#breaker.waitMs() },
+          new Error("Factory GitHub circuit opened while the dispatch write was queued"),
+        );
+      }
+      await this.#beforeMutation(mutationPermit.waitedMs);
       await fn();
-      this.#pacer.recordCall();
       this.#breaker.recordSuccess();
     } catch (error) {
       const refusal = classifyRefusal(error);
@@ -1061,6 +1076,7 @@ export class Dispatcher {
       throw new PlatformUnavailableError(refusal, error);
     } finally {
       release();
+      mutationPermit.release();
     }
   }
 }

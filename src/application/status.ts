@@ -306,6 +306,7 @@ function packetScope(item: ReadWorkItemSnapshot): {
 function activeReservations(
   snapshot: FactoryReadSnapshot,
   policy: RunPolicy,
+  runId: string,
 ): CapacityReservation[] {
   const effective = normalizeSchedulingPolicy(policy);
   return deriveCapacityReservations(
@@ -314,7 +315,7 @@ function activeReservations(
       return {
         objective: snapshot.number,
         workItem: item.number,
-        events: item.factoryEvents ?? [],
+        events: (item.factoryEvents ?? []).filter((event) => event.runId === runId),
         defaultCpu: effective.capacity.local.defaultCpu,
         defaultMemoryMb: effective.capacity.local.defaultMemoryMb,
         ...scope,
@@ -323,6 +324,7 @@ function activeReservations(
             .reverse()
             .find(
               (event) =>
+                event.runId === runId &&
                 event.kind === "attempt" &&
                 event.event === "AttemptReserved" &&
                 event.backend === backendId,
@@ -373,7 +375,10 @@ export function buildStatusReport(input: {
       };
     }
   }
-  const reservationValues = policy ? activeReservations(input.snapshot, policy) : [];
+  const reservationValues =
+    policy && run && !run.terminal
+      ? activeReservations(input.snapshot, policy, run.runId)
+      : [];
   const reservationByWorkItem = new Map(
     reservationValues.map((reservation) => [reservation.workItem, reservation]),
   );

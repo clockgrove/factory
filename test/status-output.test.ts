@@ -275,4 +275,24 @@ describe("bounded status, explain, and replay output", () => {
     expect(encoded).not.toContain("private-machine-id");
     expect(encoded).not.toContain("private-operator-name");
   });
+
+  it("does not report stale capacity after the latest run is terminal", () => {
+    const terminal = snapshot();
+    terminal.factoryEvents!.push(
+      event({
+        kind: "run",
+        event: "FactoryRunCompleted",
+        sequence: 6,
+        at: "2026-09-04T12:02:00.000Z",
+      }),
+    );
+    terminal.readAt = new Date("2026-09-04T12:02:00.000Z");
+    const report = buildStatusReport({
+      repository: "clockgrove/factory",
+      snapshot: terminal,
+    });
+    expect(report.run).toMatchObject({ state: "completed" });
+    expect(report.capacity.observed.active).toBe(0);
+    expect(report.capacity.activeReservations).toEqual([]);
+  });
 });

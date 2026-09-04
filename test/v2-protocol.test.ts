@@ -46,9 +46,11 @@ function runStarted(over: Partial<FactoryEvent> = {}): FactoryEvent {
 describe("v2 run policy", () => {
   it("defaults to local-only execution with bounded parallelism", () => {
     expect(DEFAULT_RUN_POLICY.backendOrder).toEqual(["codex-cli/local-worktree"]);
-    expect(DEFAULT_RUN_POLICY.maxParallel).toBe(2);
+    expect(DEFAULT_RUN_POLICY.maxParallel).toBe(8);
     expect(DEFAULT_RUN_POLICY.allowedPaidBackends).toEqual([]);
     expect(DEFAULT_RUN_POLICY.cloudFallback).toBe("never");
+    expect(DEFAULT_RUN_POLICY.capacity?.mode).toBe("adaptive-local");
+    expect(DEFAULT_RUN_POLICY.burst?.mode).toBe("never");
   });
 
   it("rejects a paid backend that was not explicitly allowed", () => {

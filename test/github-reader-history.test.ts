@@ -135,6 +135,20 @@ describe("GitHubReader Work Item history", () => {
                 },
                 assignees: { nodes: [] },
                 labels: { nodes: [{ name: "factory:work-item" }] },
+                issueFieldValues: {
+                  totalCount: 1,
+                  nodes: [
+                    {
+                      optionId: "urgent-option",
+                      name: "Urgent",
+                      field: {
+                        id: "IF_priority",
+                        name: "Priority",
+                        dataType: "SINGLE_SELECT",
+                      },
+                    },
+                  ],
+                },
                 blockedBy: { totalCount: 0, nodes: [] },
                 closedByPullRequestsReferences: {
                   nodes: [
@@ -216,5 +230,11 @@ describe("GitHubReader Work Item history", () => {
       priorRun,
     ]);
     expect(deriveV2State(workItem!, snapshot.readAt)).toBe("done");
+    expect(workItem).toMatchObject({
+      subIssuePosition: 0,
+      issueFieldValues: [
+        { fieldId: "IF_priority", optionId: "urgent-option" },
+      ],
+    });
   });
 });

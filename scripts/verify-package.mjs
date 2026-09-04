@@ -69,6 +69,7 @@ const EXPECTED_TOOLS = [
   "factory_cancel",
   "factory_status",
   "graph_apply",
+  "inspect_priority_fields",
   "read_objective",
   "read_pull_request_diff",
   "read_repository_file",

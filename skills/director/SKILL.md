@@ -20,8 +20,8 @@ Collect:
 - an absolute local checkout of that exact repository;
 - an optional complete run policy.
 
-If no policy was supplied, use Factory's local-only default. Never opt into paid backends or broaden
-trust on the user's behalf.
+If no policy was supplied, use Factory's adaptive local-only default (up to eight workers subject to
+measured CPU and memory headroom). Never opt into paid backends or broaden trust on the user's behalf.
 
 Call `factory_run` once with `untilTerminal: true`. Keep the call alive. It performs preflight,
 records/resumes the run, acquires the fenced GitHub lease, compiles and applies the graph, schedules

@@ -93,6 +93,7 @@ export interface StaleAttemptIdentity {
   attempt: number;
   runId: string;
   directorEpoch: number;
+  phase?: "execution" | "validation";
   providerResourceId?: string;
 }
 

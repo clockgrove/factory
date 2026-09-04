@@ -30,6 +30,17 @@ export function sandboxIdentity(context: AttemptContext | StaleAttemptIdentity):
   return raw.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-").slice(0, 63);
 }
 
+export function sandboxResourceName(
+  context: AttemptContext | StaleAttemptIdentity,
+  phase: "execution" | "validation" =
+    "phase" in context ? context.phase ?? "execution" : "execution",
+): string {
+  const identity = sandboxIdentity(context);
+  return phase === "validation"
+    ? `${identity.slice(0, 54)}-validate`
+    : identity;
+}
+
 export async function repositoryArchive(repository: string, baseSha: string): Promise<Buffer> {
   const path = join(
     tmpdir(),

@@ -17,7 +17,7 @@ import {
   parseIsolatedValidationResult,
   repositoryArchive,
   sandboxBootstrapFiles,
-  sandboxIdentity,
+  sandboxResourceName,
   sandboxValidationFiles,
 } from "./sandbox-common.js";
 
@@ -103,7 +103,7 @@ export class VercelSandboxBackend implements ExecutionBackend {
     }
     const networkPolicy: NetworkPolicy = { allow };
     const sandbox = await Sandbox.create({
-      name: sandboxIdentity(context),
+      name: sandboxResourceName(context),
       persistent: false,
       timeout: Math.max(1, context.deadline.getTime() - Date.now()),
       networkPolicy,
@@ -212,7 +212,7 @@ export class VercelSandboxBackend implements ExecutionBackend {
       allow[destination] ??= [];
     }
     const sandbox = await Sandbox.create({
-      name: `${sandboxIdentity(context).slice(0, 54)}-validate`,
+      name: sandboxResourceName(context, "validation"),
       persistent: false,
       timeout: Math.max(1, context.deadline.getTime() - Date.now()),
       networkPolicy: { allow },
@@ -265,7 +265,9 @@ export class VercelSandboxBackend implements ExecutionBackend {
 
   async reconcileStale(identity: StaleAttemptIdentity): Promise<void> {
     try {
-      const sandbox = await Sandbox.get({ name: sandboxIdentity(identity) });
+      const sandbox = await Sandbox.get({
+        name: sandboxResourceName(identity),
+      });
       await sandbox.stop();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

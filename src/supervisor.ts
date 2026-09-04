@@ -30,6 +30,7 @@ import { RunManager, type RunState } from "./control/runs.js";
 import type { FactoryEvent } from "./protocol/events.js";
 import {
   assertRequirementsWithinPolicy,
+  normalizeSchedulingPolicy,
   parseRunPolicy,
   policyDigest,
   type RunPolicy,
@@ -73,7 +74,37 @@ import {
   type LocalWorktree,
 } from "./runtime/local-worktree.js";
 import { runContainedProcess } from "./runtime/process-group.js";
-import { allDone, derive, ready, type DerivedWorkItem } from "./state.js";
+import {
+  allDone,
+  derive,
+  queuedSince,
+  ready,
+  type DerivedWorkItem,
+} from "./state.js";
+import {
+  admissionCapacityLimits,
+  planAdmissions,
+  type AdmissionProposal,
+  type AdmissionWorkItem,
+} from "./scheduling/admission.js";
+import {
+  CapacityLedger,
+  capacityReservationKey,
+  deriveCapacityReservations,
+  unreconciledCapacityReservations,
+  type CapacityReservation,
+} from "./scheduling/capacity-ledger.js";
+import { rankReadyWorkItems } from "./scheduling/priority.js";
+import { validatePriorityFieldDefinition } from "./scheduling/github-priority.js";
+import { ContinuousExecutionPool } from "./scheduling/continuous-refill.js";
+import { ObjectiveFairness } from "./scheduling/fairness.js";
+import {
+  CachedResourceSampler,
+  LinuxResourceSampler,
+  resourcePressureReasons,
+  type ResourceSampler,
+  type ResourceSnapshot,
+} from "./scheduling/resource-sampler.js";
 import {
   discardValidationResult,
   validateArtifactClean,
@@ -122,10 +153,18 @@ export interface RepositorySupervisorResources {
   concurrency: ConcurrencyLimiter;
   mutationScheduler: MutationScheduler;
   integration: <T>(operation: () => Promise<T>) => Promise<T>;
+  capacityLedger: CapacityLedger;
+  resourceSampler: ResourceSampler;
+  fairness: ObjectiveFairness;
+  controllerLimits: { maxLocalWorkers: number; maxPaidWorkers: number };
 }
 
 export function createRepositorySupervisorResources(
   onThrottle: (message: string) => void = () => {},
+  controllerLimits: {
+    maxLocalWorkers: number;
+    maxPaidWorkers: number;
+  } = { maxLocalWorkers: 8, maxPaidWorkers: 0 },
 ): RepositorySupervisorResources {
   const pacer = new ContentCreationPacer();
   let integrationTail = Promise.resolve();
@@ -134,6 +173,10 @@ export function createRepositorySupervisorResources(
     circuitBreaker: new CircuitBreaker(),
     concurrency: new ConcurrencyLimiter(),
     mutationScheduler: new MutationScheduler({ pacer, onThrottle }),
+    capacityLedger: new CapacityLedger(),
+    resourceSampler: new LinuxResourceSampler(),
+    fairness: new ObjectiveFairness(),
+    controllerLimits,
     integration: async <T>(operation: () => Promise<T>): Promise<T> => {
       const previous = integrationTail;
       let release!: () => void;
@@ -675,10 +718,18 @@ export class FactorySupervisor {
   readonly #breaker: CircuitBreaker;
   readonly #concurrency: ConcurrencyLimiter;
   readonly #mutations: MutationScheduler;
+  readonly #capacity: CapacityLedger;
+  readonly #resourceSampler: CachedResourceSampler;
+  readonly #fairness: ObjectiveFairness;
+  readonly #controllerLimits: {
+    maxLocalWorkers: number;
+    maxPaidWorkers: number;
+  };
   #sequences!: SequenceAllocator;
   #lease!: LeaseController;
   #run!: RunState;
   #baseBranch = "main";
+  #priorityFallbackReason: string | undefined;
   #budgetEvents: FactoryEvent[] = [];
   #integrationTail: Promise<void> = Promise.resolve();
   readonly #retryArtifacts = new RetryArtifactCache();
@@ -697,6 +748,21 @@ export class FactorySupervisor {
         pacer: this.#pacer,
         onThrottle: this.#notify,
       });
+    const scheduling = normalizeSchedulingPolicy(this.#policy);
+    this.#capacity = shared?.capacityLedger ?? new CapacityLedger();
+    this.#resourceSampler = new CachedResourceSampler(
+      shared?.resourceSampler ?? new LinuxResourceSampler(),
+      scheduling.capacity.local.sampleIntervalSeconds * 1_000,
+      scheduling.capacity.local.admissionCooldownSeconds * 1_000,
+    );
+    this.#fairness = shared?.fairness ?? new ObjectiveFairness();
+    this.#controllerLimits = shared?.controllerLimits ?? {
+      maxLocalWorkers: scheduling.capacity.local.maxWorkers,
+      maxPaidWorkers:
+        this.#policy.allowedPaidBackends.length === 0
+          ? 0
+          : scheduling.burst.maxCloudParallel,
+    };
     const github: GitHubOptions = {
       token: options.token,
       owner: options.owner,
@@ -885,6 +951,32 @@ export class FactorySupervisor {
           : "Objective was closed externally before all Work Items completed",
       );
     }
+    const priorityPolicy = normalizeSchedulingPolicy(this.#policy).priority;
+    if (priorityPolicy.source === "issue-field-then-subissue-order") {
+      let preflight;
+      try {
+        preflight = validatePriorityFieldDefinition(
+          priorityPolicy,
+          await this.#reader.readPriorityFields(),
+        );
+      } catch (error) {
+        preflight = {
+          available: false as const,
+          reason: `priority field inspection failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        };
+      }
+      if (!preflight.available) {
+        if (priorityPolicy.onUnavailable === "escalate") {
+          return this.#startlessEscalation(preflight.reason);
+        }
+        this.#priorityFallbackReason = preflight.reason;
+        this.#notify(
+          `${preflight.reason}; falling back to native sub-issue order for this run`,
+        );
+      }
+    }
     assertGraphQlAdmissionHeadroom(
       snapshot.graphQlRateLimit,
       this.#policy,
@@ -1023,6 +1115,8 @@ export class FactorySupervisor {
     const deadline =
       this.#run.startedAt.getTime() +
       this.#policy.objectiveTimeoutMinutes * 60_000;
+    const activeExecutions = new ContinuousExecutionPool<number>();
+    this.#fairness.register(this.#options.objective);
 
     try {
       const observedGraph = inspectCompiledGraph(snapshot);
@@ -1267,8 +1361,9 @@ export class FactorySupervisor {
 
         const recoverable = objective.items.filter(
           (item) =>
-            ["reserved", "in_flight", "validating"].includes(item.state) ||
-            (item.state === "failed" && this.#hasUnfinishedAttempt(item)),
+            !activeExecutions.has(item.number) &&
+            (["reserved", "in_flight", "validating"].includes(item.state) ||
+              (item.state === "failed" && this.#hasUnfinishedAttempt(item))),
         );
         if (recoverable.length > 0) {
           for (const item of recoverable) {
@@ -1278,35 +1373,249 @@ export class FactorySupervisor {
         }
         const runnable = ready(objective).filter(
           (item, index, all) =>
+            !activeExecutions.has(item.number) &&
             item.attempts < this.#policy.maxAttemptsPerItem &&
             all.findIndex((candidate) => candidate.number === item.number) ===
               index,
         );
-        if (runnable.length === 0) {
+        const scheduling = normalizeSchedulingPolicy(this.#policy);
+        const durableCapacity = deriveCapacityReservations(
+          objective.items.map((item) => {
+            const packet = parseWorkerPacketFromIssue(item.body ?? "");
+            return {
+              objective: objective.number,
+              workItem: item.number,
+              events: item.factoryEvents ?? [],
+              defaultCpu: scheduling.capacity.local.defaultCpu,
+              defaultMemoryMb: scheduling.capacity.local.defaultMemoryMb,
+              paths: packet.allowedPaths,
+              exclusiveResources: packet.changeSurface?.exclusiveResources ?? [],
+              isLocalBackend: (id: string) => {
+                const capabilities = this.#registry.get(id)?.capabilities;
+                return Boolean(
+                  capabilities?.hostExecution &&
+                    !capabilities.requiresPaidRuntime,
+                );
+              },
+            };
+          }),
+        );
+        const capacity = this.#capacity.reconcileObjective(
+          objective.number,
+          durableCapacity,
+        );
+        this.#fairness.reportDemand(objective.number, runnable.length);
+        const objectiveLocalMax = this.#fairness.localMaximum(
+          objective.number,
+          Math.min(
+            scheduling.capacity.local.maxWorkers,
+            this.#controllerLimits.maxLocalWorkers,
+          ),
+          capacity.reservations,
+        );
+        this.#budgetEvents = deduplicateFactoryEvents([
+          ...this.#budgetEvents,
+          ...snapshotEvents(snapshot).filter(
+            (event) => event.runId === this.#run.runId,
+          ),
+        ]);
+        const availableBudget = remainingBudget(
+          this.#policy,
+          deriveBudgetUsage(this.#budgetEvents),
+        );
+        const nowMs = snapshot.readAt.getTime();
+        let resource: ResourceSnapshot | null = null;
+        if (scheduling.capacity.mode === "adaptive-local") {
+          resource = await this.#resourceSampler.sample(nowMs).catch((error) => {
+            this.#notify(
+              `local resource sampling failed closed: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            return null;
+          });
+        }
+        const ranked = rankReadyWorkItems(
+          objective.items,
+          scheduling.priority,
+          this.#priorityFallbackReason,
+        )
+          .filter((rankedItem) =>
+            runnable.some((item) => item.number === rankedItem.item.number),
+          );
+        const admissionItems: AdmissionWorkItem[] = await Promise.all(
+          ranked.map(async (priority) => {
+            const original = parseWorkerPacketFromIssue(priority.item.body ?? "");
+            const packet = parseWorkerPacket({
+              ...original,
+              requirements: {
+                ...original.requirements,
+                ...(this.#policy.trust === "sandbox_untrusted" &&
+                original.requirements.trust === "trusted_local"
+                  ? { trust: "isolated" as const }
+                  : {}),
+              },
+            });
+            const timeoutMs = Math.min(
+              (packet.requirements.timeoutMinutes ??
+                this.#policy.workItemTimeoutMinutes) * 60_000,
+              Math.max(1, deadline - nowMs),
+            );
+            const nextAttempt =
+              (priority.item.factoryEvents ?? []).reduce(
+                (highest, event) =>
+                  event.kind === "attempt"
+                    ? Math.max(highest, event.attempt)
+                    : highest,
+                0,
+              ) + 1;
+            const queuedAt = queuedSince(priority.item, this.#run.runId);
+            return {
+              priority,
+              requirements: packet.requirements,
+              backends: await this.#registry.evaluate({
+                policy: this.#policy,
+                requirements: packet.requirements,
+                nowMs,
+              }),
+              ...(packet.requirements.trust === "trusted_local"
+                ? {}
+                : {
+                    validators:
+                      await this.#registry.evaluateIsolatedValidators({
+                        policy: this.#policy,
+                        requirements: packet.requirements,
+                        nowMs,
+                      }),
+                  }),
+              nextAttempt,
+              estimatedDurationMs: timeoutMs,
+              paths: packet.allowedPaths,
+              exclusiveResources:
+                packet.changeSurface?.exclusiveResources ?? [],
+              ...(queuedAt ? { queuedSince: queuedAt } : {}),
+            };
+          }),
+        );
+        const plan = planAdmissions({
+          objective: objective.number,
+          policy: this.#policy,
+          workItems: admissionItems,
+          capacity,
+          budget: availableBudget,
+          resource,
+          nowMs,
+          objectiveDeadlineMs: deadline,
+          cooldownUntilMs: this.#resourceSampler.cooldownUntil,
+          leaseValid: true,
+          objectiveLocalMax,
+          repositoryLimits: this.#controllerLimits,
+        });
+        if (plan.queued.some((decision) => decision.code === "local-pressure")) {
+          this.#resourceSampler.notePressure(nowMs);
+        }
+        const newQueueReceipts = plan.queued.filter(
+          (decision) => decision.recordQueueStart,
+        );
+        if (plan.admissions.length + newQueueReceipts.length > 0) {
+          assertGraphQlAdmissionHeadroom(
+            snapshot.graphQlRateLimit,
+            this.#policy,
+            Math.max(1, plan.admissions.length),
+            this.#notify,
+            newQueueReceipts.length,
+          );
+        }
+        for (const decision of newQueueReceipts) {
+          const item = objective.items.find(
+            (candidate) => candidate.number === decision.workItem,
+          )!;
+          await this.#lease.use((lease) =>
+            this.#attempts.recordQueued({
+              lease,
+              workItem: item.number,
+              workItemNodeId: item.id,
+              sequence: this.#sequences.take(),
+              reason: `${decision.code}: ${decision.reason}`,
+              observedPriorityRank: decision.observedPriorityRank,
+              observedSubIssuePosition: decision.observedSubIssuePosition,
+            }),
+          );
+        }
+        const permanent = plan.queued.find((decision) => decision.permanent);
+        if (permanent) {
+          const item = objective.items.find(
+            (candidate) => candidate.number === permanent.workItem,
+          )!;
+          return await this.#escalate(
+            runManager,
+            snapshot,
+            item,
+            `${permanent.code}: ${permanent.reason}`,
+          );
+        }
+        let expectedCapacityGeneration = capacity.generation;
+        const limits = admissionCapacityLimits(
+          this.#policy,
+          resource,
+          objective.number,
+          objectiveLocalMax,
+          this.#controllerLimits,
+        );
+        const started: number[] = [];
+        let capacityChanged = false;
+        for (const admission of plan.admissions) {
+          const item = objective.items.find(
+            (candidate) => candidate.number === admission.workItem,
+          )!;
+          const committed = this.#capacity.tryReserve(
+            expectedCapacityGeneration,
+            admission.reservation,
+            limits,
+          );
+          if (!committed.reserved) {
+            this.#notify(
+              `Work Item #${item.number} returned to queue: ${committed.code}`,
+            );
+            capacityChanged = true;
+            break;
+          }
+          expectedCapacityGeneration = committed.generation;
+          started.push(item.number);
+          let executionCapacityReleased = false;
+          const releaseExecutionCapacity = () => {
+            if (executionCapacityReleased) return;
+            executionCapacityReleased = true;
+            this.#capacity.release(admission.reservation.key);
+          };
+          activeExecutions.start(
+            item.number,
+            () =>
+              this.#execute(
+                item,
+                deadline,
+                admission,
+                releaseExecutionCapacity,
+              ),
+            releaseExecutionCapacity,
+          );
+        }
+        if (started.length > 0) {
+          this.#notify(
+            `admitted: ${started.map((number) => `#${number}`).join(", ")}`,
+          );
+        }
+        if (capacityChanged) continue;
+        if (activeExecutions.size === 0) {
           await sleep(
             this.#options.pollIntervalMs ?? 60_000,
             this.#options.signal,
           );
           continue;
         }
-        const wave = runnable.slice(0, this.#policy.maxParallel);
-        assertGraphQlAdmissionHeadroom(
-          snapshot.graphQlRateLimit,
-          this.#policy,
-          wave.length,
-          this.#notify,
+        const settled = await activeExecutions.waitForChange(
+          this.#options.pollIntervalMs ?? 2_000,
+          this.#options.signal,
         );
-        this.#notify(
-          `starting wave: ${wave.map((item) => `#${item.number}`).join(", ")}`,
-        );
-        const waveResults = await Promise.allSettled(
-          wave.map((item) => this.#execute(item, deadline)),
-        );
-        const rejected = waveResults.find(
-          (result): result is PromiseRejectedResult =>
-            result.status === "rejected",
-        );
-        if (rejected) throw rejected.reason;
+        if (settled?.error) throw settled.error;
       }
     } catch (error) {
       if (
@@ -1334,12 +1643,16 @@ export class FactorySupervisor {
       );
     } finally {
       clearInterval(heartbeat);
+      await activeExecutions.settle();
+      this.#fairness.unregister(this.#options.objective);
     }
   }
 
   async #execute(
     item: DerivedWorkItem,
     objectiveDeadline: number,
+    admission: AdmissionProposal,
+    releaseExecutionCapacity: () => void,
   ): Promise<void> {
     let reservation: AttemptReservation | undefined;
     let worker: LocalWorktree | undefined;
@@ -1356,7 +1669,14 @@ export class FactorySupervisor {
     let executionBudgetReconciled = false;
     let validationBudgetReserved = false;
     let validationBudgetReconciled = false;
+    let validationBudgetUnit:
+      | "sandbox_milliseconds"
+      | "managed_sessions"
+      | undefined;
     let validationStartedAt: number | undefined;
+    let validationCapacity: CapacityReservation | undefined;
+    let validationCapacityRecorded = false;
+    let validationCapacityReconciled = false;
     let retryableArtifact: NormalizedArtifact | undefined;
     const started = Date.now();
     try {
@@ -1410,35 +1730,71 @@ export class FactorySupervisor {
           this.#policy,
           deriveBudgetUsage(this.#budgetEvents),
         );
-        const choice = await this.#registry.select({
-          policy: this.#policy,
-          requirements: packet.requirements,
-          budget: budgets,
-          estimatedDurationMs: timeoutMs,
-        });
-        selected = choice.backend;
+        selected = this.#registry.get(admission.backendId) ?? undefined;
+        if (!selected) {
+          throw new Error(`admitted backend ${admission.backendId} is no longer registered`);
+        }
+        if (
+          admission.reservedBudget.unit === "sandbox_milliseconds" &&
+          budgets.sandboxMinutes * 60_000 < admission.reservedBudget.amount
+        ) {
+          throw new Error("sandbox-minute budget changed after admission planning");
+        }
+        if (
+          admission.reservedBudget.unit === "managed_sessions" &&
+          budgets.managedAgentSessions < admission.reservedBudget.amount
+        ) {
+          throw new Error("managed-session budget changed after admission planning");
+        }
         budgetUnit =
-          choice.backend.capabilities.id === "github-copilot/github-managed"
+          selected.capabilities.id === "github-copilot/github-managed"
             ? "managed_sessions"
-            : choice.backend.capabilities.id.includes("daytona") ||
-                choice.backend.capabilities.id.includes("vercel-sandbox")
+            : selected.capabilities.id.includes("daytona") ||
+                selected.capabilities.id.includes("vercel-sandbox")
               ? "sandbox_milliseconds"
               : "local_milliseconds";
+        const admittedExecutionUnit =
+          budgetUnit === "sandbox_milliseconds"
+            ? "sandbox_milliseconds"
+            : budgetUnit === "managed_sessions"
+              ? "managed_sessions"
+              : "none";
+        if (admission.reservedBudget.unit !== admittedExecutionUnit) {
+          throw new Error("admitted backend native budget unit changed before commit");
+        }
         if (packet.requirements.trust !== "trusted_local") {
-          const afterExecution = {
-            ...budgets,
-            sandboxMinutes:
-              budgets.sandboxMinutes -
-              (budgetUnit === "sandbox_milliseconds" ? timeoutMs / 60_000 : 0),
-          };
-          validator = (
-            await this.#registry.selectIsolatedValidator({
-              policy: this.#policy,
-              requirements: packet.requirements,
-              budget: afterExecution,
-              estimatedDurationMs: timeoutMs,
-            })
-          ).backend;
+          if (!admission.validation) {
+            throw new Error("isolated work was admitted without a pinned validator");
+          }
+          validator = this.#registry.get(admission.validation.backendId) ?? undefined;
+          if (!validator?.validate || !validator.probeValidation) {
+            throw new Error(
+              `admitted validator ${admission.validation.backendId} is no longer registered`,
+            );
+          }
+          if (
+            budgets.sandboxMinutes * 60_000 <
+              (admission.reservedBudget.unit === "sandbox_milliseconds"
+                ? admission.reservedBudget.amount
+                : 0) +
+                (admission.validation.reservedBudget.unit ===
+                "sandbox_milliseconds"
+                  ? admission.validation.reservedBudget.amount
+                  : 0)
+          ) {
+            throw new Error("sandbox-minute budget changed after validation admission planning");
+          }
+          if (
+            budgets.managedAgentSessions <
+            (admission.reservedBudget.unit === "managed_sessions"
+              ? admission.reservedBudget.amount
+              : 0) +
+              (admission.validation.reservedBudget.unit === "managed_sessions"
+                ? admission.validation.reservedBudget.amount
+                : 0)
+          ) {
+            throw new Error("managed-session budget changed after validation admission planning");
+          }
         }
         // Admission is the durable attempt-ref creation, rather than the
         // preceding local backend choice.  Fence immediately before it.
@@ -1455,12 +1811,39 @@ export class FactorySupervisor {
           lease,
           workItem: item.number,
           workItemNodeId: item.id,
-          backend: choice.backend.capabilities.id,
+          backend: selected.capabilities.id,
           base,
           sequence: this.#sequences.take(),
+          admission: {
+            admissionClass: admission.admissionClass,
+            admissionReason: admission.admissionReason,
+            requestedCpu: admission.requirements.cpu,
+            requestedMemoryMb: admission.requirements.memoryMb,
+            priorityRank: admission.priority.rank,
+            ...(admission.priority.fieldId
+              ? { priorityFieldId: admission.priority.fieldId }
+              : {}),
+            ...(admission.priority.optionId
+              ? { priorityOptionId: admission.priority.optionId }
+              : {}),
+            subIssuePosition: admission.priority.subIssuePosition,
+            criticalPathLength: admission.priority.criticalPathLength,
+            unfinishedDownstream: admission.priority.unfinishedDownstream,
+            ...(admission.capacity
+              ? {
+                  capacityMeasuredAt: admission.capacity.measuredAt,
+                  effectiveCpu: admission.capacity.effectiveCpu,
+                  availableMemoryMb: admission.capacity.availableMemoryMb,
+                  loadRatio: admission.capacity.loadRatio,
+                  memoryUsageRatio: admission.capacity.memoryUsageRatio,
+                }
+              : {}),
+          },
         });
         const reservedAmount =
-          budgetUnit === "managed_sessions" ? 1 : timeoutMs;
+          admission.reservedBudget.unit === "none"
+            ? timeoutMs
+            : admission.reservedBudget.amount;
         const budgetEvent = await this.#recorder.budget({
           lease,
           workItemNodeId: item.id,
@@ -1472,16 +1855,21 @@ export class FactorySupervisor {
         });
         this.#budgetEvents.push(budgetEvent);
         executionBudgetReserved = true;
-        if (validator) {
+        if (
+          validator &&
+          admission.validation &&
+          admission.validation.reservedBudget.unit !== "none"
+        ) {
+          validationBudgetUnit = admission.validation.reservedBudget.unit;
           const validationBudget = await this.#recorder.budget({
             lease,
             workItemNodeId: item.id,
             reservation,
             sequence: this.#sequences.take(),
             event: "BudgetReserved",
-            unit: "sandbox_milliseconds",
+            unit: validationBudgetUnit,
             phase: "validation",
-            amount: timeoutMs,
+            amount: admission.validation.reservedBudget.amount,
           });
           this.#budgetEvents.push(validationBudget);
           validationBudgetReserved = true;
@@ -1583,6 +1971,115 @@ export class FactorySupervisor {
         this.#budgetEvents.push(event);
         executionBudgetReconciled = true;
       });
+      const validationBackendId =
+        validator?.capabilities.id ?? "factory/local-validation";
+      validationCapacity = {
+        key: capacityReservationKey({
+          objective: reservation.objective,
+          workItem: reservation.workItem,
+          attempt: reservation.attempt,
+          phase: "validation",
+          backendId: validationBackendId,
+        }),
+        objective: reservation.objective,
+        workItem: reservation.workItem,
+        attempt: reservation.attempt,
+        phase: "validation",
+        backendId: validationBackendId,
+        admissionClass:
+          !validator ||
+          (validator.capabilities.hostExecution &&
+            !validator.capabilities.requiresPaidRuntime)
+            ? "local"
+            : "remote-required",
+        local:
+          !validator ||
+          (validator.capabilities.hostExecution &&
+            !validator.capabilities.requiresPaidRuntime),
+        cpu: admission.requirements.cpu,
+        memoryMb: admission.requirements.memoryMb,
+        paidUnits: validator?.capabilities.requiresPaidRuntime ? 1 : 0,
+        paths: admission.reservation.paths,
+        exclusiveResources: admission.reservation.exclusiveResources,
+      };
+      for (;;) {
+        await this.#lease.renewIfNeeded();
+        if (Date.now() >= objectiveDeadline) {
+          throw new Error("Objective timeout exhausted while awaiting validation capacity");
+        }
+        let validationResource: ResourceSnapshot | null = null;
+        const effective = normalizeSchedulingPolicy(this.#policy);
+        if (
+          validationCapacity.local &&
+          effective.capacity.mode === "adaptive-local"
+        ) {
+          validationResource = await this.#resourceSampler
+            .sample(Date.now())
+            .catch(() => null);
+          const pressure = validationResource
+            ? resourcePressureReasons(
+                validationResource,
+                effective.capacity.local,
+              )
+            : ["resource sample unavailable"];
+          if (
+            pressure.length > 0 ||
+            this.#resourceSampler.coolingDown(Date.now())
+          ) {
+            if (pressure.length > 0) {
+              this.#resourceSampler.notePressure(Date.now());
+            }
+            await sleep(
+              this.#options.pollIntervalMs ?? 2_000,
+              this.#options.signal,
+            );
+            continue;
+          }
+        }
+        const current = this.#capacity.snapshot();
+        const transitioned = this.#capacity.transition(
+          current.generation,
+          admission.reservation.key,
+          validationCapacity,
+          admissionCapacityLimits(
+            this.#policy,
+            validationResource,
+            this.#run.objective,
+            this.#fairness.localMaximum(
+              this.#run.objective,
+              Math.min(
+                effective.capacity.local.maxWorkers,
+                this.#controllerLimits.maxLocalWorkers,
+              ),
+              current.reservations,
+            ),
+            this.#controllerLimits,
+          ),
+        );
+        if (transitioned.reserved) break;
+        if (transitioned.code === "duplicate-reservation") {
+          throw new Error("execution capacity disappeared before validation transition");
+        }
+        await sleep(
+          this.#options.pollIntervalMs ?? 2_000,
+          this.#options.signal,
+        );
+      }
+      releaseExecutionCapacity();
+      await this.#lease.use(async (lease) => {
+        await this.#attempts.recordCapacity({
+          lease,
+          workItemNodeId: item.id,
+          reservation: reservation!,
+          sequence: this.#sequences.take(),
+          event: "CapacityReserved",
+          phase: "validation",
+          backend: validationCapacity!.backendId,
+          requestedCpu: validationCapacity!.cpu,
+          requestedMemoryMb: validationCapacity!.memoryMb,
+        });
+        validationCapacityRecorded = true;
+      });
       await this.#lease.use((lease) =>
         this.#attempts.record({
           lease,
@@ -1629,6 +2126,21 @@ export class FactorySupervisor {
         }),
       );
       await this.#lease.use(async (lease) => {
+        await this.#attempts.recordCapacity({
+          lease,
+          workItemNodeId: item.id,
+          reservation: reservation!,
+          sequence: this.#sequences.take(),
+          event: "CapacityReconciled",
+          phase: "validation",
+          backend: validationCapacity!.backendId,
+          requestedCpu: validationCapacity!.cpu,
+          requestedMemoryMb: validationCapacity!.memoryMb,
+        });
+        validationCapacityReconciled = true;
+      });
+      this.#capacity.release(validationCapacity.key);
+      await this.#lease.use(async (lease) => {
         const event = await this.#recorder.budget({
           lease,
           workItemNodeId: item.id,
@@ -1639,16 +2151,19 @@ export class FactorySupervisor {
           amount: Date.now() - validationStarted,
         });
         this.#budgetEvents.push(event);
-        if (validator) {
+        if (validator && validationBudgetUnit) {
           const sandboxEvent = await this.#recorder.budget({
             lease,
             workItemNodeId: item.id,
             reservation: reservation!,
             sequence: this.#sequences.take(),
             event: "BudgetReconciled",
-            unit: "sandbox_milliseconds",
+            unit: validationBudgetUnit,
             phase: "validation",
-            amount: Date.now() - validationStarted,
+            amount:
+              validationBudgetUnit === "managed_sessions"
+                ? 1
+                : Date.now() - validationStarted,
           });
           this.#budgetEvents.push(sandboxEvent);
           validationBudgetReconciled = true;
@@ -1781,6 +2296,29 @@ export class FactorySupervisor {
         await this.#store.closePullRequest(published.number).catch(() => {});
       }
       if (reservation) {
+        if (
+          validationCapacity &&
+          validationCapacityRecorded &&
+          !validationCapacityReconciled
+        ) {
+          await this.#lease
+            .use(async (lease) => {
+              await this.#attempts.recordCapacity({
+                lease,
+                workItemNodeId: item.id,
+                reservation: reservation!,
+                sequence: this.#sequences.take(),
+                event: "CapacityReconciled",
+                phase: "validation",
+                backend: validationCapacity!.backendId,
+                requestedCpu: validationCapacity!.cpu,
+                requestedMemoryMb: validationCapacity!.memoryMb,
+                reason: "validation ended before its normal capacity receipt",
+              });
+              validationCapacityReconciled = true;
+            })
+            .catch(() => {});
+        }
         if (executionBudgetReserved && !executionBudgetReconciled) {
           await this.#lease.use(async (lease) => {
             const event = await this.#recorder.budget({
@@ -1797,7 +2335,12 @@ export class FactorySupervisor {
             executionBudgetReconciled = true;
           });
         }
-        if (validationBudgetReserved && !validationBudgetReconciled) {
+        if (
+          validationBudgetReserved &&
+          !validationBudgetReconciled &&
+          validationBudgetUnit
+        ) {
+          const unit = validationBudgetUnit;
           await this.#lease.use(async (lease) => {
             const event = await this.#recorder.budget({
               lease,
@@ -1805,10 +2348,12 @@ export class FactorySupervisor {
               reservation: reservation!,
               sequence: this.#sequences.take(),
               event: "BudgetReconciled",
-              unit: "sandbox_milliseconds",
+              unit,
               phase: "validation",
               amount: validationStartedAt
-                ? Date.now() - validationStartedAt
+                ? unit === "managed_sessions"
+                  ? 1
+                  : Date.now() - validationStartedAt
                 : 0,
             });
             this.#budgetEvents.push(event);
@@ -1837,6 +2382,7 @@ export class FactorySupervisor {
       if (handle && selected) await selected.cleanup(handle).catch(() => {});
       if (worker) await cleanupLocalWorktree(worker).catch(() => {});
       if (validation) await discardValidationResult(validation).catch(() => {});
+      if (validationCapacity) this.#capacity.release(validationCapacity.key);
     }
   }
 
@@ -2034,6 +2580,61 @@ export class FactorySupervisor {
     }
   }
 
+  async #reconcileInterruptedValidationCapacity(
+    item: DerivedWorkItem,
+    reservation: AttemptReservation,
+    events: readonly FactoryEvent[],
+  ): Promise<void> {
+    const validationFinished = events.some(
+      (event) =>
+        event.kind === "validation" &&
+        event.workItem === item.number &&
+        event.attempt === reservation.attempt,
+    );
+    for (const capacity of unreconciledCapacityReservations(events)) {
+      if (
+        capacity.phase !== "validation" ||
+        capacity.workItem !== item.number ||
+        capacity.attempt !== reservation.attempt
+      ) {
+        continue;
+      }
+      if (!validationFinished && capacity.backend !== "factory/local-validation") {
+        const backend = this.#registry.get(capacity.backend);
+        if (!backend?.reconcileStale) {
+          throw new Error(
+            `validation backend ${capacity.backend} cannot prove its stale resource was stopped`,
+          );
+        }
+        await backend.reconcileStale({
+          objective: reservation.objective,
+          workItem: reservation.workItem,
+          attempt: reservation.attempt,
+          runId: reservation.runId,
+          directorEpoch: reservation.directorEpoch,
+          phase: "validation",
+        });
+      }
+      await this.#lease.use((lease) =>
+        this.#attempts.recordCapacity({
+          lease,
+          workItemNodeId: item.id,
+          reservation,
+          sequence: this.#sequences.take(),
+          event: "CapacityReconciled",
+          phase: "validation",
+          backend: capacity.backend,
+          requestedCpu: capacity.requestedCpu,
+          requestedMemoryMb: capacity.requestedMemoryMb,
+          reason: validationFinished
+            ? "recovered completed validation capacity"
+            : "recovered interrupted validation capacity after proving the resource absent",
+          allowRecovery: true,
+        }),
+      );
+    }
+  }
+
   async #recoverInterrupted(
     item: DerivedWorkItem,
     deadline: number,
@@ -2065,6 +2666,12 @@ export class FactorySupervisor {
       .find((event) => event.kind === "validation");
     const semanticallyAccepted = events.some(
       (event) => event.kind === "attempt" && event.event === "AttemptValidated",
+    );
+
+    await this.#reconcileInterruptedValidationCapacity(
+      item,
+      reservation,
+      events,
     );
 
     if (
@@ -2153,6 +2760,7 @@ export class FactorySupervisor {
         attempt: reservation.attempt,
         runId: reservation.runId,
         directorEpoch: reservation.directorEpoch,
+        phase: "execution",
         ...(providerResourceId ? { providerResourceId } : {}),
       });
     } else if (

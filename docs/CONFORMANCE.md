@@ -17,6 +17,11 @@ Its [failure record](release-evidence/local-objective-failure-2026-09-04.json) p
 acceptance check and unavailable historical model usage. It closes no live gate; missing token
 receipts are not evidence of zero consumption.
 
+The [same-Objective retry](release-evidence/local-objective-stream-failure-2026-09-04.json) exposed
+incorrect selection of an intermediate agent message as structured output. Failed-call accounting
+did persist 29,407 model tokens in GitHub this time. This is live evidence for that accounting path,
+not successful compilation or execution.
+
 | Surface | Evidence | Status |
 |---|---|---|
 | GitHub custom control refs | Live custom-ref, metadata-commit, workflow-side-effect, and GraphQL compare-and-swap probes against `clockgrove/factory` | Passed |

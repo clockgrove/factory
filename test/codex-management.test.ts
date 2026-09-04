@@ -213,7 +213,7 @@ describe("Codex management backend", () => {
     );
   });
 
-  it("rejects duplicate structured results and duplicate completions", () => {
+  it("rejects duplicate completions", () => {
     const result = JSON.stringify({
       type: "item.completed",
       item: { type: "agent_message", text: JSON.stringify({ ok: true }) },
@@ -222,11 +222,71 @@ describe("Codex management backend", () => {
       type: "turn.completed",
       usage: { input_tokens: 1, output_tokens: 2 },
     });
-    expect(() => parseManagementJsonlOutput(`${result}\n${result}\n${completed}`)).toThrow(
-      /multiple structured results/,
-    );
     expect(() => parseManagementJsonlOutput(`${result}\n${completed}\n${completed}`)).toThrow(
       /multiple turn\.completed events/,
+    );
+  });
+
+  it("uses the terminal agent response after natural-language progress and tool events", () => {
+    const stdout = [
+      {
+        type: "item.completed",
+        item: { id: "progress", type: "agent_message", text: "I’ll check the repository first." },
+      },
+      {
+        type: "item.completed",
+        item: { id: "tool", type: "command_execution", aggregated_output: "repository files" },
+      },
+      {
+        type: "item.completed",
+        item: { id: "intermediate", type: "agent_message", text: '{"intermediate":true}' },
+      },
+      {
+        type: "item.completed",
+        item: { id: "final", type: "agent_message", text: '{"final":true}' },
+      },
+      { type: "turn.completed", usage: { input_tokens: 20, output_tokens: 7 } },
+    ]
+      .map((event) => JSON.stringify(event))
+      .join("\n");
+    expect(parseManagementJsonlOutput(stdout)).toEqual({
+      value: { final: true },
+      usage: { inputTokens: 20, outputTokens: 7 },
+    });
+  });
+
+  it.each(["invalid final response", ""])(
+    "refuses a %j final response despite earlier valid JSON",
+    (text) => {
+      const stdout = [
+        { type: "item.completed", item: { type: "agent_message", text: '{"ok":true}' } },
+        { type: "item.completed", item: { type: "agent_message", text } },
+        { type: "turn.completed", usage: { input_tokens: 20, output_tokens: 7 } },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join("\n");
+      let observed: unknown;
+      try {
+        parseManagementJsonlOutput(stdout);
+      } catch (error) {
+        observed = error;
+      }
+      expect(observed).toBeInstanceOf(ManagementOutputError);
+      expect(observed).toMatchObject({ usage: { inputTokens: 20, outputTokens: 7 } });
+    },
+  );
+
+  it("refuses another agent message after the terminal boundary", () => {
+    const result = JSON.stringify({
+      type: "item.completed",
+      item: { type: "agent_message", text: '{"ok":true}' },
+    });
+    const completed = JSON.stringify({
+      type: "turn.completed",
+      usage: { input_tokens: 20, output_tokens: 7 },
+    });
+    expect(() => parseManagementJsonlOutput(`${result}\n${completed}\n${result}`)).toThrow(
+      /after turn.completed/,
     );
   });
 

@@ -77,6 +77,7 @@ interface RunningAttempt {
   final: WorkerFinal | null;
   usage: unknown;
   progress: string | undefined;
+  failure?: string;
   cancelled: boolean;
 }
 
@@ -186,54 +187,76 @@ export function workerPacketPrompt(context: AttemptContext): string {
   ].join("\n\n");
 }
 
-function parseFinal(stdout: string): WorkerFinal | null {
-  let final: WorkerFinal | null = null;
-  for (const line of stdout.split(/\r?\n/)) {
-    if (!line.trim().startsWith("{")) continue;
-    try {
-      const event = JSON.parse(line) as {
-        type?: string;
-        item?: { type?: string; text?: string };
-      };
-      if (event.type !== "item.completed" || event.item?.type !== "agent_message") continue;
-      if (!event.item.text) continue;
-      const candidate = JSON.parse(event.item.text) as WorkerFinal;
-      if (
-        ["succeeded", "failed", "declined"].includes(candidate.outcome) &&
-        typeof candidate.summary === "string" &&
-        Array.isArray(candidate.commands)
-      ) {
-        final = candidate;
-      }
-    } catch {
-      // Non-JSON stderr warnings and non-final JSONL events are expected.
-    }
-  }
-  return final;
-}
-
-function parseRuntimeDetails(stdout: string): {
+export function parseCodexWorkerStream(stdout: string): {
+  final: WorkerFinal | null;
   usage: unknown;
   progress?: string;
+  failure?: string;
 } {
+  let final: WorkerFinal | null = null;
   let usage: unknown;
   let progress: string | undefined;
+  let failure: string | undefined;
+  let completed = false;
   for (const line of stdout.split(/\r?\n/)) {
+    if (!line.trim()) continue;
     try {
       const event = JSON.parse(line) as {
         type?: string;
         usage?: unknown;
         message?: string;
-        item?: { text?: string };
+        item?: { type?: string; text?: string };
       };
-      if (event.usage !== undefined) usage = event.usage;
+      if (event.type === "turn.completed") {
+        usage = completed ? undefined : event.usage;
+        if (completed) failure = "CLI worker returned multiple turn.completed events";
+        completed = true;
+        continue;
+      }
+      if (event.type === "turn.failed" || event.type === "error") {
+        failure = "CLI worker reported a stream error";
+        continue;
+      }
       if (event.type?.includes("progress"))
         progress = event.message ?? event.item?.text ?? event.type;
+      if (event.type !== "item.completed" || event.item?.type !== "agent_message") continue;
+      if (completed) {
+        failure = "CLI worker returned an agent message after turn.completed";
+        continue;
+      }
+      // Codex emits commentary as agent messages too. The last completed
+      // message, including a malformed one, replaces every prior candidate.
+      final = null;
+      if (typeof event.item.text !== "string") continue;
+      let candidate: WorkerFinal;
+      try {
+        candidate = JSON.parse(event.item.text) as WorkerFinal;
+      } catch {
+        continue;
+      }
+      if (
+        candidate &&
+        ["succeeded", "failed", "declined"].includes(candidate.outcome) &&
+        typeof candidate.summary === "string" &&
+        Array.isArray(candidate.commands) &&
+        candidate.commands.every(
+          (command) =>
+            command && typeof command.command === "string" && Number.isInteger(command.exitCode),
+        )
+      )
+        final = candidate;
     } catch {
-      /* non-JSON diagnostics are expected */
+      failure = "CLI worker returned malformed JSONL";
     }
   }
-  return { usage, ...(progress ? { progress } : {}) };
+  if (!completed) failure ??= "CLI worker stream ended without turn.completed";
+  if (!final) failure ??= "CLI worker completed without a valid final result";
+  return {
+    final: failure ? null : final,
+    usage,
+    ...(progress ? { progress } : {}),
+    ...(failure ? { failure } : {}),
+  };
 }
 
 export class CodexCliLocalBackend implements ExecutionBackend {
@@ -416,8 +439,9 @@ export class CodexCliLocalBackend implements ExecutionBackend {
       this.#running.set(resourceId, running);
       void processHandle.completed.then((result) => {
         running.result = result;
-        running.final = parseFinal(result.stdout);
-        const details = parseRuntimeDetails(result.stdout);
+        const details = parseCodexWorkerStream(result.stdout);
+        running.final = details.final;
+        if (details.failure) running.failure = details.failure;
         running.usage = details.usage;
         running.progress = details.progress;
       });
@@ -465,6 +489,7 @@ export class CodexCliLocalBackend implements ExecutionBackend {
       ...(state === "failed"
         ? {
             reason:
+              running.failure ||
               running.final?.summary ||
               running.result.stderr ||
               (running.result.timedOut ? "worker timed out" : "worker failed"),
@@ -489,7 +514,10 @@ export class CodexCliLocalBackend implements ExecutionBackend {
     const running = this.#require(handle);
     const result = running.result ?? (await running.process.completed);
     running.result = result;
-    running.final ??= parseFinal(result.stdout);
+    const details = parseCodexWorkerStream(result.stdout);
+    running.final = details.final;
+    running.usage = details.usage;
+    if (details.failure) running.failure = details.failure;
     const collected = await collectLocalArtifact(
       {
         root: join(running.context.workspace, ".."),
@@ -520,6 +548,7 @@ export class CodexCliLocalBackend implements ExecutionBackend {
         ? {}
         : {
             reason:
+              running.failure ||
               running.final?.summary ||
               result.stderr ||
               (result.timedOut ? "worker timed out" : "worker did not produce usable work"),

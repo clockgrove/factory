@@ -652,7 +652,7 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
     let streamViolation: string | undefined;
     let terminalFailure: string | undefined;
     let completionObserved = false;
-    let structuredFinalCount = 0;
+    let completionCount = 0;
     const timeout = setTimeout(() => {
       running.timedOut = true;
       running.controller.abort("Factory worker deadline elapsed");
@@ -663,6 +663,10 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
         signal: running.controller.signal,
       });
       for await (const event of events) {
+        if (event.type === "turn.completed") {
+          completionCount += 1;
+          running.usage = completionCount === 1 ? event.usage : undefined;
+        }
         const serialized = JSON.stringify(event);
         if (!streamViolation) {
           try {
@@ -695,12 +699,8 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
             continue;
           }
           completionObserved = true;
-          running.usage = event.usage;
-          if (structuredFinalCount !== 1) {
-            terminalFailure =
-              structuredFinalCount === 0
-                ? "SDK worker completed without one valid final result"
-                : "SDK worker completed with multiple valid final results";
+          if (!running.final) {
+            terminalFailure = "SDK worker completed without a valid final result";
             running.reason = terminalFailure;
           }
         } else if (event.type === "turn.failed") {
@@ -713,18 +713,16 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
           running.controller.abort(terminalFailure);
         } else if (event.type === "item.completed") {
           if (event.item.type === "agent_message") {
-            const final = parseWorkerFinal(event.item.text);
-            if (final) {
-              structuredFinalCount += 1;
-              if (structuredFinalCount === 1 && !completionObserved) {
-                running.final = final;
-              } else {
-                terminalFailure = completionObserved
-                  ? "SDK worker returned a valid final result after turn.completed"
-                  : "SDK worker returned multiple valid final results";
-                running.reason = terminalFailure;
-                running.controller.abort(terminalFailure);
-              }
+            if (completionObserved) {
+              terminalFailure = "SDK worker returned an agent message after turn.completed";
+              running.reason = terminalFailure;
+              running.controller.abort(terminalFailure);
+            } else {
+              // Match Thread.run(): every completed agent message replaces the
+              // previous finalResponse, even if it is not valid worker JSON.
+              const final = parseWorkerFinal(event.item.text);
+              if (final) running.final = final;
+              else delete running.final;
             }
             running.progress = running.final?.summary ?? event.item.text.slice(0, 500);
           } else if (event.item.type === "command_execution") {
@@ -740,9 +738,7 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
         ? "cancelled"
         : running.timedOut || streamViolation || terminalFailure
           ? "failed"
-          : completionObserved &&
-              structuredFinalCount === 1 &&
-              running.final?.outcome === "succeeded"
+          : completionObserved && running.final?.outcome === "succeeded"
             ? "succeeded"
             : "failed";
       if (running.state === "failed" && !running.reason) {

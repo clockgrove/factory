@@ -508,6 +508,12 @@ evidence. In unattended mode the Supervisor invokes a configured CLI; in interac
 may provide the same judgment contract. Management children are explicitly marked supervised and
 cannot recursively start another Supervisor.
 
+Codex JSONL carries progress messages as well as results. Factory selects the last completed agent
+message before the single terminal completion, consistent with the Codex SDK's final-response
+contract. Earlier prose or JSON is not the final result; malformed final output cannot fall back to
+an earlier success-shaped message. Stream failures and messages after completion fail closed, while
+unambiguous terminal usage remains available for accounting.
+
 ## Security and activation
 
 Factory processes an Objective only after an authorized operator explicitly starts it, or when a

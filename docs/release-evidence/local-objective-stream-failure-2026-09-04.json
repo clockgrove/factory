@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "scope": "installed-local-objective-failure",
+  "outcome": "failed",
+  "releaseGatesClosed": [],
+  "testedCommit": "906b5f577b365b548968c01f11698436965f8fe6",
+  "pluginVersion": "2.0.26",
+  "mcpBundleSha256": "9faa7d054c8a10241d1617c716c3088d78fcab1f9a96a127e3f104791d5590dd",
+  "objectiveUrl": "https://github.com/clockgrove/factory-conformance/issues/1",
+  "runId": "587e58b0-cbc6-4c23-851a-ea1744233aa2",
+  "retryOfRunId": "3e58319b-e75f-402a-bab6-19b65955b410",
+  "startedAt": "2026-09-04T21:18:07.000Z",
+  "finishedAt": "2026-09-04T21:19:14.000Z",
+  "terminalState": "escalated",
+  "reason": "Unexpected token 'I', \"I’ll check\"... is not valid JSON",
+  "terminalReceipt": "https://github.com/clockgrove/factory-conformance/issues/1#issuecomment-5546569077",
+  "observedWorkItems": 0,
+  "observedAttempts": 0,
+  "observedPublications": 0,
+  "modelUsage": {
+    "availability": "observed",
+    "tokens": 29407,
+    "phase": "management",
+    "usageId": "failed-compile-88b50c933d0c30b25404d55214816b78e55d461c",
+    "receipt": "https://github.com/clockgrove/factory-conformance/issues/1#issuecomment-5546568598"
+  },
+  "diagnosis": "The management JSONL parser attempts to parse every completed agent message as structured output, including intermediate natural-language commentary. Codex SDK final-response selection instead uses the last completed agent message. The complete model output was not retained.",
+  "limitations": "The failed management-call usage fix is observed live. No compilation, work execution, stack publication, or integration success is established by this run."
+}

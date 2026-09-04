@@ -459,6 +459,76 @@ describe("Codex SDK local backend", () => {
     }
   });
 
+  it("selects the last agent message and rejects invalid terminal sequences without losing usage", async () => {
+    const message = (text: string): ThreadEvent => ({
+      type: "item.completed",
+      item: { id: "message", type: "agent_message", text },
+    });
+    const success = message(
+      JSON.stringify({ outcome: "succeeded", summary: "done", commands: [] }),
+    );
+    const completion: ThreadEvent = {
+      type: "turn.completed",
+      usage: {
+        input_tokens: 9,
+        output_tokens: 4,
+        cached_input_tokens: 2,
+        cache_write_input_tokens: 0,
+        reasoning_output_tokens: 0,
+      },
+    };
+    const cases: Array<{ events: ThreadEvent[]; state: string }> = [
+      { events: [message("I'll inspect the module"), success, completion], state: "succeeded" },
+      { events: [success, success, completion], state: "succeeded" },
+      { events: [success, message("invalid final"), completion], state: "failed" },
+      { events: [success, message(""), completion], state: "failed" },
+      { events: [success, completion, message("trailing commentary")], state: "failed" },
+      { events: [success, completion, completion], state: "failed" },
+      {
+        events: [success, { type: "turn.failed", error: { message: "failed" } }, completion],
+        state: "failed",
+      },
+      { events: [success, completion, { type: "error", message: "failed" }], state: "failed" },
+    ];
+    for (const example of cases) {
+      const root = await mkdtemp(join(tmpdir(), "factory-sdk-final-selection-"));
+      const workspace = join(root, "workspace");
+      await mkdir(workspace);
+      const backend = new CodexSdkLocalBackend({
+        createCodexHome: async (kind) => mkdtemp(join(root, `${kind}-`)),
+        createClient: () => ({
+          startThread: () => ({
+            id: null,
+            async runStreamed() {
+              async function* events(): AsyncGenerator<ThreadEvent> {
+                yield* example.events;
+              }
+              return { events: events() };
+            },
+          }),
+        }),
+      });
+      try {
+        const handle = await backend.launch(context(workspace, "b".repeat(40)));
+        let observation = await backend.observe(handle);
+        for (let check = 0; check < 20 && observation.state === "running"; check++) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          observation = await backend.observe(handle);
+        }
+        expect(observation).toMatchObject({
+          state: example.state,
+          usage:
+            example.events.filter((event) => event.type === "turn.completed").length === 1
+              ? { inputTokens: 9, outputTokens: 4, cachedInputTokens: 2 }
+              : { inputTokens: null, outputTokens: null, cachedInputTokens: null },
+        });
+        await backend.cleanup(handle);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+  });
+
   it("fails when the SDK event stream ends without turn.completed", async () => {
     const root = await mkdtemp(join(tmpdir(), "factory-sdk-missing-completion-"));
     const workspace = join(root, "workspace");

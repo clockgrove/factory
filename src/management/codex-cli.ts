@@ -355,9 +355,8 @@ function observedCompletionUsage(stdout: string): ManagementUsage | undefined {
 }
 
 function parseManagementJsonlResult<T>(stdout: string): { value: T; usage: ManagementUsage } {
-  let value: T | undefined;
+  let finalResponse: string | undefined;
   let usage: ManagementUsage | undefined;
-  let resultCount = 0;
   let completionCount = 0;
   for (const line of stdout.split(/\r?\n/)) {
     if (!line.trim().startsWith("{")) continue;
@@ -382,39 +381,35 @@ function parseManagementJsonlResult<T>(stdout: string): { value: T; usage: Manag
       if (completionCount !== 1) {
         throw new Error("management backend returned multiple turn.completed events");
       }
-      if (resultCount !== 1) {
-        throw new Error(
-          resultCount === 0
-            ? "management backend completed before returning a structured result"
-            : "management backend completed after multiple structured results",
-        );
+      if (finalResponse === undefined) {
+        throw new Error("management backend completed before returning a structured result");
       }
       usage = assertManagementUsage({
         inputTokens: event.usage?.input_tokens,
         outputTokens: event.usage?.output_tokens,
       });
     }
-    if (
-      event.type === "item.completed" &&
-      event.item?.type === "agent_message" &&
-      event.item.text
-    ) {
+    if (event.type === "item.completed" && event.item?.type === "agent_message") {
       if (completionCount > 0) {
         throw new Error("management backend returned a structured result after turn.completed");
       }
-      resultCount += 1;
-      if (resultCount !== 1) {
-        throw new Error("management backend returned multiple structured results");
+      if (typeof event.item.text !== "string") {
+        throw new Error("management backend returned an agent message without text");
       }
-      value = JSON.parse(event.item.text) as T;
+      // Codex SDK Thread.run() defines finalResponse as the last completed
+      // agent_message. --output-schema constrains that final response only;
+      // preceding agent messages can be plain-text progress commentary. Keep
+      // the last message verbatim, never the last message that happens to parse.
+      finalResponse = event.item.text;
     }
   }
-  if (value === undefined) throw new Error("management backend returned no structured result");
+  if (finalResponse === undefined)
+    throw new Error("management backend returned no structured result");
   if (completionCount === 0) {
     throw new Error("management backend stream ended without turn.completed");
   }
   if (!usage) throw new Error("management backend returned no model-token usage");
-  return { value, usage };
+  return { value: JSON.parse(finalResponse) as T, usage };
 }
 
 export class CodexCliManagementBackend implements ManagementBackend {

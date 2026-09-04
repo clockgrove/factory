@@ -5,7 +5,11 @@ import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { CodexCliLocalBackend, workerPacketPrompt } from "../src/backends/codex-cli-local.js";
+import {
+  CodexCliLocalBackend,
+  parseCodexWorkerStream,
+  workerPacketPrompt,
+} from "../src/backends/codex-cli-local.js";
 import { restrictedCodexArgs } from "../src/backends/codex-cli-policy.js";
 import type { AttemptContext, StaleAttemptIdentity } from "../src/execution/backend.js";
 import { durableAttemptId } from "../src/execution/session.js";
@@ -118,6 +122,50 @@ async function fixture(): Promise<{
 }
 
 describe("Codex CLI local backend", () => {
+  it("uses the actual last agent message, not the last parseable success", () => {
+    const message = (text: string) => ({
+      type: "item.completed",
+      item: { type: "agent_message", text },
+    });
+    const success = message(
+      JSON.stringify({ outcome: "succeeded", summary: "done", commands: [] }),
+    );
+    const declined = message(
+      JSON.stringify({ outcome: "declined", summary: "cannot finish", commands: [] }),
+    );
+    const completion = { type: "turn.completed", usage: { input_tokens: 9, output_tokens: 4 } };
+    const parse = (events: unknown[]) =>
+      parseCodexWorkerStream(events.map((event) => JSON.stringify(event)).join("\n"));
+    expect(parse([message("I'll inspect the module"), success, completion])).toMatchObject({
+      final: { outcome: "succeeded" },
+    });
+    expect(parse([success, declined, completion])).toMatchObject({
+      final: { outcome: "declined" },
+    });
+    for (const events of [
+      [success, message("malformed final"), completion],
+      [success, message(""), completion],
+      [success, completion, message("trailing commentary")],
+      [success, { type: "turn.failed" }, completion],
+      [success, completion, { type: "error" }],
+    ]) {
+      expect(parse(events)).toMatchObject({
+        final: null,
+        usage: completion.usage,
+        failure: expect.any(String),
+      });
+    }
+    expect(parse([success])).toMatchObject({
+      final: null,
+      failure: expect.stringContaining("without turn.completed"),
+    });
+    expect(parse([success, completion, completion])).toMatchObject({
+      final: null,
+      usage: undefined,
+      failure: expect.stringContaining("multiple turn.completed"),
+    });
+  });
+
   it("advertises the release's Linux runtime boundary", () => {
     expect(new CodexCliLocalBackend().capabilities.supportedOs).toEqual(["linux"]);
   });

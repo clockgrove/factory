@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 
 import { CodexCliLocalBackend } from "./backends/codex-cli-local.js";
+import { CodexAppServerLocalBackend } from "./backends/codex-app-server.js";
 import { GitHubCopilotBackend } from "./backends/github-copilot.js";
 import { DaytonaBackend } from "./backends/daytona.js";
 import { VercelSandboxBackend } from "./backends/vercel-sandbox.js";
@@ -733,6 +734,15 @@ export class FactorySupervisor {
     this.#managementOverride = options.managementBackend !== undefined;
     this.#registry = options.backendRegistry ?? new BackendRegistry();
     if (!options.backendRegistry) {
+      if (this.#policy.backendOrder.includes("codex-app-server/local-worktree")) {
+        this.#registry.register(
+          new CodexAppServerLocalBackend({
+            ...(this.#policy.modelProfile
+              ? { profile: this.#policy.modelProfile }
+              : {}),
+          }),
+        );
+      }
       this.#registry.register(
         new CodexCliLocalBackend({
           ...(this.#policy.modelProfile
@@ -777,6 +787,18 @@ export class FactorySupervisor {
             ? { profile: this.#policy.modelProfile }
             : {}),
         });
+      }
+      if (
+        this.#policy.backendOrder.includes("codex-app-server/local-worktree") &&
+        !this.#registry.get("codex-app-server/local-worktree")
+      ) {
+        this.#registry.register(
+          new CodexAppServerLocalBackend({
+            ...(this.#policy.modelProfile
+              ? { profile: this.#policy.modelProfile }
+              : {}),
+          }),
+        );
       }
       if (
         this.#policy.backendOrder.includes("codex-cli/daytona") &&

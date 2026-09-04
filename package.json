@@ -1,6 +1,6 @@
 {
   "name": "@clockgrove/factory",
-  "version": "2.0.20",
+  "version": "2.0.21",
   "description": "GitHub-backed, local-first unattended software factory.",
   "license": "MIT",
   "type": "module",

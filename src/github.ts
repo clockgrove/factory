@@ -36,7 +36,7 @@ import {
   triggersOnPullRequest,
   usesSelfHostedRunner,
 } from "./approval.js";
-import { decodeEventComments, latestSupportedRun } from "./control/receipts.js";
+import { decodeEventComments } from "./control/receipts.js";
 import {
   PlatformUnavailableError,
   classifyRefusal,
@@ -487,7 +487,6 @@ function toWorkItem(
   eventsByPullRequest: ReadonlyMap<number, AgentWorkEvent[]>,
   v2: boolean,
   actorsByRun: ReadonlyMap<string, string> = new Map(),
-  activeRunId?: string,
 ): WorkItemSnapshot {
   if (wi.blockedBy.totalCount > wi.blockedBy.nodes.length) {
     throw new Error(`Work Item #${wi.number} has too many dependencies for a complete snapshot`);
@@ -512,11 +511,15 @@ function toWorkItem(
     copilotAssignments: copilotAssignments(wi),
   };
   if (v2) {
+    // Attempt numbers and Work Item completion are durable across Objective
+    // runs. Keep every authenticated receipt so a later run can reconstruct a
+    // completed item instead of mistaking its closed issue and merged PR for
+    // receipt-free mixed state.
     result.factoryEvents = factoryEvents(
       wi.comments,
       `Work Item #${wi.number}`,
       actorsByRun,
-    ).filter((event) => !activeRunId || event.runId === activeRunId);
+    );
   }
   return result;
 }
@@ -1096,7 +1099,6 @@ export class GitHubReader {
           : [],
       ),
     );
-    const activeRun = latestSupportedRun(objectiveEvents);
     const agentWorkEvents = await this.#readAgentWorkEvents(issue.subIssues.nodes);
 
     return {
@@ -1108,7 +1110,7 @@ export class GitHubReader {
       body: issue.body,
       closed: issue.state === "CLOSED",
       workItems: issue.subIssues.nodes.map((wi) =>
-        toWorkItem(wi, agentWorkEvents, v2, actorsByRun, activeRun?.runId),
+        toWorkItem(wi, agentWorkEvents, v2, actorsByRun),
       ),
       readAt: new Date(),
       graphQlRateLimit: {

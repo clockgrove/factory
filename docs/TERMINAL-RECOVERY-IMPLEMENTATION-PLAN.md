@@ -33,7 +33,7 @@ source-history prefix, graph/projection, item evidence, accepted policy, explici
 increments, and any unknown-usage acknowledgement. Its content-addressed ref is a durable proposal,
 not execution authority. Changed source evidence requires a different acknowledged plan.
 
-`RecoveryRequested` and `RecoveryConsumed` have a separate event kind. Successor start records name
+`RecoveryRequested`, `RecoveryConsumed`, and `RecoveryAdoptionCompleted` have a separate event kind. Successor start records name
 the exact request, plan digest, and predecessor; authenticated reader bindings reject a changed
 actor, terminal, repository, provenance, policy, or base. The cumulative chain verifier requires
 explicit prior-plan links and independently observed immutable consumption claims. It includes
@@ -41,10 +41,24 @@ graph-only historical failures, preserves original usage identities, and never r
 authority. Plan metadata and full source-event prefixes have separate digests so a missing budget
 receipt cannot be hidden by unchanged run boundaries.
 
-These contracts are not yet a supported continuation command. Claim/adoption transactions, shared
-execution-evidence resolution, and resource reconciliation remain below. The ordinary run manager
-explicitly rejects successor execution until those pieces are connected. Pending claims must be
-reconciled to an evidenced outcome; they must not be deleted or overwritten to try another plan.
+Immutable claims bind one predecessor to one exact acknowledged plan and transaction seed. Their
+commit parent binds the immutable plan; every mutation rechecks the lease. Lost responses are
+reconciled by reading the same ref, not replacing a claim. The persisted timestamp, sequence, and
+evidence digests reconstruct the same start, consumption, and adoption-completion envelopes after
+a restart. A pure replay inspector accepts only an exact ordered transaction prefix: missing
+earlier receipts, conflicting retries, late source receipts, or unexpected successor effects block
+replay. Its next-event result is descriptive, never permission to write or launch.
+
+A read-only evidence resolver independently reloads plan, graph/projection, claim, original
+reservation, validation, review, and publication identities. It keeps source attempts separate
+from the controlling run and observes changed heads/bases without rewriting historical receipts.
+Even verified source bindings do not prove resource cleanup or authorize execution.
+
+These contracts are not yet a supported continuation command. The fenced adoption writer,
+resource reconciliation, and integration of the resolver into scheduling, publication, accounting,
+and state reconstruction remain below. The ordinary run manager explicitly rejects successor
+execution until those pieces are connected. Pending claims must be reconciled to an evidenced
+outcome; they must not be deleted or overwritten to try another plan.
 Validation and budget writers reject reservations from a different run, Objective, policy, or
 future lease epoch; successor effects cannot be appended to terminal predecessor history.
 

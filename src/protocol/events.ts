@@ -95,6 +95,30 @@ const RecoveryConsumed = Common.extend({
     });
 });
 
+// Completion records an exact adoption transaction; it is not, by itself, an
+// execution grant. Admission must still verify current leases and evidence.
+const RecoveryAdoptionCompleted = Common.extend({
+  kind: z.literal("recovery"),
+  event: z.literal("RecoveryAdoptionCompleted"),
+  recoveryRequestId: safeId,
+  planDigest: sha256Digest,
+  predecessorRunId: safeId,
+  predecessorTerminalDigest: sha256Digest,
+  claimRef: boundedText(500),
+  claimOid: gitSha,
+  evidenceDigest: sha256Digest,
+  sourceEventsDigest: sha256Digest,
+  accountingDigest: sha256Digest,
+  resourceEvidenceDigest: sha256Digest,
+  baseSha: gitSha,
+}).superRefine((value, context) => {
+  if (value.runId === value.predecessorRunId)
+    context.addIssue({
+      code: "custom",
+      message: "Completed adoption belongs to a distinct successor",
+    });
+});
+
 const RunTerminal = Common.extend({
   kind: z.literal("run"),
   event: z.enum(["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"]),
@@ -461,6 +485,7 @@ export const FactoryEventSchema = z.union([
   ActivationRejected,
   RecoveryRequested,
   RecoveryConsumed,
+  RecoveryAdoptionCompleted,
   RunControlRequested,
   RunControlAcknowledged,
   WorkItemRetryRequested,

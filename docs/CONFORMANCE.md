@@ -70,10 +70,12 @@ The read-only `factory_recovery_plan` assessment inspects graph, reservation, pu
 accounting evidence through a read-only store capability. Historical usage is not new spending
 authority, and an observed terminal resource receipt does not prove host/provider cleanup.
 Recovery-plan persistence, source-history/allowance-chain verification, authenticated successor
-request bindings, and cross-run receipt-write fences have deterministic fixtures. The parser and
-run manager still reject incomplete or executable successor state: no claim/adoption transaction
-or shared execution-evidence resolver is connected yet. These foundations do not pass the live
-recovery gate.
+request bindings, cross-run receipt-write fences, immutable pending claims, exact adoption-receipt
+replay inspection, and read-only source-evidence resolution have deterministic fixtures. The run
+manager still rejects successor execution. The fenced adoption writer, independent resource-cleanup
+proof, and shared resolver integration with execution are not connected yet. An observed completion
+receipt or a descriptive next-event candidate cannot authorize a worker. These foundations do not
+pass the live recovery gate.
 
 This table maps every stable contract statement in [`DESIGN.md`](DESIGN.md#definition-of-done) to
 the executable evidence required on a release branch. “Implemented” does not promote an open live

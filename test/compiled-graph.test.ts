@@ -12,7 +12,10 @@ import {
   type LeaseStore,
 } from "../src/control/lease.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
-import type { CompiledObjective } from "../src/graph.js";
+import {
+  workerPacketFromCompiled,
+  type CompiledObjective,
+} from "../src/graph.js";
 
 const BASE_SHA = "a".repeat(40);
 const BASE_TREE = "b".repeat(40);
@@ -50,7 +53,11 @@ class MemoryGraphStore implements LeaseStore, CompiledGraphStore {
     return commit;
   }
 
-  async createCommit(args: { treeOid: string; parentOids: string[]; message: string }): Promise<string> {
+  async createCommit(args: {
+    treeOid: string;
+    parentOids: string[];
+    message: string;
+  }): Promise<string> {
     const oid = this.#oid();
     this.commits.set(oid, {
       oid,
@@ -68,7 +75,11 @@ class MemoryGraphStore implements LeaseStore, CompiledGraphStore {
     return true;
   }
 
-  async compareAndSwapRef(args: { ref: string; beforeOid: string; afterOid: string }): Promise<boolean> {
+  async compareAndSwapRef(args: {
+    ref: string;
+    beforeOid: string;
+    afterOid: string;
+  }): Promise<boolean> {
     if (this.refs.get(args.ref) !== args.beforeOid) return false;
     this.refs.set(args.ref, args.afterOid);
     return true;
@@ -92,9 +103,16 @@ class MemoryGraphStore implements LeaseStore, CompiledGraphStore {
 
   async createTree(args: {
     baseTreeOid?: string;
-    entries: Array<{ path: string; mode: "100644" | "100755" | "120000"; type: "blob"; sha: string | null }>;
+    entries: Array<{
+      path: string;
+      mode: "100644" | "100755" | "120000";
+      type: "blob";
+      sha: string | null;
+    }>;
   }): Promise<string> {
-    const tree = new Map(args.baseTreeOid ? (this.trees.get(args.baseTreeOid) ?? []) : []);
+    const tree = new Map(
+      args.baseTreeOid ? (this.trees.get(args.baseTreeOid) ?? []) : [],
+    );
     for (const entry of args.entries) {
       if (entry.sha) tree.set(entry.path, entry.sha);
       else tree.delete(entry.path);
@@ -112,24 +130,31 @@ class MemoryGraphStore implements LeaseStore, CompiledGraphStore {
 function objective(goal = "Implement the feature."): CompiledObjective {
   return {
     title: "Ship feature",
-    workItems: [{
-      id: "feature",
-      title: "Implement feature",
-      goal,
-      acceptance: ["The feature is tested."],
-      scope: ["src/feature.ts"],
-      preconditions: [],
-      outOfScope: [],
-      conventions: [],
-      dependsOn: [],
-      baseSha: BASE_SHA,
-      validationCommands: ["npm test"],
-      requirements: {
-        os: [], architecture: [], tools: [], services: [], networkDestinations: [],
-        permittedSecretNames: [], trust: "trusted_local",
+    workItems: [
+      {
+        id: "feature",
+        title: "Implement feature",
+        goal,
+        acceptance: ["The feature is tested."],
+        scope: ["src/feature.ts"],
+        preconditions: [],
+        outOfScope: [],
+        conventions: [],
+        dependsOn: [],
+        baseSha: BASE_SHA,
+        validationCommands: ["npm test"],
+        requirements: {
+          os: [],
+          architecture: [],
+          tools: [],
+          services: [],
+          networkDestinations: [],
+          permittedSecretNames: [],
+          trust: "trusted_local",
+        },
+        artifactContract: "clockgrove.factory/artifact-v1",
       },
-      artifactContract: "clockgrove.factory/artifact-v1",
-    }],
+    ],
   };
 }
 
@@ -138,14 +163,21 @@ describe("durable compiled graph", () => {
     const store = new MemoryGraphStore();
     const leases = new LeaseManager({ store });
     const base = await store.readCommit(BASE_SHA);
-    const lease = await leases.acquire({
-      objective: 42,
-      runId: "run-1",
-      holder: "director-1",
-      policyDigest: policyDigest(DEFAULT_RUN_POLICY),
-    }, base);
+    const lease = await leases.acquire(
+      {
+        objective: 42,
+        runId: "run-1",
+        holder: "director-1",
+        policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+      },
+      base,
+    );
     const manager = new CompiledGraphManager(store, leases);
-    const first = await manager.persist({ lease, base, objective: objective() });
+    const first = await manager.persist({
+      lease,
+      base,
+      objective: objective(),
+    });
     const replay = await manager.load(42, "run-1");
     expect(replay).toMatchObject({
       ref: first.ref,
@@ -154,7 +186,9 @@ describe("durable compiled graph", () => {
       graphSize: 1,
       objective: objective(),
     });
-    expect(await manager.persist({ lease, base, objective: objective() })).toMatchObject({
+    expect(
+      await manager.persist({ lease, base, objective: objective() }),
+    ).toMatchObject({
       commitOid: first.commitOid,
       graphDigest: first.graphDigest,
     });
@@ -164,16 +198,82 @@ describe("durable compiled graph", () => {
     const store = new MemoryGraphStore();
     const leases = new LeaseManager({ store });
     const base = await store.readCommit(BASE_SHA);
-    const lease = await leases.acquire({
-      objective: 42,
-      runId: "run-1",
-      holder: "director-1",
-      policyDigest: policyDigest(DEFAULT_RUN_POLICY),
-    }, base);
+    const lease = await leases.acquire(
+      {
+        objective: 42,
+        runId: "run-1",
+        holder: "director-1",
+        policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+      },
+      base,
+    );
     const manager = new CompiledGraphManager(store, leases);
     await manager.persist({ lease, base, objective: objective() });
     await expect(
-      manager.persist({ lease, base, objective: objective("Implement something else.") }),
+      manager.persist({
+        lease,
+        base,
+        objective: objective("Implement something else."),
+      }),
     ).rejects.toThrow(/different immutable compiled graph/i);
+  });
+
+  it("round-trips vNext compiler metadata while preserving legacy graphs", async () => {
+    const store = new MemoryGraphStore();
+    const leases = new LeaseManager({ store });
+    const base = await store.readCommit(BASE_SHA);
+    const lease = await leases.acquire(
+      {
+        objective: 42,
+        runId: "run-vnext",
+        holder: "director-1",
+        policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+      },
+      base,
+    );
+    const manager = new CompiledGraphManager(store, leases);
+    const workItem = {
+      ...objective().workItems[0]!,
+      context: {
+        mustRead: ["src/feature.ts"],
+        searchSeeds: ["feature"],
+        dependencyEvidence: [],
+      },
+      changeSurface: {
+        mergeClass: "parallel-safe" as const,
+        exclusiveResources: [],
+      },
+      validation: [
+        { tier: "mechanical" as const, criteria: ["The feature is tested."] },
+      ],
+      delivery: { group: "feature", relationship: "root" as const },
+      economicReview: {
+        conservative: true,
+        rationale: "Uses repository-observed validation only.",
+        paidMeasurementRequired: false,
+      },
+    };
+
+    await manager.persist({
+      lease,
+      base,
+      objective: { title: "Ship feature", workItems: [workItem] },
+    });
+    const replay = await manager.load(42, "run-vnext");
+
+    expect(replay?.objective.workItems[0]).toMatchObject({
+      context: workItem.context,
+      changeSurface: workItem.changeSurface,
+      validation: workItem.validation,
+      delivery: workItem.delivery,
+      economicReview: workItem.economicReview,
+    });
+    expect(
+      workerPacketFromCompiled(replay!.objective.workItems[0]!),
+    ).toMatchObject({
+      context: workItem.context,
+      changeSurface: workItem.changeSurface,
+      delivery: workItem.delivery,
+    });
   });
 });

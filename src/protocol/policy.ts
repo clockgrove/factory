@@ -14,9 +14,15 @@ export const TrustPolicySchema = z.enum([
   "sandbox_untrusted",
 ]);
 
-const countMap = (value: Record<string, unknown>, context: z.RefinementCtx): void => {
+const countMap = (
+  value: Record<string, unknown>,
+  context: z.RefinementCtx,
+): void => {
   if (Object.keys(value).length > 64) {
-    context.addIssue({ code: z.ZodIssueCode.custom, message: "at most 64 entries are allowed" });
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "at most 64 entries are allowed",
+    });
   }
 };
 
@@ -24,7 +30,10 @@ export const PriorityPolicySchema = z
   .object({
     source: z.enum(["subissue-order", "issue-field-then-subissue-order"]),
     issueFieldId: boundedText(200).optional(),
-    optionRanks: z.record(safeId, z.number().int().min(0).max(1_000)).superRefine(countMap).optional(),
+    optionRanks: z
+      .record(safeId, z.number().int().min(0).max(1_000))
+      .superRefine(countMap)
+      .optional(),
     unsetRank: z.number().int().min(0).max(1_000),
     onUnavailable: z.enum(["fallback-to-subissue-order", "escalate"]),
   })
@@ -32,13 +41,27 @@ export const PriorityPolicySchema = z
   .superRefine((value, context) => {
     const usesField = value.source === "issue-field-then-subissue-order";
     if (usesField && !value.issueFieldId) {
-      context.addIssue({ code: z.ZodIssueCode.custom, path: ["issueFieldId"], message: "is required for issue-field priority" });
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["issueFieldId"],
+        message: "is required for issue-field priority",
+      });
     }
-    if (usesField && (!value.optionRanks || Object.keys(value.optionRanks).length === 0)) {
-      context.addIssue({ code: z.ZodIssueCode.custom, path: ["optionRanks"], message: "must map at least one stable option ID" });
+    if (
+      usesField &&
+      (!value.optionRanks || Object.keys(value.optionRanks).length === 0)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["optionRanks"],
+        message: "must map at least one stable option ID",
+      });
     }
     if (!usesField && (value.issueFieldId || value.optionRanks)) {
-      context.addIssue({ code: z.ZodIssueCode.custom, message: "subissue-order priority cannot configure an issue field" });
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "subissue-order priority cannot configure an issue field",
+      });
     }
   });
 
@@ -61,22 +84,39 @@ export const CapacityPolicySchema = z
   .object({
     mode: z.enum(["fixed", "adaptive-local"]),
     local: LocalCapacityPolicySchema.optional(),
-    backendMaxParallel: z.record(safeId, z.number().int().min(1).max(32)).superRefine(countMap).optional(),
+    backendMaxParallel: z
+      .record(safeId, z.number().int().min(1).max(32))
+      .superRefine(countMap)
+      .optional(),
   })
   .strict()
   .superRefine((value, context) => {
     if (value.mode === "adaptive-local" && !value.local) {
-      context.addIssue({ code: z.ZodIssueCode.custom, path: ["local"], message: "is required for adaptive-local capacity" });
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["local"],
+        message: "is required for adaptive-local capacity",
+      });
     }
   });
 
 export const BurstPolicySchema = z
   .object({
-    mode: z.enum(["never", "saturation", "queue-delay", "deadline", "queue-or-deadline"]),
+    mode: z.enum([
+      "never",
+      "saturation",
+      "queue-delay",
+      "deadline",
+      "queue-or-deadline",
+    ]),
     backendOrder: z.array(safeId).max(16),
     maxCloudParallel: z.number().int().min(1).max(32),
     queueDelaySeconds: z.number().int().min(0).max(86_400),
-    deadlineReserveMinutes: z.number().int().min(0).max(30 * 24 * 60),
+    deadlineReserveMinutes: z
+      .number()
+      .int()
+      .min(0)
+      .max(30 * 24 * 60),
     maxPriorityRank: z.number().int().min(0).max(1_000),
   })
   .strict();
@@ -113,7 +153,11 @@ export const ModelsPolicySchema = z
   .superRefine((value, context) => {
     for (const [phase, profile] of Object.entries(value.phaseProfiles)) {
       if (!value.profiles[profile]) {
-        context.addIssue({ code: z.ZodIssueCode.custom, path: ["phaseProfiles", phase], message: `references unknown profile ${profile}` });
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["phaseProfiles", phase],
+          message: `references unknown profile ${profile}`,
+        });
       }
     }
   });
@@ -123,7 +167,11 @@ export const EconomicsPolicySchema = z
     maxModelTokens: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
     maxSandboxMinutes: z.number().int().min(0).max(100_000),
     maxManagedSessions: z.number().int().min(0).max(10_000),
-    minCloudTimeSavedMinutes: z.number().int().min(0).max(30 * 24 * 60),
+    minCloudTimeSavedMinutes: z
+      .number()
+      .int()
+      .min(0)
+      .max(30 * 24 * 60),
   })
   .strict();
 
@@ -139,12 +187,28 @@ export const ControllerPolicySchema = z
 
 export type ControllerPolicy = z.infer<typeof ControllerPolicySchema>;
 
+export const DEFAULT_CONTROLLER_POLICY: ControllerPolicy = Object.freeze({
+  scope: "repository",
+  maxActiveObjectives: 2,
+  maxLocalWorkers: 8,
+  maxPaidWorkers: 0,
+  pollIntervalSeconds: 15,
+});
+
 export const RunPolicySchema = z
   .object({
     backendOrder: z.array(safeId).min(1).max(16),
     maxParallel: z.number().int().min(1).max(32),
-    workItemTimeoutMinutes: z.number().int().min(1).max(24 * 60),
-    objectiveTimeoutMinutes: z.number().int().min(1).max(30 * 24 * 60),
+    workItemTimeoutMinutes: z
+      .number()
+      .int()
+      .min(1)
+      .max(24 * 60),
+    objectiveTimeoutMinutes: z
+      .number()
+      .int()
+      .min(1)
+      .max(30 * 24 * 60),
     maxAttemptsPerItem: z.number().int().min(1).max(10),
     allowedPaidBackends: z.array(safeId).max(16),
     cloudFallback: CloudFallbackSchema,
@@ -186,14 +250,19 @@ export const DEFAULT_RUN_POLICY: RunPolicy = Object.freeze({
 
 export interface EffectiveSchedulingPolicy {
   priority: z.infer<typeof PriorityPolicySchema>;
-  capacity: Omit<z.infer<typeof CapacityPolicySchema>, "local" | "backendMaxParallel"> & {
+  capacity: Omit<
+    z.infer<typeof CapacityPolicySchema>,
+    "local" | "backendMaxParallel"
+  > & {
     local: z.infer<typeof LocalCapacityPolicySchema>;
     backendMaxParallel: Record<string, number>;
   };
   burst: z.infer<typeof BurstPolicySchema>;
 }
 
-export function normalizeSchedulingPolicy(policy: RunPolicy): EffectiveSchedulingPolicy {
+export function normalizeSchedulingPolicy(
+  policy: RunPolicy,
+): EffectiveSchedulingPolicy {
   const local = policy.capacity?.local ?? {
     maxWorkers: policy.maxParallel,
     defaultCpu: 1,
@@ -237,6 +306,10 @@ export function parseControllerPolicy(input: unknown): ControllerPolicy {
   return ControllerPolicySchema.parse(input);
 }
 
+export function controllerPolicyDigest(policy: ControllerPolicy): string {
+  return createHash("sha256").update(canonical(policy)).digest("hex");
+}
+
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value !== null && typeof value === "object") {
@@ -260,7 +333,9 @@ export function parseRunPolicy(input: unknown): RunPolicy {
       (id) => id.includes("daytona") || id.includes("vercel-sandbox"),
     );
     if (selectedSandbox) {
-      throw new Error("sandbox backend selected with zero sandbox-minute budget");
+      throw new Error(
+        "sandbox backend selected with zero sandbox-minute budget",
+      );
     }
   }
   if (
@@ -283,7 +358,10 @@ export function parseRunPolicy(input: unknown): RunPolicy {
       throw new Error(`capacity backend ${id} is absent from backendOrder`);
     }
   }
-  if (policy.capacity?.local && policy.capacity.local.maxWorkers > policy.maxParallel) {
+  if (
+    policy.capacity?.local &&
+    policy.capacity.local.maxWorkers > policy.maxParallel
+  ) {
     throw new Error("capacity.local.maxWorkers cannot exceed maxParallel");
   }
   if (policy.burst) {
@@ -297,7 +375,13 @@ export function parseRunPolicy(input: unknown): RunPolicy {
       if (!allowed.has(id)) {
         throw new Error(`burst backend ${id} is not explicitly allowed`);
       }
-      if (!(id.includes("daytona") || id.includes("vercel-sandbox") || id === "github-copilot/github-managed")) {
+      if (
+        !(
+          id.includes("daytona") ||
+          id.includes("vercel-sandbox") ||
+          id === "github-copilot/github-managed"
+        )
+      ) {
         throw new Error(`burst backend ${id} is not a paid backend`);
       }
     }
@@ -308,22 +392,36 @@ export function parseRunPolicy(input: unknown): RunPolicy {
       if (policy.burst.backendOrder.length === 0) {
         throw new Error("enabled burst requires at least one backend");
       }
-      const needsSandbox = policy.burst.backendOrder.some((id) => id.includes("daytona") || id.includes("vercel-sandbox"));
-      const needsManaged = policy.burst.backendOrder.includes("github-copilot/github-managed");
+      const needsSandbox = policy.burst.backendOrder.some(
+        (id) => id.includes("daytona") || id.includes("vercel-sandbox"),
+      );
+      const needsManaged = policy.burst.backendOrder.includes(
+        "github-copilot/github-managed",
+      );
       if (needsSandbox && policy.maxSandboxMinutes === 0) {
-        throw new Error("enabled sandbox burst requires a nonzero sandbox-minute budget");
+        throw new Error(
+          "enabled sandbox burst requires a nonzero sandbox-minute budget",
+        );
       }
       if (needsManaged && policy.maxManagedAgentSessions === 0) {
-        throw new Error("enabled managed burst requires a nonzero session budget");
+        throw new Error(
+          "enabled managed burst requires a nonzero session budget",
+        );
       }
     }
   }
   if (policy.economics) {
     if (policy.economics.maxSandboxMinutes !== policy.maxSandboxMinutes) {
-      throw new Error("economics.maxSandboxMinutes must equal the legacy sandbox budget");
+      throw new Error(
+        "economics.maxSandboxMinutes must equal the legacy sandbox budget",
+      );
     }
-    if (policy.economics.maxManagedSessions !== policy.maxManagedAgentSessions) {
-      throw new Error("economics.maxManagedSessions must equal the legacy managed-session budget");
+    if (
+      policy.economics.maxManagedSessions !== policy.maxManagedAgentSessions
+    ) {
+      throw new Error(
+        "economics.maxManagedSessions must equal the legacy managed-session budget",
+      );
     }
   }
   return policy;
@@ -353,7 +451,10 @@ export function assertRequirementsWithinPolicy(
 ): void {
   const forbiddenDestinations = requirements.networkDestinations.filter(
     (destination) =>
-      !destinationAllowedByPolicy(destination, policy.allowedNetworkDestinations),
+      !destinationAllowedByPolicy(
+        destination,
+        policy.allowedNetworkDestinations,
+      ),
   );
   if (forbiddenDestinations.length > 0) {
     throw new Error(

@@ -18,7 +18,13 @@
  * anywhere, including from a fresh clone before dev dependencies are installed.
  */
 import { spawn } from "node:child_process";
-import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,7 +50,9 @@ const EXPECTED_TOOLS = [
   "evaluate_mechanical",
   "factory_activate",
   "factory_controller_install",
+  "factory_controller_restart",
   "factory_controller_start",
+  "factory_controller_status",
   "factory_controller_stop",
   "factory_controller_uninstall",
   "factory_doctor",
@@ -73,7 +81,8 @@ console.log("\n# manifests\n");
 const plugin = readJson("plugin.json");
 const packageManifest = readJson("package.json");
 check(
-  plugin.$schema === "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  plugin.$schema ===
+    "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "plugin.json declares the Agent Plugins 1.0.0 schema",
 );
 for (const lifecycle of ["preinstall", "install", "postinstall", "prepare"]) {
@@ -82,7 +91,10 @@ for (const lifecycle of ["preinstall", "install", "postinstall", "prepare"]) {
     `package has no ${lifecycle} lifecycle script`,
   );
 }
-check(typeof plugin.name === "string" && plugin.name.length > 0, "plugin.json has a name");
+check(
+  typeof plugin.name === "string" && plugin.name.length > 0,
+  "plugin.json has a name",
+);
 check(
   /^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(plugin.name ?? ""),
   `plugin.json name "${plugin.name}" matches the spec's pattern`,
@@ -103,7 +115,10 @@ check(server?.type === "stdio", "the factory server is stdio");
 const arg = (server?.args ?? []).find((a) => a.includes("${PLUGIN_ROOT}"));
 check(Boolean(arg), "mcp.json addresses the bundle through ${PLUGIN_ROOT}");
 const bundle = arg?.replace("${PLUGIN_ROOT}", root);
-check(Boolean(bundle) && existsSync(bundle), `the path in mcp.json exists: ${arg}`);
+check(
+  Boolean(bundle) && existsSync(bundle),
+  `the path in mcp.json exists: ${arg}`,
+);
 if (bundle && existsSync(bundle)) {
   const bundleText = readFileSync(bundle, "utf8");
   for (const removedGraphqlType of [
@@ -127,27 +142,50 @@ if (bundle && existsSync(bundle)) {
 // a reordered one would sail through the only check that claims to run the
 // shipped artifact the way it actually ships.
 const launchCommand = server?.command;
-const launchArgs = (server?.args ?? []).map((a) => a.replace("${PLUGIN_ROOT}", root));
+const launchArgs = (server?.args ?? []).map((a) =>
+  a.replace("${PLUGIN_ROOT}", root),
+);
 
 // Claude Code reads its own manifest pair; they must not drift apart.
 const claude = readJson(".claude-plugin/plugin.json");
-check(claude.name === plugin.name, "the Claude manifest agrees on the plugin name");
-check(claude.version === plugin.version, "the Claude manifest agrees on the version");
+check(
+  claude.name === plugin.name,
+  "the Claude manifest agrees on the plugin name",
+);
+check(
+  claude.version === plugin.version,
+  "the Claude manifest agrees on the version",
+);
 const claudeMcp = readJson(".mcp.json");
 const claudeArg = (claudeMcp.mcpServers?.factory?.args ?? []).find((a) =>
   a.includes("${CLAUDE_PLUGIN_ROOT}"),
 );
-check(Boolean(claudeArg), ".mcp.json addresses the bundle through ${CLAUDE_PLUGIN_ROOT}");
 check(
-  claudeArg?.replace("${CLAUDE_PLUGIN_ROOT}", "") === arg?.replace("${PLUGIN_ROOT}", ""),
+  Boolean(claudeArg),
+  ".mcp.json addresses the bundle through ${CLAUDE_PLUGIN_ROOT}",
+);
+check(
+  claudeArg?.replace("${CLAUDE_PLUGIN_ROOT}", "") ===
+    arg?.replace("${PLUGIN_ROOT}", ""),
   "both manifests point at the same bundle path",
 );
 
 const marketplace = readJson(".github/plugin/marketplace.json");
-const marketplacePlugin = marketplace.plugins?.find((entry) => entry.name === plugin.name);
-check(marketplace.name === "clockgrove", "the Copilot marketplace has a stable name");
-check(Boolean(marketplacePlugin), "the Copilot marketplace lists the factory plugin");
-check(marketplacePlugin?.source === ".", "the marketplace points at the repository-root plugin");
+const marketplacePlugin = marketplace.plugins?.find(
+  (entry) => entry.name === plugin.name,
+);
+check(
+  marketplace.name === "clockgrove",
+  "the Copilot marketplace has a stable name",
+);
+check(
+  Boolean(marketplacePlugin),
+  "the Copilot marketplace lists the factory plugin",
+);
+check(
+  marketplacePlugin?.source === ".",
+  "the marketplace points at the repository-root plugin",
+);
 check(
   marketplacePlugin?.version === plugin.version,
   "the marketplace and plugin manifests agree on the version",
@@ -156,14 +194,26 @@ check(
 // Codex resolves every component and asset path from the plugin root, not from
 // the .codex-plugin directory that contains its manifest.
 const codex = readJson(".codex-plugin/plugin.json");
-check(codex.name === plugin.name, "the Codex manifest agrees on the plugin name");
-check(codex.version === plugin.version, "the Codex manifest agrees on the version");
+check(
+  codex.name === plugin.name,
+  "the Codex manifest agrees on the plugin name",
+);
+check(
+  codex.version === plugin.version,
+  "the Codex manifest agrees on the version",
+);
 for (const [field, expected] of [
   ["skills", "./skills/"],
   ["mcpServers", "./mcp.json"],
 ]) {
-  check(codex[field] === expected, `the Codex ${field} path is plugin-root-relative`);
-  check(existsSync(resolve(root, codex[field] ?? "")), `the Codex ${field} path exists`);
+  check(
+    codex[field] === expected,
+    `the Codex ${field} path is plugin-root-relative`,
+  );
+  check(
+    existsSync(resolve(root, codex[field] ?? "")),
+    `the Codex ${field} path exists`,
+  );
 }
 for (const field of ["composerIcon", "logo"]) {
   const path = codex.interface?.[field];
@@ -171,7 +221,10 @@ for (const field of ["composerIcon", "logo"]) {
     typeof path === "string" && path.startsWith("./"),
     `the Codex interface.${field} path is plugin-root-relative`,
   );
-  check(Boolean(path) && existsSync(resolve(root, path)), `the Codex interface.${field} asset exists`);
+  check(
+    Boolean(path) && existsSync(resolve(root, path)),
+    `the Codex interface.${field} asset exists`,
+  );
 }
 
 console.log("\n# skills\n");
@@ -215,7 +268,10 @@ for (const name of schemaFiles) {
   check(existsSync(path), `schemas/${name} exists`);
   if (!existsSync(path)) continue;
   const schema = readJson(`schemas/${name}`);
-  check(typeof schema.$schema === "string", `schemas/${name} declares a JSON Schema dialect`);
+  check(
+    typeof schema.$schema === "string",
+    `schemas/${name} declares a JSON Schema dialect`,
+  );
   check(typeof schema.$id === "string", `schemas/${name} has a stable id`);
   if (schema.$id) schemaIds.add(schema.$id);
 }
@@ -225,7 +281,10 @@ console.log("\n# the bundle actually runs\n");
 
 const started = await listTools();
 const tools = started?.tools ?? null;
-check(tools !== null, "the built server starts from mcp.json's own command and args");
+check(
+  tools !== null,
+  "the built server starts from mcp.json's own command and args",
+);
 
 // The server's own claim about its version is the one version nothing else
 // compares against, so a stale value can survive until a human reads the
@@ -248,14 +307,34 @@ if (tools) {
   const names = tools.map((t) => t.name).sort();
   const missing = EXPECTED_TOOLS.filter((n) => !names.includes(n));
   const extra = names.filter((n) => !EXPECTED_TOOLS.includes(n));
-  check(missing.length === 0, `no expected tool is missing`, `missing: ${missing.join(", ")}`);
-  check(extra.length === 0, `no undocumented tool is exposed`, `unexpected: ${extra.join(", ")}`);
+  check(
+    missing.length === 0,
+    `no expected tool is missing`,
+    `missing: ${missing.join(", ")}`,
+  );
+  check(
+    extra.length === 0,
+    `no undocumented tool is exposed`,
+    `unexpected: ${extra.join(", ")}`,
+  );
 
-  const thin = tools.filter((t) => (t.description ?? "").length < 40).map((t) => t.name);
-  check(thin.length === 0, "every tool has a description", `thin: ${thin.join(", ")}`);
+  const thin = tools
+    .filter((t) => (t.description ?? "").length < 40)
+    .map((t) => t.name);
+  check(
+    thin.length === 0,
+    "every tool has a description",
+    `thin: ${thin.join(", ")}`,
+  );
 
-  const noSchema = tools.filter((t) => !t.inputSchema?.properties).map((t) => t.name);
-  check(noSchema.length === 0, "every tool has an input schema", `no schema: ${noSchema.join(", ")}`);
+  const noSchema = tools
+    .filter((t) => !t.inputSchema?.properties)
+    .map((t) => t.name);
+  check(
+    noSchema.length === 0,
+    "every tool has an input schema",
+    `no schema: ${noSchema.join(", ")}`,
+  );
 
   console.log(`\n      ${tools.length} tools: ${names.join(", ")}`);
 }
@@ -265,7 +344,9 @@ if (bundle && existsSync(bundle)) {
   try {
     const isolatedBundle = resolve(isolatedRoot, "mcp-server.js");
     copyFileSync(bundle, isolatedBundle);
-    const isolatedArgs = launchArgs.map((value) => value === bundle ? isolatedBundle : value);
+    const isolatedArgs = launchArgs.map((value) =>
+      value === bundle ? isolatedBundle : value,
+    );
     const isolated = await listTools(launchCommand, isolatedArgs, isolatedRoot);
     check(
       isolated?.tools?.length === EXPECTED_TOOLS.length,
@@ -293,7 +374,11 @@ console.log("package verified");
  * without a token would be unusable at plugin-install time, when no tool has
  * been called yet.
  */
-async function listTools(command = launchCommand, args = launchArgs, cwd = root) {
+async function listTools(
+  command = launchCommand,
+  args = launchArgs,
+  cwd = root,
+) {
   if (!command || args.length === 0) return null;
 
   const child = spawn(command, args, {
@@ -340,13 +425,18 @@ async function listTools(command = launchCommand, args = launchArgs, cwd = root)
       failed,
       new Promise((res, rej) => {
         const mine = ++id;
-        const timer = setTimeout(() => rej(new Error(`timed out waiting for ${method}`)), 20_000);
+        const timer = setTimeout(
+          () => rej(new Error(`timed out waiting for ${method}`)),
+          20_000,
+        );
         pending.set(mine, (msg) => {
           clearTimeout(timer);
           res(msg);
         });
         if (spawnFailure) return;
-        child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: mine, method, params })}\n`);
+        child.stdin.write(
+          `${JSON.stringify({ jsonrpc: "2.0", id: mine, method, params })}\n`,
+        );
       }),
     ]);
 
@@ -356,7 +446,9 @@ async function listTools(command = launchCommand, args = launchArgs, cwd = root)
       capabilities: {},
       clientInfo: { name: "factory-package-check", version: "0" },
     });
-    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
+    child.stdin.write(
+      `${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`,
+    );
     const listed = await send("tools/list", {});
     return {
       tools: listed.result?.tools ?? null,

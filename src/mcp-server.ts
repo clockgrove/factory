@@ -55,6 +55,9 @@
  * burst writes; never retry through an open circuit").
  */
 
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -65,11 +68,7 @@ import { resolveGitHubToken } from "./auth.js";
 import { CodexCliLocalBackend } from "./backends/codex-cli-local.js";
 import { DaytonaBackend } from "./backends/daytona.js";
 import { VercelSandboxBackend } from "./backends/vercel-sandbox.js";
-import {
-  Dispatcher,
-  GithubOctokitWriter,
-  confirmAction,
-} from "./dispatch.js";
+import { Dispatcher, GithubOctokitWriter, confirmAction } from "./dispatch.js";
 import { evaluateMechanical } from "./evaluate.js";
 import { BackendRegistry } from "./execution/registry.js";
 import { assessBlastRadius } from "./approval.js";
@@ -98,9 +97,16 @@ import {
 import type { LinkedPullRequest } from "./types.js";
 import { DEFAULT_RUN_POLICY } from "./protocol/policy.js";
 import { ExecutionRequirementsSchema } from "./protocol/worker-packet.js";
-import { FactorySupervisor } from "./supervisor.js";
+import { runForegroundObjective } from "./controller/index.js";
 import { GitHubControlStore } from "./control/github-store.js";
-import { APPLICATION_TOOL_DEFINITIONS, FactoryApplicationService, PendingControllerLifecycle } from "./application/index.js";
+import {
+  APPLICATION_TOOL_DEFINITIONS,
+  FactoryApplicationService,
+} from "./application/index.js";
+import {
+  SystemdControllerLifecycle,
+  SystemdUserService,
+} from "./service/index.js";
 
 /** Never write anything but JSON-RPC to stdout on the stdio transport. */
 function log(message: string): void {
@@ -140,9 +146,19 @@ const breaker = new CircuitBreaker();
 const pacer = new ContentCreationPacer();
 const concurrency = new ConcurrencyLimiter();
 const mutations = new MutationScheduler({ pacer, onThrottle: log });
-const controllerLifecycle = new PendingControllerLifecycle();
+const controllerLifecycle = new SystemdControllerLifecycle(
+  new SystemdUserService({
+    factoryCommand: [
+      process.execPath,
+      join(dirname(fileURLToPath(import.meta.url)), "factory.js"),
+    ],
+  }),
+);
 
-function applicationFor(owner: string, repo: string): FactoryApplicationService {
+function applicationFor(
+  owner: string,
+  repo: string,
+): FactoryApplicationService {
   const token = getToken();
   return new FactoryApplicationService({
     owner,
@@ -216,7 +232,9 @@ function serializePr(pr: LinkedPullRequest, minimal = false) {
 function serializeWorkItem(wi: DerivedWorkItem, minimal = false) {
   return {
     ...wi,
-    linkedPullRequests: wi.linkedPullRequests.map((pr) => serializePr(pr, minimal)),
+    linkedPullRequests: wi.linkedPullRequests.map((pr) =>
+      serializePr(pr, minimal),
+    ),
     copilotAssignments: wi.copilotAssignments.map((d) => d.toISOString()),
   };
 }
@@ -254,7 +272,12 @@ async function dispatcherFor(
   }
   const escalateToId = await resolveUserIdCached(reader, escalateTo);
   return new Dispatcher({
-    writer: new GithubOctokitWriter({ token: getToken(), owner, repo, onThrottle: log }),
+    writer: new GithubOctokitWriter({
+      token: getToken(),
+      owner,
+      repo,
+      onThrottle: log,
+    }),
     repositoryId: objective.repositoryId,
     copilotBotId: objective.copilotBotId,
     defaultBranch: objective.defaultBranch,
@@ -296,7 +319,9 @@ function errorResult(error: unknown) {
 }
 
 /** Wraps a tool handler so a thrown error becomes an `isError` result rather than crashing the process. */
-function tool<T>(handler: (args: T, extra: { signal: AbortSignal }) => Promise<unknown>) {
+function tool<T>(
+  handler: (args: T, extra: { signal: AbortSignal }) => Promise<unknown>,
+) {
   return async (args: T, extra: { signal: AbortSignal }) => {
     try {
       return textResult(await handler(args, extra));
@@ -313,8 +338,16 @@ const RepoShape = {
 
 const WorkItemLocatorShape = {
   ...RepoShape,
-  objectiveNumber: z.number().int().positive().describe("Objective issue number"),
-  workItemNumber: z.number().int().positive().describe("Work Item (sub-issue) number"),
+  objectiveNumber: z
+    .number()
+    .int()
+    .positive()
+    .describe("Objective issue number"),
+  workItemNumber: z
+    .number()
+    .int()
+    .positive()
+    .describe("Work Item (sub-issue) number"),
 };
 
 const EscalateToShape = {
@@ -328,7 +361,11 @@ const EscalateToShape = {
 };
 
 const CompiledWorkItemSchema = z.object({
-  id: z.string().describe("Compiler-local id stored in the v2 graph envelope, not used as an issue number"),
+  id: z
+    .string()
+    .describe(
+      "Compiler-local id stored in the v2 graph envelope, not used as an issue number",
+    ),
   title: z.string(),
   goal: z.string(),
   acceptance: z.array(z.string()),
@@ -432,7 +469,10 @@ server.registerTool(
       // on cycle one is the whole point: it is recoverable here and is not
       // recoverable at the moment an escalation is trying to reach a human.
       const escalation = escalateTo
-        ? { login: escalateTo, resolved: Boolean(await resolveUserIdCached(reader, escalateTo)) }
+        ? {
+            login: escalateTo,
+            resolved: Boolean(await resolveUserIdCached(reader, escalateTo)),
+          }
         : undefined;
       return {
         objective: serializeObjective(objective, minimal ?? false),
@@ -485,7 +525,9 @@ server.registerTool(
       expectedFiles: z
         .array(z.string())
         .optional()
-        .describe("The Work Item's declared file scope (§8); omit to skip the untouched-scope check"),
+        .describe(
+          "The Work Item's declared file scope (§8); omit to skip the untouched-scope check",
+        ),
     },
   },
   tool(
@@ -507,10 +549,16 @@ server.registerTool(
       const item = findWorkItem(objective, workItemNumber);
       const pr = currentOpenPullRequest(item);
       if (!pr) {
-        throw new Error(`Work Item #${workItemNumber} has no open pull request`);
+        throw new Error(
+          `Work Item #${workItemNumber} has no open pull request`,
+        );
       }
       return {
-        verdict: evaluateMechanical(pr, expectedFiles, objective.ciExpectedOnPullRequests),
+        verdict: evaluateMechanical(
+          pr,
+          expectedFiles,
+          objective.ciExpectedOnPullRequests,
+        ),
         pullRequest: { number: pr.number, title: pr.title },
       };
     },
@@ -542,7 +590,11 @@ server.registerTool(
       "*that* something changed even when you chose not to read it.",
     inputSchema: {
       ...RepoShape,
-      pullNumber: z.number().int().positive().describe("Pull request number to read"),
+      pullNumber: z
+        .number()
+        .int()
+        .positive()
+        .describe("Pull request number to read"),
       paths: z
         .array(z.string())
         .optional()
@@ -617,7 +669,13 @@ server.registerTool(
           reason: `Work Item #${workItemNumber} is '${item.state}', not ready to start`,
         };
       }
-      const dispatcher = await dispatcherFor(owner, repo, objective, escalateTo, reader);
+      const dispatcher = await dispatcherFor(
+        owner,
+        repo,
+        objective,
+        escalateTo,
+        reader,
+      );
       await dispatcher.start(item);
       return { action: "started", workItem: workItemNumber };
     },
@@ -642,7 +700,7 @@ server.registerTool(
       "instead, with the specific reasons. Approving is a write; the decision and its reasoning are " +
       "recorded as a comment on the Work Item. " +
       "IMPORTANT: GitHub's per-run approve endpoint covers only *fork* pull " +
-      "requests and refuses a same-repo coding-agent branch outright with \"not from a fork pull " +
+      'requests and refuses a same-repo coding-agent branch outright with "not from a fork pull ' +
       "request or queued by the Actions bot\". That hold comes from the repository's Copilot Actions " +
       "workflow-approval requirement, which is readable over REST but has NO write API, so Factory " +
       "cannot release it. On that refusal this tool returns `action: 'not_approvable'` with GitHub's " +
@@ -656,7 +714,9 @@ server.registerTool(
       ...WorkItemLocatorShape,
       escalateTo: z
         .string()
-        .describe("Login of the human to assign if the review declines to approve"),
+        .describe(
+          "Login of the human to assign if the review declines to approve",
+        ),
     },
   },
   tool(
@@ -678,7 +738,9 @@ server.registerTool(
       const item = findWorkItem(objective, workItemNumber);
       const pr = currentOpenPullRequest(item);
       if (!pr) {
-        throw new Error(`Work Item #${workItemNumber} has no open pull request`);
+        throw new Error(
+          `Work Item #${workItemNumber} has no open pull request`,
+        );
       }
 
       const held = await reader.listRunsAwaitingApproval(pr.headSha);
@@ -709,8 +771,18 @@ server.registerTool(
         profile,
       });
 
-      const dispatcher = await dispatcherFor(owner, repo, objective, escalateTo, reader);
-      const outcome = await dispatcher.approveChecks(item, held.approvable, verdict);
+      const dispatcher = await dispatcherFor(
+        owner,
+        repo,
+        objective,
+        escalateTo,
+        reader,
+      );
+      const outcome = await dispatcher.approveChecks(
+        item,
+        held.approvable,
+        verdict,
+      );
       return {
         ...outcome,
         pullRequest: { number: pr.number, headSha: pr.headSha },
@@ -756,7 +828,13 @@ server.registerTool(
         };
       }
       const decision = confirmAction(item, objective.readAt);
-      const dispatcher = await dispatcherFor(owner, repo, objective, escalateTo, reader);
+      const dispatcher = await dispatcherFor(
+        owner,
+        repo,
+        objective,
+        escalateTo,
+        reader,
+      );
       await dispatcher.confirm(item, objective.readAt);
       return { action: decision, workItem: workItemNumber };
     },
@@ -784,7 +862,9 @@ server.registerTool(
       reason: z
         .string()
         .optional()
-        .describe("Why this attempt was judged unusable; surfaced in the close/escalation comment"),
+        .describe(
+          "Why this attempt was judged unusable; surfaced in the close/escalation comment",
+        ),
     },
   },
   tool(
@@ -812,7 +892,13 @@ server.registerTool(
           reason: `Work Item #${workItemNumber} is '${item.state}', not 'failed'`,
         };
       }
-      const dispatcher = await dispatcherFor(owner, repo, objective, escalateTo, reader);
+      const dispatcher = await dispatcherFor(
+        owner,
+        repo,
+        objective,
+        escalateTo,
+        reader,
+      );
       // Report what actually happened, not what we predicted would happen: a
       // caller told a *decision* instead of an *outcome* has to trust that the
       // two never diverge. They agree today because `retryOrEscalate`
@@ -846,7 +932,9 @@ server.registerTool(
       expectedFiles: z
         .array(z.string())
         .optional()
-        .describe("The Work Item's declared file scope (§8); omit to skip the untouched-scope check"),
+        .describe(
+          "The Work Item's declared file scope (§8); omit to skip the untouched-scope check",
+        ),
     },
   },
   tool(
@@ -876,10 +964,22 @@ server.registerTool(
       }
       const pr = currentOpenPullRequest(item);
       if (!pr) {
-        throw new Error(`Work Item #${workItemNumber} has no open pull request`);
+        throw new Error(
+          `Work Item #${workItemNumber} has no open pull request`,
+        );
       }
-      const verdict = evaluateMechanical(pr, expectedFiles, objective.ciExpectedOnPullRequests);
-      const dispatcher = await dispatcherFor(owner, repo, objective, escalateTo, reader);
+      const verdict = evaluateMechanical(
+        pr,
+        expectedFiles,
+        objective.ciExpectedOnPullRequests,
+      );
+      const dispatcher = await dispatcherFor(
+        owner,
+        repo,
+        objective,
+        escalateTo,
+        reader,
+      );
       const outcome = await dispatcher.integrate(item, pr, verdict);
       return {
         verdict,
@@ -912,11 +1012,17 @@ server.registerTool(
       "if any Work Item is not yet `done` (the same check `allDone()` in state.ts makes).",
     inputSchema: {
       ...RepoShape,
-      objectiveNumber: z.number().int().positive().describe("Objective issue number"),
+      objectiveNumber: z
+        .number()
+        .int()
+        .positive()
+        .describe("Objective issue number"),
       escalateTo: z
         .string()
         .min(1)
-        .describe("GitHub login used only to build the Dispatcher this tool reuses; not otherwise acted on here"),
+        .describe(
+          "GitHub login used only to build the Dispatcher this tool reuses; not otherwise acted on here",
+        ),
     },
   },
   tool(
@@ -934,7 +1040,10 @@ server.registerTool(
       const reader = readerFor(owner, repo);
       const objective = derive(await reader.readObjective(objectiveNumber));
       if (objective.closed) {
-        return { action: "no-op", reason: `Objective #${objectiveNumber} is already closed` };
+        return {
+          action: "no-op",
+          reason: `Objective #${objectiveNumber} is already closed`,
+        };
       }
       if (!allDone(objective)) {
         return {
@@ -942,7 +1051,13 @@ server.registerTool(
           reason: `Objective #${objectiveNumber} has Work Items that are not yet 'done'`,
         };
       }
-      const dispatcher = await dispatcherFor(owner, repo, objective, escalateTo, reader);
+      const dispatcher = await dispatcherFor(
+        owner,
+        repo,
+        objective,
+        escalateTo,
+        reader,
+      );
       await dispatcher.closeObjective(objective.id);
       return { action: "closed", objective: objectiveNumber };
     },
@@ -969,7 +1084,9 @@ server.registerTool(
       pathPrefix: z
         .string()
         .optional()
-        .describe("Only return paths starting with this prefix, e.g. 'src/' or 'test/'"),
+        .describe(
+          "Only return paths starting with this prefix, e.g. 'src/' or 'test/'",
+        ),
       maxEntries: z
         .number()
         .int()
@@ -1053,7 +1170,11 @@ server.registerTool(
       "activate a v2 run; new unattended Objectives must use factory_run.",
     inputSchema: {
       ...RepoShape,
-      objectiveNumber: z.number().int().positive().describe("Objective issue number"),
+      objectiveNumber: z
+        .number()
+        .int()
+        .positive()
+        .describe("Objective issue number"),
       compiledObjective: CompiledObjectiveSchema,
     },
   },
@@ -1078,7 +1199,9 @@ server.registerTool(
           metadata.graphDigest !== digest ||
           metadata.graphSize !== compiledObjective.workItems.length
         ) {
-          throw new Error(`Work Item #${item.number} belongs to a different compiled graph`);
+          throw new Error(
+            `Work Item #${item.number} belongs to a different compiled graph`,
+          );
         }
         return {
           compilerId: metadata.id,
@@ -1090,11 +1213,18 @@ server.registerTool(
           number: item.number,
           title: item.title,
           body: item.body ?? "",
-          blockedByNumbers: item.blockedBy.map((dependency) => dependency.number),
+          blockedByNumbers: item.blockedBy.map(
+            (dependency) => dependency.number,
+          ),
         };
       });
       const applier = new GraphApplier({
-        writer: new GithubOctokitGraphWriter({ token: getToken(), owner, repo, onThrottle: log }),
+        writer: new GithubOctokitGraphWriter({
+          token: getToken(),
+          owner,
+          repo,
+          onThrottle: log,
+        }),
         onThrottle: log,
         circuitBreaker: breaker,
         pacer,
@@ -1104,7 +1234,9 @@ server.registerTool(
       const created = await applier.apply(compiledObjective, {
         repositoryId: snapshot.repositoryId,
         objectiveIssueId: snapshot.id,
-        ...(snapshot.workItemLabelId ? { workItemLabelId: snapshot.workItemLabelId } : {}),
+        ...(snapshot.workItemLabelId
+          ? { workItemLabelId: snapshot.workItemLabelId }
+          : {}),
         existingWorkItems,
       });
       return {
@@ -1142,27 +1274,35 @@ server.registerTool(
         .string()
         .min(1)
         .optional()
-        .describe("Absolute local Git repository path; defaults to the MCP process working directory"),
+        .describe(
+          "Absolute local Git repository path; defaults to the MCP process working directory",
+        ),
       untilTerminal: z.literal(true),
-      policy: z.record(z.unknown()).optional().describe("Complete v2 run policy; defaults to local-only"),
+      policy: z
+        .record(z.unknown())
+        .optional()
+        .describe("Complete v2 run policy; defaults to local-only"),
     },
   },
   tool(
-    async ({
-      owner,
-      repo,
-      objectiveNumber,
-      repository,
-      policy,
-    }: {
-      owner: string;
-      repo: string;
-      objectiveNumber: number;
-      repository?: string | undefined;
-      untilTerminal: true;
-      policy?: Record<string, unknown> | undefined;
-    }, extra) => {
-      const supervisor = new FactorySupervisor({
+    async (
+      {
+        owner,
+        repo,
+        objectiveNumber,
+        repository,
+        policy,
+      }: {
+        owner: string;
+        repo: string;
+        objectiveNumber: number;
+        repository?: string | undefined;
+        untilTerminal: true;
+        policy?: Record<string, unknown> | undefined;
+      },
+      extra,
+    ) => {
+      return runForegroundObjective({
         token: getToken(),
         owner,
         repo,
@@ -1172,7 +1312,6 @@ server.registerTool(
         signal: extra.signal,
         onStatus: log,
       });
-      return supervisor.run();
     },
   ),
 );
@@ -1190,7 +1329,9 @@ server.registerTool(
         .string()
         .min(1)
         .optional()
-        .describe("Local repository path used by future workers; defaults to the process directory"),
+        .describe(
+          "Local repository path used by future workers; defaults to the process directory",
+        ),
     },
   },
   tool(async ({ repository }: { repository?: string | undefined }) => {
@@ -1203,70 +1344,166 @@ server.registerTool(
   }),
 );
 
-const ObjectiveToolShape = { ...RepoShape, objectiveNumber: z.number().int().positive() };
-const RequestToolShape = { ...ObjectiveToolShape, requestId: z.string().min(1).max(160) };
+const ObjectiveToolShape = {
+  ...RepoShape,
+  objectiveNumber: z.number().int().positive(),
+};
+const RequestToolShape = {
+  ...ObjectiveToolShape,
+  requestId: z.string().min(1).max(160),
+};
 
 type ApplicationToolInput = {
-  owner: string; repo: string; objectiveNumber?: number; requestId?: string; baseSha?: string;
-  workItemNumber?: number; priorityRank?: number; reason?: string; repository?: string;
+  owner: string;
+  repo: string;
+  objectiveNumber?: number;
+  requestId?: string;
+  baseSha?: string;
+  workItemNumber?: number;
+  priorityRank?: number;
+  reason?: string;
+  repository?: string;
 };
 
 function registerApplicationTool(
   name: string,
-  operation: "doctor" | "plan" | "status" | "explain" | "replay" | "activate" |
-    "pause" | "resume" | "drain" | "cloud-pause" | "retry" | "priority" | "cancel" |
-    "controller-start" | "controller-stop" | "controller-install" | "controller-uninstall",
-  annotations: { readOnlyHint: boolean; destructiveHint: boolean; idempotentHint: boolean; openWorldHint: boolean },
+  operation:
+    | "doctor"
+    | "plan"
+    | "status"
+    | "explain"
+    | "replay"
+    | "activate"
+    | "pause"
+    | "resume"
+    | "drain"
+    | "cloud-pause"
+    | "retry"
+    | "priority"
+    | "cancel"
+    | "controller-start"
+    | "controller-stop"
+    | "controller-restart"
+    | "controller-status"
+    | "controller-install"
+    | "controller-uninstall",
+  annotations: {
+    readOnlyHint: boolean;
+    destructiveHint: boolean;
+    idempotentHint: boolean;
+    openWorldHint: boolean;
+  },
 ): void {
-  const inputSchema = operation.startsWith("controller-") ? {
-    ...RepoShape,
-    repository: z.string().min(1),
-    requestId: z.string().min(1).max(160),
-  } : operation === "activate" ? {
-    ...RequestToolShape,
-    baseSha: z.string().regex(/^[0-9a-fA-F]{40}$/),
-  } : ["doctor", "plan", "status", "explain"].includes(operation) ? {
-    ...ObjectiveToolShape,
-    ...(operation === "explain" ? { workItemNumber: z.number().int().positive().optional() } : {}),
-  } : {
-    ...RequestToolShape,
-    ...((operation === "retry" || operation === "priority") ? { workItemNumber: z.number().int().positive() } : {}),
-    ...(operation === "priority" ? { priorityRank: z.number().int().min(0).max(1_000) } : {}),
-    ...(["pause", "drain", "cloud-pause", "retry", "replay", "cancel"].includes(operation)
-      ? { reason: z.string().min(1).max(8_000).optional() } : {}),
-  };
-  server.registerTool(name, {
-    title: name.replaceAll("_", " "),
-    description: `${operation} through Factory's shared application-service boundary.`,
-    inputSchema,
-    annotations,
-  }, tool(async (input: ApplicationToolInput) => {
-    const service = applicationFor(input.owner, input.repo);
-    if (!operation.startsWith("controller-") && !input.objectiveNumber) throw new Error("objectiveNumber is required");
-    if (["doctor", "plan", "status", "explain"].includes(operation)) {
-      return service.inspect(operation as "doctor" | "plan" | "status" | "explain", input.objectiveNumber!, input.workItemNumber);
-    }
-    if (operation === "activate") {
-      if (!input.requestId || !input.baseSha) throw new Error("requestId and baseSha are required");
-      return service.activate({ objective: input.objectiveNumber!, requestId: input.requestId, baseSha: input.baseSha });
-    }
-    if (operation.startsWith("controller-")) {
-      if (!input.requestId || !input.repository) throw new Error("requestId and repository are required");
-      return service.controller(operation.slice("controller-".length) as "start" | "stop" | "install" | "uninstall", {
-        repository: `${input.owner}/${input.repo}`, checkout: input.repository, requestId: input.requestId,
-      });
-    }
-    if (!input.requestId) throw new Error("requestId is required");
-    return service.command(operation as "pause" | "resume" | "drain" | "cloud-pause" | "retry" | "priority" | "replay" | "cancel", {
-      objective: input.objectiveNumber!, requestId: input.requestId,
-      ...(input.reason ? { reason: input.reason } : {}),
-      ...(input.workItemNumber ? { workItem: input.workItemNumber } : {}),
-      ...(input.priorityRank !== undefined ? { priorityRank: input.priorityRank } : {}),
-    });
-  }));
+  const inputSchema = operation.startsWith("controller-")
+    ? {
+        ...RepoShape,
+        repository: z.string().min(1),
+        requestId: z.string().min(1).max(160),
+      }
+    : operation === "activate"
+      ? {
+          ...RequestToolShape,
+          baseSha: z.string().regex(/^[0-9a-fA-F]{40}$/),
+        }
+      : ["doctor", "plan", "status", "explain"].includes(operation)
+        ? {
+            ...ObjectiveToolShape,
+            ...(operation === "explain"
+              ? { workItemNumber: z.number().int().positive().optional() }
+              : {}),
+          }
+        : {
+            ...RequestToolShape,
+            ...(operation === "retry" || operation === "priority"
+              ? { workItemNumber: z.number().int().positive() }
+              : {}),
+            ...(operation === "priority"
+              ? { priorityRank: z.number().int().min(0).max(1_000) }
+              : {}),
+            ...([
+              "pause",
+              "drain",
+              "cloud-pause",
+              "retry",
+              "replay",
+              "cancel",
+            ].includes(operation)
+              ? { reason: z.string().min(1).max(8_000).optional() }
+              : {}),
+          };
+  server.registerTool(
+    name,
+    {
+      title: name.replaceAll("_", " "),
+      description: `${operation} through Factory's shared application-service boundary.`,
+      inputSchema,
+      annotations,
+    },
+    tool(async (input: ApplicationToolInput) => {
+      const service = applicationFor(input.owner, input.repo);
+      if (!operation.startsWith("controller-") && !input.objectiveNumber)
+        throw new Error("objectiveNumber is required");
+      if (["doctor", "plan", "status", "explain"].includes(operation)) {
+        return service.inspect(
+          operation as "doctor" | "plan" | "status" | "explain",
+          input.objectiveNumber!,
+          input.workItemNumber,
+        );
+      }
+      if (operation === "activate") {
+        if (!input.requestId || !input.baseSha)
+          throw new Error("requestId and baseSha are required");
+        return service.activate({
+          objective: input.objectiveNumber!,
+          requestId: input.requestId,
+          baseSha: input.baseSha,
+        });
+      }
+      if (operation.startsWith("controller-")) {
+        if (!input.requestId || !input.repository)
+          throw new Error("requestId and repository are required");
+        return service.controller(
+          operation.slice("controller-".length) as
+            | "start"
+            | "stop"
+            | "restart"
+            | "status"
+            | "install"
+            | "uninstall",
+          {
+            repository: `${input.owner}/${input.repo}`,
+            checkout: input.repository,
+            requestId: input.requestId,
+          },
+        );
+      }
+      if (!input.requestId) throw new Error("requestId is required");
+      return service.command(
+        operation as
+          | "pause"
+          | "resume"
+          | "drain"
+          | "cloud-pause"
+          | "retry"
+          | "priority"
+          | "replay"
+          | "cancel",
+        {
+          objective: input.objectiveNumber!,
+          requestId: input.requestId,
+          ...(input.reason ? { reason: input.reason } : {}),
+          ...(input.workItemNumber ? { workItem: input.workItemNumber } : {}),
+          ...(input.priorityRank !== undefined
+            ? { priorityRank: input.priorityRank }
+            : {}),
+        },
+      );
+    }),
+  );
 }
 
-for (const [name, operation, annotations] of APPLICATION_TOOL_DEFINITIONS) registerApplicationTool(name, operation, annotations);
+for (const [name, operation, annotations] of APPLICATION_TOOL_DEFINITIONS)
+  registerApplicationTool(name, operation, annotations);
 
 export async function main(): Promise<void> {
   const transport = new StdioServerTransport();

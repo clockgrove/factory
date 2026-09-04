@@ -104,15 +104,37 @@ export function cancellationRequestFromComments(
   return null;
 }
 
+const OBJECTIVE_CARDINALITY_QUERY = `
+query ObjectiveCardinality($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    issue(number: $number) {
+      subIssues(first: 1) { totalCount }
+    }
+  }
+}`;
+
 /**
- * Fetches the Objective and its Work Items in a single query.
+ * Size nested GraphQL connections to observed data instead of pricing every
+ * snapshot for the protocol maximum. GitHub requires `first` to be positive,
+ * so an empty Objective uses one while still returning zero nodes.
+ */
+export function objectiveSubIssueQuerySize(totalCount: number): number {
+  if (!Number.isInteger(totalCount) || totalCount < 0) {
+    throw new Error("Objective sub-issue count is invalid");
+  }
+  if (totalCount > 100) throw new Error("Objective has more than 100 Work Items");
+  return Math.max(1, totalCount);
+}
+
+/**
+ * Fetches the Objective and its Work Items after a tiny cardinality preflight.
  *
  * `subIssues`, `blockedBy` and `closedByPullRequestsReferences` are all native
  * GitHub relationships (verified against the live schema), which is what makes
  * the "no sidecar state" claim in §3.1 hold.
  */
 const OBJECTIVE_QUERY = `
-query Objective($owner: String!, $repo: String!, $number: Int!) {
+query Objective($owner: String!, $repo: String!, $number: Int!, $subIssueCount: Int!) {
   repository(owner: $owner, name: $repo) {
     id
     defaultBranchRef { name }
@@ -135,7 +157,7 @@ query Objective($owner: String!, $repo: String!, $number: Int!) {
         totalCount
         nodes { body author { login } authorAssociation }
       }
-      subIssues(first: 100) {
+      subIssues(first: $subIssueCount) {
         totalCount
         nodes {
           id
@@ -307,6 +329,12 @@ interface GqlResponse {
       comments?: GqlComments;
       subIssues: { totalCount: number; nodes: GqlWorkItem[] };
     } | null;
+  } | null;
+}
+
+interface GqlObjectiveCardinality {
+  repository: {
+    issue: { subIssues: { totalCount: number } } | null;
   } | null;
 }
 
@@ -971,10 +999,24 @@ export class GitHubReader {
 
   /** Read one Objective and everything derivable about its Work Items. */
   async readObjective(number: number): Promise<ObjectiveSnapshot> {
+    const cardinality = await this.#octokit.graphql<GqlObjectiveCardinality>(
+      OBJECTIVE_CARDINALITY_QUERY,
+      { owner: this.#owner, repo: this.#repo, number },
+    );
+    const observedIssue = cardinality.repository?.issue;
+    if (!cardinality.repository || !observedIssue) {
+      throw new Error(
+        `Objective #${number} not found in ${this.#owner}/${this.#repo}`,
+      );
+    }
+    const subIssueCount = objectiveSubIssueQuerySize(
+      observedIssue.subIssues.totalCount,
+    );
     const data = await this.#octokit.graphql<GqlResponse>(OBJECTIVE_QUERY, {
       owner: this.#owner,
       repo: this.#repo,
       number,
+      subIssueCount,
     });
 
     const repository = data.repository;
@@ -990,8 +1032,10 @@ export class GitHubReader {
         `${this.#owner}/${this.#repo} has no default branch (empty repository?)`,
       );
     }
-    if (issue.subIssues.totalCount > issue.subIssues.nodes.length) {
-      throw new Error(`Objective #${number} has more than 100 Work Items`);
+    if (issue.subIssues.totalCount !== issue.subIssues.nodes.length) {
+      throw new Error(
+        `Objective #${number} sub-issues changed during snapshot; retry the read`,
+      );
     }
 
     const bot = repository.suggestedActors.nodes.find(

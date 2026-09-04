@@ -2,8 +2,8 @@
   "name": "clockgrove-factory",
   "interface": {
     "displayName": "Clockgrove Factory",
-    "shortDescription": "GitHub-native engineering management system",
-    "description": "Automatically manage software projects on GitHub. Factory compiles Objectives into Work Items, dispatches them to AI agents, evaluates progress in real-time, and merges pull requests when ready—no infrastructure required.",
+    "shortDescription": "Local-first, GitHub-backed software factory",
+    "description": "Compile Objectives into Work Items, run policy-approved AI workers, validate artifacts, and integrate pull requests with GitHub as the durable control plane—no hosted Factory infrastructure required.",
     "icon": "./assets/logos/clockgrove-mark.png",
     "website": "https://github.com/clockgrove/factory",
     "repository": "https://github.com/clockgrove/factory"
@@ -12,7 +12,7 @@
     {
       "name": "factory",
       "displayName": "Factory",
-      "description": "Engineering management for GitHub using AI agents and MCP servers",
+      "description": "Local-first unattended engineering orchestration using GitHub, AI agents, and MCP",
       "source": {
         "source": "url",
         "url": "https://github.com/clockgrove/factory.git",
@@ -26,10 +26,11 @@
       "icon": "./assets/logos/clockgrove-mark.png",
       "capabilities": [
         "Compile Objectives into Work Items",
-        "Dispatch to AI agents",
-        "Evaluate PR readiness",
-        "Merge when conditions met",
-        "GitHub-native state management"
+        "Schedule adaptive local workers",
+        "Use optional bounded cloud burst",
+        "Validate and integrate pull requests",
+        "Recover durable GitHub-backed runs",
+        "Explain and replay scheduling decisions"
       ]
     }
   ]

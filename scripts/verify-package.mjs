@@ -17,7 +17,7 @@
  * Deliberately dependency-free — no JSON-schema library — so it can run
  * anywhere, including from a fresh clone before dev dependencies are installed.
  */
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   copyFileSync,
   existsSync,
@@ -95,6 +95,10 @@ for (const lifecycle of ["preinstall", "install", "postinstall", "prepare"]) {
 check(
   typeof plugin.name === "string" && plugin.name.length > 0,
   "plugin.json has a name",
+);
+check(
+  packageManifest.version === plugin.version,
+  "package.json and plugin.json agree on the version",
 );
 check(
   /^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(plugin.name ?? ""),
@@ -191,6 +195,36 @@ check(
   marketplacePlugin?.version === plugin.version,
   "the marketplace and plugin manifests agree on the version",
 );
+check(
+  marketplace.metadata?.version === plugin.version,
+  "the Copilot marketplace metadata agrees on the version",
+);
+
+const agentMarketplace = readJson(".agents/plugins/marketplace.json");
+const agentMarketplacePlugin = agentMarketplace.plugins?.find(
+  (entry) => entry.name === plugin.name,
+);
+check(
+  agentMarketplace.name === "clockgrove-factory",
+  "the Agent marketplace has a stable name",
+);
+check(
+  agentMarketplacePlugin?.source?.source === "url" &&
+    agentMarketplacePlugin?.source?.url ===
+      "https://github.com/clockgrove/factory.git" &&
+    agentMarketplacePlugin?.source?.ref === "main",
+  "the Agent marketplace points at the public Factory main branch",
+);
+check(
+  agentMarketplacePlugin?.policy?.installation === "AVAILABLE" &&
+    agentMarketplacePlugin?.policy?.authentication === "ON_INSTALL" &&
+    agentMarketplacePlugin?.policy?.products === undefined,
+  "the Agent marketplace declares portable install and authentication policy",
+);
+check(
+  !existsSync(resolve(root, ".github", "workflows")),
+  "the package ships no Factory GitHub Actions workflows",
+);
 
 // Codex resolves every component and asset path from the plugin root, not from
 // the .codex-plugin directory that contains its manifest.
@@ -229,7 +263,8 @@ check(
 check(
   Array.isArray(codex.interface?.defaultPrompt) &&
     codex.interface.defaultPrompt.length > 0 &&
-    codex.interface.defaultPrompt.length <= 3,
+    codex.interface.defaultPrompt.length <= 3 &&
+    codex.interface.defaultPrompt.every((prompt) => prompt.length <= 128),
   "the Codex manifest exposes bounded starter prompts",
 );
 for (const field of ["composerIcon", "logo"]) {
@@ -278,6 +313,7 @@ const schemaFiles = [
   "factory-event.schema.json",
   "artifact.schema.json",
   "validation-evidence.schema.json",
+  "replay-snapshot.schema.json",
 ];
 const schemaIds = new Set();
 for (const name of schemaFiles) {
@@ -293,6 +329,25 @@ for (const name of schemaFiles) {
   if (schema.$id) schemaIds.add(schema.$id);
 }
 check(schemaIds.size === schemaFiles.length, "protocol schema ids are unique");
+const replaySnapshotSchema = readJson("schemas/replay-snapshot.schema.json");
+check(
+  replaySnapshotSchema.properties?.protocol?.const ===
+    "clockgrove.factory/replay-v1",
+  "replay snapshot schema pins the public replay protocol",
+);
+check(
+  ["capturedAt", "policyDigest", "input", "expected", "snapshotDigest"].every(
+    (field) => replaySnapshotSchema.required?.includes(field),
+  ),
+  "replay snapshot schema requires its complete digest boundary",
+);
+check(
+  replaySnapshotSchema.definitions?.input?.properties?.policy?.$ref ===
+    "run-policy.schema.json" &&
+    Boolean(replaySnapshotSchema.definitions?.decisionSet?.properties?.admissions) &&
+    Boolean(replaySnapshotSchema.definitions?.decisionSet?.properties?.queued),
+  "replay snapshot schema publishes policy, admission, and queue decisions",
+);
 const factoryEventSchema = readJson("schemas/factory-event.schema.json");
 const eventKinds = factoryEventSchema.properties?.kind?.enum ?? [];
 for (const kind of ["delivery", "publication"]) {
@@ -309,6 +364,9 @@ for (const field of [
   "validationDigest",
   "exactHeadValidationDigest",
   "operationId",
+  "reasonCode",
+  "gate",
+  "prioritySource",
 ]) {
   check(
     Boolean(factoryEventSchema.properties?.[field]),
@@ -357,6 +415,13 @@ if (tools) {
     `unexpected: ${extra.join(", ")}`,
   );
 
+  const replayTool = tools.find((tool) => tool.name === "factory_replay");
+  check(
+    replayTool?.annotations?.readOnlyHint === true &&
+      replayTool?.annotations?.destructiveHint === false,
+    "factory_replay is published as a read-only MCP operation",
+  );
+
   const thin = tools
     .filter((t) => (t.description ?? "").length < 40)
     .map((t) => t.name);
@@ -376,6 +441,44 @@ if (tools) {
   );
 
   console.log(`\n      ${tools.length} tools: ${names.join(", ")}`);
+}
+
+console.log("\n# clean Codex plugin install\n");
+
+const installVerifier = resolve(root, "scripts", "verify-plugin-install.mjs");
+check(existsSync(installVerifier), "the clean-install verifier exists");
+if (existsSync(installVerifier)) {
+  const installed = spawnSync(process.execPath, [installVerifier], {
+    cwd: root,
+    env: process.env,
+    encoding: "utf8",
+    timeout: 60_000,
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  check(
+    !installed.error && installed.status === 0,
+    "Codex installs a staged Factory package in a clean home",
+    installed.error?.message || installed.stderr || installed.stdout,
+  );
+  if (!installed.error && installed.status === 0) {
+    try {
+      const receipt = JSON.parse(installed.stdout.trim());
+      check(
+        receipt.installed === true && receipt.version === plugin.version,
+        "the clean install agrees on the plugin version",
+      );
+      check(
+        receipt.mcpTools === EXPECTED_TOOLS.length,
+        "the installed MCP executable serves the complete tool surface",
+      );
+      check(
+        receipt.controllerEntryPoint === "dist/factory.js",
+        "the installed controller executable starts successfully",
+      );
+    } catch (error) {
+      check(false, "the clean-install verifier returns a JSON receipt", error.message);
+    }
+  }
 }
 
 if (bundle && existsSync(bundle)) {

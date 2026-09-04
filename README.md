@@ -103,6 +103,20 @@ node dist/factory.js cancel OWNER/REPO#OBJECTIVE --reason "operator request"
 The request is a durable GitHub event. The active Supervisor stops workers, records terminal attempt
 and run receipts, and releases the lease; killing a process is not used as the cancellation record.
 
+## Inspect through chat or MCP
+
+The Director skill uses bounded, read-only operations when the user is inspecting a run:
+
+- `factory_status` returns the current Objective/run state, active and queued Work Items, resource
+  pressure, burst activity, and aggregate execution economics.
+- `factory_explain` returns stable reason codes, policy gates, observed evidence, and the concrete
+  action needed to unblock waiting or escalated work.
+- `factory_replay` reconstructs durable scheduling receipts and can replay a credential-free pinned
+  admission snapshot without writing GitHub or launching a worker.
+
+These reports mark unavailable observations explicitly. They do not invent token counts, provider
+costs, capacity readings, or timing data that were not durably observed.
+
 ## Policy and paid backends
 
 The default policy is exported as `DEFAULT_RUN_POLICY`. A complete JSON override looks like:
@@ -206,13 +220,13 @@ data. Factory never widens scope, trust, backend permissions, or budget to make 
 
 ```bash
 npm ci
-npm run typecheck
-npm test
-npm run verify:package
+npm run verify:release
 ```
 
 `verify:package` rebuilds the committed bundles, validates every manifest/skill/schema, starts the
-bundled MCP server with no token, and verifies its public tool surface. See
+bundled MCP server with no token, installs a staged copy through an isolated Codex home, and starts
+both installed executables without using worktree configuration. `verify:release` also runs the full
+test suite, typecheck, and production dependency audit. See
 [CONTRIBUTING.md](CONTRIBUTING.md) for contribution rules.
 
 Current release evidence and the external gates that still require real provider credentials or a

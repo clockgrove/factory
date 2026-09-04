@@ -429,10 +429,34 @@ Release evidence and deliberately unclaimed adapters are listed in
 
 ## Definition of done
 
-A clean adopter can install Factory, authenticate GitHub, deliberately install one local repository
-controller, activate an Objective through chat, compile it into native Work Item sub-issues, run
-trusted work locally by default, opt into bounded cloud burst, recover after crashes without
-duplicate valid work, validate independently, deliver correct sibling and stacked pull requests,
-integrate only evidence-backed reversible changes, and close the Objective without Factory Actions,
-a hosted service, a database, a queue, or a custom UI. Human attention occurs only for a specific,
-evidenced product, policy, safety, budget, platform, or correctness boundary.
+The stable identifiers below make every part of the release contract traceable to executable
+evidence in [`CONFORMANCE.md`](CONFORMANCE.md):
+
+- **DOD-1 — Portable installation.** A clean adopter can install Factory, authenticate GitHub, and
+  deliberately install one local repository controller without lifecycle scripts or `node_modules`.
+- **DOD-2 — GitHub-only durable control.** GitHub issues, sub-issues, dependency relationships, pull
+  requests, and versioned custom refs contain the durable orchestration state; Factory requires no
+  Action, hosted service, database, sidecar queue, or custom UI.
+- **DOD-3 — Objective compilation and activation.** A chat/MCP activation compiles an Objective into
+  a bounded, cost-aware graph of native Work Item sub-issues before execution.
+- **DOD-4 — Adaptive local-first execution.** Trusted dependency-ready work runs locally by default,
+  with concurrency continuously constrained by CPU, memory, repository, Objective, backend, path,
+  and exclusive-resource limits.
+- **DOD-5 — Explicit bounded cloud burst.** Cloud execution is opt-in and occurs only when policy,
+  capability, priority, queue/deadline trigger, independent-validation capacity, and hard native
+  budget reservations all admit it.
+- **DOD-6 — Durable recovery.** Controller, worker, validation, publication, and integration restarts
+  reconstruct facts from GitHub without duplicating already valid work or widening authority.
+- **DOD-7 — Evidence-bound delivery.** Independent validation binds the exact artifact tree and pull
+  request head; sibling or supported stacked delivery integrates only reversible, current evidence
+  and closes the Objective only after all Work Items ship.
+- **DOD-8 — Explainable, replayable economics.** Bounded status, explanation, replay, and run-summary
+  surfaces distinguish observed facts from unavailable data and expose stable gates, reasons,
+  priorities, capacity, burst use, and recorded cost units without writing the control plane.
+- **DOD-9 — Evidenced human boundaries.** Human attention occurs only for a specific product, policy,
+  safety, budget, platform, provider, or correctness boundary carrying concrete evidence and a
+  required action; retries never silently broaden scope, trust, compute, credentials, or spending.
+
+Passing deterministic and package conformance proves the implementation contract. Broad platform
+or paid-provider support is claimed only after the corresponding live gate in `CONFORMANCE.md` also
+passes.

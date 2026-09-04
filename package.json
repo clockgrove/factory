@@ -1,6 +1,6 @@
 {
   "name": "@clockgrove/factory",
-  "version": "2.0.25",
+  "version": "2.0.26",
   "description": "GitHub-backed, local-first unattended software factory.",
   "license": "MIT",
   "type": "module",
@@ -11,7 +11,8 @@
     "build": "esbuild src/cli.ts --bundle --minify --platform=node --format=esm --target=node20 --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" --outfile=dist/factory.js && esbuild src/mcp-server.ts --bundle --minify --platform=node --format=esm --target=node20 --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" --outfile=dist/mcp-server.js",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "verify:package": "npm run build && node scripts/verify-package.mjs"
+    "verify:package": "npm run build && node scripts/verify-package.mjs",
+    "verify:release": "npm run typecheck && npm test && npm run verify:package && npm audit --omit=dev"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

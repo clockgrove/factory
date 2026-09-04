@@ -1,6 +1,6 @@
 {
   "name": "factory",
-  "version": "2.0.25",
+  "version": "2.0.26",
   "description": "GitHub-backed, local-first unattended software factory.",
   "author": {
     "name": "Clockgrove",
@@ -29,7 +29,9 @@
       "Schedule dependency-ready Work Items",
       "Run local or opt-in isolated coding workers",
       "Validate and integrate completed work",
-      "Recover durable runs from GitHub"
+      "Recover durable runs from GitHub",
+      "Explain and replay scheduling decisions",
+      "Track bounded execution costs"
     ],
     "defaultPrompt": [
       "Run Factory for OWNER/REPO#OBJECTIVE using this checkout.",

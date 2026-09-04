@@ -37,6 +37,47 @@ async function repositoryFixture(): Promise<{ repository: string; baseSha: strin
   };
 }
 
+async function nodeRepositoryFixture(): Promise<{ repository: string; baseSha: string }> {
+  const fixture = await repositoryFixture();
+  await writeFile(
+    join(fixture.repository, "package.json"),
+    JSON.stringify({
+      name: "factory-validation-fixture",
+      version: "1.0.0",
+      scripts: { test: "node verify.cjs" },
+    }),
+  );
+  await writeFile(
+    join(fixture.repository, "package-lock.json"),
+    JSON.stringify({
+      name: "factory-validation-fixture",
+      version: "1.0.0",
+      lockfileVersion: 3,
+      requires: true,
+      packages: {
+        "": { name: "factory-validation-fixture", version: "1.0.0" },
+      },
+    }),
+  );
+  await writeFile(
+    join(fixture.repository, "verify.cjs"),
+    "const fs = require('node:fs'); process.exit(fs.readFileSync('value.txt', 'utf8') === 'changed\\n' ? 0 : 1);\n",
+  );
+  execFileSync("git", ["add", "package.json", "package-lock.json", "verify.cjs"], {
+    cwd: fixture.repository,
+  });
+  execFileSync("git", ["commit", "-q", "-m", "node fixture"], {
+    cwd: fixture.repository,
+  });
+  return {
+    repository: fixture.repository,
+    baseSha: execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: fixture.repository,
+      encoding: "utf8",
+    }).trim(),
+  };
+}
+
 function packet(baseSha: string, over: Partial<WorkerPacket> = {}): WorkerPacket {
   return {
     goal: "Change the value.",
@@ -99,6 +140,32 @@ describe("clean validation", () => {
     });
     expect(result.evidence.passed).toBe(false);
     expect(result.evidence.failureReason).toMatch(/validation failed/);
+    await discardValidationResult(result);
+  });
+
+  it("installs locked npm dependencies before authoritative commands", async () => {
+    const fixture = await nodeRepositoryFixture();
+    const worker = await createLocalWorktree(fixture.repository, fixture.baseSha);
+    await writeFile(join(worker.path, "value.txt"), "changed\n");
+    const artifact = await collectLocalArtifact(worker);
+    await cleanupLocalWorktree(worker);
+
+    const result = await validateArtifactClean({
+      repository: fixture.repository,
+      artifact,
+      packet: packet(fixture.baseSha, {
+        validationCommands: ["npm test"],
+        requirements: {
+          ...packet(fixture.baseSha).requirements,
+          tools: ["npm", "node"],
+        },
+      }),
+    });
+    expect(result.evidence.passed).toBe(true);
+    expect(result.evidence.commands.map(({ command }) => command)).toEqual([
+      "npm ci --no-audit --no-fund",
+      "npm test",
+    ]);
     await discardValidationResult(result);
   });
 

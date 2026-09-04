@@ -1,4 +1,4 @@
-import { writeFile } from "node:fs/promises";
+import { access, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { executionAffectingReason } from "../approval.js";
@@ -50,6 +50,19 @@ export interface CleanValidationInput {
 export interface CleanValidationResult {
   evidence: ValidationEvidence;
   worktree: LocalWorktree;
+}
+
+async function hasNpmLockfile(worktree: LocalWorktree): Promise<boolean> {
+  for (const name of ["package-lock.json", "npm-shrinkwrap.json"]) {
+    try {
+      await access(join(worktree.path, name));
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      // Try the next npm lockfile name.
+    }
+  }
+  return false;
 }
 
 export async function validateArtifactClean(
@@ -130,7 +143,30 @@ export async function validateArtifactClean(
       evidenceStartedAt = isolated.startedAt;
       evidenceCompletedAt = isolated.completedAt;
     } else {
-      for (const command of plan.commands) {
+      const localCommands = (await hasNpmLockfile(worktree))
+        ? [{ command: "npm ci --no-audit --no-fund", executable: "npm", args: ["ci", "--no-audit", "--no-fund"] }]
+        : [];
+      for (const setup of localCommands) {
+        const result = await runContainedProcess({
+          command: setup.executable,
+          args: setup.args,
+          cwd: worktree.path,
+          env: sanitizedWorkerEnvironment(process.env),
+          timeoutMs: plan.timeoutMsPerCommand,
+        });
+        commands.push({
+          command: setup.command,
+          exitCode: result.exitCode ?? (result.timedOut ? 124 : 1),
+          durationMs: result.durationMs,
+        });
+        if (result.exitCode !== 0) {
+          failureReason = result.timedOut
+            ? `validation setup timed out: ${setup.command}`
+            : `validation setup failed (${result.exitCode}): ${setup.command}`;
+          break;
+        }
+      }
+      for (const command of failureReason ? [] : plan.commands) {
         const result = await runContainedProcess({
           command: "/bin/sh",
           args: ["-lc", command],

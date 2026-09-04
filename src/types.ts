@@ -307,6 +307,17 @@ export interface ObjectiveSnapshot {
   workItems: WorkItemSnapshot[];
   /** When the snapshot was taken. One snapshot serves a whole cycle (§4.1). */
   readAt: Date;
+  /**
+   * Primary GraphQL budget observed by the query that produced this snapshot.
+   * The Supervisor uses it only to decline new admission when it cannot retain
+   * enough control-plane headroom to finish bookkeeping safely.
+   */
+  graphQlRateLimit?: {
+    cost: number;
+    limit: number;
+    remaining: number;
+    resetAt: Date;
+  };
   /** GraphQL node ID of the repository (§4.2's `agentAssignment.targetRepositoryId`). */
   repositoryId: string;
   /** The repository's default branch, used as `agentAssignment.baseRef`. */

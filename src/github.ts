@@ -135,6 +135,7 @@ export function objectiveSubIssueQuerySize(totalCount: number): number {
  */
 const OBJECTIVE_QUERY = `
 query Objective($owner: String!, $repo: String!, $number: Int!, $subIssueCount: Int!) {
+  rateLimit { cost limit remaining resetAt }
   repository(owner: $owner, name: $repo) {
     id
     defaultBranchRef { name }
@@ -313,6 +314,12 @@ interface GqlSuggestedActor {
 }
 
 interface GqlResponse {
+  rateLimit: {
+    cost: number;
+    limit: number;
+    remaining: number;
+    resetAt: string;
+  };
   repository: {
     id: string;
     defaultBranchRef: { name: string } | null;
@@ -785,6 +792,8 @@ export class GitHubReader {
   /** Cached for the process lifetime by `readWorkflowSafetyProfile`. */
   #safetyProfile: WorkflowSafetyProfile | undefined;
   #cachedDefaultBranch: string | undefined;
+  /** Stable after graph application; refreshed automatically if cardinality changes. */
+  readonly #objectiveSubIssueCounts = new Map<number, number>();
 
   constructor(opts: GitHubOptions) {
     this.#owner = opts.owner;
@@ -999,32 +1008,53 @@ export class GitHubReader {
 
   /** Read one Objective and everything derivable about its Work Items. */
   async readObjective(number: number): Promise<ObjectiveSnapshot> {
-    const cardinality = await this.#octokit.graphql<GqlObjectiveCardinality>(
-      OBJECTIVE_CARDINALITY_QUERY,
-      { owner: this.#owner, repo: this.#repo, number },
-    );
-    const observedIssue = cardinality.repository?.issue;
-    if (!cardinality.repository || !observedIssue) {
-      throw new Error(
-        `Objective #${number} not found in ${this.#owner}/${this.#repo}`,
+    const readCardinality = async (): Promise<number> => {
+      const cardinality = await this.#octokit.graphql<GqlObjectiveCardinality>(
+        OBJECTIVE_CARDINALITY_QUERY,
+        { owner: this.#owner, repo: this.#repo, number },
       );
-    }
-    const subIssueCount = objectiveSubIssueQuerySize(
-      observedIssue.subIssues.totalCount,
-    );
-    const data = await this.#octokit.graphql<GqlResponse>(OBJECTIVE_QUERY, {
-      owner: this.#owner,
-      repo: this.#repo,
-      number,
-      subIssueCount,
-    });
+      const observedIssue = cardinality.repository?.issue;
+      if (!cardinality.repository || !observedIssue) {
+        throw new Error(
+          `Objective #${number} not found in ${this.#owner}/${this.#repo}`,
+        );
+      }
+      return objectiveSubIssueQuerySize(observedIssue.subIssues.totalCount);
+    };
+    const readDetail = (subIssueCount: number) =>
+      this.#octokit.graphql<GqlResponse>(OBJECTIVE_QUERY, {
+        owner: this.#owner,
+        repo: this.#repo,
+        number,
+        subIssueCount,
+      });
 
-    const repository = data.repository;
-    const issue = repository?.issue;
+    let subIssueCount = this.#objectiveSubIssueCounts.get(number) ??
+      await readCardinality();
+    let data = await readDetail(subIssueCount);
+    let repository = data.repository;
+    let issue = repository?.issue;
     if (!repository || !issue) {
       throw new Error(
         `Objective #${number} not found in ${this.#owner}/${this.#repo}`,
       );
+    }
+
+    // The compiled graph is normally immutable, so avoid paying for a
+    // cardinality preflight on every snapshot. If an external edit adds a
+    // sub-issue, totalCount exposes the stale cached page; refresh once and
+    // retry rather than returning a partial graph.
+    if (issue.subIssues.totalCount !== issue.subIssues.nodes.length) {
+      this.#objectiveSubIssueCounts.delete(number);
+      subIssueCount = await readCardinality();
+      data = await readDetail(subIssueCount);
+      repository = data.repository;
+      issue = repository?.issue;
+      if (!repository || !issue) {
+        throw new Error(
+          `Objective #${number} not found in ${this.#owner}/${this.#repo}`,
+        );
+      }
     }
 
     if (!repository.defaultBranchRef) {
@@ -1037,6 +1067,10 @@ export class GitHubReader {
         `Objective #${number} sub-issues changed during snapshot; retry the read`,
       );
     }
+    this.#objectiveSubIssueCounts.set(
+      number,
+      objectiveSubIssueQuerySize(issue.subIssues.totalCount),
+    );
 
     const bot = repository.suggestedActors.nodes.find(
       (a) => a.login === COPILOT_LOGIN,
@@ -1077,6 +1111,12 @@ export class GitHubReader {
         toWorkItem(wi, agentWorkEvents, v2, actorsByRun, activeRun?.runId),
       ),
       readAt: new Date(),
+      graphQlRateLimit: {
+        cost: data.rateLimit.cost,
+        limit: data.rateLimit.limit,
+        remaining: data.rateLimit.remaining,
+        resetAt: new Date(data.rateLimit.resetAt),
+      },
       repositoryId: repository.id,
       defaultBranch: repository.defaultBranchRef.name,
       workItemLabelId: repository.workItemLabel?.id ?? null,

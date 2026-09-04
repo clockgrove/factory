@@ -90,13 +90,18 @@ export interface LeaseManagerOptions {
   durationMs?: number;
 }
 
+export const DEFAULT_LEASE_DURATION_MS = 10 * 60_000;
+export const DEFAULT_LEASE_RENEWAL_LEAD_MS = 2 * 60_000;
+export const DEFAULT_LEASE_RENEWAL_INTERVAL_MS =
+  DEFAULT_LEASE_DURATION_MS - DEFAULT_LEASE_RENEWAL_LEAD_MS;
+
 export class LeaseManager {
   readonly #store: LeaseStore;
   readonly #durationMs: number;
 
   constructor(options: LeaseManagerOptions) {
     this.#store = options.store;
-    this.#durationMs = options.durationMs ?? 120_000;
+    this.#durationMs = options.durationMs ?? DEFAULT_LEASE_DURATION_MS;
     if (this.#durationMs < 30_000) {
       throw new Error("lease duration must be at least 30 seconds");
     }
@@ -222,14 +227,17 @@ export class LeaseManager {
 
   async assertCurrent(lease: LeaseState): Promise<void> {
     const oid = await this.#store.readRef(lease.ref);
-    if (oid !== lease.oid) throw new LeaseLostError();
+    if (!oid) throw new LeaseLostError();
     const current = parseLease(await this.#store.readCommit(oid));
     const now = await this.#store.serverTime();
     if (
+      current.objective !== lease.objective ||
       current.epoch !== lease.epoch ||
       current.runId !== lease.runId ||
       current.holder !== lease.holder ||
       current.policyDigest !== lease.policyDigest ||
+      current.sequence < lease.sequence ||
+      (current.sequence === lease.sequence && current.oid !== lease.oid) ||
       current.expiresAt.getTime() <= now.getTime()
     ) {
       throw new LeaseLostError();

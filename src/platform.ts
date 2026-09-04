@@ -42,6 +42,8 @@ export const FACTORY_PACING = {
   maxConcurrentRequests: 5,
   maxContentCreatingPerMinute: 40,
   maxContentCreatingPerHour: 250,
+  /** Capacity kept available for lease acquisition and renewal. */
+  reservedLeaseMutationsPerHour: 24,
   minMsBetweenMutations: 1_000,
 } as const;
 
@@ -270,10 +272,26 @@ export class ContentCreationPacer {
     private readonly minGapMs: number = FACTORY_PACING.minMsBetweenMutations,
   ) {}
 
-  /** Ms to wait before the next content-creating call is safe to make. */
-  waitMs(now: Date = new Date()): number {
+  /**
+   * Ms to wait before the next content-creating call is safe to make.
+   * Normal writes can reserve part of the hourly budget for lease traffic;
+   * lease writes use the full configured limit.
+   */
+  waitMs(
+    now: Date = new Date(),
+    options: { hourlyReserve?: number } = {},
+  ): number {
     const t = now.getTime();
     this.#prune(t);
+    const hourlyReserve = options.hourlyReserve ?? 0;
+    if (
+      !Number.isInteger(hourlyReserve) ||
+      hourlyReserve < 0 ||
+      hourlyReserve >= this.perHour
+    ) {
+      throw new Error("hourly mutation reserve must leave at least one usable slot");
+    }
+    const hourlyLimit = this.perHour - hourlyReserve;
     const gapWait =
       this.#lastCallAt === null
         ? 0
@@ -281,9 +299,11 @@ export class ContentCreationPacer {
     const minuteWait =
       this.#minute.length < this.perMinute
         ? 0
-        : this.#minute[0]! + 60_000 - t;
+        : this.#minute[this.#minute.length - this.perMinute]! + 60_000 - t;
     const hourWait =
-      this.#hour.length < this.perHour ? 0 : this.#hour[0]! + 3_600_000 - t;
+      this.#hour.length < hourlyLimit
+        ? 0
+        : this.#hour[this.#hour.length - hourlyLimit]! + 3_600_000 - t;
     return Math.max(gapWait, minuteWait, hourWait, 0);
   }
 
@@ -303,6 +323,111 @@ export class ContentCreationPacer {
     while (this.#hour.length > 0 && this.#hour[0]! <= now - 3_600_000) {
       this.#hour.shift();
     }
+  }
+}
+
+export type MutationClass = "normal" | "lease";
+
+export interface MutationPermit {
+  waitedMs: number;
+  release(): void;
+}
+
+export interface MutationAdmission {
+  acquire(kind?: MutationClass): Promise<MutationPermit>;
+}
+
+export interface MutationSchedulerOptions {
+  pacer?: ContentCreationPacer;
+  reservedLeaseMutationsPerHour?: number;
+  onThrottle?: (message: string) => void;
+  now?: () => Date;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/**
+ * Serializes mutating requests while allowing lease traffic to pass normal
+ * callers that are sleeping on the hourly content budget. Admission records
+ * the request before transport so failed HTTP attempts are still priced.
+ */
+export class MutationScheduler implements MutationAdmission {
+  readonly #pacer: ContentCreationPacer;
+  readonly #reservedLeaseMutationsPerHour: number;
+  readonly #notify: (message: string) => void;
+  readonly #now: () => Date;
+  readonly #sleep: (ms: number) => Promise<void>;
+  #active = false;
+  #leaseQueue: Array<() => void> = [];
+  #normalQueue: Array<() => void> = [];
+  #lastNoticeAt = 0;
+
+  constructor(options: MutationSchedulerOptions = {}) {
+    this.#pacer = options.pacer ?? new ContentCreationPacer();
+    this.#reservedLeaseMutationsPerHour =
+      options.reservedLeaseMutationsPerHour ??
+      FACTORY_PACING.reservedLeaseMutationsPerHour;
+    this.#notify = options.onThrottle ?? (() => {});
+    this.#now = options.now ?? (() => new Date());
+    this.#sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  }
+
+  async acquire(kind: MutationClass = "normal"): Promise<MutationPermit> {
+    const startedAt = this.#now().getTime();
+    let pacedWaitMs = 0;
+    for (;;) {
+      const release = await this.#acquireGate(kind);
+      const now = this.#now();
+      let wait: number;
+      try {
+        wait = this.#pacer.waitMs(now, {
+          hourlyReserve:
+            kind === "lease" ? 0 : this.#reservedLeaseMutationsPerHour,
+        });
+      } catch (error) {
+        release();
+        throw error;
+      }
+      if (wait === 0) {
+        this.#pacer.recordCall(now);
+        return {
+          waitedMs: Math.max(pacedWaitMs, now.getTime() - startedAt),
+          release,
+        };
+      }
+      release();
+      if (wait >= 5_000 && now.getTime() - this.#lastNoticeAt >= 60_000) {
+        this.#lastNoticeAt = now.getTime();
+        this.#notify(
+          kind === "lease"
+            ? `pacing a lease mutation for ${wait}ms`
+            : `pacing a GitHub mutation for ${wait}ms; lease capacity remains reserved`,
+        );
+      }
+      await this.#sleep(wait);
+      pacedWaitMs += wait;
+    }
+  }
+
+  async #acquireGate(kind: MutationClass): Promise<() => void> {
+    if (!this.#active) {
+      this.#active = true;
+      return this.#releaseGate();
+    }
+    await new Promise<void>((resolve) => {
+      (kind === "lease" ? this.#leaseQueue : this.#normalQueue).push(resolve);
+    });
+    return this.#releaseGate();
+  }
+
+  #releaseGate(): () => void {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const next = this.#leaseQueue.shift() ?? this.#normalQueue.shift();
+      if (next) next();
+      else this.#active = false;
+    };
   }
 }
 

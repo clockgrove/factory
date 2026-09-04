@@ -23,6 +23,7 @@ import { encodeEventComment } from "../src/control/receipts.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
 import { policyDigest, DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 import { RunManager, type RunState } from "../src/control/runs.js";
+import { LeaseController } from "../src/supervisor.js";
 
 const BASE_SHA = "a".repeat(40);
 const TREE_SHA = "b".repeat(40);
@@ -32,6 +33,7 @@ class MemoryStore implements LeaseStore, AttemptStore {
   refs = new Map<string, string>();
   commits = new Map<string, GitCommitObject>();
   comments: Array<{ issue: string; body: string }> = [];
+  readRefCalls = 0;
   next = 1;
 
   constructor() {
@@ -45,6 +47,7 @@ class MemoryStore implements LeaseStore, AttemptStore {
   }
 
   async readRef(ref: string): Promise<string | null> {
+    this.readRefCalls += 1;
     return this.refs.get(ref) ?? null;
   }
 
@@ -110,7 +113,7 @@ const identity = {
 };
 
 describe("Director lease", () => {
-  it("acquires, renews, and fences a stale lease", async () => {
+  it("accepts an in-flight operation from the same renewed lease generation", async () => {
     const store = new MemoryStore();
     const manager = new LeaseManager({ store, durationMs: 60_000 });
     const base = await store.readCommit(BASE_SHA);
@@ -121,7 +124,7 @@ describe("Director lease", () => {
     const renewed = await manager.renew(acquired);
     expect(renewed.epoch).toBe(1);
     expect(renewed.sequence).toBe(2);
-    await expect(manager.assertCurrent(acquired)).rejects.toBeInstanceOf(LeaseLostError);
+    await expect(manager.assertCurrent(acquired)).resolves.toBeUndefined();
     await expect(manager.assertCurrent(renewed)).resolves.toBeUndefined();
   });
 
@@ -172,6 +175,55 @@ describe("Director lease", () => {
     );
     expect(takeover.epoch).toBe(2);
   });
+
+  it("renews while a same-generation operation is still in flight", async () => {
+    const store = new MemoryStore();
+    const manager = new LeaseManager({ store, durationMs: 60_000 });
+    const base = await store.readCommit(BASE_SHA);
+    const acquired = await manager.acquire(identity, base);
+    let sequence = acquired.sequence + 1;
+    const controller = new LeaseController(manager, acquired, {
+      take: () => sequence++,
+    });
+    let finishOperation!: () => void;
+    const operationCanFinish = new Promise<void>((resolve) => {
+      finishOperation = resolve;
+    });
+    let operationStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      operationStarted = resolve;
+    });
+    const operation = controller.use(async (lease) => {
+      operationStarted();
+      await operationCanFinish;
+      await manager.assertCurrent(lease);
+    });
+    await started;
+
+    await controller.renewIfNeeded(true);
+    finishOperation();
+    await operation;
+  });
+
+  it("does not spend a lease read on an immediately admitted mutation", async () => {
+    const store = new MemoryStore();
+    const manager = new LeaseManager({ store, durationMs: 7 * 86_400_000 });
+    const base = await store.readCommit(BASE_SHA);
+    const acquired = await manager.acquire(identity, base);
+    const controller = new LeaseController(manager, acquired, { take: () => 2 });
+    store.readRefCalls = 0;
+
+    await controller.guardMutation(0);
+    expect(store.readRefCalls).toBe(0);
+
+    await controller.guardMutation(30_000);
+    expect(store.readRefCalls).toBe(1);
+
+    const leaseFailure = new Error("heartbeat failed");
+    controller.fail(leaseFailure);
+    await expect(controller.guardMutation(0)).rejects.toBe(leaseFailure);
+    expect(store.readRefCalls).toBe(1);
+  });
 });
 
 describe("attempt reservation", () => {
@@ -215,7 +267,11 @@ describe("attempt reservation", () => {
     const leases = new LeaseManager({ store, durationMs: 60_000 });
     const base = await store.readCommit(BASE_SHA);
     const lease = await leases.acquire(identity, base);
-    store.refs.set(lease.ref, "f".repeat(40));
+    store.now = new Date(lease.expiresAt.getTime() + 1);
+    await leases.acquire(
+      { ...identity, runId: "run-2", holder: "host-2" },
+      base,
+    );
     const attempts = new AttemptManager({ store, leases });
     await expect(
       attempts.reserve({
@@ -352,6 +408,7 @@ describe("Factory event comment routing", () => {
 
   it("writes durable events through the issue comments REST endpoint", async () => {
     const requests: Request[] = [];
+    const mutationClasses: string[] = [];
     const requestFetch: typeof globalThis.fetch = async (input, init) => {
       const request = new Request(input, init);
       requests.push(request.clone());
@@ -368,6 +425,12 @@ describe("Factory event comment routing", () => {
       owner: "clockgrove",
       repo: "factory",
       requestFetch,
+      mutationScheduler: {
+        async acquire(kind = "normal") {
+          mutationClasses.push(kind);
+          return { waitedMs: 0, release() {} };
+        },
+      },
     });
     const body = encodeEventComment("started", attempt);
 
@@ -379,5 +442,38 @@ describe("Factory event comment routing", () => {
       "https://api.github.com/repos/clockgrove/factory/issues/22/comments",
     );
     expect(await requests[0]!.text()).toBe(JSON.stringify({ body }));
+    expect(mutationClasses).toEqual(["normal"]);
+  });
+
+  it("admits lease commits through the reserved mutation class", async () => {
+    const mutationClasses: string[] = [];
+    const requestFetch: typeof globalThis.fetch = async () =>
+      new Response(JSON.stringify({ sha: BASE_SHA }), {
+        status: 201,
+        headers: {
+          "content-type": "application/json",
+          date: "Thu, 03 Sep 2026 00:00:00 GMT",
+        },
+      });
+    const store = new GitHubControlStore({
+      token: "test-token",
+      owner: "clockgrove",
+      repo: "factory",
+      requestFetch,
+      mutationScheduler: {
+        async acquire(kind = "normal") {
+          mutationClasses.push(kind);
+          return { waitedMs: 0, release() {} };
+        },
+      },
+    });
+
+    await store.createCommit({
+      treeOid: TREE_SHA,
+      parentOids: [BASE_SHA],
+      message: "Factory lease LeaseRenewed for Objective #14",
+    });
+
+    expect(mutationClasses).toEqual(["lease"]);
   });
 });

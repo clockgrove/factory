@@ -42,8 +42,8 @@ describe("Supervisor repository preflight", () => {
 describe("Supervisor GraphQL admission", () => {
   it("reserves a floor for normal waves and scales for long worker timeouts", () => {
     expect(graphQlAdmissionReserve(7, 30, 2)).toBe(100);
-    expect(graphQlAdmissionReserve(7, 240, 1)).toBe(235);
-    expect(graphQlAdmissionReserve(7, 30, 2, 300)).toBe(379);
+    expect(graphQlAdmissionReserve(7, 240, 1)).toBe(100);
+    expect(graphQlAdmissionReserve(7, 30, 2, 300)).toBe(359);
     expect(() => graphQlAdmissionReserve(0, 30, 1)).toThrow(/positive integer/);
   });
 

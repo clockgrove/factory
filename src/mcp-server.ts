@@ -85,6 +85,7 @@ import {
   CircuitBreaker,
   ConcurrencyLimiter,
   ContentCreationPacer,
+  MutationScheduler,
 } from "./platform.js";
 import {
   currentOpenPullRequest,
@@ -138,6 +139,7 @@ function readerFor(owner: string, repo: string): GitHubReader {
 const breaker = new CircuitBreaker();
 const pacer = new ContentCreationPacer();
 const concurrency = new ConcurrencyLimiter();
+const mutations = new MutationScheduler({ pacer, onThrottle: log });
 const controllerLifecycle = new PendingControllerLifecycle();
 
 function applicationFor(owner: string, repo: string): FactoryApplicationService {
@@ -146,7 +148,16 @@ function applicationFor(owner: string, repo: string): FactoryApplicationService 
     owner,
     repo,
     reader: readerFor(owner, repo),
-    store: new GitHubControlStore({ token, owner, repo, onThrottle: log, circuitBreaker: breaker, pacer, concurrency }),
+    store: new GitHubControlStore({
+      token,
+      owner,
+      repo,
+      onThrottle: log,
+      circuitBreaker: breaker,
+      pacer,
+      concurrency,
+      mutationScheduler: mutations,
+    }),
     controller: controllerLifecycle,
   });
 }
@@ -252,6 +263,7 @@ async function dispatcherFor(
     circuitBreaker: breaker,
     pacer,
     concurrency,
+    mutationScheduler: mutations,
   });
 }
 
@@ -1087,6 +1099,7 @@ server.registerTool(
         circuitBreaker: breaker,
         pacer,
         concurrency,
+        mutationScheduler: mutations,
       });
       const created = await applier.apply(compiledObjective, {
         repositoryId: snapshot.repositoryId,

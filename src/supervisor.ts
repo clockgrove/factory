@@ -14,7 +14,13 @@ import {
 import { LifecycleRecorder } from "./control/events.js";
 import { CompiledGraphManager } from "./control/graphs.js";
 import { GitHubControlStore } from "./control/github-store.js";
-import { LeaseLostError, LeaseManager, type LeaseState } from "./control/lease.js";
+import {
+  DEFAULT_LEASE_RENEWAL_INTERVAL_MS,
+  DEFAULT_LEASE_RENEWAL_LEAD_MS,
+  LeaseLostError,
+  LeaseManager,
+  type LeaseState,
+} from "./control/lease.js";
 import {
   deduplicateFactoryEvents,
   nextEventSequence,
@@ -76,6 +82,7 @@ import {
   CircuitBreaker,
   ConcurrencyLimiter,
   ContentCreationPacer,
+  MutationScheduler,
   PlatformUnavailableError,
 } from "./platform.js";
 
@@ -151,7 +158,9 @@ export function graphQlAdmissionReserve(
     throw new Error("additional GraphQL mutations must be a non-negative integer");
   }
   const snapshotReserve = queryCost * 3;
-  const leaseRenewals = Math.ceil((workItemTimeoutMinutes * 60_000) / 75_000);
+  const leaseRenewals = Math.ceil(
+    (workItemTimeoutMinutes * 60_000) / DEFAULT_LEASE_RENEWAL_INTERVAL_MS,
+  );
   const perWorkItemControl = 12 * waveSize;
   return Math.max(
     100,
@@ -240,21 +249,27 @@ class SequenceAllocator {
   }
 }
 
-class LeaseController {
-  #tail: Promise<void> = Promise.resolve();
+export class LeaseController {
+  #renewalTail: Promise<void> = Promise.resolve();
   #fatal: unknown;
 
   constructor(
     private readonly manager: LeaseManager,
     private lease: LeaseState,
-    private readonly sequences: SequenceAllocator,
+    private readonly sequences: { take(): number },
   ) {}
 
   async use<T>(operation: (lease: LeaseState) => Promise<T>): Promise<T> {
     if (this.#fatal) throw this.#fatal;
+    const current = this.lease;
+    return operation(current);
+  }
+
+  async #mutateLease<T>(operation: (lease: LeaseState) => Promise<T>): Promise<T> {
+    if (this.#fatal) throw this.#fatal;
     let release!: () => void;
-    const previous = this.#tail;
-    this.#tail = new Promise<void>((resolveLock) => {
+    const previous = this.#renewalTail;
+    this.#renewalTail = new Promise<void>((resolveLock) => {
       release = resolveLock;
     });
     await previous;
@@ -270,15 +285,32 @@ class LeaseController {
     await this.use((lease) => this.manager.assertCurrent(lease));
   };
 
+  /**
+   * Fence a mutation without paying for a GitHub read on every short, local
+   * admission. A delayed mutation must revalidate its lease because ownership
+   * may have changed while it was queued or paced. Fatal heartbeat failures
+   * and locally expired leases always fail closed.
+   */
+  async guardMutation(waitedMs: number): Promise<void> {
+    if (this.#fatal) throw this.#fatal;
+    const expired = this.lease.expiresAt.getTime() <= Date.now();
+    if (expired || waitedMs >= 30_000) {
+      await this.manager.assertCurrent(this.lease);
+    }
+  }
+
   async renewIfNeeded(force = false): Promise<void> {
-    await this.use(async (lease) => {
-      if (!force && lease.expiresAt.getTime() - Date.now() > 45_000) return;
+    await this.#mutateLease(async (lease) => {
+      if (
+        !force &&
+        lease.expiresAt.getTime() - Date.now() > DEFAULT_LEASE_RENEWAL_LEAD_MS
+      ) return;
       this.lease = await this.manager.renew(lease, this.sequences.take());
     });
   }
 
   async release(): Promise<void> {
-    await this.use(async (lease) => {
+    await this.#mutateLease(async (lease) => {
       this.lease = await this.manager.release(lease, this.sequences.take());
     });
   }
@@ -540,6 +572,7 @@ export class FactorySupervisor {
   readonly #pacer = new ContentCreationPacer();
   readonly #breaker = new CircuitBreaker();
   readonly #concurrency = new ConcurrencyLimiter();
+  readonly #mutations: MutationScheduler;
   #sequences!: SequenceAllocator;
   #lease!: LeaseController;
   #run!: RunState;
@@ -552,6 +585,10 @@ export class FactorySupervisor {
     this.#options = { ...options, repository: resolve(options.repository) };
     this.#policy = parseRunPolicy(options.policy);
     this.#notify = options.onStatus ?? (() => {});
+    this.#mutations = new MutationScheduler({
+      pacer: this.#pacer,
+      onThrottle: this.#notify,
+    });
     const github: GitHubOptions = {
       token: options.token,
       owner: options.owner,
@@ -563,6 +600,12 @@ export class FactorySupervisor {
       circuitBreaker: this.#breaker,
       pacer: this.#pacer,
       concurrency: this.#concurrency,
+      mutationScheduler: this.#mutations,
+      beforeMutation: async (kind: "normal" | "lease", waitedMs: number) => {
+        if (kind === "normal" && this.#lease) {
+          await this.#lease.guardMutation(waitedMs);
+        }
+      },
     };
     this.#reader = new GitHubReader(github);
     this.#store = new GitHubControlStore(controls);
@@ -705,6 +748,8 @@ export class FactorySupervisor {
         circuitBreaker: this.#breaker,
         pacer: this.#pacer,
         concurrency: this.#concurrency,
+        mutationScheduler: this.#mutations,
+        beforeMutation: (waitedMs) => this.#lease.guardMutation(waitedMs),
       });
       this.#registry.register(
         new GitHubCopilotBackend({
@@ -894,7 +939,8 @@ export class FactorySupervisor {
         circuitBreaker: this.#breaker,
         pacer: this.#pacer,
         concurrency: this.#concurrency,
-        beforeMutation: this.#lease.assert,
+        mutationScheduler: this.#mutations,
+        beforeMutation: (waitedMs) => this.#lease.guardMutation(waitedMs),
         onThrottle: this.#notify,
       });
       for (let recovery = 0; ; recovery += 1) {

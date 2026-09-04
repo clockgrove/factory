@@ -8,6 +8,7 @@ import {
 } from "../platform.js";
 import type { AttemptStore } from "./attempts.js";
 import type { GitCommitObject, LeaseStore } from "./lease.js";
+import { decodeEventComments } from "./receipts.js";
 import { classicBranchProtectionRules } from "../publication/branch-policy.js";
 
 const UPDATE_REFS = `
@@ -28,14 +29,23 @@ mutation FactoryUpdateRefs(
   }) { clientMutationId }
 }`;
 
-const ADD_COMMENT = `
-mutation FactoryAddComment($subjectId: ID!, $body: String!) {
-  addComment(input: { subjectId: $subjectId, body: $body }) {
-    commentEdge { node { id } }
-  }
-}`;
-
 type FactoryOctokit = ReturnType<typeof createOctokit>;
+
+/**
+ * Factory's durable comment envelopes already carry their destination issue
+ * number. Derive the REST route from that validated payload instead of
+ * spending scarce GraphQL points on addComment mutations.
+ */
+export function factoryCommentIssueNumber(body: string): number {
+  const events = decodeEventComments(body);
+  if (events.length !== 1) {
+    throw new Error("Factory comment must contain exactly one event envelope");
+  }
+  const event = events[0]!;
+  return "workItem" in event && typeof event.workItem === "number"
+    ? event.workItem
+    : event.objective;
+}
 
 function stripRefs(ref: string): string {
   if (!ref.startsWith("refs/")) throw new Error(`ref must be fully qualified: ${ref}`);
@@ -222,9 +232,19 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     }
   }
 
-  async addIssueComment(issueNodeId: string, body: string): Promise<void> {
+  async addIssueComment(_issueNodeId: string, body: string): Promise<void> {
+    const issueNumber = factoryCommentIssueNumber(body);
     await this.#call(
-      () => this.#octokit.graphql(ADD_COMMENT, { subjectId: issueNodeId, body }),
+      () =>
+        this.#octokit.request(
+          "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
+          {
+            owner: this.#owner,
+            repo: this.#repo,
+            issue_number: issueNumber,
+            body,
+          },
+        ),
       true,
     );
   }

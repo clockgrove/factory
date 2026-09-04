@@ -123,6 +123,86 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 type Snapshot = Awaited<ReturnType<GitHubReader["readObjective"]>>;
+type GraphQlRateLimit = NonNullable<Snapshot["graphQlRateLimit"]>;
+
+/**
+ * Keep enough GraphQL capacity to fence a full wave even when every worker
+ * runs to its timeout. Factory comments use REST; this reserve covers graph
+ * snapshots, lease CAS renewals, publication/recovery mutations, and margin.
+ */
+export function graphQlAdmissionReserve(
+  queryCost: number,
+  workItemTimeoutMinutes: number,
+  waveSize: number,
+  additionalMutations = 0,
+): number {
+  if (!Number.isInteger(queryCost) || queryCost < 1) {
+    throw new Error("GraphQL query cost must be a positive integer");
+  }
+  if (!Number.isInteger(workItemTimeoutMinutes) || workItemTimeoutMinutes < 1) {
+    throw new Error("Work Item timeout must be a positive integer");
+  }
+  if (!Number.isInteger(waveSize) || waveSize < 1) {
+    throw new Error("wave size must be a positive integer");
+  }
+  if (!Number.isInteger(additionalMutations) || additionalMutations < 0) {
+    throw new Error("additional GraphQL mutations must be a non-negative integer");
+  }
+  const snapshotReserve = queryCost * 3;
+  const leaseRenewals = Math.ceil((workItemTimeoutMinutes * 60_000) / 75_000);
+  const perWorkItemControl = 12 * waveSize;
+  return Math.max(
+    100,
+    snapshotReserve + leaseRenewals + perWorkItemControl + additionalMutations + 10,
+  );
+}
+
+export function pendingGraphQlGraphMutations(
+  objective: CompiledObjective,
+  existing: ExistingGraphWorkItem[],
+): number {
+  const existingById = new Map(existing.map((item) => [item.compilerId, item]));
+  const missingIssues = objective.workItems.filter(
+    (item) => !existingById.has(item.id),
+  ).length;
+  const missingDependencies = objective.workItems.reduce((count, item) => {
+    const observedItem = existingById.get(item.id);
+    return count + item.dependsOn.filter((dependencyId) => {
+      const observedDependency = existingById.get(dependencyId);
+      return !observedItem ||
+        !observedDependency ||
+        !observedItem.blockedByNumbers.includes(observedDependency.number);
+    }).length;
+  }, 0);
+  return missingIssues + missingDependencies;
+}
+
+export function assertGraphQlAdmissionHeadroom(
+  rateLimit: GraphQlRateLimit | undefined,
+  policy: RunPolicy,
+  waveSize: number,
+  notify: (message: string) => void = () => {},
+  additionalMutations = 0,
+): void {
+  if (!rateLimit) return;
+  const required = graphQlAdmissionReserve(
+    rateLimit.cost,
+    policy.workItemTimeoutMinutes,
+    waveSize,
+    additionalMutations,
+  );
+  if (rateLimit.remaining >= required) return;
+  const retryAfterMs = Math.max(1_000, rateLimit.resetAt.getTime() - Date.now() + 1_000);
+  const reason =
+    `GitHub GraphQL admission paused: ${rateLimit.remaining} points remain; ` +
+    `${required} are reserved for a ${waveSize}-worker wave; quota resets at ` +
+    rateLimit.resetAt.toISOString();
+  notify(reason);
+  throw new PlatformUnavailableError(
+    { kind: "rate_limit", retryAfterMs },
+    new Error(reason),
+  );
+}
 
 function snapshotEvents(snapshot: Snapshot): FactoryEvent[] {
   return [
@@ -512,38 +592,6 @@ export class FactorySupervisor {
         "GitHub identity lacks repository write/push permission required for control refs and pull requests",
       );
     }
-    if (
-      this.#policy.backendOrder.includes("github-copilot/github-managed") &&
-      !this.#registry.get("github-copilot/github-managed") &&
-      snapshot.copilotBotId
-    ) {
-      const writer = new GithubOctokitWriter({
-        token: this.#options.token,
-        owner: this.#options.owner,
-        repo: this.#options.repo,
-        onThrottle: this.#notify,
-      });
-      const actorId = await this.#reader.resolveUserId(actor);
-      const dispatcher = new Dispatcher({
-        writer,
-        repositoryId: snapshot.repositoryId,
-        copilotBotId: snapshot.copilotBotId,
-        defaultBranch: snapshot.defaultBranch,
-        escalateToId: actorId,
-        onThrottle: this.#notify,
-        circuitBreaker: this.#breaker,
-        pacer: this.#pacer,
-        concurrency: this.#concurrency,
-      });
-      this.#registry.register(
-        new GitHubCopilotBackend({
-          reader: this.#reader,
-          dispatcher,
-          repository: this.#options.repository,
-          copilotAvailable: true,
-        }),
-      );
-    }
     if (facts.fork && this.#policy.trust === "explicitly_activated_repo") {
       return this.#startlessEscalation("trusted-local execution is not allowed for a fork");
     }
@@ -585,6 +633,44 @@ export class FactorySupervisor {
         snapshot,
         completed ? "FactoryRunCompleted" : "FactoryRunEscalated",
         completed ? undefined : "Objective was closed externally before all Work Items completed",
+      );
+    }
+    assertGraphQlAdmissionHeadroom(
+      snapshot.graphQlRateLimit,
+      this.#policy,
+      Math.min(this.#policy.maxParallel, Math.max(1, snapshot.workItems.length)),
+      this.#notify,
+    );
+    if (
+      this.#policy.backendOrder.includes("github-copilot/github-managed") &&
+      !this.#registry.get("github-copilot/github-managed") &&
+      snapshot.copilotBotId
+    ) {
+      const writer = new GithubOctokitWriter({
+        token: this.#options.token,
+        owner: this.#options.owner,
+        repo: this.#options.repo,
+        onThrottle: this.#notify,
+      });
+      const actorId = await this.#reader.resolveUserId(actor);
+      const dispatcher = new Dispatcher({
+        writer,
+        repositoryId: snapshot.repositoryId,
+        copilotBotId: snapshot.copilotBotId,
+        defaultBranch: snapshot.defaultBranch,
+        escalateToId: actorId,
+        onThrottle: this.#notify,
+        circuitBreaker: this.#breaker,
+        pacer: this.#pacer,
+        concurrency: this.#concurrency,
+      });
+      this.#registry.register(
+        new GitHubCopilotBackend({
+          reader: this.#reader,
+          dispatcher,
+          repository: this.#options.repository,
+          copilotAvailable: true,
+        }),
       );
     }
     const branchRules = await this.#store.readBranchRules(snapshot.defaultBranch);
@@ -729,6 +815,14 @@ export class FactorySupervisor {
       }
       assertGraphWithinRunPolicy(compiled, this.#policy);
       await this.#preflightCompiledGraph(compiled);
+      let existingGraphItems = observedGraph.existing;
+      assertGraphQlAdmissionHeadroom(
+        snapshot.graphQlRateLimit,
+        this.#policy,
+        Math.min(this.#policy.maxParallel, compiled.workItems.length),
+        this.#notify,
+        pendingGraphQlGraphMutations(compiled, existingGraphItems),
+      );
       if (!durableGraph) {
         durableGraph = await this.#lease.use((lease) =>
           graphManager.persist({ lease, base, objective: compiled! }),
@@ -761,7 +855,6 @@ export class FactorySupervisor {
         beforeMutation: this.#lease.assert,
         onThrottle: this.#notify,
       });
-      let existingGraphItems = observedGraph.existing;
       for (let recovery = 0; ; recovery += 1) {
         const before = JSON.stringify(
           existingGraphItems.map((item) => [
@@ -812,8 +905,6 @@ export class FactorySupervisor {
           this.#notify("replaying the immutable graph after a partially observed GitHub write");
         }
       }
-      snapshot = await this.#reader.readObjective(snapshot.number);
-
       for (;;) {
         if (heartbeatError) throw heartbeatError;
         if (this.#options.signal?.aborted) {
@@ -898,10 +989,16 @@ export class FactorySupervisor {
             all.findIndex((candidate) => candidate.number === item.number) === index,
         );
         if (runnable.length === 0) {
-          await sleep(this.#options.pollIntervalMs ?? 5_000, this.#options.signal);
+          await sleep(this.#options.pollIntervalMs ?? 60_000, this.#options.signal);
           continue;
         }
         const wave = runnable.slice(0, this.#policy.maxParallel);
+        assertGraphQlAdmissionHeadroom(
+          snapshot.graphQlRateLimit,
+          this.#policy,
+          wave.length,
+          this.#notify,
+        );
         this.#notify(`starting wave: ${wave.map((item) => `#${item.number}`).join(", ")}`);
         const waveResults = await Promise.allSettled(
           wave.map((item) => this.#execute(item, deadline)),
@@ -915,7 +1012,6 @@ export class FactorySupervisor {
       if (error instanceof LeaseLostError) throw error;
       if (error instanceof PlatformUnavailableError) throw error;
       if (error instanceof RunCancellationRequestedError) {
-        snapshot = await this.#reader.readObjective(snapshot.number);
         return await this.#terminal(
           runManager,
           snapshot,

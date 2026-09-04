@@ -10,11 +10,17 @@ import {
   type AttemptStore,
 } from "../src/control/attempts.js";
 import {
+  factoryCommentIssueNumber,
+  GitHubControlStore,
+} from "../src/control/github-store.js";
+import {
   LeaseLostError,
   LeaseManager,
   type GitCommitObject,
   type LeaseStore,
 } from "../src/control/lease.js";
+import { encodeEventComment } from "../src/control/receipts.js";
+import { parseFactoryEvent } from "../src/protocol/events.js";
 import { policyDigest, DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 import { RunManager, type RunState } from "../src/control/runs.js";
 
@@ -304,5 +310,74 @@ describe("Objective snapshot query sizing", () => {
     expect(objectiveSubIssueQuerySize(100)).toBe(100);
     expect(() => objectiveSubIssueQuerySize(101)).toThrow(/more than 100/);
     expect(() => objectiveSubIssueQuerySize(1.5)).toThrow(/invalid/);
+  });
+});
+
+describe("Factory event comment routing", () => {
+  const terminal = parseFactoryEvent({
+    protocol: "clockgrove.factory/v2",
+    kind: "run",
+    event: "FactoryRunCancelled",
+    objective: 14,
+    runId: "run-1",
+    sequence: 1,
+    at: "2026-09-03T00:00:00.000Z",
+  });
+  const attempt = parseFactoryEvent({
+    protocol: "clockgrove.factory/v2",
+    kind: "attempt",
+    event: "AttemptStarted",
+    objective: 14,
+    workItem: 22,
+    attempt: 1,
+    runId: "run-1",
+    sequence: 2,
+    at: "2026-09-03T00:00:01.000Z",
+    backend: "codex-cli/local-worktree",
+    baseSha: BASE_SHA,
+    directorEpoch: 1,
+    policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+  });
+
+  it("routes Objective and Work Item events from their validated envelopes", () => {
+    expect(factoryCommentIssueNumber(encodeEventComment("terminal", terminal))).toBe(14);
+    expect(factoryCommentIssueNumber(encodeEventComment("started", attempt))).toBe(22);
+  });
+
+  it("rejects comments without exactly one Factory event", () => {
+    const body = encodeEventComment("terminal", terminal);
+    expect(() => factoryCommentIssueNumber("ordinary comment")).toThrow(/exactly one/);
+    expect(() => factoryCommentIssueNumber(`${body}\n${body}`)).toThrow(/exactly one/);
+  });
+
+  it("writes durable events through the issue comments REST endpoint", async () => {
+    const requests: Request[] = [];
+    const requestFetch: typeof globalThis.fetch = async (input, init) => {
+      const request = new Request(input, init);
+      requests.push(request.clone());
+      return new Response(JSON.stringify({ id: 1 }), {
+        status: 201,
+        headers: {
+          "content-type": "application/json",
+          date: "Thu, 03 Sep 2026 00:00:00 GMT",
+        },
+      });
+    };
+    const store = new GitHubControlStore({
+      token: "test-token",
+      owner: "clockgrove",
+      repo: "factory",
+      requestFetch,
+    });
+    const body = encodeEventComment("started", attempt);
+
+    await store.addIssueComment("unused-node-id", body);
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe("POST");
+    expect(requests[0]!.url).toBe(
+      "https://api.github.com/repos/clockgrove/factory/issues/22/comments",
+    );
+    expect(await requests[0]!.text()).toBe(JSON.stringify({ body }));
   });
 });

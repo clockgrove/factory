@@ -108,6 +108,7 @@ function log(message: string): void {
 }
 
 let cachedToken: string | undefined;
+const readers = new Map<string, GitHubReader>();
 
 function getToken(): string {
   cachedToken ??= resolveGitHubToken();
@@ -115,13 +116,23 @@ function getToken(): string {
 }
 
 function readerFor(owner: string, repo: string): GitHubReader {
+  const key = `${owner}/${repo}`.toLowerCase();
+  const cached = readers.get(key);
+  if (cached) {
+    readers.delete(key);
+    readers.set(key, cached);
+    return cached;
+  }
   const opts: GitHubOptions = {
     token: getToken(),
     owner,
     repo,
     onThrottle: log,
   };
-  return new GitHubReader(opts);
+  const reader = new GitHubReader(opts);
+  if (readers.size >= 32) readers.delete(readers.keys().next().value!);
+  readers.set(key, reader);
+  return reader;
 }
 
 // Shared across every call this process makes — see file header.

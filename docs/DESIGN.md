@@ -97,6 +97,27 @@ the controller. A new process reconstructs everything durable from GitHub.
 The ordered implementation and migration gates are in
 [`INDIE-FACTORY-IMPLEMENTATION-PLAN.md`](INDIE-FACTORY-IMPLEMENTATION-PLAN.md).
 
+## GitHub quota discipline
+
+Factory treats GitHub API capacity as a shared control-plane budget, not as an implementation-attempt
+failure. The complete Objective snapshot remains a bounded GraphQL query because native sub-issue,
+dependency, pull-request, and event relationships must be read consistently. A process pays one
+small cardinality preflight for an Objective and caches that bound; the detailed query detects a
+changed `totalCount` and refreshes the bound before it can return a partial graph.
+
+The detailed query also returns its own primary GraphQL cost, remaining balance, and reset time.
+Before acquiring a run lease and again before launching a wave, the Supervisor requires a
+conservative reserve for snapshots, exact-CAS lease renewals, publication/recovery mutations, and a
+full Work Item timeout. Insufficient headroom raises a retryable platform-unavailable result before
+new work is admitted; it never consumes an implementation attempt.
+
+High-volume lifecycle and budget receipts are written through the GitHub issue-comments REST API,
+whose destination issue number is derived from the validated Factory event envelope. Exact custom-ref
+fencing remains on GraphQL `updateRefs` because the REST ref API does not provide equivalent CAS.
+Both API surfaces still share Factory's circuit breaker, concurrency limiter, content-creation pacer,
+and secondary-rate-limit handling. Unchanged idle state is polled no more often than once per minute
+by default, while active local-worker cancellation uses the cheaper REST comments path.
+
 ## Versioned GitHub protocol
 
 Every machine-readable v2 record contains at least:

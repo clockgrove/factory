@@ -243,6 +243,7 @@ const Attempt = Common.extend({
   policyDigest: sha256Digest,
   providerResourceId: boundedText(500).optional(),
   environmentIdentity: boundedText(500).optional(),
+  resourceHostIdentity: sha256Digest.optional(),
   artifactDigest: sha256Digest.optional(),
   headSha: gitSha.optional(),
   sessionId: boundedText(500).optional(),

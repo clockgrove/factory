@@ -252,6 +252,7 @@ export class AttemptManager {
     sequence: number;
     reason?: string;
     providerResourceId?: string;
+    resourceHostIdentity?: string;
     environmentIdentity?: string;
     artifactDigest?: string;
     headSha?: string;
@@ -296,6 +297,7 @@ export class AttemptManager {
       policyDigest: args.reservation.policyDigest,
       ...(args.reason ? { reason: args.reason } : {}),
       ...(args.providerResourceId ? { providerResourceId: args.providerResourceId } : {}),
+      ...(args.resourceHostIdentity ? { resourceHostIdentity: args.resourceHostIdentity } : {}),
       ...(args.environmentIdentity ? { environmentIdentity: args.environmentIdentity } : {}),
       ...(args.artifactDigest ? { artifactDigest: args.artifactDigest } : {}),
       ...(args.headSha ? { headSha: args.headSha } : {}),

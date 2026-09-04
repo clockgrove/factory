@@ -38,6 +38,7 @@ import {
   type CodexHomeFactory,
 } from "../runtime/codex-home.js";
 import { restrictedCodexArgs } from "./codex-cli-policy.js";
+import { readLocalResourceHostIdentity } from "../recovery/local-resources.js";
 
 export const CODEX_WORKER_OUTPUT_SCHEMA = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -423,6 +424,7 @@ export class CodexCliLocalBackend implements ExecutionBackend {
         codexHome,
       );
       env.FACTORY_ATTEMPT_ID = durableAttemptId(context);
+      const resourceHostIdentity = await readLocalResourceHostIdentity();
       const target = await resolveCodexCommand(this.#options.command);
       const processHandle = startContainedProcess({
         command: target.command,
@@ -461,6 +463,7 @@ export class CodexCliLocalBackend implements ExecutionBackend {
           workspace: context.workspace,
           baseSha: context.packet.baseSha,
           attemptId: durableAttemptId(context),
+          ...(resourceHostIdentity ? { resourceHostIdentity } : {}),
           codexHome,
         },
       };

@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "observedOn": "2026-09-04",
+  "component": "Linux local recovery resource observer",
+  "scope": "Synthetic owned Node process; no Factory model worker or paid provider",
+  "elapsedMilliseconds": 145,
+  "activeObservation": "matching-process",
+  "ownedChildExit": { "code": 0, "signal": null, "method": "graceful IPC" },
+  "postExitObservations": ["unknown", "unknown"],
+  "postExitReason": "process-observation-unavailable",
+  "repeatedUnknownEvidenceDigestStable": true,
+  "aggregateDiagnostics": {
+    "visibleProcesses": 53,
+    "sameOwnerProcesses": 29,
+    "sameOwnerEnvironmentPermissionDenied": 3,
+    "disappearedOrOtherReadErrors": 0,
+    "malformedBirthFields": 0
+  },
+  "limitations": [
+    "Active worker detection and graceful exit were observed; complete resource absence was not proved.",
+    "Unrelated same-owner unreadable processes cannot be silently excluded from a complete marker scan.",
+    "This component result does not qualify successor execution, independent validation cleanup, or provider cleanup.",
+    "Raw process identifiers, environments, host identity, and private repository data are omitted."
+  ]
+}

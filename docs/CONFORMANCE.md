@@ -59,6 +59,12 @@ measured the real sampler inside a transient systemd service capped at one CPU a
 Both ceilings were observed and the unit was automatically collected. This is partial host evidence,
 not completion of the Linux environment or live adaptive scheduling gates.
 
+A [local resource component observation](release-evidence/local-resource-observation-component-2026-09-04.json)
+detected a synthetic owned worker and observed its graceful exit. Post-exit absence remained unknown:
+three same-owner processes denied environment inspection. The observer retained that uncertainty;
+this is not a passed cleanup or successor-execution gate. More precise independently persisted
+resource ownership is still needed to avoid depending on readability of unrelated processes.
+
 ## Definition-of-done evidence map
 
 Terminal-run continuation remains an implementation gap: ordinary resume/retry cannot revive an
@@ -72,10 +78,13 @@ authority, and an observed terminal resource receipt does not prove host/provide
 Recovery-plan persistence, source-history/allowance-chain verification, authenticated successor
 request bindings, cross-run receipt-write fences, immutable pending claims, exact adoption-receipt
 replay inspection, and read-only source-evidence resolution have deterministic fixtures. The run
-manager still rejects successor execution. The fenced adoption writer, independent resource-cleanup
-proof, and shared resolver integration with execution are not connected yet. An observed completion
-receipt or a descriptive next-event candidate cannot authorize a worker. These foundations do not
-pass the live recovery gate.
+manager still rejects successor execution. The internal coordinator now tests dual-lease-fenced
+claim/comment writes and exact response-loss replay against the real evidence/accounting verifiers.
+New local handles bind their Linux host identity; bounded process observation retains unknown states
+for legacy receipts, changed hosts, permission/race failures, and unbound validation processes.
+Validation/provider cleanup and shared resolver integration with execution remain open. An observed
+completion receipt or a descriptive next-event candidate cannot authorize a worker. These
+foundations do not pass the live recovery gate.
 
 This table maps every stable contract statement in [`DESIGN.md`](DESIGN.md#definition-of-done) to
 the executable evidence required on a release branch. “Implemented” does not promote an open live

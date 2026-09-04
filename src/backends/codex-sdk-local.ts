@@ -3,6 +3,7 @@ import { access, chmod, readFile, rm, symlink, writeFile } from "node:fs/promise
 import { arch } from "node:os";
 import { join } from "node:path";
 
+import { readLocalResourceHostIdentity } from "../recovery/local-resources.js";
 import {
   Codex,
   type CodexOptions,
@@ -433,6 +434,7 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
       );
       const attemptId = durableAttemptId(context);
       env.FACTORY_ATTEMPT_ID = attemptId;
+      const resourceHostIdentity = await readLocalResourceHostIdentity();
       const config = restrictedCodexConfig(
         "workspace-write",
         context.packet.requirements.networkDestinations,
@@ -465,6 +467,7 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
           workspace: context.workspace,
           baseSha: context.packet.baseSha,
           attemptId,
+          ...(resourceHostIdentity ? { resourceHostIdentity } : {}),
           codexHome: home,
         },
       };

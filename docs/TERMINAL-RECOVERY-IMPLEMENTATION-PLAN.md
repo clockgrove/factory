@@ -54,9 +54,28 @@ reservation, validation, review, and publication identities. It keeps source att
 from the controlling run and observes changed heads/bases without rewriting historical receipts.
 Even verified source bindings do not prove resource cleanup or authorize execution.
 
-These contracts are not yet a supported continuation command. The fenced adoption writer,
-resource reconciliation, and integration of the resolver into scheduling, publication, accounting,
-and state reconstruction remain below. The ordinary run manager explicitly rejects successor
+The internal adoption coordinator now composes the immutable loaders, exact-prefix inspection,
+chain verifier, source resolver, cumulative accounting gate, and resource observations. It checks
+both repository and Objective leases before every mutation and reloads prerequisites between
+adoption steps. Lost responses are reconciled against the exact persisted envelopes. A changed
+source, competing request, unresolved write, missing reservation, or lease loss leaves a blocked or
+pending transaction; it never fabricates a terminal successor or rewrites its predecessor.
+
+The accounting gate evaluates prospective demand against cumulative native-unit usage. A zero-model
+adoption does not consume tokens or reset an exhausted model ceiling. Outstanding reservations,
+unknown usage without its exact acknowledgement, and unrelated accounting errors remain blockers.
+
+New CLI/SDK local handles record an application-specific hash of Linux machine/user/boot/namespace
+identity, persisted in the started receipt. A bounded read-only process observer can distinguish a
+matching active worker from absence on that exact host under the trusted-local, marker-preserving
+execution contract. Raw machine IDs and process environments are never returned or persisted.
+Old unbound receipts, changed boots/namespaces, reused PIDs, unreadable or changing process views,
+and validation processes without their own identity remain unknown. This is not proof of sandbox
+or managed-agent cleanup, nor does it release an outstanding billable reservation.
+
+These contracts are not yet a supported continuation command. Validation/provider reconciliation
+and integration of the coordinator and resolver into scheduling, publication, accounting, and
+state reconstruction remain below. The ordinary run manager explicitly rejects successor
 execution until those pieces are connected. Pending claims must be reconciled to an evidenced
 outcome; they must not be deleted or overwritten to try another plan.
 Validation and budget writers reject reservations from a different run, Objective, policy, or

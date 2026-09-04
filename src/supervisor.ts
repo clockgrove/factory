@@ -2738,6 +2738,9 @@ export class FactorySupervisor {
           event: "AttemptStarted",
           sequence: this.#sequences.take(),
           providerResourceId: handle!.resourceId,
+          ...(handle!.metadata?.resourceHostIdentity
+            ? { resourceHostIdentity: handle!.metadata.resourceHostIdentity }
+            : {}),
           ...(handle!.metadata?.environmentIdentity
             ? { environmentIdentity: handle!.metadata.environmentIdentity }
             : {}),

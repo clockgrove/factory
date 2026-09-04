@@ -1,0 +1,52 @@
+{
+  "protocol": "clockgrove.factory/component-observation-v1",
+  "component": "LinuxResourceSampler",
+  "status": "passed",
+  "recordedAt": "2026-09-04T20:59:21.591Z",
+  "testedCommit": "65a4ec02910b2c15fb8c350f9a9275860f4bb45a",
+  "environment": {
+    "platform": "linux",
+    "kernel": "6.18.33.2-microsoft-standard-WSL2",
+    "node": "24.20.0",
+    "cgroup": "v2"
+  },
+  "subjects": [
+    {
+      "path": "src/scheduling/resource-sampler.ts",
+      "sha256": "d1246344910c2801773be84e12ca1f542c0d05703604660f4b89da4ffc3acb39"
+    },
+    {
+      "path": "src/scheduling/cgroup.ts",
+      "sha256": "5aea706b095a4d6f3141a8444101de178a016df7f0c534ad7c3cedc3dda1aa9d"
+    }
+  ],
+  "method": "Bundle the unchanged source sampler with esbuild, invoke sample() directly on the WSL host, then invoke it inside a systemd --user transient service with CPUQuota=100% and MemoryMax=256M. Assert cgroup-v2, effectiveCpu <= 1, totalMemoryMb <= 256, and availableMemoryMb <= totalMemoryMb.",
+  "observations": {
+    "unconstrained": {
+      "logicalCpu": 24,
+      "effectiveCpu": 24,
+      "totalMemoryMb": 47037,
+      "availableMemoryMb": 44165,
+      "source": "host"
+    },
+    "constrained": {
+      "logicalCpu": 1,
+      "effectiveCpu": 1,
+      "totalMemoryMb": 256,
+      "availableMemoryMb": 243,
+      "source": "cgroup-v2"
+    },
+    "service": {
+      "result": "success",
+      "exitCode": 0,
+      "runtimeMs": 76,
+      "postRunLoadState": "not-found",
+      "postRunActiveState": "inactive"
+    }
+  },
+  "limitations": [
+    "Component observation only; does not satisfy a complete publication gate.",
+    "Executes the source sampler, not a complete installed-plugin Objective.",
+    "Does not prove pressure admission, concurrency, restart recovery, other Linux hosts, or paid burst."
+  ]
+}

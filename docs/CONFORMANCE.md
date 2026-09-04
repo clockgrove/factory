@@ -32,6 +32,11 @@ Detailed live control-plane and CLI observations are recorded in
 and the boundary around replanning are recorded in
 [`decisions/0002-immutable-graph-recovery.md`](decisions/0002-immutable-graph-recovery.md).
 
+A [WSL cgroup component observation](release-evidence/wsl-cgroup-component-2026-09-04.json)
+measured the real sampler inside a transient systemd service capped at one CPU and 256 MiB.
+Both ceilings were observed and the unit was automatically collected. This is partial host evidence,
+not completion of the Linux environment or live adaptive scheduling gates.
+
 ## Definition-of-done evidence map
 
 This table maps every stable contract statement in [`DESIGN.md`](DESIGN.md#definition-of-done) to

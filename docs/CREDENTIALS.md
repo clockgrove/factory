@@ -46,6 +46,34 @@ credential-free package test is never presented as evidence that a paid provider
 
 ## Daytona
 
+Configuration belongs to the Linux host running the Factory process, not to the target repository
+or GitHub Actions secrets. For foreground CLI or MCP execution, supply `DAYTONA_API_KEY` and
+`FACTORY_DAYTONA_MODEL_SECRET` in that process's environment. Factory does not automatically read a
+repository `.env` file or a user-level provider configuration file.
+
+For a systemd user controller, shell exports are not a persistent configuration mechanism. An
+operator can keep these two settings in a private file such as
+`~/.config/clockgrove-factory/providers.env` (directory mode `0700`, file mode `0600`) and add a
+drop-in for the exact unit reported by `factory controller status`:
+
+```ini
+[Service]
+EnvironmentFile=%h/.config/clockgrove-factory/providers.env
+```
+
+The file contains the host's Daytona API key and the **name**, not the value, of the model secret:
+
+```dotenv
+DAYTONA_API_KEY=replace-with-host-daytona-key
+FACTORY_DAYTONA_MODEL_SECRET=factory-model-key
+```
+
+After changing the drop-in, reload the user service manager and restart that controller. Keep the
+file outside Git and supply the real key through the operator's secure credential-entry mechanism.
+The model key itself is stored in the Daytona organization Secret described below. Credentials make
+the provider discoverable; they do not authorize a paid launch. The immutable Objective policy must
+also allow `codex-cli/daytona` and bound its concurrency and sandbox-minute budget.
+
 Daytona requires its normal SDK authentication (`DAYTONA_API_KEY`, or the documented JWT plus
 organization identity). The worker's model credential is not copied from the host environment.
 `FACTORY_DAYTONA_MODEL_SECRET` must name a Daytona organization Secret; Factory maps that named

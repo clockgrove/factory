@@ -35,6 +35,9 @@ import { z } from "zod";
 
 import { createOctokit, type GitHubOptions } from "./github.js";
 import {
+  ChangeSurfaceSchema,
+  ContextManifestSchema,
+  DeliveryHintSchema,
   ExecutionRequirementsSchema,
   RepositoryScopePathSchema,
   parseWorkerPacket,
@@ -73,6 +76,23 @@ export interface CompiledWorkItem {
   validationCommands?: string[] | undefined;
   requirements?: ExecutionRequirements | undefined;
   artifactContract?: "clockgrove.factory/artifact-v1" | undefined;
+  /** Compiler analysis fields are optional only for persisted pre-vNext graphs. */
+  context?: z.infer<typeof ContextManifestSchema> | undefined;
+  changeSurface?: z.infer<typeof ChangeSurfaceSchema> | undefined;
+  validation?:
+    | Array<{
+        tier: "mechanical" | "semantic" | "visual" | "deterministic-simulation";
+        criteria: string[];
+      }>
+    | undefined;
+  delivery?: z.infer<typeof DeliveryHintSchema> | undefined;
+  economicReview?:
+    | {
+        conservative: boolean;
+        rationale: string;
+        paidMeasurementRequired: boolean;
+      }
+    | undefined;
 }
 
 /** Matches `schemas/objective.schema.json` — the objective-compilation skill's output. */
@@ -156,6 +176,29 @@ const PersistedCompiledWorkItemSchema = z.object({
   validationCommands: z.array(z.string().min(1).max(1_000)).min(1).max(32),
   requirements: ExecutionRequirementsSchema,
   artifactContract: z.literal("clockgrove.factory/artifact-v1"),
+  context: ContextManifestSchema.optional(),
+  changeSurface: ChangeSurfaceSchema.optional(),
+  validation: z
+    .array(
+      z
+        .object({
+          tier: z.enum(["mechanical", "semantic", "visual", "deterministic-simulation"]),
+          criteria: z.array(z.string().min(1).max(2_000)).min(1).max(64),
+        })
+        .strict(),
+    )
+    .min(1)
+    .max(4)
+    .optional(),
+  delivery: DeliveryHintSchema.optional(),
+  economicReview: z
+    .object({
+      conservative: z.boolean(),
+      rationale: z.string().min(1).max(2_000),
+      paidMeasurementRequired: z.boolean(),
+    })
+    .strict()
+    .optional(),
 }).strict();
 
 const PersistedCompiledObjectiveSchema = z.object({
@@ -335,6 +378,9 @@ export function workerPacketFromCompiled(wi: CompiledWorkItem): WorkerPacket {
     validationCommands: wi.validationCommands,
     requirements: wi.requirements,
     artifactContract: wi.artifactContract,
+    ...(wi.context ? { context: wi.context } : {}),
+    ...(wi.changeSurface ? { changeSurface: wi.changeSurface } : {}),
+    ...(wi.delivery ? { delivery: wi.delivery } : {}),
   });
 }
 

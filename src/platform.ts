@@ -53,7 +53,10 @@ export type Refusal =
 interface HttpErrorLike {
   status?: number;
   message?: string;
-  response?: { headers?: Record<string, string | undefined> };
+  response?: {
+    headers?: Record<string, string | undefined>;
+    data?: { errors?: Array<{ type?: string }> };
+  };
 }
 
 const DEFAULT_BACKOFF_MS = 60_000;
@@ -83,6 +86,9 @@ export function classifyRefusal(error: unknown): Refusal {
 
   const headers = e.response?.headers;
   const message = (e.message ?? "").toLowerCase();
+  const graphQlRateLimited = e.response?.data?.errors?.some(
+    (entry) => entry.type === "RATE_LIMITED",
+  ) ?? false;
 
   if (status >= 500 && status < 600) {
     return { kind: "server_error", retryAfterMs: DEFAULT_BACKOFF_MS };
@@ -93,7 +99,7 @@ export function classifyRefusal(error: unknown): Refusal {
     message.includes("secondary rate limit") ||
     message.includes("abuse detection");
 
-  if (status === 429 || (status === 403 && looksLikeRateLimit)) {
+  if (graphQlRateLimited || status === 429 || (status === 403 && looksLikeRateLimit)) {
     const retryAfter = headerNumber(headers, "retry-after");
     if (retryAfter !== null) {
       return { kind: "rate_limit", retryAfterMs: retryAfter * 1000 };
@@ -104,7 +110,7 @@ export function classifyRefusal(error: unknown): Refusal {
     // case describes a window we are not in — fall back to fixed backoff.
     const remaining = headerNumber(headers, "x-ratelimit-remaining");
     const reset = headerNumber(headers, "x-ratelimit-reset");
-    if (remaining === 0 && reset !== null) {
+    if ((remaining === 0 || graphQlRateLimited) && reset !== null) {
       const ms = reset * 1000 - Date.now();
       if (ms > 0) return { kind: "rate_limit", retryAfterMs: ms };
     }

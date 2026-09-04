@@ -41,7 +41,11 @@ import {
   NoExecutionBackendError,
 } from "./execution/registry.js";
 import type { BackendHandle, ExecutionBackend } from "./execution/backend.js";
-import type { NormalizedArtifact } from "./execution/artifacts.js";
+import {
+  MAX_ARTIFACT_PATCH_BYTES,
+  normalizeArtifact,
+  type NormalizedArtifact,
+} from "./execution/artifacts.js";
 import { Dispatcher, GithubOctokitWriter } from "./dispatch.js";
 import {
   compiledGraphDigest,
@@ -67,6 +71,25 @@ import {
   missingRequiredChecks,
   requiredChecks,
 } from "./publication/branch-policy.js";
+import {
+  planDelivery,
+  selectDelivery,
+  type DeliveryPlan,
+  type DeliverySelection,
+} from "./publication/delivery.js";
+import {
+  GITHUB_STACKS_API_VERSION,
+  GitHubStacks,
+} from "./publication/github-stacks.js";
+import {
+  acquireIntegrationLease,
+  assertIntegrationHeads,
+} from "./publication/integration-lease.js";
+import {
+  PUBLICATION_RECEIPT_PROTOCOL,
+  assertPublicationEventMatchesReceipt,
+  type PublicationReceipt,
+} from "./publication/stack-manager.js";
 import {
   cleanupLocalWorktree,
   createLocalWorktree,
@@ -110,6 +133,7 @@ import {
   validateArtifactClean,
   type CleanValidationResult,
 } from "./validation/clean-run.js";
+import { bindValidationToPublishedHead } from "./validation/plan.js";
 import {
   CircuitBreaker,
   ConcurrencyLimiter,
@@ -198,6 +222,18 @@ export interface SupervisorResult {
   objective: number;
   runId: string;
   reason?: string;
+}
+
+interface DeliveryExecutionBase {
+  branch: string;
+  sha: string;
+}
+
+interface NativeStackMember {
+  receipt: PublicationReceipt;
+  pull: PublishedPullRequest;
+  reservation: AttemptReservation;
+  observedHeadSha: string;
 }
 
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -425,14 +461,18 @@ export class LeaseController {
   }
 }
 
-async function hostGit(repository: string, args: string[]): Promise<string> {
+async function hostGit(
+  repository: string,
+  args: string[],
+  maxOutputBytes = 256 * 1024,
+): Promise<string> {
   const result = await runContainedProcess({
     command: "git",
     args,
     cwd: repository,
     env: process.env,
     timeoutMs: 120_000,
-    maxOutputBytes: 256 * 1024,
+    maxOutputBytes,
   });
   if (result.exitCode !== 0) {
     throw new Error(
@@ -708,6 +748,7 @@ export class FactorySupervisor {
   readonly #notify: (message: string) => void;
   readonly #reader: GitHubReader;
   readonly #store: GitHubControlStore;
+  readonly #stacks: GitHubStacks;
   readonly #leases: LeaseManager;
   readonly #attempts: AttemptManager;
   readonly #recorder: LifecycleRecorder;
@@ -730,6 +771,8 @@ export class FactorySupervisor {
   #run!: RunState;
   #baseBranch = "main";
   #priorityFallbackReason: string | undefined;
+  #deliverySelection!: DeliverySelection;
+  #deliveryPlan?: Extract<DeliveryPlan, { result: "supported" }>;
   #budgetEvents: FactoryEvent[] = [];
   #integrationTail: Promise<void> = Promise.resolve();
   readonly #retryArtifacts = new RetryArtifactCache();
@@ -784,6 +827,14 @@ export class FactorySupervisor {
     };
     this.#reader = new GitHubReader(github);
     this.#store = new GitHubControlStore(controls);
+    this.#stacks = new GitHubStacks(
+      {
+        request: (route, parameters, mutating) =>
+          this.#store.stackRequest(route, parameters, mutating),
+      },
+      options.owner,
+      options.repo,
+    );
     this.#leases = new LeaseManager({ store: this.#store });
     this.#attempts = new AttemptManager({
       store: this.#store,
@@ -1119,6 +1170,81 @@ export class FactorySupervisor {
     this.#fairness.register(this.#options.objective);
 
     try {
+      const deliveryPolicy = this.#policy.delivery ?? {
+        mode: "regular-prs" as const,
+        onUnavailable: "regular-prs" as const,
+        merge: "bottom-up" as const,
+      };
+      const durableSelections = initialEvents.filter(
+        (event) => event.kind === "delivery" && event.runId === this.#run.runId,
+      );
+      const priorSelection = durableSelections.at(-1);
+      if (priorSelection?.kind === "delivery") {
+        const conflicting = durableSelections.some(
+          (event) =>
+            event.kind !== "delivery" ||
+            event.requested !== priorSelection.requested ||
+            event.selected !== priorSelection.selected ||
+            event.capabilityVersion !== priorSelection.capabilityVersion ||
+            event.reason !== priorSelection.reason,
+        );
+        if (conflicting || priorSelection.requested !== deliveryPolicy.mode) {
+          throw new Error("durable delivery selection conflicts with the run policy");
+        }
+        this.#deliverySelection = {
+          requested: priorSelection.requested,
+          selected: priorSelection.selected,
+          capabilityVersion: priorSelection.capabilityVersion,
+          reason: priorSelection.reason,
+        };
+      } else {
+        const capability =
+          deliveryPolicy.mode === "stacked-prs"
+            ? await this.#stacks.probe()
+            : {
+                available: false,
+                observed: true,
+                version: GITHUB_STACKS_API_VERSION,
+                reason: "native stacks were not requested",
+              };
+        this.#deliverySelection = selectDelivery({
+          requested: deliveryPolicy.mode,
+          onUnavailable: deliveryPolicy.onUnavailable,
+          capability,
+        });
+        try {
+          await this.#lease.use((lease) =>
+            this.#recorder.delivery({
+              lease,
+              objectiveNodeId: snapshot.id,
+              sequence: this.#sequences.take(),
+              selection: this.#deliverySelection,
+            }),
+          );
+        } catch (error) {
+          const recoveredSnapshot = await this.#reader.readObjective(snapshot.number);
+          const recovered = (recoveredSnapshot.factoryEvents ?? []).find(
+            (event) =>
+              event.kind === "delivery" &&
+              event.runId === this.#run.runId &&
+              event.requested === this.#deliverySelection.requested &&
+              event.selected === this.#deliverySelection.selected &&
+              event.capabilityVersion === this.#deliverySelection.capabilityVersion &&
+              event.reason === this.#deliverySelection.reason,
+          );
+          if (!recovered) throw error;
+          snapshot = recoveredSnapshot;
+          this.#sequences.observe(snapshotEvents(snapshot));
+        }
+      }
+      if (this.#deliverySelection.selected === "escalate") {
+        return await this.#terminal(
+          runManager,
+          snapshot,
+          "FactoryRunEscalated",
+          `stacked delivery unavailable: ${this.#deliverySelection.reason}`,
+        );
+      }
       const observedGraph = inspectCompiledGraph(snapshot);
       const graphManager = new CompiledGraphManager(this.#store, this.#leases);
       let durableGraph = await graphManager.load(
@@ -1187,6 +1313,29 @@ export class FactorySupervisor {
         });
       }
       assertGraphWithinRunPolicy(compiled, this.#policy);
+      if (this.#deliverySelection.selected === "native-stacks") {
+        const deliveryItems = compiled.workItems.map((item) => {
+          if (!item.delivery) {
+            throw new Error(`Work Item ${item.id} has no delivery hint for stacked delivery`);
+          }
+          return {
+            id: item.id,
+            dependsOn: item.dependsOn,
+            delivery: {
+              group: item.delivery.group,
+              relationship: item.delivery.relationship,
+              ...(item.delivery.parentWorkItem
+                ? { parentWorkItem: item.delivery.parentWorkItem }
+                : {}),
+            },
+          };
+        });
+        const planned = planDelivery(deliveryItems);
+        if (planned.result === "unsupported") {
+          throw new Error(`unsupported delivery topology: ${planned.reason}`);
+        }
+        this.#deliveryPlan = planned;
+      }
       await this.#preflightCompiledGraph(compiled);
       let existingGraphItems = observedGraph.existing;
       assertGraphQlAdmissionHeadroom(
@@ -1355,8 +1504,38 @@ export class FactorySupervisor {
           (item) => item.state === "for_review",
         );
         if (reviews.length > 0) {
-          for (const item of reviews) await this.#resumeIntegration(item);
-          continue;
+          if (this.#deliverySelection.selected !== "native-stacks") {
+            for (const item of reviews) await this.#resumeIntegration(item);
+            continue;
+          }
+          let integratedUnit = false;
+          for (const unit of this.#deliveryPlan?.units ?? []) {
+            const members = unit.items.map((itemId) =>
+              objective.items.find(
+                (item) => parseGraphItemMetadata(item.body ?? "").id === itemId,
+              ),
+            );
+            if (members.some((member) => !member)) {
+              throw new Error(`delivery unit ${unit.id} is missing a GitHub Work Item`);
+            }
+            const typedMembers = members as DerivedWorkItem[];
+            if (
+              !typedMembers.every((member) =>
+                new Set(["for_review", "done"]).has(member.state),
+              ) ||
+              !typedMembers.some((member) => member.state === "for_review")
+            ) {
+              continue;
+            }
+            if (unit.kind === "sibling") {
+              await this.#resumeIntegration(typedMembers[0]!);
+            } else {
+              await this.#integrateNativeStack(unit.id, typedMembers, deadline);
+            }
+            integratedUnit = true;
+            break;
+          }
+          if (integratedUnit) continue;
         }
 
         const recoverable = objective.items.filter(
@@ -1367,11 +1546,62 @@ export class FactorySupervisor {
         );
         if (recoverable.length > 0) {
           for (const item of recoverable) {
-            await this.#recoverInterrupted(item, deadline);
+            await this.#recoverInterrupted(item, deadline, objective.items);
           }
           continue;
         }
-        const runnable = ready(objective).filter(
+        const deliveryBases = new Map<number, DeliveryExecutionBase>();
+        const stackReady =
+          this.#deliverySelection.selected === "native-stacks"
+            ? objective.items.filter((item) => {
+                if (
+                  activeExecutions.has(item.number) ||
+                  !new Set(["blocked", "failed"]).has(item.state)
+                ) {
+                  return false;
+                }
+                const itemId = parseGraphItemMetadata(item.body ?? "").id;
+                const plan = this.#deliveryPlan?.items.find(
+                  (candidate) => candidate.itemId === itemId,
+                );
+                if (!plan?.parentItemId) return false;
+                const parent = objective.items.find(
+                  (candidate) =>
+                    parseGraphItemMetadata(candidate.body ?? "").id === plan.parentItemId,
+                );
+                if (!parent || parent.state !== "for_review") return false;
+                const waitsSatisfied = plan.waitsForMerge.every((dependencyId) =>
+                  objective.items.some(
+                    (candidate) =>
+                      parseGraphItemMetadata(candidate.body ?? "").id === dependencyId &&
+                      candidate.state === "done",
+                  ),
+                );
+                if (!waitsSatisfied) return false;
+                const published = [...(parent.factoryEvents ?? [])]
+                  .sort((left, right) => right.sequence - left.sequence)
+                  .find(
+                    (event) =>
+                      event.kind === "attempt" &&
+                      event.runId === this.#run.runId &&
+                      event.event === "AttemptPublished" &&
+                      Boolean(event.headSha),
+                  );
+                if (!published || published.kind !== "attempt" || !published.headSha) {
+                  return false;
+                }
+                deliveryBases.set(item.number, {
+                  branch: publicationBranch(
+                    this.#run.objective,
+                    parent.number,
+                    published.attempt,
+                  ),
+                  sha: published.headSha,
+                });
+                return true;
+              })
+            : [];
+        const runnable = [...ready(objective), ...stackReady].filter(
           (item, index, all) =>
             !activeExecutions.has(item.number) &&
             item.attempts < this.#policy.maxAttemptsPerItem &&
@@ -1437,6 +1667,7 @@ export class FactorySupervisor {
           objective.items,
           scheduling.priority,
           this.#priorityFallbackReason,
+          new Set(stackReady.map((item) => item.number)),
         )
           .filter((rankedItem) =>
             runnable.some((item) => item.number === rankedItem.item.number),
@@ -1468,14 +1699,28 @@ export class FactorySupervisor {
                 0,
               ) + 1;
             const queuedAt = queuedSince(priority.item, this.#run.runId);
+            const itemId = parseGraphItemMetadata(priority.item.body ?? "").id;
+            const stackUnit = this.#deliveryPlan?.units.find(
+              (unit) => unit.kind === "stack" && unit.items.includes(itemId),
+            );
+            const backends = await this.#registry.evaluate({
+              policy: this.#policy,
+              requirements: packet.requirements,
+              nowMs,
+            });
+            if (stackUnit) {
+              for (const candidate of backends) {
+                if (candidate.capabilities?.providerManagedPublication) {
+                  candidate.permanentReasons.push(
+                    "native stack members require host-owned branch publication",
+                  );
+                }
+              }
+            }
             return {
               priority,
               requirements: packet.requirements,
-              backends: await this.#registry.evaluate({
-                policy: this.#policy,
-                requirements: packet.requirements,
-                nowMs,
-              }),
+              backends,
               ...(packet.requirements.trust === "trusted_local"
                 ? {}
                 : {
@@ -1594,6 +1839,7 @@ export class FactorySupervisor {
                 deadline,
                 admission,
                 releaseExecutionCapacity,
+                deliveryBases.get(item.number),
               ),
             releaseExecutionCapacity,
           );
@@ -1653,6 +1899,7 @@ export class FactorySupervisor {
     objectiveDeadline: number,
     admission: AdmissionProposal,
     releaseExecutionCapacity: () => void,
+    deliveryBase?: DeliveryExecutionBase,
   ): Promise<void> {
     let reservation: AttemptReservation | undefined;
     let worker: LocalWorktree | undefined;
@@ -1681,7 +1928,16 @@ export class FactorySupervisor {
     const started = Date.now();
     try {
       const originalPacket = parseWorkerPacketFromIssue(item.body ?? "");
-      const base = await this.#store.getBranchHead(this.#baseBranch);
+      const base = deliveryBase
+        ? await this.#store.readCommit(deliveryBase.sha)
+        : await this.#store.getBranchHead(this.#baseBranch);
+      const publicationBaseBranch = deliveryBase?.branch ?? this.#baseBranch;
+      if (deliveryBase) {
+        const current = await this.#store.readRef(`refs/heads/${deliveryBase.branch}`);
+        if (current !== deliveryBase.sha) {
+          throw new Error("stack parent branch changed before child admission");
+        }
+      }
       const packet = parseWorkerPacket({
         ...originalPacket,
         baseSha: base.oid,
@@ -2229,6 +2485,12 @@ export class FactorySupervisor {
           commitSha: headSha,
           number: pullNumber,
           htmlUrl: `https://github.com/${this.#options.owner}/${this.#options.repo}/pull/${pullNumber}`,
+          exactHeadValidation: bindValidationToPublishedHead({
+            validation: validation.evidence,
+            publishedHeadSha: headSha,
+            publishedTreeSha: remoteHead.treeOid,
+            publishedBaseSha: validation.evidence.baseSha,
+          }),
         };
       } else {
         published = await publishValidated({
@@ -2241,9 +2503,11 @@ export class FactorySupervisor {
           workItem: item.number,
           attempt: reservation.attempt,
           title: item.title,
-          baseBranch: this.#baseBranch,
+          baseBranch: publicationBaseBranch,
         });
       }
+      if (!published) throw new Error("publication did not return a pull request");
+      const publication = published;
       await this.#lease.use((lease) =>
         this.#attempts.record({
           lease,
@@ -2252,10 +2516,50 @@ export class FactorySupervisor {
           event: "AttemptPublished",
           sequence: this.#sequences.take(),
           artifactDigest: artifact.digest,
-          headSha: published!.commitSha,
+          headSha: publication.commitSha,
         }),
       );
-      await this.#integrate(item, reservation, published, objectiveDeadline);
+      const metadata = parseGraphItemMetadata(item.body ?? "");
+      const itemPlan = this.#deliveryPlan?.items.find(
+        (candidate) => candidate.itemId === metadata.id,
+      );
+      const receipt: PublicationReceipt = {
+        protocol: PUBLICATION_RECEIPT_PROTOCOL,
+        runId: this.#run.runId,
+        unitId: itemPlan?.unitId ?? `delivery/${metadata.id}`,
+        itemId: metadata.id,
+        workItem: item.number,
+        attempt: reservation.attempt,
+        revision: 1,
+        mode:
+          this.#deliverySelection.selected === "native-stacks"
+            ? "native-stacks"
+            : "regular-prs",
+        position: itemPlan?.position ?? 0,
+        ...(itemPlan?.parentItemId
+          ? { parentItemId: itemPlan.parentItemId }
+          : {}),
+        branch: publication.branch,
+        baseBranch: publicationBaseBranch,
+        baseSha: validation.evidence.baseSha,
+        headSha: publication.commitSha,
+        pullRequest: publication.number,
+        capabilityVersion: this.#deliverySelection.capabilityVersion,
+        exactHeadValidation: publication.exactHeadValidation,
+        state: "published",
+      };
+      await this.#lease.use((lease) =>
+        this.#recorder.publication({
+          lease,
+          workItemNodeId: item.id,
+          sequence: this.#sequences.take(),
+          receipt,
+          event: "PublicationRecorded",
+        }),
+      );
+      if (this.#deliverySelection.selected !== "native-stacks") {
+        await this.#integrate(item, reservation, publication, objectiveDeadline);
+      }
       this.#retryArtifacts.delete(item.number);
     } catch (error) {
       if (
@@ -2287,6 +2591,16 @@ export class FactorySupervisor {
         if (Number.isInteger(managedPull) && managedPull > 0) {
           await this.#store.closePullRequest(managedPull).catch(() => {});
         }
+      }
+      if (
+        published &&
+        this.#deliverySelection.selected === "native-stacks" &&
+        !cancellation
+      ) {
+        this.#notify(
+          `Work Item #${item.number} publication will be reconciled from GitHub: ${reason}`,
+        );
+        return;
       }
       if (published) {
         const current = await this.#store
@@ -2429,6 +2743,708 @@ export class FactorySupervisor {
     }
   }
 
+  async #nativeStackMember(
+    item: DerivedWorkItem,
+  ): Promise<NativeStackMember> {
+    const publishedEvent = [...(item.factoryEvents ?? [])]
+      .sort((left, right) => right.sequence - left.sequence)
+      .find(
+        (event) =>
+          event.kind === "attempt" &&
+          event.runId === this.#run.runId &&
+          event.event === "AttemptPublished" &&
+          Boolean(event.headSha),
+      );
+    if (
+      !publishedEvent ||
+      publishedEvent.kind !== "attempt" ||
+      !publishedEvent.headSha
+    ) {
+      throw new Error(`stack Work Item #${item.number} has no published head receipt`);
+    }
+    const validation = [...(item.factoryEvents ?? [])]
+      .sort((left, right) => right.sequence - left.sequence)
+      .find(
+        (event) =>
+          event.kind === "validation" &&
+          event.runId === this.#run.runId &&
+          event.attempt === publishedEvent.attempt &&
+          event.passed,
+      );
+    if (!validation || validation.kind !== "validation") {
+      throw new Error(`stack Work Item #${item.number} has no passing validation receipt`);
+    }
+    const metadata = parseGraphItemMetadata(item.body ?? "");
+    const plan = this.#deliveryPlan?.items.find(
+      (candidate) => candidate.itemId === metadata.id,
+    );
+    if (!plan) throw new Error(`Work Item ${metadata.id} is absent from the delivery plan`);
+    const branch = publicationBranch(
+      this.#run.objective,
+      item.number,
+      publishedEvent.attempt,
+    );
+    const found = await this.#store.findPullRequestForBranch(branch);
+    if (!found) throw new Error(`stack publication branch ${branch} has no pull request`);
+    const commit = await this.#store.readCommit(publishedEvent.headSha);
+    if (
+      commit.parentOids.length !== 1 ||
+      commit.parentOids[0] !== validation.baseSha
+    ) {
+      throw new Error(
+        `stack Work Item #${item.number} published commit does not descend from its validated base`,
+      );
+    }
+    const exactHeadValidation = bindValidationToPublishedHead({
+      validation: {
+        passed: validation.passed,
+        digest: validation.evidenceDigest,
+        baseSha: validation.baseSha,
+        outputTreeSha: validation.outputTreeSha,
+      },
+      publishedHeadSha: publishedEvent.headSha,
+      publishedTreeSha: commit.treeOid,
+      publishedBaseSha: validation.baseSha,
+    });
+    const reservation = (
+      await this.#attempts.list(this.#run.objective, item.number)
+    ).find(
+      (candidate) =>
+        candidate.runId === this.#run.runId &&
+        candidate.attempt === publishedEvent.attempt,
+    );
+    if (!reservation) {
+      throw new Error(`stack Work Item #${item.number} has no attempt reservation`);
+    }
+    const publicationEvent = [...(item.factoryEvents ?? [])]
+      .sort((left, right) => right.sequence - left.sequence)
+      .find(
+        (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
+          event.kind === "publication" &&
+          event.runId === this.#run.runId &&
+          event.event === "PublicationRecorded" &&
+          event.itemId === metadata.id &&
+          event.headSha === publishedEvent.headSha,
+      );
+    const baseBranch =
+      publicationEvent?.kind === "publication"
+        ? publicationEvent.baseBranch
+        : this.#baseBranch;
+    if (!publicationEvent && plan.parentItemId) {
+      throw new Error(`stack Work Item ${metadata.id} is missing its publication receipt`);
+    }
+    const receipt: PublicationReceipt = {
+      protocol: PUBLICATION_RECEIPT_PROTOCOL,
+      runId: this.#run.runId,
+      unitId: plan.unitId,
+      itemId: metadata.id,
+      workItem: item.number,
+      attempt: publishedEvent.attempt,
+      revision: 1,
+      mode: "native-stacks",
+      position: plan.position,
+      ...(plan.parentItemId ? { parentItemId: plan.parentItemId } : {}),
+      branch,
+      baseBranch,
+      baseSha: validation.baseSha,
+      headSha: publishedEvent.headSha,
+      pullRequest: found.number,
+      capabilityVersion: this.#deliverySelection.capabilityVersion,
+      exactHeadValidation,
+      state: "published",
+    };
+    if (!publicationEvent) {
+      await this.#lease.use((lease) =>
+        this.#recorder.publication({
+          lease,
+          workItemNodeId: item.id,
+          sequence: this.#sequences.take(),
+          receipt,
+          event: "PublicationRecorded",
+          reason: "recovered publication receipt",
+        }),
+      );
+    } else {
+      assertPublicationEventMatchesReceipt(publicationEvent, receipt);
+    }
+    return {
+      receipt,
+      pull: {
+        branch,
+        commitSha: publishedEvent.headSha,
+        number: found.number,
+        htmlUrl: found.htmlUrl,
+        exactHeadValidation,
+      },
+      reservation,
+      observedHeadSha: found.headSha,
+    };
+  }
+
+  async #integrateNativeStack(
+    unitId: string,
+    items: DerivedWorkItem[],
+    deadline: number,
+  ): Promise<void> {
+    const ordered = [...items].sort((left, right) => {
+      const leftId = parseGraphItemMetadata(left.body ?? "").id;
+      const rightId = parseGraphItemMetadata(right.body ?? "").id;
+      const leftPosition = this.#deliveryPlan?.items.find(
+        (candidate) => candidate.itemId === leftId,
+      )?.position ?? 0;
+      const rightPosition = this.#deliveryPlan?.items.find(
+        (candidate) => candidate.itemId === rightId,
+      )?.position ?? 0;
+      return leftPosition - rightPosition;
+    });
+    const remaining = ordered.filter((item) => item.state === "for_review");
+    if (remaining.length === 0) return;
+    const members = await Promise.all(ordered.map((item) => this.#nativeStackMember(item)));
+    const mergePolicy = this.#policy.delivery?.merge ?? "bottom-up";
+    const target =
+      mergePolicy === "atomic-stack"
+        ? members.at(-1)!
+        : members.find((member) =>
+            remaining.some(
+              (item) => item.number === member.receipt.workItem,
+            ),
+          )!;
+    const operationId =
+      `stack-${this.#run.objective}-` +
+      `${unitId.replace(/[^a-z0-9-]/gi, "-")}-${target.receipt.attempt}`;
+
+    const completeIntegrated = async (
+      integrated: readonly NativeStackMember[],
+    ): Promise<void> => {
+      for (const member of integrated) {
+        const current = await this.#store.readPullRequest(member.pull.number);
+        if (!current.merged || !current.mergeCommitSha) {
+          throw new Error(
+            `GitHub reported stack merge before PR #${member.pull.number} was merged`,
+          );
+        }
+        if (current.headSha !== member.pull.commitSha) {
+          throw new Error(
+            `merged stack Work Item ${member.receipt.itemId} differs from its validated head`,
+          );
+        }
+        const item = ordered.find(
+          (candidate) => candidate.number === member.receipt.workItem,
+        )!;
+        const completion = [...(item.factoryEvents ?? [])]
+          .sort((left, right) => right.sequence - left.sequence)
+          .find(
+            (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
+              event.kind === "publication" &&
+              event.runId === this.#run.runId &&
+              event.event === "IntegrationCompleted" &&
+              event.operationId === operationId &&
+              event.headSha === member.receipt.headSha,
+          );
+        if (completion) {
+          assertPublicationEventMatchesReceipt(completion, member.receipt);
+        } else {
+          await this.#lease.use((lease) =>
+            this.#recorder.publication({
+              lease,
+              workItemNodeId: item.id,
+              sequence: this.#sequences.take(),
+              receipt: member.receipt,
+              event: "IntegrationCompleted",
+              operationId,
+            }),
+          );
+        }
+        const alreadyRecorded = (item.factoryEvents ?? []).some(
+          (event) =>
+            event.kind === "attempt" &&
+            event.runId === member.reservation.runId &&
+            event.event === "AttemptIntegrated" &&
+            event.attempt === member.reservation.attempt,
+        );
+        if (!alreadyRecorded) {
+          await this.#lease.use((lease) =>
+            this.#attempts.record({
+              lease,
+              workItemNodeId: item.id,
+              reservation: member.reservation,
+              event: "AttemptIntegrated",
+              sequence: this.#sequences.take(),
+              headSha: current.mergeCommitSha!,
+              allowRecovery: true,
+            }),
+          );
+        }
+        await this.#lease.assertGeneration("integration");
+        if (!item.closed) await this.#store.closeIssue(item.number);
+      }
+    };
+
+    const firstChanged = members.findIndex(
+      (member, index) =>
+        ordered[index]!.state === "for_review" &&
+        member.observedHeadSha !== member.pull.commitSha,
+    );
+    if (firstChanged >= 0) {
+      const changed = members[firstChanged]!;
+      for (let index = firstChanged; index < members.length; index += 1) {
+        if (ordered[index]!.state !== "for_review") continue;
+        const member = members[index]!;
+        const current = await this.#store.readPullRequest(member.pull.number);
+        const invalidated: PublicationReceipt = {
+          ...member.receipt,
+          revision: member.receipt.revision + 1,
+          state: "validation-invalidated",
+          invalidatedByItem: changed.receipt.itemId,
+          invalidatedByHeadSha: changed.observedHeadSha,
+        };
+        const alreadyInvalidated = (ordered[index]!.factoryEvents ?? []).find(
+          (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
+            event.kind === "publication" &&
+            event.runId === this.#run.runId &&
+            event.event === "ValidationInvalidated" &&
+            event.itemId === member.receipt.itemId &&
+            event.headSha === member.receipt.headSha &&
+            event.invalidatedByHeadSha === changed.observedHeadSha,
+        );
+        if (alreadyInvalidated) {
+          assertPublicationEventMatchesReceipt(
+            alreadyInvalidated,
+            invalidated,
+          );
+        } else {
+          await this.#lease.use((lease) =>
+            this.#recorder.publication({
+              lease,
+              workItemNodeId: ordered[index]!.id,
+              sequence: this.#sequences.take(),
+              receipt: invalidated,
+              event: "ValidationInvalidated",
+              reason: `lower stack layer ${changed.receipt.itemId} changed head`,
+            }),
+          );
+        }
+        const expectedBaseRef =
+          index === 0 || ordered[index - 1]!.state === "done"
+            ? this.#baseBranch
+            : members[index - 1]!.receipt.branch;
+        const expectedBaseSha =
+          index === 0 || ordered[index - 1]!.state === "done"
+            ? (await this.#store.getBranchHead(this.#baseBranch)).oid
+            : members[index - 1]!.observedHeadSha;
+        if (
+          current.baseRef !== expectedBaseRef ||
+          current.baseSha !== expectedBaseSha
+        ) {
+          // GitHub's server-side cascading rebase is still settling. The
+          // invalidation is already durable, so no stale head can integrate.
+          return;
+        }
+        await this.#revalidateNativeStackMember(
+          ordered[index]!,
+          member,
+          current.headSha,
+          current.baseSha,
+          current.baseRef,
+        );
+      }
+      // Re-read durable heads and evidence on the next controller cycle.
+      return;
+    }
+
+    const mergedDuringRecovery: NativeStackMember[] = [];
+    for (let index = 0; index < members.length; index += 1) {
+      const member = members[index]!;
+      const current = await this.#store.readPullRequest(member.pull.number);
+      if (current.headSha !== member.pull.commitSha) {
+        throw new Error(`stack Work Item ${member.receipt.itemId} changed after validation`);
+      }
+      const expectedBaseBranch =
+        index === 0 || ordered[index - 1]!.state === "done"
+          ? this.#baseBranch
+          : members[index - 1]!.receipt.branch;
+      if (current.baseRef !== expectedBaseBranch) {
+        throw new Error(
+          `stack Work Item ${member.receipt.itemId} targets ${current.baseRef}, expected ${expectedBaseBranch}`,
+        );
+      }
+      if (ordered[index]!.state === "done") continue;
+      if (current.merged) {
+        mergedDuringRecovery.push(member);
+        continue;
+      }
+      const readiness = await integrationReadiness(
+        this.#store,
+        member.pull,
+        member.receipt.baseSha,
+      );
+      if (readiness.state === "wait") {
+        if (Date.now() >= deadline) {
+          throw new Error(`stack integration timed out: ${readiness.reason}`);
+        }
+        await sleep(this.#options.pollIntervalMs ?? 5_000, this.#options.signal);
+        return;
+      }
+      if (readiness.state !== "ready") {
+        throw new Error(
+          readiness.state === "failed"
+            ? readiness.reason
+            : `stack member ${member.receipt.itemId} was already integrated unexpectedly`,
+        );
+      }
+    }
+    if (mergedDuringRecovery.length > 0) {
+      await completeIntegrated(mergedDuringRecovery);
+      return;
+    }
+
+    const durableLinks = members.flatMap((member) => {
+      const item = ordered.find(
+        (candidate) => candidate.number === member.receipt.workItem,
+      )!;
+      return (item.factoryEvents ?? []).filter(
+        (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
+          event.kind === "publication" &&
+          event.runId === this.#run.runId &&
+          event.event === "StackLinked" &&
+          event.unitId === unitId &&
+          event.itemId === member.receipt.itemId &&
+          event.headSha === member.receipt.headSha,
+      );
+    });
+    for (const link of durableLinks) {
+      const member = members.find(
+        (candidate) => candidate.receipt.itemId === link.itemId,
+      )!;
+      assertPublicationEventMatchesReceipt(link, member.receipt);
+    }
+    const durableStackNumbers = new Set(
+      durableLinks.flatMap((event) =>
+        event.stackNumber ? [event.stackNumber] : [],
+      ),
+    );
+    if (durableStackNumbers.size > 1) {
+      throw new Error("delivery unit has conflicting durable GitHub stack numbers");
+    }
+    const stack = await this.#serializeIntegration(async () => {
+      await this.#lease.assertGeneration("integration");
+      const stackNumber = [...durableStackNumbers][0];
+      return stackNumber
+        ? this.#stacks.get(stackNumber)
+        : this.#stacks.ensureStack(members.map((member) => member.pull.number));
+    });
+    const observedPulls = stack.pullRequests.map((pull) => pull.number);
+    const fullPulls = members.map((member) => member.pull.number);
+    const remainingPulls = members
+      .filter((member) =>
+        remaining.some((item) => item.number === member.receipt.workItem),
+      )
+      .map((member) => member.pull.number);
+    if (
+      JSON.stringify(observedPulls) !== JSON.stringify(fullPulls) &&
+      JSON.stringify(observedPulls) !== JSON.stringify(remainingPulls)
+    ) {
+      throw new Error("GitHub stack topology differs from Factory's immutable delivery plan");
+    }
+    for (const member of members) {
+      const durableLink = durableLinks.find(
+        (event) =>
+          event.itemId === member.receipt.itemId &&
+          event.stackNumber === stack.number,
+      );
+      if (durableLink) {
+        member.receipt = {
+          ...member.receipt,
+          revision: member.receipt.revision + 1,
+          state: "stack-linked",
+          stackNumber: stack.number,
+        };
+        continue;
+      }
+      const linked: PublicationReceipt = {
+        ...member.receipt,
+        revision: member.receipt.revision + 1,
+        state: "stack-linked",
+        stackNumber: stack.number,
+      };
+      await this.#lease.use((lease) =>
+        this.#recorder.publication({
+          lease,
+          workItemNodeId: ordered.find((item) => item.number === linked.workItem)!.id,
+          sequence: this.#sequences.take(),
+          receipt: linked,
+          event: "StackLinked",
+        }),
+      );
+      member.receipt = linked;
+    }
+
+    const targetItem = ordered.find(
+      (item) => item.number === target.receipt.workItem,
+    )!;
+    const fencedMembers =
+      mergePolicy === "atomic-stack"
+        ? members.filter((member) =>
+            remaining.some(
+              (item) => item.number === member.receipt.workItem,
+            ),
+          )
+        : [target];
+    const expectedHeads = Object.fromEntries(
+      fencedMembers.map((member) => [
+        String(member.pull.number),
+        member.pull.commitSha,
+      ]),
+    );
+    const evidence = Object.fromEntries(
+      fencedMembers.map((member) => [
+        String(member.pull.number),
+        member.pull.exactHeadValidation,
+      ]),
+    );
+    const repositoryEpoch = await this.#lease.use(async (lease) => lease.epoch);
+    const integrationLease = acquireIntegrationLease({
+      operationId,
+      unitId,
+      repositoryEpoch,
+      expectedHeads,
+      evidence,
+    });
+    const observedHeads = Object.fromEntries(
+      await Promise.all(
+        fencedMembers.map(async (member) => [
+          String(member.pull.number),
+          (await this.#store.readPullRequest(member.pull.number)).headSha,
+        ] as const),
+      ),
+    );
+    assertIntegrationHeads(integrationLease, observedHeads);
+    const pendingEvent = [...(targetItem.factoryEvents ?? [])]
+      .sort((left, right) => right.sequence - left.sequence)
+      .find(
+        (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
+          event.kind === "publication" &&
+          event.runId === this.#run.runId &&
+          event.event === "IntegrationPending" &&
+          event.operationId === operationId &&
+          event.headSha === target.receipt.headSha,
+      );
+    if (pendingEvent) {
+      assertPublicationEventMatchesReceipt(pendingEvent, target.receipt);
+    }
+    let result = await this.#serializeIntegration(async () => {
+      await this.#lease.assertGeneration("integration");
+      return pendingEvent?.asynchronousMergeUuid
+        ? this.#stacks.mergeResult(
+            target.pull.number,
+            pendingEvent.asynchronousMergeUuid,
+            target.pull.commitSha,
+          )
+        : this.#stacks.requestMerge({
+            pullRequest: target.pull.number,
+            expectedHeadSha: target.pull.commitSha,
+            title: target.receipt.itemId,
+            action: "default",
+          });
+    });
+    if (result.state === "failed") throw new Error(result.reason);
+    if (
+      (result.state === "pending" || result.state === "queued") &&
+      (!pendingEvent ||
+        (result.state === "pending" &&
+          pendingEvent.asynchronousMergeUuid !== result.uuid))
+    ) {
+      await this.#lease.use((lease) =>
+        this.#recorder.publication({
+          lease,
+          workItemNodeId: targetItem.id,
+          sequence: this.#sequences.take(),
+          receipt: target.receipt,
+          event: "IntegrationPending",
+          operationId,
+          ...(result.state === "pending"
+            ? { asynchronousMergeUuid: result.uuid }
+            : {}),
+        }),
+      );
+    }
+    while (result.state !== "merged") {
+      if (Date.now() >= deadline) throw new Error("stack asynchronous integration timed out");
+      await sleep(this.#options.pollIntervalMs ?? 5_000, this.#options.signal);
+      await this.#lease.renewIfNeeded();
+      if (result.state === "pending") {
+        const uuid = result.uuid;
+        result = await this.#stacks.mergeResult(
+          target.pull.number,
+          uuid,
+          target.pull.commitSha,
+        );
+      } else {
+        const current = await this.#store.readPullRequest(target.pull.number);
+        if (current.headSha !== target.pull.commitSha) {
+          throw new Error("merge-queue target head changed after validation");
+        }
+        if (current.merged && current.mergeCommitSha) {
+          result = { state: "merged", mergeSha: current.mergeCommitSha };
+        } else {
+          result = await this.#stacks.requestMerge({
+            pullRequest: target.pull.number,
+            expectedHeadSha: target.pull.commitSha,
+            title: target.receipt.itemId,
+            action: "default",
+          });
+        }
+      }
+      if (result.state === "failed") throw new Error(result.reason);
+    }
+
+    const integrated =
+      mergePolicy === "atomic-stack"
+        ? members.filter((member) =>
+            remaining.some((item) => item.number === member.receipt.workItem),
+          )
+        : [target];
+    await completeIntegrated(integrated);
+  }
+
+  async #revalidateNativeStackMember(
+    item: DerivedWorkItem,
+    member: NativeStackMember,
+    headSha: string,
+    baseSha: string,
+    baseBranch: string,
+  ): Promise<void> {
+    const originalPacket = parseWorkerPacketFromIssue(item.body ?? "");
+    if (originalPacket.requirements.trust !== "trusted_local") {
+      throw new Error(
+        `stack Work Item ${member.receipt.itemId} requires isolated revalidation after rebase`,
+      );
+    }
+    await ensureLocalCommit(this.#options.repository, baseSha);
+    await ensureLocalCommit(this.#options.repository, headSha);
+    const changedPaths = (
+      await hostGit(
+        this.#options.repository,
+        ["diff", "--name-only", "-z", baseSha, headSha],
+        MAX_ARTIFACT_PATCH_BYTES + 1_024,
+      )
+    )
+      .split("\0")
+      .filter(Boolean);
+    const patch = await hostGit(
+      this.#options.repository,
+      ["diff", "--binary", "--no-ext-diff", baseSha, headSha],
+      MAX_ARTIFACT_PATCH_BYTES + 1_024,
+    );
+    const artifact = normalizeArtifact({
+      baseSha,
+      patch,
+      changedPaths,
+      outcome: patch.trim() ? "succeeded" : "declined",
+      ...(patch.trim() ? {} : { reason: "rebased stack layer has no diff" }),
+    });
+    const packet = parseWorkerPacket({
+      ...originalPacket,
+      baseSha,
+    });
+    const validation = await validateArtifactClean({
+      repository: this.#options.repository,
+      artifact,
+      packet,
+    });
+    try {
+      if (!validation.evidence.passed) {
+        throw new Error(
+          validation.evidence.failureReason ?? "rebased stack validation failed",
+        );
+      }
+      const reviewed = await this.#management.review({
+        repository: this.#options.repository,
+        objectiveNumber: this.#run.objective,
+        workItemNumber: item.number,
+        packet,
+        artifact,
+        evidence: validation.evidence,
+      });
+      await this.#lease.use(async (lease) => {
+        const event = await this.#recorder.budget({
+          lease,
+          workItemNodeId: item.id,
+          reservation: member.reservation,
+          sequence: this.#sequences.take(),
+          event: "BudgetReconciled",
+          unit: "model_tokens",
+          amount: reviewed.usage.inputTokens + reviewed.usage.outputTokens,
+        });
+        this.#budgetEvents.push(event);
+      });
+      if (!reviewed.review.accepted) {
+        throw new Error(
+          `rebased semantic review rejected: ${reviewed.review.summary}; ${reviewed.review.unmetCriteria.join("; ")}`,
+        );
+      }
+      const commit = await this.#store.readCommit(headSha);
+      if (commit.parentOids.length !== 1 || commit.parentOids[0] !== baseSha) {
+        throw new Error(
+          `rebased stack Work Item ${member.receipt.itemId} does not descend from its observed base`,
+        );
+      }
+      const exactHeadValidation = bindValidationToPublishedHead({
+        validation: validation.evidence,
+        publishedHeadSha: headSha,
+        publishedTreeSha: commit.treeOid,
+        publishedBaseSha: baseSha,
+      });
+      await this.#lease.use(async (lease) => {
+        await this.#recorder.validation({
+          lease,
+          workItemNodeId: item.id,
+          reservation: member.reservation,
+          evidence: validation.evidence,
+          sequence: this.#sequences.take(),
+        });
+        await this.#attempts.record({
+          lease,
+          workItemNodeId: item.id,
+          reservation: member.reservation,
+          event: "AttemptValidated",
+          sequence: this.#sequences.take(),
+          artifactDigest: artifact.digest,
+          reason: reviewed.review.summary,
+          allowRecovery: true,
+        });
+        await this.#attempts.record({
+          lease,
+          workItemNodeId: item.id,
+          reservation: member.reservation,
+          event: "AttemptPublished",
+          sequence: this.#sequences.take(),
+          artifactDigest: artifact.digest,
+          headSha,
+          allowRecovery: true,
+        });
+        await this.#recorder.publication({
+          lease,
+          workItemNodeId: item.id,
+          sequence: this.#sequences.take(),
+          receipt: {
+            ...member.receipt,
+            revision: member.receipt.revision + 2,
+            baseBranch,
+            baseSha,
+            headSha,
+            exactHeadValidation,
+            state: "published",
+          },
+          event: "PublicationRecorded",
+          reason: "revalidated after cascading stack rebase",
+        });
+      });
+    } finally {
+      await discardValidationResult(validation);
+    }
+  }
+
   async #integrate(
     item: DerivedWorkItem,
     reservation: AttemptReservation,
@@ -2518,11 +3534,24 @@ export class FactorySupervisor {
   }
 
   async #resumeIntegration(item: DerivedWorkItem): Promise<void> {
+    if (this.#deliverySelection.selected === "native-stacks") {
+      const member = await this.#nativeStackMember(item);
+      await this.#integrate(
+        item,
+        member.reservation,
+        member.pull,
+        this.#run.startedAt.getTime() +
+          this.#policy.objectiveTimeoutMinutes * 60_000,
+        true,
+      );
+      return;
+    }
     const event = [...(item.factoryEvents ?? [])]
       .sort((left, right) => right.sequence - left.sequence)
       .find(
         (candidate) =>
           candidate.kind === "attempt" &&
+          candidate.runId === this.#run.runId &&
           candidate.event === "AttemptPublished" &&
           Boolean(candidate.headSha),
       );
@@ -2531,31 +3560,120 @@ export class FactorySupervisor {
         `Work Item #${item.number} has review state without a published attempt`,
       );
     }
-    const pull = item.linkedPullRequests.find(
-      (candidate) => candidate.state === "OPEN" || candidate.state === "MERGED",
+    const branch = publicationBranch(
+      this.#run.objective,
+      item.number,
+      event.attempt,
     );
+    const pull = await this.#store.findPullRequestForBranch(branch);
     if (!pull) {
       throw new Error(
         `Work Item #${item.number} has no recoverable Factory pull request`,
       );
     }
+    if (pull.headSha !== event.headSha) {
+      throw new Error(
+        `Work Item #${item.number} pull request differs from its published head`,
+      );
+    }
+    if (pull.state !== "open" && !pull.merged) {
+      throw new Error(
+        `Work Item #${item.number} pull request was closed without merge`,
+      );
+    }
     const reservation = (
       await this.#attempts.list(this.#run.objective, item.number)
-    ).find((candidate) => candidate.attempt === event.attempt);
+    ).find(
+      (candidate) =>
+        candidate.runId === this.#run.runId &&
+        candidate.attempt === event.attempt,
+    );
     if (!reservation)
       throw new Error(`attempt ${event.attempt} reservation is missing`);
+    const validation = [...(item.factoryEvents ?? [])]
+      .sort((left, right) => right.sequence - left.sequence)
+      .find(
+        (candidate) =>
+          candidate.kind === "validation" &&
+          candidate.runId === this.#run.runId &&
+          candidate.attempt === event.attempt &&
+          candidate.passed,
+      );
+    if (!validation || validation.kind !== "validation") {
+      throw new Error(`attempt ${event.attempt} has no passing validation receipt`);
+    }
+    const commit = await this.#store.readCommit(event.headSha);
+    if (
+      commit.parentOids.length !== 1 ||
+      commit.parentOids[0] !== validation.baseSha
+    ) {
+      throw new Error(
+        `Work Item #${item.number} published commit does not descend from its validated base`,
+      );
+    }
+    const exactHeadValidation = bindValidationToPublishedHead({
+      validation: {
+        passed: validation.passed,
+        digest: validation.evidenceDigest,
+        baseSha: validation.baseSha,
+        outputTreeSha: validation.outputTreeSha,
+      },
+      publishedHeadSha: event.headSha,
+      publishedTreeSha: commit.treeOid,
+      publishedBaseSha: commit.parentOids[0],
+    });
+    const metadata = parseGraphItemMetadata(item.body ?? "");
+    const receipt: PublicationReceipt = {
+      protocol: PUBLICATION_RECEIPT_PROTOCOL,
+      runId: this.#run.runId,
+      unitId: `delivery/${metadata.id}`,
+      itemId: metadata.id,
+      workItem: item.number,
+      attempt: event.attempt,
+      revision: 1,
+      mode: "regular-prs",
+      position: 0,
+      branch,
+      baseBranch: this.#baseBranch,
+      baseSha: validation.baseSha,
+      headSha: event.headSha,
+      pullRequest: pull.number,
+      capabilityVersion: this.#deliverySelection.capabilityVersion,
+      exactHeadValidation,
+      state: "published",
+    };
+    const publicationEvent = [...(item.factoryEvents ?? [])]
+      .sort((left, right) => right.sequence - left.sequence)
+      .find(
+        (candidate): candidate is Extract<FactoryEvent, { kind: "publication" }> =>
+          candidate.kind === "publication" &&
+          candidate.runId === this.#run.runId &&
+          candidate.event === "PublicationRecorded" &&
+          candidate.headSha === event.headSha,
+      );
+    if (publicationEvent) {
+      assertPublicationEventMatchesReceipt(publicationEvent, receipt);
+    } else {
+      await this.#lease.use((lease) =>
+        this.#recorder.publication({
+          lease,
+          workItemNodeId: item.id,
+          sequence: this.#sequences.take(),
+          receipt,
+          event: "PublicationRecorded",
+          reason: "recovered publication receipt before integration",
+        }),
+      );
+    }
     await this.#integrate(
       item,
       reservation,
       {
-        branch: publicationBranch(
-          this.#run.objective,
-          item.number,
-          event.attempt,
-        ),
+        branch,
         commitSha: event.headSha,
         number: pull.number,
-        htmlUrl: "",
+        htmlUrl: pull.htmlUrl,
+        exactHeadValidation,
       },
       this.#run.startedAt.getTime() +
         this.#policy.objectiveTimeoutMinutes * 60_000,
@@ -2638,6 +3756,7 @@ export class FactorySupervisor {
   async #recoverInterrupted(
     item: DerivedWorkItem,
     deadline: number,
+    objectiveItems: readonly DerivedWorkItem[],
   ): Promise<void> {
     const reservations = (
       await this.#attempts.list(this.#run.objective, item.number)
@@ -2692,27 +3811,109 @@ export class FactorySupervisor {
             `recovery branch for Work Item #${item.number} does not match validated tree`,
           );
         }
+        if (
+          commit.parentOids.length !== 1 ||
+          commit.parentOids[0] !== validation.baseSha
+        ) {
+          throw new Error(
+            `recovery branch for Work Item #${item.number} does not descend from its validated base`,
+          );
+        }
+        const stackMetadata =
+          this.#deliverySelection.selected === "native-stacks"
+            ? parseGraphItemMetadata(item.body ?? "")
+            : undefined;
+        const stackPlan = stackMetadata
+          ? this.#deliveryPlan?.items.find(
+              (candidate) => candidate.itemId === stackMetadata.id,
+            )
+          : undefined;
+        if (stackMetadata && !stackPlan) {
+          throw new Error(
+            `Work Item ${stackMetadata.id} is absent from the delivery plan`,
+          );
+        }
+        let recoveryBaseBranch = this.#baseBranch;
+        if (stackPlan?.parentItemId) {
+          const parent = objectiveItems.find(
+            (candidate) =>
+              parseGraphItemMetadata(candidate.body ?? "").id ===
+              stackPlan.parentItemId,
+          );
+          const parentPublished = [...(parent?.factoryEvents ?? [])]
+            .sort((left, right) => right.sequence - left.sequence)
+            .find(
+              (event) =>
+                event.kind === "attempt" &&
+                event.runId === this.#run.runId &&
+                event.event === "AttemptPublished" &&
+                Boolean(event.headSha),
+            );
+          if (
+            !parent ||
+            !parentPublished ||
+            parentPublished.kind !== "attempt" ||
+            !parentPublished.headSha
+          ) {
+            throw new Error(
+              `stack parent ${stackPlan.parentItemId} has no recoverable publication`,
+            );
+          }
+          recoveryBaseBranch = publicationBranch(
+            this.#run.objective,
+            parent.number,
+            parentPublished.attempt,
+          );
+          const parentHead = await this.#store.getBranchHead(recoveryBaseBranch);
+          if (
+            parentHead.oid !== validation.baseSha ||
+            parentPublished.headSha !== validation.baseSha
+          ) {
+            throw new Error(
+              `stack parent ${stackPlan.parentItemId} changed after the child was validated`,
+            );
+          }
+        }
         await this.#lease.assert();
-        const existing = await this.#store.findPullRequestForBranch(branch);
+        let existing = await this.#store.findPullRequestForBranch(branch);
         if (existing && existing.state !== "open" && !existing.merged) {
           throw new Error(
             `recovery pull request #${existing.number} was closed without merge`,
           );
         }
-        const pull =
-          existing ??
-          (await this.#store.createPullRequest({
-            title: item.title,
-            body:
-              `Implements Work Item #${item.number} for Objective #${this.#run.objective}.\n\n` +
-              `Closes #${item.number}\n\n` +
-              `Recovered validation: \`${validation.evidenceDigest}\``,
-            head: branch,
-            base: this.#baseBranch,
-          }));
+        if (!existing) {
+          try {
+            existing = {
+              ...(await this.#store.createPullRequest({
+                title: item.title,
+                body:
+                  `Implements Work Item #${item.number} for Objective #${this.#run.objective}.\n\n` +
+                  `Closes #${item.number}\n\n` +
+                  `Recovered validation: \`${validation.evidenceDigest}\``,
+                head: branch,
+                base: recoveryBaseBranch,
+              })),
+              state: "open",
+              merged: false,
+            };
+          } catch (error) {
+            existing = await this.#store.findPullRequestForBranch(branch);
+            if (!existing || existing.state !== "open") throw error;
+          }
+        }
+        const pull = existing;
         if (pull.headSha !== headSha) {
           throw new Error(
             "recovered pull request head differs from the validated branch",
+          );
+        }
+        const currentPull = await this.#store.readPullRequest(pull.number);
+        if (
+          currentPull.baseRef !== recoveryBaseBranch ||
+          currentPull.baseSha !== validation.baseSha
+        ) {
+          throw new Error(
+            "recovered pull request base differs from the validated publication base",
           );
         }
         await this.#lease.use((lease) =>
@@ -2729,6 +3930,53 @@ export class FactorySupervisor {
             allowRecovery: true,
           }),
         );
+        if (this.#deliverySelection.selected === "native-stacks") {
+          const metadata = stackMetadata!;
+          const itemPlan = stackPlan!;
+          const exactHeadValidation = bindValidationToPublishedHead({
+            validation: {
+              passed: validation.passed,
+              digest: validation.evidenceDigest,
+              baseSha: validation.baseSha,
+              outputTreeSha: validation.outputTreeSha,
+            },
+            publishedHeadSha: headSha,
+            publishedTreeSha: commit.treeOid,
+            publishedBaseSha: validation.baseSha,
+          });
+          await this.#lease.use((lease) =>
+            this.#recorder.publication({
+              lease,
+              workItemNodeId: item.id,
+              sequence: this.#sequences.take(),
+              receipt: {
+                protocol: PUBLICATION_RECEIPT_PROTOCOL,
+                runId: this.#run.runId,
+                unitId: itemPlan.unitId,
+                itemId: metadata.id,
+                workItem: item.number,
+                attempt: reservation.attempt,
+                revision: 1,
+                mode: "native-stacks",
+                position: itemPlan.position,
+                ...(itemPlan.parentItemId
+                  ? { parentItemId: itemPlan.parentItemId }
+                  : {}),
+                branch,
+                baseBranch: currentPull.baseRef,
+                baseSha: validation.baseSha,
+                headSha,
+                pullRequest: pull.number,
+                capabilityVersion: this.#deliverySelection.capabilityVersion,
+                exactHeadValidation,
+                state: "published",
+              },
+              event: "PublicationRecorded",
+              reason: "recovered interrupted stack publication",
+            }),
+          );
+          return;
+        }
         await this.#integrate(
           item,
           reservation,
@@ -2737,6 +3985,17 @@ export class FactorySupervisor {
             commitSha: headSha,
             number: pull.number,
             htmlUrl: pull.htmlUrl,
+            exactHeadValidation: bindValidationToPublishedHead({
+              validation: {
+                passed: validation.passed,
+                digest: validation.evidenceDigest,
+                baseSha: validation.baseSha,
+                outputTreeSha: validation.outputTreeSha,
+              },
+              publishedHeadSha: headSha,
+              publishedTreeSha: commit.treeOid,
+              publishedBaseSha: validation.baseSha,
+            }),
           },
           deadline,
           true,

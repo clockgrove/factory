@@ -17,6 +17,31 @@
 import { DECLINE_TITLE_PATTERN, isNoOp, isWorkInProgress } from "./state.js";
 import { executionAffectingReason } from "./approval.js";
 import type { LinkedPullRequest } from "./types.js";
+import {
+  verifyExactHeadValidation,
+  type ExactHeadValidationEvidence,
+} from "./validation/plan.js";
+
+export type PublishedHeadVerdict =
+  | { kind: "exact-head-validated"; headSha: string }
+  | { kind: "validation-invalidated"; headSha: string; reason: string };
+
+/** Pure integration gate binding current GitHub state to validation evidence. */
+export function evaluatePublishedHead(
+  pr: Pick<LinkedPullRequest, "headSha">,
+  evidence: ExactHeadValidationEvidence,
+): PublishedHeadVerdict {
+  try {
+    verifyExactHeadValidation(evidence, pr.headSha);
+    return { kind: "exact-head-validated", headSha: pr.headSha };
+  } catch (error) {
+    return {
+      kind: "validation-invalidated",
+      headSha: pr.headSha,
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
 
 /**
  * A PR that explicitly declines the Work Item as not actionable.

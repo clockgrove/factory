@@ -188,6 +188,27 @@ describe("deterministic Work Item priority", () => {
     ]);
   });
 
+  it("ranks an explicitly stack-ready child without treating every blocked item as ready", () => {
+    const items = [
+      item(1, { position: 0 }),
+      item(2, {
+        position: 1,
+        state: "blocked",
+        dependencies: [{ number: 1, closed: false }],
+      }),
+      item(3, {
+        position: 2,
+        state: "blocked",
+        dependencies: [{ number: 1, closed: false }],
+      }),
+    ];
+    expect(
+      rankReadyWorkItems(items, subIssuePolicy, undefined, new Set([2])).map(
+        (value) => value.item.number,
+      ),
+    ).toEqual([1, 2]);
+  });
+
   it("lets a pinned stable option ID override critical-path score", () => {
     const items = [
       item(1, { optionId: "low" }),

@@ -246,6 +246,82 @@ describe("v2 event protocol", () => {
     expect(capacity.kind).toBe("capacity");
     expect(admission.kind).toBe("attempt");
   });
+
+  it("accepts durable delivery and exact-head publication receipts", () => {
+    const delivery = parseFactoryEvent({
+      protocol: PROTOCOL_V2,
+      kind: "delivery",
+      event: "DeliverySelected",
+      objective: 42,
+      runId: "run-1",
+      sequence: 5,
+      at: "2026-09-03T00:04:00.000Z",
+      requested: "stacked-prs",
+      selected: "native-stacks",
+      capabilityVersion: "2026-03-10",
+      reason: "repository probe accepted the preview API",
+    });
+    const publication = parseFactoryEvent({
+      protocol: PROTOCOL_V2,
+      kind: "publication",
+      event: "StackLinked",
+      objective: 42,
+      runId: "run-1",
+      sequence: 6,
+      at: "2026-09-03T00:05:00.000Z",
+      workItem: 43,
+      attempt: 1,
+      unitId: "delivery/item-a",
+      itemId: "item-a",
+      mode: "native-stacks",
+      position: 0,
+      branch: "factory/objective-42/work-item-43/attempt-1",
+      baseBranch: "main",
+      baseSha: SHA,
+      headSha: "b".repeat(40),
+      pullRequest: 44,
+      capabilityVersion: "2026-03-10",
+      validationDigest: "c".repeat(64),
+      exactHeadValidationDigest: "d".repeat(64),
+      stackNumber: 7,
+    });
+    expect(delivery.kind).toBe("delivery");
+    expect(publication.kind).toBe("publication");
+  });
+
+  it("rejects publication receipts with incomplete topology or transition evidence", () => {
+    const publication = {
+      protocol: PROTOCOL_V2,
+      kind: "publication",
+      objective: 42,
+      runId: "run-1",
+      sequence: 6,
+      at: "2026-09-03T00:05:00.000Z",
+      workItem: 43,
+      attempt: 1,
+      unitId: "delivery/item-a",
+      itemId: "item-a",
+      mode: "native-stacks",
+      position: 0,
+      branch: "factory/objective-42/work-item-43/attempt-1",
+      baseBranch: "main",
+      baseSha: SHA,
+      headSha: "b".repeat(40),
+      pullRequest: 44,
+      capabilityVersion: "2026-03-10",
+      validationDigest: "c".repeat(64),
+      exactHeadValidationDigest: "d".repeat(64),
+    };
+    expect(() =>
+      parseFactoryEvent({ ...publication, event: "StackLinked" }),
+    ).toThrow(/stack number/);
+    expect(() =>
+      parseFactoryEvent({ ...publication, event: "ValidationInvalidated" }),
+    ).toThrow(/head-change cause/);
+    expect(() =>
+      parseFactoryEvent({ ...publication, event: "IntegrationPending" }),
+    ).toThrow(/operation ID/);
+  });
 });
 
 describe("Worker Packet", () => {

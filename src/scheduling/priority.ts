@@ -71,9 +71,12 @@ export function rankReadyWorkItems(
   items: readonly DerivedWorkItem[],
   policy: PriorityPolicy,
   configuredUnavailableReason?: string,
+  additionalReady: ReadonlySet<number> = new Set(),
 ): RankedWorkItem[] {
   const scores = scoreUnfinishedGraph(items);
-  const ready = items.filter(isDependencyReady);
+  const ready = items.filter(
+    (item) => isDependencyReady(item) || additionalReady.has(item.number),
+  );
   const observations = new Map(
     policy.source === "issue-field-then-subissue-order"
       ? ready.map((item) => [item.number, issueFieldPriority(item, policy)] as const)

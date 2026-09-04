@@ -34,6 +34,9 @@ and native dependencies               or opt-in sandbox/managed backends
 ## Product contract
 
 - Work Items are GitHub sub-issues; dependencies are native `blocked by` relationships.
+- Pull requests are regular siblings by default. An explicit `stacked-prs` policy uses native GitHub
+  stacks only after an observed repository capability probe; an unavailable capability is durably
+  recorded before the configured regular-PR fallback or escalation.
 - Versioned run, lease, graph, attempt, validation, and budget receipts are reconstructable from
   GitHub. The full compiled graph is stored under an immutable custom ref before the first sub-issue
   is created, so a partial graph application replays facts without another model call.
@@ -45,6 +48,9 @@ and native dependencies               or opt-in sandbox/managed backends
   implicit cloud fallback.
 - Mechanical polling never calls a model. Model calls are bounded compilation and semantic-review
   decisions.
+- Publication receipts bind every PR to its planned position, base SHA, exact published head, and
+  independent validation digest. A lower-layer head change invalidates affected descendants before
+  revalidation or integration, and asynchronous stack merges resume from durable GitHub receipts.
 - Work Item count is derived from the work. It is never hard-coded.
 
 The authoritative contract and failure model are in [docs/DESIGN.md](docs/DESIGN.md). The concrete
@@ -146,9 +152,18 @@ The default policy is exported as `DEFAULT_RUN_POLICY`. A complete JSON override
     "queueDelaySeconds": 120,
     "deadlineReserveMinutes": 60,
     "maxPriorityRank": 1000
+  },
+  "delivery": {
+    "mode": "regular-prs",
+    "onUnavailable": "regular-prs",
+    "merge": "bottom-up"
   }
 }
 ```
+
+Set `delivery.mode` to `stacked-prs` to request native stacks. The GitHub stack surface is a public
+preview pinned to API version `2026-03-10`; Factory probes it before compilation spend and never
+silently changes the recorded delivery selection after publication begins.
 
 To use Daytona or Vercel Sandbox, put its backend ID in both `backendOrder` and
 `allowedPaidBackends`, set `cloudFallback` to `explicit`, and provide a nonzero sandbox-minute cap.

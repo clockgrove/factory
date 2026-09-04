@@ -22,6 +22,28 @@ documented to behave. This document records what was measured, so that every des
   detached commands, and stop. Factory startup probes credentials without creating paid resources;
   paid-resource creation remains an opt-in integration test.
 
+## Documented native-stack contract (not yet live conformance)
+
+GitHub's stacked-pull-request surface is a public preview, so Factory isolates it behind a
+capability probe and the pinned `2026-03-10` API version. The following are current documented
+contracts, not claims from Factory's disposable-repository matrix:
+
+- The [Stacks REST API](https://docs.github.com/en/rest/pulls/stacks) creates a stack from pull
+  request numbers ordered bottom-to-top, and every higher PR base ref must match the head ref below.
+- GitHub requires the [asynchronous merge endpoint](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request-asynchronously)
+  for a stacked PR. Factory binds the request and every pending poll to the validated head SHA and
+  durably retains the returned UUID for response-loss and controller-restart recovery.
+- GitHub documents a requested contiguous merge group as atomic. A completed lower group lands in
+  order and [automatically rebases the next unmerged PR](https://docs.github.com/en/pull-requests/how-tos/merge-and-close-pull-requests/merging-stacked-pull-requests),
+  so Factory invalidates the changed head and reruns validation before requesting the next merge.
+- Editing a lower layer or advancing trunk can require a cascading rebase. GitHub documents that
+  operation through the website or `gh stack`, but does not document a REST rebase endpoint.
+  Factory therefore never invents one: it waits with durable invalidation evidence for the observed
+  base/head chain to become linear, and escalates on its existing bounded Objective deadline.
+
+Native stacks remain an unclaimed release surface until the live gate in
+[`CONFORMANCE.md`](CONFORMANCE.md) exercises these preview behaviors with disposable branches.
+
 The remainder of this document records the original GitHub coding-agent measurements. Those findings
 still govern the explicit `github-copilot/github-managed` compatibility backend; they are no longer
 Factory's default execution architecture.

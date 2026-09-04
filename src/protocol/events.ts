@@ -190,6 +190,74 @@ const Capacity = Common.extend({
   reason: boundedText(2_000).optional(),
 });
 
+const Delivery = Common.extend({
+  kind: z.literal("delivery"),
+  event: z.literal("DeliverySelected"),
+  requested: z.enum(["regular-prs", "stacked-prs"]),
+  selected: z.enum(["regular-prs", "native-stacks", "escalate"]),
+  capabilityVersion: boundedText(80),
+  reason: boundedText(2_000),
+});
+
+const Publication = Common.extend({
+  kind: z.literal("publication"),
+  event: z.enum([
+    "PublicationRecorded",
+    "StackLinked",
+    "ValidationInvalidated",
+    "IntegrationPending",
+    "IntegrationFailed",
+    "IntegrationCompleted",
+    "IntegrationCancelled",
+    "IntegrationRolledBack",
+  ]),
+  workItem: z.number().int().positive(),
+  attempt: z.number().int().positive(),
+  unitId: boundedText(200),
+  itemId: safeId,
+  mode: z.enum(["regular-prs", "native-stacks"]),
+  position: z.number().int().nonnegative(),
+  parentItemId: safeId.optional(),
+  branch: boundedText(500),
+  baseBranch: boundedText(500),
+  baseSha: gitSha,
+  headSha: gitSha,
+  pullRequest: z.number().int().positive(),
+  capabilityVersion: boundedText(80),
+  validationDigest: sha256Digest,
+  exactHeadValidationDigest: sha256Digest,
+  stackNumber: z.number().int().positive().optional(),
+  operationId: safeId.optional(),
+  asynchronousMergeUuid: boundedText(200).optional(),
+  invalidatedByItem: safeId.optional(),
+  invalidatedByHeadSha: gitSha.optional(),
+  reason: boundedText(2_000).optional(),
+}).superRefine((event, context) => {
+  const issue = (message: string) =>
+    context.addIssue({ code: z.ZodIssueCode.custom, message });
+  if (event.position === 0 && event.parentItemId) {
+    issue("bottom publication event cannot name a parent");
+  }
+  if (event.position > 0 && !event.parentItemId) {
+    issue("higher publication event must name its parent");
+  }
+  if (
+    event.event === "StackLinked" &&
+    (event.mode !== "native-stacks" || !event.stackNumber)
+  ) {
+    issue("native StackLinked event requires a stack number");
+  }
+  if (
+    event.event === "ValidationInvalidated" &&
+    (!event.invalidatedByItem || !event.invalidatedByHeadSha)
+  ) {
+    issue("ValidationInvalidated event requires its head-change cause");
+  }
+  if (event.event.startsWith("Integration") && !event.operationId) {
+    issue("integration event requires an operation ID");
+  }
+});
+
 const Validation = Common.extend({
   kind: z.literal("validation"),
   event: z.literal("ValidationRecorded"),
@@ -239,6 +307,8 @@ export const FactoryEventSchema = z.union([
   Attempt,
   Scheduling,
   Capacity,
+  Delivery,
+  Publication,
   Validation,
   Graph,
   Budget,
@@ -247,6 +317,8 @@ export const FactoryEventSchema = z.union([
 export type FactoryEvent = z.infer<typeof FactoryEventSchema>;
 export type AttemptEvent = z.infer<typeof Attempt>;
 export type LeaseEvent = z.infer<typeof Lease>;
+export type DeliveryEvent = z.infer<typeof Delivery>;
+export type PublicationEvent = z.infer<typeof Publication>;
 
 export function parseFactoryEvent(input: unknown): FactoryEvent {
   const record = FactoryEventSchema.parse(input);

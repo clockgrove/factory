@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "factory",
-  "version": "2.0.11",
+  "version": "2.0.12",
   "description": "GitHub-backed, local-first unattended software factory: compile Objectives, execute Work Items, validate artifacts, and integrate safe pull requests.",
   "author": {
     "name": "Clockgrove"

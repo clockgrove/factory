@@ -62,6 +62,48 @@ export interface GitHubOptions {
   requestFetch?: typeof globalThis.fetch;
 }
 
+export type RunCancellationRequest = Extract<
+  FactoryEvent,
+  { kind: "run"; event: "FactoryRunCancellationRequested" }
+>;
+
+export interface GitHubIssueCommentEvidence {
+  body: string;
+  authorLogin: string | null;
+  authorAssociation: string | null;
+}
+
+/**
+ * Authenticate a narrow cancellation poll without reconstructing the entire
+ * Objective graph. The active run actor was already authenticated by the full
+ * startup snapshot, so only that actor's trusted GitHub comment may cancel it.
+ */
+export function cancellationRequestFromComments(
+  comments: GitHubIssueCommentEvidence[],
+  runId: string,
+  actor: string,
+): RunCancellationRequest | null {
+  for (const comment of comments) {
+    if (
+      comment.authorLogin?.toLowerCase() !== actor.toLowerCase() ||
+      !TRUSTED_ASSOCIATIONS.has(comment.authorAssociation ?? "")
+    ) {
+      continue;
+    }
+    for (const event of decodeEventComments(comment.body)) {
+      if (
+        event.kind === "run" &&
+        event.event === "FactoryRunCancellationRequested" &&
+        event.runId === runId &&
+        event.requestedBy.toLowerCase() === actor.toLowerCase()
+      ) {
+        return event;
+      }
+    }
+  }
+  return null;
+}
+
 /**
  * Fetches the Objective and its Work Items in a single query.
  *
@@ -720,6 +762,38 @@ export class GitHubReader {
     this.#owner = opts.owner;
     this.#repo = opts.repo;
     this.#octokit = createOctokit(opts);
+  }
+
+  /**
+   * Poll only the Objective's newest comments while a worker runs. Fetching the
+   * full nested Objective graph here can spend thousands of GraphQL points on
+   * unchanged Work Items during one ordinary local attempt.
+   */
+  async readRunCancellationRequest(
+    objectiveNumber: number,
+    runId: string,
+    actor: string,
+  ): Promise<RunCancellationRequest | null> {
+    const response = await this.#octokit.request(
+      "GET /repos/{owner}/{repo}/issues/{issue_number}/comments",
+      {
+        owner: this.#owner,
+        repo: this.#repo,
+        issue_number: objectiveNumber,
+        per_page: 100,
+        sort: "created",
+        direction: "desc",
+      },
+    );
+    return cancellationRequestFromComments(
+      response.data.map((comment) => ({
+        body: comment.body ?? "",
+        authorLogin: comment.user?.login ?? null,
+        authorAssociation: comment.author_association ?? null,
+      })),
+      runId,
+      actor,
+    );
   }
 
   /**

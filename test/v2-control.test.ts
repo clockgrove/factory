@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { cancellationRequestFromComments } from "../src/github.js";
+
 import {
   AttemptManager,
   type AttemptStore,
@@ -261,6 +263,23 @@ describe("run cancellation", () => {
       policy: run.policy,
       policyDigest: run.policyDigest,
     }, event])?.runId).toBe("run-1");
+
+    const body = store.comments[0]!.body;
+    expect(cancellationRequestFromComments([{
+      body,
+      authorLogin: "operator",
+      authorAssociation: "OWNER",
+    }], run.runId, run.actor)).toEqual(event);
+    expect(cancellationRequestFromComments([{
+      body,
+      authorLogin: "intruder",
+      authorAssociation: "OWNER",
+    }], run.runId, run.actor)).toBeNull();
+    expect(cancellationRequestFromComments([{
+      body,
+      authorLogin: "operator",
+      authorAssociation: "CONTRIBUTOR",
+    }], run.runId, run.actor)).toBeNull();
   });
 
   it("rejects cancellation by a different GitHub identity", async () => {

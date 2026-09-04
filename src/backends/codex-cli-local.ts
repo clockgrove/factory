@@ -12,6 +12,7 @@ import type {
   ExecutionBackendCapabilities,
   StaleAttemptIdentity,
 } from "../execution/backend.js";
+import { durableAttemptId, normalizeExecutionUsage } from "../execution/session.js";
 import { normalizeArtifact, type NormalizedArtifact } from "../execution/artifacts.js";
 import type { ExecutionRequirements } from "../protocol/worker-packet.js";
 import { collectLocalArtifact } from "../runtime/local-worktree.js";
@@ -65,6 +66,9 @@ interface RunningAttempt {
   codexHome: string;
   result: ProcessResult | null;
   final: WorkerFinal | null;
+  usage: unknown;
+  progress: string | undefined;
+  cancelled: boolean;
 }
 
 function attemptIdentity(input: StaleAttemptIdentity | AttemptContext): string {
@@ -193,6 +197,30 @@ function parseFinal(stdout: string): WorkerFinal | null {
     }
   }
   return final;
+}
+
+function parseRuntimeDetails(stdout: string): {
+  usage: unknown;
+  progress?: string;
+} {
+  let usage: unknown;
+  let progress: string | undefined;
+  for (const line of stdout.split(/\r?\n/)) {
+    try {
+      const event = JSON.parse(line) as {
+        type?: string;
+        usage?: unknown;
+        message?: string;
+        item?: { text?: string };
+      };
+      if (event.usage !== undefined) usage = event.usage;
+      if (event.type?.includes("progress"))
+        progress = event.message ?? event.item?.text ?? event.type;
+    } catch {
+      /* non-JSON diagnostics are expected */
+    }
+  }
+  return { usage, ...(progress ? { progress } : {}) };
 }
 
 export class CodexCliLocalBackend implements ExecutionBackend {
@@ -351,17 +379,29 @@ export class CodexCliLocalBackend implements ExecutionBackend {
         codexHome,
         result: null,
         final: null,
+        usage: undefined,
+        progress: undefined,
+        cancelled: false,
       };
       this.#running.set(resourceId, running);
       void processHandle.completed.then((result) => {
         running.result = result;
         running.final = parseFinal(result.stdout);
+        const details = parseRuntimeDetails(result.stdout);
+        running.usage = details.usage;
+        running.progress = details.progress;
       });
       return {
         backendId: this.capabilities.id,
         resourceId,
         startedAt: new Date().toISOString(),
-        metadata: { pid: String(processHandle.pid) },
+        metadata: {
+          pid: String(processHandle.pid),
+          workspace: context.workspace,
+          baseSha: context.packet.baseSha,
+          attemptId: durableAttemptId(context),
+          codexHome,
+        },
       };
     } catch (error) {
       await rm(codexHome, { recursive: true, force: true });
@@ -372,18 +412,26 @@ export class CodexCliLocalBackend implements ExecutionBackend {
   async observe(handle: BackendHandle): Promise<BackendObservation> {
     const running = this.#require(handle);
     if (!running.result) {
-      return { state: "running", observedAt: new Date().toISOString() };
+      return {
+        state: "running",
+        observedAt: new Date().toISOString(),
+        usage: normalizeExecutionUsage(running.usage),
+        ...(running.progress ? { progress: running.progress } : {}),
+      };
     }
-    const state = running.result.timedOut
-      ? "failed"
-      : running.result.exitCode === 0 && running.final
-        ? running.final.outcome === "succeeded"
-          ? "succeeded"
-          : "failed"
-        : "failed";
+    const state = running.cancelled
+      ? "cancelled"
+      : running.result.timedOut
+        ? "failed"
+        : running.result.exitCode === 0 && running.final
+          ? running.final.outcome === "succeeded"
+            ? "succeeded"
+            : "failed"
+          : "failed";
     return {
       state,
       observedAt: new Date().toISOString(),
+      usage: normalizeExecutionUsage(running.usage),
       ...(state === "failed"
         ? {
             reason:
@@ -398,6 +446,13 @@ export class CodexCliLocalBackend implements ExecutionBackend {
   async cancel(handle: BackendHandle): Promise<void> {
     const running = this.#require(handle);
     await running.process.cancel();
+    running.cancelled = true;
+    handle.metadata = {
+      ...handle.metadata,
+      terminalState: "cancelled",
+      terminalAt: new Date().toISOString(),
+      terminalReason: "attempt cancelled by Factory",
+    };
   }
 
   async collect(handle: BackendHandle): Promise<NormalizedArtifact> {

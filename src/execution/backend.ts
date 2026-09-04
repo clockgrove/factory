@@ -51,6 +51,13 @@ export interface BackendHandle {
   metadata?: Record<string, string>;
 }
 
+/** Provider-neutral accounting. Missing counters stay unavailable, never zero. */
+export interface ExecutionUsage {
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cachedInputTokens: number | null;
+}
+
 export type BackendObservationState =
   | "starting"
   | "running"
@@ -64,6 +71,7 @@ export interface BackendObservation {
   observedAt: string;
   reason?: string;
   progress?: string;
+  usage?: ExecutionUsage;
 }
 
 export interface IsolatedValidationContext extends AttemptContext {
@@ -102,6 +110,11 @@ export interface ExecutionBackend {
   probeValidation?(): Promise<BackendProbe>;
   /** Ensure a prior Director's resource is absent before a replacement attempt. */
   reconcileStale?(identity: StaleAttemptIdentity): Promise<void>;
+  /** Reattach only when the durable identity can be proven to belong to this attempt. */
+  resume?(
+    context: AttemptContext,
+    handle: BackendHandle,
+  ): Promise<BackendHandle>;
 }
 
 const isolationRank: Record<IsolationKind, number> = {

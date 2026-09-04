@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { CodexCliLocalBackend } from "./backends/codex-cli-local.js";
+import { CodexAppServerLocalBackend } from "./backends/codex-app-server.js";
 import { DaytonaBackend } from "./backends/daytona.js";
 import { VercelSandboxBackend } from "./backends/vercel-sandbox.js";
 import { resolveGitHubToken } from "./auth.js";
@@ -287,6 +288,7 @@ async function runRepositoryController(args: string[]): Promise<void> {
 
 async function probeBackends(): Promise<void> {
   const registry = new BackendRegistry();
+  registry.register(new CodexAppServerLocalBackend());
   registry.register(new CodexCliLocalBackend());
   registry.register(new DaytonaBackend({ repository: process.cwd() }));
   registry.register(new VercelSandboxBackend({ repository: process.cwd() }));

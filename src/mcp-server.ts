@@ -66,6 +66,7 @@ import { version as packageVersion } from "../package.json";
 
 import { resolveGitHubToken } from "./auth.js";
 import { CodexCliLocalBackend } from "./backends/codex-cli-local.js";
+import { CodexAppServerLocalBackend } from "./backends/codex-app-server.js";
 import { DaytonaBackend } from "./backends/daytona.js";
 import { VercelSandboxBackend } from "./backends/vercel-sandbox.js";
 import { Dispatcher, GithubOctokitWriter, confirmAction } from "./dispatch.js";
@@ -1321,8 +1322,8 @@ server.registerTool(
   {
     title: "Probe Factory execution backends",
     description:
-      "Read-only capability and authentication probe for the mandatory local Codex CLI backend " +
-      "and the optional Daytona and Vercel Sandbox backends. It creates no sandbox and spends no " +
+      "Read-only capability and authentication probe for the local Codex App Server and CLI backends " +
+      "and the optional Daytona and Vercel Sandbox backends. It creates no worker or sandbox and spends no " +
       "paid runtime; GitHub Copilot availability is repository-specific and is checked by factory_run.",
     inputSchema: {
       repository: z
@@ -1337,6 +1338,7 @@ server.registerTool(
   tool(async ({ repository }: { repository?: string | undefined }) => {
     const path = repository ?? process.cwd();
     const registry = new BackendRegistry();
+    registry.register(new CodexAppServerLocalBackend());
     registry.register(new CodexCliLocalBackend());
     registry.register(new DaytonaBackend({ repository: path }));
     registry.register(new VercelSandboxBackend({ repository: path }));

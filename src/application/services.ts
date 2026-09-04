@@ -10,6 +10,12 @@ import {
   latestSupportedRun,
   nextEventSequence,
 } from "../control/receipts.js";
+import { buildExplanationReport } from "./explain.js";
+import { buildReplayReport } from "./replay.js";
+import {
+  buildStatusReport,
+  type FactoryReadSnapshot,
+} from "./status.js";
 
 export const APPLICATION_OPERATIONS = [
   "doctor",
@@ -34,15 +40,7 @@ export const APPLICATION_OPERATIONS = [
 ] as const;
 export type ApplicationOperation = (typeof APPLICATION_OPERATIONS)[number];
 
-export interface ApplicationSnapshot {
-  id: string;
-  number: number;
-  title: string;
-  authorLogin?: string;
-  defaultBranch: string;
-  factoryEvents?: FactoryEvent[];
-  workItems: Array<{ number: number; factoryEvents?: FactoryEvent[] }>;
-}
+export type ApplicationSnapshot = FactoryReadSnapshot;
 
 export interface ApplicationReader {
   readObjective(number: number): Promise<ApplicationSnapshot>;
@@ -123,7 +121,7 @@ export interface ServiceContext {
   readBaseSha?: () => Promise<string>;
 }
 
-export type ReadOperation = "doctor" | "plan" | "status" | "explain";
+export type ReadOperation = "doctor" | "plan" | "status" | "explain" | "replay";
 export type CommandOperation =
   | "pause"
   | "resume"
@@ -131,7 +129,6 @@ export type CommandOperation =
   | "cloud-pause"
   | "retry"
   | "priority"
-  | "replay"
   | "cancel";
 
 /** A single, injectable boundary used by transports. Reads can never reach a command store. */
@@ -144,9 +141,19 @@ export class FactoryApplicationService {
     workItem?: number,
   ): Promise<unknown> {
     const snapshot = await this.context.reader.readObjective(objective);
+    const repository = `${this.context.owner}/${this.context.repo}`;
+    if (operation === "status") {
+      return buildStatusReport({ repository, snapshot });
+    }
+    if (operation === "explain") {
+      return buildExplanationReport({ repository, snapshot, ...(workItem ? { workItem } : {}) });
+    }
+    if (operation === "replay") {
+      return buildReplayReport({ repository, snapshot });
+    }
     return {
       operation,
-      repository: `${this.context.owner}/${this.context.repo}`,
+      repository,
       objective: snapshot,
       ...(workItem ? { workItem } : {}),
     };
@@ -164,8 +171,8 @@ export class FactoryApplicationService {
   explain(objective: number, workItem?: number) {
     return this.inspect("explain", objective, workItem);
   }
-  replay(input: { objective: number; requestId: string; reason?: string }) {
-    return this.command("replay", input);
+  replay(objective: number) {
+    return this.inspect("replay", objective);
   }
 
   async activate(input: {
@@ -221,13 +228,7 @@ export class FactoryApplicationService {
                 ? "WorkItemRetryRequested"
                 : operation === "priority"
                   ? "WorkItemPriorityChanged"
-                  : // Replay is a request for the controller to re-apply the already durable
-                    // graph.  Phase 0 intentionally has no new replay event discriminant, so
-                    // preserve that protocol by using a resume request with an explicit,
-                    // forward-compatible operation field.
-                    operation === "replay"
-                    ? "RunResumeRequested"
-                    : "FactoryRunCancellationRequested";
+                  : "FactoryRunCancellationRequested";
     const activeRun = latestSupportedRun(snapshot.factoryEvents ?? []);
     if (operation === "cancel" && !activeRun)
       throw new Error(`Objective #${snapshot.number} has no Factory v2 run`);
@@ -238,7 +239,6 @@ export class FactoryApplicationService {
       ...(input.priorityRank !== undefined
         ? { priorityRank: input.priorityRank }
         : {}),
-      ...(operation === "replay" ? { operation: "replay" } : {}),
       ...(operation === "cancel" && activeRun
         ? { runId: activeRun.runId }
         : {}),

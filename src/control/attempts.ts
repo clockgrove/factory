@@ -51,6 +51,7 @@ export interface AttemptAdmissionReceipt {
   requestedCpu: number;
   requestedMemoryMb: number;
   priorityRank: number;
+  prioritySource?: "subissue-order" | "issue-field" | "subissue-order-fallback";
   priorityFieldId?: string;
   priorityOptionId?: string;
   subIssuePosition: number;
@@ -76,12 +77,17 @@ function admissionFromEvent(event: AttemptEvent): AttemptAdmissionReceipt | unde
   ) {
     return undefined;
   }
+  const prioritySource =
+    typeof event.prioritySource === "string"
+      ? (event.prioritySource as AttemptAdmissionReceipt["prioritySource"])
+      : undefined;
   return {
     admissionClass: event.admissionClass,
     admissionReason: event.admissionReason,
     requestedCpu: event.requestedCpu,
     requestedMemoryMb: event.requestedMemoryMb,
     priorityRank: event.priorityRank,
+    ...(prioritySource ? { prioritySource } : {}),
     ...(event.priorityFieldId ? { priorityFieldId: event.priorityFieldId } : {}),
     ...(event.priorityOptionId ? { priorityOptionId: event.priorityOptionId } : {}),
     subIssuePosition: event.subIssuePosition,
@@ -349,8 +355,15 @@ export class AttemptManager {
     workItemNodeId: string;
     sequence: number;
     reason: string;
+    reasonCode?: NonNullable<
+      Extract<FactoryEvent, { kind: "scheduling" }>["reasonCode"]
+    >;
+    gate?: NonNullable<Extract<FactoryEvent, { kind: "scheduling" }>["gate"]>;
     observedPriorityRank: number;
     observedSubIssuePosition: number;
+    prioritySource?: NonNullable<
+      Extract<FactoryEvent, { kind: "scheduling" }>["prioritySource"]
+    >;
   }): Promise<FactoryEvent> {
     await this.#leases.assertCurrent(args.lease);
     const now = await this.#store.serverTime();
@@ -366,8 +379,11 @@ export class AttemptManager {
       directorEpoch: args.lease.epoch,
       policyDigest: args.lease.policyDigest,
       reason: args.reason,
+      ...(args.reasonCode ? { reasonCode: args.reasonCode } : {}),
+      ...(args.gate ? { gate: args.gate } : {}),
       observedPriorityRank: args.observedPriorityRank,
       observedSubIssuePosition: args.observedSubIssuePosition,
+      ...(args.prioritySource ? { prioritySource: args.prioritySource } : {}),
     });
     await this.#store.addIssueComment(
       args.workItemNodeId,

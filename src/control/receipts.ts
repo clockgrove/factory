@@ -83,6 +83,58 @@ export function latestSupportedRun(events: FactoryEvent[]): FactoryEvent | null 
   return null;
 }
 
+export interface RunReceiptSet {
+  runId: string;
+  start: Extract<FactoryEvent, { kind: "run"; event: "FactoryRunStarted" }>;
+  terminal?: Extract<
+    FactoryEvent,
+    {
+      kind: "run";
+      event:
+        | "FactoryRunCompleted"
+        | "FactoryRunCancelled"
+        | "FactoryRunEscalated";
+    }
+  >;
+  events: FactoryEvent[];
+}
+
+/**
+ * Select the most recently started run and its complete, sequence-ordered
+ * evidence stream. This is intentionally useful for both active and terminal
+ * runs; `latestSupportedRun` remains the active-run authority check.
+ */
+export function latestRunReceipts(events: FactoryEvent[]): RunReceiptSet | null {
+  const deduplicated = deduplicateFactoryEvents(events).sort(
+    (left, right) => left.sequence - right.sequence,
+  );
+  const start = [...deduplicated]
+    .reverse()
+    .find(
+      (event): event is RunReceiptSet["start"] =>
+        event.kind === "run" && event.event === "FactoryRunStarted",
+    );
+  if (!start) return null;
+  const runEvents = deduplicated.filter((event) => event.runId === start.runId);
+  const terminal = [...runEvents]
+    .reverse()
+    .find(
+      (event): event is NonNullable<RunReceiptSet["terminal"]> =>
+        event.kind === "run" &&
+        [
+          "FactoryRunCompleted",
+          "FactoryRunCancelled",
+          "FactoryRunEscalated",
+        ].includes(event.event),
+    );
+  return {
+    runId: start.runId,
+    start,
+    ...(terminal ? { terminal } : {}),
+    events: runEvents,
+  };
+}
+
 /**
  * GitHub may accept a comment mutation and lose the response, after which an
  * HTTP retry can create the same receipt twice. Sequence plus the event's

@@ -88,11 +88,11 @@ async function applicationCommand(
   if (!args[0]) fail(`usage: factory ${command} OWNER/REPO#NUMBER`);
   const target = parseTarget(args[0]);
   const service = applicationFor(target.owner, target.repo);
-  const read = ["doctor", "plan", "status", "explain"];
+  const read = ["doctor", "plan", "status", "explain", "replay"];
   if (read.includes(command)) {
     const workItem = option(args, "--work-item");
     const result = await service.inspect(
-      command as "doctor" | "plan" | "status" | "explain",
+      command as "doctor" | "plan" | "status" | "explain" | "replay",
       target.objective,
       workItem ? Number(workItem) : undefined,
     );
@@ -122,7 +122,6 @@ async function applicationCommand(
             | "drain"
             | "retry"
             | "priority"
-            | "replay"
             | "cancel"),
     {
       objective: target.objective,

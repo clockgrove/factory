@@ -50,7 +50,7 @@ describe("FactoryApplicationService", () => {
     expect(duplicate).toEqual(first);
   });
 
-  it.each(["doctor", "plan", "status", "explain"] as const)(
+  it.each(["doctor", "plan", "status", "explain", "replay"] as const)(
     "%s cannot mutate GitHub",
     async (operation) => {
       let writes = 0;
@@ -107,7 +107,6 @@ describe("FactoryApplicationService", () => {
     "cloud-pause",
     "retry",
     "priority",
-    "replay",
   ] as const)(
     "returns the original durable receipt for duplicate %s requests",
     async (operation) => {

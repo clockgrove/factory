@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 
 import { describe, expect, it } from "vitest";
 
@@ -16,6 +17,12 @@ import {
   workerPacketFromCompiled,
   type CompiledObjective,
 } from "../src/graph.js";
+import {
+  compileObjective,
+  serializeCompilerObjective,
+  validateCompiledObjective,
+  type CompileInput,
+} from "../src/compiler/index.js";
 
 const BASE_SHA = "a".repeat(40);
 const BASE_TREE = "b".repeat(40);
@@ -275,5 +282,56 @@ describe("durable compiled graph", () => {
       changeSurface: workItem.changeSurface,
       delivery: workItem.delivery,
     });
+  });
+});
+
+describe("golden compiled graph", () => {
+  it("compiles a checked-in fixture byte-equivalently across enumeration order", async () => {
+    const fixture = new URL("./fixtures/compiler/golden-objective.json", import.meta.url);
+    const input = JSON.parse(await readFile(fixture, "utf8")) as CompileInput;
+    const first = compileObjective(input);
+    const reversed = compileObjective({
+      ...input,
+      repositoryFacts: {
+        ...input.repositoryFacts,
+        files: [...input.repositoryFacts.files].reverse(),
+        scripts: Object.fromEntries(
+          Object.entries(input.repositoryFacts.scripts ?? {}).reverse(),
+        ),
+      },
+      workItems: [...input.workItems].reverse().map((item) => ({
+        ...item,
+        acceptance: [...item.acceptance].reverse(),
+        scope: [...item.scope].reverse(),
+        validationCommands: [...item.validationCommands].reverse(),
+      })),
+    });
+    const observedCommands = ["npm test", "npm run typecheck"];
+
+    validateCompiledObjective(first, observedCommands);
+    validateCompiledObjective(reversed, observedCommands);
+    expect(serializeCompilerObjective(first)).toBe(serializeCompilerObjective(reversed));
+    expect(new TextEncoder().encode(serializeCompilerObjective(first))).toEqual(
+      new TextEncoder().encode(serializeCompilerObjective(reversed)),
+    );
+
+    const store = new MemoryGraphStore();
+    const leases = new LeaseManager({ store });
+    const base = await store.readCommit(BASE_SHA);
+    const lease = await leases.acquire(
+      {
+        objective: 42,
+        runId: "run-golden-compiler",
+        holder: "director-1",
+        policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+      },
+      base,
+    );
+    const manager = new CompiledGraphManager(store, leases);
+    await manager.persist({ lease, base, objective: first });
+    const replay = await manager.load(42, "run-golden-compiler");
+    expect(serializeCompilerObjective(replay!.objective as typeof first)).toBe(
+      serializeCompilerObjective(first),
+    );
   });
 });

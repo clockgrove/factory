@@ -33,6 +33,10 @@ Every Work Item must contain:
 - one or more authoritative `validationCommands` from the repository's toolchain;
 - complete `requirements`: OS, architecture, tools, services, operator-allowed network destinations,
   an empty permitted-secret list for this release, optional resource/time bounds, and `trust`;
+- a bounded repository-derived `context` manifest, mechanically classified `changeSurface`,
+  criterion-linked validation tiers, and a topology-consistent `delivery` hint;
+- a conservative `economicReview` based only on known validation/runtime needs (never invent live
+  paid measurements);
 - `artifactContract: "clockgrove.factory/artifact-v1"`.
 
 Default `trust` to `trusted_local` only for an explicitly activated trusted repository and trusted
@@ -49,6 +53,8 @@ Before returning the object:
 - every ID is unique and every dependency resolves;
 - the graph is acyclic;
 - parallel scopes do not overlap;
+- every overlapping scope pair has a dependency path, and stack parents exactly match dependencies;
+- context, conflict/resource, validation, delivery, and economic fields agree with repository facts;
 - every base SHA equals the supplied base;
 - validation commands are non-empty and actually available in the repository/backend requirements;
 - no field contains a secret value;

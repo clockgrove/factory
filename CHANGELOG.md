@@ -1,13 +1,12 @@
 # Changelog
 
-Notable user-visible changes are recorded here. Factory follows semantic versioning; v2 preview
-builds are published through npm's `next` distribution tag.
+Notable changes to Factory. See [the delivery plan](docs/DELIVERY-PLAN.md) for upcoming work.
 
-## Unreleased — Factory v2 preview
+## Unreleased
 
 ### Added
 
-- GitHub-only v2 control protocol with immutable compiled graphs, compare-and-swap leases,
+- GitHub-only control protocol with immutable compiled graphs, compare-and-swap leases,
   deterministic attempts, and restart reconstruction.
 - Repository controller and explicit Linux `systemd` lifecycle.
 - Official Codex SDK local backend with Codex CLI as the supported portable fallback.
@@ -17,13 +16,16 @@ builds are published through npm's `next` distribution tag.
 - Daytona execution adapter and provider-neutral managed-agent contract.
 - Labs adapters for Vercel Sandbox and Codex App Server.
 - Formal npm package contract for `@clockgrove/factory` alongside the Agent Plugin.
+- Provider-reported input/output/cached-input token breakdowns in existing durable receipts, with
+  explicit partial-coverage reporting and unchanged model-token budget totals.
 
 ### Changed
 
 - Local Codex execution is the default; paid execution is always explicitly authorized and bounded.
 - The supported runtime is Linux on native Linux, Windows WSL2, or a Linux guest hosted by macOS.
-- The complete v2 release is designated preview rather than assigning separate preview labels to
-  individual v2 capabilities.
+- Compiler navigation guidance now reaches local CLI/SDK workers without expanding edit scope.
+- Factory acceptance review remains mandatory; external Copilot PR review is an optional second
+  opinion, not an installation dependency or a substitute for acceptance evidence.
 
 ### Security
 
@@ -40,11 +42,3 @@ builds are published through npm's `next` distribution tag.
 - Publish and clean-install the synchronized npm and Agent Plugin artifacts.
 - Complete the native Linux, Windows WSL2, and macOS-hosted Linux matrix.
 - Complete live native-stack, Daytona, GitHub Copilot, OpenAI Codex, and adversarial Objective runs.
-
-## 1.0.1 — 2026-09-01
-
-- Preserved the original GitHub Copilot execution protocol now documented as v1 compatibility.
-
-## 1.0.0 — 2026-09-01
-
-- Initial open-source Factory release.

@@ -1,28 +1,27 @@
-# Factory v2 preview release plan
+# Factory delivery plan
 
-Status: active release goal
+Status: in progress
 
 Date: 2026-09-04
 
 ## Goal
 
-Publish a prize-quality open-source Factory v2 preview that an indie developer or small team can
+Build an open-source Factory that an indie developer or small team can
 install, understand, secure, and run without Clockgrove infrastructure. The released product must
 turn a GitHub Objective into dependency-aware Work Items, use trusted local Linux compute first,
 burst within explicit cost authority, validate every artifact independently, and deliver regular or
 native stacked pull requests until the Objective ships or one evidenced human decision is required.
 
-This is one preview product. Native stacks, Daytona, and managed agents are not assigned separate
-maturity labels; each must pass its applicable v2 conformance gates. Vercel Sandbox and Codex App
-Server are Labs and do not block release.
+The waves below group tasks by outcome. Independent tasks may run concurrently; each wave has
+explicit completion checks. Vercel Sandbox and Codex App Server are follow-on integrations.
 
-## Release promise
+## Product outcome
 
-> Factory v2 runs an unattended, GitHub-native software factory in one Linux environment, bursts
+> Factory runs an unattended, GitHub-native software factory in one Linux environment, bursts
 > selected work to Daytona or GitHub-managed agents when authorized, and publishes dependency-aware
 > work through regular or native stacked pull requests.
 
-The release includes:
+The scope includes:
 
 - synchronized Agent Plugin and `@clockgrove/factory` npm artifacts;
 - a `factory` CLI and explicitly installed repository controller;
@@ -39,23 +38,23 @@ The release includes:
 - chat/MCP and CLI control with no custom UI or required GitHub Action; and
 - public security, support, governance, contribution, release, and conformance documentation.
 
-## Workstreams and acceptance
+## Task waves and completion checks
 
-### 1. Reproducible distribution
+### Wave 1 — Reproducible distribution
 
 - Package the CLI/controller as `@clockgrove/factory` with an executable `factory` binary, explicit
   exports, type declarations for any public library surface, and a strict files allowlist.
-- Keep plugin and npm versions synchronized from one release source.
+- Build plugin and npm artifacts from the same source and keep their package versions synchronized.
 - Ensure installation runs no lifecycle script and starts no controller.
 - Produce deterministic bundles, validated schemas, dependency audit output, an SBOM, checksums, and
   package provenance appropriate to the publication path.
 - Pack and install the staged tarball in a clean environment; after publication, repeat from npm's
-  `next` tag and from the published Agent Plugin artifact.
+  package and from the published Agent Plugin artifact.
 
 Acceptance: a clean user can install either artifact, run credential-free help/doctor/startup checks,
 authenticate deliberately, and start the same controller behavior without a source checkout.
 
-### 2. Supported execution backends
+### Wave 2 — Execution backends
 
 - Make the official Codex SDK local worktree backend the default and preserve Codex CLI as the
   supported portable fallback. Run both through the same Work Packet, sandbox, artifact, validation,
@@ -73,7 +72,7 @@ authenticate deliberately, and start the same controller behavior without a sour
 Acceptance: local-only operation works with no cloud credential, and every paid launch is preceded by
 durable provider, budget, and concurrency authority.
 
-### 3. Linux environment qualification
+### Wave 3 — Linux environment verification
 
 - Run the controller, worktree, pressure, cancellation, restart, and service lifecycle matrices on
   native Linux, Windows WSL2, and a Linux guest hosted by macOS.
@@ -84,7 +83,7 @@ durable provider, budget, and concurrency authority.
 Acceptance: all three environment shapes pass the same Linux contract. Native Win32/Darwin lifecycle
 and multiple-local-machine coordination remain out of scope.
 
-### 4. GitHub delivery qualification
+### Wave 4 — GitHub delivery verification
 
 - Run native stack create, extend, observe, lower-layer update, descendant invalidation,
   revalidation, asynchronous merge, merge-queue, partial completion, restart, and cancellation cases
@@ -95,7 +94,7 @@ and multiple-local-machine coordination remain out of scope.
 Acceptance: Factory never integrates an unvalidated head, silently changes a published topology, or
 requires a Factory GitHub workflow.
 
-### 5. Security and open-source readiness
+### Wave 5 — Security and open-source readiness
 
 - Keep `SECURITY.md`, `docs/THREAT-MODEL.md`, `CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, `SUPPORT.md`,
   issue/PR templates, changelog, license, and release notes complete and mutually consistent.
@@ -106,7 +105,7 @@ requires a Factory GitHub workflow.
 Acceptance: a new contributor can identify the trust boundary, report a vulnerability privately,
 reproduce validation, and understand what Factory supports without private context.
 
-### 6. Adversarial installed-product run
+### Wave 6 — Adversarial installed-product run and distribution
 
 - From a clean staged candidate installation, execute a disposable multi-wave Objective that includes
   independent work, a dependency chain, restart, cancellation, failed validation, conflict, budget
@@ -119,9 +118,9 @@ reproduce validation, and understand what Factory supports without private conte
 Acceptance: the Objective ends in validated merged work or a single specific, evidence-backed human
 decision, without manual per-Work-Item dispatch.
 
-## Release sequence
+## Final completion sequence
 
-1. Freeze public protocol, package, policy, and backend identifiers for the preview.
+1. Finish and verify the intended protocol, package, policy, and backend interfaces.
 2. Pass deterministic tests, typecheck, package/plugin verification, audit, schema validation, and
    artifact-content checks from a clean checkout.
 3. Complete the Linux, native-stack, Daytona, managed-agent, and adversarial matrices against a clean
@@ -129,12 +128,12 @@ decision, without manual per-Work-Item dispatch.
    ledger. All other changes require the affected candidate to be retested.
 4. Review the security boundary and public documentation before freezing that tested commit; verify
    the final evidence-enriched package independently as described below.
-5. Create the immutable version tag on the evidence commit, then publish synchronized preview
-   artifacts under npm's `next` tag and the matching plugin version.
+5. Create the immutable package tag on the evidence commit, then publish synchronized
+   artifacts through npm's normal `latest` channel and the matching plugin package.
 6. Clean-install what was published, repeat startup and one private-repository smoke Objective, and
    verify the release checksum/provenance.
-7. Confirm the candidate tag still identifies the exact verified commit, publish release notes, and
-   keep all v2 documentation explicit that the complete release is preview.
+7. Confirm the package tag still identifies the exact verified commit, record what shipped, and
+   keep the delivery plan and verification ledger accurate.
 
 No live paid-provider gate runs merely because credentials are present. Each requires explicit
 authorization naming the provider, disposable target, maximum billable units, and cleanup boundary.
@@ -192,7 +191,7 @@ identical to `S`. Artifact generation from a dirty worktree is useful for inspec
 `sourceDirty: true` and cannot be published.
 
 Review the generated tarball, SBOM, checksums, and provenance. `npm run release:publish` repeats the
-verification before publishing that generated tarball with the `next` dist-tag. Direct invocation
+verification before publishing that generated tarball with the `latest` dist-tag. Direct invocation
 of `scripts/publish-release.mjs` also rechecks the live ledger, clean tree, immutable tag, artifact
 digests, and provenance source commit. The local provenance JSON records source and content; it is
 not a registry-issued or cryptographically signed npm provenance attestation. Preserve the final

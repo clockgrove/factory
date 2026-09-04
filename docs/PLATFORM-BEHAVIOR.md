@@ -4,7 +4,7 @@ Factory's design rests on how GitHub's coding agent and API actually behave, not
 documented to behave. This document records what was measured, so that every design consequence in
 [`DESIGN.md`](DESIGN.md) can be traced to an observation rather than an assumption.
 
-## v2 control-plane and local-harness conformance (September 2026)
+## Control-plane and local-harness conformance (September 2026)
 
 - GitHub accepts custom refs under `refs/clockgrove-factory/...` through the Git data APIs.
 - REST `PATCH /git/refs` with `force: false` is **not** compare-and-swap for custom refs: a sibling
@@ -46,8 +46,9 @@ Factory's disposable-repository matrix:
   Factory therefore never invents one: it waits with durable invalidation evidence for the observed
   base/head chain to become linear, and escalates on its existing bounded Objective deadline.
 
-Native stacks are part of the v2 contract. The live gate in [`CONFORMANCE.md`](CONFORMANCE.md) must
-exercise these behaviors with disposable branches before the v2 preview is published.
+Native stacks are part of Factory's product contract. The live gate in [`CONFORMANCE.md`](CONFORMANCE.md)
+must exercise these behaviors with disposable branches before publication. The remaining implementation
+waves are tracked in [`DELIVERY-PLAN.md`](DELIVERY-PLAN.md).
 
 ## Documented managed-agent contract (not yet live conformance)
 
@@ -62,14 +63,14 @@ Factory therefore discovers assignable actors from the repository and requires o
 provider-published identity before launch. GitHub documents the Copilot suggested-actor login
 `copilot-swe-agent`, but its Codex documentation currently gives the GitHub App display name
 `openai code agent` without a stable suggested-actor login or app identity. Factory pins the former
-and keeps the latter profile fail-closed; a display name is not authorization evidence. The v2 live
+and keeps the latter profile fail-closed; a display name is not authorization evidence. The live
 gate must record a stable Codex identity and then exercise both GitHub Copilot and OpenAI Codex
 through the same Work Item, session-budget, exact-head collection, independent-validation, and
 recovery contract.
 
-The remainder of this document records the original GitHub coding-agent measurements. Those findings
-still govern the explicit `github-copilot/github-managed` compatibility backend; they are no longer
-Factory's default execution architecture.
+The remainder of this document records the original GitHub coding-agent experiments, conducted during
+Factory's development rather than for a shipped product generation. Those findings inform the explicit
+`github-copilot/github-managed` backend; local execution is Factory's default architecture.
 
 The measurements were taken in a disposable repository, before implementation, across three waves of
 trivial independent tasks. Each task touched a distinct file, so any observed serialization would be

@@ -1,4 +1,8 @@
-import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
+import {
+  parseFactoryEvent,
+  type FactoryEvent,
+  type ReportedModelUsage,
+} from "../protocol/events.js";
 import { PROTOCOL_V2 } from "../protocol/limits.js";
 import { encodeEventComment } from "./receipts.js";
 import type { AttemptReservation } from "./attempts.js";
@@ -303,6 +307,7 @@ export class LifecycleRecorder {
     amount: number;
     phase?: "management" | "execution" | "validation";
     usageId?: string;
+    reportedModelUsage?: ReportedModelUsage;
   }): Promise<FactoryEvent> {
     await this.leases.assertCurrent(args.lease);
     const now = await this.store.serverTime();
@@ -326,6 +331,7 @@ export class LifecycleRecorder {
       unit: args.unit,
       amount: args.amount,
       ...(args.usageId ? { usageId: args.usageId } : {}),
+      ...(args.reportedModelUsage ? { reportedModelUsage: args.reportedModelUsage } : {}),
     });
     await this.store.addIssueComment(
       args.workItemNodeId,
@@ -345,6 +351,7 @@ export class LifecycleRecorder {
     unit: "model_tokens" | "local_milliseconds";
     amount: number;
     usageId?: string;
+    reportedModelUsage?: ReportedModelUsage;
   }): Promise<FactoryEvent> {
     await this.leases.assertCurrent(args.lease);
     const now = await this.store.serverTime();
@@ -360,6 +367,7 @@ export class LifecycleRecorder {
       unit: args.unit,
       amount: args.amount,
       ...(args.usageId ? { usageId: args.usageId } : {}),
+      ...(args.reportedModelUsage ? { reportedModelUsage: args.reportedModelUsage } : {}),
     });
     await this.store.addIssueComment(
       args.objectiveNodeId,

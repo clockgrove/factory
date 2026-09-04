@@ -1,4 +1,4 @@
-# ADR 0001 — V2 control refs and Codex CLI baseline
+# ADR 0001 — Control refs and Codex CLI baseline
 
 Date: 2026-09-03
 
@@ -63,7 +63,7 @@ Version: `codex-cli 0.153.0` on WSL/Linux.
 - Every mutating Supervisor boundary checks the exact lease ref OID and fencing epoch.
 - Attempt refs are immutable and never renewed.
 - A fallback control branch is not enabled automatically; inability to use GraphQL `updateRefs`
-  blocks v2 activation rather than silently weakening single-Director safety.
+  blocks activation rather than silently weakening single-Director safety.
 - Codex CLI remains a supported fallback inside native Linux, Windows WSL2, or a Linux guest hosted
   by macOS. ADR 0008 makes the official Codex SDK the preferred programmatic route. Additional
   clients remain Labs until their full execution and interruption probes pass.

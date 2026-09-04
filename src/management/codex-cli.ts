@@ -354,7 +354,17 @@ function assertManagementUsage(value: unknown): ManagementUsage {
   if (!validUsageCounter(usage.inputTokens) || !validUsageCounter(usage.outputTokens)) {
     throw new Error("management backend returned invalid model-token usage");
   }
-  return { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens };
+  const cached = usage.cachedInputTokens;
+  return {
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    ...(typeof cached === "number" &&
+    Number.isSafeInteger(cached) &&
+    cached >= 0 &&
+    cached <= usage.inputTokens
+      ? { cachedInputTokens: cached }
+      : {}),
+  };
 }
 
 export function parseManagementJsonlOutput<T>(stdout: string): {
@@ -382,11 +392,14 @@ function observedCompletionUsage(stdout: string): ManagementUsage | undefined {
     }
   }
   if (completions.length !== 1) return undefined;
-  const usage = completions[0] as { input_tokens?: unknown; output_tokens?: unknown } | undefined;
+  const usage = completions[0] as
+    | { input_tokens?: unknown; output_tokens?: unknown; cached_input_tokens?: unknown }
+    | undefined;
   try {
     return assertManagementUsage({
       inputTokens: usage?.input_tokens,
       outputTokens: usage?.output_tokens,
+      cachedInputTokens: usage?.cached_input_tokens,
     });
   } catch {
     return undefined;
@@ -402,7 +415,7 @@ function parseManagementJsonlResult<T>(stdout: string): { value: T; usage: Manag
     let event: {
       type?: string;
       item?: { type?: string; text?: string };
-      usage?: { input_tokens?: unknown; output_tokens?: unknown };
+      usage?: { input_tokens?: unknown; output_tokens?: unknown; cached_input_tokens?: unknown };
       message?: unknown;
       error?: unknown;
     };
@@ -426,6 +439,7 @@ function parseManagementJsonlResult<T>(stdout: string): { value: T; usage: Manag
       usage = assertManagementUsage({
         inputTokens: event.usage?.input_tokens,
         outputTokens: event.usage?.output_tokens,
+        cachedInputTokens: event.usage?.cached_input_tokens,
       });
     }
     if (event.type === "item.completed" && event.item?.type === "agent_message") {

@@ -1,27 +1,20 @@
 # Factory
 
 > [!IMPORTANT]
-> Factory v2 is being prepared as a preview release. The preview label applies to the product as a
-> whole; capabilities in the v2 contract are held to one conformance standard instead of receiving
-> separate maturity labels.
+> Factory is under development. See [what works today](docs/CONFORMANCE.md) and
+> [what's next](docs/DELIVERY-PLAN.md).
 
-Factory is a catalyst and multiplier for an indie developer or small trusted team. It turns one
-developer, one computer, and the AI agents they already use into a coordinated software studio. A
-human writes an Objective; Factory compiles it into native GitHub sub-issues, schedules
-dependency-ready Work Items, runs coding workers, independently validates their artifacts, opens and
-integrates pull requests, and continues until the Objective ships or a specific human decision is
-required.
+Factory coordinates coding agents to turn a GitHub issue into tested pull requests. Describe what
+you want to build; Factory breaks it into Work Items, runs independent tasks concurrently, checks
+the results, and integrates accepted changes.
 
-Factory is not a coding-agent competitor. Codex, Claude Code, and other agent runtimes perform the
-engineering work; Factory supplies the cost-aware compiler, local-first scheduler, durable GitHub
-protocol, recovery loop, and pull-request integration that make those sessions work as one system.
-Its optimization target is validated progress per dollar and per hour, not raw concurrency.
+Built for indie developers and small teams, Factory uses your local computer first and can burst
+into cloud workers when you authorize the cost. You interact through your agent's chat interface;
+GitHub holds the issues, dependencies, pull requests, and execution records.
 
-Factory does **not** require a Factory GitHub Action, workflow, hosted service, database, queue, or
-sidecar state. The plugin supplies the orchestration code. GitHub supplies the durable control plane.
-A local repository controller supplies the scheduler and reconstructs durable state from GitHub
-after restart. Opting into a GitHub-managed coding agent is different: that provider session can
-consume GitHub Actions minutes even though Factory installs no workflow.
+A local controller keeps work moving while it is running and recovers from GitHub records after a
+restart. No Factory GitHub Actions workflow, hosted service, or database is required. Optional
+GitHub-managed agents may consume Actions minutes as part of their own runtime.
 
 ```text
 Objective issue
@@ -37,40 +30,19 @@ and native dependencies               or opt-in sandbox/managed backends
       └──── validate / publish / merge ──────┘
 ```
 
-## Product contract
+## What Factory handles
 
-- Work Items are GitHub sub-issues; dependencies are native `blocked by` relationships.
-- Pull requests are regular siblings by default. An explicit `stacked-prs` policy uses native GitHub
-  stacks after a repository capability probe; an unavailable capability is durably recorded before
-  the configured regular-PR fallback or escalation.
-- Versioned run, lease, graph, attempt, validation, and budget receipts are reconstructable from
-  GitHub. The full compiled graph is stored under an immutable custom ref before the first sub-issue
-  is created, so a partial graph application replays facts without another model call. A second
-  immutable ref plus an authenticated Objective receipt seal the completed
-  compiler-ID-to-GitHub-issue mapping before execution, preventing moved or swapped sub-issues from
-  inheriting another Work Item's history after restart.
-- Authenticated Objective comments are the single atomic request journal for chat, MCP, and CLI
-  commands. Request IDs are normalized through one semantic comparison; response-loss retries may
-  create an identical comment, but replay applies those at-least-once duplicates only once and fails
-  closed if the same request ID carries different meaning.
-- One compare-and-swap Director lease fences competing schedulers per Objective.
-- Workers receive no GitHub mutation or merge authority. The host publishes only a bounded,
-  content-addressed artifact after independent validation.
-- Trusted work runs through the Codex SDK in an exact-SHA local Git worktree by default. Codex CLI
-  remains the supported portable fallback.
-- Daytona is the supported third-party sandbox target. Factory bundles GitHub Copilot and OpenAI
-  Codex managed-agent profiles, but the v2 preview is publication-blocked until both live gates pass.
-  The Codex profile deliberately remains unavailable until live conformance records a stable,
-  provider-published identity; Factory does not guess one from a display name. All paid execution is
-  opt-in, and there is no implicit cloud fallback.
-- Mechanical polling never calls a model. Model calls are bounded compilation and semantic-review
-  decisions.
-- Publication receipts bind every PR to its planned position, base SHA, exact published head, and
-  independent validation digest. A lower-layer head change invalidates affected descendants before
-  revalidation or integration, and asynchronous stack merges resume from durable GitHub receipts.
-- Work Item count is derived from the work. It is never hard-coded.
+- **Planning:** turns an Objective into GitHub sub-issues with clear acceptance criteria and dependencies.
+- **Scheduling:** prioritizes ready tasks and adjusts local concurrency to available CPU and memory.
+- **Execution:** runs workers in isolated Git worktrees, with explicitly authorized cloud options.
+- **Validation:** independently runs checks and reviews each artifact before publishing a PR.
+- **Delivery:** merges validated changes through ordinary PRs or explicitly selected native stacks.
+- **Recovery:** reconstructs progress from GitHub and stops for specific safety, budget, or correctness blockers.
 
-## V2 preview support boundary
+Local workers use the Codex SDK by default, with Codex CLI fallback. Cloud execution is opt-in.
+Provider availability and outstanding end-to-end checks are listed in [verification status](docs/CONFORMANCE.md).
+
+## Scope
 
 Factory executes on Linux. The supported host configurations are native Linux, a Linux distribution
 under Windows WSL2, and a Linux guest hosted by macOS. The repository, controller, worktrees, locks,
@@ -78,7 +50,7 @@ and credentials stay inside the Linux filesystem. Native Win32 and native Darwin
 service lifecycle are not targets; on macOS, Factory runs inside a Linux VM or equivalent Linux
 guest rather than as a `launchd` service.
 
-The v2 preview contract includes:
+Factory's target capabilities are:
 
 - the Codex plugin and a formally packaged `@clockgrove/factory` npm CLI/controller;
 - local Codex SDK workers, with Codex CLI fallback and adaptive Linux CPU and memory admission;
@@ -92,7 +64,7 @@ The v2 preview contract includes:
 - independent validation, crash recovery, cancellation, replay, explanation, and economic evidence.
 
 Labs contains Vercel Sandbox, Codex App Server, and additional harness/provider adapters. Labs
-features are bundled where useful but are not required to pass the v2 release matrix. Coordinating
+features are bundled where useful but are not part of the initial delivery scope. Coordinating
 multiple local machines, native Windows/macOS lifecycle support, a custom UI, and a required hosted
 Factory service are deliberately out of scope.
 
@@ -100,77 +72,39 @@ The authoritative contract and failure model are in [docs/DESIGN.md](docs/DESIGN
 priority and local-to-cloud burst implementation is specified in
 [docs/ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md](docs/ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md).
 The accepted product scope, chat/MCP boundary, repository controller, cost-aware compiler, durable
-Codex sessions, native stacked-PR delivery, and ordered release plan are specified in
+Codex sessions, native stacked-PR delivery, and implementation details are specified in
 [docs/INDIE-FACTORY-IMPLEMENTATION-PLAN.md](docs/INDIE-FACTORY-IMPLEMENTATION-PLAN.md).
-The active release goal, workstreams, and final exit sequence are in
-[docs/V2-PREVIEW-RELEASE.md](docs/V2-PREVIEW-RELEASE.md).
-The original GitHub-Copilot-specific protocol is preserved in
-[docs/PROTOCOL-V1.md](docs/PROTOCOL-V1.md) only for compatibility with already-running work.
+The active task waves and completion checks are in
+[docs/DELIVERY-PLAN.md](docs/DELIVERY-PLAN.md).
 
 ## Install and activate
 
-Factory v2's distribution contract has two synchronized artifacts: the Agent Plugins package from
-`clockgrove/factory` for chat/MCP use, and `@clockgrove/factory` on npm for the `factory` CLI and
-repository controller. Installing either artifact runs no lifecycle scripts, changes no repository,
-and starts no daemon. Until the npm `next` artifact has passed the published-artifact gate in
-[docs/CONFORMANCE.md](docs/CONFORMANCE.md), use the plugin installation supported by your client or
-the source-checkout command below rather than assuming the npm package is available.
+### TL;DR
 
-After the npm preview is published, the controller installation path is:
+Start with **[the local runner quick start](docs/setup/local.md)**: install the plugin in your Linux
+agent environment, authenticate GitHub and Codex there, then ask the Director to inspect your
+Objective and absolute checkout before authorizing execution. No sandbox account, npm/npx install,
+Factory GitHub workflow, or cloud spending permission is needed for the plugin's local path.
+See [verification status](docs/CONFORMANCE.md) for current installation limitations.
 
-```bash
-npm install --global @clockgrove/factory@next
-factory --help
-```
+### Choose your setup
 
-Install the plugin using your Agent Plugins-compatible client, then restart the client so its skills
-and bundled MCP server are reloaded. Provider SDK code required by shipped adapters is included in
-the committed JavaScript bundle. The plugin artifact does not carry a platform-specific Codex
-executable: using the default local Codex SDK worker requires a compatible `codex` CLI on `PATH`.
-The npm artifact supplies the pinned Codex CLI transitively.
+| Goal | Guide |
+|---|---|
+| First run on Linux, WSL2, or a Linux guest on macOS | [Local runner](docs/setup/local.md) |
+| Continue working after chat disconnects | [Unattended controller](docs/setup/unattended.md) |
+| Add sandbox execution or local-to-cloud burst | [Daytona](docs/setup/daytona.md) |
+| Use GitHub-managed coding agents | [Managed agents](docs/setup/github-managed.md) |
+| Try alternative Labs runners | [Vercel Sandbox](docs/setup/vercel-sandbox.md) · [Codex App Server](docs/setup/codex-app-server.md) |
 
-Authenticate GitHub on the host with `gh auth login`, or expose `GITHUB_TOKEN`/`GH_TOKEN` to the
-plugin process. Installing the plugin does not install a GitHub Action and does not activate any
-repository.
+The **plugin is the entry point**, the **controller supplies unattended scheduling**, and the
+**runner executes work**. Installing the plugin neither starts a service nor authenticates a cloud
+provider. Configure credentials on the executing Linux process—not in the target repo. Credentials
+and permission to spend are separate.
 
-In a supported harness, invoke the `director` skill with:
-
-- `OWNER/REPO#OBJECTIVE`
-- the absolute local checkout path
-- an optional complete run-policy object
-
-For unattended work, the skill checks the host, installs/starts one explicitly authorized
-repository controller, and writes a durable `factory_activate` request. The chat can then disconnect;
-the controller reconstructs work from GitHub. The authenticated Objective comment—not an in-memory
-MCP queue—is the cross-process journal; centralized request-ID semantics make exact duplicate writes
-safe after a lost response. For one-shot interactive work, the skill can instead make one long-lived
-`factory_run` call. Both modes default to
-`codex-sdk/local-worktree`, fall back to `codex-cli/local-worktree`, adapt admission to CPU and memory
-headroom up to eight workers, and never use paid compute. The equivalent foreground source-checkout
-command is:
-
-```bash
-npm ci
-npm run build
-node dist/factory.js run OWNER/REPO#OBJECTIVE --until-terminal --repo /absolute/repo/path
-```
-
-The process survives ordinary worker failures and reconstructs interrupted work from GitHub when
-restarted. It cannot wake a powered-off machine. The repository controller provides one fenced
-service per checkout. Each running controller has one random identity and repository-lease epoch;
-every Objective Supervisor it starts carries that same observation, and restart/takeover establishes
-a new fenced identity rather than impersonating the prior process. The service can be installed into
-an explicitly authorized host scheduler for login or boot recovery. See
-[docs/HOST-SCHEDULING.md](docs/HOST-SCHEDULING.md) for the supported Linux environment boundary.
-
-Request a fenced cancellation from another shell with:
-
-```bash
-node dist/factory.js cancel OWNER/REPO#OBJECTIVE --request-id cancel-001 --reason "operator request"
-```
-
-The request is a durable GitHub event. The active Supervisor stops workers, records terminal attempt
-and run receipts, and releases the lease; killing a process is not used as the cancellation record.
+Each [setup guide](docs/setup/README.md) has a TL;DR followed by detailed instructions and checks.
+For exact environment placement, service boundaries, paid-capacity gates, and troubleshooting, see
+[shared runner configuration](docs/setup/configuration.md).
 
 ## Inspect through chat or MCP
 
@@ -256,7 +190,7 @@ explicit managed-session authority. The Codex profile remains unavailable until 
 stable provider-published identity. See [docs/CREDENTIALS.md](docs/CREDENTIALS.md) for
 provider-specific credentials and boundaries.
 
-Optional economics and model-routing policy is evidence-bound. V2 accepts only a
+Optional economics and model-routing policy is evidence-bound. Factory accepts only a
 `models.mode` of `single-profile`; all four `phaseProfiles` entries must name the same explicit model
 and supported reasoning effort. `task-class` and explicit model routing to GitHub-managed agents are
 rejected rather than ignored. `economics.minCloudTimeSavedMinutes` admits overflow burst only when a
@@ -267,7 +201,7 @@ each overshoot it, and opaque sandbox/managed-agent token use remains unavailabl
 minutes or sessions.
 
 Vercel Sandbox and Codex App Server are Labs adapters. They use the same execution contract but are
-not part of the v2 release matrix.
+not part of the initial delivery scope.
 
 Use native sub-issue order as the zero-configuration priority. To configure an organization
 single-select issue field, inspect its stable field and option IDs without writing GitHub:

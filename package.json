@@ -48,7 +48,7 @@
   },
   "publishConfig": {
     "access": "public",
-    "tag": "next"
+    "tag": "latest"
   },
   "packageManager": "npm@11.19.0",
   "scripts": {

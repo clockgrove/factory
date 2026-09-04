@@ -21,8 +21,14 @@ const CompilationReceiptSchema = z
     graphDigest: z.string().regex(/^[0-9a-f]{64}$/),
     inputTokens: z.number().int().nonnegative(),
     outputTokens: z.number().int().nonnegative(),
+    cachedInputTokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (value) =>
+      value.cachedInputTokens === undefined || value.cachedInputTokens <= value.inputTokens,
+    { message: "cached input tokens cannot exceed input tokens", path: ["cachedInputTokens"] },
+  );
 
 export type CompilationReceipt = z.infer<typeof CompilationReceiptSchema>;
 
@@ -200,6 +206,7 @@ export class CompiledGraphManager {
       invocationId: string;
       inputTokens: number;
       outputTokens: number;
+      cachedInputTokens?: number | undefined;
     };
   }): Promise<CompiledGraphRecord> {
     await this.leases.assertCurrent(args.lease);

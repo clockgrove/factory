@@ -1,21 +1,22 @@
 # Factory for indie developers — implementation plan
 
-Status: core implementation complete; v2 preview finalization and live qualification in progress
+Status: core delivery waves implemented; release finalization and live qualification in progress
 
 Date: 2026-09-03
 
-This document records the ordered implementation plan that produced Factory v2. It narrows the
-audience and delivery model established in [`DESIGN.md`](DESIGN.md) and incorporates the detailed
-priority, capacity, and burst work in
+Build a local-first factory that turns GitHub Objectives into validated, integrated pull requests
+for indie developers and small teams. The delivery waves below identify the implementation tasks,
+dependencies, and acceptance checks. Follow [`DESIGN.md`](DESIGN.md) for the product contract and
+the detailed priority, capacity, and burst work in
 [`ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md`](ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md).
 
-Phases 0–7 have landed in the core implementation. Phase 8 and the release-finalization work remain
-active: formal npm publication, the complete Linux environment matrix, live native-stack coverage,
+Remaining qualification work includes formal npm publication, the complete Linux environment
+matrix, live native-stack coverage,
 one real Daytona Objective, two real GitHub-managed agents, and the adversarial installed-product
 run. [`CONFORMANCE.md`](CONFORMANCE.md) is the authoritative evidence ledger.
 
-When this plan changes a current v2 behavior, existing active runs keep their recorded protocol and
-policy. New behavior becomes a default only after its conformance gate passes.
+Active runs retain their recorded protocol and policy. Changes must preserve their safe recovery;
+release claims require the corresponding conformance evidence.
 
 ## Product thesis
 
@@ -87,8 +88,8 @@ The canonical success path is:
 | Installation | Installing the plugin never installs a GitHub Action, changes a repository, or starts a daemon. Controller installation is a separate explicit action. |
 | Open-source boundary | No required hosted Factory server, database, queue, account, or telemetry service. |
 | Hosted boundary | A hosted MCP/coordinator may be a later paid target, but it cannot become a dependency of the open-source local product. |
-| Sandbox provider | Daytona is the v2 supported third-party sandbox. Vercel Sandbox is Labs. |
-| Managed agents | GitHub Copilot and OpenAI Codex are the two v2 managed-agent targets. Both are opt-in, budget-bounded, and publication-gated; Codex discovery stays fail-closed until live evidence records a stable provider-published identity. |
+| Sandbox provider | Daytona is the supported third-party sandbox target. Vercel Sandbox is Labs. |
+| Managed agents | GitHub Copilot and OpenAI Codex are the two managed-agent targets. Both are opt-in, budget-bounded, and publication-gated; Codex discovery stays fail-closed until live evidence records a stable provider-published identity. |
 | Labs | Vercel Sandbox, Codex App Server, and additional harness/provider adapters. |
 | Native host lifecycle | Win32 and Darwin execution and lifecycle are out of scope; Windows and macOS host supported Linux environments. |
 
@@ -229,7 +230,7 @@ reconciles before another controller admits work.
 ### Objective queue behavior
 
 Multiple durable activations are supported because a developer can legitimately queue a second
-feature while the first runs. V2 admits one Objective per repository controller so a trunk merge
+feature while the first runs. Factory admits one Objective per repository controller so a trunk merge
 cannot invalidate another Objective's immutable base; concurrency is within its Work Item DAG. This
 is not a multi-host or enterprise scheduler.
 
@@ -246,9 +247,8 @@ No organization-wide queues, quotas, fairness schemes, or cross-repository trans
 
 ## Product protocol additions
 
-All new fields are optional extensions to v2 envelopes until the default migration gate passes.
-Stored policy digests are verified against their original external shape before defaults are
-normalized.
+Extend `clockgrove.factory/v2` envelopes with optional fields so stored runs remain reconstructable.
+Verify stored policy digests against their recorded external shape before normalizing defaults.
 
 ### Controller and run policy
 
@@ -314,7 +314,7 @@ a controller ceiling never widens a run beyond the authority the user already re
 admission receipt includes both policy digests and the effective caps it observed.
 
 The exact model identifier and supported reasoning effort are supplied by the operator. Factory
-contains no fashionable model default. V2 accepts `single-profile` only and requires every phase to
+contains no fashionable model default. Factory accepts `single-profile` only and requires every phase to
 name the same profile; that choice is routed into compile, implement, review, and retry/recover
 invocations. `task-class` is rejected until a durable classifier and mapping exist. GitHub managed
 agents do not expose model selection, so they cannot be combined with this explicit block.
@@ -500,7 +500,7 @@ passes:
    burst rule;
 8. the controller still owns the repository and Objective lease immediately before launch.
 
-The first release uses the Work Packet's explicit `estimatedDurationMinutes` as a configured
+The implementation uses the Work Packet's explicit `estimatedDurationMinutes` as a configured
 one-local-queue-wave cloud-time-saved proxy. It is not an observed forecast. A nonzero minimum fails
 closed when that field is absent, and admitted receipts preserve both the estimate and threshold.
 Historical estimates may replace configured evidence only after Factory has enough comparable
@@ -513,7 +513,7 @@ burst.
 
 ### Managed-agent targets
 
-Factory v2 includes GitHub Copilot and OpenAI Codex as publication-gated managed-agent targets. Both
+Factory includes GitHub Copilot and OpenAI Codex as publication-gated managed-agent targets. Both
 use the same provider-neutral execution contract: capability discovery, bounded session admission,
 durable identity, observation, cancellation/reconciliation, exact-head artifact collection,
 independent validation, and publication/integration fencing. A managed agent's self-published pull
@@ -593,7 +593,7 @@ Add a `StackManager` behind a provider-neutral delivery interface. It:
 
 Because GitHub's stack API is versioned and may change, all API shapes are isolated in this adapter. At activation,
 `delivery.onUnavailable` must be either `regular-prs` or `escalate`. Falling back later cannot change
-already-published PR topology. Existing runs retain regular independent PR behavior.
+already-published PR topology. Active runs retain their recorded delivery policy.
 
 ## Chat and MCP surface
 
@@ -658,12 +658,13 @@ Factory never invents precise dollar savings from unavailable billing data. A me
 admission decision must be available to `factory_explain` and recorded at the appropriate durable
 boundary.
 
-## Implementation phases
+## Implementation delivery waves
 
-Each phase lands behind backward-compatible parsing or an explicit policy switch. A later phase may
-start only when the earlier contracts it consumes are covered by deterministic tests.
+Start a wave when the contracts it consumes have deterministic test coverage. Preserve reconstruction
+of stored records and require an explicit policy switch for changes to execution authority. The
+runtime scheduler continuously refills eligible worker slots.
 
-### Phase 0 — protocol and decision baseline
+### Wave 0 — protocol and decision baseline
 
 Modify:
 
@@ -677,12 +678,12 @@ Modify:
 
 Add decision records for the repository controller, chat/MCP split, stacked delivery, and
 open-source/hosted boundary. Add optional policy, command-event, context, change-surface, delivery,
-and session fields. Preserve old policy digests and active-run parsing.
+and session fields. Preserve stored policy digests and active-run parsing.
 
-Exit gate: old fixtures retain their digest and derived state; invalid cross-field authority or
+Exit gate: stored-record fixtures retain their digest and derived state; invalid cross-field authority or
 budget combinations fail before the first write.
 
-### Phase 1 — activation and agent-facing control surface
+### Wave 1 — activation and agent-facing control surface
 
 Refactor the Supervisor into application services that both CLI and MCP call. Split quick durable
 activation from the long-running loop. Add doctor, plan, status, explain, pause, resume, drain,
@@ -702,7 +703,7 @@ Primary files:
 Exit gate: a chat request can create exactly one durable activation while the controller is offline;
 read-only requests perform no mutation; duplicate mutating calls return the original result.
 
-### Phase 2 — repository controller and service lifecycle
+### Wave 2 — repository controller and service lifecycle
 
 Add:
 
@@ -722,7 +723,7 @@ Exit gate: activate two Objectives, prove only one becomes active while the seco
 queued, kill the process during every meaningful lifecycle phase, restart it, and prove exactly-once
 admission/publication semantics, repository-wide caps, and clean service uninstall.
 
-### Phase 3 — cost-aware compiler and repository facts
+### Wave 3 — cost-aware compiler and repository facts
 
 Add pure compiler stages, repository facts, context manifests, conflict classification, exclusive
 resources, validation tiers, stack hints, and bounded economic review. Keep management backends
@@ -745,7 +746,7 @@ without an installable fixture and an exercised command path.
 Exit gate: golden Objectives compile deterministically into valid DAGs with no arbitrary item count,
 parallel scope overlap, invented command, unnecessary context dump, or impossible stack topology.
 
-### Phase 4 — adaptive local scheduling and bounded cloud burst
+### Wave 4 — adaptive local scheduling and bounded cloud burst
 
 Implement the subordinate adaptive-scheduling plan, but make the capacity ledger repository-wide
 and add path and exclusive-resource claims. Default remains adaptive local with paid burst disabled.
@@ -762,7 +763,7 @@ Exit gate: native Linux, Windows WSL2, and a Linux guest on macOS pass pressure,
 dependency, path collision, crash recovery, provider ambiguity, and budget fault matrices. A real
 Daytona run proves TTL, egress, cancellation, cost reconciliation, and cleanup.
 
-### Phase 5 — Labs durable Codex execution adapter
+### Wave 5 — Labs durable Codex execution adapter
 
 Add the App Server-backed local adapter, durable thread identity, usage normalization, progress
 events, cancellation, and resume. Keep the CLI adapter and run the same backend conformance suite
@@ -777,9 +778,9 @@ Primary additions:
 
 Labs gate: concurrent local threads stay isolated; process restart resumes or safely reconciles each
 attempt; approval requests cannot hang unattended work; the artifact and validation contracts remain
-identical across adapters. This gate does not block the v2 preview.
+identical across adapters. This Labs gate does not block release.
 
-### Phase 6 — native stacked pull requests
+### Wave 6 — native stacked pull requests
 
 Add stack planning, GitHub capability probing, publication receipts, cascading rebase, exact-head
 revalidation, asynchronous atomic merge, and restart reconciliation.
@@ -796,7 +797,7 @@ Exit gate: linear, sibling, diamond/join, lower-layer revision, partial publicat
 merge-queue, and asynchronous failure scenarios pass against a disposable GitHub repository. The
 regular-PR fallback is proven before it can be selected.
 
-### Phase 7 — replay, explanations, and cost feedback
+### Wave 7 — replay, explanations, and cost feedback
 
 Make scheduler decisions pure and replayable from a pinned GitHub snapshot. Add stable reason codes,
 run summaries, context/usage accounting, and conservative historical duration estimates. Do not add
@@ -806,7 +807,7 @@ Exit gate: replay reproduces every admission from a conformance run; `factory_ex
 exact dependency, capacity, authority, priority, or economic gate; unavailable billing data is
 reported as unavailable rather than estimated as fact.
 
-### Phase 8 — release qualification and Clockgrove Worlds dogfood
+### Wave 8 — release qualification and Clockgrove Worlds dogfood
 
 Exercise Factory through an installed plugin, never a development worktree MCP configuration. Use
 Clockgrove Worlds platform Objectives that cover, as the repository makes them available:
@@ -849,9 +850,9 @@ Protocol baseline
                                       Clockgrove Worlds dogfood release
 ```
 
-Pure compiler, scheduler, GitHub-stack, and session-normalization modules were developed in parallel
-after Phase 0. Controller integration followed their schemas; release claims wait for live
-conformance.
+After Wave 0, develop the pure compiler, scheduler, GitHub-stack, and session-normalization modules
+in parallel where the dependency graph permits. Integrate them into the controller after their
+schemas and contract tests pass. Release qualification requires live conformance.
 
 ## Verification strategy
 
@@ -969,19 +970,19 @@ beyond keeping protocol records versioned and provider-neutral.
 This appendix applies the general Factory contracts to repositories that contain large media,
 generated content, deterministic simulations, visual behavior, or specialized authoring tools. It
 does not change Factory's general-purpose audience, require an engine-specific runtime, or add a
-game-development phase to the core roadmap.
+game-development wave to the core roadmap.
 
 ### Reusable capabilities and release boundary
 
 These are not game features. They solve common software-repository problems and therefore remain in
-the generic design. The v2 preview implements repository-fact classification, `large-binary` and
+the generic design. Factory implements repository-fact classification, `large-binary` and
 `generated` change-surface classes, exclusive-resource serialization, binary Git patches, artifact
 digests, and clean validation. Its normalized patch is capped at 5 MiB, and a Daytona source archive
 is capped at 64 MiB. Work that cannot be represented inside those bounds fails closed.
 
-The preview does **not** ship Git LFS lifecycle management, an oversized content-addressed transfer
+The current implementation does **not** include Git LFS lifecycle management, an oversized content-addressed transfer
 service, media-type inspection, or a provider object-store artifact channel. The bullets below are
-forward-compatible design requirements for adding those capabilities after v2; they are not current
+design requirements for adding those capabilities in later delivery waves; they are not current
 support claims. A future implementation must add executable conformance evidence before changing
 that boundary.
 
@@ -1048,7 +1049,7 @@ adopter's architecture. Project-specific implementation facts, paths, and source
 in the adopter repository and enter Factory only through ordinary repository grounding.
 
 The public qualification scenarios below are design inputs for future qualification; they are not
-part of the v2 preview release matrix:
+part of the current release matrix:
 
 - a repository may expose deterministic behavior whose Work Packets must pin seeds, fixtures,
   versions, scenarios, and expected hashes;

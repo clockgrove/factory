@@ -2,7 +2,7 @@
 
 Date: 2026-09-03
 
-Status: accepted for protocol v2
+Status: accepted
 
 ## Context
 
@@ -18,7 +18,7 @@ accepted the run policy.
 
 ## Decision
 
-One v2 run has exactly one content-addressed compiled graph. Factory validates every Work Item against
+Each run has exactly one content-addressed compiled graph. Factory validates every Work Item against
 the immutable run policy and available backend capabilities before persisting that graph or creating
 the first sub-issue. It then stores the full graph under an immutable per-run custom ref and records
 its digest, blob OID, ref, and size on the Objective.
@@ -46,6 +46,6 @@ run.
 - Existing issue and attempt history keeps one auditable meaning.
 - Factory can safely repair a response-lost graph write without duplicating valid work.
 - A moved or replaced sub-issue cannot inherit another compiler ID's receipts after restart.
-- Protocol v2 deliberately does not claim autonomous graph replacement. Safe unattended replanning
+- Factory does not replace an active graph autonomously. Safe unattended replanning
   would require versioned graph revisions, rules for superseding issue and attempt history, new budget
   authorization, and a migration protocol. That is a future protocol change, not a release shortcut.

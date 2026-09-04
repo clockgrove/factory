@@ -62,7 +62,7 @@ describe("release evidence and publication boundary", () => {
       JSON.stringify({
         name: "@clockgrove/factory",
         version: "2.0.26",
-        publishConfig: { tag: "next", access: "public" },
+        publishConfig: { tag: "latest", access: "public" },
       }),
     );
     write("THIRD_PARTY_NOTICES.txt", "fixture notices\n");
@@ -95,7 +95,7 @@ describe("release evidence and publication boundary", () => {
     );
     write(
       "docs/CONFORMANCE.md",
-      `## Candidate gates required before publishing the v2 preview\n\n| Gate | Status | Evidence |\n|---|---|---|\n${gates.map((gate, index) => `| ${gate} | Passed | [record](release-evidence/${index}.json) |`).join("\n")}\n`,
+      `## Verification required before publication\n\n| Gate | Status | Evidence |\n|---|---|---|\n${gates.map((gate, index) => `| ${gate} | Passed | [record](release-evidence/${index}.json) |`).join("\n")}\n`,
     );
     commit();
     git("tag", "v2.0.26");
@@ -152,7 +152,7 @@ describe("release evidence and publication boundary", () => {
     const provenance = JSON.stringify({
       protocol: "clockgrove.factory/release-provenance-v1",
       source: { commit: sourceCommit, dirty: false },
-      package: { name: "@clockgrove/factory", version: "2.0.26", distTag: "next" },
+      package: { name: "@clockgrove/factory", version: "2.0.26", distTag: "latest" },
       subjects: [tarball, sbom, bundleInventory, thirdPartyNotices],
     });
     write("release/factory.tgz", "tarball");
@@ -163,7 +163,7 @@ describe("release evidence and publication boundary", () => {
       JSON.stringify({
         name: "@clockgrove/factory",
         version: "2.0.26",
-        distTag: "next",
+        distTag: "latest",
         tarball,
         sbom,
         bundleInventory,
@@ -215,6 +215,6 @@ describe("release evidence and publication boundary", () => {
     expect(result.stderr).toBe("");
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("npm-stub publish");
-    expect(result.stdout).toContain("--tag next --dry-run");
+    expect(result.stdout).toContain("--tag latest --dry-run");
   });
 });

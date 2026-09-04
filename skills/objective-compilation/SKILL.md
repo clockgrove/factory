@@ -1,6 +1,6 @@
 ---
 name: objective-compilation
-description: Compiles a human Objective into the smallest complete, validated DAG of issue-ready Factory v2 Work Items with exact execution and validation requirements; use when an Objective needs decomposition or graph repair.
+description: Compiles a human Objective into the smallest complete, validated DAG of issue-ready Factory Work Items with exact execution and validation requirements; use when an Objective needs decomposition or graph repair.
 ---
 
 # Objective compilation
@@ -32,7 +32,7 @@ Every Work Item must contain:
 - the exact observed `baseSha`;
 - one or more authoritative `validationCommands` from the repository's toolchain;
 - complete `requirements`: OS, architecture, tools, services, operator-allowed network destinations,
-  an empty permitted-secret list for this release, optional resource/time bounds, and `trust`;
+  an empty permitted-secret list, optional resource/time bounds, and `trust`;
 - a bounded repository-derived `context` manifest, mechanically classified `changeSurface`,
   criterion-linked validation tiers, and a topology-consistent `delivery` hint;
 - a conservative `economicReview` based only on known validation/runtime needs (never invent live
@@ -41,7 +41,7 @@ Every Work Item must contain:
 
 Default `trust` to `trusted_local` only for an explicitly activated trusted repository and trusted
 Objective provenance. Use `isolated` for untrusted code/tests or requested isolation, and `managed`
-only when the task truly requires the GitHub-managed compatibility backend. A requested network
+only when the task truly requires a GitHub-managed backend. A requested network
 destination must already be in the immutable run policy; never expand that policy. Arbitrary task
 secrets are not supported, so `permittedSecretNames` must be empty. Do not request services, CPU,
 memory, or disk without an evidenced need.
@@ -61,8 +61,8 @@ Before returning the object:
 - the result validates against `schemas/objective.schema.json` and
   `schemas/work-item.schema.json`.
 
-Return only the compiled Objective object. The v2 Supervisor authenticates the graph digest on the
+Return only the compiled Objective object. The Supervisor authenticates the graph digest on the
 Objective before applying it, stores the complete graph under an immutable GitHub custom ref, and
 persists per-item receipts in each sub-issue. An interrupted application replays that stored object
 without recompilation; a divergent replay fails closed. Do not use the standalone legacy
-`graph_apply` tool to activate a v2 execution run.
+`graph_apply` tool to activate an execution run.

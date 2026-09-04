@@ -35,6 +35,54 @@ afterEach(async () => {
 });
 
 describe("Codex management backend", () => {
+  it.each([undefined, null, -1, 1.5, "5", 101, Number.MAX_SAFE_INTEGER + 1])(
+    "keeps invalid or absent cached usage %j unknown without losing terminal totals",
+    (cached) => {
+      const stdout = [
+        JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "{}" } }),
+        JSON.stringify({
+          type: "turn.completed",
+          usage: { input_tokens: 100, output_tokens: 20, cached_input_tokens: cached },
+        }),
+      ].join("\n");
+      expect(parseManagementJsonlOutput(stdout).usage).toEqual({
+        inputTokens: 100,
+        outputTokens: 20,
+      });
+      let failed: unknown;
+      try {
+        parseManagementJsonlOutput(stdout.replace('"text":"{}"', '"text":"bad"'));
+      } catch (error) {
+        failed = error;
+      }
+      expect(failed).toBeInstanceOf(ManagementOutputError);
+      expect(failed).toMatchObject({ usage: { inputTokens: 100, outputTokens: 20 } });
+      expect((failed as ManagementOutputError).usage).not.toHaveProperty("cachedInputTokens");
+    },
+  );
+
+  it.each([0, 50, 100])(
+    "preserves cached input %i once for successful and malformed responses",
+    (cached) => {
+      const stdout = [
+        JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "{}" } }),
+        JSON.stringify({
+          type: "turn.completed",
+          usage: { input_tokens: 100, output_tokens: 20, cached_input_tokens: cached },
+        }),
+      ].join("\n");
+      const usage = { inputTokens: 100, outputTokens: 20, cachedInputTokens: cached };
+      expect(parseManagementJsonlOutput(stdout).usage).toEqual(usage);
+      let failed: unknown;
+      try {
+        parseManagementJsonlOutput(stdout.replace('"text":"{}"', '"text":"bad"'));
+      } catch (error) {
+        failed = error;
+      }
+      expect(failed).toBeInstanceOf(ManagementOutputError);
+      expect(failed).toMatchObject({ usage });
+    },
+  );
   it("grounds the model in declared scripts and shared validation recipes before invocation", async () => {
     const repository = await repositoryWithPackage(
       JSON.stringify({ scripts: { test: "node --test", dev: "node server.js" } }),
@@ -91,7 +139,7 @@ describe("Codex management backend", () => {
     const repository = await repositoryWithPackage(
       JSON.stringify({ scripts: { test: "node --test" } }),
     );
-    const usage = { inputTokens: 30, outputTokens: 12 };
+    const usage = { inputTokens: 30, outputTokens: 12, cachedInputTokens: 10 };
     const backend = new CodexCliManagementBackend({
       runStructured: async () => {
         // Validation must reuse the facts supplied to this call, not reread a

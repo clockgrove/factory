@@ -1,4 +1,9 @@
-import { type AttemptEvent, type FactoryEvent, parseFactoryEvent } from "../protocol/events.js";
+import {
+  type AttemptEvent,
+  type FactoryEvent,
+  type ReportedModelUsage,
+  parseFactoryEvent,
+} from "../protocol/events.js";
 import { assertNoSecretMaterial, PROTOCOL_V2 } from "../protocol/limits.js";
 import { encodeEventComment, encodeEventTrailer } from "./receipts.js";
 import type { GitCommitObject, LeaseManager, LeaseState } from "./lease.js";
@@ -252,6 +257,7 @@ export class AttemptManager {
     headSha?: string;
     modelProfile?: string;
     reportedModelTokens?: number;
+    reportedModelUsage?: ReportedModelUsage;
     allowRecovery?: boolean;
   }): Promise<AttemptEvent> {
     await this.#leases.assertCurrent(args.lease);
@@ -297,6 +303,7 @@ export class AttemptManager {
       ...(args.reportedModelTokens === undefined
         ? {}
         : { reportedModelTokens: args.reportedModelTokens }),
+      ...(args.reportedModelUsage ? { reportedModelUsage: args.reportedModelUsage } : {}),
     };
     await this.#store.addIssueComment(
       args.workItemNodeId,

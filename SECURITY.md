@@ -4,11 +4,10 @@ Factory schedules coding agents, executes repository commands, handles GitHub cr
 create paid compute. Treat security reports as potentially high impact even when the immediate
 reproduction uses a disposable repository.
 
-## Supported versions
+## Fixes and affected builds
 
-Until Factory v2 leaves preview, security fixes target the latest published v2 preview and `main`.
-Older previews should be upgraded before a report is reproduced. The v1 protocol remains readable
-for migration and active-run compatibility, but it is not a separately maintained product line.
+Security fixes target `main`. Include the affected commit or package version in a report so
+maintainers can reproduce it.
 
 ## Report a vulnerability privately
 

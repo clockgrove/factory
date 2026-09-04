@@ -339,7 +339,9 @@ const EscalateToShape = {
 const CompiledWorkItemSchema = z.object({
   id: z
     .string()
-    .describe("Compiler-local id stored in the v2 graph envelope, not used as an issue number"),
+    .describe(
+      "Compiler-local id stored in the compiled graph envelope, not used as an issue number",
+    ),
   title: z.string(),
   goal: z.string(),
   acceptance: z.array(z.string()),
@@ -1105,7 +1107,7 @@ server.registerTool(
       "does not, the issues are still created and the result says the label was missing. Replaying " +
       "the identical graph repairs partial issue/dependency writes without duplicating Work Items; " +
       "a divergent graph fails closed. This standalone compatibility tool does not authenticate or " +
-      "activate a v2 run; new unattended Objectives must use factory_run.",
+      "activate a supervised run; new unattended Objectives must use factory_run.",
     inputSchema: {
       ...RepoShape,
       objectiveNumber: z.number().int().positive().describe("Objective issue number"),
@@ -1191,7 +1193,7 @@ server.registerTool(
     title: "Run Factory Objective",
     annotations: DESTRUCTIVE_WRITE_TOOL_ANNOTATIONS,
     description:
-      "Run one explicitly activated Objective to a terminal state using Factory v2: acquire the " +
+      "Run one explicitly activated Objective to a terminal state using Factory: acquire the " +
       "GitHub-backed Director lease, compile missing Work Items, schedule policy-approved workers, " +
       "validate independently, publish and squash-merge acceptable work, retry bounded failures, " +
       "and persist every decision in GitHub. The default policy is local-only and never falls back " +
@@ -1210,7 +1212,7 @@ server.registerTool(
       policy: z
         .record(z.unknown())
         .optional()
-        .describe("Complete v2 run policy; defaults to local-only"),
+        .describe("Complete run policy; defaults to local-only"),
     },
   },
   tool(
@@ -1372,7 +1374,7 @@ function registerApplicationTool(
             .record(z.unknown())
             .optional()
             .describe(
-              "Complete immutable v2 run policy. Omit for adaptive local-only execution; paid backends are never inferred.",
+              "Complete immutable run policy. Omit for adaptive local-only execution; paid backends are never inferred.",
             ),
         }
       : ["doctor", "plan", "status", "explain", "replay"].includes(operation)

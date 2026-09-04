@@ -1,11 +1,10 @@
 # Support policy
 
-Factory is an open-source preview, not a hosted service or paid support product. Maintainers and the
-community help on a best-effort basis.
+Maintainers and the community provide best-effort help with Factory. There is no paid support SLA.
 
-## Supported v2 boundary
+## Product support contract
 
-| Area | V2 contract |
+| Area | Intended contract |
 |---|---|
 | Runtime | Linux: native Linux, Windows WSL2, or a Linux guest hosted by macOS |
 | Distribution | Agent Plugin plus `@clockgrove/factory` npm CLI/controller |
@@ -16,9 +15,9 @@ community help on a best-effort basis.
 | Labs | Vercel Sandbox, Codex App Server, and additional harness/provider adapters |
 | Out of scope | Native Win32/Darwin execution or lifecycle, multi-local-machine clusters, custom UI, required hosted service |
 
-The contract describes the intended v2 preview. Current proof and open release gates are listed in
-[docs/CONFORMANCE.md](docs/CONFORMANCE.md). Until the npm artifact is published, use the plugin or
-source-checkout path documented in the README.
+Current proof and open release gates are listed in [docs/CONFORMANCE.md](docs/CONFORMANCE.md);
+implementation waves are tracked in [docs/DELIVERY-PLAN.md](docs/DELIVERY-PLAN.md). Until the npm
+artifact is published, use the plugin or source-checkout path documented in the README.
 
 ## Ask for help
 
@@ -35,9 +34,8 @@ transcripts.
 Use private vulnerability reporting for security issues as described in
 [SECURITY.md](SECURITY.md). Public issues containing secrets may be removed immediately.
 
-## Version policy
+## Fixes
 
-During preview, the latest published v2 prerelease and `main` receive fixes. Older v2 previews are
-best-effort and may require upgrade before diagnosis. V1 remains a compatibility protocol for
-existing runs, not a separately developed feature line. Breaking preview changes must include a
-migration note and preserve safe reconstruction of already-active supported runs.
+Fixes are developed against `main`. Include the affected commit or package version in support
+requests. Changes to run recovery must preserve safe reconstruction or fail closed on incompatible
+receipts.

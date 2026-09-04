@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/clockgrove/factory/schemas/run-policy.schema.json",
-  "title": "Factory v2 Run Policy",
+  "title": "Factory Run Policy",
   "type": "object",
   "additionalProperties": true,
   "required": [

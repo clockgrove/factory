@@ -1,6 +1,6 @@
 # Threat model
 
-This threat model covers the open-source Factory v2 preview running one Linux environment on one
+This threat model covers the unreleased open-source Factory running one Linux environment on one
 laptop or desktop, with GitHub as its durable control plane and optional paid execution. It does not
 cover any hosted coordinator or service.
 
@@ -63,7 +63,7 @@ explicitly authorized hardened backend or escalate.
 
 ## Provider boundaries
 
-Daytona is the supported v2 sandbox provider. Factory supplies source without repository
+Daytona is the sandbox provider in Factory's product contract. Factory supplies source without repository
 credentials, creates ephemeral resources with deterministic identity and hard wall-clock TTL,
 restricts egress, brokers only the named model credential, validates in a fresh resource without a
 model credential, and attempts cleanup after collection. Provider-side spend controls and TTL are
@@ -81,7 +81,7 @@ workflow and cannot treat an Actions allowance as launch authority or as one of 
 receipts.
 
 Vercel Sandbox and Codex App Server are Labs integrations. They inherit the same worker and artifact
-contracts but are not part of the v2 release gate.
+contracts but are not publication gates in the [delivery plan](DELIVERY-PLAN.md).
 
 ## Known limitations and non-goals
 

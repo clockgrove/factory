@@ -121,6 +121,17 @@ interface LedgerEntry {
   reconciled?: number;
 }
 
+function budgetUsageKey(event: Extract<FactoryEvent, { kind: "budget" }>): string {
+  return [
+    event.runId,
+    event.workItem ?? "management",
+    event.attempt ?? "management",
+    event.phase,
+    event.unit,
+    event.usageId ?? "default",
+  ].join(":");
+}
+
 /** Reconcile native-unit reservations exactly as the durable GitHub ledger records them. */
 export function nativeUnitLedgers(
   events: readonly FactoryEvent[],
@@ -143,14 +154,7 @@ export function nativeUnitLedgers(
     (left, right) => left.sequence - right.sequence,
   )) {
     if (event.kind !== "budget" || (runId && event.runId !== runId)) continue;
-    const key = [
-      event.runId,
-      event.workItem ?? "management",
-      event.attempt ?? "management",
-      event.phase,
-      event.unit,
-      event.usageId ?? "default",
-    ].join(":");
+    const key = budgetUsageKey(event);
     const ledger = ledgers.get(event.unit)!;
     const current = ledger.get(key) ?? { reserved: 0 };
     const count = counts.get(event.unit)!;
@@ -192,6 +196,80 @@ function observedUsage(ledger: NativeUnitLedger): EvidenceMetric<number> {
       };
 }
 
+export interface ReportedTokenSubtotal {
+  /** Sum only supplied counters; missing counters are not inferred as zero. */
+  tokens: EvidenceMetric<number>;
+  receiptsWithValue: number;
+  receiptsWithoutValue: number;
+}
+
+export interface ModelTokenBreakdown {
+  /** Coverage is of recorded model-token calls, not all provider activity. */
+  source: "model-token-reconciliations";
+  reconciledCalls: number;
+  inputTokens: ReportedTokenSubtotal;
+  outputTokens: ReportedTokenSubtotal;
+  cachedInputTokens: ReportedTokenSubtotal;
+}
+
+export function modelTokenBreakdown(
+  events: readonly FactoryEvent[],
+  runId?: string,
+): ModelTokenBreakdown {
+  const calls = new Map<string, Extract<FactoryEvent, { kind: "budget" }>>();
+  for (const event of deduplicateFactoryEvents([...events]).sort(
+    (left, right) => left.sequence - right.sequence,
+  )) {
+    if (
+      event.kind !== "budget" ||
+      event.event !== "BudgetReconciled" ||
+      event.unit !== "model_tokens" ||
+      (runId && event.runId !== runId)
+    ) {
+      continue;
+    }
+    // Use the same latest-per-usage identity as the scalar ledger. An Attempt
+    // receipt is a second copy of the evidence, not another billable call.
+    calls.set(budgetUsageKey(event), event);
+  }
+  const subtotal = (
+    field: "inputTokens" | "outputTokens" | "cachedInputTokens",
+  ): ReportedTokenSubtotal => {
+    let value = 0;
+    let receiptsWithValue = 0;
+    for (const call of calls.values()) {
+      const count = call.reportedModelUsage?.[field];
+      if (count !== undefined) {
+        value += count;
+        receiptsWithValue += 1;
+      }
+    }
+    return {
+      tokens:
+        receiptsWithValue > 0
+          ? {
+              availability: "observed",
+              value,
+              source: "github-receipts",
+              evidenceCount: receiptsWithValue,
+            }
+          : {
+              availability: "unavailable",
+              reason: `no reconciled model-token receipt reports ${field}`,
+            },
+      receiptsWithValue,
+      receiptsWithoutValue: calls.size - receiptsWithValue,
+    };
+  };
+  return {
+    source: "model-token-reconciliations",
+    reconciledCalls: calls.size,
+    inputTokens: subtotal("inputTokens"),
+    outputTokens: subtotal("outputTokens"),
+    cachedInputTokens: subtotal("cachedInputTokens"),
+  };
+}
+
 export interface ProviderBillingEvidence {
   provider: string;
   receiptId: string;
@@ -202,6 +280,7 @@ export interface ProviderBillingEvidence {
 export interface EconomicSummary {
   nativeUnits: NativeUnitLedger[];
   usage: Record<NativeBudgetUnit, EvidenceMetric<number>>;
+  modelTokenBreakdown: ModelTokenBreakdown;
   budgets: {
     sandboxMilliseconds: { configured: number; committed: number; remaining: number };
     managedSessions: { configured: number; committed: number; remaining: number };
@@ -250,6 +329,7 @@ export function summarizeEconomics(input: {
   }
   return {
     nativeUnits,
+    modelTokenBreakdown: modelTokenBreakdown(input.events, input.runId),
     usage: Object.fromEntries(
       nativeUnits.map((ledger) => [ledger.unit, observedUsage(ledger)]),
     ) as Record<NativeBudgetUnit, EvidenceMetric<number>>,

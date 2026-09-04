@@ -1,13 +1,13 @@
 ---
 name: director
-description: Starts, resumes, or inspects a Factory Objective using the unattended v2 Supervisor, which persists orchestration in GitHub and runs local workers by default until completion or evidenced escalation.
+description: Starts, resumes, or inspects a Factory Objective using the unattended Supervisor, which persists orchestration in GitHub and runs local workers by default until completion or evidenced escalation.
 ---
 
 # Factory Director
 
 Use this skill when the user asks to start, resume, recover, run, or check a Factory Objective.
 
-Factory v2's Supervisor owns the loop. Do not reproduce scheduling with repeated model turns and do
+Factory's Supervisor owns the loop. Do not reproduce scheduling with repeated model turns and do
 not mutate GitHub with raw `gh`, REST, or GraphQL calls. The bundled MCP tools are the authorized
 surface.
 
@@ -81,5 +81,5 @@ authorizes it.
 - A plugin cannot wake a stopped harness or powered-off host.
 - Missing credentials, unsupported branch rules/capabilities, sensitive changes, and exhausted
   budgets are escalation reasons, not invitations to bypass policy.
-- The legacy dispatch tools exist only for already-running v1 Copilot work. Do not use them to start
-  a v2 Objective.
+- Old prototype dispatch tools are not an alternate product or a supported activation path. Use
+  the Supervisor tools above for Factory Objectives; do not bypass their recorded authority.

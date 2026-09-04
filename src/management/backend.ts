@@ -7,6 +7,8 @@ import type { ModelSelection } from "../protocol/policy.js";
 export interface ManagementUsage {
   inputTokens: number;
   outputTokens: number;
+  /** Provider-reported subset of inputTokens; absence means unavailable. */
+  cachedInputTokens?: number | undefined;
 }
 
 /** A paid response was observed but could not become a valid management result. */

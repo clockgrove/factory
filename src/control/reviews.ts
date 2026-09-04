@@ -52,8 +52,14 @@ const UsageSchema = z
   .object({
     inputTokens: z.number().int().nonnegative(),
     outputTokens: z.number().int().nonnegative(),
+    cachedInputTokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (value) =>
+      value.cachedInputTokens === undefined || value.cachedInputTokens <= value.inputTokens,
+    { message: "cached input tokens cannot exceed input tokens", path: ["cachedInputTokens"] },
+  );
 
 const ReviewReceiptSchema = z
   .object({

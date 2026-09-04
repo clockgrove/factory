@@ -81,4 +81,4 @@ The REST evidence reader uses GitHub's documented
 [sub-issue endpoint](https://docs.github.com/en/rest/issues/sub-issues) and
 [issue-dependency endpoint](https://docs.github.com/en/rest/issues/issue-dependencies).
 Results must be reviewed and bound to the tested candidate using the release-evidence process in
-[`V2-PREVIEW-RELEASE.md`](V2-PREVIEW-RELEASE.md); this script never marks release gates passed.
+[`DELIVERY-PLAN.md`](DELIVERY-PLAN.md); this script never marks release gates passed.

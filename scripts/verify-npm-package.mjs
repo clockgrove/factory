@@ -223,8 +223,8 @@ try {
   ) {
     throw new Error("npm exports must expose stable schemas without exposing runtime internals");
   }
-  if (installedPackage.publishConfig?.tag !== "next") {
-    throw new Error("preview npm packages must default to the next dist-tag");
+  if (installedPackage.publishConfig?.tag !== sourcePackage.publishConfig?.tag) {
+    throw new Error("installed npm package dist-tag differs from the source manifest");
   }
   if (
     !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(

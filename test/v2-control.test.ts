@@ -302,10 +302,44 @@ describe("attempt reservation", () => {
       sequence: 20,
       modelProfile: "frontier",
       reportedModelTokens: 321,
+      reportedModelUsage: { inputTokens: 300, outputTokens: 21, cachedInputTokens: 200 },
     });
     expect(terminal).toMatchObject({
       modelProfile: "frontier",
       reportedModelTokens: 321,
+      reportedModelUsage: { inputTokens: 300, outputTokens: 21, cachedInputTokens: 200 },
+    });
+
+    const recorder = new LifecycleRecorder(store, leases);
+    const writesBefore = store.comments.length;
+    const budgetEvent = await recorder.budget({
+      lease,
+      workItemNodeId: "I_43",
+      reservation: first,
+      sequence: 21,
+      event: "BudgetReconciled",
+      unit: "model_tokens",
+      phase: "execution",
+      amount: 321,
+      reportedModelUsage: { inputTokens: 300, outputTokens: 21, cachedInputTokens: 200 },
+    });
+    const failedManagement = await recorder.objectiveBudget({
+      lease,
+      objectiveNodeId: "I_42",
+      sequence: 22,
+      event: "BudgetReconciled",
+      unit: "model_tokens",
+      amount: 150,
+      usageId: "failed-compile",
+      reportedModelUsage: { inputTokens: 120, outputTokens: 30, cachedInputTokens: 0 },
+    });
+    expect(store.comments.length - writesBefore).toBe(2);
+    expect(decodeEventComments(store.comments.at(-2)!.body)).toEqual([budgetEvent]);
+    expect(decodeEventComments(store.comments.at(-1)!.body)).toEqual([failedManagement]);
+    expect(failedManagement.reportedModelUsage).toEqual({
+      inputTokens: 120,
+      outputTokens: 30,
+      cachedInputTokens: 0,
     });
 
     const queued = await attempts.recordQueued({

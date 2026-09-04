@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/clockgrove/factory/schemas/controller-policy.schema.json",
-  "title": "Factory v2 Repository Controller Policy",
+  "title": "Factory Repository Controller Policy",
   "type": "object",
   "additionalProperties": false,
   "required": ["scope", "maxActiveObjectives", "maxLocalWorkers", "maxPaidWorkers", "pollIntervalSeconds"],

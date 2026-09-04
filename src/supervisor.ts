@@ -89,6 +89,7 @@ import {
 import { GitHubReader, type GitHubOptions } from "./github.js";
 import { CodexCliManagementBackend } from "./management/codex-cli.js";
 import { ManagementOutputError } from "./management/backend.js";
+import { reportedModelUsage, type ReportedModelUsage } from "./protocol/model-usage.js";
 import type {
   CompilationCheckpoint,
   CompilationResult,
@@ -1756,6 +1757,9 @@ export class FactorySupervisor {
                 invocationId: compilationInvocationId,
                 inputTokens: result.usage.inputTokens,
                 outputTokens: result.usage.outputTokens,
+                ...(result.usage.cachedInputTokens === undefined
+                  ? {}
+                  : { cachedInputTokens: result.usage.cachedInputTokens }),
               },
             }),
           ),
@@ -1789,6 +1793,7 @@ export class FactorySupervisor {
                 unit: "model_tokens",
                 amount,
                 usageId,
+                reportedModelUsage: reportedModelUsage(record.compilation)!,
               }),
             );
             this.#budgetEvents.push(event);
@@ -2542,6 +2547,7 @@ export class FactorySupervisor {
     let executionCleanupConfirmed = false;
     let backendLaunchAttempted = false;
     let terminalModelTokens: number | undefined;
+    let terminalModelUsage: ReportedModelUsage | undefined;
     let terminalModelProfile: string | undefined;
     let noHandleReplacementNotBefore: string | undefined;
     let validationNoHandleReplacementNotBefore: string | undefined;
@@ -2852,6 +2858,7 @@ export class FactorySupervisor {
         }
         const observation = await selected.observe(handle);
         if (["succeeded", "failed", "cancelled"].includes(observation.state)) {
+          terminalModelUsage = reportedModelUsage(observation.usage);
           const observedTokens = reportedModelTokens(observation.usage);
           if (observedTokens !== null) {
             terminalModelTokens = observedTokens;
@@ -2866,6 +2873,7 @@ export class FactorySupervisor {
                 phase: "execution",
                 amount: observedTokens,
                 usageId: `worker-${item.number}-${reservation!.attempt}`,
+                ...(terminalModelUsage ? { reportedModelUsage: terminalModelUsage } : {}),
               });
               this.#budgetEvents.push(event);
             });
@@ -2898,6 +2906,7 @@ export class FactorySupervisor {
           ...(terminalModelTokens === undefined
             ? {}
             : { reportedModelTokens: terminalModelTokens }),
+          ...(terminalModelUsage ? { reportedModelUsage: terminalModelUsage } : {}),
         }),
       );
       await confirmExecutionCleanup("post-collection backend cleanup");
@@ -3438,6 +3447,7 @@ export class FactorySupervisor {
             ...(terminalModelTokens === undefined
               ? {}
               : { reportedModelTokens: terminalModelTokens }),
+            ...(terminalModelUsage ? { reportedModelUsage: terminalModelUsage } : {}),
           }),
         );
       } else {
@@ -3517,6 +3527,7 @@ export class FactorySupervisor {
           unit: "model_tokens" as const,
           amount,
           usageId,
+          reportedModelUsage: reportedModelUsage(usage)!,
         };
         return reservation
           ? this.#recorder.budget({ ...common, reservation, workItemNodeId: nodeId })
@@ -3571,6 +3582,7 @@ export class FactorySupervisor {
           unit: "model_tokens",
           amount,
           usageId,
+          reportedModelUsage: reportedModelUsage(record.usage)!,
         }),
       );
       this.#budgetEvents.push(event);

@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/clockgrove/factory/schemas/factory-event.schema.json",
-  "title": "Factory v2 Event",
+  "title": "Factory Event",
   "type": "object",
   "additionalProperties": true,
   "required": ["protocol", "kind", "event", "objective", "runId", "sequence", "at"],
@@ -61,6 +61,17 @@
     "sessionId": { "type": "string", "minLength": 1, "maxLength": 500 },
     "modelProfile": { "type": "string", "minLength": 1, "maxLength": 160 },
     "reportedModelTokens": { "type": "integer", "minimum": 0 },
+    "reportedModelUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "description": "Supplied model counters only. Omitted means unknown. Cached input is included in input; the runtime validates cached <= input and input + output equals the accompanying scalar when both are supplied.",
+      "properties": {
+        "inputTokens": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "outputTokens": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "cachedInputTokens": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+      }
+    },
     "estimatedCloudTimeSavedMinutes": { "type": "number", "minimum": 0 },
     "minimumCloudTimeSavedMinutes": { "type": "number", "minimum": 0 },
     "admissionClass": { "enum": ["local", "remote-required", "burst"] },
@@ -159,5 +170,24 @@
     },
     "usageId": { "type": "string", "minLength": 1, "maxLength": 300 },
     "amount": { "type": "number", "minimum": 0 }
-  }
+  },
+  "allOf": [
+    {
+      "if": { "required": ["reportedModelUsage"], "properties": { "kind": { "const": "budget" } } },
+      "then": {
+        "required": ["unit", "amount"],
+        "properties": { "event": { "const": "BudgetReconciled" }, "unit": { "const": "model_tokens" } }
+      }
+    },
+    {
+      "if": {
+        "required": ["reportedModelUsage"],
+        "properties": {
+          "kind": { "const": "attempt" },
+          "reportedModelUsage": { "required": ["inputTokens", "outputTokens"] }
+        }
+      },
+      "then": { "required": ["reportedModelTokens"] }
+    }
+  ]
 }

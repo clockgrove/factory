@@ -110,6 +110,71 @@ describe("v2 run policy", () => {
 });
 
 describe("v2 event protocol", () => {
+  it("round-trips additive reported counters while keeping legacy absence and partial unknowns", () => {
+    const event = parseFactoryEvent({
+      protocol: PROTOCOL_V2,
+      kind: "budget",
+      event: "BudgetReconciled",
+      objective: 42,
+      runId: "run-1",
+      sequence: 1,
+      at: "2026-09-03T00:00:00.000Z",
+      phase: "execution",
+      unit: "model_tokens",
+      amount: 150,
+      reportedModelUsage: { inputTokens: 120, outputTokens: 30, cachedInputTokens: 0 },
+    });
+    expect(decodeEventComments(encodeEventComment("Usage", event))).toEqual([event]);
+    const { reportedModelUsage: _usage, ...legacy } = event;
+    expect(parseFactoryEvent(legacy)).not.toHaveProperty("reportedModelUsage");
+    expect(
+      parseFactoryEvent({ ...legacy, reportedModelUsage: { cachedInputTokens: 0 } }),
+    ).toMatchObject({ reportedModelUsage: { cachedInputTokens: 0 } });
+    for (const reportedModelUsage of [
+      {},
+      { inputTokens: -1 },
+      { inputTokens: 1.5 },
+      { inputTokens: Number.MAX_SAFE_INTEGER + 1 },
+      { inputTokens: 120, cachedInputTokens: 121 },
+      { inputTokens: 120, outputTokens: 31 },
+      { cachedInputTokens: null },
+      { reasoningTokens: 1 },
+    ])
+      expect(() => parseFactoryEvent({ ...legacy, reportedModelUsage })).toThrow();
+    for (const override of [
+      { event: "BudgetReserved" },
+      { unit: "managed_sessions" },
+      { unit: "local_milliseconds" },
+    ])
+      expect(() => parseFactoryEvent({ ...event, ...override })).toThrow();
+  });
+
+  it("requires an attempt's reported total to match complete supplied input and output", () => {
+    const event = {
+      protocol: PROTOCOL_V2,
+      kind: "attempt",
+      event: "AttemptFailed",
+      objective: 42,
+      workItem: 43,
+      attempt: 1,
+      backend: "codex-cli/local-worktree",
+      runId: "run-1",
+      sequence: 2,
+      at: "2026-09-03T00:00:00.000Z",
+      baseSha: SHA,
+      directorEpoch: 1,
+      policyDigest: "b".repeat(64),
+      reportedModelUsage: { inputTokens: 120, outputTokens: 30, cachedInputTokens: 80 },
+    };
+    expect(parseFactoryEvent({ ...event, reportedModelTokens: 150 })).toMatchObject({
+      reportedModelTokens: 150,
+    });
+    expect(() => parseFactoryEvent(event)).toThrow();
+    expect(() => parseFactoryEvent({ ...event, reportedModelTokens: 230 })).toThrow();
+    expect(
+      parseFactoryEvent({ ...event, reportedModelUsage: { inputTokens: 120 } }),
+    ).not.toHaveProperty("reportedModelTokens");
+  });
   it("round-trips comment and commit-trailer envelopes", () => {
     const event = runStarted();
     expect(decodeEventComments(encodeEventComment("Factory started.", event))).toEqual([event]);

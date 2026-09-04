@@ -1,12 +1,13 @@
 # Adaptive priority and burst scheduling implementation plan
 
-Status: implemented; v2 preview live qualification in progress
+Status: scheduling implementation complete; live qualification in progress
 
 Date: 2026-09-03
 
-Scope: Factory v2 repository controller, local Codex workers, and explicitly authorized paid
-backends. This document records the design and acceptance gates implemented by the scheduling
-subsystem; current evidence is tracked in [`CONFORMANCE.md`](CONFORMANCE.md). It is the scheduling sub-plan of
+Scope: Factory repository controller, local Codex workers, and explicitly authorized paid
+backends. Implement and qualify priority ordering, measured local capacity, bounded burst admission,
+and recovery through the delivery waves below. Current evidence is tracked in
+[`CONFORMANCE.md`](CONFORMANCE.md). This is the scheduling sub-plan of
 [`INDIE-FACTORY-IMPLEMENTATION-PLAN.md`](INDIE-FACTORY-IMPLEMENTATION-PLAN.md).
 
 ## Outcome
@@ -21,13 +22,7 @@ Priority changes ordering only. It can never bypass a dependency, repository tru
 capability check, isolation requirement, branch policy, validation requirement, backend allowlist,
 or budget ceiling.
 
-The implemented admission controller replaced the original scheduling expression:
-
-```ts
-ready(objective).slice(0, policy.maxParallel)
-```
-
-with a deterministic admission controller that separates four questions:
+The deterministic admission controller evaluates four questions:
 
 1. Is the Work Item dependency-ready?
 2. Which ready Work Item should run next?
@@ -175,17 +170,17 @@ against `maxCloudParallel` and the backend parallelism ceiling, and still requir
 paid-backend and budget authority. All paid execution and validation sessions count toward
 `maxCloudParallel`; it is a cost/concurrency ceiling, not merely an overflow counter.
 
-### Compatibility and defaults
+### Stored-policy recovery and defaults
 
-- A stored policy without these blocks retains exact legacy behavior: sub-issue order, fixed
+- A stored policy without these blocks means sub-issue order, fixed
   concurrency from `maxParallel`, first compatible backend selection, and no burst.
-- Existing active runs keep their stored policy and digest. They are not silently migrated.
+- Active runs keep their stored policy and digest; recovery must not rewrite either.
 - Parsing keeps the external optional shape for digest verification. A separate
   `normalizeSchedulingPolicy()` creates the internal effective defaults after the stored digest has
-  been verified; it must not make an old run's policy hash change.
-- New-run defaults become adaptive local-only after the conformance matrix in this plan passes.
-  Paid burst remains `never` by default.
-- The intended new local default is `maxWorkers: 8`, one CPU and 2 GiB per unannotated Work Item,
+  been verified; it must not make an existing run's policy hash change.
+- New-run defaults are adaptive local-only. Release qualification still requires the conformance
+  matrix in this plan to pass. Paid burst remains `never` by default.
+- The implemented local default is `maxWorkers: 8`, one CPU and 2 GiB per unannotated Work Item,
   0.5 CPU and 1 GiB reserved for the host, 1 GiB minimum observed free memory, 90% load ceiling, and
   85% memory-use ceiling. The effective worker count can be lower, including zero while the host is
   under pressure.
@@ -438,7 +433,7 @@ criticalPathLength, unfinishedDownstream
 capacityMeasuredAt, effectiveCpu, availableMemoryMb, loadRatio, memoryUsageRatio
 ```
 
-Old receipts remain valid because the fields are optional. New admissions always populate them.
+Stored receipts may omit these optional fields. New admissions always populate them.
 Capacity reservations use the attempt identity and phase as their idempotency key. Execution
 capacity is held from `AttemptReserved` until worker cleanup has completed and `AttemptCollected` is
 recorded, or until an earlier terminal event. If cleanup is ambiguous, capacity stays reserved for
@@ -472,9 +467,9 @@ Budget reservation stays coupled to the attempt reservation under the same lease
 launches retain their reservation until observation/reconciliation proves the outcome. Capacity or
 budget exhaustion never widens policy and never silently switches providers.
 
-## File-level implementation
+## File-level delivery waves
 
-### 1. Protocol and policy
+### Wave 1 — Protocol and policy
 
 Modify:
 
@@ -484,9 +479,10 @@ Modify:
 - `src/types.ts`
 
 Add strict schemas for `priority`, `capacity`, and `burst`; preserve the external policy shape for
-digest verification; normalize legacy policies into a separate effective internal form; validate
+digest verification; normalize stored policies into a separate effective internal form; validate
 cross-field paid-backend invariants; add scheduling/capacity events and optional admission receipt
-fields; and expose normalized resource requests. Keep the external v2 envelope compatible.
+fields; and expose normalized resource requests. Preserve safe reconstruction of stored
+`clockgrove.factory/v2` envelopes.
 
 Tests:
 
@@ -494,11 +490,11 @@ Tests:
 - `test/v2-protocol.test.ts`
 - `test/worker-packet.test.ts`
 
-Acceptance: every invalid cross-field combination fails before `FactoryRunStarted`; old stored
-policies and receipts still parse; a checked-in legacy-policy fixture retains its exact pre-change
+Acceptance: every invalid cross-field combination fails before `FactoryRunStarted`; stored
+policies and receipts still parse; a checked-in stored-policy fixture retains its exact pre-change
 digest; and policy digests remain stable for identical input.
 
-### 2. GitHub priority ingestion and inspection
+### Wave 2 — GitHub priority ingestion and inspection
 
 Modify:
 
@@ -522,7 +518,7 @@ Tests:
 Acceptance: a priority edit changes the next snapshot's ready ordering without any GitHub write from
 Factory; default sub-issue ordering works in a repository with no organization issue fields.
 
-### 3. Pure priority and graph scoring
+### Wave 3 — Pure priority and graph scoring
 
 Add:
 
@@ -540,7 +536,7 @@ Tests:
 Acceptance: randomized input order produces identical output; blocked items can never appear in the
 ranked ready set.
 
-### 4. Linux resource sampling
+### Wave 4 — Linux resource sampling
 
 Add:
 
@@ -558,7 +554,7 @@ Tests:
 Acceptance: the effective values always choose the tighter observable limit; malformed or missing
 measurements fail closed for new local admissions without terminating active work.
 
-### 5. Capacity ledger and backend candidates
+### Wave 5 — Capacity ledger and backend candidates
 
 Add:
 
@@ -583,7 +579,7 @@ Acceptance: two concurrent commit attempts cannot both reserve the last slot; a 
 a stale capacity generation is rejected before launch; temporary saturation does not create an
 attempt or consume its retry budget.
 
-### 6. Admission controller
+### Wave 6 — Admission controller
 
 Add:
 
@@ -607,7 +603,7 @@ Acceptance: no plan can exceed any hard ceiling; with burst disabled, the contro
 paid backend for a local-compatible item merely because local capacity is zero. Capability-required
 remote work still follows its explicit backend and budget policy.
 
-### 7. Supervisor integration and recovery
+### Wave 7 — Supervisor integration and recovery
 
 Modify:
 
@@ -631,7 +627,7 @@ Tests:
 Acceptance: every launched worker has exactly one preceding durable reservation and every terminal
 attempt releases capacity exactly once.
 
-### 8. Status and operator documentation
+### Wave 8 — Status and operator documentation
 
 Modify:
 
@@ -650,7 +646,7 @@ responses.
 Acceptance: an operator can answer “why is #42 not running?” and “why did #43 use Daytona?” from one
 status call and the durable receipt.
 
-### 9. Live conformance and release qualification
+### Wave 9 — Live conformance and release qualification
 
 Run these gates in disposable repositories and paid provider accounts with explicit spend approval:
 
@@ -665,7 +661,7 @@ Run these gates in disposable repositories and paid provider accounts with expli
    no duplicate worker, slot, attempt, or budget reservation.
 5. Burst a bounded Objective to Daytona. Verify local-first placement, provider concurrency, TTL,
    egress, credential brokerage, cost reconciliation, and cleanup. Vercel Sandbox may run the same
-   matrix as a Labs qualification but does not block the v2 release.
+   matrix as a Labs qualification but does not block release.
 6. Exhaust sandbox minutes and cloud concurrency while local is full. Verify work remains queued and
    later returns to local rather than escalating or spending past the ceiling.
 7. Run two Directors against the same Objective. Verify the lease and attempt refs admit each Work
@@ -673,7 +669,7 @@ Run these gates in disposable repositories and paid provider accounts with expli
 
 `DEFAULT_RUN_POLICY` now uses `adaptive-local` with conservative headroom. It still contains no paid
 backend and keeps `burst.mode: "never"`. The live matrix qualifies that implemented default for the
-v2 preview; it never changes the default into paid execution.
+release; it never changes the default into paid execution.
 
 ## Implementation dependency graph
 
@@ -710,7 +706,7 @@ This feature is done when all of the following are true:
   real Daytona burst run passes.
 - `npm run typecheck`, the full test suite, package verification, production audit, and clean-install
   MCP startup pass.
-- The conformance document records measured evidence and the v2 preview is not published until the
+- The conformance document records measured evidence and Factory is not published until the
   live gates are complete.
 
 ## Explicitly out of scope

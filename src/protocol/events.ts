@@ -1,6 +1,8 @@
 import { z } from "zod";
 
 import { RunPolicySchema } from "./policy.js";
+import { ReportedModelUsageSchema } from "./model-usage.js";
+export { ReportedModelUsageSchema, type ReportedModelUsage } from "./model-usage.js";
 import {
   MAX_PERSISTED_EVENT_BYTES,
   PROTOCOL_V2,
@@ -165,6 +167,7 @@ const Attempt = Common.extend({
   sessionId: boundedText(500).optional(),
   modelProfile: boundedText(160).optional(),
   reportedModelTokens: z.number().int().nonnegative().optional(),
+  reportedModelUsage: ReportedModelUsageSchema.optional(),
   admissionClass: z.enum(["local", "remote-required", "burst"]).optional(),
   admissionReason: z
     .enum(["local-capacity", "capability-required", "local-saturated", "queue-delay", "deadline"])
@@ -185,6 +188,18 @@ const Attempt = Common.extend({
   estimatedCloudTimeSavedMinutes: z.number().nonnegative().finite().optional(),
   minimumCloudTimeSavedMinutes: z.number().nonnegative().finite().optional(),
   reason: boundedText(8_000).optional(),
+}).superRefine((event, context) => {
+  const usage = event.reportedModelUsage;
+  if (
+    usage?.inputTokens !== undefined &&
+    usage.outputTokens !== undefined &&
+    usage.inputTokens + usage.outputTokens !== event.reportedModelTokens
+  )
+    context.addIssue({
+      code: "custom",
+      path: ["reportedModelTokens"],
+      message: "reported model total must equal input plus output tokens",
+    });
 });
 
 const Scheduling = Common.extend({
@@ -359,6 +374,26 @@ const Budget = Common.extend({
     "validation_milliseconds",
   ]),
   amount: z.number().nonnegative().finite(),
+  reportedModelUsage: ReportedModelUsageSchema.optional(),
+}).superRefine((event, context) => {
+  const usage = event.reportedModelUsage;
+  if (!usage) return;
+  if (event.event !== "BudgetReconciled" || event.unit !== "model_tokens")
+    context.addIssue({
+      code: "custom",
+      path: ["reportedModelUsage"],
+      message: "model usage breakdown belongs only to reconciled model-token budgets",
+    });
+  if (
+    usage.inputTokens !== undefined &&
+    usage.outputTokens !== undefined &&
+    usage.inputTokens + usage.outputTokens !== event.amount
+  )
+    context.addIssue({
+      code: "custom",
+      path: ["amount"],
+      message: "model-token budget amount must equal input plus output tokens",
+    });
 });
 
 export const FactoryEventSchema = z.union([

@@ -1,13 +1,8 @@
-# Factory v2 — Design
+# Factory — Design
 
-This is Factory's authoritative design. [`PROTOCOL-V1.md`](PROTOCOL-V1.md) preserves the original
-GitHub Copilot execution protocol, which remains supported only as a compatibility backend.
-
-Factory v2's release designation is preview. That designation applies to the complete product
-contract, not to selected capabilities within it. A capability belongs to the v2 contract when it
-passes the same deterministic, package, security, recovery, and applicable live-provider gates
-recorded in [`CONFORMANCE.md`](CONFORMANCE.md). Additional integrations live in Labs instead of
-weakening the meaning of the supported contract.
+This document describes Factory's architecture, execution model, and safety boundaries.
+See the [delivery plan](DELIVERY-PLAN.md) for implementation tasks and
+[`CONFORMANCE.md`](CONFORMANCE.md) for verification results and remaining gaps.
 
 ## Product contract
 
@@ -48,9 +43,9 @@ The contract is:
 - Minimal human involvement is the goal, but escalation is correct when policy, safety, budget,
   platform constraints, or evidence prevent safe autonomous progress.
 
-## V2 release scope
+## Scope
 
-The v2 preview is a Linux product. Its supported environment matrix is:
+Factory targets Linux. Its environment matrix is:
 
 - native Linux on a laptop, desktop, or developer workstation;
 - a Linux distribution under Windows WSL2, with Factory state and repositories in the Linux
@@ -61,7 +56,7 @@ Windows and macOS may host or access the Linux environment, but native Win32 and
 process management, worktrees, credential handling, and service lifecycle are not supported targets.
 Coordinating a pool of multiple local computers is also out of scope.
 
-The v2 support contract includes both the Agent Plugins package and the `@clockgrove/factory` npm
+The product scope includes both the Agent Plugins package and the `@clockgrove/factory` npm
 CLI/controller, Codex SDK local execution with Codex CLI fallback, Daytona sandbox burst, GitHub
 Copilot and OpenAI Codex managed-agent execution, and regular or native stacked pull-request
 delivery. The unreleased Codex profile remains fail-closed until live conformance records a stable,
@@ -72,7 +67,7 @@ cloud execution the default.
 Labs contains Vercel Sandbox, Codex App Server, and additional harness/provider experiments. Labs
 adapters may reuse the production contracts and tests, but they are not release blockers and must not
 be selected implicitly. The boundary and its rationale are recorded in
-[`decisions/0007-v2-preview-release-boundary.md`](decisions/0007-v2-preview-release-boundary.md).
+[`decisions/0007-product-scope.md`](decisions/0007-product-scope.md).
 
 ## Component map
 
@@ -111,7 +106,7 @@ factory controller run OWNER/REPO --repo /absolute/path/to/repository
 
 An explicit chat/MCP activation writes a durable request and returns; the controller discovers it,
 acquires the repository and Objective leases, and continues without holding the chat turn open. The
-controller shares one CPU, memory, backend, and GitHub-rate-limit pool. The v2 release admits one
+controller shares one CPU, memory, backend, and GitHub-rate-limit pool. Factory admits one
 Objective at a time in that repository. Native-stack delivery may admit dependency-ready Work Items
 concurrently; regular-PR delivery admits one complete Work Item pipeline at a time. Additional
 activations remain durable and queued. Plugin installation never starts or installs the controller;
@@ -136,7 +131,7 @@ wake itself. The supported lifecycle uses a user-authorized `systemd` service in
 WSL2 or a Linux guest on macOS. Native `launchd` and Windows Task Scheduler lifecycle adapters are
 out of scope. A new process reconstructs everything durable from GitHub.
 
-The ordered implementation and migration gates are in
+The detailed implementation tasks are in
 [`INDIE-FACTORY-IMPLEMENTATION-PLAN.md`](INDIE-FACTORY-IMPLEMENTATION-PLAN.md).
 
 ## GitHub quota discipline
@@ -177,7 +172,7 @@ asserted from prompt changes alone.
 
 ## Versioned GitHub protocol
 
-Every machine-readable v2 record contains at least:
+Every current machine-readable control record contains at least:
 
 ```json
 {
@@ -291,7 +286,7 @@ Crash recovery is reconstruction:
 
 ## Provider-neutral Work Item state
 
-V2 state is a pure function of one GitHub snapshot and its server timestamp:
+State is a pure function of one GitHub snapshot and its server timestamp:
 
 ```text
 blocked       at least one native blocked-by issue remains open
@@ -305,9 +300,8 @@ escalated     terminal handoff plus human assignment
 done          linked pull request merged and Work Item closed
 ```
 
-Receipt-free Copilot Objectives continue to use v1 derivation. An active attempt remains pinned to
-the protocol and backend that created it. Inconsistent mixed state is reported; it is never guessed
-into a runnable state.
+An attempt remains pinned to the data format and backend that created it. Inconsistent mixed state
+is reported, never guessed into a runnable state.
 
 ## Worker and artifact contract
 
@@ -386,7 +380,7 @@ Immediately before each regular or stacked merge, integration is repository-fenc
 rechecks the exact validated head, current stack/base relationship, current branch rules, required
 checks, leases, and mergeability. A lower-layer rebase invalidates every affected descendant receipt
 before validation is rerun. Parallel workers therefore cannot merge sequentially from the same stale
-base. Native stacks are part of the v2 contract; release remains gated on their live conformance
+base. Native stacks are part of the product scope; completion requires their live conformance
 matrix.
 
 Immediately before merge, Factory rechecks lease epoch, policy digest, validated SHA, checks,
@@ -397,7 +391,7 @@ the autonomous tool surface.
 ## Execution backends
 
 Every backend exposes capability, availability, launch, observe, cancel, collect, and cleanup
-contracts. The v2 release bundles are:
+contracts. The planned bundles are:
 
 - `codex-sdk/local-worktree` — preferred programmatic local backend in every supported Linux environment;
 - `codex-cli/local-worktree` — supported portable local fallback;
@@ -482,7 +476,7 @@ and remaining live-provider gates are in
 [`ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md`](ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md).
 
 When `economics.minCloudTimeSavedMinutes` is nonzero, overflow burst also requires an explicit
-`requirements.estimatedDurationMinutes` value on the Work Packet at or above that threshold. V2 uses
+`requirements.estimatedDurationMinutes` value on the Work Packet at or above that threshold. Factory uses
 that duration as a one-local-queue-wave time-saved proxy; it is not an observed completion forecast.
 Missing evidence fails this gate closed. The estimate and threshold are preserved in the admission
 receipt and exposed as estimates, not provider billing evidence. Capability-required remote work is
@@ -507,6 +501,26 @@ next reporting worker, compilation, or semantic review. Already-started concurre
 not given a provider token limit and can each overshoot the threshold by their terminal usage.
 Cached-input tokens are not added again when the provider already includes them in input tokens.
 
+Where supplied by a provider, the existing terminal Attempt and model-token reconciliation receipts
+also retain `reportedModelUsage`: input, output, and cached-input counters. Compilation and review
+checkpoints preserve the same available breakdown. Cached input is a subset of input, not an
+additional charge; these counters never change the scalar budget calculation. Missing counters
+remain absent, including when reading receipts written by older builds. No extra GitHub write or
+model call is introduced to obtain a breakdown.
+
+Status, replay, and run summaries expose `economics.modelTokenBreakdown`. Each component is a
+reported subtotal with counts of model-token reconciliation receipts that do and do not supply it.
+Aggregation uses the scalar ledger's deduplicated latest-per-usage identity, not the duplicate
+Attempt copy. Coverage is limited to recorded model-token calls: it does not imply that a managed
+provider reported usage, or that a missing receipt consumed zero tokens. Neither raw nor cached
+token totals establish dollar cost or a subscription's remaining quota.
+
+This development data-format extension is backward-readable by the new build; it does not rewrite old
+immutable records to invent missing cache counts. Upgrade the controller and plugin together.
+Older builds with strict compilation/review checkpoint schemas cannot read enriched checkpoints,
+so downgrading a controller to such a build cannot resume those runs. Stop or drain active work
+before changing the installed controller; preserve its recorded policy and recovery evidence.
+
 A rejected compilation or review still consumes model quota. When terminal counters are available,
 Factory records failed-call usage even if output validation or checkpoint persistence fails. A
 recoverable successful checkpoint takes precedence so the same call is not charged twice. A
@@ -522,11 +536,11 @@ boundary. Managed-agent sessions can also consume GitHub Actions minutes outside
 native-unit receipts; Factory installs no workflow and does not treat the Actions allowance as an
 implicit spending authorization.
 
-The v2 `models` contract supports `single-profile` only. Every phase mapping must name the same
+The `models` contract supports `single-profile` only. Every phase mapping must name the same
 profile, whose model and reasoning effort are carried to compile, implement, review, and retry/recover
 invocations. GitHub managed agents do not expose model selection, so Factory rejects combining them
 with an explicit `models` block. `task-class` is rejected until a durable classifier and mapping are
-part of the protocol; it is not accepted as an inert preview field.
+part of the protocol; it is not accepted as an inert field.
 
 ## Management backends
 
@@ -611,11 +625,11 @@ to the exact request, base SHA, policy digest, and activating actor. That receip
 discovery of only that activation. Classified transient platform failures do not write a rejection;
 the repository controller keeps the request eligible and applies a bounded retry-after backoff.
 
-The v2 environment claim is Linux: native Linux, Windows WSL2, or a Linux guest hosted by macOS.
+The target environment is Linux: native Linux, Windows WSL2, or a Linux guest hosted by macOS.
 Codex SDK is the preferred local route and Codex CLI is its supported portable fallback. Daytona and
 the two GitHub-managed release targets extend local execution only after their publication-blocking
-live gates pass and under explicit paid-backend policies. V1 GitHub Copilot execution remains
-resumable during migration.
+live gates pass and under explicit paid-backend policies. Recovery preserves the original recorded
+policy.
 
 Release evidence and open gates are listed in
 [`CONFORMANCE.md`](CONFORMANCE.md). Optional host restart configuration is documented in

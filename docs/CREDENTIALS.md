@@ -101,7 +101,7 @@ header solely for `api.openai.com`.
 Independent validation uses a fresh non-persistent microVM with no model key. Worker and validator
 resources have hard timeouts, deterministic tags/names, restricted egress, and are stopped after use.
 
-Vercel Sandbox is a Labs adapter and is not required for the v2 release matrix.
+Vercel Sandbox is a Labs adapter and is not a publication gate in the [delivery plan](DELIVERY-PLAN.md).
 
 ## GitHub managed agents
 
@@ -128,12 +128,12 @@ unavailable and cannot cause Factory to select a different paid backend implicit
 
 The App Server adapter uses the operator's existing local Codex authentication and speaks the local
 `codex app-server` protocol. It is a Factory Labs integration, not a managed GitHub agent and not a
-Factory-hosted service. The supported local v2 default remains the Codex SDK, with Codex CLI as its
+Factory-hosted service. The local default is the Codex SDK, with Codex CLI as its
 portable fallback.
 
 ## Named secrets in Work Items
 
 A Worker Packet may declare secret names that policy could permit; it never contains values. Factory
-v2 currently brokers only the model credential mechanisms documented above. It does not inject
+currently brokers only the model credential mechanisms documented above. It does not inject
 arbitrary named application secrets. A Work Item requiring one therefore needs a future audited
 broker adapter or human handling; it must not receive ambient host credentials as a workaround.

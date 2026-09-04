@@ -224,7 +224,7 @@ export class FactoryApplicationService {
     );
     const activeRun = latestSupportedRun(snapshot.factoryEvents ?? []);
     if (!activeRun && !existingRequest) {
-      throw new Error(`Objective #${snapshot.number} has no active Factory v2 run`);
+      throw new Error(`Objective #${snapshot.number} has no active Factory run`);
     }
     if (
       !existingRequest &&
@@ -348,7 +348,7 @@ export class FactoryApplicationService {
       ]).has(String(fields.event))
     ) {
       if (!activeStart || activeStart.runId !== fields.runId) {
-        throw new Error(`Objective #${snapshot.number} has no active Factory v2 run`);
+        throw new Error(`Objective #${snapshot.number} has no active Factory run`);
       }
       if (
         activeStart.kind === "run" &&

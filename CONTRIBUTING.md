@@ -1,13 +1,14 @@
 # Contributing to Factory
 
-Factory v2 is a preview of an unattended orchestration system. Contributions are welcome, including
-AI-assisted contributions, but the author remains responsible for the code, tests, licensing,
+Contributions are welcome, including AI-assisted contributions. The author remains responsible for
+the code, tests, licensing,
 security boundary, and claims in the pull request.
 
 ## Before proposing a change
 
 Read [`docs/DESIGN.md`](docs/DESIGN.md) first. It states the goals, the non-goals, and the rules that
 changes are judged against; [`AGENTS.md`](AGENTS.md) states the engineering conventions.
+The current implementation waves are tracked in [`docs/DELIVERY-PLAN.md`](docs/DELIVERY-PLAN.md).
 
 Keep changes narrowly scoped. GitHub is Factory's durable state: do not add sidecar state, status
 labels, queues, services, or workflows that reconstruct the orchestration loop outside the harness.
@@ -20,7 +21,7 @@ API, or change to the product boundary. Security vulnerabilities must be reporte
 
 The supported runtime is Linux: native Linux, Windows WSL2, or a Linux guest hosted by macOS. Native
 Win32/Darwin lifecycle support and multiple-local-machine scheduling are intentionally out of scope.
-Daytona and two GitHub-managed release targets belong to the v2 contract; their live gates block
+Daytona and two GitHub-managed release targets belong to the product contract; their live gates block
 publication, and Codex discovery remains fail-closed until its provider-published identity is
 recorded. Vercel Sandbox and Codex App Server are Labs. A Labs adapter must remain optional and
 cannot change default startup or release behavior.
@@ -62,8 +63,9 @@ Two things this applies to more than it looks:
 - **Documented flows.** Prose is the only part of a release with no CI, and `verify:package` does not
   cover published distribution — installing a staged release package proves the package shape but is
   still weaker than installing a published artifact. If you change install, upgrade, or uninstall
-  instructions, run them end to end against the published artifact. Reviewing them for plausibility
-  is not the same thing.
+  instructions, run them end to end against the published artifact when one exists. Before the first
+  publication, exercise the installed staged artifact and state that published-distribution
+  verification remains open. Reviewing instructions for plausibility is not execution evidence.
 
 ## Pull requests
 

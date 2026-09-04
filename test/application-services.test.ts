@@ -309,10 +309,10 @@ describe("FactoryApplicationService", () => {
 
     await expect(
       service.command("cancel", { objective: 7, requestId: "late-cancel" }),
-    ).rejects.toThrow("no active Factory v2 run");
+    ).rejects.toThrow("no active Factory run");
     await expect(
       service.command("pause", { objective: 7, requestId: "late-pause" }),
-    ).rejects.toThrow("no active Factory v2 run");
+    ).rejects.toThrow("no active Factory run");
     expect(writes).toBe(0);
   });
 });

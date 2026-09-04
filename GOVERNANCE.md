@@ -26,7 +26,7 @@ decision when another maintainer can reasonably act.
 ## Releases
 
 Maintainers publish releases from reviewed commits only after the gates in
-[docs/V2-PREVIEW-RELEASE.md](docs/V2-PREVIEW-RELEASE.md) and
+[docs/DELIVERY-PLAN.md](docs/DELIVERY-PLAN.md) and
 [docs/CONFORMANCE.md](docs/CONFORMANCE.md) are satisfied for the claim being made. Plugin, npm,
 changelog, tag, provenance, and release notes must identify the same source version. No release
 process grants a runtime permission that an operator did not explicitly authorize.
@@ -42,4 +42,3 @@ when evidence indicates a security, data-loss, compatibility, or unbounded-cost 
 Governance changes use the same public pull-request process as product changes. Material changes
 should remain open long enough for active maintainers and contributors to review unless an immediate
 security or legal constraint requires temporary private handling.
-

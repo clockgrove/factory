@@ -69,9 +69,9 @@ const requiredBeforePublish = [
   "Objective-level adversarial E2E",
 ];
 
-const gateHeading = "## Candidate gates required before publishing the v2 preview";
+const gateHeading = "## Verification required before publication";
 if (!conformance.includes(gateHeading)) {
-  throw new Error("docs/CONFORMANCE.md is missing the v2 preview publication-gate ledger");
+  throw new Error("docs/CONFORMANCE.md is missing the publication verification ledger");
 }
 
 const gateSection = conformance.split(gateHeading, 2)[1].split(/^## /m, 1)[0];
@@ -114,7 +114,7 @@ for (const gate of requiredBeforePublish) {
     !Array.isArray(record.subjects) ||
     record.subjects.length !== requiredSubjects.length
   ) {
-    throw new Error(`${evidenceMatch[1]} is not a complete v2 release-evidence record`);
+    throw new Error(`${evidenceMatch[1]} is not a complete release-evidence record`);
   }
   verifyTestedCommit(record.commit);
   for (const path of requiredSubjects) {

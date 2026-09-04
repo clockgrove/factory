@@ -1,14 +1,12 @@
-# Factory v2 conformance status
+# Factory verification status
 
 Date: 2026-09-04
 
 This file distinguishes release evidence from implemented adapters. An adapter existing in the
 bundle is not, by itself, a support claim.
 
-Factory v2 is a preview as a whole. The v2 contract is defined in [`DESIGN.md`](DESIGN.md); this
-document records whether each release gate has evidence. It does not create separate maturity tiers
-for native stacks, Daytona, or managed agents. Labs integrations are listed separately because they
-are not release blockers.
+The scope is defined in [`DESIGN.md`](DESIGN.md). This document records tested behavior and the
+checks still required before publication. Tasks are organized in the [delivery plan](DELIVERY-PLAN.md).
 
 ## Proven on this branch
 
@@ -80,13 +78,13 @@ gate into a platform or paid-provider support claim.
 | DOD-9 — Evidenced human boundaries | `test/approval.test.ts`, `test/branch-policy.test.ts`, `test/supervisor-preflight.test.ts`, `test/budget.test.ts`, `test/explanations.test.ts`, `test/execution-contract.test.ts` | Implemented and fail-closed fixtures pass |
 
 The release command is `npm run verify:release`: typecheck, lint, formatting, coverage, schema,
-deterministic bundle, clean plugin/npm package, and production dependency-audit gates. Legacy
-`clockgrove.factory/v1` and early-v2 recovery remain covered by
+deterministic bundle, clean plugin/npm package, and production dependency-audit gates. Recovery of
+existing recorded runs is covered by
 `test/fixtures/legacy-run-policy.json`, `test/policy.test.ts`, `test/dispatch.test.ts`,
 `test/state.test.ts`, `test/v2-protocol.test.ts`, `test/v2-state.test.ts`, and the active-run history
 fixtures in `test/github-reader-history.test.ts`.
 
-## Candidate gates required before publishing the v2 preview
+## Verification required before publication
 
 | Gate | Status | Evidence or open reason |
 |---|---|---|
@@ -97,9 +95,8 @@ fixtures in `test/github-reader-history.test.ts`.
 | Two real managed-agent Objectives | Open | Record a stable provider-published Codex actor identity, then run the same bounded Work Item through GitHub Copilot and OpenAI Codex. Verify capability discovery, Factory session accounting and the provider's GitHub Actions-minute billing boundary, exact-head collection, independent validation, cancellation/recovery behavior, provider-controlled credential/egress behavior, and absence of implicit provider fallback. `test/github-managed-live.test.ts` is deliberately only a single-provider backend-plus-Daytona-validator smoke; it cannot satisfy this full Supervisor-level gate. |
 | Objective-level adversarial E2E | Open | Run a disposable multi-wave Objective through compile, parallel local execution, independent validation, integration, restart recovery, cancellation, failed checks, conflict, budget exhaustion, and final closure. Destructive failure injection belongs in a disposable repository, not `main`. |
 
-Until those candidate gates pass, the branch is preparing the Factory v2 preview and must not be
-published. The release contract remains the whole contract in `DESIGN.md`; this evidence ledger is
-the honest statement of current readiness.
+Publication requires the checks above to pass. Implemented adapters alone do not establish
+end-to-end readiness.
 
 `scripts/verify-publish-readiness.mjs` treats this table as release state, not prose. Each required
 gate must occur exactly once and say `Passed`. A passed row must link a checked-in
@@ -111,7 +108,7 @@ the final release commit, and their trees may differ only in this ledger and
 contain its own commit hash. Any other source, bundle, manifest, or documentation change invalidates
 the evidence. The final clean, tagged checkout is separately packed and verified; its tarball can
 include the newly committed evidence documentation. See the concrete sequence and record format in
-[`V2-PREVIEW-RELEASE.md`](V2-PREVIEW-RELEASE.md#recording-evidence-and-publishing).
+[`DELIVERY-PLAN.md`](DELIVERY-PLAN.md#recording-evidence-and-publishing).
 
 ## Post-publication completion gate
 
@@ -120,9 +117,9 @@ that creates the candidate.
 
 | Gate | Required evidence |
 |---|---|
-| Published-artifact install | From clean environments, install the synchronized Agent Plugin and `@clockgrove/factory` npm `next` artifacts, start each executable surface without worktree configuration, run a private-repository Objective through the installed product, and verify the published checksums and provenance. |
+| Published-artifact install | From clean environments, install the synchronized Agent Plugin and `@clockgrove/factory` npm artifacts, start each executable surface without worktree configuration, run a private-repository Objective through the installed product, and verify the published checksums and provenance. |
 
-The v2 preview must not be marked complete until this gate passes. The immutable version tag already
+Delivery is not complete until this gate passes. The immutable package tag already
 identifies the published candidate; never move it to add this later evidence. Record the completion
 receipt in a follow-up documentation commit or release attachment, identifying that version tag,
 its source commit, and the published artifact digests.
@@ -136,7 +133,7 @@ correct result is “not exercised,” not “failed” and not an inferred supp
 
 Vercel Sandbox, Codex App Server, and harness-native child workers are Labs integrations. Their
 deterministic tests should remain green, but missing credentials, host capabilities, or live-provider
-evidence do not block the v2 preview. If a paid Labs provider is exercised, it requires the same
+evidence do not block the initial delivery scope. If a paid Labs provider is exercised, it requires the same
 explicit authorization and cleanup boundary as a release provider.
 
 ## Product-plan implementation status

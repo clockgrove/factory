@@ -241,11 +241,56 @@ describe("attempt reservation", () => {
       backend: "codex-cli/local-worktree",
       base,
       sequence: 2,
+      admission: {
+        admissionClass: "local",
+        admissionReason: "local-capacity",
+        requestedCpu: 2,
+        requestedMemoryMb: 4_096,
+        priorityRank: 10,
+        subIssuePosition: 0,
+        criticalPathLength: 2,
+        unfinishedDownstream: 3,
+        capacityMeasuredAt: "2026-09-03T00:00:00.000Z",
+        effectiveCpu: 8,
+        availableMemoryMb: 8_192,
+        loadRatio: 0.25,
+        memoryUsageRatio: 0.5,
+      },
     });
     expect(first.attempt).toBe(1);
     expect(first.baseSha).toBe(BASE_SHA);
     expect(store.refs.get(first.ref)).toBe(first.oid);
     expect(store.comments[0]?.body).toContain("AttemptReserved");
+    expect(first.admission).toMatchObject({
+      admissionClass: "local",
+      requestedCpu: 2,
+      priorityRank: 10,
+    });
+    expect((await attempts.list(42, 43))[0]?.admission).toEqual(first.admission);
+
+    const queued = await attempts.recordQueued({
+      lease,
+      workItem: 44,
+      workItemNodeId: "I_44",
+      sequence: 3,
+      reason: "local-capacity: CPU is reserved",
+      observedPriorityRank: 20,
+      observedSubIssuePosition: 1,
+    });
+    expect(queued).toMatchObject({ kind: "scheduling", event: "WorkItemQueued" });
+    expect(await attempts.list(42, 44)).toEqual([]);
+    const capacity = await attempts.recordCapacity({
+      lease,
+      workItemNodeId: "I_43",
+      reservation: first,
+      sequence: 4,
+      event: "CapacityReserved",
+      phase: "validation",
+      backend: "codex-cli/daytona",
+      requestedCpu: 1,
+      requestedMemoryMb: 2_048,
+    });
+    expect(capacity).toMatchObject({ kind: "capacity", event: "CapacityReserved" });
 
     const second = await attempts.reserve({
       lease,
@@ -253,7 +298,7 @@ describe("attempt reservation", () => {
       workItemNodeId: "I_43",
       backend: "codex-cli/local-worktree",
       base,
-      sequence: 3,
+      sequence: 5,
     });
     expect(second.attempt).toBe(2);
     expect((await attempts.list(42, 43)).map((attempt) => attempt.attempt)).toEqual([
@@ -283,6 +328,54 @@ describe("attempt reservation", () => {
         sequence: 2,
       }),
     ).rejects.toBeInstanceOf(LeaseLostError);
+  });
+
+  it("allows only an older attempt epoch to reconcile capacity", async () => {
+    const store = new MemoryStore();
+    const leases = new LeaseManager({ store, durationMs: 60_000 });
+    const base = await store.readCommit(BASE_SHA);
+    const firstLease = await leases.acquire(identity, base);
+    const attempts = new AttemptManager({ store, leases });
+    const reservation = await attempts.reserve({
+      lease: firstLease,
+      workItem: 43,
+      workItemNodeId: "I_43",
+      backend: "codex-cli/local-worktree",
+      base,
+      sequence: 2,
+    });
+    store.now = new Date(firstLease.expiresAt.getTime() + 1);
+    const recoveryLease = await leases.acquire(
+      { ...identity, holder: "host-2" },
+      base,
+    );
+    const recovered = await attempts.recordCapacity({
+      lease: recoveryLease,
+      workItemNodeId: "I_43",
+      reservation,
+      sequence: 4,
+      event: "CapacityReconciled",
+      phase: "validation",
+      backend: "factory/local-validation",
+      requestedCpu: 1,
+      requestedMemoryMb: 2_048,
+      allowRecovery: true,
+    });
+    expect(recovered).toMatchObject({ directorEpoch: 1, recoveryEpoch: 2 });
+    await expect(
+      attempts.recordCapacity({
+        lease: recoveryLease,
+        workItemNodeId: "I_43",
+        reservation: { ...reservation, directorEpoch: 3 },
+        sequence: 5,
+        event: "CapacityReconciled",
+        phase: "validation",
+        backend: "factory/local-validation",
+        requestedCpu: 1,
+        requestedMemoryMb: 2_048,
+        allowRecovery: true,
+      }),
+    ).rejects.toThrow(/future lease epoch/);
   });
 });
 

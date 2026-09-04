@@ -55,6 +55,7 @@
     "loadRatio": { "type": "number", "minimum": 0 },
     "memoryUsageRatio": { "type": "number", "minimum": 0, "maximum": 1 },
     "directorEpoch": { "type": "integer", "minimum": 1 },
+    "recoveryEpoch": { "type": "integer", "minimum": 1 },
     "observedPriorityRank": { "type": "integer", "minimum": 0, "maximum": 1000 },
     "observedSubIssuePosition": { "type": "integer", "minimum": 0 },
     "unit": { "enum": ["model_tokens", "local_milliseconds", "sandbox_milliseconds", "managed_sessions", "validation_milliseconds"] },

@@ -185,6 +185,7 @@ const Capacity = Common.extend({
   requestedCpu: z.number().positive().max(256),
   requestedMemoryMb: z.number().int().positive().max(1_048_576),
   directorEpoch: z.number().int().positive(),
+  recoveryEpoch: z.number().int().positive().optional(),
   policyDigest: sha256Digest,
   reason: boundedText(2_000).optional(),
 });

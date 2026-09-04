@@ -325,7 +325,7 @@ The default policy is local-only:
 ```json
 {
   "backendOrder": ["codex-cli/local-worktree"],
-  "maxParallel": 2,
+  "maxParallel": 8,
   "workItemTimeoutMinutes": 30,
   "objectiveTimeoutMinutes": 720,
   "maxAttemptsPerItem": 3,
@@ -343,16 +343,19 @@ The default policy is local-only:
 }
 ```
 
-Routing filters by requirements and trust, removes unavailable or unauthenticated backends, removes
-policy- or budget-forbidden choices, then chooses the first permitted backend in operator order. No
-implicit paid fallback exists. If no backend remains, Factory escalates before launch.
+Routing first ranks dependency-ready work by native sub-issue order or a pinned organization
+single-select issue field, then scans the complete queue for safe resource fits. Local admission is
+bounded by per-Objective policy, repository-controller ceilings, backend limits, cgroup/host CPU and
+memory headroom, and global path/exclusive-resource reservations. Slots refill when any worker
+settles; one straggler does not hold a fixed wave open.
 
-Adaptive priority, CPU/RAM-aware local admission, and explicitly budgeted local-to-cloud burst are
-specified in
-[`ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md`](ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md). Until its
-conformance gates pass, the implemented scheduler remains fixed at `maxParallel` and does not treat
-GitHub priority as an execution input. Paid backends remain explicit choices rather than automatic
-overflow.
+Paid execution remains explicit immutable authority. Local-compatible work uses a paid burst backend
+only after local saturation and the configured burst trigger, priority threshold, provider probe,
+native-unit budget, repository concurrency, egress, trust, and TTL gates all pass. Capability-required
+remote work is recorded separately from overflow burst. Independent validation is pinned and
+budgeted in the same admission plan, but occupies its own phase reservation. The detailed invariants
+and remaining live-provider gates are in
+[`ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md`](ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md).
 
 Network destinations are also operator policy, not compiler authority. A compiled Work Item may
 request only destinations already present in the run's immutable allowlist; the graph fails before

@@ -73,7 +73,8 @@ In a supported harness, invoke the `director` skill with:
 - an optional complete run-policy object
 
 The skill makes one long-lived `factory_run` call. The default policy uses only
-`codex-cli/local-worktree`, never paid compute. The equivalent source-checkout command is:
+`codex-cli/local-worktree`, adapts local admission to CPU and memory headroom up to eight workers,
+and never uses paid compute. The equivalent source-checkout command is:
 
 ```bash
 npm ci
@@ -82,9 +83,9 @@ node dist/factory.js run OWNER/REPO#OBJECTIVE --until-terminal --repo /absolute/
 ```
 
 The process survives ordinary worker failures and reconstructs interrupted work from GitHub when
-restarted. It cannot wake a powered-off machine. The current release can use an optional
-user-authorized host scheduler to restart the same command at login or boot; the planned repository
-controller will make that one service per checkout instead of one service per Objective. See
+restarted. It cannot wake a powered-off machine. The repository controller provides one fenced
+service per checkout and can be installed into an explicitly authorized host scheduler for login or
+boot recovery. See
 [docs/HOST-SCHEDULING.md](docs/HOST-SCHEDULING.md) for the current Linux/WSL boundary.
 
 Request a fenced cancellation from another shell with:
@@ -103,7 +104,7 @@ The default policy is exported as `DEFAULT_RUN_POLICY`. A complete JSON override
 ```json
 {
   "backendOrder": ["codex-cli/local-worktree"],
-  "maxParallel": 2,
+  "maxParallel": 8,
   "workItemTimeoutMinutes": 30,
   "objectiveTimeoutMinutes": 720,
   "maxAttemptsPerItem": 3,
@@ -117,7 +118,35 @@ The default policy is exported as `DEFAULT_RUN_POLICY`. A complete JSON override
     "registry.npmjs.org",
     "*.npmjs.org",
     "api.openai.com"
-  ]
+  ],
+  "priority": {
+    "source": "subissue-order",
+    "unsetRank": 100,
+    "onUnavailable": "fallback-to-subissue-order"
+  },
+  "capacity": {
+    "mode": "adaptive-local",
+    "local": {
+      "maxWorkers": 8,
+      "defaultCpu": 1,
+      "defaultMemoryMb": 2048,
+      "reserveCpu": 0.5,
+      "reserveMemoryMb": 1024,
+      "minimumFreeMemoryMb": 1024,
+      "maxLoadRatio": 0.9,
+      "maxMemoryUsageRatio": 0.85,
+      "sampleIntervalSeconds": 5,
+      "admissionCooldownSeconds": 10
+    }
+  },
+  "burst": {
+    "mode": "never",
+    "backendOrder": [],
+    "maxCloudParallel": 1,
+    "queueDelaySeconds": 120,
+    "deadlineReserveMinutes": 60,
+    "maxPriorityRank": 1000
+  }
 }
 ```
 
@@ -125,6 +154,13 @@ To use Daytona or Vercel Sandbox, put its backend ID in both `backendOrder` and
 `allowedPaidBackends`, set `cloudFallback` to `explicit`, and provide a nonzero sandbox-minute cap.
 Sandbox validation consumes its own reservation because it runs in a fresh resource, separate from
 the worker. See [docs/CREDENTIALS.md](docs/CREDENTIALS.md) for provider-specific credentials.
+
+Use native sub-issue order as the zero-configuration priority. To configure an organization
+single-select issue field, inspect its stable field and option IDs without writing GitHub:
+
+```bash
+node dist/factory.js priority-fields OWNER/REPO
+```
 
 Probe without creating paid resources:
 

@@ -17,6 +17,10 @@ It never runs during plugin installation and never stores scheduler state. The m
 factory controller run OWNER/REPO --repo /absolute/path/to/repository
 ```
 
+It defaults to eight adaptive local workers and zero paid workers. Explicit controller ceilings are
+available through `--max-local-workers N` and `--max-paid-workers N`; the latter only permits capacity
+and never supplies the separate immutable run-policy provider or budget authority.
+
 Lifecycle operations are deliberately idempotent: `install` atomically writes the unit, reloads
 systemd and enables it; `start`, `stop`, `restart`, and `status` operate on that same deterministic
 name; `uninstall` stops and disables it before removing the unit and reloading systemd. A successful

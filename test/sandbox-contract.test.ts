@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   SANDBOX_CODEX_PACKAGE,
   sandboxBootstrapFiles,
+  sandboxResourceName,
   sandboxValidationFiles,
 } from "../src/backends/sandbox-common.js";
 import { normalizeArtifact } from "../src/execution/artifacts.js";
@@ -39,6 +40,23 @@ function context(): AttemptContext {
 }
 
 describe("sandbox bootstrap contracts", () => {
+  it("derives distinct deterministic execution and validation resource names", () => {
+    const execution = sandboxResourceName(context());
+    const validation = sandboxResourceName(context(), "validation");
+    expect(execution).toBe("factory-o1-w2-a3-run-123");
+    expect(validation).toBe("factory-o1-w2-a3-run-123-validate");
+    expect(
+      sandboxResourceName({
+        objective: 1,
+        workItem: 2,
+        attempt: 3,
+        runId: "run-123",
+        directorEpoch: 1,
+        phase: "validation",
+      }),
+    ).toBe(validation);
+  });
+
   it("pins the worker CLI and never embeds host credentials", () => {
     const rendered = sandboxBootstrapFiles(context(), Buffer.from("archive"))
       .map((file) => file.content.toString("utf8"))

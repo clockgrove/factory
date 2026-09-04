@@ -231,7 +231,7 @@ export type RunPolicy = z.infer<typeof RunPolicySchema>;
 
 export const DEFAULT_RUN_POLICY: RunPolicy = Object.freeze({
   backendOrder: ["codex-cli/local-worktree"],
-  maxParallel: 2,
+  maxParallel: 8,
   workItemTimeoutMinutes: 30,
   objectiveTimeoutMinutes: 720,
   maxAttemptsPerItem: 3,
@@ -246,6 +246,34 @@ export const DEFAULT_RUN_POLICY: RunPolicy = Object.freeze({
     "*.npmjs.org",
     "api.openai.com",
   ],
+  priority: {
+    source: "subissue-order" as const,
+    unsetRank: 100,
+    onUnavailable: "fallback-to-subissue-order" as const,
+  },
+  capacity: {
+    mode: "adaptive-local" as const,
+    local: {
+      maxWorkers: 8,
+      defaultCpu: 1,
+      defaultMemoryMb: 2_048,
+      reserveCpu: 0.5,
+      reserveMemoryMb: 1_024,
+      minimumFreeMemoryMb: 1_024,
+      maxLoadRatio: 0.9,
+      maxMemoryUsageRatio: 0.85,
+      sampleIntervalSeconds: 5,
+      admissionCooldownSeconds: 10,
+    },
+  },
+  burst: {
+    mode: "never" as const,
+    backendOrder: [],
+    maxCloudParallel: 1,
+    queueDelaySeconds: 120,
+    deadlineReserveMinutes: 60,
+    maxPriorityRank: 1_000,
+  },
 });
 
 export interface EffectiveSchedulingPolicy {
@@ -449,6 +477,18 @@ export function assertRequirementsWithinPolicy(
   policy: RunPolicy,
   subject = "Work Item",
 ): void {
+  const reasons = requirementsPolicyRejections(requirements, policy);
+  if (reasons.length > 0) {
+    throw new Error(`${subject} ${reasons.join("; ")}`);
+  }
+}
+
+/** Pure admission-friendly form of the immutable egress/secret boundary. */
+export function requirementsPolicyRejections(
+  requirements: ExecutionRequirements,
+  policy: RunPolicy,
+): string[] {
+  const reasons: string[] = [];
   const forbiddenDestinations = requirements.networkDestinations.filter(
     (destination) =>
       !destinationAllowedByPolicy(
@@ -457,13 +497,14 @@ export function assertRequirementsWithinPolicy(
       ),
   );
   if (forbiddenDestinations.length > 0) {
-    throw new Error(
-      `${subject} requests network destinations outside run policy: ${forbiddenDestinations.join(", ")}`,
+    reasons.push(
+      `requests network destinations outside run policy: ${forbiddenDestinations.join(", ")}`,
     );
   }
   if (requirements.permittedSecretNames.length > 0) {
-    throw new Error(
-      `${subject} requests unsupported task secrets: ${requirements.permittedSecretNames.join(", ")}`,
+    reasons.push(
+      `requests unsupported task secrets: ${requirements.permittedSecretNames.join(", ")}`,
     );
   }
+  return reasons;
 }

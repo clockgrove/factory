@@ -21,6 +21,7 @@ import {
   controllerPolicyDigest,
   type ControllerPolicy,
   DEFAULT_CONTROLLER_POLICY,
+  normalizeSchedulingPolicy,
   parseControllerPolicy,
   parseRunPolicy,
 } from "../protocol/policy.js";
@@ -230,6 +231,8 @@ export interface RunRepositoryControllerOptions {
   repo: string;
   repository: string;
   capacity?: number;
+  maxLocalWorkers?: number;
+  maxPaidWorkers?: number;
   pollIntervalMs?: number;
   signal?: AbortSignal;
   onStatus?: (message: string) => void;
@@ -254,7 +257,13 @@ export function createGitHubRepositoryController(
   options: RunRepositoryControllerOptions,
 ): GitHubRepositoryController {
   const resources =
-    options.resources ?? createRepositorySupervisorResources(options.onStatus);
+    options.resources ??
+    createRepositorySupervisorResources(options.onStatus, {
+      maxLocalWorkers:
+        options.maxLocalWorkers ?? DEFAULT_CONTROLLER_POLICY.maxLocalWorkers,
+      maxPaidWorkers:
+        options.maxPaidWorkers ?? DEFAULT_CONTROLLER_POLICY.maxPaidWorkers,
+    });
   const store =
     options.activationStore ??
     new GitHubControlStore({
@@ -280,24 +289,29 @@ export function createGitHubRepositoryController(
         `Objective #${objective} reconciliation failed: ${error instanceof Error ? error.message : String(error)}`,
       ),
     reconcileObjective: async (activation, signal, shared) => {
-      const supervisor =
-        options.supervisorFactory?.(activation, shared) ??
-        new FactorySupervisor({
-          token: options.token,
-          owner: options.owner,
-          repo: options.repo,
-          objective: activation.objective,
-          repository: options.repository,
-          policy: activation.policy,
-          signal,
-          repositoryResources: shared,
-          shutdownBehavior: "release-lease",
-          ...(options.repositoryFence
-            ? { repositoryFence: options.repositoryFence }
-            : {}),
-          ...(options.onStatus ? { onStatus: options.onStatus } : {}),
-        });
-      await supervisor.run();
+      shared.fairness.register(activation.objective);
+      try {
+        const supervisor =
+          options.supervisorFactory?.(activation, shared) ??
+          new FactorySupervisor({
+            token: options.token,
+            owner: options.owner,
+            repo: options.repo,
+            objective: activation.objective,
+            repository: options.repository,
+            policy: activation.policy,
+            signal,
+            repositoryResources: shared,
+            shutdownBehavior: "release-lease",
+            ...(options.repositoryFence
+              ? { repositoryFence: options.repositoryFence }
+              : {}),
+            ...(options.onStatus ? { onStatus: options.onStatus } : {}),
+          });
+        await supervisor.run();
+      } finally {
+        shared.fairness.unregister(activation.objective);
+      }
     },
   });
 }
@@ -314,9 +328,19 @@ export async function runGitHubRepositoryController(
     ...(options.pollIntervalMs === undefined
       ? {}
       : { pollIntervalSeconds: Math.ceil(options.pollIntervalMs / 1_000) }),
+    ...(options.maxLocalWorkers === undefined
+      ? {}
+      : { maxLocalWorkers: options.maxLocalWorkers }),
+    ...(options.maxPaidWorkers === undefined
+      ? {}
+      : { maxPaidWorkers: options.maxPaidWorkers }),
   });
   const resources =
-    options.resources ?? createRepositorySupervisorResources(options.onStatus);
+    options.resources ??
+    createRepositorySupervisorResources(options.onStatus, {
+      maxLocalWorkers: policy.maxLocalWorkers,
+      maxPaidWorkers: policy.maxPaidWorkers,
+    });
   await withRepositoryOwnership(
     {
       token: options.token,
@@ -347,15 +371,25 @@ export async function runForegroundObjective(
 ): Promise<SupervisorResult> {
   await verifyLocalRepository(options.repository, options.owner, options.repo);
   const runPolicy = parseRunPolicy(options.policy);
+  const scheduling = normalizeSchedulingPolicy(runPolicy);
   const policy = parseControllerPolicy({
     ...DEFAULT_CONTROLLER_POLICY,
     maxActiveObjectives: 1,
-    maxLocalWorkers: runPolicy.maxParallel,
-    maxPaidWorkers: 0,
+    maxLocalWorkers: Math.min(
+      runPolicy.maxParallel,
+      scheduling.capacity.local.maxWorkers,
+    ),
+    maxPaidWorkers:
+      runPolicy.allowedPaidBackends.length === 0
+        ? 0
+        : scheduling.burst.maxCloudParallel,
   });
   const resources =
     options.repositoryResources ??
-    createRepositorySupervisorResources(options.onStatus);
+    createRepositorySupervisorResources(options.onStatus, {
+      maxLocalWorkers: policy.maxLocalWorkers,
+      maxPaidWorkers: policy.maxPaidWorkers,
+    });
   return withRepositoryOwnership(
     {
       token: options.token,

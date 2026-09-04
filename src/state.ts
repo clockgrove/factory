@@ -514,6 +514,45 @@ export function ready(o: DerivedObjective): DerivedWorkItem[] {
   );
 }
 
+/** GitHub-server timestamp for the current durable ready-but-queued episode. */
+export function queuedSince(
+  item: DerivedWorkItem,
+  runId: string,
+): string | undefined {
+  const events = (item.factoryEvents ?? [])
+    .filter((event) => event.runId === runId && "workItem" in event)
+    .sort((left, right) => left.sequence - right.sequence);
+  const latestAdmission = [...events]
+    .reverse()
+    .find(
+      (event) =>
+        event.kind === "attempt" && event.event === "AttemptReserved",
+    );
+  const queued = [...events]
+    .reverse()
+    .find(
+      (event) =>
+        event.kind === "scheduling" &&
+        event.event === "WorkItemQueued" &&
+        (!latestAdmission || event.sequence > latestAdmission.sequence),
+    );
+  if (
+    queued &&
+    item.blockedBy.some(
+      (dependency) =>
+        dependency.closed &&
+        dependency.updatedAt !== undefined &&
+        dependency.updatedAt.getTime() > new Date(queued.at).getTime(),
+    )
+  ) {
+    // A dependency changed after the queue receipt. Conservatively treat this
+    // as a new ready episode: a reopen/reclose must never inherit an old delay
+    // and become immediately eligible for paid burst after restart.
+    return undefined;
+  }
+  return queued?.at;
+}
+
 /** Every Work Item is done, so the Objective itself can close (§4). */
 export function allDone(o: DerivedObjective): boolean {
   return o.items.length > 0 && o.items.every((i) => i.state === "done");

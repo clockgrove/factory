@@ -17,7 +17,7 @@ import {
   parseIsolatedValidationResult,
   repositoryArchive,
   sandboxBootstrapFiles,
-  sandboxIdentity,
+  sandboxResourceName,
   sandboxValidationFiles,
 } from "./sandbox-common.js";
 
@@ -114,7 +114,7 @@ export class DaytonaBackend implements ExecutionBackend {
     const daytona = new Daytona();
     const sandbox = await daytona.create(
       {
-        name: sandboxIdentity(context),
+        name: sandboxResourceName(context),
         image: this.#image,
         ephemeral: true,
         autoDeleteInterval: 0,
@@ -252,7 +252,7 @@ export class DaytonaBackend implements ExecutionBackend {
     const daytona = new Daytona();
     const sandbox = await daytona.create(
       {
-        name: `${sandboxIdentity(context).slice(0, 54)}-validate`,
+        name: sandboxResourceName(context, "validation"),
         image: this.#image,
         ephemeral: true,
         autoDeleteInterval: 0,
@@ -323,7 +323,7 @@ export class DaytonaBackend implements ExecutionBackend {
   async reconcileStale(identity: StaleAttemptIdentity): Promise<void> {
     const daytona = new Daytona();
     try {
-      const sandbox = await daytona.get(sandboxIdentity(identity));
+      const sandbox = await daytona.get(sandboxResourceName(identity));
       await sandbox.delete(60, true);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

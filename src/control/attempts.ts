@@ -1,4 +1,8 @@
-import { type AttemptEvent, parseFactoryEvent } from "../protocol/events.js";
+import {
+  type AttemptEvent,
+  type FactoryEvent,
+  parseFactoryEvent,
+} from "../protocol/events.js";
 import { PROTOCOL_V2 } from "../protocol/limits.js";
 import { encodeEventComment, encodeEventTrailer } from "./receipts.js";
 import {
@@ -33,6 +37,66 @@ export interface AttemptReservation {
   policyDigest: string;
   sequence: number;
   createdAt: Date;
+  admission?: AttemptAdmissionReceipt;
+}
+
+export interface AttemptAdmissionReceipt {
+  admissionClass: "local" | "remote-required" | "burst";
+  admissionReason:
+    | "local-capacity"
+    | "capability-required"
+    | "local-saturated"
+    | "queue-delay"
+    | "deadline";
+  requestedCpu: number;
+  requestedMemoryMb: number;
+  priorityRank: number;
+  priorityFieldId?: string;
+  priorityOptionId?: string;
+  subIssuePosition: number;
+  criticalPathLength: number;
+  unfinishedDownstream: number;
+  capacityMeasuredAt?: string;
+  effectiveCpu?: number;
+  availableMemoryMb?: number;
+  loadRatio?: number;
+  memoryUsageRatio?: number;
+}
+
+function admissionFromEvent(event: AttemptEvent): AttemptAdmissionReceipt | undefined {
+  if (
+    event.admissionClass === undefined ||
+    event.admissionReason === undefined ||
+    event.requestedCpu === undefined ||
+    event.requestedMemoryMb === undefined ||
+    event.priorityRank === undefined ||
+    event.subIssuePosition === undefined ||
+    event.criticalPathLength === undefined ||
+    event.unfinishedDownstream === undefined
+  ) {
+    return undefined;
+  }
+  return {
+    admissionClass: event.admissionClass,
+    admissionReason: event.admissionReason,
+    requestedCpu: event.requestedCpu,
+    requestedMemoryMb: event.requestedMemoryMb,
+    priorityRank: event.priorityRank,
+    ...(event.priorityFieldId ? { priorityFieldId: event.priorityFieldId } : {}),
+    ...(event.priorityOptionId ? { priorityOptionId: event.priorityOptionId } : {}),
+    subIssuePosition: event.subIssuePosition,
+    criticalPathLength: event.criticalPathLength,
+    unfinishedDownstream: event.unfinishedDownstream,
+    ...(event.capacityMeasuredAt ? { capacityMeasuredAt: event.capacityMeasuredAt } : {}),
+    ...(event.effectiveCpu === undefined ? {} : { effectiveCpu: event.effectiveCpu }),
+    ...(event.availableMemoryMb === undefined
+      ? {}
+      : { availableMemoryMb: event.availableMemoryMb }),
+    ...(event.loadRatio === undefined ? {} : { loadRatio: event.loadRatio }),
+    ...(event.memoryUsageRatio === undefined
+      ? {}
+      : { memoryUsageRatio: event.memoryUsageRatio }),
+  };
 }
 
 export class AttemptReservationConflict extends Error {
@@ -74,6 +138,7 @@ function parseReservation(ref: string, commit: GitCommitObject): AttemptReservat
   if (event.kind !== "attempt" || event.event !== "AttemptReserved") {
     throw new Error(`${ref} does not describe an attempt reservation`);
   }
+  const admission = admissionFromEvent(event);
   return {
     ref,
     oid: commit.oid,
@@ -87,6 +152,7 @@ function parseReservation(ref: string, commit: GitCommitObject): AttemptReservat
     policyDigest: event.policyDigest,
     sequence: event.sequence,
     createdAt: new Date(event.at),
+    ...(admission ? { admission } : {}),
   };
 }
 
@@ -120,6 +186,7 @@ export class AttemptManager {
     backend: string;
     base: GitCommitObject;
     sequence: number;
+    admission?: AttemptAdmissionReceipt;
   }): Promise<AttemptReservation> {
     await this.#leases.assertCurrent(args.lease);
     const existing = await this.list(args.lease.objective, args.workItem);
@@ -140,6 +207,7 @@ export class AttemptManager {
       baseSha: args.base.oid,
       directorEpoch: args.lease.epoch,
       policyDigest: args.lease.policyDigest,
+      ...(args.admission ?? {}),
     };
     const oid = await this.#store.createCommit({
       treeOid: args.base.treeOid,
@@ -171,6 +239,7 @@ export class AttemptManager {
       policyDigest: event.policyDigest,
       sequence: event.sequence,
       createdAt: now,
+      ...(args.admission ? { admission: args.admission } : {}),
     };
   }
 
@@ -263,6 +332,7 @@ export class AttemptManager {
       baseSha: args.reservation.baseSha,
       directorEpoch: args.reservation.directorEpoch,
       policyDigest: args.reservation.policyDigest,
+      ...(args.reservation.admission ?? {}),
     };
     await this.#store.addIssueComment(
       args.workItemNodeId,
@@ -271,5 +341,98 @@ export class AttemptManager {
         event,
       ),
     );
+  }
+
+  async recordQueued(args: {
+    lease: LeaseState;
+    workItem: number;
+    workItemNodeId: string;
+    sequence: number;
+    reason: string;
+    observedPriorityRank: number;
+    observedSubIssuePosition: number;
+  }): Promise<FactoryEvent> {
+    await this.#leases.assertCurrent(args.lease);
+    const now = await this.#store.serverTime();
+    const event = parseFactoryEvent({
+      protocol: PROTOCOL_V2,
+      kind: "scheduling",
+      event: "WorkItemQueued",
+      objective: args.lease.objective,
+      runId: args.lease.runId,
+      sequence: args.sequence,
+      at: now.toISOString(),
+      workItem: args.workItem,
+      directorEpoch: args.lease.epoch,
+      policyDigest: args.lease.policyDigest,
+      reason: args.reason,
+      observedPriorityRank: args.observedPriorityRank,
+      observedSubIssuePosition: args.observedSubIssuePosition,
+    });
+    await this.#store.addIssueComment(
+      args.workItemNodeId,
+      encodeEventComment(`Factory queued this Work Item: ${args.reason}.`, event),
+    );
+    return event;
+  }
+
+  async recordCapacity(args: {
+    lease: LeaseState;
+    workItemNodeId: string;
+    reservation: AttemptReservation;
+    sequence: number;
+    event: "CapacityReserved" | "CapacityReconciled";
+    phase: "execution" | "validation";
+    backend: string;
+    requestedCpu: number;
+    requestedMemoryMb: number;
+    reason?: string;
+    allowRecovery?: boolean;
+  }): Promise<FactoryEvent> {
+    await this.#leases.assertCurrent(args.lease);
+    if (
+      args.allowRecovery &&
+      args.reservation.directorEpoch !== args.lease.epoch &&
+      args.reservation.directorEpoch >= args.lease.epoch
+    ) {
+      throw new Error("capacity recovery cannot write for a future lease epoch");
+    }
+    if (
+      args.reservation.runId !== args.lease.runId ||
+      args.reservation.policyDigest !== args.lease.policyDigest ||
+      (args.reservation.directorEpoch !== args.lease.epoch && !args.allowRecovery)
+    ) {
+      throw new Error("capacity reservation is fenced from the current lease");
+    }
+    const now = await this.#store.serverTime();
+    const event = parseFactoryEvent({
+      protocol: PROTOCOL_V2,
+      kind: "capacity",
+      event: args.event,
+      objective: args.reservation.objective,
+      runId: args.reservation.runId,
+      sequence: args.sequence,
+      at: now.toISOString(),
+      workItem: args.reservation.workItem,
+      attempt: args.reservation.attempt,
+      phase: args.phase,
+      backend: args.backend,
+      requestedCpu: args.requestedCpu,
+      requestedMemoryMb: args.requestedMemoryMb,
+      directorEpoch: args.reservation.directorEpoch,
+      ...(args.reservation.directorEpoch === args.lease.epoch
+        ? {}
+        : { recoveryEpoch: args.lease.epoch }),
+      policyDigest: args.reservation.policyDigest,
+      ...(args.reason ? { reason: args.reason } : {}),
+    });
+    await this.#store.addIssueComment(
+      args.workItemNodeId,
+      encodeEventComment(
+        `Factory ${args.event === "CapacityReserved" ? "reserved" : "reconciled"} ${args.phase} capacity on \`${args.backend}\`.`,
+        event,
+      ),
+    );
+    return event;
   }
 }

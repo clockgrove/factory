@@ -42,6 +42,7 @@ import {
   classifyRefusal,
 } from "./platform.js";
 import type { FactoryEvent } from "./protocol/events.js";
+import { normalizeIssueFieldValues } from "./scheduling/github-priority.js";
 
 /** A workflow run parked in `action_required`, awaiting a maintainer's approval. */
 export interface PendingApprovalRun {
@@ -172,7 +173,19 @@ query Objective($owner: String!, $repo: String!, $number: Int!, $subIssueCount: 
           }
           assignees(first: 10) { nodes { login } }
           labels(first: 20) { nodes { name } }
-          blockedBy(first: 50) { totalCount nodes { number state } }
+          issueFieldValues(first: 100) {
+            totalCount
+            nodes {
+              ... on IssueFieldSingleSelectValue {
+                optionId
+                name
+                field {
+                  ... on IssueFieldSingleSelect { id name dataType }
+                }
+              }
+            }
+          }
+          blockedBy(first: 50) { totalCount nodes { number state updatedAt } }
           closedByPullRequestsReferences(first: 20, includeClosedPrs: true) {
             nodes {
               id
@@ -229,8 +242,31 @@ query Objective($owner: String!, $repo: String!, $number: Int!, $subIssueCount: 
   }
 }`;
 
+const PRIORITY_FIELDS_QUERY = `
+query PriorityFields($owner: String!, $after: String) {
+  organization(login: $owner) {
+    issueFields(first: 100, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        __typename
+        ... on IssueFieldSingleSelect {
+          id
+          name
+          dataType
+          options { id name }
+        }
+      }
+    }
+  }
+}`;
+
 interface GqlIssueState {
   state: "OPEN" | "CLOSED";
+}
+
+interface GqlDependency extends GqlIssueState {
+  number: number;
+  updatedAt: string;
 }
 
 interface GqlPr {
@@ -291,7 +327,15 @@ interface GqlWorkItem extends GqlIssueState {
   body?: string;
   assignees: { nodes: { login: string }[] };
   labels: { nodes: { name: string }[] } | null;
-  blockedBy: { totalCount: number; nodes: ({ number: number } & GqlIssueState)[] };
+  issueFieldValues?: {
+    totalCount: number;
+    nodes: Array<{
+      optionId?: string | null;
+      name?: string;
+      field?: { id?: string; name?: string; dataType?: string } | null;
+    }>;
+  };
+  blockedBy: { totalCount: number; nodes: GqlDependency[] };
   closedByPullRequestsReferences: { nodes: GqlPr[] };
   timelineItems: { nodes: GqlAssignedEvent[] };
   comments?: GqlComments;
@@ -343,6 +387,27 @@ interface GqlObjectiveCardinality {
   repository: {
     issue: { subIssues: { totalCount: number } } | null;
   } | null;
+}
+
+interface GqlPriorityFields {
+  organization: {
+    issueFields: {
+      pageInfo: { hasNextPage: boolean; endCursor: string | null };
+      nodes: Array<{
+        __typename: string;
+        id?: string;
+        name?: string;
+        dataType?: string;
+        options?: Array<{ id: string; name: string }>;
+      }>;
+    };
+  } | null;
+}
+
+export interface PriorityFieldDefinition {
+  id: string;
+  name: string;
+  options: Array<{ id: string; name: string; position: number }>;
 }
 
 /**
@@ -487,6 +552,7 @@ function toWorkItem(
   eventsByPullRequest: ReadonlyMap<number, AgentWorkEvent[]>,
   v2: boolean,
   actorsByRun: ReadonlyMap<string, string> = new Map(),
+  subIssuePosition?: number,
 ): WorkItemSnapshot {
   if (wi.blockedBy.totalCount > wi.blockedBy.nodes.length) {
     throw new Error(`Work Item #${wi.number} has too many dependencies for a complete snapshot`);
@@ -494,6 +560,7 @@ function toWorkItem(
   const blockedBy: IssueRef[] = wi.blockedBy.nodes.map((d) => ({
     number: d.number,
     closed: d.state === "CLOSED",
+    updatedAt: new Date(d.updatedAt),
   }));
 
   const result: WorkItemSnapshot = {
@@ -504,6 +571,8 @@ function toWorkItem(
     closed: wi.state === "CLOSED",
     assignees: wi.assignees.nodes.map((a) => a.login),
     labels: wi.labels?.nodes.map((l) => l.name) ?? [],
+    ...(subIssuePosition === undefined ? {} : { subIssuePosition }),
+    issueFieldValues: normalizeIssueFieldValues(wi.number, wi.issueFieldValues),
     blockedBy,
     linkedPullRequests: wi.closedByPullRequestsReferences.nodes.map((pr) =>
       toPullRequest(pr, eventsByPullRequest.get(pr.number) ?? []),
@@ -802,6 +871,53 @@ export class GitHubReader {
     this.#owner = opts.owner;
     this.#repo = opts.repo;
     this.#octokit = createOctokit(opts);
+  }
+
+  /** Read-only organization issue-field discovery for immutable run policy. */
+  async readPriorityFields(): Promise<PriorityFieldDefinition[]> {
+    const fields: PriorityFieldDefinition[] = [];
+    let after: string | null = null;
+    for (;;) {
+      const data: GqlPriorityFields =
+        await this.#octokit.graphql<GqlPriorityFields>(PRIORITY_FIELDS_QUERY, {
+          owner: this.#owner,
+          after,
+        });
+      if (!data.organization) {
+        throw new Error(
+          `${this.#owner} is not an organization with repository issue fields`,
+        );
+      }
+      const connection = data.organization.issueFields;
+      for (const node of connection.nodes) {
+        if (
+          node.__typename !== "IssueFieldSingleSelect" ||
+          node.dataType !== "SINGLE_SELECT" ||
+          !node.id ||
+          !node.name ||
+          !node.options
+        ) {
+          continue;
+        }
+        fields.push({
+          id: node.id,
+          name: node.name,
+          options: node.options.map((option, position) => ({
+            ...option,
+            position,
+          })),
+        });
+      }
+      if (!connection.pageInfo.hasNextPage) break;
+      if (!connection.pageInfo.endCursor) {
+        throw new Error("priority-field pagination omitted its next cursor");
+      }
+      after = connection.pageInfo.endCursor;
+    }
+    return fields.sort(
+      (left, right) =>
+        left.name.localeCompare(right.name) || left.id.localeCompare(right.id),
+    );
   }
 
   /**
@@ -1109,8 +1225,8 @@ export class GitHubReader {
       ...(issue.authorAssociation ? { authorAssociation: issue.authorAssociation } : {}),
       body: issue.body,
       closed: issue.state === "CLOSED",
-      workItems: issue.subIssues.nodes.map((wi) =>
-        toWorkItem(wi, agentWorkEvents, v2, actorsByRun),
+      workItems: issue.subIssues.nodes.map((wi, index) =>
+        toWorkItem(wi, agentWorkEvents, v2, actorsByRun, index),
       ),
       readAt: new Date(),
       graphQlRateLimit: {

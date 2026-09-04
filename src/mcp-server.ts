@@ -98,6 +98,7 @@ import {
 import type { LinkedPullRequest } from "./types.js";
 import { DEFAULT_RUN_POLICY } from "./protocol/policy.js";
 import { ExecutionRequirementsSchema } from "./protocol/worker-packet.js";
+import { priorityPolicyFragment } from "./scheduling/github-priority.js";
 import { runForegroundObjective } from "./controller/index.js";
 import { GitHubControlStore } from "./control/github-store.js";
 import {
@@ -1343,6 +1344,34 @@ server.registerTool(
     registry.register(new DaytonaBackend({ repository: path }));
     registry.register(new VercelSandboxBackend({ repository: path }));
     return registry.probeAll();
+  }),
+);
+
+server.registerTool(
+  "inspect_priority_fields",
+  {
+    title: "Inspect GitHub priority fields",
+    description:
+      "Read-only discovery of organization issue single-select fields and stable option IDs. " +
+      "Returns ready-to-paste immutable run-policy fragments; it does not enable priority or change GitHub.",
+    inputSchema: RepoShape,
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+  },
+  tool(async ({ owner, repo }: { owner: string; repo: string }) => {
+    const reader = new GitHubReader({ token: getToken(), owner, repo });
+    const fields = await reader.readPriorityFields();
+    return {
+      repository: `${owner}/${repo}`,
+      fields: fields.map((field) => ({
+        ...field,
+        policyFragment: priorityPolicyFragment(field),
+      })),
+    };
   }),
 );
 

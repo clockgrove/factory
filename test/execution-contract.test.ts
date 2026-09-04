@@ -28,6 +28,8 @@ import type { NormalizedArtifact } from "../src/execution/artifacts.js";
 const SHA = "a".repeat(40);
 
 class FakeBackend implements ExecutionBackend {
+  probeCalls = 0;
+  validationProbeCalls = 0;
   constructor(
     readonly capabilities: ExecutionBackendCapabilities,
     private readonly result: BackendProbe = {
@@ -38,6 +40,7 @@ class FakeBackend implements ExecutionBackend {
   ) {}
 
   async probe(): Promise<BackendProbe> {
+    this.probeCalls += 1;
     return this.result;
   }
   async launch(_context: AttemptContext): Promise<BackendHandle> {
@@ -61,6 +64,7 @@ class FakeBackend implements ExecutionBackend {
   }
   async cleanup(_handle: BackendHandle): Promise<void> {}
   async probeValidation(): Promise<BackendProbe> {
+    this.validationProbeCalls += 1;
     return this.result;
   }
   async validate(_context: IsolatedValidationContext): Promise<IsolatedValidationResult> {
@@ -178,6 +182,43 @@ describe("normalized artifacts", () => {
 });
 
 describe("backend registry", () => {
+  it("evaluates every backend and expires the side-effect-free probe cache", async () => {
+    const registry = new BackendRegistry();
+    const backend = new FakeBackend(capabilities());
+    registry.register(backend);
+    const requirements = {
+      os: ["linux"], architecture: ["x64"], tools: ["git"], services: [],
+      networkDestinations: [], permittedSecretNames: [], trust: "trusted_local" as const,
+    };
+    const first = await registry.evaluate({
+      policy: DEFAULT_RUN_POLICY,
+      requirements,
+      nowMs: 1_000,
+      probeTtlMs: 30_000,
+    });
+    const cached = await registry.evaluate({
+      policy: DEFAULT_RUN_POLICY,
+      requirements,
+      nowMs: 30_999,
+      probeTtlMs: 30_000,
+    });
+    await registry.evaluate({
+      policy: DEFAULT_RUN_POLICY,
+      requirements,
+      nowMs: 31_000,
+      probeTtlMs: 30_000,
+    });
+    expect(first[0]).toMatchObject({
+      id: "codex-cli/local-worktree",
+      local: true,
+      paid: false,
+      permanentReasons: [],
+      transientReasons: [],
+    });
+    expect(cached[0]!.probe).toBe(first[0]!.probe);
+    expect(backend.probeCalls).toBe(2);
+  });
+
   it("matches common operating-system and architecture aliases", () => {
     expect(capabilityMismatch(capabilities(), {
       os: ["gnu/linux"],
@@ -294,8 +335,7 @@ describe("backend registry", () => {
 
   it("selects a separately budgeted isolated validator", async () => {
     const registry = new BackendRegistry();
-    registry.register(
-      new FakeBackend(
+    const validator = new FakeBackend(
         capabilities({
           id: "codex-cli/vercel-sandbox",
           runtimeKind: "vercel-sandbox",
@@ -303,8 +343,8 @@ describe("backend registry", () => {
           isolation: "microvm",
           requiresPaidRuntime: true,
         }),
-      ),
-    );
+      );
+    registry.register(validator);
     const policy = {
       ...DEFAULT_RUN_POLICY,
       backendOrder: ["codex-cli/vercel-sandbox"],
@@ -322,6 +362,21 @@ describe("backend registry", () => {
       estimatedDurationMs: 10 * 60_000,
     });
     expect(selected.backend.capabilities.id).toBe("codex-cli/vercel-sandbox");
+    const validationRequirements = {
+      os: ["linux"], architecture: ["x64"], tools: ["git"], services: [],
+      networkDestinations: [], permittedSecretNames: [], trust: "managed" as const,
+    };
+    await registry.evaluateIsolatedValidators({
+      policy,
+      requirements: validationRequirements,
+      nowMs: 1_000,
+    });
+    await registry.evaluateIsolatedValidators({
+      policy,
+      requirements: validationRequirements,
+      nowMs: 20_000,
+    });
+    expect(validator.validationProbeCalls).toBe(1);
     await expect(
       registry.selectIsolatedValidator({
         policy,

@@ -245,6 +245,17 @@ export interface AgentWorkEvent {
 export interface IssueRef {
   number: number;
   closed: boolean;
+  /** GitHub issue update time, used to reconstruct a new readiness episode. */
+  updatedAt?: Date;
+}
+
+/** Stable GitHub issue-field identity used for deterministic priority. */
+export interface IssueFieldSingleSelectSnapshot {
+  fieldId: string;
+  fieldName: string;
+  dataType: "SINGLE_SELECT";
+  optionId: string | null;
+  optionName: string | null;
 }
 
 /**
@@ -268,6 +279,10 @@ export interface WorkItemSnapshot {
    * one.
    */
   labels: string[];
+  /** Zero-based position in GitHub's ordered native sub-issue connection. */
+  subIssuePosition?: number;
+  /** Complete bounded issue-field values observed in the same GraphQL snapshot. */
+  issueFieldValues?: IssueFieldSingleSelectSnapshot[];
   blockedBy: IssueRef[];
   /** PRs that would close this issue, via `closedByPullRequestsReferences`. */
   linkedPullRequests: LinkedPullRequest[];

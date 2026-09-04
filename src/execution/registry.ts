@@ -21,6 +21,27 @@ export interface BackendRejection {
   reasons: string[];
 }
 
+export interface BackendCandidate {
+  id: string;
+  registered: boolean;
+  backend: ExecutionBackend | null;
+  capabilities: ExecutionBackend["capabilities"] | null;
+  probe: BackendProbe | null;
+  costClass: "local" | "sandbox" | "managed";
+  local: boolean;
+  paid: boolean;
+  permanentReasons: string[];
+  transientReasons: string[];
+}
+
+function backendCostClass(id: string): BackendCandidate["costClass"] {
+  return id === "github-copilot/github-managed"
+    ? "managed"
+    : id.includes("daytona") || id.includes("vercel-sandbox")
+      ? "sandbox"
+      : "local";
+}
+
 export class NoExecutionBackendError extends Error {
   readonly rejections: BackendRejection[];
 
@@ -37,6 +58,10 @@ export class NoExecutionBackendError extends Error {
 
 export class BackendRegistry {
   readonly #backends = new Map<string, ExecutionBackend>();
+  readonly #probeCache = new Map<
+    string,
+    { probe: BackendProbe; expiresAt: number }
+  >();
 
   register(backend: ExecutionBackend): void {
     const id = backend.capabilities.id;
@@ -69,6 +94,177 @@ export class BackendRegistry {
     );
   }
 
+  async evaluate(args: {
+    policy: RunPolicy;
+    requirements: ExecutionRequirements;
+    nowMs?: number;
+    probeTtlMs?: number;
+  }): Promise<BackendCandidate[]> {
+    const nowMs = args.nowMs ?? Date.now();
+    const ttl = args.probeTtlMs ?? 30_000;
+    const requirementKey = JSON.stringify(args.requirements);
+    const candidates: BackendCandidate[] = [];
+    for (const id of args.policy.backendOrder) {
+      const backend = this.#backends.get(id) ?? null;
+      const costClass = backendCostClass(id);
+      const permanentReasons: string[] = [];
+      const transientReasons: string[] = [];
+      if (!backend) {
+        permanentReasons.push("not registered");
+        candidates.push({
+          id,
+          registered: false,
+          backend: null,
+          capabilities: null,
+          probe: null,
+          costClass,
+          local: false,
+          paid: costClass !== "local",
+          permanentReasons,
+          transientReasons,
+        });
+        continue;
+      }
+      if (
+        backend.capabilities.requiresPaidRuntime &&
+        !args.policy.allowedPaidBackends.includes(id)
+      ) {
+        permanentReasons.push("paid backend not allowed by run policy");
+      }
+      let probe: BackendProbe | null = null;
+      if (permanentReasons.length === 0) {
+        const key = `${id}\n${requirementKey}`;
+        const cached = this.#probeCache.get(key);
+        if (cached && nowMs < cached.expiresAt) {
+          probe = cached.probe;
+        } else {
+          probe = await backend.probe(args.requirements).catch((error: unknown) => ({
+            available: false,
+            authenticated: false,
+            reason: error instanceof Error ? error.message : String(error),
+            measuredAt: new Date(nowMs).toISOString(),
+          }));
+          this.#probeCache.set(key, { probe, expiresAt: nowMs + ttl });
+        }
+        if (!probe.available) transientReasons.push(probe.reason ?? "unavailable");
+        else if (!probe.authenticated) {
+          transientReasons.push(probe.reason ?? "not authenticated");
+        } else {
+          permanentReasons.push(
+            ...capabilityMismatch(backend.capabilities, args.requirements),
+          );
+        }
+      }
+      candidates.push({
+        id,
+        registered: true,
+        backend,
+        capabilities: backend.capabilities,
+        probe,
+        costClass,
+        local:
+          backend.capabilities.hostExecution &&
+          !backend.capabilities.requiresPaidRuntime,
+        paid: backend.capabilities.requiresPaidRuntime,
+        permanentReasons,
+        transientReasons,
+      });
+    }
+    return candidates;
+  }
+
+  async evaluateIsolatedValidators(args: {
+    policy: RunPolicy;
+    requirements: ExecutionRequirements;
+    nowMs?: number;
+    probeTtlMs?: number;
+  }): Promise<BackendCandidate[]> {
+    const nowMs = args.nowMs ?? Date.now();
+    const ttl = args.probeTtlMs ?? 30_000;
+    const validationRequirements = {
+      ...args.requirements,
+      trust: "isolated" as const,
+    };
+    const requirementKey = JSON.stringify(validationRequirements);
+    const candidates: BackendCandidate[] = [];
+    for (const id of args.policy.backendOrder) {
+      const backend = this.#backends.get(id) ?? null;
+      const costClass = backendCostClass(id);
+      const permanentReasons: string[] = [];
+      const transientReasons: string[] = [];
+      if (!backend) {
+        candidates.push({
+          id,
+          registered: false,
+          backend: null,
+          capabilities: null,
+          probe: null,
+          costClass,
+          local: false,
+          paid: costClass !== "local",
+          permanentReasons: ["not registered"],
+          transientReasons,
+        });
+        continue;
+      }
+      if (!backend.validate || !backend.probeValidation) {
+        permanentReasons.push("does not provide independent isolated validation");
+      }
+      if (!(["container", "microvm", "managed"] as const).includes(
+        backend.capabilities.isolation as "container" | "microvm" | "managed",
+      )) {
+        permanentReasons.push("validation boundary is weaker than a container");
+      }
+      permanentReasons.push(
+        ...capabilityMismatch(backend.capabilities, validationRequirements),
+      );
+      if (
+        backend.capabilities.requiresPaidRuntime &&
+        !args.policy.allowedPaidBackends.includes(id)
+      ) {
+        permanentReasons.push("paid backend not allowed by run policy");
+      }
+      if (costClass === "managed") {
+        permanentReasons.push("managed-session backends cannot host validation");
+      }
+      let probe: BackendProbe | null = null;
+      if (permanentReasons.length === 0) {
+        const key = `validation\n${id}\n${requirementKey}`;
+        const cached = this.#probeCache.get(key);
+        if (cached && nowMs < cached.expiresAt) {
+          probe = cached.probe;
+        } else {
+          probe = await backend.probeValidation!().catch((error: unknown) => ({
+            available: false,
+            authenticated: false,
+            reason: error instanceof Error ? error.message : String(error),
+            measuredAt: new Date(nowMs).toISOString(),
+          }));
+          this.#probeCache.set(key, { probe, expiresAt: nowMs + ttl });
+        }
+        if (!probe.available) transientReasons.push(probe.reason ?? "unavailable");
+        else if (!probe.authenticated) {
+          transientReasons.push(probe.reason ?? "not authenticated");
+        }
+      }
+      candidates.push({
+        id,
+        registered: true,
+        backend,
+        capabilities: backend.capabilities,
+        probe,
+        costClass,
+        local:
+          backend.capabilities.hostExecution &&
+          !backend.capabilities.requiresPaidRuntime,
+        paid: backend.capabilities.requiresPaidRuntime,
+        permanentReasons,
+        transientReasons,
+      });
+    }
+    return candidates;
+  }
+
   async select(args: {
     policy: RunPolicy;
     requirements: ExecutionRequirements;
@@ -76,19 +272,12 @@ export class BackendRegistry {
     estimatedDurationMs?: number;
   }): Promise<BackendSelection> {
     const rejections: BackendRejection[] = [];
-    for (const id of args.policy.backendOrder) {
-      const backend = this.#backends.get(id);
-      if (!backend) {
-        rejections.push({ id, reasons: ["not registered"] });
-        continue;
-      }
-      const reasons: string[] = [];
-      if (
-        backend.capabilities.requiresPaidRuntime &&
-        !args.policy.allowedPaidBackends.includes(id)
-      ) {
-        reasons.push("paid backend not allowed by run policy");
-      }
+    for (const candidate of await this.evaluate({
+      policy: args.policy,
+      requirements: args.requirements,
+    })) {
+      const { id, backend, probe } = candidate;
+      const reasons = [...candidate.permanentReasons, ...candidate.transientReasons];
       if (
         (id.includes("daytona") || id.includes("vercel-sandbox")) &&
         args.budget.sandboxMinutes * 60_000 < (args.estimatedDurationMs ?? 1)
@@ -101,19 +290,7 @@ export class BackendRegistry {
       ) {
         reasons.push("managed-session budget exhausted");
       }
-      let probe: BackendProbe | null = null;
-      if (reasons.length === 0) {
-        probe = await backend.probe(args.requirements).catch((error: unknown) => ({
-          available: false,
-          authenticated: false,
-          reason: error instanceof Error ? error.message : String(error),
-          measuredAt: new Date().toISOString(),
-        }));
-        if (!probe.available) reasons.push(probe.reason ?? "unavailable");
-        else if (!probe.authenticated) reasons.push(probe.reason ?? "not authenticated");
-        else reasons.push(...capabilityMismatch(backend.capabilities, args.requirements));
-      }
-      if (reasons.length === 0 && probe) return { backend, probe };
+      if (reasons.length === 0 && backend && probe) return { backend, probe };
       rejections.push({ id, reasons });
     }
     throw new NoExecutionBackendError(rejections);
@@ -126,44 +303,22 @@ export class BackendRegistry {
     estimatedDurationMs: number;
   }): Promise<BackendSelection> {
     const rejections: BackendRejection[] = [];
-    for (const id of args.policy.backendOrder) {
-      const backend = this.#backends.get(id);
-      if (!backend) {
-        rejections.push({ id, reasons: ["not registered"] });
-        continue;
-      }
-      const reasons: string[] = [];
-      if (!backend.validate || !backend.probeValidation) {
-        reasons.push("does not provide independent isolated validation");
-      }
-      if (!(["container", "microvm", "managed"] as const).includes(
-        backend.capabilities.isolation as "container" | "microvm" | "managed",
-      )) {
-        reasons.push("validation boundary is weaker than a container");
-      }
-      const validationRequirements = { ...args.requirements, trust: "isolated" as const };
-      reasons.push(...capabilityMismatch(backend.capabilities, validationRequirements));
+    for (const candidate of await this.evaluateIsolatedValidators({
+      policy: args.policy,
+      requirements: args.requirements,
+    })) {
+      const { id, backend, probe } = candidate;
+      const reasons = [
+        ...candidate.permanentReasons,
+        ...candidate.transientReasons,
+      ];
       if (
-        backend.capabilities.requiresPaidRuntime &&
-        !args.policy.allowedPaidBackends.includes(id)
+        candidate.costClass === "sandbox" &&
+        args.budget.sandboxMinutes * 60_000 < args.estimatedDurationMs
       ) {
-        reasons.push("paid backend not allowed by run policy");
-      }
-      if (args.budget.sandboxMinutes * 60_000 < args.estimatedDurationMs) {
         reasons.push("insufficient sandbox-minute budget for independent validation");
       }
-      let probe: BackendProbe | null = null;
-      if (reasons.length === 0) {
-        probe = await backend.probeValidation!().catch((error: unknown) => ({
-          available: false,
-          authenticated: false,
-          reason: error instanceof Error ? error.message : String(error),
-          measuredAt: new Date().toISOString(),
-        }));
-        if (!probe.available) reasons.push(probe.reason ?? "unavailable");
-        else if (!probe.authenticated) reasons.push(probe.reason ?? "not authenticated");
-      }
-      if (reasons.length === 0 && probe) return { backend, probe };
+      if (reasons.length === 0 && backend && probe) return { backend, probe };
       rejections.push({ id, reasons });
     }
     throw new NoExecutionBackendError(rejections);

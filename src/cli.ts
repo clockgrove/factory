@@ -9,6 +9,7 @@ import { VercelSandboxBackend } from "./backends/vercel-sandbox.js";
 import { resolveGitHubToken } from "./auth.js";
 import { BackendRegistry } from "./execution/registry.js";
 import { GitHubReader } from "./github.js";
+import { priorityPolicyFragment } from "./scheduling/github-priority.js";
 import { GitHubControlStore } from "./control/github-store.js";
 import { DEFAULT_RUN_POLICY, parseRunPolicy } from "./protocol/policy.js";
 import { allDone, counts, derive, isStalled, ready } from "./state.js";
@@ -232,10 +233,24 @@ function positiveIntegerOption(
   return value;
 }
 
+function nonNegativeIntegerOption(
+  args: string[],
+  name: string,
+  fallback: number,
+): number {
+  const raw = option(args, name);
+  if (raw === undefined) return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0) {
+    fail(`${name} must be a non-negative integer`);
+  }
+  return value;
+}
+
 async function runRepositoryController(args: string[]): Promise<void> {
   if (!args[0]) {
     fail(
-      "usage: factory controller run OWNER/REPO --repo DIR [--max-active-objectives N] [--poll-interval-seconds N]",
+      "usage: factory controller run OWNER/REPO --repo DIR [--max-active-objectives N] [--max-local-workers N] [--max-paid-workers N] [--poll-interval-seconds N]",
     );
   }
   const repository = parseRepository(args[0]);
@@ -250,11 +265,24 @@ async function runRepositoryController(args: string[]): Promise<void> {
     "--poll-interval-seconds",
     15,
   );
+  const maxLocalWorkers = positiveIntegerOption(
+    args,
+    "--max-local-workers",
+    8,
+  );
+  const maxPaidWorkers = nonNegativeIntegerOption(
+    args,
+    "--max-paid-workers",
+    0,
+  );
   if (maxActiveObjectives > 32) {
     fail("--max-active-objectives cannot exceed 32");
   }
   if (pollIntervalSeconds > 300) {
     fail("--poll-interval-seconds cannot exceed 300");
+  }
+  if (maxLocalWorkers > 32 || maxPaidWorkers > 32) {
+    fail("worker ceilings cannot exceed 32");
   }
   const controller = new AbortController();
   let interrupted = false;
@@ -275,6 +303,8 @@ async function runRepositoryController(args: string[]): Promise<void> {
       repo: repository.repo,
       repository: checkout,
       capacity: maxActiveObjectives,
+      maxLocalWorkers,
+      maxPaidWorkers,
       pollIntervalMs: pollIntervalSeconds * 1_000,
       signal: controller.signal,
       onStatus: (message) =>
@@ -294,6 +324,30 @@ async function probeBackends(): Promise<void> {
   registry.register(new VercelSandboxBackend({ repository: process.cwd() }));
   process.stdout.write(
     `${JSON.stringify(await registry.probeAll(), null, 2)}\n`,
+  );
+}
+
+async function inspectPriorityFields(args: string[]): Promise<void> {
+  if (!args[0]) fail("usage: factory priority-fields OWNER/REPO");
+  const repository = parseRepository(args[0]);
+  const reader = new GitHubReader({
+    token: resolveGitHubToken(),
+    owner: repository.owner,
+    repo: repository.repo,
+  });
+  const fields = await reader.readPriorityFields();
+  process.stdout.write(
+    `${JSON.stringify(
+      {
+        repository: `${repository.owner}/${repository.repo}`,
+        fields: fields.map((field) => ({
+          ...field,
+          policyFragment: priorityPolicyFragment(field),
+        })),
+      },
+      null,
+      2,
+    )}\n`,
   );
 }
 
@@ -369,6 +423,10 @@ export async function main(argv: string[]): Promise<void> {
     await probeBackends();
     return;
   }
+  if (command === "priority-fields") {
+    await inspectPriorityFields(rest);
+    return;
+  }
 
   // Preserve the v1 inspector invocation for installed scripts and old docs.
   if (command && rest[0] && command.includes("/") && !command.includes("#")) {
@@ -384,10 +442,11 @@ export async function main(argv: string[]): Promise<void> {
     "usage:\n" +
       "  factory run OWNER/REPO#NUMBER --until-terminal [--repo DIR] [--policy FILE]\n" +
       "  factory recover OWNER/REPO#NUMBER --until-terminal [--repo DIR] [--policy FILE]\n" +
-      "  factory controller run OWNER/REPO --repo DIR [--max-active-objectives N]\n" +
+      "  factory controller run OWNER/REPO --repo DIR [--max-active-objectives N] [--max-local-workers N] [--max-paid-workers N]\n" +
       "  factory controller install|start|stop|restart|status|uninstall OWNER/REPO --repo DIR\n" +
       "  factory status OWNER/REPO#NUMBER\n" +
       "  factory cancel OWNER/REPO#NUMBER [--reason TEXT]\n" +
+      "  factory priority-fields OWNER/REPO\n" +
       "  factory backends probe",
   );
 }

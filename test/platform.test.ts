@@ -4,9 +4,11 @@ import {
   CircuitBreaker,
   ConcurrencyLimiter,
   ContentCreationPacer,
+  PlatformUnavailableError,
   classifyRefusal,
   isPlatformUnavailable,
 } from "../src/platform.js";
+import { createOctokit } from "../src/github.js";
 
 function err(
   status: number,
@@ -25,6 +27,25 @@ describe("classifyRefusal", () => {
       "x-ratelimit-limit": "5000",
     });
     expect(classifyRefusal(e).kind).toBe("rate_limit");
+  });
+
+  it("classifies GraphQL RATE_LIMITED responses even when quota remains", () => {
+    const reset = Math.floor(Date.now() / 1000) + 120;
+    const refusal = classifyRefusal({
+      status: 403,
+      message: "Something went wrong while executing your query",
+      response: {
+        headers: {
+          "x-ratelimit-remaining": "76",
+          "x-ratelimit-reset": String(reset),
+        },
+        data: { errors: [{ type: "RATE_LIMITED" }] },
+      },
+    });
+    expect(refusal.kind).toBe("rate_limit");
+    if (refusal.kind === "rate_limit") {
+      expect(refusal.retryAfterMs).toBeGreaterThan(60_000);
+    }
   });
 
   it("does not trust a reset time when the quota reports budget remaining", () => {
@@ -95,6 +116,36 @@ describe("classifyRefusal", () => {
     expect(isPlatformUnavailable(new Error("boom"))).toBe(false);
     expect(isPlatformUnavailable(undefined)).toBe(false);
     expect(isPlatformUnavailable(null)).toBe(false);
+  });
+});
+
+describe("GitHub client throttling", () => {
+  it("surfaces quota refusal immediately instead of sleeping inside Octokit", async () => {
+    const notices: string[] = [];
+    const reset = Math.floor(Date.now() / 1000) + 3_600;
+    const requestFetch: typeof globalThis.fetch = async () =>
+      new Response(JSON.stringify({ message: "API rate limit exceeded" }), {
+        status: 403,
+        headers: {
+          "content-type": "application/json",
+          "x-ratelimit-remaining": "0",
+          "x-ratelimit-reset": String(reset),
+        },
+      });
+    const octokit = createOctokit({
+      token: "test-token",
+      owner: "clockgrove",
+      repo: "factory",
+      requestFetch,
+      onThrottle: (message) => notices.push(message),
+    });
+
+    await expect(octokit.request("GET /user")).rejects.toBeInstanceOf(
+      PlatformUnavailableError,
+    );
+    expect(notices).toEqual([
+      expect.stringContaining("yielding to Factory"),
+    ]);
   });
 });
 

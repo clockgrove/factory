@@ -37,6 +37,10 @@ import {
   usesSelfHostedRunner,
 } from "./approval.js";
 import { decodeEventComments, latestSupportedRun } from "./control/receipts.js";
+import {
+  PlatformUnavailableError,
+  classifyRefusal,
+} from "./platform.js";
 import type { FactoryEvent } from "./protocol/events.js";
 
 /** A workflow run parked in `action_required`, awaiting a maintainer's approval. */
@@ -54,6 +58,8 @@ export interface GitHubOptions {
   repo: string;
   /** Called on throttle/abuse events so the loop can log pacing decisions. */
   onThrottle?: (message: string) => void;
+  /** Injectable transport for deterministic client-contract tests. */
+  requestFetch?: typeof globalThis.fetch;
 }
 
 /**
@@ -488,22 +494,32 @@ function factoryEvents(
  */
 export function createOctokit(opts: GitHubOptions): Octokit {
   const notify = opts.onThrottle ?? (() => {});
-  return new FactoryOctokit({
+  const octokit = new FactoryOctokit({
     auth: opts.token,
+    ...(opts.requestFetch ? { request: { fetch: opts.requestFetch } } : {}),
     throttle: {
       onRateLimit: (after: number, o: { method: string; url: string }) => {
-        notify(`rate limit on ${o.method} ${o.url}; retrying in ${after}s`);
-        return true;
+        notify(`rate limit on ${o.method} ${o.url}; yielding to Factory for retry in ${after}s`);
+        return false;
       },
       onSecondaryRateLimit: (
         after: number,
         o: { method: string; url: string },
       ) => {
-        notify(`secondary limit on ${o.method} ${o.url}; retrying in ${after}s`);
-        return true;
+        notify(`secondary limit on ${o.method} ${o.url}; yielding to Factory for retry in ${after}s`);
+        return false;
       },
     },
   });
+  octokit.hook.error("request", async (error: unknown) => {
+    if (error instanceof PlatformUnavailableError) throw error;
+    const refusal = classifyRefusal(error);
+    if (refusal.kind !== "not_refusal") {
+      throw new PlatformUnavailableError(refusal, error);
+    }
+    throw error;
+  });
+  return octokit;
 }
 
 /**

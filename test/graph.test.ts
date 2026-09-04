@@ -118,9 +118,7 @@ describe("validateGraph", () => {
 
   it("accepts a resolvable dependency edge", () => {
     expect(() =>
-      validateGraph(
-        objective([workItem({ id: "a" }), workItem({ id: "b", dependsOn: ["a"] })]),
-      ),
+      validateGraph(objective([workItem({ id: "a" }), workItem({ id: "b", dependsOn: ["a"] })])),
     ).not.toThrow();
   });
 
@@ -148,21 +146,21 @@ describe("validateGraph", () => {
   });
 
   it("rejects duplicate ids", () => {
-    expect(() =>
-      validateGraph(objective([workItem({ id: "a" }), workItem({ id: "a" })])),
-    ).toThrow(/duplicate/i);
+    expect(() => validateGraph(objective([workItem({ id: "a" }), workItem({ id: "a" })]))).toThrow(
+      /duplicate/i,
+    );
   });
 
   it("rejects an unresolvable dependsOn", () => {
-    expect(() =>
-      validateGraph(objective([workItem({ id: "a", dependsOn: ["ghost"] })])),
-    ).toThrow(/unknown id/i);
+    expect(() => validateGraph(objective([workItem({ id: "a", dependsOn: ["ghost"] })]))).toThrow(
+      /unknown id/i,
+    );
   });
 
   it("rejects self-dependency", () => {
-    expect(() =>
-      validateGraph(objective([workItem({ id: "a", dependsOn: ["a"] })])),
-    ).toThrow(/itself/i);
+    expect(() => validateGraph(objective([workItem({ id: "a", dependsOn: ["a"] })]))).toThrow(
+      /itself/i,
+    );
   });
 
   it("rejects a dependency cycle", () => {
@@ -193,10 +191,12 @@ describe("addScopeSerializationEdges", () => {
   });
 
   it("preserves an existing dependency path in either direction", () => {
-    const normalized = addScopeSerializationEdges(objective([
-      workItem({ id: "a", scope: ["src/"], dependsOn: ["b"] }),
-      workItem({ id: "b", scope: ["src/slugify.ts"] }),
-    ]));
+    const normalized = addScopeSerializationEdges(
+      objective([
+        workItem({ id: "a", scope: ["src/"], dependsOn: ["b"] }),
+        workItem({ id: "b", scope: ["src/slugify.ts"] }),
+      ]),
+    );
 
     expect(normalized.workItems[0]?.dependsOn).toEqual(["b"]);
     expect(normalized.workItems[1]?.dependsOn).toEqual([]);
@@ -261,10 +261,7 @@ describe("GraphApplier.apply", () => {
     const applier = new GraphApplier({ writer });
 
     const created = await applier.apply(
-      objective([
-        workItem({ id: "a" }),
-        workItem({ id: "b", dependsOn: ["a"] }),
-      ]),
+      objective([workItem({ id: "a" }), workItem({ id: "b", dependsOn: ["a"] })]),
       ctx,
     );
 
@@ -280,10 +277,7 @@ describe("GraphApplier.apply", () => {
   it("repairs a partial graph without duplicating issues or dependency edges", async () => {
     const writer = new FakeGraphWriter();
     const applier = new GraphApplier({ writer });
-    const graph = objective([
-      workItem({ id: "a" }),
-      workItem({ id: "b", dependsOn: ["a"] }),
-    ]);
+    const graph = objective([workItem({ id: "a" }), workItem({ id: "b", dependsOn: ["a"] })]);
     const digest = compiledGraphDigest(graph);
     const created = await applier.apply(graph, {
       ...ctx,
@@ -299,10 +293,7 @@ describe("GraphApplier.apply", () => {
     const noWrites = new FakeGraphWriter();
     await new GraphApplier({ writer: noWrites }).apply(graph, {
       ...ctx,
-      existingWorkItems: [
-        existingItem(graph, 0, 90),
-        existingItem(graph, 1, 91, [90]),
-      ],
+      existingWorkItems: [existingItem(graph, 0, 90), existingItem(graph, 1, 91, [90])],
     });
     expect(noWrites.calls).toEqual([]);
   });
@@ -314,10 +305,12 @@ describe("GraphApplier.apply", () => {
     ]);
     const changed = { ...existingItem(graph, 0, 90), title: "Edited by hand" };
     const writer = new FakeGraphWriter();
-    await expect(new GraphApplier({ writer }).apply(graph, {
-      ...ctx,
-      existingWorkItems: [changed],
-    })).rejects.toThrow(/differs from the durable graph/i);
+    await expect(
+      new GraphApplier({ writer }).apply(graph, {
+        ...ctx,
+        existingWorkItems: [changed],
+      }),
+    ).rejects.toThrow(/differs from the durable graph/i);
     expect(writer.calls).toEqual([]);
   });
 
@@ -353,9 +346,9 @@ describe("GraphApplier.apply", () => {
     const writer = new FakeGraphWriter({ createWorkItemIssue: rateLimitError() });
     const applier = new GraphApplier({ writer });
 
-    await expect(
-      applier.apply(objective([workItem({ id: "a" })]), ctx),
-    ).rejects.toBeInstanceOf(PlatformUnavailableError);
+    await expect(applier.apply(objective([workItem({ id: "a" })]), ctx)).rejects.toBeInstanceOf(
+      PlatformUnavailableError,
+    );
   });
 
   it("reports exhausted() once the circuit trips maxOpens times", async () => {
@@ -371,9 +364,9 @@ describe("GraphApplier.apply", () => {
     });
     const applier = new GraphApplier({ writer, circuitBreaker: breaker });
 
-    await expect(
-      applier.apply(objective([workItem({ id: "a" })]), ctx),
-    ).rejects.toBeInstanceOf(PlatformUnavailableError);
+    await expect(applier.apply(objective([workItem({ id: "a" })]), ctx)).rejects.toBeInstanceOf(
+      PlatformUnavailableError,
+    );
 
     expect(applier.exhausted()).toBe(true);
     vi.useRealTimers();

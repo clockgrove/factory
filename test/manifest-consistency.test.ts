@@ -47,9 +47,9 @@ describe("plugin manifest consistency", () => {
       command: "node",
       args: ["${CLAUDE_PLUGIN_ROOT}/dist/mcp-server.js"],
     });
-    expect(
-      claudeMcp.mcpServers.factory.args[0].replace("${CLAUDE_PLUGIN_ROOT}", ""),
-    ).toBe(mcp.mcpServers.factory.args[0].replace("${PLUGIN_ROOT}", ""));
+    expect(claudeMcp.mcpServers.factory.args[0].replace("${CLAUDE_PLUGIN_ROOT}", "")).toBe(
+      mcp.mcpServers.factory.args[0].replace("${PLUGIN_ROOT}", ""),
+    );
     expect(existsSync(new URL("../dist/mcp-server.js", import.meta.url))).toBe(true);
     expect(existsSync(new URL("../dist/factory.js", import.meta.url))).toBe(true);
   });
@@ -64,9 +64,7 @@ describe("plugin manifest consistency", () => {
     expect(skills).toEqual(["director", "objective-compilation"]);
     expect(codex.skills).toBe("./skills/");
     for (const skill of skills) {
-      expect(
-        existsSync(new URL(`../skills/${skill}/SKILL.md`, import.meta.url)),
-      ).toBe(true);
+      expect(existsSync(new URL(`../skills/${skill}/SKILL.md`, import.meta.url))).toBe(true);
     }
     expect(agent.skills).toBeUndefined();
     expect(claude.skills).toBeUndefined();
@@ -80,7 +78,7 @@ describe("plugin manifest consistency", () => {
       source: {
         source: "url",
         url: "https://github.com/clockgrove/factory.git",
-        ref: "main",
+        ref: `v${pkg.version}`,
       },
       policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
       category: "Productivity",
@@ -96,9 +94,9 @@ describe("plugin manifest consistency", () => {
     }
     for (const field of ["composerIcon", "logo"]) {
       expect(codex.interface[field]).toMatch(/^\.\//);
-      expect(
-        existsSync(new URL(`../${codex.interface[field].slice(2)}`, import.meta.url)),
-      ).toBe(true);
+      expect(existsSync(new URL(`../${codex.interface[field].slice(2)}`, import.meta.url))).toBe(
+        true,
+      );
     }
   });
 });

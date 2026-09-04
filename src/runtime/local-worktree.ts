@@ -129,10 +129,7 @@ export async function seedLocalWorktree(
   const patchPath = join(worktree.root, "retry-checkpoint.patch");
   await writeFile(patchPath, verified.patch, { mode: 0o600 });
   try {
-    await git(
-      worktree.path,
-      ["apply", "--binary", "--whitespace=error-all", patchPath],
-    );
+    await git(worktree.path, ["apply", "--binary", "--whitespace=error-all", patchPath]);
   } finally {
     await rm(patchPath, { force: true });
   }

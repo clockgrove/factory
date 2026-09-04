@@ -4,7 +4,7 @@ Factory's design rests on how GitHub's coding agent and API actually behave, not
 documented to behave. This document records what was measured, so that every design consequence in
 [`DESIGN.md`](DESIGN.md) can be traced to an observation rather than an assumption.
 
-## v2 control-plane and local-harness conformance (September 2026)
+## Control-plane and local-harness conformance (September 2026)
 
 - GitHub accepts custom refs under `refs/clockgrove-factory/...` through the Git data APIs.
 - REST `PATCH /git/refs` with `force: false` is **not** compare-and-swap for custom refs: a sibling
@@ -16,6 +16,11 @@ documented to behave. This document records what was measured, so that every des
   installed CLI also accepts the release's explicit no-approval, disabled-web-search, command-network,
   network-proxy, and domain-policy overrides. Factory's argument-contract tests pin their exact
   composition so an empty Work Packet network list cannot silently become unrestricted egress.
+- The pinned official `@openai/codex-sdk` exposes programmatic thread creation, streamed events,
+  structured output, sandbox/approval/network options, usage, and abort signals. Factory's injected
+  SDK contract tests prove option mapping, isolation, bounded event handling, artifact collection,
+  cancellation, and cleanup without presenting the fake client as live Codex evidence. The installed
+  default SDK route remains part of the live environment and adversarial release gates.
 - The optional Daytona SDK exposes ephemeral sandboxes, TTL, domain allow-listing, named secrets,
   labels, file transfer, process execution, and deletion. The optional Vercel Sandbox SDK exposes
   non-persistent microVMs, hard timeouts, network policy/header injection, tags, file transfer,
@@ -24,9 +29,9 @@ documented to behave. This document records what was measured, so that every des
 
 ## Documented native-stack contract (not yet live conformance)
 
-GitHub's stacked-pull-request surface is a public preview, so Factory isolates it behind a
-capability probe and the pinned `2026-03-10` API version. The following are current documented
-contracts, not claims from Factory's disposable-repository matrix:
+Factory isolates GitHub's versioned stacked-pull-request surface behind a capability probe and pins
+the `2026-03-10` API version. The following are current documented contracts, not claims from
+Factory's disposable-repository matrix:
 
 - The [Stacks REST API](https://docs.github.com/en/rest/pulls/stacks) creates a stack from pull
   request numbers ordered bottom-to-top, and every higher PR base ref must match the head ref below.
@@ -41,12 +46,31 @@ contracts, not claims from Factory's disposable-repository matrix:
   Factory therefore never invents one: it waits with durable invalidation evidence for the observed
   base/head chain to become linear, and escalates on its existing bounded Objective deadline.
 
-Native stacks remain an unclaimed release surface until the live gate in
-[`CONFORMANCE.md`](CONFORMANCE.md) exercises these preview behaviors with disposable branches.
+Native stacks are part of Factory's product contract. The live gate in [`CONFORMANCE.md`](CONFORMANCE.md)
+must exercise these behaviors with disposable branches before publication. The remaining implementation
+waves are tracked in [`DELIVERY-PLAN.md`](DELIVERY-PLAN.md).
 
-The remainder of this document records the original GitHub coding-agent measurements. Those findings
-still govern the explicit `github-copilot/github-managed` compatibility backend; they are no longer
-Factory's default execution architecture.
+## Documented managed-agent contract (not yet live conformance)
+
+GitHub documents both [Copilot cloud agent](https://docs.github.com/en/copilot/concepts/agents/coding-agent/about-coding-agent)
+and [OpenAI Codex](https://docs.github.com/en/copilot/concepts/agents/openai-codex) as coding agents
+that can receive repository work and produce a branch or pull request. GitHub also documents
+[third-party coding-agent assignment](https://docs.github.com/en/copilot/concepts/agents/about-third-party-coding-agents)
+through issues and its agent surfaces. These are capability claims from GitHub, not evidence that
+both agents are enabled or assignable in a particular adopter repository.
+
+Factory therefore discovers assignable actors from the repository and requires one unambiguous,
+provider-published identity before launch. GitHub documents the Copilot suggested-actor login
+`copilot-swe-agent`, but its Codex documentation currently gives the GitHub App display name
+`openai code agent` without a stable suggested-actor login or app identity. Factory pins the former
+and keeps the latter profile fail-closed; a display name is not authorization evidence. The live
+gate must record a stable Codex identity and then exercise both GitHub Copilot and OpenAI Codex
+through the same Work Item, session-budget, exact-head collection, independent-validation, and
+recovery contract.
+
+The remainder of this document records the original GitHub coding-agent experiments, conducted during
+Factory's development rather than for a shipped product generation. Those findings inform the explicit
+`github-copilot/github-managed` backend; local execution is Factory's default architecture.
 
 The measurements were taken in a disposable repository, before implementation, across three waves of
 trivial independent tasks. Each task touched a distinct file, so any observed serialization would be

@@ -1,5 +1,6 @@
 import type { FactoryEvent } from "../protocol/events.js";
 import { deduplicateFactoryEvents } from "../control/receipts.js";
+import { isManagedAgentBackendId, isSandboxBackendId } from "../protocol/policy.js";
 
 export type CapacityPhase = "execution" | "validation";
 export type AdmissionClass = "local" | "remote-required" | "burst";
@@ -168,10 +169,7 @@ export class CapacityLedger {
   }
 
   /** Replace durable observations while retaining commits not visible yet. */
-  reconcile(
-    generation: number,
-    durable: readonly CapacityReservation[],
-  ): CapacitySnapshot {
+  reconcile(generation: number, durable: readonly CapacityReservation[]): CapacitySnapshot {
     if (!Number.isSafeInteger(generation) || generation <= this.#generation) {
       throw new Error(
         `capacity generation ${generation} is stale; current generation is ${this.#generation}`,
@@ -202,10 +200,7 @@ export class CapacityLedger {
   }
 
   /** Merge one Objective's fresh GitHub reconstruction into the repository view. */
-  reconcileObjective(
-    objective: number,
-    durable: readonly CapacityReservation[],
-  ): CapacitySnapshot {
+  reconcileObjective(objective: number, durable: readonly CapacityReservation[]): CapacitySnapshot {
     const prior = this.#durableByObjective.get(objective) ?? new Set<string>();
     const observed = new Set<string>();
     let changed = this.#generation === 0;
@@ -275,8 +270,7 @@ export class CapacityLedger {
     if (
       input.local &&
       limits.objectiveLocalMax?.objective === input.objective &&
-      objectiveReservations.filter((reservation) => reservation.local).length +
-        1 >
+      objectiveReservations.filter((reservation) => reservation.local).length + 1 >
         limits.objectiveLocalMax.max
     ) {
       return reject("local-capacity");
@@ -300,9 +294,9 @@ export class CapacityLedger {
     }
     if (
       limits.objectiveBackendMaxParallel?.objective === input.objective &&
-      objectiveReservations.filter(
-        (reservation) => reservation.backendId === input.backendId,
-      ).length + 1 >
+      objectiveReservations.filter((reservation) => reservation.backendId === input.backendId)
+        .length +
+        1 >
         (limits.objectiveBackendMaxParallel.limits[input.backendId] ??
           limits.objectiveMaxParallel?.max ??
           limits.maxParallel)
@@ -387,13 +381,7 @@ export interface DurableCapacityInput {
 export type CapacityReceipt = Extract<FactoryEvent, { kind: "capacity" }>;
 
 function capacityReceiptKey(event: CapacityReceipt): string {
-  return [
-    event.objective,
-    event.workItem,
-    event.attempt,
-    event.phase,
-    event.backend,
-  ].join(":");
+  return [event.objective, event.workItem, event.attempt, event.phase, event.backend].join(":");
 }
 
 /**
@@ -434,7 +422,7 @@ export function deriveCapacityReservations(
     const events = deduplicateFactoryEvents([...input.events]).sort(
       (left, right) => left.sequence - right.sequence,
     );
-    const attempts = new Map<number, Extract<FactoryEvent, { kind: "attempt" }>[]>() ;
+    const attempts = new Map<number, Extract<FactoryEvent, { kind: "attempt" }>[]>();
     for (const event of events) {
       if (event.kind !== "attempt" || event.workItem !== input.workItem) continue;
       const values = attempts.get(event.attempt) ?? [];
@@ -460,9 +448,7 @@ export function deriveCapacityReservations(
         reserved.admissionClass === "local" ||
         (reserved.admissionClass === undefined &&
           (input.isLocalBackend?.(reserved.backend) ??
-            (!reserved.backend.includes("daytona") &&
-              !reserved.backend.includes("vercel-sandbox") &&
-              reserved.backend !== "github-copilot/github-managed")));
+            (!isSandboxBackendId(reserved.backend) && !isManagedAgentBackendId(reserved.backend))));
       const reservation: CapacityReservation = {
         key: capacityReservationKey({
           objective: input.objective,
@@ -487,20 +473,11 @@ export function deriveCapacityReservations(
       result.set(reservation.key, reservation);
     }
 
-    const validations = events.filter(
-      (event): event is Extract<FactoryEvent, { kind: "capacity" }> =>
-        event.kind === "capacity" &&
-        event.workItem === input.workItem &&
-        event.phase === "validation",
-    );
     for (const reserved of unreconciledCapacityReservations(events).filter(
-      (event) =>
-        event.workItem === input.workItem && event.phase === "validation",
+      (event) => event.workItem === input.workItem && event.phase === "validation",
     )) {
       const attemptEvents = attempts.get(reserved.attempt) ?? [];
-      const terminalAttempt = attemptEvents.some((event) =>
-        executionTerminal.has(event.event),
-      );
+      const terminalAttempt = attemptEvents.some((event) => executionTerminal.has(event.event));
       const validationFinished = events.some(
         (event) =>
           event.kind === "validation" &&

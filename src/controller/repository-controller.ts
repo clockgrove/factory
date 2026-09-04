@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { RepositoryAdmission } from "./repository-controls.js";
-import { RepositoryControls } from "./repository-controls.js";
+import type { RepositoryControls } from "./repository-controls.js";
 import {
   DEFAULT_REPOSITORY_LEASE_RENEWAL_INTERVAL_MS,
   RepositoryLeaseLostError,
@@ -10,6 +10,7 @@ import {
 import {
   createRepositorySupervisorResources,
   FactorySupervisor,
+  type ControllerObservation,
   type RepositorySupervisorResources,
   type SupervisorOptions,
   type SupervisorResult,
@@ -25,6 +26,7 @@ import {
   parseControllerPolicy,
   parseRunPolicy,
 } from "../protocol/policy.js";
+import { PlatformUnavailableError } from "../platform.js";
 
 export interface DiscoveredObjective {
   number: number;
@@ -68,20 +70,15 @@ export class RepositoryController {
     this.#pollIntervalMs = options.pollIntervalMs ?? 60_000;
     this.#signal = options.signal;
     this.#onError = options.onError ?? (() => {});
-    this.#resources =
-      options.resources ?? createRepositorySupervisorResources();
+    this.#resources = options.resources ?? createRepositorySupervisorResources();
   }
 
   async reconcileOnce(): Promise<number> {
     const objectives = [...(await this.#source.discover())]
-      .filter(
-        (item, i, all) => all.findIndex((x) => x.number === item.number) === i,
-      )
+      .filter((item, i, all) => all.findIndex((x) => x.number === item.number) === i)
       .sort((a, b) => a.number - b.number);
     if (objectives.length === 0) return 0;
-    const ordered = objectives.map(
-      (_, i) => objectives[(this.#cursor + i) % objectives.length]!,
-    );
+    const ordered = objectives.map((_, i) => objectives[(this.#cursor + i) % objectives.length]!);
     this.#cursor = (this.#cursor + 1) % objectives.length;
     let admitted = 0;
     for (const objective of ordered) {
@@ -155,6 +152,8 @@ export interface GitHubRepositoryControllerOptions {
   signal?: AbortSignal;
   onError?: (error: unknown, objective: number) => void;
   resources?: RepositorySupervisorResources;
+  /** Deterministic clock seam for transient retry-backoff tests. */
+  nowMs?: () => number;
 }
 
 /** The production-shaped repository loop. Discovery is GitHub-backed and the
@@ -164,24 +163,21 @@ export class GitHubRepositoryController {
   readonly #options: GitHubRepositoryControllerOptions;
   readonly #resources: RepositorySupervisorResources;
   readonly #running = new Map<number, Promise<void>>();
+  readonly #retryNotBefore = new Map<number, number>();
   #cursor = 0;
 
   constructor(options: GitHubRepositoryControllerOptions) {
     this.#options = options;
     if (!Number.isInteger(options.capacity ?? 1) || (options.capacity ?? 1) < 1)
       throw new Error("capacity must be positive");
-    this.#resources =
-      options.resources ?? createRepositorySupervisorResources();
+    this.#resources = options.resources ?? createRepositorySupervisorResources();
   }
 
   async reconcileOnce(): Promise<number> {
-    const discovered = [
-      ...(await this.#options.store.discoverObjectiveActivations()),
-    ]
+    const discovered = [...(await this.#options.store.discoverObjectiveActivations())]
       .filter(
         (item, index, all) =>
-          all.findIndex((other) => other.objective === item.objective) ===
-          index,
+          all.findIndex((other) => other.objective === item.objective) === index,
       )
       .sort((a, b) => a.objective - b.objective);
     if (discovered.length === 0) return 0;
@@ -191,18 +187,31 @@ export class GitHubRepositoryController {
     this.#cursor = (this.#cursor + 1) % discovered.length;
     let started = 0;
     for (const activation of ordered) {
-      if (
-        this.#options.signal?.aborted ||
-        this.#running.size >= (this.#options.capacity ?? 1)
-      )
+      if (this.#options.signal?.aborted || this.#running.size >= (this.#options.capacity ?? 1))
         break;
       if (this.#running.has(activation.objective)) continue;
+      if (
+        (this.#retryNotBefore.get(activation.objective) ?? 0) >
+        (this.#options.nowMs?.() ?? Date.now())
+      ) {
+        continue;
+      }
       const signal = this.#options.signal ?? new AbortController().signal;
       const task = this.#options
         .reconcileObjective(activation, signal, this.#resources)
-        .catch((error) =>
-          (this.#options.onError ?? (() => {}))(error, activation.objective),
-        )
+        .then(() => {
+          this.#retryNotBefore.delete(activation.objective);
+        })
+        .catch((error) => {
+          if (error instanceof PlatformUnavailableError) {
+            const now = this.#options.nowMs?.() ?? Date.now();
+            this.#retryNotBefore.set(
+              activation.objective,
+              now + Math.max(this.#options.pollIntervalMs ?? 60_000, error.retryAfterMs),
+            );
+          }
+          (this.#options.onError ?? (() => {}))(error, activation.objective);
+        })
         .finally(() => this.#running.delete(activation.objective));
       this.#running.set(activation.objective, task);
       started += 1;
@@ -213,10 +222,7 @@ export class GitHubRepositoryController {
   async run(): Promise<void> {
     while (!this.#options.signal?.aborted) {
       await this.reconcileOnce();
-      await interruptibleDelay(
-        this.#options.pollIntervalMs ?? 60_000,
-        this.#options.signal,
-      );
+      await interruptibleDelay(this.#options.pollIntervalMs ?? 60_000, this.#options.signal);
     }
     await this.settle();
   }
@@ -238,6 +244,8 @@ export interface RunRepositoryControllerOptions {
   onStatus?: (message: string) => void;
   /** Outer repository-controller lease check for every Supervisor mutation. */
   repositoryFence?: () => Promise<void>;
+  /** Current repository-controller lease identity for durable observations. */
+  controllerObservation?: () => ControllerObservation;
   /** Injection point for deterministic conformance tests. */
   activationStore?: DurableActivationSource;
   resources?: RepositorySupervisorResources;
@@ -245,6 +253,7 @@ export interface RunRepositoryControllerOptions {
   supervisorFactory?: (
     activation: DurableObjectiveActivation,
     resources: RepositorySupervisorResources,
+    controllerObservation?: () => ControllerObservation,
   ) => {
     run(): Promise<SupervisorResult | void>;
   };
@@ -259,10 +268,8 @@ export function createGitHubRepositoryController(
   const resources =
     options.resources ??
     createRepositorySupervisorResources(options.onStatus, {
-      maxLocalWorkers:
-        options.maxLocalWorkers ?? DEFAULT_CONTROLLER_POLICY.maxLocalWorkers,
-      maxPaidWorkers:
-        options.maxPaidWorkers ?? DEFAULT_CONTROLLER_POLICY.maxPaidWorkers,
+      maxLocalWorkers: options.maxLocalWorkers ?? DEFAULT_CONTROLLER_POLICY.maxLocalWorkers,
+      maxPaidWorkers: options.maxPaidWorkers ?? DEFAULT_CONTROLLER_POLICY.maxPaidWorkers,
     });
   const store =
     options.activationStore ??
@@ -280,9 +287,7 @@ export function createGitHubRepositoryController(
     store,
     resources,
     ...(options.capacity === undefined ? {} : { capacity: options.capacity }),
-    ...(options.pollIntervalMs === undefined
-      ? {}
-      : { pollIntervalMs: options.pollIntervalMs }),
+    ...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
     onError: (error, objective) =>
       options.onStatus?.(
@@ -292,7 +297,7 @@ export function createGitHubRepositoryController(
       shared.fairness.register(activation.objective);
       try {
         const supervisor =
-          options.supervisorFactory?.(activation, shared) ??
+          options.supervisorFactory?.(activation, shared, options.controllerObservation) ??
           new FactorySupervisor({
             token: options.token,
             owner: options.owner,
@@ -300,11 +305,16 @@ export function createGitHubRepositoryController(
             objective: activation.objective,
             repository: options.repository,
             policy: activation.policy,
+            activation: {
+              requestId: activation.requestId,
+              baseSha: activation.baseSha,
+            },
             signal,
             repositoryResources: shared,
             shutdownBehavior: "release-lease",
-            ...(options.repositoryFence
-              ? { repositoryFence: options.repositoryFence }
+            ...(options.repositoryFence ? { repositoryFence: options.repositoryFence } : {}),
+            ...(options.controllerObservation
+              ? { controllerObservation: options.controllerObservation }
               : {}),
             ...(options.onStatus ? { onStatus: options.onStatus } : {}),
           });
@@ -322,18 +332,12 @@ export async function runGitHubRepositoryController(
   await verifyLocalRepository(options.repository, options.owner, options.repo);
   const policy = parseControllerPolicy({
     ...DEFAULT_CONTROLLER_POLICY,
-    ...(options.capacity === undefined
-      ? {}
-      : { maxActiveObjectives: options.capacity }),
+    ...(options.capacity === undefined ? {} : { maxActiveObjectives: options.capacity }),
     ...(options.pollIntervalMs === undefined
       ? {}
       : { pollIntervalSeconds: Math.ceil(options.pollIntervalMs / 1_000) }),
-    ...(options.maxLocalWorkers === undefined
-      ? {}
-      : { maxLocalWorkers: options.maxLocalWorkers }),
-    ...(options.maxPaidWorkers === undefined
-      ? {}
-      : { maxPaidWorkers: options.maxPaidWorkers }),
+    ...(options.maxLocalWorkers === undefined ? {} : { maxLocalWorkers: options.maxLocalWorkers }),
+    ...(options.maxPaidWorkers === undefined ? {} : { maxPaidWorkers: options.maxPaidWorkers }),
   });
   const resources =
     options.resources ??
@@ -351,7 +355,7 @@ export async function runGitHubRepositoryController(
       ...(options.signal ? { signal: options.signal } : {}),
       ...(options.onStatus ? { onStatus: options.onStatus } : {}),
     },
-    async ({ store, signal, fence }) =>
+    async ({ store, signal, fence, observation }) =>
       createGitHubRepositoryController({
         ...options,
         capacity: policy.maxActiveObjectives,
@@ -360,6 +364,7 @@ export async function runGitHubRepositoryController(
         resources,
         activationStore: store,
         repositoryFence: fence,
+        controllerObservation: observation,
       }).run(),
   );
 }
@@ -375,14 +380,9 @@ export async function runForegroundObjective(
   const policy = parseControllerPolicy({
     ...DEFAULT_CONTROLLER_POLICY,
     maxActiveObjectives: 1,
-    maxLocalWorkers: Math.min(
-      runPolicy.maxParallel,
-      scheduling.capacity.local.maxWorkers,
-    ),
+    maxLocalWorkers: Math.min(runPolicy.maxParallel, scheduling.capacity.local.maxWorkers),
     maxPaidWorkers:
-      runPolicy.allowedPaidBackends.length === 0
-        ? 0
-        : scheduling.burst.maxCloudParallel,
+      runPolicy.allowedPaidBackends.length === 0 ? 0 : scheduling.burst.maxCloudParallel,
   });
   const resources =
     options.repositoryResources ??
@@ -400,13 +400,14 @@ export async function runForegroundObjective(
       ...(options.signal ? { signal: options.signal } : {}),
       ...(options.onStatus ? { onStatus: options.onStatus } : {}),
     },
-    ({ signal, fence }) =>
+    ({ signal, fence, observation }) =>
       new FactorySupervisor({
         ...options,
         policy: runPolicy,
         signal,
         repositoryResources: resources,
         repositoryFence: fence,
+        controllerObservation: observation,
       }).run(),
   );
 }
@@ -425,6 +426,7 @@ interface RepositoryOwnership {
   store: GitHubControlStore;
   signal: AbortSignal;
   fence: () => Promise<void>;
+  observation: () => ControllerObservation;
 }
 
 async function withRepositoryOwnership<T>(
@@ -471,16 +473,11 @@ async function withRepositoryOwnership<T>(
   };
   const renewal = (async () => {
     while (!signal.aborted) {
-      await interruptibleDelay(
-        DEFAULT_REPOSITORY_LEASE_RENEWAL_INTERVAL_MS,
-        signal,
-      );
+      await interruptibleDelay(DEFAULT_REPOSITORY_LEASE_RENEWAL_INTERVAL_MS, signal);
       if (signal.aborted) return;
       try {
         lease = await leases.renew(lease);
-        options.onStatus?.(
-          `repository lease renewed at sequence ${lease.sequence}`,
-        );
+        options.onStatus?.(`repository lease renewed at sequence ${lease.sequence}`);
       } catch (error) {
         renewalFailure = error;
         options.onStatus?.(
@@ -492,8 +489,15 @@ async function withRepositoryOwnership<T>(
     }
   })();
 
+  const observation = (): ControllerObservation => ({
+    controllerId: lease.controllerId,
+    epoch: lease.epoch,
+    expiresAt: lease.expiresAt.toISOString(),
+    controllerPolicyDigest: lease.policyDigest,
+  });
+
   try {
-    const result = await operation({ store, signal, fence });
+    const result = await operation({ store, signal, fence, observation });
     if (renewalFailure) throw renewalFailure;
     return result;
   } finally {

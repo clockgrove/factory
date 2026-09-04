@@ -2,33 +2,95 @@
   "name": "@clockgrove/factory",
   "version": "2.0.26",
   "description": "GitHub-backed, local-first unattended software factory.",
+  "keywords": [
+    "ai-agents",
+    "codex",
+    "github",
+    "software-factory"
+  ],
+  "homepage": "https://github.com/clockgrove/factory#readme",
+  "bugs": {
+    "url": "https://github.com/clockgrove/factory/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/clockgrove/factory.git"
+  },
   "license": "MIT",
   "type": "module",
+  "bin": {
+    "factory": "dist/factory.js"
+  },
+  "exports": {
+    "./package.json": "./package.json",
+    "./schemas/*.json": "./schemas/*.json"
+  },
+  "files": [
+    ".agents/plugins/marketplace.json",
+    ".claude-plugin/plugin.json",
+    ".codex-plugin/plugin.json",
+    ".github/plugin/marketplace.json",
+    ".mcp.json",
+    "CHANGELOG.md",
+    "SECURITY.md",
+    "SUPPORT.md",
+    "THIRD_PARTY_NOTICES.txt",
+    "assets/",
+    "dist/",
+    "docs/",
+    "mcp.json",
+    "plugin.json",
+    "schemas/",
+    "skills/"
+  ],
   "engines": {
     "node": ">=20"
   },
+  "publishConfig": {
+    "access": "public",
+    "tag": "latest"
+  },
+  "packageManager": "npm@11.19.0",
   "scripts": {
-    "build": "esbuild src/cli.ts --bundle --minify --platform=node --format=esm --target=node20 --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" --outfile=dist/factory.js && esbuild src/mcp-server.ts --bundle --minify --platform=node --format=esm --target=node20 --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" --outfile=dist/mcp-server.js",
+    "build": "node scripts/build.mjs",
+    "format": "biome format --write src test scripts package.json biome.json vitest.config.ts vitest.live.config.ts",
+    "format:check": "biome format src test scripts package.json biome.json vitest.config.ts vitest.live.config.ts",
+    "lint": "biome lint --error-on-warnings src test scripts",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
-    "verify:package": "npm run build && node scripts/verify-package.mjs",
-    "verify:release": "npm run typecheck && npm test && npm run verify:package && npm audit --omit=dev"
+    "verify:dist": "node scripts/verify-dist.mjs",
+    "verify:live:daytona": "vitest run --config vitest.live.config.ts test/daytona-live.test.ts",
+    "verify:live:managed": "vitest run --config vitest.live.config.ts test/github-managed-live.test.ts",
+    "verify:live:stacks": "vitest run --config vitest.live.config.ts test/github-stacks-live.test.ts",
+    "verify:npm": "node scripts/verify-npm-package.mjs",
+    "verify:package": "node scripts/verify-package.mjs",
+    "verify:schemas": "node scripts/validate-schemas.mjs",
+    "release:artifacts": "node scripts/create-release-artifacts.mjs",
+    "release:publish": "npm run verify:publish && node scripts/publish-release.mjs",
+    "verify:publish": "npm run verify:release && node scripts/verify-publish-readiness.mjs && npm run release:artifacts",
+    "verify:release": "npm run typecheck && npm run lint && npm run format:check && npm run test:coverage && npm run verify:schemas && npm run verify:dist && npm run verify:package && npm run verify:npm && npm audit"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@openai/codex-sdk": "0.153.2"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.12",
     "@daytona/sdk": "^0.207.1",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@octokit/core": "^6.1.4",
     "@octokit/plugin-paginate-rest": "^11.4.0",
     "@octokit/plugin-retry": "^7.1.2",
     "@octokit/plugin-throttling": "^9.3.2",
-    "@vercel/sandbox": "^3.2.1",
-    "zod": "^3.25.76"
-  },
-  "devDependencies": {
     "@types/node": "^22.10.5",
+    "@vitest/coverage-v8": "4.1.11",
+    "@vercel/sandbox": "^3.2.1",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
     "esbuild": "^0.28.2",
     "typescript": "^5.7.3",
-    "vitest": "^4.1.11"
+    "vitest": "^4.1.11",
+    "zod": "^3.25.76"
   },
   "allowScripts": {
     "esbuild@0.28.2": true

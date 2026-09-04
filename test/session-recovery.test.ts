@@ -1,14 +1,31 @@
 import { expect, it, vi } from "vitest";
 
-import type {
-  AttemptContext,
-  BackendHandle,
-} from "../src/execution/backend.js";
+import type { AttemptContext, BackendHandle } from "../src/execution/backend.js";
 import {
+  canonicalRepositoryIdentity,
   durableAttemptId,
   recoverDurableSession,
   type DurableSessionIdentity,
 } from "../src/execution/session.js";
+
+it("namespaces attempt identities by canonical repository", () => {
+  const { context } = recoveryFixture();
+  const otherRepository = {
+    ...context,
+    repository: "example/another-repository",
+  };
+  expect(durableAttemptId(context)).toBe(
+    durableAttemptId({ ...context, repository: "ClockGrove/Factory" }),
+  );
+  expect(durableAttemptId(context)).not.toBe(durableAttemptId(otherRepository));
+  expect(canonicalRepositoryIdentity(" ClockGrove/Factory ")).toBe("clockgrove/factory");
+});
+
+it("fails closed when an attempt has no repository namespace", () => {
+  const { context } = recoveryFixture();
+  const { repository: _repository, ...unscoped } = context;
+  expect(() => durableAttemptId(unscoped as AttemptContext)).toThrow(/OWNER\/REPO/);
+});
 
 function recoveryFixture(): {
   context: AttemptContext;
@@ -16,6 +33,7 @@ function recoveryFixture(): {
   handle: BackendHandle;
 } {
   const context = {
+    repository: "clockgrove/factory",
     runId: "run",
     objective: 1,
     workItem: 2,
@@ -34,6 +52,7 @@ function recoveryFixture(): {
     handle,
     identity: {
       attemptId: durableAttemptId(context),
+      repository: context.repository,
       backendId: handle.backendId,
       resourceId: handle.resourceId,
       threadId: "thread",
@@ -88,11 +107,10 @@ it("rejects a mismatched fence before resume or reconciliation", async () => {
   const reconcile = vi.fn();
 
   await expect(
-    recoverDurableSession(
-      { ...context, directorEpoch: context.directorEpoch + 1 },
-      identity,
-      { resume, reconcile },
-    ),
+    recoverDurableSession({ ...context, directorEpoch: context.directorEpoch + 1 }, identity, {
+      resume,
+      reconcile,
+    }),
   ).rejects.toThrow("does not match the fenced attempt");
   expect(resume).not.toHaveBeenCalled();
   expect(reconcile).not.toHaveBeenCalled();

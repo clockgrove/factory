@@ -2,7 +2,7 @@
 
 Date: 2026-09-03
 
-Status: accepted for protocol v2
+Status: accepted
 
 ## Context
 
@@ -18,14 +18,22 @@ accepted the run policy.
 
 ## Decision
 
-One v2 run has exactly one content-addressed compiled graph. Factory validates every Work Item against
+Each run has exactly one content-addressed compiled graph. Factory validates every Work Item against
 the immutable run policy and available backend capabilities before persisting that graph or creating
 the first sub-issue. It then stores the full graph under an immutable per-run custom ref and records
 its digest, blob OID, ref, and size on the Objective.
 
 After persistence, recovery only replays that exact graph to repair missing sub-issues or dependency
-edges. A retry may receive bounded, sanitized evidence from an earlier attempt, but it cannot change
-the Work Item's scope, dependency position, trust, credentials, backend permissions, or budget.
+edges until graph application completes. The completed application is sealed under a second
+immutable ref that binds each compiler ID to one GitHub issue node ID and issue number and is itself
+bound to the compiled-graph commit. Its content-addressed blob is staged first; a run-actor-authenticated
+Objective receipt then names its exact graph digest, size, ref, and blob OID before the ref is created.
+This ordering rejects an unauthenticated pre-created ref while recovering a lost comment or ref
+response without guessing. No execution is admitted before the receipt and projection agree. On
+every later read, exact cardinality, issue bindings, rendered bodies, titles, metadata, and blocker
+edges must still match. A retry may receive bounded, sanitized evidence from an earlier attempt, but
+it cannot change the Work Item's scope, dependency position, trust, credentials, backend
+permissions, or budget.
 
 If the graph is structurally invalid, no GitHub issue is written. If the durable graph becomes
 inadequate or execution exhausts its bounded attempts, Factory escalates with evidence. Creating a
@@ -37,6 +45,7 @@ run.
 - Crash recovery is deterministic and never needs a model call.
 - Existing issue and attempt history keeps one auditable meaning.
 - Factory can safely repair a response-lost graph write without duplicating valid work.
-- Protocol v2 deliberately does not claim autonomous graph replacement. Safe unattended replanning
+- A moved or replaced sub-issue cannot inherit another compiler ID's receipts after restart.
+- Factory does not replace an active graph autonomously. Safe unattended replanning
   would require versioned graph revisions, rules for superseding issue and attempt history, new budget
   authorization, and a migration protocol. That is a future protocol change, not a release shortcut.

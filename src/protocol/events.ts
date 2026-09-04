@@ -1,6 +1,8 @@
 import { z } from "zod";
 
 import { RunPolicySchema } from "./policy.js";
+import { ReportedModelUsageSchema } from "./model-usage.js";
+export { ReportedModelUsageSchema, type ReportedModelUsage } from "./model-usage.js";
 import {
   MAX_PERSISTED_EVENT_BYTES,
   PROTOCOL_V2,
@@ -32,15 +34,13 @@ const RunStarted = Common.extend({
   baseBranch: boundedText(500),
   policy: RunPolicySchema,
   policyDigest: sha256Digest,
+  activationRequestId: safeId.optional(),
+  baseSha: gitSha.optional(),
 });
 
 const RunTerminal = Common.extend({
   kind: z.literal("run"),
-  event: z.enum([
-    "FactoryRunCompleted",
-    "FactoryRunCancelled",
-    "FactoryRunEscalated",
-  ]),
+  event: z.enum(["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"]),
   reason: boundedText(8_000).optional(),
 });
 
@@ -65,6 +65,16 @@ const ActivationRequested = Common.extend({
   controllerProtocolMax: boundedText(80),
 });
 
+const ActivationRejected = Common.extend({
+  kind: z.literal("run"),
+  event: z.literal("ActivationRejected"),
+  activationRequestId: safeId,
+  requestedBy: boundedText(160),
+  baseSha: gitSha,
+  policyDigest: sha256Digest,
+  reason: boundedText(8_000),
+});
+
 const RunControlRequested = Common.extend({
   kind: z.literal("run"),
   event: z.enum([
@@ -78,16 +88,29 @@ const RunControlRequested = Common.extend({
   reason: boundedText(8_000).optional(),
 });
 
-const WorkItemControlRequested = Common.extend({
+const RunControlAcknowledged = Common.extend({
   kind: z.literal("run"),
-  event: z.enum(["WorkItemRetryRequested", "WorkItemPriorityChanged"]),
+  event: z.enum(["RunPauseAcknowledged", "RunDrainCompleted"]),
+  commandRequestId: safeId,
+});
+
+const WorkItemRetryRequested = Common.extend({
+  kind: z.literal("run"),
+  event: z.literal("WorkItemRetryRequested"),
   requestedBy: boundedText(160),
   requestId: safeId,
   workItem: z.number().int().positive(),
-  priorityRank: z.number().int().min(0).max(1_000).optional(),
-  prioritySource: z
-    .enum(["subissue-order", "issue-field", "subissue-order-fallback"])
-    .optional(),
+  reason: boundedText(8_000).optional(),
+});
+
+const WorkItemPriorityChanged = Common.extend({
+  kind: z.literal("run"),
+  event: z.literal("WorkItemPriorityChanged"),
+  requestedBy: boundedText(160),
+  requestId: safeId,
+  workItem: z.number().int().positive(),
+  priorityRank: z.number().int().min(0).max(1_000),
+  prioritySource: z.literal("operator-command"),
   reason: boundedText(8_000).optional(),
 });
 
@@ -138,19 +161,17 @@ const Attempt = Common.extend({
   recoveryEpoch: z.number().int().positive().optional(),
   policyDigest: sha256Digest,
   providerResourceId: boundedText(500).optional(),
+  environmentIdentity: boundedText(500).optional(),
   artifactDigest: sha256Digest.optional(),
   headSha: gitSha.optional(),
   sessionId: boundedText(500).optional(),
   modelProfile: boundedText(160).optional(),
   reportedModelTokens: z.number().int().nonnegative().optional(),
+  reportedModelUsage: ReportedModelUsageSchema.optional(),
   admissionClass: z.enum(["local", "remote-required", "burst"]).optional(),
-  admissionReason: z.enum([
-    "local-capacity",
-    "capability-required",
-    "local-saturated",
-    "queue-delay",
-    "deadline",
-  ]).optional(),
+  admissionReason: z
+    .enum(["local-capacity", "capability-required", "local-saturated", "queue-delay", "deadline"])
+    .optional(),
   requestedCpu: z.number().positive().max(256).optional(),
   requestedMemoryMb: z.number().int().positive().max(1_048_576).optional(),
   priorityRank: z.number().int().min(0).max(1_000).optional(),
@@ -164,7 +185,21 @@ const Attempt = Common.extend({
   availableMemoryMb: z.number().int().nonnegative().max(1_048_576).optional(),
   loadRatio: z.number().nonnegative().finite().optional(),
   memoryUsageRatio: z.number().min(0).max(1).optional(),
+  estimatedCloudTimeSavedMinutes: z.number().nonnegative().finite().optional(),
+  minimumCloudTimeSavedMinutes: z.number().nonnegative().finite().optional(),
   reason: boundedText(8_000).optional(),
+}).superRefine((event, context) => {
+  const usage = event.reportedModelUsage;
+  if (
+    usage?.inputTokens !== undefined &&
+    usage.outputTokens !== undefined &&
+    usage.inputTokens + usage.outputTokens !== event.reportedModelTokens
+  )
+    context.addIssue({
+      code: "custom",
+      path: ["reportedModelTokens"],
+      message: "reported model total must equal input plus output tokens",
+    });
 });
 
 const Scheduling = Common.extend({
@@ -189,6 +224,7 @@ const Scheduling = Common.extend({
       "budget-exhausted",
       "burst-disabled",
       "burst-trigger-pending",
+      "burst-time-saved",
       "burst-priority",
       "path-conflict",
       "exclusive-resource-conflict",
@@ -209,7 +245,7 @@ const Scheduling = Common.extend({
   observedPriorityRank: z.number().int().min(0).max(1_000),
   observedSubIssuePosition: z.number().int().nonnegative(),
   prioritySource: z
-    .enum(["subissue-order", "issue-field", "subissue-order-fallback"])
+    .enum(["subissue-order", "issue-field", "subissue-order-fallback", "operator-command"])
     .optional(),
 });
 
@@ -271,18 +307,14 @@ const Publication = Common.extend({
   invalidatedByHeadSha: gitSha.optional(),
   reason: boundedText(2_000).optional(),
 }).superRefine((event, context) => {
-  const issue = (message: string) =>
-    context.addIssue({ code: z.ZodIssueCode.custom, message });
+  const issue = (message: string) => context.addIssue({ code: z.ZodIssueCode.custom, message });
   if (event.position === 0 && event.parentItemId) {
     issue("bottom publication event cannot name a parent");
   }
   if (event.position > 0 && !event.parentItemId) {
     issue("higher publication event must name its parent");
   }
-  if (
-    event.event === "StackLinked" &&
-    (event.mode !== "native-stacks" || !event.stackNumber)
-  ) {
+  if (event.event === "StackLinked" && (event.mode !== "native-stacks" || !event.stackNumber)) {
     issue("native StackLinked event requires a stack number");
   }
   if (
@@ -307,7 +339,7 @@ const Validation = Common.extend({
   evidenceDigest: sha256Digest,
 });
 
-const Graph = Common.extend({
+const GraphCompiled = Common.extend({
   kind: z.literal("graph"),
   event: z.literal("GraphCompiled"),
   graphDigest: sha256Digest,
@@ -317,12 +349,23 @@ const Graph = Common.extend({
   graphBlobSha: gitSha,
 });
 
+const GraphProjected = Common.extend({
+  kind: z.literal("graph"),
+  event: z.literal("GraphProjected"),
+  graphDigest: sha256Digest,
+  graphSize: z.number().int().positive().max(100),
+  projectionRef: boundedText(500),
+  projectionBlobSha: gitSha,
+});
+
 const Budget = Common.extend({
   kind: z.literal("budget"),
   event: z.enum(["BudgetReserved", "BudgetReconciled"]),
   workItem: z.number().int().positive().optional(),
   attempt: z.number().int().positive().optional(),
   phase: z.enum(["management", "execution", "validation"]),
+  /** Deterministic invocation identity; repeated receipts replace, distinct calls add. */
+  usageId: boundedText(300).optional(),
   unit: z.enum([
     "model_tokens",
     "local_milliseconds",
@@ -331,6 +374,26 @@ const Budget = Common.extend({
     "validation_milliseconds",
   ]),
   amount: z.number().nonnegative().finite(),
+  reportedModelUsage: ReportedModelUsageSchema.optional(),
+}).superRefine((event, context) => {
+  const usage = event.reportedModelUsage;
+  if (!usage) return;
+  if (event.event !== "BudgetReconciled" || event.unit !== "model_tokens")
+    context.addIssue({
+      code: "custom",
+      path: ["reportedModelUsage"],
+      message: "model usage breakdown belongs only to reconciled model-token budgets",
+    });
+  if (
+    usage.inputTokens !== undefined &&
+    usage.outputTokens !== undefined &&
+    usage.inputTokens + usage.outputTokens !== event.amount
+  )
+    context.addIssue({
+      code: "custom",
+      path: ["amount"],
+      message: "model-token budget amount must equal input plus output tokens",
+    });
 });
 
 export const FactoryEventSchema = z.union([
@@ -338,8 +401,11 @@ export const FactoryEventSchema = z.union([
   RunTerminal,
   RunCancellationRequested,
   ActivationRequested,
+  ActivationRejected,
   RunControlRequested,
-  WorkItemControlRequested,
+  RunControlAcknowledged,
+  WorkItemRetryRequested,
+  WorkItemPriorityChanged,
   ControllerObserved,
   Lease,
   Attempt,
@@ -348,7 +414,8 @@ export const FactoryEventSchema = z.union([
   Delivery,
   Publication,
   Validation,
-  Graph,
+  GraphCompiled,
+  GraphProjected,
   Budget,
 ]);
 

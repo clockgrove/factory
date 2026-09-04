@@ -25,11 +25,7 @@ export interface PublicationStore {
       sha: string | null;
     }>;
   }): Promise<string>;
-  createCommit(args: {
-    treeOid: string;
-    parentOids: string[];
-    message: string;
-  }): Promise<string>;
+  createCommit(args: { treeOid: string; parentOids: string[]; message: string }): Promise<string>;
   createRef(ref: string, oid: string): Promise<boolean>;
   findPullRequestForBranch(branch: string): Promise<{
     number: number;
@@ -54,13 +50,14 @@ export interface PublicationStore {
     baseSha: string;
     baseRef: string;
     mergeCommitSha: string | null;
+    createdAt?: Date;
   }>;
-  readChecks(sha: string): Promise<{ pending: string[]; failed: string[] }>;
-  mergePullRequest(args: {
-    number: number;
-    headSha: string;
-    commitTitle: string;
-  }): Promise<string>;
+  readChecks(sha: string): Promise<{
+    pending: string[];
+    failed: string[];
+    observed?: string[];
+  }>;
+  mergePullRequest(args: { number: number; headSha: string; commitTitle: string }): Promise<string>;
   closeIssue(number: number): Promise<void>;
   closePullRequest(number: number): Promise<void>;
 }
@@ -79,11 +76,47 @@ export type IntegrationReadiness =
   | { state: "failed"; reason: string }
   | { state: "integrated"; headSha: string };
 
+/**
+ * GitHub creates a pull request before Actions necessarily attaches its first
+ * check. Keep a freshly-created PR out of the merge path while that evidence
+ * is still allowed to arrive. Repositories that demonstrably run PR CI remain
+ * blocked without checks after this grace period; only a repository with a
+ * negative CI probe may proceed once the ambiguity window has elapsed.
+ */
+export const FIRST_CHECK_DISCOVERY_GRACE_MS = 60_000;
+
+export interface IntegrationReadinessOptions {
+  ciExpected?: boolean | "unknown";
+  now?: Date;
+  firstCheckDiscoveryGraceMs?: number;
+}
+
+export async function verifySquashIntegration(
+  store: PublicationStore,
+  pull: PublishedPullRequest,
+  mergeCommitSha: string,
+  expectedBaseSha = pull.exactHeadValidation.baseSha,
+): Promise<void> {
+  const commit = await store.readCommit(mergeCommitSha);
+  if (
+    commit.parentOids.length !== 1 ||
+    commit.parentOids[0] !== expectedBaseSha ||
+    commit.treeOid !== pull.exactHeadValidation.outputTreeSha
+  ) {
+    throw new Error(
+      "merged squash commit does not preserve the validated tree on the expected base",
+    );
+  }
+}
+
 export function publicationBranch(objective: number, workItem: number, attempt: number): string {
   return `factory/objective-${objective}/work-item-${workItem}/attempt-${attempt}`;
 }
 
-async function indexMode(worktree: string, path: string): Promise<"100644" | "100755" | "120000" | null> {
+async function indexMode(
+  worktree: string,
+  path: string,
+): Promise<"100644" | "100755" | "120000" | null> {
   const result = await runContainedProcess({
     command: "git",
     args: ["ls-files", "-s", "--", path],
@@ -105,7 +138,8 @@ async function blobContent(worktree: string, path: string, mode: string): Promis
   const absolute = join(worktree, path);
   const stat = await lstat(absolute);
   if (mode === "120000") {
-    if (!stat.isSymbolicLink()) throw new Error(`${path} index says symlink but workspace does not`);
+    if (!stat.isSymbolicLink())
+      throw new Error(`${path} index says symlink but workspace does not`);
     return Buffer.from(await readlink(absolute), "utf8");
   }
   if (!stat.isFile()) throw new Error(`${path} is not a publishable regular file`);
@@ -251,7 +285,8 @@ export async function publishValidated(args: {
       headSha: recovered.headSha,
     };
   }
-  if (pull.headSha !== commitSha) throw new Error("new pull request head changed during publication");
+  if (pull.headSha !== commitSha)
+    throw new Error("new pull request head changed during publication");
   return {
     branch,
     commitSha,
@@ -265,22 +300,75 @@ export async function integrationReadiness(
   store: PublicationStore,
   pull: PublishedPullRequest,
   expectedBaseSha?: string,
+  expectedBaseRef?: string,
+  options: IntegrationReadinessOptions = {},
 ): Promise<IntegrationReadiness> {
   verifyExactHeadValidation(pull.exactHeadValidation, pull.commitSha);
   const current = await store.readPullRequest(pull.number);
-  if (current.headSha !== pull.commitSha) return { state: "failed", reason: "pull request head changed after validation" };
-  if (current.merged) return { state: "integrated", headSha: current.headSha };
-  if (current.state !== "open") return { state: "failed", reason: "pull request closed without merge" };
+  if (current.headSha !== pull.commitSha)
+    return { state: "failed", reason: "pull request head changed after validation" };
+  if (expectedBaseRef && current.baseRef !== expectedBaseRef) {
+    return {
+      state: "failed",
+      reason: `pull request targets ${current.baseRef}, expected ${expectedBaseRef}`,
+    };
+  }
+  if (current.merged) {
+    if (!current.mergeCommitSha) {
+      return { state: "failed", reason: "merged pull request has no merge commit identity" };
+    }
+    try {
+      await verifySquashIntegration(
+        store,
+        pull,
+        current.mergeCommitSha,
+        expectedBaseSha ?? pull.exactHeadValidation.baseSha,
+      );
+    } catch (error) {
+      return {
+        state: "failed",
+        reason:
+          `irreversible merge could not be proven against validated state: ` +
+          (error instanceof Error ? error.message : String(error)),
+      };
+    }
+    return { state: "integrated", headSha: current.mergeCommitSha };
+  }
+  if (current.state !== "open")
+    return { state: "failed", reason: "pull request closed without merge" };
   if (expectedBaseSha && current.baseSha !== expectedBaseSha) {
     return {
       state: "failed",
       reason: `base branch advanced from validated commit ${expectedBaseSha} to ${current.baseSha}`,
     };
   }
-  if (current.draft) return { state: "failed", reason: "Factory publication unexpectedly became draft" };
+  if (current.draft)
+    return { state: "failed", reason: "Factory publication unexpectedly became draft" };
   const checks = await store.readChecks(current.headSha);
-  if (checks.failed.length > 0) return { state: "failed", reason: `checks failed: ${checks.failed.join(", ")}` };
-  if (checks.pending.length > 0) return { state: "wait", reason: `checks pending: ${checks.pending.join(", ")}` };
+  if (checks.failed.length > 0)
+    return { state: "failed", reason: `checks failed: ${checks.failed.join(", ")}` };
+  if (checks.pending.length > 0)
+    return { state: "wait", reason: `checks pending: ${checks.pending.join(", ")}` };
+  const noChecksObserved = (checks.observed?.length ?? 0) === 0;
+  if (noChecksObserved && options.ciExpected !== false && options.ciExpected !== undefined) {
+    return {
+      state: "wait",
+      reason:
+        options.ciExpected === "unknown"
+          ? "cannot determine whether repository CI is expected and no checks have appeared"
+          : "repository CI is expected but no checks have appeared",
+    };
+  }
+  if (noChecksObserved && current.createdAt) {
+    const now = options.now ?? new Date();
+    const graceMs = options.firstCheckDiscoveryGraceMs ?? FIRST_CHECK_DISCOVERY_GRACE_MS;
+    if (now.getTime() - current.createdAt.getTime() < graceMs) {
+      return {
+        state: "wait",
+        reason: "waiting for the pull request's first checks to appear",
+      };
+    }
+  }
   if (current.mergeable === null || current.mergeableState === "unknown") {
     return { state: "wait", reason: "GitHub is still computing mergeability" };
   }
@@ -288,7 +376,10 @@ export async function integrationReadiness(
     return { state: "failed", reason: "pull request conflicts with the base branch" };
   }
   if (["blocked", "behind", "unstable"].includes(current.mergeableState)) {
-    return { state: "failed", reason: `merge is ${current.mergeableState}; revalidation or human policy action is required` };
+    return {
+      state: "failed",
+      reason: `merge is ${current.mergeableState}; revalidation or human policy action is required`,
+    };
   }
   return { state: "ready", headSha: current.headSha };
 }

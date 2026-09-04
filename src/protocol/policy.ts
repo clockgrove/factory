@@ -3,21 +3,21 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 import { boundedText, safeId } from "./limits.js";
-import {
-  NetworkDestinationSchema,
-  type ExecutionRequirements,
-} from "./worker-packet.js";
+import { NetworkDestinationSchema, type ExecutionRequirements } from "./worker-packet.js";
 
 export const CloudFallbackSchema = z.enum(["never", "explicit"]);
-export const TrustPolicySchema = z.enum([
-  "explicitly_activated_repo",
-  "sandbox_untrusted",
-]);
 
-const countMap = (
-  value: Record<string, unknown>,
-  context: z.RefinementCtx,
-): void => {
+/** Stable bundle naming contract for paid GitHub-hosted coding agents. */
+export function isManagedAgentBackendId(id: string): boolean {
+  return id.endsWith("/github-managed");
+}
+
+export function isSandboxBackendId(id: string): boolean {
+  return id.includes("daytona") || id.includes("vercel-sandbox");
+}
+export const TrustPolicySchema = z.enum(["explicitly_activated_repo", "sandbox_untrusted"]);
+
+const countMap = (value: Record<string, unknown>, context: z.RefinementCtx): void => {
   if (Object.keys(value).length > 64) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
@@ -47,10 +47,7 @@ export const PriorityPolicySchema = z
         message: "is required for issue-field priority",
       });
     }
-    if (
-      usesField &&
-      (!value.optionRanks || Object.keys(value.optionRanks).length === 0)
-    ) {
+    if (usesField && (!value.optionRanks || Object.keys(value.optionRanks).length === 0)) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["optionRanks"],
@@ -102,13 +99,7 @@ export const CapacityPolicySchema = z
 
 export const BurstPolicySchema = z
   .object({
-    mode: z.enum([
-      "never",
-      "saturation",
-      "queue-delay",
-      "deadline",
-      "queue-or-deadline",
-    ]),
+    mode: z.enum(["never", "saturation", "queue-delay", "deadline", "queue-or-deadline"]),
     backendOrder: z.array(safeId).max(16),
     maxCloudParallel: z.number().int().min(1).max(32),
     queueDelaySeconds: z.number().int().min(0).max(86_400),
@@ -129,10 +120,20 @@ export const DeliveryPolicySchema = z
   })
   .strict();
 
+export const ModelReasoningEffortSchema = z.enum([
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+]);
+
 const ModelProfileSchema = z
   .object({
     model: boundedText(160),
-    reasoning: boundedText(80),
+    reasoning: ModelReasoningEffortSchema,
   })
   .strict();
 
@@ -160,7 +161,36 @@ export const ModelsPolicySchema = z
         });
       }
     }
+    if (value.mode === "single-profile" && new Set(Object.values(value.phaseProfiles)).size !== 1) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["phaseProfiles"],
+        message: "single-profile mode requires every phase to use the same profile",
+      });
+    }
   });
+
+export type ModelPhase = "compile" | "implement" | "review" | "recover";
+export type ModelSelection = {
+  profile: string;
+  model: string;
+  reasoning: z.infer<typeof ModelReasoningEffortSchema>;
+};
+
+/** Resolve the immutable model choice that must be carried to a model invocation. */
+export function resolveModelSelection(
+  policy: RunPolicy,
+  phase: ModelPhase,
+): ModelSelection | undefined {
+  const models = policy.models;
+  if (!models) return undefined;
+  const profile = models.phaseProfiles[phase];
+  const selected = models.profiles[profile];
+  if (!selected) {
+    throw new Error(`model phase ${phase} references unknown profile ${profile}`);
+  }
+  return { profile, ...selected };
+}
 
 export const EconomicsPolicySchema = z
   .object({
@@ -178,7 +208,7 @@ export const EconomicsPolicySchema = z
 export const ControllerPolicySchema = z
   .object({
     scope: z.literal("repository"),
-    maxActiveObjectives: z.number().int().min(1).max(32),
+    maxActiveObjectives: z.literal(1),
     maxLocalWorkers: z.number().int().min(1).max(32),
     maxPaidWorkers: z.number().int().min(0).max(32),
     pollIntervalSeconds: z.number().int().min(1).max(300),
@@ -189,7 +219,7 @@ export type ControllerPolicy = z.infer<typeof ControllerPolicySchema>;
 
 export const DEFAULT_CONTROLLER_POLICY: ControllerPolicy = Object.freeze({
   scope: "repository",
-  maxActiveObjectives: 2,
+  maxActiveObjectives: 1,
   maxLocalWorkers: 8,
   maxPaidWorkers: 0,
   pollIntervalSeconds: 15,
@@ -230,7 +260,7 @@ export const RunPolicySchema = z
 export type RunPolicy = z.infer<typeof RunPolicySchema>;
 
 export const DEFAULT_RUN_POLICY: RunPolicy = Object.freeze({
-  backendOrder: ["codex-cli/local-worktree"],
+  backendOrder: ["codex-sdk/local-worktree", "codex-cli/local-worktree"],
   maxParallel: 8,
   workItemTimeoutMinutes: 30,
   objectiveTimeoutMinutes: 720,
@@ -241,11 +271,7 @@ export const DEFAULT_RUN_POLICY: RunPolicy = Object.freeze({
   maxManagedAgentSessions: 0,
   trust: "explicitly_activated_repo",
   managementBackend: "codex-cli/local",
-  allowedNetworkDestinations: [
-    "registry.npmjs.org",
-    "*.npmjs.org",
-    "api.openai.com",
-  ],
+  allowedNetworkDestinations: ["registry.npmjs.org", "*.npmjs.org", "api.openai.com"],
   priority: {
     source: "subissue-order" as const,
     unsetRank: 100,
@@ -278,19 +304,14 @@ export const DEFAULT_RUN_POLICY: RunPolicy = Object.freeze({
 
 export interface EffectiveSchedulingPolicy {
   priority: z.infer<typeof PriorityPolicySchema>;
-  capacity: Omit<
-    z.infer<typeof CapacityPolicySchema>,
-    "local" | "backendMaxParallel"
-  > & {
+  capacity: Omit<z.infer<typeof CapacityPolicySchema>, "local" | "backendMaxParallel"> & {
     local: z.infer<typeof LocalCapacityPolicySchema>;
     backendMaxParallel: Record<string, number>;
   };
   burst: z.infer<typeof BurstPolicySchema>;
 }
 
-export function normalizeSchedulingPolicy(
-  policy: RunPolicy,
-): EffectiveSchedulingPolicy {
+export function normalizeSchedulingPolicy(policy: RunPolicy): EffectiveSchedulingPolicy {
   const local = policy.capacity?.local ?? {
     maxWorkers: policy.maxParallel,
     defaultCpu: 1,
@@ -353,30 +374,30 @@ function canonical(value: unknown): string {
 export function parseRunPolicy(input: unknown): RunPolicy {
   const policy = RunPolicySchema.parse(input);
   const allowed = new Set(policy.allowedPaidBackends);
+  if (policy.models && policy.backendOrder.some(isManagedAgentBackendId)) {
+    throw new Error(
+      "explicit model profiles cannot target GitHub managed agents because that provider does not expose model selection",
+    );
+  }
+  if (policy.models?.mode === "task-class") {
+    throw new Error(
+      "models.mode=task-class is not supported in v2 because no durable task-class classifier or mapping exists",
+    );
+  }
   if (policy.cloudFallback === "never" && allowed.size > 0) {
     throw new Error("paid backends require cloudFallback=explicit");
   }
   if (policy.maxSandboxMinutes === 0) {
-    const selectedSandbox = policy.backendOrder.some(
-      (id) => id.includes("daytona") || id.includes("vercel-sandbox"),
-    );
+    const selectedSandbox = policy.backendOrder.some(isSandboxBackendId);
     if (selectedSandbox) {
-      throw new Error(
-        "sandbox backend selected with zero sandbox-minute budget",
-      );
+      throw new Error("sandbox backend selected with zero sandbox-minute budget");
     }
   }
-  if (
-    policy.maxManagedAgentSessions === 0 &&
-    policy.backendOrder.includes("github-copilot/github-managed")
-  ) {
+  if (policy.maxManagedAgentSessions === 0 && policy.backendOrder.some(isManagedAgentBackendId)) {
     throw new Error("GitHub managed backend selected with zero session budget");
   }
   for (const id of policy.backendOrder) {
-    const paid =
-      id.includes("daytona") ||
-      id.includes("vercel-sandbox") ||
-      id === "github-copilot/github-managed";
+    const paid = isSandboxBackendId(id) || isManagedAgentBackendId(id);
     if (paid && !allowed.has(id)) {
       throw new Error(`paid backend ${id} is not explicitly allowed`);
     }
@@ -386,10 +407,7 @@ export function parseRunPolicy(input: unknown): RunPolicy {
       throw new Error(`capacity backend ${id} is absent from backendOrder`);
     }
   }
-  if (
-    policy.capacity?.local &&
-    policy.capacity.local.maxWorkers > policy.maxParallel
-  ) {
+  if (policy.capacity?.local && policy.capacity.local.maxWorkers > policy.maxParallel) {
     throw new Error("capacity.local.maxWorkers cannot exceed maxParallel");
   }
   if (policy.burst) {
@@ -403,13 +421,7 @@ export function parseRunPolicy(input: unknown): RunPolicy {
       if (!allowed.has(id)) {
         throw new Error(`burst backend ${id} is not explicitly allowed`);
       }
-      if (
-        !(
-          id.includes("daytona") ||
-          id.includes("vercel-sandbox") ||
-          id === "github-copilot/github-managed"
-        )
-      ) {
+      if (!(isSandboxBackendId(id) || isManagedAgentBackendId(id))) {
         throw new Error(`burst backend ${id} is not a paid backend`);
       }
     }
@@ -420,36 +432,22 @@ export function parseRunPolicy(input: unknown): RunPolicy {
       if (policy.burst.backendOrder.length === 0) {
         throw new Error("enabled burst requires at least one backend");
       }
-      const needsSandbox = policy.burst.backendOrder.some(
-        (id) => id.includes("daytona") || id.includes("vercel-sandbox"),
-      );
-      const needsManaged = policy.burst.backendOrder.includes(
-        "github-copilot/github-managed",
-      );
+      const needsSandbox = policy.burst.backendOrder.some(isSandboxBackendId);
+      const needsManaged = policy.burst.backendOrder.some(isManagedAgentBackendId);
       if (needsSandbox && policy.maxSandboxMinutes === 0) {
-        throw new Error(
-          "enabled sandbox burst requires a nonzero sandbox-minute budget",
-        );
+        throw new Error("enabled sandbox burst requires a nonzero sandbox-minute budget");
       }
       if (needsManaged && policy.maxManagedAgentSessions === 0) {
-        throw new Error(
-          "enabled managed burst requires a nonzero session budget",
-        );
+        throw new Error("enabled managed burst requires a nonzero session budget");
       }
     }
   }
   if (policy.economics) {
     if (policy.economics.maxSandboxMinutes !== policy.maxSandboxMinutes) {
-      throw new Error(
-        "economics.maxSandboxMinutes must equal the legacy sandbox budget",
-      );
+      throw new Error("economics.maxSandboxMinutes must equal the legacy sandbox budget");
     }
-    if (
-      policy.economics.maxManagedSessions !== policy.maxManagedAgentSessions
-    ) {
-      throw new Error(
-        "economics.maxManagedSessions must equal the legacy managed-session budget",
-      );
+    if (policy.economics.maxManagedSessions !== policy.maxManagedAgentSessions) {
+      throw new Error("economics.maxManagedSessions must equal the legacy managed-session budget");
     }
   }
   return policy;
@@ -459,10 +457,7 @@ export function policyDigest(policy: RunPolicy): string {
   return createHash("sha256").update(canonical(policy)).digest("hex");
 }
 
-export function destinationAllowedByPolicy(
-  destination: string,
-  allowed: string[],
-): boolean {
+export function destinationAllowedByPolicy(destination: string, allowed: string[]): boolean {
   const candidate = destination.toLowerCase();
   return allowed.some((entry) => {
     const rule = entry.toLowerCase();
@@ -490,11 +485,7 @@ export function requirementsPolicyRejections(
 ): string[] {
   const reasons: string[] = [];
   const forbiddenDestinations = requirements.networkDestinations.filter(
-    (destination) =>
-      !destinationAllowedByPolicy(
-        destination,
-        policy.allowedNetworkDestinations,
-      ),
+    (destination) => !destinationAllowedByPolicy(destination, policy.allowedNetworkDestinations),
   );
   if (forbiddenDestinations.length > 0) {
     reasons.push(

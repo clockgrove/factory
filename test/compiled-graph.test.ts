@@ -3,20 +3,11 @@ import { readFile } from "node:fs/promises";
 
 import { describe, expect, it } from "vitest";
 
-import {
-  CompiledGraphManager,
-  type CompiledGraphStore,
-} from "../src/control/graphs.js";
-import {
-  LeaseManager,
-  type GitCommitObject,
-  type LeaseStore,
-} from "../src/control/lease.js";
+import { CompiledGraphManager, type CompiledGraphStore } from "../src/control/graphs.js";
+import { ReviewCheckpointManager } from "../src/control/reviews.js";
+import { LeaseManager, type GitCommitObject, type LeaseStore } from "../src/control/lease.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
-import {
-  workerPacketFromCompiled,
-  type CompiledObjective,
-} from "../src/graph.js";
+import { workerPacketFromCompiled, type CompiledObjective } from "../src/graph.js";
 import {
   compileObjective,
   serializeCompilerObjective,
@@ -117,9 +108,7 @@ class MemoryGraphStore implements LeaseStore, CompiledGraphStore {
       sha: string | null;
     }>;
   }): Promise<string> {
-    const tree = new Map(
-      args.baseTreeOid ? (this.trees.get(args.baseTreeOid) ?? []) : [],
-    );
+    const tree = new Map(args.baseTreeOid ? (this.trees.get(args.baseTreeOid) ?? []) : []);
     for (const entry of args.entries) {
       if (entry.sha) tree.set(entry.path, entry.sha);
       else tree.delete(entry.path);
@@ -193,13 +182,87 @@ describe("durable compiled graph", () => {
       graphSize: 1,
       objective: objective(),
     });
-    expect(
-      await manager.persist({ lease, base, objective: objective() }),
-    ).toMatchObject({
+    expect(await manager.persist({ lease, base, objective: objective() })).toMatchObject({
       commitOid: first.commitOid,
       graphDigest: first.graphDigest,
     });
   });
+
+  it.each([undefined, 0, 7])(
+    "atomically persists compilation usage with cached=%s and recovers a lost ref response",
+    async (cached) => {
+      const store = new MemoryGraphStore();
+      const leases = new LeaseManager({ store });
+      const base = await store.readCommit(BASE_SHA);
+      const lease = await leases.acquire(
+        {
+          objective: 42,
+          runId: "run-usage",
+          holder: "director-1",
+          policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+        },
+        base,
+      );
+      const manager = new CompiledGraphManager(store, leases);
+      const createRef = store.createRef.bind(store);
+      let loseResponse = true;
+      store.createRef = async (ref, oid) => {
+        const created = await createRef(ref, oid);
+        if (loseResponse && ref.includes("/graphs/")) {
+          loseResponse = false;
+          throw new Error("response lost after ref creation");
+        }
+        return created;
+      };
+
+      const saved = await manager.persist({
+        lease,
+        base,
+        objective: objective(),
+        compilation: {
+          invocationId: `compile-${BASE_SHA}`,
+          inputTokens: 11,
+          outputTokens: 19,
+          ...(cached === undefined ? {} : { cachedInputTokens: cached }),
+        },
+      });
+
+      expect(saved.compilation).toMatchObject({
+        invocationId: `compile-${BASE_SHA}`,
+        graphDigest: saved.graphDigest,
+        inputTokens: 11,
+        outputTokens: 19,
+      });
+      await expect(manager.load(42, "run-usage")).resolves.toMatchObject({
+        graphDigest: saved.graphDigest,
+        compilation: saved.compilation,
+      });
+      expect(saved.compilation?.cachedInputTokens).toBe(cached);
+      if (cached === undefined) expect(saved.compilation).not.toHaveProperty("cachedInputTokens");
+      await expect(
+        manager.persist({
+          lease,
+          base,
+          objective: objective(),
+          compilation: { ...saved.compilation!, cachedInputTokens: 3 },
+        }),
+      ).rejects.toThrow(/different compiled graph|different immutable|already has/i);
+      for (const invalid of [-1, 0.5, 12, Number.MAX_SAFE_INTEGER + 1]) {
+        await expect(
+          manager.persist({
+            lease,
+            base,
+            objective: objective(),
+            compilation: { ...saved.compilation!, cachedInputTokens: invalid },
+          }),
+        ).rejects.toThrow();
+      }
+      await expect(manager.load(42, "run-usage")).resolves.toMatchObject({
+        commitOid: saved.commitOid,
+        compilation: saved.compilation,
+      });
+    },
+  );
 
   it("rejects a divergent replay for the same run", async () => {
     const store = new MemoryGraphStore();
@@ -250,9 +313,7 @@ describe("durable compiled graph", () => {
         mergeClass: "parallel-safe" as const,
         exclusiveResources: [],
       },
-      validation: [
-        { tier: "mechanical" as const, criteria: ["The feature is tested."] },
-      ],
+      validation: [{ tier: "mechanical" as const, criteria: ["The feature is tested."] }],
       delivery: { group: "feature", relationship: "root" as const },
       economicReview: {
         conservative: true,
@@ -275,14 +336,156 @@ describe("durable compiled graph", () => {
       delivery: workItem.delivery,
       economicReview: workItem.economicReview,
     });
-    expect(
-      workerPacketFromCompiled(replay!.objective.workItems[0]!),
-    ).toMatchObject({
+    expect(workerPacketFromCompiled(replay!.objective.workItems[0]!)).toMatchObject({
       context: workItem.context,
       changeSurface: workItem.changeSurface,
       delivery: workItem.delivery,
     });
   });
+
+  it("durably restores the exact compiler-ID to GitHub issue projection after restart", async () => {
+    const store = new MemoryGraphStore();
+    const leases = new LeaseManager({ store });
+    const base = await store.readCommit(BASE_SHA);
+    const lease = await leases.acquire(
+      {
+        objective: 42,
+        runId: "run-projection",
+        holder: "director-1",
+        policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+      },
+      base,
+    );
+    const manager = new CompiledGraphManager(store, leases);
+    const graph = await manager.persist({ lease, base, objective: objective() });
+    const bindings = [{ compilerId: "feature", issueNodeId: "I_kwDOFeature", issueNumber: 73 }];
+    const createRef = store.createRef.bind(store);
+    let loseResponse = true;
+    store.createRef = async (ref, oid) => {
+      const created = await createRef(ref, oid);
+      if (loseResponse && ref.includes("/graph-projections/")) {
+        loseResponse = false;
+        throw new Error("response lost after projection ref creation");
+      }
+      return created;
+    };
+    const saved = await manager.persistProjection({ lease, graph, bindings });
+
+    const restarted = new CompiledGraphManager(store, leases);
+    await expect(restarted.loadProjection(42, "run-projection", graph)).resolves.toMatchObject({
+      ref: saved.ref,
+      graphDigest: graph.graphDigest,
+      bindings,
+    });
+    await expect(
+      restarted.persistProjection({
+        lease,
+        graph,
+        bindings: [{ ...bindings[0]!, issueNumber: 74 }],
+      }),
+    ).rejects.toThrow(/different immutable graph projection/i);
+  });
+});
+
+describe("durable semantic review", () => {
+  it.each([undefined, 0, 9])(
+    "binds result and usage with cached=%s to exact input and recovers a lost ref response",
+    async (cached) => {
+      const store = new MemoryGraphStore();
+      const leases = new LeaseManager({ store });
+      const base = await store.readCommit(BASE_SHA);
+      const lease = await leases.acquire(
+        {
+          objective: 42,
+          runId: "run-review",
+          holder: "director-1",
+          policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+        },
+        base,
+      );
+      const manager = new ReviewCheckpointManager(store, leases);
+      const identity = {
+        kind: "artifact" as const,
+        runId: "run-review",
+        objective: 42,
+        workItem: 7,
+        attempt: 1,
+        artifactDigest: "c".repeat(64),
+        baseSha: BASE_SHA,
+        outputTreeSha: BASE_TREE,
+        evidenceDigest: "d".repeat(64),
+      };
+      const createRef = store.createRef.bind(store);
+      let loseResponse = true;
+      store.createRef = async (ref, oid) => {
+        const created = await createRef(ref, oid);
+        if (loseResponse && ref.includes("/reviews/")) {
+          loseResponse = false;
+          throw new Error("response lost after ref creation");
+        }
+        return created;
+      };
+      const saved = await manager.persist({
+        lease,
+        identity,
+        result: {
+          review: {
+            accepted: true,
+            summary: "All criteria are satisfied.",
+            unmetCriteria: [],
+            risks: [],
+          },
+          usage: {
+            inputTokens: 13,
+            outputTokens: 17,
+            ...(cached === undefined ? {} : { cachedInputTokens: cached }),
+          },
+        },
+      });
+
+      expect(saved).toMatchObject({
+        identity,
+        review: { accepted: true },
+        usage: { inputTokens: 13, outputTokens: 17 },
+      });
+      await expect(manager.load(identity)).resolves.toMatchObject({
+        ref: saved.ref,
+        identityDigest: saved.identityDigest,
+        usage: saved.usage,
+      });
+      await expect(
+        manager.load({ ...identity, artifactDigest: "e".repeat(64) }),
+      ).resolves.toBeNull();
+      expect(saved.usage.cachedInputTokens).toBe(cached);
+      if (cached === undefined) expect(saved.usage).not.toHaveProperty("cachedInputTokens");
+      await expect(
+        manager.persist({
+          lease,
+          identity,
+          result: {
+            review: saved.review,
+            usage: { ...saved.usage, cachedInputTokens: 3 },
+          },
+        }),
+      ).rejects.toThrow(/different immutable review result/);
+      for (const invalid of [-1, 0.5, 14, Number.MAX_SAFE_INTEGER + 1]) {
+        await expect(
+          manager.persist({
+            lease,
+            identity,
+            result: {
+              review: saved.review,
+              usage: { ...saved.usage, cachedInputTokens: invalid },
+            },
+          }),
+        ).rejects.toThrow();
+      }
+      await expect(manager.load(identity)).resolves.toMatchObject({
+        commitOid: saved.commitOid,
+        usage: saved.usage,
+      });
+    },
+  );
 });
 
 describe("golden compiled graph", () => {
@@ -295,15 +498,12 @@ describe("golden compiled graph", () => {
       repositoryFacts: {
         ...input.repositoryFacts,
         files: [...input.repositoryFacts.files].reverse(),
-        scripts: Object.fromEntries(
-          Object.entries(input.repositoryFacts.scripts ?? {}).reverse(),
-        ),
+        scripts: Object.fromEntries(Object.entries(input.repositoryFacts.scripts ?? {}).reverse()),
       },
       workItems: [...input.workItems].reverse().map((item) => ({
         ...item,
         acceptance: [...item.acceptance].reverse(),
         scope: [...item.scope].reverse(),
-        validationCommands: [...item.validationCommands].reverse(),
       })),
     });
     const observedCommands = ["npm test", "npm run typecheck"];

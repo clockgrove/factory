@@ -1,3 +1,4 @@
+import type { ModelSelection, RunPolicy } from "../protocol/policy.js";
 import type { ExecutionRequirements, WorkerPacket } from "../protocol/worker-packet.js";
 import type { NormalizedArtifact } from "./artifacts.js";
 
@@ -5,6 +6,8 @@ export type IsolationKind = "none" | "process" | "container" | "microvm" | "mana
 
 export interface ExecutionBackendCapabilities {
   id: string;
+  /** Factory's support contract; omitted third-party test doubles default to supported. */
+  supportTier?: "supported" | "labs";
   agentKind: string;
   runtimeKind: string;
   hostExecution: boolean;
@@ -17,6 +20,10 @@ export interface ExecutionBackendCapabilities {
   supportsObservation: boolean;
   supportsResume: boolean;
   supportsLocalInference: boolean;
+  /** Terminal observations include provider model-token counters. */
+  reportsModelUsage?: boolean;
+  /** Launch accepts the immutable model selection carried by AttemptContext. */
+  supportsModelSelection?: boolean;
   requiresPaidRuntime: boolean;
   providerManagedPublication: boolean;
   requiredCredentials: string[];
@@ -31,6 +38,8 @@ export interface BackendProbe {
 }
 
 export interface AttemptContext {
+  /** Canonical GitHub repository identity (OWNER/REPO), never a filesystem path. */
+  repository: string;
   objective: number;
   workItem: number;
   attempt: number;
@@ -39,6 +48,12 @@ export interface AttemptContext {
   policyDigest: string;
   workspace: string;
   packet: WorkerPacket;
+  /** Immutable per-phase choice resolved from RunPolicy.models. */
+  modelSelection?: ModelSelection;
+  /** Immutable Run Policy egress authority, distinct from task-required destinations. */
+  policyNetworkDestinations?: readonly string[];
+  /** GitHub-visible branch a provider-managed worker must branch from. */
+  providerBaseRef?: string;
   deadline: Date;
   /** A prior host-validated patch is already present for an incremental retry. */
   seededFromArtifact?: boolean;
@@ -85,9 +100,13 @@ export interface IsolatedValidationResult {
   failureReason?: string;
   startedAt: string;
   completedAt: string;
+  /** Exact immutable provider snapshot or image identity used for validation. */
+  environmentIdentity?: string;
 }
 
 export interface StaleAttemptIdentity {
+  /** Canonical GitHub repository identity (OWNER/REPO), required for safe local fencing. */
+  repository: string;
   objective: number;
   workItem: number;
   attempt: number;
@@ -95,10 +114,22 @@ export interface StaleAttemptIdentity {
   directorEpoch: number;
   phase?: "execution" | "validation";
   providerResourceId?: string;
+  /**
+   * Durable conservative fence for a create that may have committed before a
+   * handle/AttemptStarted receipt existed. Absence before this instant cannot
+   * authorize a replacement paid resource.
+   */
+  noHandleReplacementNotBefore?: string;
 }
 
 export interface ExecutionBackend {
   readonly capabilities: ExecutionBackendCapabilities;
+  /** Deterministic policy incompatibilities checked before admission or graph writes. */
+  policyRejectionReasons?(args: {
+    policy: RunPolicy;
+    requirements: ExecutionRequirements;
+    phase: "execution" | "validation";
+  }): readonly string[];
   probe(requirements?: ExecutionRequirements): Promise<BackendProbe>;
   launch(context: AttemptContext): Promise<BackendHandle>;
   observe(handle: BackendHandle): Promise<BackendObservation>;
@@ -112,10 +143,7 @@ export interface ExecutionBackend {
   /** Ensure a prior Director's resource is absent before a replacement attempt. */
   reconcileStale?(identity: StaleAttemptIdentity): Promise<void>;
   /** Reattach only when the durable identity can be proven to belong to this attempt. */
-  resume?(
-    context: AttemptContext,
-    handle: BackendHandle,
-  ): Promise<BackendHandle>;
+  resume?(context: AttemptContext, handle: BackendHandle): Promise<BackendHandle>;
 }
 
 const isolationRank: Record<IsolationKind, number> = {
@@ -188,11 +216,7 @@ export function capabilityMismatch(
   if (requirements.cpu && limits.cpu && requirements.cpu > limits.cpu) {
     reasons.push(`requires ${requirements.cpu} CPUs; backend limit is ${limits.cpu}`);
   }
-  if (
-    requirements.memoryMb &&
-    limits.memoryMb &&
-    requirements.memoryMb > limits.memoryMb
-  ) {
+  if (requirements.memoryMb && limits.memoryMb && requirements.memoryMb > limits.memoryMb) {
     reasons.push(
       `requires ${requirements.memoryMb} MB memory; backend limit is ${limits.memoryMb}`,
     );

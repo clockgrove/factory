@@ -57,6 +57,7 @@ class FakeProvider implements StackDeliveryProvider {
     uuid: "merge-1",
     expectedHeadSha: sha("e"),
     mergeAction: "default",
+    mergeMethod: "squash",
   };
   async ensureStack(pulls: readonly number[]) {
     this.stackCalls += 1;
@@ -74,8 +75,12 @@ class FakeProvider implements StackDeliveryProvider {
       })),
     };
   }
-  async requestMerge() { return this.merge; }
-  async mergeResult() { return this.merge; }
+  async requestMerge() {
+    return this.merge;
+  }
+  async mergeResult() {
+    return this.merge;
+  }
   async unstack() {}
 }
 
@@ -131,10 +136,7 @@ describe("GitHub stack capability and publication recovery", () => {
     };
     expect(() => assertPublicationEventMatchesReceipt(event, value)).not.toThrow();
     expect(() =>
-      assertPublicationEventMatchesReceipt(
-        { ...event, baseSha: sha("9") },
-        value,
-      ),
+      assertPublicationEventMatchesReceipt({ ...event, baseSha: sha("9") }, value),
     ).toThrow(/baseSha/);
   });
 
@@ -221,7 +223,11 @@ describe("GitHub stack capability and publication recovery", () => {
   });
 
   it("binds asynchronous stack merge and polling to the exact head", async () => {
-    const requests: Array<{ route: string; parameters: Record<string, unknown>; mutating?: boolean }> = [];
+    const requests: Array<{
+      route: string;
+      parameters: Record<string, unknown>;
+      mutating?: boolean;
+    }> = [];
     const transport: GitHubStackTransport = {
       request: async (route, parameters, mutating) => {
         requests.push({ route, parameters, ...(mutating === undefined ? {} : { mutating }) });
@@ -259,6 +265,7 @@ describe("GitHub stack capability and publication recovery", () => {
       uuid: "merge-1",
       expectedHeadSha: sha("e"),
       mergeAction: "merge_queue",
+      mergeMethod: "squash",
     });
     await expect(stacks.mergeResult(2, "merge-1", sha("e"))).resolves.toEqual({
       state: "merged",
@@ -296,9 +303,39 @@ describe("GitHub stack capability and publication recovery", () => {
       "clockgrove",
       "factory",
     );
+    await expect(stacks.mergeResult(2, "merge-1", sha("e"))).rejects.toThrow(
+      /stale pull request head/,
+    );
+  });
+
+  it("rejects an existing asynchronous merge whose recovered options differ", async () => {
+    const stacks = new GitHubStacks(
+      {
+        request: async () => ({
+          status: 409,
+          data: {
+            status: "pending",
+            details: {
+              message: "an existing merge request is already pending",
+              uuid: "merge-existing",
+              merge_method: "merge",
+              merge_action: "direct_merge",
+              expected_head_sha: sha("e"),
+            },
+          },
+        }),
+      },
+      "clockgrove",
+      "factory",
+    );
     await expect(
-      stacks.mergeResult(2, "merge-1", sha("e")),
-    ).rejects.toThrow(/stale pull request head/);
+      stacks.requestMerge({
+        pullRequest: 2,
+        expectedHeadSha: sha("e"),
+        title: "stack",
+        action: "merge_queue",
+      }),
+    ).rejects.toThrow(/options that differ/);
   });
 
   it("repairs partial stack-link receipts without changing topology", async () => {
@@ -355,6 +392,21 @@ describe("GitHub stack capability and publication recovery", () => {
       "factory",
     );
     await expect(stacks.unstack(9)).resolves.toBeUndefined();
+  });
+
+  it("fails closed when GitHub leaves locked pull requests in a partially unstacked stack", async () => {
+    const remaining = stackData([2]);
+    const stacks = new GitHubStacks(
+      {
+        request: async (route) => {
+          if (route.startsWith("GET ")) return { status: 200, data: remaining };
+          return { status: 200, data: remaining };
+        },
+      },
+      "clockgrove",
+      "factory",
+    );
+    await expect(stacks.unstack(9)).rejects.toThrow(/could not completely unstack stack 9.*#2/);
   });
 
   it("invalidates every descendant after a lower-layer head changes", async () => {

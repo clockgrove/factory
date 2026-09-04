@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  admissionsWithinDeliverySafety,
   planDelivery,
   selectDelivery,
   type DeliveryWorkItem,
@@ -20,13 +21,39 @@ const continuation = (id: string, parent: string, group = "a"): DeliveryWorkItem
 function permutations<T>(values: T[]): T[][] {
   if (values.length < 2) return [values];
   return values.flatMap((value, index) =>
-    permutations(values.filter((_, candidate) => candidate !== index)).map(
-      (rest) => [value, ...rest],
-    ),
+    permutations(values.filter((_, candidate) => candidate !== index)).map((rest) => [
+      value,
+      ...rest,
+    ]),
   );
 }
 
 describe("delivery topology planning", () => {
+  it("serializes ordinary-PR pipelines while native stacks keep scheduler concurrency", () => {
+    const admissions = ["a", "b", "c"];
+    expect(
+      admissionsWithinDeliverySafety({
+        selected: "regular-prs",
+        activeExecutions: 0,
+        admissions,
+      }),
+    ).toEqual(["a"]);
+    expect(
+      admissionsWithinDeliverySafety({
+        selected: "regular-prs",
+        activeExecutions: 1,
+        admissions,
+      }),
+    ).toEqual([]);
+    expect(
+      admissionsWithinDeliverySafety({
+        selected: "native-stacks",
+        activeExecutions: 2,
+        admissions,
+      }),
+    ).toEqual(admissions);
+  });
+
   it("keeps independent roots as deterministic sibling pull requests", () => {
     const plan = planDelivery([root("b"), root("a")]);
     expect(plan).toMatchObject({
@@ -39,11 +66,7 @@ describe("delivery topology planning", () => {
   });
 
   it("forms a maximal linear code-dependency stack", () => {
-    const plan = planDelivery([
-      continuation("c", "b"),
-      root("a"),
-      continuation("b", "a"),
-    ]);
+    const plan = planDelivery([continuation("c", "b"), root("a"), continuation("b", "a")]);
     expect(plan).toMatchObject({
       result: "supported",
       units: [{ id: "delivery/a", kind: "stack", items: ["a", "b", "c"] }],

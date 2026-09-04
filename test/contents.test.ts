@@ -46,11 +46,7 @@ describe("interpretContentsResponse", () => {
   // Directories arrive as bare arrays. Checking `type` first would report them
   // as too large to read, which is unactionable for the caller.
   it("recognises a directory, which the API returns as a bare array", () => {
-    const result = interpretContentsResponse(
-      "src",
-      [{ name: "a.ts" }, { name: "b.ts" }],
-      40_000,
-    );
+    const result = interpretContentsResponse("src", [{ name: "a.ts" }, { name: "b.ts" }], 40_000);
     expect(result.exists).toBe(true);
     expect(result.content).toBeUndefined();
     expect(result.unreadable).toContain("directory with 2 entries");
@@ -108,11 +104,7 @@ describe("interpretContentsResponse", () => {
   });
 
   it("reports a symlink as unreadable rather than guessing", () => {
-    const result = interpretContentsResponse(
-      "link",
-      { type: "symlink", size: 12 },
-      40_000,
-    );
+    const result = interpretContentsResponse("link", { type: "symlink", size: 12 }, 40_000);
     expect(result.unreadable).toBe("not a file (symlink)");
     expect(result.content).toBeUndefined();
   });

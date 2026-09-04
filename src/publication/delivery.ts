@@ -37,11 +37,7 @@ export type DeliveryPlan =
   | {
       protocol: typeof DELIVERY_PLAN_PROTOCOL;
       result: "unsupported";
-      code:
-        | "duplicate-item"
-        | "unknown-dependency"
-        | "dependency-cycle"
-        | "invalid-delivery-hint";
+      code: "duplicate-item" | "unknown-dependency" | "dependency-cycle" | "invalid-delivery-hint";
       reason: string;
     };
 
@@ -58,6 +54,23 @@ export interface DeliverySelection {
   selected: "regular-prs" | "native-stacks" | "escalate";
   capabilityVersion: string;
   reason: string;
+}
+
+/**
+ * Regular pull requests all target trunk. Until Factory can rebase and
+ * revalidate an arbitrary provider artifact after a sibling merge, admitting
+ * more than one complete regular-PR pipeline can invalidate every sibling's
+ * observed base. Native stacks have their own cascading revalidation path and
+ * retain full scheduler concurrency.
+ */
+export function admissionsWithinDeliverySafety<T>(args: {
+  selected: DeliverySelection["selected"];
+  activeExecutions: number;
+  admissions: readonly T[];
+}): T[] {
+  if (args.selected !== "regular-prs") return [...args.admissions];
+  if (args.activeExecutions > 0) return [];
+  return args.admissions.slice(0, 1);
 }
 
 /**
@@ -96,15 +109,14 @@ export function selectDelivery(args: {
   }
   return {
     requested: args.requested,
-    selected:
-      args.onUnavailable === "regular-prs" ? "regular-prs" : "escalate",
+    selected: args.onUnavailable === "regular-prs" ? "regular-prs" : "escalate",
     capabilityVersion: args.capability.version,
     reason: args.capability.reason,
   };
 }
 
 function unsupported(
-  code: Extract<DeliveryPlan, { result: "unsupported" }>['code'],
+  code: Extract<DeliveryPlan, { result: "unsupported" }>["code"],
   reason: string,
 ): DeliveryPlan {
   return { protocol: DELIVERY_PLAN_PROTOCOL, result: "unsupported", code, reason };
@@ -252,9 +264,7 @@ export function planDelivery(input: readonly DeliveryWorkItem[]): DeliveryPlan {
       unitId: unit.id,
       position,
       ...(parentItemId ? { parentItemId } : {}),
-      waitsForMerge: item.dependsOn
-        .filter((dependency) => dependency !== parentItemId)
-        .sort(),
+      waitsForMerge: item.dependsOn.filter((dependency) => dependency !== parentItemId).sort(),
     };
   });
   return {

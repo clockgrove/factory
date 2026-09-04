@@ -3,29 +3,19 @@ import {
   RepositoryScopePathSchema,
   type ExecutionRequirements,
 } from "../protocol/worker-packet.js";
+import { addScopeSerializationEdges } from "../graph.js";
 import {
   buildContextManifest,
   discoverValidationCommands,
+  isGroundedValidationCommand,
   normalizeRepositoryFacts,
   profileRepository,
   type RepositoryFacts,
 } from "../repository-profiles/index.js";
 
-export type ConflictClass =
-  | "parallel-safe"
-  | "exclusive"
-  | "generated"
-  | "large-binary";
-export type ValidationTier =
-  | "mechanical"
-  | "semantic"
-  | "visual"
-  | "deterministic-simulation";
-export type DeliveryRelationship =
-  | "root"
-  | "continue-stack"
-  | "sibling"
-  | "join-after-merge";
+export type ConflictClass = "parallel-safe" | "exclusive" | "generated" | "large-binary";
+export type ValidationTier = "mechanical" | "semantic" | "visual" | "deterministic-simulation";
+export type DeliveryRelationship = "root" | "continue-stack" | "sibling" | "join-after-merge";
 export type CompilerWorkItem = {
   id: string;
   title: string;
@@ -75,27 +65,31 @@ export type CompileInput = {
 
 const sorted = (xs: string[]) => [...new Set(xs)].sort();
 const overlaps = (a: string, b: string) =>
-  a === b ||
-  (a.endsWith("/") && b.startsWith(a)) ||
-  (b.endsWith("/") && a.startsWith(b));
-// An observable criterion states both a subject and a checkable outcome. Bare
-// aspirational verbs ("improve", "produce", "make valid") are not evidence.
-const observable = (criterion: string) => {
+  a === b || (a.endsWith("/") && b.startsWith(a)) || (b.endsWith("/") && a.startsWith(b));
+// This is a structural guard, not a natural-language observability classifier.
+// Function names, equations, error behavior, and domain vocabulary are all valid
+// ways to describe acceptance. Reject only malformed text and obvious whole-text
+// placeholders; matching a vocabulary can never establish semantic acceptance.
+// The management compiler must formulate checkable criteria, and independent
+// semantic review must establish each one against authoritative validation evidence.
+const acceptanceTextProblem = (criterion: string): string | undefined => {
   const text = criterion.trim();
-  return (
-    text.length >= 8 &&
-    /\b(?:tests?|commands?|files?|output|result|response|schema|graph|manifest|profile|build|typecheck|render|snapshot|simulation)\b/i.test(
-      text,
-    ) &&
-    /\b(?:pass(?:es)?|fails?|rejects?|accepts?|equals?|contains?|matches?|records?|returns?|emits?|exists?|remains? (?:unchanged|stable|bounded|valid)|compiles?|renders?)\b/i.test(
-      text,
+  if (text.length === 0) return "criterion is blank";
+  if (criterion.length > 2_000) return "criterion exceeds 2000 characters";
+  if (!/[\p{L}\p{N}]/u.test(text)) return "criterion contains no descriptive text";
+  // Anchor these narrowly: e.g. a statement describing how a literal 'TODO' is
+  // handled is not itself a placeholder. Unrecognized prose is left to review.
+  const statement = text.replace(/[.!?]+$/, "").trim();
+  if (
+    /^(?:todo|tbd|n\/?a|none|done|works?|works? (?:well|correctly|as expected)|make it better|improve (?:it|quality|performance)|(?:all )?tests? (?:are|is) (?:good|great|wonderful))$/i.test(
+      statement,
     )
-  );
+  )
+    return "criterion is only a placeholder or an unspecified quality claim";
+  return undefined;
 };
 
-export function canonicalizeObjective(
-  input: CompilerObjective,
-): CompilerObjective {
+export function canonicalizeObjective(input: CompilerObjective): CompilerObjective {
   return {
     title: input.title,
     workItems: input.workItems
@@ -107,7 +101,9 @@ export function canonicalizeObjective(
         outOfScope: sorted(w.outOfScope),
         conventions: sorted(w.conventions),
         dependsOn: sorted(w.dependsOn),
-        validationCommands: sorted(w.validationCommands),
+        // Validation is an executable sequence, not a set. Preserve its
+        // authored order so setup/generation steps cannot move after checks.
+        validationCommands: [...w.validationCommands],
         requirements: canonicalRequirements(w.requirements),
         ...(w.context
           ? {
@@ -116,8 +112,7 @@ export function canonicalizeObjective(
                 searchSeeds: sorted(w.context.searchSeeds),
                 dependencyEvidence: [...w.context.dependencyEvidence].sort(
                   (a, b) =>
-                    a.workItem.localeCompare(b.workItem) ||
-                    a.commit.localeCompare(b.commit),
+                    a.workItem.localeCompare(b.workItem) || a.commit.localeCompare(b.commit),
                 ),
               },
             }
@@ -156,7 +151,7 @@ function canonicalRequirements(value: unknown): ExecutionRequirements {
 
 export function validateCompiledObjective(
   objective: CompilerObjective,
-  observedCommands?: string[],
+  commandEvidence?: string[] | RepositoryFacts,
 ): void {
   if (objective.workItems.length < 1 || objective.workItems.length > 100)
     throw new Error("Work Item count is out of bounds");
@@ -165,22 +160,31 @@ export function validateCompiledObjective(
     if (byId.has(w.id)) throw new Error(`duplicate Work Item id ${w.id}`);
     byId.set(w.id, w);
     w.scope.forEach((p) => RepositoryScopePathSchema.parse(p));
-    if (w.acceptance.some((c) => !observable(c)))
-      throw new Error(`unobservable acceptance criterion in ${w.id}`);
-    if (w.validationCommands.length < 1)
-      throw new Error(`missing validation command in ${w.id}`);
-    if (
-      observedCommands &&
-      w.validationCommands.some((c) => !observedCommands.includes(c))
-    )
-      throw new Error(`invented validation command in ${w.id}`);
-    if (
-      !w.context ||
-      !w.changeSurface ||
-      !w.validation ||
-      !w.delivery ||
-      !w.economicReview
-    )
+    if (w.acceptance.length < 1 || w.acceptance.length > 64)
+      throw new Error(`invalid acceptance criteria in ${w.id}: provide between 1 and 64 criteria`);
+    for (const [index, criterion] of w.acceptance.entries()) {
+      const problem = acceptanceTextProblem(criterion);
+      if (problem)
+        throw new Error(
+          `invalid acceptance criterion ${index + 1} in ${w.id}: ${problem}; state a concrete expected behavior or result and associate it with validation evidence`,
+        );
+    }
+    if (w.validationCommands.length < 1) throw new Error(`missing validation command in ${w.id}`);
+    if (commandEvidence) {
+      const observed = Array.isArray(commandEvidence)
+        ? commandEvidence
+        : discoverValidationCommands(commandEvidence);
+      const invalid = w.validationCommands.find((command) =>
+        Array.isArray(commandEvidence)
+          ? !commandEvidence.includes(command)
+          : !isGroundedValidationCommand(command, commandEvidence, w.scope),
+      );
+      if (invalid !== undefined)
+        throw new Error(
+          `invented validation command in ${w.id}: ${JSON.stringify(invalid.slice(0, 200))}; repository-observed commands: ${JSON.stringify(observed).slice(0, 600)}. Use an observed command or specialize an observed bare node --test with concrete existing or Work Item-scoped JavaScript test files; flags, shell syntax, and unplanned targets are not allowed.`,
+        );
+    }
+    if (!w.context || !w.changeSurface || !w.validation || !w.delivery || !w.economicReview)
       throw new Error(`missing compiler analysis record in ${w.id}`);
     if (
       w.context.mustRead.length > 64 ||
@@ -196,10 +200,7 @@ export function validateCompiledObjective(
       throw new Error(`invalid validation design in ${w.id}`);
     if (w.changeSurface.exclusiveResources.length > 64)
       throw new Error(`unbounded exclusive resources in ${w.id}`);
-    if (
-      w.changeSurface.mergeClass === "parallel-safe" &&
-      w.changeSurface.exclusiveResources.length
-    )
+    if (w.changeSurface.mergeClass === "parallel-safe" && w.changeSurface.exclusiveResources.length)
       throw new Error(`invalid exclusive resources in ${w.id}`);
     if (
       w.changeSurface.mergeClass !== "parallel-safe" &&
@@ -209,10 +210,7 @@ export function validateCompiledObjective(
     const associated = new Set(w.validation.flatMap((v) => v.criteria));
     if (w.acceptance.some((c) => !associated.has(c)))
       throw new Error(`unvalidated acceptance criterion in ${w.id}`);
-    if (
-      !w.economicReview.conservative ||
-      w.economicReview.paidMeasurementRequired
-    )
+    if (!w.economicReview.conservative || w.economicReview.paidMeasurementRequired)
       throw new Error(`non-conservative economic review in ${w.id}`);
   }
   const visiting = new Set<string>(),
@@ -263,9 +261,7 @@ export function validateCompiledObjective(
         !path(a.id, b.id) &&
         !path(b.id, a.id)
       )
-        throw new Error(
-          `conflicting unordered exclusive resource: ${a.id}, ${b.id}`,
-        );
+        throw new Error(`conflicting unordered exclusive resource: ${a.id}, ${b.id}`);
     }
   for (const w of items) {
     const d = w.delivery;
@@ -306,17 +302,14 @@ export function validateCompiledObjective(
 }
 
 export function compileObjective(input: CompileInput): CompilerObjective {
-  if (!/^[0-9a-f]{40}$/i.test(input.baseSha))
-    throw new Error("invalid base SHA");
+  if (!/^[0-9a-f]{40}$/i.test(input.baseSha)) throw new Error("invalid base SHA");
   const facts = normalizeRepositoryFacts(input.repositoryFacts),
     commands = discoverValidationCommands(facts);
   const analyzed = input.workItems.map((w) => {
     const scope = w.scope.map((p) => RepositoryScopePathSchema.parse(p));
     const manifest = buildContextManifest(facts, scope);
     const scopedFacts = facts.files.filter((f) =>
-      scope.some((p) =>
-        p.endsWith("/") ? f.path.startsWith(p) : f.path === p,
-      ),
+      scope.some((p) => (p.endsWith("/") ? f.path.startsWith(p) : f.path === p)),
     );
     const generated =
       scopedFacts.some((f) => f.generated === true) ||
@@ -336,9 +329,7 @@ export function compileObjective(input: CompileInput): CompilerObjective {
     const tiers: ValidationTier[] = [
       "mechanical",
       "semantic",
-      ...(scopedProfile.deterministicSimulation
-        ? ["deterministic-simulation" as const]
-        : []),
+      ...(scopedProfile.deterministicSimulation ? ["deterministic-simulation" as const] : []),
       ...(scopedProfile.visualValidation ? ["visual" as const] : []),
     ];
     const resources =
@@ -353,9 +344,7 @@ export function compileObjective(input: CompileInput): CompilerObjective {
       req.memoryMb ? `memory ${req.memoryMb}MB` : undefined,
       req.diskMb ? `disk ${req.diskMb}MB` : undefined,
       req.tools.length ? `tools ${sorted(req.tools).join(",")}` : undefined,
-      req.services.length
-        ? `services ${sorted(req.services).join(",")}`
-        : undefined,
+      req.services.length ? `services ${sorted(req.services).join(",")}` : undefined,
       req.networkDestinations.length
         ? `network ${sorted(req.networkDestinations).join(",")}`
         : undefined,
@@ -376,7 +365,21 @@ export function compileObjective(input: CompileInput): CompilerObjective {
       },
     };
   });
-  const analyzedById = new Map(analyzed.map((w) => [w.id, w]));
+  // Scope overlap has one safe mechanical repair: serialize the later
+  // provider-emitted item after the earlier one. Do this before deriving
+  // delivery hints so both strict validation and stack topology see the
+  // repaired DAG.
+  const serialized = addScopeSerializationEdges({
+    title: input.title,
+    workItems: analyzed,
+  }).workItems;
+  const analyzedById = new Map(serialized.map((w) => [w.id, w]));
+  const childCounts = new Map<string, number>();
+  for (const item of serialized) {
+    for (const parent of item.dependsOn) {
+      childCounts.set(parent, (childCounts.get(parent) ?? 0) + 1);
+    }
+  }
   const stackGroup = (id: string): string => {
     const seen = new Set<string>();
     let current = id;
@@ -384,16 +387,26 @@ export function compileObjective(input: CompileInput): CompilerObjective {
       seen.add(current);
       const item = analyzedById.get(current);
       if (!item || item.dependsOn.length !== 1) return current;
-      current = item.dependsOn[0]!;
+      const parent = item.dependsOn[0]!;
+      // Every child of a fan-out starts a distinct sibling delivery group.
+      // Otherwise a later join cannot distinguish the diamond's branches.
+      if ((childCounts.get(parent) ?? 0) > 1) return current;
+      current = parent;
     }
     return id;
   };
-  const items = analyzed.map((w) => {
+  const items = serialized.map((w) => {
     if (w.dependsOn.length === 0)
       return { ...w, delivery: { group: w.id, relationship: "root" as const } };
     if (w.dependsOn.length === 1) {
-      const parent = w.dependsOn[0]!,
-        group = stackGroup(parent);
+      const parent = w.dependsOn[0]!;
+      if ((childCounts.get(parent) ?? 0) > 1) {
+        return {
+          ...w,
+          delivery: { group: w.id, relationship: "sibling" as const },
+        };
+      }
+      const group = stackGroup(parent);
       return {
         ...w,
         delivery: {
@@ -412,23 +425,18 @@ export function compileObjective(input: CompileInput): CompilerObjective {
     title: input.title,
     workItems: items,
   });
-  validateCompiledObjective(result, commands);
+  validateCompiledObjective(result, facts);
   return result;
 }
 
-export function serializeCompilerObjective(
-  objective: CompilerObjective,
-): string {
+export function serializeCompilerObjective(objective: CompilerObjective): string {
   const canonical = (value: unknown): string =>
     Array.isArray(value)
       ? `[${value.map(canonical).join(",")}]`
       : value !== null && typeof value === "object"
         ? `{${Object.keys(value as Record<string, unknown>)
             .sort()
-            .map(
-              (k) =>
-                `${JSON.stringify(k)}:${canonical((value as Record<string, unknown>)[k])}`,
-            )
+            .map((k) => `${JSON.stringify(k)}:${canonical((value as Record<string, unknown>)[k])}`)
             .join(",")}}`
         : JSON.stringify(value);
   return canonical(canonicalizeObjective(objective));

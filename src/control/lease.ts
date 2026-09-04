@@ -12,21 +12,11 @@ export interface GitCommitObject {
 export interface LeaseStore {
   readRef(ref: string): Promise<string | null>;
   /** Optional single-call ref observation carrying authoritative server time. */
-  readRefWithServerTime?(
-    ref: string,
-  ): Promise<{ oid: string | null; serverTime: Date }>;
+  readRefWithServerTime?(ref: string): Promise<{ oid: string | null; serverTime: Date }>;
   readCommit(oid: string): Promise<GitCommitObject>;
-  createCommit(args: {
-    treeOid: string;
-    parentOids: string[];
-    message: string;
-  }): Promise<string>;
+  createCommit(args: { treeOid: string; parentOids: string[]; message: string }): Promise<string>;
   createRef(ref: string, oid: string): Promise<boolean>;
-  compareAndSwapRef(args: {
-    ref: string;
-    beforeOid: string;
-    afterOid: string;
-  }): Promise<boolean>;
+  compareAndSwapRef(args: { ref: string; beforeOid: string; afterOid: string }): Promise<boolean>;
   serverTime(): Promise<Date>;
 }
 
@@ -164,7 +154,15 @@ export class LeaseManager {
       ? await this.#store.compareAndSwapRef({ ref, beforeOid: current.oid, afterOid: oid })
       : await this.#store.createRef(ref, oid);
     if (!won) throw new LeaseLostError("another Director won lease acquisition");
-    return { ...identity, ref, oid, treeOid, epoch, sequence, expiresAt: new Date(event.expiresAt) };
+    return {
+      ...identity,
+      ref,
+      oid,
+      treeOid,
+      epoch,
+      sequence,
+      expiresAt: new Date(event.expiresAt),
+    };
   }
 
   async renew(lease: LeaseState, requestedSequence?: number): Promise<LeaseState> {
@@ -240,9 +238,7 @@ export class LeaseManager {
         };
     const { oid } = observation;
     if (!oid) throw new LeaseLostError();
-    const current = oid === lease.oid
-      ? lease
-      : parseLease(await this.#store.readCommit(oid));
+    const current = oid === lease.oid ? lease : parseLease(await this.#store.readCommit(oid));
     if (
       current.objective !== lease.objective ||
       current.epoch !== lease.epoch ||

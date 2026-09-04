@@ -44,10 +44,7 @@ describe("v2 branch-policy preflight", () => {
           },
         },
       ]),
-    ).toEqual([
-      "required human pull-request review",
-      "squash merge is not allowed",
-    ]);
+    ).toEqual(["required human pull-request review", "squash merge is not allowed"]);
     expect(
       branchRuleBlockers([
         {
@@ -67,11 +64,7 @@ describe("v2 branch-policy preflight", () => {
         {
           type: "required_status_checks",
           parameters: {
-            required_status_checks: [
-              { context: "test" },
-              { context: "lint" },
-              { context: "test" },
-            ],
+            required_status_checks: [{ context: "test" }, { context: "lint" }, { context: "test" }],
           },
         },
       ]),
@@ -80,17 +73,14 @@ describe("v2 branch-policy preflight", () => {
 
   it("preserves a required check's GitHub App identity", () => {
     const rules = [
-        {
-          type: "required_status_checks",
-          parameters: {
-            strict_required_status_checks_policy: true,
-            required_status_checks: [
-              { context: "test", integration_id: 42 },
-              { context: "test" },
-            ],
-          },
+      {
+        type: "required_status_checks",
+        parameters: {
+          strict_required_status_checks_policy: true,
+          required_status_checks: [{ context: "test", integration_id: 42 }, { context: "test" }],
         },
-      ];
+      },
+    ];
     expect(requiredChecks(rules)).toEqual([
       { context: "test", integrationId: 42 },
       { context: "test" },

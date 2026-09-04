@@ -1,7 +1,10 @@
 node_modules/
+coverage/
+release/
 *.log
 .env
 .DS_Store
+.codex-marketplace-install.json
 
 # dist/ is intentionally NOT ignored.
 # Harnesses install plugins without running lifecycle scripts, so there is no

@@ -255,17 +255,12 @@ describe("repository-wide capacity ledger", () => {
       defaultCpu: 1,
       defaultMemoryMb: 2_048,
     });
-    expect(deriveCapacityReservations([input([capacity("CapacityReserved", 1)] )])).toHaveLength(1);
+    expect(deriveCapacityReservations([input([capacity("CapacityReserved", 1)])])).toHaveLength(1);
     expect(
       deriveCapacityReservations([
-        input([
-          attemptEvent("AttemptReserved", 1),
-          capacity("CapacityReserved", 2),
-        ]),
+        input([attemptEvent("AttemptReserved", 1), capacity("CapacityReserved", 2)]),
       ]),
-    ).toMatchObject([
-      { phase: "validation", backendId: "codex-cli/daytona" },
-    ]);
+    ).toMatchObject([{ phase: "validation", backendId: "codex-cli/daytona" }]);
     expect(
       deriveCapacityReservations([
         input([

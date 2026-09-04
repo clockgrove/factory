@@ -1,24 +1,17 @@
 import {
   type AttemptEvent,
   type FactoryEvent,
+  type ReportedModelUsage,
   parseFactoryEvent,
 } from "../protocol/events.js";
-import { PROTOCOL_V2 } from "../protocol/limits.js";
+import { assertNoSecretMaterial, PROTOCOL_V2 } from "../protocol/limits.js";
 import { encodeEventComment, encodeEventTrailer } from "./receipts.js";
-import {
-  type GitCommitObject,
-  type LeaseManager,
-  type LeaseState,
-} from "./lease.js";
+import type { GitCommitObject, LeaseManager, LeaseState } from "./lease.js";
 
 export interface AttemptStore {
   listRefs(prefix: string): Promise<Array<{ ref: string; oid: string }>>;
   readCommit(oid: string): Promise<GitCommitObject>;
-  createCommit(args: {
-    treeOid: string;
-    parentOids: string[];
-    message: string;
-  }): Promise<string>;
+  createCommit(args: { treeOid: string; parentOids: string[]; message: string }): Promise<string>;
   createRef(ref: string, oid: string): Promise<boolean>;
   addIssueComment(issueNodeId: string, body: string): Promise<void>;
   serverTime(): Promise<Date>;
@@ -51,7 +44,11 @@ export interface AttemptAdmissionReceipt {
   requestedCpu: number;
   requestedMemoryMb: number;
   priorityRank: number;
-  prioritySource?: "subissue-order" | "issue-field" | "subissue-order-fallback";
+  prioritySource?:
+    | "subissue-order"
+    | "issue-field"
+    | "subissue-order-fallback"
+    | "operator-command";
   priorityFieldId?: string;
   priorityOptionId?: string;
   subIssuePosition: number;
@@ -62,6 +59,8 @@ export interface AttemptAdmissionReceipt {
   availableMemoryMb?: number;
   loadRatio?: number;
   memoryUsageRatio?: number;
+  estimatedCloudTimeSavedMinutes?: number;
+  minimumCloudTimeSavedMinutes?: number;
 }
 
 function admissionFromEvent(event: AttemptEvent): AttemptAdmissionReceipt | undefined {
@@ -99,9 +98,15 @@ function admissionFromEvent(event: AttemptEvent): AttemptAdmissionReceipt | unde
       ? {}
       : { availableMemoryMb: event.availableMemoryMb }),
     ...(event.loadRatio === undefined ? {} : { loadRatio: event.loadRatio }),
-    ...(event.memoryUsageRatio === undefined
+    ...(event.memoryUsageRatio === undefined ? {} : { memoryUsageRatio: event.memoryUsageRatio }),
+    ...(event.estimatedCloudTimeSavedMinutes === undefined
       ? {}
-      : { memoryUsageRatio: event.memoryUsageRatio }),
+      : {
+          estimatedCloudTimeSavedMinutes: event.estimatedCloudTimeSavedMinutes,
+        }),
+    ...(event.minimumCloudTimeSavedMinutes === undefined
+      ? {}
+      : { minimumCloudTimeSavedMinutes: event.minimumCloudTimeSavedMinutes }),
   };
 }
 
@@ -124,13 +129,6 @@ export function attemptRef(objective: number, workItem: number, attempt: number)
     throw new Error("attempt number must be a positive integer");
   }
   return `${attemptRefPrefix(objective, workItem)}attempt-${attempt}`;
-}
-
-function attemptNumberFromRef(ref: string): number | null {
-  const match = /\/attempt-(\d+)$/.exec(ref);
-  if (!match) return null;
-  const value = Number(match[1]);
-  return Number.isInteger(value) && value > 0 ? value : null;
 }
 
 function parseReservation(ref: string, commit: GitCommitObject): AttemptReservation {
@@ -227,10 +225,7 @@ export class AttemptManager {
     if (!won) throw new AttemptReservationConflict();
     await this.#store.addIssueComment(
       args.workItemNodeId,
-      encodeEventComment(
-        `Factory reserved attempt ${next} using \`${args.backend}\`.`,
-        event,
-      ),
+      encodeEventComment(`Factory reserved attempt ${next} using \`${args.backend}\`.`, event),
     );
     return {
       ref,
@@ -257,11 +252,18 @@ export class AttemptManager {
     sequence: number;
     reason?: string;
     providerResourceId?: string;
+    environmentIdentity?: string;
     artifactDigest?: string;
     headSha?: string;
+    modelProfile?: string;
+    reportedModelTokens?: number;
+    reportedModelUsage?: ReportedModelUsage;
     allowRecovery?: boolean;
   }): Promise<AttemptEvent> {
     await this.#leases.assertCurrent(args.lease);
+    if (args.environmentIdentity) {
+      assertNoSecretMaterial(args.environmentIdentity, "attempt environment identity");
+    }
     if (
       args.reservation.runId !== args.lease.runId ||
       args.reservation.policyDigest !== args.lease.policyDigest
@@ -270,10 +272,7 @@ export class AttemptManager {
     }
     if (
       args.reservation.directorEpoch !== args.lease.epoch &&
-      !(
-        args.allowRecovery &&
-        args.reservation.directorEpoch < args.lease.epoch
-      )
+      !(args.allowRecovery && args.reservation.directorEpoch < args.lease.epoch)
     ) {
       throw new Error("attempt reservation is fenced from the current lease epoch");
     }
@@ -296,11 +295,15 @@ export class AttemptManager {
         : { recoveryEpoch: args.lease.epoch }),
       policyDigest: args.reservation.policyDigest,
       ...(args.reason ? { reason: args.reason } : {}),
-      ...(args.providerResourceId
-        ? { providerResourceId: args.providerResourceId }
-        : {}),
+      ...(args.providerResourceId ? { providerResourceId: args.providerResourceId } : {}),
+      ...(args.environmentIdentity ? { environmentIdentity: args.environmentIdentity } : {}),
       ...(args.artifactDigest ? { artifactDigest: args.artifactDigest } : {}),
       ...(args.headSha ? { headSha: args.headSha } : {}),
+      ...(args.modelProfile ? { modelProfile: args.modelProfile } : {}),
+      ...(args.reportedModelTokens === undefined
+        ? {}
+        : { reportedModelTokens: args.reportedModelTokens }),
+      ...(args.reportedModelUsage ? { reportedModelUsage: args.reportedModelUsage } : {}),
     };
     await this.#store.addIssueComment(
       args.workItemNodeId,
@@ -355,15 +358,11 @@ export class AttemptManager {
     workItemNodeId: string;
     sequence: number;
     reason: string;
-    reasonCode?: NonNullable<
-      Extract<FactoryEvent, { kind: "scheduling" }>["reasonCode"]
-    >;
+    reasonCode?: NonNullable<Extract<FactoryEvent, { kind: "scheduling" }>["reasonCode"]>;
     gate?: NonNullable<Extract<FactoryEvent, { kind: "scheduling" }>["gate"]>;
     observedPriorityRank: number;
     observedSubIssuePosition: number;
-    prioritySource?: NonNullable<
-      Extract<FactoryEvent, { kind: "scheduling" }>["prioritySource"]
-    >;
+    prioritySource?: NonNullable<Extract<FactoryEvent, { kind: "scheduling" }>["prioritySource"]>;
   }): Promise<FactoryEvent> {
     await this.#leases.assertCurrent(args.lease);
     const now = await this.#store.serverTime();

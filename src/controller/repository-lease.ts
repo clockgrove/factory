@@ -1,8 +1,7 @@
 import type { GitCommitObject, LeaseStore } from "../control/lease.js";
 import { gitSha } from "../protocol/limits.js";
 
-export const REPOSITORY_LEASE_REF =
-  "refs/clockgrove-factory/leases/repository-controller";
+export const REPOSITORY_LEASE_REF = "refs/clockgrove-factory/leases/repository-controller";
 export const DEFAULT_REPOSITORY_LEASE_DURATION_MS = 10 * 60_000;
 export const DEFAULT_REPOSITORY_LEASE_RENEWAL_INTERVAL_MS = 8 * 60_000;
 
@@ -23,10 +22,7 @@ export interface RepositoryLeaseState extends RepositoryLeaseIdentity {
 interface RepositoryLeaseRecord extends RepositoryLeaseIdentity {
   protocol: "clockgrove.factory/v2";
   kind: "repository-lease";
-  event:
-    | "RepositoryLeaseAcquired"
-    | "RepositoryLeaseRenewed"
-    | "RepositoryLeaseReleased";
+  event: "RepositoryLeaseAcquired" | "RepositoryLeaseRenewed" | "RepositoryLeaseReleased";
   epoch: number;
   sequence: number;
   at: string;
@@ -47,8 +43,7 @@ export class RepositoryLeaseManager {
 
   constructor(options: { store: LeaseStore; durationMs?: number }) {
     this.#store = options.store;
-    this.#durationMs =
-      options.durationMs ?? DEFAULT_REPOSITORY_LEASE_DURATION_MS;
+    this.#durationMs = options.durationMs ?? DEFAULT_REPOSITORY_LEASE_DURATION_MS;
     if (this.#durationMs < 30_000) {
       throw new Error("repository lease duration must be at least 30 seconds");
     }
@@ -70,9 +65,7 @@ export class RepositoryLeaseManager {
       if (current.controllerId === identity.controllerId) {
         return this.renew(current);
       }
-      throw new RepositoryLeaseLostError(
-        "another repository controller holds the lease",
-      );
+      throw new RepositoryLeaseLostError("another repository controller holds the lease");
     }
     const record = makeRecord(
       "RepositoryLeaseAcquired",
@@ -96,9 +89,7 @@ export class RepositoryLeaseManager {
         })
       : await this.#store.createRef(REPOSITORY_LEASE_REF, oid);
     if (!won) {
-      throw new RepositoryLeaseLostError(
-        "another repository controller won lease acquisition",
-      );
+      throw new RepositoryLeaseLostError("another repository controller won lease acquisition");
     }
     return state(record, oid, current?.treeOid ?? base.treeOid);
   }
@@ -123,9 +114,7 @@ export class RepositoryLeaseManager {
       afterOid: oid,
     });
     if (!won) {
-      throw new RepositoryLeaseLostError(
-        "another repository controller advanced the lease",
-      );
+      throw new RepositoryLeaseLostError("another repository controller advanced the lease");
     }
     return state(record, oid, current.treeOid);
   }
@@ -180,15 +169,11 @@ export class RepositoryLeaseManager {
     }
   }
 
-  async #currentGeneration(
-    lease: RepositoryLeaseState,
-  ): Promise<RepositoryLeaseState> {
+  async #currentGeneration(lease: RepositoryLeaseState): Promise<RepositoryLeaseState> {
     const oid = await this.#store.readRef(REPOSITORY_LEASE_REF);
     if (!oid) throw new RepositoryLeaseLostError();
     const current =
-      oid === lease.oid
-        ? lease
-        : parseRepositoryLease(await this.#store.readCommit(oid));
+      oid === lease.oid ? lease : parseRepositoryLease(await this.#store.readCommit(oid));
     if (
       current.controllerId !== lease.controllerId ||
       current.policyDigest !== lease.policyDigest ||
@@ -235,11 +220,7 @@ function makeRecord(
   };
 }
 
-function state(
-  record: RepositoryLeaseRecord,
-  oid: string,
-  treeOid: string,
-): RepositoryLeaseState {
+function state(record: RepositoryLeaseRecord, oid: string, treeOid: string): RepositoryLeaseState {
   return {
     ref: REPOSITORY_LEASE_REF,
     oid,
@@ -253,9 +234,7 @@ function state(
 }
 
 function repositoryLeaseMessage(record: RepositoryLeaseRecord): string {
-  const trailer = Buffer.from(JSON.stringify(record), "utf8").toString(
-    "base64url",
-  );
+  const trailer = Buffer.from(JSON.stringify(record), "utf8").toString("base64url");
   return `Factory repository-controller lease\n\nFactory-Repository-Lease: ${trailer}`;
 }
 
@@ -268,19 +247,14 @@ function parseRepositoryLease(commit: GitCommitObject): RepositoryLeaseState {
     throw new Error("repository lease commit has no lease trailer");
   }
   const parsed = JSON.parse(
-    Buffer.from(
-      trailer.slice("Factory-Repository-Lease: ".length),
-      "base64url",
-    ).toString("utf8"),
+    Buffer.from(trailer.slice("Factory-Repository-Lease: ".length), "base64url").toString("utf8"),
   ) as Partial<RepositoryLeaseRecord>;
   if (
     parsed.protocol !== "clockgrove.factory/v2" ||
     parsed.kind !== "repository-lease" ||
-    ![
-      "RepositoryLeaseAcquired",
-      "RepositoryLeaseRenewed",
-      "RepositoryLeaseReleased",
-    ].includes(parsed.event ?? "") ||
+    !["RepositoryLeaseAcquired", "RepositoryLeaseRenewed", "RepositoryLeaseReleased"].includes(
+      parsed.event ?? "",
+    ) ||
     !Number.isInteger(parsed.epoch) ||
     Number(parsed.epoch) < 1 ||
     !Number.isInteger(parsed.sequence) ||

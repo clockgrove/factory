@@ -15,15 +15,9 @@ import {
   createLocalWorktree,
   type LocalWorktree,
 } from "../runtime/local-worktree.js";
-import {
-  runContainedProcess,
-  sanitizedWorkerEnvironment,
-} from "../runtime/process-group.js";
-import {
-  createValidationEvidence,
-  type ValidationEvidence,
-} from "./evidence.js";
-import { validationPlanFromPacket } from "./plan.js";
+import { runContainedProcess, sanitizedWorkerEnvironment } from "../runtime/process-group.js";
+import { createValidationEvidence, type ValidationEvidence } from "./evidence.js";
+import { NPM_VALIDATION_SETUP_COMMAND, validationPlanFromPacket } from "./plan.js";
 
 async function git(worktree: LocalWorktree, args: string[]): Promise<string> {
   const result = await runContainedProcess({
@@ -90,6 +84,44 @@ export function validationFailureReason(
   return `${summary}\nOutput tail:\n${tail}`;
 }
 
+/**
+ * Treat provider-produced validation evidence as an untrusted attestation. A
+ * passing result must cover the complete plan with zero exits. A failing
+ * result may stop early, but must be the exact plan prefix through its first
+ * failed command.
+ */
+export function assertIsolatedValidationMatchesPlan(
+  isolated: IsolatedValidationResult,
+  expectedCommands: string[],
+): void {
+  for (let index = 0; index < isolated.commands.length; index += 1) {
+    if (isolated.commands[index]?.command !== expectedCommands[index]) {
+      throw new Error("isolated validator command evidence does not match the plan");
+    }
+  }
+
+  const firstFailure = isolated.commands.findIndex(({ exitCode }) => exitCode !== 0);
+  if (isolated.passed) {
+    if (isolated.commands.length !== expectedCommands.length) {
+      throw new Error("isolated validator omitted commands from a passing result");
+    }
+    if (firstFailure !== -1 || isolated.failureReason !== undefined) {
+      throw new Error("isolated validator marked failed command evidence as passing");
+    }
+    return;
+  }
+
+  if (!isolated.failureReason) {
+    throw new Error("isolated validator omitted the failure reason");
+  }
+  if (firstFailure === -1) {
+    throw new Error("isolated validator marked all-zero command evidence as failing");
+  }
+  if (isolated.commands.length !== firstFailure + 1) {
+    throw new Error("isolated validator continued after a failed command");
+  }
+}
+
 export async function validateArtifactClean(
   input: CleanValidationInput,
 ): Promise<CleanValidationResult> {
@@ -101,9 +133,7 @@ export async function validateArtifactClean(
     throw new Error("artifact base SHA does not match Worker Packet");
   }
   assertArtifactScope(artifact, input.packet.allowedPaths);
-  const sensitive = artifact.changedPaths.filter(
-    (path) => executionAffectingReason(path) !== null,
-  );
+  const sensitive = artifact.changedPaths.filter((path) => executionAffectingReason(path) !== null);
   if (sensitive.length > 0) {
     throw new Error(`artifact touches a sensitive surface: ${sensitive.join(", ")}`);
   }
@@ -144,6 +174,7 @@ export async function validateArtifactClean(
     const outputTreeSha = await git(worktree, ["write-tree"]);
     let evidenceStartedAt = startedAt.toISOString();
     let evidenceCompletedAt: string;
+    let environmentIdentity: string | undefined;
     if (plan.isolation === "isolated") {
       const isolated = await input.isolatedValidator!();
       if (isolated.outputTreeSha !== outputTreeSha) {
@@ -151,25 +182,25 @@ export async function validateArtifactClean(
           `isolated validator tree ${isolated.outputTreeSha} does not match host tree ${outputTreeSha}`,
         );
       }
-      for (let index = 0; index < isolated.commands.length; index += 1) {
-        if (isolated.commands[index]?.command !== plan.commands[index]) {
-          throw new Error("isolated validator command evidence does not match the plan");
-        }
-      }
-      if (isolated.passed && isolated.commands.length !== plan.commands.length) {
-        throw new Error("isolated validator omitted commands from a passing result");
-      }
-      if (!isolated.passed && !isolated.failureReason) {
-        throw new Error("isolated validator omitted the failure reason");
-      }
+      const expectedCommands = (await hasNpmLockfile(worktree))
+        ? [NPM_VALIDATION_SETUP_COMMAND, ...plan.commands]
+        : plan.commands;
+      assertIsolatedValidationMatchesPlan(isolated, expectedCommands);
       commands.push(...isolated.commands);
       passed = isolated.passed;
       failureReason = isolated.failureReason;
       evidenceStartedAt = isolated.startedAt;
       evidenceCompletedAt = isolated.completedAt;
+      environmentIdentity = isolated.environmentIdentity;
     } else {
       const localCommands = (await hasNpmLockfile(worktree))
-        ? [{ command: "npm ci --no-audit --no-fund", executable: "npm", args: ["ci", "--no-audit", "--no-fund"] }]
+        ? [
+            {
+              command: NPM_VALIDATION_SETUP_COMMAND,
+              executable: "npm",
+              args: ["ci", "--no-audit", "--no-fund"],
+            },
+          ]
         : [];
       for (const setup of localCommands) {
         const result = await runContainedProcess({
@@ -192,7 +223,7 @@ export async function validateArtifactClean(
       for (const command of failureReason ? [] : plan.commands) {
         const result = await runContainedProcess({
           command: "/bin/sh",
-          args: ["-lc", command],
+          args: ["-c", command],
           cwd: worktree.path,
           env: sanitizedWorkerEnvironment(process.env),
           timeoutMs: plan.timeoutMsPerCommand,
@@ -220,6 +251,7 @@ export async function validateArtifactClean(
       ...(failureReason ? { failureReason } : {}),
       startedAt: evidenceStartedAt,
       completedAt: evidenceCompletedAt,
+      ...(environmentIdentity ? { environmentIdentity } : {}),
     });
     return { evidence, worktree };
   } catch (error) {

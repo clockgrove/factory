@@ -2,10 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 
 import { MAX_LOG_BYTES } from "../protocol/limits.js";
-import {
-  PARENT_DEATH_WATCHDOG,
-  sanitizedWorkerEnvironment,
-} from "./process-group.js";
+import { PARENT_DEATH_WATCHDOG, sanitizedWorkerEnvironment } from "./process-group.js";
 
 export type AppServerRequestId = number | string;
 
@@ -29,8 +26,8 @@ export interface AppServerConnection {
   readonly closed: Promise<AppServerExit>;
   request<T = unknown>(method: string, params?: unknown): Promise<T>;
   notify(method: string, params?: unknown): void;
-  respond(id: AppServerRequestId, result: unknown): void;
-  respondError(id: AppServerRequestId, code: number, message: string): void;
+  respond(id: AppServerRequestId, result: unknown): void | Promise<void>;
+  respondError(id: AppServerRequestId, code: number, message: string): void | Promise<void>;
   onNotification(listener: (event: AppServerNotification) => void): () => void;
   onRequest(listener: (request: AppServerRequest) => void): () => void;
   close(): Promise<void>;
@@ -71,8 +68,7 @@ function appendBounded(current: string, chunk: Buffer, limit: number): string {
 }
 
 function terminate(child: ChildProcess, signal: NodeJS.Signals): void {
-  if (!child.pid || child.exitCode !== null || child.signalCode !== null)
-    return;
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
   try {
     if (process.platform === "win32") child.kill(signal);
     else process.kill(-child.pid, signal);
@@ -89,13 +85,8 @@ function jsonRpcKey(id: AppServerRequestId): string {
  * Start one supervised App Server process. Factory deliberately uses one
  * process per attempt so forced cancellation can never stop a sibling worker.
  */
-export function startCodexAppServer(
-  options: AppServerOptions,
-): AppServerConnection {
-  const environment = sanitizedWorkerEnvironment(
-    options.env,
-    options.permittedSecretNames,
-  );
+export function startCodexAppServer(options: AppServerOptions): AppServerConnection {
+  const environment = sanitizedWorkerEnvironment(options.env, options.permittedSecretNames);
   if (options.attemptIdentity) {
     environment.FACTORY_ATTEMPT_ID = options.attemptIdentity;
   }
@@ -132,9 +123,7 @@ export function startCodexAppServer(
   let exited = false;
   let closePromise: Promise<void> | null = null;
   const pending = new Map<string, PendingRequest>();
-  const notificationListeners = new Set<
-    (event: AppServerNotification) => void
-  >();
+  const notificationListeners = new Set<(event: AppServerNotification) => void>();
   const requestListeners = new Set<(request: AppServerRequest) => void>();
   const lines = createInterface({ input: stdout });
 
@@ -149,6 +138,18 @@ export function startCodexAppServer(
     }
     stdin.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
   };
+
+  const writeFlushed = (message: JsonRpcMessage): Promise<void> =>
+    new Promise((resolveWrite, rejectWrite) => {
+      if (exited || stdin.destroyed || !stdin.writable) {
+        rejectWrite(new Error("Codex App Server is not writable"));
+        return;
+      }
+      stdin.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`, (error) => {
+        if (error) rejectWrite(error);
+        else resolveWrite();
+      });
+    });
 
   const failPending = (reason: string): void => {
     for (const request of pending.values()) {
@@ -167,24 +168,16 @@ export function startCodexAppServer(
     exited = true;
     lines.close();
     const detail = error?.message || stderr.trim();
-    failPending(
-      detail ? `Codex App Server exited: ${detail}` : "Codex App Server exited",
-    );
+    failPending(detail ? `Codex App Server exited: ${detail}` : "Codex App Server exited");
     resolveClosed({ exitCode, signal, stderr });
   };
 
   child.stderr?.on("data", (chunk: Buffer) => {
-    stderr = appendBounded(
-      stderr,
-      chunk,
-      options.maxStderrBytes ?? MAX_LOG_BYTES,
-    );
+    stderr = appendBounded(stderr, chunk, options.maxStderrBytes ?? MAX_LOG_BYTES);
   });
   child.once("error", (error) => settleExit(null, null, error));
   child.once("exit", (exitCode, signal) => settleExit(exitCode, signal));
-  stdin.on("error", (error) =>
-    failPending(`Codex App Server stdin failed: ${error.message}`),
-  );
+  stdin.on("error", (error) => failPending(`Codex App Server stdin failed: ${error.message}`));
 
   lines.on("line", (line) => {
     let message: JsonRpcMessage;
@@ -268,11 +261,11 @@ export function startCodexAppServer(
     notify(method: string, params?: unknown): void {
       write({ method, ...(params === undefined ? {} : { params }) });
     },
-    respond(id: AppServerRequestId, result: unknown): void {
-      write({ id, result });
+    respond(id: AppServerRequestId, result: unknown): Promise<void> {
+      return writeFlushed({ id, result });
     },
-    respondError(id: AppServerRequestId, code: number, message: string): void {
-      write({ id, error: { code, message } });
+    respondError(id: AppServerRequestId, code: number, message: string): Promise<void> {
+      return writeFlushed({ id, error: { code, message } });
     },
     onNotification(listener): () => void {
       notificationListeners.add(listener);
@@ -290,9 +283,7 @@ export function startCodexAppServer(
         const grace = options.cancellationGraceMs ?? 2_000;
         const stopped = await Promise.race([
           closed.then(() => true),
-          new Promise<false>((resolve) =>
-            setTimeout(() => resolve(false), grace),
-          ),
+          new Promise<false>((resolve) => setTimeout(() => resolve(false), grace)),
         ]);
         if (!stopped) {
           terminate(child, "SIGKILL");

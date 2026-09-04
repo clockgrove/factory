@@ -6,7 +6,11 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import type { GitCommitObject } from "../src/control/lease.js";
-import { collectLocalArtifact, cleanupLocalWorktree, createLocalWorktree } from "../src/runtime/local-worktree.js";
+import {
+  collectLocalArtifact,
+  cleanupLocalWorktree,
+  createLocalWorktree,
+} from "../src/runtime/local-worktree.js";
 import type { PublicationStore } from "../src/publication/publisher.js";
 import { integrationReadiness, publishValidated } from "../src/publication/publisher.js";
 import { discardValidationResult, validateArtifactClean } from "../src/validation/clean-run.js";
@@ -45,24 +49,54 @@ async function fixture() {
   git(repository, ["commit", "-q", "-m", "base"]);
   const oid = git(repository, ["rev-parse", "HEAD"]);
   const treeOid = git(repository, ["rev-parse", "HEAD^{tree}"]);
-  return { repository, base: { oid, treeOid, parentOids: [], message: "base", serverTime: new Date() } satisfies GitCommitObject };
+  return {
+    repository,
+    base: {
+      oid,
+      treeOid,
+      parentOids: [],
+      message: "base",
+      serverTime: new Date(),
+    } satisfies GitCommitObject,
+  };
 }
 
 class GitObjectStore implements PublicationStore {
   refs = new Map<string, string>();
-  pull: { number: number; htmlUrl: string; state: string; merged: boolean; headSha: string } | null = null;
+  pull: {
+    number: number;
+    htmlUrl: string;
+    state: string;
+    merged: boolean;
+    headSha: string;
+  } | null = null;
   checks = { pending: [] as string[], failed: [] as string[] };
   mergeable: boolean | null = true;
   mergeableState = "clean";
+  baseRef = "main";
+  mergeTree = "d".repeat(40);
+  mergeParents = ["b".repeat(40)];
   loseCreatePullResponse = false;
   loseCreateRefResponse = false;
 
-  constructor(readonly repository: string, readonly baseSha: string) {}
+  constructor(
+    readonly repository: string,
+    readonly baseSha: string,
+  ) {}
 
   async readRef(ref: string): Promise<string | null> {
     return this.refs.get(ref) ?? null;
   }
   async readCommit(oid: string): Promise<GitCommitObject> {
+    if (oid === "f".repeat(40)) {
+      return {
+        oid,
+        treeOid: this.mergeTree,
+        parentOids: this.mergeParents,
+        message: "squash",
+        serverTime: new Date(),
+      };
+    }
     return {
       oid,
       treeOid: git(this.repository, ["rev-parse", `${oid}^{tree}`]),
@@ -77,25 +111,58 @@ class GitObjectStore implements PublicationStore {
   async createBlob(content: Buffer): Promise<string> {
     return git(this.repository, ["hash-object", "-w", "--stdin"], content);
   }
-  async createTree(args: { baseTreeOid: string; entries: Array<{ path: string; mode: "100644" | "100755" | "120000"; type: "blob"; sha: string | null }> }): Promise<string> {
+  async createTree(args: {
+    baseTreeOid: string;
+    entries: Array<{
+      path: string;
+      mode: "100644" | "100755" | "120000";
+      type: "blob";
+      sha: string | null;
+    }>;
+  }): Promise<string> {
     const index = join(this.repository, ".git", `factory-index-${Date.now()}-${Math.random()}`);
     const env = { ...process.env, GIT_INDEX_FILE: index };
     try {
       execFileSync("git", ["read-tree", args.baseTreeOid], { cwd: this.repository, env });
       for (const entry of args.entries) {
         if (entry.sha) {
-          execFileSync("git", ["update-index", "--add", "--cacheinfo", entry.mode, entry.sha, entry.path], { cwd: this.repository, env });
+          execFileSync(
+            "git",
+            ["update-index", "--add", "--cacheinfo", entry.mode, entry.sha, entry.path],
+            { cwd: this.repository, env },
+          );
         } else {
-          execFileSync("git", ["update-index", "--force-remove", "--", entry.path], { cwd: this.repository, env });
+          execFileSync("git", ["update-index", "--force-remove", "--", entry.path], {
+            cwd: this.repository,
+            env,
+          });
         }
       }
-      return execFileSync("git", ["write-tree"], { cwd: this.repository, env, encoding: "utf8" }).trim();
+      return execFileSync("git", ["write-tree"], {
+        cwd: this.repository,
+        env,
+        encoding: "utf8",
+      }).trim();
     } finally {
       await unlink(index).catch(() => {});
     }
   }
-  async createCommit(args: { treeOid: string; parentOids: string[]; message: string }): Promise<string> {
-    return git(this.repository, ["commit-tree", args.treeOid, ...args.parentOids.flatMap((parent) => ["-p", parent]), "-F", "-"], args.message);
+  async createCommit(args: {
+    treeOid: string;
+    parentOids: string[];
+    message: string;
+  }): Promise<string> {
+    return git(
+      this.repository,
+      [
+        "commit-tree",
+        args.treeOid,
+        ...args.parentOids.flatMap((parent) => ["-p", parent]),
+        "-F",
+        "-",
+      ],
+      args.message,
+    );
   }
   async createRef(ref: string, oid: string): Promise<boolean> {
     const present = this.refs.get(ref);
@@ -104,18 +171,52 @@ class GitObjectStore implements PublicationStore {
     if (this.loseCreateRefResponse) throw new Error("connection reset after ref create");
     return true;
   }
-  async findPullRequestForBranch(): Promise<typeof this.pull> { return this.pull; }
-  async createPullRequest(args: { head: string }): Promise<{ number: number; htmlUrl: string; headSha: string }> {
+  async findPullRequestForBranch(): Promise<typeof this.pull> {
+    return this.pull;
+  }
+  async createPullRequest(args: {
+    head: string;
+  }): Promise<{ number: number; htmlUrl: string; headSha: string }> {
     const headSha = this.refs.get(`refs/heads/${args.head}`)!;
-    this.pull = { number: 7, htmlUrl: "https://example.invalid/pull/7", state: "open", merged: false, headSha };
+    this.pull = {
+      number: 7,
+      htmlUrl: "https://example.invalid/pull/7",
+      state: "open",
+      merged: false,
+      headSha,
+    };
     if (this.loseCreatePullResponse) throw new Error("connection reset after write");
     return this.pull;
   }
-  async readPullRequest(): Promise<{ state: string; merged: boolean; mergeable: boolean | null; mergeableState: string; draft: boolean; headSha: string; baseSha: string; baseRef: string; mergeCommitSha: string | null }> {
-    return { state: this.pull?.state ?? "open", merged: this.pull?.merged ?? false, mergeable: this.mergeable, mergeableState: this.mergeableState, draft: false, headSha: this.pull!.headSha, baseSha: this.baseSha, baseRef: "main", mergeCommitSha: this.pull?.merged ? "f".repeat(40) : null };
+  async readPullRequest(): Promise<{
+    state: string;
+    merged: boolean;
+    mergeable: boolean | null;
+    mergeableState: string;
+    draft: boolean;
+    headSha: string;
+    baseSha: string;
+    baseRef: string;
+    mergeCommitSha: string | null;
+  }> {
+    return {
+      state: this.pull?.state ?? "open",
+      merged: this.pull?.merged ?? false,
+      mergeable: this.mergeable,
+      mergeableState: this.mergeableState,
+      draft: false,
+      headSha: this.pull!.headSha,
+      baseSha: this.baseSha,
+      baseRef: this.baseRef,
+      mergeCommitSha: this.pull?.merged ? "f".repeat(40) : null,
+    };
   }
-  async readChecks(): Promise<{ pending: string[]; failed: string[] }> { return this.checks; }
-  async mergePullRequest(): Promise<string> { return "f".repeat(40); }
+  async readChecks(): Promise<{ pending: string[]; failed: string[] }> {
+    return this.checks;
+  }
+  async mergePullRequest(): Promise<string> {
+    return "f".repeat(40);
+  }
   async closeIssue(): Promise<void> {}
   async closePullRequest(): Promise<void> {}
 }
@@ -124,10 +225,23 @@ describe("host-owned publication", () => {
   it("uploads exactly the independently validated tree and is idempotent", async () => {
     const { repository, base } = await fixture();
     const packet: WorkerPacket = {
-      goal: "change value", acceptanceCriteria: ["value changed"], allowedPaths: ["value.txt"],
-      preconditions: [], outOfScope: [], conventions: [], baseSha: base.oid,
+      goal: "change value",
+      acceptanceCriteria: ["value changed"],
+      allowedPaths: ["value.txt"],
+      preconditions: [],
+      outOfScope: [],
+      conventions: [],
+      baseSha: base.oid,
       validationCommands: ["grep -qx changed value.txt"],
-      requirements: { os: ["linux"], architecture: [], tools: ["git", "grep"], services: [], networkDestinations: [], permittedSecretNames: [], trust: "trusted_local" },
+      requirements: {
+        os: ["linux"],
+        architecture: [],
+        tools: ["git", "grep"],
+        services: [],
+        networkDestinations: [],
+        permittedSecretNames: [],
+        trust: "trusted_local",
+      },
       artifactContract: "clockgrove.factory/artifact-v1",
     };
     const worker = await createLocalWorktree(repository, base.oid);
@@ -137,13 +251,23 @@ describe("host-owned publication", () => {
     const validation = await validateArtifactClean({ repository, artifact, packet });
     const store = new GitObjectStore(repository, base.oid);
     const args = {
-      store, assertLease: async () => {}, base, validation, artifact,
-      objective: 1, workItem: 2, attempt: 1, title: "Change value", baseBranch: "main",
+      store,
+      assertLease: async () => {},
+      base,
+      validation,
+      artifact,
+      objective: 1,
+      workItem: 2,
+      attempt: 1,
+      title: "Change value",
+      baseBranch: "main",
     };
     const first = await publishValidated(args);
     const second = await publishValidated(args);
     expect(second).toEqual(first);
-    expect(git(repository, ["rev-parse", `${first.commitSha}^{tree}`])).toBe(validation.evidence.outputTreeSha);
+    expect(git(repository, ["rev-parse", `${first.commitSha}^{tree}`])).toBe(
+      validation.evidence.outputTreeSha,
+    );
     await discardValidationResult(validation);
     await rm(repository, { recursive: true, force: true });
   });
@@ -165,15 +289,40 @@ describe("host-owned publication", () => {
     store.mergeableState = "behind";
     await expect(integrationReadiness(store, pull)).resolves.toMatchObject({ state: "failed" });
     store.mergeableState = "clean";
-    await expect(integrationReadiness(store, pull)).resolves.toEqual({ state: "ready", headSha: pull.commitSha });
+    await expect(integrationReadiness(store, pull)).resolves.toEqual({
+      state: "ready",
+      headSha: pull.commitSha,
+    });
     await expect(integrationReadiness(store, pull, "d".repeat(40))).resolves.toMatchObject({
       state: "failed",
       reason: expect.stringContaining("base branch advanced"),
     });
+    store.baseRef = "release";
+    await expect(integrationReadiness(store, pull, base.oid, "main")).resolves.toEqual({
+      state: "failed",
+      reason: "pull request targets release, expected main",
+    });
+    store.baseRef = "main";
     store.pull = { ...store.pull, merged: true, state: "closed", headSha: "e".repeat(40) };
     await expect(integrationReadiness(store, pull)).resolves.toEqual({
       state: "failed",
       reason: "pull request head changed after validation",
+    });
+    store.pull = { ...store.pull, headSha: pull.commitSha };
+    store.baseRef = "release";
+    await expect(integrationReadiness(store, pull, "b".repeat(40), "main")).resolves.toEqual({
+      state: "failed",
+      reason: "pull request targets release, expected main",
+    });
+    store.baseRef = "main";
+    await expect(integrationReadiness(store, pull, "b".repeat(40), "main")).resolves.toEqual({
+      state: "integrated",
+      headSha: "f".repeat(40),
+    });
+    store.mergeParents = ["9".repeat(40)];
+    await expect(integrationReadiness(store, pull, "b".repeat(40), "main")).resolves.toMatchObject({
+      state: "failed",
+      reason: expect.stringContaining("irreversible merge could not be proven"),
     });
     await rm(repository, { recursive: true, force: true });
   });
@@ -181,10 +330,23 @@ describe("host-owned publication", () => {
   it("recovers a pull request whose create response was lost", async () => {
     const { repository, base } = await fixture();
     const packet: WorkerPacket = {
-      goal: "change value", acceptanceCriteria: ["value changed"], allowedPaths: ["value.txt"],
-      preconditions: [], outOfScope: [], conventions: [], baseSha: base.oid,
+      goal: "change value",
+      acceptanceCriteria: ["value changed"],
+      allowedPaths: ["value.txt"],
+      preconditions: [],
+      outOfScope: [],
+      conventions: [],
+      baseSha: base.oid,
       validationCommands: ["grep -qx changed value.txt"],
-      requirements: { os: ["linux"], architecture: [], tools: ["git", "grep"], services: [], networkDestinations: [], permittedSecretNames: [], trust: "trusted_local" },
+      requirements: {
+        os: ["linux"],
+        architecture: [],
+        tools: ["git", "grep"],
+        services: [],
+        networkDestinations: [],
+        permittedSecretNames: [],
+        trust: "trusted_local",
+      },
       artifactContract: "clockgrove.factory/artifact-v1",
     };
     const worker = await createLocalWorktree(repository, base.oid);
@@ -194,10 +356,20 @@ describe("host-owned publication", () => {
     const validation = await validateArtifactClean({ repository, artifact, packet });
     const store = new GitObjectStore(repository, base.oid);
     store.loseCreatePullResponse = true;
-    await expect(publishValidated({
-      store, assertLease: async () => {}, base, validation, artifact,
-      objective: 1, workItem: 2, attempt: 1, title: "Change value", baseBranch: "main",
-    })).resolves.toMatchObject({ number: 7 });
+    await expect(
+      publishValidated({
+        store,
+        assertLease: async () => {},
+        base,
+        validation,
+        artifact,
+        objective: 1,
+        workItem: 2,
+        attempt: 1,
+        title: "Change value",
+        baseBranch: "main",
+      }),
+    ).resolves.toMatchObject({ number: 7 });
     await discardValidationResult(validation);
     await rm(repository, { recursive: true, force: true });
   });
@@ -205,10 +377,23 @@ describe("host-owned publication", () => {
   it("recovers a publication branch whose create response was lost", async () => {
     const { repository, base } = await fixture();
     const packet: WorkerPacket = {
-      goal: "change value", acceptanceCriteria: ["value changed"], allowedPaths: ["value.txt"],
-      preconditions: [], outOfScope: [], conventions: [], baseSha: base.oid,
+      goal: "change value",
+      acceptanceCriteria: ["value changed"],
+      allowedPaths: ["value.txt"],
+      preconditions: [],
+      outOfScope: [],
+      conventions: [],
+      baseSha: base.oid,
       validationCommands: ["grep -qx changed value.txt"],
-      requirements: { os: ["linux"], architecture: [], tools: ["git", "grep"], services: [], networkDestinations: [], permittedSecretNames: [], trust: "trusted_local" },
+      requirements: {
+        os: ["linux"],
+        architecture: [],
+        tools: ["git", "grep"],
+        services: [],
+        networkDestinations: [],
+        permittedSecretNames: [],
+        trust: "trusted_local",
+      },
       artifactContract: "clockgrove.factory/artifact-v1",
     };
     const worker = await createLocalWorktree(repository, base.oid);
@@ -218,10 +403,20 @@ describe("host-owned publication", () => {
     const validation = await validateArtifactClean({ repository, artifact, packet });
     const store = new GitObjectStore(repository, base.oid);
     store.loseCreateRefResponse = true;
-    await expect(publishValidated({
-      store, assertLease: async () => {}, base, validation, artifact,
-      objective: 1, workItem: 2, attempt: 1, title: "Change value", baseBranch: "main",
-    })).resolves.toMatchObject({ number: 7 });
+    await expect(
+      publishValidated({
+        store,
+        assertLease: async () => {},
+        base,
+        validation,
+        artifact,
+        objective: 1,
+        workItem: 2,
+        attempt: 1,
+        title: "Change value",
+        baseBranch: "main",
+      }),
+    ).resolves.toMatchObject({ number: 7 });
     await discardValidationResult(validation);
     await rm(repository, { recursive: true, force: true });
   });

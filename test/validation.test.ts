@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { access, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -113,12 +113,14 @@ describe("clean validation", () => {
     });
     expect(reason).toContain("validation failed (2): npm run typecheck");
     expect(reason).toContain("error TS2322");
-    expect(validationFailureReason("validation", "npm test", {
-      exitCode: 1,
-      timedOut: false,
-      stdout: "x".repeat(20_000),
-      stderr: "",
-    }).length).toBeLessThan(8_000);
+    expect(
+      validationFailureReason("validation", "npm test", {
+        exitCode: 1,
+        timedOut: false,
+        stdout: "x".repeat(20_000),
+        stderr: "",
+      }).length,
+    ).toBeLessThan(8_000);
   });
 
   it("applies and tests an artifact in a fresh exact-SHA worktree", async () => {
@@ -142,6 +144,32 @@ describe("clean validation", () => {
     expect(result.evidence.commands[0]?.command).toContain("grep -qx changed");
     verifyValidationEvidence(result.evidence);
     await discardValidationResult(result);
+  });
+
+  it("does not source host login profiles during authoritative validation", async () => {
+    const fixture = await repositoryFixture();
+    const worker = await createLocalWorktree(fixture.repository, fixture.baseSha);
+    await writeFile(join(worker.path, "value.txt"), "changed\n");
+    const artifact = await collectLocalArtifact(worker);
+    await cleanupLocalWorktree(worker);
+    const fakeHome = await mkdtemp(join(tmpdir(), "factory-validation-home-"));
+    const marker = join(fakeHome, "profile-was-sourced");
+    await writeFile(join(fakeHome, ".profile"), `touch ${JSON.stringify(marker)}\n`);
+    const priorHome = process.env.HOME;
+    process.env.HOME = fakeHome;
+    try {
+      const result = await validateArtifactClean({
+        repository: fixture.repository,
+        artifact,
+        packet: packet(fixture.baseSha),
+      });
+      expect(result.evidence.passed).toBe(true);
+      await expect(access(marker)).rejects.toThrow();
+      await discardValidationResult(result);
+    } finally {
+      if (priorHome === undefined) delete process.env.HOME;
+      else process.env.HOME = priorHome;
+    }
   });
 
   it("records failed authoritative commands", async () => {
@@ -285,18 +313,24 @@ describe("clean validation", () => {
       packet: isolatedPacket,
       isolatedValidator: async () => ({
         outputTreeSha,
-        commands: [{
-          command: isolatedPacket.validationCommands[0]!,
-          exitCode: 0,
-          durationMs: 12,
-        }],
+        commands: [
+          {
+            command: isolatedPacket.validationCommands[0]!,
+            exitCode: 0,
+            durationMs: 12,
+          },
+        ],
         passed: true,
         startedAt: "2026-09-03T00:00:00.000Z",
         completedAt: "2026-09-03T00:00:00.012Z",
+        environmentIdentity: `registry.example.invalid/validator@sha256:${"a".repeat(64)}`,
       }),
     });
     expect(result.evidence.passed).toBe(true);
     expect(result.evidence.outputTreeSha).toBe(outputTreeSha);
+    expect(result.evidence.environmentIdentity).toBe(
+      `registry.example.invalid/validator@sha256:${"a".repeat(64)}`,
+    );
     await discardValidationResult(result);
 
     await expect(
@@ -313,5 +347,73 @@ describe("clean validation", () => {
         }),
       }),
     ).rejects.toThrow(/does not match host tree/);
+  });
+
+  it("accepts isolated npm setup evidence before the declared validation plan", async () => {
+    const fixture = await nodeRepositoryFixture();
+    const worker = await createLocalWorktree(fixture.repository, fixture.baseSha);
+    await writeFile(join(worker.path, "value.txt"), "changed\n");
+    const artifact = await collectLocalArtifact(worker);
+    await cleanupLocalWorktree(worker);
+    const localPacket = packet(fixture.baseSha, {
+      validationCommands: ["npm test"],
+      requirements: {
+        ...packet(fixture.baseSha).requirements,
+        tools: ["npm", "node"],
+      },
+    });
+    const trusted = await validateArtifactClean({
+      repository: fixture.repository,
+      artifact,
+      packet: localPacket,
+    });
+    const outputTreeSha = trusted.evidence.outputTreeSha;
+    await discardValidationResult(trusted);
+
+    const isolatedPacket = packet(fixture.baseSha, {
+      validationCommands: ["npm test"],
+      requirements: {
+        ...localPacket.requirements,
+        trust: "isolated",
+      },
+    });
+    const timestamps = {
+      startedAt: "2026-09-04T00:00:00.000Z",
+      completedAt: "2026-09-04T00:00:00.012Z",
+    };
+    const result = await validateArtifactClean({
+      repository: fixture.repository,
+      artifact,
+      packet: isolatedPacket,
+      isolatedValidator: async () => ({
+        outputTreeSha,
+        commands: [
+          { command: "npm ci --no-audit --no-fund", exitCode: 0, durationMs: 8 },
+          { command: "npm test", exitCode: 0, durationMs: 4 },
+        ],
+        passed: true,
+        ...timestamps,
+      }),
+    });
+    expect(result.evidence.passed).toBe(true);
+    expect(result.evidence.commands.map(({ command }) => command)).toEqual([
+      "npm ci --no-audit --no-fund",
+      "npm test",
+    ]);
+    await discardValidationResult(result);
+
+    await expect(
+      validateArtifactClean({
+        repository: fixture.repository,
+        artifact,
+        packet: isolatedPacket,
+        isolatedValidator: async () => ({
+          outputTreeSha,
+          commands: [{ command: "npm test", exitCode: 0, durationMs: 4 }],
+          passed: true,
+          ...timestamps,
+        }),
+      }),
+    ).rejects.toThrow(/command evidence does not match/);
   });
 });

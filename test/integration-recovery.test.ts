@@ -41,9 +41,9 @@ function lease() {
 
 describe("fenced integration recovery", () => {
   it("rejects a stale head even when every other pull request is unchanged", () => {
-    expect(() =>
-      assertIntegrationHeads(lease(), { "1": sha("d"), "2": sha("f") }),
-    ).toThrow("stale or incomplete");
+    expect(() => assertIntegrationHeads(lease(), { "1": sha("d"), "2": sha("f") })).toThrow(
+      "stale or incomplete",
+    );
   });
 
   it("makes retry and cancellation idempotent and each command reversible", () => {
@@ -80,7 +80,9 @@ describe("fenced integration recovery", () => {
       kind: "cancel",
       idempotencyKey: "cancel-1",
     });
-    expect(applyIntegrationCommand(cancelled, { kind: "cancel", idempotencyKey: "cancel-1" })).toBe(cancelled);
+    expect(applyIntegrationCommand(cancelled, { kind: "cancel", idempotencyKey: "cancel-1" })).toBe(
+      cancelled,
+    );
     expect(undoIntegrationCommand(cancelled, "cancel-1")).toEqual(retried);
   });
 
@@ -90,13 +92,16 @@ describe("fenced integration recovery", () => {
       uuid: "async-1",
       expectedHeadSha: sha("e"),
       mergeAction: "merge_queue",
+      mergeMethod: "squash",
     };
     let unstacked = 0;
     const provider: StackDeliveryProvider = {
       ensureStack: async () => ({ number: 4, baseRef: "main", open: true, pullRequests: [] }),
       requestMerge: async () => result,
       mergeResult: async () => result,
-      unstack: async () => { unstacked += 1; },
+      unstack: async () => {
+        unstacked += 1;
+      },
     };
     const store: PublicationReceiptStore = {
       read: async () => null,
@@ -198,10 +203,7 @@ describe("fenced integration recovery", () => {
       }),
       unstack: async () => {},
     };
-    const manager = new StackManager(
-      { read: async () => null, write: async () => {} },
-      provider,
-    );
+    const manager = new StackManager({ read: async () => null, write: async () => {} }, provider);
     const value = acquireIntegrationLease({
       operationId: "operation-stale",
       unitId: "delivery/a",

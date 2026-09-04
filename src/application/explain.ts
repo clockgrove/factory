@@ -7,11 +7,7 @@ import {
   type Explanation,
 } from "../explanations/index.js";
 import { latestRunReceipts } from "../control/receipts.js";
-import {
-  buildStatusReport,
-  snapshotEvents,
-  type FactoryReadSnapshot,
-} from "./status.js";
+import { buildStatusReport, snapshotEvents, type FactoryReadSnapshot } from "./status.js";
 
 export interface FactoryExplanationReport {
   operation: "explain";
@@ -101,18 +97,13 @@ export function buildExplanationReport(input: {
       });
       continue;
     }
-    const source = input.snapshot.workItems.find(
-      (candidate) => candidate.number === item.number,
-    )!;
+    const source = input.snapshot.workItems.find((candidate) => candidate.number === item.number)!;
     const itemEvents = (source.factoryEvents ?? [])
       .filter((event) => !run || event.runId === run.runId)
       .sort((left, right) => left.sequence - right.sequence);
     const invalidated = [...itemEvents]
       .reverse()
-      .find(
-        (event) =>
-          event.kind === "publication" && event.event === "ValidationInvalidated",
-      );
+      .find((event) => event.kind === "publication" && event.event === "ValidationInvalidated");
     if (invalidated) {
       explanations.push({
         ...explainGate({ gate: "validation", reason: "invalidated" }),
@@ -120,9 +111,7 @@ export function buildExplanationReport(input: {
       });
       continue;
     }
-    const validation = [...itemEvents]
-      .reverse()
-      .find((event) => event.kind === "validation");
+    const validation = [...itemEvents].reverse().find((event) => event.kind === "validation");
     if (validation?.kind === "validation" && !validation.passed) {
       explanations.push({
         ...explainGate({ gate: "validation", reason: "failed" }),
@@ -132,10 +121,7 @@ export function buildExplanationReport(input: {
     }
     const latestAdmission = [...itemEvents]
       .reverse()
-      .find(
-        (event) =>
-          event.kind === "attempt" && event.event === "AttemptReserved",
-      );
+      .find((event) => event.kind === "attempt" && event.event === "AttemptReserved");
     const queue = [...itemEvents]
       .reverse()
       .find(
@@ -158,10 +144,7 @@ export function buildExplanationReport(input: {
         continue;
       }
     }
-    if (
-      latestAdmission?.kind === "attempt" &&
-      latestAdmission.admissionReason !== undefined
-    ) {
+    if (latestAdmission?.kind === "attempt" && latestAdmission.admissionReason !== undefined) {
       explanations.push({
         ...explainAdmission(latestAdmission.admissionReason),
         workItem: item.number,

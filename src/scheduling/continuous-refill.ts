@@ -22,23 +22,25 @@ function delay(ms: number, signal?: AbortSignal): Promise<null> {
 /** Captures every outcome while letting the scheduler refill after any one settles. */
 export class ContinuousExecutionPool<Key> {
   readonly #active = new Map<Key, Promise<ExecutionSettlement<Key>>>();
+  readonly #completed: ExecutionSettlement<Key>[] = [];
 
-  start(
-    key: Key,
-    operation: () => Promise<void>,
-    onSettled: () => void = () => {},
-  ): void {
+  start(key: Key, operation: () => Promise<void>, onSettled: () => void = () => {}): void {
     if (this.#active.has(key)) throw new Error("execution is already active");
     const task = Promise.resolve()
       .then(operation)
       .then<ExecutionSettlement<Key>>(() => ({ key }))
       .catch((error: unknown): ExecutionSettlement<Key> => ({ key, error }))
-      .finally(() => {
+      .then((settlement) => {
+        let completed = settlement;
         try {
           onSettled();
+        } catch (error) {
+          if (!completed.error) completed = { key, error };
         } finally {
           this.#active.delete(key);
+          this.#completed.push(completed);
         }
+        return completed;
       });
     this.#active.set(key, task);
   }
@@ -59,11 +61,18 @@ export class ContinuousExecutionPool<Key> {
     pollMs: number,
     signal?: AbortSignal,
   ): Promise<ExecutionSettlement<Key> | null> {
+    const completed = this.#completed.shift();
+    if (completed) return completed;
     if (this.#active.size === 0) return delay(pollMs, signal);
-    return Promise.race([...this.#active.values(), delay(pollMs, signal)]);
+    const settlement = await Promise.race([...this.#active.values(), delay(pollMs, signal)]);
+    if (settlement === null) return null;
+    const index = this.#completed.indexOf(settlement);
+    if (index >= 0) this.#completed.splice(index, 1);
+    return settlement;
   }
 
   async settle(): Promise<ExecutionSettlement<Key>[]> {
-    return Promise.all([...this.#active.values()]);
+    await Promise.all([...this.#active.values()]);
+    return this.#completed.splice(0);
   }
 }

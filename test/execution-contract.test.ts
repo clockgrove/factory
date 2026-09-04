@@ -17,10 +17,7 @@ import {
   normalizeArtifact,
   verifyArtifact,
 } from "../src/execution/artifacts.js";
-import {
-  BackendRegistry,
-  NoExecutionBackendError,
-} from "../src/execution/registry.js";
+import { BackendRegistry, NoExecutionBackendError } from "../src/execution/registry.js";
 import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 import { byteLength, MAX_LOG_BYTES } from "../src/protocol/limits.js";
 import type { NormalizedArtifact } from "../src/execution/artifacts.js";
@@ -148,7 +145,7 @@ describe("normalized artifacts", () => {
 
   it("bounds oversized Unicode logs by persisted bytes and retains their tail", () => {
     const tail = "final diagnostic line";
-    const logs = `${"progress \"line\"\n".repeat(10_000)}${"🎮".repeat(10_000)}${tail}`;
+    const logs = `${'progress "line"\n'.repeat(10_000)}${"🎮".repeat(10_000)}${tail}`;
     const bounded = boundWorkerLogs(logs);
     const artifact = normalizeArtifact({
       baseSha: SHA,
@@ -166,9 +163,7 @@ describe("normalized artifacts", () => {
   });
 
   it("scans discarded log output for credentials before truncation", () => {
-    const logs =
-      `authorization: bearer ghp_${"x".repeat(40)}\n` +
-      "later output\n".repeat(10_000);
+    const logs = `authorization: bearer ghp_${"x".repeat(40)}\n` + "later output\n".repeat(10_000);
     expect(() =>
       normalizeArtifact({
         baseSha: SHA,
@@ -187,23 +182,32 @@ describe("backend registry", () => {
     const backend = new FakeBackend(capabilities());
     registry.register(backend);
     const requirements = {
-      os: ["linux"], architecture: ["x64"], tools: ["git"], services: [],
-      networkDestinations: [], permittedSecretNames: [], trust: "trusted_local" as const,
+      os: ["linux"],
+      architecture: ["x64"],
+      tools: ["git"],
+      services: [],
+      networkDestinations: [],
+      permittedSecretNames: [],
+      trust: "trusted_local" as const,
+    };
+    const policy = {
+      ...DEFAULT_RUN_POLICY,
+      backendOrder: ["codex-cli/local-worktree"],
     };
     const first = await registry.evaluate({
-      policy: DEFAULT_RUN_POLICY,
+      policy,
       requirements,
       nowMs: 1_000,
       probeTtlMs: 30_000,
     });
     const cached = await registry.evaluate({
-      policy: DEFAULT_RUN_POLICY,
+      policy,
       requirements,
       nowMs: 30_999,
       probeTtlMs: 30_000,
     });
     await registry.evaluate({
-      policy: DEFAULT_RUN_POLICY,
+      policy,
       requirements,
       nowMs: 31_000,
       probeTtlMs: 30_000,
@@ -220,19 +224,24 @@ describe("backend registry", () => {
   });
 
   it("matches common operating-system and architecture aliases", () => {
-    expect(capabilityMismatch(capabilities(), {
-      os: ["gnu/linux"],
-      architecture: ["x86_64"],
-      tools: [], services: [], networkDestinations: [], permittedSecretNames: [],
-      trust: "trusted_local",
-    })).toEqual([]);
+    expect(
+      capabilityMismatch(capabilities(), {
+        os: ["gnu/linux"],
+        architecture: ["x86_64"],
+        tools: [],
+        services: [],
+        networkDestinations: [],
+        permittedSecretNames: [],
+        trust: "trusted_local",
+      }),
+    ).toEqual([]);
   });
 
   it("rejects arbitrary agent/runtime identifiers", () => {
     const registry = new BackendRegistry();
-    expect(() =>
-      registry.register(new FakeBackend(capabilities({ id: "local" }))),
-    ).toThrow(/bundle/);
+    expect(() => registry.register(new FakeBackend(capabilities({ id: "local" })))).toThrow(
+      /bundle/,
+    );
   });
 
   it("selects the first available capability-compatible backend", async () => {
@@ -256,10 +265,7 @@ describe("backend registry", () => {
     const selected = await registry.select({
       policy: {
         ...DEFAULT_RUN_POLICY,
-        backendOrder: [
-          "codex-cli/local-worktree",
-          "codex-native/local-worktree",
-        ],
+        backendOrder: ["codex-cli/local-worktree", "codex-native/local-worktree"],
       },
       requirements: {
         os: ["linux"],
@@ -273,6 +279,66 @@ describe("backend registry", () => {
       budget: { sandboxMinutes: 0, managedAgentSessions: 0 },
     });
     expect(selected.backend.capabilities.id).toBe("codex-native/local-worktree");
+  });
+
+  it("skips remote backends when native-stack recovery requires host execution", async () => {
+    const registry = new BackendRegistry();
+    registry.register(
+      new FakeBackend(
+        capabilities({
+          id: "codex-cli/daytona",
+          runtimeKind: "daytona",
+          hostExecution: false,
+          isolation: "container",
+        }),
+      ),
+    );
+    registry.register(new FakeBackend(capabilities()));
+    const selected = await registry.select({
+      policy: {
+        ...DEFAULT_RUN_POLICY,
+        backendOrder: ["codex-cli/daytona", "codex-cli/local-worktree"],
+      },
+      requirements: {
+        os: ["linux"],
+        architecture: ["x64"],
+        tools: ["git"],
+        services: [],
+        networkDestinations: [],
+        permittedSecretNames: [],
+        trust: "trusted_local",
+      },
+      budget: { sandboxMinutes: 60, managedAgentSessions: 0 },
+      requireHostExecution: true,
+    });
+    expect(selected.backend.capabilities.id).toBe("codex-cli/local-worktree");
+  });
+
+  it("applies backend-specific immutable policy compatibility before probing", async () => {
+    class PolicyBoundBackend extends FakeBackend {
+      policyRejectionReasons(): readonly string[] {
+        return ["required provider egress is outside immutable policy authority"];
+      }
+    }
+    const registry = new BackendRegistry();
+    const backend = new PolicyBoundBackend(capabilities());
+    registry.register(backend);
+    await expect(
+      registry.select({
+        policy: DEFAULT_RUN_POLICY,
+        requirements: {
+          os: [],
+          architecture: [],
+          tools: [],
+          services: [],
+          networkDestinations: [],
+          permittedSecretNames: [],
+          trust: "trusted_local",
+        },
+        budget: { sandboxMinutes: 0, managedAgentSessions: 0 },
+      }),
+    ).rejects.toThrow(/provider egress/);
+    expect(backend.probeCalls).toBe(0);
   });
 
   it("lets a backend discover requested capabilities before matching", async () => {
@@ -291,8 +357,13 @@ describe("backend registry", () => {
     const selected = await registry.select({
       policy: DEFAULT_RUN_POLICY,
       requirements: {
-        os: [], architecture: [], tools: ["systemctl"], services: [],
-        networkDestinations: [], permittedSecretNames: [], trust: "trusted_local",
+        os: [],
+        architecture: [],
+        tools: ["systemctl"],
+        services: [],
+        networkDestinations: [],
+        permittedSecretNames: [],
+        trust: "trusted_local",
       },
       budget: { sandboxMinutes: 0, managedAgentSessions: 0 },
     });
@@ -336,14 +407,14 @@ describe("backend registry", () => {
   it("selects a separately budgeted isolated validator", async () => {
     const registry = new BackendRegistry();
     const validator = new FakeBackend(
-        capabilities({
-          id: "codex-cli/vercel-sandbox",
-          runtimeKind: "vercel-sandbox",
-          hostExecution: false,
-          isolation: "microvm",
-          requiresPaidRuntime: true,
-        }),
-      );
+      capabilities({
+        id: "codex-cli/vercel-sandbox",
+        runtimeKind: "vercel-sandbox",
+        hostExecution: false,
+        isolation: "microvm",
+        requiresPaidRuntime: true,
+      }),
+    );
     registry.register(validator);
     const policy = {
       ...DEFAULT_RUN_POLICY,
@@ -355,16 +426,26 @@ describe("backend registry", () => {
     const selected = await registry.selectIsolatedValidator({
       policy,
       requirements: {
-        os: ["linux"], architecture: ["x64"], tools: ["git"], services: [],
-        networkDestinations: [], permittedSecretNames: [], trust: "managed",
+        os: ["linux"],
+        architecture: ["x64"],
+        tools: ["git"],
+        services: [],
+        networkDestinations: [],
+        permittedSecretNames: [],
+        trust: "managed",
       },
       budget: { sandboxMinutes: 30, managedAgentSessions: 0 },
       estimatedDurationMs: 10 * 60_000,
     });
     expect(selected.backend.capabilities.id).toBe("codex-cli/vercel-sandbox");
     const validationRequirements = {
-      os: ["linux"], architecture: ["x64"], tools: ["git"], services: [],
-      networkDestinations: [], permittedSecretNames: [], trust: "managed" as const,
+      os: ["linux"],
+      architecture: ["x64"],
+      tools: ["git"],
+      services: [],
+      networkDestinations: [],
+      permittedSecretNames: [],
+      trust: "managed" as const,
     };
     await registry.evaluateIsolatedValidators({
       policy,
@@ -381,8 +462,13 @@ describe("backend registry", () => {
       registry.selectIsolatedValidator({
         policy,
         requirements: {
-          os: ["linux"], architecture: [], tools: [], services: [],
-          networkDestinations: [], permittedSecretNames: [], trust: "isolated",
+          os: ["linux"],
+          architecture: [],
+          tools: [],
+          services: [],
+          networkDestinations: [],
+          permittedSecretNames: [],
+          trust: "isolated",
         },
         budget: { sandboxMinutes: 5, managedAgentSessions: 0 },
         estimatedDurationMs: 10 * 60_000,

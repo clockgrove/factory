@@ -10,9 +10,5 @@
   "maxManagedAgentSessions": 0,
   "trust": "explicitly_activated_repo",
   "managementBackend": "codex-cli/local",
-  "allowedNetworkDestinations": [
-    "registry.npmjs.org",
-    "*.npmjs.org",
-    "api.openai.com"
-  ]
+  "allowedNetworkDestinations": ["registry.npmjs.org", "*.npmjs.org", "api.openai.com"]
 }

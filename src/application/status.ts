@@ -1,31 +1,21 @@
 import type { FactoryEvent } from "../protocol/events.js";
 import {
+  isManagedAgentBackendId,
+  isSandboxBackendId,
   normalizeSchedulingPolicy,
   type RunPolicy,
 } from "../protocol/policy.js";
 import { parseWorkerPacketFromIssue } from "../graph.js";
-import type {
-  LinkedPullRequest,
-  WorkItemSnapshot,
-} from "../types.js";
-import {
-  deriveState,
-  queuedSince,
-  type DerivedWorkItem,
-} from "../state.js";
-import {
-  deduplicateFactoryEvents,
-  latestRunReceipts,
-} from "../control/receipts.js";
+import type { LinkedPullRequest, WorkItemSnapshot } from "../types.js";
+import { deriveState, queuedSince, type DerivedWorkItem } from "../state.js";
+import { deduplicateFactoryEvents, latestRunReceipts } from "../control/receipts.js";
+import { deriveDurableCommandState } from "../control/commands.js";
 import { summarizeRun, type RunSummary } from "../economics/index.js";
 import {
   deriveCapacityReservations,
   type CapacityReservation,
 } from "../scheduling/capacity-ledger.js";
-import {
-  rankReadyWorkItems,
-  type ObservedPrioritySource,
-} from "../scheduling/priority.js";
+import { rankReadyWorkItems, type ObservedPrioritySource } from "../scheduling/priority.js";
 import { queuedReasonCode } from "../explanations/index.js";
 
 export interface ReadWorkItemSnapshot {
@@ -79,11 +69,7 @@ export interface StatusWorkItem {
   priority?: {
     rank: number;
     source: ObservedPrioritySource;
-    sourceEvidence:
-      | "current-snapshot"
-      | "admission-receipt"
-      | "queue-receipt"
-      | "run-policy";
+    sourceEvidence: "current-snapshot" | "admission-receipt" | "queue-receipt" | "run-policy";
     subIssuePosition: number;
   };
   activeReservation?: {
@@ -116,10 +102,12 @@ export interface FactoryStatusReport {
     | {
         availability: "observed";
         runId: string;
-        state: "active" | "completed" | "cancelled" | "escalated";
+        state: "active" | "paused" | "draining" | "completed" | "cancelled" | "escalated";
         policyDigest: string;
         startedAt: string;
         finishedAt?: string;
+        cloudPaused: boolean;
+        pendingRetries: number[];
       };
   readyOrder: Array<{
     position: number;
@@ -218,10 +206,7 @@ function evidenceTime(snapshot: FactoryReadSnapshot, events: readonly FactoryEve
   return new Date(last ?? "1970-01-01T00:00:00.000Z");
 }
 
-function derivedItems(
-  snapshot: FactoryReadSnapshot,
-  observedAt: Date,
-): DerivedWorkItem[] {
+function derivedItems(snapshot: FactoryReadSnapshot, observedAt: Date): DerivedWorkItem[] {
   return snapshot.workItems.map((item) => {
     const normalized: WorkItemSnapshot = {
       id: item.id ?? `issue-${item.number}`,
@@ -231,9 +216,7 @@ function derivedItems(
       closed: item.closed ?? false,
       assignees: [...(item.assignees ?? [])],
       labels: [...(item.labels ?? [])],
-      ...(item.subIssuePosition === undefined
-        ? {}
-        : { subIssuePosition: item.subIssuePosition }),
+      ...(item.subIssuePosition === undefined ? {} : { subIssuePosition: item.subIssuePosition }),
       ...(item.issueFieldValues === undefined
         ? {}
         : { issueFieldValues: structuredClone(item.issueFieldValues) }),
@@ -246,8 +229,7 @@ function derivedItems(
     };
     const state = deriveState(normalized, observedAt);
     const attempts = (normalized.factoryEvents ?? []).reduce(
-      (highest, event) =>
-        event.kind === "attempt" ? Math.max(highest, event.attempt) : highest,
+      (highest, event) => (event.kind === "attempt" ? Math.max(highest, event.attempt) : highest),
       0,
     );
     return {
@@ -266,9 +248,7 @@ function policyFor(events: readonly FactoryEvent[]): RunPolicy | null {
   if (run) return run.start.policy;
   const activation = [...events]
     .reverse()
-    .find(
-      (event) => event.kind === "run" && event.event === "ActivationRequested",
-    );
+    .find((event) => event.kind === "run" && event.event === "ActivationRequested");
   return activation?.kind === "run" && activation.event === "ActivationRequested"
     ? activation.policy
     : null;
@@ -282,8 +262,7 @@ function prioritySourceFromAdmission(
     return event.prioritySource as ObservedPrioritySource;
   }
   if (event.priorityFieldId) return "issue-field";
-  return normalizeSchedulingPolicy(policy).priority.source ===
-    "issue-field-then-subissue-order"
+  return normalizeSchedulingPolicy(policy).priority.source === "issue-field-then-subissue-order"
     ? "subissue-order-fallback"
     : "subissue-order";
 }
@@ -331,9 +310,7 @@ function activeReservations(
             );
           return reservation?.kind === "attempt"
             ? reservation.admissionClass === "local"
-            : !backendId.includes("daytona") &&
-                !backendId.includes("vercel-sandbox") &&
-                backendId !== "github-copilot/github-managed";
+            : !isSandboxBackendId(backendId) && !isManagedAgentBackendId(backendId);
         },
       };
     }),
@@ -351,6 +328,16 @@ export function buildStatusReport(input: {
   const policy = policyFor(events);
   const runEvents = run?.events ?? [];
   const effective = policy ? normalizeSchedulingPolicy(policy) : null;
+  const commandState =
+    run && !run.terminal
+      ? deriveDurableCommandState({
+          events: runEvents,
+          objective: input.snapshot.number,
+          runId: run.runId,
+          runActor: run.start.actor,
+          runStartSequence: run.start.sequence,
+        })
+      : null;
   let readyOrder: FactoryStatusReport["readyOrder"] = [];
   let readyOrderAvailability: FactoryStatusReport["readyOrderAvailability"] = {
     availability: "unavailable",
@@ -358,7 +345,18 @@ export function buildStatusReport(input: {
   };
   if (effective) {
     try {
-      readyOrder = rankReadyWorkItems(items, effective.priority).map((item, index) => ({
+      readyOrder = rankReadyWorkItems(
+        items,
+        effective.priority,
+        undefined,
+        new Set(),
+        new Map(
+          [...(commandState?.priorities ?? [])].map(([workItem, command]) => [
+            workItem,
+            command.rank,
+          ]),
+        ),
+      ).map((item, index) => ({
         position: index + 1,
         workItem: item.item.number,
         rank: item.rank,
@@ -376,9 +374,7 @@ export function buildStatusReport(input: {
     }
   }
   const reservationValues =
-    policy && run && !run.terminal
-      ? activeReservations(input.snapshot, policy, run.runId)
-      : [];
+    policy && run && !run.terminal ? activeReservations(input.snapshot, policy, run.runId) : [];
   const reservationByWorkItem = new Map(
     reservationValues.map((reservation) => [reservation.workItem, reservation]),
   );
@@ -395,25 +391,21 @@ export function buildStatusReport(input: {
         event.loadRatio !== undefined &&
         event.memoryUsageRatio !== undefined,
     );
-  const controller = [...events]
-    .reverse()
-    .find((event) => event.kind === "controller");
+  const controller = [...runEvents]
+    .filter((event) => event.kind === "controller")
+    .sort((left, right) => right.sequence - left.sequence)[0];
   const statusItems = items.map((item): StatusWorkItem => {
     const itemEvents = (item.factoryEvents ?? [])
       .filter((event) => !run || event.runId === run.runId)
       .sort((left, right) => left.sequence - right.sequence);
     const admission = [...itemEvents]
       .reverse()
-      .find(
-        (event) =>
-          event.kind === "attempt" && event.event === "AttemptReserved",
-      );
+      .find((event) => event.kind === "attempt" && event.event === "AttemptReserved");
     const queued = [...itemEvents]
       .reverse()
       .find(
         (event) =>
-          event.kind === "scheduling" &&
-          (!admission || event.sequence > admission.sequence),
+          event.kind === "scheduling" && (!admission || event.sequence > admission.sequence),
       );
     const ranked = rankedByWorkItem.get(item.number);
     const reservation = reservationByWorkItem.get(item.number);
@@ -437,24 +429,24 @@ export function buildStatusReport(input: {
               sourceEvidence: "queue-receipt" as const,
               subIssuePosition: queued.observedSubIssuePosition,
             }
-        : ranked
-          ? {
-              rank: ranked.rank,
-              source: ranked.source,
-              sourceEvidence: "current-snapshot" as const,
-              subIssuePosition: ranked.subIssuePosition,
-            }
-          : policy
+          : ranked
             ? {
-                rank: effective!.priority.unsetRank,
-                source:
-                  effective!.priority.source === "subissue-order"
-                    ? ("subissue-order" as const)
-                    : ("subissue-order-fallback" as const),
-                sourceEvidence: "run-policy" as const,
-                subIssuePosition: item.subIssuePosition ?? item.number,
+                rank: ranked.rank,
+                source: ranked.source,
+                sourceEvidence: "current-snapshot" as const,
+                subIssuePosition: ranked.subIssuePosition,
               }
-            : undefined;
+            : policy
+              ? {
+                  rank: effective!.priority.unsetRank,
+                  source:
+                    effective!.priority.source === "subissue-order"
+                      ? ("subissue-order" as const)
+                      : ("subissue-order-fallback" as const),
+                  sourceEvidence: "run-policy" as const,
+                  subIssuePosition: item.subIssuePosition ?? item.number,
+                }
+              : undefined;
     return {
       number: item.number,
       title: item.title,
@@ -464,8 +456,7 @@ export function buildStatusReport(input: {
         .map((dependency) => dependency.number)
         .sort((left, right) => left - right),
       ...(queuedAt === undefined ? {} : { queuedSince: queuedAt }),
-      ...(queued?.kind === "scheduling" &&
-      (queued.reasonCode ?? queuedReasonCode(queued.reason))
+      ...(queued?.kind === "scheduling" && (queued.reasonCode ?? queuedReasonCode(queued.reason))
         ? {
             queueReasonCode: (queued.reasonCode ?? queuedReasonCode(queued.reason))!,
           }
@@ -531,9 +522,17 @@ export function buildStatusReport(input: {
               : run.terminal.event === "FactoryRunCancelled"
                 ? "cancelled"
                 : "escalated"
-            : "active",
+            : commandState?.draining
+              ? "draining"
+              : commandState?.admissionsPaused
+                ? "paused"
+                : "active",
           policyDigest: run.start.policyDigest,
           startedAt: run.start.at,
+          cloudPaused: commandState?.cloudPaused ?? false,
+          pendingRetries: [...(commandState?.retries.keys() ?? [])].sort(
+            (left, right) => left - right,
+          ),
           ...(run.terminal ? { finishedAt: run.terminal.at } : {}),
         }
       : { availability: "unavailable", state: "not-started" },

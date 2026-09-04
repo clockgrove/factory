@@ -66,6 +66,7 @@ function item(number: number): PinnedAdmissionWorkItem {
         costClass: "local",
         local: true,
         paid: false,
+        reportsModelUsage: true,
         permanentReasons: [],
         transientReasons: [],
       },
@@ -75,6 +76,19 @@ function item(number: number): PinnedAdmissionWorkItem {
         costClass: "sandbox",
         local: false,
         paid: true,
+        reportsModelUsage: false,
+        permanentReasons: [],
+        transientReasons: [],
+      },
+    ],
+    validators: [
+      {
+        id: cloudId,
+        registered: true,
+        costClass: "sandbox",
+        local: false,
+        paid: true,
+        reportsModelUsage: false,
         permanentReasons: [],
         transientReasons: [],
       },
@@ -194,6 +208,10 @@ const expected: ReplayDecisionSet = {
         exclusiveResources: [],
       },
       reservedBudget: { unit: "sandbox_milliseconds", amount: 60_000 },
+      validation: {
+        backendId: cloudId,
+        reservedBudget: { unit: "sandbox_milliseconds", amount: 60_000 },
+      },
     },
   ],
   queued: [
@@ -227,9 +245,7 @@ describe("pure admission replay", () => {
     const fixture = pinAdmissionSnapshot(input, "2026-09-04T12:00:00.000Z", wrong);
     const result = replayAdmissions(fixture);
     expect(result.reproduced).toBe(false);
-    expect(result.mismatches).toMatchObject([
-      { decision: "queued", workItem: 103 },
-    ]);
+    expect(result.mismatches).toMatchObject([{ decision: "queued", workItem: 103 }]);
   });
 
   it("fails closed if any pinned input changes without a new digest", () => {
@@ -256,11 +272,7 @@ describe("pure admission replay", () => {
     expect(encoded).not.toContain("providerResponse");
 
     const rawReason = structuredClone(input);
-    rawReason.workItems[0]!.backends[0]!.transientReasons = [
-      "HTTP 401 body from provider",
-    ];
-    expect(() => pinAdmissionSnapshot(rawReason)).toThrow(
-      "reasons must be stable sanitized codes",
-    );
+    rawReason.workItems[0]!.backends[0]!.transientReasons = ["HTTP 401 body from provider"];
+    expect(() => pinAdmissionSnapshot(rawReason)).toThrow("reasons must be stable sanitized codes");
   });
 });

@@ -18,19 +18,15 @@
  * anywhere, including from a fresh clone before dev dependencies are installed.
  */
 import { spawn, spawnSync } from "node:child_process";
-import {
-  copyFileSync,
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-} from "node:fs";
+import { createHash } from "node:crypto";
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const problems = [];
+const sha256 = (value) => createHash("sha256").update(value).digest("hex");
 const check = (ok, label, detail) => {
   console.log(`${ok ? "ok  " : "FAIL"}  ${label}`);
   if (!ok) problems.push(detail ?? label);
@@ -82,20 +78,25 @@ console.log("\n# manifests\n");
 const plugin = readJson("plugin.json");
 const packageManifest = readJson("package.json");
 check(
-  plugin.$schema ===
-    "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  plugin.$schema === "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "plugin.json declares the Agent Plugins 1.0.0 schema",
 );
-for (const lifecycle of ["preinstall", "install", "postinstall", "prepare"]) {
+for (const lifecycle of [
+  "preinstall",
+  "install",
+  "postinstall",
+  "prepublish",
+  "preprepare",
+  "prepare",
+  "postprepare",
+  "dependencies",
+]) {
   check(
     packageManifest.scripts?.[lifecycle] === undefined,
     `package has no ${lifecycle} lifecycle script`,
   );
 }
-check(
-  typeof plugin.name === "string" && plugin.name.length > 0,
-  "plugin.json has a name",
-);
+check(typeof plugin.name === "string" && plugin.name.length > 0, "plugin.json has a name");
 check(
   packageManifest.version === plugin.version,
   "package.json and plugin.json agree on the version",
@@ -120,10 +121,7 @@ check(server?.type === "stdio", "the factory server is stdio");
 const arg = (server?.args ?? []).find((a) => a.includes("${PLUGIN_ROOT}"));
 check(Boolean(arg), "mcp.json addresses the bundle through ${PLUGIN_ROOT}");
 const bundle = arg?.replace("${PLUGIN_ROOT}", root);
-check(
-  Boolean(bundle) && existsSync(bundle),
-  `the path in mcp.json exists: ${arg}`,
-);
+check(Boolean(bundle) && existsSync(bundle), `the path in mcp.json exists: ${arg}`);
 if (bundle && existsSync(bundle)) {
   const bundleText = readFileSync(bundle, "utf8");
   for (const removedGraphqlType of [
@@ -141,56 +139,72 @@ if (bundle && existsSync(bundle)) {
   }
 }
 
+const inventoryPath = resolve(root, "dist", "bundle-inventory.json");
+const noticesPath = resolve(root, "THIRD_PARTY_NOTICES.txt");
+check(existsSync(inventoryPath), "the exact bundle inventory exists");
+check(existsSync(noticesPath), "third-party license notices exist");
+if (existsSync(inventoryPath) && existsSync(noticesPath)) {
+  const inventoryBytes = readFileSync(inventoryPath);
+  const inventory = JSON.parse(inventoryBytes.toString("utf8"));
+  check(
+    inventory.protocol === "clockgrove.factory/bundle-inventory-v1",
+    "the bundle inventory pins its public protocol",
+  );
+  check(
+    Array.isArray(inventory.components) && inventory.components.length > 0,
+    "the bundle inventory records embedded dependencies",
+  );
+  check(
+    inventory.components?.every(
+      (component) =>
+        component.name &&
+        component.version &&
+        component.license &&
+        component.licenseFiles?.length > 0,
+    ),
+    "every embedded dependency has license evidence",
+  );
+  for (const record of inventory.bundles ?? []) {
+    const bytes = readFileSync(resolve(root, "dist", record.file));
+    check(
+      record.bytes === bytes.length && record.sha256 === sha256(bytes),
+      `the bundle inventory matches dist/${record.file}`,
+    );
+  }
+  const notices = readFileSync(noticesPath, "utf8");
+  check(
+    notices.includes(`Bundle inventory SHA-256: ${sha256(inventoryBytes)}`),
+    "third-party notices are tied to the exact bundle inventory",
+  );
+}
+
 // Substitute ${PLUGIN_ROOT} the way a plugin client would, and launch through
 // *these* values below rather than a hard-coded path. Otherwise the manifest is
 // read, checked, and then ignored — and a wrong `command`, a missing argument or
 // a reordered one would sail through the only check that claims to run the
 // shipped artifact the way it actually ships.
 const launchCommand = server?.command;
-const launchArgs = (server?.args ?? []).map((a) =>
-  a.replace("${PLUGIN_ROOT}", root),
-);
+const launchArgs = (server?.args ?? []).map((a) => a.replace("${PLUGIN_ROOT}", root));
 
 // Claude Code reads its own manifest pair; they must not drift apart.
 const claude = readJson(".claude-plugin/plugin.json");
-check(
-  claude.name === plugin.name,
-  "the Claude manifest agrees on the plugin name",
-);
-check(
-  claude.version === plugin.version,
-  "the Claude manifest agrees on the version",
-);
+check(claude.name === plugin.name, "the Claude manifest agrees on the plugin name");
+check(claude.version === plugin.version, "the Claude manifest agrees on the version");
 const claudeMcp = readJson(".mcp.json");
 const claudeArg = (claudeMcp.mcpServers?.factory?.args ?? []).find((a) =>
   a.includes("${CLAUDE_PLUGIN_ROOT}"),
 );
+check(Boolean(claudeArg), ".mcp.json addresses the bundle through ${CLAUDE_PLUGIN_ROOT}");
 check(
-  Boolean(claudeArg),
-  ".mcp.json addresses the bundle through ${CLAUDE_PLUGIN_ROOT}",
-);
-check(
-  claudeArg?.replace("${CLAUDE_PLUGIN_ROOT}", "") ===
-    arg?.replace("${PLUGIN_ROOT}", ""),
+  claudeArg?.replace("${CLAUDE_PLUGIN_ROOT}", "") === arg?.replace("${PLUGIN_ROOT}", ""),
   "both manifests point at the same bundle path",
 );
 
 const marketplace = readJson(".github/plugin/marketplace.json");
-const marketplacePlugin = marketplace.plugins?.find(
-  (entry) => entry.name === plugin.name,
-);
-check(
-  marketplace.name === "clockgrove",
-  "the Copilot marketplace has a stable name",
-);
-check(
-  Boolean(marketplacePlugin),
-  "the Copilot marketplace lists the factory plugin",
-);
-check(
-  marketplacePlugin?.source === ".",
-  "the marketplace points at the repository-root plugin",
-);
+const marketplacePlugin = marketplace.plugins?.find((entry) => entry.name === plugin.name);
+check(marketplace.name === "clockgrove", "the Copilot marketplace has a stable name");
+check(Boolean(marketplacePlugin), "the Copilot marketplace lists the factory plugin");
+check(marketplacePlugin?.source === ".", "the marketplace points at the repository-root plugin");
 check(
   marketplacePlugin?.version === plugin.version,
   "the marketplace and plugin manifests agree on the version",
@@ -204,16 +218,12 @@ const agentMarketplace = readJson(".agents/plugins/marketplace.json");
 const agentMarketplacePlugin = agentMarketplace.plugins?.find(
   (entry) => entry.name === plugin.name,
 );
-check(
-  agentMarketplace.name === "clockgrove-factory",
-  "the Agent marketplace has a stable name",
-);
+check(agentMarketplace.name === "clockgrove-factory", "the Agent marketplace has a stable name");
 check(
   agentMarketplacePlugin?.source?.source === "url" &&
-    agentMarketplacePlugin?.source?.url ===
-      "https://github.com/clockgrove/factory.git" &&
-    agentMarketplacePlugin?.source?.ref === "main",
-  "the Agent marketplace points at the public Factory main branch",
+    agentMarketplacePlugin?.source?.url === "https://github.com/clockgrove/factory.git" &&
+    agentMarketplacePlugin?.source?.ref === `v${plugin.version}`,
+  "the Agent marketplace points at its immutable public Factory version tag",
 );
 check(
   agentMarketplacePlugin?.policy?.installation === "AVAILABLE" &&
@@ -229,35 +239,20 @@ check(
 // Codex resolves every component and asset path from the plugin root, not from
 // the .codex-plugin directory that contains its manifest.
 const codex = readJson(".codex-plugin/plugin.json");
-check(
-  codex.name === plugin.name,
-  "the Codex manifest agrees on the plugin name",
-);
-check(
-  codex.version === plugin.version,
-  "the Codex manifest agrees on the version",
-);
+check(codex.name === plugin.name, "the Codex manifest agrees on the plugin name");
+check(codex.version === plugin.version, "the Codex manifest agrees on the version");
 for (const [field, expected] of [["skills", "./skills/"]]) {
-  check(
-    codex[field] === expected,
-    `the Codex ${field} path is plugin-root-relative`,
-  );
-  check(
-    existsSync(resolve(root, codex[field] ?? "")),
-    `the Codex ${field} path exists`,
-  );
+  check(codex[field] === expected, `the Codex ${field} path is plugin-root-relative`);
+  check(existsSync(resolve(root, codex[field] ?? "")), `the Codex ${field} path exists`);
 }
 const codexServer = codex.mcpServers?.factory;
-const codexBundleArg = (codexServer?.args ?? []).find((value) =>
-  value.includes("${PLUGIN_ROOT}"),
-);
+const codexBundleArg = (codexServer?.args ?? []).find((value) => value.includes("${PLUGIN_ROOT}"));
 check(
   codexServer?.type === "stdio" && codexServer?.command === "node",
   "the Codex manifest declares the Factory stdio server inline",
 );
 check(
-  codexBundleArg?.replace("${PLUGIN_ROOT}", "") ===
-    arg?.replace("${PLUGIN_ROOT}", ""),
+  codexBundleArg?.replace("${PLUGIN_ROOT}", "") === arg?.replace("${PLUGIN_ROOT}", ""),
   "the Codex and Agent Plugins manifests point at the same bundle",
 );
 check(
@@ -321,29 +316,24 @@ for (const name of schemaFiles) {
   check(existsSync(path), `schemas/${name} exists`);
   if (!existsSync(path)) continue;
   const schema = readJson(`schemas/${name}`);
-  check(
-    typeof schema.$schema === "string",
-    `schemas/${name} declares a JSON Schema dialect`,
-  );
+  check(typeof schema.$schema === "string", `schemas/${name} declares a JSON Schema dialect`);
   check(typeof schema.$id === "string", `schemas/${name} has a stable id`);
   if (schema.$id) schemaIds.add(schema.$id);
 }
 check(schemaIds.size === schemaFiles.length, "protocol schema ids are unique");
 const replaySnapshotSchema = readJson("schemas/replay-snapshot.schema.json");
 check(
-  replaySnapshotSchema.properties?.protocol?.const ===
-    "clockgrove.factory/replay-v1",
+  replaySnapshotSchema.properties?.protocol?.const === "clockgrove.factory/replay-v1",
   "replay snapshot schema pins the public replay protocol",
 );
 check(
-  ["capturedAt", "policyDigest", "input", "expected", "snapshotDigest"].every(
-    (field) => replaySnapshotSchema.required?.includes(field),
+  ["capturedAt", "policyDigest", "input", "expected", "snapshotDigest"].every((field) =>
+    replaySnapshotSchema.required?.includes(field),
   ),
   "replay snapshot schema requires its complete digest boundary",
 );
 check(
-  replaySnapshotSchema.definitions?.input?.properties?.policy?.$ref ===
-    "run-policy.schema.json" &&
+  replaySnapshotSchema.definitions?.input?.properties?.policy?.$ref === "run-policy.schema.json" &&
     Boolean(replaySnapshotSchema.definitions?.decisionSet?.properties?.admissions) &&
     Boolean(replaySnapshotSchema.definitions?.decisionSet?.properties?.queued),
   "replay snapshot schema publishes policy, admission, and queue decisions",
@@ -351,10 +341,7 @@ check(
 const factoryEventSchema = readJson("schemas/factory-event.schema.json");
 const eventKinds = factoryEventSchema.properties?.kind?.enum ?? [];
 for (const kind of ["delivery", "publication"]) {
-  check(
-    eventKinds.includes(kind),
-    `factory-event schema publishes the ${kind} event kind`,
-  );
+  check(eventKinds.includes(kind), `factory-event schema publishes the ${kind} event kind`);
 }
 for (const field of [
   "capabilityVersion",
@@ -368,20 +355,14 @@ for (const field of [
   "gate",
   "prioritySource",
 ]) {
-  check(
-    Boolean(factoryEventSchema.properties?.[field]),
-    `factory-event schema publishes ${field}`,
-  );
+  check(Boolean(factoryEventSchema.properties?.[field]), `factory-event schema publishes ${field}`);
 }
 
 console.log("\n# the bundle actually runs\n");
 
 const started = await listTools();
 const tools = started?.tools ?? null;
-check(
-  tools !== null,
-  "the built server starts from mcp.json's own command and args",
-);
+check(tools !== null, "the built server starts from mcp.json's own command and args");
 
 // The server's own claim about its version is the one version nothing else
 // compares against, so a stale value can survive until a human reads the
@@ -404,16 +385,8 @@ if (tools) {
   const names = tools.map((t) => t.name).sort();
   const missing = EXPECTED_TOOLS.filter((n) => !names.includes(n));
   const extra = names.filter((n) => !EXPECTED_TOOLS.includes(n));
-  check(
-    missing.length === 0,
-    `no expected tool is missing`,
-    `missing: ${missing.join(", ")}`,
-  );
-  check(
-    extra.length === 0,
-    `no undocumented tool is exposed`,
-    `unexpected: ${extra.join(", ")}`,
-  );
+  check(missing.length === 0, `no expected tool is missing`, `missing: ${missing.join(", ")}`);
+  check(extra.length === 0, `no undocumented tool is exposed`, `unexpected: ${extra.join(", ")}`);
 
   const replayTool = tools.find((tool) => tool.name === "factory_replay");
   check(
@@ -422,18 +395,10 @@ if (tools) {
     "factory_replay is published as a read-only MCP operation",
   );
 
-  const thin = tools
-    .filter((t) => (t.description ?? "").length < 40)
-    .map((t) => t.name);
-  check(
-    thin.length === 0,
-    "every tool has a description",
-    `thin: ${thin.join(", ")}`,
-  );
+  const thin = tools.filter((t) => (t.description ?? "").length < 40).map((t) => t.name);
+  check(thin.length === 0, "every tool has a description", `thin: ${thin.join(", ")}`);
 
-  const noSchema = tools
-    .filter((t) => !t.inputSchema?.properties)
-    .map((t) => t.name);
+  const noSchema = tools.filter((t) => !t.inputSchema?.properties).map((t) => t.name);
   check(
     noSchema.length === 0,
     "every tool has an input schema",
@@ -475,6 +440,10 @@ if (existsSync(installVerifier)) {
         receipt.controllerEntryPoint === "dist/factory.js",
         "the installed controller executable starts successfully",
       );
+      check(
+        receipt.sdkLocalAvailable === true,
+        "the installed controller can run its default Codex SDK backend",
+      );
     } catch (error) {
       check(false, "the clean-install verifier returns a JSON receipt", error.message);
     }
@@ -486,9 +455,7 @@ if (bundle && existsSync(bundle)) {
   try {
     const isolatedBundle = resolve(isolatedRoot, "mcp-server.js");
     copyFileSync(bundle, isolatedBundle);
-    const isolatedArgs = launchArgs.map((value) =>
-      value === bundle ? isolatedBundle : value,
-    );
+    const isolatedArgs = launchArgs.map((value) => (value === bundle ? isolatedBundle : value));
     const isolated = await listTools(launchCommand, isolatedArgs, isolatedRoot);
     check(
       isolated?.tools?.length === EXPECTED_TOOLS.length,
@@ -516,11 +483,7 @@ console.log("package verified");
  * without a token would be unusable at plugin-install time, when no tool has
  * been called yet.
  */
-async function listTools(
-  command = launchCommand,
-  args = launchArgs,
-  cwd = root,
-) {
+async function listTools(command = launchCommand, args = launchArgs, cwd = root) {
   if (!command || args.length === 0) return null;
 
   const child = spawn(command, args, {
@@ -567,18 +530,13 @@ async function listTools(
       failed,
       new Promise((res, rej) => {
         const mine = ++id;
-        const timer = setTimeout(
-          () => rej(new Error(`timed out waiting for ${method}`)),
-          20_000,
-        );
+        const timer = setTimeout(() => rej(new Error(`timed out waiting for ${method}`)), 20_000);
         pending.set(mine, (msg) => {
           clearTimeout(timer);
           res(msg);
         });
         if (spawnFailure) return;
-        child.stdin.write(
-          `${JSON.stringify({ jsonrpc: "2.0", id: mine, method, params })}\n`,
-        );
+        child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: mine, method, params })}\n`);
       }),
     ]);
 

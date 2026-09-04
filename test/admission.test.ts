@@ -138,7 +138,7 @@ function workItem(
     priority,
     requirements: options.requirements ?? requirements(),
     backends: options.backends ?? [local, cloud],
-    ...(options.validators ? { validators: options.validators } : {}),
+    validators: options.validators ?? [cloud],
     nextAttempt: 1,
     estimatedDurationMs: 60_000,
     paths: [`src/item-${number}/`],
@@ -244,13 +244,7 @@ describe("pure local-first admission", () => {
         queuedSince: "2026-09-04T00:07:59.000Z",
       })),
     };
-    expect(planAdmissions(old).admissions.map((item) => item.workItem)).toEqual([
-      1,
-      2,
-      3,
-      4,
-      5,
-    ]);
+    expect(planAdmissions(old).admissions.map((item) => item.workItem)).toEqual([1, 2, 3, 4, 5]);
   });
 
   it.each([
@@ -298,6 +292,83 @@ describe("pure local-first admission", () => {
     expect(plan.queued[0]).toMatchObject({ code: "burst-priority" });
   });
 
+  it("requires the configured minimum cloud time saved before paid burst", () => {
+    const economicPolicy: RunPolicy = {
+      ...policy,
+      economics: {
+        maxModelTokens: 10_000,
+        maxSandboxMinutes: 60,
+        maxManagedSessions: 0,
+        minCloudTimeSavedMinutes: 10,
+      },
+    };
+    const tooSmall = {
+      ...workItem(1, { requirements: requirements({ cpu: 32 }) }),
+      estimatedCloudTimeSavedMs: 9 * 60_000,
+    };
+    const blocked = planAdmissions(input({ policy: economicPolicy, workItems: [tooSmall] }));
+    expect(blocked.admissions).toEqual([]);
+    expect(blocked.queued[0]).toMatchObject({ code: "burst-time-saved" });
+
+    const admitted = planAdmissions(
+      input({
+        policy: economicPolicy,
+        workItems: [{ ...tooSmall, estimatedCloudTimeSavedMs: 10 * 60_000 }],
+      }),
+    );
+    expect(admitted.admissions[0]).toMatchObject({
+      admissionClass: "burst",
+      economics: {
+        estimatedCloudTimeSavedMinutes: 10,
+        minimumCloudTimeSavedMinutes: 10,
+      },
+    });
+  });
+
+  it("does not mistake a long Work Item timeout for evidence that cloud saves time", () => {
+    const economicPolicy: RunPolicy = {
+      ...policy,
+      economics: {
+        maxModelTokens: 10_000,
+        maxSandboxMinutes: 60,
+        maxManagedSessions: 0,
+        minCloudTimeSavedMinutes: 10,
+      },
+    };
+    const longRunning = {
+      ...workItem(1, { requirements: requirements({ cpu: 32 }) }),
+      estimatedDurationMs: 60 * 60_000,
+    };
+
+    const blocked = planAdmissions(input({ policy: economicPolicy, workItems: [longRunning] }));
+    expect(blocked.admissions).toEqual([]);
+    expect(blocked.queued[0]).toMatchObject({
+      code: "burst-time-saved",
+      reason: expect.stringContaining("no conservative estimate"),
+    });
+  });
+
+  it("refuses reporting workers after observed model-token exhaustion", () => {
+    const reportingLocal: BackendCandidate = {
+      ...local,
+      capabilities: {
+        reportsModelUsage: true,
+      } as NonNullable<BackendCandidate["capabilities"]>,
+    };
+    const exhausted = planAdmissions(
+      input({
+        workItems: [workItem(1, { backends: [reportingLocal] })],
+        budget: {
+          sandboxMinutes: 60,
+          managedAgentSessions: 0,
+          modelTokens: 0,
+        },
+      }),
+    );
+    expect(exhausted.admissions).toEqual([]);
+    expect(exhausted.queued[0]).toMatchObject({ code: "budget-exhausted" });
+  });
+
   it("never spends on local-compatible overflow when burst is disabled", () => {
     const never = {
       ...policy,
@@ -337,10 +408,7 @@ describe("pure local-first admission", () => {
     const plan = planAdmissions(
       input({
         policy: { ...policy, burst: { ...policy.burst!, mode: "never" } },
-        workItems: [
-          workItem(1, { requirements: requirements({ cpu: 32 }) }),
-          workItem(2),
-        ],
+        workItems: [workItem(1, { requirements: requirements({ cpu: 32 }) }), workItem(2)],
       }),
     );
     expect(plan.queued[0]).toMatchObject({ workItem: 1, code: "local-capacity" });
@@ -356,18 +424,11 @@ describe("pure local-first admission", () => {
         resource: { ...resource, availableMemoryMb: 4_096 },
       }),
     );
-    expect(plan.admissions).toMatchObject([
-      { workItem: 1, admissionClass: "local" },
-    ]);
+    expect(plan.admissions).toMatchObject([{ workItem: 1, admissionClass: "local" }]);
   });
 
   it.each([
-    [
-      "path conflict",
-      occupiedCapacity({ paths: ["src/item-1/"] }),
-      workItem(1),
-      "path-conflict",
-    ],
+    ["path conflict", occupiedCapacity({ paths: ["src/item-1/"] }), workItem(1), "path-conflict"],
     [
       "exclusive resource",
       occupiedCapacity({ exclusiveResources: ["asset-pipeline"] }),
@@ -418,10 +479,7 @@ describe("pure local-first admission", () => {
 
   it("does not reinterpret an unavailable or missing local backend as cloud authority", () => {
     const unavailable = workItem(1, {
-      backends: [
-        candidate(local.id, "local", { transientReasons: ["probe unavailable"] }),
-        cloud,
-      ],
+      backends: [candidate(local.id, "local", { transientReasons: ["probe unavailable"] }), cloud],
     });
     const missing = workItem(2, {
       backends: [
@@ -447,8 +505,8 @@ describe("pure local-first admission", () => {
     const managed = candidate("github-copilot/github-managed", "managed");
     const managedPolicy: RunPolicy = {
       ...policy,
-      backendOrder: [managed.id],
-      allowedPaidBackends: [managed.id],
+      backendOrder: [managed.id, cloud.id],
+      allowedPaidBackends: [managed.id, cloud.id],
       maxManagedAgentSessions: 1,
       capacity: {
         ...policy.capacity!,
@@ -463,11 +521,8 @@ describe("pure local-first admission", () => {
     const plan = planAdmissions(
       input({
         policy: managedPolicy,
-        workItems: [
-          workItem(1, { backends: [managed] }),
-          workItem(2, { backends: [managed] }),
-        ],
-        budget: { sandboxMinutes: 0, managedAgentSessions: 1 },
+        workItems: [workItem(1, { backends: [managed] }), workItem(2, { backends: [managed] })],
+        budget: { sandboxMinutes: 1, managedAgentSessions: 1 },
       }),
     );
     expect(plan.admissions).toMatchObject([
@@ -480,19 +535,36 @@ describe("pure local-first admission", () => {
     expect(plan.queued[0]).toMatchObject({ workItem: 2, code: "budget-exhausted" });
   });
 
+  it("never runs a cloud-produced artifact on the unsandboxed host", () => {
+    const plan = planAdmissions(
+      input({
+        workItems: [workItem(1, { backends: [cloud], validators: [] })],
+      }),
+    );
+    expect(plan.admissions).toEqual([]);
+    expect(plan.queued).toMatchObject([
+      {
+        workItem: 1,
+        gate: "validation",
+        code: "backend-incompatible",
+        permanent: true,
+      },
+    ]);
+  });
+
   it.each([
     ["lease", { leaseValid: false }, "lease-unavailable"],
     [
       "egress policy",
-      { workItems: [workItem(1, { requirements: requirements({ networkDestinations: ["example.com"] }) })] },
+      {
+        workItems: [
+          workItem(1, { requirements: requirements({ networkDestinations: ["example.com"] }) }),
+        ],
+      },
       "policy-constraint",
     ],
     ["resource sample", { resource: null }, "resource-sample-unavailable"],
-    [
-      "pressure",
-      { resource: { ...resource, loadRatio: 0.95 } },
-      "local-pressure",
-    ],
+    ["pressure", { resource: { ...resource, loadRatio: 0.95 } }, "local-pressure"],
   ])("does not cross the %s gate", (_name, overrides, expected) => {
     const plan = planAdmissions(
       input({
@@ -511,10 +583,7 @@ describe("pure local-first admission", () => {
         workItems: [
           workItem(1, {
             requirements: requirements({ trust: "isolated" }),
-            backends: [
-              candidate(local.id, "local", { permanentReasons: ["isolation"] }),
-              cloud,
-            ],
+            backends: [candidate(local.id, "local", { permanentReasons: ["isolation"] }), cloud],
             validators: [cloud],
           }),
         ],
@@ -528,10 +597,7 @@ describe("pure local-first admission", () => {
   it("budgets isolated execution and independent validation before either launches", () => {
     const isolated = workItem(1, {
       requirements: requirements({ trust: "isolated" }),
-      backends: [
-        candidate(local.id, "local", { permanentReasons: ["isolation"] }),
-        cloud,
-      ],
+      backends: [candidate(local.id, "local", { permanentReasons: ["isolation"] }), cloud],
       validators: [cloud],
     });
     const insufficient = planAdmissions(

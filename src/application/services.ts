@@ -1,21 +1,15 @@
 import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
 import { PROTOCOL_V2 } from "../protocol/limits.js";
+import { DEFAULT_RUN_POLICY, parseRunPolicy, policyDigest } from "../protocol/policy.js";
 import {
-  DEFAULT_RUN_POLICY,
-  parseRunPolicy,
-  policyDigest,
-} from "../protocol/policy.js";
-import {
+  deduplicateFactoryEvents,
   encodeEventComment,
   latestSupportedRun,
   nextEventSequence,
 } from "../control/receipts.js";
 import { buildExplanationReport } from "./explain.js";
 import { buildReplayReport } from "./replay.js";
-import {
-  buildStatusReport,
-  type FactoryReadSnapshot,
-} from "./status.js";
+import { buildStatusReport, type FactoryReadSnapshot } from "./status.js";
 
 export const APPLICATION_OPERATIONS = [
   "doctor",
@@ -118,7 +112,7 @@ export interface ServiceContext {
   reader: ApplicationReader;
   store?: ApplicationCommandStore;
   controller?: ControllerLifecycle;
-  readBaseSha?: () => Promise<string>;
+  readBaseSha?: (defaultBranch: string) => Promise<string>;
 }
 
 export type ReadOperation = "doctor" | "plan" | "status" | "explain" | "replay";
@@ -135,11 +129,7 @@ export type CommandOperation =
 export class FactoryApplicationService {
   constructor(private readonly context: ServiceContext) {}
 
-  async inspect(
-    operation: ReadOperation,
-    objective: number,
-    workItem?: number,
-  ): Promise<unknown> {
+  async inspect(operation: ReadOperation, objective: number, workItem?: number): Promise<unknown> {
     const snapshot = await this.context.reader.readObjective(objective);
     const repository = `${this.context.owner}/${this.context.repo}`;
     if (operation === "status") {
@@ -183,7 +173,7 @@ export class FactoryApplicationService {
   }): Promise<FactoryEvent> {
     const snapshot = await this.context.reader.readObjective(input.objective);
     const policy = parseRunPolicy(input.policy ?? DEFAULT_RUN_POLICY);
-    const baseSha = input.baseSha ?? (await this.requireBaseSha());
+    const baseSha = input.baseSha ?? (await this.requireBaseSha(snapshot.defaultBranch));
     return this.append(snapshot, input.requestId, {
       event: "ActivationRequested",
       repository: `${this.context.owner}/${this.context.repo}`,
@@ -206,10 +196,7 @@ export class FactoryApplicationService {
     },
   ): Promise<FactoryEvent> {
     const snapshot = await this.context.reader.readObjective(input.objective);
-    if (
-      (operation === "retry" || operation === "priority") &&
-      !input.workItem
-    ) {
+    if ((operation === "retry" || operation === "priority") && !input.workItem) {
       throw new Error(`${operation} requires a Work Item number`);
     }
     if (operation === "priority" && input.priorityRank === undefined) {
@@ -229,35 +216,41 @@ export class FactoryApplicationService {
                 : operation === "priority"
                   ? "WorkItemPriorityChanged"
                   : "FactoryRunCancellationRequested";
+    // Durable receipts remain replayable after a run becomes terminal or a
+    // Work Item leaves the live snapshot. appendLocked still compares every
+    // material field before returning the original receipt.
+    const existingRequest = this.allEvents(snapshot).find(
+      (candidate) => "requestId" in candidate && candidate.requestId === input.requestId,
+    );
     const activeRun = latestSupportedRun(snapshot.factoryEvents ?? []);
-    if (operation === "cancel" && !activeRun)
-      throw new Error(`Objective #${snapshot.number} has no Factory v2 run`);
+    if (!activeRun && !existingRequest) {
+      throw new Error(`Objective #${snapshot.number} has no active Factory run`);
+    }
+    if (
+      !existingRequest &&
+      input.workItem &&
+      !snapshot.workItems.some((item) => item.number === input.workItem)
+    ) {
+      throw new Error(
+        `Work Item #${input.workItem} does not belong to Objective #${snapshot.number}`,
+      );
+    }
     return this.append(snapshot, input.requestId, {
       event,
+      runId: existingRequest?.runId ?? activeRun!.runId,
       ...(input.reason ? { reason: input.reason } : {}),
       ...(input.workItem ? { workItem: input.workItem } : {}),
-      ...(input.priorityRank !== undefined
-        ? { priorityRank: input.priorityRank }
-        : {}),
-      ...(operation === "cancel" && activeRun
-        ? { runId: activeRun.runId }
-        : {}),
+      ...(input.priorityRank !== undefined ? { priorityRank: input.priorityRank } : {}),
+      ...(operation === "priority" ? { prioritySource: "operator-command" } : {}),
     });
   }
 
   controller(
-    operation:
-      | "start"
-      | "stop"
-      | "restart"
-      | "status"
-      | "install"
-      | "uninstall",
+    operation: "start" | "stop" | "restart" | "status" | "install" | "uninstall",
     input: ControllerInput,
   ): Promise<unknown> {
     const lifecycle = this.context.controller;
-    if (!lifecycle)
-      throw new Error("controller lifecycle is unavailable on this host");
+    if (!lifecycle) throw new Error("controller lifecycle is unavailable on this host");
     const key = `${input.repository.toLowerCase()}:${input.requestId}`;
     const fingerprint = JSON.stringify({
       operation,
@@ -278,27 +271,23 @@ export class FactoryApplicationService {
       receipt,
     });
     receipt.catch(() => {
-      if (
-        FactoryApplicationService.controllerRequests.get(key)?.receipt ===
-        receipt
-      ) {
+      if (FactoryApplicationService.controllerRequests.get(key)?.receipt === receipt) {
         FactoryApplicationService.controllerRequests.delete(key);
       }
     });
     return receipt;
   }
 
-  private async requireBaseSha(): Promise<string> {
-    if (!this.context.readBaseSha)
-      throw new Error("activation requires a base SHA");
-    return this.context.readBaseSha();
+  private async requireBaseSha(defaultBranch: string): Promise<string> {
+    if (!this.context.readBaseSha) throw new Error("activation requires a base SHA");
+    return this.context.readBaseSha(defaultBranch);
   }
 
   private allEvents(snapshot: ApplicationSnapshot): FactoryEvent[] {
-    return [
+    return deduplicateFactoryEvents([
       ...(snapshot.factoryEvents ?? []),
       ...snapshot.workItems.flatMap((item) => item.factoryEvents ?? []),
-    ];
+    ]);
   }
 
   private async append(
@@ -334,49 +323,57 @@ export class FactoryApplicationService {
         "policyDigest",
         "workItem",
         "priorityRank",
+        "prioritySource",
         "reason",
       ];
+      if (fields.runId !== undefined) comparableKeys.push("runId");
       const conflict = comparableKeys.some(
-        (key) =>
-          (existing as unknown as Record<string, unknown>)[key] !== fields[key],
+        (key) => (existing as unknown as Record<string, unknown>)[key] !== fields[key],
       );
       if (conflict)
-        throw new Error(
-          `idempotency key ${requestId} was already used for a different request`,
-        );
+        throw new Error(`idempotency key ${requestId} was already used for a different request`);
       return existing;
     }
     const actor = await store.getAuthenticatedLogin();
     const activeStart = latestSupportedRun(snapshot.factoryEvents ?? []);
-    if (fields.event === "FactoryRunCancellationRequested") {
+    if (
+      new Set([
+        "FactoryRunCancellationRequested",
+        "RunPauseRequested",
+        "RunResumeRequested",
+        "RunDrainRequested",
+        "CloudPauseRequested",
+        "WorkItemRetryRequested",
+        "WorkItemPriorityChanged",
+      ]).has(String(fields.event))
+    ) {
       if (!activeStart || activeStart.runId !== fields.runId) {
-        throw new Error(
-          `Objective #${snapshot.number} has no active Factory v2 run`,
-        );
+        throw new Error(`Objective #${snapshot.number} has no active Factory run`);
       }
       if (
         activeStart.kind === "run" &&
         activeStart.event === "FactoryRunStarted" &&
         activeStart.actor.toLowerCase() !== actor.toLowerCase()
       ) {
+        throw new Error(`only activating actor ${activeStart.actor} may control this run`);
+      }
+      if (
+        typeof fields.workItem === "number" &&
+        !snapshot.workItems.some((item) => item.number === fields.workItem)
+      ) {
         throw new Error(
-          `only activating actor ${activeStart.actor} may cancel this run`,
+          `Work Item #${fields.workItem} does not belong to Objective #${snapshot.number}`,
         );
       }
     }
     const now = await store.serverTime();
-    const run = [...(snapshot.factoryEvents ?? [])]
-      .reverse()
-      .find((event) => event.kind === "run");
+    const run = [...(snapshot.factoryEvents ?? [])].reverse().find((event) => event.kind === "run");
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
       kind: "run",
       event: fields.event,
       objective: snapshot.number,
-      runId:
-        typeof fields.runId === "string"
-          ? fields.runId
-          : (run?.runId ?? requestId),
+      runId: typeof fields.runId === "string" ? fields.runId : (run?.runId ?? requestId),
       sequence: nextEventSequence(this.allEvents(snapshot)),
       at: now.toISOString(),
       requestedBy: actor,
@@ -385,10 +382,7 @@ export class FactoryApplicationService {
     });
     await store.addIssueComment(
       snapshot.id,
-      encodeEventComment(
-        `Factory accepted ${String(fields.event)} from ${actor}.`,
-        event,
-      ),
+      encodeEventComment(`Factory accepted ${String(fields.event)} from ${actor}.`, event),
     );
     return event;
   }
@@ -399,13 +393,9 @@ export class FactoryApplicationService {
     { fingerprint: string; receipt: Promise<unknown> }
   >();
 
-  private async serialize<T>(
-    objective: number,
-    action: () => Promise<T>,
-  ): Promise<T> {
+  private async serialize<T>(objective: number, action: () => Promise<T>): Promise<T> {
     const key = `${this.context.owner.toLowerCase()}/${this.context.repo.toLowerCase()}#${objective}`;
-    const previous =
-      FactoryApplicationService.queues.get(key) ?? Promise.resolve();
+    const previous = FactoryApplicationService.queues.get(key) ?? Promise.resolve();
     let release!: () => void;
     const current = new Promise<void>((resolve) => {
       release = resolve;

@@ -1,9 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  FactoryApplicationService,
-  type ApplicationSnapshot,
-} from "../src/application/index.js";
+import { FactoryApplicationService, type ApplicationSnapshot } from "../src/application/index.js";
 import { decodeEventComments } from "../src/control/receipts.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
@@ -19,7 +16,7 @@ const snapshot = (): ApplicationSnapshot => ({
 
 describe("FactoryApplicationService", () => {
   it("persists one activation and returns its original receipt for concurrent duplicates", async () => {
-    let current = snapshot();
+    const current = snapshot();
     const comments: string[] = [];
     const service = new FactoryApplicationService({
       owner: "o",
@@ -30,10 +27,7 @@ describe("FactoryApplicationService", () => {
         serverTime: async () => new Date("2026-01-01T00:00:00.000Z"),
         addIssueComment: async (_id, body) => {
           comments.push(body);
-          current.factoryEvents = [
-            ...(current.factoryEvents ?? []),
-            ...decodeEventComments(body),
-          ];
+          current.factoryEvents = [...(current.factoryEvents ?? []), ...decodeEventComments(body)];
         },
       },
     });
@@ -100,17 +94,29 @@ describe("FactoryApplicationService", () => {
     expect(calls).toBe(1);
   });
 
-  it.each([
-    "pause",
-    "resume",
-    "drain",
-    "cloud-pause",
-    "retry",
-    "priority",
-  ] as const)(
+  it.each(["pause", "resume", "drain", "cloud-pause", "retry", "priority"] as const)(
     "returns the original durable receipt for duplicate %s requests",
     async (operation) => {
-      let current = snapshot();
+      const current = snapshot();
+      current.workItems = [{ number: 8 }];
+      current.factoryEvents = [
+        parseFactoryEvent({
+          protocol: "clockgrove.factory/v2",
+          kind: "run",
+          event: "FactoryRunStarted",
+          objective: 7,
+          runId: "run-1",
+          sequence: 1,
+          at: "2026-01-01T00:00:00.000Z",
+          actor: "actor",
+          repository: "o/r",
+          objectiveAuthor: "actor",
+          fork: false,
+          baseBranch: "main",
+          policy: DEFAULT_RUN_POLICY,
+          policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+        }),
+      ];
       let writes = 0;
       const service = new FactoryApplicationService({
         owner: "o",
@@ -131,9 +137,7 @@ describe("FactoryApplicationService", () => {
       const input = {
         objective: 7,
         requestId: `duplicate-${operation}`,
-        ...(operation === "retry" || operation === "priority"
-          ? { workItem: 8 }
-          : {}),
+        ...(operation === "retry" || operation === "priority" ? { workItem: 8 } : {}),
         ...(operation === "priority" ? { priorityRank: 3 } : {}),
       };
       const first = await service.command(operation, input);
@@ -143,8 +147,57 @@ describe("FactoryApplicationService", () => {
     },
   );
 
+  it("rejects commands outside the active run actor and Work Item scope", async () => {
+    const current = snapshot();
+    current.workItems = [{ number: 8 }];
+    current.factoryEvents = [
+      parseFactoryEvent({
+        protocol: "clockgrove.factory/v2",
+        kind: "run",
+        event: "FactoryRunStarted",
+        objective: 7,
+        runId: "run-1",
+        sequence: 1,
+        at: "2026-01-01T00:00:00.000Z",
+        actor: "actor",
+        repository: "o/r",
+        objectiveAuthor: "actor",
+        fork: false,
+        baseBranch: "main",
+        policy: DEFAULT_RUN_POLICY,
+        policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+      }),
+    ];
+    let login = "intruder";
+    let writes = 0;
+    const service = new FactoryApplicationService({
+      owner: "o",
+      repo: "r",
+      reader: { readObjective: async () => structuredClone(current) },
+      store: {
+        getAuthenticatedLogin: async () => login,
+        serverTime: async () => new Date("2026-01-01T00:01:00.000Z"),
+        addIssueComment: async () => {
+          writes += 1;
+        },
+      },
+    });
+    await expect(service.command("pause", { objective: 7, requestId: "intruder" })).rejects.toThrow(
+      /only activating actor/,
+    );
+    login = "actor";
+    await expect(
+      service.command("retry", {
+        objective: 7,
+        requestId: "wrong-item",
+        workItem: 99,
+      }),
+    ).rejects.toThrow(/does not belong/);
+    expect(writes).toBe(0);
+  });
+
   it("returns the original durable cancellation receipt", async () => {
-    let current = snapshot();
+    const current = snapshot();
     current.factoryEvents = [
       parseFactoryEvent({
         protocol: "clockgrove.factory/v2",
@@ -179,11 +232,39 @@ describe("FactoryApplicationService", () => {
     });
     const input = { objective: 7, requestId: "duplicate-cancel" };
     const first = await service.command("cancel", input);
+    current.factoryEvents!.push(
+      parseFactoryEvent({
+        protocol: "clockgrove.factory/v2",
+        kind: "run",
+        event: "FactoryRunCancelled",
+        objective: 7,
+        runId: "run-1",
+        sequence: 3,
+        at: "2026-01-01T00:02:00.000Z",
+        reason: "operator cancellation",
+      }),
+      parseFactoryEvent({
+        protocol: "clockgrove.factory/v2",
+        kind: "run",
+        event: "FactoryRunStarted",
+        objective: 7,
+        runId: "run-2",
+        sequence: 4,
+        at: "2026-01-01T00:03:00.000Z",
+        actor: "actor",
+        repository: "o/r",
+        objectiveAuthor: "actor",
+        fork: false,
+        baseBranch: "main",
+        policy: DEFAULT_RUN_POLICY,
+        policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+      }),
+    );
     expect(await service.command("cancel", input)).toEqual(first);
     expect(writes).toBe(1);
   });
 
-  it("rejects cancellation when the latest run is terminal", async () => {
+  it("rejects new commands when the latest run is terminal", async () => {
     const current = snapshot();
     current.factoryEvents = [
       parseFactoryEvent({
@@ -228,7 +309,10 @@ describe("FactoryApplicationService", () => {
 
     await expect(
       service.command("cancel", { objective: 7, requestId: "late-cancel" }),
-    ).rejects.toThrow("no Factory v2 run");
+    ).rejects.toThrow("no active Factory run");
+    await expect(
+      service.command("pause", { objective: 7, requestId: "late-pause" }),
+    ).rejects.toThrow("no active Factory run");
     expect(writes).toBe(0);
   });
 });

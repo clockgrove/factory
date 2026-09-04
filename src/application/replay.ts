@@ -8,10 +8,7 @@ import {
   type AdmissionReplayResult,
   type PinnedAdmissionSnapshot,
 } from "../replay/index.js";
-import {
-  snapshotEvents,
-  type FactoryReadSnapshot,
-} from "./status.js";
+import { snapshotEvents, type FactoryReadSnapshot } from "./status.js";
 
 export type ReplayedSchedulingDecision =
   | {
@@ -116,7 +113,8 @@ export function buildReplayReport(input: {
             }
           : {
               availability: "unavailable",
-              reason: "no pinned admission snapshot was supplied; durable receipts are reconstructed but not misrepresented as scheduler recomputation",
+              reason:
+                "no pinned admission snapshot was supplied; durable receipts are reconstructed but not misrepresented as scheduler recomputation",
             },
     };
   }
@@ -151,12 +149,8 @@ export function buildReplayReport(input: {
       backendId: event.backend,
       admissionClass: event.admissionClass ?? "unavailable",
       reasonCode: event.admissionReason ?? "unavailable",
-      ...(event.priorityRank === undefined
-        ? {}
-        : { priorityRank: event.priorityRank }),
-      ...(event.subIssuePosition === undefined
-        ? {}
-        : { subIssuePosition: event.subIssuePosition }),
+      ...(event.priorityRank === undefined ? {} : { priorityRank: event.priorityRank }),
+      ...(event.subIssuePosition === undefined ? {} : { subIssuePosition: event.subIssuePosition }),
       ...(completeCapacity
         ? {
             capacity: {
@@ -194,7 +188,8 @@ export function buildReplayReport(input: {
           }
         : {
             availability: "unavailable",
-            reason: "no pinned admission snapshot was supplied; durable receipts are reconstructed but not misrepresented as scheduler recomputation",
+            reason:
+              "no pinned admission snapshot was supplied; durable receipts are reconstructed but not misrepresented as scheduler recomputation",
           },
   };
 }

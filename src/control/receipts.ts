@@ -74,9 +74,7 @@ export function latestSupportedRun(events: FactoryEvent[]): FactoryEvent | null 
       (event) =>
         event.runId === start.runId &&
         event.sequence > start.sequence &&
-        ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(
-          event.event,
-        ),
+        ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(event.event),
     );
     if (!terminal) return start;
   }
@@ -90,10 +88,7 @@ export interface RunReceiptSet {
     FactoryEvent,
     {
       kind: "run";
-      event:
-        | "FactoryRunCompleted"
-        | "FactoryRunCancelled"
-        | "FactoryRunEscalated";
+      event: "FactoryRunCompleted" | "FactoryRunCancelled" | "FactoryRunEscalated";
     }
   >;
   events: FactoryEvent[];
@@ -121,11 +116,7 @@ export function latestRunReceipts(events: FactoryEvent[]): RunReceiptSet | null 
     .find(
       (event): event is NonNullable<RunReceiptSet["terminal"]> =>
         event.kind === "run" &&
-        [
-          "FactoryRunCompleted",
-          "FactoryRunCancelled",
-          "FactoryRunEscalated",
-        ].includes(event.event),
+        ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(event.event),
     );
   return {
     runId: start.runId,
@@ -144,13 +135,53 @@ export function latestRunReceipts(events: FactoryEvent[]): RunReceiptSet | null 
  * event after both observed the same prior sequence.
  */
 export function deduplicateFactoryEvents(events: FactoryEvent[]): FactoryEvent[] {
+  const canonical = (value: unknown): string => {
+    if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+    if (value !== null && typeof value === "object") {
+      const record = value as Record<string, unknown>;
+      return `{${Object.keys(record)
+        .sort()
+        .map((key) => `${JSON.stringify(key)}:${canonical(record[key])}`)
+        .join(",")}}`;
+    }
+    return JSON.stringify(value);
+  };
+  const requestFingerprint = (event: FactoryEvent): string => {
+    const semantic = { ...event } as Record<string, unknown>;
+    delete semantic.at;
+    delete semantic.sequence;
+    if (typeof semantic.requestedBy === "string") {
+      semantic.requestedBy = semantic.requestedBy.toLowerCase();
+    }
+    if (typeof semantic.repository === "string") {
+      semantic.repository = semantic.repository.toLowerCase();
+    }
+    return canonical(semantic);
+  };
+  const applicationRequests = new Map<string, { encoded: string; event: FactoryEvent }>();
   const bySequence = new Map<string, { encoded: string; event: FactoryEvent }>();
   for (const event of events) {
-    const workItem = "workItem" in event ? event.workItem ?? "" : "";
-    const attempt = "attempt" in event ? event.attempt ?? "" : "";
+    const workItem = "workItem" in event ? (event.workItem ?? "") : "";
+    const attempt = "attempt" in event ? (event.attempt ?? "") : "";
     const phase = "phase" in event ? event.phase : "";
     const unit = "unit" in event ? event.unit : "";
     const requestId = "requestId" in event ? event.requestId : "";
+    if (typeof requestId === "string" && requestId) {
+      const key = `${event.objective}:${requestId}`;
+      const encoded = requestFingerprint(event);
+      const prior = applicationRequests.get(key);
+      if (prior && prior.encoded !== encoded) {
+        throw new Error(`conflicting Factory application requests at ${key}`);
+      }
+      if (
+        !prior ||
+        event.sequence < prior.event.sequence ||
+        (event.sequence === prior.event.sequence && event.at < prior.event.at)
+      ) {
+        applicationRequests.set(key, { encoded, event });
+      }
+      continue;
+    }
     const key = [
       event.runId,
       event.sequence,
@@ -169,7 +200,14 @@ export function deduplicateFactoryEvents(events: FactoryEvent[]): FactoryEvent[]
     }
     if (!prior) bySequence.set(key, { encoded, event });
   }
-  return [...bySequence.values()].map(({ event }) => event);
+  return [...bySequence.values(), ...applicationRequests.values()]
+    .map(({ event }) => event)
+    .sort(
+      (left, right) =>
+        left.sequence - right.sequence ||
+        left.at.localeCompare(right.at) ||
+        left.event.localeCompare(right.event),
+    );
 }
 
 /** Allocate the next objective-wide event sequence from reconstructed state. */

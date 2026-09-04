@@ -17,10 +17,7 @@
 import { DECLINE_TITLE_PATTERN, isNoOp, isWorkInProgress } from "./state.js";
 import { executionAffectingReason } from "./approval.js";
 import type { LinkedPullRequest } from "./types.js";
-import {
-  verifyExactHeadValidation,
-  type ExactHeadValidationEvidence,
-} from "./validation/plan.js";
+import { verifyExactHeadValidation, type ExactHeadValidationEvidence } from "./validation/plan.js";
 
 export type PublishedHeadVerdict =
   | { kind: "exact-head-validated"; headSha: string }
@@ -98,10 +95,7 @@ export function fileListComplete(pr: LinkedPullRequest): boolean {
  * this check entirely rather than fail closed on an item with no declared
  * scope yet.
  */
-export function isUntouched(
-  pr: LinkedPullRequest,
-  expectedFiles: string[] | undefined,
-): boolean {
+export function isUntouched(pr: LinkedPullRequest, expectedFiles: string[] | undefined): boolean {
   if (!expectedFiles || expectedFiles.length === 0) return false;
   if (isNoOp(pr)) return false; // already classified as no-op; do not double-count
   // A partial file list cannot prove a negative. This verdict routes to
@@ -109,9 +103,7 @@ export function isUntouched(
   // nothing in scope" from incomplete evidence destroys correct work whose
   // in-scope file merely sorted past the first page.
   if (!fileListComplete(pr)) return false;
-  return !pr.changedFilePaths.some((path) =>
-    expectedFiles.some((scope) => inScope(path, scope)),
-  );
+  return !pr.changedFilePaths.some((path) => expectedFiles.some((scope) => inScope(path, scope)));
 }
 
 /**
@@ -136,9 +128,7 @@ export function outOfScopeFiles(
   expectedFiles: string[] | undefined,
 ): string[] {
   if (!expectedFiles || expectedFiles.length === 0) return [];
-  return pr.changedFilePaths.filter(
-    (path) => !expectedFiles.some((scope) => inScope(path, scope)),
-  );
+  return pr.changedFilePaths.filter((path) => !expectedFiles.some((scope) => inScope(path, scope)));
 }
 
 /**
@@ -153,9 +143,7 @@ export function outOfScopeFiles(
  * autonomous merge of it would make the safety property self-certifying. A
  * human confirms these whether or not someone wrote them down in advance.
  */
-export function sensitiveSurfaceFiles(
-  pr: LinkedPullRequest,
-): { path: string; reason: string }[] {
+export function sensitiveSurfaceFiles(pr: LinkedPullRequest): { path: string; reason: string }[] {
   const found: { path: string; reason: string }[] = [];
   for (const path of pr.changedFilePaths) {
     const reason = executionAffectingReason(path);

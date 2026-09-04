@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   estimateDuration,
+  modelTokenBreakdown,
   summarizeEconomics,
   summarizeRun,
   type DurationEvidenceSample,
@@ -45,6 +46,19 @@ function event(value: Record<string, unknown>): FactoryEvent {
     runId: "run-7",
     at: "2026-09-04T12:00:00.000Z",
     ...value,
+  });
+}
+
+function modelReceipt(sequence: number, overrides: Record<string, unknown> = {}): FactoryEvent {
+  return event({
+    kind: "budget",
+    event: "BudgetReconciled",
+    sequence,
+    phase: "management",
+    unit: "model_tokens",
+    amount: 100,
+    usageId: `call-${sequence}`,
+    ...overrides,
   });
 }
 
@@ -156,6 +170,123 @@ function runEvidence(): FactoryEvent[] {
 }
 
 describe("conservative economic feedback", () => {
+  it("reports partial token subtotals with explicit coverage and leaves missing cache unknown", () => {
+    const summary = summarizeEconomics({
+      events: [
+        modelReceipt(1, {
+          reportedModelUsage: { inputTokens: 80, outputTokens: 20, cachedInputTokens: 60 },
+        }),
+        modelReceipt(2, { reportedModelUsage: { inputTokens: 90, outputTokens: 10 } }),
+        modelReceipt(3),
+      ],
+      policy: DEFAULT_RUN_POLICY,
+    });
+    expect(summary.modelTokenBreakdown).toEqual({
+      source: "model-token-reconciliations",
+      reconciledCalls: 3,
+      inputTokens: {
+        tokens: {
+          availability: "observed",
+          value: 170,
+          source: "github-receipts",
+          evidenceCount: 2,
+        },
+        receiptsWithValue: 2,
+        receiptsWithoutValue: 1,
+      },
+      outputTokens: {
+        tokens: {
+          availability: "observed",
+          value: 30,
+          source: "github-receipts",
+          evidenceCount: 2,
+        },
+        receiptsWithValue: 2,
+        receiptsWithoutValue: 1,
+      },
+      cachedInputTokens: {
+        tokens: {
+          availability: "observed",
+          value: 60,
+          source: "github-receipts",
+          evidenceCount: 1,
+        },
+        receiptsWithValue: 1,
+        receiptsWithoutValue: 2,
+      },
+    });
+    expect(summary.usage.model_tokens).toMatchObject({ availability: "observed", value: 300 });
+    expect(summary.providerCost.availability).toBe("unavailable");
+  });
+
+  it("does not count duplicate or Attempt copies, reservations, other units, or other runs", () => {
+    const reportedModelUsage = { inputTokens: 80, outputTokens: 20, cachedInputTokens: 0 };
+    const receipt = modelReceipt(1, { reportedModelUsage });
+    const summary = modelTokenBreakdown(
+      [
+        receipt,
+        receipt,
+        modelReceipt(2, { event: "BudgetReserved" }),
+        modelReceipt(3, { runId: "other-run", reportedModelUsage }),
+        modelReceipt(4, { phase: "execution", unit: "local_milliseconds" }),
+        event({
+          kind: "attempt",
+          event: "AttemptSucceeded",
+          sequence: 5,
+          workItem: 8,
+          attempt: 1,
+          backend: "codex-sdk/local-worktree",
+          baseSha: sha,
+          directorEpoch: 1,
+          policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+          reportedModelTokens: 100,
+          reportedModelUsage,
+        }),
+      ],
+      "run-7",
+    );
+    expect(summary.reconciledCalls).toBe(1);
+    expect(summary.inputTokens.tokens).toMatchObject({ availability: "observed", value: 80 });
+    expect(summary.cachedInputTokens).toMatchObject({
+      tokens: { availability: "observed", value: 0, evidenceCount: 1 },
+      receiptsWithValue: 1,
+      receiptsWithoutValue: 0,
+    });
+  });
+
+  it("uses the scalar ledger's latest usage identity without combining old breakdowns", () => {
+    const receipts = [
+      modelReceipt(2, { usageId: "compile" }),
+      modelReceipt(1, {
+        usageId: "compile",
+        reportedModelUsage: { inputTokens: 80, outputTokens: 20, cachedInputTokens: 60 },
+      }),
+    ];
+    const summary = summarizeEconomics({ events: receipts, policy: DEFAULT_RUN_POLICY });
+    expect(summary.modelTokenBreakdown.reconciledCalls).toBe(1);
+    expect(summary.modelTokenBreakdown.inputTokens).toMatchObject({
+      tokens: { availability: "unavailable" },
+      receiptsWithValue: 0,
+      receiptsWithoutValue: 1,
+    });
+    expect(summary.usage.model_tokens).toMatchObject({ availability: "observed", value: 100 });
+  });
+
+  it("never infers input from a scalar total or treats an empty ledger as zero usage", () => {
+    const partial = modelTokenBreakdown([
+      modelReceipt(1, { reportedModelUsage: { outputTokens: 20 } }),
+    ]);
+    expect(partial.inputTokens.tokens.availability).toBe("unavailable");
+    expect(partial.outputTokens.tokens).toMatchObject({ availability: "observed", value: 20 });
+    const empty = modelTokenBreakdown([]);
+    expect(empty.reconciledCalls).toBe(0);
+    expect(empty.cachedInputTokens).toMatchObject({
+      tokens: { availability: "unavailable" },
+      receiptsWithValue: 0,
+      receiptsWithoutValue: 0,
+    });
+  });
+
   it("uses only exact, durable successful duration matches and widens sparse evidence", () => {
     const result = estimateDuration(query, [
       sample("a", 40_000),
@@ -176,8 +307,8 @@ describe("conservative economic feedback", () => {
 
   it("reports duration as unavailable when no exact evidence matches", () => {
     expect(
-      estimateDuration(query, [sample("other", 10_000, { os: ["darwin"] })])
-        .durationMs.availability,
+      estimateDuration(query, [sample("other", 10_000, { os: ["darwin"] })]).durationMs
+        .availability,
     ).toBe("unavailable");
   });
 

@@ -6,8 +6,8 @@ Status: accepted
 
 ## Context
 
-A future hosted coordinator could wake independently of a laptop and offer managed cloud capacity,
-but making it part of the open-source execution path would add an account, service, queue, privacy
+A hosted coordinator could wake independently of a laptop and offer managed cloud capacity, but
+making it part of the open-source execution path would add an account, service, queue, privacy
 surface, and cost dependency that contradict Factory's local-first purpose.
 
 ## Decision
@@ -16,9 +16,10 @@ The open-source Factory product requires only an Agent Plugins-compatible host, 
 GitHub, and an explicitly started local controller. It has no required Clockgrove account, hosted
 endpoint, private database, queue, telemetry service, or GitHub workflow.
 
-A hosted MCP/coordinator is a later, separately planned offering with its own threat model,
-authentication, privacy, billing, and availability contracts. It may reuse the public protocol but
-cannot become authoritative for local runs.
+Any hosted MCP/coordinator would be a separate product with its own threat model, authentication,
+privacy, billing, and availability contracts. It could reuse the public protocol but cannot become
+authoritative for local runs. This repository makes no hosted-product roadmap or availability
+commitment.
 
 ## Consequences
 

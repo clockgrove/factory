@@ -32,34 +32,23 @@ export class SystemdUserService {
   readonly #run: (args: readonly string[]) => Promise<unknown>;
   constructor(options: SystemdUserServiceOptions) {
     if (options.factoryCommand && options.factoryExecutable) {
-      throw new Error(
-        "configure factoryCommand or factoryExecutable, not both",
-      );
+      throw new Error("configure factoryCommand or factoryExecutable, not both");
     }
     const command =
       options.factoryCommand ??
-      (options.factoryExecutable
-        ? ([resolve(options.factoryExecutable)] as const)
-        : undefined);
+      (options.factoryExecutable ? ([resolve(options.factoryExecutable)] as const) : undefined);
     if (!command || !isAbsolute(command[0])) {
-      throw new Error(
-        "Factory service command must start with an absolute executable path",
-      );
+      throw new Error("Factory service command must start with an absolute executable path");
     }
     if (command.some((part) => !part || /[\r\n]/.test(part))) {
       throw new Error("Factory service command contains an invalid argument");
     }
     this.#command = [...command] as [string, ...string[]];
-    const config =
-      process.env.XDG_CONFIG_HOME ?? join(process.env.HOME ?? "", ".config");
+    const config = process.env.XDG_CONFIG_HOME ?? join(process.env.HOME ?? "", ".config");
     if (!options.unitDirectory && !config)
       throw new Error("cannot determine systemd user unit directory");
-    this.#directory = resolve(
-      options.unitDirectory ?? join(config, "systemd/user"),
-    );
-    this.#run =
-      options.run ??
-      (async (args) => execFileAsync("systemctl", ["--user", ...args]));
+    this.#directory = resolve(options.unitDirectory ?? join(config, "systemd/user"));
+    this.#run = options.run ?? (async (args) => execFileAsync("systemctl", ["--user", ...args]));
   }
 
   unitName(input: SystemdServiceInput): string {
@@ -81,11 +70,7 @@ export class SystemdUserService {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
-    if (
-      old !== undefined &&
-      old !== body &&
-      !old.startsWith(FACTORY_UNIT_MARKER)
-    ) {
+    if (old !== undefined && old !== body && !old.startsWith(FACTORY_UNIT_MARKER)) {
       throw new Error(`refusing to overwrite unmanaged unit ${path}`);
     }
     if (old !== body) {
@@ -137,16 +122,8 @@ export class SystemdUserService {
     const installed = await exists(this.unitPath(input));
     // Query systemd even after the file is removed: its manager may still
     // have a loaded or enabled unit, which uninstall must never conceal.
-    const enabled = await this.#is([
-      "is-enabled",
-      "--quiet",
-      this.unitName(input),
-    ]);
-    const active = await this.#is([
-      "is-active",
-      "--quiet",
-      this.unitName(input),
-    ]);
+    const enabled = await this.#is(["is-enabled", "--quiet", this.unitName(input)]);
+    const active = await this.#is(["is-active", "--quiet", this.unitName(input)]);
     return { installed, enabled, active, unit: this.unitName(input) };
   }
   async #is(args: readonly string[]): Promise<boolean> {
@@ -187,8 +164,7 @@ async function exists(path: string): Promise<boolean> {
 function validateInput(input: SystemdServiceInput): void {
   if (!/^[^/\s]+\/[^/\s]+$/.test(input.repository))
     throw new Error("repository must be OWNER/REPO");
-  if (!isAbsolute(input.checkout))
-    throw new Error("checkout must be an absolute path");
+  if (!isAbsolute(input.checkout)) throw new Error("checkout must be an absolute path");
 }
 function systemdQuote(value: string): string {
   return `"${value.replaceAll("%", "%%").replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
@@ -199,8 +175,7 @@ function systemdDirectivePath(value: string): string {
     .replaceAll("\\", "\\x5c")
     .replace(
       /[\s"]/g,
-      (character) =>
-        `\\x${character.charCodeAt(0).toString(16).padStart(2, "0")}`,
+      (character) => `\\x${character.charCodeAt(0).toString(16).padStart(2, "0")}`,
     );
 }
 function escapeDescription(value: string): string {

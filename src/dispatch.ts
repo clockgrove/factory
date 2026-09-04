@@ -32,24 +32,15 @@
  * this PR once" across cycles.
  */
 
-import { Octokit } from "@octokit/core";
+import type { Octokit } from "@octokit/core";
 
 import type { MechanicalVerdict } from "./evaluate.js";
 import type { BlastRadiusVerdict } from "./approval.js";
-import {
-  createOctokit,
-  type GitHubOptions,
-  type PendingApprovalRun,
-} from "./github.js";
+import { createOctokit, type GitHubOptions, type PendingApprovalRun } from "./github.js";
 
 /** Result of `Dispatcher.approveChecks`, reported verbatim to Director. */
 export interface ApprovalOutcome {
-  action:
-    | "approved"
-    | "partially_approved"
-    | "not_approvable"
-    | "escalated"
-    | "no_runs_held";
+  action: "approved" | "partially_approved" | "not_approvable" | "escalated" | "no_runs_held";
   approvedRunIds: number[];
   /** Present only when the review declined; the reasons it declined. */
   blockers?: string[];
@@ -95,10 +86,7 @@ import type { LinkedPullRequest } from "./types.js";
  *  - `escalate`: this is the second consecutive PR-less assignment. §4.2
  *    caps the confirm mechanism at one retry.
  */
-export function confirmAction(
-  wi: DerivedWorkItem,
-  now: Date,
-): "wait" | "retry" | "escalate" {
+export function confirmAction(wi: DerivedWorkItem, now: Date): "wait" | "retry" | "escalate" {
   if (withinConfirmWindow(wi, now)) return "wait";
   return confirmFailureStreak(wi) >= 2 ? "escalate" : "retry";
 }
@@ -147,12 +135,7 @@ export interface IntegrateOutcome {
    * anything, looping forever, is invisible from that output, which is the one
    * thing the result most needs to show (§10).
    */
-  action?:
-    | "merged"
-    | "rebased"
-    | "redispatched"
-    | "escalated"
-    | "waiting";
+  action?: "merged" | "rebased" | "redispatched" | "escalated" | "waiting";
 }
 
 /**
@@ -174,10 +157,7 @@ const MERGE_DEFERRALS: ReadonlyArray<readonly [needle: string, because: string]>
     "the base branch moved between GitHub computing mergeability and the merge itself, " +
       "which happens when a sibling pull request merges in the same window",
   ],
-  [
-    "head branch was modified",
-    "the agent pushed to the branch between the snapshot and the merge",
-  ],
+  ["head branch was modified", "the agent pushed to the branch between the snapshot and the merge"],
   [
     "not mergeable",
     "GitHub had not finished recomputing mergeability when the merge was attempted",
@@ -205,13 +185,12 @@ export function mergeDeferral(error: unknown): string | null {
  * `addAssigneesToAssignable`, `addComment`, and `closePullRequest` are all
  * exercised against real repositories, not just checked against docs.
  */
-const COPILOT_ASSIGNMENT_HEADERS = {
-  "GraphQL-Features":
-    "issues_copilot_assignment_api_support,coding_agent_model_selection",
+const AGENT_ASSIGNMENT_HEADERS = {
+  "GraphQL-Features": "issues_copilot_assignment_api_support,coding_agent_model_selection",
 };
 
-const ASSIGN_COPILOT_MUTATION = `
-mutation AssignCopilot($assignableId: ID!, $botId: ID!, $repositoryId: ID!, $baseRef: String!) {
+const ASSIGN_MANAGED_AGENT_MUTATION = `
+mutation AssignManagedAgent($assignableId: ID!, $botId: ID!, $repositoryId: ID!, $baseRef: String!) {
   replaceActorsForAssignable(input: {
     assignableId: $assignableId
     actorIds: [$botId]
@@ -224,6 +203,16 @@ mutation AssignCopilot($assignableId: ID!, $botId: ID!, $repositoryId: ID!, $bas
 const CLEAR_ACTORS_MUTATION = `
 mutation ClearActors($assignableId: ID!) {
   replaceActorsForAssignable(input: { assignableId: $assignableId, actorIds: [] }) {
+    clientMutationId
+  }
+}`;
+
+const REMOVE_MANAGED_AGENT_MUTATION = `
+mutation RemoveManagedAgent($assignableId: ID!, $actorId: ID!) {
+  removeAssigneesFromAssignable(input: {
+    assignableId: $assignableId
+    assigneeIds: [$actorId]
+  }) {
     clientMutationId
   }
 }`;
@@ -317,6 +306,15 @@ mutation UpdatePullRequestBranch($pullRequestId: ID!) {
  * real implementation.
  */
 export interface GitHubWriter {
+  /** Generic managed-agent assignment. Older injected writers may implement only the alias below. */
+  assignManagedAgent?(args: {
+    issueId: string;
+    botId: string;
+    repositoryId: string;
+    baseRef: string;
+  }): Promise<void>;
+  /** Remove only this managed actor, preserving any human assignees. */
+  removeManagedAgent?(issueId: string, actorId: string): Promise<void>;
   /** Set the coding agent as the issue's sole actor — triggers a session. */
   assignCopilot(args: {
     issueId: string;
@@ -372,25 +370,43 @@ export class GithubOctokitWriter implements GitHubWriter {
     this.#repo = opts.repo;
   }
 
+  async assignManagedAgent(args: {
+    issueId: string;
+    botId: string;
+    repositoryId: string;
+    baseRef: string;
+  }): Promise<void> {
+    await this.#octokit.graphql(ASSIGN_MANAGED_AGENT_MUTATION, {
+      assignableId: args.issueId,
+      botId: args.botId,
+      repositoryId: args.repositoryId,
+      baseRef: args.baseRef,
+      headers: AGENT_ASSIGNMENT_HEADERS,
+    });
+  }
+
+  /** Compatibility alias retained for v1 callers and injected test writers. */
   async assignCopilot(args: {
     issueId: string;
     botId: string;
     repositoryId: string;
     baseRef: string;
   }): Promise<void> {
-    await this.#octokit.graphql(ASSIGN_COPILOT_MUTATION, {
-      assignableId: args.issueId,
-      botId: args.botId,
-      repositoryId: args.repositoryId,
-      baseRef: args.baseRef,
-      headers: COPILOT_ASSIGNMENT_HEADERS,
-    });
+    await this.assignManagedAgent(args);
   }
 
   async clearActors(issueId: string): Promise<void> {
     await this.#octokit.graphql(CLEAR_ACTORS_MUTATION, {
       assignableId: issueId,
-      headers: COPILOT_ASSIGNMENT_HEADERS,
+      headers: AGENT_ASSIGNMENT_HEADERS,
+    });
+  }
+
+  async removeManagedAgent(issueId: string, actorId: string): Promise<void> {
+    await this.#octokit.graphql(REMOVE_MANAGED_AGENT_MUTATION, {
+      assignableId: issueId,
+      actorId,
+      headers: AGENT_ASSIGNMENT_HEADERS,
     });
   }
 
@@ -398,7 +414,7 @@ export class GithubOctokitWriter implements GitHubWriter {
     await this.#octokit.graphql(ASSIGN_HUMAN_ONLY_MUTATION, {
       assignableId: issueId,
       userId,
-      headers: COPILOT_ASSIGNMENT_HEADERS,
+      headers: AGENT_ASSIGNMENT_HEADERS,
     });
   }
 
@@ -442,17 +458,21 @@ export class GithubOctokitWriter implements GitHubWriter {
     // coding-agent branch — see §9, and note that the repository setting
     // which governs that hold is readable over REST and not writable, so there
     // is deliberately no second call attempted here.
-    await this.#octokit.request(
-      "POST /repos/{owner}/{repo}/actions/runs/{run_id}/approve",
-      { owner: this.#owner, repo: this.#repo, run_id: runId },
-    );
+    await this.#octokit.request("POST /repos/{owner}/{repo}/actions/runs/{run_id}/approve", {
+      owner: this.#owner,
+      repo: this.#repo,
+      run_id: runId,
+    });
   }
 }
 
 export interface DispatcherOptions {
   writer: GitHubWriter;
   repositoryId: string;
-  copilotBotId: string;
+  /** Legacy v1 name for the assignable coding-agent actor. */
+  copilotBotId?: string;
+  /** Assignable actor ID for a non-Copilot managed profile. */
+  managedAgentActorId?: string;
   defaultBranch: string;
   /** Node ID of the human to escalate to (§7.2), resolved once at startup. */
   escalateToId: string;
@@ -471,7 +491,7 @@ function sleep(ms: number): Promise<void> {
 export class Dispatcher {
   readonly #writer: GitHubWriter;
   readonly #repositoryId: string;
-  readonly #copilotBotId: string;
+  readonly #managedAgentActorId: string;
   readonly #defaultBranch: string;
   readonly #escalateToId: string;
   readonly #notify: (message: string) => void;
@@ -484,17 +504,23 @@ export class Dispatcher {
   constructor(opts: DispatcherOptions) {
     this.#writer = opts.writer;
     this.#repositoryId = opts.repositoryId;
-    this.#copilotBotId = opts.copilotBotId;
+    const managedAgentActorId = opts.managedAgentActorId ?? opts.copilotBotId;
+    if (!managedAgentActorId) {
+      throw new Error("Dispatcher requires an assignable managed-agent actor ID");
+    }
+    this.#managedAgentActorId = managedAgentActorId;
     this.#defaultBranch = opts.defaultBranch;
     this.#escalateToId = opts.escalateToId;
     this.#notify = opts.onThrottle ?? (() => {});
     this.#breaker = opts.circuitBreaker ?? new CircuitBreaker();
     this.#pacer = opts.pacer ?? new ContentCreationPacer();
     this.#concurrency = opts.concurrency ?? new ConcurrencyLimiter();
-    this.#mutations = opts.mutationScheduler ?? new MutationScheduler({
-      pacer: this.#pacer,
-      onThrottle: this.#notify,
-    });
+    this.#mutations =
+      opts.mutationScheduler ??
+      new MutationScheduler({
+        pacer: this.#pacer,
+        onThrottle: this.#notify,
+      });
     this.#beforeMutation = opts.beforeMutation ?? (async () => {});
   }
 
@@ -504,8 +530,26 @@ export class Dispatcher {
   }
 
   /** §4: dispatch a ready Work Item for the first time. */
-  async start(wi: DerivedWorkItem): Promise<void> {
-    await this.#assign(wi.id);
+  async start(
+    wi: DerivedWorkItem,
+    baseRef = this.#defaultBranch,
+    beforeAssignment?: () => void,
+  ): Promise<void> {
+    await this.#assign(wi.id, baseRef, beforeAssignment);
+  }
+
+  /**
+   * End a completed or failed managed session without touching its pull
+   * request. Clearing the actor is required before a retry: assigning the
+   * same actor twice is not a GitHub transition and does not start a new
+   * session.
+   */
+  async unassign(issueId: string): Promise<void> {
+    await this.#call(() =>
+      this.#writer.removeManagedAgent
+        ? this.#writer.removeManagedAgent(issueId, this.#managedAgentActorId)
+        : this.#writer.clearActors(issueId),
+    );
   }
 
   /** §4.2: check a dispatched Work Item and act per `confirmAction`. */
@@ -514,10 +558,7 @@ export class Dispatcher {
     if (action === "wait") return;
 
     if (action === "escalate") {
-      await this.#escalate(
-        wi,
-        "two consecutive assignments produced no pull request",
-      );
+      await this.#escalate(wi, "two consecutive assignments produced no pull request");
       return;
     }
 
@@ -631,10 +672,7 @@ export class Dispatcher {
       case "declined":
         return {
           merged: false,
-          action: await this.retryOrEscalate(
-            wi,
-            "the agent declined the task as not actionable",
-          ),
+          action: await this.retryOrEscalate(wi, "the agent declined the task as not actionable"),
         };
       case "sensitive_surface":
         // Mergeable and green, but the diff changes what CI executes or what it
@@ -824,17 +862,26 @@ export class Dispatcher {
   async cancel(wi: DerivedWorkItem): Promise<void> {
     const pull = currentOpenPullRequest(wi);
     if (pull) await this.#call(() => this.#writer.closePullRequest(pull.id));
-    await this.#call(() => this.#writer.clearActors(wi.id));
+    await this.unassign(wi.id);
   }
 
-  async #assign(issueId: string): Promise<void> {
-    await this.#call(() =>
-      this.#writer.assignCopilot({
-        issueId,
-        botId: this.#copilotBotId,
-        repositoryId: this.#repositoryId,
-        baseRef: this.#defaultBranch,
-      }),
+  async #assign(
+    issueId: string,
+    baseRef = this.#defaultBranch,
+    beforeAssignment?: () => void,
+  ): Promise<void> {
+    const assign =
+      this.#writer.assignManagedAgent?.bind(this.#writer) ??
+      this.#writer.assignCopilot.bind(this.#writer);
+    await this.#call(
+      () =>
+        assign({
+          issueId,
+          botId: this.#managedAgentActorId,
+          repositoryId: this.#repositoryId,
+          baseRef,
+        }),
+      beforeAssignment,
     );
   }
 
@@ -933,13 +980,9 @@ export class Dispatcher {
     // against a token that will never be permitted. A 403 reaching this point
     // is definitely a permission problem rather than a rate limit, because
     // `classifyRefusal` routes rate-limit 403s to the branch above.
-    const forkOnly =
-      /not from a fork pull request|queued by the Actions bot/i.test(failureMessage);
+    const forkOnly = /not from a fork pull request|queued by the Actions bot/i.test(failureMessage);
     const notApprovable =
-      forkOnly ||
-      failureStatus === 401 ||
-      failureStatus === 403 ||
-      failureStatus === 404;
+      forkOnly || failureStatus === 401 || failureStatus === 403 || failureStatus === 404;
 
     const record = [
       approvedRunIds.length > 0
@@ -956,7 +999,7 @@ export class Dispatcher {
           ? `GitHub refused: ${failureMessage} The approve endpoint only covers fork pull requests, and ` +
             "this is a coding-agent branch held by the repository's Copilot Actions workflow-approval " +
             "requirement, which has no write API — so Factory cannot release it and a human must. " +
-            "Either click \"Approve and run workflows\" on the pull request, or turn the requirement " +
+            'Either click "Approve and run workflows" on the pull request, or turn the requirement ' +
             "off in Settings → Copilot → Coding agent so future Work Items are not blocked the same way."
           : `GitHub refused with HTTP ${failureStatus}: ${failureMessage} That is an authorization ` +
             "failure, not a rate limit, so it will return the identical answer on every retry. The " +
@@ -992,18 +1035,18 @@ export class Dispatcher {
         wi,
         forkOnly
           ? "workflow runs are held and Factory cannot release them: the per-run approve endpoint " +
-            "covers only fork pull requests and refuses coding-agent branches, and the repository " +
-            "setting that governs this hold has no write API. A human must click \"Approve and run " +
-            "workflows\" on the pull request, or turn the requirement off in Settings → Copilot → " +
-            "Coding agent" +
-            (verdict.repoScopeSafe
-              ? " — which the repository-scoped review found low-risk here: read-only default " +
-                "workflow token, no secrets reachable from a pull-request workflow, no self-hosted runner"
-              : `. Note before doing so: ${verdict.repoScopeBlockers.join("; ")}`)
+              "covers only fork pull requests and refuses coding-agent branches, and the repository " +
+              'setting that governs this hold has no write API. A human must click "Approve and run ' +
+              'workflows" on the pull request, or turn the requirement off in Settings → Copilot → ' +
+              "Coding agent" +
+              (verdict.repoScopeSafe
+                ? " — which the repository-scoped review found low-risk here: read-only default " +
+                  "workflow token, no secrets reachable from a pull-request workflow, no self-hosted runner"
+                : `. Note before doing so: ${verdict.repoScopeBlockers.join("; ")}`)
           : `workflow runs are held and GitHub refused to approve them with HTTP ${failureStatus}: ` +
-            `${failureMessage} This is an authorization failure rather than a rate limit, so every ` +
-            "retry returns the same answer. Grant the token Factory runs under write access to " +
-            "Actions on this repository, or approve the runs on the pull request by hand",
+              `${failureMessage} This is an authorization failure rather than a rate limit, so every ` +
+              "retry returns the same answer. Grant the token Factory runs under write access to " +
+              "Actions on this repository, or approve the runs on the pull request by hand",
       );
       return {
         action: "not_approvable",
@@ -1037,9 +1080,7 @@ export class Dispatcher {
    * announces an escalation it is not actually in, and keeps being retried.
    */
   async #escalate(wi: DerivedWorkItem, reason: string): Promise<void> {
-    await this.#call(() =>
-      this.#writer.assignHumanOnly(wi.id, this.#escalateToId),
-    );
+    await this.#call(() => this.#writer.assignHumanOnly(wi.id, this.#escalateToId));
     await this.#call(() =>
       this.#writer.addComment(wi.id, `Escalating to a human: ${reason} (§7.2).`),
     );
@@ -1050,7 +1091,7 @@ export class Dispatcher {
    * limiter (Finding 4) — the same discipline for every write this class
    * makes, so no call site can bypass it by accident.
    */
-  async #call(fn: () => Promise<void>): Promise<void> {
+  async #call(fn: () => Promise<void>, beforeCall?: () => void): Promise<void> {
     if (this.#breaker.isOpen()) {
       const wait = this.#breaker.waitMs();
       this.#notify(`circuit open; waiting ${wait}ms before the next call`);
@@ -1067,6 +1108,10 @@ export class Dispatcher {
         );
       }
       await this.#beforeMutation(mutationPermit.waitedMs);
+      // Some callers have a deadline that can elapse while waiting for this
+      // shared mutation permit. Keep their final synchronous fence adjacent to
+      // the provider call instead of checking before the queue.
+      beforeCall?.();
       await fn();
       this.#breaker.recordSuccess();
     } catch (error) {

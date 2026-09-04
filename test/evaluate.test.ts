@@ -81,11 +81,7 @@ describe("isDeclined", () => {
   it("does not treat a real diff with a similar title as declined", () => {
     // Guards against a false positive from title text alone (§5.1): title text
     // like `[WIP]` is not a reliable signal on its own.
-    expect(
-      isDeclined(
-        pr({ title: "No-op: refactor internals", changedLines: 12 }),
-      ),
-    ).toBe(false);
+    expect(isDeclined(pr({ title: "No-op: refactor internals", changedLines: 12 }))).toBe(false);
   });
 
   it("does not treat a plain no-op without decline language as declined", () => {
@@ -109,27 +105,19 @@ describe("isUntouched", () => {
   });
 
   it("is false when the diff touches an exact-path scope entry", () => {
-    expect(
-      isUntouched(pr({ changedFilePaths: ["src/slugify.ts"] }), [
-        "src/slugify.ts",
-      ]),
-    ).toBe(false);
+    expect(isUntouched(pr({ changedFilePaths: ["src/slugify.ts"] }), ["src/slugify.ts"])).toBe(
+      false,
+    );
   });
 
   it("is false when the diff touches a file inside a directory scope entry", () => {
-    expect(
-      isUntouched(pr({ changedFilePaths: ["src/utils/slugify.ts"] }), [
-        "src/utils/",
-      ]),
-    ).toBe(false);
+    expect(isUntouched(pr({ changedFilePaths: ["src/utils/slugify.ts"] }), ["src/utils/"])).toBe(
+      false,
+    );
   });
 
   it("is true when the diff touches only files outside every scope entry", () => {
-    expect(
-      isUntouched(pr({ changedFilePaths: ["src/other.ts"] }), [
-        "src/slugify.ts",
-      ]),
-    ).toBe(true);
+    expect(isUntouched(pr({ changedFilePaths: ["src/other.ts"] }), ["src/slugify.ts"])).toBe(true);
   });
 
   it("defers to isNoOp rather than double-counting an empty diff", () => {
@@ -181,16 +169,12 @@ describe("evaluateMechanical", () => {
 
   it("classifies a real diff outside the declared scope as untouched", () => {
     expect(
-      evaluateMechanical(pr({ changedFilePaths: ["src/other.ts"] }), [
-        "src/slugify.ts",
-      ]),
+      evaluateMechanical(pr({ changedFilePaths: ["src/other.ts"] }), ["src/slugify.ts"]),
     ).toEqual({ kind: "untouched", touchedFiles: ["src/other.ts"] });
   });
 
   it("classifies a confirmed merge conflict", () => {
-    expect(
-      evaluateMechanical(pr({ mergeable: "CONFLICTING" })),
-    ).toEqual({ kind: "conflict" });
+    expect(evaluateMechanical(pr({ mergeable: "CONFLICTING" }))).toEqual({ kind: "conflict" });
   });
 
   it("classifies pending checks", () => {
@@ -214,15 +198,15 @@ describe("evaluateMechanical", () => {
   // pull request. That destroys correct work for a suite that never ran, and
   // the replacement pull request is held identically (§9).
   it("distinguishes held checks from failed checks", () => {
-    expect(
-      evaluateMechanical(pr({ checks: "FAILURE", checksNeverStarted: true })),
-    ).toEqual({ kind: "checks_held" });
+    expect(evaluateMechanical(pr({ checks: "FAILURE", checksNeverStarted: true }))).toEqual({
+      kind: "checks_held",
+    });
   });
 
   it("still reports a genuine failure when checks did start", () => {
-    expect(
-      evaluateMechanical(pr({ checks: "FAILURE", checksNeverStarted: false })),
-    ).toEqual({ kind: "checks_failed" });
+    expect(evaluateMechanical(pr({ checks: "FAILURE", checksNeverStarted: false }))).toEqual({
+      kind: "checks_failed",
+    });
   });
 
   it("prefers a conflict over held checks", () => {
@@ -262,9 +246,7 @@ describe("evaluateMechanical", () => {
   });
 
   it("does not let an unknown CI expectation override settled checks", () => {
-    expect(
-      evaluateMechanical(pr({ checks: "SUCCESS" }), undefined, "unknown"),
-    ).toEqual(READY);
+    expect(evaluateMechanical(pr({ checks: "SUCCESS" }), undefined, "unknown")).toEqual(READY);
   });
 
   it("reports settled checks even when CI is expected", () => {
@@ -290,20 +272,19 @@ describe("evaluateMechanical", () => {
   // should be reported now, not delayed a cycle behind a value GitHub will
   // settle on its own.
   it("reports a check failure ahead of unresolved mergeability", () => {
-    expect(
-      evaluateMechanical(pr({ mergeable: "UNKNOWN", checks: "FAILURE" })),
-    ).toEqual({ kind: "checks_failed" });
+    expect(evaluateMechanical(pr({ mergeable: "UNKNOWN", checks: "FAILURE" }))).toEqual({
+      kind: "checks_failed",
+    });
   });
 
   it("reports held checks ahead of unresolved mergeability", () => {
     expect(
-      evaluateMechanical(
-        pr({ mergeable: "UNKNOWN", checks: "FAILURE", checksNeverStarted: true }),
-      ),
+      evaluateMechanical(pr({ mergeable: "UNKNOWN", checks: "FAILURE", checksNeverStarted: true })),
     ).toEqual({ kind: "checks_held" });
   });
 
-  it("prioritizes a no-op over missing checks", () => {    expect(
+  it("prioritizes a no-op over missing checks", () => {
+    expect(
       evaluateMechanical(
         pr({
           changedLines: 0,
@@ -347,9 +328,9 @@ describe("evaluateMechanical", () => {
   });
 
   it("prioritizes conflict over checks", () => {
-    expect(
-      evaluateMechanical(pr({ mergeable: "CONFLICTING", checks: "FAILURE" })),
-    ).toEqual({ kind: "conflict" });
+    expect(evaluateMechanical(pr({ mergeable: "CONFLICTING", checks: "FAILURE" }))).toEqual({
+      kind: "conflict",
+    });
   });
 });
 
@@ -374,17 +355,12 @@ describe("scope creep", () => {
 
   it("is silent when every changed file is in scope", () => {
     expect(
-      evaluateMechanical(
-        pr({ changedFilePaths: ["src/a.ts", "src/b.ts"] }),
-        ["src/"],
-      ),
+      evaluateMechanical(pr({ changedFilePaths: ["src/a.ts", "src/b.ts"] }), ["src/"]),
     ).toEqual(READY);
   });
 
   it("cannot judge scope without a declared scope", () => {
-    expect(
-      outOfScopeFiles(pr({ changedFilePaths: ["anything.ts"] }), undefined),
-    ).toEqual([]);
+    expect(outOfScopeFiles(pr({ changedFilePaths: ["anything.ts"] }), undefined)).toEqual([]);
   });
 
   it("still merges in-scope work, so a legitimate extra file is not fatal", () => {
@@ -406,10 +382,9 @@ describe("scope creep", () => {
  */
 describe("sensitive surfaces", () => {
   it("refuses to auto-merge a workflow change", () => {
-    const verdict = evaluateMechanical(
-      pr({ changedFilePaths: [".github/workflows/ci.yml"] }),
-      [".github/workflows/ci.yml"],
-    );
+    const verdict = evaluateMechanical(pr({ changedFilePaths: [".github/workflows/ci.yml"] }), [
+      ".github/workflows/ci.yml",
+    ]);
     expect(verdict.kind).toBe("sensitive_surface");
   });
 
@@ -435,9 +410,7 @@ describe("sensitive surfaces", () => {
 
   it("does not fire on ordinary source and test files", () => {
     expect(
-      sensitiveSurfaceFiles(
-        pr({ changedFilePaths: ["src/a.ts", "test/a.test.ts", "docs/x.md"] }),
-      ),
+      sensitiveSurfaceFiles(pr({ changedFilePaths: ["src/a.ts", "test/a.test.ts", "docs/x.md"] })),
     ).toEqual([]);
   });
 
@@ -468,9 +441,7 @@ describe("partial file lists", () => {
   });
 
   it("still reports untouched when the whole list was seen", () => {
-    expect(isUntouched(pr({ changedFilePaths: ["src/other.ts"] }), ["src/slugify.ts"])).toBe(
-      true,
-    );
+    expect(isUntouched(pr({ changedFilePaths: ["src/other.ts"] }), ["src/slugify.ts"])).toBe(true);
   });
 
   it("marks the ready verdict so a caller knows scope creep is a lower bound", () => {
@@ -499,9 +470,9 @@ describe("partial file lists", () => {
  */
 describe("work the agent has not finished", () => {
   it("does not merge a pull request the agent still calls [WIP]", () => {
-    expect(
-      evaluateMechanical(pr({ title: "[WIP] Add slugify" }), ["src/slugify.ts"]),
-    ).toEqual({ kind: "in_progress" });
+    expect(evaluateMechanical(pr({ title: "[WIP] Add slugify" }), ["src/slugify.ts"])).toEqual({
+      kind: "in_progress",
+    });
   });
 
   it("is not confused by unfinished work that is otherwise perfectly mergeable", () => {
@@ -536,10 +507,9 @@ describe("work the agent has not finished", () => {
 
   it("does not report unfinished work's failing checks as a failed attempt", () => {
     // An unfinished change failing its own tests is expected, not a defect.
-    const verdict = evaluateMechanical(
-      pr({ title: "[WIP] Add slugify", checks: "FAILURE" }),
-      ["src/slugify.ts"],
-    );
+    const verdict = evaluateMechanical(pr({ title: "[WIP] Add slugify", checks: "FAILURE" }), [
+      "src/slugify.ts",
+    ]);
     expect(verdict.kind).toBe("in_progress");
   });
 
@@ -561,23 +531,17 @@ describe("work the agent has not finished", () => {
   });
 
   it("merges normally once the agent renames away the prefix", () => {
-    const verdict = evaluateMechanical(pr({ title: "Add slugify" }), [
-      "src/slugify.ts",
-    ]);
+    const verdict = evaluateMechanical(pr({ title: "Add slugify" }), ["src/slugify.ts"]);
     expect(verdict.kind).toBe("ready");
   });
 
   it("matches the prefix case-insensitively and with leading space", () => {
-    expect(evaluateMechanical(pr({ title: "  [wip] Add slugify" })).kind).toBe(
-      "in_progress",
-    );
+    expect(evaluateMechanical(pr({ title: "  [wip] Add slugify" })).kind).toBe("in_progress");
   });
 
   it("does not treat an incidental mention of WIP as unfinished", () => {
     // Only the prefix is the signal. A title merely containing the word must
     // not stall the item.
-    expect(evaluateMechanical(pr({ title: "Add wip-status helper" })).kind).toBe(
-      "ready",
-    );
+    expect(evaluateMechanical(pr({ title: "Add wip-status helper" })).kind).toBe("ready");
   });
 });

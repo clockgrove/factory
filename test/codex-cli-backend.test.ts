@@ -1,20 +1,87 @@
-import { execFileSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { execFileSync, spawn } from "node:child_process";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   CodexCliLocalBackend,
+  parseCodexWorkerStream,
   workerPacketPrompt,
 } from "../src/backends/codex-cli-local.js";
 import { restrictedCodexArgs } from "../src/backends/codex-cli-policy.js";
-import type { AttemptContext } from "../src/execution/backend.js";
+import type { AttemptContext, StaleAttemptIdentity } from "../src/execution/backend.js";
+import { durableAttemptId } from "../src/execution/session.js";
+import { cleanupLocalWorktree, createLocalWorktree } from "../src/runtime/local-worktree.js";
 import {
-  cleanupLocalWorktree,
-  createLocalWorktree,
-} from "../src/runtime/local-worktree.js";
+  linuxProcessGroupId,
+  processGroupExists,
+  terminateProcessGroup,
+} from "../src/runtime/process-group.js";
+
+const staleIdentity: StaleAttemptIdentity = {
+  repository: "clockgrove/repo-a",
+  objective: 91,
+  workItem: 92,
+  attempt: 1,
+  runId: "run-stale",
+  directorEpoch: 1,
+};
+
+async function spawnStaleGroup(
+  resistTerm: boolean,
+  marker = durableAttemptId(staleIdentity),
+): Promise<{
+  directory: string;
+  groupId: number;
+  descendantPid: number;
+}> {
+  const directory = await mkdtemp(join(tmpdir(), "factory-stale-cli-"));
+  const pidFile = join(directory, "descendant.pid");
+  const script = [
+    ":",
+    `( ${resistTerm ? "trap '' TERM; " : ""}while :; do sleep 60; done ) &`,
+    'echo "$!" > "$FACTORY_TEST_PID_FILE"',
+    "while :; do sleep 60; done",
+  ].join("\n");
+  const child = spawn("/bin/sh", ["-c", script], {
+    detached: true,
+    stdio: "ignore",
+    env: {
+      ...process.env,
+      FACTORY_ATTEMPT_ID: marker,
+      FACTORY_TEST_PID_FILE: pidFile,
+    },
+  });
+  if (!child.pid) throw new Error("failed to launch stale test process group");
+  for (let check = 0; check < 100; check += 1) {
+    const descendantPid = await readFile(pidFile, "utf8")
+      .then((value) => Number(value.trim()))
+      .catch(() => 0);
+    if (descendantPid > 0) {
+      return { directory, groupId: child.pid, descendantPid };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  try {
+    process.kill(-child.pid, "SIGKILL");
+  } catch {
+    // The failed fixture is already gone.
+  }
+  await rm(directory, { recursive: true, force: true });
+  throw new Error("stale test descendant did not start");
+}
+
+async function cleanupStaleGroup(groupId: number, directory: string): Promise<void> {
+  try {
+    await terminateProcessGroup(groupId, "SIGKILL", 50);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
 
 async function fixture(): Promise<{
   repository: string;
@@ -40,10 +107,11 @@ async function fixture(): Promise<{
     fakeCodex,
     [
       "#!/bin/sh",
-      "if [ \"$1\" = \"--version\" ]; then echo 'codex-cli 99.0.0'; exit 0; fi",
+      'if [ "$1" = "--version" ]; then echo \'codex-cli 99.0.0\'; exit 0; fi',
+      'printf \'%s\\n\' "$@" > "$CODEX_HOME/args"',
       "printf 'changed\\n' > value.txt",
-      "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"fake\"}'",
-      "printf '%s\\n' '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"{\\\"outcome\\\":\\\"succeeded\\\",\\\"summary\\\":\\\"done\\\",\\\"commands\\\":[]}\"}}'",
+      'printf \'%s\\n\' \'{"type":"thread.started","thread_id":"fake"}\'',
+      'printf \'%s\\n\' \'{"type":"item.completed","item":{"type":"agent_message","text":"{\\"outcome\\":\\"succeeded\\",\\"summary\\":\\"done\\",\\"commands\\":[]}"}}\'',
       "printf '%s\\n' '{\"type\":\"turn.completed\"}'",
     ].join("\n"),
   );
@@ -54,13 +122,65 @@ async function fixture(): Promise<{
 }
 
 describe("Codex CLI local backend", () => {
+  it("uses the actual last agent message, not the last parseable success", () => {
+    const message = (text: string) => ({
+      type: "item.completed",
+      item: { type: "agent_message", text },
+    });
+    const success = message(
+      JSON.stringify({ outcome: "succeeded", summary: "done", commands: [] }),
+    );
+    const declined = message(
+      JSON.stringify({ outcome: "declined", summary: "cannot finish", commands: [] }),
+    );
+    const completion = { type: "turn.completed", usage: { input_tokens: 9, output_tokens: 4 } };
+    const parse = (events: unknown[]) =>
+      parseCodexWorkerStream(events.map((event) => JSON.stringify(event)).join("\n"));
+    expect(parse([message("I'll inspect the module"), success, completion])).toMatchObject({
+      final: { outcome: "succeeded" },
+    });
+    expect(parse([success, declined, completion])).toMatchObject({
+      final: { outcome: "declined" },
+    });
+    for (const events of [
+      [success, message("malformed final"), completion],
+      [success, message(""), completion],
+      [success, completion, message("trailing commentary")],
+      [success, { type: "turn.failed" }, completion],
+      [success, completion, { type: "error" }],
+    ]) {
+      expect(parse(events)).toMatchObject({
+        final: null,
+        usage: completion.usage,
+        failure: expect.any(String),
+      });
+    }
+    expect(parse([success])).toMatchObject({
+      final: null,
+      failure: expect.stringContaining("without turn.completed"),
+    });
+    expect(parse([success, completion, completion])).toMatchObject({
+      final: null,
+      usage: undefined,
+      failure: expect.stringContaining("multiple turn.completed"),
+    });
+  });
+
+  it("advertises the release's Linux runtime boundary", () => {
+    expect(new CodexCliLocalBackend().capabilities.supportedOs).toEqual(["linux"]);
+  });
+
   it("runs unattended inside the sandbox with network and web search off by default", () => {
     const args = restrictedCodexArgs("workspace-write");
     expect(args).toEqual([
-      "--ask-for-approval", "never",
-      "--sandbox", "workspace-write",
-      "-c", 'web_search="disabled"',
-      "-c", "sandbox_workspace_write.network_access=false",
+      "--ask-for-approval",
+      "never",
+      "--sandbox",
+      "workspace-write",
+      "-c",
+      'web_search="disabled"',
+      "-c",
+      "sandbox_workspace_write.network_access=false",
     ]);
     expect(args).not.toContain("--approve-for-me");
   });
@@ -80,27 +200,46 @@ describe("Codex CLI local backend", () => {
   });
 
   it("fails closed on malformed destinations and management-network requests", () => {
-    expect(() => restrictedCodexArgs("workspace-write", ["https://example.com/path"]))
-      .toThrow("invalid Codex command-network destination");
-    expect(() => restrictedCodexArgs("read-only", ["example.com"]))
-      .toThrow("read-only Codex management runs cannot request");
+    expect(() => restrictedCodexArgs("workspace-write", ["https://example.com/path"])).toThrow(
+      "invalid Codex command-network destination",
+    );
+    expect(() => restrictedCodexArgs("read-only", ["example.com"])).toThrow(
+      "read-only Codex management runs cannot request",
+    );
   });
 
   it("frames retry feedback as untrusted diagnostic data", () => {
     const packet = {
-      goal: "Fix it.", acceptanceCriteria: ["It works."], allowedPaths: ["src/fix.ts"],
-      preconditions: [], outOfScope: [], conventions: [], baseSha: "a".repeat(40),
+      goal: "Fix it.",
+      acceptanceCriteria: ["It works."],
+      allowedPaths: ["src/fix.ts"],
+      preconditions: [],
+      outOfScope: [],
+      conventions: [],
+      baseSha: "a".repeat(40),
       validationCommands: ["npm test"],
       requirements: {
-        os: [], architecture: [], tools: [], services: [], networkDestinations: [],
-        permittedSecretNames: [], trust: "trusted_local" as const,
+        os: [],
+        architecture: [],
+        tools: [],
+        services: [],
+        networkDestinations: [],
+        permittedSecretNames: [],
+        trust: "trusted_local" as const,
       },
       retryContext: { attempt: 1, outcome: "failed" as const, reason: "test failed" },
       artifactContract: "clockgrove.factory/artifact-v1" as const,
     };
     const prompt = workerPacketPrompt({
-      objective: 1, workItem: 2, attempt: 2, runId: "run-1", directorEpoch: 1,
-      policyDigest: "f".repeat(64), workspace: "/tmp/work", packet,
+      repository: "clockgrove/factory",
+      objective: 1,
+      workItem: 2,
+      attempt: 2,
+      runId: "run-1",
+      directorEpoch: 1,
+      policyDigest: "f".repeat(64),
+      workspace: "/tmp/work",
+      packet,
       deadline: new Date(Date.now() + 1_000),
       seededFromArtifact: true,
     });
@@ -153,6 +292,7 @@ describe("Codex CLI local backend", () => {
     });
 
     const context: AttemptContext = {
+      repository: "clockgrove/factory",
       objective: 1,
       workItem: 2,
       attempt: 1,
@@ -181,6 +321,11 @@ describe("Codex CLI local backend", () => {
         },
         artifactContract: "clockgrove.factory/artifact-v1",
       },
+      modelSelection: {
+        profile: "frontier",
+        model: "gpt-5",
+        reasoning: "high",
+      },
     };
     const handle = await backend.launch(context);
     let observed = await backend.observe(handle);
@@ -189,6 +334,9 @@ describe("Codex CLI local backend", () => {
       observed = await backend.observe(handle);
     }
     expect(observed.state).toBe("succeeded");
+    const args = await readFile(join(handle.metadata!.codexHome!, "args"), "utf8");
+    expect(args).toContain("--model\ngpt-5");
+    expect(args).toContain('-c\nmodel_reasoning_effort="high"');
     const artifact = await backend.collect(handle);
     expect(artifact.outcome).toBe("succeeded");
     expect(artifact.changedPaths).toEqual(["value.txt"]);
@@ -196,4 +344,92 @@ describe("Codex CLI local backend", () => {
     await backend.cleanup(handle);
     await cleanupLocalWorktree(worktree);
   });
+
+  it.skipIf(process.platform !== "linux")(
+    "reconciles the complete stale process group including a TERM-resistant descendant",
+    async () => {
+      const stale = await spawnStaleGroup(true);
+      try {
+        expect(linuxProcessGroupId(stale.descendantPid)).toBe(stale.groupId);
+        const backend = new CodexCliLocalBackend({ staleTerminationGraceMs: 50 });
+        await backend.reconcileStale({
+          ...staleIdentity,
+          providerResourceId: `local-${stale.groupId}`,
+        });
+        expect(processGroupExists(stale.groupId)).toBe(false);
+      } finally {
+        await cleanupStaleGroup(stale.groupId, stale.directory);
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "fails stale reconciliation closed when the process group signal is denied",
+    async () => {
+      const stale = await spawnStaleGroup(false);
+      const originalKill = process.kill.bind(process);
+      const denied = Object.assign(new Error("not permitted"), { code: "EPERM" });
+      const killSpy = vi.spyOn(process, "kill").mockImplementation(((
+        pid: number,
+        signal?: NodeJS.Signals | number,
+      ) => {
+        if (pid === -stale.groupId && signal === "SIGTERM") throw denied;
+        return signal === undefined ? originalKill(pid) : originalKill(pid, signal);
+      }) as typeof process.kill);
+      try {
+        const backend = new CodexCliLocalBackend({ staleTerminationGraceMs: 50 });
+        await expect(
+          backend.reconcileStale({
+            ...staleIdentity,
+            providerResourceId: `local-${stale.groupId}`,
+          }),
+        ).rejects.toMatchObject({ code: "EPERM" });
+        expect(processGroupExists(stale.groupId)).toBe(true);
+      } finally {
+        killSpy.mockRestore();
+        await cleanupStaleGroup(stale.groupId, stale.directory);
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "reconciles only the matching repository namespace",
+    async () => {
+      const otherRepository = {
+        ...staleIdentity,
+        repository: "clockgrove/repo-b",
+      };
+      const staleA = await spawnStaleGroup(false);
+      const staleB = await spawnStaleGroup(false, durableAttemptId(otherRepository));
+      try {
+        expect(durableAttemptId(staleIdentity)).not.toBe(durableAttemptId(otherRepository));
+        const backend = new CodexCliLocalBackend({ staleTerminationGraceMs: 50 });
+        await backend.reconcileStale({
+          ...staleIdentity,
+          providerResourceId: `local-${staleA.groupId}`,
+        });
+        expect(processGroupExists(staleA.groupId)).toBe(false);
+        expect(processGroupExists(staleB.groupId)).toBe(true);
+      } finally {
+        await cleanupStaleGroup(staleA.groupId, staleA.directory);
+        await cleanupStaleGroup(staleB.groupId, staleB.directory);
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "fails closed around a legacy unscoped worker marker",
+    async () => {
+      const legacy = await spawnStaleGroup(false, "factory-o91-w92-a1-run-stale");
+      try {
+        const backend = new CodexCliLocalBackend({ staleTerminationGraceMs: 50 });
+        await expect(backend.reconcileStale(staleIdentity)).rejects.toThrow(
+          /legacy local worker identity has no repository namespace/,
+        );
+        expect(processGroupExists(legacy.groupId)).toBe(true);
+      } finally {
+        await cleanupStaleGroup(legacy.groupId, legacy.directory);
+      }
+    },
+  );
 });

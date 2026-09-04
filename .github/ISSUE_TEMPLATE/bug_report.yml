@@ -1,0 +1,82 @@
+name: Bug report
+description: Report reproducible incorrect Factory behavior
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Search existing issues first. Remove credentials, private source, raw environment dumps, and unsanitized agent transcripts. Report security vulnerabilities privately using SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: Factory version
+      description: Include the npm/plugin version and commit SHA when known.
+      placeholder: "2.x.y / abc1234"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: Installation method
+      options:
+        - Agent Plugin
+        - npm global package
+        - npm project dependency
+        - source checkout
+    validations:
+      required: true
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Linux environment
+      options:
+        - Native Linux
+        - Windows WSL2
+        - Linux guest hosted by macOS
+        - Other or Labs
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the operation, expected behavior, and actual behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: Provide the smallest safe sequence of CLI or chat actions. Use a disposable repository when possible.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Include Node.js/CLI versions, relevant Factory reason codes or receipt kinds, and bounded logs. Never paste tokens or private repository contents.
+      render: shell
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Execution backend
+      options:
+        - codex-sdk/local-worktree
+        - codex-cli/local-worktree
+        - codex-cli/daytona
+        - github-copilot/github-managed
+        - openai-codex/github-managed
+        - Vercel Sandbox (Labs)
+        - Codex App Server (Labs)
+        - Not backend-specific
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials, private source, and sensitive agent/provider output.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

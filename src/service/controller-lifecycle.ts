@@ -1,11 +1,5 @@
-import type {
-  ControllerInput,
-  ControllerLifecycle,
-} from "../application/services.js";
-import {
-  SystemdUserService,
-  type SystemdStatus,
-} from "./systemd-user-service.js";
+import type { ControllerInput, ControllerLifecycle } from "../application/services.js";
+import type { SystemdUserService, SystemdStatus } from "./systemd-user-service.js";
 
 export interface ControllerLifecycleResult extends SystemdStatus {
   operation: "start" | "stop" | "restart" | "status" | "install" | "uninstall";

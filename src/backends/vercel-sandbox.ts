@@ -36,6 +36,7 @@ export interface VercelSandboxBackendOptions {
 export class VercelSandboxBackend implements ExecutionBackend {
   readonly capabilities: ExecutionBackendCapabilities = {
     id: "codex-cli/vercel-sandbox",
+    supportTier: "labs",
     agentKind: "codex-cli",
     runtimeKind: "vercel-sandbox",
     hostExecution: false,
@@ -48,6 +49,7 @@ export class VercelSandboxBackend implements ExecutionBackend {
     supportsObservation: true,
     supportsResume: false,
     supportsLocalInference: false,
+    supportsModelSelection: true,
     requiresPaidRuntime: true,
     providerManagedPublication: false,
     requiredCredentials: ["VERCEL_OIDC_TOKEN", "OPENAI_API_KEY"],
@@ -91,12 +93,13 @@ export class VercelSandboxBackend implements ExecutionBackend {
     const modelKey = process.env[this.#modelCredential];
     if (!modelKey) throw new Error(`${this.#modelCredential} is unavailable`);
     const archive = await repositoryArchive(this.#repository, context.packet.baseSha);
-    const allow: Record<string, Array<{ transform: Array<{ headers: Record<string, string> }> }>> = {
+    const allow: Record<
+      string,
+      Array<{ transform: Array<{ headers: Record<string, string> }> }>
+    > = {
       "registry.npmjs.org": [],
       "*.npmjs.org": [],
-      "api.openai.com": [
-        { transform: [{ headers: { authorization: `Bearer ${modelKey}` } }] },
-      ],
+      "api.openai.com": [{ transform: [{ headers: { authorization: `Bearer ${modelKey}` } }] }],
     };
     for (const destination of context.packet.requirements.networkDestinations) {
       allow[destination] ??= [];
@@ -163,7 +166,11 @@ export class VercelSandboxBackend implements ExecutionBackend {
       observedAt: new Date().toISOString(),
       ...(running.result.exitCode === 0
         ? {}
-        : { reason: (await running.result.stderr()).slice(0, 8_000) || `sandbox exited ${running.result.exitCode}` }),
+        : {
+            reason:
+              (await running.result.stderr()).slice(0, 8_000) ||
+              `sandbox exited ${running.result.exitCode}`,
+          }),
     };
   }
 
@@ -182,10 +189,12 @@ export class VercelSandboxBackend implements ExecutionBackend {
       running.sandbox.readFileToBuffer({ path: "factory/worker.stdout" }),
       running.sandbox.readFileToBuffer({ path: "factory/worker.stderr" }),
     ]);
-    if (!patch || !paths || !exit) throw new Error("sandbox did not produce the artifact contract files");
+    if (!patch || !paths || !exit)
+      throw new Error("sandbox did not produce the artifact contract files");
     const exitCode = Number(exit.toString("utf8"));
     const patchText = patch.toString("utf8");
-    const outcome = exitCode === 0 && patchText.trim() ? "succeeded" : patchText.trim() ? "failed" : "declined";
+    const outcome =
+      exitCode === 0 && patchText.trim() ? "succeeded" : patchText.trim() ? "failed" : "declined";
     return normalizeArtifact({
       baseSha: running.context.packet.baseSha,
       patch: patchText,
@@ -277,7 +286,8 @@ export class VercelSandboxBackend implements ExecutionBackend {
   }
 
   #require(handle: BackendHandle): RunningVercel {
-    if (handle.backendId !== this.capabilities.id) throw new Error(`handle belongs to ${handle.backendId}`);
+    if (handle.backendId !== this.capabilities.id)
+      throw new Error(`handle belongs to ${handle.backendId}`);
     const running = this.#running.get(handle.resourceId);
     if (!running) throw new Error(`unknown Vercel sandbox ${handle.resourceId}`);
     return running;

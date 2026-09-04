@@ -1,25 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  cancellationRequestFromComments,
-  objectiveSubIssueQuerySize,
-} from "../src/github.js";
+import { cancellationRequestFromComments, objectiveSubIssueQuerySize } from "../src/github.js";
 
-import {
-  AttemptManager,
-  type AttemptStore,
-} from "../src/control/attempts.js";
-import {
-  factoryCommentIssueNumber,
-  GitHubControlStore,
-} from "../src/control/github-store.js";
+import { AttemptManager, type AttemptStore } from "../src/control/attempts.js";
+import { factoryCommentIssueNumber, GitHubControlStore } from "../src/control/github-store.js";
 import {
   LeaseLostError,
   LeaseManager,
   type GitCommitObject,
   type LeaseStore,
 } from "../src/control/lease.js";
-import { encodeEventComment } from "../src/control/receipts.js";
+import { LifecycleRecorder } from "../src/control/events.js";
+import { decodeEventComments, encodeEventComment } from "../src/control/receipts.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
 import { policyDigest, DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 import { RunManager, type RunState } from "../src/control/runs.js";
@@ -113,6 +105,32 @@ const identity = {
 };
 
 describe("Director lease", () => {
+  it("emits a fenced durable controller observation", async () => {
+    const store = new MemoryStore();
+    const manager = new LeaseManager({ store, durationMs: 60_000 });
+    const acquired = await manager.acquire(identity, await store.readCommit(BASE_SHA));
+    const event = await new LifecycleRecorder(store, manager).controller({
+      lease: acquired,
+      objectiveNodeId: "objective-node",
+      sequence: 2,
+      controllerId: "controller-1",
+      epoch: 5,
+      expiresAt: "2026-09-03T00:05:00.000Z",
+      controllerPolicyDigest: "d".repeat(64),
+      protocolMin: "clockgrove.factory/v2",
+      protocolMax: "clockgrove.factory/v2",
+    });
+
+    expect(event).toMatchObject({
+      event: "ControllerObserved",
+      runId: "run-1",
+      controllerId: "controller-1",
+      epoch: 5,
+    });
+    expect(store.comments).toHaveLength(1);
+    expect(decodeEventComments(store.comments[0]!.body)).toEqual([event]);
+  });
+
   it("accepts an in-flight operation from the same renewed lease generation", async () => {
     const store = new MemoryStore();
     const manager = new LeaseManager({ store, durationMs: 60_000 });
@@ -138,10 +156,7 @@ describe("Director lease", () => {
     ).rejects.toThrow(/leased by host-1/);
 
     store.now = new Date(first.expiresAt.getTime() + 1);
-    const takeover = await manager.acquire(
-      { ...identity, runId: "run-2", holder: "host-2" },
-      base,
-    );
+    const takeover = await manager.acquire({ ...identity, runId: "run-2", holder: "host-2" }, base);
     expect(takeover.epoch).toBe(2);
     expect(takeover.oid).not.toBe(first.oid);
   });
@@ -169,10 +184,7 @@ describe("Director lease", () => {
     const released = await manager.release(first);
     expect(released.expiresAt).toEqual(store.now);
     await expect(manager.assertCurrent(released)).rejects.toBeInstanceOf(LeaseLostError);
-    const takeover = await manager.acquire(
-      { ...identity, runId: "run-2", holder: "host-2" },
-      base,
-    );
+    const takeover = await manager.acquire({ ...identity, runId: "run-2", holder: "host-2" }, base);
     expect(takeover.epoch).toBe(2);
   });
 
@@ -268,6 +280,68 @@ describe("attempt reservation", () => {
     });
     expect((await attempts.list(42, 43))[0]?.admission).toEqual(first.admission);
 
+    const started = await attempts.record({
+      lease,
+      workItemNodeId: "I_43",
+      reservation: first,
+      event: "AttemptStarted",
+      sequence: 19,
+      providerResourceId: "sandbox-1",
+      environmentIdentity: `registry.example.invalid/factory@sha256:${"a".repeat(64)}`,
+    });
+    expect(started).toMatchObject({
+      providerResourceId: "sandbox-1",
+      environmentIdentity: `registry.example.invalid/factory@sha256:${"a".repeat(64)}`,
+    });
+
+    const terminal = await attempts.record({
+      lease,
+      workItemNodeId: "I_43",
+      reservation: first,
+      event: "AttemptSucceeded",
+      sequence: 20,
+      modelProfile: "frontier",
+      reportedModelTokens: 321,
+      reportedModelUsage: { inputTokens: 300, outputTokens: 21, cachedInputTokens: 200 },
+    });
+    expect(terminal).toMatchObject({
+      modelProfile: "frontier",
+      reportedModelTokens: 321,
+      reportedModelUsage: { inputTokens: 300, outputTokens: 21, cachedInputTokens: 200 },
+    });
+
+    const recorder = new LifecycleRecorder(store, leases);
+    const writesBefore = store.comments.length;
+    const budgetEvent = await recorder.budget({
+      lease,
+      workItemNodeId: "I_43",
+      reservation: first,
+      sequence: 21,
+      event: "BudgetReconciled",
+      unit: "model_tokens",
+      phase: "execution",
+      amount: 321,
+      reportedModelUsage: { inputTokens: 300, outputTokens: 21, cachedInputTokens: 200 },
+    });
+    const failedManagement = await recorder.objectiveBudget({
+      lease,
+      objectiveNodeId: "I_42",
+      sequence: 22,
+      event: "BudgetReconciled",
+      unit: "model_tokens",
+      amount: 150,
+      usageId: "failed-compile",
+      reportedModelUsage: { inputTokens: 120, outputTokens: 30, cachedInputTokens: 0 },
+    });
+    expect(store.comments.length - writesBefore).toBe(2);
+    expect(decodeEventComments(store.comments.at(-2)!.body)).toEqual([budgetEvent]);
+    expect(decodeEventComments(store.comments.at(-1)!.body)).toEqual([failedManagement]);
+    expect(failedManagement.reportedModelUsage).toEqual({
+      inputTokens: 120,
+      outputTokens: 30,
+      cachedInputTokens: 0,
+    });
+
     const queued = await attempts.recordQueued({
       lease,
       workItem: 44,
@@ -301,10 +375,7 @@ describe("attempt reservation", () => {
       sequence: 5,
     });
     expect(second.attempt).toBe(2);
-    expect((await attempts.list(42, 43)).map((attempt) => attempt.attempt)).toEqual([
-      1,
-      2,
-    ]);
+    expect((await attempts.list(42, 43)).map((attempt) => attempt.attempt)).toEqual([1, 2]);
   });
 
   it("refuses reservation after the lease is fenced", async () => {
@@ -313,10 +384,7 @@ describe("attempt reservation", () => {
     const base = await store.readCommit(BASE_SHA);
     const lease = await leases.acquire(identity, base);
     store.now = new Date(lease.expiresAt.getTime() + 1);
-    await leases.acquire(
-      { ...identity, runId: "run-2", holder: "host-2" },
-      base,
-    );
+    await leases.acquire({ ...identity, runId: "run-2", holder: "host-2" }, base);
     const attempts = new AttemptManager({ store, leases });
     await expect(
       attempts.reserve({
@@ -345,10 +413,7 @@ describe("attempt reservation", () => {
       sequence: 2,
     });
     store.now = new Date(firstLease.expiresAt.getTime() + 1);
-    const recoveryLease = await leases.acquire(
-      { ...identity, holder: "host-2" },
-      base,
-    );
+    const recoveryLease = await leases.acquire({ ...identity, holder: "host-2" }, base);
     const recovered = await attempts.recordCapacity({
       lease: recoveryLease,
       workItemNodeId: "I_43",
@@ -405,49 +470,80 @@ describe("run cancellation", () => {
       requestedBy: "operator",
       reason: "maintenance window",
     });
-    expect(manager.resume([{
-      protocol: "clockgrove.factory/v2",
-      kind: "run",
-      event: "FactoryRunStarted",
-      objective: 42,
-      runId: "run-1",
-      sequence: 1,
-      at: run.startedAt.toISOString(),
-      actor: run.actor,
-      repository: "clockgrove/factory",
-      objectiveAuthor: run.actor,
-      fork: false,
-      baseBranch: "main",
-      policy: run.policy,
-      policyDigest: run.policyDigest,
-    }, event])?.runId).toBe("run-1");
+    expect(
+      manager.resume([
+        {
+          protocol: "clockgrove.factory/v2",
+          kind: "run",
+          event: "FactoryRunStarted",
+          objective: 42,
+          runId: "run-1",
+          sequence: 1,
+          at: run.startedAt.toISOString(),
+          actor: run.actor,
+          repository: "clockgrove/factory",
+          objectiveAuthor: run.actor,
+          fork: false,
+          baseBranch: "main",
+          policy: run.policy,
+          policyDigest: run.policyDigest,
+        },
+        event,
+      ])?.runId,
+    ).toBe("run-1");
 
     const body = store.comments[0]!.body;
-    expect(cancellationRequestFromComments([{
-      body,
-      authorLogin: "operator",
-      authorAssociation: "OWNER",
-    }], run.runId, run.actor)).toEqual(event);
-    expect(cancellationRequestFromComments([{
-      body,
-      authorLogin: "intruder",
-      authorAssociation: "OWNER",
-    }], run.runId, run.actor)).toBeNull();
-    expect(cancellationRequestFromComments([{
-      body,
-      authorLogin: "operator",
-      authorAssociation: "CONTRIBUTOR",
-    }], run.runId, run.actor)).toBeNull();
+    expect(
+      cancellationRequestFromComments(
+        [
+          {
+            body,
+            authorLogin: "operator",
+            authorAssociation: "OWNER",
+          },
+        ],
+        run.runId,
+        run.actor,
+      ),
+    ).toEqual(event);
+    expect(
+      cancellationRequestFromComments(
+        [
+          {
+            body,
+            authorLogin: "intruder",
+            authorAssociation: "OWNER",
+          },
+        ],
+        run.runId,
+        run.actor,
+      ),
+    ).toBeNull();
+    expect(
+      cancellationRequestFromComments(
+        [
+          {
+            body,
+            authorLogin: "operator",
+            authorAssociation: "CONTRIBUTOR",
+          },
+        ],
+        run.runId,
+        run.actor,
+      ),
+    ).toBeNull();
   });
 
   it("rejects cancellation by a different GitHub identity", async () => {
     const store = new MemoryStore();
-    await expect(new RunManager(store).requestCancellation({
-      run,
-      objectiveNodeId: "I_42",
-      actor: "intruder",
-      sequence: 2,
-    })).rejects.toThrow(/only activating actor/i);
+    await expect(
+      new RunManager(store).requestCancellation({
+        run,
+        objectiveNodeId: "I_42",
+        actor: "intruder",
+        sequence: 2,
+      }),
+    ).rejects.toThrow(/only activating actor/i);
     expect(store.comments).toEqual([]);
   });
 });
@@ -593,5 +689,411 @@ describe("Factory event comment routing", () => {
     });
 
     expect(mutationClasses).toEqual(["lease"]);
+  });
+});
+
+describe("authenticated durable activation discovery", () => {
+  const activation = parseFactoryEvent({
+    protocol: "clockgrove.factory/v2",
+    kind: "run",
+    event: "ActivationRequested",
+    objective: 14,
+    runId: "activation-14",
+    sequence: 1,
+    at: "2026-09-03T00:00:00.000Z",
+    requestedBy: "operator",
+    requestId: "activation-14",
+    repository: "clockgrove/factory",
+    baseSha: BASE_SHA,
+    policy: DEFAULT_RUN_POLICY,
+    policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+    controllerProtocolMin: "clockgrove.factory/v2",
+    controllerProtocolMax: "clockgrove.factory/v2",
+  });
+  const started = parseFactoryEvent({
+    protocol: "clockgrove.factory/v2",
+    kind: "run",
+    event: "FactoryRunStarted",
+    objective: 14,
+    runId: "run-14",
+    sequence: 2,
+    at: "2026-09-03T00:00:01.000Z",
+    actor: "operator",
+    repository: "clockgrove/factory",
+    objectiveAuthor: "operator",
+    fork: false,
+    baseBranch: "main",
+    policy: DEFAULT_RUN_POLICY,
+    policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+    activationRequestId: "activation-14",
+    baseSha: BASE_SHA,
+  });
+  const rejected = parseFactoryEvent({
+    protocol: "clockgrove.factory/v2",
+    kind: "run",
+    event: "ActivationRejected",
+    objective: 14,
+    runId: "activation-14",
+    sequence: 2,
+    at: "2026-09-03T00:00:01.000Z",
+    activationRequestId: "activation-14",
+    requestedBy: "operator",
+    baseSha: BASE_SHA,
+    policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+    reason: "activation base is stale",
+  });
+  const terminal = parseFactoryEvent({
+    protocol: "clockgrove.factory/v2",
+    kind: "run",
+    event: "FactoryRunCompleted",
+    objective: 14,
+    runId: "run-14",
+    sequence: 3,
+    at: "2026-09-03T00:00:02.000Z",
+  });
+  const pause = parseFactoryEvent({
+    protocol: "clockgrove.factory/v2",
+    kind: "run",
+    event: "RunPauseRequested",
+    objective: 14,
+    runId: "run-14",
+    sequence: 3,
+    at: "2026-09-03T00:00:02.000Z",
+    requestedBy: "operator",
+    requestId: "pause-14",
+  });
+  const pauseAcknowledged = parseFactoryEvent({
+    protocol: "clockgrove.factory/v2",
+    kind: "run",
+    event: "RunPauseAcknowledged",
+    objective: 14,
+    runId: "run-14",
+    sequence: 4,
+    at: "2026-09-03T00:00:03.000Z",
+    commandRequestId: "pause-14",
+  });
+  const drain = parseFactoryEvent({
+    protocol: "clockgrove.factory/v2",
+    kind: "run",
+    event: "RunDrainRequested",
+    objective: 14,
+    runId: "run-14",
+    sequence: 3,
+    at: "2026-09-03T00:00:02.000Z",
+    requestedBy: "operator",
+    requestId: "drain-14",
+  });
+  const drainCompleted = parseFactoryEvent({
+    protocol: "clockgrove.factory/v2",
+    kind: "run",
+    event: "RunDrainCompleted",
+    objective: 14,
+    runId: "run-14",
+    sequence: 4,
+    at: "2026-09-03T00:00:03.000Z",
+    commandRequestId: "drain-14",
+  });
+  const resume = parseFactoryEvent({
+    protocol: "clockgrove.factory/v2",
+    kind: "run",
+    event: "RunResumeRequested",
+    objective: 14,
+    runId: "run-14",
+    sequence: 5,
+    at: "2026-09-03T00:00:04.000Z",
+    requestedBy: "operator",
+    requestId: "resume-14",
+  });
+
+  function discoveryStore(
+    comments: Array<{
+      body: string;
+      login: string;
+      association: string;
+    }>,
+    state: "open" | "closed" = "open",
+  ): GitHubControlStore {
+    return new GitHubControlStore({
+      token: "test-token",
+      owner: "clockgrove",
+      repo: "factory",
+      requestFetch: async (input, init) => {
+        const request = new Request(input, init);
+        if (request.url.endsWith("/user")) {
+          return Response.json({ login: "operator" });
+        }
+        const isComments = request.url.includes("/issues/14/comments");
+        if (!isComments) {
+          expect(new URL(request.url).searchParams.get("state")).toBe("all");
+        }
+        const data = isComments
+          ? comments.map((comment, index) => ({
+              id: index + 1,
+              body: comment.body,
+              user: { login: comment.login },
+              author_association: comment.association,
+            }))
+          : [{ number: 14, state }];
+        return new Response(JSON.stringify(data), {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+            date: "Thu, 03 Sep 2026 00:00:03 GMT",
+          },
+        });
+      },
+    });
+  }
+
+  it("keeps the newest unique activation when an older request is replayed late", async () => {
+    const nextActivation = parseFactoryEvent({
+      ...activation,
+      runId: "activation-15",
+      requestId: "activation-15",
+      sequence: 2,
+      at: "2026-09-03T00:00:01.000Z",
+    });
+    const delayedReplay = parseFactoryEvent({
+      ...activation,
+      sequence: 3,
+      at: "2026-09-03T00:00:02.000Z",
+    });
+    const store = discoveryStore(
+      [activation, nextActivation, delayedReplay].map((event) => ({
+        body: encodeEventComment(event.event, event),
+        login: "operator",
+        association: "OWNER",
+      })),
+    );
+
+    await expect(store.discoverObjectiveActivations()).resolves.toMatchObject([
+      { objective: 14, requestId: "activation-15", requestedBy: "operator" },
+    ]);
+  });
+
+  it("rejects reuse of one request ID across application event types", async () => {
+    const conflictingPause = parseFactoryEvent({
+      ...pause,
+      requestId: activation.requestId,
+    });
+    const store = discoveryStore(
+      [activation, started, conflictingPause].map((event) => ({
+        body: encodeEventComment(event.event, event),
+        login: "operator",
+        association: "OWNER",
+      })),
+    );
+
+    await expect(store.discoverObjectiveActivations()).rejects.toThrow(
+      /conflicting Factory application requests/i,
+    );
+  });
+
+  it("ignores outsider activations and collaborator comments with mismatched actors", async () => {
+    const forged = { ...activation, runId: "forged", requestId: "forged" };
+    const teammateActivation = {
+      ...activation,
+      runId: "teammate-activation",
+      requestId: "teammate-activation",
+      requestedBy: "teammate",
+    };
+    const store = discoveryStore([
+      {
+        body: encodeEventComment("valid", activation),
+        login: "operator",
+        association: "OWNER",
+      },
+      {
+        body: encodeEventComment("outsider", forged),
+        login: "outsider",
+        association: "CONTRIBUTOR",
+      },
+      {
+        body: encodeEventComment("actor mismatch", forged),
+        login: "collaborator",
+        association: "COLLABORATOR",
+      },
+      {
+        body: encodeEventComment("different controller identity", teammateActivation),
+        login: "teammate",
+        association: "MEMBER",
+      },
+    ]);
+
+    await expect(store.discoverObjectiveActivations()).resolves.toEqual([
+      expect.objectContaining({
+        objective: 14,
+        requestId: "activation-14",
+        requestedBy: "operator",
+        baseSha: BASE_SHA,
+      }),
+    ]);
+  });
+
+  it("does not let another collaborator forge a terminal receipt", async () => {
+    const forgedStart = parseFactoryEvent({
+      ...started,
+      actor: "collaborator",
+    });
+    const store = discoveryStore([
+      {
+        body: encodeEventComment("activate", activation),
+        login: "operator",
+        association: "OWNER",
+      },
+      {
+        body: encodeEventComment("start", started),
+        login: "operator",
+        association: "OWNER",
+      },
+      {
+        body: encodeEventComment("forged start", forgedStart),
+        login: "collaborator",
+        association: "COLLABORATOR",
+      },
+      {
+        body: encodeEventComment("forged terminal", terminal),
+        login: "collaborator",
+        association: "COLLABORATOR",
+      },
+    ]);
+    await expect(store.discoverObjectiveActivations()).rejects.toThrow(
+      /conflicting authenticated actors/i,
+    );
+  });
+
+  it("suppresses a completed activation only with its actor-bound run receipt", async () => {
+    const store = discoveryStore(
+      [
+        {
+          body: encodeEventComment("activate", activation),
+          login: "operator",
+          association: "OWNER",
+        },
+        {
+          body: encodeEventComment("start", started),
+          login: "operator",
+          association: "OWNER",
+        },
+        {
+          body: encodeEventComment("terminal", terminal),
+          login: "operator",
+          association: "OWNER",
+        },
+      ],
+      "closed",
+    );
+    await expect(store.discoverObjectiveActivations()).resolves.toEqual([]);
+  });
+
+  it("suppresses an open paused run until its actor durably resumes it", async () => {
+    const comments = [activation, started, pause, pauseAcknowledged].map((event) => ({
+      body: encodeEventComment(event.event, event),
+      login: "operator",
+      association: "OWNER",
+    }));
+    await expect(discoveryStore(comments).discoverObjectiveActivations()).resolves.toEqual([]);
+
+    comments.push({
+      body: encodeEventComment("resume", resume),
+      login: "operator",
+      association: "OWNER",
+    });
+    await expect(discoveryStore(comments).discoverObjectiveActivations()).resolves.toHaveLength(1);
+  });
+
+  it.each([
+    ["local", "codex-sdk/local-worktree", pause],
+    ["cloud", "codex-cli/daytona", drain],
+  ] as const)(
+    "rediscovers a crash after %s admission is stopped while its attempt may still be live",
+    async (_class, backend, gate) => {
+      const attempt = parseFactoryEvent({
+        protocol: "clockgrove.factory/v2",
+        kind: "attempt",
+        event: "AttemptStarted",
+        objective: 14,
+        runId: "run-14",
+        sequence: 4,
+        at: "2026-09-03T00:00:03.000Z",
+        workItem: 22,
+        attempt: 1,
+        backend,
+        baseSha: BASE_SHA,
+        directorEpoch: 1,
+        policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+        providerResourceId: `${_class}-resource`,
+      });
+      const comments = [activation, started, attempt, gate].map((event) => ({
+        body: encodeEventComment(event.event, event),
+        login: "operator",
+        association: "OWNER",
+      }));
+      await expect(discoveryStore(comments).discoverObjectiveActivations()).resolves.toHaveLength(
+        1,
+      );
+    },
+  );
+
+  it("suppresses a drained run only after its exact durable completion acknowledgement", async () => {
+    const comments = [activation, started, drain].map((event) => ({
+      body: encodeEventComment(event.event, event),
+      login: "operator",
+      association: "OWNER",
+    }));
+    await expect(discoveryStore(comments).discoverObjectiveActivations()).resolves.toHaveLength(1);
+    comments.push({
+      body: encodeEventComment("drained", drainCompleted),
+      login: "operator",
+      association: "OWNER",
+    });
+    await expect(discoveryStore(comments).discoverObjectiveActivations()).resolves.toEqual([]);
+  });
+
+  it("rediscovers a closed active run for close-before-terminal repair", async () => {
+    const comments = [activation, started, pause].map((event) => ({
+      body: encodeEventComment(event.event, event),
+      login: "operator",
+      association: "OWNER",
+    }));
+    await expect(
+      discoveryStore(comments, "closed").discoverObjectiveActivations(),
+    ).resolves.toHaveLength(1);
+  });
+
+  it("durably suppresses a rejected pre-start activation across discovery passes", async () => {
+    const comments = [
+      {
+        body: encodeEventComment("activate", activation),
+        login: "operator",
+        association: "OWNER",
+      },
+    ];
+    const store = discoveryStore(comments);
+    await expect(store.discoverObjectiveActivations()).resolves.toHaveLength(1);
+
+    comments.push({
+      body: encodeEventComment("rejected", rejected),
+      login: "operator",
+      association: "OWNER",
+    });
+    await expect(store.discoverObjectiveActivations()).resolves.toEqual([]);
+    await expect(store.discoverObjectiveActivations()).resolves.toEqual([]);
+  });
+
+  it("does not let another collaborator reject an activation", async () => {
+    const store = discoveryStore([
+      {
+        body: encodeEventComment("activate", activation),
+        login: "operator",
+        association: "OWNER",
+      },
+      {
+        body: encodeEventComment("forged rejection", rejected),
+        login: "collaborator",
+        association: "COLLABORATOR",
+      },
+    ]);
+    await expect(store.discoverObjectiveActivations()).resolves.toHaveLength(1);
   });
 });

@@ -1,0 +1,59 @@
+name: Feature request
+description: Propose a focused change to Factory's product contract
+title: "feature: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Factory targets one Linux environment on one developer machine, local-first execution, bounded cloud burst, GitHub-only durable state, and chat/MCP control. Explain the user problem before proposing a new provider or abstraction.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What cannot an indie developer or small team accomplish effectively today?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe observable behavior and how success would be measured.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach
+      description: Include protocol, recovery, security, cost, and compatibility implications when relevant.
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Primary surface
+      options:
+        - Objective compilation
+        - Scheduling and priority
+        - Local execution
+        - Sandbox or managed agent
+        - Validation and security
+        - Pull requests and integration
+        - CLI, plugin, or MCP
+        - Documentation and contributor experience
+        - Labs
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include a repository-local profile or existing adapter when it could solve the problem.
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Product boundaries
+      options:
+        - label: This does not require a Factory scheduler workflow, a hosted Factory service, or a private state store.
+        - label: Any paid execution or new credential is explicitly authorized and bounded.
+        - label: I reviewed the out-of-scope and Labs boundaries in docs/DESIGN.md.
+          required: true

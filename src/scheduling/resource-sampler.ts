@@ -79,8 +79,7 @@ async function observeV2(
   if (cpuRaw === null && maxRaw === null && currentRaw === null) return null;
   return {
     cpu: cpuRaw === null ? null : parseCgroupV2CpuMax(cpuRaw, cpuPath),
-    memoryLimitBytes:
-      maxRaw === null ? null : parseCgroupBytes(maxRaw, maxPath),
+    memoryLimitBytes: maxRaw === null ? null : parseCgroupBytes(maxRaw, maxPath),
     memoryCurrentBytes:
       currentRaw === null ? null : parseCgroupBytes(currentRaw, currentPath, false),
     source: "cgroup-v2",
@@ -95,10 +94,7 @@ async function observeV1(
   const memoryRoot = "/sys/fs/cgroup/memory";
   const maxPath = cgroupPath(memoryRoot, memoryMembership, "memory.limit_in_bytes");
   const currentPath = cgroupPath(memoryRoot, memoryMembership, "memory.usage_in_bytes");
-  const [maxRaw, currentRaw] = await Promise.all([
-    files.read(maxPath),
-    files.read(currentPath),
-  ]);
+  const [maxRaw, currentRaw] = await Promise.all([files.read(maxPath), files.read(currentPath)]);
   let cpu: number | null = null;
   let cpuObserved = false;
   for (const cpuRoot of [
@@ -125,8 +121,7 @@ async function observeV1(
   }
   return {
     cpu,
-    memoryLimitBytes:
-      maxRaw === null ? null : parseCgroupBytes(maxRaw, maxPath),
+    memoryLimitBytes: maxRaw === null ? null : parseCgroupBytes(maxRaw, maxPath),
     memoryCurrentBytes:
       currentRaw === null ? null : parseCgroupBytes(currentRaw, currentPath, false),
     source: "cgroup-v1",
@@ -203,10 +198,7 @@ export class LinuxResourceSampler implements ResourceSampler {
       totalMemoryMb: Math.floor(effectiveTotal / MB),
       availableMemoryMb: Math.floor(effectiveFree / MB),
       memoryUsageRatio: Math.max(hostUsage, cgroupUsage),
-      source:
-        cgroup && (finiteCpu !== null || finiteMemoryLimit !== null)
-          ? cgroup.source
-          : "host",
+      source: cgroup && (finiteCpu !== null || finiteMemoryLimit !== null) ? cgroup.source : "host",
     };
   }
 }
@@ -237,10 +229,7 @@ export class CachedResourceSampler {
   }
 
   notePressure(nowMs: number): void {
-    this.#cooldownUntil = Math.max(
-      this.#cooldownUntil,
-      nowMs + this.admissionCooldownMs,
-    );
+    this.#cooldownUntil = Math.max(this.#cooldownUntil, nowMs + this.admissionCooldownMs);
   }
 
   get cooldownUntil(): number {

@@ -1,2 +1,4 @@
 .codex-marketplace-install.json
 *.tgz
+coverage/
+release/

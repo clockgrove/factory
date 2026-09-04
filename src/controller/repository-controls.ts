@@ -28,8 +28,7 @@ export class RepositoryControls {
     readonly cpuCapacity = Number.POSITIVE_INFINITY,
     readonly memoryCapacityMb = Number.POSITIVE_INFINITY,
   ) {
-    if (!Number.isInteger(capacity) || capacity < 1)
-      throw new Error("capacity must be positive");
+    if (!Number.isInteger(capacity) || capacity < 1) throw new Error("capacity must be positive");
     if (!Number.isFinite(paidBudget) || paidBudget < 0)
       throw new Error("paid budget must be non-negative");
   }
@@ -46,18 +45,11 @@ export class RepositoryControls {
     const paid = admission.paidUnits ?? 0;
     const cpu = admission.cpu ?? 0;
     const memory = admission.memoryMb ?? 0;
-    if (
-      ![paid, cpu, memory].every(
-        (value) => Number.isFinite(value) && value >= 0,
-      )
-    ) {
+    if (![paid, cpu, memory].every((value) => Number.isFinite(value) && value >= 0)) {
       throw new Error("admission resources must be finite and non-negative");
     }
     if (this.#paidUnits + paid > this.paidBudget) return null;
-    if (
-      this.#cpu + cpu > this.cpuCapacity ||
-      this.#memoryMb + memory > this.memoryCapacityMb
-    )
+    if (this.#cpu + cpu > this.cpuCapacity || this.#memoryMb + memory > this.memoryCapacityMb)
       return null;
     const wanted = admission.paths ?? [];
     for (const current of this.#active.values()) {
@@ -84,19 +76,12 @@ export class RepositoryControls {
     return this.reserve(admission);
   }
 
-  async publication<T>(
-    lease: LeaseState,
-    operation: () => Promise<T>,
-  ): Promise<T> {
+  async publication<T>(lease: LeaseState, operation: () => Promise<T>): Promise<T> {
     await this.fence(lease, "publication");
     return operation();
   }
 
-  async integrate<T>(
-    workItem: number,
-    lease: LeaseState,
-    operation: () => Promise<T>,
-  ): Promise<T> {
+  async integrate<T>(workItem: number, lease: LeaseState, operation: () => Promise<T>): Promise<T> {
     await this.fence(lease, "integration");
     if (this.#integrating.size > 0 && !this.#integrating.has(workItem)) {
       throw new Error("another repository integration is in progress");
@@ -123,10 +108,7 @@ function normalize(path: string): string {
   return path.replaceAll("\\", "/").replace(/^\.\//, "").replace(/\/+$/, "");
 }
 
-export function pathsOverlap(
-  left: readonly string[],
-  right: readonly string[],
-): boolean {
+export function pathsOverlap(left: readonly string[], right: readonly string[]): boolean {
   return left.some((a) =>
     right.some((b) => {
       const x = normalize(a);

@@ -2,16 +2,8 @@ import { randomUUID } from "node:crypto";
 
 import { type FactoryEvent, parseFactoryEvent } from "../protocol/events.js";
 import { PROTOCOL_V2 } from "../protocol/limits.js";
-import {
-  parseRunPolicy,
-  policyDigest,
-  type RunPolicy,
-} from "../protocol/policy.js";
-import {
-  encodeEventComment,
-  latestSupportedRun,
-  nextEventSequence,
-} from "./receipts.js";
+import { parseRunPolicy, policyDigest, type RunPolicy } from "../protocol/policy.js";
+import { encodeEventComment, latestSupportedRun, nextEventSequence } from "./receipts.js";
 
 export interface RunEventStore {
   addIssueComment(issueNodeId: string, body: string): Promise<void>;
@@ -26,6 +18,11 @@ export interface RunState {
   policy: RunPolicy;
   policyDigest: string;
   startedAt: Date;
+  activationRequestId?: string;
+  baseSha?: string;
+  repository?: string;
+  baseBranch?: string;
+  fork?: boolean;
 }
 
 export class RunManager {
@@ -49,6 +46,11 @@ export class RunManager {
       policy,
       policyDigest: digest,
       startedAt: new Date(active.at),
+      ...(active.activationRequestId ? { activationRequestId: active.activationRequestId } : {}),
+      ...(active.baseSha ? { baseSha: active.baseSha } : {}),
+      repository: active.repository,
+      baseBranch: active.baseBranch,
+      fork: active.fork,
     };
   }
 
@@ -64,19 +66,18 @@ export class RunManager {
     existingEvents?: FactoryEvent[];
     runId?: string;
     sequence?: number;
+    activationRequestId?: string;
+    baseSha?: string;
   }): Promise<RunState> {
     const resumed = this.resume(args.existingEvents ?? []);
     if (resumed) return resumed;
     const policy = parseRunPolicy(args.policy);
     const digest = policyDigest(policy);
     const now = await this.store.serverTime();
-    const sequence = args.sequence ?? Math.max(
-      0,
-      ...(args.existingEvents ?? []).map((event) => event.sequence),
-    ) + 1;
-    if (
-      sequence <= Math.max(0, ...(args.existingEvents ?? []).map((event) => event.sequence))
-    ) {
+    const sequence =
+      args.sequence ??
+      Math.max(0, ...(args.existingEvents ?? []).map((event) => event.sequence)) + 1;
+    if (sequence <= Math.max(0, ...(args.existingEvents ?? []).map((event) => event.sequence))) {
       throw new Error("run sequence must advance the Objective event log");
     }
     const event = parseFactoryEvent({
@@ -94,16 +95,15 @@ export class RunManager {
       baseBranch: args.baseBranch,
       policy,
       policyDigest: digest,
+      ...(args.activationRequestId ? { activationRequestId: args.activationRequestId } : {}),
+      ...(args.baseSha ? { baseSha: args.baseSha } : {}),
     });
     if (event.kind !== "run" || event.event !== "FactoryRunStarted") {
       throw new Error("internal error creating run start event");
     }
     await this.store.addIssueComment(
       args.objectiveNodeId,
-      encodeEventComment(
-        `Factory started run \`${event.runId}\` with local-first policy.`,
-        event,
-      ),
+      encodeEventComment(`Factory started run \`${event.runId}\` with local-first policy.`, event),
     );
     return {
       objective: event.objective,
@@ -113,6 +113,11 @@ export class RunManager {
       policy,
       policyDigest: digest,
       startedAt: now,
+      ...(event.activationRequestId ? { activationRequestId: event.activationRequestId } : {}),
+      ...(event.baseSha ? { baseSha: event.baseSha } : {}),
+      repository: event.repository,
+      baseBranch: event.baseBranch,
+      fork: event.fork,
     };
   }
 
@@ -133,10 +138,7 @@ export class RunManager {
       runId: args.run.runId,
       sequence:
         args.sequence ??
-        Math.max(
-          args.run.sequence + 1,
-          nextEventSequence(args.existingEvents ?? []),
-        ),
+        Math.max(args.run.sequence + 1, nextEventSequence(args.existingEvents ?? [])),
       at: now.toISOString(),
       ...(args.reason ? { reason: args.reason } : {}),
     });

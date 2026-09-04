@@ -31,16 +31,10 @@ import type {
 } from "./types.js";
 import { COPILOT_LOGIN } from "./types.js";
 import type { WorkflowSafetyProfile } from "./approval.js";
-import {
-  referencedSecretNames,
-  triggersOnPullRequest,
-  usesSelfHostedRunner,
-} from "./approval.js";
-import { decodeEventComments } from "./control/receipts.js";
-import {
-  PlatformUnavailableError,
-  classifyRefusal,
-} from "./platform.js";
+import { referencedSecretNames, triggersOnPullRequest, usesSelfHostedRunner } from "./approval.js";
+import { bindAuthenticatedRunActors } from "./control/authenticated-events.js";
+import { decodeEventComments, deduplicateFactoryEvents } from "./control/receipts.js";
+import { PlatformUnavailableError, classifyRefusal } from "./platform.js";
 import type { FactoryEvent } from "./protocol/events.js";
 import { normalizeIssueFieldValues } from "./scheduling/github-priority.js";
 
@@ -84,6 +78,7 @@ export function cancellationRequestFromComments(
   runId: string,
   actor: string,
 ): RunCancellationRequest | null {
+  const candidates: FactoryEvent[] = [];
   for (const comment of comments) {
     if (
       comment.authorLogin?.toLowerCase() !== actor.toLowerCase() ||
@@ -98,11 +93,16 @@ export function cancellationRequestFromComments(
         event.runId === runId &&
         event.requestedBy.toLowerCase() === actor.toLowerCase()
       ) {
-        return event;
+        candidates.push(event);
       }
     }
   }
-  return null;
+  return (
+    deduplicateFactoryEvents(candidates).find(
+      (event): event is RunCancellationRequest =>
+        event.kind === "run" && event.event === "FactoryRunCancellationRequested",
+    ) ?? null
+  );
 }
 
 const OBJECTIVE_CARDINALITY_QUERY = `
@@ -141,8 +141,9 @@ query Objective($owner: String!, $repo: String!, $number: Int!, $subIssueCount: 
     id
     defaultBranchRef { name }
     workItemLabel: label(name: "factory:work-item") { id }
-    suggestedActors(capabilities: [CAN_BE_ASSIGNED], first: 10) {
+    suggestedActors(capabilities: [CAN_BE_ASSIGNED], first: 100) {
       nodes {
+        __typename
         login
         ... on Bot { id }
       }
@@ -353,6 +354,7 @@ interface GqlComments {
 }
 
 interface GqlSuggestedActor {
+  __typename: string;
   login: string;
   id?: string;
 }
@@ -484,8 +486,7 @@ export function toPullRequest(
     changedFilePaths: pr.files.nodes.map((n) => n.path),
     commitSubjects: pr.commits.nodes.map((n) => n.commit.messageHeadline),
     checks,
-    checksNeverStarted:
-      checks === "FAILURE" && !commit?.statusCheckRollup?.state,
+    checksNeverStarted: checks === "FAILURE" && !commit?.statusCheckRollup?.state,
     mergeable: pr.mergeable,
     createdAt: new Date(pr.createdAt),
     mergedAt: pr.mergedAt ? new Date(pr.mergedAt) : null,
@@ -525,11 +526,13 @@ export function toAgentWorkEvents(nodes: RestAgentWorkEvent[]): AgentWorkEvent[]
       const kind = n.event ? AGENT_EVENT_KINDS[n.event] : undefined;
       const at = new Date(n.created_at ?? "");
       if (!kind || !Number.isFinite(at.getTime())) return [];
-      return [{
-        kind,
-        at,
-        message: n.failure_message ?? n.message ?? null,
-      }];
+      return [
+        {
+          kind,
+          at,
+          message: n.failure_message ?? n.message ?? null,
+        },
+      ];
     })
     .sort((a, b) => a.at.getTime() - b.at.getTime());
 }
@@ -549,6 +552,7 @@ function copilotAssignments(wi: GqlWorkItem): Date[] {
 
 function toWorkItem(
   wi: GqlWorkItem,
+  objectiveNumber: number,
   eventsByPullRequest: ReadonlyMap<number, AgentWorkEvent[]>,
   v2: boolean,
   actorsByRun: ReadonlyMap<string, string> = new Map(),
@@ -587,6 +591,7 @@ function toWorkItem(
     result.factoryEvents = factoryEvents(
       wi.comments,
       `Work Item #${wi.number}`,
+      { objective: objectiveNumber, workItem: wi.number },
       actorsByRun,
     );
   }
@@ -598,6 +603,7 @@ const TRUSTED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 function factoryEvents(
   comments: GqlComments | undefined,
   subject: string,
+  expected: { objective: number; workItem?: number },
   actorsByRun?: ReadonlyMap<string, string>,
 ): FactoryEvent[] {
   if (!comments) return [];
@@ -605,11 +611,20 @@ function factoryEvents(
     throw new Error(`${subject} Factory event history is incomplete`);
   }
   const parsed = comments.nodes.flatMap((comment) => {
-    const events = decodeEventComments(comment.body);
-    if (events.length === 0) return [];
     const login = comment.author?.login;
     if (!login || !TRUSTED_ASSOCIATIONS.has(comment.authorAssociation ?? "")) {
       return [];
+    }
+    const events = decodeEventComments(comment.body);
+    if (events.length === 0) return [];
+    for (const event of events) {
+      if (
+        event.objective !== expected.objective ||
+        (expected.workItem !== undefined &&
+          (!("workItem" in event) || event.workItem !== expected.workItem))
+      ) {
+        throw new Error(`${subject} contains an authenticated Factory event for another issue`);
+      }
     }
     return events.map((event) => ({ event, login }));
   });
@@ -617,22 +632,20 @@ function factoryEvents(
   // The activating identity is authenticated by GitHub as the author of the
   // RunStarted comment. Every later receipt must come from that same identity;
   // an issue participant cannot forge state by pasting a Factory envelope.
-  const runActors = actorsByRun
-    ? new Map(actorsByRun)
-    : new Map(
-        parsed.flatMap(({ event, login }) =>
+  const runActors = actorsByRun ? new Map(actorsByRun) : bindAuthenticatedRunActors(parsed);
+  return deduplicateFactoryEvents(
+    parsed
+      .filter(({ event, login }) => {
+        if (
           event.kind === "run" &&
-          event.event === "FactoryRunStarted" &&
-          event.actor.toLowerCase() === login.toLowerCase()
-            ? [[event.runId, login] as const]
-            : [],
-        ),
-      );
-  return parsed
-    .filter(({ event, login }) =>
-      runActors.get(event.runId)?.toLowerCase() === login.toLowerCase(),
-    )
-    .map(({ event }) => event);
+          (event.event === "ActivationRequested" || event.event === "ActivationRejected")
+        ) {
+          return event.requestedBy.toLowerCase() === login.toLowerCase();
+        }
+        return runActors.get(event.runId)?.toLowerCase() === login.toLowerCase();
+      })
+      .map(({ event }) => event),
+  );
 }
 
 /**
@@ -659,11 +672,10 @@ export function createOctokit(opts: GitHubOptions): Octokit {
         notify(`rate limit on ${o.method} ${o.url}; yielding to Factory for retry in ${after}s`);
         return false;
       },
-      onSecondaryRateLimit: (
-        after: number,
-        o: { method: string; url: string },
-      ) => {
-        notify(`secondary limit on ${o.method} ${o.url}; yielding to Factory for retry in ${after}s`);
+      onSecondaryRateLimit: (after: number, o: { method: string; url: string }) => {
+        notify(
+          `secondary limit on ${o.method} ${o.url}; yielding to Factory for retry in ${after}s`,
+        );
         return false;
       },
     },
@@ -778,9 +790,7 @@ export function interpretContentsResponse(
  * exactly.
  */
 function isRequested(path: string, paths: string[]): boolean {
-  return paths.some((entry) =>
-    entry.endsWith("/") ? path.startsWith(entry) : path === entry,
-  );
+  return paths.some((entry) => (entry.endsWith("/") ? path.startsWith(entry) : path === entry));
 }
 
 export function budgetPatches(
@@ -878,15 +888,15 @@ export class GitHubReader {
     const fields: PriorityFieldDefinition[] = [];
     let after: string | null = null;
     for (;;) {
-      const data: GqlPriorityFields =
-        await this.#octokit.graphql<GqlPriorityFields>(PRIORITY_FIELDS_QUERY, {
+      const data: GqlPriorityFields = await this.#octokit.graphql<GqlPriorityFields>(
+        PRIORITY_FIELDS_QUERY,
+        {
           owner: this.#owner,
           after,
-        });
+        },
+      );
       if (!data.organization) {
-        throw new Error(
-          `${this.#owner} is not an organization with repository issue fields`,
-        );
+        throw new Error(`${this.#owner} is not an organization with repository issue fields`);
       }
       const connection = data.organization.issueFields;
       for (const node of connection.nodes) {
@@ -915,8 +925,7 @@ export class GitHubReader {
       after = connection.pageInfo.endCursor;
     }
     return fields.sort(
-      (left, right) =>
-        left.name.localeCompare(right.name) || left.id.localeCompare(right.id),
+      (left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id),
     );
   }
 
@@ -1037,20 +1046,14 @@ export class GitHubReader {
    * one response, and is reported rather than worked around. Blobs only —
    * directory entries are implied by the paths and would only spend budget.
    */
-  async readRepositoryLayout(
-    pathPrefix?: string,
-    maxEntries = 2_000,
-  ): Promise<RepositoryLayout> {
+  async readRepositoryLayout(pathPrefix?: string, maxEntries = 2_000): Promise<RepositoryLayout> {
     const branch = await this.#defaultBranch();
-    const tree = await this.#octokit.request(
-      "GET /repos/{owner}/{repo}/git/trees/{tree_sha}",
-      {
-        owner: this.#owner,
-        repo: this.#repo,
-        tree_sha: branch,
-        recursive: "1",
-      },
-    );
+    const tree = await this.#octokit.request("GET /repos/{owner}/{repo}/git/trees/{tree_sha}", {
+      owner: this.#owner,
+      repo: this.#repo,
+      tree_sha: branch,
+      recursive: "1",
+    });
     const all = tree.data.tree
       .filter((e) => e.type === "blob" && typeof e.path === "string")
       .map((e) => e.path as string);
@@ -1087,16 +1090,14 @@ export class GitHubReader {
    * only reported as a missing path once the repository itself is confirmed
    * readable; `#defaultBranch()` caches, so this costs one request per reader.
    */
-  async readRepositoryFile(
-    path: string,
-    maxBytes = 40_000,
-  ): Promise<RepositoryFile> {
+  async readRepositoryFile(path: string, maxBytes = 40_000): Promise<RepositoryFile> {
     let response;
     try {
-      response = await this.#octokit.request(
-        "GET /repos/{owner}/{repo}/contents/{path}",
-        { owner: this.#owner, repo: this.#repo, path },
-      );
+      response = await this.#octokit.request("GET /repos/{owner}/{repo}/contents/{path}", {
+        owner: this.#owner,
+        repo: this.#repo,
+        path,
+      });
     } catch (error) {
       if ((error as { status?: number }).status === 404) {
         try {
@@ -1134,9 +1135,7 @@ export class GitHubReader {
       );
       const observedIssue = cardinality.repository?.issue;
       if (!cardinality.repository || !observedIssue) {
-        throw new Error(
-          `Objective #${number} not found in ${this.#owner}/${this.#repo}`,
-        );
+        throw new Error(`Objective #${number} not found in ${this.#owner}/${this.#repo}`);
       }
       return objectiveSubIssueQuerySize(observedIssue.subIssues.totalCount);
     };
@@ -1148,15 +1147,12 @@ export class GitHubReader {
         subIssueCount,
       });
 
-    let subIssueCount = this.#objectiveSubIssueCounts.get(number) ??
-      await readCardinality();
+    let subIssueCount = this.#objectiveSubIssueCounts.get(number) ?? (await readCardinality());
     let data = await readDetail(subIssueCount);
     let repository = data.repository;
     let issue = repository?.issue;
     if (!repository || !issue) {
-      throw new Error(
-        `Objective #${number} not found in ${this.#owner}/${this.#repo}`,
-      );
+      throw new Error(`Objective #${number} not found in ${this.#owner}/${this.#repo}`);
     }
 
     // The compiled graph is normally immutable, so avoid paying for a
@@ -1170,43 +1166,36 @@ export class GitHubReader {
       repository = data.repository;
       issue = repository?.issue;
       if (!repository || !issue) {
-        throw new Error(
-          `Objective #${number} not found in ${this.#owner}/${this.#repo}`,
-        );
+        throw new Error(`Objective #${number} not found in ${this.#owner}/${this.#repo}`);
       }
     }
 
     if (!repository.defaultBranchRef) {
-      throw new Error(
-        `${this.#owner}/${this.#repo} has no default branch (empty repository?)`,
-      );
+      throw new Error(`${this.#owner}/${this.#repo} has no default branch (empty repository?)`);
     }
     if (issue.subIssues.totalCount !== issue.subIssues.nodes.length) {
-      throw new Error(
-        `Objective #${number} sub-issues changed during snapshot; retry the read`,
-      );
+      throw new Error(`Objective #${number} sub-issues changed during snapshot; retry the read`);
     }
     this.#objectiveSubIssueCounts.set(
       number,
       objectiveSubIssueQuerySize(issue.subIssues.totalCount),
     );
 
-    const bot = repository.suggestedActors.nodes.find(
-      (a) => a.login === COPILOT_LOGIN,
+    const bot = repository.suggestedActors.nodes.find((a) => a.login === COPILOT_LOGIN);
+    const managedAgentActors = repository.suggestedActors.nodes.flatMap((actor) =>
+      actor.__typename === "Bot" && actor.id
+        ? [{ id: actor.id, login: actor.login, type: "Bot" as const }]
+        : [],
     );
-    const hydratedObjectiveComments = await this.#completeComments(
-      issue.number,
-      issue.comments,
-    );
+    const hydratedObjectiveComments = await this.#completeComments(issue.number, issue.comments);
     if (hydratedObjectiveComments) issue.comments = hydratedObjectiveComments;
     for (const workItem of issue.subIssues.nodes) {
-      const hydrated = await this.#completeComments(
-        workItem.number,
-        workItem.comments,
-      );
+      const hydrated = await this.#completeComments(workItem.number, workItem.comments);
       if (hydrated) workItem.comments = hydrated;
     }
-    const objectiveEvents = factoryEvents(issue.comments, `Objective #${issue.number}`);
+    const objectiveEvents = factoryEvents(issue.comments, `Objective #${issue.number}`, {
+      objective: issue.number,
+    });
     const v2 = objectiveEvents.some((event) => event.protocol === "clockgrove.factory/v2");
     const actorsByRun = new Map(
       objectiveEvents.flatMap((event) =>
@@ -1226,7 +1215,7 @@ export class GitHubReader {
       body: issue.body,
       closed: issue.state === "CLOSED",
       workItems: issue.subIssues.nodes.map((wi, index) =>
-        toWorkItem(wi, agentWorkEvents, v2, actorsByRun, index),
+        toWorkItem(wi, issue.number, agentWorkEvents, v2, actorsByRun, index),
       ),
       readAt: new Date(),
       graphQlRateLimit: {
@@ -1239,6 +1228,7 @@ export class GitHubReader {
       defaultBranch: repository.defaultBranchRef.name,
       workItemLabelId: repository.workItemLabel?.id ?? null,
       copilotBotId: bot?.id ?? null,
+      managedAgentActors,
       ciExpectedOnPullRequests: await this.#ciExpectedOnPullRequests(),
       ...(v2 ? { factoryEvents: objectiveEvents } : {}),
     };
@@ -1293,9 +1283,7 @@ export class GitHubReader {
    * attempt, which keeps the companion reads proportional to active work and
    * avoids re-reading every closed historical attempt on every cycle.
    */
-  async #readAgentWorkEvents(
-    workItems: GqlWorkItem[],
-  ): Promise<Map<number, AgentWorkEvent[]>> {
+  async #readAgentWorkEvents(workItems: GqlWorkItem[]): Promise<Map<number, AgentWorkEvent[]>> {
     const openPullRequests = new Set<number>();
     for (const workItem of workItems) {
       for (const pullRequest of workItem.closedByPullRequestsReferences.nodes) {
@@ -1354,15 +1342,12 @@ export class GitHubReader {
   async #ciExpectedOnPullRequests(): Promise<boolean | "unknown"> {
     if (this.#ciExpected) return true;
     try {
-      const runs = await this.#octokit.request(
-        "GET /repos/{owner}/{repo}/actions/runs",
-        {
-          owner: this.#owner,
-          repo: this.#repo,
-          event: "pull_request",
-          per_page: 1,
-        },
-      );
+      const runs = await this.#octokit.request("GET /repos/{owner}/{repo}/actions/runs", {
+        owner: this.#owner,
+        repo: this.#repo,
+        event: "pull_request",
+        per_page: 1,
+      });
       if (runs.data.total_count > 0) this.#ciExpected = true;
     } catch (error) {
       // 404 and 403 are the API answering: Actions is disabled for this
@@ -1400,8 +1385,7 @@ export class GitHubReader {
   async readWorkflowSafetyProfile(): Promise<WorkflowSafetyProfile> {
     if (this.#safetyProfile) return this.#safetyProfile;
 
-    let defaultWorkflowPermissions: WorkflowSafetyProfile["defaultWorkflowPermissions"] =
-      "unknown";
+    let defaultWorkflowPermissions: WorkflowSafetyProfile["defaultWorkflowPermissions"] = "unknown";
     try {
       const perms = await this.#octokit.request(
         "GET /repos/{owner}/{repo}/actions/permissions/workflow",
@@ -1436,10 +1420,11 @@ export class GitHubReader {
         // keeps this method from failing closed on every repo Factory works on.
         if (!workflow.path.startsWith(".github/")) continue;
         try {
-          const file = await this.#octokit.request(
-            "GET /repos/{owner}/{repo}/contents/{path}",
-            { owner: this.#owner, repo: this.#repo, path: workflow.path },
-          );
+          const file = await this.#octokit.request("GET /repos/{owner}/{repo}/contents/{path}", {
+            owner: this.#owner,
+            repo: this.#repo,
+            path: workflow.path,
+          });
           const data = file.data as { content?: string };
           if (!data.content) {
             // Not a success case. The contents API returns 200 with empty
@@ -1503,16 +1488,13 @@ export class GitHubReader {
         "cannot list held workflow runs without a head commit SHA; an empty SHA would match every held run in the repository",
       );
     }
-    const runs = await this.#octokit.request(
-      "GET /repos/{owner}/{repo}/actions/runs",
-      {
-        owner: this.#owner,
-        repo: this.#repo,
-        head_sha: headSha,
-        status: "action_required",
-        per_page: 100,
-      },
-    );
+    const runs = await this.#octokit.request("GET /repos/{owner}/{repo}/actions/runs", {
+      owner: this.#owner,
+      repo: this.#repo,
+      head_sha: headSha,
+      status: "action_required",
+      per_page: 100,
+    });
     const all = runs.data.workflow_runs.map((run) => ({
       id: run.id,
       name: run.name ?? String(run.id),

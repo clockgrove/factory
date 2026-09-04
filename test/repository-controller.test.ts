@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  GitHubRepositoryController,
   RepositoryController,
   createGitHubRepositoryController,
 } from "../src/controller/repository-controller.js";
@@ -10,6 +11,7 @@ import {
   type RepositoryAdmission,
 } from "../src/controller/repository-controls.js";
 import type { LeaseManager, LeaseState } from "../src/control/lease.js";
+import { PlatformUnavailableError } from "../src/platform.js";
 
 function lease(objective: number, epoch = 1): LeaseState {
   return {
@@ -42,13 +44,25 @@ function manager(
 
 describe("repository controller", () => {
   it("connects durable discovery to fair per-Objective supervisors with shared resources", async () => {
-    const seen: Array<{ objective: number; resources: unknown }> = [];
+    const observed = {
+      controllerId: "controller-1",
+      epoch: 3,
+      expiresAt: "2026-01-01T00:05:00.000Z",
+      controllerPolicyDigest: "d".repeat(64),
+    };
+    const controllerObservation = () => observed;
+    const seen: Array<{
+      objective: number;
+      resources: unknown;
+      observation: unknown;
+    }> = [];
     const controller = createGitHubRepositoryController({
       token: "not-used-by-injected-store",
       owner: "owner",
       repo: "repo",
       repository: "/repo",
       capacity: 2,
+      controllerObservation,
       activationStore: {
         discoverObjectiveActivations: async () => [
           {
@@ -56,24 +70,37 @@ describe("repository controller", () => {
             activatedAt: "2026-01-01T00:00:00Z",
             requestId: "two",
             policy: {},
+            policyDigest: "c".repeat(64),
+            baseSha: "a".repeat(40),
+            requestedBy: "operator",
           },
           {
             objective: 1,
             activatedAt: "2026-01-01T00:00:00Z",
             requestId: "one",
             policy: {},
+            policyDigest: "c".repeat(64),
+            baseSha: "a".repeat(40),
+            requestedBy: "operator",
           },
           {
             objective: 1,
             activatedAt: "2026-01-01T00:00:00Z",
             requestId: "duplicate",
             policy: {},
+            policyDigest: "c".repeat(64),
+            baseSha: "a".repeat(40),
+            requestedBy: "operator",
           },
         ],
       },
-      supervisorFactory: (activation, resources) => ({
+      supervisorFactory: (activation, resources, observe) => ({
         run: async () => {
-          seen.push({ objective: activation.objective, resources });
+          seen.push({
+            objective: activation.objective,
+            resources,
+            observation: observe?.(),
+          });
         },
       }),
     });
@@ -81,16 +108,50 @@ describe("repository controller", () => {
     await controller.settle();
     expect(seen.map((item) => item.objective)).toEqual([1, 2]);
     expect(seen[0]!.resources).toBe(seen[1]!.resources);
+    expect(seen.map((item) => item.observation)).toEqual([observed, observed]);
+  });
+
+  it("backs off a transient activation failure without terminalizing it", async () => {
+    let now = 1_000;
+    let attempts = 0;
+    const activation = {
+      objective: 1,
+      activatedAt: "2026-01-01T00:00:00Z",
+      requestId: "activation-1",
+      policy: {},
+      policyDigest: "c".repeat(64),
+      baseSha: "a".repeat(40),
+      requestedBy: "operator",
+    };
+    const controller = new GitHubRepositoryController({
+      store: { discoverObjectiveActivations: async () => [activation] },
+      pollIntervalMs: 1_000,
+      nowMs: () => now,
+      reconcileObjective: async () => {
+        attempts += 1;
+        throw new PlatformUnavailableError(
+          { kind: "rate_limit", retryAfterMs: 5_000 },
+          new Error("temporary refusal"),
+        );
+      },
+    });
+
+    expect(await controller.reconcileOnce()).toBe(1);
+    await controller.settle();
+    expect(await controller.reconcileOnce()).toBe(0);
+    now += 4_999;
+    expect(await controller.reconcileOnce()).toBe(0);
+    now += 1;
+    expect(await controller.reconcileOnce()).toBe(1);
+    await controller.settle();
+    expect(attempts).toBe(2);
   });
 
   it("fairly activates two Objectives and never admits a Work Item twice", async () => {
     const gates = new Map<number, () => void>();
     const started: number[] = [];
     const controls = new RepositoryControls(2, 2, manager());
-    const admission = (
-      objective: number,
-      workItem: number,
-    ): RepositoryAdmission => ({
+    const admission = (objective: number, workItem: number): RepositoryAdmission => ({
       objective,
       workItem,
       lease: lease(objective),
@@ -100,14 +161,10 @@ describe("repository controller", () => {
       controls,
       source: {
         discover: async () => [{ number: 2 }, { number: 1 }, { number: 1 }],
-        admissions: async (objective) => [
-          admission(objective, objective === 1 ? 101 : 202),
-        ],
+        admissions: async (objective) => [admission(objective, objective === 1 ? 101 : 202)],
         reconcile: async (_objective, item) => {
           started.push(item.workItem);
-          await new Promise<void>((resolve) =>
-            gates.set(item.workItem, resolve),
-          );
+          await new Promise<void>((resolve) => gates.set(item.workItem, resolve));
         },
       },
     });
@@ -123,15 +180,15 @@ describe("repository controller", () => {
   it("rejects stale generations before admission, publication, and integration", async () => {
     const controls = new RepositoryControls(1, 1, manager(new Map([[1, 2]])));
     const stale = lease(1, 1);
-    await expect(
-      controls.admit({ objective: 1, workItem: 10, lease: stale }),
-    ).rejects.toThrow("before admission");
-    await expect(
-      controls.publication(stale, async () => "published"),
-    ).rejects.toThrow("before publication");
-    await expect(
-      controls.integrate(10, stale, async () => "merged"),
-    ).rejects.toThrow("before integration");
+    await expect(controls.admit({ objective: 1, workItem: 10, lease: stale })).rejects.toThrow(
+      "before admission",
+    );
+    await expect(controls.publication(stale, async () => "published")).rejects.toThrow(
+      "before publication",
+    );
+    await expect(controls.integrate(10, stale, async () => "merged")).rejects.toThrow(
+      "before integration",
+    );
   });
 
   it("shares capacity, budget, path claims, and integration serialization across Objectives", async () => {
@@ -173,9 +230,9 @@ describe("repository controller", () => {
         }),
     );
     await Promise.resolve();
-    await expect(
-      controls.integrate(22, lease(2), async () => {}),
-    ).rejects.toThrow("integration is in progress");
+    await expect(controls.integrate(22, lease(2), async () => {})).rejects.toThrow(
+      "integration is in progress",
+    );
     unblock();
     await integrating;
     first!();
@@ -210,9 +267,7 @@ describe("repository controller", () => {
       controls: new RepositoryControls(2, 2, manager()),
       source: {
         discover: async () => [{ number: 1 }, { number: 2 }],
-        admissions: async (n) => [
-          { objective: n, workItem: n * 10, lease: lease(n) },
-        ],
+        admissions: async (n) => [{ objective: n, workItem: n * 10, lease: lease(n) }],
         reconcile: async (_n, _item, _signal, resources) => {
           seen.push(resources);
         },

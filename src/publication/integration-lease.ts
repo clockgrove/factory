@@ -1,10 +1,6 @@
-import {
-  verifyExactHeadValidation,
-  type ExactHeadValidationEvidence,
-} from "../validation/plan.js";
+import { verifyExactHeadValidation, type ExactHeadValidationEvidence } from "../validation/plan.js";
 
-export const INTEGRATION_LEASE_PROTOCOL =
-  "clockgrove.factory/integration-lease-v1" as const;
+export const INTEGRATION_LEASE_PROTOCOL = "clockgrove.factory/integration-lease-v1" as const;
 
 export type IntegrationLeaseState =
   | "acquired"
@@ -65,9 +61,7 @@ function snapshot(lease: IntegrationLease): IntegrationLeaseSnapshot {
     attempt: lease.attempt,
     expectedHeads: { ...lease.expectedHeads },
     evidence: { ...lease.evidence },
-    ...(lease.asynchronousMergeUuid
-      ? { asynchronousMergeUuid: lease.asynchronousMergeUuid }
-      : {}),
+    ...(lease.asynchronousMergeUuid ? { asynchronousMergeUuid: lease.asynchronousMergeUuid } : {}),
     ...(lease.failureReason ? { failureReason: lease.failureReason } : {}),
   };
 }
@@ -89,10 +83,7 @@ function assertHeadMap(
   evidence: Record<string, ExactHeadValidationEvidence>,
 ): void {
   const keys = Object.keys(expected).sort();
-  if (
-    keys.length === 0 ||
-    JSON.stringify(keys) !== JSON.stringify(Object.keys(evidence).sort())
-  ) {
+  if (keys.length === 0 || JSON.stringify(keys) !== JSON.stringify(Object.keys(evidence).sort())) {
     throw new Error("integration lease heads and validation evidence differ");
   }
   for (const key of keys) {
@@ -161,9 +152,7 @@ export function applyIntegrationCommand(
   command: IntegrationCommand,
 ): IntegrationLease {
   const payload = canonical(command);
-  const replay = lease.journal.find(
-    (entry) => entry.idempotencyKey === command.idempotencyKey,
-  );
+  const replay = lease.journal.find((entry) => entry.idempotencyKey === command.idempotencyKey);
   if (replay) {
     if (replay.command !== command.kind || replay.payload !== payload) {
       throw new Error("integration idempotency key was reused with different input");
@@ -187,7 +176,8 @@ export function applyIntegrationCommand(
     ],
   };
   if (command.kind === "pending") {
-    if (lease.state !== "acquired") throw new Error(`cannot enqueue integration from ${lease.state}`);
+    if (lease.state !== "acquired")
+      throw new Error(`cannot enqueue integration from ${lease.state}`);
     next.state = "pending";
     next.asynchronousMergeUuid = command.uuid;
     delete next.failureReason;

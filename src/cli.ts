@@ -7,11 +7,12 @@ import { resolveGitHubToken } from "./auth.js";
 import { BackendRegistry } from "./execution/registry.js";
 import { GitHubReader } from "./github.js";
 import { GitHubControlStore } from "./control/github-store.js";
-import { nextEventSequence } from "./control/receipts.js";
-import { RunManager } from "./control/runs.js";
 import { DEFAULT_RUN_POLICY, parseRunPolicy } from "./protocol/policy.js";
 import { allDone, counts, derive, isStalled, ready } from "./state.js";
 import { FactorySupervisor } from "./supervisor.js";
+import { FactoryApplicationService, PendingControllerLifecycle } from "./application/index.js";
+
+const controllerLifecycle = new PendingControllerLifecycle();
 
 function fail(message: string): never {
   process.stderr.write(`${message}\n`);
@@ -22,6 +23,52 @@ function parseTarget(value: string): { owner: string; repo: string; objective: n
   const match = /^([^/\s]+)\/([^#\s]+)#(\d+)$/.exec(value);
   if (!match) fail(`invalid Objective target: ${value} (expected OWNER/REPO#NUMBER)`);
   return { owner: match[1]!, repo: match[2]!, objective: Number(match[3]) };
+}
+
+function parseRepository(value: string): { owner: string; repo: string } {
+  const match = /^([^/\s]+)\/([^/\s]+)$/.exec(value);
+  if (!match) fail(`invalid repository: ${value} (expected OWNER/REPO)`);
+  return { owner: match[1]!, repo: match[2]! };
+}
+
+function applicationFor(owner: string, repo: string): FactoryApplicationService {
+  const token = resolveGitHubToken();
+  return new FactoryApplicationService({
+    owner, repo,
+    reader: new GitHubReader({ token, owner, repo }),
+    store: new GitHubControlStore({ token, owner, repo }),
+    controller: controllerLifecycle,
+  });
+}
+
+async function applicationCommand(command: string, args: string[]): Promise<void> {
+  if (!args[0]) fail(`usage: factory ${command} OWNER/REPO#NUMBER`);
+  const target = parseTarget(args[0]);
+  const service = applicationFor(target.owner, target.repo);
+  const read = ["doctor", "plan", "status", "explain"];
+  if (read.includes(command)) {
+    const workItem = option(args, "--work-item");
+    const result = await service.inspect(command as "doctor" | "plan" | "status" | "explain", target.objective, workItem ? Number(workItem) : undefined);
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+  const requestId = option(args, "--request-id");
+  if (!requestId) fail(`${command} requires --request-id ID`);
+  if (command === "activate") {
+    const baseSha = option(args, "--base-sha");
+    if (!baseSha) fail("activate requires --base-sha SHA");
+    process.stdout.write(`${JSON.stringify(await service.activate({ objective: target.objective, requestId, baseSha }), null, 2)}\n`);
+    return;
+  }
+  const workItem = option(args, "--work-item");
+  const priority = option(args, "--priority");
+  const result = await service.command(command === "pause-cloud" || command === "cloud-pause" ? "cloud-pause" : command === "set-priority" ? "priority" : command as "pause" | "resume" | "drain" | "retry" | "priority" | "replay" | "cancel", {
+    objective: target.objective, requestId,
+    ...(option(args, "--reason") ? { reason: option(args, "--reason")! } : {}),
+    ...(workItem ? { workItem: Number(workItem) } : {}),
+    ...(priority !== undefined ? { priorityRank: Number(priority) } : {}),
+  });
+  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
 function option(args: string[], name: string): string | undefined {
@@ -107,49 +154,31 @@ async function probeBackends(): Promise<void> {
   process.stdout.write(`${JSON.stringify(await registry.probeAll(), null, 2)}\n`);
 }
 
-async function cancelRun(args: string[]): Promise<void> {
-  if (!args[0]) fail("usage: factory cancel OWNER/REPO#NUMBER [--reason TEXT]");
-  const target = parseTarget(args[0]);
-  const token = resolveGitHubToken();
-  const reader = new GitHubReader({ token, owner: target.owner, repo: target.repo });
-  const snapshot = await reader.readObjective(target.objective);
-  const store = new GitHubControlStore({ token, owner: target.owner, repo: target.repo });
-  const manager = new RunManager(store);
-  const run = manager.resume(snapshot.factoryEvents ?? []);
-  if (!run) fail(`Objective #${target.objective} has no active Factory v2 run`);
-  const actor = await store.getAuthenticatedLogin();
-  const reason = option(args, "--reason");
-  const event = await manager.requestCancellation({
-    run,
-    objectiveNodeId: snapshot.id,
-    actor,
-    sequence: nextEventSequence(
-      snapshot.factoryEvents ?? [],
-      ...snapshot.workItems.map((item) => item.factoryEvents ?? []),
-    ),
-    ...(reason ? { reason } : {}),
-  });
-  process.stdout.write(`${JSON.stringify(event, null, 2)}\n`);
-}
-
 export async function main(argv: string[]): Promise<void> {
   const [command, ...rest] = argv;
+  if (command === "controller" && ["start", "stop", "install", "uninstall"].includes(rest[0] ?? "")) {
+    const operation = rest[0] as "start" | "stop" | "install" | "uninstall";
+    if (!rest[1]) fail(`usage: factory controller ${operation} OWNER/REPO --repo DIR --request-id ID`);
+    const repository = parseRepository(rest[1]);
+    const checkout = option(rest, "--repo");
+    const requestId = option(rest, "--request-id");
+    if (!checkout || !requestId) fail("controller lifecycle requires --repo DIR and --request-id ID");
+    const result = await applicationFor(repository.owner, repository.repo).controller(operation, {
+      repository: `${repository.owner}/${repository.repo}`, checkout, requestId,
+    });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
   if (command === "run" || command === "recover") {
     await runCommand(rest);
     return;
   }
-  if (command === "status") {
-    if (!rest[0]) fail("usage: factory status OWNER/REPO#NUMBER");
-    const target = parseTarget(rest[0]);
-    await inspect(target.owner, target.repo, target.objective);
+  if (command && ["doctor", "plan", "status", "explain", "replay", "activate", "pause", "resume", "drain", "cloud-pause", "pause-cloud", "retry", "priority", "set-priority", "cancel"].includes(command)) {
+    await applicationCommand(command, rest);
     return;
   }
   if (command === "backends" && rest[0] === "probe") {
     await probeBackends();
-    return;
-  }
-  if (command === "cancel") {
-    await cancelRun(rest);
     return;
   }
 

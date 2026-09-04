@@ -99,8 +99,7 @@ import { DEFAULT_RUN_POLICY } from "./protocol/policy.js";
 import { ExecutionRequirementsSchema } from "./protocol/worker-packet.js";
 import { FactorySupervisor } from "./supervisor.js";
 import { GitHubControlStore } from "./control/github-store.js";
-import { nextEventSequence } from "./control/receipts.js";
-import { RunManager } from "./control/runs.js";
+import { APPLICATION_TOOL_DEFINITIONS, FactoryApplicationService, PendingControllerLifecycle } from "./application/index.js";
 
 /** Never write anything but JSON-RPC to stdout on the stdio transport. */
 function log(message: string): void {
@@ -139,6 +138,18 @@ function readerFor(owner: string, repo: string): GitHubReader {
 const breaker = new CircuitBreaker();
 const pacer = new ContentCreationPacer();
 const concurrency = new ConcurrencyLimiter();
+const controllerLifecycle = new PendingControllerLifecycle();
+
+function applicationFor(owner: string, repo: string): FactoryApplicationService {
+  const token = getToken();
+  return new FactoryApplicationService({
+    owner,
+    repo,
+    reader: readerFor(owner, repo),
+    store: new GitHubControlStore({ token, owner, repo, onThrottle: log, circuitBreaker: breaker, pacer, concurrency }),
+    controller: controllerLifecycle,
+  });
+}
 
 /**
  * Login -> GraphQL node ID is an immutable GitHub identity fact, not Factory
@@ -1179,50 +1190,70 @@ server.registerTool(
   }),
 );
 
-server.registerTool(
-  "factory_cancel",
-  {
-    title: "Cancel Factory run",
-    description:
-      "Request cancellation of the active Factory v2 run through its authenticated GitHub event " +
-      "log. Only the activating GitHub identity may request it. The Supervisor observes the request, " +
-      "stops active workers at a fenced boundary, records terminal receipts, and releases its lease.",
-    inputSchema: {
-      ...RepoShape,
-      objectiveNumber: z.number().int().positive(),
-      reason: z.string().min(1).max(8_000).optional(),
-    },
-  },
-  tool(async ({
-    owner,
-    repo,
-    objectiveNumber,
-    reason,
-  }: {
-    owner: string;
-    repo: string;
-    objectiveNumber: number;
-    reason?: string | undefined;
-  }) => {
-    const token = getToken();
-    const snapshot = await readerFor(owner, repo).readObjective(objectiveNumber);
-    const store = new GitHubControlStore({ token, owner, repo, onThrottle: log });
-    const manager = new RunManager(store);
-    const run = manager.resume(snapshot.factoryEvents ?? []);
-    if (!run) throw new Error(`Objective #${objectiveNumber} has no active Factory v2 run`);
-    const actor = await store.getAuthenticatedLogin();
-    return manager.requestCancellation({
-      run,
-      objectiveNodeId: snapshot.id,
-      actor,
-      sequence: nextEventSequence(
-        snapshot.factoryEvents ?? [],
-        ...snapshot.workItems.map((item) => item.factoryEvents ?? []),
-      ),
-      ...(reason ? { reason } : {}),
+const ObjectiveToolShape = { ...RepoShape, objectiveNumber: z.number().int().positive() };
+const RequestToolShape = { ...ObjectiveToolShape, requestId: z.string().min(1).max(160) };
+
+type ApplicationToolInput = {
+  owner: string; repo: string; objectiveNumber?: number; requestId?: string; baseSha?: string;
+  workItemNumber?: number; priorityRank?: number; reason?: string; repository?: string;
+};
+
+function registerApplicationTool(
+  name: string,
+  operation: "doctor" | "plan" | "status" | "explain" | "replay" | "activate" |
+    "pause" | "resume" | "drain" | "cloud-pause" | "retry" | "priority" | "cancel" |
+    "controller-start" | "controller-stop" | "controller-install" | "controller-uninstall",
+  annotations: { readOnlyHint: boolean; destructiveHint: boolean; idempotentHint: boolean; openWorldHint: boolean },
+): void {
+  const inputSchema = operation.startsWith("controller-") ? {
+    ...RepoShape,
+    repository: z.string().min(1),
+    requestId: z.string().min(1).max(160),
+  } : operation === "activate" ? {
+    ...RequestToolShape,
+    baseSha: z.string().regex(/^[0-9a-fA-F]{40}$/),
+  } : ["doctor", "plan", "status", "explain"].includes(operation) ? {
+    ...ObjectiveToolShape,
+    ...(operation === "explain" ? { workItemNumber: z.number().int().positive().optional() } : {}),
+  } : {
+    ...RequestToolShape,
+    ...((operation === "retry" || operation === "priority") ? { workItemNumber: z.number().int().positive() } : {}),
+    ...(operation === "priority" ? { priorityRank: z.number().int().min(0).max(1_000) } : {}),
+    ...(["pause", "drain", "cloud-pause", "retry", "replay", "cancel"].includes(operation)
+      ? { reason: z.string().min(1).max(8_000).optional() } : {}),
+  };
+  server.registerTool(name, {
+    title: name.replaceAll("_", " "),
+    description: `${operation} through Factory's shared application-service boundary.`,
+    inputSchema,
+    annotations,
+  }, tool(async (input: ApplicationToolInput) => {
+    const service = applicationFor(input.owner, input.repo);
+    if (!operation.startsWith("controller-") && !input.objectiveNumber) throw new Error("objectiveNumber is required");
+    if (["doctor", "plan", "status", "explain"].includes(operation)) {
+      return service.inspect(operation as "doctor" | "plan" | "status" | "explain", input.objectiveNumber!, input.workItemNumber);
+    }
+    if (operation === "activate") {
+      if (!input.requestId || !input.baseSha) throw new Error("requestId and baseSha are required");
+      return service.activate({ objective: input.objectiveNumber!, requestId: input.requestId, baseSha: input.baseSha });
+    }
+    if (operation.startsWith("controller-")) {
+      if (!input.requestId || !input.repository) throw new Error("requestId and repository are required");
+      return service.controller(operation.slice("controller-".length) as "start" | "stop" | "install" | "uninstall", {
+        repository: `${input.owner}/${input.repo}`, checkout: input.repository, requestId: input.requestId,
+      });
+    }
+    if (!input.requestId) throw new Error("requestId is required");
+    return service.command(operation as "pause" | "resume" | "drain" | "cloud-pause" | "retry" | "priority" | "replay" | "cancel", {
+      objective: input.objectiveNumber!, requestId: input.requestId,
+      ...(input.reason ? { reason: input.reason } : {}),
+      ...(input.workItemNumber ? { workItem: input.workItemNumber } : {}),
+      ...(input.priorityRank !== undefined ? { priorityRank: input.priorityRank } : {}),
     });
-  }),
-);
+  }));
+}
+
+for (const [name, operation, annotations] of APPLICATION_TOOL_DEFINITIONS) registerApplicationTool(name, operation, annotations);
 
 export async function main(): Promise<void> {
   const transport = new StdioServerTransport();

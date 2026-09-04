@@ -1,5 +1,6 @@
 import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
 import { PROTOCOL_V2 } from "../protocol/limits.js";
+import { implicitRestartBlocker } from "../control/recovery.js";
 import { DEFAULT_RUN_POLICY, parseRunPolicy, policyDigest } from "../protocol/policy.js";
 import {
   deduplicateFactoryEvents,
@@ -333,6 +334,10 @@ export class FactoryApplicationService {
       if (conflict)
         throw new Error(`idempotency key ${requestId} was already used for a different request`);
       return existing;
+    }
+    if (fields.event === "ActivationRequested") {
+      const blocker = implicitRestartBlocker(snapshot);
+      if (blocker) throw new Error(blocker);
     }
     const actor = await store.getAuthenticatedLogin();
     const activeStart = latestSupportedRun(snapshot.factoryEvents ?? []);

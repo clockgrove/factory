@@ -107,6 +107,8 @@ reproduce validation, and understand what Factory supports without private conte
 
 ### Wave 6 — Adversarial installed-product run and distribution
 
+- Complete [explicit successor-run recovery](TERMINAL-RECOVERY-IMPLEMENTATION-PLAN.md) so an
+  escalated Objective can retain its existing work and accounting under acknowledged authority.
 - From a clean staged candidate installation, execute a disposable multi-wave Objective that includes
   independent work, a dependency chain, restart, cancellation, failed validation, conflict, budget
   exhaustion, and final closure.

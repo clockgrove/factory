@@ -61,6 +61,12 @@ not completion of the Linux environment or live adaptive scheduling gates.
 
 ## Definition-of-done evidence map
 
+Terminal-run continuation remains an implementation gap: ordinary resume/retry cannot revive an
+escalated run, and a fresh run cannot yet adopt its execution evidence. The
+[successor recovery plan](TERMINAL-RECOVERY-IMPLEMENTATION-PLAN.md) covers explicit authority,
+cumulative accounting, resource reconciliation, and reuse of validated publications. A startup
+guard blocks implicit reuse of executed work; it is containment, not a passed recovery gate.
+
 This table maps every stable contract statement in [`DESIGN.md`](DESIGN.md#definition-of-done) to
 the executable evidence required on a release branch. “Implemented” does not promote an open live
 gate into a platform or paid-provider support claim.

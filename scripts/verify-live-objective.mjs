@@ -57,7 +57,11 @@ export function installedIdentity({
     1,
     "the exact cache path must match one enabled installed Factory marketplace/version receipt",
   );
-  return { version, codexManifestVersion: manifest.version, pluginId: matches[0].pluginId };
+  return {
+    version,
+    codexManifestVersion: manifest.version,
+    pluginId: matches[0].pluginId,
+  };
 }
 
 export function assertMcpSurface(tools) {
@@ -143,7 +147,11 @@ export function boundedPolicy(delivery = "regular-prs") {
       maxManagedSessions: 0,
       minCloudTimeSavedMinutes: 0,
     },
-    delivery: { mode: delivery, onUnavailable: "regular-prs", merge: "bottom-up" },
+    delivery: {
+      mode: delivery,
+      onUnavailable: "regular-prs",
+      merge: "bottom-up",
+    },
     capacity: {
       mode: "adaptive-local",
       local: {
@@ -163,17 +171,102 @@ export function boundedPolicy(delivery = "regular-prs") {
 }
 
 export function assertCompletion(evidence) {
+  const runId = evidence.runResult?.runId;
+  assert.ok(typeof runId === "string" && runId.length > 0, "explicit executed run ID required");
+  assert.equal(evidence.status?.run?.runId, runId, "status belongs to another run");
+  assert.equal(evidence.status?.summary?.runId, runId, "summary belongs to another run");
   assert.equal(evidence.status.run.state, "completed", "Supervisor did not complete");
+  assert.equal(evidence.runResult.status, "completed", "executed run did not complete");
+  assert.equal(evidence.status.summary.outcome, "completed", "summary did not complete");
+  assert.equal(
+    evidence.runResult.objective,
+    evidence.objective.number,
+    "executed Objective differs",
+  );
+  assert.equal(
+    evidence.status.objective?.number,
+    evidence.objective.number,
+    "status Objective differs",
+  );
+  assert.equal(evidence.status.objective.closed, true, "status Objective remains open");
   assert.equal(evidence.objective.state, "closed", "Objective remains open");
+  for (const [name, limit] of [
+    ["children", 100],
+    ["dependencies", 100],
+    ["pulls", 1000],
+    ["events", 50_000],
+  ]) {
+    assert.ok(
+      Array.isArray(evidence[name]) && evidence[name].length <= limit,
+      `unbounded or missing ${name} evidence`,
+    );
+  }
   assert.ok(evidence.children.length >= 3, "expected a multi-wave compiled graph");
+  const childNumbers = new Set(evidence.children.map((child) => child.number));
+  assert.equal(childNumbers.size, evidence.children.length, "duplicate Work Items");
+  assert.ok(
+    [...childNumbers].every((number) => Number.isSafeInteger(number) && number > 0),
+    "invalid Work Item identity",
+  );
+  assert.ok(
+    Array.isArray(evidence.status.workItems) && evidence.status.workItems.length <= 100,
+    "unbounded or missing status Work Items",
+  );
+  assert.ok(
+    evidence.dependencies.every(
+      (entry) => Array.isArray(entry.blockedBy) && entry.blockedBy.length <= 100,
+    ),
+    "unbounded or missing dependency edges",
+  );
+  assert.deepEqual(
+    evidence.status.workItems?.map((item) => item.number).sort((a, b) => a - b),
+    [...childNumbers].sort((a, b) => a - b),
+    "status differs from observed Work Item set",
+  );
+  assert.ok(
+    evidence.status.workItems.every(
+      (item) =>
+        item.state === "done" && item.openDependencies?.length === 0 && !item.activeReservation,
+    ),
+    "Work Item status is not settled",
+  );
+  assert.equal(evidence.status.summary.attempts?.active, 0, "active attempts remain");
+  assert.equal(evidence.status.capacity?.observed?.active, 0, "active capacity remains");
+  assert.deepEqual(
+    evidence.status.capacity?.activeReservations,
+    [],
+    "capacity reservations remain",
+  );
+  assert.deepEqual(
+    evidence.dependencies.map((entry) => entry.workItem).sort((a, b) => a - b),
+    [...childNumbers].sort((a, b) => a - b),
+    "dependency observation is incomplete",
+  );
   assert.ok(
     evidence.dependencies.some((entry) => entry.blockedBy.length >= 2),
     "missing two-parent join",
   );
-  const runId = evidence.status.run.runId;
-  const events = evidence.events.filter((event) => event.runId === runId);
+  const events = evidence.events
+    .filter((event) => event.runId === runId)
+    .sort((a, b) => a.sequence - b.sequence);
   assert.ok(
-    events.some((event) => event.event === "GraphProjected"),
+    events.every(
+      (event) =>
+        event.objective === evidence.objective.number &&
+        Number.isSafeInteger(event.sequence) &&
+        event.sequence >= 0,
+    ),
+    "receipt Objective or sequence differs",
+  );
+  const completion = events.find((event) => event.event === "FactoryRunCompleted");
+  assert.ok(
+    !events.some((event) => ["FactoryRunEscalated", "FactoryRunCancelled"].includes(event.event)),
+    "conflicting terminal run evidence",
+  );
+  assert.ok(
+    events.some(
+      (event) => event.event === "GraphProjected" && event.graphSize === childNumbers.size,
+    ),
     "missing compilation receipt",
   );
   assert.ok(
@@ -182,14 +275,74 @@ export function assertCompletion(evidence) {
   );
   const starts = events.filter((event) => event.event === "AttemptStarted");
   assert.ok(starts.length >= 3, "fewer than three workers started");
-  for (const start of starts)
+  for (const start of starts) {
+    assert.ok(childNumbers.has(start.workItem), "worker outside observed graph");
     assert.ok(localBackends.includes(start.backend), "nonlocal worker used");
+  }
+  const terminalAttempts = new Set([
+    "AttemptSucceeded",
+    "AttemptFailed",
+    "AttemptTimedOut",
+    "AttemptCancelled",
+    "AttemptDeferred",
+    "AttemptIntegrated",
+  ]);
+  const terminalSequences = new Map();
+  const reconciledSequences = new Map();
+  const attemptKey = (event) => JSON.stringify([event.workItem, event.attempt]);
+  const reservationKey = (event, type) =>
+    JSON.stringify([
+      type,
+      event.workItem,
+      event.attempt,
+      event.phase,
+      ...(type === "capacity" ? [event.backend] : [event.unit, event.usageId ?? "default"]),
+    ]);
+  for (const event of events) {
+    if (terminalAttempts.has(event.event)) terminalSequences.set(attemptKey(event), event.sequence);
+    if (["BudgetReconciled", "CapacityReconciled"].includes(event.event))
+      reconciledSequences.set(
+        reservationKey(event, event.event === "CapacityReconciled" ? "capacity" : "budget"),
+        event.sequence,
+      );
+  }
+  for (const reserved of events.filter((event) =>
+    ["AttemptReserved", "AttemptStarted"].includes(event.event),
+  )) {
+    assert.ok(
+      terminalSequences.get(attemptKey(reserved)) > reserved.sequence,
+      "attempt lacks terminal reconciliation",
+    );
+  }
+  for (const reserved of events.filter((event) =>
+    ["BudgetReserved", "CapacityReserved"].includes(event.event),
+  )) {
+    assert.ok(
+      reconciledSequences.get(
+        reservationKey(reserved, reserved.event === "CapacityReserved" ? "capacity" : "budget"),
+      ) > reserved.sequence,
+      `unreconciled ${reserved.event}`,
+    );
+  }
   for (const child of evidence.children) {
     assert.equal(child.state, "closed", `Work Item #${child.number} remains open`);
     const integrated = events.find(
       (event) => event.workItem === child.number && event.event === "AttemptIntegrated",
     );
     assert.ok(integrated, `Work Item #${child.number} missing integration receipt`);
+    assert.ok(
+      integrated.sequence < completion.sequence,
+      "completion precedes Work Item integration",
+    );
+    assert.ok(
+      starts.some(
+        (start) =>
+          start.workItem === child.number &&
+          start.attempt === integrated.attempt &&
+          start.sequence < integrated.sequence,
+      ),
+      "integrated attempt lacks its worker start",
+    );
     const published = events.find(
       (event) =>
         event.workItem === child.number &&
@@ -222,15 +375,55 @@ export function assertCompletion(evidence) {
       evidence.pulls.some(
         (pull) =>
           pull.number === publication.pullRequest &&
+          pull.state === "closed" &&
           pull.merged === true &&
+          pull.head?.sha === published.headSha &&
           pull.merge_commit_sha === integrated.headSha,
       ),
       "integration receipt differs from GitHub merge commit",
     );
   }
+  for (const entry of evidence.dependencies) {
+    const dependencies = entry.blockedBy.map((dependency) => dependency.number);
+    assert.equal(new Set(dependencies).size, dependencies.length, "duplicate dependency evidence");
+    for (const parent of dependencies) {
+      assert.ok(
+        childNumbers.has(parent) && parent !== entry.workItem,
+        "dependency outside graph or self dependency",
+      );
+      // Native-stack linear descendants may execute before their parent merges.
+      // The fixture's multi-parent join must wait for every parent to integrate.
+      if (dependencies.length < 2) continue;
+      const integrated = events.find(
+        (event) => event.event === "AttemptIntegrated" && event.workItem === parent,
+      );
+      assert.ok(
+        starts
+          .filter((start) => start.workItem === entry.workItem)
+          .every((start) => integrated.sequence < start.sequence),
+        "dependency join started before parent integration",
+      );
+    }
+  }
   assert.ok(evidence.pulls.length >= 3, "expected published PRs");
   for (const pull of evidence.pulls)
     assert.equal(pull.merged, true, `PR #${pull.number} was not merged`);
+}
+
+/** Pure assessment of captured evidence, not a live authentication or provider-leak audit. */
+export function assessCompletion(evidence) {
+  try {
+    assertCompletion(evidence);
+    return { result: "passed", scope: "installed-local-objective-happy-path" };
+  } catch (error) {
+    return {
+      result: ["escalated", "cancelled"].includes(evidence?.status?.run?.state)
+        ? "failed"
+        : "incomplete",
+      scope: "installed-local-objective-happy-path",
+      reason: (error instanceof Error ? error.message : String(error)).slice(0, 2000),
+    };
+  }
 }
 
 function required(name) {
@@ -317,7 +510,11 @@ export async function main() {
   const list = async (route, parameters = {}) => {
     const results = [];
     for (let page = 1; ; page++) {
-      const { data } = await request(route, { ...parameters, per_page: 100, page });
+      const { data } = await request(route, {
+        ...parameters,
+        per_page: 100,
+        page,
+      });
       assert.ok(Array.isArray(data), "paginated GitHub response must be an array");
       results.push(...data);
       if (data.length < 100) return results;
@@ -326,7 +523,9 @@ export async function main() {
   const info = (await request("GET /repos/{owner}/{repo}")).data;
   assert.ok(!info.archived && info.permissions?.push, "target must permit fixture integration");
   const base = (
-    await request("GET /repos/{owner}/{repo}/commits/{ref}", { ref: info.default_branch })
+    await request("GET /repos/{owner}/{repo}/commits/{ref}", {
+      ref: info.default_branch,
+    })
   ).data.sha;
   assert.equal(
     run("git", ["rev-parse", "HEAD"], checkout),
@@ -364,7 +563,10 @@ export async function main() {
       `${JSON.stringify(evidence, null, 2)}\n`,
       { mode: 0o600 },
     );
-  const client = new Client({ name: "factory-live-objective", version: "1.0.0" });
+  const client = new Client({
+    name: "factory-live-objective",
+    version: "1.0.0",
+  });
   const transport = new StdioClientTransport({
     command: mcp.command,
     args: mcp.args.map((arg) => arg.replaceAll("${PLUGIN_ROOT}", pluginRoot)),
@@ -404,7 +606,11 @@ export async function main() {
           issue_number: issueNumber,
         })
       ).data;
-      const status = await call("factory_status", { owner, repo, objectiveNumber: issueNumber });
+      const status = await call("factory_status", {
+        owner,
+        repo,
+        objectiveNumber: issueNumber,
+      });
       const children = await list("GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues", {
         issue_number: issueNumber,
       });
@@ -418,7 +624,14 @@ export async function main() {
         ),
       );
       const runId = required("FACTORY_LIVE_OBJECTIVE_PRIOR_RUN_ID");
-      assertRetryableObjective({ issue, actorId, status, children, events, runId });
+      assertRetryableObjective({
+        issue,
+        actorId,
+        status,
+        children,
+        events,
+        runId,
+      });
       evidence.objective = issue;
       evidence.retryOfRunId = runId;
       evidence.priorStatus = status;
@@ -489,11 +702,19 @@ export async function main() {
     );
     for (const number of pullNumbers)
       evidence.pulls.push(
-        (await request("GET /repos/{owner}/{repo}/pulls/{pull_number}", { pull_number: number }))
-          .data,
+        (
+          await request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
+            pull_number: number,
+          })
+        ).data,
       );
+    evidence.completionAssessment = assessCompletion(evidence);
     save();
-    assertCompletion(evidence);
+    assert.equal(
+      evidence.completionAssessment.result,
+      "passed",
+      evidence.completionAssessment.reason,
+    );
     const verified = join(output, "merged-fixture");
     run("git", ["clone", "--depth", "1", `https://github.com/${repository}.git`, verified], output);
     evidence.finalSha = run("git", ["rev-parse", "HEAD"], verified);
@@ -527,6 +748,7 @@ export async function main() {
         // The durable Objective URL remains available even if the MCP transport died.
       }
     }
+    evidence.completionAssessment = assessCompletion(evidence);
     save();
     throw error;
   } finally {

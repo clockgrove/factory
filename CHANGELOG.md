@@ -29,6 +29,9 @@ Notable changes to Factory. See [the delivery plan](docs/DELIVERY-PLAN.md) for u
 
 ### Security
 
+- New activations reject predecessor execution that cannot yet be adopted safely, including
+  reservation refs with missing comments and startup races. Existing PRs and accounting remain
+  untouched; explicit successor-run recovery is still an open implementation task.
 - Rejected management output retains observed token usage, with checkpoint-first recovery and
   failed-invocation replay protection.
 

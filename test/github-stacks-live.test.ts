@@ -3,7 +3,12 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import { GitHubControlStore } from "../src/control/github-store.js";
-import { GitHubStacks, type AsyncMergeResult } from "../src/publication/github-stacks.js";
+import {
+  GitHubStacks,
+  type AsyncMergeResult,
+  type GitHubStackTransport,
+} from "../src/publication/github-stacks.js";
+import { loseAcknowledgedResponse } from "./helpers/github-stack-response-loss.js";
 
 const LIVE = process.env.FACTORY_LIVE_GITHUB_STACKS === "1";
 
@@ -198,20 +203,23 @@ async function cleanupLiveFixture(args: {
 
 describe.skipIf(!LIVE)("live GitHub native-stack release gate", () => {
   it(
-    "creates, extends, partially merges, rebases, resumes, and cleans a disposable stack",
+    "recovers acknowledged create/extend response loss, replays, partially merges, rebases, and cleans a disposable stack",
     async () => {
       const target = repository();
       const token = process.env.GITHUB_TOKEN;
       if (!token) throw new Error("GITHUB_TOKEN is required for the live stack gate");
 
       const store = new GitHubControlStore({ token, ...target });
-      const stacks = new GitHubStacks(
-        {
-          request: (route, parameters, mutating) => store.stackRequest(route, parameters, mutating),
+      const writes: string[] = [];
+      const transport: GitHubStackTransport = {
+        request: (route, parameters, mutating) => {
+          if (mutating) writes.push(route);
+          return store.stackRequest(route, parameters, mutating);
         },
-        target.owner,
-        target.repo,
-      );
+      };
+      const freshStacks = (selectedTransport = transport) =>
+        new GitHubStacks(selectedTransport, target.owner, target.repo);
+      const stacks = freshStacks();
       const suffix = randomUUID().slice(0, 8);
       const baseBranch = `factory-conformance-base-${suffix}`;
       const branches = [1, 2, 3].map(
@@ -277,19 +285,49 @@ describe.skipIf(!LIVE)("live GitHub native-stack release gate", () => {
           available: true,
           observed: true,
         });
-        const created = await stacks.ensureStack(pulls.slice(0, 2));
+        const createFault = loseAcknowledgedResponse(
+          transport,
+          "POST /repos/{owner}/{repo}/stacks",
+          201,
+        );
+        const created = await freshStacks(createFault.transport).ensureStack(pulls.slice(0, 2));
+        expect(createFault.lost()).toBe(true);
         stackNumber = created.number;
-        const extended = await stacks.ensureExtended(
+        const createWrites = [...writes];
+        await expect(freshStacks().ensureStack(pulls.slice(0, 2))).resolves.toMatchObject({
+          number: created.number,
+        });
+        expect(writes).toEqual(createWrites);
+
+        const extendFault = loseAcknowledgedResponse(
+          transport,
+          "POST /repos/{owner}/{repo}/stacks/{stack_number}/add",
+          200,
+        );
+        const extended = await freshStacks(extendFault.transport).ensureExtended(
           created.number,
           pulls.slice(0, 2),
           pulls.slice(2),
         );
+        expect(extendFault.lost()).toBe(true);
         expect(extended.pullRequests.map((pull) => pull.number)).toEqual(pulls);
+        const extendWrites = [...writes];
+        const replayed = await freshStacks().ensureExtended(
+          created.number,
+          pulls.slice(0, 2),
+          pulls.slice(2),
+        );
+        expect(replayed.pullRequests.map((pull) => pull.number)).toEqual(pulls);
+        expect(writes).toEqual(extendWrites);
+        expect(
+          writes.filter((route) => route === "POST /repos/{owner}/{repo}/stacks"),
+        ).toHaveLength(1);
+        expect(writes.filter((route) => route.endsWith("/add"))).toHaveLength(1);
 
         const originalTopSha = extended.pullRequests[2]!.headSha;
         const middle = extended.pullRequests[1]!;
         const partial = await settleMerge(
-          stacks,
+          freshStacks(),
           middle.number,
           middle.headSha,
           await stacks.requestMerge({
@@ -313,9 +351,20 @@ describe.skipIf(!LIVE)("live GitHub native-stack release gate", () => {
         }
         expect(top).toMatchObject({ state: "open", base: { ref: baseBranch } });
         expect(top!.head.sha).not.toBe(originalTopSha);
+        // A changed SHA alone is not success: the complete fixture tree must survive
+        // GitHub's rebase. This is content conformance, not Supervisor validation evidence.
+        await expect(store.readCommit(top!.head.sha)).resolves.toMatchObject({
+          treeOid: parentTree,
+        });
+        for (const pull of pulls.slice(0, 2)) {
+          await expect(store.readPullRequest(pull)).resolves.toMatchObject({
+            state: "closed",
+            merged: true,
+          });
+        }
 
         const final = await settleMerge(
-          stacks,
+          freshStacks(),
           pulls[2]!,
           top!.head.sha,
           await stacks.requestMerge({

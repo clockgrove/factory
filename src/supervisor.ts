@@ -43,6 +43,7 @@ import {
   nextEventSequence,
 } from "./control/receipts.js";
 import { RunManager, type RunState } from "./control/runs.js";
+import { inspectImplicitRestart } from "./control/recovery.js";
 import {
   ReviewCheckpointManager,
   reviewIdentityDigest,
@@ -1352,6 +1353,12 @@ export class FactorySupervisor {
         completed ? undefined : "Objective was closed externally before all Work Items completed",
       );
     }
+    const recoveryBlocker = await inspectImplicitRestart(snapshot, (prefix) =>
+      this.#store.listRefs(prefix),
+    );
+    if (recoveryBlocker) {
+      return this.#startlessEscalation(recoveryBlocker, snapshot, actor);
+    }
     const priorityPolicy = normalizeSchedulingPolicy(this.#policy).priority;
     if (priorityPolicy.source === "issue-field-then-subissue-order") {
       let preflight;
@@ -1509,8 +1516,48 @@ export class FactorySupervisor {
     );
     this.#lease = new LeaseController(this.#leases, acquired, this.#sequences);
     try {
+      // Preflight is not a lock: the previous holder may have finished or spent
+      // more budget before this lease was acquired. Refresh both new and resumed runs.
+      const current = await this.#reader.readObjective(snapshot.number);
+      const currentRun = runManager.resume(current.factoryEvents ?? []);
+      if (
+        current.closed ||
+        current.number !== snapshot.number ||
+        current.id !== snapshot.id ||
+        current.repositoryId !== snapshot.repositoryId ||
+        current.defaultBranch !== snapshot.defaultBranch ||
+        current.authorLogin !== snapshot.authorLogin ||
+        (resumedRun
+          ? !currentRun ||
+            currentRun.runId !== resumedRun.runId ||
+            currentRun.objective !== resumedRun.objective ||
+            currentRun.repository !== resumedRun.repository ||
+            currentRun.baseBranch !== resumedRun.baseBranch ||
+            currentRun.fork !== resumedRun.fork ||
+            currentRun.policyDigest !== resumedRun.policyDigest ||
+            currentRun.actor !== resumedRun.actor ||
+            currentRun.baseSha !== resumedRun.baseSha ||
+            currentRun.activationRequestId !== resumedRun.activationRequestId ||
+            currentRun.startedAt.getTime() !== resumedRun.startedAt.getTime()
+          : Boolean(currentRun))
+      ) {
+        throw new Error("Objective run changed during startup; re-read its current state");
+      }
+      if (!resumedRun) {
+        const blocker = await inspectImplicitRestart(current, (prefix) =>
+          this.#store.listRefs(prefix),
+        );
+        if (blocker) {
+          const rejected = await this.#startlessEscalation(blocker, current, actor);
+          await this.#lease.release();
+          return rejected;
+        }
+      }
+      snapshot = current;
+      this.#sequences.observe(snapshotEvents(snapshot));
+      this.#budgetEvents = snapshotEvents(snapshot).filter((event) => event.runId === runId);
       this.#run =
-        resumedRun ??
+        currentRun ??
         (await runManager.start({
           objective: snapshot.number,
           objectiveNodeId: snapshot.id,

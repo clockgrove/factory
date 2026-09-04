@@ -21,6 +21,21 @@ allow-first domain rules. Web search remains disabled because it is outside the 
 
 Installing Factory creates no repository secret, environment, workflow, service account, or daemon.
 
+## Release verification
+
+The clean-install verifier copies only committed package surfaces into a temporary marketplace,
+uses an isolated `CODEX_HOME`, removes environment variables whose names indicate tokens, keys,
+credentials, cookies, passwords, authentication, or secrets, and explicitly blanks known Factory
+provider credentials. It installs Factory with the real Codex plugin commands, starts the installed
+MCP bundle, and runs the installed controller's read-only backend probe. The probe reports capability
+and authentication availability but creates no worker, sandbox, session, repository mutation, or
+billable resource.
+
+Production dependency auditing is part of `npm run verify:release`. Live Daytona, Vercel Sandbox,
+or managed-agent conformance is a separate gate and requires explicit authorization for the
+credentials, target repository, hard spending cap, and billable run. Passing a fake-provider or
+credential-free package test is never presented as evidence that a paid provider was exercised.
+
 ## Daytona
 
 Daytona requires its normal SDK authentication (`DAYTONA_API_KEY`, or the documented JWT plus

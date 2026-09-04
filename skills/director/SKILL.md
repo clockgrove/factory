@@ -43,9 +43,17 @@ pull requests.
 
 ## Status only
 
-Use `read_objective` for a read-only status request. Report the Objective, each Work Item's derived
-state, open blockers, attempts, and any explicit escalation reason. Do not start `factory_run` unless
-the user asked to execute or resume.
+Use `factory_status` for a read-only status request. Report its bounded Objective and run state,
+Work Item counts and active details, open blockers, attempts, scheduling decisions, burst activity,
+and cost totals. If the user asks why work is waiting or what evidence would unblock it, call
+`factory_explain` and preserve its stable reason code, gate, evidence, and required action.
+
+Use `factory_replay` only when the user asks to audit or reproduce scheduling. It is read-only: it
+reconstructs durable scheduling receipts and can evaluate supplied credential-free admission
+snapshots without writing GitHub or launching a worker. Report unavailable observations as
+unavailable; do not infer missing provider, token, capacity, cost, or timing values.
+
+Do not start `factory_run` unless the user asked to execute or resume.
 
 ## Hard boundaries
 

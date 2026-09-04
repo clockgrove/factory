@@ -55,15 +55,17 @@ the service separately even if a foreground plugin probe already works.
    intentionally fails service startup when the configured file is missing; silently running
    without required credentials is not the desired setup. Do not place secret values directly in
    the unit, command line, or committed files.
-4. Ensure the service can also find its prerequisites. The generated unit pins Node and Factory
-   executable paths, but other tools, such as a host-installed `codex` or `gh`, still need to be
-   discoverable in the service's `PATH`. An interactive shell's version-manager setup is not
-   automatically available to systemd. If setting `PATH` or a custom `CODEX_HOME` in a drop-in,
-   use the actual absolute Linux paths; do not rely on shell expansion. The service user must be
-   able to read the intended GitHub/Codex logins and checkout.
-   `FACTORY_CODEX_PATH` can explicitly select a Codex executable instead of bundled/PATH resolution;
-   set it to the real absolute executable path, not a command string with arguments. This is a
-   runtime-location override, not an authentication setting.
+4. Install from the Linux environment where the required tools are available. The generated unit
+   pins Node and Factory executable paths and records a limited service `PATH`: directories where
+   the installer finds `gh` and `codex`, the running Node directory, and standard Linux tool
+   directories. It does not copy the shell's full environment, credentials, or startup files.
+   An explicit `FACTORY_CODEX_PATH` is resolved to an absolute executable during installation and
+   preserved separately; it selects a runtime, not a login or model. Reinstall the controller after
+   moving those executables. Missing tools are not installed for you.
+   The service user must still be able to read the intended GitHub/Codex logins and checkout.
+   Configure a deliberate custom `CODEX_HOME` or additional tool directories in a service drop-in
+   using absolute Linux paths, without shell expansion. Installer credentials and custom login
+   directories are not automatically copied to the service.
 5. Before restarting an active controller, ask Factory to drain it and confirm acknowledgement if
    you need an orderly stop. Restarting can interrupt active workers. Then run
    `systemctl --user daemon-reload` and restart the **exact configured unit**. Changing the file

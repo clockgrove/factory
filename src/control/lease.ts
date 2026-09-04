@@ -53,6 +53,8 @@ export class LeaseLostError extends Error {
   }
 }
 
+export type LeaseMutationBoundary = "admission" | "publication" | "integration";
+
 export function leaseRef(objective: number): string {
   if (!Number.isInteger(objective) || objective <= 0) {
     throw new Error("objective number must be a positive integer");
@@ -252,6 +254,20 @@ export class LeaseManager {
       current.expiresAt.getTime() <= observation.serverTime.getTime()
     ) {
       throw new LeaseLostError();
+    }
+  }
+
+  /** Named boundary check used immediately before externally visible effects.
+   * Renewal sequence changes are intentionally accepted; holder/epoch is the
+   * fencing generation and takeover changes the epoch. */
+  async assertGeneration(lease: LeaseState, boundary: LeaseMutationBoundary): Promise<void> {
+    try {
+      await this.assertCurrent(lease);
+    } catch (error) {
+      if (error instanceof LeaseLostError) {
+        throw new LeaseLostError(`stale lease generation rejected before ${boundary}`);
+      }
+      throw error;
     }
   }
 }

@@ -107,6 +107,46 @@ export interface SupervisorOptions {
   signal?: AbortSignal;
   managementBackend?: ManagementBackend;
   backendRegistry?: BackendRegistry;
+  /** RepositoryController supplies one instance to every Objective. */
+  repositoryResources?: RepositorySupervisorResources;
+  /** Outer repository-controller fence, checked before every GitHub mutation. */
+  repositoryFence?: () => Promise<void>;
+  /** A service stop releases ownership without durably cancelling the run. */
+  shutdownBehavior?: "cancel-run" | "release-lease";
+}
+
+export interface RepositorySupervisorResources {
+  pacer: ContentCreationPacer;
+  circuitBreaker: CircuitBreaker;
+  concurrency: ConcurrencyLimiter;
+  mutationScheduler: MutationScheduler;
+  integration: <T>(operation: () => Promise<T>) => Promise<T>;
+}
+
+export function createRepositorySupervisorResources(
+  onThrottle: (message: string) => void = () => {},
+): RepositorySupervisorResources {
+  const pacer = new ContentCreationPacer();
+  let integrationTail = Promise.resolve();
+  return {
+    pacer,
+    circuitBreaker: new CircuitBreaker(),
+    concurrency: new ConcurrencyLimiter(),
+    mutationScheduler: new MutationScheduler({ pacer, onThrottle }),
+    integration: async <T>(operation: () => Promise<T>): Promise<T> => {
+      const previous = integrationTail;
+      let release!: () => void;
+      integrationTail = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await previous;
+      try {
+        return await operation();
+      } finally {
+        release();
+      }
+    },
+  };
 }
 
 export interface SupervisorResult {
@@ -155,7 +195,9 @@ export function graphQlAdmissionReserve(
     throw new Error("wave size must be a positive integer");
   }
   if (!Number.isInteger(additionalMutations) || additionalMutations < 0) {
-    throw new Error("additional GraphQL mutations must be a non-negative integer");
+    throw new Error(
+      "additional GraphQL mutations must be a non-negative integer",
+    );
   }
   const snapshotReserve = queryCost * 3;
   const leaseRenewals = Math.ceil(
@@ -164,7 +206,11 @@ export function graphQlAdmissionReserve(
   const perWorkItemControl = 12 * waveSize;
   return Math.max(
     100,
-    snapshotReserve + leaseRenewals + perWorkItemControl + additionalMutations + 10,
+    snapshotReserve +
+      leaseRenewals +
+      perWorkItemControl +
+      additionalMutations +
+      10,
   );
 }
 
@@ -178,12 +224,17 @@ export function pendingGraphQlGraphMutations(
   ).length;
   const missingDependencies = objective.workItems.reduce((count, item) => {
     const observedItem = existingById.get(item.id);
-    return count + item.dependsOn.filter((dependencyId) => {
-      const observedDependency = existingById.get(dependencyId);
-      return !observedItem ||
-        !observedDependency ||
-        !observedItem.blockedByNumbers.includes(observedDependency.number);
-    }).length;
+    return (
+      count +
+      item.dependsOn.filter((dependencyId) => {
+        const observedDependency = existingById.get(dependencyId);
+        return (
+          !observedItem ||
+          !observedDependency ||
+          !observedItem.blockedByNumbers.includes(observedDependency.number)
+        );
+      }).length
+    );
   }, 0);
   return missingIssues + missingDependencies;
 }
@@ -203,7 +254,10 @@ export function assertGraphQlAdmissionHeadroom(
     additionalMutations,
   );
   if (rateLimit.remaining >= required) return;
-  const retryAfterMs = Math.max(1_000, rateLimit.resetAt.getTime() - Date.now() + 1_000);
+  const retryAfterMs = Math.max(
+    1_000,
+    rateLimit.resetAt.getTime() - Date.now() + 1_000,
+  );
   const reason =
     `GitHub GraphQL admission paused: ${rateLimit.remaining} points remain; ` +
     `${required} are reserved for a ${waveSize}-worker wave; quota resets at ` +
@@ -235,7 +289,11 @@ class SequenceAllocator {
   #next: number;
 
   constructor(events: FactoryEvent[], minimum = 1, lease?: LeaseState) {
-    this.#next = Math.max(nextEventSequence(events), minimum, (lease?.sequence ?? 0) + 1);
+    this.#next = Math.max(
+      nextEventSequence(events),
+      minimum,
+      (lease?.sequence ?? 0) + 1,
+    );
   }
 
   take(): number {
@@ -265,7 +323,9 @@ export class LeaseController {
     return operation(current);
   }
 
-  async #mutateLease<T>(operation: (lease: LeaseState) => Promise<T>): Promise<T> {
+  async #mutateLease<T>(
+    operation: (lease: LeaseState) => Promise<T>,
+  ): Promise<T> {
     if (this.#fatal) throw this.#fatal;
     let release!: () => void;
     const previous = this.#renewalTail;
@@ -285,6 +345,13 @@ export class LeaseController {
     await this.use((lease) => this.manager.assertCurrent(lease));
   };
 
+  /** Re-read the GitHub lease at a named externally-visible boundary. */
+  async assertGeneration(
+    boundary: "admission" | "publication" | "integration",
+  ): Promise<void> {
+    await this.use((lease) => this.manager.assertGeneration(lease, boundary));
+  }
+
   /** Fence every externally visible mutation using a current ref observation. */
   async guardMutation(waitedMs: number): Promise<void> {
     if (this.#fatal) throw this.#fatal;
@@ -297,7 +364,8 @@ export class LeaseController {
       if (
         !force &&
         lease.expiresAt.getTime() - Date.now() > DEFAULT_LEASE_RENEWAL_LEAD_MS
-      ) return;
+      )
+        return;
       this.lease = await this.manager.renew(lease, this.sequences.take());
     });
   }
@@ -323,19 +391,30 @@ async function hostGit(repository: string, args: string[]): Promise<string> {
     maxOutputBytes: 256 * 1024,
   });
   if (result.exitCode !== 0) {
-    throw new Error(`git ${args.join(" ")} failed: ${result.stderr || result.stdout}`);
+    throw new Error(
+      `git ${args.join(" ")} failed: ${result.stderr || result.stdout}`,
+    );
   }
   return result.stdout.trim();
 }
 
-async function ensureLocalCommit(repository: string, sha: string): Promise<void> {
-  const present = await hostGit(repository, ["cat-file", "-e", `${sha}^{commit}`]).then(
+async function ensureLocalCommit(
+  repository: string,
+  sha: string,
+): Promise<void> {
+  const present = await hostGit(repository, [
+    "cat-file",
+    "-e",
+    `${sha}^{commit}`,
+  ]).then(
     () => true,
     () => false,
   );
-  if (!present) await hostGit(repository, ["fetch", "--no-tags", "origin", sha]);
+  if (!present)
+    await hostGit(repository, ["fetch", "--no-tags", "origin", sha]);
   const local = await hostGit(repository, ["rev-parse", `${sha}^{commit}`]);
-  if (local !== sha) throw new Error(`local repository did not resolve exact commit ${sha}`);
+  if (local !== sha)
+    throw new Error(`local repository did not resolve exact commit ${sha}`);
 }
 
 export async function verifyLocalRepository(
@@ -372,17 +451,27 @@ function retryContext(item: DerivedWorkItem, runId: string) {
   if (!failed || failed.kind !== "attempt" || !failed.reason) return undefined;
   return {
     attempt: failed.attempt,
-    outcome: failed.event === "AttemptTimedOut" ? ("timed_out" as const) : ("failed" as const),
+    outcome:
+      failed.event === "AttemptTimedOut"
+        ? ("timed_out" as const)
+        : ("failed" as const),
     reason: failed.reason.slice(0, 2_000),
   };
 }
 
-function assertGraphWithinRunPolicy(graph: CompiledObjective, policy: RunPolicy): void {
+function assertGraphWithinRunPolicy(
+  graph: CompiledObjective,
+  policy: RunPolicy,
+): void {
   for (const item of graph.workItems) {
     if (!item.requirements) {
       throw new Error(`Work Item ${item.id} has no v2 execution requirements`);
     }
-    assertRequirementsWithinPolicy(item.requirements, policy, `Work Item ${item.id}`);
+    assertRequirementsWithinPolicy(
+      item.requirements,
+      policy,
+      `Work Item ${item.id}`,
+    );
   }
 }
 
@@ -397,7 +486,9 @@ function inspectCompiledGraph(snapshot: Snapshot): {
   existing: ExistingGraphWorkItem[];
 } {
   const receipt = deduplicateFactoryEvents(snapshot.factoryEvents ?? [])
-    .filter((event) => event.kind === "graph" && event.event === "GraphCompiled")
+    .filter(
+      (event) => event.kind === "graph" && event.event === "GraphCompiled",
+    )
     .sort((left, right) => right.sequence - left.sequence)[0];
   if (snapshot.workItems.length === 0) {
     return {
@@ -415,7 +506,9 @@ function inspectCompiledGraph(snapshot: Snapshot): {
     };
   }
   if (!receipt || receipt.kind !== "graph") {
-    throw new Error("Objective has Work Items but no authenticated v2 graph receipt");
+    throw new Error(
+      "Objective has Work Items but no authenticated v2 graph receipt",
+    );
   }
   const parsed = snapshot.workItems.map((item) => {
     let metadata;
@@ -439,18 +532,29 @@ function inspectCompiledGraph(snapshot: Snapshot): {
     ids.size !== parsed.length ||
     indexes.size !== parsed.length
   ) {
-    throw new Error("Objective contains mixed or duplicate compiled-graph receipts");
+    throw new Error(
+      "Objective contains mixed or duplicate compiled-graph receipts",
+    );
   }
   const expectedDigest = parsed[0]!.metadata.graphDigest;
   const expectedSize = parsed[0]!.metadata.graphSize;
-  if (expectedDigest !== receipt.graphDigest || expectedSize !== receipt.graphSize) {
-    throw new Error("Work Item graph metadata does not match the authenticated Objective receipt");
+  if (
+    expectedDigest !== receipt.graphDigest ||
+    expectedSize !== receipt.graphSize
+  ) {
+    throw new Error(
+      "Work Item graph metadata does not match the authenticated Objective receipt",
+    );
   }
   if (parsed.length > expectedSize) {
-    throw new Error("Objective contains more Work Items than its compiled graph declares");
+    throw new Error(
+      "Objective contains more Work Items than its compiled graph declares",
+    );
   }
   if (parsed.some(({ metadata }) => metadata.index >= expectedSize)) {
-    throw new Error("Objective contains an out-of-range compiled Work Item index");
+    throw new Error(
+      "Objective contains an out-of-range compiled Work Item index",
+    );
   }
   const existing = parsed.map(({ item, metadata }) => ({
     compilerId: metadata.id,
@@ -497,7 +601,9 @@ function inspectCompiledGraph(snapshot: Snapshot): {
     }),
   };
   if (compiledGraphDigest(completeObjective) !== expectedDigest) {
-    throw new Error("persisted Work Item graph does not match its compilation digest");
+    throw new Error(
+      "persisted Work Item graph does not match its compilation digest",
+    );
   }
   return {
     hasReceipt: true,
@@ -531,7 +637,8 @@ class RetryArtifactCache {
 
   set(workItem: number, artifact: NormalizedArtifact): void {
     this.delete(workItem);
-    const bytes = Buffer.byteLength(artifact.patch) + Buffer.byteLength(artifact.logs);
+    const bytes =
+      Buffer.byteLength(artifact.patch) + Buffer.byteLength(artifact.logs);
     if (bytes > MAX_RETRY_CHECKPOINT_CACHE_BYTES) return;
     while (this.#bytes + bytes > MAX_RETRY_CHECKPOINT_CACHE_BYTES) {
       const oldest = this.#entries.keys().next().value;
@@ -545,7 +652,8 @@ class RetryArtifactCache {
   delete(workItem: number): void {
     const artifact = this.#entries.get(workItem);
     if (!artifact) return;
-    this.#bytes -= Buffer.byteLength(artifact.patch) + Buffer.byteLength(artifact.logs);
+    this.#bytes -=
+      Buffer.byteLength(artifact.patch) + Buffer.byteLength(artifact.logs);
     this.#entries.delete(workItem);
   }
 }
@@ -562,9 +670,9 @@ export class FactorySupervisor {
   #management: ManagementBackend;
   readonly #managementOverride: boolean;
   readonly #registry: BackendRegistry;
-  readonly #pacer = new ContentCreationPacer();
-  readonly #breaker = new CircuitBreaker();
-  readonly #concurrency = new ConcurrencyLimiter();
+  readonly #pacer: ContentCreationPacer;
+  readonly #breaker: CircuitBreaker;
+  readonly #concurrency: ConcurrencyLimiter;
   readonly #mutations: MutationScheduler;
   #sequences!: SequenceAllocator;
   #lease!: LeaseController;
@@ -578,10 +686,16 @@ export class FactorySupervisor {
     this.#options = { ...options, repository: resolve(options.repository) };
     this.#policy = parseRunPolicy(options.policy);
     this.#notify = options.onStatus ?? (() => {});
-    this.#mutations = new MutationScheduler({
-      pacer: this.#pacer,
-      onThrottle: this.#notify,
-    });
+    const shared = options.repositoryResources;
+    this.#pacer = shared?.pacer ?? new ContentCreationPacer();
+    this.#breaker = shared?.circuitBreaker ?? new CircuitBreaker();
+    this.#concurrency = shared?.concurrency ?? new ConcurrencyLimiter();
+    this.#mutations =
+      shared?.mutationScheduler ??
+      new MutationScheduler({
+        pacer: this.#pacer,
+        onThrottle: this.#notify,
+      });
     const github: GitHubOptions = {
       token: options.token,
       owner: options.owner,
@@ -595,6 +709,7 @@ export class FactorySupervisor {
       concurrency: this.#concurrency,
       mutationScheduler: this.#mutations,
       beforeMutation: async (kind: "normal" | "lease", waitedMs: number) => {
+        await this.#options.repositoryFence?.();
         if (kind === "normal" && this.#lease) {
           await this.#lease.guardMutation(waitedMs);
         }
@@ -603,19 +718,26 @@ export class FactorySupervisor {
     this.#reader = new GitHubReader(github);
     this.#store = new GitHubControlStore(controls);
     this.#leases = new LeaseManager({ store: this.#store });
-    this.#attempts = new AttemptManager({ store: this.#store, leases: this.#leases });
+    this.#attempts = new AttemptManager({
+      store: this.#store,
+      leases: this.#leases,
+    });
     this.#recorder = new LifecycleRecorder(this.#store, this.#leases);
     this.#management =
       options.managementBackend ??
       new CodexCliManagementBackend({
-        ...(this.#policy.modelProfile ? { profile: this.#policy.modelProfile } : {}),
+        ...(this.#policy.modelProfile
+          ? { profile: this.#policy.modelProfile }
+          : {}),
       });
     this.#managementOverride = options.managementBackend !== undefined;
     this.#registry = options.backendRegistry ?? new BackendRegistry();
     if (!options.backendRegistry) {
       this.#registry.register(
         new CodexCliLocalBackend({
-          ...(this.#policy.modelProfile ? { profile: this.#policy.modelProfile } : {}),
+          ...(this.#policy.modelProfile
+            ? { profile: this.#policy.modelProfile }
+            : {}),
         }),
       );
       if (this.#policy.backendOrder.includes("codex-cli/daytona")) {
@@ -629,6 +751,11 @@ export class FactorySupervisor {
         );
       }
     }
+  }
+
+  async #guardMutation(waitedMs: number): Promise<void> {
+    await this.#options.repositoryFence?.();
+    await this.#lease.guardMutation(waitedMs);
   }
 
   async run(): Promise<SupervisorResult> {
@@ -646,14 +773,18 @@ export class FactorySupervisor {
       this.#policy = resumedRun.policy;
       if (!this.#managementOverride) {
         this.#management = new CodexCliManagementBackend({
-          ...(this.#policy.modelProfile ? { profile: this.#policy.modelProfile } : {}),
+          ...(this.#policy.modelProfile
+            ? { profile: this.#policy.modelProfile }
+            : {}),
         });
       }
       if (
         this.#policy.backendOrder.includes("codex-cli/daytona") &&
         !this.#registry.get("codex-cli/daytona")
       ) {
-        this.#registry.register(new DaytonaBackend({ repository: this.#options.repository }));
+        this.#registry.register(
+          new DaytonaBackend({ repository: this.#options.repository }),
+        );
       }
       if (
         this.#policy.backendOrder.includes("codex-cli/vercel-sandbox") &&
@@ -671,22 +802,35 @@ export class FactorySupervisor {
       );
     }
     if (facts.fork && this.#policy.trust === "explicitly_activated_repo") {
-      return this.#startlessEscalation("trusted-local execution is not allowed for a fork");
+      return this.#startlessEscalation(
+        "trusted-local execution is not allowed for a fork",
+      );
     }
     if (
       this.#policy.trust !== "sandbox_untrusted" &&
-      (!snapshot.authorLogin || !TRUSTED_ASSOCIATIONS.has(snapshot.authorAssociation ?? ""))
+      (!snapshot.authorLogin ||
+        !TRUSTED_ASSOCIATIONS.has(snapshot.authorAssociation ?? ""))
     ) {
-      return this.#startlessEscalation("Objective author is not trusted for local execution");
+      return this.#startlessEscalation(
+        "Objective author is not trusted for local execution",
+      );
     }
     if (snapshot.closed) {
       if (!resumedRun) {
-        return { status: "completed", objective: snapshot.number, runId: "already-closed" };
+        return {
+          status: "completed",
+          objective: snapshot.number,
+          runId: "already-closed",
+        };
       }
       if (resumedRun.actor.toLowerCase() !== actor.toLowerCase()) {
-        throw new Error(`active run belongs to ${resumedRun.actor}; ${actor} cannot terminate it`);
+        throw new Error(
+          `active run belongs to ${resumedRun.actor}; ${actor} cannot terminate it`,
+        );
       }
-      const closedBase = await this.#store.getBranchHead(snapshot.defaultBranch);
+      const closedBase = await this.#store.getBranchHead(
+        snapshot.defaultBranch,
+      );
       const closedLease = await this.#leases.read(snapshot.number);
       this.#sequences = new SequenceAllocator(
         snapshotEvents(snapshot),
@@ -703,20 +847,29 @@ export class FactorySupervisor {
         closedBase,
         this.#sequences.take(),
       );
-      this.#lease = new LeaseController(this.#leases, acquired, this.#sequences);
+      this.#lease = new LeaseController(
+        this.#leases,
+        acquired,
+        this.#sequences,
+      );
       this.#run = resumedRun;
       const completed = allDone(derive(snapshot));
       return this.#terminal(
         runManager,
         snapshot,
         completed ? "FactoryRunCompleted" : "FactoryRunEscalated",
-        completed ? undefined : "Objective was closed externally before all Work Items completed",
+        completed
+          ? undefined
+          : "Objective was closed externally before all Work Items completed",
       );
     }
     assertGraphQlAdmissionHeadroom(
       snapshot.graphQlRateLimit,
       this.#policy,
-      Math.min(this.#policy.maxParallel, Math.max(1, snapshot.workItems.length)),
+      Math.min(
+        this.#policy.maxParallel,
+        Math.max(1, snapshot.workItems.length),
+      ),
       this.#notify,
     );
     if (
@@ -742,7 +895,7 @@ export class FactorySupervisor {
         pacer: this.#pacer,
         concurrency: this.#concurrency,
         mutationScheduler: this.#mutations,
-        beforeMutation: (waitedMs) => this.#lease.guardMutation(waitedMs),
+        beforeMutation: (waitedMs) => this.#guardMutation(waitedMs),
       });
       this.#registry.register(
         new GitHubCopilotBackend({
@@ -753,13 +906,19 @@ export class FactorySupervisor {
         }),
       );
     }
-    const branchRules = await this.#store.readBranchRules(snapshot.defaultBranch);
+    const branchRules = await this.#store.readBranchRules(
+      snapshot.defaultBranch,
+    );
     const blockers = branchRuleBlockers(branchRules);
     if (blockers.length > 0) {
-      return this.#startlessEscalation(`branch policy requires HITL: ${blockers.join(", ")}`);
+      return this.#startlessEscalation(
+        `branch policy requires HITL: ${blockers.join(", ")}`,
+      );
     }
     if (requiredChecks(branchRules).length > 0) {
-      const branchHead = await this.#store.getBranchHead(snapshot.defaultBranch);
+      const branchHead = await this.#store.getBranchHead(
+        snapshot.defaultBranch,
+      );
       const missing = missingRequiredChecks(
         branchRules,
         await this.#store.readChecks(branchHead.oid),
@@ -783,7 +942,9 @@ export class FactorySupervisor {
     }
 
     if (resumedRun && resumedRun.actor.toLowerCase() !== actor.toLowerCase()) {
-      throw new Error(`active run belongs to ${resumedRun.actor}; ${actor} cannot append its receipts`);
+      throw new Error(
+        `active run belongs to ${resumedRun.actor}; ${actor} cannot append its receipts`,
+      );
     }
     const base = await this.#store.getBranchHead(snapshot.defaultBranch);
     const initialEvents = snapshotEvents(snapshot);
@@ -795,7 +956,8 @@ export class FactorySupervisor {
     );
     const runId = resumedRun?.runId ?? randomUUID();
     this.#budgetEvents = initialEvents.filter((event) => event.runId === runId);
-    const acceptedPolicyDigest = resumedRun?.policyDigest ?? policyDigest(this.#policy);
+    const acceptedPolicyDigest =
+      resumedRun?.policyDigest ?? policyDigest(this.#policy);
     const acquired = await this.#leases.acquire(
       {
         objective: snapshot.number,
@@ -808,19 +970,21 @@ export class FactorySupervisor {
     );
     this.#lease = new LeaseController(this.#leases, acquired, this.#sequences);
     try {
-      this.#run = resumedRun ?? (await runManager.start({
-        objective: snapshot.number,
-        objectiveNodeId: snapshot.id,
-        repository: facts.fullName,
-        objectiveAuthor: snapshot.authorLogin ?? "unknown",
-        actor,
-        fork: facts.fork,
-        baseBranch: snapshot.defaultBranch,
-        policy: this.#policy,
-        existingEvents: snapshot.factoryEvents ?? [],
-        runId,
-        sequence: this.#sequences.take(),
-      }));
+      this.#run =
+        resumedRun ??
+        (await runManager.start({
+          objective: snapshot.number,
+          objectiveNodeId: snapshot.id,
+          repository: facts.fullName,
+          objectiveAuthor: snapshot.authorLogin ?? "unknown",
+          actor,
+          fork: facts.fork,
+          baseBranch: snapshot.defaultBranch,
+          policy: this.#policy,
+          existingEvents: snapshot.factoryEvents ?? [],
+          runId,
+          sequence: this.#sequences.take(),
+        }));
     } catch (error) {
       await this.#lease.release().catch(() => {});
       throw error;
@@ -835,17 +999,22 @@ export class FactorySupervisor {
     }, 30_000);
     heartbeat.unref();
     const deadline =
-      this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000;
+      this.#run.startedAt.getTime() +
+      this.#policy.objectiveTimeoutMinutes * 60_000;
 
     try {
       const observedGraph = inspectCompiledGraph(snapshot);
       const graphManager = new CompiledGraphManager(this.#store, this.#leases);
-      let durableGraph = await graphManager.load(snapshot.number, this.#run.runId);
-      const sourceGraph = durableGraph ?? (
-        observedGraph.receiptRunId && observedGraph.receiptRunId !== this.#run.runId
-          ? await graphManager.load(snapshot.number, observedGraph.receiptRunId)
-          : null
+      let durableGraph = await graphManager.load(
+        snapshot.number,
+        this.#run.runId,
       );
+      const sourceGraph =
+        durableGraph ??
+        (observedGraph.receiptRunId &&
+        observedGraph.receiptRunId !== this.#run.runId
+          ? await graphManager.load(snapshot.number, observedGraph.receiptRunId)
+          : null);
       if (sourceGraph && observedGraph.expectedDigest) {
         if (
           sourceGraph.graphDigest !== observedGraph.expectedDigest ||
@@ -853,20 +1022,27 @@ export class FactorySupervisor {
           sourceGraph.ref !== observedGraph.expectedRef ||
           sourceGraph.blobOid !== observedGraph.expectedBlobSha
         ) {
-          throw new Error("durable compiled graph does not match its Objective receipt");
+          throw new Error(
+            "durable compiled graph does not match its Objective receipt",
+          );
         }
       }
       let compiled = sourceGraph?.objective ?? observedGraph.completeObjective;
       if (!compiled) {
-        this.#notify(
-          "compiling Objective into a dependency graph",
-        );
+        this.#notify("compiling Objective into a dependency graph");
         if (observedGraph.hasReceipt || observedGraph.existing.length > 0) {
-          throw new Error("compiled graph receipt exists but its durable graph record is missing");
+          throw new Error(
+            "compiled graph receipt exists but its durable graph record is missing",
+          );
         }
-        const layout = await this.#reader.readRepositoryLayout(undefined, 5_000);
+        const layout = await this.#reader.readRepositoryLayout(
+          undefined,
+          5_000,
+        );
         if (layout.truncated) {
-          throw new Error("repository layout is incomplete; compilation would be under-grounded");
+          throw new Error(
+            "repository layout is incomplete; compilation would be under-grounded",
+          );
         }
         const compilation = await this.#management.compile({
           repository: this.#options.repository,
@@ -888,7 +1064,8 @@ export class FactorySupervisor {
             sequence: this.#sequences.take(),
             event: "BudgetReconciled",
             unit: "model_tokens",
-            amount: compilation.usage.inputTokens + compilation.usage.outputTokens,
+            amount:
+              compilation.usage.inputTokens + compilation.usage.outputTokens,
           });
           this.#budgetEvents.push(event);
         });
@@ -933,7 +1110,7 @@ export class FactorySupervisor {
         pacer: this.#pacer,
         concurrency: this.#concurrency,
         mutationScheduler: this.#mutations,
-        beforeMutation: (waitedMs) => this.#lease.guardMutation(waitedMs),
+        beforeMutation: (waitedMs) => this.#guardMutation(waitedMs),
         onThrottle: this.#notify,
       });
       for (let recovery = 0; ; recovery += 1) {
@@ -981,14 +1158,20 @@ export class FactorySupervisor {
               [...item.blockedByNumbers].sort((a, b) => a - b),
             ]),
           );
-          if (after === before && !(error instanceof PlatformUnavailableError)) throw error;
+          if (after === before && !(error instanceof PlatformUnavailableError))
+            throw error;
           existingGraphItems = recovered.existing;
-          this.#notify("replaying the immutable graph after a partially observed GitHub write");
+          this.#notify(
+            "replaying the immutable graph after a partially observed GitHub write",
+          );
         }
       }
       for (;;) {
         if (heartbeatError) throw heartbeatError;
         if (this.#options.signal?.aborted) {
+          if (this.#options.shutdownBehavior === "release-lease") {
+            return await this.#releaseForShutdown(snapshot);
+          }
           return await this.#terminal(
             runManager,
             snapshot,
@@ -1020,7 +1203,11 @@ export class FactorySupervisor {
         if (allDone(objective)) {
           await this.#lease.assert();
           await this.#store.closeIssue(snapshot.number);
-          return await this.#terminal(runManager, snapshot, "FactoryRunCompleted");
+          return await this.#terminal(
+            runManager,
+            snapshot,
+            "FactoryRunCompleted",
+          );
         }
 
         const inconsistent = objective.items.find(
@@ -1048,15 +1235,18 @@ export class FactorySupervisor {
           );
         }
 
-        const reviews = objective.items.filter((item) => item.state === "for_review");
+        const reviews = objective.items.filter(
+          (item) => item.state === "for_review",
+        );
         if (reviews.length > 0) {
           for (const item of reviews) await this.#resumeIntegration(item);
           continue;
         }
 
-        const recoverable = objective.items.filter((item) =>
-          ["reserved", "in_flight", "validating"].includes(item.state) ||
-          (item.state === "failed" && this.#hasUnfinishedAttempt(item)),
+        const recoverable = objective.items.filter(
+          (item) =>
+            ["reserved", "in_flight", "validating"].includes(item.state) ||
+            (item.state === "failed" && this.#hasUnfinishedAttempt(item)),
         );
         if (recoverable.length > 0) {
           for (const item of recoverable) {
@@ -1067,10 +1257,14 @@ export class FactorySupervisor {
         const runnable = ready(objective).filter(
           (item, index, all) =>
             item.attempts < this.#policy.maxAttemptsPerItem &&
-            all.findIndex((candidate) => candidate.number === item.number) === index,
+            all.findIndex((candidate) => candidate.number === item.number) ===
+              index,
         );
         if (runnable.length === 0) {
-          await sleep(this.#options.pollIntervalMs ?? 60_000, this.#options.signal);
+          await sleep(
+            this.#options.pollIntervalMs ?? 60_000,
+            this.#options.signal,
+          );
           continue;
         }
         const wave = runnable.slice(0, this.#policy.maxParallel);
@@ -1080,16 +1274,25 @@ export class FactorySupervisor {
           wave.length,
           this.#notify,
         );
-        this.#notify(`starting wave: ${wave.map((item) => `#${item.number}`).join(", ")}`);
+        this.#notify(
+          `starting wave: ${wave.map((item) => `#${item.number}`).join(", ")}`,
+        );
         const waveResults = await Promise.allSettled(
           wave.map((item) => this.#execute(item, deadline)),
         );
         const rejected = waveResults.find(
-          (result): result is PromiseRejectedResult => result.status === "rejected",
+          (result): result is PromiseRejectedResult =>
+            result.status === "rejected",
         );
         if (rejected) throw rejected.reason;
       }
     } catch (error) {
+      if (
+        this.#options.signal?.aborted &&
+        this.#options.shutdownBehavior === "release-lease"
+      ) {
+        return await this.#releaseForShutdown(snapshot);
+      }
       if (error instanceof LeaseLostError) throw error;
       if (error instanceof PlatformUnavailableError) throw error;
       if (error instanceof RunCancellationRequestedError) {
@@ -1101,13 +1304,21 @@ export class FactorySupervisor {
         );
       }
       const reason = error instanceof Error ? error.message : String(error);
-      return await this.#terminal(runManager, snapshot, "FactoryRunEscalated", reason);
+      return await this.#terminal(
+        runManager,
+        snapshot,
+        "FactoryRunEscalated",
+        reason,
+      );
     } finally {
       clearInterval(heartbeat);
     }
   }
 
-  async #execute(item: DerivedWorkItem, objectiveDeadline: number): Promise<void> {
+  async #execute(
+    item: DerivedWorkItem,
+    objectiveDeadline: number,
+  ): Promise<void> {
     let reservation: AttemptReservation | undefined;
     let worker: LocalWorktree | undefined;
     let validation: CleanValidationResult | undefined;
@@ -1143,17 +1354,21 @@ export class FactorySupervisor {
             : {}),
         },
       });
-      assertRequirementsWithinPolicy(packet.requirements, this.#policy, `Work Item #${item.number}`);
+      assertRequirementsWithinPolicy(
+        packet.requirements,
+        this.#policy,
+        `Work Item #${item.number}`,
+      );
       await ensureLocalCommit(this.#options.repository, base.oid);
       const timeoutMs = Math.min(
-        (packet.requirements.timeoutMinutes ?? this.#policy.workItemTimeoutMinutes) *
-          60_000,
+        (packet.requirements.timeoutMinutes ??
+          this.#policy.workItemTimeoutMinutes) * 60_000,
         Math.max(1, objectiveDeadline - Date.now()),
       );
       await this.#lease.use(async (lease) => {
-        const prior = (await this.#attempts.list(this.#run.objective, item.number)).filter(
-          (attempt) => attempt.runId === this.#run.runId,
-        );
+        const prior = (
+          await this.#attempts.list(this.#run.objective, item.number)
+        ).filter((attempt) => attempt.runId === this.#run.runId);
         const deferred = new Set(
           (item.factoryEvents ?? []).flatMap((event) =>
             event.kind === "attempt" &&
@@ -1163,7 +1378,9 @@ export class FactorySupervisor {
               : [],
           ),
         );
-        const consumed = prior.filter((attempt) => !deferred.has(attempt.attempt)).length;
+        const consumed = prior.filter(
+          (attempt) => !deferred.has(attempt.attempt),
+        ).length;
         if (consumed >= this.#policy.maxAttemptsPerItem) {
           throw new Error(`attempt budget exhausted (${consumed})`);
         }
@@ -1180,11 +1397,11 @@ export class FactorySupervisor {
         selected = choice.backend;
         budgetUnit =
           choice.backend.capabilities.id === "github-copilot/github-managed"
-          ? "managed_sessions"
-          : choice.backend.capabilities.id.includes("daytona") ||
-              choice.backend.capabilities.id.includes("vercel-sandbox")
-            ? "sandbox_milliseconds"
-            : "local_milliseconds";
+            ? "managed_sessions"
+            : choice.backend.capabilities.id.includes("daytona") ||
+                choice.backend.capabilities.id.includes("vercel-sandbox")
+              ? "sandbox_milliseconds"
+              : "local_milliseconds";
         if (packet.requirements.trust !== "trusted_local") {
           const afterExecution = {
             ...budgets,
@@ -1201,6 +1418,17 @@ export class FactorySupervisor {
             })
           ).backend;
         }
+        // Admission is the durable attempt-ref creation, rather than the
+        // preceding local backend choice.  Fence immediately before it.
+        await this.#leases.assertGeneration(lease, "admission");
+        await this.#store.claimWorkItem({
+          objective: this.#run.objective,
+          workItem: item.number,
+          runId: this.#run.runId,
+          directorEpoch: lease.epoch,
+          treeOid: base.treeOid,
+          parentOid: base.oid,
+        });
         reservation = await this.#attempts.reserve({
           lease,
           workItem: item.number,
@@ -1209,7 +1437,8 @@ export class FactorySupervisor {
           base,
           sequence: this.#sequences.take(),
         });
-        const reservedAmount = budgetUnit === "managed_sessions" ? 1 : timeoutMs;
+        const reservedAmount =
+          budgetUnit === "managed_sessions" ? 1 : timeoutMs;
         const budgetEvent = await this.#recorder.budget({
           lease,
           workItemNodeId: item.id,
@@ -1236,7 +1465,8 @@ export class FactorySupervisor {
           validationBudgetReserved = true;
         }
       });
-      if (!selected || !reservation) throw new Error("backend reservation did not complete");
+      if (!selected || !reservation)
+        throw new Error("backend reservation did not complete");
       const retryCheckpoint = selected.capabilities.providerManagedPublication
         ? undefined
         : this.#retryArtifacts.get(item.number, base.oid);
@@ -1291,11 +1521,16 @@ export class FactorySupervisor {
         const observation = await selected.observe(handle);
         if (["succeeded", "failed", "cancelled"].includes(observation.state)) {
           if (observation.state !== "succeeded") {
-            throw new Error(observation.reason ?? `worker ${observation.state}`);
+            throw new Error(
+              observation.reason ?? `worker ${observation.state}`,
+            );
           }
           break;
         }
-        await sleep(this.#options.pollIntervalMs ?? 2_000, this.#options.signal);
+        await sleep(
+          this.#options.pollIntervalMs ?? 2_000,
+          this.#options.signal,
+        );
       }
       const artifact = await selected.collect(handle);
       retryableArtifact = artifact;
@@ -1398,7 +1633,9 @@ export class FactorySupervisor {
         }
       });
       if (!validation.evidence.passed) {
-        throw new Error(validation.evidence.failureReason ?? "validation failed");
+        throw new Error(
+          validation.evidence.failureReason ?? "validation failed",
+        );
       }
 
       const reviewed = await this.#management.review({
@@ -1437,6 +1674,7 @@ export class FactorySupervisor {
           reason: reviewed.review.summary,
         }),
       );
+      await this.#lease.assertGeneration("publication");
       if (selected.capabilities.providerManagedPublication) {
         const pullNumber = Number(handle.metadata?.pullNumber);
         const headSha = handle.metadata?.headSha;
@@ -1445,7 +1683,9 @@ export class FactorySupervisor {
         }
         const remoteHead = await this.#store.readCommit(headSha);
         if (remoteHead.treeOid !== validation.evidence.outputTreeSha) {
-          throw new Error("managed pull request head does not match the validated output tree");
+          throw new Error(
+            "managed pull request head does not match the validated output tree",
+          );
         }
         published = {
           branch: `github-managed/pr-${pullNumber}`,
@@ -1456,7 +1696,7 @@ export class FactorySupervisor {
       } else {
         published = await publishValidated({
           store: this.#store,
-          assertLease: this.#lease.assert,
+          assertLease: () => this.#lease.assertGeneration("publication"),
           base,
           validation,
           artifact,
@@ -1493,9 +1733,14 @@ export class FactorySupervisor {
         if (handle && selected) await selected.cancel(handle).catch(() => {});
         throw error;
       }
-      if (error instanceof LeaseLostError || error instanceof NoExecutionBackendError) throw error;
+      if (
+        error instanceof LeaseLostError ||
+        error instanceof NoExecutionBackendError
+      )
+        throw error;
       const cancellation =
-        error instanceof RunCancellationRequestedError || this.#options.signal?.aborted;
+        error instanceof RunCancellationRequestedError ||
+        this.#options.signal?.aborted;
       if (cancellation && handle && selected) {
         await selected.cancel(handle).catch(() => {});
       }
@@ -1507,7 +1752,9 @@ export class FactorySupervisor {
         }
       }
       if (published) {
-        const current = await this.#store.readPullRequest(published.number).catch(() => null);
+        const current = await this.#store
+          .readPullRequest(published.number)
+          .catch(() => null);
         if (current?.merged) throw error;
         await this.#store.closePullRequest(published.number).catch(() => {});
       }
@@ -1521,7 +1768,8 @@ export class FactorySupervisor {
               sequence: this.#sequences.take(),
               event: "BudgetReconciled",
               unit: budgetUnit,
-              amount: budgetUnit === "managed_sessions" ? 1 : Date.now() - started,
+              amount:
+                budgetUnit === "managed_sessions" ? 1 : Date.now() - started,
             });
             this.#budgetEvents.push(event);
             executionBudgetReconciled = true;
@@ -1537,7 +1785,9 @@ export class FactorySupervisor {
               event: "BudgetReconciled",
               unit: "sandbox_milliseconds",
               phase: "validation",
-              amount: validationStartedAt ? Date.now() - validationStartedAt : 0,
+              amount: validationStartedAt
+                ? Date.now() - validationStartedAt
+                : 0,
             });
             this.#budgetEvents.push(event);
             validationBudgetReconciled = true;
@@ -1583,7 +1833,8 @@ export class FactorySupervisor {
           : {}),
       };
       const timeoutMs =
-        (requirements.timeoutMinutes ?? this.#policy.workItemTimeoutMinutes) * 60_000;
+        (requirements.timeoutMinutes ?? this.#policy.workItemTimeoutMinutes) *
+        60_000;
       const execution = await this.#registry.select({
         policy: this.#policy,
         requirements,
@@ -1635,7 +1886,9 @@ export class FactorySupervisor {
               `to ${currentBase.oid}`,
           };
         }
-        const currentRules = await this.#store.readBranchRules(this.#baseBranch);
+        const currentRules = await this.#store.readBranchRules(
+          this.#baseBranch,
+        );
         const blockers = branchRuleBlockers(currentRules);
         if (blockers.length > 0) {
           return {
@@ -1655,7 +1908,7 @@ export class FactorySupervisor {
             };
           }
         }
-        await this.#lease.assert();
+        await this.#lease.assertGeneration("integration");
         const mergeSha = await this.#store.mergePullRequest({
           number: pull.number,
           headSha: current.headSha,
@@ -1664,7 +1917,7 @@ export class FactorySupervisor {
         return { state: "integrated" as const, headSha: mergeSha };
       });
       if (readiness.state === "integrated") {
-        await this.#lease.assert();
+        await this.#lease.assertGeneration("integration");
         if (!item.closed) await this.#store.closeIssue(item.number);
         const alreadyRecorded = (item.factoryEvents ?? []).some(
           (candidate) =>
@@ -1706,33 +1959,46 @@ export class FactorySupervisor {
           Boolean(candidate.headSha),
       );
     if (!event || event.kind !== "attempt" || !event.headSha) {
-      throw new Error(`Work Item #${item.number} has review state without a published attempt`);
+      throw new Error(
+        `Work Item #${item.number} has review state without a published attempt`,
+      );
     }
-    const pull = item.linkedPullRequests.find((candidate) =>
-      candidate.state === "OPEN" || candidate.state === "MERGED",
+    const pull = item.linkedPullRequests.find(
+      (candidate) => candidate.state === "OPEN" || candidate.state === "MERGED",
     );
     if (!pull) {
-      throw new Error(`Work Item #${item.number} has no recoverable Factory pull request`);
+      throw new Error(
+        `Work Item #${item.number} has no recoverable Factory pull request`,
+      );
     }
-    const reservation = (await this.#attempts.list(this.#run.objective, item.number)).find(
-      (candidate) => candidate.attempt === event.attempt,
-    );
-    if (!reservation) throw new Error(`attempt ${event.attempt} reservation is missing`);
+    const reservation = (
+      await this.#attempts.list(this.#run.objective, item.number)
+    ).find((candidate) => candidate.attempt === event.attempt);
+    if (!reservation)
+      throw new Error(`attempt ${event.attempt} reservation is missing`);
     await this.#integrate(
       item,
       reservation,
       {
-        branch: publicationBranch(this.#run.objective, item.number, event.attempt),
+        branch: publicationBranch(
+          this.#run.objective,
+          item.number,
+          event.attempt,
+        ),
         commitSha: event.headSha,
         number: pull.number,
         htmlUrl: "",
       },
-      this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
+      this.#run.startedAt.getTime() +
+        this.#policy.objectiveTimeoutMinutes * 60_000,
       true,
     );
   }
 
   async #serializeIntegration<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.#options.repositoryResources) {
+      return this.#options.repositoryResources.integration(operation);
+    }
     let release!: () => void;
     const previous = this.#integrationTail;
     this.#integrationTail = new Promise<void>((resolveLock) => {
@@ -1746,13 +2012,20 @@ export class FactorySupervisor {
     }
   }
 
-  async #recoverInterrupted(item: DerivedWorkItem, deadline: number): Promise<void> {
-    const reservations = (await this.#attempts.list(this.#run.objective, item.number))
+  async #recoverInterrupted(
+    item: DerivedWorkItem,
+    deadline: number,
+  ): Promise<void> {
+    const reservations = (
+      await this.#attempts.list(this.#run.objective, item.number)
+    )
       .filter((candidate) => candidate.runId === this.#run.runId)
       .sort((a, b) => b.attempt - a.attempt);
     const reservation = reservations[0];
     if (!reservation) {
-      throw new Error(`Work Item #${item.number} has recoverable state but no attempt ref`);
+      throw new Error(
+        `Work Item #${item.number} has recoverable state but no attempt ref`,
+      );
     }
     const events = (item.factoryEvents ?? [])
       .filter(
@@ -1772,7 +2045,11 @@ export class FactorySupervisor {
       (event) => event.kind === "attempt" && event.event === "AttemptValidated",
     );
 
-    if (validation?.kind === "validation" && validation.passed && semanticallyAccepted) {
+    if (
+      validation?.kind === "validation" &&
+      validation.passed &&
+      semanticallyAccepted
+    ) {
       const branch = publicationBranch(
         this.#run.objective,
         item.number,
@@ -1789,19 +2066,25 @@ export class FactorySupervisor {
         await this.#lease.assert();
         const existing = await this.#store.findPullRequestForBranch(branch);
         if (existing && existing.state !== "open" && !existing.merged) {
-          throw new Error(`recovery pull request #${existing.number} was closed without merge`);
+          throw new Error(
+            `recovery pull request #${existing.number} was closed without merge`,
+          );
         }
-        const pull = existing ?? (await this.#store.createPullRequest({
-          title: item.title,
-          body:
-            `Implements Work Item #${item.number} for Objective #${this.#run.objective}.\n\n` +
-            `Closes #${item.number}\n\n` +
-            `Recovered validation: \`${validation.evidenceDigest}\``,
-          head: branch,
-          base: this.#baseBranch,
-        }));
+        const pull =
+          existing ??
+          (await this.#store.createPullRequest({
+            title: item.title,
+            body:
+              `Implements Work Item #${item.number} for Objective #${this.#run.objective}.\n\n` +
+              `Closes #${item.number}\n\n` +
+              `Recovered validation: \`${validation.evidenceDigest}\``,
+            head: branch,
+            base: this.#baseBranch,
+          }));
         if (pull.headSha !== headSha) {
-          throw new Error("recovered pull request head differs from the validated branch");
+          throw new Error(
+            "recovered pull request head differs from the validated branch",
+          );
         }
         await this.#lease.use((lease) =>
           this.#attempts.record({
@@ -1820,7 +2103,12 @@ export class FactorySupervisor {
         await this.#integrate(
           item,
           reservation,
-          { branch, commitSha: headSha, number: pull.number, htmlUrl: pull.htmlUrl },
+          {
+            branch,
+            commitSha: headSha,
+            number: pull.number,
+            htmlUrl: pull.htmlUrl,
+          },
           deadline,
           true,
         );
@@ -1830,7 +2118,9 @@ export class FactorySupervisor {
 
     const backend = this.#registry.get(reservation.backend);
     if (!backend) {
-      throw new Error(`cannot reconcile unavailable backend ${reservation.backend}`);
+      throw new Error(
+        `cannot reconcile unavailable backend ${reservation.backend}`,
+      );
     }
     const providerResourceId =
       latest?.kind === "attempt" ? latest.providerResourceId : undefined;
@@ -1843,7 +2133,11 @@ export class FactorySupervisor {
         directorEpoch: reservation.directorEpoch,
         ...(providerResourceId ? { providerResourceId } : {}),
       });
-    } else if (events.some((event) => event.kind === "attempt" && event.event === "AttemptStarted")) {
+    } else if (
+      events.some(
+        (event) => event.kind === "attempt" && event.event === "AttemptStarted",
+      )
+    ) {
       throw new Error(
         `backend ${reservation.backend} cannot prove the stale resource was stopped`,
       );
@@ -1855,9 +2149,10 @@ export class FactorySupervisor {
       (event) => event.kind === "attempt" && event.event === "AttemptCollected",
     )?.at;
     for (const budget of unreconciledBudgetReservations(events)) {
-      const phaseStart = budget.phase === "validation"
-        ? validationCouldHaveStartedAt
-        : attemptStartedAt;
+      const phaseStart =
+        budget.phase === "validation"
+          ? validationCouldHaveStartedAt
+          : attemptStartedAt;
       const elapsed = phaseStart
         ? Math.max(0, Date.now() - new Date(phaseStart).getTime())
         : 0;
@@ -1865,9 +2160,10 @@ export class FactorySupervisor {
         budget.phase === "execution" &&
         budget.unit === "sandbox_milliseconds" &&
         !attemptStartedAt;
-      const amount = budget.unit === "managed_sessions" || ambiguousPaidLaunch
-        ? budget.amount
-        : Math.min(budget.amount, elapsed);
+      const amount =
+        budget.unit === "managed_sessions" || ambiguousPaidLaunch
+          ? budget.amount
+          : Math.min(budget.amount, elapsed);
       await this.#lease.use(async (lease) => {
         const event = await this.#recorder.budget({
           lease,
@@ -1882,7 +2178,8 @@ export class FactorySupervisor {
         this.#budgetEvents.push(event);
       });
     }
-    const validationFailure = validation?.kind === "validation" && !validation.passed;
+    const validationFailure =
+      validation?.kind === "validation" && !validation.passed;
     await this.#lease.use((lease) =>
       this.#attempts.record({
         lease,
@@ -1924,7 +2221,10 @@ export class FactorySupervisor {
     let repaired = false;
     for (const item of items) {
       const comments = item.factoryEvents ?? [];
-      const reservations = await this.#attempts.list(this.#run.objective, item.number);
+      const reservations = await this.#attempts.list(
+        this.#run.objective,
+        item.number,
+      );
       for (const reservation of reservations) {
         if (reservation.runId !== this.#run.runId) continue;
         const recorded = comments.some(
@@ -1967,7 +2267,10 @@ export class FactorySupervisor {
   async #terminal(
     runManager: RunManager,
     snapshot: Snapshot,
-    event: "FactoryRunCompleted" | "FactoryRunCancelled" | "FactoryRunEscalated",
+    event:
+      | "FactoryRunCompleted"
+      | "FactoryRunCancelled"
+      | "FactoryRunEscalated",
     reason?: string,
   ): Promise<SupervisorResult> {
     await this.#lease.assert();
@@ -1989,6 +2292,16 @@ export class FactorySupervisor {
       objective: snapshot.number,
       runId: this.#run.runId,
       ...(reason ? { reason } : {}),
+    };
+  }
+
+  async #releaseForShutdown(snapshot: Snapshot): Promise<SupervisorResult> {
+    await this.#lease.release();
+    return {
+      status: "cancelled",
+      objective: snapshot.number,
+      runId: this.#run.runId,
+      reason: "repository controller stopped; durable run remains active",
     };
   }
 

@@ -22,7 +22,13 @@ describe("CLI and MCP control surface", () => {
     const mcpSource = await readFile(new URL("../src/mcp-server.ts", import.meta.url), "utf8");
     expect(mcpSource).toContain("for (const [name, operation, annotations] of APPLICATION_TOOL_DEFINITIONS)");
     expect(APPLICATION_TOOL_DEFINITIONS.map(([, operation]) => operation)).toEqual([...APPLICATION_OPERATIONS]);
-    const reads = new Set(["doctor", "plan", "status", "explain"]);
+    const reads = new Set([
+      "doctor",
+      "plan",
+      "status",
+      "explain",
+      "controller-status",
+    ]);
     const destructive = new Set(["cancel", "controller-stop", "controller-uninstall"]);
     for (const [name, operation, annotations] of APPLICATION_TOOL_DEFINITIONS) {
       expect(name).toMatch(/^factory_/);

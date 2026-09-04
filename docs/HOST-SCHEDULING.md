@@ -10,18 +10,34 @@ does not install or enable a daemon during plugin installation.
 
 ## Linux and WSL with systemd
 
-Create a user service such as `~/.config/systemd/user/factory-objective.service`:
+Factory's explicit repository-service lifecycle creates one deterministic user unit per checkout.
+It never runs during plugin installation and never stores scheduler state. The managed command is:
+
+```text
+factory controller run OWNER/REPO --repo /absolute/path/to/repository
+```
+
+Lifecycle operations are deliberately idempotent: `install` atomically writes the unit, reloads
+systemd and enables it; `start`, `stop`, `restart`, and `status` operate on that same deterministic
+name; `uninstall` stops and disables it before removing the unit and reloading systemd. A successful
+uninstall reports both `installed=false` and `enabled=false`.
+
+The unit starts with a Factory ownership marker. Installation refuses to overwrite an existing unit
+at the deterministic path unless that marker is present. It records both the absolute Node runtime
+and shipped `dist/factory.js` path, so startup never relies on a login shell or `PATH`.
+
+The generated unit is equivalent to:
 
 ```ini
 [Unit]
-Description=Factory Objective OWNER/REPO#123
+Description=Clockgrove Factory repository controller for OWNER/REPO
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
 WorkingDirectory=/absolute/path/to/repository
-ExecStart=/usr/bin/node /absolute/path/to/installed/factory/dist/factory.js run OWNER/REPO#123 --until-terminal --repo /absolute/path/to/repository --policy /absolute/path/to/policy.json
+ExecStart=/absolute/path/to/node /absolute/path/to/installed/dist/factory.js controller run OWNER/REPO --repo /absolute/path/to/repository
 Restart=on-failure
 RestartPreventExitStatus=2 130
 RestartSec=30

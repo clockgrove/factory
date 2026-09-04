@@ -13,6 +13,7 @@ import type { AttemptStore } from "./attempts.js";
 import type { GitCommitObject, LeaseStore } from "./lease.js";
 import { decodeEventComments } from "./receipts.js";
 import { classicBranchProtectionRules } from "../publication/branch-policy.js";
+import type { FactoryEvent } from "../protocol/events.js";
 
 const UPDATE_REFS = `
 mutation FactoryUpdateRefs(
@@ -51,7 +52,8 @@ export function factoryCommentIssueNumber(body: string): number {
 }
 
 function stripRefs(ref: string): string {
-  if (!ref.startsWith("refs/")) throw new Error(`ref must be fully qualified: ${ref}`);
+  if (!ref.startsWith("refs/"))
+    throw new Error(`ref must be fully qualified: ${ref}`);
   return ref.slice("refs/".length);
 }
 
@@ -61,8 +63,47 @@ function responseDate(response: {
   const value = response.headers.date;
   if (!value) throw new Error("GitHub response did not contain a Date header");
   const parsed = new Date(String(value));
-  if (Number.isNaN(parsed.getTime())) throw new Error(`invalid GitHub Date header: ${value}`);
+  if (Number.isNaN(parsed.getTime()))
+    throw new Error(`invalid GitHub Date header: ${value}`);
   return parsed;
+}
+
+export interface RepositoryWorkItemClaim {
+  objective: number;
+  workItem: number;
+  runId: string;
+  directorEpoch: number;
+}
+
+function workItemClaimRef(workItem: number): string {
+  if (!Number.isInteger(workItem) || workItem <= 0)
+    throw new Error("Work Item number must be positive");
+  return `refs/clockgrove-factory/repository/work-items/work-item-${workItem}`;
+}
+
+function parseWorkItemClaim(commit: GitCommitObject): RepositoryWorkItemClaim {
+  const trailer = commit.message
+    .split(/\r?\n/)
+    .reverse()
+    .find((line) => line.startsWith("Factory-Repository-Claim: "));
+  if (!trailer)
+    throw new Error("repository Work Item claim has no claim trailer");
+  const value = JSON.parse(
+    Buffer.from(
+      trailer.slice("Factory-Repository-Claim: ".length),
+      "base64url",
+    ).toString("utf8"),
+  ) as Partial<RepositoryWorkItemClaim>;
+  if (
+    ![value.objective, value.workItem, value.directorEpoch].every(
+      (item) => Number.isInteger(item) && Number(item) > 0,
+    ) ||
+    typeof value.runId !== "string" ||
+    !value.runId
+  ) {
+    throw new Error("repository Work Item claim is invalid");
+  }
+  return value as RepositoryWorkItemClaim;
 }
 
 export interface GitHubControlStoreOptions extends GitHubOptions {
@@ -71,6 +112,13 @@ export interface GitHubControlStoreOptions extends GitHubOptions {
   concurrency?: ConcurrencyLimiter;
   mutationScheduler?: MutationAdmission;
   beforeMutation?: (kind: MutationClass, waitedMs: number) => Promise<void>;
+}
+
+export interface DurableObjectiveActivation {
+  objective: number;
+  activatedAt: string;
+  requestId: string;
+  policy: unknown;
 }
 
 /** GitHub-backed v2 control store. Every mutation shares v1's pacing controls. */
@@ -82,7 +130,10 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
   readonly #pacer: ContentCreationPacer;
   readonly #concurrency: ConcurrencyLimiter;
   readonly #mutations: MutationAdmission;
-  readonly #beforeMutation: (kind: MutationClass, waitedMs: number) => Promise<void>;
+  readonly #beforeMutation: (
+    kind: MutationClass,
+    waitedMs: number,
+  ) => Promise<void>;
   #repositoryId: string | null = null;
 
   constructor(options: GitHubControlStoreOptions) {
@@ -92,10 +143,12 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     this.#breaker = options.circuitBreaker ?? new CircuitBreaker();
     this.#pacer = options.pacer ?? new ContentCreationPacer();
     this.#concurrency = options.concurrency ?? new ConcurrencyLimiter();
-    this.#mutations = options.mutationScheduler ?? new MutationScheduler({
-      pacer: this.#pacer,
-      ...(options.onThrottle ? { onThrottle: options.onThrottle } : {}),
-    });
+    this.#mutations =
+      options.mutationScheduler ??
+      new MutationScheduler({
+        pacer: this.#pacer,
+        ...(options.onThrottle ? { onThrottle: options.onThrottle } : {}),
+      });
     this.#beforeMutation = options.beforeMutation ?? (async () => {});
   }
 
@@ -118,7 +171,9 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       if (this.#breaker.isOpen()) {
         throw new PlatformUnavailableError(
           { kind: "rate_limit", retryAfterMs: this.#breaker.waitMs() },
-          new Error("Factory GitHub circuit opened while the request was queued"),
+          new Error(
+            "Factory GitHub circuit opened while the request was queued",
+          ),
         );
       }
       if (mutationPermit) {
@@ -181,22 +236,31 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
 
   async listRefs(prefix: string): Promise<Array<{ ref: string; oid: string }>> {
     const response = await this.#call(() =>
-      this.#octokit.request("GET /repos/{owner}/{repo}/git/matching-refs/{ref}", {
-        owner: this.#owner,
-        repo: this.#repo,
-        ref: stripRefs(prefix),
-      }),
+      this.#octokit.request(
+        "GET /repos/{owner}/{repo}/git/matching-refs/{ref}",
+        {
+          owner: this.#owner,
+          repo: this.#repo,
+          ref: stripRefs(prefix),
+        },
+      ),
     );
-    return response.data.map((item) => ({ ref: item.ref, oid: item.object.sha }));
+    return response.data.map((item) => ({
+      ref: item.ref,
+      oid: item.object.sha,
+    }));
   }
 
   async readCommit(oid: string): Promise<GitCommitObject> {
     const response = await this.#call(() =>
-      this.#octokit.request("GET /repos/{owner}/{repo}/git/commits/{commit_sha}", {
-        owner: this.#owner,
-        repo: this.#repo,
-        commit_sha: oid,
-      }),
+      this.#octokit.request(
+        "GET /repos/{owner}/{repo}/git/commits/{commit_sha}",
+        {
+          owner: this.#owner,
+          repo: this.#repo,
+          commit_sha: oid,
+        },
+      ),
     );
     return {
       oid: response.data.sha,
@@ -222,7 +286,10 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
           parents: args.parentOids,
         }),
       true,
-      args.message.startsWith("Factory lease ") ? "lease" : "normal",
+      args.message.startsWith("Factory lease ") ||
+        args.message.startsWith("Factory repository-controller lease")
+        ? "lease"
+        : "normal",
     );
     return response.data.sha;
   }
@@ -264,7 +331,9 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
             afterOid: args.afterOid,
           }),
         true,
-        args.ref.startsWith("refs/clockgrove-factory/leases/") ? "lease" : "normal",
+        args.ref.startsWith("refs/clockgrove-factory/leases/")
+          ? "lease"
+          : "normal",
       );
       return true;
     } catch (error) {
@@ -310,6 +379,141 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     return response.data.login;
   }
 
+  /** Reconstruct controller work directly from Objective comments.  There is
+   * deliberately no scheduler cursor or activation cache: every controller
+   * process can recover from the same GitHub records after an interruption. */
+  async discoverObjectiveActivations(): Promise<DurableObjectiveActivation[]> {
+    const result: DurableObjectiveActivation[] = [];
+    for (let page = 1; page <= 100; page += 1) {
+      const issues = await this.#call(() =>
+        this.#octokit.request("GET /repos/{owner}/{repo}/issues", {
+          owner: this.#owner,
+          repo: this.#repo,
+          state: "open",
+          labels: "factory:objective",
+          per_page: 100,
+          page,
+        }),
+      );
+      for (const issue of issues.data) {
+        if ("pull_request" in issue) continue;
+        const events: FactoryEvent[] = [];
+        for (let commentsPage = 1; commentsPage <= 100; commentsPage += 1) {
+          const comments = await this.#call(() =>
+            this.#octokit.request(
+              "GET /repos/{owner}/{repo}/issues/{issue_number}/comments",
+              {
+                owner: this.#owner,
+                repo: this.#repo,
+                issue_number: issue.number,
+                per_page: 100,
+                page: commentsPage,
+              },
+            ),
+          );
+          for (const comment of comments.data)
+            events.push(...decodeEventComments(comment.body ?? ""));
+          if (comments.data.length < 100) break;
+          if (commentsPage === 100)
+            throw new Error(
+              `Objective #${issue.number} exceeds the controller comment limit`,
+            );
+        }
+        let activationIndex = -1;
+        for (let index = events.length - 1; index >= 0; index -= 1) {
+          const event = events[index]!;
+          if (
+            event.kind === "run" &&
+            event.event === "ActivationRequested" &&
+            event.objective === issue.number
+          ) {
+            activationIndex = index;
+            break;
+          }
+        }
+        const activation =
+          activationIndex < 0 ? undefined : events[activationIndex];
+        const terminalAfterActivation =
+          activationIndex >= 0 &&
+          events
+            .slice(activationIndex + 1)
+            .some(
+              (event) =>
+                event.kind === "run" &&
+                event.objective === issue.number &&
+                [
+                  "FactoryRunCompleted",
+                  "FactoryRunCancelled",
+                  "FactoryRunEscalated",
+                ].includes(event.event),
+            );
+        if (
+          activation &&
+          activation.event === "ActivationRequested" &&
+          !terminalAfterActivation
+        ) {
+          result.push({
+            objective: issue.number,
+            activatedAt: activation.at,
+            requestId: activation.requestId,
+            policy: activation.policy,
+          });
+        }
+      }
+      if (issues.data.length < 100) return result;
+    }
+    throw new Error(
+      "repository exceeds the controller's 10000-Objective discovery limit",
+    );
+  }
+
+  /** Permanently bind an issue to one Objective. The repository-wide ref and
+   * atomic create make this safe across controller processes and restarts. */
+  async claimWorkItem(
+    args: RepositoryWorkItemClaim & { treeOid: string; parentOid: string },
+  ): Promise<void> {
+    const ref = workItemClaimRef(args.workItem);
+    const existingOid = await this.readRef(ref);
+    if (existingOid) {
+      const existing = parseWorkItemClaim(await this.readCommit(existingOid));
+      if (
+        existing.workItem !== args.workItem ||
+        existing.objective !== args.objective
+      ) {
+        throw new Error(
+          `Work Item #${args.workItem} is already claimed by Objective #${existing.objective}`,
+        );
+      }
+      return;
+    }
+    const claim: RepositoryWorkItemClaim = {
+      objective: args.objective,
+      workItem: args.workItem,
+      runId: args.runId,
+      directorEpoch: args.directorEpoch,
+    };
+    const oid = await this.createCommit({
+      treeOid: args.treeOid,
+      parentOids: [args.parentOid],
+      message: `Factory repository claim for Work Item #${args.workItem}\n\nFactory-Repository-Claim: ${Buffer.from(JSON.stringify(claim)).toString("base64url")}`,
+    });
+    if (await this.createRef(ref, oid)) return;
+    const winnerOid = await this.readRef(ref);
+    if (!winnerOid)
+      throw new Error(
+        `Work Item #${args.workItem} claim disappeared after conflict`,
+      );
+    const winner = parseWorkItemClaim(await this.readCommit(winnerOid));
+    if (
+      winner.workItem !== args.workItem ||
+      winner.objective !== args.objective
+    ) {
+      throw new Error(
+        `Work Item #${args.workItem} is already claimed by Objective #${winner.objective}`,
+      );
+    }
+  }
+
   async getRepositoryFacts(): Promise<{
     fullName: string;
     fork: boolean;
@@ -332,29 +536,40 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     };
   }
 
-  async readBranchRules(branch: string): Promise<Array<{ type: string; parameters?: unknown }>> {
+  async readBranchRules(
+    branch: string,
+  ): Promise<Array<{ type: string; parameters?: unknown }>> {
     const rules: Array<{ type: string; parameters?: unknown }> = [];
     try {
       for (let page = 1; page <= 10; page += 1) {
         const response = await this.#call(() =>
-          this.#octokit.request("GET /repos/{owner}/{repo}/rules/branches/{branch}", {
-            owner: this.#owner,
-            repo: this.#repo,
-            branch,
-            per_page: 100,
-            page,
+          this.#octokit.request(
+            "GET /repos/{owner}/{repo}/rules/branches/{branch}",
+            {
+              owner: this.#owner,
+              repo: this.#repo,
+              branch,
+              per_page: 100,
+              page,
+            },
+          ),
+        );
+        rules.push(
+          ...response.data.map((rule) => {
+            const record = rule as { type: string; parameters?: unknown };
+            return {
+              type: record.type,
+              ...(record.parameters === undefined
+                ? {}
+                : { parameters: record.parameters }),
+            };
           }),
         );
-        rules.push(...response.data.map((rule) => {
-          const record = rule as { type: string; parameters?: unknown };
-          return {
-            type: record.type,
-            ...(record.parameters === undefined ? {} : { parameters: record.parameters }),
-          };
-        }));
         if (response.data.length < 100) break;
         if (page === 10) {
-          throw new Error("branch rule result exceeds Factory's 1000-rule snapshot limit");
+          throw new Error(
+            "branch rule result exceeds Factory's 1000-rule snapshot limit",
+          );
         }
       }
     } catch (error) {
@@ -366,11 +581,14 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     // classic review/check requirement until the merge request fails.
     try {
       const response = await this.#call(() =>
-        this.#octokit.request("GET /repos/{owner}/{repo}/branches/{branch}/protection", {
-          owner: this.#owner,
-          repo: this.#repo,
-          branch,
-        }),
+        this.#octokit.request(
+          "GET /repos/{owner}/{repo}/branches/{branch}/protection",
+          {
+            owner: this.#owner,
+            repo: this.#repo,
+            branch,
+          },
+        ),
       );
       rules.push(...classicBranchProtectionRules(response.data));
     } catch (error) {
@@ -408,7 +626,9 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       }),
     );
     if (response.data.encoding !== "base64") {
-      throw new Error(`unsupported GitHub blob encoding ${response.data.encoding}`);
+      throw new Error(
+        `unsupported GitHub blob encoding ${response.data.encoding}`,
+      );
     }
     return Buffer.from(response.data.content.replace(/\s/g, ""), "base64");
   }
@@ -447,7 +667,9 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     if (response.data.truncated) {
       throw new Error("GitHub truncated the compiled graph control tree");
     }
-    const entry = response.data.tree.find((candidate) => candidate.path === path);
+    const entry = response.data.tree.find(
+      (candidate) => candidate.path === path,
+    );
     if (!entry) return null;
     if (entry.type !== "blob" || !entry.sha) {
       throw new Error(`compiled graph tree entry ${path} is not a blob`);
@@ -551,62 +773,83 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
         }> = [];
         for (let page = 1; page <= 30; page += 1) {
           const response = await this.#call(() =>
-            this.#octokit.request("GET /repos/{owner}/{repo}/commits/{ref}/check-runs", {
-              owner: this.#owner,
-              repo: this.#repo,
-              ref: sha,
-              per_page: 100,
-              page,
-              filter: "latest",
-            }),
+            this.#octokit.request(
+              "GET /repos/{owner}/{repo}/commits/{ref}/check-runs",
+              {
+                owner: this.#owner,
+                repo: this.#repo,
+                ref: sha,
+                per_page: 100,
+                page,
+                filter: "latest",
+              },
+            ),
           );
-          result.push(...response.data.check_runs.map((check) => ({
-            name: check.name,
-            status: check.status,
-            conclusion: check.conclusion,
-            appId: check.app?.id ?? null,
-          })));
+          result.push(
+            ...response.data.check_runs.map((check) => ({
+              name: check.name,
+              status: check.status,
+              conclusion: check.conclusion,
+              appId: check.app?.id ?? null,
+            })),
+          );
           if (result.length >= response.data.total_count) return result;
           if (response.data.check_runs.length < 100) return result;
         }
-        throw new Error("check-run result exceeds GitHub's 3000-item snapshot limit");
+        throw new Error(
+          "check-run result exceeds GitHub's 3000-item snapshot limit",
+        );
       })(),
       (async () => {
         const result: Array<{ context: string; state: string }> = [];
         for (let page = 1; page <= 30; page += 1) {
           const response = await this.#call(() =>
-            this.#octokit.request("GET /repos/{owner}/{repo}/commits/{ref}/statuses", {
-              owner: this.#owner,
-              repo: this.#repo,
-              ref: sha,
-              per_page: 100,
-              page,
-            }),
+            this.#octokit.request(
+              "GET /repos/{owner}/{repo}/commits/{ref}/statuses",
+              {
+                owner: this.#owner,
+                repo: this.#repo,
+                ref: sha,
+                per_page: 100,
+                page,
+              },
+            ),
           );
           result.push(...response.data);
           if (response.data.length < 100) return result;
         }
-        throw new Error("commit-status result exceeds Factory's 3000-item snapshot limit");
+        throw new Error(
+          "commit-status result exceeds Factory's 3000-item snapshot limit",
+        );
       })(),
     ]);
     const pending: string[] = [];
     const failed: string[] = [];
     const observed: string[] = [];
-    const observedChecks: Array<{ context: string; integrationId: number | null }> = [];
+    const observedChecks: Array<{
+      context: string;
+      integrationId: number | null;
+    }> = [];
     for (const check of checks) {
       observed.push(check.name);
       observedChecks.push({ context: check.name, integrationId: check.appId });
       if (check.status !== "completed") pending.push(check.name);
-      else if (!new Set(["success", "neutral", "skipped"]).has(check.conclusion ?? "")) {
+      else if (
+        !new Set(["success", "neutral", "skipped"]).has(check.conclusion ?? "")
+      ) {
         failed.push(check.name);
       }
     }
-    const latestStatuses = new Map<string, { context: string; state: string }>();
+    const latestStatuses = new Map<
+      string,
+      { context: string; state: string }
+    >();
     // GitHub returns commit statuses newest first. Only the newest result for
     // a context participates in the combined status; an older failed retry
     // must not override a newer success.
     for (const status of statuses) {
-      if (!latestStatuses.has(status.context)) latestStatuses.set(status.context, status);
+      if (!latestStatuses.has(status.context))
+        latestStatuses.set(status.context, status);
     }
     for (const status of latestStatuses.values()) {
       observed.push(status.context);
@@ -638,14 +881,17 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     try {
       response = await this.#call(
         () =>
-          this.#octokit.request("PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge", {
-            owner: this.#owner,
-            repo: this.#repo,
-            pull_number: args.number,
-            sha: args.headSha,
-            merge_method: "squash",
-            commit_title: args.commitTitle,
-          }),
+          this.#octokit.request(
+            "PUT /repos/{owner}/{repo}/pulls/{pull_number}/merge",
+            {
+              owner: this.#owner,
+              repo: this.#repo,
+              pull_number: args.number,
+              sha: args.headSha,
+              merge_method: "squash",
+              commit_title: args.commitTitle,
+            },
+          ),
         true,
       );
     } catch (error) {
@@ -662,7 +908,9 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       throw error;
     }
     if (!response.data.merged || !response.data.sha) {
-      throw new Error(response.data.message || `pull request #${args.number} was not merged`);
+      throw new Error(
+        response.data.message || `pull request #${args.number} was not merged`,
+      );
     }
     return response.data.sha;
   }
@@ -670,12 +918,15 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
   async closePullRequest(number: number): Promise<void> {
     await this.#call(
       () =>
-        this.#octokit.request("PATCH /repos/{owner}/{repo}/pulls/{pull_number}", {
-          owner: this.#owner,
-          repo: this.#repo,
-          pull_number: number,
-          state: "closed",
-        }),
+        this.#octokit.request(
+          "PATCH /repos/{owner}/{repo}/pulls/{pull_number}",
+          {
+            owner: this.#owner,
+            repo: this.#repo,
+            pull_number: number,
+            state: "closed",
+          },
+        ),
       true,
     );
   }
@@ -683,13 +934,16 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
   async closeIssue(number: number): Promise<void> {
     await this.#call(
       () =>
-        this.#octokit.request("PATCH /repos/{owner}/{repo}/issues/{issue_number}", {
-          owner: this.#owner,
-          repo: this.#repo,
-          issue_number: number,
-          state: "closed",
-          state_reason: "completed",
-        }),
+        this.#octokit.request(
+          "PATCH /repos/{owner}/{repo}/issues/{issue_number}",
+          {
+            owner: this.#owner,
+            repo: this.#repo,
+            issue_number: number,
+            state: "closed",
+            state_reason: "completed",
+          },
+        ),
       true,
     );
   }
@@ -697,12 +951,15 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
   async assignIssue(number: number, login: string): Promise<void> {
     await this.#call(
       () =>
-        this.#octokit.request("POST /repos/{owner}/{repo}/issues/{issue_number}/assignees", {
-          owner: this.#owner,
-          repo: this.#repo,
-          issue_number: number,
-          assignees: [login],
-        }),
+        this.#octokit.request(
+          "POST /repos/{owner}/{repo}/issues/{issue_number}/assignees",
+          {
+            owner: this.#owner,
+            repo: this.#repo,
+            issue_number: number,
+            assignees: [login],
+          },
+        ),
       true,
     );
   }

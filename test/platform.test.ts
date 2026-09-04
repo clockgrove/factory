@@ -48,6 +48,33 @@ describe("classifyRefusal", () => {
     }
   });
 
+  it("classifies the status-less GraphqlResponseError shape GitHub emits at zero quota", () => {
+    const reset = Math.floor(Date.now() / 1000) + 120;
+    const refusal = classifyRefusal({
+      message: "Request failed due to following response errors",
+      errors: [{
+        type: "RATE_LIMIT",
+        code: "graphql_rate_limit",
+        message: "API rate limit already exceeded for user ID 318831919.",
+      }],
+      headers: {
+        "x-ratelimit-remaining": "0",
+        "x-ratelimit-reset": String(reset),
+      },
+      response: {
+        errors: [{
+          type: "RATE_LIMIT",
+          code: "graphql_rate_limit",
+          message: "API rate limit already exceeded for user ID 318831919.",
+        }],
+      },
+    });
+    expect(refusal.kind).toBe("rate_limit");
+    if (refusal.kind === "rate_limit") {
+      expect(refusal.retryAfterMs).toBeGreaterThan(60_000);
+    }
+  });
+
   it("does not trust a reset time when the quota reports budget remaining", () => {
     // Plane 3 refuses while reporting a full budget, so the reset timestamp
     // describes a window we are not in. Fixed backoff is the honest answer.
@@ -152,6 +179,36 @@ describe("GitHub client throttling", () => {
     expect(notices).toEqual([
       expect.stringContaining("yielding to Factory"),
     ]);
+  });
+
+  it("wraps GitHub's RATE_LIMIT/graphql_rate_limit GraphqlResponseError shape", async () => {
+    const reset = Math.floor(Date.now() / 1000) + 3_600;
+    const requestFetch: typeof globalThis.fetch = async () =>
+      new Response(JSON.stringify({
+        data: null,
+        errors: [{
+          type: "RATE_LIMIT",
+          code: "graphql_rate_limit",
+          message: "API rate limit already exceeded for test user",
+        }],
+      }), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          "x-ratelimit-remaining": "0",
+          "x-ratelimit-reset": String(reset),
+        },
+      });
+    const octokit = createOctokit({
+      token: "test-token",
+      owner: "clockgrove",
+      repo: "factory",
+      requestFetch,
+    });
+
+    await expect(
+      octokit.graphql("query { viewer { login } }"),
+    ).rejects.toBeInstanceOf(PlatformUnavailableError);
   });
 });
 

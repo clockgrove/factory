@@ -168,6 +168,13 @@ non-authoritative optimization: it cannot change derived state, is lost on resta
 a provider-managed publication backend, and every resulting complete patch is independently
 revalidated from the pinned base.
 
+The shared local CLI/SDK worker prompt also carries the compiler's bounded context manifest:
+initial read paths and search hints, not preloaded file contents. These are untrusted navigation
+guidance, not extra edit authority or executable commands. Workers are directed to batch needed
+initial reads and expand exploration only when the task or observed evidence requires it. This
+removes a dropped-context gap; its effect on live token consumption must be measured rather than
+asserted from prompt changes alone.
+
 ## Versioned GitHub protocol
 
 Every machine-readable v2 record contains at least:
@@ -342,6 +349,30 @@ the publication commit and pull request.
 Repository CI remains supported but Factory does not impersonate required checks. Preflight reads
 branch rules and required checks before spending on implementation. If a required check cannot be
 produced without repository configuration, Factory escalates before launch.
+
+### Optional external code review
+
+Factory's independent semantic acceptance review is mandatory: it evaluates the Work Item's
+criteria against the exact artifact and independent validation evidence before publication. An
+automatic GitHub Copilot PR review is a separate, optional second opinion, not that acceptance
+review and not a requirement for using Factory. Factory does not request Copilot PR reviews by
+default or enable automatic-review settings. Repository, organization, or personal GitHub settings
+may independently trigger them; opting into the GitHub Copilot execution backend is a different
+choice from enabling Copilot PR review.
+
+External review adds its own provider usage and latency. Operators should deliberately choose it
+when that second opinion is worth the additional cost. Factory neither changes those settings nor
+assumes that a successful external review establishes every Work Item acceptance criterion.
+
+The current integration path observes external check status and GitHub mergeability, but does not
+translate external review comments into criterion-bound acceptance or autonomous rework. A failed
+observed check still blocks integration, even when no branch ruleset requires it; optional review
+does not mean silently ignoring a failed review service. Disabling future automatic reviews does
+not clear an existing failed check or revive a terminal run. Any recovery must preserve the recorded
+graph, validated artifact identities, branch policy, and budget authority. A future external-review
+adapter must explicitly reconcile findings before it can replace or participate in acceptance.
+
+### Pull-request integration
 
 Only branch-rule shapes whose autonomous semantics are proven are allowed. Unknown rule types fail
 closed. Human-approval, code-owner, last-push approval, and incompatible merge-method requirements

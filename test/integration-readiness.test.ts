@@ -31,7 +31,12 @@ function pull(): PublishedPullRequest {
   };
 }
 
-function store(args: { createdAt: Date; observed?: string[] }): PublicationStore {
+function store(args: {
+  createdAt: Date;
+  observed?: string[];
+  pending?: string[];
+  failed?: string[];
+}): PublicationStore {
   return {
     readPullRequest: async () => ({
       state: "open",
@@ -46,14 +51,53 @@ function store(args: { createdAt: Date; observed?: string[] }): PublicationStore
       createdAt: args.createdAt,
     }),
     readChecks: async () => ({
-      pending: [],
-      failed: [],
+      pending: args.pending ?? [],
+      failed: args.failed ?? [],
       observed: args.observed ?? [],
     }),
   } as unknown as PublicationStore;
 }
 
 describe("integration check discovery", () => {
+  it("does not require optional Copilot review but respects an externally triggered review", async () => {
+    const createdAt = new Date("2026-09-04T12:00:00.000Z");
+    const options = {
+      ciExpected: false as const,
+      now: new Date(createdAt.getTime() + FIRST_CHECK_DISCOVERY_GRACE_MS),
+    };
+    const review = "copilot-pull-request-reviewer";
+    await expect(
+      integrationReadiness(store({ createdAt }), pull(), BASE_SHA, "main", options),
+    ).resolves.toEqual({ state: "ready", headSha: HEAD_SHA });
+    await expect(
+      integrationReadiness(
+        store({ createdAt, observed: [review], pending: [review] }),
+        pull(),
+        BASE_SHA,
+        "main",
+        options,
+      ),
+    ).resolves.toEqual({ state: "wait", reason: `checks pending: ${review}` });
+    await expect(
+      integrationReadiness(
+        store({ createdAt, observed: [review], failed: [review] }),
+        pull(),
+        BASE_SHA,
+        "main",
+        options,
+      ),
+    ).resolves.toEqual({ state: "failed", reason: `checks failed: ${review}` });
+    await expect(
+      integrationReadiness(
+        store({ createdAt, observed: [review] }),
+        pull(),
+        BASE_SHA,
+        "main",
+        options,
+      ),
+    ).resolves.toEqual({ state: "ready", headSha: HEAD_SHA });
+  });
+
   it("waits for delayed first checks, then accepts the observed successful check", async () => {
     const createdAt = new Date("2026-09-04T12:00:00.000Z");
     await expect(

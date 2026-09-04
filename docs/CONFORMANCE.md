@@ -27,6 +27,15 @@ grounding and escalated before graph projection, recording 15,125 model tokens. 
 discovery list cannot express the fixture's scoped use of its observed test runner. This remains a
 failed Objective, not a passed compilation gate.
 
+The subsequent installed WSL2 run on candidate `3e64d41` compiled three native Work Items, admitted
+two SDK workers with overlapping attempt lifecycles, independently validated both artifacts, and
+published two PRs. Integration escalated on an external automatic review check whose integration
+could not access the now-private repository. No PR was merged and the dependent join did not run.
+Observed model usage was 157,125 tokens across compilation, two workers, and two reviews; the
+150,000-token policy is a stop-before-next-call threshold, not an in-flight hard cap. Raw private
+issues, diffs, and job logs are retained outside this public repository. These partial results do not
+close the environment, scheduling, native-stack, or Objective E2E gates below.
+
 | Surface | Evidence | Status |
 |---|---|---|
 | GitHub custom control refs | Live custom-ref, metadata-commit, workflow-side-effect, and GraphQL compare-and-swap probes against `clockgrove/factory` | Passed |

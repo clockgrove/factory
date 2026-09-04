@@ -36,6 +36,63 @@ const RunStarted = Common.extend({
   policyDigest: sha256Digest,
   activationRequestId: safeId.optional(),
   baseSha: gitSha.optional(),
+  recoveryRequestId: safeId.optional(),
+  recoveryPlanDigest: sha256Digest.optional(),
+  predecessorRunId: safeId.optional(),
+}).superRefine((value, context) => {
+  const recovery = [value.recoveryRequestId, value.recoveryPlanDigest, value.predecessorRunId];
+  if (
+    recovery.some((field) => field !== undefined) &&
+    (!recovery.every((field) => field !== undefined) ||
+      value.activationRequestId ||
+      !value.baseSha ||
+      value.predecessorRunId === value.runId)
+  ) {
+    context.addIssue({
+      code: "custom",
+      message:
+        "A successor start requires its complete distinct predecessor/request/plan/base binding and cannot also be an ordinary activation",
+    });
+  }
+});
+
+// A separate event kind makes unsupported controllers fail closed instead of
+// ignoring successor authority as an optional field on an ordinary activation.
+const RecoveryRequested = Common.extend({
+  kind: z.literal("recovery"),
+  event: z.literal("RecoveryRequested"),
+  requestedBy: boundedText(160),
+  requestId: safeId,
+  repository: boundedText(300),
+  planDigest: sha256Digest,
+  predecessorRunId: safeId,
+  predecessorTerminalDigest: sha256Digest,
+  successorRunId: safeId,
+  policyDigest: sha256Digest,
+  baseSha: gitSha,
+}).superRefine((value, context) => {
+  if (value.runId !== value.predecessorRunId || value.successorRunId === value.predecessorRunId)
+    context.addIssue({
+      code: "custom",
+      message: "A recovery request belongs to its predecessor and names a distinct successor",
+    });
+});
+
+const RecoveryConsumed = Common.extend({
+  kind: z.literal("recovery"),
+  event: z.literal("RecoveryConsumed"),
+  recoveryRequestId: safeId,
+  planDigest: sha256Digest,
+  predecessorRunId: safeId,
+  predecessorTerminalDigest: sha256Digest,
+  claimRef: boundedText(500),
+  claimOid: gitSha,
+}).superRefine((value, context) => {
+  if (value.runId === value.predecessorRunId)
+    context.addIssue({
+      code: "custom",
+      message: "A consumed recovery belongs to a distinct successor",
+    });
 });
 
 const RunTerminal = Common.extend({
@@ -402,6 +459,8 @@ export const FactoryEventSchema = z.union([
   RunCancellationRequested,
   ActivationRequested,
   ActivationRejected,
+  RecoveryRequested,
+  RecoveryConsumed,
   RunControlRequested,
   RunControlAcknowledged,
   WorkItemRetryRequested,

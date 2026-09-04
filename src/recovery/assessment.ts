@@ -11,6 +11,12 @@ import { decodeEventTrailer, deduplicateFactoryEvents } from "../control/receipt
 import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
 import { parseRunPolicy, policyDigest } from "../protocol/policy.js";
 import type { GitHubStack } from "../publication/github-stacks.js";
+import {
+  planDelivery,
+  type DeliveryItemPlan,
+  type DeliveryPlan,
+  type DeliveryUnit,
+} from "../publication/delivery.js";
 import { branchRuleBlockers, missingRequiredChecks } from "../publication/branch-policy.js";
 import { publicationBranch } from "../publication/publisher.js";
 import { bindValidationToPublishedHead } from "../validation/plan.js";
@@ -167,6 +173,7 @@ export async function assessRecovery(input: {
   const starts = new Map<string, Start>();
   const verifiedGraphs = new Map<string, Map<number, string>>();
   const graphParents = new Map<string, Map<number, string[]>>();
+  const deliveryPlans = new Map<string, Extract<DeliveryPlan, { result: "supported" }>>();
   const reservations = new Map<string, Attempt>();
   const reservationKey = (runId: string, workItem: number, attempt: number) =>
     `${runId}:${workItem}:${attempt}`;
@@ -341,6 +348,35 @@ export async function assessRecovery(input: {
         }),
       };
       assertSnapshotMatchesCompiledGraph(graph.objective, current, projection.bindings);
+      const selections = runEvents.filter((event) => event.kind === "delivery");
+      if (selections.length > 1) throw new Error("conflicting delivery selection");
+      const selection = selections[0];
+      if (selection?.kind === "delivery" && selection.selected === "native-stacks") {
+        if (
+          selection.requested !== "stacked-prs" ||
+          start.policy.delivery?.mode !== "stacked-prs" ||
+          selection.sequence <= start.sequence
+        )
+          throw new Error("native delivery authority");
+        const planned = planDelivery(
+          graph.objective.workItems.map((item) => {
+            if (!item.delivery) throw new Error("missing native delivery hint");
+            return {
+              id: item.id,
+              dependsOn: item.dependsOn,
+              delivery: {
+                group: item.delivery.group,
+                relationship: item.delivery.relationship,
+                ...(item.delivery.parentWorkItem
+                  ? { parentWorkItem: item.delivery.parentWorkItem }
+                  : {}),
+              },
+            };
+          }),
+        );
+        if (planned.result !== "supported") throw new Error("unsupported delivery plan");
+        deliveryPlans.set(start.runId, planned);
+      }
       verifiedGraphs.set(
         start.runId,
         new Map(projection.bindings.map((binding) => [binding.issueNumber, binding.compilerId])),
@@ -670,6 +706,33 @@ export async function assessRecovery(input: {
             "Native stack parent does not match the immutable Work Item dependency.",
           );
       }
+      let delivery: { unit: DeliveryUnit; item: DeliveryItemPlan } | undefined;
+      if (publication.mode === "native-stacks") {
+        const planned = deliveryPlans.get(source);
+        const deliveryItem = planned?.items.find(
+          (candidate) => candidate.itemId === publication.itemId,
+        );
+        const unit = planned?.units.find((candidate) => candidate.id === deliveryItem?.unitId);
+        const selection = events.find(
+          (event) => event.kind === "delivery" && event.runId === source,
+        );
+        if (
+          !unit ||
+          !deliveryItem ||
+          selection?.kind !== "delivery" ||
+          selection.sequence >= publication.sequence ||
+          selection.capabilityVersion !== publication.capabilityVersion ||
+          deliveryItem.unitId !== publication.unitId ||
+          deliveryItem.position !== publication.position ||
+          deliveryItem.parentItemId !== publication.parentItemId
+        ) {
+          throw new RecoveryEvidenceError(
+            "delivery-plan-mismatch",
+            "Native publication does not match the authenticated delivery selection and immutable graph-derived unit.",
+          );
+        }
+        delivery = { unit, item: deliveryItem };
+      }
       await inspectPublication(
         item,
         assessment,
@@ -679,6 +742,7 @@ export async function assessRecovery(input: {
         snapshot.defaultBranch,
         baseSha,
         events,
+        delivery,
       );
     } catch (error) {
       assessment.classification = "blocked";
@@ -734,6 +798,7 @@ async function inspectPublication(
   defaultBranch: string,
   baseSha: string | undefined,
   events: readonly FactoryEvent[],
+  delivery: { unit: DeliveryUnit; item: DeliveryItemPlan } | undefined,
 ): Promise<void> {
   const linked = item.linkedPullRequests?.filter((pull) => pull.number === publication.pullRequest);
   if (
@@ -754,9 +819,7 @@ async function inspectPublication(
     pull.baseRepository?.toLowerCase() !== repository.toLowerCase() ||
     pull.headRepository?.toLowerCase() !== repository.toLowerCase() ||
     !pull.headRef ||
-    (publication.mode === "regular-prs" &&
-      !publication.branch.startsWith("github-managed/") &&
-      pull.headRef !== publication.branch)
+    (!publication.branch.startsWith("github-managed/") && pull.headRef !== publication.branch)
   )
     throw new RecoveryEvidenceError(
       "pr-identity-mismatch",
@@ -781,7 +844,7 @@ async function inspectPublication(
       "pr-observation-changed",
       "PR linkage snapshot and current PR head or state disagree; re-read before planning recovery.",
     );
-  if (publication.mode === "native-stacks") {
+  if (publication.mode === "native-stacks" && delivery?.unit.kind === "stack") {
     if (!publication.stackNumber || !port.readStack)
       throw new RecoveryEvidenceError(
         "stack-unavailable",
@@ -831,6 +894,19 @@ async function inspectPublication(
         "The observed stack predecessor lacks a matching authenticated source publication.",
       );
     }
+  } else if (
+    publication.mode === "native-stacks" &&
+    (delivery?.unit.kind !== "sibling" ||
+      publication.position !== 0 ||
+      publication.parentItemId !== undefined ||
+      publication.stackNumber !== undefined ||
+      delivery.unit.items.length !== 1 ||
+      pull.baseRef !== defaultBranch)
+  ) {
+    throw new RecoveryEvidenceError(
+      "sibling-delivery-mismatch",
+      "Independent native-mode sibling must match its single-item unit and default-branch base without a stack identity.",
+    );
   } else if (pull.baseRef !== defaultBranch)
     throw new RecoveryEvidenceError(
       "ordinary-base-mismatch",
@@ -863,7 +939,8 @@ async function inspectPublication(
     item.closed ||
     pull.draft ||
     pull.mergeable !== true ||
-    (pull.baseSha !== baseSha && publication.mode === "regular-prs")
+    (pull.baseSha !== baseSha &&
+      (publication.mode === "regular-prs" || delivery?.unit.kind === "sibling"))
   )
     throw new RecoveryEvidenceError(
       "delivery-not-ready",

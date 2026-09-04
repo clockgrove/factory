@@ -686,6 +686,12 @@ function factoryEvents(
   return deduplicateFactoryEvents(
     parsed
       .filter(({ event, login }) => {
+        if (event.kind === "recovery" && event.event === "RecoveryRequested") {
+          return (
+            event.requestedBy.toLowerCase() === login.toLowerCase() &&
+            runActors.get(event.predecessorRunId)?.toLowerCase() === login.toLowerCase()
+          );
+        }
         if (
           event.kind === "run" &&
           (event.event === "ActivationRequested" || event.event === "ActivationRejected")

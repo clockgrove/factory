@@ -22,6 +22,32 @@ missing evidence without returning issue bodies, review prose, or raw provider e
 read counter measures cached logical evidence operations, not total HTTP requests; snapshot
 hydration has its own bounded inspection mode.
 
+Native-stack selection does not require independent sibling PRs to have a stack number. The
+assessment reconstructs delivery units from the immutable graph and authenticated selection:
+sibling units use ordinary trunk-base checks, while actual stack units require exact membership.
+
+## Implemented authorization foundations
+
+The immutable recovery-plan document binds the proposed successor, exact predecessor terminal,
+source-history prefix, graph/projection, item evidence, accepted policy, explicit allowance
+increments, and any unknown-usage acknowledgement. Its content-addressed ref is a durable proposal,
+not execution authority. Changed source evidence requires a different acknowledged plan.
+
+`RecoveryRequested` and `RecoveryConsumed` have a separate event kind. Successor start records name
+the exact request, plan digest, and predecessor; authenticated reader bindings reject a changed
+actor, terminal, repository, provenance, policy, or base. The cumulative chain verifier requires
+explicit prior-plan links and independently observed immutable consumption claims. It includes
+graph-only historical failures, preserves original usage identities, and never returns execution
+authority. Plan metadata and full source-event prefixes have separate digests so a missing budget
+receipt cannot be hidden by unchanged run boundaries.
+
+These contracts are not yet a supported continuation command. Claim/adoption transactions, shared
+execution-evidence resolution, and resource reconciliation remain below. The ordinary run manager
+explicitly rejects successor execution until those pieces are connected. Pending claims must be
+reconciled to an evidenced outcome; they must not be deleted or overwritten to try another plan.
+Validation and budget writers reject reservations from a different run, Objective, policy, or
+future lease epoch; successor effects cannot be appended to terminal predecessor history.
+
 ## Outcome and observed gap
 
 An operator can resolve an escalation and explicitly continue the same Objective, retaining its

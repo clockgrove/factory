@@ -6,6 +6,9 @@ Notable changes to Factory. See [the delivery plan](docs/DELIVERY-PLAN.md) for u
 
 ### Added
 
+- Immutable recovery-plan and predecessor-chain verification contracts, with authenticated request
+  bindings and explicit cumulative allowance increments. Execution remains gated on the unfinished
+  adoption and resource-reconciliation transaction.
 - Read-only recovery assessment through chat/MCP and CLI, with graph/PR identity checks and
   historical cumulative accounting. Successor execution and additional spending still require
   a separate implemented authorization path.
@@ -24,6 +27,7 @@ Notable changes to Factory. See [the delivery plan](docs/DELIVERY-PLAN.md) for u
 
 ### Changed
 
+- Recovery inspection distinguishes graph-derived native-stack units from independent sibling PRs.
 - Local Codex execution is the default; paid execution is always explicitly authorized and bounded.
 - The supported runtime is Linux on native Linux, Windows WSL2, or a Linux guest hosted by macOS.
 - Compiler navigation guidance now reaches local CLI/SDK workers without expanding edit scope.
@@ -32,6 +36,8 @@ Notable changes to Factory. See [the delivery plan](docs/DELIVERY-PLAN.md) for u
 
 ### Security
 
+- Validation and budget receipts cannot be written using another run's reservation under a current
+  lease; same-run fenced takeover remains supported.
 - New activations reject predecessor execution that cannot yet be adopted safely, including
   reservation refs with missing comments and startup races. Existing PRs and accounting remain
   untouched; explicit successor-run recovery is still an open implementation task.

@@ -33,6 +33,11 @@ export class RunManager {
     if (!active || active.kind !== "run" || active.event !== "FactoryRunStarted") {
       return null;
     }
+    if (active.recoveryRequestId) {
+      throw new Error(
+        "Successor execution requires the fenced adoption transaction and shared evidence resolver; it is not available yet",
+      );
+    }
     const policy = parseRunPolicy(active.policy);
     const digest = policyDigest(policy);
     if (digest !== active.policyDigest) throw new Error("run policy digest mismatch");

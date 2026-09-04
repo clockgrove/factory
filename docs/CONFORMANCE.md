@@ -69,6 +69,11 @@ guard blocks implicit reuse of executed work; it is containment, not a passed re
 The read-only `factory_recovery_plan` assessment inspects graph, reservation, publication, and
 accounting evidence through a read-only store capability. Historical usage is not new spending
 authority, and an observed terminal resource receipt does not prove host/provider cleanup.
+Recovery-plan persistence, source-history/allowance-chain verification, authenticated successor
+request bindings, and cross-run receipt-write fences have deterministic fixtures. The parser and
+run manager still reject incomplete or executable successor state: no claim/adoption transaction
+or shared execution-evidence resolver is connected yet. These foundations do not pass the live
+recovery gate.
 
 This table maps every stable contract statement in [`DESIGN.md`](DESIGN.md#definition-of-done) to
 the executable evidence required on a release branch. “Implemented” does not promote an open live

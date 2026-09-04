@@ -44,6 +44,16 @@ export type QueuedReasonCode =
   | "path-conflict"
   | "exclusive-resource-conflict";
 
+export type SchedulingGate =
+  | "authority"
+  | "capacity"
+  | "priority"
+  | "scope"
+  | "trust"
+  | "backend"
+  | "validation"
+  | "economic";
+
 export interface AdmissionWorkItem {
   priority: RankedWorkItem;
   requirements: ExecutionRequirements;
@@ -65,6 +75,7 @@ export interface AdmissionProposal {
   requirements: { cpu: number; memoryMb: number };
   priority: {
     rank: number;
+    source: RankedWorkItem["source"];
     fieldId?: string;
     optionId?: string;
     subIssuePosition: number;
@@ -93,9 +104,11 @@ export interface AdmissionProposal {
 export interface QueuedDecision {
   workItem: number;
   code: QueuedReasonCode;
+  gate: SchedulingGate;
   reason: string;
   observedPriorityRank: number;
   observedSubIssuePosition: number;
+  prioritySource: RankedWorkItem["source"];
   queuedSince?: string;
   recordQueueStart: boolean;
   permanent: boolean;
@@ -178,17 +191,45 @@ function queue(
   code: QueuedReasonCode,
   reason: string,
   permanent = false,
+  gate = schedulingGate(code, reason),
 ): QueuedDecision {
   return {
     workItem: item.priority.item.number,
     code,
+    gate,
     reason,
     observedPriorityRank: item.priority.rank,
     observedSubIssuePosition: item.priority.subIssuePosition,
+    prioritySource: item.priority.source,
     ...(item.queuedSince ? { queuedSince: item.queuedSince } : {}),
     recordQueueStart: item.queuedSince === undefined,
     permanent,
   };
+}
+
+function schedulingGate(code: QueuedReasonCode, reason: string): SchedulingGate {
+  if (code === "lease-unavailable") return "authority";
+  if (
+    code === "global-capacity" ||
+    code === "local-capacity" ||
+    code === "backend-at-capacity" ||
+    code === "local-pressure" ||
+    code === "local-cooldown" ||
+    code === "resource-sample-unavailable"
+  ) {
+    return "capacity";
+  }
+  if (code === "burst-priority") return "priority";
+  if (code === "path-conflict" || code === "exclusive-resource-conflict") {
+    return "scope";
+  }
+  if (code === "policy-constraint") {
+    return reason.toLowerCase().includes("secret") ? "trust" : "scope";
+  }
+  if (code === "backend-incompatible" || code === "backend-unavailable") {
+    return "backend";
+  }
+  return "economic";
 }
 
 function capacityQueueCode(code: CapacityRejectionCode): QueuedReasonCode {
@@ -350,6 +391,7 @@ export function planAdmissions(input: AdmissionInput): AdmissionPlan {
             [...transient, ...permanent].join("; ") ||
               "no independent isolated validator is available",
             transient.length === 0,
+            "validation",
           ),
         );
         continue;
@@ -363,6 +405,8 @@ export function planAdmissions(input: AdmissionInput): AdmissionPlan {
             item,
             "backend-at-capacity",
             "repository controller allows no paid validation workers",
+            false,
+            "validation",
           ),
         );
         continue;
@@ -481,6 +525,7 @@ export function planAdmissions(input: AdmissionInput): AdmissionPlan {
           requirements: requested,
           priority: {
             rank: item.priority.rank,
+            source: item.priority.source,
             ...(item.priority.fieldId ? { fieldId: item.priority.fieldId } : {}),
             ...(item.priority.optionId ? { optionId: item.priority.optionId } : {}),
             subIssuePosition: item.priority.subIssuePosition,
@@ -646,6 +691,7 @@ export function planAdmissions(input: AdmissionInput): AdmissionPlan {
         requirements: requested,
         priority: {
           rank: item.priority.rank,
+          source: item.priority.source,
           ...(item.priority.fieldId ? { fieldId: item.priority.fieldId } : {}),
           ...(item.priority.optionId ? { optionId: item.priority.optionId } : {}),
           subIssuePosition: item.priority.subIssuePosition,

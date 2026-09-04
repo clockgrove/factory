@@ -41,7 +41,7 @@ export const APPLICATION_TOOL_DEFINITIONS: ReadonlyArray<
   ["factory_pause_cloud", "cloud-pause", WRITE],
   ["factory_retry", "retry", WRITE],
   ["factory_priority", "priority", WRITE],
-  ["factory_replay", "replay", WRITE],
+  ["factory_replay", "replay", READ],
   ["factory_cancel", "cancel", DESTRUCTIVE],
   ["factory_controller_start", "controller-start", WRITE],
   ["factory_controller_stop", "controller-stop", DESTRUCTIVE],

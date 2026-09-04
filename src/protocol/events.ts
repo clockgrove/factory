@@ -85,6 +85,9 @@ const WorkItemControlRequested = Common.extend({
   requestId: safeId,
   workItem: z.number().int().positive(),
   priorityRank: z.number().int().min(0).max(1_000).optional(),
+  prioritySource: z
+    .enum(["subissue-order", "issue-field", "subissue-order-fallback"])
+    .optional(),
   reason: boundedText(8_000).optional(),
 });
 
@@ -171,8 +174,43 @@ const Scheduling = Common.extend({
   directorEpoch: z.number().int().positive(),
   policyDigest: sha256Digest,
   reason: boundedText(2_000),
+  reasonCode: z
+    .enum([
+      "lease-unavailable",
+      "policy-constraint",
+      "backend-incompatible",
+      "backend-unavailable",
+      "backend-at-capacity",
+      "global-capacity",
+      "local-capacity",
+      "local-pressure",
+      "local-cooldown",
+      "resource-sample-unavailable",
+      "budget-exhausted",
+      "burst-disabled",
+      "burst-trigger-pending",
+      "burst-priority",
+      "path-conflict",
+      "exclusive-resource-conflict",
+    ])
+    .optional(),
+  gate: z
+    .enum([
+      "authority",
+      "capacity",
+      "priority",
+      "scope",
+      "trust",
+      "backend",
+      "validation",
+      "economic",
+    ])
+    .optional(),
   observedPriorityRank: z.number().int().min(0).max(1_000),
   observedSubIssuePosition: z.number().int().nonnegative(),
+  prioritySource: z
+    .enum(["subissue-order", "issue-field", "subissue-order-fallback"])
+    .optional(),
 });
 
 const Capacity = Common.extend({

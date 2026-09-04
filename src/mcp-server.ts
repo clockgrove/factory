@@ -1436,7 +1436,7 @@ function registerApplicationTool(
           ...RequestToolShape,
           baseSha: z.string().regex(/^[0-9a-fA-F]{40}$/),
         }
-      : ["doctor", "plan", "status", "explain"].includes(operation)
+      : ["doctor", "plan", "status", "explain", "replay"].includes(operation)
         ? {
             ...ObjectiveToolShape,
             ...(operation === "explain"
@@ -1456,7 +1456,6 @@ function registerApplicationTool(
               "drain",
               "cloud-pause",
               "retry",
-              "replay",
               "cancel",
             ].includes(operation)
               ? { reason: z.string().min(1).max(8_000).optional() }
@@ -1474,9 +1473,9 @@ function registerApplicationTool(
       const service = applicationFor(input.owner, input.repo);
       if (!operation.startsWith("controller-") && !input.objectiveNumber)
         throw new Error("objectiveNumber is required");
-      if (["doctor", "plan", "status", "explain"].includes(operation)) {
+      if (["doctor", "plan", "status", "explain", "replay"].includes(operation)) {
         return service.inspect(
-          operation as "doctor" | "plan" | "status" | "explain",
+          operation as "doctor" | "plan" | "status" | "explain" | "replay",
           input.objectiveNumber!,
           input.workItemNumber,
         );
@@ -1517,7 +1516,6 @@ function registerApplicationTool(
           | "cloud-pause"
           | "retry"
           | "priority"
-          | "replay"
           | "cancel",
         {
           objective: input.objectiveNumber!,

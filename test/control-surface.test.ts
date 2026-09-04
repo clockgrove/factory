@@ -27,6 +27,7 @@ describe("CLI and MCP control surface", () => {
       "plan",
       "status",
       "explain",
+      "replay",
       "controller-status",
     ]);
     const destructive = new Set(["cancel", "controller-stop", "controller-uninstall"]);

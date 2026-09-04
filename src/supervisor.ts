@@ -1780,8 +1780,11 @@ export class FactorySupervisor {
               workItemNodeId: item.id,
               sequence: this.#sequences.take(),
               reason: `${decision.code}: ${decision.reason}`,
+              reasonCode: decision.code,
+              gate: decision.gate,
               observedPriorityRank: decision.observedPriorityRank,
               observedSubIssuePosition: decision.observedSubIssuePosition,
+              prioritySource: decision.prioritySource,
             }),
           );
         }
@@ -2076,6 +2079,7 @@ export class FactorySupervisor {
             requestedCpu: admission.requirements.cpu,
             requestedMemoryMb: admission.requirements.memoryMb,
             priorityRank: admission.priority.rank,
+            prioritySource: admission.priority.source,
             ...(admission.priority.fieldId
               ? { priorityFieldId: admission.priority.fieldId }
               : {}),

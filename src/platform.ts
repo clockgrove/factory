@@ -82,15 +82,16 @@ function headerNumber(
 export function classifyRefusal(error: unknown): Refusal {
   const e = error as HttpErrorLike;
   const status = e?.status;
-  if (typeof status !== "number") return { kind: "not_refusal" };
-
-  const headers = e.response?.headers;
-  const message = (e.message ?? "").toLowerCase();
-  const graphQlRateLimited = e.response?.data?.errors?.some(
+  const headers = e?.response?.headers;
+  const message = (e?.message ?? "").toLowerCase();
+  const graphQlRateLimited = e?.response?.data?.errors?.some(
     (entry) => entry.type === "RATE_LIMITED",
   ) ?? false;
+  if (typeof status !== "number" && !graphQlRateLimited) {
+    return { kind: "not_refusal" };
+  }
 
-  if (status >= 500 && status < 600) {
+  if (typeof status === "number" && status >= 500 && status < 600) {
     return { kind: "server_error", retryAfterMs: DEFAULT_BACKOFF_MS };
   }
 

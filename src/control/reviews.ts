@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { ManagementOutputError } from "../management/backend.js";
 
 import { z } from "zod";
 
@@ -90,6 +91,7 @@ export async function runDurableReviewTransaction(args: {
   persist: (result: ReviewResult) => Promise<ReviewCheckpointRecord>;
   recover: () => Promise<ReviewCheckpointRecord | null>;
   recordUsage: (record: ReviewCheckpointRecord) => Promise<void>;
+  recordFailureUsage?: (usage: ManagementUsage) => Promise<void>;
   recordOutcome: (record: ReviewCheckpointRecord) => Promise<void>;
   fault?: (point: ReviewFaultPoint) => Promise<void> | void;
 }): Promise<ReviewCheckpointRecord> {
@@ -107,7 +109,10 @@ export async function runDurableReviewTransaction(args: {
       }
     } catch (error) {
       record = await args.recover();
-      if (!record) throw error;
+      if (!record) {
+        if (error instanceof ManagementOutputError) await args.recordFailureUsage?.(error.usage);
+        throw error;
+      }
     }
     await args.fault?.("after-model-result");
   }

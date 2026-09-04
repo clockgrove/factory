@@ -476,6 +476,13 @@ next reporting worker, compilation, or semantic review. Already-started concurre
 not given a provider token limit and can each overshoot the threshold by their terminal usage.
 Cached-input tokens are not added again when the provider already includes them in input tokens.
 
+A rejected compilation or review still consumes model quota. When terminal counters are available,
+Factory records failed-call usage even if output validation or checkpoint persistence fails. A
+recoverable successful checkpoint takes precedence so the same call is not charged twice. A
+failed-call receipt prevents replay of that invocation in the same run; an implementation retry
+with a distinct attempt remains subject to the original policy. Missing or ambiguous counters stay
+unavailable and are never replaced with an estimate or an assertion of zero consumption.
+
 Daytona, Vercel Sandbox, GitHub Copilot, and OpenAI Codex managed-agent adapters do not currently
 return authoritative model-token counters to Factory. Their token use is explicitly unavailable and
 does not decrement `maxModelTokens`; sandbox-minute or managed-session reservations remain their

@@ -66,8 +66,15 @@ written to evidence.
 
 On failure, the harness preserves the Objective and any partial PRs rather than making them look
 successfully completed. Read `factory_status`, inspect the recorded Objective URL, and cancel an
-active run through Factory before retrying. Do not rerun blindly: each invocation creates a new
-Objective. A successful prior fixture already contains the requested modules, so prepare a fresh
+active run through Factory before retrying. By default each invocation creates a new Objective.
+For a terminal compilation failure before any graph or attempt receipts, set
+`FACTORY_LIVE_OBJECTIVE_NUMBER` and `FACTORY_LIVE_OBJECTIVE_PRIOR_RUN_ID` to explicitly acknowledge
+the issue and failed run being retried. The harness requires the unchanged fixture body, the same
+authenticated issue author, no Work Items or attempts, and the acknowledged run still being the
+latest terminal escalation. It records the prior status and starts a new bounded run on that issue;
+this is not recovery of a partially executed graph. Always select a fresh evidence directory:
+existing evidence files are never overwritten by a new invocation.
+A successful prior fixture already contains the requested modules, so prepare a fresh
 disposable repository for a new full compilation exercise. The output clone is retained for review.
 
 The REST evidence reader uses GitHub's documented

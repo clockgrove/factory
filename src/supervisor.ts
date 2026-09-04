@@ -45,6 +45,7 @@ import {
 import { RunManager, type RunState } from "./control/runs.js";
 import {
   ReviewCheckpointManager,
+  reviewIdentityDigest,
   runDurableReviewTransaction,
   type ReviewCheckpointRecord,
   type ReviewIdentity,
@@ -87,10 +88,12 @@ import {
 } from "./graph.js";
 import { GitHubReader, type GitHubOptions } from "./github.js";
 import { CodexCliManagementBackend } from "./management/codex-cli.js";
+import { ManagementOutputError } from "./management/backend.js";
 import type {
   CompilationCheckpoint,
   CompilationResult,
   ManagementBackend,
+  ManagementUsage,
 } from "./management/backend.js";
 import {
   integrationReadiness,
@@ -320,6 +323,25 @@ export function reportedModelTokens(usage?: ExecutionUsage): number | null {
   return usage.inputTokens + usage.outputTokens;
 }
 
+export function assertManagementInvocationNotFailed(
+  events: readonly FactoryEvent[],
+  runId: string,
+  invocationId: string,
+): void {
+  if (
+    events.some(
+      (event) =>
+        event.kind === "budget" &&
+        event.runId === runId &&
+        event.event === "BudgetReconciled" &&
+        event.phase === "management" &&
+        event.unit === "model_tokens" &&
+        event.usageId === `failed-${invocationId}`,
+    )
+  )
+    throw new Error("management invocation already failed with recorded usage; refusing replay");
+}
+
 export type CompilationFaultPoint =
   | "after-model-return"
   | "after-graph-persistence"
@@ -337,6 +359,7 @@ export async function runDurableCompilationTransaction(args: {
   persist: (result: CompilationResult) => Promise<CompiledGraphRecord>;
   recover: () => Promise<CompiledGraphRecord | null>;
   recordUsage: (record: CompiledGraphRecord) => Promise<void>;
+  recordFailureUsage?: (usage: ManagementUsage) => Promise<void>;
   preflight: (objective: CompiledObjective) => Promise<void>;
   fault?: (point: CompilationFaultPoint) => Promise<void> | void;
 }): Promise<CompiledGraphRecord> {
@@ -354,7 +377,10 @@ export async function runDurableCompilationTransaction(args: {
       }
     } catch (error) {
       record = await args.recover();
-      if (!record) throw error;
+      if (!record) {
+        if (error instanceof ManagementOutputError) await args.recordFailureUsage?.(error.usage);
+        throw error;
+      }
     }
     await args.fault?.("after-model-return");
   }
@@ -1670,6 +1696,7 @@ export class FactorySupervisor {
         | undefined;
       const compilationInvocationId = `compile-${base.oid}`;
       if (!recoverableObjective) {
+        this.#assertManagementInvocationNotFailed(compilationInvocationId);
         this.#notify("compiling Objective into a dependency graph");
         if (observedGraph.hasReceipt || observedGraph.existing.length > 0) {
           throw new Error("compiled graph receipt exists but its durable graph record is missing");
@@ -1733,6 +1760,8 @@ export class FactorySupervisor {
             }),
           ),
         recover: () => graphManager.load(snapshot.number, this.#run.runId),
+        recordFailureUsage: (usage) =>
+          this.#recordFailedManagementUsage(compilationInvocationId, usage, snapshot.id),
         recordUsage: async (record) => {
           if (!record.compilation) return;
           const amount = record.compilation.inputTokens + record.compilation.outputTokens;
@@ -3094,6 +3123,7 @@ export class FactorySupervisor {
           ) => ReturnType<ManagementBackend["review"]>)
         | undefined;
       if (!existingReview) {
+        this.#assertManagementInvocationNotFailed(`review-${reviewIdentityDigest(reviewIdentity)}`);
         const reviewBudget = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
         if (reviewBudget.modelTokens !== null && reviewBudget.modelTokens <= 0) {
           throw new Error("model-token budget is exhausted; refusing semantic review");
@@ -3123,6 +3153,13 @@ export class FactorySupervisor {
             this.#reviews.persist({ lease, identity: reviewIdentity, result }),
           ),
         recover: () => this.#reviews.load(reviewIdentity),
+        recordFailureUsage: (usage) =>
+          this.#recordFailedManagementUsage(
+            `review-${reviewIdentityDigest(reviewIdentity)}`,
+            usage,
+            item.id,
+            reservation!,
+          ),
         recordUsage: (record) => this.#recordReviewUsage(record, item, reservation!),
         recordOutcome: (record) => this.#recordInitialReviewOutcome(record, item, reservation!),
       });
@@ -3440,6 +3477,63 @@ export class FactorySupervisor {
   #reviewUsageId(record: ReviewCheckpointRecord): string {
     const prefix = record.identity.kind === "rebase" ? "rebase-review" : "review";
     return `${prefix}-${record.identityDigest}`;
+  }
+
+  #assertManagementInvocationNotFailed(invocationId: string): void {
+    assertManagementInvocationNotFailed(this.#budgetEvents, this.#run.runId, invocationId);
+  }
+
+  async #recordFailedManagementUsage(
+    invocationId: string,
+    usage: ManagementUsage,
+    nodeId: string,
+    reservation?: AttemptReservation,
+  ): Promise<void> {
+    const usageId = `failed-${invocationId}`;
+    const amount = usage.inputTokens + usage.outputTokens;
+    const matches = (events: readonly FactoryEvent[]) =>
+      events.filter(
+        (event) =>
+          event.kind === "budget" &&
+          event.runId === this.#run.runId &&
+          event.event === "BudgetReconciled" &&
+          event.phase === "management" &&
+          event.unit === "model_tokens" &&
+          event.usageId === usageId &&
+          event.workItem === reservation?.workItem &&
+          event.attempt === reservation?.attempt,
+      );
+    const existing = matches(this.#budgetEvents);
+    if (existing.some((event) => event.amount !== amount)) {
+      throw new Error("failed management usage conflicts with its budget receipt");
+    }
+    if (existing.length > 0) return;
+    try {
+      const event = await this.#lease.use((lease) => {
+        const common = {
+          lease,
+          sequence: this.#sequences.take(),
+          event: "BudgetReconciled" as const,
+          unit: "model_tokens" as const,
+          amount,
+          usageId,
+        };
+        return reservation
+          ? this.#recorder.budget({ ...common, reservation, workItemNodeId: nodeId })
+          : this.#recorder.objectiveBudget({ ...common, objectiveNodeId: nodeId });
+      });
+      this.#budgetEvents.push(event);
+    } catch (error) {
+      const snapshot = await this.#reader.readObjective(this.#run.objective);
+      this.#fenceSnapshot(snapshot);
+      const recovered = matches(snapshotEvents(snapshot));
+      if (recovered.some((event) => event.amount !== amount)) {
+        throw new Error("failed management usage conflicts with its recovered receipt");
+      }
+      if (recovered.length === 0) throw error;
+      this.#sequences.observe(snapshotEvents(snapshot));
+      this.#budgetEvents.push(...recovered);
+    }
   }
 
   async #recordReviewUsage(
@@ -4338,6 +4432,9 @@ export class FactorySupervisor {
         if (reviewBudget.modelTokens !== null && reviewBudget.modelTokens <= 0) {
           throw new Error("model-token budget is exhausted; refusing rebased semantic review");
         }
+        this.#assertManagementInvocationNotFailed(
+          `rebase-review-${reviewIdentityDigest(reviewIdentity)}`,
+        );
         const reviewModel = resolveModelSelection(this.#policy, "review");
         invokeReview = (checkpoint) =>
           this.#externalAdmission(() =>
@@ -4385,6 +4482,13 @@ export class FactorySupervisor {
           ),
         recover: () => this.#reviews.load(reviewIdentity),
         recordUsage: (record) => this.#recordReviewUsage(record, item, member.reservation),
+        recordFailureUsage: (usage) =>
+          this.#recordFailedManagementUsage(
+            `rebase-review-${reviewIdentityDigest(reviewIdentity)}`,
+            usage,
+            item.id,
+            member.reservation,
+          ),
         recordOutcome: (record) =>
           this.#recordRebaseReviewOutcome(
             record,

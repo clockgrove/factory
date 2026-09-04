@@ -1,7 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { ManagementOutputError } from "../src/management/backend.js";
 
 import {
   CODEX_COMPILED_OBJECTIVE_SCHEMA,
+  CodexCliManagementBackend,
   codexCompiledObjectiveSchema,
   parseManagementJsonlOutput,
 } from "../src/management/codex-cli.js";
@@ -17,6 +19,122 @@ function objectSchemas(value: unknown): Array<Record<string, unknown>> {
 }
 
 describe("Codex management backend", () => {
+  it("retains valid compiler usage when durable checkpoint persistence fails", async () => {
+    const usage = { inputTokens: 30, outputTokens: 12 };
+    const backend = new CodexCliManagementBackend({
+      runStructured: async () => ({
+        usage,
+        value: {
+          title: "Test",
+          workItems: [
+            {
+              id: "code",
+              title: "Implement code",
+              goal: "Implement code",
+              acceptance: ["Tests pass"],
+              scope: ["src/code.ts"],
+              preconditions: [],
+              outOfScope: [],
+              conventions: [],
+              dependsOn: [],
+              baseSha: "a".repeat(40),
+              validationCommands: ["npm test"],
+              requirements: {
+                os: ["linux"],
+                architecture: ["x64"],
+                cpu: 1,
+                memoryMb: 2048,
+                diskMb: 1024,
+                timeoutMinutes: 30,
+                estimatedDurationMinutes: 10,
+                tools: ["node", "npm"],
+                services: [],
+                networkDestinations: [],
+                permittedSecretNames: [],
+                trust: "trusted_local",
+              },
+              artifactContract: "clockgrove.factory/artifact-v1",
+            },
+          ],
+        },
+      }),
+    });
+    const checkpoint = vi.fn(async () => {
+      throw new Error("persistence unavailable");
+    });
+    await expect(
+      backend.compile(
+        {
+          repository: process.cwd(),
+          objective: { number: 1, title: "Test", body: "Test" },
+          defaultBranch: "main",
+          baseSha: "a".repeat(40),
+          repositoryFiles: ["src/code.ts", "package.json"],
+          allowedNetworkDestinations: [],
+        },
+        checkpoint,
+      ),
+    ).rejects.toMatchObject({
+      name: "ManagementOutputError",
+      usage,
+      message: "persistence unavailable",
+    });
+    expect(checkpoint).toHaveBeenCalledTimes(1);
+  });
+
+  it("retains observed usage when compiler output is rejected before its checkpoint", async () => {
+    const usage = { inputTokens: 30, outputTokens: 12 };
+    const backend = new CodexCliManagementBackend({
+      runStructured: async () => ({ value: { title: "invalid", workItems: [] }, usage }),
+    });
+    const checkpoint = vi.fn();
+    await expect(
+      backend.compile(
+        {
+          repository: "/tmp",
+          objective: { number: 1, title: "Test", body: "Test" },
+          defaultBranch: "main",
+          baseSha: "a".repeat(40),
+          repositoryFiles: [],
+          allowedNetworkDestinations: [],
+        },
+        checkpoint,
+      ),
+    ).rejects.toMatchObject({ name: "ManagementOutputError", usage });
+    expect(checkpoint).not.toHaveBeenCalled();
+  });
+
+  it("recovers unique terminal counters after malformed result JSON without accepting the result", () => {
+    const stdout = [
+      JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "{invalid" } }),
+      JSON.stringify({ type: "turn.completed", usage: { input_tokens: 30, output_tokens: 12 } }),
+    ].join("\n");
+    let observed: unknown;
+    try {
+      parseManagementJsonlOutput(stdout);
+    } catch (error) {
+      observed = error;
+    }
+    expect(observed).toBeInstanceOf(ManagementOutputError);
+    expect(observed).toMatchObject({ usage: { inputTokens: 30, outputTokens: 12 } });
+  });
+
+  it("does not invent an aggregate for ambiguous completion counters", () => {
+    const stdout = [
+      JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "{}" } }),
+      JSON.stringify({ type: "turn.completed", usage: { input_tokens: 30, output_tokens: 12 } }),
+      JSON.stringify({ type: "turn.completed", usage: { input_tokens: 40, output_tokens: 15 } }),
+    ].join("\n");
+    let observed: unknown;
+    try {
+      parseManagementJsonlOutput(stdout);
+    } catch (error) {
+      observed = error;
+    }
+    expect(observed).not.toBeInstanceOf(ManagementOutputError);
+    expect(observed).toMatchObject({ message: expect.stringContaining("multiple turn.completed") });
+  });
+
   it("uses a strict structured-output schema accepted by the Codex API", () => {
     for (const schema of objectSchemas(CODEX_COMPILED_OBJECTIVE_SCHEMA)) {
       const properties = Object.keys(

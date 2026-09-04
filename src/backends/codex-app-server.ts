@@ -1,5 +1,5 @@
 import { constants as fsConstants } from "node:fs";
-import { access, mkdir, readdir, readFile, rm, symlink } from "node:fs/promises";
+import { access, mkdir, readFile, rm, symlink } from "node:fs/promises";
 import { arch, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -29,6 +29,7 @@ import {
   resolveCodexHomeRoot,
 } from "../runtime/codex-home.js";
 import { collectLocalArtifact } from "../runtime/local-worktree.js";
+import { linuxProcessIds } from "../runtime/process-group.js";
 import {
   startCodexAppServer,
   type AppServerConnection,
@@ -279,13 +280,12 @@ async function wait(ms: number): Promise<void> {
 async function processGroupsForAttempt(attemptId: string): Promise<number[]> {
   const expected = `FACTORY_ATTEMPT_ID=${attemptId}`;
   const groups = new Set<number>();
-  for (const entry of await readdir("/proc", { withFileTypes: true })) {
-    if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
-    const environment = await readFile(`/proc/${entry.name}/environ`).catch(() => null);
+  for (const pid of await linuxProcessIds()) {
+    const environment = await readFile(`/proc/${pid}/environ`).catch(() => null);
     if (!environment || !environment.toString("utf8").split("\0").includes(expected)) {
       continue;
     }
-    const stat = await readFile(`/proc/${entry.name}/stat`, "utf8").catch(() => null);
+    const stat = await readFile(`/proc/${pid}/stat`, "utf8").catch(() => null);
     if (!stat) continue;
     const suffix = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
     const processGroup = Number(suffix[2]);

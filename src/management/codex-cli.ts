@@ -32,6 +32,7 @@ import type {
 } from "./backend.js";
 import { restrictedCodexArgs } from "../backends/codex-cli-policy.js";
 import { compileObjective } from "../compiler/index.js";
+import { ManagementOutputError } from "./backend.js";
 
 export const CODEX_COMPILED_OBJECTIVE_SCHEMA = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -321,6 +322,39 @@ export function parseManagementJsonlOutput<T>(stdout: string): {
   value: T;
   usage: ManagementUsage;
 } {
+  try {
+    return parseManagementJsonlResult<T>(stdout);
+  } catch (error) {
+    const usage = observedCompletionUsage(stdout);
+    if (usage) throw new ManagementOutputError(error, usage);
+    throw error;
+  }
+}
+
+/** Recover counters independently of an invalid payload; ambiguous completions stay unknown. */
+function observedCompletionUsage(stdout: string): ManagementUsage | undefined {
+  const completions: unknown[] = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    try {
+      const event = JSON.parse(line);
+      if (event?.type === "turn.completed") completions.push(event.usage);
+    } catch {
+      // Diagnostics and malformed payload lines do not invalidate separate terminal counters.
+    }
+  }
+  if (completions.length !== 1) return undefined;
+  const usage = completions[0] as { input_tokens?: unknown; output_tokens?: unknown } | undefined;
+  try {
+    return assertManagementUsage({
+      inputTokens: usage?.input_tokens,
+      outputTokens: usage?.output_tokens,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+function parseManagementJsonlResult<T>(stdout: string): { value: T; usage: ManagementUsage } {
   let value: T | undefined;
   let usage: ManagementUsage | undefined;
   let resultCount = 0;
@@ -447,39 +481,44 @@ export class CodexCliManagementBackend implements ManagementBackend {
       prompt,
       context.modelSelection,
     );
-    const providerObjective = parseManagementCompilerOutput(value);
-    let objective: CompiledObjective = providerObjective;
-    if (objective.title !== context.objective.title) {
-      throw new Error("compiler changed the Objective title");
+    let result: CompilationResult;
+    try {
+      const providerObjective = parseManagementCompilerOutput(value);
+      let objective: CompiledObjective = providerObjective;
+      if (objective.title !== context.objective.title) {
+        throw new Error("compiler changed the Objective title");
+      }
+      for (const item of objective.workItems) {
+        if (item.baseSha !== context.baseSha)
+          throw new Error(`compiler emitted wrong base SHA for ${item.id}`);
+        item.scope = item.scope.map((path) => RepositoryScopePathSchema.parse(path));
+        if (item.requirements)
+          item.requirements = ExecutionRequirementsSchema.parse(item.requirements);
+      }
+      const packageScripts = await readFile(join(context.repository, "package.json"), "utf8").then(
+        (text) => {
+          const parsed = JSON.parse(text) as { scripts?: unknown };
+          return parsed.scripts && typeof parsed.scripts === "object"
+            ? (parsed.scripts as Record<string, string>)
+            : {};
+        },
+        () => ({}),
+      );
+      objective = compileObjective({
+        title: context.objective.title,
+        baseSha: context.baseSha,
+        repositoryFacts: {
+          files: context.repositoryFiles.map((path) => ({ path })),
+          scripts: packageScripts,
+        },
+        workItems: providerObjective.workItems,
+      });
+      validateGraph(objective);
+      result = { objective, usage };
+      await checkpoint(result);
+    } catch (error) {
+      throw new ManagementOutputError(error, usage);
     }
-    for (const item of objective.workItems) {
-      if (item.baseSha !== context.baseSha)
-        throw new Error(`compiler emitted wrong base SHA for ${item.id}`);
-      item.scope = item.scope.map((path) => RepositoryScopePathSchema.parse(path));
-      if (item.requirements)
-        item.requirements = ExecutionRequirementsSchema.parse(item.requirements);
-    }
-    const packageScripts = await readFile(join(context.repository, "package.json"), "utf8").then(
-      (text) => {
-        const parsed = JSON.parse(text) as { scripts?: unknown };
-        return parsed.scripts && typeof parsed.scripts === "object"
-          ? (parsed.scripts as Record<string, string>)
-          : {};
-      },
-      () => ({}),
-    );
-    objective = compileObjective({
-      title: context.objective.title,
-      baseSha: context.baseSha,
-      repositoryFacts: {
-        files: context.repositoryFiles.map((path) => ({ path })),
-        scripts: packageScripts,
-      },
-      workItems: providerObjective.workItems,
-    });
-    validateGraph(objective);
-    const result = { objective, usage };
-    await checkpoint(result);
     return result;
   }
 
@@ -510,8 +549,13 @@ export class CodexCliManagementBackend implements ManagementBackend {
       prompt,
       context.modelSelection,
     );
-    const result = { review: ReviewSchema.parse(value), usage };
-    await checkpoint(result);
+    let result: ReviewResult;
+    try {
+      result = { review: ReviewSchema.parse(value), usage };
+      await checkpoint(result);
+    } catch (error) {
+      throw new ManagementOutputError(error, usage);
+    }
     return result;
   }
 
@@ -586,9 +630,12 @@ export class CodexCliManagementBackend implements ManagementBackend {
           .join("\n");
         const diagnostic =
           streams.length <= 7_000 ? streams : `[diagnostic truncated]\n${streams.slice(-6_900)}`;
-        throw new Error(
+        const error = new Error(
           `management backend failed: ${diagnostic || "Codex CLI exited without diagnostics"}`,
         );
+        const usage = observedCompletionUsage(result.stdout);
+        if (usage) throw new ManagementOutputError(error, usage);
+        throw error;
       }
       return parseManagementJsonlOutput<T>(result.stdout);
     } finally {

@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "scope": "installed-local-objective-failure",
+  "outcome": "failed",
+  "releaseGatesClosed": [],
+  "testedCommit": "65a4ec02910b2c15fb8c350f9a9275860f4bb45a",
+  "pluginVersion": "2.0.26",
+  "mcpBundleSha256": "661cdf66870d95fe04da76cd5320459cdca46e25d0c6bb15ae21fa924a177908",
+  "objectiveUrl": "https://github.com/clockgrove/factory-conformance/issues/1",
+  "runId": "3e58319b-e75f-402a-bab6-19b65955b410",
+  "startedAt": "2026-09-04T21:05:26.000Z",
+  "finishedAt": "2026-09-04T21:06:29.000Z",
+  "terminalState": "escalated",
+  "reason": "unobservable acceptance criterion in clamp",
+  "terminalReceipt": "https://github.com/clockgrove/factory-conformance/issues/1#issuecomment-5546450716",
+  "deliverySelected": "native-stacks",
+  "deliveryReceipt": "https://github.com/clockgrove/factory-conformance/issues/1#issuecomment-5546441791",
+  "observedWorkItems": 0,
+  "observedAttempts": 0,
+  "observedPublications": 0,
+  "modelUsage": {
+    "availability": "unavailable",
+    "reason": "The compiler response was rejected before a durable graph checkpoint; this candidate discarded its token counters. Missing receipts do not mean zero usage, and the historical counters cannot be reconstructed."
+  },
+  "diagnosis": "The compiler's subject/verb vocabulary check could reject valid API acceptance criteria. The exact generated criterion was not retained, so its wording cannot be established from these receipts.",
+  "limitations": "Capability selection is not evidence of stack publication or integration. No happy-path, concurrency, recovery, or paid-provider gate passed in this run."
+}

@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { ManagementOutputError } from "../src/management/backend.js";
 
 import {
   runDurableReviewTransaction,
@@ -41,6 +42,47 @@ function checkpoint(kind: "artifact" | "rebase" = "artifact"): ReviewCheckpointR
 }
 
 describe("durable semantic review transaction", () => {
+  it("accounts malformed paid review output without publishing an outcome", async () => {
+    const recordFailureUsage = vi.fn();
+    const recordOutcome = vi.fn();
+    const recordUsage = vi.fn();
+    const error = new ManagementOutputError(new Error("invalid review"), result.usage);
+    await expect(
+      runDurableReviewTransaction({
+        existing: null,
+        invoke: async () => {
+          throw error;
+        },
+        persist: async () => checkpoint(),
+        recover: async () => null,
+        recordUsage,
+        recordFailureUsage,
+        recordOutcome,
+      }),
+    ).rejects.toBe(error);
+    expect(recordFailureUsage).toHaveBeenCalledExactlyOnceWith(result.usage);
+    expect(recordOutcome).not.toHaveBeenCalled();
+    expect(recordUsage).not.toHaveBeenCalled();
+  });
+
+  it("does not count a rejected call again when its immutable review checkpoint exists", async () => {
+    const recordFailureUsage = vi.fn();
+    const recordUsage = vi.fn();
+    await runDurableReviewTransaction({
+      existing: null,
+      invoke: async () => {
+        throw new ManagementOutputError(new Error("lost return"), result.usage);
+      },
+      persist: async () => checkpoint(),
+      recover: async () => checkpoint(),
+      recordUsage,
+      recordFailureUsage,
+      recordOutcome: async () => {},
+    });
+    expect(recordUsage).toHaveBeenCalledTimes(1);
+    expect(recordFailureUsage).not.toHaveBeenCalled();
+  });
+
   it.each<ReviewFaultPoint>([
     "after-model-result",
     "after-checkpoint",

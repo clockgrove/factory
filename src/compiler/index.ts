@@ -65,19 +65,27 @@ export type CompileInput = {
 const sorted = (xs: string[]) => [...new Set(xs)].sort();
 const overlaps = (a: string, b: string) =>
   a === b || (a.endsWith("/") && b.startsWith(a)) || (b.endsWith("/") && a.startsWith(b));
-// An observable criterion states both a subject and a checkable outcome. Bare
-// aspirational verbs ("improve", "produce", "make valid") are not evidence.
-const observable = (criterion: string) => {
+// This is a structural guard, not a natural-language observability classifier.
+// Function names, equations, error behavior, and domain vocabulary are all valid
+// ways to describe acceptance. Reject only malformed text and obvious whole-text
+// placeholders; matching a vocabulary can never establish semantic acceptance.
+// The management compiler must formulate checkable criteria, and independent
+// semantic review must establish each one against authoritative validation evidence.
+const acceptanceTextProblem = (criterion: string): string | undefined => {
   const text = criterion.trim();
-  return (
-    text.length >= 8 &&
-    /\b(?:tests?|commands?|files?|output|result|response|schema|graph|manifest|profile|build|typecheck|render|snapshot|simulation)\b/i.test(
-      text,
-    ) &&
-    /\b(?:pass(?:es)?|fails?|rejects?|accepts?|equals?|contains?|matches?|records?|returns?|emits?|exists?|remains? (?:unchanged|stable|bounded|valid)|compiles?|renders?)\b/i.test(
-      text,
+  if (text.length === 0) return "criterion is blank";
+  if (criterion.length > 2_000) return "criterion exceeds 2000 characters";
+  if (!/[\p{L}\p{N}]/u.test(text)) return "criterion contains no descriptive text";
+  // Anchor these narrowly: e.g. a statement describing how a literal 'TODO' is
+  // handled is not itself a placeholder. Unrecognized prose is left to review.
+  const statement = text.replace(/[.!?]+$/, "").trim();
+  if (
+    /^(?:todo|tbd|n\/?a|none|done|works?|works? (?:well|correctly|as expected)|make it better|improve (?:it|quality|performance)|(?:all )?tests? (?:are|is) (?:good|great|wonderful))$/i.test(
+      statement,
     )
-  );
+  )
+    return "criterion is only a placeholder or an unspecified quality claim";
+  return undefined;
 };
 
 export function canonicalizeObjective(input: CompilerObjective): CompilerObjective {
@@ -151,8 +159,15 @@ export function validateCompiledObjective(
     if (byId.has(w.id)) throw new Error(`duplicate Work Item id ${w.id}`);
     byId.set(w.id, w);
     w.scope.forEach((p) => RepositoryScopePathSchema.parse(p));
-    if (w.acceptance.some((c) => !observable(c)))
-      throw new Error(`unobservable acceptance criterion in ${w.id}`);
+    if (w.acceptance.length < 1 || w.acceptance.length > 64)
+      throw new Error(`invalid acceptance criteria in ${w.id}: provide between 1 and 64 criteria`);
+    for (const [index, criterion] of w.acceptance.entries()) {
+      const problem = acceptanceTextProblem(criterion);
+      if (problem)
+        throw new Error(
+          `invalid acceptance criterion ${index + 1} in ${w.id}: ${problem}; state a concrete expected behavior or result and associate it with validation evidence`,
+        );
+    }
     if (w.validationCommands.length < 1) throw new Error(`missing validation command in ${w.id}`);
     if (observedCommands && w.validationCommands.some((c) => !observedCommands.includes(c)))
       throw new Error(`invented validation command in ${w.id}`);

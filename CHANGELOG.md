@@ -27,6 +27,9 @@ builds are published through npm's `next` distribution tag.
 
 ### Security
 
+- Rejected management output retains observed token usage, with checkpoint-first recovery and
+  failed-invocation replay protection.
+
 - Workers are treated as untrusted artifact producers without GitHub mutation, merge, budget, or
   Director authority.
 - Credentials are stripped or brokered by name, artifacts are independently validated, mutations are

@@ -170,25 +170,81 @@ describe("bounded objective compiler", () => {
       "npm run typecheck",
     ]);
   });
-  it("rejects cycles, unobservable criteria, overlap, invented commands, and topology", () => {
+  it("preserves function, exception, and domain acceptance through compilation and validation", () => {
+    const acceptance = [
+      "clamp(-1, 0, 10) returns 0; clamp(11, 0, 10) returns 10",
+      "RangeError is thrown when the lower bound exceeds the upper bound",
+      "clamp(5, 0, 10) === 5",
+      "A player at zero health cannot move until respawn",
+      "入力が空の場合、空配列を返す",
+      "A literal TODO in the document is preserved",
+    ];
+    const objective = compileObjective({
+      title: "Implement boundary behavior",
+      baseSha: sha,
+      repositoryFacts: facts,
+      workItems: [{ ...base, acceptance }],
+    });
+    const compiled = objective.workItems[0]!;
+    expect(compiled.acceptance).toEqual([...acceptance].sort());
+    expect(compiled.validation.find((v) => v.tier === "semantic")?.criteria).toEqual(
+      compiled.acceptance,
+    );
+    expect(workerPacketFromCompiled(compiled).acceptanceCriteria).toEqual(compiled.acceptance);
+    expect(validationPlanFromPacket(workerPacketFromCompiled(compiled)).commands).toEqual(
+      base.validationCommands,
+    );
+    // Admitting natural language is not acceptance evidence: every criterion
+    // still has to be included in the independent validation design.
+    expect(() =>
+      validateCompiledObjective({
+        ...objective,
+        workItems: [
+          { ...compiled, validation: [{ tier: "semantic", criteria: [acceptance[0]!] }] },
+        ],
+      }),
+    ).toThrow(/unvalidated acceptance criterion/);
+  });
+
+  it.each([
+    "",
+    "  \n ",
+    "...",
+    "TODO",
+    "TBD.",
+    "Make it better",
+    "Tests are wonderful",
+    "Works as expected",
+  ])("rejects blank or vacuous acceptance %j with an actionable location", (criterion) => {
+    expect(() =>
+      validateCompiledObjective({
+        title: "x",
+        workItems: [{ ...base, acceptance: ["Tests pass", criterion] }],
+      }),
+    ).toThrow(/invalid acceptance criterion 2 in code: .*state a concrete expected behavior/);
+  });
+
+  it("bounds criteria before constructing worker packets", () => {
+    for (const acceptance of [[], Array(65).fill("Tests pass")]) {
+      expect(() =>
+        validateCompiledObjective({ title: "x", workItems: [{ ...base, acceptance }] }),
+      ).toThrow(/between 1 and 64 criteria/);
+    }
+    expect(() =>
+      validateCompiledObjective({
+        title: "x",
+        workItems: [{ ...base, acceptance: ["x".repeat(2_001)] }],
+      }),
+    ).toThrow(/exceeds 2000 characters/);
+  });
+
+  it("rejects cycles, overlap, invented commands, and topology", () => {
     expect(() =>
       validateCompiledObjective({
         title: "x",
         workItems: [{ ...base, dependsOn: ["code"] }],
       }),
     ).toThrow(/itself|cycle/);
-    expect(() =>
-      validateCompiledObjective({
-        title: "x",
-        workItems: [{ ...base, acceptance: ["Make it better"] }],
-      }),
-    ).toThrow(/unobservable/);
-    expect(() =>
-      validateCompiledObjective({
-        title: "x",
-        workItems: [{ ...base, acceptance: ["Tests are wonderful"] }],
-      }),
-    ).toThrow(/unobservable/);
     expect(() =>
       validateCompiledObjective({
         title: "x",

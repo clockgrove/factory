@@ -8,3 +8,4 @@ export function installedIdentity(input: unknown): {
   pluginId: string;
 };
 export function assertMcpSurface(tools: unknown): void;
+export function assertRetryableObjective(input: unknown): void;

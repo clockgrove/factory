@@ -91,6 +91,37 @@ Compile three Work Items: two independent foundational modules, followed by one 
 
 Use node --test test/<module>.test.js as each foundation's independent validation, and npm test for the final integration. No dependencies, services, credentials, cloud workers, workflows, or network access are needed by these modules. Preserve the existing repository. Complete publication, independent validation, integration, and issue closure through Factory.`;
 
+export function assertRetryableObjective({ issue, actorId, status, children, events, runId }) {
+  assert.equal(issue.state, "open", "retry requires an open Objective");
+  assert.ok(!issue.pull_request, "retry target must be an issue");
+  assert.equal(issue.body, objectiveBody, "retry Objective differs from this fixture");
+  assert.ok(Number.isInteger(actorId) && actorId > 0, "authenticated actor ID required");
+  assert.equal(issue.user?.id, actorId, "retry Objective belongs to another actor");
+  assert.equal(status.objective?.number, issue.number, "status belongs to another Objective");
+  assert.ok(typeof runId === "string" && runId.length > 0, "prior run ID required");
+  assert.equal(status.run?.runId, runId, "latest run differs from acknowledged failed run");
+  assert.equal(status.run?.state, "escalated", "retry requires a terminal escalated run");
+  assert.equal(children.length, 0, "retry cannot replace existing Work Items");
+  assert.equal(status.workItems?.length, 0, "retry cannot replace projected work");
+  assert.equal(status.summary?.attempts?.total, 0, "retry cannot replace attempted work");
+  const beforeCompilation = new Set([
+    "FactoryRunStarted",
+    "ControllerObserved",
+    "DeliverySelected",
+    "FactoryRunEscalated",
+    "BudgetReserved",
+    "BudgetReconciled",
+  ]);
+  assert.ok(
+    events.some((event) => event.runId === runId && event.event === "FactoryRunEscalated"),
+    "missing terminal failure receipt",
+  );
+  assert.ok(
+    events.every((event) => beforeCompilation.has(event.event)),
+    "retry requires failure before graph or execution receipts",
+  );
+}
+
 export function boundedPolicy(delivery = "regular-prs") {
   assert.ok(["regular-prs", "stacked-prs"].includes(delivery), "unsupported delivery mode");
   return {
@@ -304,6 +335,10 @@ export async function main() {
   );
   const suffix = randomUUID();
   const output = resolve(required("FACTORY_LIVE_OBJECTIVE_EVIDENCE"));
+  assert.ok(
+    !existsSync(join(output, "objective-evidence.json")),
+    "preserve prior run evidence; use a fresh output directory",
+  );
   mkdirSync(output, { recursive: true });
   const evidence = {
     schemaVersion: 1,
@@ -359,15 +394,44 @@ export async function main() {
       "installed server version mismatch",
     );
     assertMcpSurface((await client.listTools()).tools);
-    evidence.objective = (
-      await request("POST /repos/{owner}/{repo}/issues", {
-        title: `Factory installed local Objective ${suffix}`,
-        body: objectiveBody,
-      })
-    ).data;
+    const retryNumber = process.env.FACTORY_LIVE_OBJECTIVE_NUMBER;
+    if (retryNumber !== undefined) {
+      assert.match(retryNumber, /^[1-9]\d*$/, "invalid retry Objective number");
+      const issueNumber = Number(retryNumber);
+      assert.ok(Number.isSafeInteger(issueNumber), "invalid retry Objective number");
+      const issue = (
+        await request("GET /repos/{owner}/{repo}/issues/{issue_number}", {
+          issue_number: issueNumber,
+        })
+      ).data;
+      const status = await call("factory_status", { owner, repo, objectiveNumber: issueNumber });
+      const children = await list("GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues", {
+        issue_number: issueNumber,
+      });
+      const comments = await list("GET /repos/{owner}/{repo}/issues/{issue_number}/comments", {
+        issue_number: issueNumber,
+      });
+      const actorId = (await octokit.request("GET /user")).data.id;
+      const events = comments.flatMap((comment) =>
+        [...(comment.body ?? "").matchAll(/<!-- clockgrove-factory:event\n([\s\S]*?)\n-->/g)].map(
+          (match) => JSON.parse(match[1]),
+        ),
+      );
+      const runId = required("FACTORY_LIVE_OBJECTIVE_PRIOR_RUN_ID");
+      assertRetryableObjective({ issue, actorId, status, children, events, runId });
+      evidence.objective = issue;
+      evidence.retryOfRunId = runId;
+      evidence.priorStatus = status;
+    } else
+      evidence.objective = (
+        await request("POST /repos/{owner}/{repo}/issues", {
+          title: `Factory installed local Objective ${suffix}`,
+          body: objectiveBody,
+        })
+      ).data;
     save();
     console.log(
-      `Created disposable Objective ${evidence.objective.html_url}; installed Factory is running.`,
+      `${retryNumber ? "Retrying" : "Created"} disposable Objective ${evidence.objective.html_url}; installed Factory is running.`,
     );
     evidence.runResult = await call(
       "factory_run",

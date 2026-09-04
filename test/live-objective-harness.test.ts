@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   assertCompletion,
+  assertRetryableObjective,
   boundedPolicy,
   installedIdentity,
+  objectiveBody,
 } from "../scripts/verify-live-objective.mjs";
 import { parseRunPolicy } from "../src/protocol/policy.js";
 
@@ -64,6 +66,33 @@ function evidence() {
 }
 
 describe("installed live Objective harness evidence boundary", () => {
+  it("permits only an acknowledged same-actor failure before graph creation", () => {
+    const value = {
+      issue: { number: 1, state: "open", body: objectiveBody, user: { id: 42 } },
+      actorId: 42,
+      status: {
+        objective: { number: 1 },
+        run: { runId: "old", state: "escalated" },
+        workItems: [],
+        summary: { attempts: { total: 0 } },
+      },
+      children: [],
+      events: [{ runId: "old", event: "FactoryRunEscalated" }],
+      runId: "old",
+    };
+    expect(() => assertRetryableObjective(value)).not.toThrow();
+    for (const change of [
+      { actorId: 43 },
+      { runId: "different" },
+      { children: [{}] },
+      { issue: { ...value.issue, body: "different" } },
+      { issue: { ...value.issue, state: "closed" } },
+      { status: { ...value.status, run: { runId: "old", state: "running" } } },
+      { status: { ...value.status, summary: { attempts: { total: 1 } } } },
+      { events: [...value.events, { runId: "old", event: "GraphCompiled" }] },
+    ])
+      expect(() => assertRetryableObjective({ ...value, ...change })).toThrow();
+  });
   it("binds the documented Codex cachebuster to the canonical package and exact installed marketplace", () => {
     const input = {
       manifest: { name: "factory", version: "2.0.26+codex.20260904205148" },

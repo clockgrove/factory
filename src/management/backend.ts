@@ -9,6 +9,17 @@ export interface ManagementUsage {
   outputTokens: number;
 }
 
+/** A paid response was observed but could not become a valid management result. */
+export class ManagementOutputError extends Error {
+  readonly usage: ManagementUsage;
+
+  constructor(cause: unknown, usage: ManagementUsage) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+    this.name = "ManagementOutputError";
+    this.usage = { ...usage };
+  }
+}
+
 export interface CompilationContext {
   repository: string;
   objective: { number: number; title: string; body: string };

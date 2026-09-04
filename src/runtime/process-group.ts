@@ -1,10 +1,19 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
+import { readdir } from "node:fs/promises";
 
 import { assertNoSecretMaterial, MAX_LOG_BYTES } from "../protocol/limits.js";
 
 const activeGroups = new Set<number>();
 let exitHookInstalled = false;
+
+/** Enumerate names only: Dirent conversion may lstat a PID that has already exited. */
+export async function linuxProcessIds(procRoot = "/proc"): Promise<number[]> {
+  return (await readdir(procRoot))
+    .filter((name) => /^[1-9]\d*$/.test(name))
+    .map(Number)
+    .filter(Number.isSafeInteger);
+}
 
 export const PARENT_DEATH_WATCHDOG = String.raw`
 supervisor_pid="$1"

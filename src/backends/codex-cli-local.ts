@@ -1,4 +1,4 @@
-import { access, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { arch, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -23,6 +23,7 @@ import { collectLocalArtifact } from "../runtime/local-worktree.js";
 import { resolveCodexCommand } from "../runtime/codex-command.js";
 import {
   linuxProcessGroupId,
+  linuxProcessIds,
   sanitizedWorkerEnvironment,
   startContainedProcess,
   runContainedProcess,
@@ -540,10 +541,7 @@ export class CodexCliLocalBackend implements ExecutionBackend {
     const expected = `FACTORY_ATTEMPT_ID=${durableAttemptId(identity)}`;
     const hintedPid = Number(/^local-(\d+)$/.exec(identity.providerResourceId ?? "")?.[1]);
     const findGroups = async (marker: string): Promise<Set<number>> => {
-      const entries = await readdir("/proc", { withFileTypes: true });
-      const pids = entries
-        .filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name))
-        .map((entry) => Number(entry.name));
+      const pids = await linuxProcessIds();
       if (Number.isSafeInteger(hintedPid) && hintedPid > 0) {
         const index = pids.indexOf(hintedPid);
         if (index >= 0) pids.splice(index, 1);

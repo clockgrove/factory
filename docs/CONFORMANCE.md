@@ -12,6 +12,11 @@ are not release blockers.
 
 ## Proven on this branch
 
+The first installed multi-wave Objective escalated during compilation before creating Work Items.
+Its [failure record](release-evidence/local-objective-failure-2026-09-04.json) preserves the rejected
+acceptance check and unavailable historical model usage. It closes no live gate; missing token
+receipts are not evidence of zero consumption.
+
 | Surface | Evidence | Status |
 |---|---|---|
 | GitHub custom control refs | Live custom-ref, metadata-commit, workflow-side-effect, and GraphQL compare-and-swap probes against `clockgrove/factory` | Passed |

@@ -1,9 +1,15 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { ManagementOutputError } from "../src/management/backend.js";
 
-import { deriveBudgetUsage } from "../src/control/budget.js";
+import { deriveBudgetUsage, remainingBudget } from "../src/control/budget.js";
+import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 import type { CompiledGraphRecord } from "../src/control/graphs.js";
 import type { FactoryEvent } from "../src/protocol/events.js";
-import { runDurableCompilationTransaction, type CompilationFaultPoint } from "../src/supervisor.js";
+import {
+  assertManagementInvocationNotFailed,
+  runDurableCompilationTransaction,
+  type CompilationFaultPoint,
+} from "../src/supervisor.js";
 import type { CompilationCheckpoint, CompilationResult } from "../src/management/backend.js";
 
 const graphDigest = "d".repeat(64);
@@ -76,6 +82,73 @@ function budgetEvent(sequence: number): Extract<FactoryEvent, { kind: "budget" }
 }
 
 describe("durable compilation transaction", () => {
+  it("replays failed usage once and refuses the same paid invocation across restart", () => {
+    const invocationId = `compile-${"a".repeat(40)}`;
+    const receipt = { ...budgetEvent(1), usageId: `failed-${invocationId}` };
+    const events = [receipt, { ...receipt, sequence: 2 }];
+    const usage = deriveBudgetUsage(events);
+    expect(usage.modelTokens).toBe(30);
+    expect(
+      remainingBudget(
+        {
+          ...DEFAULT_RUN_POLICY,
+          economics: { ...DEFAULT_RUN_POLICY.economics!, maxModelTokens: 30 },
+        },
+        usage,
+      ).modelTokens,
+    ).toBe(0);
+    expect(() => assertManagementInvocationNotFailed(events, "run-test", invocationId)).toThrow(
+      /refusing replay/,
+    );
+    expect(() =>
+      assertManagementInvocationNotFailed(events, "new-run", invocationId),
+    ).not.toThrow();
+    expect(() =>
+      assertManagementInvocationNotFailed(events, "run-test", "another-call"),
+    ).not.toThrow();
+  });
+
+  it("records rejected compiler usage before propagating its error", async () => {
+    const recordFailureUsage = vi.fn();
+    const recordUsage = vi.fn();
+    const persist = vi.fn();
+    const error = new ManagementOutputError(new Error("invalid graph"), compilation.usage);
+    await expect(
+      runDurableCompilationTransaction({
+        existing: null,
+        invoke: async () => {
+          throw error;
+        },
+        persist,
+        recover: async () => null,
+        recordUsage,
+        recordFailureUsage,
+        preflight: async () => {},
+      }),
+    ).rejects.toBe(error);
+    expect(recordFailureUsage).toHaveBeenCalledExactlyOnceWith(compilation.usage);
+    expect(recordUsage).not.toHaveBeenCalled();
+    expect(persist).not.toHaveBeenCalled();
+  });
+
+  it("charges only the recovered checkpoint if a backend fails after saving its result", async () => {
+    const recordFailureUsage = vi.fn();
+    const recordUsage = vi.fn();
+    await runDurableCompilationTransaction({
+      existing: null,
+      invoke: async () => {
+        throw new ManagementOutputError(new Error("lost return"), compilation.usage);
+      },
+      persist: async () => record(),
+      recover: async () => record(),
+      recordUsage,
+      recordFailureUsage,
+      preflight: async () => {},
+    });
+    expect(recordUsage).toHaveBeenCalledTimes(1);
+    expect(recordFailureUsage).not.toHaveBeenCalled();
+  });
+
   it.each<CompilationFaultPoint>([
     "after-model-return",
     "after-graph-persistence",

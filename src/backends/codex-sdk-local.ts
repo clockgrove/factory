@@ -1,5 +1,5 @@
 import { constants as fsConstants } from "node:fs";
-import { access, chmod, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { arch } from "node:os";
 import { join } from "node:path";
 
@@ -36,7 +36,11 @@ import {
 } from "../runtime/codex-home.js";
 import { collectLocalArtifact } from "../runtime/local-worktree.js";
 import { resolveCodexCommand, type CodexCommand } from "../runtime/codex-command.js";
-import { runContainedProcess, sanitizedWorkerEnvironment } from "../runtime/process-group.js";
+import {
+  linuxProcessIds,
+  runContainedProcess,
+  sanitizedWorkerEnvironment,
+} from "../runtime/process-group.js";
 import { restrictedCodexConfig } from "./codex-cli-policy.js";
 import {
   CODEX_WORKER_OUTPUT_SCHEMA,
@@ -296,9 +300,7 @@ function signalProcess(pid: number, signal: NodeJS.Signals): void {
 }
 
 async function matchingAttemptProcesses(marker: string): Promise<number[]> {
-  const pids = (await readdir("/proc", { withFileTypes: true }))
-    .filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name))
-    .map((entry) => Number(entry.name));
+  const pids = await linuxProcessIds();
   const matches: number[] = [];
   for (const pid of pids) {
     if (await processEnvironmentContains(pid, marker)) matches.push(pid);

@@ -53,10 +53,19 @@ export type Refusal =
 interface HttpErrorLike {
   status?: number;
   message?: string;
+  headers?: Record<string, string | undefined>;
+  errors?: Array<GraphQlErrorLike>;
   response?: {
     headers?: Record<string, string | undefined>;
-    data?: { errors?: Array<{ type?: string }> };
+    data?: { errors?: Array<GraphQlErrorLike> };
+    errors?: Array<GraphQlErrorLike>;
   };
+}
+
+interface GraphQlErrorLike {
+  type?: string;
+  code?: string;
+  message?: string;
 }
 
 const DEFAULT_BACKOFF_MS = 60_000;
@@ -82,11 +91,25 @@ function headerNumber(
 export function classifyRefusal(error: unknown): Refusal {
   const e = error as HttpErrorLike;
   const status = e?.status;
-  const headers = e?.response?.headers;
+  // `RequestError` keeps these under `response`; `GraphqlResponseError`
+  // exposes both headers and errors at the top level and leaves `status`
+  // undefined. GitHub has emitted both RATE_LIMITED and RATE_LIMIT with the
+  // `graphql_rate_limit` code, so classification must use all documented
+  // client shapes rather than one enum spelling.
+  const headers = e?.response?.headers ?? e?.headers;
   const message = (e?.message ?? "").toLowerCase();
-  const graphQlRateLimited = e?.response?.data?.errors?.some(
-    (entry) => entry.type === "RATE_LIMITED",
-  ) ?? false;
+  const graphQlErrors = [
+    ...(e?.errors ?? []),
+    ...(e?.response?.errors ?? []),
+    ...(e?.response?.data?.errors ?? []),
+  ];
+  const graphQlRateLimited = graphQlErrors.some((entry) => {
+    const type = entry.type?.toUpperCase();
+    const code = entry.code?.toLowerCase();
+    const detail = entry.message?.toLowerCase() ?? "";
+    return type === "RATE_LIMITED" || type === "RATE_LIMIT" ||
+      code === "graphql_rate_limit" || detail.includes("rate limit");
+  });
   if (typeof status !== "number" && !graphQlRateLimited) {
     return { kind: "not_refusal" };
   }

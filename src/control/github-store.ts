@@ -156,6 +156,29 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     }
   }
 
+  async readRefWithServerTime(
+    ref: string,
+  ): Promise<{ oid: string | null; serverTime: Date }> {
+    try {
+      const response = await this.#call(() =>
+        this.#octokit.request("GET /repos/{owner}/{repo}/git/ref/{ref}", {
+          owner: this.#owner,
+          repo: this.#repo,
+          ref: stripRefs(ref),
+        }),
+      );
+      return {
+        oid: response.data.object.sha,
+        serverTime: responseDate(response),
+      };
+    } catch (error) {
+      if ((error as { status?: number }).status === 404) {
+        return { oid: null, serverTime: new Date() };
+      }
+      throw error;
+    }
+  }
+
   async listRefs(prefix: string): Promise<Array<{ ref: string; oid: string }>> {
     const response = await this.#call(() =>
       this.#octokit.request("GET /repos/{owner}/{repo}/git/matching-refs/{ref}", {

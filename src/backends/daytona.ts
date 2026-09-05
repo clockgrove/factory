@@ -20,6 +20,7 @@ import {
 } from "../execution/artifacts.js";
 import { assertNoSecretMaterial, MAX_LOG_BYTES } from "../protocol/limits.js";
 import { destinationAllowedByPolicy } from "../protocol/policy.js";
+import { validationInvocationOwnership } from "./validation-invocation.js";
 import {
   parseSandboxPaths,
   parseIsolatedValidationResult,
@@ -588,6 +589,7 @@ export class DaytonaBackend implements ExecutionBackend {
   }
 
   async validate(context: IsolatedValidationContext): Promise<IsolatedValidationResult> {
+    const invocationOwner = validationInvocationOwnership(context);
     if (this.#now() >= context.deadline.getTime()) {
       throw new Error("Daytona validation deadline elapsed before sandbox creation");
     }
@@ -613,6 +615,7 @@ export class DaytonaBackend implements ExecutionBackend {
           labels: {
             factory: "v2",
             phase: "validation",
+            ...(invocationOwner ? { invocationOwner } : {}),
             objective: String(context.objective),
             workItem: String(context.workItem),
             attempt: String(context.attempt),
@@ -646,9 +649,18 @@ export class DaytonaBackend implements ExecutionBackend {
         "validation",
         ttlMinutes,
         createFailure,
+        invocationOwner ?? undefined,
       );
       throw safeFailure(createFailure, "Daytona validator creation failure");
     }
+
+    if (
+      invocationOwner &&
+      (sandbox.name !== resourceName || sandbox.labels?.invocationOwner !== invocationOwner)
+    )
+      throw new Error(
+        "Daytona created validation resource has mismatching ownership; refusing use or cleanup",
+      );
 
     const tracked: TrackedDaytona = {
       sandbox,
@@ -711,6 +723,7 @@ export class DaytonaBackend implements ExecutionBackend {
   }
 
   async reconcileStale(identity: StaleAttemptIdentity): Promise<void> {
+    const invocationOwner = validationInvocationOwnership(identity);
     const resourceName = sandboxResourceName(identity, identity.phase);
     const locator = identity.providerResourceId ?? resourceName;
     const durableReplacementFence = identity.providerResourceId
@@ -720,6 +733,12 @@ export class DaytonaBackend implements ExecutionBackend {
       (resource) => resource.resourceName === resourceName || resource.sandbox.id === locator,
     );
     if (tracked) {
+      if (
+        invocationOwner &&
+        (tracked.sandbox.name !== resourceName ||
+          tracked.sandbox.labels?.invocationOwner !== invocationOwner)
+      )
+        throw new Error("Daytona tracked validation resource ownership mismatch; refusing cleanup");
       await this.#deleteTracked(tracked, "stale-attempt reconciliation");
       return;
     }
@@ -777,6 +796,13 @@ export class DaytonaBackend implements ExecutionBackend {
       phase: identity.phase === "validation" ? "validation" : "execution",
       ...(ambiguity ? { ttlMinutes: ambiguity.ttlMinutes } : {}),
     };
+    if (
+      invocationOwner &&
+      (sandbox.name !== resourceName || sandbox.labels?.invocationOwner !== invocationOwner)
+    )
+      throw new Error(
+        "Daytona validation invocation resource ownership mismatch; refusing cleanup",
+      );
     this.#track(recovered);
     await this.#deleteTracked(recovered, "stale-attempt reconciliation");
   }
@@ -913,6 +939,7 @@ export class DaytonaBackend implements ExecutionBackend {
     phase: "execution" | "validation",
     ttlMinutes: number,
     createFailure: unknown,
+    invocationOwner?: string,
   ): Promise<void> {
     const definitiveRejection = isDefinitiveCreateRejection(createFailure);
     const ambiguity: AmbiguousDaytonaCreate = {
@@ -951,6 +978,11 @@ export class DaytonaBackend implements ExecutionBackend {
         ttlMinutes,
       });
     }
+    if (
+      invocationOwner &&
+      (sandbox.name !== resourceName || sandbox.labels?.invocationOwner !== invocationOwner)
+    )
+      throw new Error("Daytona ambiguous validation resource ownership mismatch; refusing cleanup");
     const tracked: TrackedDaytona = {
       sandbox,
       resourceName,

@@ -175,7 +175,7 @@ export async function validateArtifactClean(
     let evidenceStartedAt = startedAt.toISOString();
     let evidenceCompletedAt: string;
     let environmentIdentity: string | undefined;
-    if (plan.isolation === "isolated") {
+    if (plan.isolation === "isolated" || input.isolatedValidator) {
       const isolated = await input.isolatedValidator!();
       if (isolated.outputTreeSha !== outputTreeSha) {
         throw new Error(

@@ -153,6 +153,44 @@ function rerun(
 }
 
 describe("immutable merge-candidate validation checkpoints", () => {
+  it("persists exact isolated resource completion across restart and refuses changed ownership", async () => {
+    const f = fixture();
+    const isolatedResource = {
+      backend: "codex-cli/daytona" as const,
+      invocationOwnershipDigest: digest("c"),
+      startedAt: now.toISOString(),
+      completedAt: new Date(now.getTime() + 3000).toISOString(),
+      sandboxMilliseconds: 3000,
+    };
+    const first = await f.manager.persist({ ...f.args, isolatedResource });
+    expect((await f.manager.load(f.args.identity))?.isolatedResource).toEqual(isolatedResource);
+    expect((await f.manager.persist({ ...f.args, isolatedResource })).commitOid).toBe(
+      first.commitOid,
+    );
+    await expect(
+      f.manager.persist({
+        ...f.args,
+        isolatedResource: { ...isolatedResource, invocationOwnershipDigest: digest("f") },
+      }),
+    ).rejects.toThrow(/conflicting/);
+    await expect(f.manager.persist(f.args)).rejects.toThrow(/conflicting/);
+  });
+  it("rejects invented or negative resource lifetime before checkpoint writes", async () => {
+    const f = fixture();
+    await expect(
+      f.manager.persist({
+        ...f.args,
+        isolatedResource: {
+          backend: "codex-cli/daytona",
+          invocationOwnershipDigest: digest("c"),
+          startedAt: now.toISOString(),
+          completedAt: new Date(now.getTime() + 3000).toISOString(),
+          sandboxMilliseconds: 100,
+        },
+      }),
+    ).rejects.toThrow(/duration/);
+    expect(f.store.writes).toEqual([]);
+  });
   it("persists complete bound evidence with the target base as its sole parent and no artifact patch", async () => {
     const f = fixture();
     const record = await f.manager.persist(f.args);

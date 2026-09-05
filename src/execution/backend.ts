@@ -91,6 +91,15 @@ export interface BackendObservation {
 
 export interface IsolatedValidationContext extends AttemptContext {
   artifact: NormalizedArtifact;
+  /** Distinct, immutable revalidation of a published sibling; never an attempt retry. */
+  validationInvocation?: IntegrationValidationInvocation;
+}
+
+export interface IntegrationValidationInvocation {
+  kind: "integration-candidate";
+  identityDigest: string;
+  artifactDigest: string;
+  baseSha: string;
 }
 
 export interface IsolatedValidationResult {
@@ -105,6 +114,9 @@ export interface IsolatedValidationResult {
 }
 
 export interface StaleAttemptIdentity {
+  /** Required with validationInvocation to bind the original resource authority. */
+  policyDigest?: string;
+  validationInvocation?: IntegrationValidationInvocation;
   /** Canonical GitHub repository identity (OWNER/REPO), required for safe local fencing. */
   repository: string;
   objective: number;

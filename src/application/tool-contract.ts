@@ -32,6 +32,9 @@ export const APPLICATION_TOOL_DEFINITIONS: ReadonlyArray<
 > = [
   ["factory_doctor", "doctor", READ],
   ["factory_plan", "plan", READ],
+  ["factory_recovery_plan", "recovery-plan", READ],
+  ["factory_recovery_propose", "recovery-propose", READ],
+  ["factory_recovery_request", "recovery-request", WRITE],
   ["factory_status", "status", READ],
   ["factory_explain", "explain", READ],
   ["factory_activate", "activate", WRITE],

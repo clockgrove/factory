@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "kind": "offline-supervisor-and-installed-entrypoint-component",
+  "observedAt": "2026-09-05",
+  "sourceCommit": "e93acae850254930cfa9c420b25bf99ad21e5c00",
+  "scope": {
+    "delivery": "native-mode independent sibling PRs",
+    "runtime": "trusted-local Linux",
+    "originalPullRequestHeadPreserved": true,
+    "terminalRunRestarted": false,
+    "cloudResourcesCreated": false,
+    "publicationToRegistryPerformed": false,
+    "installedObjectiveEndToEndPassed": false,
+    "liveNativeStackGatePassed": false
+  },
+  "verification": {
+    "command": "npm run build && npm run verify:release",
+    "exitCode": 0,
+    "testFilesPassed": 90,
+    "testsPassed": 1512,
+    "testsSkipped": 1,
+    "supervisorScenarios": 9,
+    "typecheck": "passed",
+    "lint": "passed",
+    "format": "passed",
+    "schemas": "passed",
+    "reproducibleBundles": "passed",
+    "cleanTemporaryPluginInstall": "passed",
+    "cleanTemporaryNpmTarballInstall": "passed",
+    "dependencyAuditVulnerabilities": 0,
+    "independentAdversarialReview": "no remaining actionable findings"
+  },
+  "supervisorCoverage": [
+    "two independently published siblings integrate with the original second PR head unchanged",
+    "external trunk advancement rejected before new semantic review",
+    "lost merge response recovers through a new lease without repeated validation, review, or merge",
+    "missing post-close integration receipt repaired before it can justify another candidate",
+    "stale GitHub test-merge evidence waits and reuses the same validation and review",
+    "GitHub test-merge tree mismatch rejected before merge",
+    "failed combined-tree validation records native duration and preserves unresolved resource capacity",
+    "semantic rejection prevents merge",
+    "thrown validator does not fabricate cleanup or a completion checkpoint"
+  ],
+  "installedArtifact": {
+    "packageName": "@clockgrove/factory",
+    "packageVersion": "2.0.26",
+    "origin": "npm pack of the exact committed source snapshot, not the public registry",
+    "tarballSha256": "49aca9f80a9682151f9f0e2d645b07a81dbaa3ee7e6ca519807b708feb7f9ba2",
+    "codexCachebusterVersion": "2.0.26+codex.20260905031526",
+    "cliSha256": "66b7f68bb9cbcc9841051427514c578feab2adb4613a919c29960b532c8f1be3",
+    "mcpSha256": "ae8b32ec263f01794c3a24204144edbd5f895a9b2f91e30bacf11c2cd6d289bd",
+    "reinstall": "official personal-marketplace cachebuster and codex plugin add flow",
+    "installedCliHelp": "passed",
+    "freshInstalledMcpReadOnlyStatus": "passed",
+    "priorQualificationState": "escalated, unchanged",
+    "controllerStateBeforeReplacement": "inactive"
+  },
+  "limitations": [
+    "Offline Supervisor tests use real local Git and immutable control stores with simulated GitHub and management responses; no live model worker is launched.",
+    "The dependent join and full installed Objective have not completed.",
+    "A validator interrupted before its completion checkpoint still requires independent resource reconciliation; it is not automatically relaunched.",
+    "GitHub REST squash merge does not provide base-SHA compare-and-swap; a competing external base write is detected by post-merge parent/tree verification, not atomically prevented.",
+    "Registry installation, published provenance, the complete Linux matrix, live native stacks, managed providers, Daytona burst, and successor execution retain their separate release gates."
+  ]
+}

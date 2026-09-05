@@ -17,6 +17,9 @@ import { GitHubControlStore } from "./control/github-store.js";
 import { DEFAULT_RUN_POLICY, parseRunPolicy } from "./protocol/policy.js";
 import { allDone, counts, derive, isStalled, ready } from "./state.js";
 import { FactoryApplicationService } from "./application/index.js";
+import { assessRecovery } from "./recovery/assessment.js";
+import { recoveryReadPort } from "./recovery/github-read-port.js";
+import { RecoveryRequestService } from "./recovery/requests.js";
 import { CodexCliManagementBackend } from "./management/codex-cli.js";
 import { runForegroundObjective, runGitHubRepositoryController } from "./controller/index.js";
 import { SystemdControllerLifecycle, SystemdUserService } from "./service/index.js";
@@ -30,11 +33,14 @@ const controllerLifecycle = new SystemdControllerLifecycle(
 const USAGE = [
   "usage:",
   "  factory run OWNER/REPO#NUMBER --until-terminal [--repo DIR] [--policy FILE]",
-  "  factory recover OWNER/REPO#NUMBER --until-terminal [--repo DIR] [--policy FILE]",
+  "  factory recover OWNER/REPO#NUMBER --until-terminal [--repo DIR] [--policy FILE]  (non-terminal restart only)",
   "  factory activate OWNER/REPO#NUMBER --request-id ID [--base-sha SHA] [--policy FILE]",
   "  factory controller run OWNER/REPO --repo DIR [--max-active-objectives N] [--max-local-workers N] [--max-paid-workers N]",
   "  factory controller install|start|stop|restart|status|uninstall OWNER/REPO --repo DIR",
   "  factory doctor|plan|status|explain|replay OWNER/REPO#NUMBER [--work-item NUMBER]",
+  "  factory recovery-plan OWNER/REPO#NUMBER  (read-only; does not authorize execution)",
+  "  factory recovery-propose OWNER/REPO#NUMBER --request-id ID [--allowance-increment FILE] [--acknowledge-unknown-usage DIGEST]",
+  "  factory recovery-request OWNER/REPO#NUMBER --request-id ID --plan-digest DIGEST [--allowance-increment FILE] [--acknowledge-unknown-usage DIGEST]",
   "  factory pause|resume|drain|pause-cloud|cancel OWNER/REPO#NUMBER --request-id ID [--reason TEXT]",
   "  factory retry OWNER/REPO#NUMBER --request-id ID --work-item NUMBER [--reason TEXT]",
   "  factory priority OWNER/REPO#NUMBER --request-id ID --work-item NUMBER --priority RANK",
@@ -64,13 +70,37 @@ function parseRepository(value: string): { owner: string; repo: string } {
   return { owner: match[1]!, repo: match[2]! };
 }
 
-function applicationFor(owner: string, repo: string): FactoryApplicationService {
+function applicationFor(
+  owner: string,
+  repo: string,
+  recoveryInspection = false,
+): FactoryApplicationService {
   const token = resolveGitHubToken();
   const store = new GitHubControlStore({ token, owner, repo });
+  const reader = new GitHubReader({ token, owner, repo, recoveryInspection });
   return new FactoryApplicationService({
     owner,
     repo,
-    reader: new GitHubReader({ token, owner, repo }),
+    reader,
+    ...(recoveryInspection
+      ? {
+          recovery: new RecoveryRequestService({
+            repository: `${owner}/${repo}`,
+            store,
+            readStore: recoveryReadPort(store, owner, repo),
+            readSnapshot: async (objective) => ({
+              snapshot: await reader.readObjective(objective),
+              historyComplete: true,
+            }),
+          }),
+        }
+      : {}),
+    assessRecovery: (snapshot) =>
+      assessRecovery({
+        repository: `${owner}/${repo}`,
+        snapshot,
+        store: recoveryReadPort(store, owner, repo),
+      }),
     store,
     controller: controllerLifecycle,
     readBaseSha: async (defaultBranch) => {
@@ -97,12 +127,35 @@ function controllerApplicationFor(owner: string, repo: string): FactoryApplicati
 async function applicationCommand(command: string, args: string[]): Promise<void> {
   if (!args[0]) fail(`usage: factory ${command} OWNER/REPO#NUMBER`);
   const target = parseTarget(args[0]);
-  const service = applicationFor(target.owner, target.repo);
-  const read = ["doctor", "plan", "status", "explain", "replay"];
+  const service = applicationFor(target.owner, target.repo, command.startsWith("recovery-"));
+  if (command === "recovery-propose" || command === "recovery-request") {
+    const requestId = option(args, "--request-id");
+    if (!requestId) fail(`${command} requires --request-id ID`);
+    const incrementPath = option(args, "--allowance-increment");
+    const acknowledgement = option(args, "--acknowledge-unknown-usage");
+    const input = {
+      objective: target.objective,
+      requestId,
+      ...(incrementPath
+        ? { allowanceIncrement: JSON.parse(await readFile(incrementPath, "utf8")) }
+        : {}),
+      ...(acknowledgement ? { unknownUsageAcknowledgementDigest: acknowledgement } : {}),
+    };
+    const planDigest = option(args, "--plan-digest");
+    if (command === "recovery-request" && !planDigest)
+      fail("recovery-request requires --plan-digest DIGEST");
+    const result =
+      command === "recovery-propose"
+        ? await service.recoveryPropose(input)
+        : await service.recoveryRequest({ ...input, planDigest: planDigest! });
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+  const read = ["doctor", "plan", "recovery-plan", "status", "explain", "replay"];
   if (read.includes(command)) {
     const workItem = option(args, "--work-item");
     const result = await service.inspect(
-      command as "doctor" | "plan" | "status" | "explain" | "replay",
+      command as "doctor" | "plan" | "recovery-plan" | "status" | "explain" | "replay",
       target.objective,
       workItem ? Number(workItem) : undefined,
     );
@@ -391,6 +444,9 @@ export async function main(argv: string[]): Promise<void> {
     [
       "doctor",
       "plan",
+      "recovery-plan",
+      "recovery-propose",
+      "recovery-request",
       "status",
       "explain",
       "replay",

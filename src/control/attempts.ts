@@ -7,6 +7,7 @@ import {
 import { assertNoSecretMaterial, PROTOCOL_V2 } from "../protocol/limits.js";
 import { encodeEventComment, encodeEventTrailer } from "./receipts.js";
 import type { GitCommitObject, LeaseManager, LeaseState } from "./lease.js";
+import type { LocalScopeBatch } from "../protocol/local-scope.js";
 
 export interface AttemptStore {
   listRefs(prefix: string): Promise<Array<{ ref: string; oid: string }>>;
@@ -31,6 +32,7 @@ export interface AttemptReservation {
   sequence: number;
   createdAt: Date;
   admission?: AttemptAdmissionReceipt;
+  localScopeBatch?: LocalScopeBatch;
 }
 
 export interface AttemptAdmissionReceipt {
@@ -157,6 +159,7 @@ function parseReservation(ref: string, commit: GitCommitObject): AttemptReservat
     sequence: event.sequence,
     createdAt: new Date(event.at),
     ...(admission ? { admission } : {}),
+    ...(event.localScopeBatch ? { localScopeBatch: event.localScopeBatch } : {}),
   };
 }
 
@@ -191,12 +194,14 @@ export class AttemptManager {
     base: GitCommitObject;
     sequence: number;
     admission?: AttemptAdmissionReceipt;
+    prepareLocalScope?: (attempt: number, at: Date) => Promise<LocalScopeBatch | null>;
   }): Promise<AttemptReservation> {
     await this.#leases.assertCurrent(args.lease);
     const existing = await this.list(args.lease.objective, args.workItem);
     const next = (existing.at(-1)?.attempt ?? 0) + 1;
     const ref = attemptRef(args.lease.objective, args.workItem, next);
     const now = await this.#store.serverTime();
+    const localScopeBatch = await args.prepareLocalScope?.(next, now);
     const event: AttemptEvent = {
       protocol: PROTOCOL_V2,
       kind: "attempt",
@@ -212,7 +217,9 @@ export class AttemptManager {
       directorEpoch: args.lease.epoch,
       policyDigest: args.lease.policyDigest,
       ...(args.admission ?? {}),
+      ...(localScopeBatch ? { localScopeBatch } : {}),
     };
+    parseFactoryEvent(event);
     const oid = await this.#store.createCommit({
       treeOid: args.base.treeOid,
       parentOids: [args.base.oid],
@@ -241,6 +248,7 @@ export class AttemptManager {
       sequence: event.sequence,
       createdAt: now,
       ...(args.admission ? { admission: args.admission } : {}),
+      ...(localScopeBatch ? { localScopeBatch } : {}),
     };
   }
 
@@ -252,6 +260,7 @@ export class AttemptManager {
     sequence: number;
     reason?: string;
     providerResourceId?: string;
+    resourceHostIdentity?: string;
     environmentIdentity?: string;
     artifactDigest?: string;
     headSha?: string;
@@ -296,6 +305,7 @@ export class AttemptManager {
       policyDigest: args.reservation.policyDigest,
       ...(args.reason ? { reason: args.reason } : {}),
       ...(args.providerResourceId ? { providerResourceId: args.providerResourceId } : {}),
+      ...(args.resourceHostIdentity ? { resourceHostIdentity: args.resourceHostIdentity } : {}),
       ...(args.environmentIdentity ? { environmentIdentity: args.environmentIdentity } : {}),
       ...(args.artifactDigest ? { artifactDigest: args.artifactDigest } : {}),
       ...(args.headSha ? { headSha: args.headSha } : {}),
@@ -403,6 +413,7 @@ export class AttemptManager {
     requestedMemoryMb: number;
     reason?: string;
     allowRecovery?: boolean;
+    localScopeBatch?: LocalScopeBatch;
   }): Promise<FactoryEvent> {
     await this.#leases.assertCurrent(args.lease);
     if (
@@ -431,6 +442,7 @@ export class AttemptManager {
       workItem: args.reservation.workItem,
       attempt: args.reservation.attempt,
       phase: args.phase,
+      ...(args.localScopeBatch ? { localScopeBatch: args.localScopeBatch } : {}),
       backend: args.backend,
       requestedCpu: args.requestedCpu,
       requestedMemoryMb: args.requestedMemoryMb,

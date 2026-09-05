@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import type { NormalizedArtifact } from "../execution/artifacts.js";
 import type { GitCommitObject } from "../control/lease.js";
+import { gitSha } from "../protocol/limits.js";
 import type { CleanValidationResult } from "../validation/clean-run.js";
 import { verifyValidationEvidence } from "../validation/evidence.js";
 import {
@@ -11,6 +12,11 @@ import {
   type ExactHeadValidationEvidence,
 } from "../validation/plan.js";
 import { runContainedProcess, sanitizedWorkerEnvironment } from "../runtime/process-group.js";
+import {
+  verifyMergeCandidateSquash,
+  verifyMergeCandidateValidation,
+  type MergeCandidateValidationEvidence,
+} from "./merge-candidate.js";
 
 export interface PublicationStore {
   readRef(ref: string): Promise<string | null>;
@@ -89,6 +95,10 @@ export interface IntegrationReadinessOptions {
   ciExpected?: boolean | "unknown";
   now?: Date;
   firstCheckDiscoveryGraceMs?: number;
+  /** Separate validation of this unchanged source PR against an advanced target branch. */
+  mergeCandidateValidation?: MergeCandidateValidationEvidence;
+  /** Observed native-stack rewrite; requires the original source-bound candidate proof. */
+  mergeCandidateDeliveryHeadSha?: string;
 }
 
 export async function verifySquashIntegration(
@@ -304,9 +314,31 @@ export async function integrationReadiness(
   options: IntegrationReadinessOptions = {},
 ): Promise<IntegrationReadiness> {
   verifyExactHeadValidation(pull.exactHeadValidation, pull.commitSha);
+  const candidate = options.mergeCandidateValidation;
+  if (candidate)
+    verifyMergeCandidateValidation(candidate, pull.exactHeadValidation, expectedBaseSha);
+  const deliveryHeadSha = options.mergeCandidateDeliveryHeadSha;
+  if (deliveryHeadSha !== undefined) {
+    if (!candidate) throw new Error("merge candidate delivery head requires candidate validation");
+    gitSha.parse(deliveryHeadSha);
+  }
+  const validatedBaseSha = candidate?.targetBaseSha ?? expectedBaseSha;
   const current = await store.readPullRequest(pull.number);
-  if (current.headSha !== pull.commitSha)
+  if (current.headSha !== (deliveryHeadSha ?? pull.commitSha))
     return { state: "failed", reason: "pull request head changed after validation" };
+  if (deliveryHeadSha !== undefined && candidate) {
+    const delivery = await store.readCommit(deliveryHeadSha);
+    if (
+      delivery.oid !== deliveryHeadSha ||
+      delivery.parentOids.length !== 1 ||
+      delivery.parentOids[0] !== candidate.targetBaseSha ||
+      delivery.treeOid !== candidate.candidateOutputTreeSha
+    )
+      return {
+        state: "failed",
+        reason: "delivery head does not preserve the merge candidate tree on its target base",
+      };
+  }
   if (expectedBaseRef && current.baseRef !== expectedBaseRef) {
     return {
       state: "failed",
@@ -318,12 +350,21 @@ export async function integrationReadiness(
       return { state: "failed", reason: "merged pull request has no merge commit identity" };
     }
     try {
-      await verifySquashIntegration(
-        store,
-        pull,
-        current.mergeCommitSha,
-        expectedBaseSha ?? pull.exactHeadValidation.baseSha,
-      );
+      if (candidate) {
+        await verifyMergeCandidateSquash(
+          store,
+          pull.exactHeadValidation,
+          candidate,
+          current.mergeCommitSha,
+        );
+      } else {
+        await verifySquashIntegration(
+          store,
+          pull,
+          current.mergeCommitSha,
+          expectedBaseSha ?? pull.exactHeadValidation.baseSha,
+        );
+      }
     } catch (error) {
       return {
         state: "failed",
@@ -336,10 +377,10 @@ export async function integrationReadiness(
   }
   if (current.state !== "open")
     return { state: "failed", reason: "pull request closed without merge" };
-  if (expectedBaseSha && current.baseSha !== expectedBaseSha) {
+  if (validatedBaseSha && current.baseSha !== validatedBaseSha) {
     return {
       state: "failed",
-      reason: `base branch advanced from validated commit ${expectedBaseSha} to ${current.baseSha}`,
+      reason: `base branch advanced from validated commit ${validatedBaseSha} to ${current.baseSha}`,
     };
   }
   if (current.draft)

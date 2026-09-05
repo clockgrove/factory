@@ -156,6 +156,102 @@ function canonicalProjection(
   });
 }
 
+/** Read-only control-store surface; graph inspection never needs a lease or write port. */
+export type CompiledGraphReadStore = Pick<
+  CompiledGraphStore,
+  "readRef" | "readCommit" | "readTreeEntry" | "readBlob"
+>;
+
+export async function loadCompiledGraph(
+  store: CompiledGraphReadStore,
+  objective: number,
+  runId: string,
+): Promise<CompiledGraphRecord | null> {
+  const ref = compiledGraphRef(objective, runId);
+  const commitOid = await store.readRef(ref);
+  if (!commitOid) return null;
+  const commit = await store.readCommit(commitOid);
+  const blobOid = await store.readTreeEntry(commit.treeOid, GRAPH_PATH);
+  if (!blobOid) throw new Error(`${ref} has no compiled graph blob`);
+  const bytes = await store.readBlob(blobOid);
+  if (bytes.byteLength > 2 * 1024 * 1024) {
+    throw new Error("persisted compiled graph exceeds 2 MiB");
+  }
+  const parsed = parsePersistedCompiledObjective(JSON.parse(bytes.toString("utf8")));
+  const graphDigest = compiledGraphDigest(parsed);
+  const compilationBlobOid = await store.readTreeEntry(commit.treeOid, COMPILATION_PATH);
+  let compilation: CompilationReceipt | undefined;
+  if (compilationBlobOid) {
+    const receiptBytes = await store.readBlob(compilationBlobOid);
+    if (receiptBytes.byteLength > 16 * 1024) {
+      throw new Error("persisted compilation receipt exceeds 16 KiB");
+    }
+    compilation = CompilationReceiptSchema.parse(JSON.parse(receiptBytes.toString("utf8")));
+    if (compilation.graphDigest !== graphDigest) {
+      throw new Error("persisted compilation receipt names a different graph digest");
+    }
+  }
+  return {
+    ref,
+    commitOid,
+    blobOid,
+    graphDigest,
+    graphSize: parsed.workItems.length,
+    objective: parsed,
+    ...(compilation ? { compilation } : {}),
+  };
+}
+
+export async function loadCompiledGraphProjection(
+  store: CompiledGraphReadStore,
+  objective: number,
+  runId: string,
+  graph: CompiledGraphRecord,
+): Promise<CompiledGraphProjectionRecord | null> {
+  const ref = compiledGraphProjectionRef(objective, runId);
+  const commitOid = await store.readRef(ref);
+  if (!commitOid) return null;
+  const commit = await store.readCommit(commitOid);
+  if (commit.parentOids.length !== 1 || commit.parentOids[0] !== graph.commitOid) {
+    throw new Error("compiled graph projection is not bound to its immutable graph commit");
+  }
+  const blobOid = await store.readTreeEntry(commit.treeOid, PROJECTION_PATH);
+  if (!blobOid) throw new Error(`${ref} has no compiled graph projection blob`);
+  const staged = await loadStagedCompiledGraphProjection(store, objective, runId, graph, blobOid);
+  return {
+    ...staged,
+    commitOid,
+  };
+}
+
+async function loadStagedCompiledGraphProjection(
+  store: Pick<CompiledGraphReadStore, "readBlob">,
+  objective: number,
+  runId: string,
+  graph: CompiledGraphRecord,
+  blobOid: string,
+): Promise<StagedCompiledGraphProjection> {
+  const bytes = await store.readBlob(blobOid);
+  if (bytes.byteLength > 256 * 1024) {
+    throw new Error("persisted compiled graph projection exceeds 256 KiB");
+  }
+  const parsed = GraphProjectionSchema.parse(JSON.parse(bytes.toString("utf8")));
+  const canonical = canonicalProjection(graph, parsed.bindings);
+  if (
+    parsed.graphDigest !== graph.graphDigest ||
+    JSON.stringify(parsed) !== JSON.stringify(canonical)
+  ) {
+    throw new Error("persisted compiled graph projection differs from its immutable graph");
+  }
+  return {
+    ref: compiledGraphProjectionRef(objective, runId),
+    blobOid,
+    graphDigest: parsed.graphDigest,
+    graphSize: parsed.bindings.length,
+    bindings: parsed.bindings,
+  };
+}
+
 export class CompiledGraphManager {
   constructor(
     private readonly store: CompiledGraphStore,
@@ -163,39 +259,7 @@ export class CompiledGraphManager {
   ) {}
 
   async load(objective: number, runId: string): Promise<CompiledGraphRecord | null> {
-    const ref = compiledGraphRef(objective, runId);
-    const commitOid = await this.store.readRef(ref);
-    if (!commitOid) return null;
-    const commit = await this.store.readCommit(commitOid);
-    const blobOid = await this.store.readTreeEntry(commit.treeOid, GRAPH_PATH);
-    if (!blobOid) throw new Error(`${ref} has no compiled graph blob`);
-    const bytes = await this.store.readBlob(blobOid);
-    if (bytes.byteLength > 2 * 1024 * 1024) {
-      throw new Error("persisted compiled graph exceeds 2 MiB");
-    }
-    const parsed = parsePersistedCompiledObjective(JSON.parse(bytes.toString("utf8")));
-    const graphDigest = compiledGraphDigest(parsed);
-    const compilationBlobOid = await this.store.readTreeEntry(commit.treeOid, COMPILATION_PATH);
-    let compilation: CompilationReceipt | undefined;
-    if (compilationBlobOid) {
-      const receiptBytes = await this.store.readBlob(compilationBlobOid);
-      if (receiptBytes.byteLength > 16 * 1024) {
-        throw new Error("persisted compilation receipt exceeds 16 KiB");
-      }
-      compilation = CompilationReceiptSchema.parse(JSON.parse(receiptBytes.toString("utf8")));
-      if (compilation.graphDigest !== graphDigest) {
-        throw new Error("persisted compilation receipt names a different graph digest");
-      }
-    }
-    return {
-      ref,
-      commitOid,
-      blobOid,
-      graphDigest,
-      graphSize: parsed.workItems.length,
-      objective: parsed,
-      ...(compilation ? { compilation } : {}),
-    };
+    return loadCompiledGraph(this.store, objective, runId);
   }
 
   async persist(args: {
@@ -300,20 +364,7 @@ export class CompiledGraphManager {
     runId: string,
     graph: CompiledGraphRecord,
   ): Promise<CompiledGraphProjectionRecord | null> {
-    const ref = compiledGraphProjectionRef(objective, runId);
-    const commitOid = await this.store.readRef(ref);
-    if (!commitOid) return null;
-    const commit = await this.store.readCommit(commitOid);
-    if (commit.parentOids.length !== 1 || commit.parentOids[0] !== graph.commitOid) {
-      throw new Error("compiled graph projection is not bound to its immutable graph commit");
-    }
-    const blobOid = await this.store.readTreeEntry(commit.treeOid, PROJECTION_PATH);
-    if (!blobOid) throw new Error(`${ref} has no compiled graph projection blob`);
-    const staged = await this.loadStagedProjection(objective, runId, graph, blobOid);
-    return {
-      ...staged,
-      commitOid,
-    };
+    return loadCompiledGraphProjection(this.store, objective, runId, graph);
   }
 
   async loadStagedProjection(
@@ -322,25 +373,7 @@ export class CompiledGraphManager {
     graph: CompiledGraphRecord,
     blobOid: string,
   ): Promise<StagedCompiledGraphProjection> {
-    const bytes = await this.store.readBlob(blobOid);
-    if (bytes.byteLength > 256 * 1024) {
-      throw new Error("persisted compiled graph projection exceeds 256 KiB");
-    }
-    const parsed = GraphProjectionSchema.parse(JSON.parse(bytes.toString("utf8")));
-    const canonical = canonicalProjection(graph, parsed.bindings);
-    if (
-      parsed.graphDigest !== graph.graphDigest ||
-      JSON.stringify(parsed) !== JSON.stringify(canonical)
-    ) {
-      throw new Error("persisted compiled graph projection differs from its immutable graph");
-    }
-    return {
-      ref: compiledGraphProjectionRef(objective, runId),
-      blobOid,
-      graphDigest: parsed.graphDigest,
-      graphSize: parsed.bindings.length,
-      bindings: parsed.bindings,
-    };
+    return loadStagedCompiledGraphProjection(this.store, objective, runId, graph, blobOid);
   }
 
   async stageProjection(args: {

@@ -12,6 +12,13 @@ import type {
   ExecutionBackendCapabilities,
   StaleAttemptIdentity,
 } from "../execution/backend.js";
+import { localExecutionScopeBatch } from "../execution/backend.js";
+import {
+  LocalScopeCleanupError,
+  startScopedLocalProcess,
+  stopLocalScope,
+  type LocalScopeProcessPort,
+} from "../runtime/local-scope.js";
 import {
   durableAttemptId,
   legacyDurableAttemptId,
@@ -38,6 +45,7 @@ import {
   type CodexHomeFactory,
 } from "../runtime/codex-home.js";
 import { restrictedCodexArgs } from "./codex-cli-policy.js";
+import { readLocalResourceHostIdentity } from "../recovery/local-resources.js";
 
 export const CODEX_WORKER_OUTPUT_SCHEMA = {
   $schema: "https://json-schema.org/draft/2020-12/schema",
@@ -90,6 +98,8 @@ function legacyCliAttemptIdentity(input: StaleAttemptIdentity | AttemptContext):
 }
 
 export interface CodexCliLocalOptions {
+  /** Low-level owned-resource port for deterministic lifecycle conformance. */
+  localScopePort?: LocalScopeProcessPort;
   command?: string;
   profile?: string;
   model?: string;
@@ -379,6 +389,7 @@ export class CodexCliLocalBackend implements ExecutionBackend {
   }
 
   async launch(context: AttemptContext): Promise<BackendHandle> {
+    const scope = localExecutionScopeBatch(context);
     if (Date.now() >= context.deadline.getTime())
       throw new Error("attempt deadline already elapsed");
     const codexHome = await (this.#options.createCodexHome ?? createIsolatedCodexHome)("worker");
@@ -423,15 +434,24 @@ export class CodexCliLocalBackend implements ExecutionBackend {
         codexHome,
       );
       env.FACTORY_ATTEMPT_ID = durableAttemptId(context);
+      const resourceHostIdentity = await readLocalResourceHostIdentity();
       const target = await resolveCodexCommand(this.#options.command);
-      const processHandle = startContainedProcess({
+      const processOptions = {
         command: target.command,
         args: [...target.args, ...args],
         cwd: context.workspace,
         env,
         timeoutMs: Math.max(1, context.deadline.getTime() - Date.now()),
         maxOutputBytes: 256 * 1024,
-      });
+      };
+      if (scope) await context.localExecutionScope!.assertCurrent();
+      const processHandle = scope
+        ? await startScopedLocalProcess(
+            scope.identity,
+            { ...processOptions, launchDeadline: context.deadline },
+            this.#options.localScopePort,
+          )
+        : startContainedProcess(processOptions);
       const resourceId = `local-${processHandle.pid}`;
       const running: RunningAttempt = {
         process: processHandle,
@@ -444,13 +464,25 @@ export class CodexCliLocalBackend implements ExecutionBackend {
         cancelled: false,
       };
       this.#running.set(resourceId, running);
-      void processHandle.completed.then((result) => {
+      const recordResult = (result: ProcessResult) => {
         running.result = result;
         const details = parseCodexWorkerStream(result.stdout);
         running.final = details.final;
         if (details.failure) running.failure = details.failure;
         running.usage = details.usage;
         running.progress = details.progress;
+      };
+      void processHandle.completed.then(recordResult, (error: unknown) => {
+        const result = error instanceof LocalScopeCleanupError ? error.result : null;
+        recordResult({
+          exitCode: 1,
+          signal: result?.signal ?? null,
+          stdout: result?.stdout ?? "",
+          stderr: "local worker resource cleanup is unverified",
+          durationMs: result?.durationMs ?? 0,
+          timedOut: result?.timedOut ?? false,
+        });
+        running.failure = "local worker resource cleanup is unverified";
       });
       return {
         backendId: this.capabilities.id,
@@ -461,6 +493,7 @@ export class CodexCliLocalBackend implements ExecutionBackend {
           workspace: context.workspace,
           baseSha: context.packet.baseSha,
           attemptId: durableAttemptId(context),
+          ...(resourceHostIdentity ? { resourceHostIdentity } : {}),
           codexHome,
         },
       };
@@ -566,6 +599,8 @@ export class CodexCliLocalBackend implements ExecutionBackend {
   async cleanup(handle: BackendHandle): Promise<void> {
     const running = this.#require(handle);
     if (!running.result) await running.process.cancel();
+    const scope = localExecutionScopeBatch(running.context);
+    if (scope) await stopLocalScope(scope.identity, this.#options.localScopePort);
     this.#running.delete(handle.resourceId);
     await rm(running.codexHome, { recursive: true, force: true });
   }

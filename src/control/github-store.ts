@@ -20,6 +20,7 @@ import { decodeEventComments, deduplicateFactoryEvents, latestSupportedRun } fro
 import { classicBranchProtectionRules } from "../publication/branch-policy.js";
 import { PROTOCOL_V2 } from "../protocol/limits.js";
 import { parseRunPolicy, policyDigest } from "../protocol/policy.js";
+import { discoverRecoveryActivation } from "../recovery/discovery.js";
 
 const UPDATE_REFS = `
 mutation FactoryUpdateRefs(
@@ -120,6 +121,7 @@ export interface DurableObjectiveActivation {
   policyDigest: string;
   baseSha: string;
   requestedBy: string;
+  recovery?: { requestId: string; planDigest: string; successorRunId: string };
 }
 
 const TRUSTED_CONTROL_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
@@ -457,6 +459,18 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
             .map(({ event }) => event),
         ).map((event) => ({ event, login: controllerLogin }));
         const events = authenticated.map(({ event }) => event);
+        const recovery = await discoverRecoveryActivation({
+          repository: `${this.#owner}/${this.#repo}`,
+          objective: issue.number,
+          actor: controllerLogin,
+          closed: issue.state === "closed",
+          events,
+          store: this,
+        });
+        if (recovery) {
+          result.push(recovery);
+          continue;
+        }
         const activationsByRequest = new Map<string, string>();
         for (const { event, login } of authenticated) {
           if (
@@ -853,6 +867,11 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
   }
 
   async readPullRequest(number: number): Promise<{
+    number?: number;
+    nodeId?: string;
+    baseRepository?: string;
+    headRepository?: string | null;
+    headRef?: string;
     state: string;
     merged: boolean;
     mergeable: boolean | null;
@@ -872,6 +891,11 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       }),
     );
     return {
+      number: response.data.number,
+      nodeId: response.data.node_id,
+      baseRepository: response.data.base.repo.full_name,
+      headRepository: response.data.head.repo?.full_name ?? null,
+      headRef: response.data.head.ref,
       state: response.data.state,
       merged: response.data.merged,
       mergeable: response.data.mergeable,
@@ -919,7 +943,9 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
             })),
           );
           if (result.length >= response.data.total_count) return result;
-          if (response.data.check_runs.length < 100) return result;
+          if (response.data.check_runs.length < 100) {
+            throw new Error("GitHub check-run history is incomplete; retry the snapshot");
+          }
         }
         throw new Error("check-run result exceeds GitHub's 3000-item snapshot limit");
       })(),

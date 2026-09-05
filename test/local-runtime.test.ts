@@ -231,6 +231,67 @@ describe("contained processes", () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it("settles as failure when owned cleanup throws while an escaped descendant holds pipes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-escaped-pipe-failure-"));
+    const pidFile = join(directory, "owned-descendant.pid");
+    const descendant = [
+      'const { writeFileSync } = require("node:fs");',
+      `writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));`,
+      "setTimeout(() => {}, 15_000);",
+    ].join(" ");
+    const leader = [
+      'const { spawn } = require("node:child_process");',
+      'const { existsSync } = require("node:fs");',
+      `spawn(process.execPath, ["-e", ${JSON.stringify(descendant)}], { detached: true, stdio: "inherit" }).unref();`,
+      `const ready = setInterval(() => { if (existsSync(${JSON.stringify(pidFile)})) { clearInterval(ready); process.exit(0); } }, 10);`,
+    ].join(" ");
+    let deadline: NodeJS.Timeout | undefined;
+    let cleanupCalls = 0;
+    try {
+      const started = Date.now();
+      const result = await Promise.race([
+        runContainedProcess({
+          command: process.execPath,
+          args: ["-e", leader],
+          cwd: directory,
+          env: sanitizedWorkerEnvironment(process.env),
+          timeoutMs: 2_000,
+          cancellationGraceMs: 20,
+          terminateDescendants: async () => {
+            cleanupCalls += 1;
+            throw new Error("owned cleanup unavailable");
+          },
+        }),
+        new Promise<never>((_resolve, reject) => {
+          deadline = setTimeout(() => reject(new Error("escaped pipes blocked failure")), 3_000);
+        }),
+      ]);
+      expect(Date.now() - started).toBeLessThan(3_000);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toContain("owned cleanup unavailable");
+      expect(cleanupCalls).toBe(1);
+      // Failure must not pretend it killed the escaped process. This test owns
+      // its exact PID and removes it explicitly, never another process group.
+      const descendantPid = Number((await readFile(pidFile, "utf8")).trim());
+      expect(Number.isSafeInteger(descendantPid) && descendantPid > 1).toBe(true);
+      expect(() => process.kill(descendantPid, 0)).not.toThrow();
+    } finally {
+      if (deadline) clearTimeout(deadline);
+      if (existsSync(pidFile)) {
+        const descendantPid = Number((await readFile(pidFile, "utf8")).trim());
+        if (Number.isSafeInteger(descendantPid) && descendantPid > 1) {
+          try {
+            process.kill(descendantPid, "SIGKILL");
+          } catch {
+            // This exact test-owned descendant has already exited.
+          }
+        }
+      }
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("local worktrees", () => {

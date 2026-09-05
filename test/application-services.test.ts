@@ -282,6 +282,10 @@ describe("FactoryApplicationService", () => {
       planning: {
         management: backend,
         repositoryPath: "/repo",
+        validateCheckout: async (path, baseSha) => {
+          expect(path).toBe("/repo");
+          expect(baseSha).toBe("a".repeat(40));
+        },
         readRepositoryLayout: async () => ({
           files: ["package.json", "src/feature.ts"],
           totalFiles: 2,

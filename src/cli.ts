@@ -20,6 +20,7 @@ import {
   FactoryApplicationService,
   probeHostResources,
   probeHostToolchain,
+  validatePlanningCheckout,
 } from "./application/index.js";
 import { assessRecovery } from "./recovery/assessment.js";
 import { recoveryReadPort } from "./recovery/github-read-port.js";
@@ -132,6 +133,7 @@ function applicationFor(
     planning: {
       management,
       repositoryPath: checkout,
+      validateCheckout: validatePlanningCheckout,
       readRepositoryLayout: (maxEntries) => reader.readRepositoryLayout(undefined, maxEntries),
       readBaseSha: async (defaultBranch) => {
         const sha = await store.readRef(`refs/heads/${defaultBranch}`);

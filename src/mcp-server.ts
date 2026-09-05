@@ -55,7 +55,7 @@
  * burst writes; never retry through an open circuit").
  */
 
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -108,6 +108,7 @@ import {
   FactoryApplicationService,
   probeHostResources,
   probeHostToolchain,
+  validatePlanningCheckout,
 } from "./application/index.js";
 import { assessRecovery } from "./recovery/assessment.js";
 import { recoveryReadPort } from "./recovery/github-read-port.js";
@@ -230,6 +231,7 @@ function applicationFor(
     planning: {
       management,
       repositoryPath: checkout,
+      validateCheckout: validatePlanningCheckout,
       readRepositoryLayout: (maxEntries) => reader.readRepositoryLayout(undefined, maxEntries),
       readBaseSha: async (defaultBranch) => {
         const sha = await store.readRef(`refs/heads/${defaultBranch}`);
@@ -1535,7 +1537,7 @@ function registerApplicationTool(
         input.owner,
         input.repo,
         operation.startsWith("recovery-"),
-        input.repository ?? process.cwd(),
+        resolve(input.repository ?? process.cwd()),
       );
       if (!operation.startsWith("controller-") && !input.objectiveNumber)
         throw new Error("objectiveNumber is required");
@@ -1555,7 +1557,7 @@ function registerApplicationTool(
       }
       if (["doctor", "plan", "recovery-plan", "status", "explain", "replay"].includes(operation)) {
         if (operation === "doctor") {
-          return service.doctor(input.objectiveNumber!, input.repository ?? process.cwd());
+          return service.doctor(input.objectiveNumber!, resolve(input.repository ?? process.cwd()));
         }
         if (operation === "plan") {
           return service.plan({

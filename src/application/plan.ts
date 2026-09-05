@@ -1,3 +1,5 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import {
   compiledGraphDigest,
   parseGraphItemMetadata,
@@ -15,6 +17,7 @@ import { DEFAULT_RUN_POLICY, parseRunPolicy, resolveModelSelection } from "../pr
 import type { ApplicationSnapshot } from "./services.js";
 import { safeDiagnosticMessage } from "./doctor.js";
 
+const execFileAsync = promisify(execFile);
 export interface PlanInput {
   objective: number;
   compile?: boolean;
@@ -44,6 +47,7 @@ export interface PlanningContext {
   management?: ManagementBackend;
   /** Local checkout used only for repository-grounded compiler reads. */
   repositoryPath?: string;
+  validateCheckout?: (repositoryPath: string, baseSha: string) => Promise<void>;
   readBaseSha?: (defaultBranch: string) => Promise<string>;
   readRepositoryLayout?: (maxEntries: number) => Promise<{
     files: string[];
@@ -52,6 +56,29 @@ export interface PlanningContext {
   }>;
 }
 
+/** Proves compiler filesystem facts come from the selected clean base, without writing Git or files. */
+export async function validatePlanningCheckout(
+  repositoryPath: string,
+  baseSha: string,
+): Promise<void> {
+  const run = async (args: string[]): Promise<string> => {
+    const result = await execFileAsync("git", ["-C", repositoryPath, ...args], {
+      encoding: "utf8",
+      timeout: 5_000,
+      maxBuffer: 64_000,
+    });
+    return result.stdout.trim();
+  };
+  const head = await run(["rev-parse", "HEAD"]);
+  if (head.toLowerCase() !== baseSha.toLowerCase()) {
+    throw new Error(
+      `planning checkout HEAD ${head.slice(0, 12)} does not match selected base ${baseSha.slice(0, 12)}`,
+    );
+  }
+  const changes = await run(["status", "--porcelain", "--untracked-files=no"]);
+  if (changes)
+    throw new Error("planning checkout has tracked changes; refusing mixed-revision compilation");
+}
 function summarizeGraph(objective: CompiledObjective, observedDigest?: string) {
   const edges = objective.workItems.flatMap((item) =>
     item.dependsOn.map((dependency) => ({ from: dependency, to: item.id })),
@@ -197,6 +224,9 @@ export async function buildPlanReport(input: {
     const baseSha =
       input.request.baseSha ?? (await input.planning.readBaseSha?.(input.snapshot.defaultBranch));
     if (!baseSha) throw new Error("plan compilation requires a readable base SHA");
+    if (input.planning.repositoryPath && input.planning.validateCheckout) {
+      await input.planning.validateCheckout(input.planning.repositoryPath, baseSha);
+    }
     const policy = parseRunPolicy(input.request.policy ?? DEFAULT_RUN_POLICY);
     const modelSelection = resolveModelSelection(policy, "compile");
     const context: CompilationContext = {

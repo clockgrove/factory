@@ -77,6 +77,7 @@ import {
   createRecoverySourceIntegratedEvent,
   verifyRecoverySourceIntegration,
   verifyPriorRecoveryDelivery,
+  verifyRecoveryMergedSource,
 } from "./recovery/outcomes.js";
 import { inspectImplicitRestart } from "./control/recovery.js";
 import {
@@ -231,7 +232,7 @@ import {
   type CleanValidationInput,
 } from "./validation/clean-run.js";
 import { bindValidationToPublishedHead, validationPlanFromPacket } from "./validation/plan.js";
-import { discoverLocalScopeHost } from "./runtime/local-scope.js";
+import { discoverLocalScopeHost, observeLocalScope } from "./runtime/local-scope.js";
 import { LocalScopeBatchSchema, type LocalScopeBatch } from "./protocol/local-scope.js";
 import type { ValidationEvidence } from "./validation/evidence.js";
 import {
@@ -1266,6 +1267,7 @@ export class FactorySupervisor {
     try {
       recovered = await manager.resumeRecovery(input);
     } catch (error) {
+      if (error instanceof PlatformUnavailableError) throw error;
       // Ordinary execution/admission never uses this startup-only repair path.
       if (reconciliationMode === "none" || this.#recoveryRuntime) throw error;
       const inspection = await manager.inspectRecoveryReconciliation({
@@ -1556,6 +1558,10 @@ export class FactorySupervisor {
     snapshot: Snapshot,
     run: RunState,
     targetBaseSha: string,
+    completionDeadline?: number,
+    completedSources?: ReadonlyMap<number, { mergeCommitSha: string; targetBaseSha: string }>,
+    completedCandidates?: Map<string, MergeCandidateCheckpointRecord>,
+    completedMergeOids?: Set<string>,
   ): Promise<boolean> {
     if (!run.baseSha || snapshot.number !== run.objective) return false;
     const observations = new Map<
@@ -1568,7 +1574,18 @@ export class FactorySupervisor {
       if (visited.has(cursor) || visited.size >= snapshot.workItems.length) return false;
       visited.add(cursor);
       const matches = [];
+      if (completionDeadline !== undefined) {
+        for (const proof of completedSources?.values() ?? []) {
+          if (proof.mergeCommitSha !== cursor) continue;
+          matches.push(proof.targetBaseSha);
+        }
+      }
       for (const item of snapshot.workItems) {
+        if (
+          completionDeadline !== undefined &&
+          completedSources?.get(item.number)?.mergeCommitSha === cursor
+        )
+          continue;
         const events = deduplicateFactoryEvents(item.factoryEvents ?? []).filter(
           (event) =>
             event.runId === run.runId && "workItem" in event && event.workItem === item.number,
@@ -1582,6 +1599,16 @@ export class FactorySupervisor {
             observations.set(linked.number, pull);
           }
           if (!pull.merged || pull.mergeCommitSha !== cursor) continue;
+          if (completionDeadline !== undefined) {
+            const integrated = events.filter((event) => event.event === "AttemptIntegrated");
+            if (
+              integrated.length !== 1 ||
+              integrated[0]?.kind !== "attempt" ||
+              integrated[0].headSha !== cursor ||
+              Date.parse(integrated[0].at) > completionDeadline
+            )
+              return false;
+          }
           const publication = [...events]
             .reverse()
             .find(
@@ -1653,6 +1680,26 @@ export class FactorySupervisor {
             pull.headRepository?.toLowerCase() !== run.repository?.toLowerCase()
           )
             return false;
+          if (completionDeadline !== undefined) {
+            const review = await this.#reviews.load({
+              kind: validation.baseSha === reservation.baseSha ? "artifact" : "rebase",
+              runId: run.runId,
+              objective: run.objective,
+              workItem: item.number,
+              attempt: published.attempt,
+              artifactDigest: published.artifactDigest,
+              baseSha: validation.baseSha,
+              outputTreeSha: validation.outputTreeSha,
+              evidenceDigest: validation.evidenceDigest,
+              ...(validation.baseSha === reservation.baseSha
+                ? {}
+                : { headSha: publication.headSha }),
+            });
+            if (
+              !this.#completedReviewAccounted(review, snapshotEvents(snapshot), completionDeadline)
+            )
+              return false;
+          }
           const head = await this.#store.readCommit(publication.headSha);
           if (
             head.oid !== publication.headSha ||
@@ -1713,6 +1760,17 @@ export class FactorySupervisor {
               (refresh && candidate.validation.outputTreeSha !== refresh.outputTreeSha)
             )
               return false;
+            if (
+              completionDeadline !== undefined &&
+              (!this.#completedReviewAccounted(
+                review,
+                snapshotEvents(snapshot),
+                completionDeadline,
+              ) ||
+                Date.parse(candidate.validation.completedAt) > completionDeadline)
+            )
+              return false;
+            completedCandidates?.set(mergeCandidateIdentityDigest(candidate.identity), candidate);
             await verifyMergeCandidateSquash(
               this.#store,
               exactHeadValidation,
@@ -1724,9 +1782,400 @@ export class FactorySupervisor {
         }
       }
       if (matches.length !== 1) return false;
+      completedMergeOids?.add(cursor);
       cursor = matches[0]!;
     }
     return true;
+  }
+
+  #completedReviewAccounted(
+    record: ReviewCheckpointRecord | null,
+    events: readonly FactoryEvent[],
+    deadline: number,
+    sourceOwned = false,
+  ): boolean {
+    if (!record?.review.accepted || record.review.unmetCriteria.length) return false;
+    const receipts = events.filter(
+      (event) =>
+        event.kind === "budget" &&
+        event.event === "BudgetReconciled" &&
+        event.runId === record.identity.runId &&
+        event.workItem === record.identity.workItem &&
+        event.attempt === (sourceOwned ? undefined : record.identity.attempt) &&
+        event.phase === "management" &&
+        event.unit === "model_tokens" &&
+        event.usageId === this.#reviewUsageId(record),
+    );
+    return (
+      receipts.length === 1 &&
+      receipts[0]?.kind === "budget" &&
+      receipts[0].amount === record.usage.inputTokens + record.usage.outputTokens &&
+      Date.parse(receipts[0].at) <= deadline
+    );
+  }
+
+  /** Completion-only authority after expiry: no repair or new execution may be inferred. */
+  async #recordedCompletionReady(snapshot: Snapshot, deadline: number): Promise<boolean> {
+    try {
+      const active = latestSupportedRun(snapshot.factoryEvents ?? []);
+      if (
+        active?.event !== "FactoryRunStarted" ||
+        active.runId !== this.#run.runId ||
+        active.policyDigest !== this.#run.policyDigest
+      )
+        return false;
+      if (this.#options.recovery) {
+        const runtime = await loadRecoveryRuntime({
+          objective: snapshot.number,
+          runId: this.#run.runId,
+          store: this.#recoveryStore,
+          readSnapshot: async () => ({ snapshot, historyComplete: true }),
+        });
+        if (
+          runtime.status !== "verified" ||
+          runtime.currentUnknownModelUsageCount !== 0 ||
+          runtime.planRecord.digest !== this.#options.recovery.planDigest ||
+          runtime.planRecord.plan.requestId !== this.#options.recovery.requestId
+        )
+          return false;
+        this.#recoveryRuntime = runtime;
+      }
+      const graphs = new CompiledGraphManager(this.#store, this.#leases);
+      const graph =
+        this.#recoveryRuntime?.graph ?? (await graphs.load(snapshot.number, this.#run.runId));
+      const projection =
+        this.#recoveryRuntime?.projection ??
+        (graph && (await graphs.loadProjection(snapshot.number, this.#run.runId, graph)));
+      if (!graph || !projection) return false;
+      assertGraphWithinRunPolicy(graph.objective, this.#policy);
+      this.#compiledGraph = graph.objective;
+      this.#compiledProjection = projection;
+      this.#fenceSnapshot(snapshot);
+      const completedSources = new Map<
+        number,
+        { mergeCommitSha: string; targetBaseSha: string; at: string }
+      >();
+      const runtime = this.#recoveryRuntime;
+      for (const proof of runtime?.sourceIntegrations ?? []) {
+        if (
+          proof.candidate &&
+          (Date.parse(proof.candidate.validation.completedAt) > deadline ||
+            !this.#completedReviewAccounted(
+              proof.candidateReview,
+              runtime!.events,
+              deadline,
+              proof.candidate.identity.runId !==
+                runtime!.planRecord.plan.items.find(
+                  (item) => item.workItem === proof.outcome.workItem,
+                )?.source?.runId,
+            ))
+        )
+          return false;
+        completedSources.set(proof.outcome.workItem, {
+          mergeCommitSha: proof.outcome.mergeCommitSha,
+          targetBaseSha: proof.targetBaseSha,
+          at: proof.outcome.at,
+        });
+      }
+      // An acknowledged already-integrated predecessor retains its ORIGINAL
+      // receipt. Never manufacture a successor outcome to make closure possible.
+      for (const item of runtime?.planRecord.plan.items ?? []) {
+        if (item.action !== "integrated" || !item.source || completedSources.has(item.workItem))
+          continue;
+        const source = item.source;
+        if (source.priorDelivery) {
+          const prior = await verifyPriorRecoveryDelivery({
+            plan: runtime!.planRecord.plan,
+            item,
+            events: runtime!.events,
+            store: this.#recoveryStore,
+          });
+          completedSources.set(item.workItem, {
+            mergeCommitSha: prior.outcome.mergeCommitSha,
+            targetBaseSha: prior.targetBaseSha,
+            at: prior.outcome.at,
+          });
+        } else {
+          const receipts = runtime!.events.filter(
+            (event) =>
+              event.event === "AttemptIntegrated" &&
+              event.runId === source.runId &&
+              event.workItem === item.workItem &&
+              event.attempt === source.attempt,
+          );
+          if (receipts.length !== 1 || receipts[0]?.kind !== "attempt") return false;
+          const receipt = receipts[0];
+          const proof = await verifyRecoveryMergedSource({
+            planRecord: runtime!.planRecord,
+            claim: runtime!.claim,
+            events: runtime!.events,
+            store: this.#recoveryStore,
+            workItem: item.workItem,
+          });
+          if (
+            proof.mergeCommitSha !== receipt.headSha ||
+            receipt.policyDigest !==
+              runtime!.planRecord.plan.history.find((entry) => entry.runId === source.runId)
+                ?.policyDigest
+          )
+            return false;
+          const merge = await this.#store.readCommit(proof.mergeCommitSha);
+          if (merge.oid !== proof.mergeCommitSha || merge.parentOids.length !== 1) return false;
+          completedSources.set(item.workItem, {
+            mergeCommitSha: proof.mergeCommitSha,
+            targetBaseSha: merge.parentOids[0]!,
+            at: receipt.at,
+          });
+        }
+      }
+      const derived = this.#deriveObjective(snapshot);
+      const objective = {
+        ...derived,
+        items: derived.items.map((item) =>
+          completedSources.has(item.number) && item.closed
+            ? { ...item, state: "done" as const }
+            : item,
+        ),
+      };
+      if (!allDone(objective) || objective.items.some((item) => !item.closed)) return false;
+      const events = deduplicateFactoryEvents(
+        this.#accountingEvents(snapshotEvents(snapshot), this.#run.runId),
+      );
+      if (graph.compilation) {
+        const owner = runtime?.planRecord.plan.graph.sourceRunId ?? this.#run.runId;
+        const compiler = events.filter(
+          (event) =>
+            event.kind === "budget" &&
+            event.event === "BudgetReconciled" &&
+            event.runId === owner &&
+            event.phase === "management" &&
+            event.unit === "model_tokens" &&
+            event.workItem === undefined &&
+            event.attempt === undefined &&
+            event.usageId === `compile-${graph.graphDigest}`,
+        );
+        if (
+          compiler.length !== 1 ||
+          compiler[0]?.kind !== "budget" ||
+          compiler[0].amount !== graph.compilation.inputTokens + graph.compilation.outputTokens ||
+          Date.parse(compiler[0].at) > deadline
+        )
+          return false;
+      }
+      if (
+        unreconciledBudgetReservations(events).length ||
+        unreconciledCapacityReservations(events).length
+      )
+        return false;
+      const current = events.filter((event) => event.runId === this.#run.runId);
+      if (
+        current.some(
+          (event) =>
+            ["attempt", "capacity", "budget", "validation", "publication"].includes(event.kind) &&
+            (!Number.isFinite(Date.parse(event.at)) || Date.parse(event.at) > deadline),
+        )
+      )
+        return false;
+      // Every completed Work Item needs its real, on-time integration receipt. A
+      // closed issue or an observed merge without the receipt cannot use this path.
+      for (const item of objective.items) {
+        const source = completedSources.get(item.number);
+        const own = current.filter(
+          (event) => event.event === "AttemptIntegrated" && event.workItem === item.number,
+        );
+        const outcomes = [...(source ? [source] : []), ...own];
+        if (
+          outcomes.length !== 1 ||
+          !Number.isFinite(Date.parse(outcomes[0]!.at)) ||
+          Date.parse(outcomes[0]!.at) > deadline
+        )
+          return false;
+      }
+      for (const started of current) {
+        if (started.event !== "AttemptStarted") continue;
+        const terminal = current.filter(
+          (event) =>
+            event.kind === "attempt" &&
+            event.workItem === started.workItem &&
+            event.attempt === started.attempt &&
+            ["AttemptSucceeded", "AttemptFailed", "AttemptTimedOut", "AttemptCancelled"].includes(
+              event.event,
+            ),
+        );
+        if (
+          terminal.length !== 1 ||
+          terminal[0]?.kind !== "attempt" ||
+          terminal[0].reportedModelTokens === undefined ||
+          terminal[0].sequence <= started.sequence ||
+          Date.parse(terminal[0].at) > deadline
+        )
+          return false;
+        const usage = current.filter(
+          (event) =>
+            event.kind === "budget" &&
+            event.event === "BudgetReconciled" &&
+            event.workItem === started.workItem &&
+            event.attempt === started.attempt &&
+            event.phase === "execution" &&
+            event.unit === "model_tokens",
+        );
+        if (
+          usage.length !== 1 ||
+          usage[0]?.kind !== "budget" ||
+          usage[0].amount !== terminal[0].reportedModelTokens
+        )
+          return false;
+      }
+      const target = await this.#store.getBranchHead(this.#baseBranch);
+      const candidates = new Map<string, MergeCandidateCheckpointRecord>();
+      const merged = new Set<string>();
+      if (
+        !(await this.#observedRunOwnsBaseAdvance(
+          snapshot,
+          this.#run,
+          target.oid,
+          deadline,
+          completedSources,
+          candidates,
+          merged,
+        ))
+      )
+        return false;
+      if (
+        current.some(
+          (event) =>
+            event.event === "AttemptIntegrated" && (!event.headSha || !merged.has(event.headSha)),
+        )
+      )
+        return false;
+      if (
+        runtime?.sourceIntegrations.some(
+          (proof) =>
+            runtime.planRecord.plan.items.find((item) => item.workItem === proof.outcome.workItem)
+              ?.action !== "integrated" && !merged.has(proof.outcome.mergeCommitSha),
+        )
+      )
+        return false;
+      // This shortcut is intentionally local-only. Exact settled receipts plus
+      // synchronous terminal control flow precede physical observation of every
+      // possible command slot; a live Director producer is not a worker liability.
+      for (const event of events) {
+        if (event.event !== "AttemptReserved" && event.event !== "CapacityReserved") continue;
+        if (event.event === "CapacityReserved" && event.phase !== "validation") continue;
+        if (!event.localScopeBatch) return false;
+        const batch = LocalScopeBatchSchema.parse(event.localScopeBatch);
+        const identity = batch.identity;
+        if (
+          identity.repository !== this.#run.repository ||
+          identity.objective !== snapshot.number ||
+          identity.runId !== event.runId ||
+          identity.workItem !== event.workItem ||
+          identity.attempt !== event.attempt ||
+          identity.policyDigest !== event.policyDigest ||
+          identity.directorEpoch !== (event.recoveryEpoch ?? event.directorEpoch) ||
+          identity.phase !== (event.event === "AttemptReserved" ? "execution" : "validation")
+        )
+          return false;
+        if (event.event === "AttemptReserved") {
+          const reservation = (await this.#attempts.list(snapshot.number, event.workItem)).find(
+            (entry) => entry.runId === event.runId && entry.attempt === event.attempt,
+          );
+          if (
+            !reservation?.localScopeBatch ||
+            JSON.stringify(LocalScopeBatchSchema.parse(reservation.localScopeBatch)) !==
+              JSON.stringify(batch)
+          )
+            return false;
+        } else {
+          const workItem = snapshot.workItems.find((item) => item.number === event.workItem);
+          const compilerId = workItem && parseGraphItemMetadata(workItem.body ?? "").id;
+          const packet = graph.objective.workItems.find((item) => item.id === compilerId);
+          if (
+            !packet ||
+            batch.commandCount !== workerPacketFromCompiled(packet).validationCommands.length + 1
+          )
+            return false;
+          const candidate = candidates.get(
+            event.backend.replace(/^factory\/integration-validation-/, ""),
+          );
+          const sourceCapacity = runtime?.verifiedSourceCapacity.some(
+            (entry) => recoveryEventDigest(entry) === recoveryEventDigest(event),
+          );
+          const ordinary = events.some(
+            (collected) =>
+              collected.event === "AttemptCollected" &&
+              collected.runId === event.runId &&
+              collected.workItem === event.workItem &&
+              collected.attempt === event.attempt &&
+              collected.artifactDigest === identity.invocationDigest &&
+              events.some(
+                (validated) =>
+                  validated.kind === "validation" &&
+                  validated.passed &&
+                  validated.runId === event.runId &&
+                  validated.workItem === event.workItem &&
+                  validated.attempt === event.attempt &&
+                  validated.sequence > event.sequence &&
+                  validated.sequence > collected.sequence,
+              ),
+          );
+          if (candidate) {
+            if (
+              candidate.identity.runId !== event.runId ||
+              candidate.identity.workItem !== event.workItem ||
+              candidate.identity.attempt !== event.attempt ||
+              candidate.validation.artifactDigest !== identity.invocationDigest ||
+              ![batch.commandCount, batch.commandCount - 1].includes(
+                candidate.validation.commands.length,
+              )
+            )
+              return false;
+            const usage = events.filter(
+              (entry) =>
+                entry.kind === "budget" &&
+                entry.event === "BudgetReconciled" &&
+                entry.runId === event.runId &&
+                entry.workItem === event.workItem &&
+                entry.attempt === event.attempt &&
+                entry.unit === "validation_milliseconds" &&
+                entry.phase === "validation" &&
+                entry.usageId ===
+                  `integration-validation-${mergeCandidateIdentityDigest(candidate.identity)}`,
+            );
+            if (
+              usage.length !== 1 ||
+              usage[0]?.kind !== "budget" ||
+              usage[0].amount !==
+                Date.parse(candidate.validation.completedAt) -
+                  Date.parse(candidate.validation.startedAt)
+            )
+              return false;
+          } else if (!sourceCapacity && !ordinary) return false;
+          else if (!sourceCapacity) {
+            const duration = events.filter(
+              (entry) =>
+                entry.kind === "budget" &&
+                entry.event === "BudgetReconciled" &&
+                entry.runId === event.runId &&
+                entry.workItem === event.workItem &&
+                entry.attempt === event.attempt &&
+                entry.unit === "validation_milliseconds" &&
+                entry.phase === "validation" &&
+                !entry.usageId,
+            );
+            if (duration.length !== 1 || duration[0]!.sequence <= event.sequence) return false;
+          }
+        }
+        for (let commandIndex = 0; commandIndex < batch.commandCount; commandIndex++) {
+          const observed = await observeLocalScope({ ...identity, commandIndex });
+          if (observed.status !== "absent") return false;
+        }
+      }
+      return true;
+    } catch (error) {
+      if (error instanceof PlatformUnavailableError || error instanceof LeaseLostError) throw error;
+      return false;
+    }
   }
 
   async run(): Promise<SupervisorResult> {
@@ -1835,7 +2284,13 @@ export class FactorySupervisor {
         );
       }
     }
-    if (snapshot.closed) {
+    if (
+      snapshot.closed &&
+      !(
+        resumedRun &&
+        Date.now() >= resumedRun.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000
+      )
+    ) {
       if (!resumedRun) {
         return {
           status: "completed",
@@ -2043,8 +2498,19 @@ export class FactorySupervisor {
       // Preflight is not a lock: the previous holder may have finished or spent
       // more budget before this lease was acquired. Refresh both new and resumed runs.
       let current = await this.#reader.readObjective(snapshot.number);
-      const needsReconciliation = Boolean(this.#options.recovery && !this.#recoveryRuntime);
-      let currentRun = await this.#resumeObservedRun(current, runManager, "repair");
+      const expiredResume = Boolean(
+        resumedRun &&
+          Date.now() >=
+            resumedRun.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
+      );
+      const needsReconciliation = Boolean(
+        !expiredResume && this.#options.recovery && !this.#recoveryRuntime,
+      );
+      let currentRun = await this.#resumeObservedRun(
+        current,
+        runManager,
+        expiredResume ? "inspect" : "repair",
+      );
       if (!currentRun && this.#withdrawnActivation(current, actor, facts.fullName)) {
         await this.#lease.release();
         return {
@@ -2061,7 +2527,7 @@ export class FactorySupervisor {
         currentRun = await this.#resumeObservedRun(current, runManager);
       }
       if (
-        current.closed ||
+        (current.closed && !expiredResume) ||
         current.number !== snapshot.number ||
         current.id !== snapshot.id ||
         current.repositoryId !== snapshot.repositoryId ||
@@ -2134,7 +2600,7 @@ export class FactorySupervisor {
           event.runId === this.#run.runId,
       );
       this.#runStartSequence = durableRunStart?.sequence ?? this.#run.sequence;
-      await this.#recordControllerObservation(snapshot);
+      if (!expiredResume) await this.#recordControllerObservation(snapshot);
     } catch (error) {
       await this.#lease.release().catch(() => {});
       throw error;
@@ -2181,6 +2647,39 @@ export class FactorySupervisor {
       await drainExecutions();
       return this.#releaseForShutdown(snapshot);
     };
+    const finishExpired = async (): Promise<SupervisorResult> => {
+      snapshot = await this.#reader.readObjective(snapshot.number);
+      this.#sequences.observe(snapshotEvents(snapshot));
+      if (hasCancellationRequest(snapshot, this.#run.runId) || this.#options.signal?.aborted)
+        return terminalAfterDrain("FactoryRunCancelled", "operator requested cancellation");
+      if (
+        activeExecutions.size === 0 &&
+        (await this.#recordedCompletionReady(snapshot, deadline))
+      ) {
+        const failure = (await activeExecutions.settle()).find((value) => value.error);
+        if (failure?.error) throw failure.error;
+        const finalSnapshot = await this.#reader.readObjective(snapshot.number);
+        this.#sequences.observe(snapshotEvents(finalSnapshot));
+        if (hasCancellationRequest(finalSnapshot, this.#run.runId) || this.#options.signal?.aborted)
+          return terminalAfterDrain("FactoryRunCancelled", "operator requested cancellation");
+        if (await this.#recordedCompletionReady(finalSnapshot, deadline)) {
+          const cancellation = await this.#reader.readRunCancellationRequest(
+            this.#run.objective,
+            this.#run.runId,
+            this.#run.actor,
+            this.#activationBinding(),
+          );
+          if (cancellation)
+            return terminalAfterDrain("FactoryRunCancelled", "operator requested cancellation");
+          await this.#options.repositoryFence?.();
+          await this.#lease.assert();
+          this.#options.signal?.throwIfAborted();
+          if (!finalSnapshot.closed) await this.#store.closeIssue(finalSnapshot.number);
+          return this.#terminal(runManager, finalSnapshot, "FactoryRunCompleted");
+        }
+      }
+      return terminalAfterDrain("FactoryRunEscalated", "Objective timeout exhausted");
+    };
     const escalateAfterDrain = async (
       item: DerivedWorkItem,
       reason: string,
@@ -2202,6 +2701,8 @@ export class FactorySupervisor {
     this.#fairness.register(this.#options.objective);
 
     try {
+      // A resumed expired run cannot repair graph/publication/checkpoint state.
+      if (Date.now() >= deadline) return await finishExpired();
       const deliveryPolicy = this.#policy.delivery ?? {
         mode: "regular-prs" as const,
         onUnavailable: "regular-prs" as const,
@@ -2676,9 +3177,6 @@ export class FactorySupervisor {
           }
           return await terminalAfterDrain("FactoryRunCancelled", "operator cancelled run");
         }
-        if (Date.now() >= deadline) {
-          return await terminalAfterDrain("FactoryRunEscalated", "Objective timeout exhausted");
-        }
         await this.#lease.renewIfNeeded();
         snapshot = await this.#reader.readObjective(snapshot.number);
         this.#fenceSnapshot(snapshot);
@@ -2689,6 +3187,9 @@ export class FactorySupervisor {
             "FactoryRunCancelled",
             "operator requested cancellation through GitHub",
           );
+        }
+        if (Date.now() >= deadline) {
+          return await finishExpired();
         }
         await this.#recordControllerObservation(snapshot);
         const commandState = deriveDurableCommandState({

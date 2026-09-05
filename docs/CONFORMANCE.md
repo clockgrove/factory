@@ -11,6 +11,14 @@ the [delivery plan](DELIVERY-PLAN.md) retains the accepted waves.
 
 ## Proven on this branch
 
+The [corrected publication-recovery candidate](release-evidence/publication-recovery-candidate-component-2026-09-05.json)
+passed integrated release checks and matching Linux CLI installation at
+`f67fd05ac97ffd68803e1fea299c7977e5b3c73c`. The installed package matches the tarball verified by those
+checks; all 84 canonical files and exact inventory match except the permitted manifest cachebuster.
+The exact controller remained inactive. Successor execution awaits explicit approval; the previous
+native failure remains failed and all broad gates remain Open. This evidence and board update are
+later documentation, not part of the identified tested or installed package.
+
 The separate [installed planning component](release-evidence/installed-planning-component-2026-09-05.json)
 passed at `894537324a1fa61cdb3c2b905e841bca8a80e9ba`: actual `factory_plan` with `compile:true`
 returned one scoped Work Item with repository-grounded validation commands. One compiler call

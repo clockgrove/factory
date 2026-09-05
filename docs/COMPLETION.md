@@ -25,7 +25,7 @@ active agents. Each row closes only when its stated acceptance is evidenced.
 
 | Target / capability | Acceptance | Kind | Owner / status | Dependency → next deliverable |
 | --- | --- | --- | --- | --- |
-| Pilot — corrected integrated artifact | Frozen source passes integrated checks; matching staged package installs with recorded hashes. | Testing | Coordinator / running | Guidance and board integration → one candidate check/build/install, no provider launch. |
+| Pilot — corrected integrated artifact | Frozen source passes integrated checks; matching staged package installs with recorded hashes. | Testing | Coordinator / completed | Passed at `f67fd05`; exact matching Linux CLI artifact installed. [Candidate evidence](release-evidence/publication-recovery-candidate-component-2026-09-05.json) → use this identity for the authorized continuation. |
 | Pilot — concurrent native delivery and recovery | Installed corrected runtime reuses authenticated completed work, validates/reviews each changed head, integrates remaining sibling and dependent join, closes the Objective, and proves accounting/resource cleanup. Original failed attempt stays failed. | Testing, External input | Local runtime / waiting | Candidate above + explicit successor approval → bounded successor qualification within existing authority; no fresh replacement Objective merely to erase history. |
 | Pilot — local-only adopter handoff | Installed doctor/plan and explicit bounded activation are usable on the actual pilot checkout; scope, trust, delivery policy and allowance are accepted. SDK is the chosen route; direct CLI evidence is not automatic fallback evidence. | Testing, External input | Coordinator + operator / waiting | Corrected local qualification + pilot Objective/authority → ready-to-start local pilot handoff; no cloud prerequisite or silent production activation. |
 | Release — remaining Linux and local fault cases | Native Linux, WSL2 and macOS-hosted Linux satisfy lifecycle/resource checks; SDK-failure fallback, broader adaptive priority/pressure/lease cases, native stacks/merge queue, and adversarial restart/cancel/conflict/budget cases pass. | Testing, External input | Local qualification / waiting | Stable candidate + missing host access and scoped fault authority → remaining cases in the four local [gate rows](CONFORMANCE.md#verification-required-before-publication), retaining existing exact-candidate evidence. |
@@ -46,7 +46,7 @@ or published distribution from the product contract. Vercel Sandbox and Codex Ap
 | Local runtime closure | Completed | No additional unblocked implementation defect identified. Restart only for a concrete defect or authorized qualification deliverable. |
 | Compilation/chat/economics/scheduling | Completed | No additional unblocked implementation gap identified. No make-work test lane. |
 | Provider implementation closure | Completed | Daytona/Copilot implementation classified; Codex's externally blocked implementation remains explicit. |
-| Coordination and candidate qualification | Running | Apply development-versus-release guidance, freeze candidate, qualify matching artifact, hand off capability PR with honest remaining gates. |
+| Coordination and candidate qualification | Completed | Guidance applied; frozen `f67fd05` passed integrated checks and matching installation. Capability PR handoff retains all remaining gates; execution waits for the named approvals. |
 
 ## External inputs — one actionable list
 
@@ -73,7 +73,9 @@ or published distribution from the product contract. Vercel Sandbox and Codex Ap
 [Conformance](CONFORMANCE.md) and the [historical handoff](IMPLEMENTATION-HANDOFF.md) retain exact
 source/artifact identities, original failures and prior component results. The previous native run
 failed; its separate planning pass does not qualify recovery. The interrupted later release check is
-not a pass. Corrected source has not yet qualified that installed continuation.
+not a pass. The [corrected candidate component](release-evidence/publication-recovery-candidate-component-2026-09-05.json)
+passes integrated checks and exact installation at `f67fd05`, but has not qualified installed
+continuation. This board update is subsequent documentation, not part of that installed package.
 
 Finish implementation and integration review first. Then freeze a candidate, run integrated checks,
 build/install matching bytes and execute authorized end-to-end cases. After a defect, run affected

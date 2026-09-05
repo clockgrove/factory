@@ -876,6 +876,12 @@ export async function runQualificationCall({ invoke, duringRun, hooks }) {
   }
 }
 
+/** Distinct negative qualifiers supply their own final artifact boundary. The
+ * ordinary/native path always retains its original fresh merged-tree verifier. */
+export async function verifyQualificationFinalArtifact({ verifier, defaultVerifier, hooks }) {
+  await (verifier ?? defaultVerifier)(hooks);
+}
+
 export async function main(qualification = {}) {
   const preflightOnly = process.env.FACTORY_LIVE_OBJECTIVE_PREFLIGHT === "1";
   if (process.env.FACTORY_LIVE_OBJECTIVE !== "1" && !preflightOnly) {
@@ -1252,41 +1258,51 @@ export async function main(qualification = {}) {
     assertQualificationNamespace(evidence);
     const completionAssessment = (qualification.assessCompletion ?? assessCompletion)(evidence);
     assert.equal(completionAssessment.result, "passed", completionAssessment.reason);
-    const verified = join(output, "merged-fixture");
-    run("git", ["clone", "--depth", "1", `https://github.com/${repository}.git`, verified], output);
-    evidence.finalSha = run("git", ["rev-parse", "HEAD"], verified);
-    const finalDefaultSha = (
-      await request("GET /repos/{owner}/{repo}/commits/{ref}", { ref: info.default_branch })
-    ).data.sha;
-    assert.equal(
-      evidence.finalSha,
-      finalDefaultSha,
-      "verified clone is not the current default branch",
-    );
-    const joinWorkItem = evidence.dependencies.find(
-      (entry) => entry.blockedBy.length === 2,
-    ).workItem;
-    const joinIntegration = evidence.events.find(
-      (event) =>
-        event.runId === evidence.runResult.runId &&
-        event.event === "AttemptIntegrated" &&
-        event.workItem === joinWorkItem,
-    );
-    assert.equal(
-      evidence.finalSha,
-      joinIntegration?.headSha,
-      "default branch does not end at the dependent join integration",
-    );
-    evidence.testOutput = run("node", ["--test"], verified);
-    evidence.behaviorOutput = run(
-      "node",
-      [
-        "--input-type=module",
-        "-e",
-        `import assert from 'node:assert/strict'; import {clamp} from './${fixturePaths.sourceDirectory}/clamp.js'; import {slugify} from './${fixturePaths.sourceDirectory}/slugify.js'; import {describe} from './${fixturePaths.sourceDirectory}/describe.js'; assert.equal(clamp(-2,0,10),0); assert.equal(clamp(4,0,10),4); assert.equal(clamp(12,0,10),10); assert.throws(()=>clamp(1,2,0),RangeError); assert.equal(slugify(' Hello, WORLD!! '),'hello-world'); assert.equal(slugify('---'),''); assert.equal(describe(' Hello World ',12,0,10),'hello-world:10'); assert.throws(()=>describe('x',1,2,0),RangeError); console.log('Independent merged-artifact assertions passed for ${namespace}');`,
-      ],
-      verified,
-    );
+    await verifyQualificationFinalArtifact({
+      verifier: qualification.verifyFinalArtifact,
+      hooks,
+      defaultVerifier: async () => {
+        const verified = join(output, "merged-fixture");
+        run(
+          "git",
+          ["clone", "--depth", "1", `https://github.com/${repository}.git`, verified],
+          output,
+        );
+        evidence.finalSha = run("git", ["rev-parse", "HEAD"], verified);
+        const finalDefaultSha = (
+          await request("GET /repos/{owner}/{repo}/commits/{ref}", { ref: info.default_branch })
+        ).data.sha;
+        assert.equal(
+          evidence.finalSha,
+          finalDefaultSha,
+          "verified clone is not the current default branch",
+        );
+        const joinWorkItem = evidence.dependencies.find(
+          (entry) => entry.blockedBy.length === 2,
+        ).workItem;
+        const joinIntegration = evidence.events.find(
+          (event) =>
+            event.runId === evidence.runResult.runId &&
+            event.event === "AttemptIntegrated" &&
+            event.workItem === joinWorkItem,
+        );
+        assert.equal(
+          evidence.finalSha,
+          joinIntegration?.headSha,
+          "default branch does not end at the dependent join integration",
+        );
+        evidence.testOutput = run("node", ["--test"], verified);
+        evidence.behaviorOutput = run(
+          "node",
+          [
+            "--input-type=module",
+            "-e",
+            `import assert from 'node:assert/strict'; import {clamp} from './${fixturePaths.sourceDirectory}/clamp.js'; import {slugify} from './${fixturePaths.sourceDirectory}/slugify.js'; import {describe} from './${fixturePaths.sourceDirectory}/describe.js'; assert.equal(clamp(-2,0,10),0); assert.equal(clamp(4,0,10),4); assert.equal(clamp(12,0,10),10); assert.throws(()=>clamp(1,2,0),RangeError); assert.equal(slugify(' Hello, WORLD!! '),'hello-world'); assert.equal(slugify('---'),''); assert.equal(describe(' Hello World ',12,0,10),'hello-world:10'); assert.throws(()=>describe('x',1,2,0),RangeError); console.log('Independent merged-artifact assertions passed for ${namespace}');`,
+          ],
+          verified,
+        );
+      },
+    });
     evidence.completionAssessment = completionAssessment;
     evidence.result = "passed";
     evidence.finishedAt = new Date().toISOString();

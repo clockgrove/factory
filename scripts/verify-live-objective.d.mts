@@ -27,6 +27,11 @@ export function assessCompletion(evidence: unknown): {
   reason?: string;
 };
 export function main(qualification?: Record<string, unknown>): Promise<void>;
+export function verifyQualificationFinalArtifact(input: {
+  verifier?: (hooks: Record<string, unknown>) => Promise<void>;
+  defaultVerifier: (hooks: Record<string, unknown>) => Promise<void>;
+  hooks: Record<string, unknown>;
+}): Promise<void>;
 export function runQualificationCall<T>(input: {
   invoke: () => Promise<T>;
   duringRun?: (

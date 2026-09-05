@@ -802,6 +802,80 @@ describe("Supervisor parallel independent sibling integration", () => {
     expect(f.launch).not.toHaveBeenCalled();
   });
 
+  it("accepts only equivalent recovered publication receipts while preserving the original audit history", async () => {
+    const f = await fixture();
+    const events = f.snapshot.workItems[1]!.factoryEvents!;
+    const original = events.find((event) => event.event === "PublicationRecorded")!;
+    events.push(
+      f.event({
+        ...original,
+        sequence: 80,
+        at: new Date().toISOString(),
+        reason: "recovered publication receipt",
+      }),
+    );
+    const publications = structuredClone(
+      events.filter((event) => event.event === "PublicationRecorded"),
+    );
+    const result = await f.run();
+    expect(result, result.reason).toMatchObject({ status: "completed" });
+    expect(events.filter((event) => event.event === "PublicationRecorded")).toEqual(publications);
+    expect(f.refresh).toHaveBeenCalledOnce();
+    expect(f.validate).toHaveBeenCalledOnce();
+    expect(f.review).toHaveBeenCalledOnce();
+  });
+
+  it("retains an existing refresh's exact receipt pin when an earlier equivalent envelope arrives later", async () => {
+    const f = await fixture({ loseRefreshResponse: true });
+    const events = f.snapshot.workItems[1]!.factoryEvents!;
+    const index = events.findIndex((event) => event.event === "PublicationRecorded");
+    const original = events[index]!;
+    events[index] = f.event({
+      ...original,
+      sequence: 80,
+      at: new Date().toISOString(),
+      reason: "recovered publication receipt",
+    });
+    await expect(f.run()).rejects.toThrow(PlatformUnavailableError);
+    const pinned = [...f.refs].filter(([ref]) => ref.includes("/sibling-refreshes/"));
+    expect(pinned).toHaveLength(1);
+    events.push(original);
+    const result = await f.run();
+    expect(result, result.reason).toMatchObject({ status: "completed" });
+    expect([...f.refs].filter(([ref]) => ref.includes("/sibling-refreshes/"))).toEqual(pinned);
+    expect(f.refresh).toHaveBeenCalledOnce();
+    expect(f.validate).toHaveBeenCalledOnce();
+    expect(f.review).toHaveBeenCalledOnce();
+  });
+
+  it.each(["headSha", "pullRequest", "unitId", "validationDigest"] as const)(
+    "rejects a conflicting %s publication before even the original-base sibling merges",
+    async (field) => {
+      const f = await fixture();
+      const events = f.snapshot.workItems[0]!.factoryEvents!;
+      const original = events.find((event) => event.event === "PublicationRecorded")!;
+      events.push(
+        f.event({
+          ...original,
+          sequence: 80,
+          [field]:
+            field === "pullRequest"
+              ? 20
+              : field === "headSha"
+                ? f.heads[1]
+                : field === "validationDigest"
+                  ? "f".repeat(64)
+                  : "delivery/other",
+        }),
+      );
+      expect(await f.run()).toMatchObject({ status: "escalated" });
+      expect(f.merge).not.toHaveBeenCalled();
+      expect(f.refresh).not.toHaveBeenCalled();
+      expect(f.validate).not.toHaveBeenCalled();
+      expect(f.review).not.toHaveBeenCalled();
+    },
+  );
+
   it("accounts returned validation duration but rejects a divergent refreshed tree before review", async () => {
     const f = await fixture();
     let duration = -1;

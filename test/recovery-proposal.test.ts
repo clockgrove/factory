@@ -631,6 +631,40 @@ async function refreshedSiblingFixture() {
 }
 
 describe("authenticated sibling refresh recovery", () => {
+  it("keeps an exact refresh pin while an equivalent later publication is selected by recovery", async () => {
+    const f = await refreshedSiblingFixture();
+    const events = f.snapshot.workItems[1]!.factoryEvents!;
+    const original = events.find((event) => event.event === "PublicationRecorded")!;
+    const later = f.event({ ...original, sequence: 73, reason: "recovered publication receipt" });
+    events.push(later);
+    const proof = await observeRecoverySiblingRefresh({
+      repository: "o/r",
+      objective: 7,
+      workItem: 9,
+      store: f.store,
+      source: {
+        ...f.source,
+        publication: { ...f.source.publication!, receiptDigest: recoveryEventDigest(later) },
+      },
+      events: [
+        ...f.snapshot.factoryEvents!,
+        ...f.snapshot.workItems.flatMap((item) => item.factoryEvents!),
+      ],
+      controllingRunIds: ["source"],
+      deliveryHeadSha: f.record.plannedHeadSha,
+      requireCompletion: true,
+    });
+    expect(proof.record.ref).toBe(f.record.ref);
+    expect(proof.record.identity.sourcePublicationDigest).toBe(recoveryEventDigest(original));
+    const proposal = await f.build();
+    expect(proposal.blockers).toEqual([]);
+    expect(proposal.plan!.items[1]!.source!.publication!.receiptDigest).toBe(
+      recoveryEventDigest(original),
+    );
+    Object.assign(later, { capabilityVersion: "conflicting-capability" });
+    await expect(f.observe()).rejects.toThrow();
+    expect((await f.build()).blockers.length).toBeGreaterThan(0);
+  });
   it("binds a successor's unfinished refresh to the accepted original source without reviving it", async () => {
     const f = await refreshedSiblingFixture();
     f.refs.delete(f.candidate.ref);

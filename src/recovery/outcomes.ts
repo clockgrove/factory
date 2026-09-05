@@ -12,6 +12,7 @@ import {
 } from "../control/reviews.js";
 import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
 import { verifyMergeCandidateSquash } from "../publication/merge-candidate.js";
+import { selectEquivalentPublicationRecord } from "../publication/recorded-publication.js";
 import {
   bindValidationToPublishedHead,
   type ExactHeadValidationEvidence,
@@ -564,6 +565,15 @@ async function verifySourceProof(
             ),
         );
         const ref = attemptRef(plan.objective, ancestor.workItem, ancestor.attempt);
+        selectEquivalentPublicationRecord(
+          group.filter(
+            (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
+              event.kind === "publication" &&
+              event.event === "PublicationRecorded" &&
+              event.headSha === publication.headSha,
+          ),
+          publication,
+        );
         const oid = await store.readRef(ref);
         requireOutcome(oid);
         requireOutcome(

@@ -27,6 +27,10 @@ import {
 } from "./native-source-stacks.js";
 import type { RecoveryRuntime } from "./runtime.js";
 import { observeRecoverySiblingRefresh, recoverySiblingRefreshBinding } from "./sibling-refresh.js";
+import {
+  equivalentPublicationRecords,
+  selectEquivalentPublicationRecord,
+} from "../publication/recorded-publication.js";
 import { verifyRecoveryProposalResources } from "./resources.js";
 import {
   RECOVERY_PLAN_PROTOCOL,
@@ -595,9 +599,17 @@ export async function buildRecoveryProposal(input: {
       planItem.source = source;
       planItem.action = "reconcile";
       planItem.resources = { state: "unknown", receiptDigest: null, identities: [] };
-      const publication = sourceEvents
+      const latestPublication = sourceEvents
         .filter((event) => event.kind === "publication" && event.event === "PublicationRecorded")
         .at(-1);
+      const publication = selectEquivalentPublicationRecord(
+        sourceEvents.filter(
+          (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
+            event.kind === "publication" &&
+            event.event === "PublicationRecorded" &&
+            event.headSha === latestPublication?.headSha,
+        ),
+      );
       const validation = sourceEvents.filter((event) => event.kind === "validation").at(-1);
       const accepted = sourceEvents
         .filter((event) => event.kind === "attempt" && event.event === "AttemptValidated")
@@ -768,7 +780,11 @@ export async function buildRecoveryProposal(input: {
           (event) =>
             event.kind === "publication" &&
             event.sequence > publication.sequence &&
-            !isNativePublicationStackLink(publication, event),
+            !isNativePublicationStackLink(publication, event) &&
+            !(
+              event.event === "PublicationRecorded" &&
+              equivalentPublicationRecords(publication, event)
+            ),
         ),
       );
       const exact = bindValidationToPublishedHead({

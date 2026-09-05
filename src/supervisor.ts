@@ -179,6 +179,7 @@ import {
   type DeliverySelection,
 } from "./publication/delivery.js";
 import { GITHUB_STACKS_API_VERSION, GitHubStacks } from "./publication/github-stacks.js";
+import { selectEquivalentPublicationRecord } from "./publication/recorded-publication.js";
 import {
   acquireIntegrationLease,
   assertIntegrationHeads,
@@ -1590,6 +1591,16 @@ export class FactorySupervisor {
                 event.pullRequest === linked.number,
             );
           if (publication?.kind !== "publication") return false;
+          selectEquivalentPublicationRecord(
+            events.filter(
+              (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
+                event.kind === "publication" &&
+                event.event === "PublicationRecorded" &&
+                event.attempt === publication.attempt &&
+                event.headSha === publication.headSha,
+            ),
+            publication,
+          );
           const published = events.find(
             (event) =>
               event.kind === "attempt" &&
@@ -4870,15 +4881,28 @@ export class FactorySupervisor {
     // A completed publication receipt is the commit point for a rebase. Validation and
     // AttemptPublished may have been written before a lost final publication response.
     // Replay the prior complete binding until that exact checkpoint transaction repairs it.
-    const recordedPublication = [...(item.factoryEvents ?? [])]
+    const metadata = parseGraphItemMetadata(item.body ?? "");
+    const plan = this.#deliveryPlan?.items.find((candidate) => candidate.itemId === metadata.id);
+    if (!plan) throw new Error(`Work Item ${metadata.id} is absent from the delivery plan`);
+    const sibling =
+      this.#deliveryPlan?.units.find((unit) => unit.id === plan.unitId)?.kind === "sibling";
+    const recordedPublications = [...(item.factoryEvents ?? [])]
       .sort((left, right) => right.sequence - left.sequence)
-      .find(
+      .filter(
         (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
           event.kind === "publication" &&
           event.runId === this.#run.runId &&
           event.workItem === item.number &&
           event.event === "PublicationRecorded",
       );
+    const latestPublication = recordedPublications[0];
+    const recordedPublication = selectEquivalentPublicationRecord(
+      recordedPublications.filter(
+        (event) =>
+          event.attempt === latestPublication?.attempt &&
+          (sibling || event.headSha === latestPublication.headSha),
+      ),
+    );
     const publishedEvent = [...(item.factoryEvents ?? [])]
       .sort((left, right) => right.sequence - left.sequence)
       .find(
@@ -4909,9 +4933,6 @@ export class FactorySupervisor {
     if (!validation || validation.kind !== "validation") {
       throw new Error(`stack Work Item #${item.number} has no passing validation receipt`);
     }
-    const metadata = parseGraphItemMetadata(item.body ?? "");
-    const plan = this.#deliveryPlan?.items.find((candidate) => candidate.itemId === metadata.id);
-    if (!plan) throw new Error(`Work Item ${metadata.id} is absent from the delivery plan`);
     const branch = publicationBranch(this.#run.objective, item.number, publishedEvent.attempt);
     const found = await this.#store.findPullRequestForBranch(branch);
     if (!found) throw new Error(`stack publication branch ${branch} has no pull request`);
@@ -4939,16 +4960,7 @@ export class FactorySupervisor {
     if (!reservation) {
       throw new Error(`stack Work Item #${item.number} has no attempt reservation`);
     }
-    const publicationEvent = [...(item.factoryEvents ?? [])]
-      .sort((left, right) => right.sequence - left.sequence)
-      .find(
-        (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
-          event.kind === "publication" &&
-          event.runId === this.#run.runId &&
-          event.event === "PublicationRecorded" &&
-          event.itemId === metadata.id &&
-          event.headSha === publishedEvent.headSha,
-      );
+    let publicationEvent = recordedPublication ?? undefined;
     const baseBranch =
       publicationEvent?.kind === "publication" ? publicationEvent.baseBranch : this.#baseBranch;
     if (!publicationEvent && (plan.parentItemId || requireRecordedPublication)) {
@@ -4975,17 +4987,39 @@ export class FactorySupervisor {
       state: "published",
     };
     if (!publicationEvent) {
-      await this.#lease.use((lease) =>
-        this.#recorder.publication({
-          lease,
-          workItemNodeId: item.id,
-          sequence: this.#sequences.take(),
-          receipt,
-          event: "PublicationRecorded",
-          reason: "recovered publication receipt",
-        }),
+      // The owning worker may have finished its publication while another unit
+      // awaited checks. Re-read before repairing the older loop snapshot.
+      const fresh = await this.#reader.readObjective(this.#run.objective);
+      this.#fenceSnapshot(fresh);
+      this.#sequences.observe(snapshotEvents(fresh));
+      const current = fresh.workItems.find((value) => value.number === item.number);
+      if (!current || current.id !== item.id)
+        throw new Error("publication recovery Work Item identity changed");
+      const records = (current.factoryEvents ?? []).filter(
+        (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
+          event.kind === "publication" &&
+          event.event === "PublicationRecorded" &&
+          event.runId === this.#run.runId &&
+          event.workItem === item.number &&
+          event.attempt === publishedEvent.attempt,
       );
-    } else {
+      publicationEvent = selectEquivalentPublicationRecord(records) ?? undefined;
+      item.factoryEvents = current.factoryEvents ?? [];
+      if (!publicationEvent) {
+        const recorded = await this.#lease.use((lease) =>
+          this.#recorder.publication({
+            lease,
+            workItemNodeId: item.id,
+            sequence: this.#sequences.take(),
+            receipt,
+            event: "PublicationRecorded",
+            reason: "recovered publication receipt",
+          }),
+        );
+        item.factoryEvents = [...(item.factoryEvents ?? []), recorded];
+      }
+    }
+    if (publicationEvent) {
       assertPublicationEventMatchesReceipt(publicationEvent, receipt);
     }
     return {
@@ -6196,19 +6230,17 @@ export class FactorySupervisor {
     targetBaseSha: string,
     run = this.#run,
   ): Promise<SiblingRefreshIdentity> {
-    const publication = deduplicateFactoryEvents([
+    const publications = deduplicateFactoryEvents([
       ...(this.#recoveryRuntime?.events ?? item.factoryEvents ?? []),
     ]).filter(
-      (event) =>
+      (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
         event.kind === "publication" &&
         event.event === "PublicationRecorded" &&
         event.runId === member.reservation.runId &&
         event.workItem === item.number &&
-        event.attempt === member.reservation.attempt &&
-        event.headSha === member.pull.commitSha &&
-        event.pullRequest === member.pull.number &&
-        event.validationDigest === member.pull.exactHeadValidation.validationDigest,
+        event.attempt === member.reservation.attempt,
     );
+    const publication = selectEquivalentPublicationRecord(publications);
     const restored = this.#recoveryRuntime?.sourcePublications.find(
       (proof) =>
         proof.publication.workItem === item.number &&
@@ -6216,8 +6248,18 @@ export class FactorySupervisor {
         proof.publication.sourceAttempt === member.reservation.attempt &&
         proof.publication.sourceHeadSha === member.pull.commitSha,
     );
-    if (publication.length !== 1 && !(publication.length === 0 && restored))
-      throw new Error("sibling refresh lacks one authenticated original publication");
+    if (!publication && !restored)
+      throw new Error("sibling refresh lacks an authenticated original publication");
+    if (
+      publication &&
+      (publication.headSha !== member.pull.commitSha ||
+        publication.pullRequest !== member.pull.number ||
+        publication.validationDigest !== member.pull.exactHeadValidation.validationDigest ||
+        publication.exactHeadValidationDigest !== member.pull.exactHeadValidation.digest ||
+        publication.branch !== member.pull.branch ||
+        publication.objective !== run.objective)
+    )
+      throw new Error("sibling refresh original publication binding changed");
     const pull = await this.#store.readPullRequest(member.pull.number);
     if (
       !pull.nodeId ||
@@ -6229,7 +6271,7 @@ export class FactorySupervisor {
         `${this.#options.owner}/${this.#options.repo}`.toLowerCase()
     )
       throw new Error("sibling refresh repository or PR identity changed");
-    return {
+    const identity: SiblingRefreshIdentity = {
       repository: `${this.#options.owner}/${this.#options.repo}`,
       runId: run.runId,
       sourceRunId: member.reservation.runId,
@@ -6244,11 +6286,27 @@ export class FactorySupervisor {
       leaseEpoch: member.reservation.directorEpoch,
       policyDigest: member.reservation.policyDigest,
       controllingPolicyDigest: run.policyDigest,
-      sourcePublicationDigest: recoveryEventDigest(publication[0] ?? restored!.publication),
+      sourcePublicationDigest: recoveryEventDigest(publication ?? restored!.publication),
       sourceHeadSha: member.pull.commitSha,
       sourceExactHeadValidationDigest: member.pull.exactHeadValidation.digest,
       targetBaseSha,
     };
+    // A late-arriving equivalent envelope cannot change an already pinned ref.
+    // Probe only this bounded equivalence class, never guess another head/target.
+    if (publications.length > 1) {
+      const existing: SiblingRefreshRecord[] = [];
+      for (const event of publications) {
+        const record = await this.#siblingRefreshes.load({
+          ...identity,
+          sourcePublicationDigest: recoveryEventDigest(event),
+        });
+        if (record && !existing.some((prior) => prior.ref === record.ref)) existing.push(record);
+      }
+      if (existing.length > 1)
+        throw new Error("equivalent publications have conflicting refresh intents");
+      if (existing[0]) return existing[0].identity;
+    }
+    return identity;
   }
 
   async #observedSiblingRefresh(

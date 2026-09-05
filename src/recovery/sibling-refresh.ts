@@ -11,6 +11,7 @@ import {
 } from "../control/sibling-refreshes.js";
 import type { FactoryEvent } from "../protocol/events.js";
 import { planDelivery } from "../publication/delivery.js";
+import { selectEquivalentPublicationRecord } from "../publication/recorded-publication.js";
 import { bindValidationToPublishedHead } from "../validation/plan.js";
 import type { RecoveryReadStore } from "./assessment.js";
 import { loadRecoveryClaim } from "./claims.js";
@@ -89,6 +90,25 @@ export async function observeRecoverySiblingRefresh(
           publicationEvent.sourceHeadSha === publication.headSha &&
           publicationEvent.pullRequest === publication.pullRequest)),
   );
+  const equivalentPublications =
+    publicationEvent.event === "PublicationRecorded"
+      ? events.filter(
+          (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
+            event.kind === "publication" &&
+            event.event === "PublicationRecorded" &&
+            event.runId === source.runId &&
+            event.objective === input.objective &&
+            event.workItem === input.workItem &&
+            event.attempt === source.attempt,
+        )
+      : [];
+  if (publicationEvent.event === "PublicationRecorded")
+    selectEquivalentPublicationRecord(equivalentPublications, publicationEvent);
+  const publicationDigests = new Set(
+    equivalentPublications.length
+      ? equivalentPublications.map(recoveryEventDigest)
+      : [publication.receiptDigest],
+  );
   const original = await store.readCommit(publication.headSha);
   const exact = bindValidationToPublishedHead({
     validation: {
@@ -158,27 +178,29 @@ export async function observeRecoverySiblingRefresh(
   let targetBaseSha = delivery.parentOids[1]!;
   const matches: SiblingRefreshRecord[] = [];
   for (const start of starts) {
-    const record = await loadSiblingRefresh(store, {
-      repository: input.repository,
-      runId: start.runId,
-      sourceRunId: source.runId,
-      controllingPolicyDigest: start.policyDigest,
-      objective: input.objective,
-      workItem: input.workItem,
-      attempt: source.attempt,
-      pullRequest: publication.pullRequest,
-      pullRequestNodeId: publication.pullRequestNodeId,
-      branch: publication.branch,
-      reservationRef: source.reservationRef,
-      reservationOid: source.reservationCommitOid,
-      leaseEpoch: reserved.directorEpoch!,
-      policyDigest: reserved.policyDigest,
-      sourcePublicationDigest: publication.receiptDigest,
-      sourceHeadSha: publication.headSha,
-      sourceExactHeadValidationDigest: exact.digest,
-      targetBaseSha,
-    });
-    if (record && record.plannedHeadSha === input.deliveryHeadSha) matches.push(record);
+    for (const sourcePublicationDigest of publicationDigests) {
+      const record = await loadSiblingRefresh(store, {
+        repository: input.repository,
+        runId: start.runId,
+        sourceRunId: source.runId,
+        controllingPolicyDigest: start.policyDigest,
+        objective: input.objective,
+        workItem: input.workItem,
+        attempt: source.attempt,
+        pullRequest: publication.pullRequest,
+        pullRequestNodeId: publication.pullRequestNodeId,
+        branch: publication.branch,
+        reservationRef: source.reservationRef,
+        reservationOid: source.reservationCommitOid,
+        leaseEpoch: reserved.directorEpoch!,
+        policyDigest: reserved.policyDigest,
+        sourcePublicationDigest,
+        sourceHeadSha: publication.headSha,
+        sourceExactHeadValidationDigest: exact.digest,
+        targetBaseSha,
+      });
+      if (record && record.plannedHeadSha === input.deliveryHeadSha) matches.push(record);
+    }
   }
   requireRefresh(matches.length === 1);
   let record = matches[0]!;
@@ -244,7 +266,7 @@ export async function observeRecoverySiblingRefresh(
     const start = await authenticateController(identity.runId, identity.controllingPolicyDigest);
     requireRefresh(
       identity.sourceRunId === source.runId &&
-        identity.sourcePublicationDigest === publication.receiptDigest &&
+        publicationDigests.has(identity.sourcePublicationDigest) &&
         identity.reservationRef === source.reservationRef &&
         identity.reservationOid === source.reservationCommitOid &&
         identity.sourceExactHeadValidationDigest === exact.digest,
@@ -321,6 +343,15 @@ export async function observeRecoverySiblingRefresh(
             reservation[0]?.event === "AttemptReserved",
         );
         const pull = await store.readPullRequest(publication.pullRequest);
+        selectEquivalentPublicationRecord(
+          group.filter(
+            (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
+              event.kind === "publication" &&
+              event.event === "PublicationRecorded" &&
+              event.headSha === publication.headSha,
+          ),
+          publication,
+        );
         requireRefresh(
           pull.merged &&
             pull.mergeCommitSha === cursor &&

@@ -11,6 +11,7 @@ import { decodeEventTrailer, deduplicateFactoryEvents } from "../control/receipt
 import { loadReviewCheckpoint, type ReviewIdentity } from "../control/reviews.js";
 import { type FactoryEvent, parseFactoryEvent } from "../protocol/events.js";
 import { policyDigest } from "../protocol/policy.js";
+import { selectEquivalentPublicationRecord } from "../publication/recorded-publication.js";
 import { bindValidationToPublishedHead } from "../validation/plan.js";
 import type { RecoveryReadStore } from "./assessment.js";
 import { loadRecoveryClaim, type RecoveryClaimRecord } from "./claims.js";
@@ -651,6 +652,16 @@ export async function resolveRecoveryEvidence(input: {
           );
           if (publication.kind !== "publication" || !source.validation)
             throw new Error("publication validation");
+          selectEquivalentPublicationRecord(
+            sourceEvents.filter(
+              (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
+                event.kind === "publication" &&
+                event.event === "PublicationRecorded" &&
+                event.sequence <= plan.sourceEventMaxSequence &&
+                event.headSha === publication.headSha,
+            ),
+            publication,
+          );
           const published = await store.readCommit(publication.headSha);
           const binding = bindValidationToPublishedHead({
             validation: {

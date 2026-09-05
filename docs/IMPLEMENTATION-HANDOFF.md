@@ -1,9 +1,26 @@
 # Implementation handoff
 
-Implementation complete and ready for the separate testing phase, not release approval.
-Integrated source and distributable artifacts: `3780a29`.
+Implementation and qualification are in progress. Completing an integration batch does not establish
+that the product contract is complete. The last bundled checkpoint is `3780a29`; the completion work
+below must be integrated, tested, and rebuilt before it can replace that checkpoint.
 [DESIGN.md](DESIGN.md) defines behavior; [CONFORMANCE.md](CONFORMANCE.md) remains the release-gate
 ledger. This document grants no execution, spending, installation, or publication authority.
+
+## Completion acceptance
+
+| Capability | Required outcome | Status |
+| --- | --- | --- |
+| Ordinary restart and receipt repair | Resume after authenticated same-run merges; reject external trunk changes; reconstruct reservation receipts without losing immutable resource identity. | In progress |
+| Partial native-stack recovery | Retain validated lower work and execute unfinished upper work through exact-evidence publication and integration without duplicate work. | In progress |
+| Generic, economic compilation | Ground commands in observed repository toolchains, accept explicit exclusive-resource claims, and evaluate decomposition costs without fabricated prices or measurements. | In progress |
+| Chat preflight and planning | Doctor performs useful mechanical diagnostics; explicit plan produces or inspects a proposed graph before activation; CLI and MCP share the same write-free inspection contract. | In progress |
+| Managed providers | Prove assignable provider identities and owned session lifecycle observations for both managed targets; preserve explicit unsupported boundaries until evidenced. | In progress |
+| Installed complete Objective | Qualify matching installed artifacts through parallel siblings, independent validation/review, integration, dependent join, final closure, and bounded recovery/cancellation cases. | Pending integration |
+| Release verification | Run the complete integrated suite and package checks; preserve exact-revision evidence and the independent host/provider/publication gates. | Pending integration |
+
+These are completion gates, not a new architecture or permission to reduce scope. Regression tests
+must expose the reported defects before a fix is accepted. Simulated fixtures, component probes,
+installed local runs, and paid-provider/host qualification remain distinct evidence scopes.
 
 ## Integrated capabilities
 

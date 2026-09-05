@@ -40,6 +40,11 @@ through real Factory implementation, clean validation, adaptive admission under 
 cancellation, and GitHub-fenced restart. Use the separately authorized live Objective harness for
 those cases; this runner cannot grant model, GitHub, or paid-provider authority.
 
+The [recorded WSL2 component run](release-evidence/portable-host-component-2026-09-05.json) passed
+both staged installation paths, disposable host checks, and batch-boundary release verification.
+It identifies the exact executable subjects and distinguishes its two staged tarballs; it is not
+published-distribution or full Factory Objective evidence.
+
 A Linux guest cannot reliably identify its physical host operating system from its architecture or
 virtualization vendor. A requested macOS guest label therefore remains an unverified claim until
 external host provenance accompanies that host's evidence. A WSL2 result cannot satisfy native Linux

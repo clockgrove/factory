@@ -87,7 +87,9 @@ admission counters, and collected-resource observations. Do not publish raw evid
 The initial barrier has at most 48 mechanical ten-second waits. Priority readback has
 at most six two-second waits. The contender is invoked once with a 60-second response
 bound. Systemctl calls are bounded to 15 seconds, with at most ten 200-ms readbacks
-after a single stop. API pages, receipt counts, commit reads, and recorded worker scope
+after a single stop. Each scheduling GitHub call uses a 15-second fetch abort signal,
+combined with revocation when the original run's outcome becomes unavailable. The
+priority mutation is never retried after an uncertain response. API pages, receipt counts, commit reads, and recorded worker scope
 identities are bounded. None of these loops invokes a model to decide what to do.
 
 Immediately before each cap change or stop, the harness independently verifies its
@@ -96,6 +98,10 @@ boot, and cgroup. It never uses broad unit patterns or kills unrelated processes
 On success, the explicitly refused contender is stopped; after completion the exact
 recorded worker/validation scopes must be absent and the primary service is stopped
 and observed collected. The shared qualifier then tests the fresh merged default tree.
+Every execution reservation and validation-capacity reservation must contain its
+exact source-bound scope batch; every validation receipt must be covered by a
+preceding validation reservation bound to the collected artifact. A few remaining
+execution scopes cannot substitute for missing validator ownership evidence.
 
 An uncertain original call, missing authentication, changed service incarnation,
 unexpected admission, unknown cleanup, or failed contender refusal is incomplete.

@@ -69,6 +69,13 @@ export function assertNativePriorityReadback(
 export function ownedSchedulingScopes(evidence: unknown, primary: unknown): string[];
 export function assertSchedulingCompletion(evidence: unknown): void;
 export function assertRepositoryContention(input: unknown): void;
+export function schedulingRequest<T>(
+  hooks: { request: (route: string, parameters: Record<string, unknown>) => Promise<T> },
+  route: string,
+  parameters?: Record<string, unknown>,
+  signal?: AbortSignal,
+  timeoutMs?: number,
+): Promise<T>;
 export function createSchedulingQualification(
   authority: NonNullable<ReturnType<typeof schedulingAuthority>>,
   env?: Record<string, string | undefined>,

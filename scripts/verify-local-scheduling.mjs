@@ -307,22 +307,43 @@ export function assertSchedulingBarrier(
   };
 }
 
+/** Octokit's fetch transport honors AbortSignal, not a request.timeout field.
+ * An uncertain PATCH is aborted once and never automatically resubmitted. */
+export async function schedulingRequest(hooks, route, parameters = {}, signal, timeoutMs = 15000) {
+  assert.ok(Number.isSafeInteger(timeoutMs) && timeoutMs > 0 && timeoutMs <= 15000);
+  signal?.throwIfAborted();
+  const bounded = signal
+    ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
+    : AbortSignal.timeout(timeoutMs);
+  return await hooks.request(route, { ...parameters, request: { signal: bounded } });
+}
+
 async function snapshot(hooks) {
   const objective = hooks.evidence.objective.number;
   const children = (
-    await hooks.request("GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues", {
-      issue_number: objective,
-      per_page: 100,
-    })
+    await schedulingRequest(
+      hooks,
+      "GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues",
+      {
+        issue_number: objective,
+        per_page: 100,
+      },
+      hooks.signal,
+    )
   ).data;
   assert.ok(Array.isArray(children) && children.length <= 3, "unexpected fixture graph");
   const comments = [];
   for (const number of [objective, ...children.map((item) => item.number)]) {
     const rows = (
-      await hooks.request("GET /repos/{owner}/{repo}/issues/{issue_number}/comments", {
-        issue_number: number,
-        per_page: 100,
-      })
+      await schedulingRequest(
+        hooks,
+        "GET /repos/{owner}/{repo}/issues/{issue_number}/comments",
+        {
+          issue_number: number,
+          per_page: 100,
+        },
+        hooks.signal,
+      )
     ).data;
     assert.ok(Array.isArray(rows) && rows.length < 100, "receipt page is incomplete");
     comments.push(...rows);
@@ -342,14 +363,24 @@ async function snapshot(hooks) {
 
 async function repositoryLease(hooks) {
   const ref = (
-    await hooks.request("GET /repos/{owner}/{repo}/git/ref/{ref}", {
-      ref: "clockgrove-factory/leases/repository-controller",
-    })
+    await schedulingRequest(
+      hooks,
+      "GET /repos/{owner}/{repo}/git/ref/{ref}",
+      {
+        ref: "clockgrove-factory/leases/repository-controller",
+      },
+      hooks.signal,
+    )
   ).data;
   const commit = (
-    await hooks.request("GET /repos/{owner}/{repo}/git/commits/{commit_sha}", {
-      commit_sha: ref.object.sha,
-    })
+    await schedulingRequest(
+      hooks,
+      "GET /repos/{owner}/{repo}/git/commits/{commit_sha}",
+      {
+        commit_sha: ref.object.sha,
+      },
+      hooks.signal,
+    )
   ).data;
   assert.equal(commit.sha, ref.object.sha);
   const trailers = commit.message
@@ -526,12 +557,20 @@ export function assertNativePriorityReadback(before, after, roots, promoted) {
 }
 
 export function ownedSchedulingScopes(evidence, primary) {
-  const batches = evidence.events
-    .filter((event) => event.runId === evidence.runResult.runId && event.localScopeBatch)
-    .map((event) => event.localScopeBatch);
-  assert.ok(batches.length > 0 && batches.length <= 100);
+  const events = evidence.events.filter((event) => event.runId === evidence.runResult.runId);
+  const reservations = events.filter(
+    (event) =>
+      event.event === "AttemptReserved" ||
+      (event.event === "CapacityReserved" && event.phase === "validation"),
+  );
+  assert.ok(reservations.length > 0 && reservations.length <= 100);
+  for (const event of reservations)
+    assert.ok(event.localScopeBatch, "resource reservation lacks its owned scope batch");
+  const scoped = events.filter((event) => event.localScopeBatch);
+  assert.ok(scoped.length <= 100);
   const units = new Set();
-  for (const batch of batches) {
+  for (const event of scoped) {
+    const batch = event.localScopeBatch;
     assert.equal(batch.producerPid, primary.pid);
     assert.equal(batch.producerStartTicks, primary.startTicks);
     assert.equal(batch.identity.producerUnit, primary.unit);
@@ -539,13 +578,49 @@ export function ownedSchedulingScopes(evidence, primary) {
     assert.equal(batch.identity.repository, evidence.repository);
     assert.equal(batch.identity.runId, evidence.runResult.runId);
     assert.equal(batch.identity.objective, evidence.objective.number);
+    assert.equal(batch.identity.workItem, event.workItem);
+    assert.equal(batch.identity.attempt, event.attempt);
+    assert.equal(batch.identity.policyDigest, event.policyDigest);
+    assert.equal(batch.identity.directorEpoch, event.directorEpoch);
+    assert.equal(batch.identity.phase, event.phase ?? "execution");
+    assert.equal(batch.identity.commandIndex, 0);
     assert.ok(
       Number.isSafeInteger(batch.commandCount) &&
         batch.commandCount > 0 &&
         batch.commandCount <= 257,
     );
+    if (batch.identity.phase === "execution") assert.equal(batch.commandCount, 1);
     for (let i = 0; i < batch.commandCount; i++)
       units.add(scopeUnit({ ...batch.identity, commandIndex: i }));
+  }
+  for (const validation of events.filter((event) => event.event === "ValidationRecorded")) {
+    const capacities = reservations.filter(
+      (event) =>
+        event.event === "CapacityReserved" &&
+        event.workItem === validation.workItem &&
+        event.attempt === validation.attempt &&
+        event.sequence < validation.sequence,
+    );
+    assert.ok(capacities.length > 0, "validation invocation lacks its preceding owned capacity");
+    const capacity = capacities.sort((left, right) => right.sequence - left.sequence)[0];
+    const collected = events
+      .filter(
+        (event) =>
+          event.event === "AttemptCollected" &&
+          event.workItem === validation.workItem &&
+          event.attempt === validation.attempt &&
+          event.sequence < capacity.sequence,
+      )
+      .sort((left, right) => right.sequence - left.sequence)[0];
+    assert.ok(
+      collected?.artifactDigest,
+      "validation invocation lacks its collected artifact binding",
+    );
+    assert.equal(
+      capacity.localScopeBatch.identity.invocationDigest,
+      collected.artifactDigest,
+      "validation scope belongs to another artifact invocation",
+    );
   }
   assert.ok(units.size <= 100);
   return [...units].sort();
@@ -664,11 +739,16 @@ export function createSchedulingQualification(authority, env = process.env, port
       const promoted = roots[1];
       const prior = roots[0];
       assertRunning();
-      await hooks.request("PATCH /repos/{owner}/{repo}/issues/{issue_number}/sub_issues/priority", {
-        issue_number: hooks.evidence.objective.number,
-        sub_issue_id: promoted.id,
-        before_id: prior.id,
-      });
+      await schedulingRequest(
+        hooks,
+        "PATCH /repos/{owner}/{repo}/issues/{issue_number}/sub_issues/priority",
+        {
+          issue_number: hooks.evidence.objective.number,
+          sub_issue_id: promoted.id,
+          before_id: prior.id,
+        },
+        hooks.signal,
+      );
       let after;
       for (let attempt = 0; attempt < 6; attempt++) {
         const check = await snapshot(hooks);
@@ -779,7 +859,10 @@ export function createSchedulingQualification(authority, env = process.env, port
       hooks.save();
     }),
     afterRun: safe(async (hooks) => {
-      await observeRegularCommits(hooks);
+      await observeRegularCommits({
+        ...hooks,
+        request: (route, parameters) => schedulingRequest(hooks, route, parameters),
+      });
       assertRegularCompletion(hooks.evidence);
       const proof = hooks.evidence.scheduling;
       proof.cleanup.workerScopes = ownedSchedulingScopes(hooks.evidence, primary).map((unit) =>

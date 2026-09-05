@@ -9,6 +9,7 @@ import {
   observeSchedulingService,
   ownedSchedulingScopes,
   schedulingAuthority,
+  schedulingRequest,
   schedulingTransport,
   schedulingUnit,
   type ServiceIdentity,
@@ -398,7 +399,7 @@ describe("read-only admission and native-order evidence", () => {
     expect(() =>
       assertNativePriorityReadback(before, [before[2], before[0], before[1]], [2, 3], 4),
     ).toThrow());
-  it("preserves exact original producer/resource identities instead of scanning unrelated processes", () => {
+  function scopeEvidence() {
     const scope = {
       protocol: "clockgrove.factory/local-scope-v1",
       repository: binding.repository,
@@ -422,22 +423,124 @@ describe("read-only admission and native-order evidence", () => {
       producerStartTicks: "10001",
       deadline: now,
     };
-    const evidence = {
+    const common = {
+      runId: "run",
+      workItem: 2,
+      attempt: 1,
+      directorEpoch: 1,
+      policyDigest: scope.policyDigest,
+    };
+    return {
       repository: binding.repository,
       objective: { number: 1 },
       runResult: { runId: "run" },
       events: [
-        { runId: "run", localScopeBatch: batch },
-        { runId: "run", localScopeBatch: batch },
+        { ...common, event: "AttemptReserved", sequence: 1, localScopeBatch: batch },
+        { ...common, event: "AttemptStarted", sequence: 2, localScopeBatch: batch },
+        { ...common, event: "AttemptCollected", sequence: 3, artifactDigest: "f".repeat(64) },
+        {
+          ...common,
+          event: "CapacityReserved",
+          phase: "validation",
+          sequence: 4,
+          localScopeBatch: {
+            ...batch,
+            commandCount: 2,
+            identity: { ...scope, phase: "validation", invocationDigest: "f".repeat(64) },
+          },
+        },
+        { ...common, event: "ValidationRecorded", sequence: 5 },
       ],
     };
-    expect(ownedSchedulingScopes(evidence, identity)).toHaveLength(1);
+  }
+  it("preserves exact original producer/resource identities instead of scanning unrelated processes", () => {
+    const evidence = scopeEvidence();
+    expect(ownedSchedulingScopes(evidence, identity)).toHaveLength(3);
     expect(() =>
       ownedSchedulingScopes(evidence, { ...identity, startTicks: "different" }),
     ).toThrow();
     expect(() =>
       ownedSchedulingScopes({ ...evidence, repository: "example/other" }, identity),
     ).toThrow();
+  });
+  it.each(["AttemptReserved", "CapacityReserved"])(
+    "requires physical ownership on every %s, not just remaining scopes",
+    (event) => {
+      const evidence = scopeEvidence();
+      evidence.events = evidence.events.map((entry) =>
+        entry.event === event ? { ...entry, localScopeBatch: undefined } : entry,
+      );
+      expect(() => ownedSchedulingScopes(evidence, identity)).toThrow(
+        /lacks its owned scope batch/,
+      );
+    },
+  );
+  it("rejects an entirely missing validation reservation despite retained execution scopes", () => {
+    const evidence = scopeEvidence();
+    evidence.events = evidence.events.filter((entry) => entry.event !== "CapacityReserved");
+    expect(() => ownedSchedulingScopes(evidence, identity)).toThrow(/preceding owned capacity/);
+  });
+  it.each([
+    { phase: "execution" },
+    { workItem: 3 },
+    { attempt: 2 },
+    { policyDigest: "f".repeat(64) },
+    { invocationDigest: "d".repeat(64) },
+  ])("rejects transplanted validation scope identity %j", (delta) => {
+    const evidence = scopeEvidence();
+    const capacity = evidence.events.find((entry) => entry.event === "CapacityReserved")!;
+    if (!("localScopeBatch" in capacity)) throw Error("fixture lacks capacity batch");
+    Object.assign(capacity.localScopeBatch!.identity, delta);
+    expect(() => ownedSchedulingScopes(evidence, identity)).toThrow();
+  });
+});
+
+describe("bounded GitHub observations without mutation retries", () => {
+  it("attaches the supported fetch AbortSignal, including to one priority PATCH", async () => {
+    const request = vi.fn(
+      async (_route: string, parameters: Record<string, unknown>) => parameters,
+    );
+    const result = await schedulingRequest({ request }, "PATCH fixture", { sub_issue_id: 3 });
+    expect(result.sub_issue_id).toBe(3);
+    expect((result.request as { signal: AbortSignal }).signal).toBeInstanceOf(AbortSignal);
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+  it("never starts another request after original observer authority is revoked", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const request = vi.fn();
+    await expect(
+      schedulingRequest({ request }, "PATCH fixture", {}, controller.signal),
+    ).rejects.toThrow();
+    expect(request).not.toHaveBeenCalled();
+  });
+  it("aborts a hung transport once at the finite boundary without resubmitting uncertain writes", async () => {
+    const keepAlive = setTimeout(() => {}, 1000);
+    const request = vi.fn(
+      (_route: string, parameters: Record<string, unknown>) =>
+        new Promise((_resolve, reject) => {
+          const signal = (parameters.request as { signal: AbortSignal }).signal;
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        }),
+    );
+    try {
+      await expect(
+        schedulingRequest({ request }, "PATCH fixture", {}, undefined, 10),
+      ).rejects.toThrow();
+      expect(request).toHaveBeenCalledTimes(1);
+    } finally {
+      clearTimeout(keepAlive);
+    }
+  });
+  it("combines the original-call abort with the per-request bound", async () => {
+    const controller = new AbortController();
+    const request = vi.fn(
+      async (_route: string, parameters: Record<string, unknown>) =>
+        parameters.request as { signal: AbortSignal },
+    );
+    const result = await schedulingRequest({ request }, "GET fixture", {}, controller.signal);
+    controller.abort();
+    expect(result.signal.aborted).toBe(true);
   });
 });
 

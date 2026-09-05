@@ -27,6 +27,13 @@ export function assessCompletion(evidence: unknown): {
   reason?: string;
 };
 export function main(qualification?: Record<string, unknown>): Promise<void>;
+export function runQualificationCall<T>(input: {
+  invoke: () => Promise<T>;
+  duringRun?: (
+    hooks: Record<string, unknown> & { run: Promise<T>; signal: AbortSignal },
+  ) => Promise<unknown>;
+  hooks: Record<string, unknown>;
+}): Promise<T>;
 export function installedIdentity(input: unknown): {
   version: string;
   codexManifestVersion: string;

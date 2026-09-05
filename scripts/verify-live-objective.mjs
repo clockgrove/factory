@@ -858,6 +858,24 @@ function run(command, args, cwd) {
   assert.equal(result.status, 0, `${command} failed: ${result.stderr}`);
   return result.stdout.trim();
 }
+/** Invoke once; a failed observer never retries an uncertain foreground request. */
+export async function runQualificationCall({ invoke, duringRun, hooks }) {
+  const run = invoke();
+  if (!duringRun) return await run;
+  const observer = new AbortController();
+  try {
+    const [result] = await Promise.all([
+      run,
+      duringRun({ ...hooks, run, signal: observer.signal }),
+    ]);
+    return result;
+  } finally {
+    // A failed/uncertain original call must not leave a delayed observer free to
+    // perform another intervention. This never retries or cancels the run.
+    observer.abort();
+  }
+}
+
 export async function main(qualification = {}) {
   const preflightOnly = process.env.FACTORY_LIVE_OBJECTIVE_PREFLIGHT === "1";
   if (process.env.FACTORY_LIVE_OBJECTIVE !== "1" && !preflightOnly) {
@@ -1109,13 +1127,18 @@ export async function main(qualification = {}) {
     name: "factory-live-objective",
     version: "1.0.0",
   });
-  const transport = new StdioClientTransport({
+  const transportParameters = {
     command: mcp.command,
     args: mcp.args.map((arg) => arg.replaceAll("${PLUGIN_ROOT}", pluginRoot)),
     cwd: checkout,
     env: { ...process.env, GITHUB_TOKEN: token },
     stderr: "pipe",
-  });
+  };
+  const transport = new StdioClientTransport(
+    qualification.wrapTransport
+      ? await qualification.wrapTransport(transportParameters, { evidence, pluginRoot, save })
+      : transportParameters,
+  );
   const call = async (name, args, timeout = 60_000) => {
     const result = await client.callTool({ name, arguments: args }, undefined, {
       timeout,
@@ -1138,7 +1161,7 @@ export async function main(qualification = {}) {
       "installed server version mismatch",
     );
     assertMcpSurface((await client.listTools()).tools);
-    const hooks = { call, request, octokit, evidence, checkout, owner, repo };
+    const hooks = { call, request, octokit, evidence, checkout, owner, repo, save };
     if (qualification.beforeRun) await qualification.beforeRun(hooks);
     evidence.objective = (
       await request("POST /repos/{owner}/{repo}/issues", {
@@ -1163,11 +1186,11 @@ export async function main(qualification = {}) {
       },
     };
     save();
-    evidence.runResult = await call(
-      evidence.runRequest.tool,
-      evidence.runRequest.arguments,
-      48 * 60_000,
-    );
+    evidence.runResult = await runQualificationCall({
+      invoke: () => call(evidence.runRequest.tool, evidence.runRequest.arguments, 48 * 60_000),
+      duringRun: qualification.duringRun,
+      hooks,
+    });
     evidence.status = await call("factory_status", {
       owner,
       repo,

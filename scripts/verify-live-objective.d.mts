@@ -19,6 +19,7 @@ export function assertQualificationNamespace(evidence: unknown): void;
 export function assertQualificationCompletion(
   evidence: unknown,
   deliveryMode?: "stacked-prs" | "regular-prs",
+  allowedBackends?: string[],
 ): void;
 export function assessCompletion(evidence: unknown): {
   result: "passed" | "failed" | "incomplete";

@@ -12,6 +12,13 @@ import {
 import { deduplicateQualificationReceipts } from "./qualification-receipts.mjs";
 
 const scope = "installed-local-explicit-regular-objective";
+function regularPolicy(profile, ceiling) {
+  assert.ok(["local-default", "codex-cli"].includes(profile), "unsupported regular backend route");
+  const policy = boundedPolicy("regular-prs", ceiling);
+  return profile === "codex-cli"
+    ? { ...policy, backendOrder: ["codex-cli/local-worktree"] }
+    : policy;
+}
 const hash = (text) => createHash("sha256").update(text).digest("hex");
 const canonical = (value) => {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
@@ -46,14 +53,18 @@ export function regularQualification(env) {
     !env.FACTORY_LIVE_OBJECTIVE_DELIVERY || env.FACTORY_LIVE_OBJECTIVE_DELIVERY === "regular-prs",
     "regular qualifier cannot override another delivery selection",
   );
-  const policy = boundedPolicy(
-    "regular-prs",
+  const profile = env.FACTORY_LIVE_REGULAR_BACKEND ?? "local-default";
+  const policy = regularPolicy(
+    profile,
     modelTokenLimit(env.FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS),
   );
   return {
     scope,
     policy,
     privateEvidence: true,
+    beforeRun: async ({ evidence }) => {
+      evidence.regularBackendProfile = profile;
+    },
     assessCompletion: assessRegularCompletion,
     afterRun: observeRegularCommits,
   };
@@ -88,12 +99,13 @@ export async function observeRegularCommits({ evidence, request }) {
 }
 
 export function assertRegularCompletion(evidence) {
-  assertQualificationCompletion(evidence, "regular-prs");
-  assert.equal(evidence.scope, scope, "qualification scope differs");
-  const expected = boundedPolicy(
-    "regular-prs",
+  const profile = evidence.regularBackendProfile ?? "local-default";
+  const expected = regularPolicy(
+    profile,
     modelTokenLimit(String(evidence.policy.economics.maxModelTokens)),
   );
+  assertQualificationCompletion(evidence, "regular-prs", expected.backendOrder);
+  assert.equal(evidence.scope, scope, "qualification scope differs");
   assert.deepEqual(evidence.policy, expected, "requested bounded regular policy differs");
   const events = eventsOf(evidence);
   const start = events.find((event) => event.event === "FactoryRunStarted");

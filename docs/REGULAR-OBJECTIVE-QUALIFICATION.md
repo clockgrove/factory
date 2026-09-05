@@ -60,6 +60,24 @@ fallback, or allowance is added after failure. The installed call retains the ex
 45-minute Objective and two-attempt limits. An uncertain foreground response is
 incomplete and requires inspection; the harness never reinjects it.
 
+### Explicit CLI worker route
+
+For a **new**, independently namespaced Objective, set
+`FACTORY_LIVE_REGULAR_BACKEND=codex-cli` before preflight and execution. This changes
+only the initial execution backend order to `[codex-cli/local-worktree]`. It preserves
+the management backend, models, two-worker/two-attempt limits, token threshold, and
+zero-paid policy. Every authenticated `AttemptStarted.backend` must name that exact
+CLI backend; an SDK worker or a differently requested policy fails qualification.
+
+Unset the selector or use `local-default` to preserve the original SDK-first
+`[codex-sdk/local-worktree, codex-cli/local-worktree]` policy byte-for-byte. Its actual
+worker routes remain visible in authenticated attempt receipts; this default is not
+an SDK-only requirement. The evidence records `regularBackendProfile` before activation.
+Neither selecting CLI directly nor observing a CLI worker alone proves an SDK failure
+followed by successful fallback. That transition requires its own observed evidence.
+Do not switch an existing Objective's route, reuse its evidence file, or rerun an
+uncertain invocation to obtain a different route result.
+
 ## Evidence and limitations
 
 `qualification-preflight.json` records prerequisites. `objective-evidence.json` binds

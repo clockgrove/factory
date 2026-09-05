@@ -662,12 +662,22 @@ export function assertQualificationNamespace(evidence) {
   );
 }
 
-export function assertQualificationCompletion(evidence, deliveryMode = "stacked-prs") {
+export function assertQualificationCompletion(
+  evidence,
+  deliveryMode = "stacked-prs",
+  allowedBackends = localBackends,
+) {
   assert.ok(
     ["stacked-prs", "regular-prs"].includes(deliveryMode),
     "unsupported qualification mode",
   );
-  assertCompletion(evidence);
+  assert.ok(
+    JSON.stringify(allowedBackends) === JSON.stringify(localBackends) ||
+      (deliveryMode === "regular-prs" &&
+        JSON.stringify(allowedBackends) === JSON.stringify(["codex-cli/local-worktree"])),
+    "unsupported qualification backend route",
+  );
+  assertCompletion(evidence, allowedBackends);
   assertQualificationNamespace(evidence);
   assert.equal(
     evidence.preflight?.harness?.candidateInventorySha256,
@@ -707,7 +717,7 @@ export function assertQualificationCompletion(evidence, deliveryMode = "stacked-
   assert.equal(completions.length, 1, "exactly one authenticated run completion is required");
   assert.equal(starts[0].actor?.toLowerCase(), evidence.actor.login.toLowerCase());
   assert.equal(starts[0].repository?.toLowerCase(), evidence.repository.toLowerCase());
-  assert.deepEqual(starts[0].policy?.backendOrder, localBackends, "run backend policy changed");
+  assert.deepEqual(starts[0].policy?.backendOrder, allowedBackends, "run backend policy changed");
   assert.equal(starts[0].policy?.maxParallel, 2, "run parallel bound changed");
   assert.deepEqual(starts[0].policy?.allowedPaidBackends, [], "paid backend authority appeared");
   assert.equal(starts[0].policy?.maxSandboxMinutes, 0, "sandbox authority appeared");

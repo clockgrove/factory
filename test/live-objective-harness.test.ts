@@ -293,9 +293,10 @@ function evidence() {
   };
 }
 
-function regularEvidence() {
+function regularEvidence(profile = "local-default") {
   const fixture = evidence();
   const policy = parseRunPolicy(boundedPolicy("regular-prs"));
+  if (profile === "codex-cli") policy.backendOrder = ["codex-cli/local-worktree"];
   const digest = policyDigest(policy);
   const base = "a".repeat(40);
   const graphDigest = "b".repeat(64);
@@ -341,6 +342,10 @@ function regularEvidence() {
       merge_commit_sha: merge,
     });
     const records = fixture.events.filter((event) => event.workItem === number);
+    if (profile === "codex-cli")
+      for (const event of records)
+        if (event.backend === "codex-sdk/local-worktree")
+          event.backend = "codex-cli/local-worktree";
     const started = records.find((event) => event.event === "AttemptStarted")!;
     const published = records.find((event) => event.event === "AttemptPublished")!;
     const publication = records.find((event) => event.event === "PublicationRecorded")!;
@@ -401,6 +406,7 @@ function regularEvidence() {
   });
   return {
     ...fixture,
+    regularBackendProfile: profile,
     scope: "installed-local-explicit-regular-objective",
     base,
     policy,
@@ -436,6 +442,60 @@ function regularEvidence() {
 }
 
 describe("explicit installed regular qualification", () => {
+  it("selects only explicit CLI without changing default authority or model settings", async () => {
+    const env = {
+      FACTORY_LIVE_REGULAR_OBJECTIVE: "1",
+      FACTORY_LIVE_OBJECTIVE: "1",
+      FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS: "500000",
+    };
+    const selected = regularQualification({ ...env, FACTORY_LIVE_REGULAR_BACKEND: "codex-cli" })!;
+    expect(selected.policy).toEqual({
+      ...(boundedPolicy("regular-prs") as object),
+      backendOrder: ["codex-cli/local-worktree"],
+    });
+    expect(regularQualification(env)!.policy).toEqual(boundedPolicy("regular-prs"));
+    for (const profile of ["codex-sdk", "unknown", "codex-cli/daytona", ""])
+      expect(() => regularQualification({ ...env, FACTORY_LIVE_REGULAR_BACKEND: profile })).toThrow(
+        /route/,
+      );
+    const captured: Record<string, unknown> = {};
+    await (selected.beforeRun as (input: { evidence: Record<string, unknown> }) => Promise<void>)({
+      evidence: captured,
+    });
+    expect(captured.regularBackendProfile).toBe("codex-cli");
+  });
+  it("requires CLI for every attempt under explicit CLI policy", () => {
+    const value = regularEvidence("codex-cli");
+    expect(() => assertRegularCompletion(value)).not.toThrow();
+    for (const start of value.events.filter((event) => event.event === "AttemptStarted")) {
+      const changed = structuredClone(value);
+      changed.events.find((event) => event.sequence === start.sequence)!.backend =
+        "codex-sdk/local-worktree";
+      expect(() => assertRegularCompletion(changed)).toThrow(/backend selection/);
+    }
+    const relabelled = regularEvidence();
+    relabelled.regularBackendProfile = "codex-cli";
+    expect(() => assertRegularCompletion(relabelled)).toThrow();
+    const wrongDefault = regularEvidence("codex-cli");
+    wrongDefault.regularBackendProfile = "local-default";
+    expect(() => assertRegularCompletion(wrongDefault)).toThrow(/policy changed/);
+  });
+  it("retains default SDK-first fallback authority without pretending SDK-only selection", () => {
+    const value = regularEvidence();
+    for (const event of value.events)
+      if (event.backend === "codex-sdk/local-worktree") event.backend = "codex-cli/local-worktree";
+    expect(() => assertRegularCompletion(value)).not.toThrow();
+    expect(value.policy.backendOrder).toEqual([
+      "codex-sdk/local-worktree",
+      "codex-cli/local-worktree",
+    ]);
+    expect(() =>
+      assertQualificationCompletion(evidence(), "stacked-prs", ["codex-cli/local-worktree"]),
+    ).toThrow(/unsupported qualification backend route/);
+    expect(() =>
+      assertQualificationCompletion(value, "regular-prs", ["codex-cli/daytona"]),
+    ).toThrow(/unsupported qualification backend route/);
+  });
   it("is inert without its own opt-in and refuses implicit selection overrides", async () => {
     const run = vi.fn();
     await regularMain({}, run);

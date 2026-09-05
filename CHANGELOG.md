@@ -34,6 +34,8 @@ Notable changes to Factory. See [the delivery plan](docs/DELIVERY-PLAN.md) for u
 
 - Clean plugin verification requires the exact enabled Codex installation receipt and cache path;
   an available-only listing or staged source directory cannot satisfy installation evidence.
+- Native linear-stack Daytona execution uses immutable, independently sandboxed rebase validation
+  and separate paid capacity/accounting before semantic review. Runtime qualification remains open.
 - Native-mode independent siblings retain parallel execution and validate the combined merge tree
   after another Work Item in the same run advances trunk. Durable candidate/review checkpoints
   preserve original PR heads, budget history, and response-loss recovery; external advances remain

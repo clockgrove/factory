@@ -125,12 +125,12 @@ export interface BackendObservation {
 
 export interface IsolatedValidationContext extends AttemptContext {
   artifact: NormalizedArtifact;
-  /** Distinct, immutable revalidation of a published sibling; never an attempt retry. */
+  /** Distinct immutable integration validation; never an implementation-attempt retry. */
   validationInvocation?: IntegrationValidationInvocation;
 }
 
 export interface IntegrationValidationInvocation {
-  kind: "integration-candidate";
+  kind: "integration-candidate" | "native-stack-rebase";
   identityDigest: string;
   artifactDigest: string;
   baseSha: string;

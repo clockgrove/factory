@@ -415,7 +415,6 @@ export class GitHubManagedAgentBackend implements ExecutionBackend {
           reason: "managed provider reported review state without an attributable pull request",
         };
       }
-      this.#bindPull(attempt, pull.number, pull.headSha);
       try {
         const task = await this.#observeExactTask(attempt, pull.number);
         if (!task) {
@@ -425,6 +424,7 @@ export class GitHubManagedAgentBackend implements ExecutionBackend {
             progress: "pull request is attributed; exact Agent Task binding is not yet visible",
           };
         }
+        this.#assertTaskIdentity(attempt.handle.metadata?.providerTaskId, task.taskId);
         attempt.handle.metadata = {
           ...attempt.handle.metadata,
           providerTaskId: task.taskId,
@@ -444,6 +444,9 @@ export class GitHubManagedAgentBackend implements ExecutionBackend {
             reason: `exact Agent Task ${task.taskId} ended ${task.taskState}`,
           };
         }
+        // A running task may legitimately push another head. Collection authority
+        // is established only after its exact task and all sessions are terminal.
+        this.#bindPull(attempt, pull.number, pull.headSha);
         return { state: "succeeded", observedAt: task.observedAt };
       } catch (error) {
         return {
@@ -462,9 +465,11 @@ export class GitHubManagedAgentBackend implements ExecutionBackend {
     }
     if (item.state === "done") {
       return {
-        state: "succeeded",
+        state: "unknown",
         observedAt: new Date().toISOString(),
-        progress: "already integrated",
+        reason:
+          "Work Item is closed or integrated; this does not prove exact managed task completion " +
+          "or provide an open pull request for collection. Reconcile the exact session before replacement.",
       };
     }
     return { state: "running", observedAt: new Date().toISOString() };
@@ -559,7 +564,9 @@ export class GitHubManagedAgentBackend implements ExecutionBackend {
     }
     const objective = derive(await this.#options.reader.readObjective(identity.objective));
     const item = objective.items.find((candidate) => candidate.number === identity.workItem);
-    if (!item) return;
+    if (!item) {
+      throw new Error("cannot prove managed session termination: Work Item disappeared");
+    }
     await this.#options.dispatcher.unassign(item.id);
     const startedAt = item.factoryEvents?.find(
       (event) =>
@@ -649,10 +656,24 @@ export class GitHubManagedAgentBackend implements ExecutionBackend {
           "unassignment is not cancellation—use GitHub's Agent session view to stop the session",
       );
     }
-    await this.#confirmTaskTerminal(pulls[0]!.number, attempt.handle.startedAt);
+    await this.#confirmTaskTerminal(
+      pulls[0]!.number,
+      attempt.handle.startedAt,
+      attempt.handle.metadata?.providerTaskId,
+    );
   }
 
-  async #confirmTaskTerminal(pullNumber: number, startedAt: string): Promise<void> {
+  #assertTaskIdentity(expectedTaskId: string | undefined, taskId: string): void {
+    if (expectedTaskId !== undefined && expectedTaskId !== taskId) {
+      throw new Error("managed task identity changed after exact task observation");
+    }
+  }
+
+  async #confirmTaskTerminal(
+    pullNumber: number,
+    startedAt: string,
+    expectedTaskId?: string,
+  ): Promise<void> {
     const task = await this.#options.reader.readCopilotAgentTaskForPull(
       pullNumber,
       new Date(new Date(startedAt).getTime() - MANAGED_ATTRIBUTION_CLOCK_SKEW_MS).toISOString(),
@@ -662,6 +683,7 @@ export class GitHubManagedAgentBackend implements ExecutionBackend {
         "cannot prove managed session termination: no Agent Task matches the exact pull request",
       );
     }
+    this.#assertTaskIdentity(expectedTaskId, task.taskId);
     if (task.activeSessionIds.length > 0 || !TERMINAL_AGENT_TASK_STATES.has(task.taskState)) {
       throw new Error(
         `managed Agent Task ${task.taskId} remains ${task.taskState}; ` +

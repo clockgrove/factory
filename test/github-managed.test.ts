@@ -17,7 +17,7 @@ import type {
 } from "../src/execution/backend.js";
 import { BackendRegistry, NoExecutionBackendError } from "../src/execution/registry.js";
 import type { NormalizedArtifact } from "../src/execution/artifacts.js";
-import type { GitHubReader } from "../src/github.js";
+import type { CopilotAgentTaskObservation, GitHubReader } from "../src/github.js";
 import { DEFAULT_RUN_POLICY, parseRunPolicy } from "../src/protocol/policy.js";
 import type { ObjectiveSnapshot } from "../src/types.js";
 import { selectManagedRecoveryPull } from "../src/supervisor.js";
@@ -392,6 +392,128 @@ describe("GitHub managed-agent profiles", () => {
     });
     await expect(backend.cleanup(handle)).rejects.toThrow(/unassignment is not cancellation/);
     state = "completed";
+    await expect(backend.cleanup(handle)).resolves.toBeUndefined();
+  });
+
+  it("blocks stale reconciliation when the exact Work Item disappears", async () => {
+    const actor = { id: "BOT_runtime", login: "copilot-swe-agent", type: "Bot" as const };
+    const current = snapshot();
+    current.workItems = [];
+    const writer = new ManagedWriter();
+    const backend = new GitHubManagedAgentBackend({
+      reader: managedReader(current),
+      dispatcher: dispatcher(writer, actor.id),
+      repository: "/tmp/factory-managed-test",
+      profile: GITHUB_COPILOT_MANAGED_PROFILE,
+      actorResolution: { actor },
+    });
+    await expect(backend.reconcileStale(context())).rejects.toThrow(/Work Item disappeared/);
+    expect(writer.calls).toEqual([]);
+  });
+
+  it.each(["closed", "merged"] as const)(
+    "never substitutes a %s Work Item for exact terminal task evidence",
+    async (completion) => {
+      const actor = { id: "BOT_runtime", login: "copilot-swe-agent", type: "Bot" as const };
+      const current = snapshot();
+      const backend = new GitHubManagedAgentBackend({
+        reader: managedReader(current, () => "in_progress"),
+        dispatcher: dispatcher(new ManagedWriter(), actor.id),
+        repository: "/tmp/factory-managed-test",
+        profile: GITHUB_COPILOT_MANAGED_PROFILE,
+        actorResolution: { actor },
+      });
+      const handle = await backend.launch(context());
+      const item = current.workItems[0]!;
+      if (completion === "closed") item.closed = true;
+      else
+        item.linkedPullRequests = [{ ...managedPull(51), state: "MERGED", mergedAt: new Date() }];
+      await expect(backend.observe(handle)).resolves.toMatchObject({ state: "unknown" });
+      expect(handle.metadata?.headSha).toBeUndefined();
+      await expect(backend.cleanup(handle)).rejects.toThrow(/cannot prove|remains in_progress/);
+    },
+  );
+
+  it("allows running heads to evolve but binds only the exact successful task head", async () => {
+    const actor = { id: "BOT_runtime", login: "copilot-swe-agent", type: "Bot" as const };
+    const current = snapshot();
+    let task: CopilotAgentTaskObservation | null = null;
+    const reader = managedReader(current);
+    reader.readCopilotAgentTaskForPull = async () => task;
+    const backend = new GitHubManagedAgentBackend({
+      reader,
+      dispatcher: dispatcher(new ManagedWriter(), actor.id),
+      repository: "/tmp/factory-managed-test",
+      profile: GITHUB_COPILOT_MANAGED_PROFILE,
+      actorResolution: { actor },
+    });
+    const handle = await backend.launch(context());
+    const pull = managedPull(51);
+    current.workItems[0]!.linkedPullRequests = [pull];
+    await expect(backend.observe(handle)).resolves.toMatchObject({ state: "running" });
+    expect(handle.metadata?.headSha).toBeUndefined();
+    await expect(backend.collect(handle)).rejects.toThrow(/uncorrelated collection/);
+    task = {
+      taskId: "exact-task",
+      taskState: "in_progress",
+      sessionIds: ["session-1"],
+      activeSessionIds: ["session-1"],
+      observedAt: new Date().toISOString(),
+    };
+    pull.headSha = "c".repeat(40);
+    await expect(backend.observe(handle)).resolves.toMatchObject({ state: "running" });
+    expect(handle.metadata?.headSha).toBeUndefined();
+    // A completed task with an active session is not terminal either.
+    task.taskState = "completed";
+    await expect(backend.observe(handle)).resolves.toMatchObject({ state: "running" });
+    task.activeSessionIds = [];
+    pull.headSha = "d".repeat(40);
+    await expect(backend.observe(handle)).resolves.toMatchObject({ state: "succeeded" });
+    await expect(backend.observe(handle)).resolves.toMatchObject({ state: "succeeded" });
+    expect(handle.metadata).toMatchObject({
+      headSha: "d".repeat(40),
+      providerTaskId: "exact-task",
+    });
+    pull.headSha = "e".repeat(40);
+    await expect(backend.observe(handle)).resolves.toMatchObject({
+      state: "unknown",
+      reason: expect.stringContaining("identity changed"),
+    });
+    expect(handle.metadata?.headSha).toBe("d".repeat(40));
+  });
+
+  it("rejects a replacement task instead of rebinding the observed managed attempt", async () => {
+    const actor = { id: "BOT_runtime", login: "copilot-swe-agent", type: "Bot" as const };
+    const current = snapshot();
+    let taskId = "original-task";
+    let completed = false;
+    const reader = managedReader(current);
+    reader.readCopilotAgentTaskForPull = async () => ({
+      taskId,
+      taskState: completed ? "completed" : "in_progress",
+      sessionIds: ["session-1"],
+      activeSessionIds: completed ? [] : ["session-1"],
+      observedAt: new Date().toISOString(),
+    });
+    const backend = new GitHubManagedAgentBackend({
+      reader,
+      dispatcher: dispatcher(new ManagedWriter(), actor.id),
+      repository: "/tmp/factory-managed-test",
+      profile: GITHUB_COPILOT_MANAGED_PROFILE,
+      actorResolution: { actor },
+    });
+    const handle = await backend.launch(context());
+    current.workItems[0]!.linkedPullRequests = [managedPull(51)];
+    await expect(backend.observe(handle)).resolves.toMatchObject({ state: "running" });
+    taskId = "replacement-task";
+    completed = true;
+    await expect(backend.observe(handle)).resolves.toMatchObject({
+      state: "unknown",
+      reason: expect.stringContaining("task identity changed"),
+    });
+    expect(handle.metadata?.providerTaskId).toBe("original-task");
+    await expect(backend.cleanup(handle)).rejects.toThrow(/task identity changed/);
+    taskId = "original-task";
     await expect(backend.cleanup(handle)).resolves.toBeUndefined();
   });
 

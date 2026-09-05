@@ -114,4 +114,30 @@ process.exitCode=${childExit};
       await rm(f.root, { recursive: true, force: true });
     }
   });
+  it("keeps EPERM group probes unknown and returns a bounded failure instead of hanging", async () => {
+    const f = await fixture("collected");
+    const preload = join(f.root, "permission-probe.cjs");
+    await writeFile(
+      preload,
+      `const kill=process.kill;process.kill=function(pid,signal){if(pid<0&&signal===0){const error=new Error('fixture permission');error.code='EPERM';throw error;}return kill.call(process,pid,signal);};\n`,
+    );
+    try {
+      await expect(
+        promisify(execFile)(f.wrapper, [], {
+          env: {
+            ...process.env,
+            PATH: `${f.root}:${process.env.PATH}`,
+            NODE_OPTIONS: `--require ${preload}`,
+          },
+          timeout: 6000,
+        }),
+      ).rejects.toMatchObject({
+        code: 1,
+        killed: false,
+        stderr: expect.stringContaining("Factory SDK owned scope cleanup unverified"),
+      });
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
 });

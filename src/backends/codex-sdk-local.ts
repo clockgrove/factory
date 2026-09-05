@@ -174,8 +174,9 @@ function groupExists() {
   try {
     process.kill(-child.pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    // A permission/read failure is not evidence that the launcher group is gone.
+    return error.code !== "ESRCH";
   }
 }
 
@@ -190,6 +191,14 @@ function exitFromChild() {
 function finishWhenGroupIsGone() {
   if (!childResult) return;
   if (!scopeCleanupDone) return;
+  if (scopeCleanupFailed) {
+    // Do not wait forever after the bounded cleanup verifier has already failed.
+    // This is a nonzero result, never an absence grant; the backend must reconcile
+    // the exact owned scope before the Supervisor can close or replace the attempt.
+    try { process.kill(-child.pid, "SIGKILL"); } catch {}
+    exitFromChild();
+    return;
+  }
   if (!groupExists()) {
     exitFromChild();
     return;
@@ -239,12 +248,12 @@ async function cleanupScope() {
   }
   // Allow the existing bounded process-group TERM/KILL drain to finish before
   // checking absence: a still-live launcher could otherwise create the scope late.
-  const groupDeadline = Date.now() + 3000;
+  const groupDeadline = performance.now() + 3000;
   while (!childResult || groupExists()) {
-    if (Date.now() >= groupDeadline) throw new Error("scope launcher remains active");
+    if (performance.now() >= groupDeadline) throw new Error("scope launcher remains active");
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  const drainDeadline = Date.now() + 500;
+  const drainDeadline = performance.now() + 500;
   for (;;) {
     const current = unitProperties(scope.unit, true);
     if (scopeMissing(current)) {
@@ -253,7 +262,7 @@ async function cleanupScope() {
     }
     if (current.LoadState !== "loaded" || current.KillMode !== "control-group" ||
       !/^[a-f0-9]{32}$/.test(current.InvocationID ?? "") ||
-      !current.ControlGroup.endsWith("/" + scope.unit) || Date.now() >= drainDeadline)
+      !current.ControlGroup.endsWith("/" + scope.unit) || performance.now() >= drainDeadline)
       throw new Error("scope absence unavailable");
     await new Promise((resolve) => setTimeout(resolve, 50));
   }

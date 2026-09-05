@@ -1,5 +1,10 @@
 import { expect, it, vi } from "vitest";
 import { NativeRebaseCheckpointStore } from "../src/control/native-rebases.js";
+import { ReviewCheckpointManager } from "../src/control/reviews.js";
+import { GitHubControlStore } from "../src/control/github-store.js";
+import { decodeEventComments } from "../src/control/receipts.js";
+import { PlatformUnavailableError } from "../src/platform.js";
+import { GitHubReader } from "../src/github.js";
 import { DAYTONA, providerSupervisorFixture } from "./helpers/provider-supervisor.js";
 
 it("executes a cloud child on its parent PR, then validates its rewritten head in a fresh sandbox before merge", async () => {
@@ -33,6 +38,28 @@ it("executes a cloud child on its parent PR, then validates its rewritten head i
       mode: "native-stacks",
       baseBranch: "main",
     });
+    const [original, rewritten] = childPublications;
+    if (original?.kind !== "publication" || rewritten?.kind !== "publication")
+      throw new Error("missing child publication proofs");
+    expect(rewritten.headSha).not.toBe(original.headSha);
+    expect(rewritten.baseSha).not.toBe(original.baseSha);
+    expect(rewritten.exactHeadValidationDigest).not.toBe(original.exactHeadValidationDigest);
+    const invalidated = events.filter(
+      (event) => event.event === "ValidationInvalidated" && event.workItem === 9,
+    );
+    expect(invalidated).toEqual([
+      expect.objectContaining({
+        headSha: original.headSha,
+        exactHeadValidationDigest: original.exactHeadValidationDigest,
+        invalidatedByHeadSha: rewritten.headSha,
+      }),
+    ]);
+    expect(invalidated[0]!.sequence).toBeLessThan(rewritten.sequence);
+    const integration = events.find(
+      (event) => event.event === "AttemptIntegrated" && event.workItem === 9,
+    );
+    expect(integration).toBeDefined();
+    expect(rewritten.sequence).toBeLessThan(integration!.sequence);
     expect(fixture.resources.size).toBe(0);
   } finally {
     await fixture.dispose();
@@ -121,6 +148,137 @@ it("recovers a lost native validation checkpoint response without another sandbo
     await fixture.dispose();
   }
 }, 30_000);
+
+it.each([
+  "before-review",
+  "after-review-checkpoint",
+  "after-validation-receipt",
+  "after-publication-receipt",
+] as const)(
+  "restarts the native Supervisor %s without duplicating sandbox, review, or original accounting",
+  async (point) => {
+    const fixture = await providerSupervisorFixture("daytona-burst", {
+      nativeStack: true,
+      controllerActivation: true,
+    });
+    let stopped = false;
+    let readOutage = false;
+    const refuse = () => {
+      stopped = true;
+      throw new PlatformUnavailableError(
+        { kind: "server_error", retryAfterMs: 1 },
+        "injected native checkpoint outage",
+      );
+    };
+    if (point === "before-review") {
+      const load = ReviewCheckpointManager.prototype.load;
+      vi.spyOn(ReviewCheckpointManager.prototype, "load").mockImplementation(async function (
+        this: ReviewCheckpointManager,
+        identity,
+      ) {
+        if (!stopped && identity.kind === "rebase") refuse();
+        return load.call(this, identity);
+      });
+    } else {
+      const read = vi.mocked(GitHubReader.prototype.readObjective).getMockImplementation()!;
+      vi.spyOn(GitHubReader.prototype, "readObjective").mockImplementation(async function (
+        this: GitHubReader,
+        ...args
+      ) {
+        if (readOutage) refuse();
+        return read.apply(this, args);
+      });
+      const append = vi
+        .mocked(GitHubControlStore.prototype.addIssueComment)
+        .getMockImplementation()!;
+      vi.spyOn(GitHubControlStore.prototype, "addIssueComment").mockImplementation(async function (
+        this: GitHubControlStore,
+        node,
+        body,
+      ) {
+        if (
+          !stopped &&
+          [...fixture.refs.keys()].some((ref) => ref.includes("/native-rebases/")) &&
+          decodeEventComments(body).some(
+            (event) =>
+              event.event ===
+                (point === "after-publication-receipt"
+                  ? "PublicationRecorded"
+                  : "ValidationRecorded") && event.workItem === 9,
+          )
+        ) {
+          if (point !== "after-review-checkpoint") {
+            await append.call(this, node, body);
+            // Lose the write response and read-back until a fresh controller starts.
+            readOutage = true;
+          }
+          refuse();
+        }
+        return append.call(this, node, body);
+      });
+    }
+    try {
+      await expect(fixture.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
+      expect(stopped).toBe(true);
+      expect(fixture.snapshot.workItems.map((item) => item.closed)).toEqual([true, false, false]);
+      expect(fixture.activity.filter((entry) => entry.invocation)).toHaveLength(1);
+      expect(fixture.activity.filter((entry) => entry.operation === "rebase-review")).toHaveLength(
+        point === "before-review" ? 0 : 1,
+      );
+      const checkpoints = [...fixture.refs.entries()].filter(([ref]) =>
+        ref.includes("/native-rebases/"),
+      );
+      expect(checkpoints).toHaveLength(1);
+      const originalStarts = fixture.events().filter((event) => event.event === "AttemptStarted");
+      readOutage = false;
+      const result = await fixture.run();
+      expect(result, result.reason).toMatchObject({
+        status: "completed",
+        runId: "provider-fixture",
+      });
+      expect(
+        [...fixture.refs.entries()].filter(([ref]) => ref.includes("/native-rebases/")),
+      ).toEqual(checkpoints);
+      expect(fixture.activity.filter((entry) => entry.invocation)).toHaveLength(1);
+      expect(fixture.activity.filter((entry) => entry.operation === "rebase-review")).toHaveLength(
+        1,
+      );
+      expect(
+        fixture.activity
+          .filter((entry) => entry.operation === "launch")
+          .map((entry) => entry.workItem),
+      ).toEqual([8, 9, 10]);
+      expect(
+        fixture
+          .events()
+          .filter((event) => event.event === "AttemptStarted" && event.workItem !== 10),
+      ).toEqual(originalStarts);
+      expect(
+        new Set(
+          fixture
+            .events()
+            .filter((event) => event.kind === "controller")
+            .map((event) => event.controllerId),
+        ).size,
+      ).toBe(2);
+      expect(
+        fixture
+          .events()
+          .filter(
+            (event) =>
+              event.kind === "budget" &&
+              event.unit === "sandbox_milliseconds" &&
+              event.usageId?.startsWith("integration-validation-"),
+          )
+          .map((event) => event.event),
+      ).toEqual(["BudgetReserved", "BudgetReconciled"]);
+      expect(fixture.resources.size).toBe(0);
+    } finally {
+      await fixture.dispose();
+    }
+  },
+  30_000,
+);
 
 for (const fault of [
   "nativeRebaseConflict",

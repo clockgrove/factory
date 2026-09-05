@@ -14,12 +14,21 @@ export function waitForCreatedObjectiveNamespace(input: {
   wait?: (milliseconds: number) => Promise<void>;
 }): Promise<void>;
 export function boundedPolicy(delivery?: string, maxModelTokens?: number): unknown;
-export function assertCompletion(evidence: unknown, allowedBackends?: string[]): void;
+export type QualificationMergeAssertion = (
+  proof: unknown,
+  input: import("./qualification-merge-proof.mjs").MergeProofInput,
+) => void;
+export function assertCompletion(
+  evidence: unknown,
+  allowedBackends?: string[],
+  assertMergeProof?: QualificationMergeAssertion,
+): void;
 export function assertQualificationNamespace(evidence: unknown): void;
 export function assertQualificationCompletion(
   evidence: unknown,
   deliveryMode?: "stacked-prs" | "regular-prs",
   allowedBackends?: string[],
+  assertMergeProof?: QualificationMergeAssertion,
 ): void;
 export function assessCompletion(evidence: unknown): {
   result: "passed" | "failed" | "incomplete";

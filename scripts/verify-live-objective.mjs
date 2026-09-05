@@ -384,7 +384,11 @@ export function boundedPolicy(delivery = "stacked-prs", maxModelTokens = maximum
   };
 }
 
-export function assertCompletion(evidence, allowedBackends = localBackends) {
+export function assertCompletion(
+  evidence,
+  allowedBackends = localBackends,
+  assertMergeProof = assertQualificationMergeProof,
+) {
   const runId = evidence.runResult?.runId;
   assert.ok(typeof runId === "string" && runId.length > 0, "explicit executed run ID required");
   assert.equal(evidence.status?.run?.runId, runId, "status belongs to another run");
@@ -605,7 +609,7 @@ export function assertCompletion(evidence, allowedBackends = localBackends) {
     );
     assert.equal(pulls.length, 1, "exact REST PR identity missing or repeated");
     assert.equal(proofs.length, 1, "exact GraphQL merge commit proof missing or repeated");
-    assertQualificationMergeProof(proofs[0], {
+    assertMergeProof(proofs[0], {
       repository: evidence.repository,
       pull: pulls[0],
       publication,
@@ -680,6 +684,7 @@ export function assertQualificationCompletion(
   evidence,
   deliveryMode = "stacked-prs",
   allowedBackends = localBackends,
+  assertMergeProof = assertQualificationMergeProof,
 ) {
   assert.ok(
     ["stacked-prs", "regular-prs"].includes(deliveryMode),
@@ -691,7 +696,7 @@ export function assertQualificationCompletion(
         JSON.stringify(allowedBackends) === JSON.stringify(["codex-cli/local-worktree"])),
     "unsupported qualification backend route",
   );
-  assertCompletion(evidence, allowedBackends);
+  assertCompletion(evidence, allowedBackends, assertMergeProof);
   assertQualificationNamespace(evidence);
   assert.equal(
     evidence.preflight?.harness?.candidateInventorySha256,
@@ -1264,10 +1269,12 @@ export async function main(qualification = {}) {
         ).data,
       );
     if (evidence.runResult.status === "completed") {
-      evidence.mergeProofs = await observeQualificationMergeProofs(
-        { request: (route, parameters) => octokit.request(route, parameters) },
-        evidence,
-      );
+      evidence.mergeProofs = qualification.observeMergeProofs
+        ? await qualification.observeMergeProofs(hooks)
+        : await observeQualificationMergeProofs(
+            { request: (route, parameters) => octokit.request(route, parameters) },
+            evidence,
+          );
       save();
     }
     evidence.finishedInstalledArtifact = installedBundleIdentity(pluginRoot);

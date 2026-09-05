@@ -52,6 +52,36 @@ export function assertQualificationMergeProof(proof, input) {
 
 export async function readQualificationMergeProof(hooks, input) {
   const expected = expectedProof(input);
+  return readQualificationMergeProofForIdentity(hooks, expected);
+}
+
+/** Caller must independently prove any delivery head distinct from the source publication. */
+export async function readQualificationMergeProofForIdentity(hooks, expected) {
+  assert.deepEqual(
+    Object.keys(expected).sort(),
+    [
+      "runId",
+      "objective",
+      "workItem",
+      "attempt",
+      "pullRequestNodeId",
+      "pullRequest",
+      "repository",
+      "repositoryNodeId",
+      "headSha",
+      "mergeSha",
+    ].sort(),
+  );
+  for (const field of ["objective", "workItem", "attempt", "pullRequest"])
+    assert.ok(Number.isSafeInteger(expected[field]) && expected[field] > 0);
+  for (const field of ["runId", "pullRequestNodeId", "repositoryNodeId"])
+    assert.ok(
+      typeof expected[field] === "string" &&
+        expected[field].length > 0 &&
+        expected[field].length <= 256,
+    );
+  assert.match(expected.repository, /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/);
+  for (const field of ["headSha", "mergeSha"]) assert.match(expected[field], /^[a-f0-9]{40}$/);
   const response = await hooks.request("POST /graphql", {
     query: `query QualificationMergeProof($id: ID!) {
       node(id: $id) { __typename ... on PullRequest {

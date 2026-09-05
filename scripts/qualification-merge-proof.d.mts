@@ -23,6 +23,10 @@ export function readQualificationMergeProof(
   hooks: MergeProofHooks,
   input: MergeProofInput,
 ): Promise<QualificationMergeProof>;
+export function readQualificationMergeProofForIdentity(
+  hooks: MergeProofHooks,
+  expected: QualificationMergeProof,
+): Promise<QualificationMergeProof>;
 export function assertQualificationMergeProof(proof: unknown, input: MergeProofInput): void;
 export function observeQualificationMergeProofs(
   hooks: MergeProofHooks,

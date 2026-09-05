@@ -53,6 +53,8 @@ export interface ApplicationReader {
 }
 
 export interface ApplicationCommandStore {
+  /** Required for activation; other command-only ports may omit discovery repair. */
+  ensureObjectiveLabel?(objective: number): Promise<void>;
   addIssueComment(issueNodeId: string, body: string): Promise<void>;
   serverTime(): Promise<Date>;
   getAuthenticatedLogin(): Promise<string>;
@@ -232,17 +234,33 @@ export class FactoryApplicationService {
     baseSha?: string;
     policy?: unknown;
   }): Promise<FactoryEvent> {
+    if (!this.context.store?.ensureObjectiveLabel)
+      throw new Error("activation requires Objective discovery-label support");
     const snapshot = await this.context.reader.readObjective(input.objective);
-    const policy = parseRunPolicy(input.policy ?? DEFAULT_RUN_POLICY);
-    const baseSha = input.baseSha ?? (await this.requireBaseSha(snapshot.defaultBranch));
-    return this.append(snapshot, input.requestId, {
-      event: "ActivationRequested",
-      repository: `${this.context.owner}/${this.context.repo}`,
-      baseSha,
-      policy,
-      policyDigest: policyDigest(policy),
-      controllerProtocolMin: PROTOCOL_V2,
-      controllerProtocolMax: PROTOCOL_V2,
+    return this.append(snapshot, input.requestId, async (current) => {
+      const prior = this.allEvents(current).find(
+        (event) =>
+          event.kind === "run" &&
+          event.event === "ActivationRequested" &&
+          event.requestId === input.requestId,
+      );
+      const activation =
+        prior?.kind === "run" && prior.event === "ActivationRequested" ? prior : undefined;
+      // Omitted fields on exact replay mean the accepted immutable binding,
+      // not today's branch head or defaults. Resolve under the request gate.
+      const policy = parseRunPolicy(input.policy ?? activation?.policy ?? DEFAULT_RUN_POLICY);
+      const baseSha =
+        input.baseSha ?? activation?.baseSha ?? (await this.requireBaseSha(current.defaultBranch));
+      return {
+        event: "ActivationRequested",
+        runId: input.requestId,
+        repository: `${this.context.owner}/${this.context.repo}`,
+        baseSha,
+        policy,
+        policyDigest: policyDigest(policy),
+        controllerProtocolMin: PROTOCOL_V2,
+        controllerProtocolMax: PROTOCOL_V2,
+      };
     });
   }
 
@@ -354,14 +372,20 @@ export class FactoryApplicationService {
   private async append(
     snapshot: ApplicationSnapshot,
     requestId: string,
-    fields: Record<string, unknown>,
+    fields:
+      | Record<string, unknown>
+      | ((current: ApplicationSnapshot) => Promise<Record<string, unknown>>),
   ): Promise<FactoryEvent> {
     return this.serialize(snapshot.number, async () => {
       // A request may have waited behind an equivalent request. Reconstruct
       // from GitHub while holding the process-wide repository/objective gate;
       // never decide idempotency from the caller's stale snapshot.
       snapshot = await this.context.reader.readObjective(snapshot.number);
-      return this.appendLocked(snapshot, requestId, fields);
+      return this.appendLocked(
+        snapshot,
+        requestId,
+        typeof fields === "function" ? await fields(snapshot) : fields,
+      );
     });
   }
 
@@ -393,6 +417,8 @@ export class FactoryApplicationService {
       );
       if (conflict)
         throw new Error(`idempotency key ${requestId} was already used for a different request`);
+      if (fields.event === "ActivationRequested")
+        await store.ensureObjectiveLabel!(snapshot.number);
       return existing;
     }
     if (fields.event === "ActivationRequested") {
@@ -449,6 +475,7 @@ export class FactoryApplicationService {
       snapshot.id,
       encodeEventComment(`Factory accepted ${String(fields.event)} from ${actor}.`, event),
     );
+    if (fields.event === "ActivationRequested") await store.ensureObjectiveLabel!(snapshot.number);
     return event;
   }
 

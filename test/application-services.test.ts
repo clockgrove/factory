@@ -91,6 +91,7 @@ describe("FactoryApplicationService", () => {
       repo: "r",
       reader: { readObjective: async () => structuredClone(current) },
       store: {
+        ensureObjectiveLabel: async () => {},
         getAuthenticatedLogin: async () => "actor",
         serverTime: async () => new Date("2026-01-01T00:00:00.000Z"),
         addIssueComment: async (_id, body) => {

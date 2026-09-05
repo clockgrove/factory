@@ -408,6 +408,67 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     return response.data.login;
   }
 
+  /** The label is a discovery index, never execution authority. Add it only
+   * after an authenticated activation receipt exists, including exact replay. */
+  async ensureObjectiveLabel(objective: number): Promise<void> {
+    const name = "factory:objective";
+    const issue = await this.#call(() =>
+      this.#octokit.request("GET /repos/{owner}/{repo}/issues/{issue_number}", {
+        owner: this.#owner,
+        repo: this.#repo,
+        issue_number: objective,
+      }),
+    );
+    if (
+      issue.data.labels.some(
+        (label) => (typeof label === "string" ? label : label.name)?.toLowerCase() === name,
+      )
+    )
+      return;
+    const readLabel = () =>
+      this.#call(() =>
+        this.#octokit.request("GET /repos/{owner}/{repo}/labels/{name}", {
+          owner: this.#owner,
+          repo: this.#repo,
+          name,
+        }),
+      );
+    try {
+      await readLabel();
+    } catch (error) {
+      if ((error as { status?: number }).status !== 404) throw error;
+      try {
+        await this.#call(
+          () =>
+            this.#octokit.request("POST /repos/{owner}/{repo}/labels", {
+              owner: this.#owner,
+              repo: this.#repo,
+              name,
+              color: "6f42c1",
+              description:
+                "Factory Objective discovery; execution requires an authorized activation",
+            }),
+          true,
+        );
+      } catch (createError) {
+        if ((createError as { status?: number }).status !== 422) throw createError;
+        // Another activation may have created the same structural label.
+        // A fresh successful read, not the conflict alone, proves existence.
+        await readLabel();
+      }
+    }
+    await this.#call(
+      () =>
+        this.#octokit.request("POST /repos/{owner}/{repo}/issues/{issue_number}/labels", {
+          owner: this.#owner,
+          repo: this.#repo,
+          issue_number: objective,
+          labels: [name],
+        }),
+      true,
+    );
+  }
+
   /** Reconstruct controller work directly from Objective comments.  There is
    * deliberately no scheduler cursor or activation cache: every controller
    * process can recover from the same GitHub records after an interruption. */

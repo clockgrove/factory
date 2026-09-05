@@ -50,6 +50,8 @@ export interface RecoveryRequestPorts {
     LeaseStore & {
       getAuthenticatedLogin(): Promise<string>;
       addIssueComment(issueNodeId: string, body: string): Promise<void>;
+      /** Structural discovery only, after exact accepted recovery authority is verified. */
+      ensureObjectiveLabel(objective: number): Promise<void>;
     };
 }
 
@@ -185,7 +187,11 @@ export class RecoveryRequestService {
     if (!observed.historyComplete)
       throw new Error("Recovery requires complete authenticated history");
     const prior = await this.existing(input, observed.snapshot, actor);
-    if (prior) return prior; // Retry observes accepted authority, not a newly compiled plan.
+    if (prior) {
+      // Repair discovery after an accepted request, never create a new activation or plan.
+      await this.ports.store.ensureObjectiveLabel(input.objective);
+      return prior;
+    }
     const proposed = await this.proposal(input, observed);
     if (
       !proposed.plan ||
@@ -218,7 +224,11 @@ export class RecoveryRequestService {
       if (!observed.historyComplete)
         throw new Error("Recovery requires complete authenticated history");
       const replay = await this.existing(input, observed.snapshot, actor);
-      if (replay) return replay;
+      if (replay) {
+        await leases.assertCurrent(lease);
+        await this.ports.store.ensureObjectiveLabel(input.objective);
+        return replay;
+      }
       const refreshed = await this.proposal(input, observed);
       if (
         !refreshed.plan ||
@@ -267,12 +277,18 @@ export class RecoveryRequestService {
         const after = await this.ports.readSnapshot(input.objective);
         if (after.historyComplete) {
           const replay = await this.existing(input, after.snapshot, actor);
-          if (replay) return replay;
+          if (replay) {
+            await leases.assertCurrent(lease);
+            await this.ports.store.ensureObjectiveLabel(input.objective);
+            return replay;
+          }
         }
         throw new Error(
           "Recovery request write is unresolved; retry the same request ID and plan digest",
         );
       }
+      await leases.assertCurrent(lease);
+      await this.ports.store.ensureObjectiveLabel(input.objective);
       return event;
     } finally {
       // Failure to release cannot revoke a committed request or justify overwriting the lease.

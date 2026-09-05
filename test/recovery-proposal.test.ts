@@ -2,10 +2,15 @@ import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { FactoryReadSnapshot } from "../src/application/status.js";
 import { CompiledGraphManager, type CompiledGraphStore } from "../src/control/graphs.js";
+import { GitHubControlStore } from "../src/control/github-store.js";
 import type { GitCommitObject, LeaseManager, LeaseState } from "../src/control/lease.js";
 import { ReviewCheckpointManager } from "../src/control/reviews.js";
 import { attemptRef } from "../src/control/attempts.js";
-import { decodeEventComments, encodeEventTrailer } from "../src/control/receipts.js";
+import {
+  decodeEventComments,
+  encodeEventComment,
+  encodeEventTrailer,
+} from "../src/control/receipts.js";
 import { RecoveryRequestService } from "../src/recovery/requests.js";
 import { discoverRecoveryActivation } from "../src/recovery/discovery.js";
 import { sourceUsesCurrentProducer } from "../src/controller/retirement.js";
@@ -1015,8 +1020,66 @@ describe("explicit recovery request application", () => {
     let loseCommentResponse = false;
     let beforeRead: (() => void) | undefined;
     const comments: FactoryEvent[] = [];
+    const labels = new Set<string>();
+    const labelWrites: string[] = [];
+    let labelFailure: "before" | "response" | undefined;
+    const discoveryStore = new GitHubControlStore({
+      token: "fixture-only",
+      owner: "o",
+      repo: "r",
+      mutationScheduler: { acquire: async () => ({ waitedMs: 0, release: () => {} }) },
+      requestFetch: async (input, init) => {
+        const request = new Request(input, init);
+        const url = new URL(request.url);
+        const route = `${request.method} ${url.pathname}`;
+        const response = (value: unknown, status = 200) =>
+          Response.json(value, { status, headers: { date: now.toUTCString() } });
+        const issue = { number: 7, state: "open", labels: [...labels].map((name) => ({ name })) };
+        if (route === "GET /user") return response({ login: actor });
+        if (route === "GET /repos/o/r/issues") {
+          expect(url.searchParams.get("labels")).toBe("factory:objective");
+          return response(labels.has("factory:objective") ? [issue] : []);
+        }
+        if (route === "GET /repos/o/r/issues/7") return response(issue);
+        if (route === "GET /repos/o/r/issues/7/comments")
+          return response(
+            f.snapshot.factoryEvents!.map((event, index) => ({
+              id: index + 1,
+              body: encodeEventComment("fixture", event),
+              user: { login: "operator" },
+              author_association: "OWNER",
+            })),
+          );
+        if (
+          route === "GET /repos/o/r/labels/factory%3Aobjective" ||
+          route === "GET /repos/o/r/labels/factory:objective"
+        )
+          return response({ name: "factory:objective" });
+        if (route === "POST /repos/o/r/issues/7/labels") {
+          labelWrites.push(route);
+          const fault = labelFailure;
+          labelFailure = undefined;
+          if (fault === "before") return response({ message: "label unavailable" }, 400);
+          const data = (await request.json()) as { labels: string[] };
+          expect(data.labels).toEqual(["factory:objective"]);
+          for (const name of data.labels) labels.add(name);
+          if (fault === "response") return response({ message: "label response lost" }, 400);
+          return response([...labels].map((name) => ({ name })));
+        }
+        throw new Error(`unexpected recovery discovery route ${route}`);
+      },
+    });
+    // Keep the existing real immutable-plan fixture; exercise actual REST issue
+    // listing, comments authentication and structural label writes end to end.
+    vi.spyOn(discoveryStore, "readRef").mockImplementation(f.store.readRef);
+    vi.spyOn(discoveryStore, "readCommit").mockImplementation(f.store.readCommit);
+    vi.spyOn(discoveryStore, "readBlob").mockImplementation(f.store.readBlob);
+    vi.spyOn(discoveryStore, "readTreeEntry").mockImplementation(f.store.readTreeEntry);
     const store = {
       ...f.storage,
+      ensureObjectiveLabel: vi.fn((objective: number) =>
+        discoveryStore.ensureObjectiveLabel(objective),
+      ),
       serverTime: async () => now,
       getAuthenticatedLogin: async () => actor,
       compareAndSwapRef: vi.fn(
@@ -1057,6 +1120,12 @@ describe("explicit recovery request application", () => {
       writer: store,
       reader,
       comments,
+      labels,
+      labelWrites,
+      discover: () => discoveryStore.discoverObjectiveActivations(),
+      failLabel: (value: "before" | "response") => {
+        labelFailure = value;
+      },
       setActor: (value: string) => {
         actor = value;
       },
@@ -1068,6 +1137,61 @@ describe("explicit recovery request application", () => {
       },
     };
   }
+
+  it("makes an unlabeled foreground Objective discoverable only after exact recovery acceptance", async () => {
+    const f = await requests();
+    expect(await f.discover()).toEqual([]);
+    f.labels.add("factory:objective");
+    expect(await f.discover()).toEqual([]);
+    f.labels.clear();
+    const proposal = await f.service.propose({ objective: 7, requestId: "request" });
+    expect(f.labelWrites).toEqual([]);
+    const accepted = await f.service.request({
+      objective: 7,
+      requestId: "request",
+      planDigest: proposal.planDigest!,
+    });
+    const discovered = await f.discover();
+    expect(discovered).toHaveLength(1);
+    expect(discovered[0]!.recovery).toEqual({
+      requestId: accepted.requestId,
+      planDigest: accepted.planDigest,
+      successorRunId: accepted.successorRunId,
+    });
+    expect(f.comments.map((event) => event.event)).toEqual(["RecoveryRequested"]);
+    expect(
+      f.snapshot.factoryEvents!.filter((event) => event.event === "FactoryRunStarted"),
+    ).toHaveLength(1);
+  });
+
+  it.each(["before", "response"] as const)(
+    "repairs a %s-label failure by replaying only the accepted request",
+    async (fault) => {
+      const f = await requests();
+      const proposal = await f.service.propose({ objective: 7, requestId: "request" });
+      const input = { objective: 7, requestId: "request", planDigest: proposal.planDigest! };
+      f.failLabel(fault);
+      await expect(f.service.request(input)).rejects.toThrow();
+      expect(f.comments).toHaveLength(1);
+      const accepted = f.comments[0]!;
+      const refs = structuredClone(f.refs);
+      expect(await f.service.request(input)).toEqual(accepted);
+      expect(f.refs).toEqual(refs);
+      expect(f.writer.addIssueComment).toHaveBeenCalledTimes(1);
+      expect(await f.discover()).toHaveLength(1);
+      expect(f.labelWrites).toHaveLength(fault === "before" ? 2 : 1);
+      f.labels.clear();
+      expect(await f.service.request(input)).toEqual(accepted);
+      expect(await f.discover()).toHaveLength(1);
+      expect(f.writer.addIssueComment).toHaveBeenCalledTimes(1);
+      f.labels.clear();
+      f.setActor("someone-else");
+      const writes = f.labelWrites.length;
+      await expect(f.service.request(input)).rejects.toThrow("authority");
+      expect(f.labelWrites).toHaveLength(writes);
+      expect(f.labels.size).toBe(0);
+    },
+  );
 
   it("proposes without writes, then persists acknowledged immutable authority without reviving the predecessor", async () => {
     const f = await requests();
@@ -1102,6 +1226,7 @@ describe("explicit recovery request application", () => {
     const retry = await f.service.request(input);
     expect(retry).toEqual(first);
     expect(f.writer.addIssueComment).toHaveBeenCalledTimes(1);
+    expect(await f.discover()).toHaveLength(1);
   });
 
   it("discovers only the exact acknowledged successor and suppresses terminal successors", async () => {
@@ -1218,6 +1343,7 @@ describe("explicit recovery request application", () => {
     ).rejects.toThrow("actor");
     expect(f.refs.size).toBe(count);
     expect(f.comments).toEqual([]);
+    expect(f.writer.ensureObjectiveLabel).not.toHaveBeenCalled();
   });
 
   it("does not infer increments, accept new policy, or reuse the request ID for different authority", async () => {

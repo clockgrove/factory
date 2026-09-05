@@ -412,7 +412,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
   }
 
   /** The label is a discovery index, never execution authority. Add it only
-   * after an authenticated activation receipt exists, including exact replay. */
+   * after an authenticated activation or recovery request exists, including exact replay. */
   async ensureObjectiveLabel(objective: number): Promise<void> {
     const name = "factory:objective";
     const issue = await this.#call(() =>

@@ -1097,8 +1097,8 @@ export async function main(qualification = {}) {
         body: runObjectiveBody,
       })
     ).data;
-    await waitForCreatedObjectiveNamespace({ list, namespace, createdIssue: evidence.objective });
     save();
+    await waitForCreatedObjectiveNamespace({ list, namespace, createdIssue: evidence.objective });
     console.log(
       `Created disposable Objective ${evidence.objective.html_url} for ${namespace}; installed Factory is running.`,
     );

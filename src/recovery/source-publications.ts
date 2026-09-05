@@ -18,7 +18,11 @@ import {
   type RecoveryPlanRecord,
 } from "./plan.js";
 import { observeRecoveryNativeTransition } from "./native-transition.js";
-import { recoveryEventDigest, recoverySourceEventsDigest } from "./identity.js";
+import {
+  createRecoveryEventDigest,
+  recoveryEventDigest,
+  recoverySourceEventsDigest,
+} from "./identity.js";
 import { recoveryAdoptionEvents } from "./transaction.js";
 
 export type RecoverySourcePublishedEvent = Extract<
@@ -76,6 +80,7 @@ export async function loadRecoverySourceArtifact(
   input: Input,
   recordedPublication?: RecoverySourcePublishedEvent,
 ): Promise<RecoverySourceArtifactProof> {
+  const recoveryEventDigest = createRecoveryEventDigest();
   requireEvidence(input.events.length <= 10000);
   const events = [
     ...new Map(
@@ -124,10 +129,10 @@ export async function loadRecoverySourceArtifact(
     claim,
     authenticatedRequest: requests[0]!,
     predecessorStart: starts[0]!,
-  }))
-    requireEvidence(
-      events.some((event) => recoveryEventDigest(event) === recoveryEventDigest(expected)),
-    );
+  })) {
+    const expectedDigest = recoveryEventDigest(expected);
+    requireEvidence(events.some((event) => recoveryEventDigest(event) === expectedDigest));
+  }
   requireEvidence(
     recoverySourceEventsDigest({
       objective: plan.objective,
@@ -425,6 +430,7 @@ export async function verifyRecoverySourcePublication(
     }
   | { status: "blocked"; blockers: string[]; executionAuthorized: false }
 > {
+  const recoveryEventDigest = createRecoveryEventDigest();
   try {
     const event = parseFactoryEvent(input.publication);
     requireEvidence(event.event === "RecoverySourcePublished");

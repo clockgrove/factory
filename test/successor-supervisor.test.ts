@@ -151,17 +151,23 @@ async function fixture(
   let stalePreviewOid: string | undefined;
   let counter = 0;
   const oid = () => createHash("sha1").update(`metadata-${counter++}`).digest("hex");
+  const immutableCommits = new Map<string, Omit<GitCommitObject, "serverTime">>();
+  const previewTrees = new Map<string, string>();
   const readCommit = async (id: string): Promise<GitCommitObject> => {
     if (id === stalePreviewOid) stalePreviewServed = true;
-    return (
-      commits.get(id) ?? {
+    const synthetic = commits.get(id);
+    if (synthetic) return synthetic;
+    let immutable = immutableCommits.get(id);
+    if (!immutable) {
+      immutable = {
         oid: id,
         treeOid: git("rev-parse", `${id}^{tree}`),
         parentOids: git("show", "-s", "--format=%P", id).split(" ").filter(Boolean),
         message: git("show", "-s", "--format=%B", id),
-        serverTime: new Date(),
-      }
-    );
+      };
+      immutableCommits.set(id, immutable);
+    }
+    return { ...immutable, parentOids: [...immutable.parentOids], serverTime: new Date() };
   };
   const storage: CompiledGraphStore = {
     readRef: async (ref) => refs.get(ref) ?? null,
@@ -575,17 +581,23 @@ async function fixture(
     const preview = createHash("sha1")
       .update(`preview:${currentBase}:${pull.headSha}`)
       .digest("hex");
-    if (pull.state === "OPEN")
-      commits.set(preview, {
-        oid: preview,
-        treeOid:
+    if (pull.state === "OPEN") {
+      let treeOid = previewTrees.get(preview);
+      if (!treeOid) {
+        treeOid =
           options.wrongPreviewTree && number === 19
             ? git("rev-parse", `${pull.headSha}^{tree}`)
-            : git("merge-tree", "--write-tree", currentBase, pull.headSha).split("\n")[0]!,
+            : git("merge-tree", "--write-tree", currentBase, pull.headSha).split("\n")[0]!;
+        previewTrees.set(preview, treeOid);
+      }
+      commits.set(preview, {
+        oid: preview,
+        treeOid,
         parentOids: [currentBase, pull.headSha],
         message: "GitHub test merge",
         serverTime: new Date(),
       });
+    }
     if (
       options.stalePreviewOnce &&
       !stalePreviewServed &&

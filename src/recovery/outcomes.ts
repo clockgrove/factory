@@ -18,7 +18,11 @@ import {
 } from "../validation/plan.js";
 import type { RecoveryReadStore } from "./assessment.js";
 import { loadRecoveryClaim, type RecoveryClaimRecord } from "./claims.js";
-import { recoveryEventDigest, recoverySourceEventsDigest } from "./identity.js";
+import {
+  createRecoveryEventDigest,
+  recoveryEventDigest,
+  recoverySourceEventsDigest,
+} from "./identity.js";
 import {
   loadRecoveryPlan,
   recoveryPlanDigest,
@@ -272,6 +276,7 @@ export async function verifyRecoveryMergedSource(
 async function verifySourceProof(
   input: SourceProofInput & ({ outcome: RecoverySourceIntegratedEvent } | { workItem: number }),
 ): Promise<RecoverySourceIntegrationResult | RecoveryMergedSourceProof> {
+  const recoveryEventDigest = createRecoveryEventDigest();
   try {
     requireOutcome(input.events.length <= 10_000);
     const events = [
@@ -340,9 +345,11 @@ async function verifySourceProof(
       predecessorStart: starts[0]!,
     });
     requireOutcome(
-      envelopes.every((expected) =>
-        events.some((event) => recoveryEventDigest(event) === recoveryEventDigest(expected)),
-      ),
+      envelopes
+        .map(recoveryEventDigest)
+        .every((expectedDigest) =>
+          events.some((event) => recoveryEventDigest(event) === expectedDigest),
+        ),
     );
     requireOutcome(
       recoverySourceEventsDigest({

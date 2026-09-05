@@ -19,7 +19,7 @@ import type { RecoveryReadStore } from "./assessment.js";
 import { verifyRecoveryChain } from "./chain.js";
 import { loadRecoveryClaim, type RecoveryClaimRecord } from "./claims.js";
 import { resolveRecoveryEvidence, type RecoveryEvidenceResolution } from "./evidence.js";
-import { recoveryClaimRef, recoveryEventDigest } from "./identity.js";
+import { recoveryClaimRef, createRecoveryEventDigest } from "./identity.js";
 import { loadRecoveryPlan, type RecoveryPlanRecord } from "./plan.js";
 import { recoveryAdoptionEvents } from "./transaction.js";
 import {
@@ -128,6 +128,7 @@ export async function loadRecoveryRuntime(input: {
   store: RecoveryReadStore;
   readSnapshot(): Promise<{ snapshot: FactoryReadSnapshot; historyComplete: boolean }>;
 }): Promise<RecoveryRuntimeResult> {
+  const recoveryEventDigest = createRecoveryEventDigest();
   try {
     input = { ...input, store: boundedReadStore(input.store) };
     const { snapshot, historyComplete } = await input.readSnapshot();
@@ -247,11 +248,13 @@ export async function loadRecoveryRuntime(input: {
         authenticatedRequest: r[0]!,
         predecessorStart: s,
       });
-      for (const envelope of expected)
+      for (const envelope of expected) {
+        const expectedDigest = recoveryEventDigest(envelope);
         requireRuntime(
-          events.some((event) => recoveryEventDigest(event) === recoveryEventDigest(envelope)),
+          events.some((event) => recoveryEventDigest(event) === expectedDigest),
           "adoption-envelope-missing-or-conflicting",
         );
+      }
       requireRuntime(
         events.filter(
           (event) =>

@@ -17,6 +17,11 @@ export function checkpointFacts(
   requirePaused?: boolean,
 ): { runId: string; modelTokens: number; integrated: number; stable: unknown[] };
 export function assertScopeCoverage(events: Record<string, unknown>[]): void;
+export function checkpointReady(
+  observation: unknown,
+  authority: CheckpointAuthority,
+  pauseRequestId: string,
+): boolean;
 export function checkpointLease(commit: unknown, oid: string): Record<string, unknown>;
 export function assertControllerUnit(
   body: string,

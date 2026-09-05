@@ -84,7 +84,34 @@ export function checkpointAuthority(env) {
   };
 }
 
-export function checkpointFacts(observation, authority, pauseRequestId, requirePaused = true) {
+class CheckpointPending extends Error {}
+
+export function checkpointReady(observation, authority, pauseRequestId) {
+  try {
+    checkpointFacts(observation, authority, pauseRequestId, true, true);
+    return true;
+  } catch (error) {
+    if (error instanceof CheckpointPending) return false;
+    throw error;
+  }
+}
+
+export function checkpointFacts(
+  observation,
+  authority,
+  pauseRequestId,
+  requirePaused = true,
+  waiting = false,
+) {
+  const settled = (condition, reason) => {
+    if (!condition && waiting) throw new CheckpointPending(reason);
+    assert.ok(condition, reason);
+  };
+  const completedReceipt = (values, reason) => {
+    assert.ok(values.length <= 1, reason);
+    settled(values.length === 1, reason);
+    return values[0];
+  };
   const events = observation.receipts.map((receipt) => receipt.event);
   const start = unique(
     events.filter((event) => event.event === "FactoryRunStarted"),
@@ -126,17 +153,76 @@ export function checkpointFacts(observation, authority, pauseRequestId, requireP
   const reservations = run.filter((event) => event.event === "AttemptReserved");
   assertScopeCoverage(run);
   const integrated = run.filter((event) => event.event === "AttemptIntegrated");
-  assert.ok(integrated.length >= 1 && integrated.length <= (requirePaused ? 2 : 3));
-  assert.equal(reservations.length, integrated.length, "admitted work remains unsettled");
+  assert.ok(integrated.length <= (requirePaused ? 2 : 3));
   assert.equal(
     new Set(reservations.map((event) => event.workItem)).size,
     reservations.length,
     "duplicate execution",
   );
+  if (requirePaused) {
+    const pause = completedReceipt(
+      run.filter(
+        (event) => event.event === "RunPauseRequested" && event.requestId === pauseRequestId,
+      ),
+      "exact pause request missing or repeated",
+    );
+    const ack = completedReceipt(
+      run.filter(
+        (event) =>
+          event.event === "RunPauseAcknowledged" && event.commandRequestId === pauseRequestId,
+      ),
+      "drained pause acknowledgement missing or repeated",
+    );
+    assert.ok(ack.sequence > pause.sequence, "pause acknowledgement precedes request");
+    assert.ok(
+      !run.some(
+        (event) =>
+          ["AttemptReserved", "AttemptStarted"].includes(event.event) &&
+          event.sequence > ack.sequence,
+      ),
+      "new admission after pause acknowledgement",
+    );
+    assert.ok(!run.some((event) => terminal.has(event.event)), "terminal run cannot resume");
+  }
+  assert.ok(reservations.length >= integrated.length, "integration lacks admission");
+  // An acknowledged admission gate can precede deferred PR integration. Keep
+  // polling, but never reinterpret contradictory identity/duplicate receipts as pending.
+  for (const eventName of [
+    "AttemptStarted",
+    "PublicationRecorded",
+    "AttemptSucceeded",
+    "AttemptValidated",
+    "ValidationRecorded",
+    "AttemptIntegrated",
+  ]) {
+    const seen = new Set();
+    for (const event of run.filter((event) => event.event === eventName)) {
+      const key = `${event.workItem}:${event.attempt}`;
+      assert.ok(!seen.has(key), `${eventName} repeated`);
+      seen.add(key);
+    }
+  }
+  const usageKeys = new Set();
+  for (const event of run.filter((event) => event.event === "BudgetReconciled")) {
+    const key = JSON.stringify([
+      event.workItem,
+      event.attempt,
+      event.phase,
+      event.unit,
+      event.usageId,
+    ]);
+    assert.ok(!usageKeys.has(key), "usage repeated");
+    usageKeys.add(key);
+    assert.ok(Number.isSafeInteger(event.amount) && event.amount >= 0, "invalid known usage");
+  }
+  settled(
+    integrated.length >= 1 && reservations.length === integrated.length,
+    "admitted work remains unsettled",
+  );
   const usage = run.filter(
     (event) => event.event === "BudgetReconciled" && event.unit === "model_tokens",
   );
-  const compile = unique(
+  const compile = completedReceipt(
     usage.filter(
       (event) =>
         event.phase === "management" &&
@@ -164,7 +250,7 @@ export function checkpointFacts(observation, authority, pauseRequestId, requireP
       ["execution", "local_milliseconds"],
       ["validation", "validation_milliseconds"],
     ]) {
-      const native = unique(
+      const native = completedReceipt(
         itemEvents.filter(
           (event) =>
             event.event === "BudgetReconciled" && event.phase === phase && event.unit === unit,
@@ -173,7 +259,7 @@ export function checkpointFacts(observation, authority, pauseRequestId, requireP
       );
       assert.ok(Number.isSafeInteger(native.amount) && native.amount >= 0);
     }
-    const succeeded = unique(
+    const succeeded = completedReceipt(
       itemEvents.filter((event) => event.event === "AttemptSucceeded"),
       "worker completion missing or repeated",
     );
@@ -181,16 +267,16 @@ export function checkpointFacts(observation, authority, pauseRequestId, requireP
       itemEvents.filter((event) => event.event === "AttemptIntegrated"),
       "integration missing or repeated",
     );
-    unique(
+    completedReceipt(
       itemEvents.filter((event) => event.event === "AttemptValidated"),
       "accepted semantic review missing or repeated",
     );
-    const validation = unique(
+    const validation = completedReceipt(
       itemEvents.filter((event) => event.event === "ValidationRecorded"),
       "validation missing or repeated",
     );
     assert.equal(validation.passed, true);
-    const worker = unique(
+    const worker = completedReceipt(
       usage.filter(
         (event) =>
           event.workItem === reserved.workItem &&
@@ -199,7 +285,7 @@ export function checkpointFacts(observation, authority, pauseRequestId, requireP
       ),
       "worker usage missing or repeated",
     );
-    const review = unique(
+    const review = completedReceipt(
       usage.filter(
         (event) =>
           event.workItem === reserved.workItem &&
@@ -211,6 +297,7 @@ export function checkpointFacts(observation, authority, pauseRequestId, requireP
     );
     assert.ok(Number.isSafeInteger(worker.amount) && worker.amount >= 0);
     assert.ok(Number.isSafeInteger(review.amount) && review.amount >= 0);
+    settled(succeeded.reportedModelTokens !== undefined, "terminal worker counter unavailable");
     assert.equal(
       succeeded.reportedModelTokens,
       worker.amount,
@@ -223,7 +310,7 @@ export function checkpointFacts(observation, authority, pauseRequestId, requireP
   )) {
     const expected =
       reserved.event === "BudgetReserved" ? "BudgetReconciled" : "CapacityReconciled";
-    assert.ok(
+    settled(
       run.some(
         (event) =>
           event.event === expected &&
@@ -238,9 +325,13 @@ export function checkpointFacts(observation, authority, pauseRequestId, requireP
       "durable native reservation remains unsettled",
     );
   }
-  assert.deepEqual(observation.status.capacity.activeReservations, []);
+  assert.ok(Array.isArray(observation.status.capacity.activeReservations));
+  settled(
+    observation.status.capacity.activeReservations.length === 0,
+    "active reservations remain",
+  );
   for (const entry of observation.status.summary.economics.nativeUnits)
-    assert.equal(entry.outstanding, 0, "native usage not reconciled");
+    settled(entry.outstanding === 0, "native usage not reconciled");
   const modelTokens = usage.reduce((sum, event) => sum + event.amount, 0);
   assert.equal(observation.status.summary.economics.usage.model_tokens.availability, "observed");
   assert.equal(observation.status.summary.economics.usage.model_tokens.value, modelTokens);
@@ -262,22 +353,6 @@ export function checkpointFacts(observation, authority, pauseRequestId, requireP
   );
   if (requirePaused) {
     assert.ok(!run.some((event) => terminal.has(event.event)), "terminal run cannot resume");
-    const pause = unique(
-      run.filter(
-        (event) => event.event === "RunPauseRequested" && event.requestId === pauseRequestId,
-      ),
-      "exact pause request missing",
-    );
-    const ack = unique(
-      run.filter(
-        (event) =>
-          event.event === "RunPauseAcknowledged" && event.commandRequestId === pauseRequestId,
-      ),
-      "drained pause acknowledgement missing",
-    );
-    assert.ok(
-      ack.sequence > pause.sequence && integrated.every((event) => event.sequence < ack.sequence),
-    );
     assert.equal(observation.status.run.state, "paused");
   } else {
     assert.equal(integrated.length, 3);
@@ -316,17 +391,9 @@ export async function runCheckpointScenario(port, authority) {
     observation.receipts.some(({ event }) => event.event === "AttemptStarted"),
   );
   await port.action("pause");
-  const checkpoint = await port.poll("accounted-pause", (observation) => {
-    if (
-      !observation.receipts.some(
-        ({ event }) =>
-          event.event === "RunPauseAcknowledged" && event.commandRequestId === port.pauseRequestId,
-      )
-    )
-      return false;
-    checkpointFacts(observation, authority, port.pauseRequestId);
-    return true;
-  });
+  const checkpoint = await port.poll("accounted-pause", (observation) =>
+    checkpointReady(observation, authority, port.pauseRequestId),
+  );
   const facts = checkpointFacts(checkpoint, authority, port.pauseRequestId);
   const scopes = await port.absence(checkpoint, [original]);
   await port.checkpoint({ checkpoint, facts, original, scopes });

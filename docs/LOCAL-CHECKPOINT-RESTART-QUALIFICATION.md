@@ -74,6 +74,10 @@ The acknowledgement authorizes only this one-shot sequence:
    unfinished work in the original three-item graph. Compilation, each worker and each review
    must have known, unique model-token counters. Native execution and validation accounting must
    be reconciled, with no active reservations. Known zero differs from missing usage.
+   The acknowledgement closes new admission; it can precede deferred PR integration. Bounded
+   polling waits for that later integration and complete known accounting, while rejecting any
+   worker reservation/start after the acknowledgement or contradictory receipts. The acknowledgement
+   alone never authorizes restart.
 4. Derive every captured execution and validation scope from authenticated receipts, including
    artifact-to-validation invocation bindings and exact original producer ownership. Independently
    observe every named scope absent. An orphan, unknown or surviving resource blocks restart.

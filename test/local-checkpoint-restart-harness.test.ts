@@ -5,6 +5,7 @@ import {
   assertControllerUnit,
   checkpointAuthority,
   checkpointFacts,
+  checkpointReady,
   checkpointLease,
   assertScopeCoverage,
   main,
@@ -184,6 +185,60 @@ describe("explicit checkpoint restart authority", () => {
 });
 
 describe("fully accounted checkpoint", () => {
+  it("waits for outstanding accounting and capacity rather than authorizing restart", () => {
+    const active = observation();
+    active.status.capacity.activeReservations.push({ workItem: 1, attempt: 1 });
+    expect(checkpointReady(active, authority, pause)).toBe(false);
+    const unsettled = observation();
+    unsettled.status.summary.economics.nativeUnits[0]!.outstanding = 1;
+    expect(checkpointReady(unsettled, authority, pause)).toBe(false);
+  });
+  it("waits after pause acknowledgement while PR integration is deferred, then accepts its later integration", () => {
+    const value = observation();
+    const integrated = value.receipts.find(({ event }) => event.event === "AttemptIntegrated")!;
+    const ack = value.receipts.find(({ event }) => event.event === "RunPauseAcknowledged")!;
+    integrated.event.sequence = Number(ack.event.sequence) + 1;
+    const pending = structuredClone(value);
+    pending.receipts = pending.receipts.filter(({ event }) => event.event !== "AttemptIntegrated");
+    expect(checkpointReady(pending, authority, pause)).toBe(false);
+    expect(() => checkpointFacts(pending, authority, pause)).toThrow(/unsettled/);
+    expect(checkpointReady(value, authority, pause)).toBe(true);
+    expect(checkpointFacts(value, authority, pause).integrated).toBe(1);
+  });
+  it.each(["AttemptReserved", "AttemptStarted"])(
+    "rejects new %s after acknowledgement even while integration is pending",
+    (name) => {
+      const value = observation();
+      const ack = value.receipts.find(({ event }) => event.event === "RunPauseAcknowledged")!;
+      value.receipts.find(({ event }) => event.event === name)!.event.sequence =
+        Number(ack.event.sequence) + 1;
+      value.receipts = value.receipts.filter(({ event }) => event.event !== "AttemptIntegrated");
+      expect(() => checkpointReady(value, authority, pause)).toThrow(/new admission/);
+    },
+  );
+  it("waits for missing counters without treating them as zero or accepting a contradictory known counter", () => {
+    const value = observation();
+    const worker = value.receipts.find(
+      ({ event }) => event.unit === "model_tokens" && event.phase === "execution",
+    )!;
+    value.receipts = value.receipts.filter((receipt) => receipt !== worker);
+    expect(checkpointReady(value, authority, pause)).toBe(false);
+    worker.event.amount = 1;
+    value.receipts.push(worker);
+    expect(() => checkpointReady(value, authority, pause)).toThrow(/different/);
+  });
+  it("does not hide duplicate receipts or failure behind deferred integration", () => {
+    for (const contradictory of ["AttemptSucceeded", "AttemptFailed"]) {
+      const value = observation();
+      value.receipts = value.receipts.filter(({ event }) => event.event !== "AttemptIntegrated");
+      const extra = structuredClone(
+        value.receipts.find(({ event }) => event.event === "AttemptSucceeded")!,
+      );
+      extra.event.event = contradictory;
+      value.receipts.push(extra);
+      expect(() => checkpointReady(value, authority, pause)).toThrow();
+    }
+  });
   it("rejects usage reconstructed for another run", () => {
     const value = observation();
     value.status.summary.runId = "other";
@@ -324,6 +379,31 @@ function scenario() {
 }
 
 describe("one-shot checkpoint lifecycle", () => {
+  it("does not inspect scopes or restart until the post-ack integration becomes visible", async () => {
+    const f = scenario();
+    const ack = f.checkpoint.receipts.find(({ event }) => event.event === "RunPauseAcknowledged")!;
+    f.checkpoint.receipts.find(({ event }) => event.event === "AttemptIntegrated")!.event.sequence =
+      Number(ack.event.sequence) + 1;
+    f.final.receipts.find(({ event }) => event.event === "AttemptIntegrated")!.event.sequence =
+      Number(ack.event.sequence) + 1;
+    vi.mocked(f.port.poll).mockImplementation(async (phase, accept) => {
+      if (phase === "accounted-pause") {
+        const pending = structuredClone(f.checkpoint);
+        pending.receipts = pending.receipts.filter(
+          ({ event }) => event.event !== "AttemptIntegrated",
+        );
+        expect(accept(pending)).toBe(false);
+        expect(f.port.absence).not.toHaveBeenCalled();
+        expect(f.actions).not.toContain("restart");
+      }
+      const value = phase === "completed" ? f.final : f.checkpoint;
+      expect(accept(value)).toBe(true);
+      return value;
+    });
+    await expect(runCheckpointScenario(f.port, authority)).resolves.toMatchObject({
+      result: "passed",
+    });
+  });
   it("rechecks the replacement incarnation after awaited takeover and absence before resume", async () => {
     const f = scenario();
     vi.mocked(f.port.controller).mockImplementation(async (state, expected) => {

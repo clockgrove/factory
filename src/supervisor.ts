@@ -2003,7 +2003,14 @@ export class FactorySupervisor {
     const drainExecutions = async (): Promise<void> => {
       executionAbort.abort();
       const settlements = await activeExecutions.settle();
-      const failure = settlements.find((settlement) => settlement.error);
+      // Intentional teardown reports this typed cancellation only after the
+      // execution has reconciled cleanup and its attempt receipt. It is not a
+      // new operator command and must not replace the outcome being drained for.
+      // Every other failure (including cleanup or fencing uncertainty) survives.
+      const failure = settlements.find(
+        (settlement) =>
+          settlement.error && !(settlement.error instanceof RunCancellationRequestedError),
+      );
       if (failure?.error) throw failure.error;
     };
     const terminalAfterDrain = async (
@@ -3091,9 +3098,6 @@ export class FactorySupervisor {
         if (settled?.error) throw settled.error;
       }
     } catch (error) {
-      if (this.#options.signal?.aborted && this.#options.shutdownBehavior === "release-lease") {
-        return await releaseAfterDrain();
-      }
       if (error instanceof LeaseLostError) throw error;
       if (error instanceof PlatformUnavailableError) throw error;
       const unsafeCleanup =
@@ -3103,6 +3107,9 @@ export class FactorySupervisor {
             error.message,
           ));
       if (unsafeCleanup) throw error;
+      if (this.#options.signal?.aborted && this.#options.shutdownBehavior === "release-lease") {
+        return await releaseAfterDrain();
+      }
       if (error instanceof RunCancellationRequestedError || this.#options.signal?.aborted) {
         return await terminalAfterDrain(
           "FactoryRunCancelled",

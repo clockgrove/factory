@@ -10,6 +10,20 @@ checks still required before publication. Tasks are organized in the [delivery p
 
 ## Proven on this branch
 
+A later [explicit regular-delivery observation](release-evidence/regular-delivery-failure-2026-09-05.json)
+failed despite passing the offline release batch at `657d746bb8a2708d03f55a898ee04e3da2e0d725`
+(121 files, 2,051 tests, three skips). The installed unchanged runtime ran two SDK workers, passed
+both independent validations, recorded two review calls, and merged one PR; the other PR was closed
+unmerged and the dependent join never started. Pending regular integration failed to block the next
+Work Item's admission. A possible additional concurrent publication/recovery race remains under
+investigation, not a proved cause. The run escalated with 131,699 known model tokens across five
+calls against its initial 500,000-token admission threshold, no active reservations, and all six
+exact recorded scopes independently absent. Fresh installed status/explain/replay reads retained the
+failure honestly: status and replay summaries agreed, replay was write-free, and scheduler
+recomputation remained unavailable without pinned admission snapshots. This is failed explicit
+regular qualification and useful read-only reconstruction, not native fallback/concurrency evidence
+or a passed live gate. Earlier records and all six prepublication gates remain unchanged.
+
 The final verifier batch `35ea74c00d1f0eba9a963fde9256dba5190b5716` passed the full release
 command: 121 test files, 2,035 passing tests and three skips, all static/schema/bundle/package
 checks, and zero dependency vulnerabilities. The

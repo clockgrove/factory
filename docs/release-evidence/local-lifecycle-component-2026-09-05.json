@@ -4,6 +4,48 @@
   "implementationCommit": "136983af385413c971bf3f5cd0f744542a56cdf2",
   "status": "mixed-component-results",
   "scope": "offline-release-batch-staged-no-model-wsl2-queued-withdrawal-and-partial-worker-faults",
+  "finalVerifierBatch": {
+    "sourceCommit": "35ea74c00d1f0eba9a963fde9256dba5190b5716",
+    "command": "npm run verify:release",
+    "exitCode": 0,
+    "testFilesPassed": 121,
+    "testsPassed": 2035,
+    "testsSkipped": 3,
+    "testDurationSeconds": 281.79,
+    "coveragePercent": {
+      "statements": 81.01,
+      "branches": 77.04,
+      "functions": 85.52,
+      "lines": 82.28
+    },
+    "staticSchemaBundlePluginAndNpmChecks": "passed",
+    "dependencyAuditVulnerabilities": 0,
+    "sourceLogSha256": "3e6962518fcb8bed19fe0dd0cd7b91815693504cc6d0c8e724f29f60fedca1a2",
+    "runtimeBundlesUnchangedFromInstalledSubject": true,
+    "package": {
+      "origin": "local npm pack of this source commit; not the public registry",
+      "files": 72,
+      "bytes": 2914538,
+      "sha256": "f2c8e135318c20d68ffff4a601eb735078449ee57b323201b384d59f7632b9d0",
+      "containsThisFinalEvidenceUpdate": false
+    },
+    "liveGatePassed": false
+  },
+  "correctedRestartParser": {
+    "sourceCommit": "1edf4acf73a56d52466ed9a4d1c23e25ba021f2e",
+    "integratedCommit": "35ea74c00d1f0eba9a963fde9256dba5190b5716",
+    "observedAt": "2026-09-05T11:33:33.974Z",
+    "sourceDiagnosticSha256": "6f7090caf3e691b2c9eaeb9b2236fa8937d9da46048a83168b9e68a3adf04f39",
+    "result": "parser-and-takeover-subset-observed",
+    "independentSameSequenceReceiptsPreserved": true,
+    "controllerTakeoverAndPauseAcknowledgementObserved": true,
+    "retryOrResumeReceipts": 0,
+    "workerModelUsage": "unavailable",
+    "capturedScopeAbsentAt": "2026-09-05T11:34:03.235Z",
+    "originalFailureEvidenceUnchanged": true,
+    "recoveredCompletionQualified": false,
+    "scope": "Read-only authenticated receipt parsing and exact-scope observation; no lifecycle actions, reinjection, retry, model call, or original evidence rewrite."
+  },
   "verification": {
     "command": "npm run verify:release",
     "exitCode": 0,

@@ -10,7 +10,16 @@ checks still required before publication. Tasks are organized in the [delivery p
 
 ## Proven on this branch
 
-The latest lifecycle candidate `136983af385413c971bf3f5cd0f744542a56cdf2` passed
+The final verifier batch `35ea74c00d1f0eba9a963fde9256dba5190b5716` passed the full release
+command: 121 test files, 2,035 passing tests and three skips, all static/schema/bundle/package
+checks, and zero dependency vulnerabilities. The
+[local lifecycle component record](release-evidence/local-lifecycle-component-2026-09-05.json)
+separately binds its 72-file local tarball and the earlier installed lifecycle subject. Runtime
+bundles did not change. A corrected read-only parser confirmed the retained restart's independent
+same-sequence receipts, controller takeover and pause acknowledgement, with no retry/resume and
+unavailable worker usage. Neither that parser check nor this release batch closes a live gate.
+
+The installed lifecycle candidate `136983af385413c971bf3f5cd0f744542a56cdf2` passed
 `npm run verify:release`: 121 test files, 2,032 passing tests and three skips, typecheck,
 lint, formatting, schemas, reproducible bundles, staged clean plugin/npm installation,
 and a dependency audit with zero vulnerabilities. The

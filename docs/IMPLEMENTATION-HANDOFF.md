@@ -1,5 +1,9 @@
 # Implementation handoff
 
+For current remaining work, owners and blockers, use the [completion board](COMPLETION.md).
+The sections below retain historical implementation and exact-candidate evidence, not a second
+current execution queue.
+
 The completion implementation and matching bundles are integrated. Exact offline, installed and
 staged-package results are recorded in the conformance ledger below. A fresh installed regular-PR
 exercise exposed premature admission while a prior publication still awaited integration. The
@@ -24,7 +28,7 @@ recompute scheduling without pinned admission snapshots.
 [DESIGN.md](DESIGN.md) defines behavior; [CONFORMANCE.md](CONFORMANCE.md) remains the release-gate
 ledger. This document grants no execution, spending, installation, or publication authority.
 
-## Completion acceptance
+## Historical acceptance snapshot
 
 | Capability | Required outcome | Status |
 | --- | --- | --- |

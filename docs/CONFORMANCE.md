@@ -1,6 +1,6 @@
 # Factory verification status
 
-Date: 2026-09-04
+Date: 2026-09-05
 
 This file distinguishes release evidence from implemented adapters. An adapter existing in the
 bundle is not, by itself, a support claim.
@@ -9,6 +9,13 @@ The scope is defined in [`DESIGN.md`](DESIGN.md). This document records tested b
 checks still required before publication. Tasks are organized in the [delivery plan](DELIVERY-PLAN.md).
 
 ## Proven on this branch
+
+The completion branch integrates new regression-tested ordinary resume/receipt repair, frozen-port
+recovery, generic/economic compilation, read-only doctor/planning, and exact managed-session
+observation. Its combined release suite and rebuilt installed artifacts still require verification;
+earlier evidence below remains scoped to its recorded revision, not promoted to the changed source.
+Credential-free tests and local installed qualification proceed independently of deferred paid-provider
+credentials. No deferred live gate is marked passed by that deferral.
 
 The first installed multi-wave Objective escalated during compilation before creating Work Items.
 Its [failure record](release-evidence/local-objective-failure-2026-09-04.json) preserves the rejected

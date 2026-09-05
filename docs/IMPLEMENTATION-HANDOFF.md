@@ -10,17 +10,21 @@ ledger. This document grants no execution, spending, installation, or publicatio
 
 | Capability | Required outcome | Status |
 | --- | --- | --- |
-| Ordinary restart and receipt repair | Resume after authenticated same-run merges; reject external trunk changes; reconstruct reservation receipts without losing immutable resource identity. | In progress |
+| Ordinary restart and receipt repair | Resume after authenticated same-run merges; reject external trunk changes; reconstruct reservation receipts without losing immutable resource identity. | Integrated; targeted regression checks passed; full batch pending |
 | Partial native-stack recovery | Retain validated lower work and execute unfinished upper work through exact-evidence publication and integration without duplicate work. | In progress |
-| Generic, economic compilation | Ground commands in observed repository toolchains, accept explicit exclusive-resource claims, and evaluate decomposition costs without fabricated prices or measurements. | In progress |
-| Chat preflight and planning | Doctor performs useful mechanical diagnostics; explicit plan produces or inspects a proposed graph before activation; CLI and MCP share the same write-free inspection contract. | In progress |
-| Managed providers | Prove assignable provider identities and owned session lifecycle observations for both managed targets; preserve explicit unsupported boundaries until evidenced. | In progress |
+| Generic, economic compilation | Ground commands in observed repository toolchains, accept explicit exclusive-resource claims, and evaluate decomposition costs without fabricated prices or measurements. | Integrated; targeted regression checks passed; full batch pending |
+| Chat preflight and planning | Doctor performs useful mechanical diagnostics; explicit plan produces or inspects a proposed graph before activation; CLI and MCP share the same write-free inspection contract. | Integrated; targeted regression checks passed; installed verification pending |
+| Managed providers | Prove assignable provider identities and owned session lifecycle observations for both managed targets; preserve explicit unsupported boundaries until evidenced. | Exact Copilot task/session reconciliation integrated and regression-tested; live credentials and Codex identity remain external gates |
 | Installed complete Objective | Qualify matching installed artifacts through parallel siblings, independent validation/review, integration, dependent join, final closure, and bounded recovery/cancellation cases. | Pending integration |
 | Release verification | Run the complete integrated suite and package checks; preserve exact-revision evidence and the independent host/provider/publication gates. | Pending integration |
 
 These are completion gates, not a new architecture or permission to reduce scope. Regression tests
 must expose the reported defects before a fix is accepted. Simulated fixtures, component probes,
 installed local runs, and paid-provider/host qualification remain distinct evidence scopes.
+
+The current completion effort proceeds with credential-free verification and local installed runs.
+Paid-provider qualification is deferred until the operator supplies credentials; this does not waive
+provider evidence or authorize fallback, extra spending, publication, or a reduced support contract.
 
 ## Integrated capabilities
 

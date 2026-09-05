@@ -26,6 +26,7 @@ import type {
 import type { ManagementBackend } from "../../src/management/backend.js";
 import { validateArtifactClean, discardValidationResult } from "../../src/validation/clean-run.js";
 import type { ObjectiveSnapshot, LinkedPullRequest } from "../../src/types.js";
+import { GitHubStacks } from "../../src/publication/github-stacks.js";
 
 export const LOCAL = "codex-sdk/local-worktree";
 export const DAYTONA = "codex-cli/daytona";
@@ -44,6 +45,7 @@ export interface ProviderFaults {
   loseCandidateCheckpointResponse?: boolean;
   candidateReviewRejects?: boolean;
   sandboxUntrusted?: boolean;
+  nativeStack?: boolean;
 }
 
 export async function providerSupervisorFixture(
@@ -190,7 +192,7 @@ export async function providerSupervisorFixture(
       preconditions: [],
       outOfScope: [],
       conventions: [],
-      dependsOn: index === 2 ? ["a", "b"] : [],
+      dependsOn: index === 2 ? ["a", "b"] : faults.nativeStack && index === 1 ? ["a"] : [],
       baseSha,
       validationCommands: ["node --test"],
       requirements: {
@@ -200,11 +202,18 @@ export async function providerSupervisorFixture(
         services: [],
         networkDestinations: [],
         permittedSecretNames: [],
-        trust: managed ? "managed" : "trusted_local",
+        trust: managed
+          ? "managed"
+          : faults.nativeStack && index === 1
+            ? "isolated"
+            : "trusted_local",
         estimatedDurationMinutes: 1,
       },
       artifactContract: "clockgrove.factory/artifact-v1",
-      delivery: { group: id, relationship: index === 2 ? "join-after-merge" : "root" },
+      delivery:
+        faults.nativeStack && index === 1
+          ? { group: "a", relationship: "continue-stack", parentWorkItem: "a" }
+          : { group: id, relationship: index === 2 ? "join-after-merge" : "root" },
     })),
   };
   const graphManager = new CompiledGraphManager(storage, {
@@ -336,8 +345,8 @@ export async function providerSupervisorFixture(
     observed: [],
     observedChecks: [],
   });
-  vi.spyOn(GitHubControlStore.prototype, "getBranchHead").mockImplementation(async () =>
-    readCommit(git("rev-parse", "main")),
+  vi.spyOn(GitHubControlStore.prototype, "getBranchHead").mockImplementation(async (branch) =>
+    readCommit(refs.get(`refs/heads/${branch}`) ?? git("rev-parse", branch)),
   );
   vi.spyOn(GitHubControlStore.prototype, "addIssueComment").mockImplementation(
     async (node, body) => {
@@ -375,9 +384,9 @@ export async function providerSupervisorFixture(
   vi.spyOn(LeaseManager.prototype, "release").mockImplementation(async (value) => value);
   const pulls = new Map<
     number,
-    { pull: LinkedPullRequest; branch: string; base: string; merged?: string }
+    { pull: LinkedPullRequest; branch: string; base: string; baseRef: string; merged?: string }
   >();
-  const createPull = async (workItem: number, head: string, branch: string) => {
+  const createPull = async (workItem: number, head: string, branch: string, baseRef = "main") => {
     const number = 100 + workItem;
     const item = snapshot.workItems.find((item) => item.number === workItem)!;
     const pull: LinkedPullRequest = {
@@ -400,7 +409,12 @@ export async function providerSupervisorFixture(
       closedAt: null,
       agentWorkEvents: [],
     };
-    pulls.set(number, { pull, branch, base: git("rev-parse", "main") });
+    pulls.set(number, {
+      pull,
+      branch,
+      base: refs.get(`refs/heads/${baseRef}`) ?? git("rev-parse", baseRef),
+      baseRef,
+    });
     item.linkedPullRequests.push(pull);
     return {
       number,
@@ -426,11 +440,11 @@ export async function providerSupervisorFixture(
     const workItem = Number(/work-item-(\d+)/.exec(input.head)?.[1]);
     const head = refs.get(`refs/heads/${input.head}`);
     if (!head) throw new Error("missing publication branch");
-    return createPull(workItem, head, input.head);
+    return createPull(workItem, head, input.head, input.base);
   });
   vi.spyOn(GitHubControlStore.prototype, "readPullRequest").mockImplementation(async (number) => {
     const value = pulls.get(number)!;
-    const base = git("rev-parse", "main");
+    const base = refs.get(`refs/heads/${value.baseRef}`) ?? git("rev-parse", value.baseRef);
     const tree = git("merge-tree", "--write-tree", base, value.pull.headSha).split("\n")[0]!;
     const preview = rawGit(
       ["commit-tree", tree, "-p", base, "-p", value.pull.headSha],
@@ -444,7 +458,7 @@ export async function providerSupervisorFixture(
       draft: false,
       headSha: value.pull.headSha,
       baseSha: base,
-      baseRef: "main",
+      baseRef: value.baseRef,
       mergeCommitSha: value.merged ?? preview,
       createdAt: value.pull.createdAt,
     };
@@ -452,13 +466,28 @@ export async function providerSupervisorFixture(
   vi.spyOn(GitHubControlStore.prototype, "closePullRequest").mockImplementation(async (number) => {
     pulls.get(number)!.pull.state = "CLOSED";
   });
-  vi.spyOn(GitHubControlStore.prototype, "mergePullRequest").mockImplementation(
-    async ({ number, headSha }) => {
+  const mergePull = vi
+    .spyOn(GitHubControlStore.prototype, "mergePullRequest")
+    .mockImplementation(async ({ number, headSha }) => {
       git("merge", "--squash", headSha);
       git("commit", "-qm", `integrate ${number}`);
       const value = pulls.get(number)!;
       value.merged = git("rev-parse", "HEAD");
       value.pull.state = "MERGED";
+      if (faults.nativeStack) {
+        for (const child of pulls.values()) {
+          if (child.merged || child.baseRef !== value.branch) continue;
+          const oldHead = child.pull.headSha;
+          const newHead = rawGit(
+            ["commit-tree", git("rev-parse", `${oldHead}^{tree}`), "-p", value.merged],
+            "simulated GitHub cascading rebase",
+          ).trim();
+          child.pull.headSha = newHead;
+          child.baseRef = "main";
+          child.base = value.merged;
+          refs.set(`refs/heads/${child.branch}`, newHead);
+        }
+      }
       if (faults.externalAdvance) {
         faults.externalAdvance = false;
         await writeFile(join(repository, "external.txt"), "unrelated external actor\n");
@@ -466,8 +495,36 @@ export async function providerSupervisorFixture(
         git("commit", "-qm", "external advance");
       }
       return value.merged;
-    },
-  );
+    });
+  if (faults.nativeStack) {
+    const stack = () => ({
+      number: 1,
+      baseRef: "main",
+      open: [...pulls.values()].some((value) => !value.merged),
+      pullRequests: [...pulls.values()]
+        .filter((value) => value.pull.number < 110)
+        .map((value) => ({
+          number: value.pull.number,
+          state: value.merged ? "closed" : "open",
+          draft: false,
+          mergedAt: value.merged ? new Date().toISOString() : null,
+          headRef: value.branch,
+          headSha: value.pull.headSha,
+          baseRef: value.baseRef,
+          baseSha: value.base,
+        })),
+    });
+    vi.spyOn(GitHubStacks.prototype, "ensureStack").mockImplementation(async () => stack());
+    vi.spyOn(GitHubStacks.prototype, "get").mockImplementation(async () => stack());
+    vi.spyOn(GitHubStacks.prototype, "requestMerge").mockImplementation(async (input) => ({
+      state: "merged",
+      mergeSha: await mergePull({
+        number: input.pullRequest,
+        headSha: input.expectedHeadSha,
+        commitTitle: input.title,
+      }),
+    }));
+  }
   const activity: Array<{
     operation: string;
     backend: string;
@@ -543,6 +600,7 @@ export async function providerSupervisorFixture(
       observe: async (handle) => ({
         state:
           !managed &&
+          !faults.nativeStack &&
           ((running.get(handle.resourceId)!.workItem < 10 &&
             !activity.some(
               (entry) =>
@@ -625,6 +683,7 @@ export async function providerSupervisorFixture(
                   passed: !failed && result.evidence.passed,
                   startedAt: result.evidence.startedAt,
                   completedAt: result.evidence.completedAt,
+                  environmentIdentity: `docker.io/library/node@sha256:${"a".repeat(64)}`,
                   ...(failed ? { failureReason: "simulated isolated validation failure" } : {}),
                 };
               } finally {

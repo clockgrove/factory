@@ -62,6 +62,14 @@ import {
 } from "./control/merge-candidates.js";
 import { verifyMergeCandidateSquash } from "./publication/merge-candidate.js";
 import {
+  NativeRebaseCheckpointStore,
+  nativeRebaseIdentityDigest,
+  nativeRebaseResourceOwnership,
+  nativeRebaseValidationInvocation,
+  type NativeRebaseIdentity,
+  type NativeRebaseCheckpointRecord,
+} from "./control/native-rebases.js";
+import {
   ReviewCheckpointManager,
   reviewIdentityDigest,
   runDurableReviewTransaction,
@@ -893,6 +901,7 @@ export class FactorySupervisor {
   readonly #attempts: AttemptManager;
   readonly #reviews: ReviewCheckpointManager;
   readonly #mergeCandidates: MergeCandidateCheckpointStore;
+  readonly #nativeRebases: NativeRebaseCheckpointStore;
   readonly #recorder: LifecycleRecorder;
   #management: ManagementBackend;
   readonly #managementOverride: boolean;
@@ -988,6 +997,7 @@ export class FactorySupervisor {
     });
     this.#reviews = new ReviewCheckpointManager(this.#store, this.#leases);
     this.#mergeCandidates = new MergeCandidateCheckpointStore(this.#store, this.#leases);
+    this.#nativeRebases = new NativeRebaseCheckpointStore(this.#store, this.#leases);
     this.#recorder = new LifecycleRecorder(this.#store, this.#leases);
     this.#management =
       options.managementBackend ??
@@ -2008,8 +2018,8 @@ export class FactorySupervisor {
         const objective = derive(snapshot);
         if (await this.#repairReservationReceipts(objective.items)) continue;
         // GitHub can report MERGED before the response or our closure receipt arrives.
-        // Reconstruct sibling integration before derived "done" can close the Objective.
-        const unrecordedSibling =
+        // Reconstruct exact integration before derived "done" can close the Objective.
+        const unrecordedNative =
           this.#deliverySelection.selected === "native-stacks"
             ? objective.items.find((item) => {
                 if (item.state !== "done") return false;
@@ -2017,7 +2027,7 @@ export class FactorySupervisor {
                 const unit = this.#deliveryPlan?.units.find((candidate) =>
                   candidate.items.includes(metadata.id),
                 );
-                if (unit?.kind !== "sibling") return false;
+                if (!unit) return false;
                 const published = [...(item.factoryEvents ?? [])]
                   .reverse()
                   .find(
@@ -2038,8 +2048,18 @@ export class FactorySupervisor {
                 );
               })
             : undefined;
-        if (unrecordedSibling) {
-          await this.#resumeIntegration(unrecordedSibling);
+        if (unrecordedNative) {
+          const metadata = parseGraphItemMetadata(unrecordedNative.body ?? "");
+          const unit = this.#deliveryPlan!.units.find((unit) => unit.items.includes(metadata.id))!;
+          if (unit.kind === "sibling") await this.#resumeIntegration(unrecordedNative);
+          else {
+            const members = unit.items.map((id) =>
+              objective.items.find((item) => parseGraphItemMetadata(item.body ?? "").id === id),
+            );
+            if (members.some((item) => !item || !["done", "for_review"].includes(item.state)))
+              throw new Error("native integration recovery has an incomplete publication unit");
+            await this.#integrateNativeStack(unit.id, members as DerivedWorkItem[], deadline);
+          }
           continue;
         }
         if (allDone(objective)) {
@@ -2305,12 +2325,12 @@ export class FactorySupervisor {
                   !candidate.capabilities.hostExecution &&
                   !(
                     candidate.id === "codex-cli/daytona" &&
-                    unit?.kind === "sibling" &&
-                    unit.items.length === 1
+                    unit &&
+                    (unit.kind === "stack" || (unit.kind === "sibling" && unit.items.length === 1))
                   )
                 ) {
                   candidate.permanentReasons.push(
-                    "native linear stacks require host-owned execution; only independent Daytona sibling artifacts support isolated integration revalidation",
+                    "native publication requires host-owned artifacts or Daytona with independent isolated revalidation",
                   );
                 }
               }
@@ -3633,7 +3653,7 @@ export class FactorySupervisor {
     record: ReviewCheckpointRecord,
     item: DerivedWorkItem,
     reservation: AttemptReservation,
-    validation: CleanValidationResult,
+    validation: Pick<CleanValidationResult, "evidence">,
     receipt: PublicationReceipt,
   ): Promise<void> {
     if (!record.review.accepted) {
@@ -3758,12 +3778,12 @@ export class FactorySupervisor {
       const timeoutMs =
         (requirements.timeoutMinutes ?? this.#policy.workItemTimeoutMinutes) * 60_000;
       const unit = this.#deliveryPlan?.units.find((unit) => unit.items.includes(item.id));
-      const isolatedSibling =
+      const isolatedNativeUnit =
         this.#deliverySelection.selected === "native-stacks" &&
-        unit?.kind === "sibling" &&
-        unit.items.length === 1;
+        unit &&
+        (unit.kind === "stack" || (unit.kind === "sibling" && unit.items.length === 1));
       const execution = await this.#registry.select({
-        policy: isolatedSibling
+        policy: isolatedNativeUnit
           ? {
               ...this.#policy,
               backendOrder: this.#policy.backendOrder.filter(
@@ -3776,7 +3796,7 @@ export class FactorySupervisor {
         budget: budgets,
         estimatedDurationMs: timeoutMs,
         requireHostExecution:
-          this.#deliverySelection.selected === "native-stacks" && !isolatedSibling,
+          this.#deliverySelection.selected === "native-stacks" && !isolatedNativeUnit,
       });
       if (requirements.trust !== "trusted_local" || !execution.backend.capabilities.hostExecution) {
         const afterExecution = {
@@ -3831,6 +3851,18 @@ export class FactorySupervisor {
     item: DerivedWorkItem,
     requireRecordedPublication = false,
   ): Promise<NativeStackMember> {
+    // A completed publication receipt is the commit point for a rebase. Validation and
+    // AttemptPublished may have been written before a lost final publication response.
+    // Replay the prior complete binding until that exact checkpoint transaction repairs it.
+    const recordedPublication = [...(item.factoryEvents ?? [])]
+      .sort((left, right) => right.sequence - left.sequence)
+      .find(
+        (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
+          event.kind === "publication" &&
+          event.runId === this.#run.runId &&
+          event.workItem === item.number &&
+          event.event === "PublicationRecorded",
+      );
     const publishedEvent = [...(item.factoryEvents ?? [])]
       .sort((left, right) => right.sequence - left.sequence)
       .find(
@@ -3838,6 +3870,9 @@ export class FactorySupervisor {
           event.kind === "attempt" &&
           event.runId === this.#run.runId &&
           event.event === "AttemptPublished" &&
+          (!recordedPublication ||
+            (event.headSha === recordedPublication.headSha &&
+              event.attempt === recordedPublication.attempt)) &&
           Boolean(event.headSha),
       );
     if (!publishedEvent || publishedEvent.kind !== "attempt" || !publishedEvent.headSha) {
@@ -3850,6 +3885,9 @@ export class FactorySupervisor {
           event.kind === "validation" &&
           event.runId === this.#run.runId &&
           event.attempt === publishedEvent.attempt &&
+          (recordedPublication
+            ? event.evidenceDigest === recordedPublication.validationDigest
+            : event.sequence <= publishedEvent.sequence) &&
           event.passed,
       );
     if (!validation || validation.kind !== "validation") {
@@ -3962,7 +4000,28 @@ export class FactorySupervisor {
         this.#deliveryPlan?.items.find((candidate) => candidate.itemId === rightId)?.position ?? 0;
       return leftPosition - rightPosition;
     });
-    const remaining = ordered.filter((item) => item.state === "for_review");
+    const remaining = ordered.filter((item) => {
+      if (item.state === "for_review") return true;
+      if (item.state !== "done") return false;
+      const published = [...(item.factoryEvents ?? [])]
+        .sort((a, b) => b.sequence - a.sequence)
+        .find(
+          (event) =>
+            event.kind === "attempt" &&
+            event.runId === this.#run.runId &&
+            event.event === "AttemptPublished",
+        );
+      return (
+        published?.kind === "attempt" &&
+        !(item.factoryEvents ?? []).some(
+          (event) =>
+            event.kind === "attempt" &&
+            event.runId === this.#run.runId &&
+            event.event === "AttemptIntegrated" &&
+            event.attempt === published.attempt,
+        )
+      );
+    });
     if (remaining.length === 0) return;
     const members = await Promise.all(ordered.map((item) => this.#nativeStackMember(item)));
     const mergePolicy = this.#policy.delivery?.merge ?? "bottom-up";
@@ -4145,7 +4204,7 @@ export class FactorySupervisor {
           `stack Work Item ${member.receipt.itemId} targets ${current.baseRef}, expected ${expectedBaseBranch}`,
         );
       }
-      if (ordered[index]!.state === "done") continue;
+      if (ordered[index]!.state === "done" && !remaining.includes(ordered[index]!)) continue;
       if (current.merged) {
         mergedDuringRecovery.push(member);
         continue;
@@ -4362,6 +4421,372 @@ export class FactorySupervisor {
     await completeIntegrated(integrated);
   }
 
+  async #nativeRebaseAdmissionCurrent(
+    member: NativeStackMember,
+    headSha: string,
+    baseSha: string,
+    baseBranch: string,
+    alreadyAdmitted = false,
+  ): Promise<boolean> {
+    this.#options.signal?.throwIfAborted();
+    const snapshot = await this.#reader.readObjective(this.#run.objective);
+    this.#fenceSnapshot(snapshot);
+    this.#sequences.observe(snapshotEvents(snapshot));
+    if (hasCancellationRequest(snapshot, this.#run.runId))
+      throw new RunCancellationRequestedError("operator cancelled before native rebase admission");
+    const commands = deriveDurableCommandState({
+      events: snapshotEvents(snapshot),
+      objective: snapshot.number,
+      runId: this.#run.runId,
+      runActor: this.#run.actor,
+      runStartSequence: this.#runStartSequence,
+    });
+    // Cloud pause stops new reservations; it does not cancel an already admitted phase.
+    if (commands.cloudPaused && !alreadyAdmitted) return false;
+    const current = await this.#store.readPullRequest(member.pull.number);
+    if (
+      current.merged ||
+      current.state !== "open" ||
+      current.headSha !== headSha ||
+      current.baseSha !== baseSha ||
+      current.baseRef !== baseBranch
+    )
+      throw new Error(
+        "native rebase head or base changed before exact validation/review admission",
+      );
+    const commit = await this.#store.readCommit(headSha);
+    if (
+      commit.oid !== headSha ||
+      commit.parentOids.length !== 1 ||
+      commit.parentOids[0] !== baseSha
+    )
+      throw new Error("native rebase head does not descend from its exact observed base");
+    return true;
+  }
+
+  /** Revalidation is a new paid resource, never a new implementation attempt. */
+  async #prepareNativeRebaseValidation(
+    item: DerivedWorkItem,
+    member: NativeStackMember,
+    headSha: string,
+    artifact: NormalizedArtifact,
+    packet: WorkerPacket,
+    baseBranch: string,
+  ): Promise<NativeRebaseCheckpointRecord | null> {
+    const reservation = member.reservation;
+    const identity: NativeRebaseIdentity = {
+      repository: `${this.#options.owner}/${this.#options.repo}`,
+      runId: reservation.runId,
+      objective: reservation.objective,
+      workItem: item.number,
+      attempt: reservation.attempt,
+      directorEpoch: reservation.directorEpoch,
+      policyDigest: reservation.policyDigest,
+      pullRequest: member.pull.number,
+      sourceHeadSha: member.pull.commitSha,
+      sourceExactHeadValidationDigest: member.pull.exactHeadValidation.digest,
+      headSha,
+      baseSha: packet.baseSha,
+    };
+    const digest = nativeRebaseIdentityDigest(identity);
+    const capacityBackend = `factory/integration-sandbox-${digest}`;
+    const snapshot = await this.#reader.readObjective(this.#run.objective);
+    this.#fenceSnapshot(snapshot);
+    this.#sequences.observe(snapshotEvents(snapshot));
+    const events = snapshotEvents(snapshot);
+    this.#budgetEvents = deduplicateFactoryEvents([
+      ...this.#budgetEvents,
+      ...events.filter((event) => event.runId === this.#run.runId),
+    ]);
+    let record = await this.#nativeRebases.load(identity);
+    if (record && record.validation.artifactDigest !== artifact.digest)
+      throw new Error("native rebase checkpoint does not match the current rewritten artifact");
+    if (record) {
+      const history = deduplicateFactoryEvents(events);
+      const capacity = history.filter(
+        (event) =>
+          event.kind === "capacity" &&
+          event.event === "CapacityReserved" &&
+          event.runId === reservation.runId &&
+          event.objective === reservation.objective &&
+          event.workItem === item.number &&
+          event.attempt === reservation.attempt &&
+          event.phase === "validation" &&
+          event.backend === capacityBackend &&
+          event.policyDigest === reservation.policyDigest &&
+          event.directorEpoch === reservation.directorEpoch,
+      );
+      const budget = history.filter(
+        (event) =>
+          event.kind === "budget" &&
+          event.event === "BudgetReserved" &&
+          event.runId === reservation.runId &&
+          event.objective === reservation.objective &&
+          event.workItem === item.number &&
+          event.attempt === reservation.attempt &&
+          event.phase === "validation" &&
+          event.unit === "sandbox_milliseconds" &&
+          event.usageId === `integration-validation-${digest}`,
+      );
+      if (
+        capacity.length !== 1 ||
+        budget.length !== 1 ||
+        capacity[0]!.sequence >= budget[0]!.sequence
+      )
+        throw new Error(
+          "native rebase checkpoint has no exact authenticated capacity and budget admission",
+        );
+    }
+    const pending = unreconciledCapacityReservations(events).filter(
+      (event) =>
+        event.runId === reservation.runId &&
+        event.workItem === item.number &&
+        event.attempt === reservation.attempt &&
+        event.backend === capacityBackend,
+    );
+    if (!record && pending.length)
+      throw new Error(
+        "native rebase completion is unavailable; automated replacement is blocked until exact resource reconciliation",
+      );
+    const reconcile = (cpu: number, memoryMb: number) =>
+      this.#lease.use((lease) =>
+        this.#attempts.recordCapacity({
+          lease,
+          workItemNodeId: item.id,
+          reservation,
+          sequence: this.#sequences.take(),
+          event: "CapacityReconciled",
+          phase: "validation",
+          backend: capacityBackend,
+          requestedCpu: cpu,
+          requestedMemoryMb: memoryMb,
+          allowRecovery: true,
+        }),
+      );
+    if (record) {
+      for (const capacity of pending)
+        await reconcile(capacity.requestedCpu, capacity.requestedMemoryMb);
+    } else {
+      this.#options.signal?.throwIfAborted();
+      if (hasCancellationRequest(snapshot, this.#run.runId))
+        throw new RunCancellationRequestedError(
+          "operator cancelled before native rebase validation",
+        );
+      const commandState = deriveDurableCommandState({
+        events,
+        objective: snapshot.number,
+        runId: this.#run.runId,
+        runActor: this.#run.actor,
+        runStartSequence: this.#runStartSequence,
+      });
+      if (commandState.cloudPaused) return null;
+      if (!(await this.#nativeRebaseAdmissionCurrent(member, headSha, packet.baseSha, baseBranch)))
+        return null;
+      const objectiveDeadline =
+        this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000;
+      const timeout = Math.min(
+        (packet.requirements.timeoutMinutes ?? this.#policy.workItemTimeoutMinutes) * 60_000,
+        objectiveDeadline - Date.now(),
+      );
+      const available = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
+      if (timeout <= 0 || available.sandboxMinutes * 60_000 < timeout)
+        throw new Error(
+          "sandbox-minute budget or deadline exhausted before native rebase validation",
+        );
+      const validator = await this.#registry.selectIsolatedValidator({
+        policy: { ...this.#policy, backendOrder: ["codex-cli/daytona"] },
+        requirements: packet.requirements,
+        budget: available,
+        estimatedDurationMs: timeout,
+      });
+      if (validator.backend.capabilities.id !== "codex-cli/daytona" || !validator.backend.validate)
+        throw new Error(
+          "native rebase requires explicitly authorized independent Daytona validation",
+        );
+      const effective = normalizeSchedulingPolicy(this.#policy);
+      const capacity: CapacityReservation = {
+        key: capacityReservationKey({
+          objective: reservation.objective,
+          workItem: item.number,
+          attempt: reservation.attempt,
+          phase: "validation",
+          backendId: capacityBackend,
+        }),
+        objective: reservation.objective,
+        workItem: item.number,
+        attempt: reservation.attempt,
+        phase: "validation",
+        backendId: capacityBackend,
+        admissionClass: "remote-required",
+        local: false,
+        cpu: packet.requirements.cpu ?? effective.capacity.local.defaultCpu,
+        memoryMb: packet.requirements.memoryMb ?? effective.capacity.local.defaultMemoryMb,
+        paidUnits: 1,
+        paths: packet.allowedPaths,
+        exclusiveResources: packet.changeSurface?.exclusiveResources ?? [],
+      };
+      const current = this.#capacity.snapshot();
+      const admitted = this.#capacity.tryReserve(
+        current.generation,
+        capacity,
+        admissionCapacityLimits(
+          this.#policy,
+          null,
+          this.#run.objective,
+          this.#fairness.localMaximum(
+            this.#run.objective,
+            Math.min(effective.capacity.local.maxWorkers, this.#controllerLimits.maxLocalWorkers),
+            current.reservations,
+          ),
+          this.#controllerLimits,
+        ),
+      );
+      if (!admitted.reserved) return null;
+      let capacityRecorded = false;
+      let validation: CleanValidationResult | undefined;
+      let providerStarted: Date | undefined;
+      let providerCompleted: Date | undefined;
+      let budgetReserved = false;
+      try {
+        await this.#lease.use((lease) =>
+          this.#attempts.recordCapacity({
+            lease,
+            workItemNodeId: item.id,
+            reservation,
+            sequence: this.#sequences.take(),
+            event: "CapacityReserved",
+            phase: "validation",
+            backend: capacityBackend,
+            requestedCpu: capacity.cpu,
+            requestedMemoryMb: capacity.memoryMb,
+            allowRecovery: true,
+          }),
+        );
+        capacityRecorded = true;
+        const budget = await this.#lease.use(async (lease) => {
+          const available = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
+          const amount = Math.min(timeout, objectiveDeadline - Date.now());
+          if (amount <= 0 || available.sandboxMinutes * 60_000 < amount)
+            throw new Error("sandbox budget or deadline changed before native rebase reservation");
+          return this.#recorder.budget({
+            lease,
+            workItemNodeId: item.id,
+            reservation,
+            sequence: this.#sequences.take(),
+            event: "BudgetReserved",
+            phase: "validation",
+            unit: "sandbox_milliseconds",
+            amount,
+            usageId: `integration-validation-${digest}`,
+          });
+        });
+        this.#budgetEvents.push(budget);
+        budgetReserved = true;
+        if (budget.kind !== "budget") throw new Error("native rebase budget receipt is invalid");
+        const deadline = new Date(
+          Math.min(Date.parse(budget.at) + budget.amount, objectiveDeadline),
+        );
+        validation = await this.#externalAdmission(() =>
+          validateArtifactClean({
+            repository: this.#options.repository,
+            artifact,
+            packet,
+            isolatedValidator: () =>
+              this.#externalAdmission(async () => {
+                await this.#nativeRebaseAdmissionCurrent(
+                  member,
+                  headSha,
+                  packet.baseSha,
+                  baseBranch,
+                  true,
+                );
+                providerStarted = new Date();
+                const result = await validator.backend.validate!({
+                  repository: identity.repository,
+                  objective: reservation.objective,
+                  workItem: item.number,
+                  attempt: reservation.attempt,
+                  runId: reservation.runId,
+                  directorEpoch: reservation.directorEpoch,
+                  policyDigest: reservation.policyDigest,
+                  workspace: this.#options.repository,
+                  packet,
+                  artifact,
+                  policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                  deadline,
+                  validationInvocation: nativeRebaseValidationInvocation(identity, artifact.digest),
+                });
+                providerCompleted = new Date();
+                return result;
+              }),
+          }),
+        );
+        if (!validation.evidence.passed)
+          throw new Error(validation.evidence.failureReason ?? "native rebase validation failed");
+        record = await this.#lease.use((lease) =>
+          this.#nativeRebases.persist({
+            lease,
+            identity,
+            source: member.pull.exactHeadValidation,
+            validation: validation!.evidence,
+            isolatedResource: {
+              backend: "codex-cli/daytona",
+              invocationOwnershipDigest: nativeRebaseResourceOwnership(identity, artifact.digest),
+              startedAt: providerStarted!.toISOString(),
+              completedAt: providerCompleted!.toISOString(),
+              sandboxMilliseconds: providerCompleted!.getTime() - providerStarted!.getTime(),
+            },
+          }),
+        );
+      } catch (error) {
+        if (providerStarted && !record) {
+          // A response may have been lost after immutable persistence. Never launch twice.
+          record = await this.#nativeRebases.load(identity);
+          if (!record)
+            throw new Error(
+              "native rebase validation lacks durable completion; automated replacement is blocked until exact resource reconciliation",
+              { cause: error },
+            );
+        }
+        if (!record) throw error;
+      } finally {
+        try {
+          if (validation) await discardValidationResult(validation);
+          if (!providerStarted && budgetReserved) {
+            const event = await this.#lease.use((lease) =>
+              this.#recorder.budget({
+                lease,
+                workItemNodeId: item.id,
+                reservation,
+                sequence: this.#sequences.take(),
+                event: "BudgetReconciled",
+                phase: "validation",
+                unit: "sandbox_milliseconds",
+                amount: 0,
+                usageId: `integration-validation-${digest}`,
+              }),
+            );
+            this.#budgetEvents.push(event);
+          }
+          if (capacityRecorded && (record || !providerStarted))
+            await reconcile(capacity.cpu, capacity.memoryMb);
+        } finally {
+          if (!capacityRecorded || record || !providerStarted) this.#capacity.release(capacity.key);
+        }
+      }
+    }
+    await this.#recordCandidateValidationUsage(record.validation, digest, item, reservation);
+    await this.#recordCandidateValidationUsage(
+      record.validation,
+      digest,
+      item,
+      reservation,
+      "sandbox_milliseconds",
+      record.isolatedResource.sandboxMilliseconds,
+    );
+    return record;
+  }
+
   async #revalidateNativeStackMember(
     item: DerivedWorkItem,
     member: NativeStackMember,
@@ -4371,14 +4796,9 @@ export class FactorySupervisor {
   ): Promise<void> {
     const originalPacket = this.#packetFor(item.number);
     const executionBackend = this.#registry.get(member.reservation.backend);
-    if (
+    const isolated =
       originalPacket.requirements.trust !== "trusted_local" ||
-      !executionBackend?.capabilities.hostExecution
-    ) {
-      throw new Error(
-        `stack Work Item ${member.receipt.itemId} cannot be revalidated on the host because its execution provenance was not trusted-local`,
-      );
-    }
+      !executionBackend?.capabilities.hostExecution;
     await ensureLocalCommit(this.#options.repository, baseSha);
     await ensureLocalCommit(this.#options.repository, headSha);
     const changedPaths = (
@@ -4408,11 +4828,25 @@ export class FactorySupervisor {
       ...originalPacket,
       baseSha,
     });
-    const validation = await validateArtifactClean({
-      repository: this.#options.repository,
-      artifact,
-      packet,
-    });
+    let localValidation: CleanValidationResult | undefined;
+    const remoteRecord = isolated
+      ? await this.#prepareNativeRebaseValidation(
+          item,
+          member,
+          headSha,
+          artifact,
+          packet,
+          baseBranch,
+        )
+      : null;
+    if (isolated && !remoteRecord) return;
+    const validation: Pick<CleanValidationResult, "evidence"> = remoteRecord
+      ? { evidence: remoteRecord.validation }
+      : (localValidation = await validateArtifactClean({
+          repository: this.#options.repository,
+          artifact,
+          packet,
+        }));
     try {
       if (!validation.evidence.passed) {
         throw new Error(validation.evidence.failureReason ?? "rebased stack validation failed");
@@ -4436,6 +4870,11 @@ export class FactorySupervisor {
           ) => ReturnType<ManagementBackend["review"]>)
         | undefined;
       if (!existingReview) {
+        if (
+          isolated &&
+          !(await this.#nativeRebaseAdmissionCurrent(member, headSha, baseSha, baseBranch))
+        )
+          return;
         const reviewBudget = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
         if (reviewBudget.modelTokens !== null && reviewBudget.modelTokens <= 0) {
           throw new Error("model-token budget is exhausted; refusing rebased semantic review");
@@ -4507,7 +4946,7 @@ export class FactorySupervisor {
           ),
       });
     } finally {
-      await discardValidationResult(validation);
+      if (localValidation) await discardValidationResult(localValidation);
     }
   }
 

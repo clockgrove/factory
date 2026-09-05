@@ -5,7 +5,7 @@ import type { IsolatedValidationContext, StaleAttemptIdentity } from "../executi
 const digest = z.string().regex(/^[0-9a-f]{64}$/);
 const Invocation = z
   .object({
-    kind: z.literal("integration-candidate"),
+    kind: z.enum(["integration-candidate", "native-stack-rebase"]),
     identityDigest: digest,
     artifactDigest: digest,
     baseSha: z.string().regex(/^[0-9a-f]{40}$/),

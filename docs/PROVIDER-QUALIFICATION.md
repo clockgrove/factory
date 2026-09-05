@@ -17,8 +17,9 @@ failed validation/review, uncertain cleanup, checkpoint response loss, and accou
 covered. Copilot and Codex simulations each execute the complete three-item Objective without provider
 fallback. That does not supply Codex's missing live actor identity.
 
-Independent Daytona siblings use native delivery mode for concurrent pipelines; linear stacks remain
-host-only. Regular PR mode remains serialized and cannot pass the burst-overlap gate. Every non-host
+Independent Daytona siblings use native delivery mode for concurrent pipelines. The linear-stack
+Daytona path now includes durable isolated cascading revalidation; its runtime qualification is still
+pending. Regular PR mode remains serialized and cannot pass the burst-overlap gate. Every non-host
 worker receives fresh independent validation, including `trusted_local` work that overflowed for
 capacity. Accepted trusted-local work may feed local descendants; sandbox-untrusted work stays isolated.
 
@@ -65,14 +66,14 @@ resources against their original identities before attempting another run.
 
 ## What remains open
 
-**Daytona linear-stack publication remains required implementation work.** Independent siblings do
-not satisfy that product goal. The next capability must replace the current host-only cascading
-revalidation path with a distinct stack-rebase invocation bound to the exact rewritten head, new base,
-and artifact; persist complete validation and provider resource lifetime before semantic review;
-reserve/reconcile separate sandbox budget and capacity across restart; and test a cloud child through
-parent merge, cascading rebase, exact-head invalidation, fresh isolated validation, and native merge.
-Its conflict, response-loss, cancellation, and cleanup fault matrix is not an upstream prerequisite
-or something that credentials alone can finish. This batch intentionally retains that guard.
+**Daytona linear-stack runtime qualification remains open.** The implementation now binds a distinct
+stack-rebase invocation to the original publication, rewritten head, new base and artifact, persists
+complete validation and provider resource lifetime before semantic review, and reconstructs separate
+sandbox budget/capacity. The new credential-free linear-stack fixture has not yet been executed.
+Testing must cover the cloud child through parent merge, cascading rebase, exact-head invalidation,
+isolated validation and native merge, plus conflict, response-loss, cancellation, budget and cleanup
+faults. Independent sibling evidence does not establish this acceptance matrix, and credentials alone
+cannot finish the deferred deterministic verification.
 
 No live provider launch was performed to implement these tests. A passed Daytona happy-path report
 does not qualify all TTL, crash, egress, secret-brokerage, or provider-invoice cases. The overall live

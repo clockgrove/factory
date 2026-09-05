@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { PlatformUnavailableError } from "../src/platform.js";
 import { describe, expect, it, vi } from "vitest";
 import { CompiledGraphManager, type CompiledGraphStore } from "../src/control/graphs.js";
 import type { GitCommitObject, LeaseManager, LeaseState } from "../src/control/lease.js";
@@ -429,6 +430,26 @@ async function fixture(backend = "codex-sdk/local-worktree") {
 }
 
 describe("completed original foreground invocation witness", () => {
+  it.each(["readRef", "readCommit", "readBlob"] as const)(
+    "preserves platform refusal from foreground %s through full resource verification",
+    async (method) => {
+      const f = await fixture();
+      const refusal = new PlatformUnavailableError(
+        { kind: "rate_limit", retryAfterMs: 123456 },
+        new Error("primary exhausted"),
+      );
+      const read = vi.spyOn(f.store, method).mockRejectedValueOnce(refusal);
+      await expect(verifyRecoveryProposalResources({ ...f, scopePort: f.port })).rejects.toBe(
+        refusal,
+      );
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(refusal.retryAfterMs).toBe(123456);
+      expect(f.show).not.toHaveBeenCalled();
+      expect(await verifyRecoveryProposalResources({ ...f, scopePort: f.port })).toMatchObject({
+        status: "verified",
+      });
+    },
+  );
   it("reuses immutable proof content across admissions but reobserves refs, source history and all physical resources", async () => {
     const f = await fixture();
     const methods = ["readCommit", "readBlob", "readTreeEntry"] as const;

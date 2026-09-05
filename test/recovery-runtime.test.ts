@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { PlatformUnavailableError } from "../src/platform.js";
 import { describe, expect, it, vi } from "vitest";
 import type { FactoryReadSnapshot } from "../src/application/status.js";
 import type { GitHubControlStore } from "../src/control/github-store.js";
@@ -619,6 +620,55 @@ async function addAttempt(f: Awaited<ReturnType<typeof adopted>>, attempt = 1) {
 }
 
 describe("verified successor runtime loader", () => {
+  it.each(["readRef", "readCommit", "readBlob", "getRepositoryFacts", "getBranchHead"] as const)(
+    "preserves typed refusal through %s and retries only on a new full observation",
+    async (method) => {
+      const f = await adopted();
+      const refusal = new PlatformUnavailableError(
+        { kind: "rate_limit", retryAfterMs: 123456 },
+        new Error("primary exhausted"),
+      );
+      const read = vi.spyOn(f.store, method).mockRejectedValueOnce(refusal);
+      const port = recoveryReadPort(f.store as unknown as GitHubControlStore, "o", "r");
+      await expect(f.read(port)).rejects.toBe(refusal);
+      expect(refusal.retryAfterMs).toBe(123456);
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(await f.read(port)).toMatchObject({ status: "verified" });
+    },
+  );
+  it("defers adoption on observation refusal without writes or lost request identity", async () => {
+    const f = await fixture();
+    const refusal = new PlatformUnavailableError(
+      { kind: "rate_limit", retryAfterMs: 321000 },
+      new Error("primary exhausted"),
+    );
+    const writes = f.store.writes.length;
+    vi.spyOn(f.store, "readBlob").mockRejectedValueOnce(refusal);
+    await expect(f.make().adopt(f.args)).rejects.toBe(refusal);
+    expect(f.store.writes).toHaveLength(writes);
+    expect(await f.make().adopt(f.args)).toMatchObject({ status: "adopted" });
+  });
+  it("preserves a persisted claim after a typed refusal without immediate repair reads or duplicate claim writes", async () => {
+    const f = await fixture();
+    const refusal = new PlatformUnavailableError(
+      { kind: "rate_limit", retryAfterMs: 321000 },
+      new Error("primary exhausted"),
+    );
+    const original = f.store.createRef.bind(f.store);
+    const refs = vi.spyOn(f.store, "readRef");
+    let readsAtRefusal = 0;
+    const creates = vi.spyOn(f.store, "createRef").mockImplementationOnce(async (ref, oid) => {
+      const result = await original(ref, oid);
+      expect(result).toBe(true);
+      readsAtRefusal = refs.mock.calls.length;
+      throw refusal;
+    });
+    await expect(f.make().adopt(f.args)).rejects.toBe(refusal);
+    expect(refs).toHaveBeenCalledTimes(readsAtRefusal);
+    expect(creates).toHaveBeenCalledTimes(1);
+    expect(await f.make().adopt(f.args)).toMatchObject({ status: "adopted" });
+    expect(creates).toHaveBeenCalledTimes(1);
+  });
   it("reuses immutable objects across full reconstructions without caching snapshots, authority refs or mutable base", async () => {
     const f = await adopted();
     const methods = ["readCommit", "readBlob", "readTreeEntry"] as const;

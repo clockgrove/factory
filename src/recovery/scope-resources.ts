@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { PlatformUnavailableError } from "../platform.js";
 import { LocalScopeBatchSchema, type LocalScopeBatch } from "../protocol/local-scope.js";
 import {
   linuxLocalScopeReadPort,
@@ -84,7 +85,8 @@ export async function observeCompletedForegroundScopeBatch(
       if (!(await originalGenerationAbsent())) return finish("active", "producer-active");
     }
     return finish("absent", "completed-foreground-producer-and-scopes-absent");
-  } catch {
+  } catch (error) {
+    if (error instanceof PlatformUnavailableError) throw error;
     return finish("unknown", "observation-unavailable");
   }
 }

@@ -1,4 +1,5 @@
 import { attemptRef } from "../control/attempts.js";
+import { PlatformUnavailableError } from "../platform.js";
 import { loadCompiledGraph, loadCompiledGraphProjection } from "../control/graphs.js";
 import { decodeEventTrailer } from "../control/receipts.js";
 import { loadReviewCheckpoint } from "../control/reviews.js";
@@ -583,7 +584,8 @@ export async function verifyRecoverySourcePublication(
         : "unchanged",
       executionAuthorized: false,
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof PlatformUnavailableError) throw error;
     return {
       status: "blocked",
       blockers: ["source-publication-unverified"],

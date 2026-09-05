@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { PlatformUnavailableError } from "../platform.js";
 import { attemptRef } from "../control/attempts.js";
 import { decodeEventTrailer, deduplicateFactoryEvents } from "../control/receipts.js";
 import type { StaleAttemptIdentity } from "../execution/backend.js";
@@ -263,6 +264,7 @@ export async function verifyRecoveryProposalResources(
     );
     return { status: "verified", evidenceDigest, blockers: [] };
   } catch (error) {
+    if (error instanceof PlatformUnavailableError) throw error;
     return {
       status: "blocked",
       evidenceDigest: null,

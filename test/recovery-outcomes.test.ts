@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { PlatformUnavailableError } from "../src/platform.js";
 import { CompiledGraphManager, type CompiledGraphStore } from "../src/control/graphs.js";
 import type { GitCommitObject, LeaseManager, LeaseState } from "../src/control/lease.js";
 import { encodeEventTrailer } from "../src/control/receipts.js";
@@ -854,6 +855,17 @@ async function adopted(
 }
 
 describe("explicit adopted-source integration outcomes", () => {
+  it("propagates exact transient PR refusal instead of forging unavailable integration evidence", async () => {
+    const f = await adopted();
+    const refusal = new PlatformUnavailableError(
+      { kind: "rate_limit", retryAfterMs: 123456 },
+      new Error("primary exhausted"),
+    );
+    const read = vi.spyOn(f.input.store, "readPullRequest").mockRejectedValueOnce(refusal);
+    await expect(f.verify()).rejects.toBe(refusal);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(await f.verify()).toMatchObject({ status: "verified" });
+  });
   it("verifies exact source outcomes with a frozen read capability object", async () => {
     const f = await adopted();
     Object.freeze(f.input.store);

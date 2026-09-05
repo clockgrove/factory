@@ -1,4 +1,5 @@
 import { attemptRef } from "../control/attempts.js";
+import { PlatformUnavailableError } from "../platform.js";
 import {
   loadMergeCandidateCheckpoint,
   mergeCandidateIdentityDigest,
@@ -1044,7 +1045,8 @@ async function verifySourceProof(
         : {}),
       ...(deliveryHeadSha ? { deliveryHeadSha } : {}),
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof PlatformUnavailableError) throw error;
     return {
       status: "blocked",
       executionAuthorized: false,

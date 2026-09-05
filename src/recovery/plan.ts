@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { PlatformUnavailableError } from "../platform.js";
 import { z } from "zod";
 
 import { attemptRef } from "../control/attempts.js";
@@ -580,6 +581,7 @@ export class RecoveryPlanManager {
     try {
       await this.store.createRef(ref, commitOid);
     } catch (error) {
+      if (error instanceof PlatformUnavailableError) throw error;
       const observed = await this.load(plan.objective, planDigest);
       if (observed) return observed;
       throw error;

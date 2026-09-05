@@ -1,4 +1,5 @@
 import type { FactoryReadSnapshot } from "../application/status.js";
+import { PlatformUnavailableError } from "../platform.js";
 import { attemptRef } from "../control/attempts.js";
 import {
   loadMergeCandidateCheckpoint,
@@ -669,6 +670,7 @@ export async function loadRecoveryRuntime(input: {
       currentUnknownModelUsageCount: unknown.length,
     };
   } catch (error) {
+    if (error instanceof PlatformUnavailableError) throw error;
     return {
       status: "blocked",
       adoptionVerified: false,

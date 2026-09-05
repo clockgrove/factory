@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { PlatformUnavailableError } from "../platform.js";
 import type { FactoryReadSnapshot } from "../application/status.js";
 import { attemptRef } from "../control/attempts.js";
 import { observeRecoverySiblingRefresh, recoverySiblingRefreshBinding } from "./sibling-refresh.js";
@@ -382,7 +383,8 @@ export async function resolveRecoveryEvidence(input: {
       ).oid;
       output.currentBase = output.currentBaseSha === plan.expectedBaseSha ? "unchanged" : "changed";
       if (output.currentBase === "changed") block("current-base-changed");
-    } catch {
+    } catch (error) {
+      if (error instanceof PlatformUnavailableError) throw error;
       block("current-base-unavailable");
     }
     if (input.claim) {
@@ -409,7 +411,8 @@ export async function resolveRecoveryEvidence(input: {
             request.planDigest === input.planRecord.digest,
         );
         output.claimBinding = "verified";
-      } catch {
+      } catch (error) {
+        if (error instanceof PlatformUnavailableError) throw error;
         output.claimBinding = "mismatch";
         block("claim-binding-unavailable");
       }
@@ -752,7 +755,8 @@ export async function resolveRecoveryEvidence(input: {
                 : "changed";
             if (resolved.current.head === "changed")
               block("current-publication-changed", item.workItem);
-          } catch {
+          } catch (error) {
+            if (error instanceof PlatformUnavailableError) throw error;
             resolved.current.head = "unavailable";
             block("current-publication-unavailable", item.workItem);
           }
@@ -762,14 +766,16 @@ export async function resolveRecoveryEvidence(input: {
         }
         if (source) block("resource-cleanup-unverified", item.workItem);
         resolved.sourceBindings = "verified";
-      } catch {
+      } catch (error) {
+        if (error instanceof PlatformUnavailableError) throw error;
         block("source-item-unavailable", item.workItem);
       }
     }
     output.sourceBindings = output.items.every((item) => item.sourceBindings === "verified")
       ? "verified"
       : "incomplete";
-  } catch {
+  } catch (error) {
+    if (error instanceof PlatformUnavailableError) throw error;
     block("source-plan-or-graph-unavailable");
   }
   return output;

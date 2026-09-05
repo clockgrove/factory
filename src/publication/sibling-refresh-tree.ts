@@ -102,7 +102,9 @@ export async function prepareSiblingRefreshTree(input: {
     return value;
   };
   const run = async (command: string, args: string[], maxOutputBytes: number) => {
-    await input.assertCurrent();
+    // Local object/index plumbing grants no execution or publication authority.
+    // Reconstruct remote admission at entry and before EACH upload, not before
+    // every local read; successor admission can otherwise repeat a full graph.
     const result = await runContainedProcess({
       command,
       args,

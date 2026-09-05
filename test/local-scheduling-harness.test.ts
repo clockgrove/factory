@@ -480,6 +480,35 @@ describe("read-only admission and native-order evidence", () => {
       ownedSchedulingScopes({ ...evidence, repository: "example/other" }, identity),
     ).toThrow();
   });
+  it.each([
+    [14, 16, 17],
+    [31, 32, 33],
+    [49, 50, 51],
+  ])(
+    "accepts actual SDK ordering capacity %i -> collection %i -> validation %i",
+    (capacitySequence, collectedSequence, validationSequence) => {
+      const evidence = scopeEvidence();
+      evidence.events.find((event) => event.event === "CapacityReserved")!.sequence =
+        capacitySequence;
+      evidence.events.find((event) => event.event === "AttemptCollected")!.sequence =
+        collectedSequence;
+      evidence.events.find((event) => event.event === "ValidationRecorded")!.sequence =
+        validationSequence;
+      expect(ownedSchedulingScopes(evidence, identity)).toHaveLength(3);
+    },
+  );
+  it("does not accept collection after validation as earlier invocation evidence", () => {
+    const evidence = scopeEvidence();
+    evidence.events.find((event) => event.event === "AttemptCollected")!.sequence = 6;
+    expect(() => ownedSchedulingScopes(evidence, identity)).toThrow(/missing or ambiguous/);
+  });
+  it("rejects conflicting earlier artifact receipts instead of choosing the latest convenient digest", () => {
+    const evidence = scopeEvidence();
+    const collected = evidence.events.find((event) => event.event === "AttemptCollected")!;
+    if (!("artifactDigest" in collected)) throw Error("fixture lacks artifact digest");
+    evidence.events.push({ ...collected, sequence: 2, artifactDigest: "e".repeat(64) });
+    expect(() => ownedSchedulingScopes(evidence, identity)).toThrow(/ambiguous/);
+  });
   it.each(["AttemptReserved", "CapacityReserved"])(
     "requires physical ownership on every %s, not just remaining scopes",
     (event) => {

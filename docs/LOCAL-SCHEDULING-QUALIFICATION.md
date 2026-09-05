@@ -48,6 +48,7 @@ export FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS=500000
 export FACTORY_LIVE_OBJECTIVE_EVIDENCE=/home/USER/private-evidence/scheduling-unique-20260905-a
 
 env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST -u GH_CONFIG_DIR -u XDG_CONFIG_HOME \
+  PATH=/home/USER/.local/bin:/usr/local/bin:/usr/bin:/bin \
   FACTORY_LIVE_OBJECTIVE_PREFLIGHT=1 node scripts/verify-local-scheduling.mjs
 ```
 
@@ -60,6 +61,7 @@ export FACTORY_LIVE_OBJECTIVE=1
 export FACTORY_LIVE_OBJECTIVE_MUTATION_ACK=example/disposable
 export FACTORY_LIVE_LOCAL_SCHEDULING_ACK=example/disposable:owned-cpu-priority-contention
 env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST -u GH_CONFIG_DIR -u XDG_CONFIG_HOME \
+  PATH=/home/USER/.local/bin:/usr/local/bin:/usr/bin:/bin \
   node scripts/verify-local-scheduling.mjs
 ```
 
@@ -81,6 +83,11 @@ The scheduling-only entry point rejects `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST`,
 The per-process `env -u` examples leave global configuration untouched and make both
 the parent and installed service use the same normal Linux-home GitHub configuration.
 Hookless regular and native qualifiers retain their existing environment behavior.
+WSL commonly imports Windows PATH segments containing spaces. For this bounded
+qualifier, select a **per-process Linux-only PATH** containing the actual directories
+for `node`, `codex`, `gh`, `git`, `systemd-run`, and `systemctl`; adjust the example
+to the installed locations. Do not modify the global PATH or move installed tools.
+The launched Node executable is still resolved to and checked against its exact path.
 
 ## Bounds, evidence, and failure handling
 

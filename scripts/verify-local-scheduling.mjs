@@ -610,16 +610,28 @@ export function ownedSchedulingScopes(evidence, primary) {
         event.sequence < validation.sequence,
     );
     assert.ok(capacities.length > 0, "validation invocation lacks its preceding owned capacity");
+    assert.equal(
+      new Set(capacities.map((event) => event.localScopeBatch.identity.invocationDigest)).size,
+      1,
+      "validation capacity invocation is ambiguous",
+    );
     const capacity = capacities.sort((left, right) => right.sequence - left.sequence)[0];
-    const collected = events
-      .filter(
-        (event) =>
-          event.event === "AttemptCollected" &&
-          event.workItem === validation.workItem &&
-          event.attempt === validation.attempt &&
-          event.sequence < capacity.sequence,
-      )
-      .sort((left, right) => right.sequence - left.sequence)[0];
+    // The real Supervisor reserves validator capacity before journaling
+    // AttemptCollected. Both must precede validation, but collection need not
+    // precede capacity reservation.
+    const collections = events.filter(
+      (event) =>
+        event.event === "AttemptCollected" &&
+        event.workItem === validation.workItem &&
+        event.attempt === validation.attempt &&
+        event.sequence < validation.sequence,
+    );
+    assert.equal(
+      new Set(collections.map((event) => event.artifactDigest)).size,
+      1,
+      "collected validation artifact is missing or ambiguous",
+    );
+    const collected = collections.sort((left, right) => right.sequence - left.sequence)[0];
     assert.ok(
       collected?.artifactDigest,
       "validation invocation lacks its collected artifact binding",

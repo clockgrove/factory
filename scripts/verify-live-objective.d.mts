@@ -1,6 +1,15 @@
 export const objectiveBody: string;
+export function objectiveBodyFor(namespace: string): string;
+export function qualificationNamespace(value?: string, generate?: () => string): string;
+export function qualificationPaths(namespace: string): {
+  sourceDirectory: string;
+  testDirectory: string;
+  files: string[];
+};
+export function qualificationNamespaceMarker(namespace: string): string;
 export function boundedPolicy(delivery?: string, maxModelTokens?: number): unknown;
 export function assertCompletion(evidence: unknown, allowedBackends?: string[]): void;
+export function assertQualificationNamespace(evidence: unknown): void;
 export function assertQualificationCompletion(evidence: unknown): void;
 export function assessCompletion(evidence: unknown): {
   result: "passed" | "failed" | "incomplete";

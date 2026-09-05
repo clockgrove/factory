@@ -146,7 +146,9 @@ describe("installed provider Objective harness (no live calls)", () => {
       expect(policy.maxAttemptsPerItem).toBe(1);
       expect(policy.delivery?.onUnavailable).toBe("escalate");
       expect(policy.maxSandboxMinutes).toBe(30);
-      expect(providerObjective(profile)).toContain(
+      const objective = providerObjective(profile, "provider-20260905-a");
+      expect(objective).toContain("src/factory-qualification/provider-20260905-a/clamp.js");
+      expect(objective).toContain(
         profile === "daytona-burst" ? "join-after-merge" : "managed execution trust",
       );
     },

@@ -9,7 +9,7 @@ export function providerAuthority(
   env: Record<string, string | undefined>,
 ): ProviderAuthority | null;
 export function providerPolicy(authority: ProviderAuthority): unknown;
-export function providerObjective(profile: ProviderAuthority["profile"]): string;
+export function providerObjective(profile: ProviderAuthority["profile"], namespace: string): string;
 export function assessProviderCompletion(
   evidence: unknown,
   authority: ProviderAuthority,

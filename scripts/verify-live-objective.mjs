@@ -23,6 +23,36 @@ const localBackends = ["codex-sdk/local-worktree", "codex-cli/local-worktree"];
 const minimumGitHubQuota = 1_000;
 const minimumModelTokens = 250_000;
 const maximumModelTokens = 500_000;
+const namespacePattern = /^[a-z](?:[a-z0-9-]{6,46}[a-z0-9])$/;
+
+export function qualificationNamespace(value, generate = randomUUID) {
+  const namespace = value?.trim() || `q-${generate()}`;
+  assert.match(
+    namespace,
+    namespacePattern,
+    "qualification namespace must be 8-48 lowercase letters, digits, or internal hyphens",
+  );
+  return namespace;
+}
+
+export function qualificationPaths(namespace) {
+  assert.match(namespace, namespacePattern, "invalid qualification namespace");
+  const sourceDirectory = `src/factory-qualification/${namespace}`;
+  const testDirectory = `test/factory-qualification/${namespace}`;
+  return {
+    sourceDirectory,
+    testDirectory,
+    files: ["clamp", "slugify", "describe"].flatMap((name) => [
+      `${sourceDirectory}/${name}.js`,
+      `${testDirectory}/${name}.test.js`,
+    ]),
+  };
+}
+
+export function qualificationNamespaceMarker(namespace) {
+  assert.match(namespace, namespacePattern, "invalid qualification namespace");
+  return `<!-- clockgrove-factory:qualification-namespace=${namespace} -->`;
+}
 
 export function installedPluginPath({ listed, codexHome, requestedRoot }) {
   const matches = (listed.installed ?? []).filter(
@@ -107,20 +137,14 @@ export function assessQualificationPreflight(input) {
     blockers.push("qualification-harness-is-not-committed");
   if (input.harness?.candidateInventorySha256 !== input.installedArtifact?.inventorySha256)
     blockers.push("installed-bundle-differs-from-qualification-candidate");
+  if ((input.namespaceIssues ?? []).length > 0)
+    blockers.push("qualification-namespace-already-exists");
   if (input.repository?.private !== true) blockers.push("qualification-repository-must-be-private");
   if (input.repository?.archived || input.repository?.permissions?.push !== true)
     blockers.push("repository-is-not-writable");
   if (input.branch?.protected) blockers.push("default-branch-is-protected");
   if ((input.rulesets ?? []).some((ruleset) => ruleset.enforcement === "active"))
     blockers.push("active-repository-ruleset");
-  if (
-    (input.workflows ?? []).some(
-      (workflow) =>
-        workflow.state === "active" &&
-        /^dynamic\/agents\/(?:copilot-)?pull-request-reviewer$/.test(workflow.path ?? ""),
-    )
-  )
-    blockers.push("automatic-pull-request-review-is-active");
   if ((input.openFactoryPulls ?? []).length > 0)
     blockers.push("prior-factory-pull-requests-remain-open");
   for (const plane of ["core", "graphql"])
@@ -207,15 +231,24 @@ export function assertMcpSurface(tools) {
   }
 }
 
-export const objectiveBody = `Build three tiny dependency-free ESM modules with node:test tests.
+export function objectiveBodyFor(namespace) {
+  const paths = qualificationPaths(namespace);
+  return `Build three tiny dependency-free ESM modules with node:test tests.
+
+Qualification namespace: ${namespace}
+${qualificationNamespaceMarker(namespace)}
 
 Compile three Work Items: two independent foundational modules, followed by one integration module that depends on both. Use native blocked-by relationships for that final Work Item. Keep each module and its own tests in its Work Item's allowed paths. Do not modify package.json or existing tests.
 
-1. src/clamp.js exports clamp(value, min, max): return value bounded inclusively to min and max; throw RangeError when min > max. Add test/clamp.test.js covering below, within, above, equal bounds, and inverted bounds.
-2. src/slugify.js exports slugify(text): lowercase ASCII text, replace each run of non-ASCII-alphanumeric characters with one hyphen, remove leading and trailing hyphens. Add test/slugify.test.js covering spaces, punctuation, repeated separators, empty input, and uppercase.
-3. src/describe.js imports those two modules and exports describe(name, value, min, max), returning slugify(name) + ':' + clamp(value, min, max). Add test/describe.test.js: describe(' Hello World ', 12, 0, 10) equals 'hello-world:10', and inverted bounds propagate RangeError.
+1. ${paths.sourceDirectory}/clamp.js exports clamp(value, min, max): return value bounded inclusively to min and max; throw RangeError when min > max. Add ${paths.testDirectory}/clamp.test.js covering below, within, above, equal bounds, and inverted bounds.
+2. ${paths.sourceDirectory}/slugify.js exports slugify(text): lowercase ASCII text, replace each run of non-ASCII-alphanumeric characters with one hyphen, remove leading and trailing hyphens. Add ${paths.testDirectory}/slugify.test.js covering spaces, punctuation, repeated separators, empty input, and uppercase.
+3. ${paths.sourceDirectory}/describe.js imports those two modules and exports describe(name, value, min, max), returning slugify(name) + ':' + clamp(value, min, max). Add ${paths.testDirectory}/describe.test.js: describe(' Hello World ', 12, 0, 10) equals 'hello-world:10', and inverted bounds propagate RangeError.
 
-Use node --test test/<module>.test.js as each foundation's independent validation, and npm test for the final integration. No dependencies, services, credentials, cloud workers, workflows, or network access are needed by these modules. Preserve the existing repository. Complete publication, independent validation, integration, and issue closure through Factory.`;
+Use node --test ${paths.testDirectory}/<module>.test.js as each foundation's independent validation, and npm test for the final integration. No dependencies, services, credentials, cloud workers, workflows, or network access are needed by these modules. Preserve all existing modules and tests. Complete publication, independent validation, integration, and issue closure through Factory.`;
+}
+
+/** Legacy fixture constant retained for pure retry-boundary tests; live runs always use a namespace. */
+export const objectiveBody = objectiveBodyFor("legacy-qualification");
 
 export function assertRetryableObjective({ issue, actorId, status, children, events, runId }) {
   assert.equal(issue.state, "open", "retry requires an open Objective");
@@ -559,8 +592,30 @@ export function assessCompletion(evidence) {
   }
 }
 
+export function assertQualificationNamespace(evidence) {
+  const namespace = qualificationNamespace(evidence.qualificationNamespace);
+  const paths = qualificationPaths(namespace);
+  assert.equal(
+    evidence.preflight?.qualificationNamespace,
+    namespace,
+    "preflight namespace differs from executed qualification",
+  );
+  assert.deepEqual(
+    evidence.fixturePaths,
+    paths,
+    "evidence paths differ from qualification namespace",
+  );
+  assert.deepEqual(evidence.preflight?.namespaceIssues, [], "qualification namespace collided");
+  assert.ok(
+    evidence.objective?.body?.includes(qualificationNamespaceMarker(namespace)) &&
+      paths.files.every((path) => evidence.objective.body.includes(path)),
+    "executed Objective does not retain its exact qualification namespace",
+  );
+}
+
 export function assertQualificationCompletion(evidence) {
   assertCompletion(evidence);
+  assertQualificationNamespace(evidence);
   assert.equal(
     evidence.preflight?.harness?.candidateInventorySha256,
     evidence.installedArtifact?.inventorySha256,
@@ -725,6 +780,26 @@ export async function main(qualification = {}) {
     return;
   }
   assert.equal(process.platform, "linux", "live Objective harness requires Linux");
+  assert.equal(
+    process.env.FACTORY_LIVE_OBJECTIVE_NUMBER,
+    undefined,
+    "installed qualification never revives a prior Objective",
+  );
+  assert.equal(
+    process.env.FACTORY_LIVE_OBJECTIVE_PRIOR_RUN_ID,
+    undefined,
+    "installed qualification never reuses a terminal run",
+  );
+  const namespace = qualificationNamespace(
+    qualification.namespace ?? process.env.FACTORY_LIVE_OBJECTIVE_NAMESPACE,
+  );
+  const fixturePaths = qualificationPaths(namespace);
+  const runObjectiveBody = qualification.objectiveBody ?? objectiveBodyFor(namespace);
+  assert.ok(
+    runObjectiveBody.includes(qualificationNamespaceMarker(namespace)) &&
+      fixturePaths.files.every((path) => runObjectiveBody.includes(path)),
+    "Objective body does not retain its exact qualification namespace",
+  );
   const repository = required("FACTORY_LIVE_OBJECTIVE_REPOSITORY");
   assert.match(repository, /^[\w.-]+\/[\w.-]+$/);
   assert.notEqual(repository.toLowerCase(), "clockgrove/factory", "use a disposable repository");
@@ -738,11 +813,7 @@ export async function main(qualification = {}) {
   const checkout = realpathSync(required("FACTORY_LIVE_OBJECTIVE_CHECKOUT"));
   assert.ok(!checkout.startsWith("/mnt/"), "checkout must reside on the Linux filesystem");
   const checkoutClean = run("git", ["status", "--porcelain"], checkout) === "";
-  const fixturePathsAbsent = ["clamp", "slugify", "describe"].every(
-    (name) =>
-      !existsSync(join(checkout, "src", `${name}.js`)) &&
-      !existsSync(join(checkout, "test", `${name}.test.js`)),
-  );
+  const fixturePathsAbsent = fixturePaths.files.every((path) => !existsSync(join(checkout, path)));
   const origin = run("git", ["remote", "get-url", "origin"], checkout).replace(/\.git$/, "");
   assert.ok(
     origin === `https://github.com/${repository}` || origin === `git@github.com:${repository}`,
@@ -804,7 +875,7 @@ export async function main(qualification = {}) {
   });
   const request = (route, parameters = {}) =>
     octokit.request(route, { owner, repo, ...parameters });
-  const list = async (route, parameters = {}) => {
+  const list = async (route, parameters = {}, maximumEntries = Number.MAX_SAFE_INTEGER) => {
     const results = [];
     for (let page = 1; ; page++) {
       const { data } = await request(route, {
@@ -814,6 +885,7 @@ export async function main(qualification = {}) {
       });
       assert.ok(Array.isArray(data), "paginated GitHub response must be an array");
       results.push(...data);
+      assert.ok(results.length <= maximumEntries, "paginated GitHub observation bound exceeded");
       if (data.length < 100) return results;
     }
   };
@@ -832,6 +904,11 @@ export async function main(qualification = {}) {
   const workflows = (
     await request("GET /repos/{owner}/{repo}/actions/workflows", { per_page: 100 })
   ).data.workflows;
+  const repositoryIssues = await list("GET /repos/{owner}/{repo}/issues", { state: "all" }, 1_000);
+  const namespaceMarker = qualificationNamespaceMarker(namespace);
+  const namespaceIssues = repositoryIssues
+    .filter((issue) => !issue.pull_request && issue.body?.includes(namespaceMarker))
+    .map((issue) => ({ number: issue.number, state: issue.state, title: issue.title }));
   const openFactoryPulls = (await list("GET /repos/{owner}/{repo}/pulls", { state: "open" }))
     .filter((pull) => pull.head?.ref?.startsWith("factory/"))
     .map((pull) => ({ number: pull.number, head: pull.head.ref, title: pull.title }));
@@ -845,6 +922,7 @@ export async function main(qualification = {}) {
       },
       harness,
       installedArtifact: artifact,
+      namespaceIssues,
       repository: info,
       branch,
       rulesets,
@@ -854,6 +932,8 @@ export async function main(qualification = {}) {
     }),
     observedAt: new Date().toISOString(),
     repository,
+    qualificationNamespace: namespace,
+    fixturePaths,
     base,
     checkout: {
       clean: checkoutClean,
@@ -869,16 +949,18 @@ export async function main(qualification = {}) {
       configured: modelTokenCeiling,
       semantics: "observed stop-before-next-call threshold; concurrent calls may overshoot",
     },
+    namespaceIssues,
     openFactoryPulls,
-    activeWorkflows: workflows
-      .filter((workflow) => workflow.state === "active")
+    enabledDynamicWorkflows: workflows
+      .filter(
+        (workflow) => workflow.state === "active" && workflow.path?.startsWith("dynamic/agents/"),
+      )
       .map((workflow) => ({ name: workflow.name, path: workflow.path })),
     rateLimit: {
       core: rateLimit.core,
       graphql: rateLimit.graphql,
     },
   };
-  const suffix = randomUUID();
   const output = resolve(required("FACTORY_LIVE_OBJECTIVE_EVIDENCE"));
   mkdirSync(output, { recursive: true });
   const evidencePath = join(
@@ -908,6 +990,8 @@ export async function main(qualification = {}) {
     scope: qualification.scope ?? "installed-local-objective-happy-path",
     startedAt: new Date().toISOString(),
     repository,
+    qualificationNamespace: namespace,
+    fixturePaths,
     base,
     pluginVersion: identity.version,
     codexManifestVersion: identity.codexManifestVersion,
@@ -960,59 +1044,23 @@ export async function main(qualification = {}) {
     assertMcpSurface((await client.listTools()).tools);
     const hooks = { call, request, octokit, evidence, checkout, owner, repo };
     if (qualification.beforeRun) await qualification.beforeRun(hooks);
-    const retryNumber = process.env.FACTORY_LIVE_OBJECTIVE_NUMBER;
-    assert.ok(
-      !qualification.scope || retryNumber === undefined,
-      "provider qualification requires a fresh Objective, never terminal-run retry",
+    evidence.objective = (
+      await request("POST /repos/{owner}/{repo}/issues", {
+        title: `Factory ${qualification.scope ?? "installed local Objective"} [${namespace}]`,
+        body: runObjectiveBody,
+      })
+    ).data;
+    const createdNamespaceIssues = (
+      await list("GET /repos/{owner}/{repo}/issues", { state: "all" }, 1_000)
+    ).filter((issue) => !issue.pull_request && issue.body?.includes(namespaceMarker));
+    assert.deepEqual(
+      createdNamespaceIssues.map((issue) => issue.number),
+      [evidence.objective.number],
+      "qualification namespace is not uniquely bound to the created Objective",
     );
-    if (retryNumber !== undefined) {
-      assert.match(retryNumber, /^[1-9]\d*$/, "invalid retry Objective number");
-      const issueNumber = Number(retryNumber);
-      assert.ok(Number.isSafeInteger(issueNumber), "invalid retry Objective number");
-      const issue = (
-        await request("GET /repos/{owner}/{repo}/issues/{issue_number}", {
-          issue_number: issueNumber,
-        })
-      ).data;
-      const status = await call("factory_status", {
-        owner,
-        repo,
-        objectiveNumber: issueNumber,
-      });
-      const children = await list("GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues", {
-        issue_number: issueNumber,
-      });
-      const comments = await list("GET /repos/{owner}/{repo}/issues/{issue_number}/comments", {
-        issue_number: issueNumber,
-      });
-      const actorId = (await octokit.request("GET /user")).data.id;
-      const events = comments.flatMap((comment) =>
-        [...(comment.body ?? "").matchAll(/<!-- clockgrove-factory:event\n([\s\S]*?)\n-->/g)].map(
-          (match) => JSON.parse(match[1]),
-        ),
-      );
-      const runId = required("FACTORY_LIVE_OBJECTIVE_PRIOR_RUN_ID");
-      assertRetryableObjective({
-        issue,
-        actorId,
-        status,
-        children,
-        events,
-        runId,
-      });
-      evidence.objective = issue;
-      evidence.retryOfRunId = runId;
-      evidence.priorStatus = status;
-    } else
-      evidence.objective = (
-        await request("POST /repos/{owner}/{repo}/issues", {
-          title: `Factory ${qualification.scope ?? "installed local Objective"} ${suffix}`,
-          body: qualification.objectiveBody ?? objectiveBody,
-        })
-      ).data;
     save();
     console.log(
-      `${retryNumber ? "Retrying" : "Created"} disposable Objective ${evidence.objective.html_url}; installed Factory is running.`,
+      `Created disposable Objective ${evidence.objective.html_url} for ${namespace}; installed Factory is running.`,
     );
     evidence.runResult = await call(
       "factory_run",
@@ -1084,6 +1132,7 @@ export async function main(qualification = {}) {
       "installed bundle changed during qualification",
     );
     if (qualification.afterRun) await qualification.afterRun(hooks);
+    assertQualificationNamespace(evidence);
     const completionAssessment = (qualification.assessCompletion ?? assessCompletion)(evidence);
     assert.equal(completionAssessment.result, "passed", completionAssessment.reason);
     const verified = join(output, "merged-fixture");
@@ -1117,7 +1166,7 @@ export async function main(qualification = {}) {
       [
         "--input-type=module",
         "-e",
-        "import assert from 'node:assert/strict'; import {clamp} from './src/clamp.js'; import {slugify} from './src/slugify.js'; import {describe} from './src/describe.js'; assert.equal(clamp(-2,0,10),0); assert.equal(clamp(4,0,10),4); assert.equal(clamp(12,0,10),10); assert.throws(()=>clamp(1,2,0),RangeError); assert.equal(slugify(' Hello, WORLD!! '),'hello-world'); assert.equal(slugify('---'),''); assert.equal(describe(' Hello World ',12,0,10),'hello-world:10'); assert.throws(()=>describe('x',1,2,0),RangeError); console.log('Independent merged-artifact assertions passed');",
+        `import assert from 'node:assert/strict'; import {clamp} from './${fixturePaths.sourceDirectory}/clamp.js'; import {slugify} from './${fixturePaths.sourceDirectory}/slugify.js'; import {describe} from './${fixturePaths.sourceDirectory}/describe.js'; assert.equal(clamp(-2,0,10),0); assert.equal(clamp(4,0,10),4); assert.equal(clamp(12,0,10),10); assert.throws(()=>clamp(1,2,0),RangeError); assert.equal(slugify(' Hello, WORLD!! '),'hello-world'); assert.equal(slugify('---'),''); assert.equal(describe(' Hello World ',12,0,10),'hello-world:10'); assert.throws(()=>describe('x',1,2,0),RangeError); console.log('Independent merged-artifact assertions passed for ${namespace}');`,
       ],
       verified,
     );

@@ -8,7 +8,8 @@ import {
   assertCompletion,
   boundedPolicy,
   main as runInstalledObjective,
-  objectiveBody,
+  objectiveBodyFor,
+  qualificationNamespace,
 } from "./verify-live-objective.mjs";
 
 const DAYTONA = "codex-cli/daytona";
@@ -121,9 +122,9 @@ export function providerPolicy(authority) {
   };
 }
 
-export function providerObjective(profile) {
+export function providerObjective(profile, namespace) {
   return (
-    objectiveBody.replace("cloud workers, ", "") +
+    objectiveBodyFor(namespace).replace("cloud workers, ", "") +
     (profile === "daytona-burst"
       ? "\nThe two foundations must be independent root sibling delivery units; the final unit must join-after-merge. Their code is trusted_local. Factory may overflow one concurrent worker to the explicitly authorized Daytona sandbox; independent provider validation must remain isolated."
       : `\nEvery Work Item must declare managed execution trust and use only the ${PROFILES[profile]} managed profile. Daytona is authorized only for independent validation. Do not substitute local execution or a different managed profile.`)
@@ -473,6 +474,7 @@ export async function main() {
     "Not exercised: Codex managed profile lacks qualified stable provider actor identity; no Objective or session was created",
   );
   const policy = providerPolicy(authority);
+  const namespace = qualificationNamespace(process.env.FACTORY_LIVE_OBJECTIVE_NAMESPACE);
   const observe = async ({ evidence, request }) => {
     if (authority.profile === "daytona-burst") {
       evidence.cleanupObservation = await observeProviderAbsence(new Daytona(), evidence);
@@ -491,7 +493,8 @@ export async function main() {
         ? "installed-daytona-burst-objective-happy-path"
         : "installed-managed-objective-happy-path",
     policy,
-    objectiveBody: providerObjective(authority.profile),
+    namespace,
+    objectiveBody: providerObjective(authority.profile, namespace),
     assessCompletion: (evidence) => assessProviderCompletion(evidence, authority),
     beforeRun: async ({ call, checkout, evidence, request }) => {
       evidence.providerAuthority = authority;

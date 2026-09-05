@@ -15,6 +15,10 @@ import {
   installedPluginPath,
   modelTokenLimit,
   objectiveBody,
+  objectiveBodyFor,
+  qualificationNamespace,
+  qualificationNamespaceMarker,
+  qualificationPaths,
 } from "../scripts/verify-live-objective.mjs";
 import { parseRunPolicy } from "../src/protocol/policy.js";
 
@@ -27,6 +31,8 @@ type HarnessEvent = {
 function evidence() {
   const children = [2, 3, 4].map((number) => ({ number, state: "closed" }));
   const policy = boundedPolicy();
+  const namespace = "fixture-qualification";
+  const fixturePaths = qualificationPaths(namespace);
   const reservation = (number: number) => [
     {
       event: "BudgetReserved",
@@ -137,7 +143,7 @@ function evidence() {
         openDependencies: [],
       })),
     },
-    objective: { number: 1, state: "closed" },
+    objective: { number: 1, state: "closed", body: objectiveBodyFor(namespace) },
     children,
     dependencies: [
       { workItem: 2, blockedBy: [] },
@@ -145,9 +151,15 @@ function evidence() {
       { workItem: 4, blockedBy: [{ number: 2 }, { number: 3 }] },
     ],
     policy,
+    qualificationNamespace: namespace,
+    fixturePaths,
     installedArtifact: { inventorySha256: "candidate", bundles: [] },
     finishedInstalledArtifact: { inventorySha256: "candidate", bundles: [] },
-    preflight: { harness: { candidateInventorySha256: "candidate" } },
+    preflight: {
+      qualificationNamespace: namespace,
+      namespaceIssues: [],
+      harness: { candidateInventorySha256: "candidate" },
+    },
     actor: { id: 42, login: "operator" },
     repository: "clockgrove/factory-conformance",
     events: [
@@ -288,6 +300,22 @@ describe("installed live Objective harness evidence boundary", () => {
       }),
     ).toThrow(/one enabled/);
   });
+  it("creates one bounded namespace and applies it to every fixture path and marker", () => {
+    const generated = qualificationNamespace(
+      undefined,
+      () => "12345678-1234-1234-1234-123456789abc",
+    );
+    expect(generated).toBe("q-12345678-1234-1234-1234-123456789abc");
+    const namespace = qualificationNamespace("local-20260905-a");
+    const paths = qualificationPaths(namespace);
+    expect(paths.files).toHaveLength(6);
+    expect(paths.files.every((path) => path.includes(`/${namespace}/`))).toBe(true);
+    const body = objectiveBodyFor(namespace);
+    expect(body).toContain(qualificationNamespaceMarker(namespace));
+    expect(paths.files.every((path) => body.includes(path))).toBe(true);
+    for (const invalid of ["short", "UPPERCASE-NAMESPACE", "bad/path-name", "ends-with-"])
+      expect(() => qualificationNamespace(invalid)).toThrow(/namespace/);
+  });
   it("binds both installed bundles to their inventory", async () => {
     const root = await mkdtemp(join(tmpdir(), "factory-live-installed-"));
     try {
@@ -332,6 +360,7 @@ describe("installed live Objective harness evidence boundary", () => {
       branch: { protected: false },
       rulesets: [],
       workflows: [],
+      namespaceIssues: [],
       openFactoryPulls: [],
       rateLimit: { core: { remaining: 5000 }, graphql: { remaining: 5000 } },
     };
@@ -348,17 +377,29 @@ describe("installed live Objective harness evidence boundary", () => {
             path: "dynamic/agents/copilot-pull-request-reviewer",
           },
         ],
+        namespaceIssues: [{ number: 13 }],
         openFactoryPulls: [{ number: 5 }],
         rateLimit: { core: { remaining: 999 }, graphql: { remaining: 5000 } },
       }),
     ).toMatchObject({
       result: "blocked",
       blockers: [
-        "automatic-pull-request-review-is-active",
+        "qualification-namespace-already-exists",
         "prior-factory-pull-requests-remain-open",
         "core-quota-below-1000",
       ],
     });
+    expect(
+      assessQualificationPreflight({
+        ...ready,
+        workflows: [
+          {
+            state: "active",
+            path: "dynamic/agents/copilot-pull-request-reviewer",
+          },
+        ],
+      }),
+    ).toMatchObject({ result: "passed", blockers: [] });
   });
   it("uses a valid bounded local-only policy", () => {
     for (const mode of ["regular-prs", "stacked-prs"]) {

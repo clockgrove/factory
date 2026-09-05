@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "kind": "installed-successor-discovery-and-foreground-resource-gate-component",
+  "sourceCommit": "0363c5e43ffb3e8647140071d441ab85193bc098",
+  "observedAt": "2026-09-05T21:06:55.486Z",
+  "result": "discovery repaired; adoption blocked by resource-absence-unverified",
+  "artifact": {
+    "manifestVersion": "2.0.26+codex.20260905205743",
+    "packageSha256": "f872e290bad5017178e2dfab5f680c0f743a3e2722356a80b9c0a10e2ee81363",
+    "inventorySha256": "2bee5d504b4c470599af2aee4a8475d692c0e5fc03db02626ca2a92bc4c7558b",
+    "cliSha256": "22319b3db6b9472c363a037e5cd38476853b28fce6062a2239dd015d82702844",
+    "mcpSha256": "9b7185587fe5eef59f574ea6b5716177680e01a9087c5e4df631e6076912edc5"
+  },
+  "observations": {
+    "exactAcceptedRequestReplayed": true,
+    "structuralDiscoveryLabelRepaired": true,
+    "controllerReachedAdoption": true,
+    "resourceGate": "resource-absence-unverified",
+    "sourceResourceGap": "Original foreground batches have no recorded producer service generation. PID and scope absence alone cannot exclude a delayed pre-registration launcher.",
+    "successorWorkerStarted": false,
+    "modelTokensBefore": 131622,
+    "modelTokensAfter": 131622,
+    "allowanceIncrement": 0,
+    "unknownUsageAcknowledgement": false,
+    "controllerStop": "Normal installed Stop returned active:false; later exact-unit read independently observed inactive/dead, MainPID zero, no job or control group."
+  },
+  "retainedEvidenceSha256": {
+    "sameRequestReplay": "e0aefb86473ca4a56af13aee66dbf40db000a86b21195d8c360da7d39774b5ed",
+    "observedDiscoveryLabel": "c05d967ccfc80d4b9cd347b51bf9de1421ba2f924af72b78ebc9ea640ed6cc1b",
+    "controllerStart": "48c77956ed42fdd07d605d807e0c579de69bf55353ac9b711110e39b8cd8ad7f",
+    "lastStatus": "7ad208ca39495492edea979a86835f01b59a615ae686f4e83a2cdddd88a6eff2",
+    "controllerStop": "46190971eef33bdfe2fffa6fbff76f20112b10b33e2e5327c01aeb52190041b2",
+    "controllerLog": "eba93c3f8b98f9d58d3c152950b3a31875c3dd908d49b8a28bd645e1043901d8",
+    "laterControllerAbsence": "9ac304eea479905ed0f81b745ff329a38f6e2582ecb8987182cfff2f77a74109"
+  },
+  "limitations": [
+    "Focused regressions, typecheck, build and matching installation passed for this correction; no full integrated release suite is claimed at this source.",
+    "Discovery is observed, not successor adoption, execution or resource-closure qualification.",
+    "A completed-foreground proof requires a separately reviewed implementation and fresh physical observations; no cleanup gate was waived.",
+    "Original failed runs and accepted request identities are preserved. All six broad prepublication gates remain Open.",
+    "This evidence document and later controller observation are subsequent to the identified installed package."
+  ]
+}

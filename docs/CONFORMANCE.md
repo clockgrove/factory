@@ -11,19 +11,28 @@ the [delivery plan](DELIVERY-PLAN.md) retains the accepted waves.
 
 ## Proven on this branch
 
+The [installed foreground-resource component](release-evidence/recovery-foreground-resource-component-2026-09-05.json)
+records discovery repair at `0363c5e`: replaying the exact accepted request restored the structural
+label and the controller reached adoption. Adoption then blocked at `resource-absence-unverified`
+because the original foreground batches lack a producer service identity. No successor worker
+started or additional model usage was observed; the controller was stopped. Focused checks and
+matching installation passed, not a new full release suite. A completed-invocation proof is now
+implementation work; PID/scope absence alone is not accepted and the failed observations remain intact.
+
 The [installed recovery-discovery component](release-evidence/recovery-discovery-component-2026-09-05.json)
 preserves a later failure at `f67fd05`: explicit successor authority was accepted, but a foreground-created
 Objective lacked its structural discovery label, so the healthy controller did not adopt it. No
 successor worker started; known usage stayed unchanged. The controller was normally stopped and
 independently observed inactive. Request/replay discovery repair is separately implemented and
-regression-tested; its installed continuation is not yet qualified.
+regression-tested; discovery is now observed on the later artifact above, but continuation is not qualified.
 
 The [corrected publication-recovery candidate](release-evidence/publication-recovery-candidate-component-2026-09-05.json)
 passed integrated release checks and matching Linux CLI installation at
 `f67fd05ac97ffd68803e1fea299c7977e5b3c73c`. The installed package matches the tarball verified by those
 checks; all 84 canonical files and exact inventory match except the permitted manifest cachebuster.
-The exact controller remained inactive. Successor execution awaits explicit approval; the previous
-native failure remains failed and all broad gates remain Open. This evidence and board update are
+The exact controller remained inactive. Successor execution was approved later; its subsequent
+discovery/resource outcomes are recorded above. The previous native failure remains failed and all
+broad gates remain Open. This evidence and board update are
 later documentation, not part of the identified tested or installed package.
 
 The separate [installed planning component](release-evidence/installed-planning-component-2026-09-05.json)

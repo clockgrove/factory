@@ -1,0 +1,77 @@
+{
+  "protocol": "clockgrove.factory/component-evidence-v1",
+  "capability": "installed-local-objective-and-durable-activation",
+  "implementationCommit": "efb9578edd959a23d23e8e9ab0ae97e619b675e8",
+  "status": "incomplete",
+  "hostClass": "wsl2",
+  "installedInventorySha256": "a095db4ec5cba74e91e248ab35c698c95229a43285f55d78f2826c878dfdd082",
+  "packageSha256": "c42269f54236f7e00d01996286dc7c2845e0f0dbfdaae672b7f2c27adbcc75d2",
+  "foregroundObjective": {
+    "command": "node scripts/verify-live-objective.mjs",
+    "sourceRecordSha256": "ce2b828003976b383763ab279c7a30c3534143f178f1ebb45c2fb45afd06d58f",
+    "independentDiagnosticSha256": "293210995023692e5e21935b7f5b254072e6ed83d0ec311da8374db48f86518b",
+    "startedAt": "2026-09-05T09:46:07.000Z",
+    "finishedAt": "2026-09-05T10:04:07.000Z",
+    "result": "failed",
+    "terminalState": "cancelled",
+    "operatorCancellationRequestedAt": "2026-09-05T10:04:01.000Z",
+    "workItemsCompiled": 3,
+    "implementationAttempts": 2,
+    "firstAttemptSuccesses": 2,
+    "recordedWorkerOverlapSeconds": 32,
+    "independentValidationsPassed": 2,
+    "pullRequestsPublished": 2,
+    "pullRequestsIntegrated": 1,
+    "dependentJoinStarted": false,
+    "objectiveClosed": false,
+    "modelUsage": {
+      "reconciledCalls": 6,
+      "tokens": 145186,
+      "inputTokens": 141863,
+      "outputTokens": 3323,
+      "cachedInputTokens": 55424,
+      "cachedTokensAreSubsetOfInput": true,
+      "providerBilling": "unavailable"
+    },
+    "cleanup": {
+      "observedAt": "2026-09-05T10:08:43.000Z",
+      "exactRecordedScopesChecked": 8,
+      "exactRecordedScopesAbsent": 8,
+      "unmergedTestPullRequest": "closed after terminal cancellation; branch and evidence retained"
+    },
+    "blocker": "After one sibling squash advanced trunk, GitHub retained the other PR's original base and test-merge parents. Factory had validated and reviewed the new combined candidate but refused to merge against stale GitHub preview evidence.",
+    "platformSource": "https://github.blog/changelog/2026-02-19-changes-to-test-merge-commit-generation-for-pull-requests/"
+  },
+  "durableCancellationScenario": {
+    "command": "node scripts/verify-local-faults.mjs",
+    "scenario": "cancel",
+    "sourceRecordSha256": "b3d84dfaa2884daec577f423ff4411441e481cb807f77cbeba2a00ff89dae921",
+    "result": "incomplete",
+    "preflight": "passed",
+    "controller": "exact installed bundle started successfully, then deliberately stopped after the failed observation window",
+    "activation": "accepted",
+    "runStarted": false,
+    "faultInjected": false,
+    "blocker": "Activation wrote an authenticated request but did not add the structural Objective label required by controller discovery. The plain human issue was not discovered.",
+    "pendingActivation": "retained, not represented as a cancelled or completed run"
+  },
+  "authority": {
+    "localAuthentication": "existing Codex login and GitHub authentication",
+    "newApiKeysConfigured": false,
+    "allowedPaidBackends": [],
+    "cloudFallback": "never",
+    "sandboxMinutesAllowed": 0,
+    "managedSessionsAllowed": 0,
+    "modelTokenAdmissionThreshold": 500000,
+    "thresholdIsHardProviderCap": false,
+    "publicationPerformed": false
+  },
+  "limitations": [
+    "This is partial installed execution and failure evidence, not a passed happy-path, restart, cancellation, native-stack or publication gate.",
+    "Recorded worker lifecycles overlap; this is not a measurement of simultaneous CPU or model-session execution.",
+    "Only exact recorded scope absence was checked; no global absence or provider invoice claim is made.",
+    "The pre-worker durable activation failure cannot qualify cancellation of an active worker.",
+    "Source and private diagnostic hashes identify retained inputs, not publicly reproducible raw logs. No private repository, actor, branch, issue identity, host path, process identifier, credential or raw event is included.",
+    "Later fixes and documentation must be verified against their own candidate; these observations apply to the recorded implementation only."
+  ]
+}

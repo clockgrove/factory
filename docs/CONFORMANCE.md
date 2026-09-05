@@ -31,6 +31,20 @@ Doctor reported ready with a controller warning and no allowed paid backend. Pla
 existing Work Items with compilation disabled, no model usage and no writes; it did not verify a
 durable graph. Neither operation granted activation authority or establishes Objective completion.
 
+An [installed local Objective observation](release-evidence/installed-local-component-2026-09-05.json)
+then compiled three Work Items, ran both independent siblings successfully on their first attempts,
+validated both artifacts, and merged one PR. The second sibling remained blocked by GitHub's stale
+test-merge metadata after trunk advanced. The operator cancelled the run; the dependent join did not
+start. All eight exact recorded execution/validation scopes were subsequently absent. This is useful
+partial execution evidence, not an end-to-end pass. GitHub's
+[documented test-merge generation policy](https://github.blog/changelog/2026-02-19-changes-to-test-merge-commit-generation-for-pull-requests/)
+invalidates an assumption that polling alone will promptly refresh that preview.
+
+The same observation records a separate pre-worker failure: durable activation of a plain human
+issue was accepted but remained undiscovered because its structural Objective label was missing.
+The fault harness injected no cancellation and the controller was stopped. Fixes require fresh
+installed qualification; neither the activation receipt nor controller startup passes the fault gate.
+
 The first installed multi-wave Objective escalated during compilation before creating Work Items.
 Its [failure record](release-evidence/local-objective-failure-2026-09-04.json) preserves the rejected
 acceptance check and unavailable historical model usage. It closes no live gate; missing token

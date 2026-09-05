@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { RunPolicySchema } from "./policy.js";
+import { LocalScopeBatchSchema } from "./local-scope.js";
 import { ReportedModelUsageSchema } from "./model-usage.js";
 export { ReportedModelUsageSchema, type ReportedModelUsage } from "./model-usage.js";
 import {
@@ -116,6 +117,33 @@ const RecoveryAdoptionCompleted = Common.extend({
     context.addIssue({
       code: "custom",
       message: "Completed adoption belongs to a distinct successor",
+    });
+});
+
+// A successor records its own delivery outcome while retaining the exact original
+// attempt identity. It must never manufacture a cross-run AttemptIntegrated.
+const RecoverySourceIntegrated = Common.extend({
+  kind: z.literal("recovery"),
+  event: z.literal("RecoverySourceIntegrated"),
+  recoveryRequestId: safeId,
+  planDigest: sha256Digest,
+  claimRef: boundedText(500),
+  claimOid: gitSha,
+  workItem: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  sourceRunId: safeId,
+  sourceAttempt: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  sourceReservationRef: boundedText(500),
+  sourceReservationCommitOid: gitSha,
+  sourceReservationReceiptDigest: sha256Digest,
+  sourcePublicationReceiptDigest: sha256Digest,
+  sourceHeadSha: gitSha,
+  mergeCommitSha: gitSha,
+  mergeCandidateIdentityDigest: sha256Digest.optional(),
+}).superRefine((value, context) => {
+  if (value.runId === value.sourceRunId)
+    context.addIssue({
+      code: "custom",
+      message: "Adopted-source outcome belongs to a distinct successor",
     });
 });
 
@@ -244,6 +272,7 @@ const Attempt = Common.extend({
   providerResourceId: boundedText(500).optional(),
   environmentIdentity: boundedText(500).optional(),
   resourceHostIdentity: sha256Digest.optional(),
+  localScopeBatch: LocalScopeBatchSchema.optional(),
   artifactDigest: sha256Digest.optional(),
   headSha: gitSha.optional(),
   sessionId: boundedText(500).optional(),
@@ -271,6 +300,27 @@ const Attempt = Common.extend({
   minimumCloudTimeSavedMinutes: z.number().nonnegative().finite().optional(),
   reason: boundedText(8_000).optional(),
 }).superRefine((event, context) => {
+  const scopeBatch = event.localScopeBatch;
+  if (scopeBatch) {
+    const scope = scopeBatch.identity;
+    if (
+      event.event !== "AttemptReserved" ||
+      scope.phase !== "execution" ||
+      scopeBatch.commandCount !== 1 ||
+      scope.objective !== event.objective ||
+      scope.runId !== event.runId ||
+      scope.workItem !== event.workItem ||
+      scope.attempt !== event.attempt ||
+      scope.directorEpoch !== event.directorEpoch ||
+      scope.policyDigest !== event.policyDigest ||
+      Date.parse(scopeBatch.deadline) <= Date.parse(event.at)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "execution scope batch must bind its exact attempt reservation",
+      });
+    }
+  }
   const usage = event.reportedModelUsage;
   if (
     usage?.inputTokens !== undefined &&
@@ -344,6 +394,45 @@ const Capacity = Common.extend({
   recoveryEpoch: z.number().int().positive().optional(),
   policyDigest: sha256Digest,
   reason: boundedText(2_000).optional(),
+  localScopeBatch: LocalScopeBatchSchema.optional(),
+  /** Explicit source attempt identity; never a successor attempt reservation. */
+  sourceRunId: safeId.optional(),
+  targetBaseSha: gitSha.optional(),
+}).superRefine((event, context) => {
+  if ((event.sourceRunId === undefined) !== (event.targetBaseSha === undefined)) {
+    context.addIssue({ code: "custom", message: "source capacity requires its exact target base" });
+  }
+  if (
+    event.sourceRunId &&
+    (event.sourceRunId === event.runId ||
+      event.phase !== "validation" ||
+      !/^factory\/integration-validation-[a-f0-9]{64}$/.test(event.backend))
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "source capacity is only a distinct source-bound integration validation",
+    });
+  }
+  const batch = event.localScopeBatch;
+  if (!batch) return;
+  const scope = batch.identity;
+  if (
+    event.event !== "CapacityReserved" ||
+    event.phase !== "validation" ||
+    scope.phase !== event.phase ||
+    scope.objective !== event.objective ||
+    scope.runId !== event.runId ||
+    scope.workItem !== event.workItem ||
+    scope.attempt !== event.attempt ||
+    scope.policyDigest !== event.policyDigest ||
+    scope.directorEpoch !== (event.recoveryEpoch ?? event.directorEpoch) ||
+    Date.parse(batch.deadline) <= Date.parse(event.at)
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "local scope batch must bind its exact validation capacity reservation",
+    });
+  }
 });
 
 const Delivery = Common.extend({
@@ -487,6 +576,7 @@ export const FactoryEventSchema = z.union([
   RecoveryRequested,
   RecoveryConsumed,
   RecoveryAdoptionCompleted,
+  RecoverySourceIntegrated,
   RunControlRequested,
   RunControlAcknowledged,
   WorkItemRetryRequested,

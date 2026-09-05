@@ -321,6 +321,43 @@ Two cautions found while implementing this:
   dispatch for a cooldown measured in minutes, growing on repeated trips, and surface for a human
   decision once the breaker has tripped repeatedly.
 
+## Local validation resource scopes (2026-09-05)
+
+Disposable probes on Linux under WSL2 with systemd 259 verified the owned-resource boundary used
+by local validation. These were local process tests, not model calls or a completed Factory Objective.
+
+- Idle unit observations return an empty `Job=`. A missing scope is accepted only from a complete,
+  stable property response; a failed manager query remains unknown.
+- Scope mode preserves the caller's sanitized environment. Explicit `--expand-environment=no`
+  preserved literal dollar expressions and argument boundaries. A fixed description prevented
+  command arguments from becoming unit-description metadata. A synthetic GitHub token was removed
+  by Factory's real environment sanitizer.
+- A detached child remained inside its exact scope after its leader exited. The integrated runner
+  stopped an escaped 15-second child with inherited output pipes in about 176 ms. Exit code 7 was
+  preserved; timeout and cancellation ended with independently observed absent scopes.
+- If owned cleanup fails, inherited pipes must be detached before returning a non-success result.
+  Otherwise an escaped descendant can keep the Supervisor waiting after the original process group
+  is gone. This failure retains unresolved resource liability rather than granting validation success.
+- `Requisite` + `After` + `StopPropagatedFrom` propagated a disposable producer-service stop to its
+  scope in about 121 ms, and an observed producer failure in about 90 ms. A late launch was rejected
+  without activating the stopped producer. `BindsTo` was rejected for this design because its
+  activation semantics could start a stopped producer. `PartOf` did not immediately cover the tested
+  producer-failure case.
+- `RuntimeMaxSec=900ms` terminated the whole test scope at approximately 903 ms. This is a runtime
+  bound from scope activation, not an absolute launch deadline or a guarantee that every controller
+  failure immediately removes a scope. Factory retains explicit launch deadlines and producer
+  PID/start-time identity; late-launch reconciliation must still prove the producer cannot launch.
+
+The Supervisor records potential command scopes together on the existing validation-capacity
+receipt, with distinct artifact/invocation identities for original and merge-candidate validation.
+Per-command fences do not add per-command GitHub writes. This observation does not retroactively
+assign scope ownership to older unscoped workers or validators, and does not enable terminal-run
+revival. Successor execution and recovery conformance remain separate completion gates.
+
+Primary references: [systemd-run argument and scope behavior](https://raw.githubusercontent.com/systemd/systemd/v259/man/systemd-run.xml),
+[unit dependency semantics](https://raw.githubusercontent.com/systemd/systemd/v259/man/systemd.unit.xml),
+and [scope runtime limits](https://raw.githubusercontent.com/systemd/systemd/v259/man/systemd.scope.xml).
+
 ## Verdict
 
 Cloud-hosted Copilot agent sessions are a viable execution substrate: parallel to at least 24, fast,

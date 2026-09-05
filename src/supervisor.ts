@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 
 import { CodexCliLocalBackend } from "./backends/codex-cli-local.js";
@@ -50,8 +50,15 @@ import {
   deduplicateFactoryEvents,
   encodeEventComment,
   nextEventSequence,
+  latestSupportedRun,
 } from "./control/receipts.js";
 import { RunManager, type RunState } from "./control/runs.js";
+import { loadRecoveryRuntime, type RecoveryRuntime } from "./recovery/runtime.js";
+import { verifyRecoveryResources } from "./recovery/resources.js";
+import {
+  createRecoverySourceIntegratedEvent,
+  verifyRecoverySourceIntegration,
+} from "./recovery/outcomes.js";
 import { inspectImplicitRestart } from "./control/recovery.js";
 import {
   MergeCandidateCheckpointStore,
@@ -79,7 +86,12 @@ import {
   resolveModelSelection,
   type RunPolicy,
 } from "./protocol/policy.js";
-import { parseWorkerPacket, type WorkerPacket } from "./protocol/worker-packet.js";
+import {
+  parseWorkerPacket,
+  workerPacketDigest,
+  type WorkerPacket,
+} from "./protocol/worker-packet.js";
+import { recoveryEventDigest } from "./recovery/identity.js";
 import {
   BackendRegistry,
   NoExecutionBackendError,
@@ -179,8 +191,11 @@ import {
   discardValidationResult,
   validateArtifactClean,
   type CleanValidationResult,
+  type CleanValidationInput,
 } from "./validation/clean-run.js";
-import { bindValidationToPublishedHead } from "./validation/plan.js";
+import { bindValidationToPublishedHead, validationPlanFromPacket } from "./validation/plan.js";
+import { discoverLocalScopeHost } from "./runtime/local-scope.js";
+import { LocalScopeBatchSchema, type LocalScopeBatch } from "./protocol/local-scope.js";
 import type { ValidationEvidence } from "./validation/evidence.js";
 import {
   CircuitBreaker,
@@ -217,6 +232,8 @@ export interface SupervisorOptions {
   shutdownBehavior?: "cancel-run" | "release-lease";
   /** Durable controller activation fence. Foreground runs omit this. */
   activation?: { requestId: string; baseSha: string };
+  /** Exact acknowledged successor; selects complete authenticated recovery history reads. */
+  recovery?: { requestId: string; planDigest: string; successorRunId: string };
   /** Current fenced repository-controller identity, sampled for durable status. */
   controllerObservation?: () => ControllerObservation;
 }
@@ -921,7 +938,9 @@ export class FactorySupervisor {
   readonly #retryArtifacts = new RetryArtifactCache();
   #durablePackets = new Map<number, WorkerPacket>();
   #compiledGraph: CompiledObjective | null = null;
+  #recoveryRuntime: RecoveryRuntime | null = null;
   #compiledProjection: CompiledGraphProjectionRecord | null = null;
+  #localScopeHost: ReturnType<typeof discoverLocalScopeHost> | undefined;
 
   constructor(options: SupervisorOptions) {
     this.#options = { ...options, repository: resolve(options.repository) };
@@ -969,7 +988,10 @@ export class FactorySupervisor {
         }
       },
     };
-    this.#reader = new GitHubReader(github);
+    this.#reader = new GitHubReader({
+      ...github,
+      ...(options.recovery ? { recoveryInspection: true } : {}),
+    });
     this.#store = new GitHubControlStore(controls);
     this.#stacks = new GitHubStacks(
       {
@@ -1024,12 +1046,226 @@ export class FactorySupervisor {
     await this.#lease.guardMutation(waitedMs);
   }
 
-  #externalAdmission<T>(operation: () => Promise<T>): Promise<T> {
+  async #externalAdmission<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.#recoveryRuntime) {
+      await this.#resumeObservedRun(
+        await this.#reader.readObjective(this.#run.objective),
+        new RunManager(this.#store),
+      );
+      const resources = await verifyRecoveryResources({
+        planRecord: this.#recoveryRuntime.planRecord,
+        events: this.#recoveryRuntime.events,
+        store: this.#store,
+      });
+      if (resources.status !== "verified")
+        throw new Error(`successor resources unavailable: ${resources.blockers.join(", ")}`);
+      if (this.#recoveryRuntime.currentUnknownModelUsageCount > 0)
+        throw new Error("successor model usage is unknown; refusing another invocation");
+      this.#budgetEvents = this.#accountingEvents([...this.#recoveryRuntime.events]);
+    }
     return runWithExternalAdmissionBoundary(
       this.#options.repositoryFence ?? (async () => {}),
       () => this.#lease.assertGeneration("admission"),
       operation,
     );
+  }
+
+  #accountingEvents(events: FactoryEvent[], currentRunId = this.#run.runId): FactoryEvent[] {
+    const runs = new Set(this.#recoveryRuntime?.accountingRunIds ?? [currentRunId]);
+    return events.filter((event) => runs.has(event.runId));
+  }
+
+  async #resumeObservedRun(snapshot: Snapshot, manager: RunManager): Promise<RunState | null> {
+    const active = latestSupportedRun(snapshot.factoryEvents ?? []);
+    const recovery = this.#options.recovery;
+    if (recovery && (active?.event !== "FactoryRunStarted" || !active.recoveryRequestId)) {
+      if (
+        !this.#recoveryRuntime &&
+        !active &&
+        snapshot.closed &&
+        snapshot.factoryEvents?.some(
+          (event) =>
+            event.event === "FactoryRunCompleted" && event.runId === recovery.successorRunId,
+        ) &&
+        snapshot.factoryEvents
+          .filter((event) => event.event === "FactoryRunStarted")
+          .sort((a, b) => a.sequence - b.sequence)
+          .at(-1)?.runId === recovery.successorRunId
+      ) {
+        const completed = await loadRecoveryRuntime({
+          objective: snapshot.number,
+          runId: recovery.successorRunId,
+          store: this.#store,
+          readSnapshot: async () => ({ snapshot, historyComplete: true }),
+        });
+        if (
+          completed.status !== "verified" ||
+          completed.planRecord.digest !== recovery.planDigest ||
+          completed.planRecord.plan.requestId !== recovery.requestId
+        )
+          throw new Error("completed successor authority is unavailable");
+        return null;
+      }
+      throw new Error("recovery request does not name the current active successor");
+    }
+    if (
+      this.#recoveryRuntime &&
+      (active?.event !== "FactoryRunStarted" ||
+        active.runId !== this.#recoveryRuntime.controllingRun.runId)
+    )
+      throw new Error("successor is no longer the current non-terminal run");
+    if (active?.event !== "FactoryRunStarted" || !active.recoveryRequestId)
+      return manager.resume(snapshot.factoryEvents ?? []);
+    if (
+      !recovery ||
+      active.recoveryRequestId !== recovery.requestId ||
+      active.recoveryPlanDigest !== recovery.planDigest ||
+      active.runId !== recovery.successorRunId
+    )
+      throw new Error(
+        "successor resume requires its exact acknowledged recovery request, plan, and run",
+      );
+    const recovered = await manager.resumeRecovery({
+      objective: snapshot.number,
+      runId: active.runId,
+      store: this.#store,
+      readSnapshot: async () => ({ snapshot, historyComplete: true }),
+    });
+    if (this.#recoveryRuntime && this.#recoveryRuntime.controllingRun.runId !== recovered.run.runId)
+      throw new Error("successor runtime changed during execution");
+    this.#recoveryRuntime = recovered.runtime;
+    return recovered.run;
+  }
+
+  #deriveObjective(snapshot: Snapshot): ReturnType<typeof derive> {
+    const objective = derive(snapshot);
+    if (!this.#recoveryRuntime) return objective;
+    return {
+      ...objective,
+      items: objective.items.map((item) => {
+        const planned = this.#recoveryRuntime!.planRecord.plan.items.find(
+          (entry) => entry.workItem === item.number,
+        );
+        const count =
+          this.#recoveryRuntime!.attemptCounts.find((entry) => entry.workItem === item.number)
+            ?.count ?? 0;
+        if (!planned?.source?.publication || planned.action === "execute")
+          return { ...item, attempts: count };
+        const integrated = this.#recoveryRuntime!.sourceIntegrations.some(
+          (proof) => proof.outcome.workItem === item.number,
+        );
+        return {
+          ...item,
+          attempts: count,
+          state:
+            integrated && item.closed
+              ? ("done" as const)
+              : planned.action !== "integrated" && item.blockedBy.some((blocker) => !blocker.closed)
+                ? ("blocked" as const)
+                : ("for_review" as const),
+          doneWithoutMergedPullRequest: false,
+        };
+      }),
+    };
+  }
+
+  async #prepareRecoveryGraph(snapshot: Snapshot): Promise<void> {
+    const runtime = this.#recoveryRuntime!;
+    const compiled = runtime.graph.objective;
+    if (
+      runtime.planRecord.plan.items.some(
+        (item) => item.action !== "execute" && !item.source?.publication,
+      )
+    )
+      throw new Error(
+        "successor artifact-only recovery requires an explicit artifact consumer; no replacement worker is authorized",
+      );
+    assertGraphWithinRunPolicy(compiled, this.#policy);
+    if (this.#deliverySelection.selected === "native-stacks") {
+      const planned = planDelivery(
+        compiled.workItems.map((item) => {
+          if (!item.delivery) throw new Error(`Work Item ${item.id} has no delivery hint`);
+          return {
+            id: item.id,
+            dependsOn: item.dependsOn,
+            delivery: {
+              group: item.delivery.group,
+              relationship: item.delivery.relationship,
+              ...(item.delivery.parentWorkItem
+                ? { parentWorkItem: item.delivery.parentWorkItem }
+                : {}),
+            },
+          };
+        }),
+      );
+      if (planned.result === "unsupported")
+        throw new Error(`unsupported recovery delivery: ${planned.reason}`);
+      this.#deliveryPlan = planned;
+    }
+    await this.#preflightCompiledGraph(compiled);
+    this.#compiledGraph = compiled;
+    this.#compiledProjection = runtime.projection;
+    this.#fenceSnapshot(snapshot);
+  }
+
+  async #scopedValidation(
+    reservation: Pick<
+      AttemptReservation,
+      "objective" | "runId" | "workItem" | "attempt" | "policyDigest"
+    >,
+    artifact: NormalizedArtifact,
+    packet: WorkerPacket,
+    deadline: Date,
+  ): Promise<{
+    batch: LocalScopeBatch;
+    hooks: NonNullable<CleanValidationInput["localScope"]>;
+  } | null> {
+    if (validationPlanFromPacket(packet).isolation === "isolated") return null;
+    const host = await (this.#localScopeHost ??= discoverLocalScopeHost());
+    if (!host) return null;
+    const batch = await this.#lease.use(async (lease) =>
+      LocalScopeBatchSchema.parse({
+        identity: {
+          protocol: "clockgrove.factory/local-scope-v1",
+          repository: `${this.#options.owner}/${this.#options.repo}`.toLowerCase(),
+          objective: reservation.objective,
+          runId: reservation.runId,
+          workItem: reservation.workItem,
+          attempt: reservation.attempt,
+          directorEpoch: lease.epoch,
+          policyDigest: reservation.policyDigest,
+          phase: "validation",
+          commandIndex: 0,
+          invocationDigest: artifact.digest,
+          hostIdentity: host.hostIdentity,
+          ...(host.producerUnit
+            ? { producerUnit: host.producerUnit, producerInvocationId: host.producerInvocationId }
+            : {}),
+        },
+        // The optional npm setup consumes at most one additional index. Unused
+        // scopes stay absent; each actual command is covered before the first launch.
+        commandCount: validationPlanFromPacket(packet).commands.length + 1,
+        producerPid: host.producerPid,
+        producerStartTicks: host.producerStartTicks,
+        deadline: deadline.toISOString(),
+      }),
+    );
+    return {
+      batch,
+      hooks: {
+        identity: batch.identity,
+        deadline: batch.deadline,
+        beforeLaunch: async (identity) => {
+          if (identity.commandIndex >= batch.commandCount)
+            throw new Error("local validation command exceeds reserved scope batch");
+          await this.#externalAdmission(async () => {
+            if (Date.now() >= deadline.getTime())
+              throw new Error("local validation deadline expired");
+          });
+        },
+        afterStop: async () => {},
+      },
+    };
   }
 
   async #recordControllerObservation(snapshot: Snapshot): Promise<void> {
@@ -1089,6 +1325,7 @@ export class FactorySupervisor {
   }
 
   async run(): Promise<SupervisorResult> {
+    this.#recoveryRuntime = null;
     this.#compiledGraph = null;
     this.#compiledProjection = null;
     this.#durablePackets.clear();
@@ -1098,14 +1335,15 @@ export class FactorySupervisor {
     const facts = await this.#store.getRepositoryFacts();
     const actor = await this.#store.getAuthenticatedLogin();
     const runManager = new RunManager(this.#store);
-    const resumedRun = runManager.resume(snapshot.factoryEvents ?? []);
+    const resumedRun = await this.#resumeObservedRun(snapshot, runManager);
     if (resumedRun) {
       if (
         resumedRun.objective !== snapshot.number ||
         resumedRun.repository?.toLowerCase() !== facts.fullName.toLowerCase() ||
         resumedRun.baseBranch !== snapshot.defaultBranch ||
         resumedRun.fork !== facts.fork ||
-        (this.#options.activation !== undefined &&
+        (!this.#options.recovery &&
+          this.#options.activation !== undefined &&
           (resumedRun.activationRequestId !== this.#options.activation.requestId ||
             resumedRun.baseSha !== this.#options.activation.baseSha))
       ) {
@@ -1215,7 +1453,7 @@ export class FactorySupervisor {
       );
       this.#lease = new LeaseController(this.#leases, acquired, this.#sequences);
       this.#run = resumedRun;
-      const completed = allDone(derive(snapshot));
+      const completed = allDone(this.#deriveObjective(snapshot));
       return this.#terminal(
         runManager,
         snapshot,
@@ -1372,7 +1610,7 @@ export class FactorySupervisor {
       previousLease ?? undefined,
     );
     const runId = resumedRun?.runId ?? randomUUID();
-    this.#budgetEvents = initialEvents.filter((event) => event.runId === runId);
+    this.#budgetEvents = this.#accountingEvents(initialEvents, runId);
     const acceptedPolicyDigest = resumedRun?.policyDigest ?? policyDigest(this.#policy);
     const acquired = await this.#leases.acquire(
       {
@@ -1389,7 +1627,7 @@ export class FactorySupervisor {
       // Preflight is not a lock: the previous holder may have finished or spent
       // more budget before this lease was acquired. Refresh both new and resumed runs.
       const current = await this.#reader.readObjective(snapshot.number);
-      const currentRun = runManager.resume(current.factoryEvents ?? []);
+      const currentRun = await this.#resumeObservedRun(current, runManager);
       if (
         current.closed ||
         current.number !== snapshot.number ||
@@ -1425,7 +1663,7 @@ export class FactorySupervisor {
       }
       snapshot = current;
       this.#sequences.observe(snapshotEvents(snapshot));
-      this.#budgetEvents = snapshotEvents(snapshot).filter((event) => event.runId === runId);
+      this.#budgetEvents = this.#accountingEvents(snapshotEvents(snapshot), runId);
       this.#run =
         currentRun ??
         (await runManager.start({
@@ -1590,389 +1828,397 @@ export class FactorySupervisor {
           `stacked delivery unavailable: ${this.#deliverySelection.reason}`,
         );
       }
-      const observedGraph = inspectCompiledGraph(snapshot);
-      const graphManager = new CompiledGraphManager(this.#store, this.#leases);
-      let durableGraph = await graphManager.load(snapshot.number, this.#run.runId);
-      const sourceGraph =
-        durableGraph ??
-        (observedGraph.receiptRunId && observedGraph.receiptRunId !== this.#run.runId
-          ? await graphManager.load(snapshot.number, observedGraph.receiptRunId)
-          : null);
-      if (sourceGraph && observedGraph.expectedDigest) {
-        if (
-          sourceGraph.graphDigest !== observedGraph.expectedDigest ||
-          sourceGraph.graphSize !== observedGraph.expectedSize ||
-          sourceGraph.ref !== observedGraph.expectedRef ||
-          sourceGraph.blobOid !== observedGraph.expectedBlobSha
-        ) {
-          throw new Error("durable compiled graph does not match its Objective receipt");
+      if (this.#recoveryRuntime) {
+        await this.#prepareRecoveryGraph(snapshot);
+      } else {
+        const observedGraph = inspectCompiledGraph(snapshot);
+        const graphManager = new CompiledGraphManager(this.#store, this.#leases);
+        let durableGraph = await graphManager.load(snapshot.number, this.#run.runId);
+        const sourceGraph =
+          durableGraph ??
+          (observedGraph.receiptRunId && observedGraph.receiptRunId !== this.#run.runId
+            ? await graphManager.load(snapshot.number, observedGraph.receiptRunId)
+            : null);
+        if (sourceGraph && observedGraph.expectedDigest) {
+          if (
+            sourceGraph.graphDigest !== observedGraph.expectedDigest ||
+            sourceGraph.graphSize !== observedGraph.expectedSize ||
+            sourceGraph.ref !== observedGraph.expectedRef ||
+            sourceGraph.blobOid !== observedGraph.expectedBlobSha
+          ) {
+            throw new Error("durable compiled graph does not match its Objective receipt");
+          }
         }
-      }
-      const recoverableObjective = sourceGraph?.objective ?? observedGraph.completeObjective;
-      let invokeCompilation:
-        | ((checkpoint: CompilationCheckpoint) => Promise<CompilationResult>)
-        | undefined;
-      const compilationInvocationId = `compile-${base.oid}`;
-      if (!recoverableObjective) {
-        this.#assertManagementInvocationNotFailed(compilationInvocationId);
-        this.#notify("compiling Objective into a dependency graph");
-        if (observedGraph.hasReceipt || observedGraph.existing.length > 0) {
-          throw new Error("compiled graph receipt exists but its durable graph record is missing");
-        }
-        const layout = await this.#reader.readRepositoryLayout(undefined, 5_000);
-        if (layout.truncated) {
-          throw new Error("repository layout is incomplete; compilation would be under-grounded");
-        }
-        const compilationBudget = remainingBudget(
-          this.#policy,
-          deriveBudgetUsage(this.#budgetEvents),
-        );
-        if (compilationBudget.modelTokens !== null && compilationBudget.modelTokens <= 0) {
-          throw new Error("model-token budget is exhausted; refusing Objective compilation");
-        }
-        const compilationModel = resolveModelSelection(this.#policy, "compile");
-        invokeCompilation = (checkpoint) =>
-          this.#externalAdmission(() =>
-            this.#management.compile(
-              {
-                repository: this.#options.repository,
-                objective: {
-                  number: snapshot.number,
-                  title: snapshot.title,
-                  body: snapshot.body,
-                },
-                defaultBranch: snapshot.defaultBranch,
-                baseSha: base.oid,
-                repositoryFiles: layout.files,
-                allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
-                ...(compilationModel ? { modelSelection: compilationModel } : {}),
-              },
-              checkpoint,
-            ),
+        const recoverableObjective = sourceGraph?.objective ?? observedGraph.completeObjective;
+        let invokeCompilation:
+          | ((checkpoint: CompilationCheckpoint) => Promise<CompilationResult>)
+          | undefined;
+        const compilationInvocationId = `compile-${base.oid}`;
+        if (!recoverableObjective) {
+          this.#assertManagementInvocationNotFailed(compilationInvocationId);
+          this.#notify("compiling Objective into a dependency graph");
+          if (observedGraph.hasReceipt || observedGraph.existing.length > 0) {
+            throw new Error(
+              "compiled graph receipt exists but its durable graph record is missing",
+            );
+          }
+          const layout = await this.#reader.readRepositoryLayout(undefined, 5_000);
+          if (layout.truncated) {
+            throw new Error("repository layout is incomplete; compilation would be under-grounded");
+          }
+          const compilationBudget = remainingBudget(
+            this.#policy,
+            deriveBudgetUsage(this.#budgetEvents),
           );
-      } else if (!durableGraph) {
-        // A graph recovered from an older run or issue receipt is copied into
-        // this run's immutable ref before any backend preflight can fail.
-        durableGraph = await this.#lease.use((lease) =>
-          graphManager.persist({
-            lease,
-            base,
-            objective: recoverableObjective,
-          }),
-        );
-      }
-      durableGraph = await runDurableCompilationTransaction({
-        existing: durableGraph,
-        ...(invokeCompilation ? { invoke: invokeCompilation } : {}),
-        persist: (result) =>
-          this.#lease.use((lease) =>
+          if (compilationBudget.modelTokens !== null && compilationBudget.modelTokens <= 0) {
+            throw new Error("model-token budget is exhausted; refusing Objective compilation");
+          }
+          const compilationModel = resolveModelSelection(this.#policy, "compile");
+          invokeCompilation = (checkpoint) =>
+            this.#externalAdmission(() =>
+              this.#management.compile(
+                {
+                  repository: this.#options.repository,
+                  objective: {
+                    number: snapshot.number,
+                    title: snapshot.title,
+                    body: snapshot.body,
+                  },
+                  defaultBranch: snapshot.defaultBranch,
+                  baseSha: base.oid,
+                  repositoryFiles: layout.files,
+                  allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                  ...(compilationModel ? { modelSelection: compilationModel } : {}),
+                },
+                checkpoint,
+              ),
+            );
+        } else if (!durableGraph) {
+          // A graph recovered from an older run or issue receipt is copied into
+          // this run's immutable ref before any backend preflight can fail.
+          durableGraph = await this.#lease.use((lease) =>
             graphManager.persist({
               lease,
               base,
-              objective: result.objective,
-              compilation: {
-                invocationId: compilationInvocationId,
-                inputTokens: result.usage.inputTokens,
-                outputTokens: result.usage.outputTokens,
-                ...(result.usage.cachedInputTokens === undefined
-                  ? {}
-                  : { cachedInputTokens: result.usage.cachedInputTokens }),
-              },
+              objective: recoverableObjective,
             }),
-          ),
-        recover: () => graphManager.load(snapshot.number, this.#run.runId),
-        recordFailureUsage: (usage) =>
-          this.#recordFailedManagementUsage(compilationInvocationId, usage, snapshot.id),
-        recordUsage: async (record) => {
-          if (!record.compilation) return;
-          const amount = record.compilation.inputTokens + record.compilation.outputTokens;
-          const usageId = `compile-${record.graphDigest}`;
-          const matching = this.#budgetEvents.filter(
-            (event) =>
-              event.kind === "budget" &&
-              event.runId === this.#run.runId &&
-              event.event === "BudgetReconciled" &&
-              event.phase === "management" &&
-              event.unit === "model_tokens" &&
-              event.usageId === usageId,
           );
-          if (matching.some((event) => event.amount !== amount)) {
-            throw new Error("durable compilation usage conflicts with its budget receipt");
-          }
-          if (matching.length > 0) return;
-          try {
-            const event = await this.#lease.use((lease) =>
-              this.#recorder.objectiveBudget({
+        }
+        durableGraph = await runDurableCompilationTransaction({
+          existing: durableGraph,
+          ...(invokeCompilation ? { invoke: invokeCompilation } : {}),
+          persist: (result) =>
+            this.#lease.use((lease) =>
+              graphManager.persist({
                 lease,
-                objectiveNodeId: snapshot.id,
-                sequence: this.#sequences.take(),
-                event: "BudgetReconciled",
-                unit: "model_tokens",
-                amount,
-                usageId,
-                reportedModelUsage: reportedModelUsage(record.compilation)!,
+                base,
+                objective: result.objective,
+                compilation: {
+                  invocationId: compilationInvocationId,
+                  inputTokens: result.usage.inputTokens,
+                  outputTokens: result.usage.outputTokens,
+                  ...(result.usage.cachedInputTokens === undefined
+                    ? {}
+                    : { cachedInputTokens: result.usage.cachedInputTokens }),
+                },
               }),
-            );
-            this.#budgetEvents.push(event);
-          } catch (error) {
-            const recoveredSnapshot = await this.#reader.readObjective(snapshot.number);
-            const recoveredEvent = snapshotEvents(recoveredSnapshot).find(
+            ),
+          recover: () => graphManager.load(snapshot.number, this.#run.runId),
+          recordFailureUsage: (usage) =>
+            this.#recordFailedManagementUsage(compilationInvocationId, usage, snapshot.id),
+          recordUsage: async (record) => {
+            if (!record.compilation) return;
+            const amount = record.compilation.inputTokens + record.compilation.outputTokens;
+            const usageId = `compile-${record.graphDigest}`;
+            const matching = this.#budgetEvents.filter(
               (event) =>
                 event.kind === "budget" &&
                 event.runId === this.#run.runId &&
                 event.event === "BudgetReconciled" &&
                 event.phase === "management" &&
                 event.unit === "model_tokens" &&
-                event.usageId === usageId &&
-                event.amount === amount,
+                event.usageId === usageId,
             );
-            if (!recoveredEvent) throw error;
-            snapshot = recoveredSnapshot;
-            this.#sequences.observe(snapshotEvents(snapshot));
-            if (
-              !this.#budgetEvents.some(
+            if (matching.some((event) => event.amount !== amount)) {
+              throw new Error("durable compilation usage conflicts with its budget receipt");
+            }
+            if (matching.length > 0) return;
+            try {
+              const event = await this.#lease.use((lease) =>
+                this.#recorder.objectiveBudget({
+                  lease,
+                  objectiveNodeId: snapshot.id,
+                  sequence: this.#sequences.take(),
+                  event: "BudgetReconciled",
+                  unit: "model_tokens",
+                  amount,
+                  usageId,
+                  reportedModelUsage: reportedModelUsage(record.compilation)!,
+                }),
+              );
+              this.#budgetEvents.push(event);
+            } catch (error) {
+              const recoveredSnapshot = await this.#reader.readObjective(snapshot.number);
+              const recoveredEvent = snapshotEvents(recoveredSnapshot).find(
                 (event) =>
                   event.kind === "budget" &&
-                  event.sequence === recoveredEvent.sequence &&
-                  event.runId === recoveredEvent.runId,
-              )
-            ) {
-              this.#budgetEvents.push(recoveredEvent);
-            }
-          }
-        },
-        preflight: async (objective) => {
-          assertGraphWithinRunPolicy(objective, this.#policy);
-          if (this.#deliverySelection.selected === "native-stacks") {
-            const deliveryItems = objective.workItems.map((item) => {
-              if (!item.delivery) {
-                throw new Error(`Work Item ${item.id} has no delivery hint for stacked delivery`);
+                  event.runId === this.#run.runId &&
+                  event.event === "BudgetReconciled" &&
+                  event.phase === "management" &&
+                  event.unit === "model_tokens" &&
+                  event.usageId === usageId &&
+                  event.amount === amount,
+              );
+              if (!recoveredEvent) throw error;
+              snapshot = recoveredSnapshot;
+              this.#sequences.observe(snapshotEvents(snapshot));
+              if (
+                !this.#budgetEvents.some(
+                  (event) =>
+                    event.kind === "budget" &&
+                    event.sequence === recoveredEvent.sequence &&
+                    event.runId === recoveredEvent.runId,
+                )
+              ) {
+                this.#budgetEvents.push(recoveredEvent);
               }
-              return {
-                id: item.id,
-                dependsOn: item.dependsOn,
-                delivery: {
-                  group: item.delivery.group,
-                  relationship: item.delivery.relationship,
-                  ...(item.delivery.parentWorkItem
-                    ? { parentWorkItem: item.delivery.parentWorkItem }
-                    : {}),
-                },
-              };
-            });
-            const planned = planDelivery(deliveryItems);
-            if (planned.result === "unsupported") {
-              throw new Error(`unsupported delivery topology: ${planned.reason}`);
             }
-            this.#deliveryPlan = planned;
-          }
-          await this.#preflightCompiledGraph(objective);
-        },
-      });
-      const compiled = durableGraph.objective;
-      let durableProjection = await graphManager.loadProjection(
-        snapshot.number,
-        this.#run.runId,
-        durableGraph,
-      );
-      const existingProjectionReceipts = snapshotEvents(snapshot).filter(
-        (event): event is Extract<FactoryEvent, { kind: "graph"; event: "GraphProjected" }> =>
-          event.kind === "graph" &&
-          event.event === "GraphProjected" &&
-          event.runId === this.#run.runId,
-      );
-      if (existingProjectionReceipts.length > 1) {
-        throw new Error("immutable graph projection has multiple authenticated Objective receipts");
-      }
-      if (durableProjection) {
-        assertAuthenticatedGraphProjection(
-          snapshotEvents(snapshot),
-          snapshot.number,
-          this.#run.runId,
-          durableProjection,
-        );
-        assertSnapshotMatchesCompiledGraph(compiled, snapshot, durableProjection.bindings);
-      } else if (existingProjectionReceipts[0]) {
-        const receipt = existingProjectionReceipts[0];
-        const staged = await graphManager.loadStagedProjection(
+          },
+          preflight: async (objective) => {
+            assertGraphWithinRunPolicy(objective, this.#policy);
+            if (this.#deliverySelection.selected === "native-stacks") {
+              const deliveryItems = objective.workItems.map((item) => {
+                if (!item.delivery) {
+                  throw new Error(`Work Item ${item.id} has no delivery hint for stacked delivery`);
+                }
+                return {
+                  id: item.id,
+                  dependsOn: item.dependsOn,
+                  delivery: {
+                    group: item.delivery.group,
+                    relationship: item.delivery.relationship,
+                    ...(item.delivery.parentWorkItem
+                      ? { parentWorkItem: item.delivery.parentWorkItem }
+                      : {}),
+                  },
+                };
+              });
+              const planned = planDelivery(deliveryItems);
+              if (planned.result === "unsupported") {
+                throw new Error(`unsupported delivery topology: ${planned.reason}`);
+              }
+              this.#deliveryPlan = planned;
+            }
+            await this.#preflightCompiledGraph(objective);
+          },
+        });
+        const compiled = durableGraph.objective;
+        let durableProjection = await graphManager.loadProjection(
           snapshot.number,
           this.#run.runId,
           durableGraph,
-          receipt.projectionBlobSha,
         );
-        assertAuthenticatedGraphProjection(
-          snapshotEvents(snapshot),
-          snapshot.number,
-          this.#run.runId,
-          staged,
+        const existingProjectionReceipts = snapshotEvents(snapshot).filter(
+          (event): event is Extract<FactoryEvent, { kind: "graph"; event: "GraphProjected" }> =>
+            event.kind === "graph" &&
+            event.event === "GraphProjected" &&
+            event.runId === this.#run.runId,
         );
-        assertSnapshotMatchesCompiledGraph(compiled, snapshot, staged.bindings);
-      }
-      let existingGraphItems = observedGraph.existing;
-      assertGraphQlAdmissionHeadroom(
-        snapshot.graphQlRateLimit,
-        this.#policy,
-        Math.min(this.#policy.maxParallel, compiled.workItems.length),
-        this.#notify,
-        pendingGraphQlGraphMutations(compiled, existingGraphItems),
-      );
-      if (observedGraph.receiptRunId !== this.#run.runId) {
-        await this.#lease.use((lease) =>
-          this.#recorder.graph({
-            lease,
-            objectiveNodeId: snapshot.id,
-            sequence: this.#sequences.take(),
-            graphDigest: durableGraph!.graphDigest,
-            graphSize: durableGraph!.graphSize,
-            baseSha: base.oid,
-            graphRef: durableGraph!.ref,
-            graphBlobSha: durableGraph!.blobOid,
+        if (existingProjectionReceipts.length > 1) {
+          throw new Error(
+            "immutable graph projection has multiple authenticated Objective receipts",
+          );
+        }
+        if (durableProjection) {
+          assertAuthenticatedGraphProjection(
+            snapshotEvents(snapshot),
+            snapshot.number,
+            this.#run.runId,
+            durableProjection,
+          );
+          assertSnapshotMatchesCompiledGraph(compiled, snapshot, durableProjection.bindings);
+        } else if (existingProjectionReceipts[0]) {
+          const receipt = existingProjectionReceipts[0];
+          const staged = await graphManager.loadStagedProjection(
+            snapshot.number,
+            this.#run.runId,
+            durableGraph,
+            receipt.projectionBlobSha,
+          );
+          assertAuthenticatedGraphProjection(
+            snapshotEvents(snapshot),
+            snapshot.number,
+            this.#run.runId,
+            staged,
+          );
+          assertSnapshotMatchesCompiledGraph(compiled, snapshot, staged.bindings);
+        }
+        let existingGraphItems = observedGraph.existing;
+        assertGraphQlAdmissionHeadroom(
+          snapshot.graphQlRateLimit,
+          this.#policy,
+          Math.min(this.#policy.maxParallel, compiled.workItems.length),
+          this.#notify,
+          pendingGraphQlGraphMutations(compiled, existingGraphItems),
+        );
+        if (observedGraph.receiptRunId !== this.#run.runId) {
+          await this.#lease.use((lease) =>
+            this.#recorder.graph({
+              lease,
+              objectiveNodeId: snapshot.id,
+              sequence: this.#sequences.take(),
+              graphDigest: durableGraph!.graphDigest,
+              graphSize: durableGraph!.graphSize,
+              baseSha: base.oid,
+              graphRef: durableGraph!.ref,
+              graphBlobSha: durableGraph!.blobOid,
+            }),
+          );
+        }
+        const graph = new GraphApplier({
+          writer: new GithubOctokitGraphWriter({
+            token: this.#options.token,
+            owner: this.#options.owner,
+            repo: this.#options.repo,
+            onThrottle: this.#notify,
           }),
-        );
-      }
-      const graph = new GraphApplier({
-        writer: new GithubOctokitGraphWriter({
-          token: this.#options.token,
-          owner: this.#options.owner,
-          repo: this.#options.repo,
+          circuitBreaker: this.#breaker,
+          pacer: this.#pacer,
+          concurrency: this.#concurrency,
+          mutationScheduler: this.#mutations,
+          beforeMutation: (waitedMs) => this.#guardMutation(waitedMs),
           onThrottle: this.#notify,
-        }),
-        circuitBreaker: this.#breaker,
-        pacer: this.#pacer,
-        concurrency: this.#concurrency,
-        mutationScheduler: this.#mutations,
-        beforeMutation: (waitedMs) => this.#guardMutation(waitedMs),
-        onThrottle: this.#notify,
-      });
-      let appliedWorkItems: Map<string, { id: string; number: number }> | null = null;
-      for (let recovery = 0; ; recovery += 1) {
-        const before = JSON.stringify(
-          existingGraphItems.map((item) => [
-            item.compilerId,
-            [...item.blockedByNumbers].sort((a, b) => a - b),
-          ]),
-        );
-        try {
-          appliedWorkItems = await graph.apply(compiled, {
-            repositoryId: snapshot.repositoryId,
-            objectiveIssueId: snapshot.id,
-            ...(snapshot.workItemLabelId ? { workItemLabelId: snapshot.workItemLabelId } : {}),
-            existingWorkItems: existingGraphItems,
-          });
-          break;
-        } catch (error) {
-          if (recovery >= 4) throw error;
-          if (error instanceof PlatformUnavailableError) {
-            // The breaker cooldown can outlive the lease. Stop this Director
-            // and let the host scheduler resume from the immutable graph after
-            // connectivity returns instead of mutating under an expired lease.
-            throw error;
-          } else {
-            // A mutation response can be lost after GitHub commits the write.
-            // Give the relationship snapshot a moment to become observable
-            // before deciding that no idempotent repair is possible.
-            await sleep(1_000, this.#options.signal);
-          }
-          snapshot = await this.#reader.readObjective(snapshot.number);
-          const recovered = inspectCompiledGraph(snapshot);
-          if (
-            recovered.expectedDigest !== durableGraph.graphDigest ||
-            recovered.expectedRef !== durableGraph.ref ||
-            recovered.expectedBlobSha !== durableGraph.blobOid
-          ) {
-            throw error;
-          }
-          const after = JSON.stringify(
-            recovered.existing.map((item) => [
+        });
+        let appliedWorkItems: Map<string, { id: string; number: number }> | null = null;
+        for (let recovery = 0; ; recovery += 1) {
+          const before = JSON.stringify(
+            existingGraphItems.map((item) => [
               item.compilerId,
               [...item.blockedByNumbers].sort((a, b) => a - b),
             ]),
           );
-          if (after === before && !(error instanceof PlatformUnavailableError)) throw error;
-          existingGraphItems = recovered.existing;
-          this.#notify("replaying the immutable graph after a partially observed GitHub write");
+          try {
+            appliedWorkItems = await graph.apply(compiled, {
+              repositoryId: snapshot.repositoryId,
+              objectiveIssueId: snapshot.id,
+              ...(snapshot.workItemLabelId ? { workItemLabelId: snapshot.workItemLabelId } : {}),
+              existingWorkItems: existingGraphItems,
+            });
+            break;
+          } catch (error) {
+            if (recovery >= 4) throw error;
+            if (error instanceof PlatformUnavailableError) {
+              // The breaker cooldown can outlive the lease. Stop this Director
+              // and let the host scheduler resume from the immutable graph after
+              // connectivity returns instead of mutating under an expired lease.
+              throw error;
+            } else {
+              // A mutation response can be lost after GitHub commits the write.
+              // Give the relationship snapshot a moment to become observable
+              // before deciding that no idempotent repair is possible.
+              await sleep(1_000, this.#options.signal);
+            }
+            snapshot = await this.#reader.readObjective(snapshot.number);
+            const recovered = inspectCompiledGraph(snapshot);
+            if (
+              recovered.expectedDigest !== durableGraph.graphDigest ||
+              recovered.expectedRef !== durableGraph.ref ||
+              recovered.expectedBlobSha !== durableGraph.blobOid
+            ) {
+              throw error;
+            }
+            const after = JSON.stringify(
+              recovered.existing.map((item) => [
+                item.compilerId,
+                [...item.blockedByNumbers].sort((a, b) => a - b),
+              ]),
+            );
+            if (after === before && !(error instanceof PlatformUnavailableError)) throw error;
+            existingGraphItems = recovered.existing;
+            this.#notify("replaying the immutable graph after a partially observed GitHub write");
+          }
         }
-      }
-      if (!appliedWorkItems) {
-        throw new Error("compiled graph application returned no GitHub issue projection");
-      }
-      const projectionBindings = compiled.workItems.map((item) => {
-        const issue = appliedWorkItems!.get(item.id);
-        if (!issue) {
-          throw new Error(`compiled graph application omitted Work Item ${item.id}`);
+        if (!appliedWorkItems) {
+          throw new Error("compiled graph application returned no GitHub issue projection");
         }
-        return {
-          compilerId: item.id,
-          issueNodeId: issue.id,
-          issueNumber: issue.number,
-        };
-      });
-      const stagedProjection = await this.#lease.use((lease) =>
-        graphManager.stageProjection({
-          lease,
-          graph: durableGraph!,
-          bindings: projectionBindings,
-        }),
-      );
-      let projectionReceiptEvents: readonly FactoryEvent[] = snapshotEvents(snapshot);
-      const authenticateProjection = () =>
+        const projectionBindings = compiled.workItems.map((item) => {
+          const issue = appliedWorkItems!.get(item.id);
+          if (!issue) {
+            throw new Error(`compiled graph application omitted Work Item ${item.id}`);
+          }
+          return {
+            compilerId: item.id,
+            issueNodeId: issue.id,
+            issueNumber: issue.number,
+          };
+        });
+        const stagedProjection = await this.#lease.use((lease) =>
+          graphManager.stageProjection({
+            lease,
+            graph: durableGraph!,
+            bindings: projectionBindings,
+          }),
+        );
+        let projectionReceiptEvents: readonly FactoryEvent[] = snapshotEvents(snapshot);
+        const authenticateProjection = () =>
+          assertAuthenticatedGraphProjection(
+            projectionReceiptEvents,
+            snapshot.number,
+            this.#run.runId,
+            stagedProjection,
+          );
+        const priorProjectionReceipt = snapshotEvents(snapshot).some(
+          (event) =>
+            event.kind === "graph" &&
+            event.event === "GraphProjected" &&
+            event.runId === this.#run.runId,
+        );
+        if (priorProjectionReceipt) {
+          authenticateProjection();
+        } else {
+          try {
+            const projectionEvent = await this.#lease.use((lease) =>
+              this.#recorder.graphProjection({
+                lease,
+                objectiveNodeId: snapshot.id,
+                sequence: this.#sequences.take(),
+                graphDigest: stagedProjection.graphDigest,
+                graphSize: stagedProjection.graphSize,
+                projectionRef: stagedProjection.ref,
+                projectionBlobSha: stagedProjection.blobOid,
+              }),
+            );
+            projectionReceiptEvents = [projectionEvent];
+            authenticateProjection();
+          } catch (error) {
+            const recoveredSnapshot = await this.#reader.readObjective(snapshot.number);
+            snapshot = recoveredSnapshot;
+            this.#sequences.observe(snapshotEvents(snapshot));
+            projectionReceiptEvents = snapshotEvents(snapshot);
+            try {
+              authenticateProjection();
+            } catch {
+              throw error;
+            }
+          }
+        }
+        durableProjection = await this.#lease.use((lease) =>
+          graphManager.persistProjection({
+            lease,
+            graph: durableGraph!,
+            bindings: projectionBindings,
+            expectedBlobOid: stagedProjection.blobOid,
+          }),
+        );
         assertAuthenticatedGraphProjection(
           projectionReceiptEvents,
           snapshot.number,
           this.#run.runId,
-          stagedProjection,
+          durableProjection,
         );
-      const priorProjectionReceipt = snapshotEvents(snapshot).some(
-        (event) =>
-          event.kind === "graph" &&
-          event.event === "GraphProjected" &&
-          event.runId === this.#run.runId,
-      );
-      if (priorProjectionReceipt) {
-        authenticateProjection();
-      } else {
-        try {
-          const projectionEvent = await this.#lease.use((lease) =>
-            this.#recorder.graphProjection({
-              lease,
-              objectiveNodeId: snapshot.id,
-              sequence: this.#sequences.take(),
-              graphDigest: stagedProjection.graphDigest,
-              graphSize: stagedProjection.graphSize,
-              projectionRef: stagedProjection.ref,
-              projectionBlobSha: stagedProjection.blobOid,
-            }),
-          );
-          projectionReceiptEvents = [projectionEvent];
-          authenticateProjection();
-        } catch (error) {
-          const recoveredSnapshot = await this.#reader.readObjective(snapshot.number);
-          snapshot = recoveredSnapshot;
-          this.#sequences.observe(snapshotEvents(snapshot));
-          projectionReceiptEvents = snapshotEvents(snapshot);
-          try {
-            authenticateProjection();
-          } catch {
-            throw error;
-          }
-        }
+        this.#compiledGraph = compiled;
+        this.#compiledProjection = durableProjection;
       }
-      durableProjection = await this.#lease.use((lease) =>
-        graphManager.persistProjection({
-          lease,
-          graph: durableGraph!,
-          bindings: projectionBindings,
-          expectedBlobOid: stagedProjection.blobOid,
-        }),
-      );
-      assertAuthenticatedGraphProjection(
-        projectionReceiptEvents,
-        snapshot.number,
-        this.#run.runId,
-        durableProjection,
-      );
-      this.#compiledGraph = compiled;
-      this.#compiledProjection = durableProjection;
       for (;;) {
         if (heartbeatError) throw heartbeatError;
         if (this.#options.signal?.aborted) {
@@ -2003,7 +2249,24 @@ export class FactorySupervisor {
           runActor: this.#run.actor,
           runStartSequence: this.#runStartSequence,
         });
-        const objective = derive(snapshot);
+        if (this.#recoveryRuntime) await this.#resumeObservedRun(snapshot, runManager);
+        const objective = this.#deriveObjective(snapshot);
+        const adoptedPublication =
+          this.#recoveryRuntime &&
+          objective.items.find((item) => {
+            const planned = this.#recoveryRuntime!.planRecord.plan.items.find(
+              (entry) => entry.workItem === item.number,
+            );
+            return (
+              planned?.source?.publication &&
+              planned.action !== "execute" &&
+              item.state === "for_review"
+            );
+          });
+        if (adoptedPublication) {
+          await this.#resumeAdoptedSource(adoptedPublication);
+          continue;
+        }
         if (await this.#repairReservationReceipts(objective.items)) continue;
         // GitHub can report MERGED before the response or our closure receipt arrives.
         // Reconstruct sibling integration before derived "done" can close the Objective.
@@ -2047,7 +2310,8 @@ export class FactorySupervisor {
           snapshot = await this.#reader.readObjective(snapshot.number);
           this.#fenceSnapshot(snapshot);
           this.#sequences.observe(snapshotEvents(snapshot));
-          if (!allDone(derive(snapshot))) continue;
+          if (this.#recoveryRuntime) await this.#resumeObservedRun(snapshot, runManager);
+          if (!allDone(this.#deriveObjective(snapshot))) continue;
           await this.#lease.assert();
           await this.#store.closeIssue(snapshot.number);
           return await this.#terminal(runManager, snapshot, "FactoryRunCompleted");
@@ -2232,7 +2496,7 @@ export class FactorySupervisor {
         );
         this.#budgetEvents = deduplicateFactoryEvents([
           ...this.#budgetEvents,
-          ...snapshotEvents(snapshot).filter((event) => event.runId === this.#run.runId),
+          ...this.#accountingEvents(snapshotEvents(snapshot)),
         ]);
         const availableBudget = remainingBudget(
           this.#policy,
@@ -2541,6 +2805,7 @@ export class FactorySupervisor {
       }
     };
     try {
+      if (this.#recoveryRuntime) await this.#externalAdmission(async () => {});
       const originalPacket = this.#packetFor(item.number);
       const base = deliveryBase
         ? await this.#store.readCommit(deliveryBase.sha)
@@ -2580,18 +2845,21 @@ export class FactorySupervisor {
       noHandleReplacementNotBefore = new Date(attemptDeadline.getTime() + 60_000).toISOString();
       await this.#lease.use(async (lease) => {
         const prior = (await this.#attempts.list(this.#run.objective, item.number)).filter(
-          (attempt) => attempt.runId === this.#run.runId,
+          (attempt) =>
+            (this.#recoveryRuntime?.accountingRunIds ?? [this.#run.runId]).includes(attempt.runId),
         );
         const deferred = new Set(
           (item.factoryEvents ?? []).flatMap((event) =>
             event.kind === "attempt" &&
-            event.runId === this.#run.runId &&
+            (this.#recoveryRuntime?.accountingRunIds ?? [this.#run.runId]).includes(event.runId) &&
             event.event === "AttemptDeferred"
-              ? [event.attempt]
+              ? [`${event.runId}:${event.attempt}`]
               : [],
           ),
         );
-        const consumed = prior.filter((attempt) => !deferred.has(attempt.attempt)).length;
+        const consumed = prior.filter(
+          (attempt) => !deferred.has(`${attempt.runId}:${attempt.attempt}`),
+        ).length;
         if (consumed >= this.#policy.maxAttemptsPerItem) {
           throw new Error(`attempt budget exhausted (${consumed})`);
         }
@@ -2686,6 +2954,41 @@ export class FactorySupervisor {
           backend: selected.capabilities.id,
           base,
           sequence: this.#sequences.take(),
+          prepareLocalScope: async (attempt) => {
+            if (!selected!.capabilities.hostExecution) return null;
+            const host = await (this.#localScopeHost ??= discoverLocalScopeHost());
+            if (!host) {
+              if (this.#recoveryRuntime)
+                throw new Error("successor execution requires observable owned local scopes");
+              return null;
+            }
+            return LocalScopeBatchSchema.parse({
+              identity: {
+                protocol: "clockgrove.factory/local-scope-v1",
+                repository: `${this.#options.owner}/${this.#options.repo}`.toLowerCase(),
+                objective: this.#run.objective,
+                runId: this.#run.runId,
+                workItem: item.number,
+                attempt,
+                directorEpoch: lease.epoch,
+                policyDigest: this.#run.policyDigest,
+                phase: "execution",
+                commandIndex: 0,
+                invocationDigest: workerPacketDigest(packet),
+                hostIdentity: host.hostIdentity,
+                ...(host.producerUnit
+                  ? {
+                      producerUnit: host.producerUnit,
+                      producerInvocationId: host.producerInvocationId,
+                    }
+                  : {}),
+              },
+              commandCount: 1,
+              producerPid: host.producerPid,
+              producerStartTicks: host.producerStartTicks,
+              deadline: attemptDeadline.toISOString(),
+            });
+          },
           admission: {
             admissionClass: admission.admissionClass,
             admissionReason: admission.admissionReason,
@@ -2776,6 +3079,18 @@ export class FactorySupervisor {
           policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
           providerBaseRef: publicationBaseBranch,
           deadline: attemptDeadline,
+          ...(reservation!.localScopeBatch
+            ? {
+                localExecutionScope: {
+                  batch: reservation!.localScopeBatch,
+                  assertCurrent: () =>
+                    this.#externalAdmission(async () => {
+                      if (Date.now() >= attemptDeadline.getTime())
+                        throw new Error("execution scope deadline expired");
+                    }),
+                },
+              }
+            : {}),
           ...(workerModelSelection ? { modelSelection: workerModelSelection } : {}),
           ...(retryCheckpoint ? { seededFromArtifact: true } : {}),
         });
@@ -2953,6 +3268,14 @@ export class FactorySupervisor {
         await sleep(this.#options.pollIntervalMs ?? 2_000, executionSignal);
       }
       releaseExecutionCapacity();
+      const scopedValidation = validator
+        ? null
+        : await this.#scopedValidation(
+            reservation!,
+            artifact,
+            packet,
+            new Date(Date.now() + timeoutMs),
+          );
       await this.#lease.use(async (lease) => {
         const capacityEvent = await this.#attempts.recordCapacity({
           lease,
@@ -2964,6 +3287,7 @@ export class FactorySupervisor {
           backend: validationCapacity!.backendId,
           requestedCpu: validationCapacity!.cpu,
           requestedMemoryMb: validationCapacity!.memoryMb,
+          ...(scopedValidation ? { localScopeBatch: scopedValidation.batch } : {}),
         });
         const validationDeadline = new Date(new Date(capacityEvent.at).getTime() + timeoutMs);
         if (validationDeadline.getTime() <= Date.now()) {
@@ -2992,6 +3316,7 @@ export class FactorySupervisor {
           repository: this.#options.repository,
           artifact,
           packet,
+          ...(scopedValidation ? { localScope: scopedValidation.hooks } : {}),
           ...(validator
             ? {
                 isolatedValidator: () =>
@@ -3794,7 +4119,7 @@ export class FactorySupervisor {
     assertAuthenticatedGraphProjection(
       snapshotEvents(snapshot),
       snapshot.number,
-      this.#run.runId,
+      this.#recoveryRuntime?.planRecord.plan.graph.sourceRunId ?? this.#run.runId,
       this.#compiledProjection,
     );
   }
@@ -4380,11 +4705,130 @@ export class FactorySupervisor {
       ...originalPacket,
       baseSha,
     });
-    const validation = await validateArtifactClean({
-      repository: this.#options.repository,
+    const invocation = createHash("sha256")
+      .update(
+        JSON.stringify([
+          "native-rebase",
+          this.#run.runId,
+          item.number,
+          member.reservation.attempt,
+          artifact.digest,
+          headSha,
+        ]),
+      )
+      .digest("hex");
+    const capacityBackend = `factory/integration-validation-${invocation}`;
+    const currentSnapshot = await this.#reader.readObjective(this.#run.objective);
+    if (
+      unreconciledCapacityReservations(snapshotEvents(currentSnapshot)).some(
+        (event) => event.runId === this.#run.runId && event.backend === capacityBackend,
+      )
+    )
+      throw new Error(
+        "interrupted native-rebase validation requires owned-resource reconciliation",
+      );
+    const scoped = await this.#scopedValidation(
+      member.reservation,
       artifact,
       packet,
-    });
+      new Date(
+        Math.min(
+          Date.now() + this.#policy.workItemTimeoutMinutes * 60_000,
+          this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
+        ),
+      ),
+    );
+    if (this.#recoveryRuntime && !scoped)
+      throw new Error("successor native rebase requires owned local scopes");
+    const scheduling = normalizeSchedulingPolicy(this.#policy);
+    const capacity: CapacityReservation = {
+      key: capacityReservationKey({
+        objective: this.#run.objective,
+        workItem: item.number,
+        attempt: member.reservation.attempt,
+        phase: "validation",
+        backendId: capacityBackend,
+      }),
+      objective: this.#run.objective,
+      workItem: item.number,
+      attempt: member.reservation.attempt,
+      phase: "validation",
+      backendId: capacityBackend,
+      admissionClass: "local",
+      local: true,
+      cpu: packet.requirements.cpu ?? scheduling.capacity.local.defaultCpu,
+      memoryMb: packet.requirements.memoryMb ?? scheduling.capacity.local.defaultMemoryMb,
+      paidUnits: 0,
+      paths: packet.allowedPaths,
+      exclusiveResources: packet.changeSurface?.exclusiveResources ?? [],
+    };
+    const resource =
+      scheduling.capacity.mode === "adaptive-local"
+        ? await this.#resourceSampler.sample(Date.now())
+        : null;
+    if (
+      resource &&
+      (resourcePressureReasons(resource, scheduling.capacity.local).length ||
+        this.#resourceSampler.coolingDown(Date.now()))
+    )
+      throw new Error("local capacity pressure blocks native-rebase validation");
+    if (
+      !this.#capacity.tryReserve(
+        this.#capacity.snapshot().generation,
+        capacity,
+        admissionCapacityLimits(
+          this.#policy,
+          resource,
+          this.#run.objective,
+          Math.min(scheduling.capacity.local.maxWorkers, this.#controllerLimits.maxLocalWorkers),
+          this.#controllerLimits,
+        ),
+      ).reserved
+    )
+      throw new Error("local capacity unavailable for native-rebase validation");
+    const recordCapacity = (event: "CapacityReserved" | "CapacityReconciled") =>
+      this.#lease.use((lease) =>
+        this.#attempts.recordCapacity({
+          lease,
+          workItemNodeId: item.id,
+          reservation: member.reservation,
+          sequence: this.#sequences.take(),
+          event,
+          phase: "validation",
+          backend: capacityBackend,
+          requestedCpu: capacity.cpu,
+          requestedMemoryMb: capacity.memoryMb,
+          allowRecovery: true,
+          ...(event === "CapacityReserved" && scoped ? { localScopeBatch: scoped.batch } : {}),
+        }),
+      );
+    let validation: CleanValidationResult;
+    let pendingValidation: CleanValidationResult | undefined;
+    let capacityRecorded = false;
+    let validatedAndRecorded = false;
+    try {
+      await recordCapacity("CapacityReserved");
+      capacityRecorded = true;
+      validation = await this.#externalAdmission(() =>
+        validateArtifactClean({
+          repository: this.#options.repository,
+          artifact,
+          packet,
+          ...(scoped ? { localScope: scoped.hooks } : {}),
+        }),
+      );
+      pendingValidation = validation;
+      await this.#recordCandidateValidationUsage(
+        validation.evidence,
+        invocation,
+        item,
+        member.reservation,
+      );
+    } catch (error) {
+      if (pendingValidation) await discardValidationResult(pendingValidation);
+      if (!capacityRecorded) this.#capacity.release(capacity.key);
+      throw error;
+    }
     try {
       if (!validation.evidence.passed) {
         throw new Error(validation.evidence.failureReason ?? "rebased stack validation failed");
@@ -4478,8 +4922,13 @@ export class FactorySupervisor {
             rebasedReceipt,
           ),
       });
+      validatedAndRecorded = true;
     } finally {
       await discardValidationResult(validation);
+      if (validatedAndRecorded) {
+        await recordCapacity("CapacityReconciled");
+        this.#capacity.release(capacity.key);
+      }
     }
   }
 
@@ -4523,6 +4972,7 @@ export class FactorySupervisor {
     const snapshot = await this.#reader.readObjective(this.#run.objective);
     this.#fenceSnapshot(snapshot);
     this.#sequences.observe(snapshotEvents(snapshot));
+    if (this.#recoveryRuntime) await this.#resumeObservedRun(snapshot, new RunManager(this.#store));
     const items = derive(snapshot).items;
     let cursor = targetBaseSha;
     const visited = new Set<string>();
@@ -4531,6 +4981,24 @@ export class FactorySupervisor {
         throw new Error("base advancement is not a bounded chain of this run's integrations");
       }
       visited.add(cursor);
+      const adopted =
+        this.#recoveryRuntime?.sourceIntegrations.filter(
+          (proof) =>
+            proof.outcome.workItem !== currentWorkItem && proof.outcome.mergeCommitSha === cursor,
+        ) ?? [];
+      if (adopted.length) {
+        if (adopted.length !== 1) throw new Error("conflicting source integration ancestry");
+        const commit = await this.#store.readCommit(cursor);
+        if (
+          commit.oid !== cursor ||
+          commit.parentOids.length !== 1 ||
+          commit.parentOids[0] !== adopted[0]!.targetBaseSha ||
+          commit.treeOid !== adopted[0]!.outputTreeSha
+        )
+          throw new Error("adopted source integration ancestry changed");
+        cursor = commit.parentOids[0]!;
+        continue;
+      }
       const matches = items.flatMap((item) =>
         deduplicateFactoryEvents(item.factoryEvents ?? [])
           .filter(
@@ -4806,6 +5274,17 @@ export class FactorySupervisor {
       let capacityRecorded = false;
       try {
         artifact = await reconstructArtifact();
+        const scopedValidation = await this.#scopedValidation(
+          member.reservation,
+          artifact,
+          packet,
+          new Date(
+            Math.min(
+              Date.now() + this.#policy.workItemTimeoutMinutes * 60_000,
+              this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
+            ),
+          ),
+        );
         await this.#lease.use((lease) =>
           this.#attempts.recordCapacity({
             lease,
@@ -4818,6 +5297,7 @@ export class FactorySupervisor {
             requestedCpu: capacity.cpu,
             requestedMemoryMb: capacity.memoryMb,
             allowRecovery: true,
+            ...(scopedValidation ? { localScopeBatch: scopedValidation.batch } : {}),
           }),
         );
         capacityRecorded = true;
@@ -4827,6 +5307,7 @@ export class FactorySupervisor {
             repository: this.#options.repository,
             artifact: artifact!,
             packet,
+            ...(scopedValidation ? { localScope: scopedValidation.hooks } : {}),
           }),
         );
         if (!validation.evidence.passed) {
@@ -4920,6 +5401,399 @@ export class FactorySupervisor {
     return record;
   }
 
+  async #appendSuccessorEvent(nodeId: string, event: FactoryEvent): Promise<void> {
+    if (!this.#recoveryRuntime || event.runId !== this.#run.runId)
+      throw new Error("successor event lacks its verified controlling run");
+    try {
+      await this.#lease.use(async () =>
+        this.#store.addIssueComment(
+          nodeId,
+          encodeEventComment("Factory recorded evidence-preserving successor progress.", event),
+        ),
+      );
+    } catch (error) {
+      const snapshot = await this.#reader.readObjective(this.#run.objective);
+      this.#fenceSnapshot(snapshot);
+      if (
+        !snapshotEvents(snapshot).some(
+          (value) => recoveryEventDigest(value) === recoveryEventDigest(event),
+        )
+      )
+        throw error;
+      this.#sequences.observe(snapshotEvents(snapshot));
+    }
+    if (event.kind === "budget") this.#budgetEvents.push(event);
+  }
+
+  async #sourceUsage(
+    item: DerivedWorkItem,
+    usageId: string,
+    amount: number,
+    unit: "model_tokens" | "validation_milliseconds",
+  ): Promise<void> {
+    const existing = this.#budgetEvents.filter(
+      (event) =>
+        event.kind === "budget" &&
+        event.runId === this.#run.runId &&
+        event.workItem === item.number &&
+        event.attempt === undefined &&
+        event.unit === unit &&
+        event.usageId === usageId &&
+        event.event === "BudgetReconciled",
+    );
+    if (existing.some((event) => event.amount !== amount))
+      throw new Error("successor usage conflicts with immutable evidence");
+    if (existing.length) return;
+    await this.#appendSuccessorEvent(
+      item.id,
+      parseFactoryEvent({
+        protocol: "clockgrove.factory/v2",
+        kind: "budget",
+        event: "BudgetReconciled",
+        objective: this.#run.objective,
+        runId: this.#run.runId,
+        sequence: this.#sequences.take(),
+        at: (await this.#store.serverTime()).toISOString(),
+        workItem: item.number,
+        phase: unit === "model_tokens" ? "management" : "validation",
+        unit,
+        amount,
+        usageId,
+      }),
+    );
+  }
+
+  async #resumeAdoptedSource(item: DerivedWorkItem): Promise<void> {
+    const runtime = this.#recoveryRuntime!;
+    const planItem = runtime.planRecord.plan.items.find((entry) => entry.workItem === item.number)!;
+    const source = planItem.source!;
+    const publication = source.publication!;
+    const existingOutcome = runtime.sourceIntegrations.find(
+      (entry) => entry.outcome.workItem === item.number,
+    );
+    if (existingOutcome) {
+      await this.#lease.assertGeneration("integration");
+      if (!item.closed) await this.#store.closeIssue(item.number);
+      return;
+    }
+    const reserved = (await this.#attempts.list(this.#run.objective, item.number)).find(
+      (entry) => entry.runId === source.runId && entry.attempt === source.attempt,
+    );
+    if (!reserved) throw new Error("adopted source reservation is unavailable");
+    const head = await this.#store.readCommit(publication.headSha);
+    const exactHeadValidation = bindValidationToPublishedHead({
+      validation: {
+        passed: true,
+        digest: source.validation!.evidenceDigest,
+        baseSha: source.validation!.baseSha,
+        outputTreeSha: source.validation!.outputTreeSha,
+      },
+      publishedHeadSha: publication.headSha,
+      publishedTreeSha: head.treeOid,
+      publishedBaseSha: publication.baseSha,
+    });
+    const pull: PublishedPullRequest = {
+      number: publication.pullRequest,
+      branch: publication.branch,
+      commitSha: publication.headSha,
+      htmlUrl: `https://github.com/${this.#options.owner}/${this.#options.repo}/pull/${publication.pullRequest}`,
+      exactHeadValidation,
+    };
+    const observed = await this.#store.readPullRequest(pull.number);
+    if (
+      observed.headSha !== pull.commitSha ||
+      observed.baseRef !== this.#baseBranch ||
+      (!observed.merged && observed.state !== "open")
+    )
+      throw new Error(
+        "adopted publication changed; original source authority cannot be relabelled",
+      );
+    const target = observed.merged
+      ? (await this.#store.readCommit(observed.mergeCommitSha!)).parentOids[0]!
+      : (await this.#store.getBranchHead(this.#baseBranch)).oid;
+    let candidate: MergeCandidateCheckpointRecord | undefined;
+    if (target !== exactHeadValidation.baseSha) {
+      const identity: MergeCandidateIdentity = {
+        runId: this.#run.runId,
+        objective: this.#run.objective,
+        workItem: item.number,
+        attempt: source.attempt,
+        pullRequest: pull.number,
+        sourceHeadSha: pull.commitSha,
+        sourceExactHeadValidationDigest: exactHeadValidation.digest,
+        targetBaseSha: target,
+      };
+      const digest = mergeCandidateIdentityDigest(identity);
+      const backendId = `factory/integration-validation-${digest}`;
+      candidate = (await this.#mergeCandidates.load(identity)) ?? undefined;
+      if (!candidate && observed.merged)
+        throw new Error("merged adopted source lacks pre-merge validation");
+      if (!observed.merged)
+        await this.#assertOwnTrunkAdvance(
+          runtime.planRecord.plan.expectedBaseSha,
+          target,
+          item.number,
+        );
+      const original = this.#packetFor(item.number);
+      if (original.requirements.trust !== "trusted_local")
+        throw new Error("adopted source validation requires trusted local scope");
+      const packet = parseWorkerPacket({ ...original, baseSha: target });
+      const deadline = new Date(
+        this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
+      );
+      let artifact: NormalizedArtifact | undefined;
+      const reconstruct = async () => {
+        for (const sha of [exactHeadValidation.baseSha, pull.commitSha, target])
+          await ensureLocalCommit(this.#options.repository, sha);
+        const range = [exactHeadValidation.baseSha, pull.commitSha];
+        const changedPaths = (
+          await hostGit(
+            this.#options.repository,
+            ["diff", "--name-only", "-z", ...range],
+            MAX_ARTIFACT_PATCH_BYTES + 1024,
+            true,
+          )
+        )
+          .split("\0")
+          .filter(Boolean);
+        const patch = await hostGit(
+          this.#options.repository,
+          ["diff", "--binary", "--no-ext-diff", "--no-textconv", ...range],
+          MAX_ARTIFACT_PATCH_BYTES + 1024,
+          true,
+        );
+        return normalizeArtifact({ baseSha: target, changedPaths, patch, outcome: "succeeded" });
+      };
+      const outstanding = unreconciledCapacityReservations([...runtime.events]).filter(
+        (event) =>
+          event.runId === this.#run.runId &&
+          event.workItem === item.number &&
+          event.backend === backendId,
+      );
+      const recordCapacity = async (
+        event: "CapacityReserved" | "CapacityReconciled",
+        cpu: number,
+        memoryMb: number,
+        batch?: LocalScopeBatch,
+      ) =>
+        this.#appendSuccessorEvent(
+          item.id,
+          parseFactoryEvent({
+            protocol: "clockgrove.factory/v2",
+            kind: "capacity",
+            event,
+            objective: this.#run.objective,
+            runId: this.#run.runId,
+            workItem: item.number,
+            attempt: source.attempt,
+            sourceRunId: source.runId,
+            targetBaseSha: target,
+            directorEpoch: await this.#lease.use(async (lease) => lease.epoch),
+            policyDigest: this.#run.policyDigest,
+            phase: "validation",
+            backend: backendId,
+            sequence: this.#sequences.take(),
+            at: (await this.#store.serverTime()).toISOString(),
+            requestedCpu: cpu,
+            requestedMemoryMb: memoryMb,
+            ...(batch ? { localScopeBatch: batch } : {}),
+          }),
+        );
+      if (!candidate && outstanding.length)
+        throw new Error("interrupted adopted validation requires exact scope reconciliation");
+      if (candidate)
+        for (const entry of outstanding)
+          await recordCapacity("CapacityReconciled", entry.requestedCpu, entry.requestedMemoryMb);
+      if (!candidate) {
+        const effective = normalizeSchedulingPolicy(this.#policy);
+        const resource =
+          effective.capacity.mode === "adaptive-local"
+            ? await this.#resourceSampler.sample(Date.now()).catch(() => null)
+            : null;
+        if (
+          effective.capacity.mode === "adaptive-local" &&
+          (!resource ||
+            resourcePressureReasons(resource, effective.capacity.local).length ||
+            this.#resourceSampler.coolingDown(Date.now()))
+        )
+          return;
+        const capacity: CapacityReservation = {
+          key: capacityReservationKey({
+            objective: this.#run.objective,
+            workItem: item.number,
+            attempt: source.attempt,
+            phase: "validation",
+            backendId,
+          }),
+          objective: this.#run.objective,
+          workItem: item.number,
+          attempt: source.attempt,
+          phase: "validation",
+          backendId,
+          admissionClass: "local",
+          local: true,
+          cpu: packet.requirements.cpu ?? effective.capacity.local.defaultCpu,
+          memoryMb: packet.requirements.memoryMb ?? effective.capacity.local.defaultMemoryMb,
+          paidUnits: 0,
+          paths: packet.allowedPaths,
+          exclusiveResources: packet.changeSurface?.exclusiveResources ?? [],
+        };
+        const state = this.#capacity.snapshot();
+        if (
+          !this.#capacity.tryReserve(
+            state.generation,
+            capacity,
+            admissionCapacityLimits(
+              this.#policy,
+              resource,
+              this.#run.objective,
+              Math.min(effective.capacity.local.maxWorkers, this.#controllerLimits.maxLocalWorkers),
+              this.#controllerLimits,
+            ),
+          ).reserved
+        )
+          return;
+        let validation: CleanValidationResult | undefined;
+        let recorded = false;
+        try {
+          artifact = await reconstruct();
+          const scope = await this.#scopedValidation(
+            {
+              objective: this.#run.objective,
+              runId: this.#run.runId,
+              workItem: item.number,
+              attempt: source.attempt,
+              policyDigest: this.#run.policyDigest,
+            },
+            artifact,
+            packet,
+            deadline,
+          );
+          if (!scope) throw new Error("adopted validation requires observable owned local scopes");
+          await recordCapacity("CapacityReserved", capacity.cpu, capacity.memoryMb, scope.batch);
+          recorded = true;
+          validation = await this.#externalAdmission(() =>
+            validateArtifactClean({
+              repository: this.#options.repository,
+              artifact: artifact!,
+              packet,
+              localScope: scope.hooks,
+            }),
+          );
+          if (!validation.evidence.passed) {
+            await this.#sourceUsage(
+              item,
+              `integration-validation-${digest}`,
+              Date.parse(validation.evidence.completedAt) -
+                Date.parse(validation.evidence.startedAt),
+              "validation_milliseconds",
+            );
+            throw new Error(
+              validation.evidence.failureReason ?? "adopted candidate validation failed",
+            );
+          }
+          candidate = await this.#lease.use((lease) =>
+            this.#mergeCandidates.persist({
+              lease,
+              identity,
+              source: exactHeadValidation,
+              validation: validation!.evidence,
+            }),
+          );
+        } finally {
+          try {
+            if (validation) await discardValidationResult(validation);
+            if (recorded && candidate)
+              await recordCapacity("CapacityReconciled", capacity.cpu, capacity.memoryMb);
+          } finally {
+            if (!recorded || candidate) this.#capacity.release(capacity.key);
+          }
+        }
+      }
+      await this.#sourceUsage(
+        item,
+        `integration-validation-${digest}`,
+        Date.parse(candidate.validation.completedAt) - Date.parse(candidate.validation.startedAt),
+        "validation_milliseconds",
+      );
+      const reviewIdentity = this.#mergeCandidateReviewIdentity(candidate);
+      const existing = await this.#reviews.load(reviewIdentity);
+      if (!existing && observed.merged)
+        throw new Error("merged adopted source lacks pre-merge semantic review");
+      const invocationId = `integration-review-${reviewIdentityDigest(reviewIdentity)}`;
+      let invoke: Parameters<typeof runDurableReviewTransaction>[0]["invoke"];
+      if (!existing) {
+        if (Date.now() >= deadline.getTime())
+          throw new Error("successor Objective timeout exhausted");
+        const remaining = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
+        if (remaining.modelTokens !== null && remaining.modelTokens <= 0)
+          throw new Error("cumulative model-token budget exhausted");
+        this.#assertManagementInvocationNotFailed(invocationId);
+        artifact ??= await reconstruct();
+        if (artifact.digest !== candidate.validation.artifactDigest)
+          throw new Error("adopted candidate artifact changed");
+        const model = resolveModelSelection(this.#policy, "review");
+        invoke = (checkpoint) =>
+          this.#externalAdmission(() =>
+            this.#management.review(
+              {
+                repository: this.#options.repository,
+                objectiveNumber: this.#run.objective,
+                workItemNumber: item.number,
+                packet,
+                artifact: artifact!,
+                evidence: candidate!.validation,
+                ...(model ? { modelSelection: model } : {}),
+              },
+              checkpoint,
+            ),
+          );
+      }
+      await runDurableReviewTransaction({
+        existing,
+        ...(invoke ? { invoke } : {}),
+        persist: (result) =>
+          this.#lease.use((lease) =>
+            this.#reviews.persist({ lease, identity: reviewIdentity, result }),
+          ),
+        recover: () => this.#reviews.load(reviewIdentity),
+        recordUsage: (review) =>
+          this.#sourceUsage(
+            item,
+            invocationId,
+            review.usage.inputTokens + review.usage.outputTokens,
+            "model_tokens",
+          ),
+        recordFailureUsage: (usage) =>
+          this.#sourceUsage(
+            item,
+            `failed-${invocationId}`,
+            usage.inputTokens + usage.outputTokens,
+            "model_tokens",
+          ),
+        recordOutcome: async (review) => {
+          if (!review.review.accepted)
+            throw new Error("adopted candidate semantic review rejected");
+        },
+      });
+    } else if (!observed.merged && target !== runtime.planRecord.plan.expectedBaseSha) {
+      await this.#assertOwnTrunkAdvance(
+        runtime.planRecord.plan.expectedBaseSha,
+        target,
+        item.number,
+      );
+    }
+    await this.#integrate(
+      item,
+      reserved,
+      pull,
+      this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
+      true,
+      candidate,
+      true,
+    );
+  }
+
   async #integrate(
     item: DerivedWorkItem,
     reservation: AttemptReservation,
@@ -4927,6 +5801,7 @@ export class FactorySupervisor {
     deadline: number,
     allowRecovery = false,
     candidate?: MergeCandidateCheckpointRecord,
+    adoptedSource = false,
   ): Promise<void> {
     for (;;) {
       await this.#lease.renewIfNeeded();
@@ -5045,6 +5920,35 @@ export class FactorySupervisor {
       });
       if (readiness.state === "integrated") {
         await this.#lease.assertGeneration("integration");
+        if (adoptedSource) {
+          const runtime = this.#recoveryRuntime!;
+          const outcome = createRecoverySourceIntegratedEvent({
+            planRecord: runtime.planRecord,
+            claim: runtime.claim,
+            workItem: item.number,
+            mergeCommitSha: readiness.headSha,
+            sequence: this.#sequences.take(),
+            at: (await this.#store.serverTime()).toISOString(),
+            ...(candidate
+              ? { mergeCandidateIdentityDigest: mergeCandidateIdentityDigest(candidate.identity) }
+              : {}),
+          });
+          const proof = await verifyRecoverySourceIntegration({
+            planRecord: runtime.planRecord,
+            claim: runtime.claim,
+            events: [
+              ...runtime.events,
+              ...this.#budgetEvents.filter((event) => event.runId === this.#run.runId),
+            ],
+            store: this.#store,
+            outcome,
+          });
+          if (proof.status !== "verified")
+            throw new Error("adopted source integration evidence is unavailable");
+          await this.#appendSuccessorEvent(item.id, outcome);
+          if (!item.closed) await this.#store.closeIssue(item.number);
+          return;
+        }
         if (!item.closed) await this.#store.closeIssue(item.number);
         const alreadyRecorded = (item.factoryEvents ?? []).some(
           (candidate) =>

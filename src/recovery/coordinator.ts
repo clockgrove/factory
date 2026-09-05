@@ -1,19 +1,12 @@
-import { createHash } from "node:crypto";
 import type { FactoryReadSnapshot } from "../application/status.js";
-import { attemptRef } from "../control/attempts.js";
 import type { CompiledGraphStore } from "../control/graphs.js";
 import type { LeaseManager, LeaseState } from "../control/lease.js";
-import {
-  decodeEventTrailer,
-  deduplicateFactoryEvents,
-  encodeEventComment,
-} from "../control/receipts.js";
+import { deduplicateFactoryEvents, encodeEventComment } from "../control/receipts.js";
 import type { RunEventStore } from "../control/runs.js";
 import type {
   RepositoryLeaseManager,
   RepositoryLeaseState,
 } from "../controller/repository-lease.js";
-import type { StaleAttemptIdentity } from "../execution/backend.js";
 import { type FactoryEvent, parseFactoryEvent } from "../protocol/events.js";
 import { verifyRecoveryAdmission } from "./admission.js";
 import type { RecoveryReadStore } from "./assessment.js";
@@ -21,16 +14,14 @@ import { verifyRecoveryChain } from "./chain.js";
 import { RecoveryClaimManager, loadRecoveryClaim, type RecoveryClaimRecord } from "./claims.js";
 import { recoveryEvidenceDigest, resolveRecoveryEvidence } from "./evidence.js";
 import { recoveryClaimRef, recoveryEventDigest } from "./identity.js";
-import {
-  localRecoveryResourceIdentityDigest,
-  observeLocalRecoveryResource,
-} from "./local-resources.js";
+import type { observeLocalRecoveryResource } from "./local-resources.js";
 import { loadRecoveryPlan, type RecoveryPlanRecord } from "./plan.js";
 import { inspectRecoveryAdoption } from "./transaction.js";
+import { verifyRecoveryResources } from "./resources.js";
+import type { LocalScopeReadPort } from "../runtime/local-scope.js";
 
 type Start = Extract<FactoryEvent, { event: "FactoryRunStarted" }>;
 type Request = Extract<FactoryEvent, { event: "RecoveryRequested" }>;
-type Attempt = Extract<FactoryEvent, { kind: "attempt" }>;
 interface CoordinatorPorts {
   /** Actual GitHub adapters must retain the shared mutation pacing/circuit breaker. */
   store: RecoveryReadStore & CompiledGraphStore & RunEventStore;
@@ -40,6 +31,7 @@ interface CoordinatorPorts {
   repositoryLeases: Pick<RepositoryLeaseManager, "assertCurrent">;
   /** Test seam for the concrete read-only local observer, not an eligibility callback. */
   observeLocalResource?: typeof observeLocalRecoveryResource;
+  scopePort?: LocalScopeReadPort;
 }
 interface AdoptionInput {
   objective: number;
@@ -72,7 +64,6 @@ class RecoveryGateError extends Error {
 function requireGate(condition: unknown, code: string): asserts condition {
   if (!condition) throw new RecoveryGateError(code);
 }
-const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 /**
  * Fenced durable adoption, not Supervisor admission. It writes only the fixed
@@ -243,124 +234,20 @@ export class RecoveryCoordinator {
   }
 
   async #resources(record: RecoveryPlanRecord, events: FactoryEvent[]): Promise<string> {
-    const { store } = this.ports;
-    const plan = record.plan;
-    const sourceRuns = new Set(plan.history.map((entry) => entry.runId));
-    const reservations = events.filter(
-      (event): event is Attempt =>
-        event.kind === "attempt" &&
-        event.event === "AttemptReserved" &&
-        sourceRuns.has(event.runId),
-    );
-    const refs = await store.listRefs(
-      `refs/clockgrove-factory/attempts/objective-${plan.objective}/`,
-    );
+    const result = await verifyRecoveryResources({
+      planRecord: record,
+      events,
+      store: this.ports.store,
+      ...(this.ports.observeLocalResource
+        ? { observeLocalResource: this.ports.observeLocalResource }
+        : {}),
+      ...(this.ports.scopePort ? { scopePort: this.ports.scopePort } : {}),
+    });
     requireGate(
-      refs.length <= 1000 &&
-        refs.length === reservations.length &&
-        new Set(refs.map((ref) => ref.ref)).size === refs.length,
-      "orphan-or-missing-reservation",
+      result.status === "verified" && result.evidenceDigest,
+      result.blockers[0] ?? "resource-absence-unverified",
     );
-    const observations: Array<{ identityDigest: string; evidenceDigest: string }> = [];
-    for (const ref of refs.slice().sort((a, b) => a.ref.localeCompare(b.ref))) {
-      const commit = await store.readCommit(ref.oid);
-      const reserved = decodeEventTrailer(commit.message);
-      requireGate(
-        reserved?.kind === "attempt" && reserved.event === "AttemptReserved",
-        "reservation-unavailable",
-      );
-      requireGate(
-        commit.oid === ref.oid &&
-          ref.ref === attemptRef(plan.objective, reserved.workItem, reserved.attempt) &&
-          reserved.objective === plan.objective &&
-          sourceRuns.has(reserved.runId) &&
-          reservations.filter(
-            (event) => recoveryEventDigest(event) === recoveryEventDigest(reserved),
-          ).length === 1 &&
-          commit.parentOids.length === 1 &&
-          commit.parentOids[0] === reserved.baseSha,
-        "reservation-binding-mismatch",
-      );
-      const itemEvents = events.filter(
-        (event) =>
-          event.runId === reserved.runId &&
-          "workItem" in event &&
-          event.workItem === reserved.workItem &&
-          "attempt" in event &&
-          event.attempt === reserved.attempt,
-      );
-      const sourceStart = events.find(
-        (event) => event.event === "FactoryRunStarted" && event.runId === reserved.runId,
-      );
-      requireGate(
-        sourceStart?.event === "FactoryRunStarted" &&
-          sourceStart.policyDigest === reserved.policyDigest &&
-          (await store.readCommit(reserved.baseSha)).treeOid === commit.treeOid &&
-          itemEvents.every(
-            (event) =>
-              event.kind !== "attempt" ||
-              (event.backend === reserved.backend &&
-                event.directorEpoch === reserved.directorEpoch &&
-                event.policyDigest === reserved.policyDigest),
-          ),
-        "resource-reservation-provenance-mismatch",
-      );
-      const launched = itemEvents.filter(
-        (event): event is Attempt =>
-          event.kind === "attempt" && typeof event.resourceHostIdentity === "string",
-      );
-      const hostIds = new Set(launched.map((event) => event.resourceHostIdentity as string));
-      const handles = new Set(
-        itemEvents.flatMap((event) =>
-          event.kind === "attempt" && event.providerResourceId ? [event.providerResourceId] : [],
-        ),
-      );
-      requireGate(hostIds.size === 1 && handles.size <= 1, "resource-host-or-handle-unavailable");
-      // Local validation currently lacks independently persisted process/host
-      // identity. Neither an execution scan nor terminal validation proves it absent.
-      requireGate(
-        !itemEvents.some(
-          (event) =>
-            event.kind === "validation" ||
-            ((event.kind === "budget" || event.kind === "capacity") &&
-              event.phase === "validation"),
-        ),
-        "validation-resource-unbound",
-      );
-      requireGate(
-        ["codex-cli/local-worktree", "codex-sdk/local-worktree"].includes(reserved.backend),
-        "resource-provider-unsupported",
-      );
-      const identity: StaleAttemptIdentity = {
-        repository: plan.repository,
-        objective: plan.objective,
-        workItem: reserved.workItem,
-        attempt: reserved.attempt,
-        runId: reserved.runId,
-        directorEpoch: reserved.directorEpoch,
-        phase: "execution",
-        ...(handles.size ? { providerResourceId: [...handles][0]! } : {}),
-      };
-      const args = { identity, expectedHostIdentity: [...hostIds][0]! };
-      const before = Date.now();
-      const observed = await (this.ports.observeLocalResource ?? observeLocalRecoveryResource)(
-        args,
-      );
-      requireGate(
-        observed.status === "absent" &&
-          observed.hostIdentity === args.expectedHostIdentity &&
-          observed.identityDigest === localRecoveryResourceIdentityDigest(args) &&
-          /^[0-9a-f]{64}$/.test(observed.evidenceDigest) &&
-          Date.parse(observed.observedAt) >= before - 1000 &&
-          Date.parse(observed.observedAt) <= Date.now() + 1000,
-        "resource-absence-unverified",
-      );
-      observations.push({
-        identityDigest: observed.identityDigest,
-        evidenceDigest: observed.evidenceDigest,
-      });
-    }
-    return digest(observations);
+    return result.evidenceDigest;
   }
 
   async adopt(input: AdoptionInput): Promise<RecoveryCoordinatorResult> {

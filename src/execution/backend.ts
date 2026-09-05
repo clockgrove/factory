@@ -1,6 +1,8 @@
 import type { ModelSelection, RunPolicy } from "../protocol/policy.js";
 import type { ExecutionRequirements, WorkerPacket } from "../protocol/worker-packet.js";
+import { workerPacketDigest } from "../protocol/worker-packet.js";
 import type { NormalizedArtifact } from "./artifacts.js";
+import { LocalScopeBatchSchema, type LocalScopeBatch } from "../protocol/local-scope.js";
 
 export type IsolationKind = "none" | "process" | "container" | "microvm" | "managed";
 
@@ -57,6 +59,38 @@ export interface AttemptContext {
   deadline: Date;
   /** A prior host-validated patch is already present for an incremental retry. */
   seededFromArtifact?: boolean;
+  /** Prepared and durably journaled by the Supervisor, never by a backend. */
+  localExecutionScope?: {
+    batch: LocalScopeBatch;
+    assertCurrent: () => Promise<void>;
+  };
+}
+
+/** Reject a borrowed or stale launch descriptor before touching an executable.
+ * This validates bindings only; the caller still needs the supplied live fence. */
+export function localExecutionScopeBatch(context: AttemptContext): LocalScopeBatch | undefined {
+  if (!context.localExecutionScope) return undefined;
+  const batch = LocalScopeBatchSchema.parse(context.localExecutionScope.batch);
+  const identity = batch.identity;
+  if (
+    identity.repository !== context.repository.toLowerCase() ||
+    identity.objective !== context.objective ||
+    identity.workItem !== context.workItem ||
+    identity.attempt !== context.attempt ||
+    identity.runId !== context.runId ||
+    identity.directorEpoch !== context.directorEpoch ||
+    identity.policyDigest !== context.policyDigest ||
+    identity.phase !== "execution" ||
+    identity.commandIndex !== 0 ||
+    identity.invocationDigest !== workerPacketDigest(context.packet) ||
+    batch.commandCount !== 1 ||
+    batch.producerPid !== process.pid ||
+    batch.deadline !== context.deadline.toISOString() ||
+    typeof context.localExecutionScope.assertCurrent !== "function"
+  ) {
+    throw new Error("local execution scope does not match the prepared attempt");
+  }
+  return batch;
 }
 
 export interface BackendHandle {

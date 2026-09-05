@@ -20,6 +20,7 @@ import { decodeEventComments, deduplicateFactoryEvents, latestSupportedRun } fro
 import { classicBranchProtectionRules } from "../publication/branch-policy.js";
 import { PROTOCOL_V2 } from "../protocol/limits.js";
 import { parseRunPolicy, policyDigest } from "../protocol/policy.js";
+import { discoverRecoveryActivation } from "../recovery/discovery.js";
 
 const UPDATE_REFS = `
 mutation FactoryUpdateRefs(
@@ -120,6 +121,7 @@ export interface DurableObjectiveActivation {
   policyDigest: string;
   baseSha: string;
   requestedBy: string;
+  recovery?: { requestId: string; planDigest: string; successorRunId: string };
 }
 
 const TRUSTED_CONTROL_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
@@ -457,6 +459,17 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
             .map(({ event }) => event),
         ).map((event) => ({ event, login: controllerLogin }));
         const events = authenticated.map(({ event }) => event);
+        const recovery = await discoverRecoveryActivation({
+          repository: `${this.#owner}/${this.#repo}`,
+          objective: issue.number,
+          actor: controllerLogin,
+          events,
+          store: this,
+        });
+        if (recovery) {
+          result.push(recovery);
+          continue;
+        }
         const activationsByRequest = new Map<string, string>();
         for (const { event, login } of authenticated) {
           if (

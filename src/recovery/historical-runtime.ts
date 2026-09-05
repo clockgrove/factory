@@ -118,11 +118,12 @@ export async function loadHistoricalRecoveryRuntimes(input: {
       );
       return observed.filter((entry) => historicalClaimRefs.has(entry.ref));
     };
-    const store = new Proxy(input.store, {
-      get(target, property) {
+    // listRefs is a restricted historical view, including when the input port is frozen.
+    const store = new Proxy({} as RecoveryReadStore, {
+      get(_target, property) {
         if (property === "listRefs") return listRefs;
-        const value = Reflect.get(target, property, target);
-        return typeof value === "function" ? value.bind(target) : value;
+        const value = Reflect.get(input.store, property, input.store);
+        return typeof value === "function" ? value.bind(input.store) : value;
       },
     });
     const snapshot: FactoryReadSnapshot = {

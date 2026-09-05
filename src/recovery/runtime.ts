@@ -94,19 +94,21 @@ function requireRuntime(condition: unknown, code: string): asserts condition {
   if (!condition) throw new RuntimeBindingError(code);
 }
 
-function boundedReadStore(store: RecoveryReadStore): RecoveryReadStore {
+export function boundedReadStore(store: RecoveryReadStore): RecoveryReadStore {
   let reads = 0;
   const cache = new Map<string, Promise<unknown>>();
-  return new Proxy(store, {
-    get(target, property, receiver) {
-      const operation = Reflect.get(target, property, receiver);
+  // The capability port is frozen. Proxy an empty facade so wrapping a bound
+  // method cannot violate the target's non-configurable property invariants.
+  return new Proxy({} as RecoveryReadStore, {
+    get(_target, property) {
+      const operation = Reflect.get(store, property, store);
       if (typeof operation !== "function") return operation;
       return (...args: unknown[]) => {
         const key = JSON.stringify([property, args]);
         const previous = cache.get(key);
         if (previous) return previous;
         requireRuntime(++reads <= 1024, "runtime-read-bound");
-        const pending = Promise.resolve().then(() => Reflect.apply(operation, target, args));
+        const pending = Promise.resolve().then(() => Reflect.apply(operation, store, args));
         cache.set(key, pending);
         return pending;
       };

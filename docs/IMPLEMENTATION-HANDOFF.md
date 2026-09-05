@@ -98,7 +98,52 @@ the selected escalation or lease-release outcome. These paths passed in the full
 
 ## Implementation closeout
 
-The latest [scheduling component record](release-evidence/local-scheduling-component-2026-09-05.json)
+The [final key-free record](release-evidence/local-keyfree-finalization-component-2026-09-05.json)
+adds the latest exact `1346107` full release (2,300 passing tests, three skips, 125 files) and its
+79-file local package, retaining the earlier `2668f0b` full release and installed package separately.
+Runtime bundles are unchanged and were not reinstalled during the live exercise.
+The one-token negative exercise remained incomplete:
+known compiler accounting and early exhausted-budget escalation occurred before the harness's
+expected queue/cancel stage. A distinct retained read-only assessment verifies that earlier refusal,
+zero worker admissions/liabilities and captured-service absence without rewriting the failed result.
+The prospective correction uses an explicit pre-projection-refusal/no-cancel scope and has not been
+live exercised. The separate `f634bd6` checkpoint attempt failed before Objective creation or model
+execution; its single started controller was subsequently stopped through the normal surface and
+independently observed inactive. Neither is a passed recovered-completion or broad fault gate.
+The corrected budget helper integrated at `12f6373` passes 132 focused checks and static validation;
+its script is identical to the `0f3f55a` retained assessor, not a new live invocation. A later
+startup-only diagnostic at `e90628a` recorded a local executable-identity read returning `EACCES`,
+again before Objective/model/restart activity. A privileged later observation matched the sole
+generation with zero restarts; normal stop and independent inactive state followed. This does not
+localize the original startup failure or qualify checkpoint completion. These distinct revisions
+cannot retroactively qualify either attempt. This documentation update is not in the recorded tarball.
+
+A separate `1346107` no-model startup component then passed: one exact controller generation became
+fully observable on its second bounded read, its prior-bound identity recheck passed, and normal
+stop reached inactive state. Its helper passed 90 focused tests and static checks. No Objective,
+worker or restart was exercised by that component; the full checkpoint exercise and its later
+retained observations are separately recorded below.
+
+That full exercise reached an accounted one-integration checkpoint, exact resource absence and
+same-run paused takeover by a new controller generation, then accepted resume. It later exited 2
+at final proof because its earlier comments snapshot lacked the terminal receipt already reflected
+by a later completed-status read. The original qualifier recorded no final Stop and remains
+incomplete. A subsequent retained read-only observation verifies same-run closure with three
+first-attempt integrations, exact PR heads/GraphQL merge commits, 205,830 known tokens across seven
+calls, the unchanged checkpoint/takeover, no active reservations and all nine recorded scopes absent.
+Separate fresh artifact verification passed 76 clone tests plus independent behavior checks at the
+exact clean default head, including both join dependencies. Separate cleanup rechecked the exact
+replacement generation, issued one normal Stop and independently observed inactive/MainPID zero.
+No new model call was made after original completion. The original qualifier still remains incomplete;
+neither these components nor a prospective coherent-poll correction retrospectively passes it.
+
+The later coherence helper at `abd582c` passed 97 focused checks; final exact GraphQL merge proof at
+`c3b31a` passed 113, with typecheck and scoped formatting/lint. These test-harness-only corrections
+retain the unchanged runtime and their own checks rather than borrowing the earlier `1346107`
+full-release result. No corrected full qualification was rerun. All six broad prepublication gates
+remain Open.
+
+The earlier [scheduling component record](release-evidence/local-scheduling-component-2026-09-05.json)
 binds the full release at `13d4efea2b8eaf7ca8ed764492c0f8b2091ad9f8` (2,140 passing tests,
 three skips, 123 files, all static/schema/package checks and zero vulnerabilities), final 148 affected
 tests and static checks at harness `98ce207`, and its distinct 76-file local tarball. The installed

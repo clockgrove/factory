@@ -10,6 +10,79 @@ checks still required before publication. Tasks are organized in the [delivery p
 
 ## Proven on this branch
 
+The [final key-free component record](release-evidence/local-keyfree-finalization-component-2026-09-05.json)
+binds the latest `npm run verify:release` at `1346107ae568099f823a72066316c86d8793b685`:
+125 files, 2,300 passing tests, three skips, all static/schema/bundle/staged-package checks and zero
+dependency vulnerabilities. Its exact 79-file package is separately identified from the earlier
+`2668f0b` full release (2,249 passing tests) and 79-file installed package. All earlier installed
+files match that installed package except the canonical personal-plugin manifest cachebuster.
+Runtime bundles remain the recorded `0c97438` subjects; no reinstall occurred during the live
+exercise. This later evidence update is not part of either tested tarball.
+
+The installed one-token negative exercise at the earlier `2668f0b` candidate remained
+**failed/incomplete**: its queue-and-cancel harness expected a later stage than Factory reached.
+Retained authenticated evidence
+instead shows one compiler call accounting for 15,919 tokens, followed by exact exhausted-budget
+backend refusal and escalation before Work Item projection. No attempts, validation, publication or
+capacity receipts exist; fresh installed status reports no active or outstanding reservations, and
+the exact captured service was independently absent. The immutable compiled graph was not inspected:
+source persists graph and usage before preflight, so absent graph-event receipts do not prove absent
+durable graph data. A separate read-only assessment at `0f3f55a` preserves the original failed record;
+it is not execution of the corrected prospective pre-projection-refusal qualifier. No cancellation,
+reinjection or allowance increase occurred.
+
+That prospective correction is integrated at `12f63736cf1d615dff3510e3988617d5bcfe9404`, where
+132 focused tests, typecheck and scoped formatting/lint passed. Its script is byte-identical to the
+recorded assessor source; integration does not mean the private assessment was reinvoked at that
+revision. The earlier full release and unchanged installed runtime retain their separate identities.
+
+A separate checkpoint qualifier at `f634bd62e14e6ade80e84a4a1c839943ca6b95db` stopped after its
+sole controller-start action and before Objective creation or any model call. Its original generic
+diagnostic did not localize the failed startup assertion. A later independent read observed that
+exact controller active; a separate normal stop was accepted and independent inspection confirmed
+inactive state with MainPID zero. No checkpoint, worker interruption or restart completion was
+exercised. A later no-model startup-only probe at `e90628a` localized its own failure to reading the
+controller executable identity (`EACCES`). It likewise created no Objective and made no model or
+restart call. A subsequent privileged read matched the original single generation with no restarts;
+normal cleanup and independent inactive/MainPID-zero observation followed. This is a local process
+observation boundary, not a provider-credential gate; it does not retrospectively localize the first
+attempt or pass full restart qualification. These narrowly observed outcomes close none of the six
+broad prepublication gates.
+
+A subsequent startup-only probe at `1346107` passed its intended component: the initial executable
+read returned `EACCES`, the second bounded read validated the exact same generation, a prior-bound
+pre-stop recheck passed, and normal stop reached independently observed inactive state. It created
+no Objective, made no model call and exercised no restart. Ninety focused tests plus static checks
+passed for that helper revision. The separate full checkpoint exercise retains its own outcome;
+this startup result does not stand in for it.
+
+The actual full exercise reached a clean intermediate checkpoint after one integration with
+73,821 known tokens across three calls, no outstanding reservations and exact resource absence.
+A new controller invocation and lease reconstructed the same paused work/accounting before resume.
+The qualifier subsequently exited 2 during final proof: its comments snapshot ended at the final
+`AttemptIntegrated` receipt while the later status read already reported completed. It accepted
+status before the terminal receipt entered the same observation, then correctly failed its final
+receipt proof. No final stop action was recorded by that exercise. This is a harness snapshot
+coherence failure, not a qualified final pass. A later retained read-only observation independently
+verified the original run completed with all three first-attempt integrations, closed Work Items
+and Objective, exact published PR heads and GraphQL merge commits. Seven known usage receipts total
+205,830 tokens; the accounted checkpoint prefix and takeover remain unchanged, no active
+reservations remain, and all nine recorded execution/validation scopes were absent. Separate fresh
+artifact verification passed 76 clone tests and independent behavior assertions at the exact default
+head, with a clean worktree before/after execution and both join dependencies verified. A separate
+cleanup component strictly rechecked the replacement generation, issued one normal installed Stop,
+and independently observed inactive state/MainPID zero. No new model calls occurred after the
+original run completed. These components establish useful retained closure/recovery evidence but
+do not rewrite the original incomplete qualifier or close the broader adversarial/host gates.
+
+Prospective harness fixes are separately checked: the coherent completion poll at `abd582c` passed
+97 focused tests, and exact GraphQL actual-merge proof at `c3b31a` passed 113 focused tests; both
+passed typecheck and scoped formatting/lint. The final proof binds REST/GraphQL PR identity, head,
+repository and merge commit to the authenticated integration receipt, without relying on the removed
+REST `merge_commit_sha` field. These later test-harness corrections do not change runtime bundles;
+they were not in the `1346107` full-release snapshot and have not been re-exercised as a complete
+prospective qualification. All six broad prepublication gates remain Open.
+
 The [installed local scheduling component](release-evidence/local-scheduling-component-2026-09-05.json)
 passed with harness `98ce207650e76b2f1aed114b89749c80b34e0e34` and the unchanged installed
 `0c97438` runtime. A 0.5-CPU Director leaf admitted no workers while both roots queued; native

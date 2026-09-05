@@ -963,6 +963,9 @@ export class FactorySupervisor {
   #deliveryPlan?: Extract<DeliveryPlan, { result: "supported" }>;
   #budgetEvents: FactoryEvent[] = [];
   #integrationTail: Promise<void> = Promise.resolve();
+  // Scheduling hints only: never reuse authority or mutable GitHub evidence.
+  // Lost on restart; every due observation repeats the normal integration fences.
+  #integrationWaits = new Map<number, { until: number; delay: number; reason: string }>();
   readonly #retryArtifacts = new RetryArtifactCache();
   #durablePackets = new Map<number, WorkerPacket>();
   #compiledGraph: CompiledObjective | null = null;
@@ -2552,7 +2555,12 @@ export class FactorySupervisor {
             const planned = this.#recoveryRuntime!.planRecord.plan.items.find(
               (entry) => entry.workItem === item.number,
             );
-            if (!planned?.source || planned.action === "execute" || item.state !== "for_review")
+            if (
+              !planned?.source ||
+              planned.action === "execute" ||
+              item.state !== "for_review" ||
+              !this.#integrationDue(item.number)
+            )
               return false;
             if (planned.action === "integrated") return true;
             const unit = this.#deliveryPlan?.units.find((entry) =>
@@ -2604,7 +2612,8 @@ export class FactorySupervisor {
             );
           });
           if (unrecorded) {
-            await this.#resumeIntegration(unrecorded);
+            if (!(await this.#resumeIntegration(unrecorded)))
+              await sleep(this.#options.pollIntervalMs ?? 60_000, this.#options.signal);
             continue;
           }
         }
@@ -2642,15 +2651,22 @@ export class FactorySupervisor {
         if (unrecordedNative) {
           const metadata = parseGraphItemMetadata(unrecordedNative.body ?? "");
           const unit = this.#deliveryPlan!.units.find((unit) => unit.items.includes(metadata.id))!;
-          if (unit.kind === "sibling") await this.#resumeIntegration(unrecordedNative);
+          let progressed: boolean;
+          if (unit.kind === "sibling") progressed = await this.#resumeIntegration(unrecordedNative);
           else {
             const members = unit.items.map((id) =>
               objective.items.find((item) => parseGraphItemMetadata(item.body ?? "").id === id),
             );
             if (members.some((item) => !item || !["done", "for_review"].includes(item.state)))
               throw new Error("native integration recovery has an incomplete publication unit");
-            await this.#integrateNativeStack(unit.id, members as DerivedWorkItem[], deadline);
+            progressed = await this.#integrateNativeStack(
+              unit.id,
+              members as DerivedWorkItem[],
+              deadline,
+            );
           }
+          if (!progressed)
+            await sleep(this.#options.pollIntervalMs ?? 60_000, this.#options.signal);
           continue;
         }
         if (allDone(objective)) {
@@ -2707,14 +2723,24 @@ export class FactorySupervisor {
           continue;
         }
 
-        const reviews = objective.items.filter((item) => item.state === "for_review");
+        const reviews = objective.items.filter(
+          (item) => item.state === "for_review" && this.#integrationDue(item.number),
+        );
         if (reviews.length > 0) {
           if (this.#deliverySelection.selected !== "native-stacks") {
-            for (const item of reviews) await this.#resumeIntegration(item);
-            continue;
+            let progressed = false;
+            for (const item of reviews) {
+              if (await this.#resumeIntegration(item)) {
+                progressed = true;
+                break; // Reconstruct after an integration before considering another base.
+              }
+            }
+            if (progressed) continue;
           }
           let integratedUnit = false;
-          for (const unit of this.#deliveryPlan?.units ?? []) {
+          for (const unit of this.#deliverySelection.selected === "native-stacks"
+            ? (this.#deliveryPlan?.units ?? [])
+            : []) {
             const members = unit.items.map((itemId) =>
               objective.items.find((item) => parseGraphItemMetadata(item.body ?? "").id === itemId),
             );
@@ -2724,17 +2750,17 @@ export class FactorySupervisor {
             const typedMembers = members as DerivedWorkItem[];
             if (
               !typedMembers.every((member) => new Set(["for_review", "done"]).has(member.state)) ||
-              !typedMembers.some((member) => member.state === "for_review")
+              !typedMembers.some((member) => member.state === "for_review") ||
+              typedMembers.some((member) => !this.#integrationDue(member.number))
             ) {
               continue;
             }
             if (unit.kind === "sibling") {
-              await this.#resumeIntegration(typedMembers[0]!);
+              integratedUnit = await this.#resumeIntegration(typedMembers[0]!);
             } else {
-              await this.#integrateNativeStack(unit.id, typedMembers, deadline);
+              integratedUnit = await this.#integrateNativeStack(unit.id, typedMembers, deadline);
             }
-            integratedUnit = true;
-            break;
+            if (integratedUnit) break;
           }
           if (integratedUnit) continue;
         }
@@ -4813,7 +4839,8 @@ export class FactorySupervisor {
     unitId: string,
     items: DerivedWorkItem[],
     deadline: number,
-  ): Promise<void> {
+  ): Promise<boolean> {
+    if (items.some((item) => !this.#integrationDue(item.number))) return false;
     const ordered = [...items].sort((left, right) => {
       const leftId = parseGraphItemMetadata(left.body ?? "").id;
       const rightId = parseGraphItemMetadata(right.body ?? "").id;
@@ -4845,7 +4872,7 @@ export class FactorySupervisor {
         )
       );
     });
-    if (remaining.length === 0) return;
+    if (remaining.length === 0) return false;
     const members = await Promise.all(ordered.map((item) => this.#nativeStackMember(item)));
     if (
       members.some(
@@ -5007,7 +5034,10 @@ export class FactorySupervisor {
         if (current.baseRef !== expectedBaseRef || current.baseSha !== expectedBaseSha) {
           // GitHub's server-side cascading rebase is still settling. The
           // invalidation is already durable, so no stale head can integrate.
-          return;
+          return this.#deferIntegration(
+            ordered[index]!.number,
+            "waiting for GitHub's current cascading-rebase base",
+          );
         }
         await this.#revalidateNativeStackMember(
           ordered[index]!,
@@ -5018,7 +5048,7 @@ export class FactorySupervisor {
         );
       }
       // Re-read durable heads and evidence on the next controller cycle.
-      return;
+      return true;
     }
 
     const mergedDuringRecovery: NativeStackMember[] = [];
@@ -5058,8 +5088,7 @@ export class FactorySupervisor {
         if (Date.now() >= deadline) {
           throw new Error(`stack integration timed out: ${readiness.reason}`);
         }
-        await sleep(this.#options.pollIntervalMs ?? 5_000, this.#options.signal);
-        return;
+        return this.#deferIntegration(member.receipt.workItem, readiness.reason);
       }
       if (readiness.state !== "ready") {
         throw new Error(
@@ -5071,7 +5100,7 @@ export class FactorySupervisor {
     }
     if (mergedDuringRecovery.length > 0) {
       await completeIntegrated(mergedDuringRecovery);
-      return;
+      return true;
     }
 
     const durableLinks = members.flatMap((member) => {
@@ -5288,6 +5317,8 @@ export class FactorySupervisor {
           )
         : [target];
     await completeIntegrated(integrated);
+    for (const item of ordered) this.#integrationWaits.delete(item.number);
+    return true;
   }
 
   async #nativeRebaseAdmissionCurrent(
@@ -7531,6 +7562,20 @@ export class FactorySupervisor {
     );
   }
 
+  #integrationDue(workItem: number): boolean {
+    return (this.#integrationWaits.get(workItem)?.until ?? 0) <= Date.now();
+  }
+
+  #deferIntegration(workItem: number, reason: string): false {
+    const previous = this.#integrationWaits.get(workItem);
+    const interval = Math.max(1, Math.min(this.#options.pollIntervalMs ?? 60_000, 60_000));
+    const delay = Math.min(previous ? previous.delay * 2 : interval, interval * 5);
+    this.#integrationWaits.set(workItem, { until: Date.now() + delay, delay, reason });
+    if (previous?.reason !== reason)
+      this.#notify(`Work Item #${workItem} integration waiting: ${reason}`);
+    return false;
+  }
+
   async #integrate(
     item: DerivedWorkItem,
     reservation: AttemptReservation,
@@ -7540,7 +7585,7 @@ export class FactorySupervisor {
     candidate?: MergeCandidateCheckpointRecord,
     adoptedSource = false,
     deliveryHeadSha?: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     for (;;) {
       await this.#lease.renewIfNeeded();
       const readiness = await this.#serializeIntegration(async () => {
@@ -7552,7 +7597,8 @@ export class FactorySupervisor {
           if (!observed.merged && observed.baseSha !== candidate.identity.targetBaseSha) {
             return {
               state: "wait" as const,
-              reason: "candidate base changed; fresh validation is required",
+              reason:
+                "waiting for GitHub pull-request base metadata to match the validated candidate",
             };
           }
         }
@@ -7663,6 +7709,7 @@ export class FactorySupervisor {
         return { state: "integrated" as const, headSha: mergeSha };
       });
       if (readiness.state === "integrated") {
+        this.#integrationWaits.delete(item.number);
         await this.#lease.assertGeneration("integration");
         if (adoptedSource) {
           const runtime = this.#recoveryRuntime!;
@@ -7701,7 +7748,7 @@ export class FactorySupervisor {
             throw new Error("adopted source integration evidence is unavailable");
           await this.#appendSuccessorEvent(item.id, outcome);
           if (!item.closed) await this.#store.closeIssue(item.number);
-          return;
+          return true;
         }
         if (!item.closed) await this.#store.closeIssue(item.number);
         const alreadyRecorded = (item.factoryEvents ?? []).some(
@@ -7724,7 +7771,7 @@ export class FactorySupervisor {
             }),
           );
         }
-        return;
+        return true;
       }
       if (readiness.state === "failed") throw new Error(readiness.reason);
       if (Date.now() >= deadline) {
@@ -7733,11 +7780,12 @@ export class FactorySupervisor {
       // A pending check is controller state, not a worker-sized blocking task.
       // Return after one observation so stale resources, other reviews, and
       // newly-ready work can progress on the next snapshot.
-      return;
+      return this.#deferIntegration(item.number, readiness.reason);
     }
   }
 
-  async #resumeIntegration(item: DerivedWorkItem): Promise<void> {
+  async #resumeIntegration(item: DerivedWorkItem): Promise<boolean> {
+    if (!this.#integrationDue(item.number)) return false;
     if (this.#deliverySelection.selected === "native-stacks") {
       const member = await this.#nativeStackMember(item);
       const current = await this.#store.readPullRequest(member.pull.number);
@@ -7762,10 +7810,12 @@ export class FactorySupervisor {
           ? undefined
           : await this.#prepareSiblingMergeCandidate(item, member, targetBaseSha, current.merged);
       if (candidate === null) {
-        await sleep(this.#options.pollIntervalMs ?? 2_000, this.#options.signal);
-        return;
+        return this.#deferIntegration(
+          item.number,
+          "waiting for merge-candidate validation capacity",
+        );
       }
-      await this.#integrate(
+      return await this.#integrate(
         item,
         member.reservation,
         member.pull,
@@ -7773,7 +7823,6 @@ export class FactorySupervisor {
         true,
         candidate,
       );
-      return;
     }
     const event = [...(item.factoryEvents ?? [])]
       .sort((left, right) => right.sequence - left.sequence)
@@ -7951,7 +8000,7 @@ export class FactorySupervisor {
         }),
       );
     }
-    await this.#integrate(
+    return await this.#integrate(
       item,
       reservation,
       {

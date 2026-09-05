@@ -41,6 +41,24 @@ parents and tree before candidate integration, rather than treating a truthy mer
 fresh combined-tree evidence. This observation establishes a stale-metadata case, not completed
 live conformance for the candidate integration path.
 
+GitHub's [February 19, 2026 change to test-merge generation](https://github.blog/changelog/2026-02-19-changes-to-test-merge-commit-generation-for-pull-requests/)
+limits regeneration to PR-head changes, merge-base changes, or a test merge older than twelve hours.
+Viewing the PR no longer triggers regeneration. Advancing trunk through a sibling squash need not
+change the remaining sibling's merge base. A September 5 read-only qualification check observed the
+same stale parents through REST, GraphQL, and the merge ref despite repeated PR reads. The older
+[Git database guide](https://docs.github.com/en/rest/guides/using-the-rest-api-to-interact-with-your-git-database#checking-mergeability-of-pull-requests)
+still describes page-view and GET-triggered generation; that guidance is not evidence of a bounded
+refresh for this observed case. No head-preserving force-refresh API was established.
+
+Factory preserves the exact-preview gate. A waiting integration is not progress: other ready units
+and work admission may proceed while that Work Item's integration reads back off from one minute
+to at most five minutes by default. The ordinary snapshot/lease/cancellation cadence continues,
+and a changed wait reason is reported through the controller's existing status callback. This
+in-memory pacing hint carries no authority and disappears on restart. Each due attempt rechecks
+current evidence; completed immutable validation/review checkpoints are reused. A stale preview can
+still prevent completion until the existing Objective deadline; pacing does not qualify a merge or
+claim that GitHub will refresh within that deadline.
+
 ## Documented native-stack contract (not yet live conformance)
 
 Factory isolates GitHub's versioned stacked-pull-request surface behind a capability probe and pins

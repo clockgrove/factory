@@ -10,8 +10,30 @@ checks still required before publication. Tasks are organized in the [delivery p
 
 ## Proven on this branch
 
+The separate [installed planning component](release-evidence/installed-planning-component-2026-09-05.json)
+passed at `894537324a1fa61cdb3c2b905e841bca8a80e9ba`: actual `factory_plan` with `compile:true`
+returned one scoped Work Item with repository-grounded validation commands. One compiler call
+reported 14,959 tokens in the response; independent returned-graph digest verification passed.
+Activation remained unauthorized, and before/after comparisons found no activation, sub-issue, PR,
+repository or installed-artifact changes. This qualifies planning, not durable graph publication or
+execution, and leaves all six broad gates Open.
+
+The [native sibling-refresh release/install component](release-evidence/native-refresh-release-component-2026-09-05.json)
+records `npm run verify:release` passing at `894537324a1fa61cdb3c2b905e841bca8a80e9ba`:
+129 files, 2,492 passing tests, three skips, all static/schema/bundle/staged-package checks and zero
+dependency vulnerabilities. The exact 81-file candidate package was installed with canonical bytes
+matching except the permitted manifest cachebuster. The record binds its package, bundle, inventory
+and retained log hashes, plus the bounded recovery digest optimization. The installed native exercise
+failed in runtime with `sibling refresh lacks one authenticated original publication`: two Work Items
+published and validated, one integrated, and the dependent join never started. Five known usage
+receipts account for 131,622 tokens. A separate read-only observation found all six actually reserved
+execution/validation units absent, unchanged installed bundles, and the exact controller inactive;
+it did not invent join scopes or pass the stronger qualifier's missing SDK environment-identity
+check. The original failure remains unchanged. All broad prepublication gates remain
+Open; this later documentation update is not part of that tested or installed package.
+
 The [final key-free component record](release-evidence/local-keyfree-finalization-component-2026-09-05.json)
-binds the latest `npm run verify:release` at `1346107ae568099f823a72066316c86d8793b685`:
+binds the earlier `npm run verify:release` at `1346107ae568099f823a72066316c86d8793b685`:
 125 files, 2,300 passing tests, three skips, all static/schema/bundle/staged-package checks and zero
 dependency vulnerabilities. Its exact 79-file package is separately identified from the earlier
 `2668f0b` full release (2,249 passing tests) and 79-file installed package. All earlier installed

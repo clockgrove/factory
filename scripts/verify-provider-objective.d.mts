@@ -18,4 +18,8 @@ export function observeProviderAbsence(
   daytona: unknown,
   evidence: unknown,
 ): Promise<{ state: string; reason?: string }>;
+export function observeManagedAgentTermination(
+  request: (route: string, parameters?: Record<string, unknown>) => Promise<{ data: unknown }>,
+  evidence: unknown,
+): Promise<{ state: string; reason?: string; bindings?: unknown[]; active?: unknown[] }>;
 export function main(): Promise<void>;

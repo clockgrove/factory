@@ -85,6 +85,7 @@ export const GITHUB_MANAGED_AGENT_PROFILES: readonly GitHubManagedAgentProfile[]
 ]);
 
 const MANAGED_ATTRIBUTION_CLOCK_SKEW_MS = 2 * 60_000;
+const TERMINAL_AGENT_TASK_STATES = new Set(["completed", "failed", "timed_out", "cancelled"]);
 
 class ManagedAssignmentDeadlineError extends Error {}
 
@@ -261,7 +262,10 @@ export class GitHubManagedAgentBackend implements ExecutionBackend {
       supportedArchitectures: [],
       supportedTools: ["git", "node", "npm", "npx", "bash", "sh", "grep", "python", "python3"],
       supportedServices: [],
-      supportsCancellation: true,
+      // GitHub documents only a human Stop session UI, not an Agent Tasks
+      // cancellation endpoint. `cancel()` below requests unassignment and then
+      // reconciles; it deliberately fails while the exact session stays active.
+      supportsCancellation: false,
       supportsObservation: true,
       supportsResume: false,
       supportsLocalInference: false,
@@ -273,6 +277,20 @@ export class GitHubManagedAgentBackend implements ExecutionBackend {
 
   async probe(): Promise<BackendProbe> {
     const { actor, reason } = this.#options.actorResolution;
+    if (actor !== null && this.#options.dispatcher !== undefined) {
+      try {
+        await this.#options.reader.probeCopilotAgentTasks();
+      } catch (error) {
+        return {
+          available: false,
+          authenticated: false,
+          reason:
+            `${this.#options.profile.displayName} requires the documented Agent Tasks read ` +
+            `permission for session reconciliation: ${safeDiagnostic(error, "Agent Tasks probe")}`,
+          measuredAt: new Date().toISOString(),
+        };
+      }
+    }
     return {
       available: actor !== null && this.#options.dispatcher !== undefined,
       authenticated: actor !== null && this.#options.dispatcher !== undefined,
@@ -398,7 +416,42 @@ export class GitHubManagedAgentBackend implements ExecutionBackend {
         };
       }
       this.#bindPull(attempt, pull.number, pull.headSha);
-      return { state: "succeeded", observedAt: new Date().toISOString() };
+      try {
+        const task = await this.#observeExactTask(attempt, pull.number);
+        if (!task) {
+          return {
+            state: "running",
+            observedAt: new Date().toISOString(),
+            progress: "pull request is attributed; exact Agent Task binding is not yet visible",
+          };
+        }
+        attempt.handle.metadata = {
+          ...attempt.handle.metadata,
+          providerTaskId: task.taskId,
+          providerSessionIds: JSON.stringify(task.sessionIds),
+        };
+        if (task.activeSessionIds.length > 0 || !TERMINAL_AGENT_TASK_STATES.has(task.taskState)) {
+          return {
+            state: "running",
+            observedAt: task.observedAt,
+            progress: `exact Agent Task ${task.taskId} remains ${task.taskState}`,
+          };
+        }
+        if (task.taskState !== "completed") {
+          return {
+            state: task.taskState === "cancelled" ? "cancelled" : "failed",
+            observedAt: task.observedAt,
+            reason: `exact Agent Task ${task.taskId} ended ${task.taskState}`,
+          };
+        }
+        return { state: "succeeded", observedAt: task.observedAt };
+      } catch (error) {
+        return {
+          state: "unknown",
+          observedAt: new Date().toISOString(),
+          reason: safeDiagnostic(error, "managed session observation"),
+        };
+      }
     }
     if (item.state === "failed" || item.state === "escalated") {
       return {
@@ -424,6 +477,7 @@ export class GitHubManagedAgentBackend implements ExecutionBackend {
     // actor, so cancellation removes only this exact managed actor and leaves
     // ambiguous pull requests visible for host-side validation or cleanup.
     await this.#options.dispatcher!.unassign(attempt.issueNodeId);
+    await this.#confirmAttemptTerminal(attempt);
   }
 
   async collect(handle: BackendHandle): Promise<NormalizedArtifact> {
@@ -493,6 +547,7 @@ export class GitHubManagedAgentBackend implements ExecutionBackend {
     // Preserve the handle until unassignment succeeds so Supervisor can retry
     // cleanup and cannot launch a replacement against an active assignment.
     await this.#options.dispatcher?.unassign(attempt.issueNodeId);
+    await this.#confirmAttemptTerminal(attempt);
     this.#attempts.delete(handle.resourceId);
   }
 
@@ -504,7 +559,32 @@ export class GitHubManagedAgentBackend implements ExecutionBackend {
     }
     const objective = derive(await this.#options.reader.readObjective(identity.objective));
     const item = objective.items.find((candidate) => candidate.number === identity.workItem);
-    if (item) await this.#options.dispatcher.unassign(item.id);
+    if (!item) return;
+    await this.#options.dispatcher.unassign(item.id);
+    const startedAt = item.factoryEvents?.find(
+      (event) =>
+        event.kind === "attempt" &&
+        event.event === "AttemptStarted" &&
+        event.runId === identity.runId &&
+        event.workItem === identity.workItem &&
+        event.attempt === identity.attempt &&
+        event.backend === this.capabilities.id,
+    )?.at;
+    if (!startedAt) {
+      throw new Error(
+        `cannot prove ${this.#options.profile.displayName} session termination: ` +
+          "the exact AttemptStarted timestamp is unavailable",
+      );
+    }
+    const pulls = this.#attributedPulls(item.linkedPullRequests, startedAt, new Set());
+    if (pulls.length !== 1) {
+      throw new Error(
+        `cannot prove ${this.#options.profile.displayName} session termination: ` +
+          `${pulls.length === 0 ? "no" : "multiple"} exact post-launch pull-request bindings exist; ` +
+          "use GitHub's Agent session view to stop the session before replacement",
+      );
+    }
+    await this.#confirmTaskTerminal(pulls[0]!.number, startedAt);
   }
 
   #require(handle: BackendHandle): ManagedAttempt {
@@ -542,6 +622,69 @@ export class GitHubManagedAgentBackend implements ExecutionBackend {
     }
   }
 
+  async #observeExactTask(attempt: ManagedAttempt, pullNumber: number) {
+    return this.#options.reader.readCopilotAgentTaskForPull(
+      pullNumber,
+      new Date(
+        new Date(attempt.handle.startedAt).getTime() - MANAGED_ATTRIBUTION_CLOCK_SKEW_MS,
+      ).toISOString(),
+    );
+  }
+
+  async #confirmAttemptTerminal(attempt: ManagedAttempt): Promise<void> {
+    const objective = derive(await this.#options.reader.readObjective(attempt.context.objective));
+    const item = objective.items.find((candidate) => candidate.number === attempt.context.workItem);
+    if (!item) {
+      throw new Error("cannot prove managed session termination: Work Item disappeared");
+    }
+    const pulls = this.#attributedPulls(
+      item.linkedPullRequests,
+      attempt.handle.startedAt,
+      attempt.preexistingPullNumbers,
+    );
+    if (pulls.length !== 1) {
+      throw new Error(
+        `cannot prove ${this.#options.profile.displayName} session termination: ` +
+          `${pulls.length === 0 ? "no" : "multiple"} exact post-launch pull-request bindings exist; ` +
+          "unassignment is not cancellation—use GitHub's Agent session view to stop the session",
+      );
+    }
+    await this.#confirmTaskTerminal(pulls[0]!.number, attempt.handle.startedAt);
+  }
+
+  async #confirmTaskTerminal(pullNumber: number, startedAt: string): Promise<void> {
+    const task = await this.#options.reader.readCopilotAgentTaskForPull(
+      pullNumber,
+      new Date(new Date(startedAt).getTime() - MANAGED_ATTRIBUTION_CLOCK_SKEW_MS).toISOString(),
+    );
+    if (!task) {
+      throw new Error(
+        "cannot prove managed session termination: no Agent Task matches the exact pull request",
+      );
+    }
+    if (task.activeSessionIds.length > 0 || !TERMINAL_AGENT_TASK_STATES.has(task.taskState)) {
+      throw new Error(
+        `managed Agent Task ${task.taskId} remains ${task.taskState}; ` +
+          "unassignment is not cancellation—stop the exact session in GitHub before replacement",
+      );
+    }
+  }
+
+  #attributedPulls(
+    pulls: DerivedWorkItem["linkedPullRequests"],
+    startedAt: string,
+    preexisting: ReadonlySet<number>,
+  ): DerivedWorkItem["linkedPullRequests"] {
+    const earliest = new Date(startedAt).getTime() - MANAGED_ATTRIBUTION_CLOCK_SKEW_MS;
+    if (!Number.isFinite(earliest)) return [];
+    return pulls.filter(
+      (pull) =>
+        !preexisting.has(pull.number) &&
+        pull.createdAt.getTime() >= earliest &&
+        pull.agentWorkEvents.some((event) => event.at.getTime() >= earliest),
+    );
+  }
+
   async #cleanupCollectionRef(localRef: string, priorFailure?: unknown): Promise<void> {
     try {
       await this.#runGit(this.#options.repository, ["update-ref", "-d", localRef]);
@@ -570,12 +713,10 @@ export class GitHubManagedAgentBackend implements ExecutionBackend {
           `${linkedPullRequests.length} pull requests were linked after assignment`,
       );
     }
-    const earliestAttributedAt =
-      new Date(attempt.handle.startedAt).getTime() - MANAGED_ATTRIBUTION_CLOCK_SKEW_MS;
-    const attributedPullRequests = linkedPullRequests.filter(
-      (pullRequest) =>
-        pullRequest.createdAt.getTime() >= earliestAttributedAt &&
-        pullRequest.agentWorkEvents.some((event) => event.at.getTime() >= earliestAttributedAt),
+    const attributedPullRequests = this.#attributedPulls(
+      linkedPullRequests,
+      attempt.handle.startedAt,
+      new Set(),
     );
     return {
       ...item,

@@ -90,6 +90,46 @@ function snapshot(): ObjectiveSnapshot {
   };
 }
 
+function managedReader(
+  current: ObjectiveSnapshot,
+  taskState: () => "completed" | "in_progress" = () => "completed",
+): GitHubReader {
+  return {
+    readObjective: async () => current,
+    probeCopilotAgentTasks: async () => {},
+    readCopilotAgentTaskForPull: async () => ({
+      taskId: "task-exact",
+      taskState: taskState(),
+      sessionIds: ["session-exact"],
+      activeSessionIds: taskState() === "completed" ? [] : ["session-exact"],
+      observedAt: new Date().toISOString(),
+    }),
+  } as unknown as GitHubReader;
+}
+
+function managedPull(number: number) {
+  return {
+    id: `PR_${number}`,
+    number,
+    state: "OPEN" as const,
+    isDraft: false,
+    title: "Managed result",
+    body: "Closes #22",
+    changedLines: 1,
+    changedFiles: 1,
+    changedFilePaths: ["src/value.ts"],
+    commitSubjects: ["Managed result"],
+    checks: "SUCCESS" as const,
+    mergeable: "MERGEABLE" as const,
+    createdAt: new Date(),
+    headSha: String(number % 10).repeat(40),
+    headCommittedAt: new Date(),
+    mergedAt: null,
+    closedAt: null,
+    agentWorkEvents: [{ kind: "finished" as const, at: new Date(), message: null }],
+  };
+}
+
 class ManagedWriter implements GitHubWriter {
   readonly calls: string[] = [];
   assignFailures = 0;
@@ -167,7 +207,7 @@ describe("GitHub managed-agent profiles", () => {
     });
 
     const backend = new GitHubManagedAgentBackend({
-      reader: { readObjective: async () => snapshot() } as unknown as GitHubReader,
+      reader: managedReader(snapshot()),
       repository: "/tmp/factory-managed-test",
       profile: GITHUB_COPILOT_MANAGED_PROFILE,
       actorResolution: absent,
@@ -217,7 +257,7 @@ describe("GitHub managed-agent profiles", () => {
     ).toMatchObject({ actor: null, reason: expect.stringContaining("not exposed") });
 
     const base = {
-      reader: { readObjective: async () => snapshot() } as unknown as GitHubReader,
+      reader: managedReader(snapshot()),
       repository: "/tmp/factory-managed-test",
       profile: OPENAI_CODEX_MANAGED_PROFILE,
     };
@@ -252,7 +292,7 @@ describe("GitHub managed-agent profiles", () => {
       reason: expect.stringContaining("no live conformance evidence"),
     });
     const backend = new GitHubManagedAgentBackend({
-      reader: { readObjective: async () => snapshot() } as unknown as GitHubReader,
+      reader: managedReader(snapshot()),
       repository: "/tmp/factory-managed-test",
       profile: OPENAI_CODEX_MANAGED_PROFILE,
       actorResolution: resolution,
@@ -267,14 +307,17 @@ describe("GitHub managed-agent profiles", () => {
   it("uses deterministic fenced identities and the discovered Copilot actor", async () => {
     const actor = { id: "BOT_runtime", login: "copilot-swe-agent", type: "Bot" as const };
     const writer = new ManagedWriter();
+    const current = snapshot();
     const backend = new GitHubManagedAgentBackend({
-      reader: { readObjective: async () => snapshot() } as unknown as GitHubReader,
+      reader: managedReader(current),
       dispatcher: dispatcher(writer, actor.id),
       repository: "/tmp/factory-managed-test",
       profile: GITHUB_COPILOT_MANAGED_PROFILE,
       actorResolution: { actor },
     });
     const first = await backend.launch(context());
+    expect(backend.capabilities.supportsCancellation).toBe(false);
+    current.workItems[0]!.linkedPullRequests = [managedPull(51)];
     await backend.cleanup(first);
     const second = await backend.launch(context());
     expect(first.resourceId).toBe(second.resourceId);
@@ -288,17 +331,20 @@ describe("GitHub managed-agent profiles", () => {
       "remove:I_work_item:BOT_runtime",
       "assign:I_work_item:BOT_runtime:factory/stack-parent",
     ]);
+    current.workItems[0]!.linkedPullRequests.push(managedPull(52));
     await backend.cancel(second);
     expect(writer.calls.at(-1)).toBe("remove:I_work_item:BOT_runtime");
-    await backend.reconcileStale({
-      repository: "clockgrove/factory",
-      objective: 14,
-      workItem: 22,
-      attempt: 1,
-      runId: "run-managed-1",
-      directorEpoch: 3,
-      providerResourceId: second.resourceId,
-    });
+    await expect(
+      backend.reconcileStale({
+        repository: "clockgrove/factory",
+        objective: 14,
+        workItem: 22,
+        attempt: 1,
+        runId: "run-managed-1",
+        directorEpoch: 3,
+        providerResourceId: second.resourceId,
+      }),
+    ).rejects.toThrow(/AttemptStarted timestamp is unavailable/);
     expect(writer.calls.slice(-2)).toEqual([
       "remove:I_work_item:BOT_runtime",
       "remove:I_work_item:BOT_runtime",
@@ -308,8 +354,9 @@ describe("GitHub managed-agent profiles", () => {
   it("retains the managed handle until paid assignment cleanup is confirmed", async () => {
     const actor = { id: "BOT_runtime", login: "copilot-swe-agent", type: "Bot" as const };
     const writer = new ManagedWriter();
+    const current = snapshot();
     const backend = new GitHubManagedAgentBackend({
-      reader: { readObjective: async () => snapshot() } as unknown as GitHubReader,
+      reader: managedReader(current),
       dispatcher: dispatcher(writer, actor.id),
       repository: "/tmp/factory-managed-test",
       profile: GITHUB_COPILOT_MANAGED_PROFILE,
@@ -318,16 +365,63 @@ describe("GitHub managed-agent profiles", () => {
     const handle = await backend.launch(context());
     writer.removeFailures = 1;
     await expect(backend.cleanup(handle)).rejects.toThrow("temporary unassign failure");
+    current.workItems[0]!.linkedPullRequests = [managedPull(51)];
     await expect(backend.cleanup(handle)).resolves.toBeUndefined();
     await expect(backend.cleanup(handle)).rejects.toThrow(/unknown managed attempt/);
     expect(writer.calls.filter((call) => call.startsWith("remove:"))).toHaveLength(2);
+  });
+
+  it("does not treat unassignment or a finished pull request as session termination", async () => {
+    const actor = { id: "BOT_runtime", login: "copilot-swe-agent", type: "Bot" as const };
+    const current = snapshot();
+    let state: "completed" | "in_progress" = "in_progress";
+    const writer = new ManagedWriter();
+    const backend = new GitHubManagedAgentBackend({
+      reader: managedReader(current, () => state),
+      dispatcher: dispatcher(writer, actor.id),
+      repository: "/tmp/factory-managed-test",
+      profile: GITHUB_COPILOT_MANAGED_PROFILE,
+      actorResolution: { actor },
+    });
+    const handle = await backend.launch(context());
+    current.workItems[0]!.assignees = ["Copilot"];
+    current.workItems[0]!.linkedPullRequests = [managedPull(51)];
+    await expect(backend.observe(handle)).resolves.toMatchObject({
+      state: "running",
+      progress: expect.stringContaining("remains in_progress"),
+    });
+    await expect(backend.cleanup(handle)).rejects.toThrow(/unassignment is not cancellation/);
+    state = "completed";
+    await expect(backend.cleanup(handle)).resolves.toBeUndefined();
+  });
+
+  it("fails the production probe when Agent Tasks read permission is unavailable", async () => {
+    const actor = { id: "BOT_runtime", login: "copilot-swe-agent", type: "Bot" as const };
+    const reader = managedReader(snapshot()) as unknown as {
+      probeCopilotAgentTasks: () => Promise<void>;
+    };
+    reader.probeCopilotAgentTasks = async () => {
+      throw new Error("403 Agent tasks: read required");
+    };
+    const backend = new GitHubManagedAgentBackend({
+      reader: reader as unknown as GitHubReader,
+      dispatcher: dispatcher(new ManagedWriter(), actor.id),
+      repository: "/tmp/factory-managed-test",
+      profile: GITHUB_COPILOT_MANAGED_PROFILE,
+      actorResolution: { actor },
+    });
+    await expect(backend.probe()).resolves.toMatchObject({
+      available: false,
+      authenticated: false,
+      reason: expect.stringContaining("Agent Tasks read permission"),
+    });
   });
 
   it("rejects an elapsed deadline before assigning the paid managed agent", async () => {
     const actor = { id: "BOT_runtime", login: "copilot-swe-agent", type: "Bot" as const };
     const writer = new ManagedWriter();
     const backend = new GitHubManagedAgentBackend({
-      reader: { readObjective: async () => snapshot() } as unknown as GitHubReader,
+      reader: managedReader(snapshot()),
       dispatcher: dispatcher(writer, actor.id),
       repository: "/tmp/factory-managed-test",
       profile: GITHUB_COPILOT_MANAGED_PROFILE,
@@ -342,7 +436,7 @@ describe("GitHub managed-agent profiles", () => {
     const writer = new ManagedWriter();
     let now = 1_000;
     const backend = new GitHubManagedAgentBackend({
-      reader: { readObjective: async () => snapshot() } as unknown as GitHubReader,
+      reader: managedReader(snapshot()),
       dispatcher: new Dispatcher({
         writer,
         repositoryId: "R_repo",
@@ -367,7 +461,7 @@ describe("GitHub managed-agent profiles", () => {
     const writer = new ManagedWriter();
     writer.assignFailures = 1;
     const backend = new GitHubManagedAgentBackend({
-      reader: { readObjective: async () => snapshot() } as unknown as GitHubReader,
+      reader: managedReader(snapshot()),
       dispatcher: dispatcher(writer, actor.id),
       repository: "/tmp/factory-managed-test",
       profile: GITHUB_COPILOT_MANAGED_PROFILE,
@@ -416,7 +510,7 @@ describe("GitHub managed-agent profiles", () => {
     };
     current.workItems[0]!.linkedPullRequests = [stalePull];
     const backend = new GitHubManagedAgentBackend({
-      reader: { readObjective: async () => current } as unknown as GitHubReader,
+      reader: managedReader(current),
       dispatcher: dispatcher(new ManagedWriter(), actor.id),
       repository: "/tmp/factory-managed-test",
       profile: GITHUB_COPILOT_MANAGED_PROFILE,
@@ -501,7 +595,7 @@ describe("GitHub managed-agent profiles", () => {
     current.workItems[0]!.linkedPullRequests = [];
     const gitCalls: string[][] = [];
     const backend = new GitHubManagedAgentBackend({
-      reader: { readObjective: async () => current } as unknown as GitHubReader,
+      reader: managedReader(current),
       dispatcher: dispatcher(new ManagedWriter(), actor.id),
       repository: "/tmp/factory-managed-test",
       profile: GITHUB_COPILOT_MANAGED_PROFILE,
@@ -554,7 +648,7 @@ describe("GitHub managed-agent profiles", () => {
     const gitCalls: string[][] = [];
     let fetchedHead = "e".repeat(40);
     const backend = new GitHubManagedAgentBackend({
-      reader: { readObjective: async () => current } as unknown as GitHubReader,
+      reader: managedReader(current),
       dispatcher: dispatcher(new ManagedWriter(), actor.id),
       repository: "/tmp/factory-managed-test",
       profile: GITHUB_COPILOT_MANAGED_PROFILE,
@@ -629,7 +723,7 @@ describe("GitHub managed-agent profiles", () => {
     const current = snapshot();
     current.workItems[0]!.assignees = [actor.login];
     const backend = new GitHubManagedAgentBackend({
-      reader: { readObjective: async () => current } as unknown as GitHubReader,
+      reader: managedReader(current),
       dispatcher: dispatcher(new ManagedWriter(), actor.id),
       repository: "/tmp/factory-managed-test",
       profile: GITHUB_COPILOT_MANAGED_PROFILE,
@@ -660,7 +754,7 @@ describe("GitHub managed-agent profiles", () => {
       state: "failed",
       reason: expect.stringContaining("attribution is ambiguous"),
     });
-    await backend.cleanup(handle);
+    await expect(backend.cleanup(handle)).rejects.toThrow(/multiple exact post-launch/);
   });
 });
 

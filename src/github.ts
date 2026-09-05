@@ -45,6 +45,72 @@ export interface PendingApprovalRun {
   event: string;
 }
 
+export type CopilotAgentTaskState =
+  | "queued"
+  | "in_progress"
+  | "completed"
+  | "failed"
+  | "idle"
+  | "waiting_for_user"
+  | "timed_out"
+  | "cancelled";
+
+export interface CopilotAgentTaskObservation {
+  taskId: string;
+  taskState: CopilotAgentTaskState;
+  sessionIds: string[];
+  activeSessionIds: string[];
+  observedAt: string;
+}
+
+interface RestAgentTaskSummary {
+  id?: unknown;
+  creator?: { id?: unknown } | null;
+  repository?: { id?: unknown } | null;
+  state?: unknown;
+  session_count?: unknown;
+  artifacts?: Array<{
+    provider?: unknown;
+    type?: unknown;
+    data?: { id?: unknown } | null;
+  }>;
+}
+
+interface RestAgentTask extends RestAgentTaskSummary {
+  sessions?: Array<{
+    id?: unknown;
+    task_id?: unknown;
+    user?: { id?: unknown } | null;
+    repository?: { id?: unknown } | null;
+    state?: unknown;
+    head_ref?: unknown;
+  }>;
+}
+
+const AGENT_TASK_STATES = new Set<CopilotAgentTaskState>([
+  "queued",
+  "in_progress",
+  "completed",
+  "failed",
+  "idle",
+  "waiting_for_user",
+  "timed_out",
+  "cancelled",
+]);
+const TERMINAL_AGENT_TASK_STATES = new Set<CopilotAgentTaskState>([
+  "completed",
+  "failed",
+  "timed_out",
+  "cancelled",
+]);
+
+function agentTaskState(value: unknown, label: string): CopilotAgentTaskState {
+  if (typeof value !== "string" || !AGENT_TASK_STATES.has(value as CopilotAgentTaskState)) {
+    throw new Error(`${label} returned an unknown state`);
+  }
+  return value as CopilotAgentTaskState;
+}
+
 const FactoryOctokit = Octokit.plugin(retry, throttling);
 
 export interface GitHubOptions {
@@ -931,6 +997,7 @@ export class GitHubReader {
   /** Cached for the process lifetime by `readWorkflowSafetyProfile`. */
   #safetyProfile: WorkflowSafetyProfile | undefined;
   #cachedDefaultBranch: string | undefined;
+  #authenticatedUserId: number | undefined;
   /** Stable after graph application; refreshed automatically if cardinality changes. */
   readonly #objectiveSubIssueCounts = new Map<number, number>();
 
@@ -939,6 +1006,175 @@ export class GitHubReader {
     this.#repo = opts.repo;
     this.#recoveryInspection = opts.recoveryInspection === true;
     this.#octokit = createOctokit(opts);
+  }
+
+  /**
+   * Read-only capability probe for GitHub's public-preview Copilot Agent Tasks API.
+   * The endpoint requires a user-to-server token with repository Agent tasks: read.
+   */
+  async probeCopilotAgentTasks(): Promise<void> {
+    const creatorId = await this.#authenticatedActorDatabaseId();
+    const response = await this.#octokit.request("GET /agents/repos/{owner}/{repo}/tasks", {
+      owner: this.#owner,
+      repo: this.#repo,
+      creator_id: [creatorId],
+      per_page: 1,
+      page: 1,
+      headers: { "x-github-api-version": "2026-03-10" },
+    });
+    if (!Array.isArray((response.data as { tasks?: unknown }).tasks)) {
+      throw new Error("GitHub Agent Tasks probe returned an invalid task collection");
+    }
+  }
+
+  /**
+   * Bind an issue-assigned Copilot run only after GitHub exposes its exact PR
+   * artifact. Agent Tasks has no issue-reference field, so no pre-PR match is
+   * safe when more than one repository task can exist.
+   */
+  async readCopilotAgentTaskForPull(
+    pullNumber: number,
+    since: string,
+  ): Promise<CopilotAgentTaskObservation | null> {
+    if (!Number.isSafeInteger(pullNumber) || pullNumber <= 0) {
+      throw new Error("Copilot task observation requires a positive pull-request number");
+    }
+    const sinceDate = new Date(since);
+    if (!Number.isFinite(sinceDate.getTime())) {
+      throw new Error("Copilot task observation requires a valid launch timestamp");
+    }
+    const creatorId = await this.#authenticatedActorDatabaseId();
+    const pull = await this.#octokit.request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
+      owner: this.#owner,
+      repo: this.#repo,
+      pull_number: pullNumber,
+    });
+    const pullData = pull.data as {
+      id?: unknown;
+      head?: { ref?: unknown; repo?: { id?: unknown } | null } | null;
+      base?: { repo?: { id?: unknown } | null } | null;
+    };
+    const pullId = pullData.id;
+    const headRef = pullData.head?.ref;
+    const repositoryId = pullData.base?.repo?.id ?? pullData.head?.repo?.id;
+    if (
+      !Number.isSafeInteger(pullId) ||
+      typeof headRef !== "string" ||
+      headRef === "" ||
+      !Number.isSafeInteger(repositoryId)
+    ) {
+      throw new Error("GitHub returned an incomplete pull-request identity for Agent Tasks");
+    }
+
+    const tasks: RestAgentTaskSummary[] = [];
+    for (const archived of [false, true]) {
+      for (let page = 1; page <= 2; page += 1) {
+        const response = await this.#octokit.request("GET /agents/repos/{owner}/{repo}/tasks", {
+          owner: this.#owner,
+          repo: this.#repo,
+          creator_id: [creatorId],
+          since: sinceDate.toISOString(),
+          is_archived: archived,
+          per_page: 100,
+          page,
+          headers: { "x-github-api-version": "2026-03-10" },
+        });
+        const pageTasks = (response.data as { tasks?: unknown }).tasks;
+        if (!Array.isArray(pageTasks)) {
+          throw new Error("GitHub Agent Tasks list returned an invalid task collection");
+        }
+        if (page === 2 && pageTasks.length > 0) {
+          throw new Error("GitHub Agent Tasks observation exceeded its 100-task bound");
+        }
+        tasks.push(...(pageTasks as RestAgentTaskSummary[]));
+        if (tasks.length > 100) {
+          throw new Error("GitHub Agent Tasks observation exceeded its 100-task bound");
+        }
+        if (pageTasks.length < 100) break;
+      }
+    }
+    const matches = tasks.filter(
+      (task) =>
+        task.creator?.id === creatorId &&
+        task.repository?.id === repositoryId &&
+        task.artifacts?.some(
+          (artifact) =>
+            artifact.provider === "github" &&
+            artifact.type === "pull" &&
+            artifact.data?.id === pullId,
+        ),
+    );
+    if (matches.length === 0) return null;
+    if (matches.length !== 1 || typeof matches[0]?.id !== "string" || matches[0].id === "") {
+      throw new Error("Copilot Agent Tasks returned an ambiguous task for the exact pull request");
+    }
+
+    const taskId = matches[0].id;
+    const response = await this.#octokit.request(
+      "GET /agents/repos/{owner}/{repo}/tasks/{task_id}",
+      {
+        owner: this.#owner,
+        repo: this.#repo,
+        task_id: taskId,
+        headers: { "x-github-api-version": "2026-03-10" },
+      },
+    );
+    const task = response.data as RestAgentTask;
+    const taskState = agentTaskState(task.state, "GitHub Agent Task");
+    if (
+      task.id !== taskId ||
+      task.creator?.id !== creatorId ||
+      task.repository?.id !== repositoryId ||
+      !task.artifacts?.some(
+        (artifact) =>
+          artifact.provider === "github" &&
+          artifact.type === "pull" &&
+          artifact.data?.id === pullId,
+      ) ||
+      !Array.isArray(task.sessions) ||
+      task.session_count !== task.sessions.length ||
+      task.sessions.length === 0 ||
+      task.sessions.length > 100
+    ) {
+      throw new Error("GitHub returned an incomplete or changed exact Agent Task binding");
+    }
+    const sessionIds: string[] = [];
+    const activeSessionIds: string[] = [];
+    for (const session of task.sessions) {
+      if (
+        typeof session.id !== "string" ||
+        session.id === "" ||
+        session.task_id !== taskId ||
+        session.user?.id !== creatorId ||
+        session.repository?.id !== repositoryId ||
+        session.head_ref !== headRef
+      ) {
+        throw new Error("GitHub returned a session outside the exact Agent Task binding");
+      }
+      const state = agentTaskState(session.state, "GitHub Agent Task session");
+      sessionIds.push(session.id);
+      if (!TERMINAL_AGENT_TASK_STATES.has(state)) activeSessionIds.push(session.id);
+    }
+    if (new Set(sessionIds).size !== sessionIds.length) {
+      throw new Error("GitHub returned duplicate sessions for the exact Agent Task binding");
+    }
+    return {
+      taskId,
+      taskState,
+      sessionIds,
+      activeSessionIds,
+      observedAt: new Date().toISOString(),
+    };
+  }
+
+  async #authenticatedActorDatabaseId(): Promise<number> {
+    if (this.#authenticatedUserId !== undefined) return this.#authenticatedUserId;
+    const response = await this.#octokit.request("GET /user");
+    if (!Number.isSafeInteger(response.data.id) || response.data.id <= 0) {
+      throw new Error("GitHub returned an invalid authenticated user identity");
+    }
+    this.#authenticatedUserId = response.data.id;
+    return this.#authenticatedUserId;
   }
 
   /** Read-only organization issue-field discovery for immutable run policy. */

@@ -81,7 +81,7 @@ import {
   parseGraphItemMetadata,
 } from "./graph.js";
 import type { GitHubOptions } from "./github.js";
-import { GitHubReader } from "./github.js";
+import { createOctokit, GitHubReader } from "./github.js";
 import {
   CircuitBreaker,
   ConcurrencyLimiter,
@@ -98,11 +98,17 @@ import {
 } from "./state.js";
 import type { LinkedPullRequest } from "./types.js";
 import { DEFAULT_RUN_POLICY } from "./protocol/policy.js";
+import { GitHubStacks, type GitHubStackTransport } from "./publication/github-stacks.js";
 import { ExecutionRequirementsSchema } from "./protocol/worker-packet.js";
 import { priorityPolicyFragment } from "./scheduling/github-priority.js";
 import { runForegroundObjective } from "./controller/index.js";
 import { GitHubControlStore } from "./control/github-store.js";
-import { APPLICATION_TOOL_DEFINITIONS, FactoryApplicationService } from "./application/index.js";
+import {
+  APPLICATION_TOOL_DEFINITIONS,
+  FactoryApplicationService,
+  probeHostResources,
+  probeHostToolchain,
+} from "./application/index.js";
 import { assessRecovery } from "./recovery/assessment.js";
 import { recoveryReadPort } from "./recovery/github-read-port.js";
 import {
@@ -111,6 +117,7 @@ import {
   type RecoveryProposalInput,
 } from "./recovery/requests.js";
 import { SystemdControllerLifecycle, SystemdUserService } from "./service/index.js";
+import { CodexCliManagementBackend } from "./management/codex-cli.js";
 
 /** Never write anything but JSON-RPC to stdout on the stdio transport. */
 function log(message: string): void {
@@ -160,6 +167,7 @@ function applicationFor(
   owner: string,
   repo: string,
   recoveryInspection = false,
+  checkout = process.cwd(),
 ): FactoryApplicationService {
   const token = getToken();
   const store = new GitHubControlStore({
@@ -175,10 +183,18 @@ function applicationFor(
   const recoveryReader = recoveryInspection
     ? new GitHubReader({ token, owner, repo, recoveryInspection: true })
     : undefined;
+  const reader = recoveryReader ?? readerFor(owner, repo);
+  const registry = executionRegistry(checkout);
+  const management = new CodexCliManagementBackend();
+  const stacks = new GitHubStacks(
+    createOctokit({ token, owner, repo, onThrottle: log }) as unknown as GitHubStackTransport,
+    owner,
+    repo,
+  );
   return new FactoryApplicationService({
     owner,
     repo,
-    reader: recoveryReader ?? readerFor(owner, repo),
+    reader,
     ...(recoveryReader
       ? {
           recovery: new RecoveryRequestService({
@@ -200,12 +216,43 @@ function applicationFor(
       }),
     store,
     controller: controllerLifecycle,
+    diagnostics: {
+      repositoryFacts: () => store.getRepositoryFacts(),
+      authenticatedLogin: () => store.getAuthenticatedLogin(),
+      branchRules: (branch) => store.readBranchRules(branch),
+      stackCapability: () => stacks.probe(),
+      managementProbe: async () => ({ id: management.id, probe: await management.probe() }),
+      backendProbes: () => registry.probeAll(),
+      toolchainProbe: probeHostToolchain,
+      resourceProbe: async () => probeHostResources(),
+      controller: controllerLifecycle,
+    },
+    planning: {
+      management,
+      repositoryPath: checkout,
+      readRepositoryLayout: (maxEntries) => reader.readRepositoryLayout(undefined, maxEntries),
+      readBaseSha: async (defaultBranch) => {
+        const sha = await store.readRef(`refs/heads/${defaultBranch}`);
+        if (!sha) throw new Error(`default branch ${defaultBranch} has no readable head`);
+        return sha;
+      },
+    },
     readBaseSha: async (defaultBranch) => {
       const sha = await store.readRef(`refs/heads/${defaultBranch}`);
       if (!sha) throw new Error(`default branch ${defaultBranch} has no readable head`);
       return sha;
     },
   });
+}
+
+function executionRegistry(repository: string): BackendRegistry {
+  const registry = new BackendRegistry();
+  registry.register(new CodexSdkLocalBackend());
+  registry.register(new CodexAppServerLocalBackend());
+  registry.register(new CodexCliLocalBackend());
+  registry.register(new DaytonaBackend({ repository }));
+  registry.register(new VercelSandboxBackend({ repository }));
+  return registry;
 }
 
 /**
@@ -1359,6 +1406,7 @@ type ApplicationToolInput = {
   reason?: string;
   repository?: string;
   policy?: Record<string, unknown>;
+  compile?: boolean;
   planDigest?: string;
   allowanceIncrement?: RecoveryProposalInput["allowanceIncrement"];
   unknownUsageAcknowledgementDigest?: string | null;
@@ -1429,6 +1477,24 @@ function registerApplicationTool(
         : ["doctor", "plan", "recovery-plan", "status", "explain", "replay"].includes(operation)
           ? {
               ...ObjectiveToolShape,
+              ...(operation === "doctor" ? { repository: z.string().min(1).optional() } : {}),
+              ...(operation === "plan"
+                ? {
+                    repository: z.string().min(1).optional(),
+                    compile: z
+                      .boolean()
+                      .optional()
+                      .default(false)
+                      .describe(
+                        "Explicitly invoke bounded management compilation. False only inspects an existing graph.",
+                      ),
+                    baseSha: z
+                      .string()
+                      .regex(/^[0-9a-fA-F]{40}$/)
+                      .optional(),
+                    policy: z.record(z.unknown()).optional(),
+                  }
+                : {}),
               ...(operation === "explain"
                 ? { workItemNumber: z.number().int().positive().optional() }
                 : {}),
@@ -1450,18 +1516,27 @@ function registerApplicationTool(
     {
       title: name.replaceAll("_", " "),
       description:
-        operation === "recovery-plan"
-          ? "Read-only assessment of historical work, graph and PR evidence, and cumulative usage. Does not authorize successor execution, reset budgets, or modify GitHub."
-          : operation === "recovery-propose"
-            ? "Read-only proposal of an exact successor plan for explicit approval. Default allowance increments are zero. Unknown usage acknowledgement and any extra allowance must be explicitly supplied; this tool writes nothing and starts no work."
-            : operation === "recovery-request"
-              ? "Persist and acknowledge the exact inspected successor plan digest. Retains predecessor terminal history and cumulative allowance; changed evidence requires a newly acknowledged plan. The controller must independently reconcile resources and adopt before execution."
-              : `${operation} through Factory's shared application-service boundary.`,
+        operation === "doctor"
+          ? "Run bounded, secret-safe repository, authentication, toolchain, controller, backend, branch-policy, stack, and host-resource diagnostics. Read-only: creates no GitHub records or paid resources and never runs a model."
+          : operation === "plan"
+            ? "Inspect an existing compiled graph mechanically. Set compile=true to explicitly request one bounded management compilation and receive its observed model usage. Never activates work or writes GitHub."
+            : operation === "recovery-plan"
+              ? "Read-only assessment of historical work, graph and PR evidence, and cumulative usage. Does not authorize successor execution, reset budgets, or modify GitHub."
+              : operation === "recovery-propose"
+                ? "Read-only proposal of an exact successor plan for explicit approval. Default allowance increments are zero. Unknown usage acknowledgement and any extra allowance must be explicitly supplied; this tool writes nothing and starts no work."
+                : operation === "recovery-request"
+                  ? "Persist and acknowledge the exact inspected successor plan digest. Retains predecessor terminal history and cumulative allowance; changed evidence requires a newly acknowledged plan. The controller must independently reconcile resources and adopt before execution."
+                  : `${operation} through Factory's shared application-service boundary.`,
       inputSchema,
       annotations,
     },
     tool(async (input: ApplicationToolInput) => {
-      const service = applicationFor(input.owner, input.repo, operation.startsWith("recovery-"));
+      const service = applicationFor(
+        input.owner,
+        input.repo,
+        operation.startsWith("recovery-"),
+        input.repository ?? process.cwd(),
+      );
       if (!operation.startsWith("controller-") && !input.objectiveNumber)
         throw new Error("objectiveNumber is required");
       if (operation === "recovery-propose" || operation === "recovery-request") {
@@ -1479,6 +1554,17 @@ function registerApplicationTool(
         return service.recoveryRequest({ ...request, planDigest: input.planDigest });
       }
       if (["doctor", "plan", "recovery-plan", "status", "explain", "replay"].includes(operation)) {
+        if (operation === "doctor") {
+          return service.doctor(input.objectiveNumber!, input.repository ?? process.cwd());
+        }
+        if (operation === "plan") {
+          return service.plan({
+            objective: input.objectiveNumber!,
+            compile: input.compile ?? false,
+            ...(input.baseSha ? { baseSha: input.baseSha } : {}),
+            ...(input.policy ? { policy: input.policy } : {}),
+          });
+        }
         return service.inspect(
           operation as "doctor" | "plan" | "recovery-plan" | "status" | "explain" | "replay",
           input.objectiveNumber!,

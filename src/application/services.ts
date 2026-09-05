@@ -17,6 +17,8 @@ import type {
   RecoveryProposalInput,
   RecoveryRequestInput,
 } from "../recovery/requests.js";
+import { buildDoctorReport, type DoctorChecks } from "./doctor.js";
+import { buildPlanReport, type PlanInput, type PlanningContext } from "./plan.js";
 
 export const APPLICATION_OPERATIONS = [
   "doctor",
@@ -125,6 +127,8 @@ export interface ServiceContext {
   readBaseSha?: (defaultBranch: string) => Promise<string>;
   assessRecovery?: (snapshot: ApplicationSnapshot) => Promise<RecoveryAssessment>;
   recovery?: RecoveryRequestService;
+  diagnostics?: DoctorChecks;
+  planning?: PlanningContext;
 }
 
 export type ReadOperation = "doctor" | "plan" | "recovery-plan" | "status" | "explain" | "replay";
@@ -152,6 +156,8 @@ export class FactoryApplicationService {
   }
 
   async inspect(operation: ReadOperation, objective: number, workItem?: number): Promise<unknown> {
+    if (operation === "doctor") return this.doctor(objective);
+    if (operation === "plan") return this.plan({ objective });
     if (operation === "recovery-plan") {
       if (workItem !== undefined) throw new Error("recovery-plan assesses the whole Objective");
       if (!this.context.assessRecovery) {
@@ -185,11 +191,29 @@ export class FactoryApplicationService {
     };
   }
 
-  doctor(objective: number) {
-    return this.inspect("doctor", objective);
+  doctor(objective: number, checkout?: string) {
+    return buildDoctorReport({
+      repository: `${this.context.owner}/${this.context.repo}`,
+      objective,
+      ...(checkout ? { checkout } : {}),
+      readObjective: () => this.context.reader.readObjective(objective),
+      checks: {
+        ...this.context.diagnostics,
+        ...((this.context.diagnostics?.controller ?? this.context.controller)
+          ? { controller: this.context.diagnostics?.controller ?? this.context.controller! }
+          : {}),
+      },
+    });
   }
-  plan(objective: number) {
-    return this.inspect("plan", objective);
+  async plan(input: number | PlanInput) {
+    const request = typeof input === "number" ? { objective: input } : input;
+    const snapshot = await this.context.reader.readObjective(request.objective);
+    return buildPlanReport({
+      repository: `${this.context.owner}/${this.context.repo}`,
+      request,
+      snapshot,
+      ...(this.context.planning ? { planning: this.context.planning } : {}),
+    });
   }
   status(objective: number) {
     return this.inspect("status", objective);

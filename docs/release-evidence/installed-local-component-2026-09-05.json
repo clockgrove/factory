@@ -24,6 +24,14 @@
     "pullRequestsIntegrated": 1,
     "dependentJoinStarted": false,
     "objectiveClosed": false,
+    "partialDefaultBranchCheck": {
+      "command": "npm test",
+      "observedAt": "2026-09-05T10:41:42.000Z",
+      "exitCode": 0,
+      "testsPassed": 11,
+      "testsFailed": 0,
+      "scope": "already-merged sibling and preexisting fixtures only; not a completed Objective or dependent-join test"
+    },
     "modelUsage": {
       "reconciledCalls": 6,
       "tokens": 145186,
@@ -64,7 +72,7 @@
     "managedSessionsAllowed": 0,
     "modelTokenAdmissionThreshold": 500000,
     "thresholdIsHardProviderCap": false,
-    "publicationPerformed": false
+    "releasePublicationPerformed": false
   },
   "limitations": [
     "This is partial installed execution and failure evidence, not a passed happy-path, restart, cancellation, native-stack or publication gate.",

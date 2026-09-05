@@ -21,6 +21,7 @@ import { classicBranchProtectionRules } from "../publication/branch-policy.js";
 import { PROTOCOL_V2 } from "../protocol/limits.js";
 import { parseRunPolicy, policyDigest } from "../protocol/policy.js";
 import { discoverRecoveryActivation } from "../recovery/discovery.js";
+import { activationCancellation } from "./activations.js";
 
 const UPDATE_REFS = `
 mutation FactoryUpdateRefs(
@@ -149,7 +150,9 @@ function authenticatedCommentEvents(
   return parsed.filter(({ event, login }) => {
     if (
       event.kind === "run" &&
-      (event.event === "ActivationRequested" || event.event === "ActivationRejected")
+      (event.event === "ActivationRequested" ||
+        event.event === "ActivationRejected" ||
+        event.event === "ActivationCancellationRequested")
     ) {
       return event.requestedBy.toLowerCase() === login.toLowerCase();
     }
@@ -656,11 +659,13 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
         // Supervisor acknowledges the exact gate only after every admitted
         // attempt and review has been reconciled.
         const operationallyStopped = Boolean(commandState?.admissionsPaused && gateAcknowledged);
+        const withdrawal = activationRequest && activationCancellation(events, activationRequest);
         if (
           activationRequest &&
           !terminalAfterActivation &&
           !rejectionAfterActivation &&
-          (issue.state === "closed" || !operationallyStopped)
+          (currentRun || !withdrawal) &&
+          (issue.state === "closed" || !operationallyStopped || withdrawal)
         ) {
           result.push({
             objective: issue.number,

@@ -837,6 +837,7 @@ export async function providerSupervisorFixture(
     runId: lease.runId,
     policy,
     snapshot,
+    management,
     activity,
     resources,
     events,

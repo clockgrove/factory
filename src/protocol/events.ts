@@ -235,6 +235,24 @@ const ActivationRejected = Common.extend({
   reason: boundedText(8_000),
 });
 
+const ActivationCancellationRequested = Common.extend({
+  kind: z.literal("run"),
+  event: z.literal("ActivationCancellationRequested"),
+  requestId: safeId,
+  activationRequestId: safeId,
+  requestedBy: boundedText(160),
+  repository: boundedText(300),
+  baseSha: gitSha,
+  policyDigest: sha256Digest,
+  reason: boundedText(8_000).optional(),
+}).superRefine((value, context) => {
+  if (value.runId !== value.activationRequestId)
+    context.addIssue({
+      code: "custom",
+      message: "Activation cancellation must bind its original activation identity",
+    });
+});
+
 const RunControlRequested = Common.extend({
   kind: z.literal("run"),
   event: z.enum([
@@ -624,6 +642,7 @@ export const FactoryEventSchema = z.union([
   RunCancellationRequested,
   ActivationRequested,
   ActivationRejected,
+  ActivationCancellationRequested,
   RecoveryRequested,
   RecoveryConsumed,
   RecoveryAdoptionCompleted,

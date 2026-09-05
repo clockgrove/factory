@@ -4,7 +4,9 @@ import {
   type ApplicationSnapshot,
 } from "../src/application/services.js";
 import { GitHubControlStore } from "../src/control/github-store.js";
-import { decodeEventComments } from "../src/control/receipts.js";
+import { decodeEventComments, encodeEventComment } from "../src/control/receipts.js";
+import { parseFactoryEvent } from "../src/protocol/events.js";
+import { cancellationRequestFromComments } from "../src/github.js";
 import { DEFAULT_RUN_POLICY, parseRunPolicy } from "../src/protocol/policy.js";
 
 function fixture(fault?: "comment-response" | "label-before" | "label-response") {
@@ -14,6 +16,8 @@ function fixture(fault?: "comment-response" | "label-before" | "label-response")
   const writes: string[] = [];
   let faultUsed = false;
   let defaultBase = "a".repeat(40);
+  let actor = "operator";
+  let loseNextComment = false;
   const store = new GitHubControlStore({
     token: "fixture-only",
     owner: "fixture",
@@ -32,7 +36,7 @@ function fixture(fault?: "comment-response" | "label-before" | "label-response")
       const response = (value: unknown, status = 200) =>
         Response.json(value, { status, headers: { date: "Sat, 05 Sep 2026 10:00:00 GMT" } });
       const issue = { number: 7, state: "open", labels: [...labels].map((name) => ({ name })) };
-      if (route === "GET /user") return response({ login: "operator" });
+      if (route === "GET /user") return response({ login: actor });
       if (route === "GET /repos/fixture/activation") return response({});
       if (route === "GET /repos/fixture/activation/issues")
         return response(
@@ -52,6 +56,10 @@ function fixture(fault?: "comment-response" | "label-before" | "label-response")
         );
       if (route === "POST /repos/fixture/activation/issues/7/comments") {
         comments.push(data.body);
+        if (loseNextComment) {
+          loseNextComment = false;
+          return response({ message: "lost cancellation response" }, 400);
+        }
         if (!faultUsed && fault === "comment-response") {
           faultUsed = true;
           return response({ message: "lost activation response" }, 400);
@@ -114,13 +122,234 @@ function fixture(fault?: "comment-response" | "label-before" | "label-response")
     comments,
     writes,
     repositoryLabels,
+    setActor: (value: string) => {
+      actor = value;
+    },
+    loseNextCommentResponse: () => {
+      loseNextComment = true;
+    },
     advanceBase: () => {
       defaultBase = "b".repeat(40);
     },
   };
 }
 
-describe("plain issue activation discovery", () => {
+// Exercise real Octokit throttling: the longer cancellation/replay sequences
+// contain multiple serialized writes and must finish before the next fixture.
+describe("plain issue activation discovery", { timeout: 15_000 }, () => {
+  it.each([
+    { baseSha: "b".repeat(40) },
+    { policyDigest: "c".repeat(64) },
+    { repository: "fixture/another" },
+  ])("rejects an authenticated withdrawal with changed immutable binding %j", (changed) => {
+    const binding = {
+      objective: 7,
+      requestId: "activation",
+      repository: "fixture/activation",
+      requestedBy: "operator",
+      baseSha: "a".repeat(40),
+      policyDigest: "b".repeat(64),
+    };
+    const event = parseFactoryEvent({
+      ...binding,
+      ...changed,
+      protocol: "clockgrove.factory/v2",
+      kind: "run",
+      event: "ActivationCancellationRequested",
+      runId: "activation",
+      activationRequestId: "activation",
+      requestId: "withdraw",
+      sequence: 2,
+      at: "2026-09-05T10:00:00Z",
+    });
+    const comments = [
+      {
+        body: encodeEventComment("Withdraw", event),
+        authorLogin: "operator",
+        authorAssociation: "OWNER",
+      },
+    ];
+    expect(() =>
+      cancellationRequestFromComments(comments, "real-run", "operator", binding),
+    ).toThrow(/immutable activation binding/);
+    expect(
+      cancellationRequestFromComments(
+        [{ ...comments[0]!, authorLogin: "forged-actor" }],
+        "real-run",
+        "operator",
+        binding,
+      ),
+    ).toBeNull();
+    expect(
+      cancellationRequestFromComments(comments, "real-run", "operator", {
+        ...binding,
+        objective: 8,
+      }),
+    ).toBeNull();
+  });
+  const cancel = {
+    objective: 7,
+    requestId: "withdraw-activation",
+    reason: "operator withdrew queued work",
+  };
+
+  function start(f: ReturnType<typeof fixture>) {
+    const activation = f.comments
+      .flatMap(decodeEventComments)
+      .find((event) => event.event === "ActivationRequested")!;
+    const { requestId: _requestId, ...binding } = activation;
+    const event = parseFactoryEvent({
+      ...binding,
+      event: "FactoryRunStarted",
+      runId: "actual-started-run",
+      activationRequestId: f.activation.requestId,
+      actor: "operator",
+      objectiveAuthor: "operator",
+      fork: false,
+      baseBranch: "main",
+      sequence: f.comments.length + 1,
+    });
+    f.comments.push(encodeEventComment("Run adopted activation", event));
+  }
+
+  it("withdraws only exact queued authority, reports no invented run, and survives activation replay", async () => {
+    const f = fixture();
+    const activation = await f.service().activate(f.activation);
+    const receipt = await f.service().command("cancel", cancel);
+    expect(receipt).toMatchObject({
+      event: "ActivationCancellationRequested",
+      runId: activation.runId,
+      activationRequestId: f.activation.requestId,
+      requestedBy: "operator",
+      baseSha: "a".repeat(40),
+      repository: "fixture/activation",
+      policyDigest: activation.policyDigest,
+    });
+    expect(await f.store.discoverObjectiveActivations()).toEqual([]);
+    expect(await f.service().status(7)).toMatchObject({
+      activation: {
+        requestId: f.activation.requestId,
+        state: "withdrawn",
+        cancellationRequestId: cancel.requestId,
+      },
+      run: { availability: "unavailable", state: "not-started" },
+    });
+    expect(JSON.stringify(await f.service().explain(7))).toContain("was withdrawn");
+    f.labels.clear();
+    await f.service().activate(f.activation);
+    expect(await f.store.discoverObjectiveActivations()).toEqual([]);
+    const writes = [...f.writes];
+    expect(await f.service().command("cancel", cancel)).toEqual(receipt);
+    await expect(f.service().command("cancel", { ...cancel, reason: "different" })).rejects.toThrow(
+      /idempotency key/,
+    );
+    expect(f.writes).toEqual(writes);
+    expect(f.comments.flatMap(decodeEventComments).map((event) => event.event)).toEqual([
+      "ActivationRequested",
+      "ActivationCancellationRequested",
+    ]);
+  });
+
+  it("repairs cancellation response loss after concurrent run start without reclassifying or duplicating", async () => {
+    const f = fixture();
+    await f.service().activate(f.activation);
+    f.loseNextCommentResponse();
+    await expect(f.service().command("cancel", cancel)).rejects.toThrow();
+    start(f);
+    const writes = [...f.writes];
+    expect(await f.service().command("cancel", cancel)).toMatchObject({
+      event: "ActivationCancellationRequested",
+      runId: f.activation.requestId,
+    });
+    expect(f.writes).toEqual(writes);
+    expect(await f.store.discoverObjectiveActivations()).toHaveLength(1);
+    expect(await f.service().status(7)).toMatchObject({
+      activation: { state: "cancellation-requested" },
+      run: { availability: "observed", runId: "actual-started-run" },
+    });
+    for (const [index, fields] of [
+      { event: "RunPauseRequested", requestId: "pause-racing-run", requestedBy: "operator" },
+      { event: "RunPauseAcknowledged", commandRequestId: "pause-racing-run" },
+    ].entries()) {
+      f.comments.push(
+        encodeEventComment(
+          "Paused while withdrawal raced",
+          parseFactoryEvent({
+            protocol: "clockgrove.factory/v2",
+            kind: "run",
+            objective: 7,
+            runId: "actual-started-run",
+            sequence: 4 + index,
+            at: "2026-09-05T10:00:00Z",
+            ...fields,
+          }),
+        ),
+      );
+    }
+    // Withdrawal remains actionable even when a pause was acknowledged while
+    // the queued cancellation/start race was being resolved.
+    expect(await f.store.discoverObjectiveActivations()).toHaveLength(1);
+  });
+
+  it("does not let an old withdrawal suppress a later distinct activation or change exact replay", async () => {
+    const f = fixture();
+    await f.service().activate(f.activation);
+    const receipt = await f.service().command("cancel", cancel);
+    await f.service().activate({ ...f.activation, requestId: "later-activation" });
+    expect(await f.service().command("cancel", cancel)).toEqual(receipt);
+    expect(await f.store.discoverObjectiveActivations()).toMatchObject([
+      { requestId: "later-activation" },
+    ]);
+    expect(await f.service().status(7)).toMatchObject({
+      activation: { requestId: "later-activation", state: "queued" },
+    });
+  });
+
+  it("allows only the activating actor to withdraw or replay queued authority", async () => {
+    const f = fixture();
+    await f.service().activate(f.activation);
+    const writes = [...f.writes];
+    f.setActor("other-maintainer");
+    await expect(f.service().command("cancel", cancel)).rejects.toThrow(
+      /only the activating actor/,
+    );
+    expect(f.writes).toEqual(writes);
+    f.setActor("operator");
+    await f.service().command("cancel", cancel);
+    f.setActor("other-maintainer");
+    await expect(f.service().command("cancel", cancel)).rejects.toThrow(
+      /only the activating actor/,
+    );
+  });
+
+  it("uses normal run cancellation when start wins, and never withdraws terminal run history", async () => {
+    const f = fixture();
+    await f.service().activate(f.activation);
+    start(f);
+    expect(await f.service().command("cancel", cancel)).toMatchObject({
+      event: "FactoryRunCancellationRequested",
+      runId: "actual-started-run",
+    });
+    f.comments.push(
+      encodeEventComment(
+        "Terminal",
+        parseFactoryEvent({
+          protocol: "clockgrove.factory/v2",
+          kind: "run",
+          event: "FactoryRunCancelled",
+          objective: 7,
+          runId: "actual-started-run",
+          sequence: 5,
+          at: "2026-09-05T10:00:00.000Z",
+          reason: "cancelled",
+        }),
+      ),
+    );
+    await expect(
+      f.service().command("cancel", { ...cancel, requestId: "after-terminal" }),
+    ).rejects.toThrow(/no active Factory run or pending activation/);
+  });
+
   it("repairs implicit-base replay from the original receipt after trunk advances", async () => {
     const f = fixture("label-before");
     const input = { objective: 7, requestId: f.activation.requestId };

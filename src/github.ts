@@ -33,6 +33,7 @@ import { COPILOT_LOGIN } from "./types.js";
 import type { WorkflowSafetyProfile } from "./approval.js";
 import { referencedSecretNames, triggersOnPullRequest, usesSelfHostedRunner } from "./approval.js";
 import { bindAuthenticatedRunActors } from "./control/authenticated-events.js";
+import { activationCancellation, type ActivationBinding } from "./control/activations.js";
 import { decodeEventComments, deduplicateFactoryEvents } from "./control/receipts.js";
 import { PlatformUnavailableError, classifyRefusal } from "./platform.js";
 import type { FactoryEvent } from "./protocol/events.js";
@@ -164,7 +165,7 @@ function accountRecoveryRecords(
 
 export type RunCancellationRequest = Extract<
   FactoryEvent,
-  { kind: "run"; event: "FactoryRunCancellationRequested" }
+  { kind: "run"; event: "FactoryRunCancellationRequested" | "ActivationCancellationRequested" }
 >;
 
 export interface GitHubIssueCommentEvidence {
@@ -182,6 +183,7 @@ export function cancellationRequestFromComments(
   comments: GitHubIssueCommentEvidence[],
   runId: string,
   actor: string,
+  activation?: ActivationBinding,
 ): RunCancellationRequest | null {
   const candidates: FactoryEvent[] = [];
   for (const comment of comments) {
@@ -192,6 +194,7 @@ export function cancellationRequestFromComments(
       continue;
     }
     for (const event of decodeEventComments(comment.body)) {
+      if (activation && activationCancellation([event], activation)) candidates.push(event);
       if (
         event.kind === "run" &&
         event.event === "FactoryRunCancellationRequested" &&
@@ -205,7 +208,9 @@ export function cancellationRequestFromComments(
   return (
     deduplicateFactoryEvents(candidates).find(
       (event): event is RunCancellationRequest =>
-        event.kind === "run" && event.event === "FactoryRunCancellationRequested",
+        event.kind === "run" &&
+        (event.event === "FactoryRunCancellationRequested" ||
+          event.event === "ActivationCancellationRequested"),
     ) ?? null
   );
 }
@@ -760,7 +765,9 @@ function factoryEvents(
         }
         if (
           event.kind === "run" &&
-          (event.event === "ActivationRequested" || event.event === "ActivationRejected")
+          (event.event === "ActivationRequested" ||
+            event.event === "ActivationRejected" ||
+            event.event === "ActivationCancellationRequested")
         ) {
           return event.requestedBy.toLowerCase() === login.toLowerCase();
         }
@@ -1232,6 +1239,7 @@ export class GitHubReader {
     objectiveNumber: number,
     runId: string,
     actor: string,
+    activation?: ActivationBinding,
   ): Promise<RunCancellationRequest | null> {
     const response = await this.#octokit.request(
       "GET /repos/{owner}/{repo}/issues/{issue_number}/comments",
@@ -1252,6 +1260,7 @@ export class GitHubReader {
       })),
       runId,
       actor,
+      activation,
     );
   }
 

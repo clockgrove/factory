@@ -1,6 +1,7 @@
 import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
 import { PROTOCOL_V2 } from "../protocol/limits.js";
 import { implicitRestartBlocker } from "../control/recovery.js";
+import { latestActivation } from "../control/activations.js";
 import { DEFAULT_RUN_POLICY, parseRunPolicy, policyDigest } from "../protocol/policy.js";
 import {
   deduplicateFactoryEvents,
@@ -275,6 +276,58 @@ export class FactoryApplicationService {
     },
   ): Promise<FactoryEvent> {
     const snapshot = await this.context.reader.readObjective(input.objective);
+    if (operation === "cancel")
+      return this.append(snapshot, input.requestId, async (current) => {
+        const events = this.allEvents(current);
+        const prior = events.find(
+          (event) => "requestId" in event && event.requestId === input.requestId,
+        );
+        if (prior?.kind === "run" && prior.event === "ActivationCancellationRequested")
+          return {
+            event: prior.event,
+            runId: prior.runId,
+            activationRequestId: prior.activationRequestId,
+            repository: prior.repository,
+            baseSha: prior.baseSha,
+            policyDigest: prior.policyDigest,
+            ...(input.reason ? { reason: input.reason } : {}),
+          };
+        const active = latestSupportedRun(current.factoryEvents ?? []);
+        if (active || prior)
+          return {
+            event: "FactoryRunCancellationRequested",
+            runId: prior?.runId ?? active!.runId,
+            ...(input.reason ? { reason: input.reason } : {}),
+          };
+        const activation = latestActivation(events, current.number);
+        if (
+          !activation ||
+          events.some(
+            (event) =>
+              event.kind === "run" &&
+              ((event.event === "FactoryRunStarted" &&
+                event.activationRequestId === activation.requestId) ||
+                (event.event === "ActivationRejected" &&
+                  event.activationRequestId === activation.requestId &&
+                  event.runId === activation.runId &&
+                  event.requestedBy.toLowerCase() === activation.requestedBy.toLowerCase() &&
+                  event.baseSha === activation.baseSha &&
+                  event.policyDigest === activation.policyDigest)),
+          )
+        )
+          throw new Error(
+            `Objective #${current.number} has no active Factory run or pending activation`,
+          );
+        return {
+          event: "ActivationCancellationRequested",
+          runId: activation.runId,
+          activationRequestId: activation.requestId,
+          repository: activation.repository,
+          baseSha: activation.baseSha,
+          policyDigest: activation.policyDigest,
+          ...(input.reason ? { reason: input.reason } : {}),
+        };
+      });
     if ((operation === "retry" || operation === "priority") && !input.workItem) {
       throw new Error(`${operation} requires a Work Item number`);
     }
@@ -399,11 +452,39 @@ export class FactoryApplicationService {
     const existing = this.allEvents(snapshot).find(
       (event) => "requestId" in event && event.requestId === requestId,
     );
+    if (fields.event === "ActivationCancellationRequested") {
+      const activation = this.allEvents(snapshot).find(
+        (event) =>
+          event.kind === "run" &&
+          event.event === "ActivationRequested" &&
+          event.requestId === fields.activationRequestId,
+      );
+      const actor = await store.getAuthenticatedLogin();
+      if (
+        activation?.kind !== "run" ||
+        activation.event !== "ActivationRequested" ||
+        activation.requestedBy.toLowerCase() !== actor.toLowerCase()
+      )
+        throw new Error("only the activating actor may withdraw this activation");
+      if (
+        activation.objective !== snapshot.number ||
+        activation.runId !== activation.requestId ||
+        activation.repository.toLowerCase() !==
+          `${this.context.owner}/${this.context.repo}`.toLowerCase() ||
+        policyDigest(activation.policy) !== activation.policyDigest ||
+        fields.runId !== activation.runId ||
+        fields.repository !== activation.repository ||
+        fields.baseSha !== activation.baseSha ||
+        fields.policyDigest !== activation.policyDigest
+      )
+        throw new Error("activation cancellation differs from its immutable activation binding");
+    }
     if (existing) {
       const comparableKeys = [
         "event",
         "operation",
         "repository",
+        "activationRequestId",
         "baseSha",
         "policyDigest",
         "workItem",

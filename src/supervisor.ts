@@ -13,6 +13,7 @@ import { DaytonaBackend, DaytonaResourceCleanupError } from "./backends/daytona.
 import { VercelSandboxBackend } from "./backends/vercel-sandbox.js";
 import { validationInvocationOwnership } from "./backends/validation-invocation.js";
 import { AttemptManager, type AttemptReservation } from "./control/attempts.js";
+import { activationCancellation, type ActivationBinding } from "./control/activations.js";
 import {
   deriveBudgetUsage,
   remainingBudget,
@@ -546,7 +547,26 @@ function snapshotEvents(snapshot: Snapshot): FactoryEvent[] {
 }
 
 function hasCancellationRequest(snapshot: Snapshot, runId: string): boolean {
-  return deduplicateFactoryEvents(snapshot.factoryEvents ?? []).some(
+  const events = deduplicateFactoryEvents(snapshot.factoryEvents ?? []);
+  const start = events.find(
+    (event) => event.kind === "run" && event.event === "FactoryRunStarted" && event.runId === runId,
+  );
+  if (
+    start?.kind === "run" &&
+    start.event === "FactoryRunStarted" &&
+    start.activationRequestId &&
+    start.baseSha &&
+    activationCancellation(events, {
+      objective: start.objective,
+      requestId: start.activationRequestId,
+      requestedBy: start.actor,
+      repository: start.repository,
+      baseSha: start.baseSha,
+      policyDigest: start.policyDigest,
+    })
+  )
+    return true;
+  return events.some(
     (event) =>
       event.kind === "run" &&
       event.event === "FactoryRunCancellationRequested" &&
@@ -1099,7 +1119,65 @@ export class FactorySupervisor {
     return runWithExternalAdmissionBoundary(
       this.#options.repositoryFence ?? (async () => {}),
       () => this.#lease.assertGeneration("admission"),
-      operation,
+      async () => {
+        const binding = this.#activationBinding();
+        if (binding) {
+          const cancellation = await this.#reader.readRunCancellationRequest(
+            this.#run.objective,
+            this.#run.runId,
+            this.#run.actor,
+            binding,
+          );
+          if (cancellation) {
+            this.#sequences.observe([cancellation]);
+            throw new RunCancellationRequestedError(
+              "operator withdrew the activation through GitHub",
+            );
+          }
+          // The receipt read can span a lease change. Admission still belongs
+          // to the current generation, never the pre-read observation.
+          await this.#lease.assertGeneration("admission");
+        }
+        return operation();
+      },
+    );
+  }
+
+  #activationBinding(): ActivationBinding | undefined {
+    if (!this.#run.activationRequestId) return undefined;
+    if (!this.#run.baseSha || !this.#run.repository)
+      throw new Error("activation-bound run is missing its immutable base or repository");
+    return {
+      objective: this.#run.objective,
+      requestId: this.#run.activationRequestId,
+      requestedBy: this.#run.actor,
+      repository: this.#run.repository,
+      baseSha: this.#run.baseSha,
+      policyDigest: this.#run.policyDigest,
+    };
+  }
+
+  #withdrawnActivation(snapshot: Snapshot, actor: string, repository: string): boolean {
+    const activation = this.#options.activation;
+    if (
+      (snapshot.factoryEvents ?? []).some(
+        (event) =>
+          event.kind === "run" &&
+          event.event === "FactoryRunStarted" &&
+          event.activationRequestId === activation?.requestId,
+      )
+    )
+      return false;
+    return Boolean(
+      activation &&
+        activationCancellation(snapshot.factoryEvents ?? [], {
+          objective: snapshot.number,
+          requestId: activation.requestId,
+          requestedBy: actor,
+          repository,
+          baseSha: activation.baseSha,
+          policyDigest: policyDigest(this.#policy),
+        }),
     );
   }
 
@@ -1606,6 +1684,13 @@ export class FactorySupervisor {
     const actor = await this.#store.getAuthenticatedLogin();
     const runManager = new RunManager(this.#store);
     const resumedRun = await this.#resumeObservedRun(snapshot, runManager, "inspect");
+    if (!resumedRun && this.#withdrawnActivation(snapshot, actor, facts.fullName))
+      return {
+        status: "cancelled",
+        objective: snapshot.number,
+        runId: this.#options.activation!.requestId,
+        reason: "activation was withdrawn before its run started",
+      };
     if (resumedRun) {
       if (
         resumedRun.objective !== snapshot.number ||
@@ -1903,6 +1988,15 @@ export class FactorySupervisor {
       let current = await this.#reader.readObjective(snapshot.number);
       const needsReconciliation = Boolean(this.#options.recovery && !this.#recoveryRuntime);
       let currentRun = await this.#resumeObservedRun(current, runManager, "repair");
+      if (!currentRun && this.#withdrawnActivation(current, actor, facts.fullName)) {
+        await this.#lease.release();
+        return {
+          status: "cancelled",
+          objective: current.number,
+          runId: this.#options.activation!.requestId,
+          reason: "activation was withdrawn before its run started",
+        };
+      }
       // Repair may append actual merge receipts. Refresh the startup accounting
       // and derive state from those receipts, never from the pre-repair snapshot.
       if (needsReconciliation) {
@@ -3547,6 +3641,7 @@ export class FactorySupervisor {
             this.#run.objective,
             this.#run.runId,
             this.#run.actor,
+            this.#activationBinding(),
           );
           if (cancellation) {
             this.#sequences.observe([cancellation]);

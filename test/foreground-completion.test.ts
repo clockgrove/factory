@@ -61,7 +61,7 @@ async function fixture(backend = "codex-sdk/local-worktree") {
     },
     readTreeEntry: async (oid, path) => trees.get(oid)?.get(path) ?? null,
     createBlob: async (b) => {
-      const oid = next();
+      const oid = createHash("sha1").update(`blob ${b.length}\0`).update(b).digest("hex");
       blobs.set(oid, b);
       return oid;
     },
@@ -429,6 +429,41 @@ async function fixture(backend = "codex-sdk/local-worktree") {
 }
 
 describe("completed original foreground invocation witness", () => {
+  it("reuses immutable proof content across admissions but reobserves refs, source history and all physical resources", async () => {
+    const f = await fixture();
+    const methods = ["readCommit", "readBlob", "readTreeEntry"] as const;
+    const reads = methods.map((method) => vi.spyOn(f.store, method));
+    const refs = vi.spyOn(f.store, "readRef");
+    const prove = () => verifyRecoveryProposalResources({ ...f, scopePort: f.port });
+    expect(await prove()).toMatchObject({ status: "verified" });
+    const counts = reads.map((read) => read.mock.calls.length);
+    const presentTrees = (
+      await Promise.all(reads[2]!.mock.results.map((result) => result.value))
+    ).filter((value) => value !== null).length;
+    expect(counts.every((count) => count > 0)).toBe(true);
+    const refCount = refs.mock.calls.length,
+      hostCount = f.hostIdentity.mock.calls.length,
+      scopeCount = f.show.mock.calls.length;
+    for (let i = 0; i < 5; i++) expect(await prove()).toMatchObject({ status: "verified" });
+    expect(reads.slice(0, 2).map((read) => read.mock.calls.length)).toEqual(counts.slice(0, 2));
+    // Optional absent tree paths remain fresh; positively observed graph paths reuse content.
+    expect(
+      (await Promise.all(reads[2]!.mock.results.map((result) => result.value))).filter(
+        (value) => value !== null,
+      ),
+    ).toHaveLength(presentTrees);
+    expect(refs.mock.calls.length).toBe(refCount * 6);
+    expect(f.hostIdentity.mock.calls.length).toBe(hostCount * 6);
+    expect(f.show.mock.calls.length).toBe(scopeCount * 6);
+    f.hostIdentity.mockResolvedValue(digest("f"));
+    expect(await prove()).toMatchObject({ status: "blocked" });
+    f.hostIdentity.mockResolvedValue(f.execution.identity.hostIdentity);
+    f.events.find((event) => event.event === "AttemptSucceeded")!.at = "2026-09-05T00:01:00Z";
+    expect(await prove()).toMatchObject({ status: "blocked" });
+    f.events.find((event) => event.event === "AttemptSucceeded")!.at = now.toISOString();
+    refs.mockResolvedValue(null);
+    expect(await prove()).toMatchObject({ status: "blocked" });
+  });
   it.each(["codex-sdk/local-worktree", "codex-cli/local-worktree"])(
     "verifies exact captured %s chain without invented validation fields",
     async (backend) => {

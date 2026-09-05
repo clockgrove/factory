@@ -12,6 +12,7 @@ import {
 } from "./local-resources.js";
 import { observeCompletedForegroundScopeBatch, observeLocalScopeBatch } from "./scope-resources.js";
 import type { LocalScopeReadPort } from "../runtime/local-scope.js";
+import { withImmutableRecoveryReads } from "./immutable-read-cache.js";
 
 type Attempt = Extract<FactoryEvent, { kind: "attempt" }>;
 export interface RecoveryResourcePorts {
@@ -254,7 +255,12 @@ export async function verifyRecoveryProposalResources(
       events.every((event) => event.objective === plan.objective),
       "resource-objective-mismatch",
     );
-    const evidenceDigest = await resourceEvidence(plan, events, input.store, input);
+    const evidenceDigest = await resourceEvidence(
+      plan,
+      events,
+      withImmutableRecoveryReads(input.store),
+      input,
+    );
     return { status: "verified", evidenceDigest, blockers: [] };
   } catch (error) {
     return {

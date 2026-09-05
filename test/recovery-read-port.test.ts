@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 
 import { GitHubControlStore } from "../src/control/github-store.js";
 import { GitHubStacks, type GitHubStackTransport } from "../src/publication/github-stacks.js";
@@ -7,7 +8,7 @@ import { recoveryReadPort } from "../src/recovery/github-read-port.js";
 const HEAD = "a".repeat(40);
 const BASE = "b".repeat(40);
 const TREE = "c".repeat(40);
-const BLOB = "d".repeat(40);
+const BLOB = createHash("sha1").update("blob 12\0fixture blob").digest("hex");
 
 function pullResponse(headRepository: Record<string, unknown> | null | undefined) {
   return {
@@ -109,6 +110,23 @@ function fixture(headRepository?: Record<string, unknown> | null) {
 afterEach(() => vi.restoreAllMocks());
 
 describe("recovery GitHub read port", () => {
+  it("does not repeat exact successful Git object GETs across newly created recovery read ports", async () => {
+    const f = fixture();
+    for (let i = 0; i < 5; i++) {
+      const port = recoveryReadPort(f.store, "fixture", "project");
+      await port.readCommit(HEAD);
+      await port.readBlob(BLOB);
+      await port.readTreeEntry(TREE, "control.json");
+      await port.readRef("refs/heads/main");
+      await port.readPullRequest(23);
+    }
+    const paths = f.requests.map((request) => decodeURIComponent(new URL(request.url).pathname));
+    for (const path of [`/git/commits/${HEAD}`, `/git/blobs/${BLOB}`, `/git/trees/${TREE}`])
+      expect(paths.filter((value) => value.endsWith(path))).toHaveLength(1);
+    for (const path of ["/git/ref/heads/main", "/pulls/23"])
+      expect(paths.filter((value) => value.endsWith(path))).toHaveLength(5);
+    expect(f.beforeMutation).not.toHaveBeenCalled();
+  });
   it("exposes only frozen, explicitly bound read capabilities", async () => {
     const { store, requests, beforeMutation } = fixture();
     const port = recoveryReadPort(store, "fixture", "project");

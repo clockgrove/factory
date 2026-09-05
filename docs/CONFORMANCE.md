@@ -10,12 +10,26 @@ checks still required before publication. Tasks are organized in the [delivery p
 
 ## Proven on this branch
 
-The completion branch integrates new regression-tested ordinary resume/receipt repair, frozen-port
-recovery, generic/economic compilation, read-only doctor/planning, and exact managed-session
-observation. Its combined release suite and rebuilt installed artifacts still require verification;
-earlier evidence below remains scoped to its recorded revision, not promoted to the changed source.
-Credential-free tests and local installed qualification proceed independently of deferred paid-provider
-credentials. No deferred live gate is marked passed by that deferral.
+The integrated implementation and matching bundles at `efb9578edd959a23d23e8e9ab0ae97e619b675e8`
+passed `npm run verify:release`: 118 test files, 1,996 passing tests and three skips, typecheck,
+lint, formatting, schema checks, reproducible bundles, staged clean plugin/npm installation,
+and a dependency audit with zero vulnerabilities. The
+[completion-batch component record](release-evidence/completion-batch-component-2026-09-05.json)
+binds that exact source snapshot, package digest and executable subjects. The tested local tarball
+contains 69 files; this later evidence update was not in that tarball.
+
+Fresh staged npm and plugin installations of the same executable subjects also passed no-model
+WSL2 component checks: installed startup, explicit controller install/idempotent reinstall/uninstall,
+process pressure, descendant cancellation, restart generation and cleanup. These checks did not
+start a Factory controller or execute a model-backed Objective. The complete installed happy path
+and fault matrix are not claimed passed. Native Linux, macOS-hosted Linux, paid-provider and
+published-artifact gates remain open. Earlier records below retain their own revision and scope;
+neither a passing component test nor deferred credentials closes a live gate.
+
+The same record includes installed read-only `doctor` and `plan` observations against those bundles.
+Doctor reported ready with a controller warning and no allowed paid backend. Plan inspected three
+existing Work Items with compilation disabled, no model usage and no writes; it did not verify a
+durable graph. Neither operation granted activation authority or establishes Objective completion.
 
 The first installed multi-wave Objective escalated during compilation before creating Work Items.
 Its [failure record](release-evidence/local-objective-failure-2026-09-04.json) preserves the rejected
@@ -97,14 +111,15 @@ not completion of the Linux environment or live adaptive scheduling gates.
 A [local resource component observation](release-evidence/local-resource-observation-component-2026-09-04.json)
 detected a synthetic owned worker and observed its graceful exit. Post-exit absence remained unknown:
 three same-owner processes denied environment inspection. The observer retained that uncertainty;
-this is not a passed cleanup or successor-execution gate. More precise independently persisted
-resource ownership is still needed to avoid depending on readability of unrelated processes.
+this is not a passed cleanup or successor-execution gate. It does not qualify the current
+generation-bound resource ownership and cleanup implementation.
 
 ## Definition-of-done evidence map
 
-Terminal-run continuation remains an open qualification gate: ordinary resume/retry cannot revive
-an escalated run. The branch now has explicit successor requests and a controller adoption path;
-installed execution and complete delivery-lineage coverage remain outstanding. The
+Terminal-run continuation remains an open installed qualification gate: ordinary resume/retry cannot
+revive an escalated run. Explicit successor requests, controller adoption, repeated-successor lineage
+and mixed retained/fresh native-stack restoration have deterministic coverage in the completed batch.
+Installed execution and live delivery-lineage qualification remain outstanding. The
 [successor recovery plan](TERMINAL-RECOVERY-IMPLEMENTATION-PLAN.md) covers explicit authority,
 cumulative accounting, resource reconciliation, and reuse of validated publications. A startup
 guard blocks implicit reuse of executed work; it is containment, not a passed recovery gate.
@@ -125,8 +140,8 @@ New Linux execution/validation reservations bind command scopes and their produc
 `test/controller-retirement.test.ts` includes a real no-model, opt-in systemd probe for controlled
 retirement and prevention of a repeated restart. Absence is independently rechecked after restart;
 legacy unbound resources, changed hosts, and incomplete observations still block. Repeated-successor
-delivery lineage, multi-member native-stack restoration, provider cleanup, and installed recovery
-qualification remain open. An observed completion receipt or a descriptive next-event candidate
+delivery lineage and multi-member native-stack restoration are covered by offline Supervisor fixtures;
+live provider cleanup and installed recovery qualification remain open. An observed completion receipt or a descriptive next-event candidate
 cannot authorize a worker. These component results do not pass the live recovery gate.
 
 This table maps every stable contract statement in [`DESIGN.md`](DESIGN.md#definition-of-done) to
@@ -152,11 +167,16 @@ existing recorded runs is covered by
 `test/state.test.ts`, `test/v2-protocol.test.ts`, `test/v2-state.test.ts`, and the active-run history
 fixtures in `test/github-reader-history.test.ts`.
 
+The same batch covers cancellation-drain token receipts before cleanup, retention of known usage
+when cleanup remains uncertain, no stale-lease accounting writes, and preservation of escalation,
+cancellation or lease-release outcomes while workers drain. Unknown counters remain unavailable and
+unknown resources still block replacement. These are deterministic regressions, not live fault passes.
+
 ## Verification required before publication
 
 | Gate | Status | Evidence or open reason |
 |---|---|---|
-| Linux environment matrix | Open | Run the default Codex SDK route and Codex CLI fallback with adaptive scheduling, pressure, cancellation, restart, service install/uninstall, and clean validation on native Linux, Windows WSL2, and a Linux guest hosted by macOS. Native Win32 and Darwin are not part of this gate. |
+| Linux environment matrix | Open | [Current staged WSL2 component evidence](release-evidence/completion-batch-component-2026-09-05.json) covers no-model installation and host-process checks only. Run the default Codex SDK route and Codex CLI fallback with adaptive scheduling, pressure, cancellation, restart, service install/uninstall, and clean validation on native Linux, Windows WSL2, and a Linux guest hosted by macOS. Native Win32 and Darwin are not part of this gate. |
 | Live adaptive scheduling matrix | Open | The deterministic scheduler and recovery mechanics are implemented, but native sub-issue/field edits, constrained cgroups, process kills in every phase, two-Director races, and paid burst still need the disposable-repository/live-host matrix in [`ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md`](ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md). |
 | Live native-stack matrix | Open | [Live API component evidence](release-evidence/native-stack-component-2026-09-05.json) covers create/extend response-loss replay, partial direct merge, cascading rebase/tree preservation, final merge, and cleanup. Installed Supervisor recovery, cascading exact-head validation/review, merge-queue ejection, and regular-PR fallback still need live evidence. |
 | Real Daytona Objective | Open | Credential-free full-Supervisor tests prove local/Daytona independent-sibling overlap, both integration orders, isolated merge-candidate validation, native accounting restart, and cleanup fail-closed behavior. Sixteen native linear-stack scenarios include four fresh-controller checkpoint/review/receipt replay boundaries without duplicated sandbox, review, or accounting. The opt-in installed runner is described in [provider qualification](PROVIDER-QUALIFICATION.md). Paid creation, TTL, egress, secret brokerage and actual leak cleanup remain unexercised; simulated-provider results do not satisfy this live gate. |

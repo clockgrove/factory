@@ -36,6 +36,7 @@ export const COPILOT = "github-copilot/github-managed";
 export const CODEX = "openai-codex/github-managed";
 export type ProviderScenario = "daytona-burst" | "copilot-objective" | "codex-objective";
 export interface ProviderFaults {
+  repositoryFence?: () => Promise<void>;
   configureLocalBackend?: (backend: ExecutionBackend) => ExecutionBackend;
   controllerActivation?: boolean;
   afterIntegration?: () => void;
@@ -856,6 +857,7 @@ export async function providerSupervisorFixture(
         managementBackend: management,
         backendRegistry: registry,
         repositoryResources: shared,
+        ...(faults.repositoryFence ? { repositoryFence: faults.repositoryFence } : {}),
         pollIntervalMs: 20,
         ...(faults.controllerActivation
           ? {

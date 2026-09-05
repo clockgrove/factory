@@ -1231,7 +1231,7 @@ export class GitHubReader {
   }
 
   /**
-   * Poll only the Objective's newest comments while a worker runs. Fetching the
+   * Poll the Objective's bounded comment history while a worker runs. Fetching the
    * full nested Objective graph here can spend thousands of GraphQL points on
    * unchanged Work Items during one ordinary local attempt.
    */
@@ -1241,27 +1241,41 @@ export class GitHubReader {
     actor: string,
     activation?: ActivationBinding,
   ): Promise<RunCancellationRequest | null> {
-    const response = await this.#octokit.request(
-      "GET /repos/{owner}/{repo}/issues/{issue_number}/comments",
-      {
-        owner: this.#owner,
-        repo: this.#repo,
-        issue_number: objectiveNumber,
-        per_page: 100,
-        sort: "created",
-        direction: "desc",
-      },
-    );
-    return cancellationRequestFromComments(
-      response.data.map((comment) => ({
-        body: comment.body ?? "",
-        authorLogin: comment.user?.login ?? null,
-        authorAssociation: comment.author_association ?? null,
-      })),
-      runId,
-      actor,
-      activation,
-    );
+    // Unlike the repository-wide comments endpoint, issue comments are always
+    // ascending by ID: sort/direction cannot select the newest receipts.
+    // https://docs.github.com/en/rest/issues/comments#list-issue-comments
+    const comments: GitHubIssueCommentEvidence[] = [];
+    let bytes = 0;
+    const maxPages = Math.ceil(RECOVERY_READER_LIMITS.commentsPerIssue / 100);
+    for (let page = 1; page <= maxPages; page++) {
+      const response = await this.#octokit.request(
+        "GET /repos/{owner}/{repo}/issues/{issue_number}/comments",
+        {
+          owner: this.#owner,
+          repo: this.#repo,
+          issue_number: objectiveNumber,
+          per_page: 100,
+          page,
+        },
+      );
+      bytes += Buffer.byteLength(JSON.stringify(response.data), "utf8");
+      if (
+        response.data.length > 100 ||
+        comments.length + response.data.length > RECOVERY_READER_LIMITS.commentsPerIssue ||
+        bytes > RECOVERY_READER_LIMITS.hydratedBytes
+      )
+        throw new Error("Cancellation poll exceeded its bounded comment history");
+      comments.push(
+        ...response.data.map((comment) => ({
+          body: comment.body ?? "",
+          authorLogin: comment.user?.login ?? null,
+          authorAssociation: comment.author_association ?? null,
+        })),
+      );
+      if (!response.headers.link?.includes('rel="next"'))
+        return cancellationRequestFromComments(comments, runId, actor, activation);
+    }
+    throw new Error("Cancellation poll exceeded its bounded comment history pages");
   }
 
   /**

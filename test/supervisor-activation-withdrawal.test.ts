@@ -12,10 +12,11 @@ afterEach(async () => {
   for (const fixture of fixtures.splice(0)) await fixture.dispose();
 });
 
-async function fixture(fresh = true) {
+async function fixture(fresh = true, repositoryFence?: () => Promise<void>) {
   const f = await providerSupervisorFixture("daytona-burst", {
     controllerActivation: true,
     localOnly: true,
+    ...(repositoryFence ? { repositoryFence } : {}),
   });
   fixtures.push(f);
   vi.spyOn(GitHubReader.prototype, "readRepositoryLayout").mockResolvedValue({
@@ -120,6 +121,22 @@ function afterReceipt(eventName: FactoryEvent["event"], action: () => void) {
 }
 
 describe("Supervisor activation withdrawal races", () => {
+  it("rechecks repository authority after the cancellation read before compilation", async () => {
+    let changed = false;
+    const f = await fixture(true, async () => {
+      if (changed) throw new Error("repository fence changed during cancellation read");
+    });
+    f.narrowRead.mockImplementation(async () => {
+      changed = true;
+      return null;
+    });
+    expect(await f.run()).toMatchObject({
+      status: "escalated",
+      reason: "repository fence changed during cancellation read",
+    });
+    expect(f.compile).not.toHaveBeenCalled();
+    expect(f.activity).toEqual([]);
+  });
   it("does not start or compile an activation already withdrawn before startup", async () => {
     const f = await fixture();
     f.withdraw();

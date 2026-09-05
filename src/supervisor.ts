@@ -1134,8 +1134,9 @@ export class FactorySupervisor {
               "operator withdrew the activation through GitHub",
             );
           }
-          // The receipt read can span a lease change. Admission still belongs
-          // to the current generation, never the pre-read observation.
+          // The receipt read can span either authority change. Admission still
+          // belongs to both current generations, never the pre-read observation.
+          await this.#options.repositoryFence?.();
           await this.#lease.assertGeneration("admission");
         }
         return operation();

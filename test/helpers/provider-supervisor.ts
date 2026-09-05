@@ -27,6 +27,7 @@ import type { ManagementBackend } from "../../src/management/backend.js";
 import { validateArtifactClean, discardValidationResult } from "../../src/validation/clean-run.js";
 import type { ObjectiveSnapshot, LinkedPullRequest } from "../../src/types.js";
 import { GitHubStacks } from "../../src/publication/github-stacks.js";
+import { PlatformUnavailableError } from "../../src/platform.js";
 
 export const LOCAL = "codex-sdk/local-worktree";
 export const DAYTONA = "codex-cli/daytona";
@@ -37,6 +38,7 @@ export interface ProviderFaults {
   controllerActivation?: boolean;
   afterIntegration?: () => void;
   localOnly?: boolean;
+  loseIntegrationReceipt?: "before" | "after";
   unavailable?: boolean;
   validationFailure?: boolean;
   cleanupFailure?: boolean;
@@ -352,13 +354,27 @@ export async function providerSupervisorFixture(
   vi.spyOn(GitHubControlStore.prototype, "getBranchHead").mockImplementation(async (branch) =>
     readCommit(refs.get(`refs/heads/${branch}`) ?? git("rev-parse", branch)),
   );
+  let receiptTransportUnavailable = false;
   vi.spyOn(GitHubControlStore.prototype, "addIssueComment").mockImplementation(
     async (node, body) => {
+      const receipt = decodeEventComments(body);
+      const integration = receipt.some((event) => event.event === "AttemptIntegrated");
+      const loss = integration ? faults.loseIntegrationReceipt : undefined;
+      if (loss) {
+        delete faults.loseIntegrationReceipt;
+        receiptTransportUnavailable = true;
+      }
+      const unavailable = () =>
+        new PlatformUnavailableError(
+          { kind: "server_error", retryAfterMs: 1 },
+          new Error("simulated integration receipt transport outage"),
+        );
+      if (receiptTransportUnavailable && loss !== "after") throw unavailable();
       const target =
         node === snapshot.id ? snapshot : snapshot.workItems.find((item) => item.id === node)!;
-      target.factoryEvents!.push(...decodeEventComments(body));
-      if (decodeEventComments(body).some((event) => event.event === "AttemptIntegrated"))
-        faults.afterIntegration?.();
+      target.factoryEvents!.push(...receipt);
+      if (loss === "after") throw unavailable();
+      if (integration) faults.afterIntegration?.();
     },
   );
   vi.spyOn(GitHubControlStore.prototype, "closeIssue").mockImplementation(async (number) => {
@@ -770,6 +786,7 @@ export async function providerSupervisorFixture(
     events,
     refs,
     run: (signal?: AbortSignal) => {
+      receiptTransportUnavailable = false;
       const generation = ++controllerGeneration;
       const controllerExpiresAt = new Date(Date.now() + 600_000).toISOString();
       return new FactorySupervisor({

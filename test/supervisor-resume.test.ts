@@ -1,9 +1,86 @@
 import { execFileSync } from "node:child_process";
 import { describe, expect, it, vi } from "vitest";
 import { LeaseManager } from "../src/control/lease.js";
+import { PlatformUnavailableError } from "../src/platform.js";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
 
 describe("same-run controller restart after integration", () => {
+  it.each(["before", "after"] as const)(
+    "repairs a lost ordinary integration receipt %s the comment commits",
+    async (loss) => {
+      const f = await providerSupervisorFixture("daytona-burst", {
+        controllerActivation: true,
+        localOnly: true,
+        loseIntegrationReceipt: loss,
+      });
+      try {
+        await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
+        expect(f.snapshot.workItems[0]!.closed).toBe(true);
+        expect(f.snapshot.workItems[0]!.linkedPullRequests[0]!.state).toBe("MERGED");
+        expect(f.events().filter((event) => event.event === "AttemptIntegrated")).toHaveLength(
+          loss === "before" ? 0 : 1,
+        );
+        const firstReviews = f.activity.filter(
+          (entry) => entry.operation === "review" && entry.workItem === 8,
+        );
+        expect(firstReviews).toHaveLength(1);
+        const firstBudget = f
+          .events()
+          .filter((event) => event.kind === "budget" && event.workItem === 8);
+        const resumed = await f.run();
+        expect(resumed, resumed.reason).toMatchObject({
+          status: "completed",
+          runId: "provider-fixture",
+        });
+        expect(
+          f.events().filter((event) => event.event === "AttemptIntegrated" && event.workItem === 8),
+        ).toHaveLength(1);
+        if (loss === "before")
+          expect(
+            f.events().find((event) => event.event === "AttemptIntegrated" && event.workItem === 8),
+          ).toMatchObject({ directorEpoch: 1, recoveryEpoch: 2 });
+        expect(
+          f.events().filter((event) => event.kind === "budget" && event.workItem === 8),
+        ).toEqual(firstBudget);
+        expect(
+          f.activity.filter((entry) => entry.operation === "launch").map((entry) => entry.workItem),
+        ).toEqual([8, 9, 10]);
+        expect(
+          f.activity.filter((entry) => entry.operation === "review" && entry.workItem === 8),
+        ).toEqual(firstReviews);
+        expect(f.resources.size).toBe(0);
+      } finally {
+        await f.dispose();
+      }
+    },
+    30_000,
+  );
+
+  it("does not repair a completed ordinary merge without its original acceptance checkpoint", async () => {
+    const f = await providerSupervisorFixture("daytona-burst", {
+      controllerActivation: true,
+      localOnly: true,
+      loseIntegrationReceipt: "before",
+    });
+    try {
+      await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
+      const reviewRefs = [...f.refs.keys()].filter((ref) => ref.includes("/reviews/"));
+      expect(reviewRefs).toHaveLength(1);
+      f.refs.delete(reviewRefs[0]!);
+      const invocations = [...f.activity];
+      const result = await f.run();
+      expect(result).toMatchObject({
+        status: "escalated",
+        reason: expect.stringContaining("original acceptance checkpoint"),
+      });
+      expect(f.events().filter((event) => event.event === "AttemptIntegrated")).toHaveLength(0);
+      expect(f.activity).toEqual(invocations);
+      expect(f.snapshot.workItems[0]!.linkedPullRequests[0]!.state).toBe("MERGED");
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
+
   it("reconstructs a chain including accepted sibling candidate integration after restart", async () => {
     const shutdown = new AbortController();
     let integrations = 0;

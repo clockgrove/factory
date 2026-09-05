@@ -2533,6 +2533,33 @@ export class FactorySupervisor {
           continue;
         }
         if (await this.#repairReservationReceipts(objective.items)) continue;
+        if (this.#deliverySelection.selected === "regular-prs") {
+          const unrecorded = objective.items.find((item) => {
+            if (item.state !== "done" || activeExecutions.has(item.number)) return false;
+            const published = [...(item.factoryEvents ?? [])]
+              .reverse()
+              .find(
+                (event) =>
+                  event.kind === "attempt" &&
+                  event.runId === this.#run.runId &&
+                  event.event === "AttemptPublished",
+              );
+            return (
+              published?.kind === "attempt" &&
+              !(item.factoryEvents ?? []).some(
+                (event) =>
+                  event.kind === "attempt" &&
+                  event.runId === this.#run.runId &&
+                  event.event === "AttemptIntegrated" &&
+                  event.attempt === published.attempt,
+              )
+            );
+          });
+          if (unrecorded) {
+            await this.#resumeIntegration(unrecorded);
+            continue;
+          }
+        }
         // GitHub can report MERGED before the response or our closure receipt arrives.
         // Reconstruct exact integration before derived "done" can close the Objective.
         const unrecordedNative =
@@ -7385,6 +7412,34 @@ export class FactorySupervisor {
       exactHeadValidation,
       state: "published",
     };
+    if (pull.merged) {
+      // Closing the issue is not acceptance evidence. Recover only an already
+      // accepted publication; never review or validate a completed merge anew.
+      const accepted = (item.factoryEvents ?? []).some(
+        (candidate) =>
+          candidate.kind === "attempt" &&
+          candidate.runId === this.#run.runId &&
+          candidate.event === "AttemptValidated" &&
+          candidate.attempt === event.attempt &&
+          candidate.artifactDigest === event.artifactDigest &&
+          candidate.sequence < event.sequence,
+      );
+      const review = event.artifactDigest
+        ? await this.#reviews.load({
+            kind: "artifact",
+            runId: this.#run.runId,
+            objective: this.#run.objective,
+            workItem: item.number,
+            attempt: event.attempt,
+            artifactDigest: event.artifactDigest,
+            baseSha: validation.baseSha,
+            outputTreeSha: validation.outputTreeSha,
+            evidenceDigest: validation.evidenceDigest,
+          })
+        : null;
+      if (!accepted || !review?.review.accepted || review.review.unmetCriteria.length)
+        throw new Error("completed ordinary integration lacks its original acceptance checkpoint");
+    }
     if (publicationEvent) {
       assertPublicationEventMatchesReceipt(publicationEvent, receipt);
     } else {

@@ -10,14 +10,14 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  readdirSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { installedPluginRoot, optionalHostQualification } from "./qualify-linux-host.mjs";
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const codexCommand = process.env.FACTORY_CODEX_COMMAND || "codex";
@@ -98,61 +98,6 @@ function json(command, args, options) {
   } catch {
     throw new Error(`${command} did not return JSON: ${output.slice(0, 500)}`);
   }
-}
-
-function objects(value, result = []) {
-  if (Array.isArray(value)) {
-    for (const item of value) objects(item, result);
-  } else if (value && typeof value === "object") {
-    result.push(value);
-    for (const item of Object.values(value)) objects(item, result);
-  }
-  return result;
-}
-
-function strings(value, result = []) {
-  if (typeof value === "string") result.push(value);
-  else if (Array.isArray(value)) {
-    for (const item of value) strings(item, result);
-  } else if (value && typeof value === "object") {
-    for (const item of Object.values(value)) strings(item, result);
-  }
-  return result;
-}
-
-function findInstalledRoot(...responses) {
-  const candidates = new Set();
-  for (const value of responses.flatMap((response) => strings(response))) {
-    if (!value.includes("/") && !value.includes("\\")) continue;
-    const absolute = isAbsolute(value) ? resolve(value) : resolve(temporaryRoot, value);
-    candidates.add(absolute);
-    candidates.add(dirname(absolute));
-  }
-  if (existsSync(codexHome)) {
-    const visit = (directory, depth = 0) => {
-      if (depth > 8) return;
-      for (const entry of readdirSync(directory, { withFileTypes: true })) {
-        if (!entry.isDirectory()) continue;
-        const path = join(directory, entry.name);
-        candidates.add(path);
-        visit(path, depth + 1);
-      }
-    };
-    visit(codexHome);
-  }
-  // Prefer a path resolved or materialized by Codex. A local marketplace may
-  // legitimately resolve to its source package, so retain that only as the
-  // final fallback after inspecting command receipts and the isolated home.
-  candidates.add(stagedRoot);
-  return [...candidates].find((candidate) => {
-    const manifest = join(candidate, ".codex-plugin", "plugin.json");
-    if (!existsSync(manifest)) return false;
-    try {
-      return JSON.parse(readFileSync(manifest, "utf8")).name === "factory";
-    } catch {
-      return false;
-    }
-  });
 }
 
 async function listTools(command, args, cwd) {
@@ -252,22 +197,11 @@ async function main() {
     `${JSON.stringify(marketplace, null, 2)}\n`,
   );
 
-  const addedMarketplace = json(codexCommand, [
-    "plugin",
-    "marketplace",
-    "add",
-    marketplaceRoot,
-    "--json",
-  ]);
-  const installed = json(codexCommand, ["plugin", "add", "factory@factory-install-test", "--json"]);
+  json(codexCommand, ["plugin", "marketplace", "add", marketplaceRoot, "--json"]);
+  json(codexCommand, ["plugin", "add", "factory@factory-install-test", "--json"]);
   const listed = json(codexCommand, ["plugin", "list", "--json"]);
-  const record = objects(listed).find(
-    (value) => value.name === "factory" || value.plugin === "factory",
-  );
-  if (!record) throw new Error("clean Codex home did not list the installed Factory plugin");
-
-  const installedRoot = findInstalledRoot(addedMarketplace, installed, listed);
-  if (!installedRoot) throw new Error("could not locate the installed Factory plugin root");
+  const version = JSON.parse(readFileSync(join(sourceRoot, "package.json"), "utf8")).version;
+  const installedRoot = installedPluginRoot(listed, codexHome, version);
   if (installedRoot === sourceRoot || installedRoot.startsWith(`${sourceRoot}${sep}`)) {
     throw new Error("clean install resolved back to the development worktree");
   }
@@ -325,6 +259,11 @@ async function main() {
     );
   }
 
+  await optionalHostQualification({
+    installedRoot,
+    artifactKind: "plugin",
+    installation: { source: "staged-codex-marketplace", cleanInstall: true },
+  });
   console.log(
     JSON.stringify({
       installed: true,

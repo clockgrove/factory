@@ -222,9 +222,14 @@ start. All eight exact recorded execution/validation scopes were subsequently ab
 partial execution evidence, not an end-to-end pass. GitHub's
 [documented test-merge generation policy](https://github.blog/changelog/2026-02-19-changes-to-test-merge-commit-generation-for-pull-requests/)
 invalidates an assumption that polling alone will promptly refresh that preview.
-The decision whether to permit changing a sibling PR head to obtain fresh preview evidence remains
-unanswered. Current integration pacing preserves the unchanged-head and exact-merge guards; it does
-not resolve that product decision. This blocker is independent of API keys or paid-provider access.
+The operator has since approved non-force refresh of Factory-owned sibling branches, with separate
+full validation and semantic review of each changed head and immutable original publication history.
+The [real exact-head branch-CAS component](release-evidence/sibling-branch-cas-component-2026-09-05.json)
+passed: a planned two-parent update succeeded and a stale writer was rejected despite proposing a
+valid fast-forward descendant. This resolves the product decision and measures the update primitive,
+not the full native delivery criterion. Fresh installed qualification remains required; the cancelled
+historical Objective is unchanged and must not be revived. No API key or paid provider is needed for
+the local-first capability.
 
 The same observation records a separate pre-worker failure: durable activation of a plain human
 issue was accepted but remained undiscovered because its structural Objective label was missing.

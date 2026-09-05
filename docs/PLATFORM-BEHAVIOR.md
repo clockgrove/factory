@@ -59,6 +59,29 @@ current evidence; completed immutable validation/review checkpoints are reused. 
 still prevent completion until the existing Objective deadline; pacing does not qualify a merge or
 claim that GitHub will refresh within that deadline.
 
+### Exact sibling-branch update primitive
+
+A September 5 disposable-repository probe exercised the existing `GitHubControlStore` against a
+real `refs/heads/...` branch. Creating a two-parent commit with parents `[old head, target trunk]`
+and applying GraphQL `updateRefs` with `force: false` and the exact `beforeOid` succeeded. A second
+update with a stale `beforeOid` was rejected even though its proposed new commit was a valid
+fast-forward descendant of the branch's current head. The branch remained unchanged after that
+rejection. This establishes exact compare-and-swap behavior, not merely fast-forward checking.
+
+The probe changed no default branch, Objective, or PR and invoked no model. Its one temporary branch
+was removed only at its independently observed exact head; subsequent reads confirmed branch absence
+and an unchanged default branch. The sanitized
+[component record](release-evidence/sibling-branch-cas-component-2026-09-05.json) binds the source and
+retained observation hashes. This is **not** a completed installed native Objective, a measurement
+of PR-preview regeneration, or evidence of changed-head validation or semantic review.
+
+The result agrees with GitHub's [atomic reference-update contract](https://docs.github.com/en/graphql/reference/git#updaterefs)
+and [multi-parent commit contract](https://docs.github.com/en/rest/git/commits#create-a-commit).
+The separate [update-PR-branch endpoint](https://docs.github.com/en/rest/pulls/pulls#update-a-pull-request-branch)
+accepts an expected head but selects the latest base asynchronously; it does not establish a pinned
+target-base compare-and-swap. Factory's sibling refresh therefore pins its exact two-parent commit
+in an immutable intent before attempting the ordinary, non-force branch update.
+
 ## Documented native-stack contract (not yet live conformance)
 
 Factory isolates GitHub's versioned stacked-pull-request surface behind a capability probe and pins

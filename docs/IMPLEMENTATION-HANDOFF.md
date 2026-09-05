@@ -49,9 +49,12 @@ or resolve the unavailable stable managed Codex identity. No fallback, extra spe
 or reduced support contract is authorized by those prerequisites becoming available.
 
 The installed native happy path separately exposed stale sibling test-merge metadata after trunk
-advanced. Whether to permit changing a sibling PR head to obtain fresh preview evidence remains an
-unanswered product decision, not an API-key shortage. Integration pacing preserves current exact-head
-and merge-evidence guards and does not itself force GitHub to refresh that preview.
+advanced. The operator has approved refreshing Factory-owned sibling branches with full validation
+and semantic review of every changed head. The capability batch implements an immutable write-ahead
+intent and a non-force, exact-head branch update; it preserves the original publication and validation
+history. The [real branch-CAS primitive](release-evidence/sibling-branch-cas-component-2026-09-05.json)
+passed, but that component observation does not qualify the installed native Objective. Fresh
+installed parallel delivery and recovery evidence remain required, independently of API keys.
 
 Explicit regular delivery now holds each complete pipeline through integration, including pending
 checks and fresh-controller reconstruction. Its dedicated installed qualifier also supports a

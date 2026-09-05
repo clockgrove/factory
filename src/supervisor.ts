@@ -1433,6 +1433,145 @@ export class FactorySupervisor {
     );
   }
 
+  /** A resume may cross only actual squash merges of this run's accepted heads.
+   * This read-only preflight also tolerates a lost final integration receipt:
+   * publication and acceptance predate the independently observed real merge. */
+  async #observedRunOwnsBaseAdvance(
+    snapshot: Snapshot,
+    run: RunState,
+    targetBaseSha: string,
+  ): Promise<boolean> {
+    if (!run.baseSha || snapshot.number !== run.objective) return false;
+    const observations = new Map<
+      number,
+      Awaited<ReturnType<GitHubControlStore["readPullRequest"]>>
+    >();
+    let cursor = targetBaseSha;
+    const visited = new Set<string>();
+    while (cursor !== run.baseSha) {
+      if (visited.has(cursor) || visited.size >= snapshot.workItems.length) return false;
+      visited.add(cursor);
+      const matches = [];
+      for (const item of snapshot.workItems) {
+        const events = deduplicateFactoryEvents(item.factoryEvents ?? []).filter(
+          (event) =>
+            event.runId === run.runId && "workItem" in event && event.workItem === item.number,
+        );
+        for (const linked of item.linkedPullRequests) {
+          if (linked.state !== "MERGED") continue;
+          let pull = observations.get(linked.number);
+          if (!pull) {
+            if (observations.size >= 1000) return false;
+            pull = await this.#store.readPullRequest(linked.number);
+            observations.set(linked.number, pull);
+          }
+          if (!pull.merged || pull.mergeCommitSha !== cursor) continue;
+          const published = events.find(
+            (event) =>
+              event.kind === "attempt" &&
+              event.event === "AttemptPublished" &&
+              event.headSha === pull.headSha &&
+              event.policyDigest === run.policyDigest,
+          );
+          if (published?.kind !== "attempt" || !published.artifactDigest) return false;
+          const validation = [...events]
+            .reverse()
+            .find(
+              (event) =>
+                event.kind === "validation" &&
+                event.attempt === published.attempt &&
+                event.passed &&
+                event.sequence < published.sequence &&
+                (event.policyDigest === undefined || event.policyDigest === run.policyDigest),
+            );
+          if (
+            validation?.kind !== "validation" ||
+            !events.some(
+              (event) =>
+                event.kind === "attempt" &&
+                event.event === "AttemptValidated" &&
+                event.attempt === published.attempt &&
+                event.policyDigest === run.policyDigest &&
+                event.artifactDigest === published.artifactDigest &&
+                event.sequence < published.sequence,
+            )
+          )
+            return false;
+          const reservation = (await this.#attempts.list(run.objective, item.number)).find(
+            (entry) => entry.runId === run.runId && entry.attempt === published.attempt,
+          );
+          if (
+            !reservation ||
+            reservation.objective !== run.objective ||
+            reservation.workItem !== item.number ||
+            reservation.policyDigest !== run.policyDigest ||
+            reservation.backend !== published.backend ||
+            reservation.directorEpoch !== published.directorEpoch ||
+            reservation.baseSha !== published.baseSha ||
+            pull.baseRef !== run.baseBranch ||
+            pull.nodeId !== linked.id ||
+            pull.number !== linked.number ||
+            pull.headSha !== linked.headSha ||
+            pull.baseRepository?.toLowerCase() !== run.repository?.toLowerCase() ||
+            pull.headRepository?.toLowerCase() !== run.repository?.toLowerCase()
+          )
+            return false;
+          const head = await this.#store.readCommit(pull.headSha);
+          const exactHeadValidation = bindValidationToPublishedHead({
+            validation: {
+              passed: true,
+              digest: validation.evidenceDigest,
+              baseSha: validation.baseSha,
+              outputTreeSha: validation.outputTreeSha,
+            },
+            publishedHeadSha: pull.headSha,
+            publishedTreeSha: head.treeOid,
+            publishedBaseSha: validation.baseSha,
+          });
+          const commit = await this.#store.readCommit(cursor);
+          if (commit.oid !== cursor || commit.parentOids.length !== 1) return false;
+          const parent = commit.parentOids[0]!;
+          const publishedPull: PublishedPullRequest = {
+            number: linked.number,
+            branch: pull.headRef!,
+            commitSha: pull.headSha,
+            htmlUrl: `https://github.com/${run.repository}/pull/${linked.number}`,
+            exactHeadValidation,
+          };
+          if (parent === validation.baseSha) {
+            await verifySquashIntegration(this.#store, publishedPull, cursor, parent);
+          } else {
+            const candidate = await this.#mergeCandidates.load({
+              runId: run.runId,
+              objective: run.objective,
+              workItem: item.number,
+              attempt: published.attempt,
+              pullRequest: linked.number,
+              sourceHeadSha: pull.headSha,
+              sourceExactHeadValidationDigest: exactHeadValidation.digest,
+              targetBaseSha: parent,
+            });
+            const review = candidate
+              ? await this.#reviews.load(this.#mergeCandidateReviewIdentity(candidate))
+              : null;
+            if (!candidate || !review?.review.accepted || review.review.unmetCriteria.length)
+              return false;
+            await verifyMergeCandidateSquash(
+              this.#store,
+              exactHeadValidation,
+              candidate.evidence,
+              cursor,
+            );
+          }
+          matches.push(parent);
+        }
+      }
+      if (matches.length !== 1) return false;
+      cursor = matches[0]!;
+    }
+    return true;
+  }
+
   async run(): Promise<SupervisorResult> {
     this.#recoveryRuntime = null;
     this.#compiledGraph = null;
@@ -1704,7 +1843,11 @@ export class FactorySupervisor {
       );
     }
     const base = await this.#store.getBranchHead(snapshot.defaultBranch);
-    if (this.#options.activation && base.oid !== this.#options.activation.baseSha) {
+    if (
+      this.#options.activation &&
+      base.oid !== this.#options.activation.baseSha &&
+      (!resumedRun || !(await this.#observedRunOwnsBaseAdvance(snapshot, resumedRun, base.oid)))
+    ) {
       return this.#startlessEscalation(
         `activation ${this.#options.activation.requestId} is stale: ${snapshot.defaultBranch} advanced from ${this.#options.activation.baseSha} to ${base.oid}; reactivate against the new head`,
         snapshot,
@@ -1776,6 +1919,16 @@ export class FactorySupervisor {
           await this.#lease.release();
           return rejected;
         }
+      }
+      // The original activation remains immutable across restarts. Recheck its
+      // permitted progress under the lease before writing any resumed-run effect.
+      if (currentRun && this.#options.activation) {
+        const currentBase = await this.#store.getBranchHead(current.defaultBranch);
+        if (
+          currentBase.oid !== this.#options.activation.baseSha &&
+          !(await this.#observedRunOwnsBaseAdvance(current, currentRun, currentBase.oid))
+        )
+          throw new Error("base branch advanced outside this run during startup");
       }
       snapshot = current;
       this.#sequences.observe(snapshotEvents(snapshot));

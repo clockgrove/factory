@@ -34,6 +34,9 @@ export const COPILOT = "github-copilot/github-managed";
 export const CODEX = "openai-codex/github-managed";
 export type ProviderScenario = "daytona-burst" | "copilot-objective" | "codex-objective";
 export interface ProviderFaults {
+  controllerActivation?: boolean;
+  afterIntegration?: () => void;
+  localOnly?: boolean;
   unavailable?: boolean;
   validationFailure?: boolean;
   cleanupFailure?: boolean;
@@ -86,13 +89,13 @@ export async function providerSupervisorFixture(
   const policy = parseRunPolicy({
     ...DEFAULT_RUN_POLICY,
     ...(faults.sandboxUntrusted ? { trust: "sandbox_untrusted" } : {}),
-    backendOrder: managed ? [provider, DAYTONA] : [LOCAL, DAYTONA],
-    maxParallel: managed ? 1 : 2,
+    backendOrder: faults.localOnly ? [LOCAL] : managed ? [provider, DAYTONA] : [LOCAL, DAYTONA],
+    maxParallel: managed || faults.localOnly ? 1 : 2,
     maxAttemptsPerItem: 1,
     workItemTimeoutMinutes: 2,
     objectiveTimeoutMinutes: 20,
-    allowedPaidBackends: managed ? [provider, DAYTONA] : [DAYTONA],
-    cloudFallback: "explicit",
+    allowedPaidBackends: faults.localOnly ? [] : managed ? [provider, DAYTONA] : [DAYTONA],
+    cloudFallback: faults.localOnly ? "never" : "explicit",
     maxSandboxMinutes: 30,
     maxManagedAgentSessions: managed ? 3 : 0,
     economics: {
@@ -108,14 +111,14 @@ export async function providerSupervisorFixture(
     },
     burst: {
       ...DEFAULT_RUN_POLICY.burst,
-      mode: "saturation",
-      backendOrder: [provider],
+      mode: faults.localOnly ? "never" : "saturation",
+      backendOrder: faults.localOnly ? [] : [provider],
       maxCloudParallel: 2,
       queueDelaySeconds: 0,
       deadlineReserveMinutes: 1,
     },
     delivery: {
-      mode: managed ? "regular-prs" : "stacked-prs",
+      mode: managed || faults.localOnly ? "regular-prs" : "stacked-prs",
       onUnavailable: "escalate",
       merge: "bottom-up",
     },
@@ -266,14 +269,15 @@ export async function providerSupervisorFixture(
         fork: false,
         baseBranch: "main",
         baseSha,
+        ...(faults.controllerActivation ? { activationRequestId: "fixture-activation" } : {}),
         policy,
         policyDigest: pd,
       }),
       event({
         kind: "delivery",
         event: "DeliverySelected",
-        requested: managed ? "regular-prs" : "stacked-prs",
-        selected: managed ? "regular-prs" : "native-stacks",
+        requested: managed || faults.localOnly ? "regular-prs" : "stacked-prs",
+        selected: managed || faults.localOnly ? "regular-prs" : "native-stacks",
         capabilityVersion: "2026-03-10",
         reason: "Simulated transport capability",
       }),
@@ -353,6 +357,8 @@ export async function providerSupervisorFixture(
       const target =
         node === snapshot.id ? snapshot : snapshot.workItems.find((item) => item.id === node)!;
       target.factoryEvents!.push(...decodeEventComments(body));
+      if (decodeEventComments(body).some((event) => event.event === "AttemptIntegrated"))
+        faults.afterIntegration?.();
     },
   );
   vi.spyOn(GitHubControlStore.prototype, "closeIssue").mockImplementation(async (number) => {
@@ -375,9 +381,11 @@ export async function providerSupervisorFixture(
   vi.spyOn(GitHubReader.prototype, "resolveUserId").mockResolvedValue("U_operator");
   vi.spyOn(GitHubReader.prototype, "readRunCancellationRequest").mockResolvedValue(null);
   vi.spyOn(LeaseManager.prototype, "read").mockResolvedValue(null);
+  let leaseGeneration = 0;
   vi.spyOn(LeaseManager.prototype, "acquire").mockImplementation(async (identity) => ({
     ...lease,
     ...identity,
+    ...(faults.controllerActivation ? { epoch: ++leaseGeneration } : {}),
   }));
   vi.spyOn(LeaseManager.prototype, "assertCurrent").mockResolvedValue(undefined);
   vi.spyOn(LeaseManager.prototype, "assertGeneration").mockResolvedValue(undefined);
@@ -452,6 +460,11 @@ export async function providerSupervisorFixture(
     ).trim();
     return {
       state: value.merged ? "closed" : "open",
+      number,
+      nodeId: value.pull.id,
+      headRef: value.branch,
+      headRepository: "fixture/provider-qualification",
+      baseRepository: "fixture/provider-qualification",
       merged: Boolean(value.merged),
       mergeable: true,
       mergeableState: "clean",
@@ -600,6 +613,7 @@ export async function providerSupervisorFixture(
       observe: async (handle) => ({
         state:
           !managed &&
+          !faults.localOnly &&
           !faults.nativeStack &&
           ((running.get(handle.resourceId)!.workItem < 10 &&
             !activity.some(
@@ -746,6 +760,7 @@ export async function providerSupervisorFixture(
       source: "host",
     }),
   };
+  let controllerGeneration = 0;
   return {
     repository,
     policy,
@@ -754,8 +769,10 @@ export async function providerSupervisorFixture(
     resources,
     events,
     refs,
-    run: (signal?: AbortSignal) =>
-      new FactorySupervisor({
+    run: (signal?: AbortSignal) => {
+      const generation = ++controllerGeneration;
+      const controllerExpiresAt = new Date(Date.now() + 600_000).toISOString();
+      return new FactorySupervisor({
         token: "fixture-only",
         owner: "fixture",
         repo: "provider-qualification",
@@ -766,9 +783,22 @@ export async function providerSupervisorFixture(
         backendRegistry: registry,
         repositoryResources: shared,
         pollIntervalMs: 20,
+        ...(faults.controllerActivation
+          ? {
+              activation: { requestId: "fixture-activation", baseSha },
+              shutdownBehavior: "release-lease" as const,
+              controllerObservation: () => ({
+                controllerId: `fixture-controller-${generation}`,
+                epoch: generation,
+                expiresAt: controllerExpiresAt,
+                controllerPolicyDigest: pd,
+              }),
+            }
+          : {}),
         ...(signal ? { signal } : {}),
         onStatus: (message) => notifications.push(message),
-      }).run(),
+      }).run();
+    },
     dispose: async () => {
       vi.restoreAllMocks();
       vi.unstubAllGlobals();

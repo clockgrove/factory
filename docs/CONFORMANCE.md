@@ -11,6 +11,23 @@ the [delivery plan](DELIVERY-PLAN.md) retains the accepted waves.
 
 ## Proven on this branch
 
+The [quota-safe completion candidate and retained successor](release-evidence/quota-safe-successor-completion-component-2026-09-05.json)
+passed at the explicitly recorded boundaries: `4e06b13` passed full integrated checks and matching
+89-file Linux plugin installation; the same already-delivered successor then completed through the
+new proof-only deadline path, without new model work. Independent observation verified original
+history, retained sibling refresh/validation/review, dependent integration, all three closed Work
+Items, 219,769 cumulative known tokens under the unchanged 500,000 allowance, and eleven absent
+reserved scopes. The normally stopped controller has MainPID zero and no restarts. Fresh-clone
+delivered-code tests also passed.
+
+Adoption and delivery used `007cd8c`; final closure used `4e06b13`. This is not a clean-history run
+performed entirely on one candidate. The original runtime failures remain failed. Two private
+observer format/optional-setup assertions also remain preserved; separately corrected read-only
+observation passed without restarting Factory. The evidence document is later than the installed
+package. This completes the bounded retained-successor case, not any broad release gate.
+
+### Earlier candidate observations (unchanged)
+
 The [foreground-recovery candidate](release-evidence/foreground-recovery-candidate-component-2026-09-05.json)
 passed full integrated checks and exact matching Linux installation at `007cd8c`. The installed
 successor then adopted the original work, refreshed and integrated the retained publication, and

@@ -153,6 +153,57 @@ function rerun(
 }
 
 describe("immutable merge-candidate validation checkpoints", () => {
+  it("keeps the pre-refresh candidate identity and ref byte-stable when no delivery head exists", () => {
+    const { args } = fixture();
+    const legacyDigest = createHash("sha256").update(JSON.stringify(args.identity)).digest("hex");
+    expect(mergeCandidateIdentityDigest(args.identity)).toBe(legacyDigest);
+    expect(mergeCandidateCheckpointRef(args.identity)).toBe(
+      `refs/clockgrove-factory/merge-candidates/objective-7/work-item-8/attempt-1/candidate-${legacyDigest}`,
+    );
+  });
+
+  it("separates changed delivery heads even with the same original source and combined tree", async () => {
+    const f = fixture();
+    const original = await f.manager.persist(f.args);
+    const originalBytes = Buffer.from(f.store.blobs.get(original.blobOid)!);
+    const identities = [sha("1"), sha("2")].map((deliveryHeadSha) => ({
+      ...f.args.identity,
+      deliveryHeadSha,
+    }));
+    const records = [];
+    for (const identity of identities)
+      records.push(await f.manager.persist({ ...f.args, identity }));
+    expect(new Set([original.ref, ...records.map((record) => record.ref)]).size).toBe(3);
+    for (const [index, record] of records.entries()) {
+      expect(record.source).toEqual(original.source);
+      expect(record.validation).toEqual(original.validation);
+      expect(await f.manager.load(identities[index]!)).toEqual(record);
+    }
+    expect(f.store.blobs.get(original.blobOid)).toEqual(originalBytes);
+    expect(await f.manager.load(f.args.identity)).toEqual(original);
+  });
+
+  it("refuses to transplant an original-head checkpoint into a refreshed-head ref", async () => {
+    const f = fixture();
+    const original = await f.manager.persist(f.args);
+    const refreshed = { ...f.args.identity, deliveryHeadSha: sha("1") };
+    expect(await f.manager.load(refreshed)).toBeNull();
+    f.store.refs.set(mergeCandidateCheckpointRef(refreshed), original.commitOid);
+    await expect(f.manager.load(refreshed)).rejects.toThrow(/reference identity/);
+    expect(await f.manager.load(f.args.identity)).toEqual(original);
+  });
+
+  it.each(["", "not-a-sha", "a".repeat(41)])(
+    "rejects malformed delivery head %j before metadata writes",
+    async (deliveryHeadSha) => {
+      const f = fixture();
+      await expect(
+        f.manager.persist({ ...f.args, identity: { ...f.args.identity, deliveryHeadSha } }),
+      ).rejects.toThrow();
+      expect(f.store.writes).toEqual([]);
+    },
+  );
+
   it("persists exact isolated resource completion across restart and refuses changed ownership", async () => {
     const f = fixture();
     const isolatedResource = {

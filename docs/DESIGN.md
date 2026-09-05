@@ -155,6 +155,18 @@ Both API surfaces still share Factory's circuit breaker, concurrency limiter, co
 and secondary-rate-limit handling. Unchanged idle state is polled no more often than once per minute
 by default, while active local-worker cancellation uses the cheaper REST comments path.
 
+Recovery may retain bounded immutable Git content by exact object identity across repeated proof
+calls. It never caches mutable refs, authenticated event snapshots, PR/base state, leases, physical
+absence or an admission decision. A cache hit saves a content read, not an authority check; failures
+and misses are not retained, and cached response timestamps are not fresh server-time evidence.
+
+A classified quota refusal imposes a shared retry boundary, including during controller bootstrap,
+discovery and lease retirement. An in-flight success cannot clear a later retry deadline. After
+settling the current generation, the same process waits abortably and reconstructs ownership; it
+does not reuse a stale lease or rely on service restarts to retry. Authentication and invariant
+failures remain errors. The controller honors GitHub's [rate-limit response headers](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#exceeding-the-rate-limit),
+not a contradictory later balance from another observation.
+
 Model quota is protected at retry boundaries as well. After an artifact has passed host scope,
 secret, clean-apply, and sensitive-path checks, the running Supervisor may retain it in a bounded
 32 MiB in-memory cache. A retry at the same base SHA is seeded with that complete patch and receives

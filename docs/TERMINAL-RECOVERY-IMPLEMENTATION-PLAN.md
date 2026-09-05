@@ -107,6 +107,13 @@ assert that optional setup ran. All reserved slots, including the optional setup
 Partial, conflicting, unbound or unsupported invocations remain blocked. Generic PID/scope absence
 alone is still insufficient; no old receipt acquires an invented service identity.
 
+Quota-delayed restart does not extend the original run deadline. A completion-only path may close
+the Objective and record completion afterward only when fresh authenticated evidence proves that
+all required delivery finished in time, exact acceptance/integration receipts already exist, and
+accounting, resources and current fences are settled. Cancellation still wins. This path performs
+no implementation, validation, review, merge or receipt repair; missing proof retains the timeout
+boundary, and a transient platform refusal remains retryable rather than fabricated failure evidence.
+
 Repeated successors retain the original attempt and publication identities. Historical adopted
 runs are independently checked at their next accepted plan's exact cutoff; complete current
 accounting and resource observations still include later liabilities. Failed local attempts use

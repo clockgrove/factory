@@ -34,6 +34,10 @@ Notable changes to Factory. See [the delivery plan](docs/DELIVERY-PLAN.md) for u
 
 ### Changed
 
+- Recovery shares bounded exact-OID content reads without caching mutable authority or resource
+  observations. Platform refusals retain their retry boundary through proof reconstruction.
+- The repository controller settles ownership before abortable in-process quota cooldown and fresh
+  acquisition. Queued calls respect the same boundary; quota failures do not cause restart storms.
 - Completed original-local foreground work can prove launcher closure from exact authenticated
   completion chains plus fresh producer/host and reserved-scope observations. Missing, partial or
   conflicting evidence still blocks recovery; no service identity or command output is invented.

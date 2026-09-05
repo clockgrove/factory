@@ -854,6 +854,13 @@ async function adopted(
 }
 
 describe("explicit adopted-source integration outcomes", () => {
+  it("verifies exact source outcomes with a frozen read capability object", async () => {
+    const f = await adopted();
+    Object.freeze(f.input.store);
+    expect(await f.verify()).toMatchObject({ status: "verified", executionAuthorized: false });
+    f.refs.delete(f.input.planRecord.ref);
+    expect(await f.verify()).toMatchObject({ status: "blocked" });
+  });
   it("requires an already-integrated source merge to remain in the adopted base ancestry", async () => {
     expect(await (await adopted(false, false, true)).verify()).toMatchObject({
       status: "verified",

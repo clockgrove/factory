@@ -19,7 +19,7 @@ import type { RecoveryReadStore } from "./assessment.js";
 import { verifyRecoveryChain } from "./chain.js";
 import { loadRecoveryClaim, type RecoveryClaimRecord } from "./claims.js";
 import { resolveRecoveryEvidence, type RecoveryEvidenceResolution } from "./evidence.js";
-import { recoveryClaimRef, recoveryEventDigest } from "./identity.js";
+import { recoveryClaimRef, createRecoveryEventDigest } from "./identity.js";
 import { loadRecoveryPlan, type RecoveryPlanRecord } from "./plan.js";
 import { recoveryAdoptionEvents } from "./transaction.js";
 import {
@@ -94,19 +94,21 @@ function requireRuntime(condition: unknown, code: string): asserts condition {
   if (!condition) throw new RuntimeBindingError(code);
 }
 
-function boundedReadStore(store: RecoveryReadStore): RecoveryReadStore {
+export function boundedReadStore(store: RecoveryReadStore): RecoveryReadStore {
   let reads = 0;
   const cache = new Map<string, Promise<unknown>>();
-  return new Proxy(store, {
-    get(target, property, receiver) {
-      const operation = Reflect.get(target, property, receiver);
+  // The capability port is frozen. Proxy an empty facade so wrapping a bound
+  // method cannot violate the target's non-configurable property invariants.
+  return new Proxy({} as RecoveryReadStore, {
+    get(_target, property) {
+      const operation = Reflect.get(store, property, store);
       if (typeof operation !== "function") return operation;
       return (...args: unknown[]) => {
         const key = JSON.stringify([property, args]);
         const previous = cache.get(key);
         if (previous) return previous;
         requireRuntime(++reads <= 1024, "runtime-read-bound");
-        const pending = Promise.resolve().then(() => Reflect.apply(operation, target, args));
+        const pending = Promise.resolve().then(() => Reflect.apply(operation, store, args));
         cache.set(key, pending);
         return pending;
       };
@@ -126,6 +128,7 @@ export async function loadRecoveryRuntime(input: {
   store: RecoveryReadStore;
   readSnapshot(): Promise<{ snapshot: FactoryReadSnapshot; historyComplete: boolean }>;
 }): Promise<RecoveryRuntimeResult> {
+  const recoveryEventDigest = createRecoveryEventDigest();
   try {
     input = { ...input, store: boundedReadStore(input.store) };
     const { snapshot, historyComplete } = await input.readSnapshot();
@@ -245,11 +248,13 @@ export async function loadRecoveryRuntime(input: {
         authenticatedRequest: r[0]!,
         predecessorStart: s,
       });
-      for (const envelope of expected)
+      for (const envelope of expected) {
+        const expectedDigest = recoveryEventDigest(envelope);
         requireRuntime(
-          events.some((event) => recoveryEventDigest(event) === recoveryEventDigest(envelope)),
+          events.some((event) => recoveryEventDigest(event) === expectedDigest),
           "adoption-envelope-missing-or-conflicting",
         );
+      }
       requireRuntime(
         events.filter(
           (event) =>

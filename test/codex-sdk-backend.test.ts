@@ -106,6 +106,47 @@ async function waitUntilGone(pid: number): Promise<void> {
 }
 
 describe("Codex SDK local backend", () => {
+  it.each([true, false])(
+    "exposes only actual usage available while cancellation drains (reported=%s)",
+    async (reported) => {
+      const fixture = await repositoryFixture();
+      const backend = new CodexSdkLocalBackend({
+        authFile: fixture.authFile,
+        createClient: () => ({
+          startThread: () => ({
+            id: null,
+            runStreamed: async (_prompt, options) => ({
+              events: (async function* () {
+                if (!options?.signal?.aborted)
+                  await new Promise<void>((resolve) =>
+                    options?.signal?.addEventListener("abort", () => resolve(), { once: true }),
+                  );
+                if (reported)
+                  yield {
+                    type: "turn.completed",
+                    usage: { input_tokens: 9, output_tokens: 4, cached_input_tokens: 2 },
+                  } as ThreadEvent;
+              })(),
+            }),
+          }),
+        }),
+      });
+      const handle = await backend.launch(context(fixture.repository, fixture.baseSha));
+      try {
+        await backend.cancel(handle);
+        expect(await backend.observe(handle)).toMatchObject({
+          state: "cancelled",
+          usage: reported
+            ? { inputTokens: 9, outputTokens: 4, cachedInputTokens: 2 }
+            : { inputTokens: null, outputTokens: null, cachedInputTokens: null },
+        });
+      } finally {
+        await backend.cleanup(handle);
+        await rm(fixture.repository, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("advertises the release's Linux runtime boundary", () => {
     expect(new CodexSdkLocalBackend().capabilities.supportedOs).toEqual(["linux"]);
   });

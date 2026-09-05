@@ -6,6 +6,7 @@ import { loadRecoveryClaim } from "./claims.js";
 import { recoveryEventDigest } from "./identity.js";
 import { loadRecoveryPlan, type RecoveryPlanRecord } from "./plan.js";
 import { verifyRecoverySourceIntegration } from "./outcomes.js";
+import { nativePublicationStackNumber } from "./native-source-stacks.js";
 
 function requireTransition(value: unknown): asserts value {
   if (!value) throw new Error("native source transition evidence unavailable");
@@ -64,9 +65,14 @@ export async function observeRecoveryNativeTransition(input: {
           stackNumber: restored.stackNumber ?? null,
         }
       : null);
-  requireTransition(
-    publication?.mode === "native-stacks" && publication.stackNumber && input.store.readStack,
-  );
+  const original = source.publication
+    ? input.events.find((event) => recoveryEventDigest(event) === source.publication!.receiptDigest)
+    : null;
+  const stackNumber =
+    original?.kind === "publication"
+      ? nativePublicationStackNumber(original, input.events)
+      : publication?.stackNumber;
+  requireTransition(publication?.mode === "native-stacks" && stackNumber && input.store.readStack);
   if (!source.publication)
     requireTransition(
       restored?.event === "RecoverySourcePublished" &&
@@ -144,20 +150,20 @@ export async function observeRecoveryNativeTransition(input: {
   );
   const targetBaseSha = lowerProof.outcome.mergeCommitSha;
   requireTransition(pull.baseSha === targetBaseSha);
-  const original = await input.store.readCommit(publication.headSha);
+  const originalHead = await input.store.readCommit(publication.headSha);
   const head = await input.store.readCommit(pull.headSha);
   requireTransition(
-    original.oid === publication.headSha &&
-      original.treeOid === source.validation.outputTreeSha &&
+    originalHead.oid === publication.headSha &&
+      originalHead.treeOid === source.validation.outputTreeSha &&
       head.oid === pull.headSha &&
       head.parentOids.length === 1 &&
       head.parentOids[0] === targetBaseSha &&
-      head.treeOid === original.treeOid,
+      head.treeOid === originalHead.treeOid,
   );
-  const stack = await input.store.readStack(publication.stackNumber);
+  const stack = await input.store.readStack(stackNumber);
   const current = stack.pullRequests.find((entry) => entry.number === publication.pullRequest);
   requireTransition(
-    stack.number === publication.stackNumber &&
+    stack.number === stackNumber &&
       stack.baseRef === plan.baseBranch &&
       current &&
       current.headSha === pull.headSha &&

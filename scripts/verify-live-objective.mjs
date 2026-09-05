@@ -1,17 +1,212 @@
 /** Opt-in installed-plugin Supervisor exercise; never part of offline release checks. */
 import assert from "node:assert/strict";
+import { deduplicateQualificationReceipts } from "./qualification-receipts.mjs";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { setTimeout as sleep } from "node:timers/promises";
 import { Octokit } from "@octokit/core";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const localBackends = ["codex-sdk/local-worktree", "codex-cli/local-worktree"];
+const minimumGitHubQuota = 1_000;
+const minimumModelTokens = 250_000;
+const maximumModelTokens = 500_000;
+const namespacePattern = /^[a-z](?:[a-z0-9-]{6,46}[a-z0-9])$/;
+
+export function qualificationNamespace(value, generate = randomUUID) {
+  const namespace = value?.trim() || `q-${generate()}`;
+  assert.match(
+    namespace,
+    namespacePattern,
+    "qualification namespace must be 8-48 lowercase letters, digits, or internal hyphens",
+  );
+  return namespace;
+}
+
+export function qualificationPaths(namespace) {
+  assert.match(namespace, namespacePattern, "invalid qualification namespace");
+  const sourceDirectory = `src/factory-qualification/${namespace}`;
+  const testDirectory = `test/factory-qualification/${namespace}`;
+  return {
+    sourceDirectory,
+    testDirectory,
+    files: ["clamp", "slugify", "describe"].flatMap((name) => [
+      `${sourceDirectory}/${name}.js`,
+      `${testDirectory}/${name}.test.js`,
+    ]),
+  };
+}
+
+export function qualificationNamespaceMarker(namespace) {
+  assert.match(namespace, namespacePattern, "invalid qualification namespace");
+  return `<!-- clockgrove-factory:qualification-namespace=${namespace} -->`;
+}
+
+export async function waitForCreatedObjectiveNamespace({
+  list,
+  namespace,
+  createdIssue,
+  wait = sleep,
+}) {
+  const marker = qualificationNamespaceMarker(namespace);
+  assert.ok(
+    Number.isSafeInteger(createdIssue.number) &&
+      createdIssue.number > 0 &&
+      Number.isSafeInteger(createdIssue.id) &&
+      createdIssue.id > 0 &&
+      !createdIssue.pull_request &&
+      createdIssue.body?.includes(marker),
+    "created Objective identity or qualification namespace is invalid",
+  );
+  // Creation is single-shot. Only a successful empty namespace observation may
+  // be retried; lookup failures and conflicting identities never mean absence.
+  const delays = [1_000, 2_000, 4_000, 8_000];
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    const issues = await list("GET /repos/{owner}/{repo}/issues", { state: "all" }, 1_000);
+    assert.ok(Array.isArray(issues), "namespace issue lookup must return an array");
+    for (const issue of issues)
+      assert.ok(
+        issue &&
+          Number.isSafeInteger(issue.number) &&
+          issue.number > 0 &&
+          Number.isSafeInteger(issue.id) &&
+          issue.id > 0 &&
+          (issue.body === null || typeof issue.body === "string"),
+        "namespace issue lookup returned an unknown issue shape",
+      );
+    const matching = issues.filter((issue) => !issue.pull_request && issue.body?.includes(marker));
+    if (matching.length > 0) {
+      assert.deepEqual(
+        matching.map((issue) => ({ number: issue.number, id: issue.id })),
+        [{ number: createdIssue.number, id: createdIssue.id }],
+        "qualification namespace is not uniquely bound to the created Objective",
+      );
+      return;
+    }
+    if (attempt < delays.length) await wait(delays[attempt]);
+  }
+  assert.fail("created Objective qualification namespace is not visible after five bounded reads");
+}
+
+export function installedPluginPath({ listed, codexHome, requestedRoot }) {
+  const matches = (listed.installed ?? []).filter(
+    (entry) =>
+      entry.name === "factory" &&
+      entry.installed === true &&
+      entry.enabled === true &&
+      typeof entry.version === "string" &&
+      typeof entry.marketplaceName === "string" &&
+      /^[\w.-]+$/.test(entry.marketplaceName) &&
+      entry.pluginId === `factory@${entry.marketplaceName}`,
+  );
+  assert.equal(matches.length, 1, "one enabled installed Factory plugin is required");
+  const entry = matches[0];
+  const path = join(
+    resolve(codexHome),
+    "plugins",
+    "cache",
+    entry.marketplaceName,
+    "factory",
+    entry.version,
+  );
+  if (requestedRoot)
+    assert.equal(
+      resolve(requestedRoot),
+      path,
+      "requested plugin root differs from installed receipt",
+    );
+  return path;
+}
+
+export function installedBundleIdentity(pluginRoot) {
+  const root = realpathSync(pluginRoot);
+  assert.ok(
+    root !== sourceRoot && !root.startsWith(`${sourceRoot}${sep}`),
+    "development worktree is not an installation",
+  );
+  const packageManifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const inventoryPath = realpathSync(join(root, "dist", "bundle-inventory.json"));
+  assert.ok(inventoryPath.startsWith(`${root}${sep}`), "installed inventory escapes its artifact");
+  const inventoryBytes = readFileSync(inventoryPath);
+  const inventory = JSON.parse(inventoryBytes.toString("utf8"));
+  assert.equal(inventory.protocol, "clockgrove.factory/bundle-inventory-v1");
+  assert.ok(Array.isArray(inventory.bundles), "installed bundle inventory is missing");
+  const bundles = [];
+  for (const file of ["factory.js", "mcp-server.js"]) {
+    const records = inventory.bundles.filter((entry) => entry.file === file);
+    assert.equal(records.length, 1, `missing or duplicate installed ${file} identity`);
+    const path = realpathSync(join(root, "dist", file));
+    assert.ok(path.startsWith(`${root}${sep}`), `installed ${file} escapes its artifact`);
+    const bytes = readFileSync(path);
+    assert.equal(records[0].bytes, bytes.length, `installed ${file} byte count differs`);
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    assert.equal(records[0].sha256, digest, `installed ${file} digest differs`);
+    bundles.push({ file, bytes: bytes.length, sha256: digest });
+  }
+  return {
+    version: packageManifest.version,
+    inventorySha256: createHash("sha256").update(inventoryBytes).digest("hex"),
+    bundles,
+  };
+}
+
+export function modelTokenLimit(value) {
+  assert.match(value ?? "", /^[1-9]\d*$/, "explicit model-token limit required");
+  const limit = Number(value);
+  assert.ok(
+    Number.isSafeInteger(limit) && limit >= minimumModelTokens && limit <= maximumModelTokens,
+    `model-token limit must be ${minimumModelTokens}-${maximumModelTokens}`,
+  );
+  return limit;
+}
+
+export function assessQualificationPreflight(input) {
+  const blockers = [];
+  if (input.checkout?.clean !== true) blockers.push("checkout-is-not-clean");
+  if (input.checkout?.headMatchesDefault !== true)
+    blockers.push("checkout-head-differs-from-default-branch");
+  if (input.checkout?.fixturePathsAbsent !== true)
+    blockers.push("qualification-output-paths-already-exist");
+  if (input.harness?.sourceTreeClean !== true)
+    blockers.push("qualification-harness-is-not-committed");
+  if (input.harness?.candidateInventorySha256 !== input.installedArtifact?.inventorySha256)
+    blockers.push("installed-bundle-differs-from-qualification-candidate");
+  if ((input.namespaceIssues ?? []).length > 0)
+    blockers.push("qualification-namespace-already-exists");
+  if (input.repository?.private !== true) blockers.push("qualification-repository-must-be-private");
+  if (input.repository?.archived || input.repository?.permissions?.push !== true)
+    blockers.push("repository-is-not-writable");
+  if (input.branch?.protected) blockers.push("default-branch-is-protected");
+  if ((input.rulesets ?? []).some((ruleset) => ruleset.enforcement === "active"))
+    blockers.push("active-repository-ruleset");
+  if ((input.openFactoryPulls ?? []).length > 0)
+    blockers.push("prior-factory-pull-requests-remain-open");
+  for (const plane of ["core", "graphql"])
+    if (!Number.isSafeInteger(input.rateLimit?.[plane]?.remaining))
+      blockers.push(`${plane}-quota-unavailable`);
+    else if (input.rateLimit[plane].remaining < minimumGitHubQuota)
+      blockers.push(`${plane}-quota-below-${minimumGitHubQuota}`);
+  return {
+    result: blockers.length === 0 ? "passed" : "blocked",
+    blockers,
+    requiredMinimumRemaining: { core: minimumGitHubQuota, graphql: minimumGitHubQuota },
+  };
+}
 
 export function installedIdentity({
   manifest,
@@ -85,15 +280,24 @@ export function assertMcpSurface(tools) {
   }
 }
 
-export const objectiveBody = `Build three tiny dependency-free ESM modules with node:test tests.
+export function objectiveBodyFor(namespace) {
+  const paths = qualificationPaths(namespace);
+  return `Build three tiny dependency-free ESM modules with node:test tests.
+
+Qualification namespace: ${namespace}
+${qualificationNamespaceMarker(namespace)}
 
 Compile three Work Items: two independent foundational modules, followed by one integration module that depends on both. Use native blocked-by relationships for that final Work Item. Keep each module and its own tests in its Work Item's allowed paths. Do not modify package.json or existing tests.
 
-1. src/clamp.js exports clamp(value, min, max): return value bounded inclusively to min and max; throw RangeError when min > max. Add test/clamp.test.js covering below, within, above, equal bounds, and inverted bounds.
-2. src/slugify.js exports slugify(text): lowercase ASCII text, replace each run of non-ASCII-alphanumeric characters with one hyphen, remove leading and trailing hyphens. Add test/slugify.test.js covering spaces, punctuation, repeated separators, empty input, and uppercase.
-3. src/describe.js imports those two modules and exports describe(name, value, min, max), returning slugify(name) + ':' + clamp(value, min, max). Add test/describe.test.js: describe(' Hello World ', 12, 0, 10) equals 'hello-world:10', and inverted bounds propagate RangeError.
+1. ${paths.sourceDirectory}/clamp.js exports clamp(value, min, max): return value bounded inclusively to min and max; throw RangeError when min > max. Add ${paths.testDirectory}/clamp.test.js covering below, within, above, equal bounds, and inverted bounds.
+2. ${paths.sourceDirectory}/slugify.js exports slugify(text): lowercase ASCII text, replace each run of non-ASCII-alphanumeric characters with one hyphen, remove leading and trailing hyphens. Add ${paths.testDirectory}/slugify.test.js covering spaces, punctuation, repeated separators, empty input, and uppercase.
+3. ${paths.sourceDirectory}/describe.js imports those two modules and exports describe(name, value, min, max), returning slugify(name) + ':' + clamp(value, min, max). Add ${paths.testDirectory}/describe.test.js: describe(' Hello World ', 12, 0, 10) equals 'hello-world:10', and inverted bounds propagate RangeError.
 
-Use node --test test/<module>.test.js as each foundation's independent validation, and npm test for the final integration. No dependencies, services, credentials, cloud workers, workflows, or network access are needed by these modules. Preserve the existing repository. Complete publication, independent validation, integration, and issue closure through Factory.`;
+Use node --test ${paths.testDirectory}/<module>.test.js as each foundation's independent validation, and npm test for the final integration. No dependencies, services, credentials, cloud workers, workflows, or network access are needed by these modules. Preserve all existing modules and tests. Complete publication, independent validation, integration, and issue closure through Factory.`;
+}
+
+/** Legacy fixture constant retained for pure retry-boundary tests; live runs always use a namespace. */
+export const objectiveBody = objectiveBodyFor("legacy-qualification");
 
 export function assertRetryableObjective({ issue, actorId, status, children, events, runId }) {
   assert.equal(issue.state, "open", "retry requires an open Objective");
@@ -126,8 +330,14 @@ export function assertRetryableObjective({ issue, actorId, status, children, eve
   );
 }
 
-export function boundedPolicy(delivery = "regular-prs") {
+export function boundedPolicy(delivery = "stacked-prs", maxModelTokens = maximumModelTokens) {
   assert.ok(["regular-prs", "stacked-prs"].includes(delivery), "unsupported delivery mode");
+  assert.ok(
+    Number.isSafeInteger(maxModelTokens) &&
+      maxModelTokens >= minimumModelTokens &&
+      maxModelTokens <= maximumModelTokens,
+    "model-token limit is outside qualification bounds",
+  );
   return {
     backendOrder: localBackends,
     maxParallel: 2,
@@ -142,14 +352,14 @@ export function boundedPolicy(delivery = "regular-prs") {
     managementBackend: "codex-cli/local",
     allowedNetworkDestinations: ["api.openai.com"],
     economics: {
-      maxModelTokens: 150_000,
+      maxModelTokens,
       maxSandboxMinutes: 0,
       maxManagedSessions: 0,
       minCloudTimeSavedMinutes: 0,
     },
     delivery: {
       mode: delivery,
-      onUnavailable: "regular-prs",
+      onUnavailable: "escalate",
       merge: "bottom-up",
     },
     capacity: {
@@ -418,7 +628,7 @@ export function assertCompletion(evidence, allowedBackends = localBackends) {
 /** Pure assessment of captured evidence, not a live authentication or provider-leak audit. */
 export function assessCompletion(evidence) {
   try {
-    assertCompletion(evidence);
+    assertQualificationCompletion(evidence);
     return { result: "passed", scope: "installed-local-objective-happy-path" };
   } catch (error) {
     return {
@@ -429,6 +639,208 @@ export function assessCompletion(evidence) {
       reason: (error instanceof Error ? error.message : String(error)).slice(0, 2000),
     };
   }
+}
+
+export function assertQualificationNamespace(evidence) {
+  const namespace = qualificationNamespace(evidence.qualificationNamespace);
+  const paths = qualificationPaths(namespace);
+  assert.equal(
+    evidence.preflight?.qualificationNamespace,
+    namespace,
+    "preflight namespace differs from executed qualification",
+  );
+  assert.deepEqual(
+    evidence.fixturePaths,
+    paths,
+    "evidence paths differ from qualification namespace",
+  );
+  assert.deepEqual(evidence.preflight?.namespaceIssues, [], "qualification namespace collided");
+  assert.ok(
+    evidence.objective?.body?.includes(qualificationNamespaceMarker(namespace)) &&
+      paths.files.every((path) => evidence.objective.body.includes(path)),
+    "executed Objective does not retain its exact qualification namespace",
+  );
+}
+
+export function assertQualificationCompletion(
+  evidence,
+  deliveryMode = "stacked-prs",
+  allowedBackends = localBackends,
+) {
+  assert.ok(
+    ["stacked-prs", "regular-prs"].includes(deliveryMode),
+    "unsupported qualification mode",
+  );
+  assert.ok(
+    JSON.stringify(allowedBackends) === JSON.stringify(localBackends) ||
+      (deliveryMode === "regular-prs" &&
+        JSON.stringify(allowedBackends) === JSON.stringify(["codex-cli/local-worktree"])),
+    "unsupported qualification backend route",
+  );
+  assertCompletion(evidence, allowedBackends);
+  assertQualificationNamespace(evidence);
+  assert.equal(
+    evidence.preflight?.harness?.candidateInventorySha256,
+    evidence.installedArtifact?.inventorySha256,
+    "installed bundle is not the qualification candidate",
+  );
+  assert.deepEqual(
+    evidence.finishedInstalledArtifact,
+    evidence.installedArtifact,
+    "installed bundle changed during qualification",
+  );
+  const runId = evidence.runResult.runId;
+  const rawEvents = evidence.events.filter((event) => event.runId === runId);
+  assert.ok(Number.isSafeInteger(evidence.actor?.id) && evidence.actor.id > 0, "actor ID missing");
+  assert.ok(
+    rawEvents.every(
+      (event) =>
+        event.authorId === evidence.actor.id &&
+        event.author?.toLowerCase() === evidence.actor.login?.toLowerCase() &&
+        typeof event.receiptUrl === "string" &&
+        event.receiptUrl.startsWith(`https://github.com/${evidence.repository}/`),
+    ),
+    "run receipt lacks the authenticated GitHub actor or location",
+  );
+  const events = deduplicateQualificationReceipts(
+    rawEvents.map((event) => {
+      const envelope = { ...event };
+      delete envelope.receiptUrl;
+      delete envelope.author;
+      delete envelope.authorId;
+      return { event: envelope };
+    }),
+  ).map(({ event }) => event);
+  const starts = events.filter((event) => event.event === "FactoryRunStarted");
+  const completions = events.filter((event) => event.event === "FactoryRunCompleted");
+  assert.equal(starts.length, 1, "exactly one authenticated run start is required");
+  assert.equal(completions.length, 1, "exactly one authenticated run completion is required");
+  assert.equal(starts[0].actor?.toLowerCase(), evidence.actor.login.toLowerCase());
+  assert.equal(starts[0].repository?.toLowerCase(), evidence.repository.toLowerCase());
+  assert.deepEqual(starts[0].policy?.backendOrder, allowedBackends, "run backend policy changed");
+  assert.equal(starts[0].policy?.maxParallel, 2, "run parallel bound changed");
+  assert.deepEqual(starts[0].policy?.allowedPaidBackends, [], "paid backend authority appeared");
+  assert.equal(starts[0].policy?.maxSandboxMinutes, 0, "sandbox authority appeared");
+  assert.equal(starts[0].policy?.maxManagedAgentSessions, 0, "managed authority appeared");
+  assert.equal(
+    starts[0].policy?.economics?.maxModelTokens,
+    evidence.policy.economics.maxModelTokens,
+    "durable model-token ceiling differs from requested policy",
+  );
+  assert.equal(evidence.status.run.policyDigest, starts[0].policyDigest, "status policy differs");
+
+  assert.equal(evidence.children.length, 3, "qualification requires exactly three Work Items");
+  const roots = evidence.dependencies.filter((entry) => entry.blockedBy.length === 0);
+  const joins = evidence.dependencies.filter((entry) => entry.blockedBy.length === 2);
+  assert.equal(roots.length, 2, "qualification requires exactly two independent roots");
+  assert.equal(joins.length, 1, "qualification requires exactly one two-parent join");
+  assert.deepEqual(
+    joins[0].blockedBy.map((item) => item.number).sort((a, b) => a - b),
+    roots.map((item) => item.workItem).sort((a, b) => a - b),
+    "join does not depend on both independent roots",
+  );
+  const delivery = events.filter((event) => event.event === "DeliverySelected");
+  assert.equal(delivery.length, 1, "exactly one delivery selection is required");
+  const selectedMode = deliveryMode === "stacked-prs" ? "native-stacks" : "regular-prs";
+  assert.equal(
+    delivery[0].requested,
+    deliveryMode,
+    "requested native delivery or explicit regular delivery differs",
+  );
+  assert.equal(
+    delivery[0].selected,
+    selectedMode,
+    "selected native delivery or explicit regular delivery differs",
+  );
+  assert.ok(
+    events
+      .filter((event) => event.event === "PublicationRecorded")
+      .every((event) => event.mode === selectedMode),
+    "publication escaped selected delivery mode",
+  );
+  const attemptStarts = events.filter((event) => event.event === "AttemptStarted");
+  const attemptSuccesses = events.filter((event) => event.event === "AttemptSucceeded");
+  if (deliveryMode === "regular-prs") {
+    const admissions = events.filter((event) =>
+      ["AttemptReserved", "AttemptStarted"].includes(event.event),
+    );
+    const seen = new Set();
+    for (const admission of admissions) {
+      for (const prior of seen)
+        if (prior !== admission.workItem)
+          assert.ok(
+            events.some(
+              (event) =>
+                event.event === "AttemptIntegrated" &&
+                event.workItem === prior &&
+                event.sequence < admission.sequence,
+            ),
+            "regular Work Item admitted before previous pipeline integrated",
+          );
+      seen.add(admission.workItem);
+    }
+  } else
+    for (const root of roots) {
+      const start = attemptStarts.find((event) => event.workItem === root.workItem);
+      assert.ok(start, `root Work Item #${root.workItem} did not start`);
+      assert.ok(
+        roots
+          .filter((other) => other.workItem !== root.workItem)
+          .every((other) =>
+            attemptSuccesses.some(
+              (success) => success.workItem === other.workItem && success.sequence > start.sequence,
+            ),
+          ),
+        "independent sibling attempt lifecycles did not overlap",
+      );
+    }
+
+  const modelReceipts = events.filter(
+    (event) => event.event === "BudgetReconciled" && event.unit === "model_tokens",
+  );
+  assert.ok(modelReceipts.length >= 7, "too few attributable model-call receipts");
+  assert.ok(
+    modelReceipts.every(
+      (event) => typeof event.usageId === "string" && event.usageId.length > 0 && event.amount > 0,
+    ),
+    "model usage lacks a positive, stable call identity",
+  );
+  const latestModelCalls = new Map(
+    modelReceipts.map((event) => [
+      JSON.stringify([
+        event.workItem ?? "management",
+        event.attempt ?? "management",
+        event.phase,
+        event.unit,
+        event.usageId,
+      ]),
+      event,
+    ]),
+  );
+  const modelTokens = [...latestModelCalls.values()].reduce((sum, event) => sum + event.amount, 0);
+  const economics = evidence.status.summary.economics;
+  assert.equal(economics.usage.model_tokens?.availability, "observed");
+  assert.equal(
+    economics.usage.model_tokens?.value,
+    modelTokens,
+    "status model usage is not attributable to the captured GitHub receipts",
+  );
+  assert.equal(
+    economics.budgets.modelTokens?.value?.configured,
+    evidence.policy.economics.maxModelTokens,
+    "status model-token ceiling differs",
+  );
+  assert.equal(
+    economics.budgets.modelTokens?.value?.committed,
+    modelTokens,
+    "status model-token commitment differs",
+  );
+  for (const unit of ["local_milliseconds", "validation_milliseconds"])
+    assert.equal(
+      economics.usage[unit]?.availability,
+      "observed",
+      `${unit} usage is not attributable to GitHub receipts`,
+    );
 }
 
 function required(name) {
@@ -446,44 +858,93 @@ function run(command, args, cwd) {
   assert.equal(result.status, 0, `${command} failed: ${result.stderr}`);
   return result.stdout.trim();
 }
-function sha256(path) {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
+/** Invoke once; a failed observer never retries an uncertain foreground request. */
+export async function runQualificationCall({ invoke, duringRun, hooks }) {
+  const run = invoke();
+  if (!duringRun) return await run;
+  const observer = new AbortController();
+  try {
+    const [result] = await Promise.all([
+      run,
+      duringRun({ ...hooks, run, signal: observer.signal }),
+    ]);
+    return result;
+  } finally {
+    // A failed/uncertain original call must not leave a delayed observer free to
+    // perform another intervention. This never retries or cancels the run.
+    observer.abort();
+  }
+}
+
+/** Distinct negative qualifiers supply their own final artifact boundary. The
+ * ordinary/native path always retains its original fresh merged-tree verifier. */
+export async function verifyQualificationFinalArtifact({ verifier, defaultVerifier, hooks }) {
+  await (verifier ?? defaultVerifier)(hooks);
 }
 
 export async function main(qualification = {}) {
-  if (process.env.FACTORY_LIVE_OBJECTIVE !== "1") {
+  const preflightOnly = process.env.FACTORY_LIVE_OBJECTIVE_PREFLIGHT === "1";
+  if (process.env.FACTORY_LIVE_OBJECTIVE !== "1" && !preflightOnly) {
     console.log(
-      "Not exercised: set FACTORY_LIVE_OBJECTIVE=1 and explicit disposable-repository inputs.",
+      "Not exercised: set FACTORY_LIVE_OBJECTIVE_PREFLIGHT=1 or FACTORY_LIVE_OBJECTIVE=1.",
     );
     return;
   }
   assert.equal(process.platform, "linux", "live Objective harness requires Linux");
+  assert.equal(
+    process.env.FACTORY_LIVE_OBJECTIVE_NUMBER,
+    undefined,
+    "installed qualification never revives a prior Objective",
+  );
+  assert.equal(
+    process.env.FACTORY_LIVE_OBJECTIVE_PRIOR_RUN_ID,
+    undefined,
+    "installed qualification never reuses a terminal run",
+  );
+  const namespace = qualificationNamespace(
+    qualification.namespace ?? process.env.FACTORY_LIVE_OBJECTIVE_NAMESPACE,
+  );
+  const fixturePaths = qualificationPaths(namespace);
+  const runObjectiveBody = qualification.objectiveBody ?? objectiveBodyFor(namespace);
+  assert.ok(
+    runObjectiveBody.includes(qualificationNamespaceMarker(namespace)) &&
+      fixturePaths.files.every((path) => runObjectiveBody.includes(path)),
+    "Objective body does not retain its exact qualification namespace",
+  );
   const repository = required("FACTORY_LIVE_OBJECTIVE_REPOSITORY");
   assert.match(repository, /^[\w.-]+\/[\w.-]+$/);
   assert.notEqual(repository.toLowerCase(), "clockgrove/factory", "use a disposable repository");
-  assert.equal(
-    required("FACTORY_LIVE_OBJECTIVE_MUTATION_ACK"),
-    repository,
-    "acknowledge the exact disposable repository",
-  );
+  if (!preflightOnly)
+    assert.equal(
+      required("FACTORY_LIVE_OBJECTIVE_MUTATION_ACK"),
+      repository,
+      "acknowledge the exact disposable repository",
+    );
   const [owner, repo] = repository.split("/");
   const checkout = realpathSync(required("FACTORY_LIVE_OBJECTIVE_CHECKOUT"));
   assert.ok(!checkout.startsWith("/mnt/"), "checkout must reside on the Linux filesystem");
-  assert.equal(run("git", ["status", "--porcelain"], checkout), "", "fixture must start clean");
-  for (const name of ["clamp", "slugify", "describe"]) {
-    assert.ok(
-      !existsSync(join(checkout, "src", `${name}.js`)) &&
-        !existsSync(join(checkout, "test", `${name}.test.js`)),
-      "use a fresh fixture without previous Objective output",
-    );
-  }
+  const checkoutClean = run("git", ["status", "--porcelain"], checkout) === "";
+  const fixturePathsAbsent = fixturePaths.files.every((path) => !existsSync(join(checkout, path)));
   const origin = run("git", ["remote", "get-url", "origin"], checkout).replace(/\.git$/, "");
   assert.ok(
     origin === `https://github.com/${repository}` || origin === `git@github.com:${repository}`,
     "checkout origin differs from approved repository",
   );
-  const pluginRoot = realpathSync(required("FACTORY_LIVE_OBJECTIVE_PLUGIN_ROOT"));
-  const codexHome = realpathSync(process.env.CODEX_HOME || join(homedir(), ".codex"));
+  const codexHome = realpathSync(join(homedir(), ".codex"));
+  if (process.env.CODEX_HOME)
+    assert.equal(
+      realpathSync(process.env.CODEX_HOME),
+      codexHome,
+      "unset non-Linux-home CODEX_HOME for installed qualification",
+    );
+  const listed = JSON.parse(run("codex", ["plugin", "list", "--json"], checkout));
+  const pluginRoot = realpathSync(
+    installedPluginPath({
+      listed,
+      codexHome,
+      requestedRoot: process.env.FACTORY_LIVE_OBJECTIVE_PLUGIN_ROOT?.trim(),
+    }),
+  );
   assert.ok(
     pluginRoot.startsWith(`${join(codexHome, "plugins", "cache")}${sep}`),
     "use the plugin installed in this Codex home's cache",
@@ -493,7 +954,6 @@ export async function main(qualification = {}) {
     "development worktree is not an installation",
   );
   const manifest = JSON.parse(readFileSync(join(pluginRoot, ".codex-plugin/plugin.json"), "utf8"));
-  const listed = JSON.parse(run("codex", ["plugin", "list", "--json"], checkout));
   const identity = installedIdentity({
     manifest,
     listed,
@@ -502,6 +962,20 @@ export async function main(qualification = {}) {
     portable: JSON.parse(readFileSync(join(pluginRoot, "plugin.json"), "utf8")),
     packageManifest: JSON.parse(readFileSync(join(pluginRoot, "package.json"), "utf8")),
   });
+  const artifact = installedBundleIdentity(pluginRoot);
+  assert.equal(artifact.version, identity.version, "installed inventory version differs");
+  const candidateInventorySha256 = createHash("sha256")
+    .update(readFileSync(join(sourceRoot, "dist", "bundle-inventory.json")))
+    .digest("hex");
+  const harness = {
+    sourceCommit: run("git", ["rev-parse", "HEAD"], sourceRoot),
+    sourceTreeClean:
+      run("git", ["status", "--porcelain", "--untracked-files=no"], sourceRoot) === "",
+    candidateInventorySha256,
+  };
+  const modelTokenCeiling =
+    qualification.policy?.economics?.maxModelTokens ??
+    modelTokenLimit(required("FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS"));
   const mcp = manifest.mcpServers?.factory;
   assert.equal(mcp?.command, "node");
   const token =
@@ -512,7 +986,7 @@ export async function main(qualification = {}) {
   });
   const request = (route, parameters = {}) =>
     octokit.request(route, { owner, repo, ...parameters });
-  const list = async (route, parameters = {}) => {
+  const list = async (route, parameters = {}, maximumEntries = Number.MAX_SAFE_INTEGER) => {
     const results = [];
     for (let page = 1; ; page++) {
       const { data } = await request(route, {
@@ -522,40 +996,129 @@ export async function main(qualification = {}) {
       });
       assert.ok(Array.isArray(data), "paginated GitHub response must be an array");
       results.push(...data);
+      assert.ok(results.length <= maximumEntries, "paginated GitHub observation bound exceeded");
       if (data.length < 100) return results;
     }
   };
   const info = (await request("GET /repos/{owner}/{repo}")).data;
   const actor = (await octokit.request("GET /user")).data;
-  assert.ok(!info.archived && info.permissions?.push, "target must permit fixture integration");
   const base = (
     await request("GET /repos/{owner}/{repo}/commits/{ref}", {
       ref: info.default_branch,
     })
   ).data.sha;
-  assert.equal(
-    run("git", ["rev-parse", "HEAD"], checkout),
+  const checkoutHead = run("git", ["rev-parse", "HEAD"], checkout);
+  const branch = (
+    await request("GET /repos/{owner}/{repo}/branches/{branch}", { branch: info.default_branch })
+  ).data;
+  const rulesets = await list("GET /repos/{owner}/{repo}/rulesets");
+  const workflows = (
+    await request("GET /repos/{owner}/{repo}/actions/workflows", { per_page: 100 })
+  ).data.workflows;
+  const repositoryIssues = await list("GET /repos/{owner}/{repo}/issues", { state: "all" }, 1_000);
+  const namespaceMarker = qualificationNamespaceMarker(namespace);
+  const namespaceIssues = repositoryIssues
+    .filter((issue) => !issue.pull_request && issue.body?.includes(namespaceMarker))
+    .map((issue) => ({ number: issue.number, state: issue.state, title: issue.title }));
+  const openFactoryPulls = (await list("GET /repos/{owner}/{repo}/pulls", { state: "open" }))
+    .filter((pull) => pull.head?.ref?.startsWith("factory/"))
+    .map((pull) => ({ number: pull.number, head: pull.head.ref, title: pull.title }));
+  const rateLimit = (await octokit.request("GET /rate_limit")).data.resources;
+  const preflight = {
+    ...assessQualificationPreflight({
+      checkout: {
+        clean: checkoutClean,
+        headMatchesDefault: checkoutHead === base,
+        fixturePathsAbsent,
+      },
+      harness,
+      installedArtifact: artifact,
+      namespaceIssues,
+      repository: info,
+      branch,
+      rulesets,
+      workflows,
+      openFactoryPulls,
+      rateLimit,
+    }),
+    observedAt: new Date().toISOString(),
+    repository,
+    qualificationNamespace: namespace,
+    fixturePaths,
     base,
-    "fixture must match GitHub default branch",
-  );
-  const suffix = randomUUID();
+    checkout: {
+      clean: checkoutClean,
+      head: checkoutHead,
+      headMatchesDefault: checkoutHead === base,
+      fixturePathsAbsent,
+    },
+    installedArtifact: artifact,
+    harness,
+    pluginId: identity.pluginId,
+    codexManifestVersion: identity.codexManifestVersion,
+    modelTokenCeiling: {
+      configured: modelTokenCeiling,
+      semantics: "observed stop-before-next-call threshold; concurrent calls may overshoot",
+    },
+    namespaceIssues,
+    openFactoryPulls,
+    enabledDynamicWorkflows: workflows
+      .filter(
+        (workflow) => workflow.state === "active" && workflow.path?.startsWith("dynamic/agents/"),
+      )
+      .map((workflow) => ({ name: workflow.name, path: workflow.path })),
+    rateLimit: {
+      core: rateLimit.core,
+      graphql: rateLimit.graphql,
+    },
+  };
   const output = resolve(required("FACTORY_LIVE_OBJECTIVE_EVIDENCE"));
-  assert.ok(
-    !existsSync(join(output, "objective-evidence.json")),
-    "preserve prior run evidence; use a fresh output directory",
+  mkdirSync(output, { recursive: true, ...(qualification.privateEvidence ? { mode: 0o700 } : {}) });
+  if (qualification.privateEvidence) {
+    const directory = statSync(output);
+    assert.ok(
+      directory.isDirectory() &&
+        directory.uid === process.getuid() &&
+        (directory.mode & 0o077) === 0,
+      "regular qualification evidence directory must be owner-only",
+    );
+  }
+  const evidencePath = join(
+    output,
+    preflightOnly ? "qualification-preflight.json" : "objective-evidence.json",
   );
-  mkdirSync(output, { recursive: true });
+  const reservation = openSync(evidencePath, "wx", 0o600);
+  closeSync(reservation);
+  writeFileSync(evidencePath, `${JSON.stringify(preflight, null, 2)}\n`, { mode: 0o600 });
+  if (preflightOnly) {
+    console.log(`${preflight.result} installed Objective preflight; evidence: ${evidencePath}`);
+    if (preflight.result !== "passed") process.exitCode = 2;
+    return;
+  }
+  assert.equal(preflight.result, "passed", `preflight blocked: ${preflight.blockers.join(", ")}`);
+  if (!qualification.policy)
+    assert.equal(
+      process.env.FACTORY_LIVE_OBJECTIVE_DELIVERY ?? "stacked-prs",
+      "stacked-prs",
+      "installed local qualification requires native delivery",
+    );
+  const policy =
+    qualification.policy ??
+    boundedPolicy(process.env.FACTORY_LIVE_OBJECTIVE_DELIVERY ?? "stacked-prs", modelTokenCeiling);
   const evidence = {
     schemaVersion: 1,
     scope: qualification.scope ?? "installed-local-objective-happy-path",
     startedAt: new Date().toISOString(),
     repository,
+    qualificationNamespace: namespace,
+    fixturePaths,
     base,
     pluginVersion: identity.version,
     codexManifestVersion: identity.codexManifestVersion,
     pluginId: identity.pluginId,
-    bundleSha256: sha256(join(pluginRoot, "dist/mcp-server.js")),
-    policy: qualification.policy ?? boundedPolicy(process.env.FACTORY_LIVE_OBJECTIVE_DELIVERY),
+    installedArtifact: artifact,
+    preflight,
+    policy,
     actor: { id: actor.id, login: actor.login },
     objective: null,
     status: null,
@@ -565,22 +1128,23 @@ export async function main(qualification = {}) {
     pulls: [],
   };
   const save = () =>
-    writeFileSync(
-      join(output, "objective-evidence.json"),
-      `${JSON.stringify(evidence, null, 2)}\n`,
-      { mode: 0o600 },
-    );
+    writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });
   const client = new Client({
     name: "factory-live-objective",
     version: "1.0.0",
   });
-  const transport = new StdioClientTransport({
+  const transportParameters = {
     command: mcp.command,
     args: mcp.args.map((arg) => arg.replaceAll("${PLUGIN_ROOT}", pluginRoot)),
     cwd: checkout,
     env: { ...process.env, GITHUB_TOKEN: token },
     stderr: "pipe",
-  });
+  };
+  const transport = new StdioClientTransport(
+    qualification.wrapTransport
+      ? await qualification.wrapTransport(transportParameters, { evidence, pluginRoot, save })
+      : transportParameters,
+  );
   const call = async (name, args, timeout = 60_000) => {
     const result = await client.callTool({ name, arguments: args }, undefined, {
       timeout,
@@ -603,65 +1167,22 @@ export async function main(qualification = {}) {
       "installed server version mismatch",
     );
     assertMcpSurface((await client.listTools()).tools);
-    const hooks = { call, request, octokit, evidence, checkout, owner, repo };
+    const hooks = { call, request, octokit, evidence, checkout, owner, repo, save };
     if (qualification.beforeRun) await qualification.beforeRun(hooks);
-    const retryNumber = process.env.FACTORY_LIVE_OBJECTIVE_NUMBER;
-    assert.ok(
-      !qualification.scope || retryNumber === undefined,
-      "provider qualification requires a fresh Objective, never terminal-run retry",
-    );
-    if (retryNumber !== undefined) {
-      assert.match(retryNumber, /^[1-9]\d*$/, "invalid retry Objective number");
-      const issueNumber = Number(retryNumber);
-      assert.ok(Number.isSafeInteger(issueNumber), "invalid retry Objective number");
-      const issue = (
-        await request("GET /repos/{owner}/{repo}/issues/{issue_number}", {
-          issue_number: issueNumber,
-        })
-      ).data;
-      const status = await call("factory_status", {
-        owner,
-        repo,
-        objectiveNumber: issueNumber,
-      });
-      const children = await list("GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues", {
-        issue_number: issueNumber,
-      });
-      const comments = await list("GET /repos/{owner}/{repo}/issues/{issue_number}/comments", {
-        issue_number: issueNumber,
-      });
-      const actorId = (await octokit.request("GET /user")).data.id;
-      const events = comments.flatMap((comment) =>
-        [...(comment.body ?? "").matchAll(/<!-- clockgrove-factory:event\n([\s\S]*?)\n-->/g)].map(
-          (match) => JSON.parse(match[1]),
-        ),
-      );
-      const runId = required("FACTORY_LIVE_OBJECTIVE_PRIOR_RUN_ID");
-      assertRetryableObjective({
-        issue,
-        actorId,
-        status,
-        children,
-        events,
-        runId,
-      });
-      evidence.objective = issue;
-      evidence.retryOfRunId = runId;
-      evidence.priorStatus = status;
-    } else
-      evidence.objective = (
-        await request("POST /repos/{owner}/{repo}/issues", {
-          title: `Factory ${qualification.scope ?? "installed local Objective"} ${suffix}`,
-          body: qualification.objectiveBody ?? objectiveBody,
-        })
-      ).data;
+    evidence.objective = (
+      await request("POST /repos/{owner}/{repo}/issues", {
+        title: `Factory ${qualification.scope ?? "installed local Objective"} [${namespace}]`,
+        body: runObjectiveBody,
+      })
+    ).data;
     save();
+    await waitForCreatedObjectiveNamespace({ list, namespace, createdIssue: evidence.objective });
     console.log(
-      `${retryNumber ? "Retrying" : "Created"} disposable Objective ${evidence.objective.html_url}; installed Factory is running.`,
+      `Created disposable Objective ${evidence.objective.html_url} for ${namespace}; installed Factory is running.`,
     );
-    evidence.runResult = await call(
-      "factory_run",
-      {
+    evidence.runRequest = {
+      tool: "factory_run",
+      arguments: {
         owner,
         repo,
         objectiveNumber: evidence.objective.number,
@@ -669,8 +1190,13 @@ export async function main(qualification = {}) {
         untilTerminal: true,
         policy: evidence.policy,
       },
-      48 * 60_000,
-    );
+    };
+    save();
+    evidence.runResult = await runQualificationCall({
+      invoke: () => call(evidence.runRequest.tool, evidence.runRequest.arguments, 48 * 60_000),
+      duringRun: qualification.duringRun,
+      hooks,
+    });
     evidence.status = await call("factory_status", {
       owner,
       repo,
@@ -722,31 +1248,66 @@ export async function main(qualification = {}) {
           })
         ).data,
       );
+    evidence.finishedInstalledArtifact = installedBundleIdentity(pluginRoot);
+    assert.deepEqual(
+      evidence.finishedInstalledArtifact,
+      evidence.installedArtifact,
+      "installed bundle changed during qualification",
+    );
     if (qualification.afterRun) await qualification.afterRun(hooks);
-    evidence.completionAssessment = (qualification.assessCompletion ?? assessCompletion)(evidence);
-    save();
-    assert.equal(
-      evidence.completionAssessment.result,
-      "passed",
-      evidence.completionAssessment.reason,
-    );
-    const verified = join(output, "merged-fixture");
-    run("git", ["clone", "--depth", "1", `https://github.com/${repository}.git`, verified], output);
-    evidence.finalSha = run("git", ["rev-parse", "HEAD"], verified);
-    evidence.testOutput = run("node", ["--test"], verified);
-    evidence.behaviorOutput = run(
-      "node",
-      [
-        "--input-type=module",
-        "-e",
-        "import assert from 'node:assert/strict'; import {clamp} from './src/clamp.js'; import {slugify} from './src/slugify.js'; import {describe} from './src/describe.js'; assert.equal(clamp(-2,0,10),0); assert.equal(clamp(4,0,10),4); assert.equal(clamp(12,0,10),10); assert.throws(()=>clamp(1,2,0),RangeError); assert.equal(slugify(' Hello, WORLD!! '),'hello-world'); assert.equal(slugify('---'),''); assert.equal(describe(' Hello World ',12,0,10),'hello-world:10'); assert.throws(()=>describe('x',1,2,0),RangeError); console.log('Independent merged-artifact assertions passed');",
-      ],
-      verified,
-    );
+    assertQualificationNamespace(evidence);
+    const completionAssessment = (qualification.assessCompletion ?? assessCompletion)(evidence);
+    assert.equal(completionAssessment.result, "passed", completionAssessment.reason);
+    await verifyQualificationFinalArtifact({
+      verifier: qualification.verifyFinalArtifact,
+      hooks,
+      defaultVerifier: async () => {
+        const verified = join(output, "merged-fixture");
+        run(
+          "git",
+          ["clone", "--depth", "1", `https://github.com/${repository}.git`, verified],
+          output,
+        );
+        evidence.finalSha = run("git", ["rev-parse", "HEAD"], verified);
+        const finalDefaultSha = (
+          await request("GET /repos/{owner}/{repo}/commits/{ref}", { ref: info.default_branch })
+        ).data.sha;
+        assert.equal(
+          evidence.finalSha,
+          finalDefaultSha,
+          "verified clone is not the current default branch",
+        );
+        const joinWorkItem = evidence.dependencies.find(
+          (entry) => entry.blockedBy.length === 2,
+        ).workItem;
+        const joinIntegration = evidence.events.find(
+          (event) =>
+            event.runId === evidence.runResult.runId &&
+            event.event === "AttemptIntegrated" &&
+            event.workItem === joinWorkItem,
+        );
+        assert.equal(
+          evidence.finalSha,
+          joinIntegration?.headSha,
+          "default branch does not end at the dependent join integration",
+        );
+        evidence.testOutput = run("node", ["--test"], verified);
+        evidence.behaviorOutput = run(
+          "node",
+          [
+            "--input-type=module",
+            "-e",
+            `import assert from 'node:assert/strict'; import {clamp} from './${fixturePaths.sourceDirectory}/clamp.js'; import {slugify} from './${fixturePaths.sourceDirectory}/slugify.js'; import {describe} from './${fixturePaths.sourceDirectory}/describe.js'; assert.equal(clamp(-2,0,10),0); assert.equal(clamp(4,0,10),4); assert.equal(clamp(12,0,10),10); assert.throws(()=>clamp(1,2,0),RangeError); assert.equal(slugify(' Hello, WORLD!! '),'hello-world'); assert.equal(slugify('---'),''); assert.equal(describe(' Hello World ',12,0,10),'hello-world:10'); assert.throws(()=>describe('x',1,2,0),RangeError); console.log('Independent merged-artifact assertions passed for ${namespace}');`,
+          ],
+          verified,
+        );
+      },
+    });
+    evidence.completionAssessment = completionAssessment;
     evidence.result = "passed";
     evidence.finishedAt = new Date().toISOString();
     save();
-    console.log(`Passed ${evidence.scope}; evidence: ${join(output, "objective-evidence.json")}`);
+    console.log(`Passed ${evidence.scope}; evidence: ${evidencePath}`);
   } catch (error) {
     evidence.result = "failed";
     evidence.failure = error instanceof Error ? error.message : String(error);

@@ -31,6 +31,7 @@ import { resolveCodexCommand } from "../runtime/codex-command.js";
 import {
   linuxProcessGroupId,
   linuxProcessIds,
+  processGroupExists,
   sanitizedWorkerEnvironment,
   startContainedProcess,
   runContainedProcess,
@@ -627,6 +628,11 @@ export class CodexCliLocalBackend implements ExecutionBackend {
           const code = (error as NodeJS.ErrnoException).code;
           if (["ENOENT", "ESRCH", "EACCES", "EPERM"].includes(code ?? "")) {
             if (pid === hintedPid && ["EACCES", "EPERM"].includes(code ?? "")) {
+              // A dying leader can lose readable environ before procfs removes it.
+              // Independent group absence, not the denied read, discharges the hint;
+              // live descendants and any unknown stat/group observation still block.
+              const groupId = linuxProcessGroupId(pid) ?? hintedPid;
+              if (!processGroupExists(groupId)) continue;
               throw new Error(`cannot inspect hinted stale worker ${pid}: ${code}`, {
                 cause: error,
               });

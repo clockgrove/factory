@@ -508,6 +508,7 @@ describe("terminal-run recovery admission", () => {
       },
       store: {
         addIssueComment: write,
+        ensureObjectiveLabel: async () => {},
         serverTime: async () => new Date(),
         getAuthenticatedLogin: async () => "operator",
       },
@@ -550,6 +551,7 @@ describe("terminal-run recovery admission", () => {
       reader: { readObjective: async () => structuredClone(current) },
       store: {
         addIssueComment: write,
+        ensureObjectiveLabel: async () => {},
         serverTime: async () => new Date(),
         getAuthenticatedLogin: actor,
       },

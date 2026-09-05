@@ -18,7 +18,11 @@ import {
 } from "../validation/plan.js";
 import type { RecoveryReadStore } from "./assessment.js";
 import { loadRecoveryClaim, type RecoveryClaimRecord } from "./claims.js";
-import { recoveryEventDigest, recoverySourceEventsDigest } from "./identity.js";
+import {
+  createRecoveryEventDigest,
+  recoveryEventDigest,
+  recoverySourceEventsDigest,
+} from "./identity.js";
 import {
   loadRecoveryPlan,
   recoveryPlanDigest,
@@ -272,6 +276,7 @@ export async function verifyRecoveryMergedSource(
 async function verifySourceProof(
   input: SourceProofInput & ({ outcome: RecoverySourceIntegratedEvent } | { workItem: number }),
 ): Promise<RecoverySourceIntegrationResult | RecoveryMergedSourceProof> {
+  const recoveryEventDigest = createRecoveryEventDigest();
   try {
     requireOutcome(input.events.length <= 10_000);
     const events = [
@@ -285,16 +290,17 @@ async function verifySourceProof(
     requireOutcome(new Set(events.map((event) => event.sequence)).size === events.length);
     let reads = 0;
     const cache = new Map<string, Promise<unknown>>();
-    const store = new Proxy(input.store, {
-      get(target, property, receiver) {
-        const operation = Reflect.get(target, property, receiver);
+    // Never use the frozen capability port as a target whose methods are replaced.
+    const store = new Proxy({} as RecoveryReadStore, {
+      get(_target, property) {
+        const operation = Reflect.get(input.store, property, input.store);
         if (typeof operation !== "function") return operation;
         return (...args: unknown[]) => {
           const key = JSON.stringify([property, args]);
           const previous = cache.get(key);
           if (previous) return previous;
           requireOutcome(++reads <= 1024);
-          const pending = Promise.resolve().then(() => Reflect.apply(operation, target, args));
+          const pending = Promise.resolve().then(() => Reflect.apply(operation, input.store, args));
           cache.set(key, pending);
           return pending;
         };
@@ -339,9 +345,11 @@ async function verifySourceProof(
       predecessorStart: starts[0]!,
     });
     requireOutcome(
-      envelopes.every((expected) =>
-        events.some((event) => recoveryEventDigest(event) === recoveryEventDigest(expected)),
-      ),
+      envelopes
+        .map(recoveryEventDigest)
+        .every((expectedDigest) =>
+          events.some((event) => recoveryEventDigest(event) === expectedDigest),
+        ),
     );
     requireOutcome(
       recoverySourceEventsDigest({

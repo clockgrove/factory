@@ -12,7 +12,10 @@ import {
   qualificationEnvironment,
   summarizeQualification,
 } from "../scripts/qualify-linux-host.mjs";
-import { assessPortableQualification } from "../scripts/verify-portable-qualification.mjs";
+import {
+  assessPortableQualification,
+  runBoundedVerifier,
+} from "../scripts/verify-portable-qualification.mjs";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -46,6 +49,16 @@ async function artifactFixture() {
 }
 
 describe("portable qualification evidence boundaries", () => {
+  it("bounds verifier subprocesses and reports timeout as failure", async () => {
+    await expect(
+      runBoundedVerifier(process.execPath, ["-e", "process.exit(0)"], { timeoutMs: 1_000 }),
+    ).resolves.toBe(true);
+    await expect(
+      runBoundedVerifier(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+        timeoutMs: 25,
+      }),
+    ).resolves.toBe(false);
+  });
   it("does not accept disabled, available-only, stale, or duplicate plugin listings as an install", () => {
     const entry = {
       name: "factory",

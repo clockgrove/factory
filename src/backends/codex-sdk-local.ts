@@ -92,6 +92,8 @@ interface SdkAttempt {
   cancelled: boolean;
   timedOut: boolean;
   scopeSettled?: boolean;
+  /** Wrapper failure means its detached launcher may still create the scope late. */
+  launcherCleanupUnverified?: boolean;
 }
 
 export interface CodexSdkLocalOptions {
@@ -118,7 +120,7 @@ const supervisorPid = __FACTORY_SUPERVISOR_PID__;
 const command = __FACTORY_CODEX_COMMAND__;
 const prefixArgs = __FACTORY_CODEX_ARGS__;
 const scope = __FACTORY_LOCAL_SCOPE__;
-function unitProperties(unit) {
+function unitProperties(unit, allowPendingJob = false) {
   let text;
   try {
     text = execFileSync("systemctl", ["--user", "show", unit, "--property=Id,LoadState,ActiveState,ControlGroup,Job,InvocationID,KillMode", "--no-pager"], { encoding: "utf8", timeout: 10000, maxBuffer: 16384, stdio: ["ignore", "pipe", "pipe"] });
@@ -133,7 +135,7 @@ function unitProperties(unit) {
     if (at < 1 || Object.hasOwn(fields, name)) throw new Error("Factory SDK scope observation invalid");
     fields[name] = line.slice(at + 1);
   }
-  if (fields.Id !== unit || fields.ControlGroup === undefined || !["", "0", "0 /"].includes(fields.Job)) throw new Error("Factory SDK scope observation invalid");
+  if (fields.Id !== unit || fields.ControlGroup === undefined || fields.Job === undefined || (!allowPendingJob && !["", "0", "0 /"].includes(fields.Job))) throw new Error("Factory SDK scope observation invalid");
   return fields;
 }
 if (scope) {
@@ -174,13 +176,14 @@ function groupExists() {
   try {
     process.kill(-child.pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    // A permission/read failure is not evidence that the launcher group is gone.
+    return error.code !== "ESRCH";
   }
 }
 
 function exitFromChild() {
-  if (!childResult) return;
+  if (!childResult && !scopeCleanupFailed) return;
   clearInterval(watchdog);
   if (forceTimer) clearTimeout(forceTimer);
   if (groupPoll) clearInterval(groupPoll);
@@ -188,8 +191,16 @@ function exitFromChild() {
 }
 
 function finishWhenGroupIsGone() {
-  if (!childResult) return;
   if (!scopeCleanupDone) return;
+  if (scopeCleanupFailed) {
+    // Do not wait forever after the bounded cleanup verifier has already failed.
+    // This is a nonzero result, never an absence grant; the backend must reconcile
+    // the exact owned scope before the Supervisor can close or replace the attempt.
+    try { process.kill(-child.pid, "SIGKILL"); } catch {}
+    exitFromChild();
+    return;
+  }
+  if (!childResult) return;
   if (!groupExists()) {
     exitFromChild();
     return;
@@ -204,19 +215,62 @@ function finishWhenGroupIsGone() {
 function stopGroup() {
   if (stopping) return;
   stopping = true;
-  if (scope) {
-    execFile("systemctl", ["--user", "stop", scope.unit], { timeout: 10000, maxBuffer: 16384 }, (error) => {
-      scopeCleanupFailed = Boolean(error);
-      scopeCleanupDone = true;
-      if (error) process.stderr.write("Factory SDK owned scope cleanup unverified\n");
-      finishWhenGroupIsGone();
-    });
-  }
   try { process.kill(-child.pid, "SIGTERM"); } catch {}
   forceTimer = setTimeout(() => {
     try { process.kill(-child.pid, "SIGKILL"); } catch {}
   }, 2_000);
+  if (scope) {
+    cleanupScope().catch(() => {
+      scopeCleanupFailed = true;
+      // The pinned SDK discards stderr when abort raises its spawnError. Carry
+      // this denial-only diagnostic through the event stream as well.
+      process.stdout.write(JSON.stringify({ type: "error", message: "Factory SDK owned scope cleanup unverified" }) + "\n");
+      process.stderr.write("Factory SDK owned scope cleanup unverified\n");
+    }).finally(() => {
+      scopeCleanupDone = true;
+      finishWhenGroupIsGone();
+    });
+  }
   finishWhenGroupIsGone();
+}
+
+function scopeMissing(fields) {
+  return fields.LoadState === "not-found" && fields.ActiveState === "inactive" &&
+    fields.ControlGroup === "" && fields.InvocationID === "" &&
+    ["", "0", "0 /"].includes(fields.Job);
+}
+
+async function cleanupScope() {
+  // --collect can remove a successfully completed scope before systemd-run exits.
+  // Neither a stop error nor a successful stop is an absence observation.
+  const before = unitProperties(scope.unit, true);
+  if (!scopeMissing(before) || !childResult || groupExists()) {
+    if (!scopeMissing(before) && (before.LoadState !== "loaded" ||
+      before.KillMode !== "control-group" || !/^[a-f0-9]{32}$/.test(before.InvocationID ?? "") ||
+      !before.ControlGroup.endsWith("/" + scope.unit))) throw new Error("scope ownership unavailable");
+    await new Promise((resolve) => execFile("systemctl", ["--user", "stop", scope.unit],
+      { timeout: 10000, maxBuffer: 16384 }, () => resolve()));
+  }
+  // Allow the existing bounded process-group TERM/KILL drain to finish before
+  // checking absence: a still-live launcher could otherwise create the scope late.
+  const groupDeadline = performance.now() + 3000;
+  while (!childResult || groupExists()) {
+    if (performance.now() >= groupDeadline) throw new Error("scope launcher remains active");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  const drainDeadline = performance.now() + 500;
+  for (;;) {
+    const current = unitProperties(scope.unit, true);
+    if (scopeMissing(current)) {
+      if (scopeMissing(unitProperties(scope.unit))) return;
+      throw new Error("scope observation changed");
+    }
+    if (current.LoadState !== "loaded" || current.KillMode !== "control-group" ||
+      !/^[a-f0-9]{32}$/.test(current.InvocationID ?? "") ||
+      !current.ControlGroup.endsWith("/" + scope.unit) || performance.now() >= drainDeadline)
+      throw new Error("scope absence unavailable");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
 }
 
 function forwardBounded(name, target, chunk) {
@@ -487,6 +541,7 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
   }
 
   async launch(context: AttemptContext): Promise<BackendHandle> {
+    this.#assertNoUnverifiedLauncher(context);
     const scope = localExecutionScopeBatch(context);
     if (Date.now() >= context.deadline.getTime()) {
       throw new Error("attempt deadline already elapsed");
@@ -598,6 +653,8 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
     running.cancelled = true;
     running.controller.abort("attempt cancelled by Factory");
     await running.terminal;
+    if (running.launcherCleanupUnverified)
+      throw new Error("SDK launcher cleanup is unverified; automated replacement is blocked");
     handle.metadata = {
       ...handle.metadata,
       terminalState: "cancelled",
@@ -609,6 +666,8 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
   async collect(handle: BackendHandle): Promise<NormalizedArtifact> {
     const running = this.#require(handle);
     await running.terminal;
+    if (running.launcherCleanupUnverified)
+      throw new Error("SDK launcher cleanup is unverified; automated replacement is blocked");
     const collected = await collectLocalArtifact(
       {
         root: join(running.context.workspace, ".."),
@@ -658,6 +717,8 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
     // deleting the only in-process recovery handle.
     running.controller.abort("Factory cleanup");
     await running.terminal;
+    if (running.launcherCleanupUnverified)
+      throw new Error("SDK launcher cleanup is unverified; automated replacement is blocked");
     const scope = localExecutionScopeBatch(running.context);
     if (scope) await stopLocalScope(scope.identity, this.#options.localScopePort);
     else
@@ -676,6 +737,7 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
   }
 
   async reconcileStale(identity: StaleAttemptIdentity): Promise<void> {
+    this.#assertNoUnverifiedLauncher(identity);
     if (process.platform === "win32") {
       throw new Error("stale SDK process reconciliation is supported only on Linux/WSL");
     }
@@ -758,6 +820,12 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
         signal: running.controller.signal,
       });
       for await (const event of events) {
+        if (
+          running.context.localExecutionScope &&
+          event.type === "error" &&
+          event.message === "Factory SDK owned scope cleanup unverified"
+        )
+          running.launcherCleanupUnverified = true;
         if (event.type === "turn.completed") {
           completionCount += 1;
           running.usage = completionCount === 1 ? event.usage : undefined;
@@ -840,6 +908,13 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
         running.reason = running.final?.summary ?? "SDK worker returned no valid final result";
       }
     } catch (error) {
+      if (
+        running.context.localExecutionScope &&
+        error instanceof Error &&
+        error.message.includes("Factory SDK owned scope cleanup unverified")
+      ) {
+        running.launcherCleanupUnverified = true;
+      }
       running.state = running.cancelled ? "cancelled" : "failed";
       running.reason ??= safeDiagnostic(
         running.timedOut
@@ -859,6 +934,10 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
           running.state = "failed";
           running.reason = "SDK worker resource cleanup is unverified";
         } finally {
+          if (running.launcherCleanupUnverified) {
+            running.state = "failed";
+            running.reason = "SDK launcher cleanup is unverified; automated replacement is blocked";
+          }
           running.scopeSettled = true;
         }
       }
@@ -872,5 +951,20 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
     const running = this.#running.get(handle.resourceId);
     if (!running) throw new Error(`unknown SDK worker ${handle.resourceId}`);
     return running;
+  }
+
+  #assertNoUnverifiedLauncher(
+    identity: Pick<StaleAttemptIdentity, "repository" | "runId" | "workItem">,
+  ): void {
+    if (
+      [...this.#running.values()].some(
+        (running) =>
+          running.launcherCleanupUnverified &&
+          running.context.repository === identity.repository &&
+          running.context.runId === identity.runId &&
+          running.context.workItem === identity.workItem,
+      )
+    )
+      throw new Error("SDK launcher cleanup is unverified; automated replacement is blocked");
   }
 }

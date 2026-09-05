@@ -1,0 +1,139 @@
+{
+  "protocol": "clockgrove.factory/component-evidence-v1",
+  "capability": "integrated-implementation-and-staged-portability",
+  "implementationCommit": "efb9578edd959a23d23e8e9ab0ae97e619b675e8",
+  "scope": "full-offline-release-batch-staged-no-model-wsl2-and-installed-read-only-components",
+  "status": "passed-with-explicit-scope",
+  "verification": {
+    "command": "npm run verify:release",
+    "exitCode": 0,
+    "testFilesPassed": 118,
+    "testsPassed": 1996,
+    "testsSkipped": 3,
+    "testDurationSeconds": 272.15,
+    "coveragePercent": {
+      "statements": 80.77,
+      "branches": 76.53,
+      "functions": 85.03,
+      "lines": 82.02
+    },
+    "typecheck": "passed",
+    "lint": "passed",
+    "format": "passed",
+    "schemas": "passed",
+    "reproducibleBundles": "passed",
+    "cleanStagedPluginInstall": "passed",
+    "cleanStagedNpmTarballInstall": "passed",
+    "dependencyAuditVulnerabilities": 0,
+    "sourceLogSha256": "28428a446626c55f7cca2a553071712c00a3658948ae396c6fe76756814d13cd"
+  },
+  "package": {
+    "name": "@clockgrove/factory",
+    "version": "2.0.26",
+    "origin": "local npm pack of the recorded candidate; not the public registry",
+    "files": 69,
+    "bytes": 2898129,
+    "unpackedBytes": 8033467,
+    "sha256": "c42269f54236f7e00d01996286dc7c2845e0f0dbfdaae672b7f2c27adbcc75d2",
+    "containsThisEvidenceUpdate": false
+  },
+  "installedSubjects": {
+    "npmAndPluginAgree": true,
+    "bundles": [
+      {
+        "file": "factory.js",
+        "bytes": 2946896,
+        "sha256": "fd186e0141b62390cda6ea9ee5af46ce7b93effa3aea8b9d5608c8976ce7e070"
+      },
+      {
+        "file": "mcp-server.js",
+        "bytes": 3239221,
+        "sha256": "33390a29717aba700ba30205949c1ff30b4b2d3231fb9c0e2fc5c03cc65fdc91"
+      }
+    ]
+  },
+  "portableComponents": {
+    "observedAt": "2026-09-05T09:42:20.829Z",
+    "result": "passed",
+    "scope": "fresh-staged-installs-and-no-model-linux-host-components",
+    "sourceRecordSha256": "730f967b952c91274e03d4cc1764a9da029b4c1f94933fbc61ab27b849fec048",
+    "host": {
+      "class": "wsl2",
+      "architecture": "x64",
+      "kernel": "6.18.33.2-microsoft-standard-WSL2",
+      "node": "24.20.0",
+      "systemd": 259
+    },
+    "npmInstallation": "fresh-staged-tarball",
+    "pluginInstallation": "fresh-staged-codex-marketplace",
+    "installedCliStartup": "passed",
+    "controllerInstallIdempotencyAndUninstall": "passed",
+    "controllerStarted": false,
+    "hostProcessLifecycle": {
+      "npm": { "throttledPeriods": 11, "memoryBytes": 18153472, "memoryLimitBytes": 402653184 },
+      "plugin": { "throttledPeriods": 11, "memoryBytes": 17350656, "memoryLimitBytes": 402653184 },
+      "detachedDescendantCancelled": true,
+      "restartGenerationChanged": true,
+      "originalProcessesGone": true,
+      "cleanupVerified": true
+    }
+  },
+  "installedReadOnlyComponents": {
+    "sameBundleSubjects": true,
+    "doctor": {
+      "observedAt": "2026-09-05T10:01:42.184Z",
+      "sourceRecordSha256": "23471b0a778b6dd1efaebc1f5d1c4ffde18af469074522268214a3d0033a09d6",
+      "overall": "ready",
+      "activationAuthorized": false,
+      "passingDiagnosticAreas": [
+        "repository",
+        "resources",
+        "management",
+        "toolchain",
+        "authentication",
+        "backends",
+        "stacks",
+        "branch-rules"
+      ],
+      "controllerDiagnostic": "warning",
+      "allowedPaidBackends": [],
+      "cloudFallback": "never"
+    },
+    "plan": {
+      "observedAt": "2026-09-05T10:01:46.018Z",
+      "sourceRecordSha256": "075bb1f99aaeb267b077c897983c7a2ac6d288236ce7feb45075889a03783c01",
+      "mode": "existing-graph-inspection",
+      "compilationRequested": false,
+      "workItemCount": 3,
+      "activationAuthorized": false,
+      "durableGraphVerified": false,
+      "digestAuthority": "reconstructed-issue-content",
+      "usage": null,
+      "usagePersistence": "none"
+    }
+  },
+  "authority": {
+    "liveModelCalls": 0,
+    "paidProviderLaunches": 0,
+    "githubWrites": 0,
+    "publicationPerformed": false
+  },
+  "remainingGates": [
+    "complete-installed-objective-happy-path-and-adversarial-fault-matrix",
+    "full-model-backed-linux-sdk-and-cli-host-matrix",
+    "live-adaptive-scheduling-and-native-stack-validation-review",
+    "github-fenced-installed-controller-restart-and-durable-cancellation",
+    "native-linux-and-macos-hosted-linux-observations",
+    "real-daytona-and-both-managed-agent-objectives-under-separate-authority",
+    "publication-and-exact-published-artifact-install"
+  ],
+  "limitations": [
+    "Offline tests use simulated GitHub, model and provider responses; passing tests and skipped cases are not live qualification.",
+    "No complete installed Objective or live fault-matrix pass is claimed by this record.",
+    "Installed doctor readiness is diagnostic only; existing-graph plan inspection neither compiles nor verifies a durable graph and grants no activation authority.",
+    "The staged WSL2 probes exercise installed executables and disposable host components, not a running Factory controller or model-backed worker pipeline.",
+    "Source log and record hashes identify retained inputs; raw logs are not published here. This component record is not schema-2 evidence closing a publication gate.",
+    "This later documentation update is outside the tested snapshot and tarball. Final release evidence and packing must bind their own exact subjects; no unchanged final tarball is implied."
+  ],
+  "sanitization": "Only aggregate checks, public artifact identities and host-class measurements are included; no private repository names, actors, host paths, process identifiers, credentials or raw events are published."
+}

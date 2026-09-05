@@ -11,18 +11,25 @@ import { DaytonaBackend } from "./backends/daytona.js";
 import { VercelSandboxBackend } from "./backends/vercel-sandbox.js";
 import { resolveGitHubToken } from "./auth.js";
 import { BackendRegistry } from "./execution/registry.js";
-import { GitHubReader } from "./github.js";
+import { createOctokit, GitHubReader } from "./github.js";
 import { priorityPolicyFragment } from "./scheduling/github-priority.js";
 import { GitHubControlStore } from "./control/github-store.js";
 import { DEFAULT_RUN_POLICY, parseRunPolicy } from "./protocol/policy.js";
 import { allDone, counts, derive, isStalled, ready } from "./state.js";
-import { FactoryApplicationService } from "./application/index.js";
+import {
+  FactoryApplicationService,
+  probeHostResources,
+  probeHostToolchain,
+  validatePlanningCheckout,
+  readPlanningRepositoryLayout,
+} from "./application/index.js";
 import { assessRecovery } from "./recovery/assessment.js";
 import { recoveryReadPort } from "./recovery/github-read-port.js";
 import { RecoveryRequestService } from "./recovery/requests.js";
 import { CodexCliManagementBackend } from "./management/codex-cli.js";
 import { runForegroundObjective, runGitHubRepositoryController } from "./controller/index.js";
 import { SystemdControllerLifecycle, SystemdUserService } from "./service/index.js";
+import { GitHubStacks, type GitHubStackTransport } from "./publication/github-stacks.js";
 
 const controllerLifecycle = new SystemdControllerLifecycle(
   new SystemdUserService({
@@ -37,7 +44,9 @@ const USAGE = [
   "  factory activate OWNER/REPO#NUMBER --request-id ID [--base-sha SHA] [--policy FILE]",
   "  factory controller run OWNER/REPO --repo DIR [--max-active-objectives N] [--max-local-workers N] [--max-paid-workers N]",
   "  factory controller install|start|stop|restart|status|uninstall OWNER/REPO --repo DIR",
-  "  factory doctor|plan|status|explain|replay OWNER/REPO#NUMBER [--work-item NUMBER]",
+  "  factory doctor OWNER/REPO#NUMBER [--repo DIR]",
+  "  factory plan OWNER/REPO#NUMBER [--compile] [--repo DIR] [--base-sha SHA] [--policy FILE]",
+  "  factory status|explain|replay OWNER/REPO#NUMBER [--work-item NUMBER]",
   "  factory recovery-plan OWNER/REPO#NUMBER  (read-only; does not authorize execution)",
   "  factory recovery-propose OWNER/REPO#NUMBER --request-id ID [--allowance-increment FILE] [--acknowledge-unknown-usage DIGEST]",
   "  factory recovery-request OWNER/REPO#NUMBER --request-id ID --plan-digest DIGEST [--allowance-increment FILE] [--acknowledge-unknown-usage DIGEST]",
@@ -74,10 +83,18 @@ function applicationFor(
   owner: string,
   repo: string,
   recoveryInspection = false,
+  checkout = process.cwd(),
 ): FactoryApplicationService {
   const token = resolveGitHubToken();
   const store = new GitHubControlStore({ token, owner, repo });
   const reader = new GitHubReader({ token, owner, repo, recoveryInspection });
+  const registry = executionRegistry(checkout);
+  const management = new CodexCliManagementBackend();
+  const stacks = new GitHubStacks(
+    createOctokit({ token, owner, repo }) as unknown as GitHubStackTransport,
+    owner,
+    repo,
+  );
   return new FactoryApplicationService({
     owner,
     repo,
@@ -103,6 +120,29 @@ function applicationFor(
       }),
     store,
     controller: controllerLifecycle,
+    diagnostics: {
+      repositoryFacts: () => store.getRepositoryFacts(),
+      authenticatedLogin: () => store.getAuthenticatedLogin(),
+      branchRules: (branch) => store.readBranchRules(branch),
+      stackCapability: () => stacks.probe(),
+      managementProbe: async () => ({ id: management.id, probe: await management.probe() }),
+      backendProbes: () => registry.probeAll(),
+      toolchainProbe: probeHostToolchain,
+      resourceProbe: async () => probeHostResources(),
+      controller: controllerLifecycle,
+    },
+    planning: {
+      management,
+      repositoryPath: checkout,
+      validateCheckout: validatePlanningCheckout,
+      readRepositoryLayout: (maxEntries, baseSha) =>
+        readPlanningRepositoryLayout(checkout, maxEntries, baseSha),
+      readBaseSha: async (defaultBranch) => {
+        const sha = await store.readRef(`refs/heads/${defaultBranch}`);
+        if (!sha) throw new Error(`default branch ${defaultBranch} has no readable head`);
+        return sha;
+      },
+    },
     readBaseSha: async (defaultBranch) => {
       const sha = await store.readRef(`refs/heads/${defaultBranch}`);
       if (!sha) throw new Error(`default branch ${defaultBranch} has no readable head`);
@@ -127,7 +167,13 @@ function controllerApplicationFor(owner: string, repo: string): FactoryApplicati
 async function applicationCommand(command: string, args: string[]): Promise<void> {
   if (!args[0]) fail(`usage: factory ${command} OWNER/REPO#NUMBER`);
   const target = parseTarget(args[0]);
-  const service = applicationFor(target.owner, target.repo, command.startsWith("recovery-"));
+  const checkout = option(args, "--repo");
+  const service = applicationFor(
+    target.owner,
+    target.repo,
+    command.startsWith("recovery-"),
+    checkout ? resolve(checkout) : process.cwd(),
+  );
   if (command === "recovery-propose" || command === "recovery-request") {
     const requestId = option(args, "--request-id");
     if (!requestId) fail(`${command} requires --request-id ID`);
@@ -154,11 +200,23 @@ async function applicationCommand(command: string, args: string[]): Promise<void
   const read = ["doctor", "plan", "recovery-plan", "status", "explain", "replay"];
   if (read.includes(command)) {
     const workItem = option(args, "--work-item");
-    const result = await service.inspect(
-      command as "doctor" | "plan" | "recovery-plan" | "status" | "explain" | "replay",
-      target.objective,
-      workItem ? Number(workItem) : undefined,
-    );
+    const result =
+      command === "doctor"
+        ? await service.doctor(target.objective, checkout ? resolve(checkout) : process.cwd())
+        : command === "plan"
+          ? await service.plan({
+              objective: target.objective,
+              compile: args.includes("--compile"),
+              ...(option(args, "--base-sha") ? { baseSha: option(args, "--base-sha")! } : {}),
+              ...(option(args, "--policy")
+                ? { policy: JSON.parse(await readFile(option(args, "--policy")!, "utf8")) }
+                : {}),
+            })
+          : await service.inspect(
+              command as "recovery-plan" | "status" | "explain" | "replay",
+              target.objective,
+              workItem ? Number(workItem) : undefined,
+            );
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return;
   }
@@ -352,13 +410,18 @@ async function runRepositoryController(args: string[]): Promise<void> {
 }
 
 async function probeBackends(): Promise<void> {
+  const registry = executionRegistry(process.cwd());
+  process.stdout.write(`${JSON.stringify(await registry.probeAll(), null, 2)}\n`);
+}
+
+function executionRegistry(repository: string): BackendRegistry {
   const registry = new BackendRegistry();
   registry.register(new CodexSdkLocalBackend());
   registry.register(new CodexAppServerLocalBackend());
   registry.register(new CodexCliLocalBackend());
-  registry.register(new DaytonaBackend({ repository: process.cwd() }));
-  registry.register(new VercelSandboxBackend({ repository: process.cwd() }));
-  process.stdout.write(`${JSON.stringify(await registry.probeAll(), null, 2)}\n`);
+  registry.register(new DaytonaBackend({ repository }));
+  registry.register(new VercelSandboxBackend({ repository }));
+  return registry;
 }
 
 async function probeManagement(): Promise<void> {

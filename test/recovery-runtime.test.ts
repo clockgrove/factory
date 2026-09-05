@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { FactoryReadSnapshot } from "../src/application/status.js";
+import type { GitHubControlStore } from "../src/control/github-store.js";
+import { recoveryReadPort } from "../src/recovery/github-read-port.js";
+import { loadRecoverySourceReconciliation } from "../src/recovery/reconciliation.js";
+import { loadHistoricalRecoveryRuntimes } from "../src/recovery/historical-runtime.js";
 import { CompiledGraphManager, type CompiledGraphStore } from "../src/control/graphs.js";
 import type { GitCommitObject, LeaseManager, LeaseState } from "../src/control/lease.js";
 import { decodeEventComments, encodeEventTrailer } from "../src/control/receipts.js";
@@ -192,10 +196,13 @@ async function fixture(
     missingCompileUsage?: boolean;
     tokenLimit?: number;
     resource?: "legacy" | "local" | "managed";
+    stacked?: boolean;
   } = {},
 ) {
   const store = new MemoryStore();
   const policy = structuredClone(DEFAULT_RUN_POLICY);
+  if (options.stacked)
+    policy.delivery = { mode: "stacked-prs", onUnavailable: "escalate", merge: "bottom-up" };
   if (options.tokenLimit !== undefined)
     policy.economics = {
       maxModelTokens: options.tokenLimit,
@@ -274,6 +281,8 @@ async function fixture(
       },
     ],
   };
+  if (options.stacked)
+    graphInput.workItems[0]!.delivery = { group: "feature", relationship: "root" };
   const graphManager = new CompiledGraphManager(store, {
     assertCurrent: async () => {},
   } as unknown as LeaseManager);
@@ -568,11 +577,11 @@ async function adopted(options: Parameters<typeof fixture>[0] = {}) {
   const f = await fixture(options);
   expect(await f.make().adopt(f.args)).toMatchObject({ status: "adopted" });
   f.store.enforce = false;
-  const read = () =>
+  const read = (store: RecoveryReadStore = f.store) =>
     loadRecoveryRuntime({
       objective: 7,
       runId: "successor",
-      store: f.store,
+      store,
       readSnapshot: async () => ({
         snapshot: structuredClone(f.snapshot),
         historyComplete: f.state.historyComplete,
@@ -610,6 +619,121 @@ async function addAttempt(f: Awaited<ReturnType<typeof adopted>>, attempt = 1) {
 }
 
 describe("verified successor runtime loader", () => {
+  it("loads and memoizes complete adoption through the actual frozen capability port", async () => {
+    const f = await adopted();
+    const port = recoveryReadPort(f.store as unknown as GitHubControlStore, "o", "r");
+    const writes = f.store.writes.length;
+    expect(Object.isFrozen(port)).toBe(true);
+    expect(await f.read(port)).toMatchObject({ status: "verified", executionAuthorized: false });
+    expect(f.store.writes).toHaveLength(writes);
+    f.store.refs.delete(f.planRecord.ref);
+    expect(await f.read(port)).toMatchObject({ status: "blocked" });
+  });
+
+  it("reconciles a fully bound native adoption through the frozen capability port", async () => {
+    const f = await adopted({ stacked: true });
+    const port = recoveryReadPort(f.store as unknown as GitHubControlStore, "o", "r");
+    const input = {
+      objective: 7,
+      runId: "successor",
+      planDigest: f.planRecord.digest,
+      requestId: f.planRecord.plan.requestId,
+      store: port,
+      readSnapshot: async () => ({ snapshot: structuredClone(f.snapshot), historyComplete: true }),
+    };
+    await expect(loadRecoverySourceReconciliation(input)).resolves.toMatchObject({
+      controllingRun: { runId: "successor" },
+      mergedSources: [],
+    });
+    f.store.refs.delete(f.planRecord.ref);
+    await expect(loadRecoverySourceReconciliation(input)).rejects.toThrow(
+      /authority or merge evidence/,
+    );
+  });
+
+  it("preserves exact historical claim filtering across two adoptions from a frozen port", async () => {
+    const f = await adopted();
+    const events = f.snapshot.factoryEvents!;
+    const start = events.find(
+      (value) => value.event === "FactoryRunStarted" && value.runId === "successor",
+    )!;
+    const sequence = Math.max(...events.map((value) => value.sequence)) + 1;
+    const terminal = event({
+      ...events.find((value) => value.event === "FactoryRunEscalated")!,
+      runId: "successor",
+      sequence,
+    });
+    events.push(terminal);
+    const predecessor = {
+      runId: "successor",
+      startDigest: recoveryEventDigest(start),
+      terminalDigest: recoveryEventDigest(terminal),
+      terminalEvent: "FactoryRunEscalated" as const,
+      terminalSequence: sequence,
+    };
+    const history = [
+      ...f.planRecord.plan.history,
+      { ...predecessor, policyDigest: f.planRecord.plan.policyDigest },
+    ];
+    const plan: RecoveryPlan = {
+      ...structuredClone(f.planRecord.plan),
+      requestId: "recover-again",
+      successorRunId: "third",
+      predecessor,
+      history,
+      historyDigest: recoveryHistoryDigest(history),
+      priorPlanDigest: f.planRecord.digest,
+      sourceEventMaxSequence: sequence,
+      sourceEventsDigest: recoverySourceEventsDigest({
+        objective: 7,
+        runIds: ["source", "successor"],
+        events,
+        maxSequence: sequence,
+      }),
+    };
+    const record = await new RecoveryPlanManager(f.store, {
+      assertCurrent: async () => {},
+    } as unknown as LeaseManager).persist({
+      lease: { ...f.args.objectiveLease, runId: "third" },
+      plan,
+    });
+    events.push(
+      event({
+        kind: "recovery",
+        event: "RecoveryRequested",
+        runId: "successor",
+        sequence: sequence + 1,
+        requestedBy: "operator",
+        requestId: plan.requestId,
+        repository: plan.repository,
+        planDigest: record.digest,
+        predecessorRunId: predecessor.runId,
+        predecessorTerminalDigest: predecessor.terminalDigest,
+        successorRunId: plan.successorRunId,
+        policyDigest: plan.policyDigest,
+        baseSha: base.oid,
+      }),
+    );
+    const adoption = await f.make().adopt({
+      ...f.args,
+      planDigest: record.digest,
+      objectiveLease: { ...f.args.objectiveLease, runId: "third" },
+    });
+    expect(adoption, JSON.stringify(adoption)).toMatchObject({ status: "adopted" });
+    const port = recoveryReadPort(f.store as unknown as GitHubControlStore, "o", "r");
+    const result = await loadHistoricalRecoveryRuntimes({
+      snapshot: f.snapshot,
+      historyComplete: true,
+      store: port,
+      latestRunId: "third",
+    });
+    expect([...result.keys()]).toEqual(["third", "successor"]);
+    expect(result.get("successor")!.controllingRun.runId).toBe("successor");
+    expect(result.get("third")!.accountingRunIds).toEqual(["source", "successor", "third"]);
+    expect(
+      await port.listRefs("refs/clockgrove-factory/recovery-claims/objective-7/"),
+    ).toHaveLength(2);
+  });
   it("loads actual completed adoption without new writes or resetting allowance", async () => {
     const f = await adopted({ tokenLimit: 1000 });
     const writes = f.store.writes.length;

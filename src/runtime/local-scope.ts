@@ -13,6 +13,8 @@ import {
 } from "./process-group.js";
 
 const exec = promisify(execFile);
+const LOCAL_SCOPE_DRAIN_TIMEOUT_MS = 500;
+const LOCAL_SCOPE_DRAIN_POLL_MS = 20;
 
 export interface LocalScopeHost {
   hostIdentity: string;
@@ -260,13 +262,33 @@ export async function stopLocalScope(
   const identity = parseLocalScopeIdentity(input);
   const state = await observeLocalScope(identity, port);
   if (state.status === "unknown") throw new Error("owned local scope cleanup unavailable");
+  if (state.status === "absent") return;
   if (state.status === "active") {
     await port.stop(localScopeUnit(identity)).catch(() => {
       throw new Error("owned local scope stop unavailable");
     });
   }
-  if ((await observeLocalScope(identity, port)).status !== "absent")
+  if (!(await waitForLocalScopeAbsence(identity, port)))
     throw new Error("owned local scope cleanup unverified");
+}
+
+async function waitForLocalScopeAbsence(
+  identity: LocalScopeIdentity,
+  port: LocalScopeReadPort,
+): Promise<boolean> {
+  // A completed stop job can precede the scope's final inactive/collected state.
+  // Drain only continuously owned active evidence; unknown never becomes absence.
+  const deadline = performance.now() + LOCAL_SCOPE_DRAIN_TIMEOUT_MS;
+  let observation = await observeLocalScope(identity, port);
+  if (observation.status === "absent") return true;
+  if (observation.status === "unknown") return false;
+  while (performance.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, LOCAL_SCOPE_DRAIN_POLL_MS));
+    observation = await observeLocalScope(identity, port);
+    if (observation.status === "absent") return true;
+    if (observation.status === "unknown") return false;
+  }
+  return false;
 }
 
 /** Starts only after the caller has journaled and fenced this launch. Scope absence
@@ -295,10 +317,14 @@ export async function startScopedLocalProcess(
     // A worker/test can daemonize out of its original process group. Stop only
     // this content-bound scope, then require an independently observed empty tree.
     const observation = await observeLocalScope(identity, port);
+    if (observation.status === "unknown") {
+      throw new LocalScopeCleanupError(identity, result);
+    }
+    if (observation.status === "absent") return result;
     if (observation.status === "active") {
       await port.stop(localScopeUnit(identity)).catch(() => undefined);
     }
-    if ((await observeLocalScope(identity, port)).status !== "absent") {
+    if (!(await waitForLocalScopeAbsence(identity, port))) {
       throw new LocalScopeCleanupError(identity, result);
     }
     return result;

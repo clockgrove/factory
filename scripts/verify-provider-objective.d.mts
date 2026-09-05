@@ -9,7 +9,7 @@ export function providerAuthority(
   env: Record<string, string | undefined>,
 ): ProviderAuthority | null;
 export function providerPolicy(authority: ProviderAuthority): unknown;
-export function providerObjective(profile: ProviderAuthority["profile"]): string;
+export function providerObjective(profile: ProviderAuthority["profile"], namespace: string): string;
 export function assessProviderCompletion(
   evidence: unknown,
   authority: ProviderAuthority,
@@ -18,4 +18,8 @@ export function observeProviderAbsence(
   daytona: unknown,
   evidence: unknown,
 ): Promise<{ state: string; reason?: string }>;
+export function observeManagedAgentTermination(
+  request: (route: string, parameters?: Record<string, unknown>) => Promise<{ data: unknown }>,
+  evidence: unknown,
+): Promise<{ state: string; reason?: string; bindings?: unknown[]; active?: unknown[] }>;
 export function main(): Promise<void>;

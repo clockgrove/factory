@@ -28,6 +28,7 @@ import * as cleanValidation from "../src/validation/clean-run.js";
 
 const directories: string[] = [];
 afterEach(async () => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   for (const directory of directories.splice(0))
     await rm(directory, { recursive: true, force: true });
@@ -44,6 +45,12 @@ async function fixture(
     wrongPreviewTree?: boolean;
     loseIntegrationReceipt?: boolean;
     stalePreviewOnce?: boolean;
+    previewState?: () => "fresh" | "stale-base" | "stale-parents" | "absent";
+    pollIntervalMs?: number;
+    signal?: AbortSignal;
+    onStatus?: (message: string) => void;
+    thirdSibling?: boolean;
+    afterMerge?: (number: number) => void;
   } = {},
 ) {
   const repository = await mkdtemp(join(tmpdir(), "factory-sibling-integration-"));
@@ -68,7 +75,8 @@ async function fixture(
   git("commit", "-qm", "base");
   const baseSha = git("rev-parse", "HEAD");
   const heads: string[] = [];
-  for (const name of ["a", "b"]) {
+  const names = options.thirdSibling ? ["a", "b", "c"] : ["a", "b"];
+  for (const name of names) {
     git("checkout", "-q", "-b", name, baseSha);
     await writeFile(join(repository, `${name}.txt`), `${name}\n`);
     git("add", ".");
@@ -161,7 +169,7 @@ async function fixture(
   const leases = { assertCurrent: async () => {} } as unknown as LeaseManager;
   const graph: CompiledObjective = {
     title: "Parallel siblings",
-    workItems: ["a", "b"].map((name) => ({
+    workItems: names.map((name) => ({
       id: name,
       title: name,
       goal: `Add ${name}`,
@@ -324,7 +332,7 @@ async function fixture(
         protocol: "clockgrove.factory/graph-v1",
         id: item.id,
         graphDigest: record.graphDigest,
-        graphSize: 2,
+        graphSize: names.length,
         index,
         dependsOn: [],
       }),
@@ -432,11 +440,24 @@ async function fixture(
   });
   vi.spyOn(LeaseManager.prototype, "read").mockResolvedValue(null);
   let acquisitions = 0;
-  vi.spyOn(LeaseManager.prototype, "acquire").mockImplementation(async (identity) => ({
-    ...lease,
-    ...identity,
-    epoch: ++acquisitions,
-  }));
+  vi.spyOn(LeaseManager.prototype, "acquire").mockImplementation(
+    async (identity, _base, requestedSequence) => ({
+      ...lease,
+      ...identity,
+      sequence: requestedSequence ?? lease.sequence,
+      epoch: ++acquisitions,
+    }),
+  );
+  const renewLease = vi
+    .spyOn(LeaseManager.prototype, "renew")
+    .mockImplementation(async (current, requestedSequence) => {
+      expect(requestedSequence).toBeGreaterThan(current.sequence);
+      return {
+        ...current,
+        sequence: requestedSequence!,
+        expiresAt: new Date(Date.now() + 600_000),
+      };
+    });
   vi.spyOn(LeaseManager.prototype, "assertCurrent").mockResolvedValue(undefined);
   vi.spyOn(LeaseManager.prototype, "assertGeneration").mockResolvedValue(undefined);
   vi.spyOn(LeaseManager.prototype, "release").mockImplementation(async (value) => value);
@@ -460,50 +481,55 @@ async function fixture(
       };
     },
   );
-  vi.spyOn(GitHubControlStore.prototype, "readPullRequest").mockImplementation(async (number) => {
-    const pull = findPull(number);
-    const currentBase = git("rev-parse", "main");
-    const preview = createHash("sha1")
-      .update(`preview:${currentBase}:${pull.headSha}`)
-      .digest("hex");
-    if (pull.state === "OPEN")
-      commits.set(preview, {
-        oid: preview,
-        treeOid:
-          options.wrongPreviewTree && number === 19
-            ? git("rev-parse", `${pull.headSha}^{tree}`)
-            : git("merge-tree", "--write-tree", currentBase, pull.headSha).split("\n")[0]!,
-        parentOids: [currentBase, pull.headSha],
-        message: "GitHub test merge",
-        serverTime: new Date(),
-      });
-    if (
-      options.stalePreviewOnce &&
-      !stalePreviewServed &&
-      number === 19 &&
-      [...refs.keys()].some((ref) => ref.includes("/reviews/"))
-    ) {
-      stalePreviewOid = preview;
-      commits.get(preview)!.parentOids = [baseSha, pull.headSha];
-    }
-    return {
-      number,
-      nodeId: pull.id,
-      baseRepository: "o/r",
-      headRepository: "o/r",
-      headRef: publicationBranch(7, number - 10, 1),
-      state: pull.state === "OPEN" ? "open" : "closed",
-      draft: false,
-      merged: pull.state === "MERGED",
-      mergeable: true,
-      mergeableState: "clean",
-      headSha: pull.headSha,
-      baseRef: "main",
-      baseSha: currentBase,
-      mergeCommitSha: mergeShas.get(number) ?? preview,
-      createdAt: new Date(now.getTime() - 120_000),
-    };
-  });
+  const pullReads = vi
+    .spyOn(GitHubControlStore.prototype, "readPullRequest")
+    .mockImplementation(async (number) => {
+      const pull = findPull(number);
+      const currentBase = git("rev-parse", "main");
+      const preview = createHash("sha1")
+        .update(`preview:${currentBase}:${pull.headSha}`)
+        .digest("hex");
+      if (pull.state === "OPEN")
+        commits.set(preview, {
+          oid: preview,
+          treeOid:
+            options.wrongPreviewTree && number === 19
+              ? git("rev-parse", `${pull.headSha}^{tree}`)
+              : git("merge-tree", "--write-tree", currentBase, pull.headSha).split("\n")[0]!,
+          parentOids: [currentBase, pull.headSha],
+          message: "GitHub test merge",
+          serverTime: new Date(),
+        });
+      if (
+        options.stalePreviewOnce &&
+        !stalePreviewServed &&
+        number === 19 &&
+        [...refs.keys()].some((ref) => ref.includes("/reviews/"))
+      ) {
+        stalePreviewOid = preview;
+        commits.get(preview)!.parentOids = [baseSha, pull.headSha];
+      }
+      const previewState = number === 19 ? options.previewState?.() : "fresh";
+      if (previewState === "stale-parents" && pull.state === "OPEN")
+        commits.get(preview)!.parentOids = [baseSha, pull.headSha];
+      return {
+        number,
+        nodeId: pull.id,
+        baseRepository: "o/r",
+        headRepository: "o/r",
+        headRef: publicationBranch(7, number - 10, 1),
+        state: pull.state === "OPEN" ? "open" : "closed",
+        draft: false,
+        merged: pull.state === "MERGED",
+        mergeable: true,
+        mergeableState: "clean",
+        headSha: pull.headSha,
+        baseRef: "main",
+        baseSha: previewState === "stale-base" ? baseSha : currentBase,
+        mergeCommitSha: previewState === "absent" ? null : (mergeShas.get(number) ?? preview),
+        createdAt: new Date(now.getTime() - 120_000),
+      };
+    });
   const merge = vi
     .spyOn(GitHubControlStore.prototype, "mergePullRequest")
     .mockImplementation(async ({ number, headSha }) => {
@@ -525,6 +551,7 @@ async function fixture(
         git("add", ".");
         git("commit", "-qm", "external advance");
       }
+      options.afterMerge?.(number);
       return merged;
     });
   const review = vi.fn<ManagementBackend["review"]>(async (_context, checkpoint) => {
@@ -565,7 +592,9 @@ async function fixture(
       repository,
       policy,
       managementBackend: management,
-      pollIntervalMs: 1,
+      pollIntervalMs: options.pollIntervalMs ?? 1,
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.onStatus ? { onStatus: options.onStatus } : {}),
     }).run();
   return {
     run,
@@ -581,6 +610,8 @@ async function fixture(
     git,
     repository,
     validate,
+    pullReads,
+    renewLease,
     stalePreviewObserved: () => stalePreviewServed,
   };
 }
@@ -725,6 +756,118 @@ describe("Supervisor parallel independent sibling integration", () => {
     expect(f.review).toHaveBeenCalledOnce();
     expect(f.validate).toHaveBeenCalledOnce();
     expect(f.stalePreviewObserved()).toBe(true);
+  });
+
+  it.each(["stale-base", "stale-parents", "absent"] as const)(
+    "paces prolonged %s evidence, then integrates fresh evidence without repeated paid work",
+    async (initialState) => {
+      let state: "fresh" | typeof initialState = initialState;
+      let observedWait!: () => void;
+      const waiting = new Promise<void>((resolve) => {
+        observedWait = resolve;
+      });
+      const statuses: string[] = [];
+      const f = await fixture({
+        previewState: () => state,
+        pollIntervalMs: 60_000,
+        onStatus: (message) => {
+          statuses.push(message);
+          if (message.includes("integration waiting:")) {
+            vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+            observedWait();
+          }
+        },
+      });
+      const completion = f.run();
+      await waiting;
+      await vi.advanceTimersByTimeAsync(0);
+      const readsBefore = f.pullReads.mock.calls.length;
+      for (let minute = 0; minute < 7; minute++) await vi.advanceTimersByTimeAsync(60_000);
+      // Initial read, then 1m/3m/7m: not one full immutable-proof/API cycle per snapshot.
+      const readsWhileWaiting = f.pullReads.mock.calls.length - readsBefore;
+      expect(readsWhileWaiting).toBeGreaterThan(0);
+      expect(readsWhileWaiting).toBeLessThanOrEqual(24);
+      expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
+      expect(f.validate).toHaveBeenCalledOnce();
+      expect(f.review).toHaveBeenCalledOnce();
+      expect(statuses.filter((message) => message.includes("integration waiting:"))).toHaveLength(
+        1,
+      );
+      state = "fresh";
+      await vi.advanceTimersByTimeAsync(300_000);
+      const result = await completion;
+      expect(result, result.reason).toMatchObject({ status: "completed" });
+      expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18, 19]);
+      expect(f.validate).toHaveBeenCalledOnce();
+      expect(f.review).toHaveBeenCalledOnce();
+      expect(f.launch).not.toHaveBeenCalled();
+      expect(f.renewLease).toHaveBeenCalled();
+    },
+  );
+
+  it("observes durable cancellation during preview backoff without another candidate or merge", async () => {
+    let observedWait!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      observedWait = resolve;
+    });
+    const f = await fixture({
+      previewState: () => "stale-parents",
+      pollIntervalMs: 60_000,
+      onStatus: (message) => {
+        if (message.includes("integration waiting:")) {
+          vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+          observedWait();
+        }
+      },
+    });
+    const completion = f.run();
+    await waiting;
+    await vi.advanceTimersByTimeAsync(180_000);
+    const readsBeforeCancel = f.pullReads.mock.calls.length;
+    const events = [
+      ...f.snapshot.factoryEvents!,
+      ...f.snapshot.workItems.flatMap((item) => item.factoryEvents!),
+    ];
+    f.snapshot.factoryEvents!.push(
+      parseFactoryEvent({
+        protocol: "clockgrove.factory/v2",
+        kind: "run",
+        event: "FactoryRunCancellationRequested",
+        objective: 7,
+        runId: "parallel",
+        requestedBy: "operator",
+        requestId: "stop-during-preview-wait",
+        sequence: Math.max(...events.map((event) => event.sequence)) + 1,
+        at: new Date().toISOString(),
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(await completion).toMatchObject({ status: "cancelled" });
+    expect(f.pullReads.mock.calls.length).toBe(readsBeforeCancel);
+    expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
+    expect(f.review).toHaveBeenCalledOnce();
+    expect(f.validate).toHaveBeenCalledOnce();
+    expect(f.launch).not.toHaveBeenCalled();
+  });
+
+  it("lets another ready sibling integrate while an earlier sibling's preview is stale", async () => {
+    const abort = new AbortController();
+    const f = await fixture({
+      thirdSibling: true,
+      previewState: () => "stale-parents",
+      pollIntervalMs: 60_000,
+      signal: abort.signal,
+      afterMerge: (number) => {
+        if (number === 20) abort.abort();
+      },
+    });
+    const result = await f.run();
+    expect(result, result.reason).toMatchObject({ status: "cancelled" });
+    expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18, 20]);
+    expect(f.snapshot.workItems[1]!.closed).toBe(false);
+    expect(f.review.mock.calls.map(([input]) => input.workItemNumber)).toEqual([9, 10]);
+    expect(f.validate).toHaveBeenCalledTimes(2);
+    expect(f.launch).not.toHaveBeenCalled();
   });
 
   it("does not claim resource cleanup when clean validation throws without completion evidence", async () => {

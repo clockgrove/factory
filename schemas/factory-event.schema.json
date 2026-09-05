@@ -245,6 +245,16 @@
   },
   "allOf": [
     {
+      "if": { "properties": { "event": { "const": "ActivationCancellationRequested" } } },
+      "then": {
+        "properties": {
+          "kind": { "const": "run" },
+          "reason": { "type": "string", "minLength": 1, "maxLength": 8000 }
+        },
+        "required": ["requestId", "activationRequestId", "requestedBy", "repository", "baseSha", "policyDigest"]
+      }
+    },
+    {
       "if": { "properties": { "kind": { "const": "recovery" } } },
       "then": { "properties": { "event": { "enum": ["RecoveryRequested", "RecoveryConsumed", "RecoveryAdoptionCompleted", "RecoverySourcePublished", "RecoverySourceIntegrated"] } } }
     },

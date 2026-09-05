@@ -13,7 +13,11 @@ import { policyDigest } from "../protocol/policy.js";
 import { bindValidationToPublishedHead } from "../validation/plan.js";
 import type { RecoveryReadStore } from "./assessment.js";
 import { loadRecoveryClaim, type RecoveryClaimRecord } from "./claims.js";
-import { recoveryEventDigest, recoverySourceEventsDigest } from "./identity.js";
+import {
+  createRecoveryEventDigest,
+  recoveryEventDigest,
+  recoverySourceEventsDigest,
+} from "./identity.js";
 import { verifyPriorRecoveryDelivery } from "./outcomes.js";
 import { recoveryAdoptionEvents } from "./transaction.js";
 import {
@@ -127,6 +131,7 @@ export async function resolveRecoveryEvidence(input: {
   store: RecoveryReadStore;
   snapshot: FactoryReadSnapshot;
 }): Promise<RecoveryEvidenceResolution> {
+  const recoveryEventDigest = createRecoveryEventDigest();
   const output: RecoveryEvidenceResolution = {
     controllingRunId: input.planRecord.plan.successorRunId,
     sourcePlanDigest: input.planRecord.digest,
@@ -294,9 +299,11 @@ export async function resolveRecoveryEvidence(input: {
             predecessorStart: predecessor,
           });
           requireEvidence(
-            expected.every((receipt) =>
-              events.some((event) => recoveryEventDigest(event) === recoveryEventDigest(receipt)),
-            ),
+            expected
+              .map(recoveryEventDigest)
+              .every((expectedDigest) =>
+                events.some((event) => recoveryEventDigest(event) === expectedDigest),
+              ),
           );
           await verifyGraph(adopted!.plan.graph.sourceRunId);
           return;

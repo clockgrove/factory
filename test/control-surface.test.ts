@@ -19,6 +19,17 @@ describe("CLI and MCP control surface", () => {
     }
     expect(cli).toContain("controller: controllerLifecycle");
     expect(mcp).toContain("controller: controllerLifecycle");
+    for (const source of [cli, mcp]) {
+      expect(source).toContain("diagnostics:");
+      expect(source).toContain("planning:");
+      expect(source).toContain("management,");
+      expect(source).toContain("readRepositoryLayout:");
+    }
+    expect(cli).toContain('args.includes("--compile")');
+    expect(cli).toContain("service.doctor");
+    expect(cli).toContain("service.plan");
+    expect(mcp).toContain("input.compile ?? false");
+    expect(mcp).toContain("Never activates work");
   });
 
   it("marks every registered read, mutation, and destructive request correctly", async () => {

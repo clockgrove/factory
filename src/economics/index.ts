@@ -399,7 +399,9 @@ export interface RunSummary {
   validation: { recorded: number; passed: number; failed: number };
   delivery: {
     selected: "regular-prs" | "native-stacks" | "escalate" | "unavailable";
+    /** Distinct attempt/PR publications, not replay or revalidation receipt rows. */
     publications: number;
+    /** Distinct integrated attempts, including each native stack member once. */
     integrationsCompleted: number;
   };
   economics: EconomicSummary;
@@ -452,9 +454,20 @@ export function summarizeRun(
   const effectivePolicy = policy ?? receiptSet.start.policy;
   const validations = runEvents.filter((event) => event.kind === "validation");
   const delivery = [...runEvents].reverse().find((event) => event.kind === "delivery");
-  const publications = runEvents.filter(
-    (event) => event.kind === "publication" && event.event === "PublicationRecorded",
-  );
+  const publications = new Set<string>();
+  const integrations = new Set<string>();
+  for (const event of runEvents) {
+    if (event.kind !== "attempt" && event.kind !== "publication") continue;
+    const attemptIdentity = JSON.stringify([event.runId, event.workItem, event.attempt]);
+    if (event.kind === "publication" && event.event === "PublicationRecorded") {
+      publications.add(JSON.stringify([attemptIdentity, event.pullRequest]));
+    }
+    // Native integration records both events; regular delivery records the attempt.
+    // Recovery/revalidation can add receipts without creating another delivered item.
+    if (event.event === "AttemptIntegrated" || event.event === "IntegrationCompleted") {
+      integrations.add(attemptIdentity);
+    }
+  }
   return {
     runId: receiptSet.runId,
     outcome,
@@ -489,10 +502,8 @@ export function summarizeRun(
     },
     delivery: {
       selected: delivery?.kind === "delivery" ? delivery.selected : "unavailable",
-      publications: publications.length,
-      integrationsCompleted: runEvents.filter(
-        (event) => event.kind === "publication" && event.event === "IntegrationCompleted",
-      ).length,
+      publications: publications.size,
+      integrationsCompleted: integrations.size,
     },
     economics: summarizeEconomics({
       events: runEvents,

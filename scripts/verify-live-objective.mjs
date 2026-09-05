@@ -1,6 +1,10 @@
 /** Opt-in installed-plugin Supervisor exercise; never part of offline release checks. */
 import assert from "node:assert/strict";
 import { deduplicateQualificationReceipts } from "./qualification-receipts.mjs";
+import {
+  assertQualificationMergeProof,
+  observeQualificationMergeProofs,
+} from "./qualification-merge-proof.mjs";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -404,6 +408,7 @@ export function assertCompletion(evidence, allowedBackends = localBackends) {
     ["children", 100],
     ["dependencies", 100],
     ["pulls", 1000],
+    ["mergeProofs", 100],
     ["events", 50_000],
   ]) {
     assert.ok(
@@ -414,6 +419,11 @@ export function assertCompletion(evidence, allowedBackends = localBackends) {
   assert.ok(evidence.children.length >= 3, "expected a multi-wave compiled graph");
   const childNumbers = new Set(evidence.children.map((child) => child.number));
   assert.equal(childNumbers.size, evidence.children.length, "duplicate Work Items");
+  assert.equal(
+    evidence.mergeProofs.length,
+    evidence.children.length,
+    "merge commit proof coverage differs",
+  );
   assert.ok(
     [...childNumbers].every((number) => Number.isSafeInteger(number) && number > 0),
     "invalid Work Item identity",
@@ -586,17 +596,21 @@ export function assertCompletion(evidence, allowedBackends = localBackends) {
         event.headSha === published.headSha,
     );
     assert.ok(publication?.pullRequest, "missing publication PR identity");
-    assert.ok(
-      evidence.pulls.some(
-        (pull) =>
-          pull.number === publication.pullRequest &&
-          pull.state === "closed" &&
-          pull.merged === true &&
-          pull.head?.sha === published.headSha &&
-          pull.merge_commit_sha === integrated.headSha,
-      ),
-      "integration receipt differs from GitHub merge commit",
+    const pulls = evidence.pulls.filter((pull) => pull.number === publication.pullRequest);
+    const proofs = evidence.mergeProofs.filter(
+      (proof) =>
+        proof.runId === runId &&
+        proof.workItem === child.number &&
+        proof.attempt === integrated.attempt,
     );
+    assert.equal(pulls.length, 1, "exact REST PR identity missing or repeated");
+    assert.equal(proofs.length, 1, "exact GraphQL merge commit proof missing or repeated");
+    assertQualificationMergeProof(proofs[0], {
+      repository: evidence.repository,
+      pull: pulls[0],
+      publication,
+      integration: integrated,
+    });
   }
   for (const entry of evidence.dependencies) {
     const dependencies = entry.blockedBy.map((dependency) => dependency.number);
@@ -1126,6 +1140,7 @@ export async function main(qualification = {}) {
     dependencies: [],
     events: [],
     pulls: [],
+    mergeProofs: [],
   };
   const save = () =>
     writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });
@@ -1248,6 +1263,13 @@ export async function main(qualification = {}) {
           })
         ).data,
       );
+    if (evidence.runResult.status === "completed") {
+      evidence.mergeProofs = await observeQualificationMergeProofs(
+        { request: (route, parameters) => octokit.request(route, parameters) },
+        evidence,
+      );
+      save();
+    }
     evidence.finishedInstalledArtifact = installedBundleIdentity(pluginRoot);
     assert.deepEqual(
       evidence.finishedInstalledArtifact,

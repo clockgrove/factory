@@ -23,6 +23,7 @@ import {
 } from "../scripts/verify-live-objective.mjs";
 import { parseRunPolicy, policyDigest } from "../src/protocol/policy.js";
 import { bindValidationToPublishedHead } from "../src/validation/plan.js";
+import { assertSchedulingCompletion } from "../scripts/verify-local-scheduling.mjs";
 import {
   assertRegularCompletion,
   assessRegularCompletion,
@@ -165,13 +166,13 @@ function evidence() {
       workItem: number,
       attempt: 1,
       artifactDigest: `artifact-${number}`,
-      headSha: `head-${number}`,
+      headSha: String(number).repeat(40),
     },
     {
       event: "PublicationRecorded",
       workItem: number,
       attempt: 1,
-      headSha: `head-${number}`,
+      headSha: String(number).repeat(40),
       pullRequest: number + 10,
       mode: "native-stacks",
     },
@@ -179,7 +180,7 @@ function evidence() {
       event: "AttemptIntegrated",
       workItem: number,
       attempt: 1,
-      headSha: `merge-${number}`,
+      headSha: String(number + 3).repeat(40),
     },
     {
       event: "BudgetReconciled",
@@ -284,11 +285,24 @@ function evidence() {
         }) as HarnessEvent,
     ),
     pulls: children.map(({ number }) => ({
+      node_id: `PR_${number + 10}`,
+      base: { repo: { node_id: "R_fixture", full_name: "example/factory-qualification" } },
       number: number + 10,
       state: "closed",
       merged: true,
-      head: { sha: `head-${number}` },
-      merge_commit_sha: `merge-${number}`,
+      head: { sha: String(number).repeat(40) },
+    })),
+    mergeProofs: children.map(({ number }) => ({
+      runId: "fixture",
+      objective: 1,
+      workItem: number,
+      attempt: 1,
+      pullRequest: number + 10,
+      pullRequestNodeId: `PR_${number + 10}`,
+      repository: "example/factory-qualification",
+      repositoryNodeId: "R_fixture",
+      headSha: String(number).repeat(40),
+      mergeSha: String(number + 3).repeat(40),
     })),
   };
 }
@@ -339,7 +353,10 @@ function regularEvidence(profile = "local-default") {
     );
     Object.assign(fixture.pulls.find((pull) => pull.number === number + 10)!, {
       head: { sha: head },
-      merge_commit_sha: merge,
+    });
+    Object.assign(fixture.mergeProofs.find((proof) => proof.workItem === number)!, {
+      headSha: head,
+      mergeSha: merge,
     });
     const records = fixture.events.filter((event) => event.workItem === number);
     if (profile === "codex-cli")
@@ -440,6 +457,25 @@ function regularEvidence(profile = "local-default") {
     ),
   };
 }
+
+describe("shared versioned REST merge evidence", () => {
+  it("default and regular qualification accept field-absent REST only with exact separate proofs", () => {
+    const native = evidence();
+    const regular = regularEvidence();
+    for (const value of [native, regular]) {
+      expect(value.pulls.every((pull) => !("merge_commit_sha" in pull))).toBe(true);
+      expect(() => assertCompletion(value)).not.toThrow();
+      value.mergeProofs.pop();
+      expect(() => assertCompletion(value)).toThrow(/merge commit proof coverage/);
+    }
+  });
+  it("regular and scheduling qualification reject cross-run stored proof before accepting delivery", () => {
+    const value = regularEvidence();
+    value.mergeProofs[0]!.runId = "other";
+    expect(() => assertRegularCompletion(value)).toThrow(/merge commit proof missing/);
+    expect(() => assertSchedulingCompletion(value)).toThrow(/merge commit proof missing/);
+  });
+});
 
 describe("explicit installed regular qualification", () => {
   it("selects only explicit CLI without changing default authority or model settings", async () => {
@@ -872,7 +908,7 @@ describe("installed live Objective harness evidence boundary", () => {
   });
   it("rejects a different GitHub merge commit", () => {
     const value = evidence();
-    value.pulls[0]!.merge_commit_sha = "other";
+    value.mergeProofs[0]!.mergeSha = "other";
     expect(() => assertCompletion(value)).toThrow(/merge commit/);
   });
   it("rejects closed issues without the two-parent dependency wave", () => {

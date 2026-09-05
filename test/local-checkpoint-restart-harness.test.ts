@@ -752,6 +752,11 @@ describe("exact GraphQL merged commit proof", () => {
   it("uses authoritative GraphQL mergeCommit when REST omits merge_commit_sha", async () => {
     const request = vi.fn(async () => ({ data: { data: { node } } }));
     await expect(readCheckpointMergeProof({ request }, input)).resolves.toEqual({
+      runId: "run",
+      objective: 1,
+      workItem: 2,
+      attempt: 1,
+      repositoryNodeId: "R_exact",
       pullRequestNodeId: "PR_exact",
       pullRequest: 3,
       repository,

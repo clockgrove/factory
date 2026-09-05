@@ -1,26 +1,18 @@
+export const budgetRefusalReason: string;
 export function budgetStopPolicy(): Record<string, unknown>;
 export function budgetStopAuthority(
   env: Record<string, string | undefined>,
 ): { repository: string; namespace: string; policy: Record<string, unknown> } | null;
 export function assessBudgetStopObservation(input: unknown): {
+  observationScope: "observed-pre-projection-budget-refusal";
   runId: string;
-  policyDigest: string;
-  graphDigest: string;
-  compilerUsageId: string;
+  start: Record<string, unknown>;
+  compiler: Record<string, unknown>;
+  terminal: Record<string, unknown>;
   compilerTokens: number;
-  roots: number[];
-} | null;
-export function observeBudgetStopThenCancel(input: {
-  read: () => Promise<unknown>;
-  cancel: (requestId: string) => Promise<unknown>;
-  context: unknown;
-  cancelRequestId: string;
-  assertRunning: () => void;
-  saveObservation: (value: unknown) => void;
-  saveCancelRequested: (value: unknown) => void;
-  wait?: (milliseconds: number) => Promise<unknown>;
-  now?: () => string;
-}): Promise<unknown>;
+  durableGraph: "uninspected";
+  originalExerciseResultChanged: false;
+};
 export function assertBudgetStopCompletion(evidence: unknown): void;
 export function createBudgetStopQualification(
   authority: NonNullable<ReturnType<typeof budgetStopAuthority>>,

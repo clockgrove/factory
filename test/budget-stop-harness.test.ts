@@ -2,10 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import {
   assertBudgetStopCompletion,
   assessBudgetStopObservation,
+  budgetRefusalReason,
   budgetStopAuthority,
   budgetStopPolicy,
+  createBudgetStopQualification,
   main,
-  observeBudgetStopThenCancel,
 } from "../scripts/verify-budget-stop.mjs";
 import {
   boundedPolicy,
@@ -18,15 +19,12 @@ import {
 const repository = "example/disposable";
 const namespace = "budget-negative-fixture";
 const actor = { id: 7, login: "operator" };
-const base = "a".repeat(40);
-const digest = "b".repeat(64);
 const policyDigest = "c".repeat(64);
-const at = "2026-09-05T12:00:00.000Z";
 type Event = Record<string, unknown> & {
   event: string;
+  kind: string;
   sequence: number;
   runId: string;
-  kind: string;
   objective: number;
 };
 const event = (
@@ -41,107 +39,58 @@ const event = (
   sequence,
   runId: "budget-run",
   objective: 1,
-  at,
+  at: "2026-09-05T12:00:00.000Z",
   ...extra,
 });
 function observation() {
-  const events = [
-    event("FactoryRunStarted", "run", 1, {
-      repository,
-      actor: actor.login,
-      policy: budgetStopPolicy(),
-      policyDigest,
-      baseBranch: "main",
-    }),
-    event("BudgetReconciled", "budget", 2, {
-      phase: "management",
-      unit: "model_tokens",
-      usageId: `compile-${digest}`,
-      amount: 15542,
-      reportedModelUsage: { inputTokens: 14132, outputTokens: 1410 },
-    }),
-    event("GraphCompiled", "graph", 3, {
-      graphDigest: digest,
-      graphSize: 3,
-      baseSha: base,
-      graphRef: "refs/clockgrove-factory/graphs/1/budget-run",
-      graphBlobSha: "d".repeat(40),
-    }),
-    event("GraphProjected", "graph", 4, {
-      graphDigest: digest,
-      graphSize: 3,
-      projectionRef: "refs/clockgrove-factory/projections/1/budget-run",
-      projectionBlobSha: "e".repeat(40),
-    }),
-    ...[2, 3].map((workItem, index) =>
-      event("WorkItemQueued", "scheduling", 5 + index, {
-        workItem,
-        policyDigest,
-        reasonCode: "budget-exhausted",
-      }),
-    ),
-  ];
   return {
-    receipts: events.map((event, index) => ({ event, commentId: 100 + index, actorId: actor.id })),
-    unit: {
-      checkout: "/home/example/disposable",
-      state: "active",
-      unit: `clockgrove-factory-qualification-${"f".repeat(64)}.service`,
-      effectiveCpu: 4,
-      invocationId: "a".repeat(32),
-      pid: 123,
-      startTicks: "456",
-      bootDigest: "d".repeat(64),
-    },
-    context: { repository, objective: 1, actor, base },
+    context: { repository, objective: 1, actor },
+    receipts: [
+      event("FactoryRunStarted", "run", 1, {
+        repository,
+        actor: actor.login,
+        policy: budgetStopPolicy(),
+        policyDigest,
+        baseBranch: "main",
+      }),
+      event("BudgetReconciled", "budget", 5, {
+        phase: "management",
+        unit: "model_tokens",
+        usageId: `compile-${"b".repeat(64)}`,
+        amount: 15919,
+        reportedModelUsage: { inputTokens: 14460, outputTokens: 1459 },
+      }),
+      event("FactoryRunEscalated", "run", 6, { reason: budgetRefusalReason }),
+      event("DeliverySelected", "delivery", 4, {
+        requested: "regular-prs",
+        selected: "regular-prs",
+      }),
+    ].map((event, index) => ({ event, commentId: 100 + index, actorId: actor.id })),
     status: {
       operation: "status",
       repository,
       objective: { number: 1 },
-      run: { availability: "observed", runId: "budget-run", policyDigest, state: "active" },
+      run: { availability: "observed", runId: "budget-run", policyDigest, state: "escalated" },
       summary: {
         runId: "budget-run",
         attempts: { active: 0 },
         economics: {
-          usage: { model_tokens: { availability: "observed", value: 15542 } },
-          budgets: { modelTokens: { value: { configured: 1, committed: 15542 } } },
+          usage: { model_tokens: { availability: "observed", value: 15919 } },
+          budgets: { modelTokens: { value: { configured: 1, committed: 15919 } } },
         },
       },
+      workItems: [] as unknown[],
       capacity: { activeReservations: [] as unknown[], observed: { active: 0 } },
-      workItems: [
-        { number: 2, openDependencies: [] },
-        { number: 3, openDependencies: [] },
-        { number: 4, openDependencies: [2, 3] },
-      ],
     },
   };
 }
-function receipt(input: ReturnType<typeof observation>, name: string) {
-  return input.receipts.find((receipt) => receipt.event.event === name)!.event;
-}
 function terminalEvidence() {
-  const first = observation();
-  const second = structuredClone(first);
-  const cancel = event("FactoryRunCancellationRequested", "run", 7, {
-    requestId: `${namespace}-cancel`,
-    requestedBy: actor.login,
-  });
-  const cancelled = event("FactoryRunCancelled", "run", 8);
-  const events = [...first.receipts.map((receipt) => receipt.event), cancel, cancelled].map(
-    (event, index) => ({
-      ...event,
-      author: actor.login,
-      authorId: actor.id,
-      receiptUrl: `https://github.com/${repository}/issues/1#issuecomment-${100 + index}`,
-    }),
-  );
-  const status = structuredClone(first.status);
-  status.run.state = "cancelled";
+  const observed = observation();
   return {
-    scope: "installed-local-observed-budget-stop-no-worker",
+    scope: "installed-local-pre-projection-budget-refusal",
     repository,
     actor,
-    base,
+    base: "a".repeat(40),
     qualificationNamespace: namespace,
     fixturePaths: qualificationPaths(namespace),
     objective: { number: 1, body: objectiveBodyFor(namespace) },
@@ -153,14 +102,20 @@ function terminalEvidence() {
     },
     installedArtifact: { inventorySha256: "a".repeat(64) },
     finishedInstalledArtifact: { inventorySha256: "a".repeat(64) },
-    events,
-    status,
-    pulls: [],
-    runResult: { runId: "budget-run", status: "cancelled" },
+    events: observed.receipts.map(({ event, commentId }) => ({
+      ...event,
+      author: actor.login,
+      authorId: actor.id,
+      receiptUrl: `https://github.com/${repository}/issues/1#issuecomment-${commentId}`,
+    })),
+    status: observed.status,
+    children: [] as unknown[],
+    pulls: [] as unknown[],
+    runResult: { runId: "budget-run", status: "escalated" },
     runRequest: {
       tool: "factory_run",
       arguments: {
-        repository: first.unit.checkout,
+        repository: "/home/example/disposable",
         owner: "example",
         repo: "disposable",
         objectiveNumber: 1,
@@ -169,353 +124,360 @@ function terminalEvidence() {
       },
     },
     budgetStop: {
-      primary: first.unit,
-      observations: [
-        { ...first, observedAt: at },
-        { ...second, observedAt: "2026-09-05T12:00:10.000Z" },
-      ],
-      beforeCancel: { ...second, observedAt: "2026-09-05T12:00:11.000Z" },
-      cancelRequestId: `${namespace}-cancel`,
-      cancelReceipt: cancel,
-      cleanup: { state: "absent", unit: first.unit.unit, bootDigest: first.unit.bootDigest },
+      kind: "pre-projection-budget-refusal-no-cancel",
+      primary: {
+        checkout: "/home/example/disposable",
+        unit: "exact.service",
+        bootDigest: "b".repeat(64),
+      },
+      terminalObservation: assessBudgetStopObservation(observed),
+      cleanup: { state: "absent", unit: "exact.service", bootDigest: "b".repeat(64) },
     },
   };
 }
+const env = {
+  FACTORY_LIVE_BUDGET_STOP: "1",
+  FACTORY_LIVE_OBJECTIVE: "1",
+  FACTORY_LIVE_OBJECTIVE_REPOSITORY: repository,
+  FACTORY_LIVE_OBJECTIVE_NAMESPACE: namespace,
+  FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS: "1",
+  FACTORY_LIVE_BUDGET_STOP_ACK: `${repository}:pre-projection-refusal-no-cancel`,
+};
 
-describe("explicit negative budget authority", () => {
-  const env = {
-    FACTORY_LIVE_BUDGET_STOP: "1",
-    FACTORY_LIVE_OBJECTIVE: "1",
-    FACTORY_LIVE_OBJECTIVE_REPOSITORY: repository,
-    FACTORY_LIVE_OBJECTIVE_NAMESPACE: namespace,
-    FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS: "1",
-    FACTORY_LIVE_BUDGET_STOP_ACK: `${repository}:compile-once-budget-stop-no-worker`,
-  };
-  it("does nothing without its own opt-in", async () => {
-    const run = vi.fn();
+describe("prospective pre-projection refusal authority", () => {
+  it("has no import/entry action without its own opt-in", async () => {
+    const invoke = vi.fn(async () => {});
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
-      await main({}, run);
-      expect(run).not.toHaveBeenCalled();
+      await main({}, invoke);
+      expect(invoke).not.toHaveBeenCalled();
     } finally {
       log.mockRestore();
     }
   });
-  it("reduces only the initial model allowance and does not weaken happy-path guards", () => {
+  it("reduces only the initial budget and leaves happy guard unchanged", () => {
     const full = boundedPolicy("regular-prs", 500000) as Record<string, unknown>;
-    const reduced = budgetStopPolicy();
-    expect(reduced).toEqual({
+    expect(budgetStopPolicy()).toEqual({
       ...full,
       economics: { ...(full.economics as object), maxModelTokens: 1 },
     });
     expect(() => modelTokenLimit("1")).toThrow();
-    expect(() => boundedPolicy("regular-prs", 1)).toThrow();
-    expect(budgetStopAuthority(env)?.policy).toEqual(reduced);
+    expect(budgetStopAuthority(env)?.policy).toEqual(budgetStopPolicy());
   });
   it.each([
-    { FACTORY_LIVE_BUDGET_STOP_ACK: "other/repo" },
-    { FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS: "0" },
-    { FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS: "500000" },
-    { FACTORY_LIVE_OBJECTIVE_DELIVERY: "stacked-prs" },
-    { FACTORY_LIVE_REGULAR_BACKEND: "codex-cli" },
-    { FACTORY_LIVE_OBJECTIVE_REPOSITORY: "clockgrove/factory" },
-    { GH_TOKEN: "private-sentinel" },
-    { GH_CONFIG_DIR: "/other/config" },
-  ])("rejects altered scope before invocation %j", async (delta) => {
-    const run = vi.fn();
-    await expect(main({ ...env, ...delta }, run)).rejects.toThrow();
-    expect(run).not.toHaveBeenCalled();
+    ["FACTORY_LIVE_BUDGET_STOP_ACK", `${repository}:compile-once-budget-stop-no-worker`],
+    ["FACTORY_LIVE_BUDGET_STOP_ACK", "another/repo:pre-projection-refusal-no-cancel"],
+    ["FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS", "2"],
+    ["FACTORY_LIVE_OBJECTIVE_DELIVERY", "native-stacks"],
+    ["FACTORY_LIVE_REGULAR_BACKEND", "codex-cli"],
+    ["FACTORY_LIVE_OBJECTIVE_REPOSITORY", "clockgrove/factory"],
+    ...["GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME"].map((key) => [
+      key,
+      "override",
+    ]),
+  ])("rejects changed %s before any invocation", async (key, value) => {
+    const invoke = vi.fn(async () => {});
+    await expect(main({ ...env, [key!]: value }, invoke)).rejects.toThrow();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+  it("constructs no control/polling hook and calls the shared runner once", async () => {
+    const invoke = vi.fn(async () => {});
+    await main(env, invoke);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    const qualification = createBudgetStopQualification(budgetStopAuthority(env)!);
+    expect(qualification.duringRun).toBeUndefined();
+    expect(qualification.scope).toBe("installed-local-pre-projection-budget-refusal");
   });
 });
 
-describe("observed compiler accounting and no-worker gate", () => {
-  it("accepts a real positive compiler overshoot followed by blocked roots", () =>
-    expect(assessBudgetStopObservation(observation())).toMatchObject({
-      runId: "budget-run",
-      compilerTokens: 15542,
-      roots: [2, 3],
-    }));
-  it("waits for compilation rather than claiming unknown usage as zero", () => {
+describe("observed pre-projection terminal rather than queued/cancelled assumptions", () => {
+  it("retains real counters and marks durable graph uninspected, never absent", () => {
     const input = observation();
-    input.receipts = [];
-    expect(assessBudgetStopObservation(input)).toBeNull();
-  });
-  it("waits when only one ready root has an observed budget refusal", () => {
-    const input = observation();
-    input.receipts.pop();
-    expect(assessBudgetStopObservation(input)).toBeNull();
-  });
-  it.each(["AttemptReserved", "AttemptStarted"])(
-    "rejects any admitted %s even if status says inactive",
-    (name) => {
-      const input = observation();
-      input.receipts.push({
-        event: event(name, "attempt", 7, { workItem: 2, attempt: 1 }),
-        commentId: 107,
-        actorId: 7,
-      });
-      expect(() => assessBudgetStopObservation(input)).toThrow(/admission/);
-    },
-  );
-  it.each([
-    "FactoryRunCancelled",
-    "FactoryRunCompleted",
-    "FactoryRunEscalated",
-    "FactoryRunCancellationRequested",
-  ])("does not replace unexpected %s with its own cleanup", (name) => {
-    const input = observation();
-    input.receipts.push({ event: event(name, "run", 7), commentId: 107, actorId: 7 });
-    expect(() => assessBudgetStopObservation(input)).toThrow(/outcome changed/);
-  });
-  it.each([
-    { amount: 0 },
-    { amount: 1 },
-    { reportedModelUsage: undefined },
-    { reportedModelUsage: { inputTokens: 14132 } },
-    { reportedModelUsage: { inputTokens: 14132, outputTokens: 1409 } },
-    { usageId: "failed-compile-unrelated" },
-    { workItem: 2 },
-  ])("rejects missing, zero, inconsistent, or non-compiler usage %j", (delta) => {
-    const input = observation();
-    Object.assign(receipt(input, "BudgetReconciled"), delta);
-    expect(() => assessBudgetStopObservation(input)).toThrow();
-  });
-  it("rejects extra accounted calls rather than interpreting them as compiler-only", () => {
-    const input = observation();
-    input.receipts.push({
-      event: { ...receipt(input, "BudgetReconciled"), sequence: 7, usageId: "review-extra" },
-      commentId: 107,
-      actorId: 7,
+    const before = structuredClone(input);
+    expect(assessBudgetStopObservation(input)).toMatchObject({
+      observationScope: "observed-pre-projection-budget-refusal",
+      compilerTokens: 15919,
+      durableGraph: "uninspected",
+      originalExerciseResultChanged: false,
     });
-    expect(() => assessBudgetStopObservation(input)).toThrow(/one known compiler/);
+    expect(input).toEqual(before);
   });
-  it("rejects unauthenticated source receipts", () => {
+  it.each(["AttemptReserved", "AttemptStarted", "AttemptCancelled"])("rejects any %s", (name) => {
     const input = observation();
-    input.receipts[0]!.actorId = 8;
+    input.receipts.push({ event: event(name, "attempt", 4), actorId: 7, commentId: 200 });
     expect(() => assessBudgetStopObservation(input)).toThrow();
   });
-  it("rejects changed policy, base, graph and status binding", () => {
-    for (const mutate of [
-      (input: ReturnType<typeof observation>) => {
-        receipt(input, "FactoryRunStarted").policy = boundedPolicy("regular-prs", 500000);
-      },
-      (input: ReturnType<typeof observation>) => {
-        receipt(input, "GraphCompiled").baseSha = "f".repeat(40);
-      },
-      (input: ReturnType<typeof observation>) => {
-        receipt(input, "GraphProjected").graphDigest = "f".repeat(64);
-      },
-      (input: ReturnType<typeof observation>) => {
-        input.status.run.runId = "different";
-      },
-      (input: ReturnType<typeof observation>) => {
-        input.status.summary.economics.budgets.modelTokens.value.configured = 500000;
-      },
-    ]) {
-      const input = observation();
-      mutate(input);
-      expect(() => assessBudgetStopObservation(input)).toThrow();
-    }
-  });
-  it("rejects outstanding status liabilities even with no captured attempt receipt", () => {
+  it.each([
+    ["CapacityReserved", "capacity"],
+    ["GraphCompiled", "graph"],
+    ["GraphProjected", "graph"],
+    ["WorkItemQueued", "scheduling"],
+    ["PublicationRecorded", "publication"],
+    ["ValidationRecorded", "validation"],
+    ["FactoryRunCancellationRequested", "run"],
+  ])("rejects %s outside this narrow boundary", (name, kind) => {
     const input = observation();
-    input.status.capacity.activeReservations.push({ workItem: 2 });
+    input.receipts.push({ event: event(name!, kind!, 4), actorId: 7, commentId: 200 });
     expect(() => assessBudgetStopObservation(input)).toThrow();
+  });
+  const changes: Array<[string, (v: ReturnType<typeof observation>) => void]> = [
+    [
+      "changed delivery",
+      (v) => {
+        v.receipts[3]!.event.selected = "native-stacks";
+      },
+    ],
+    [
+      "late delivery",
+      (v) => {
+        v.receipts[3]!.event.sequence = 7;
+      },
+    ],
+    [
+      "missing delivery",
+      (v) => {
+        v.receipts.pop();
+      },
+    ],
+    [
+      "unknown event",
+      (v) => {
+        v.receipts.push({ event: event("FutureAuthority", "run", 4), actorId: 7, commentId: 200 });
+      },
+    ],
+    [
+      "unknown usage",
+      (v) => {
+        delete v.receipts[1]!.event.reportedModelUsage;
+      },
+    ],
+    [
+      "zero usage",
+      (v) => {
+        v.receipts[1]!.event.amount = 0;
+      },
+    ],
+    [
+      "bad breakdown",
+      (v) => {
+        v.receipts[1]!.event.reportedModelUsage = { inputTokens: 1, outputTokens: 1 };
+      },
+    ],
+    [
+      "failed compile identity",
+      (v) => {
+        v.receipts[1]!.event.usageId = "failed-compile-other";
+      },
+    ],
+    [
+      "usage after terminal",
+      (v) => {
+        v.receipts[1]!.event.sequence = 7;
+      },
+    ],
+    [
+      "usage before start",
+      (v) => {
+        v.receipts[1]!.event.sequence = 1;
+      },
+    ],
+    [
+      "other terminal",
+      (v) => {
+        v.receipts[2]!.event.event = "FactoryRunCancelled";
+      },
+    ],
+    [
+      "other reason",
+      (v) => {
+        v.receipts[2]!.event.reason = "provider unavailable";
+      },
+    ],
+    [
+      "other actor",
+      (v) => {
+        v.receipts[0]!.actorId = 8;
+      },
+    ],
+    [
+      "other Objective",
+      (v) => {
+        v.receipts[0]!.event.objective = 2;
+      },
+    ],
+    [
+      "other run",
+      (v) => {
+        v.receipts[1]!.event.runId = "other";
+      },
+    ],
+    [
+      "other status",
+      (v) => {
+        v.status.run.state = "completed";
+      },
+    ],
+    [
+      "unobserved status",
+      (v) => {
+        v.status.run.availability = "unavailable";
+      },
+    ],
+    [
+      "unknown status usage",
+      (v) => {
+        v.status.summary.economics.usage.model_tokens.availability = "unavailable";
+      },
+    ],
+    [
+      "outstanding capacity",
+      (v) => {
+        v.status.capacity.activeReservations.push({ reserved: 1 });
+      },
+    ],
+    [
+      "projected child",
+      (v) => {
+        v.status.workItems.push({ number: 2 });
+      },
+    ],
+    [
+      "additional model call",
+      (v) => {
+        v.receipts.push({
+          ...v.receipts[1]!,
+          commentId: 200,
+          event: { ...v.receipts[1]!.event, sequence: 4, usageId: `compile-${"e".repeat(64)}` },
+        });
+      },
+    ],
+    [
+      "conflicting receipt",
+      (v) => {
+        v.receipts.push({
+          ...v.receipts[1]!,
+          commentId: 200,
+          event: { ...v.receipts[1]!.event, amount: 123 },
+        });
+      },
+    ],
+  ];
+  it.each(changes)("rejects %s", (_name, change) => {
+    const input = observation();
+    change(input);
+    expect(() => assessBudgetStopObservation(input)).toThrow();
+  });
+  it("deduplicates authenticated same-identity lost responses", () => {
+    const input = observation();
+    input.receipts.push(structuredClone(input.receipts[1]!));
+    expect(assessBudgetStopObservation(input).compilerTokens).toBe(15919);
   });
 });
 
-function coordinator() {
-  let milliseconds = Date.parse(at);
-  const original = observation();
-  return {
-    read: vi.fn(async () => structuredClone(original)),
-    cancel: vi.fn(async (requestId: string) =>
-      event("FactoryRunCancellationRequested", "run", 7, { requestId, requestedBy: actor.login }),
-    ),
-    context: original.context,
-    cancelRequestId: `${namespace}-cancel`,
-    assertRunning: vi.fn(),
-    saveObservation: vi.fn(),
-    saveCancelRequested: vi.fn(),
-    wait: vi.fn(async (duration: number) => {
-      milliseconds += duration;
-    }),
-    now: () => new Date(milliseconds).toISOString(),
-  };
-}
-describe("one stable cancellation only after repeated known stop", () => {
-  it("observes twice across an interval and rereads immediately before one cancellation", async () => {
-    const input = coordinator();
-    await expect(observeBudgetStopThenCancel(input)).resolves.toMatchObject({
-      requestId: input.cancelRequestId,
-    });
-    expect(input.read).toHaveBeenCalledTimes(3);
-    expect(input.saveObservation).toHaveBeenCalledTimes(2);
-    expect(input.wait).toHaveBeenCalledWith(10000);
-    expect(input.saveCancelRequested).toHaveBeenCalledTimes(1);
-    expect(input.cancel.mock.calls).toEqual([[input.cancelRequestId]]);
+describe("prospective completion and original-exercise preservation", () => {
+  it("requires exact terminal evidence plus service absence", () => {
+    expect(() => assertBudgetStopCompletion(terminalEvidence())).not.toThrow();
   });
-  it("does not cancel when an attempt appears in the final pre-request read", async () => {
-    const input = coordinator();
-    const bad = observation();
-    bad.receipts.push({
-      event: event("AttemptReserved", "attempt", 7),
-      commentId: 107,
-      actorId: 7,
-    });
-    input.read
-      .mockResolvedValueOnce(observation())
-      .mockResolvedValueOnce(observation())
-      .mockResolvedValueOnce(bad);
-    await expect(observeBudgetStopThenCancel(input)).rejects.toThrow();
-    expect(input.cancel).not.toHaveBeenCalled();
-    expect(input.saveCancelRequested).not.toHaveBeenCalled();
-  });
-  it("does not cancel on unknown compiler usage", async () => {
-    const input = coordinator();
-    const bad = observation();
-    receipt(bad, "BudgetReconciled").reportedModelUsage = undefined;
-    input.read.mockResolvedValue(bad);
-    await expect(observeBudgetStopThenCancel(input)).rejects.toThrow();
-    expect(input.cancel).not.toHaveBeenCalled();
-  });
-  it("does not cancel a changed service incarnation", async () => {
-    const input = coordinator();
-    const changed = observation();
-    changed.unit.invocationId = "b".repeat(32);
-    input.read.mockResolvedValueOnce(observation()).mockResolvedValueOnce(changed);
-    await expect(observeBudgetStopThenCancel(input)).rejects.toThrow();
-    expect(input.cancel).not.toHaveBeenCalled();
-  });
-  it("does not retry an uncertain cancellation response", async () => {
-    const input = coordinator();
-    input.cancel.mockRejectedValue(Error("response unavailable"));
-    await expect(observeBudgetStopThenCancel(input)).rejects.toThrow(/response unavailable/);
-    expect(input.cancel).toHaveBeenCalledTimes(1);
-    expect(input.read).toHaveBeenCalledTimes(3);
-  });
-  it("does not proceed after original foreground authority is revoked", async () => {
-    const input = coordinator();
-    input.assertRunning.mockImplementation(() => {
-      throw Error("original call uncertain");
-    });
-    await expect(observeBudgetStopThenCancel(input)).rejects.toThrow(/uncertain/);
-    expect(input.read).not.toHaveBeenCalled();
-    expect(input.cancel).not.toHaveBeenCalled();
-  });
-  it("bounds unchanged incomplete observations with no cancellation", async () => {
-    const input = coordinator();
-    const pending = observation();
-    pending.receipts = [];
-    input.read.mockResolvedValue(pending);
-    await expect(observeBudgetStopThenCancel(input)).rejects.toThrow(/bounded observed/);
-    expect(input.read).toHaveBeenCalledTimes(48);
-    expect(input.cancel).not.toHaveBeenCalled();
-  });
-});
-
-describe("negative terminal evidence and independent artifact verifier", () => {
-  it("accepts only the no-worker cancelled outcome with known accounting and collected service", () =>
-    expect(() => assertBudgetStopCompletion(terminalEvidence())).not.toThrow());
-  it.each(["unknown", "active"])("rejects %s cleanup", (state) => {
-    const evidence = terminalEvidence();
-    evidence.budgetStop.cleanup.state = state;
-    expect(() => assertBudgetStopCompletion(evidence)).toThrow();
-  });
-  it("rejects another run, request, source unit, or namespace", () => {
-    for (const mutate of [
-      (e: ReturnType<typeof terminalEvidence>) => {
-        e.status.run.runId = "other";
-      },
-      (e: ReturnType<typeof terminalEvidence>) => {
-        e.budgetStop.cancelRequestId = "other";
-      },
-      (e: ReturnType<typeof terminalEvidence>) => {
-        e.budgetStop.primary = { ...e.budgetStop.primary, unit: "other.service" };
-      },
-      (e: ReturnType<typeof terminalEvidence>) => {
-        e.qualificationNamespace = "other-namespace";
-      },
-      (e: ReturnType<typeof terminalEvidence>) => {
-        e.events[0]!.authorId = 99;
-      },
-    ]) {
-      const evidence = terminalEvidence();
-      mutate(evidence);
-      expect(() => assertBudgetStopCompletion(evidence)).toThrow();
-    }
-  });
-  it.each([
+  const changes: Array<[string, (v: ReturnType<typeof terminalEvidence>) => void]> = [
     [
-      "checkout",
-      (e: ReturnType<typeof terminalEvidence>) => {
-        e.runRequest.arguments.repository = "/home/example/another-checkout";
+      "historical failed scope",
+      (v) => {
+        v.scope = "installed-local-observed-budget-stop-no-worker";
       },
     ],
     [
-      "objective",
-      (e: ReturnType<typeof terminalEvidence>) => {
-        e.events.at(-1)!.objective = 99;
+      "wrong checkout",
+      (v) => {
+        v.runRequest.arguments.repository = "/another";
       },
     ],
     [
-      "start base",
-      (e: ReturnType<typeof terminalEvidence>) => {
-        Object.assign(e.events.find((event) => event.event === "FactoryRunStarted")!, {
-          baseBranch: "other",
+      "wrong namespace",
+      (v) => {
+        v.qualificationNamespace = "another";
+      },
+    ],
+    [
+      "wrong installed artifact",
+      (v) => {
+        v.finishedInstalledArtifact.inventorySha256 = "e".repeat(64);
+      },
+    ],
+    [
+      "unknown resource",
+      (v) => {
+        v.budgetStop.cleanup.state = "unknown";
+      },
+    ],
+    [
+      "wrong unit",
+      (v) => {
+        v.budgetStop.cleanup.unit = "other.service";
+      },
+    ],
+    [
+      "wrong boot",
+      (v) => {
+        v.budgetStop.cleanup.bootDigest = "f".repeat(64);
+      },
+    ],
+    [
+      "foreign receipt",
+      (v) => {
+        v.events[0]!.authorId = 9;
+      },
+    ],
+    [
+      "foreign receipt location",
+      (v) => {
+        v.events[0]!.receiptUrl = `https://github.com/${repository}/issues/2#issuecomment-100`;
+      },
+    ],
+    [
+      "changed original start",
+      (v) => {
+        Object.assign(v.events[0]!, { baseBranch: "other" });
+      },
+    ],
+    [
+      "changed compiler breakdown",
+      (v) => {
+        Object.assign(v.events[1]!, {
+          reportedModelUsage: { inputTokens: 14461, outputTokens: 1458 },
         });
       },
     ],
     [
-      "start actor",
-      (e: ReturnType<typeof terminalEvidence>) => {
-        Object.assign(e.events.find((event) => event.event === "FactoryRunStarted")!, {
-          actor: "other",
-        });
+      "unexpected child",
+      (v) => {
+        v.children.push({ number: 2 });
       },
     ],
     [
-      "compiler breakdown",
-      (e: ReturnType<typeof terminalEvidence>) => {
-        Object.assign(e.events.find((event) => event.event === "BudgetReconciled")!, {
-          reportedModelUsage: {
-            inputTokens: 14131,
-            outputTokens: 1411,
-          },
-        });
+      "unexpected PR",
+      (v) => {
+        v.pulls.push({ number: 2 });
       },
     ],
     [
-      "compiler phase",
-      (e: ReturnType<typeof terminalEvidence>) => {
-        Object.assign(e.events.find((event) => event.event === "BudgetReconciled")!, {
-          phase: "validation",
-        });
+      "cancel attempt",
+      (v) => {
+        Object.assign(v.budgetStop, { cancelRequested: true });
       },
     ],
-  ] as const)(
-    "rejects changed final %s even when totals and run ID are unchanged",
-    (_name, mutate) => {
-      const evidence = terminalEvidence();
-      mutate(evidence);
-      expect(() => assertBudgetStopCompletion(evidence)).toThrow();
-    },
-  );
-  it("retains the ordinary final merged-artifact verifier when no override is provided", async () => {
+  ];
+  it.each(changes)("rejects %s", (_name, change) => {
+    const input = terminalEvidence();
+    change(input);
+    expect(() => assertBudgetStopCompletion(input)).toThrow();
+  });
+  it("keeps ordinary merged-artifact verifier unchanged by default", async () => {
     const defaultVerifier = vi.fn(async () => {});
-    const hooks = { immutable: "retained" };
+    const hooks = {};
     await verifyQualificationFinalArtifact({ defaultVerifier, hooks });
     expect(defaultVerifier.mock.calls).toEqual([[hooks]]);
   });
-  it("invokes the explicit negative verifier once without running the merged-success verifier", async () => {
-    const verifier = vi.fn(async () => {});
-    const defaultVerifier = vi.fn(async () => {});
-    const hooks = {};
-    await verifyQualificationFinalArtifact({ verifier, defaultVerifier, hooks });
-    expect(verifier).toHaveBeenCalledTimes(1);
-    expect(defaultVerifier).not.toHaveBeenCalled();
-  });
-  it("propagates negative verification failure instead of falling back or claiming success", async () => {
+  it("invokes the explicit final verifier once and propagates its failure", async () => {
     const verifier = vi.fn(async () => {
       throw Error("base changed");
     });

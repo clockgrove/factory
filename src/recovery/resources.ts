@@ -10,7 +10,7 @@ import {
   localRecoveryResourceIdentityDigest,
   observeLocalRecoveryResource,
 } from "./local-resources.js";
-import { observeLocalScopeBatch } from "./scope-resources.js";
+import { observeCompletedForegroundScopeBatch, observeLocalScopeBatch } from "./scope-resources.js";
 import type { LocalScopeReadPort } from "../runtime/local-scope.js";
 
 type Attempt = Extract<FactoryEvent, { kind: "attempt" }>;
@@ -44,6 +44,23 @@ async function resourceEvidence(
   const refs = await store.listRefs(
     `refs/clockgrove-factory/attempts/objective-${plan.objective}/`,
   );
+  // Every historical validator/scoped invocation must belong to an original
+  // reservation. Otherwise iterating reservation refs could conceal a liability.
+  for (const event of events) {
+    if (!sourceRuns.has(event.runId)) continue;
+    if (event.kind !== "validation" && event.kind !== "capacity") continue;
+    const originalRun =
+      event.kind === "capacity" ? (event.sourceRunId ?? event.runId) : event.runId;
+    requireGate(
+      reservations.filter(
+        (reserved) =>
+          reserved.runId === originalRun &&
+          reserved.workItem === event.workItem &&
+          reserved.attempt === event.attempt,
+      ).length === 1,
+      "orphan-validation-resource",
+    );
+  }
   requireGate(
     refs.length <= 1000 &&
       refs.length === reservations.length &&
@@ -118,7 +135,12 @@ async function resourceEvidence(
         "resource-scope-binding-mismatch",
       );
       const began = Date.now();
-      const observed = await observeLocalScopeBatch(batch, ports.scopePort);
+      const observed = batch.identity.producerUnit
+        ? await observeLocalScopeBatch(batch, ports.scopePort)
+        : await observeCompletedForegroundScopeBatch(
+            { batch, plan, events, store },
+            ports.scopePort,
+          );
       requireGate(
         observed.status === "absent" &&
           observed.identityDigest === digest(batch) &&

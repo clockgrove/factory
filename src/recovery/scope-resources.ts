@@ -5,6 +5,10 @@ import {
   observeLocalScope,
   type LocalScopeReadPort,
 } from "../runtime/local-scope.js";
+import {
+  deriveForegroundCompletion,
+  type ForegroundCompletionInput,
+} from "./foreground-completion.js";
 
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 export interface LocalScopeBatchObservation {
@@ -13,10 +17,76 @@ export interface LocalScopeBatchObservation {
     | "producer-active"
     | "scope-active"
     | "original-producer-and-scopes-absent"
+    | "completed-foreground-producer-and-scopes-absent"
     | "observation-unavailable";
   identityDigest: string;
   evidenceDigest: string;
   observedAt: string;
+}
+
+/** This separate path derives finite launcher-loop closure from authenticated,
+ * immutable history. The generic foreground pre-registration gate stays closed. */
+export async function observeCompletedForegroundScopeBatch(
+  input: ForegroundCompletionInput,
+  port: LocalScopeReadPort = linuxLocalScopeReadPort,
+): Promise<LocalScopeBatchObservation> {
+  const batch = LocalScopeBatchSchema.parse(input.batch);
+  const identityDigest = digest(batch);
+  let completionDigest: string | undefined;
+  const finish = (
+    status: LocalScopeBatchObservation["status"],
+    reason: LocalScopeBatchObservation["reason"],
+  ): LocalScopeBatchObservation => ({
+    status,
+    reason,
+    identityDigest,
+    evidenceDigest: digest([identityDigest, completionDigest ?? null, status, reason]),
+    observedAt: port.now().toISOString(),
+  });
+  const originalGenerationAbsent = async () => {
+    try {
+      const text = await port.read(`/proc/${batch.producerPid}/stat`);
+      if (
+        Buffer.byteLength(text) > 16_384 ||
+        !text.startsWith(`${batch.producerPid} (`) ||
+        !text.includes(") ")
+      )
+        throw new Error("producer stat malformed");
+      const fields = text
+        .slice(text.lastIndexOf(")") + 2)
+        .trim()
+        .split(/\s+/);
+      if (!/^[0-9]{1,30}$/.test(fields[19] ?? "") || !/^[A-Za-z]$/.test(fields[0] ?? ""))
+        throw new Error("producer stat incomplete");
+      return fields[19] !== batch.producerStartTicks || ["Z", "X", "x"].includes(fields[0]!);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      return true;
+    }
+  };
+  try {
+    completionDigest = await deriveForegroundCompletion(input);
+    const began = port.now().getTime();
+    // Two complete passes, each bracketed by host and original producer checks.
+    // No missing optional command slot or delayed reappearance is ignored.
+    for (let pass = 0; pass < 2; pass++) {
+      if ((await port.hostIdentity()) !== batch.identity.hostIdentity)
+        throw new Error("original host unavailable");
+      if (!(await originalGenerationAbsent())) return finish("active", "producer-active");
+      for (let commandIndex = 0; commandIndex < batch.commandCount; commandIndex++) {
+        if (port.now().getTime() - began > 30_000) throw new Error("scope observation deadline");
+        const observed = await observeLocalScope({ ...batch.identity, commandIndex }, port);
+        if (observed.status === "active") return finish("active", "scope-active");
+        if (observed.status !== "absent") throw new Error("scope absence unavailable");
+      }
+      if ((await port.hostIdentity()) !== batch.identity.hostIdentity)
+        throw new Error("original host changed");
+      if (!(await originalGenerationAbsent())) return finish("active", "producer-active");
+    }
+    return finish("absent", "completed-foreground-producer-and-scopes-absent");
+  } catch {
+    return finish("unknown", "observation-unavailable");
+  }
 }
 
 /** Read only the exact original producer PID, never unrelated process environments.

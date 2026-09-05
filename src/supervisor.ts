@@ -4015,6 +4015,36 @@ export class FactorySupervisor {
           }
         }
       }
+      let cancelledUsageWriteFailure: { error: unknown } | undefined;
+      if (
+        cancelledModelUsageObserved &&
+        reservation &&
+        !(error instanceof PlatformUnavailableError) &&
+        !(error instanceof LeaseLostError)
+      ) {
+        try {
+          await this.#lease.use(async (lease) => {
+            const event = await this.#recorder.budget({
+              lease,
+              workItemNodeId: item.id,
+              reservation: reservation!,
+              sequence: this.#sequences.take(),
+              event: "BudgetReconciled",
+              unit: "model_tokens",
+              phase: "execution",
+              amount: terminalModelTokens!,
+              usageId: `worker-${item.number}-${reservation!.attempt}`,
+              ...(terminalModelUsage ? { reportedModelUsage: terminalModelUsage } : {}),
+            });
+            this.#budgetEvents.push(event);
+          });
+        } catch (usageError) {
+          // Accounting is independent of resource absence. Always attempt
+          // cleanup, but never turn a failed fenced receipt into permission
+          // to finish or replace this attempt.
+          cancelledUsageWriteFailure = { error: usageError };
+        }
+      }
       await confirmExecutionCleanup("failed-attempt backend cleanup");
       if (error instanceof DaytonaResourceCleanupError && validationCapacity) {
         if (!reservation || !validator?.reconcileStale) {
@@ -4050,23 +4080,7 @@ export class FactorySupervisor {
       ) {
         throw error;
       }
-      if (cancelledModelUsageObserved && reservation) {
-        await this.#lease.use(async (lease) => {
-          const event = await this.#recorder.budget({
-            lease,
-            workItemNodeId: item.id,
-            reservation: reservation!,
-            sequence: this.#sequences.take(),
-            event: "BudgetReconciled",
-            unit: "model_tokens",
-            phase: "execution",
-            amount: terminalModelTokens!,
-            usageId: `worker-${item.number}-${reservation!.attempt}`,
-            ...(terminalModelUsage ? { reportedModelUsage: terminalModelUsage } : {}),
-          });
-          this.#budgetEvents.push(event);
-        });
-      }
+      if (cancelledUsageWriteFailure) throw cancelledUsageWriteFailure.error;
       const reason = error instanceof Error ? error.message : String(error);
       if (!published && selected?.capabilities.providerManagedPublication) {
         const managedPull = Number(handle?.metadata?.pullNumber);

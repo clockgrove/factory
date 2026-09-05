@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   assertCompletion,
   assessCompletion,
@@ -19,6 +19,7 @@ import {
   qualificationNamespace,
   qualificationNamespaceMarker,
   qualificationPaths,
+  waitForCreatedObjectiveNamespace,
 } from "../scripts/verify-live-objective.mjs";
 import { parseRunPolicy } from "../src/protocol/policy.js";
 
@@ -27,6 +28,88 @@ type HarnessEvent = {
   sequence: number;
   [key: string]: unknown;
 };
+
+describe("created Objective namespace visibility", () => {
+  const namespace = "visibility-qualification";
+  const createdIssue = { number: 17, id: 1700, body: qualificationNamespaceMarker(namespace) };
+  const input = () => ({ namespace, createdIssue, wait: vi.fn(async () => {}) });
+
+  it("accepts an immediately visible exact identity without waiting", async () => {
+    const list = vi.fn().mockResolvedValue([createdIssue]);
+    const options = input();
+    await waitForCreatedObjectiveNamespace({ ...options, list });
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(options.wait).not.toHaveBeenCalled();
+  });
+
+  it("retries empty reads until the exact created issue is visible, with reads only", async () => {
+    const list = vi.fn().mockResolvedValueOnce([]).mockResolvedValueOnce([createdIssue]);
+    const options = input();
+    await waitForCreatedObjectiveNamespace({ ...options, list });
+    expect(list.mock.calls).toEqual([
+      ["GET /repos/{owner}/{repo}/issues", { state: "all" }, 1000],
+      ["GET /repos/{owner}/{repo}/issues", { state: "all" }, 1000],
+    ]);
+    expect(options.wait.mock.calls).toEqual([[1000]]);
+  });
+
+  it.each([
+    [createdIssue, { ...createdIssue, number: 18, id: 1800 }],
+    [{ ...createdIssue, number: 18 }],
+    [{ ...createdIssue, id: 1800 }],
+  ])("rejects duplicate or wrong issue identity without another read", async (...issues) => {
+    const list = vi.fn().mockResolvedValue(issues);
+    const options = input();
+    await expect(waitForCreatedObjectiveNamespace({ ...options, list })).rejects.toThrow();
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(options.wait).not.toHaveBeenCalled();
+  });
+
+  it("fails after five empty reads with bounded backoff and no creation", async () => {
+    const list = vi.fn().mockResolvedValue([]);
+    const options = input();
+    await expect(waitForCreatedObjectiveNamespace({ ...options, list })).rejects.toThrow(
+      /not visible/,
+    );
+    expect(list).toHaveBeenCalledTimes(5);
+    expect(options.wait.mock.calls).toEqual([[1000], [2000], [4000], [8000]]);
+    expect(list.mock.calls.every(([route]) => route.startsWith("GET "))).toBe(true);
+  });
+
+  it("stops at a conflicting observation after an initially empty read", async () => {
+    const list = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([createdIssue, { ...createdIssue, number: 18, id: 1800 }])
+      .mockResolvedValue([createdIssue]);
+    const options = input();
+    await expect(waitForCreatedObjectiveNamespace({ ...options, list })).rejects.toThrow(
+      /not uniquely bound/,
+    );
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(options.wait.mock.calls).toEqual([[1000]]);
+  });
+
+  it.each([null, {}, [{ number: 17 }]])(
+    "rejects unknown list shape without retry",
+    async (response) => {
+      const list = vi.fn().mockResolvedValue(response);
+      const options = input();
+      await expect(waitForCreatedObjectiveNamespace({ ...options, list })).rejects.toThrow();
+      expect(list).toHaveBeenCalledTimes(1);
+      expect(options.wait).not.toHaveBeenCalled();
+    },
+  );
+
+  it("propagates lookup failure without retry or writes", async () => {
+    const failure = new Error("GitHub lookup unavailable");
+    const list = vi.fn().mockRejectedValue(failure);
+    const options = input();
+    await expect(waitForCreatedObjectiveNamespace({ ...options, list })).rejects.toBe(failure);
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(options.wait).not.toHaveBeenCalled();
+  });
+});
 
 function evidence() {
   const children = [2, 3, 4].map((number) => ({ number, state: "closed" }));

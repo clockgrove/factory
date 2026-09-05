@@ -14,6 +14,7 @@ import {
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { setTimeout as sleep } from "node:timers/promises";
 import { Octokit } from "@octokit/core";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -52,6 +53,52 @@ export function qualificationPaths(namespace) {
 export function qualificationNamespaceMarker(namespace) {
   assert.match(namespace, namespacePattern, "invalid qualification namespace");
   return `<!-- clockgrove-factory:qualification-namespace=${namespace} -->`;
+}
+
+export async function waitForCreatedObjectiveNamespace({
+  list,
+  namespace,
+  createdIssue,
+  wait = sleep,
+}) {
+  const marker = qualificationNamespaceMarker(namespace);
+  assert.ok(
+    Number.isSafeInteger(createdIssue.number) &&
+      createdIssue.number > 0 &&
+      Number.isSafeInteger(createdIssue.id) &&
+      createdIssue.id > 0 &&
+      !createdIssue.pull_request &&
+      createdIssue.body?.includes(marker),
+    "created Objective identity or qualification namespace is invalid",
+  );
+  // Creation is single-shot. Only a successful empty namespace observation may
+  // be retried; lookup failures and conflicting identities never mean absence.
+  const delays = [1_000, 2_000, 4_000, 8_000];
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    const issues = await list("GET /repos/{owner}/{repo}/issues", { state: "all" }, 1_000);
+    assert.ok(Array.isArray(issues), "namespace issue lookup must return an array");
+    for (const issue of issues)
+      assert.ok(
+        issue &&
+          Number.isSafeInteger(issue.number) &&
+          issue.number > 0 &&
+          Number.isSafeInteger(issue.id) &&
+          issue.id > 0 &&
+          (issue.body === null || typeof issue.body === "string"),
+        "namespace issue lookup returned an unknown issue shape",
+      );
+    const matching = issues.filter((issue) => !issue.pull_request && issue.body?.includes(marker));
+    if (matching.length > 0) {
+      assert.deepEqual(
+        matching.map((issue) => ({ number: issue.number, id: issue.id })),
+        [{ number: createdIssue.number, id: createdIssue.id }],
+        "qualification namespace is not uniquely bound to the created Objective",
+      );
+      return;
+    }
+    if (attempt < delays.length) await wait(delays[attempt]);
+  }
+  assert.fail("created Objective qualification namespace is not visible after five bounded reads");
 }
 
 export function installedPluginPath({ listed, codexHome, requestedRoot }) {
@@ -1050,14 +1097,7 @@ export async function main(qualification = {}) {
         body: runObjectiveBody,
       })
     ).data;
-    const createdNamespaceIssues = (
-      await list("GET /repos/{owner}/{repo}/issues", { state: "all" }, 1_000)
-    ).filter((issue) => !issue.pull_request && issue.body?.includes(namespaceMarker));
-    assert.deepEqual(
-      createdNamespaceIssues.map((issue) => issue.number),
-      [evidence.objective.number],
-      "qualification namespace is not uniquely bound to the created Objective",
-    );
+    await waitForCreatedObjectiveNamespace({ list, namespace, createdIssue: evidence.objective });
     save();
     console.log(
       `Created disposable Objective ${evidence.objective.html_url} for ${namespace}; installed Factory is running.`,

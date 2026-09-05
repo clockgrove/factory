@@ -7,6 +7,12 @@ export function qualificationPaths(namespace: string): {
   files: string[];
 };
 export function qualificationNamespaceMarker(namespace: string): string;
+export function waitForCreatedObjectiveNamespace(input: {
+  list: (route: string, parameters: { state: string }, maximumEntries: number) => Promise<unknown>;
+  namespace: string;
+  createdIssue: { number: number; id: number; body: string; pull_request?: unknown };
+  wait?: (milliseconds: number) => Promise<void>;
+}): Promise<void>;
 export function boundedPolicy(delivery?: string, maxModelTokens?: number): unknown;
 export function assertCompletion(evidence: unknown, allowedBackends?: string[]): void;
 export function assertQualificationNamespace(evidence: unknown): void;

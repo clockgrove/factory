@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import type { NormalizedArtifact } from "../execution/artifacts.js";
 import type { GitCommitObject } from "../control/lease.js";
+import { gitSha } from "../protocol/limits.js";
 import type { CleanValidationResult } from "../validation/clean-run.js";
 import { verifyValidationEvidence } from "../validation/evidence.js";
 import {
@@ -96,6 +97,8 @@ export interface IntegrationReadinessOptions {
   firstCheckDiscoveryGraceMs?: number;
   /** Separate validation of this unchanged source PR against an advanced target branch. */
   mergeCandidateValidation?: MergeCandidateValidationEvidence;
+  /** Observed native-stack rewrite; requires the original source-bound candidate proof. */
+  mergeCandidateDeliveryHeadSha?: string;
 }
 
 export async function verifySquashIntegration(
@@ -314,10 +317,28 @@ export async function integrationReadiness(
   const candidate = options.mergeCandidateValidation;
   if (candidate)
     verifyMergeCandidateValidation(candidate, pull.exactHeadValidation, expectedBaseSha);
+  const deliveryHeadSha = options.mergeCandidateDeliveryHeadSha;
+  if (deliveryHeadSha !== undefined) {
+    if (!candidate) throw new Error("merge candidate delivery head requires candidate validation");
+    gitSha.parse(deliveryHeadSha);
+  }
   const validatedBaseSha = candidate?.targetBaseSha ?? expectedBaseSha;
   const current = await store.readPullRequest(pull.number);
-  if (current.headSha !== pull.commitSha)
+  if (current.headSha !== (deliveryHeadSha ?? pull.commitSha))
     return { state: "failed", reason: "pull request head changed after validation" };
+  if (deliveryHeadSha !== undefined && candidate) {
+    const delivery = await store.readCommit(deliveryHeadSha);
+    if (
+      delivery.oid !== deliveryHeadSha ||
+      delivery.parentOids.length !== 1 ||
+      delivery.parentOids[0] !== candidate.targetBaseSha ||
+      delivery.treeOid !== candidate.candidateOutputTreeSha
+    )
+      return {
+        state: "failed",
+        reason: "delivery head does not preserve the merge candidate tree on its target base",
+      };
+  }
   if (expectedBaseRef && current.baseRef !== expectedBaseRef) {
     return {
       state: "failed",

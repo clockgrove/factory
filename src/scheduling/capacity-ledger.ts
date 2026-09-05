@@ -7,6 +7,10 @@ export type AdmissionClass = "local" | "remote-required" | "burst";
 
 /** Each integration candidate owns a distinct local validation obligation. */
 export function isIntegrationValidationBackend(backend: string): boolean {
+  return /^factory\/integration-(?:validation|sandbox)-[a-f0-9]{64}$/.test(backend);
+}
+
+export function isLocalIntegrationValidationBackend(backend: string): boolean {
   return /^factory\/integration-validation-[a-f0-9]{64}$/.test(backend);
 }
 
@@ -493,7 +497,9 @@ export function deriveCapacityReservations(
       // Original attempt/validation completion cannot discharge a later candidate validator.
       // Only that exact backend's durable CapacityReconciled receipt removes its obligation.
       if (!integrationValidation && (terminalAttempt || validationFinished)) continue;
-      const local = integrationValidation || (input.isLocalBackend?.(reserved.backend) ?? false);
+      const local = integrationValidation
+        ? isLocalIntegrationValidationBackend(reserved.backend)
+        : (input.isLocalBackend?.(reserved.backend) ?? false);
       const reservation: CapacityReservation = {
         key: capacityReservationKey({
           objective: input.objective,

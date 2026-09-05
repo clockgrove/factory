@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FactorySupervisor } from "../src/supervisor.js";
+import * as localScopes from "../src/runtime/local-scope.js";
+import { runContainedProcess } from "../src/runtime/process-group.js";
 import { GitHubReader } from "../src/github.js";
 import { GitHubControlStore } from "../src/control/github-store.js";
 import { CompiledGraphManager, type CompiledGraphStore } from "../src/control/graphs.js";
@@ -584,6 +586,42 @@ async function fixture(
 }
 
 describe("Supervisor parallel independent sibling integration", () => {
+  it("records a complete candidate scope batch before any test command without per-command writes", async () => {
+    const f = await fixture();
+    vi.spyOn(localScopes, "discoverLocalScopeHost").mockResolvedValue({
+      hostIdentity: "b".repeat(64),
+      producerPid: 123,
+      producerStartTicks: "456",
+    });
+    const scoped = vi
+      .spyOn(localScopes, "runScopedLocalProcess")
+      .mockImplementation(async (identity, options) => {
+        const receipts = f.snapshot.workItems[1]!.factoryEvents!.filter(
+          (entry) => entry.kind === "capacity" && entry.event === "CapacityReserved",
+        );
+        expect(receipts).toHaveLength(1);
+        const receipt = receipts[0]!;
+        expect(receipt.kind === "capacity" && receipt.localScopeBatch).toMatchObject({
+          identity: { ...identity, commandIndex: 0 },
+          producerPid: 123,
+          producerStartTicks: "456",
+        });
+        expect(
+          receipt.kind === "capacity" && receipt.localScopeBatch!.commandCount,
+        ).toBeGreaterThan(identity.commandIndex);
+        return runContainedProcess(options);
+      });
+    const result = await f.run();
+    expect(result, result.reason).toMatchObject({ status: "completed" });
+    expect(scoped).toHaveBeenCalled();
+    expect(
+      f.snapshot.workItems[1]!.factoryEvents!.filter(
+        (entry) => entry.kind === "capacity" && entry.event === "CapacityReserved",
+      ),
+    ).toHaveLength(1);
+    expect(f.launch).not.toHaveBeenCalled();
+  });
+
   it("integrates A then validates unchanged B against the advanced trunk", async () => {
     const f = await fixture();
     const result = await f.run();

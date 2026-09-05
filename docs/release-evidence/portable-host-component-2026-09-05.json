@@ -1,0 +1,57 @@
+{
+  "protocol": "clockgrove.factory/component-evidence-v1",
+  "capability": "installed-linux-portability-qualification",
+  "implementationCommit": "172c5f21dddc3164791af15f030a00b3d07b86f5",
+  "scope": "fresh-staged-npm-and-plugin-installs-plus-no-model-wsl2-host-components",
+  "status": "passed-with-explicit-scope",
+  "hostObservationAt": "2026-09-05T04:43:52.701Z",
+  "host": {
+    "class": "wsl2",
+    "architecture": "x64",
+    "kernel": "6.18.33.2-microsoft-standard-WSL2",
+    "node": "24.20.0",
+    "systemd": 259
+  },
+  "installedSubjects": {
+    "packageVersion": "2.0.26",
+    "cliSha256": "66b7f68bb9cbcc9841051427514c578feab2adb4613a919c29960b532c8f1be3",
+    "mcpSha256": "ae8b32ec263f01794c3a24204144edbd5f895a9b2f91e30bacf11c2cd6d289bd",
+    "npmAndPluginAgree": true,
+    "hostProbeStagedTarballSha256": "0e276b5ad82e70dab547c4667c9e1e82803fa5f32821087dfd9d3810516769cd"
+  },
+  "observed": {
+    "freshNpmAndPluginInstall": true,
+    "exactEnabledCodexCacheReceipt": true,
+    "installedCliStartup": true,
+    "disposableControllerInstallAndIdempotentReinstall": true,
+    "disposableControllerUninstall": true,
+    "controllerStarted": false,
+    "cpuQuotaFraction": 0.25,
+    "memoryLimitBytes": 402653184,
+    "npmProbe": { "throttledPeriods": 11, "memoryBytes": 36188160 },
+    "pluginProbe": { "throttledPeriods": 10, "memoryBytes": 23724032 },
+    "mainProcessCrashChangedInvocation": true,
+    "oldDetachedDescendantGone": true,
+    "cancellationAndCleanupVerified": true
+  },
+  "releaseVerification": {
+    "command": "npm run verify:release",
+    "commit": "172c5f21dddc3164791af15f030a00b3d07b86f5",
+    "exitCode": 0,
+    "testFilesPassed": 91,
+    "testsPassed": 1524,
+    "testsSkipped": 1,
+    "auditVulnerabilities": 0,
+    "stagedTarballSha256": "74ff09f663edbb91329f62f0516c75753908086387c0d6fcee1a417d13e745c4",
+    "tarballNote": "The host-probe and release-check tarballs differ; exact executable subjects above agree. This later evidence file was not present in either tarball."
+  },
+  "remainingGates": [
+    "full-model-backed-linux-host-matrix",
+    "factory-adaptive-admission-under-pressure",
+    "github-fenced-controller-restart-and-durable-cancellation",
+    "native-linux-and-macos-hosted-linux-observations",
+    "registry-publication-and-published-artifact-install"
+  ],
+  "authority": { "modelCalls": 0, "paidProviderLaunches": 0, "githubWrites": 0, "npmPublication": false },
+  "sanitization": "No private repository identities, credentials, user paths, process identifiers, service names, or raw logs are included. This record does not satisfy a full release conformance gate."
+}

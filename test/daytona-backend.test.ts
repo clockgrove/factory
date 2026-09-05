@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 
 import type { Daytona } from "@daytona/sdk";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 
 import {
   DAYTONA_DEFAULT_IMAGE,
@@ -129,10 +129,12 @@ function fakeProvider() {
   let workerResult = "ok";
   let workerStdout = "worker complete\n";
 
-  function sandbox(id: string, name = id) {
+  function sandbox(id: string, name = id, labels: Record<string, string> = {}) {
     const files = new Map<string, Buffer>();
     const value = {
       id,
+      name,
+      labels,
       fs: {
         createFolder: async () => undefined,
         uploadFiles: async (uploads: Array<{ source: Buffer; destination: string }>) => {
@@ -254,7 +256,11 @@ function fakeProvider() {
     create: async (params: Record<string, unknown>, options: Record<string, unknown>) => {
       creates.push({ params, options });
       serial += 1;
-      const created = sandbox(`sandbox-${serial}`, String(params.name));
+      const created = sandbox(
+        `sandbox-${serial}`,
+        String(params.name),
+        params.labels as Record<string, string>,
+      );
       if (createFailureAfterAllocation) {
         const error = createFailureAfterAllocation;
         createFailureAfterAllocation = undefined;
@@ -325,6 +331,125 @@ function fakeProvider() {
 }
 
 describe("Daytona supported provider contract", () => {
+  it("isolates repeated merge-candidate validations and binds cleanup to exact ownership", async () => {
+    const source = await fixture();
+    const provider = fakeProvider();
+    const backend = new DaytonaBackend({
+      repository: source.repository,
+      createClient: () => provider.client,
+      credentialAvailable: () => true,
+    });
+    const artifact = normalizeArtifact({
+      baseSha: source.context.packet.baseSha,
+      patch: "",
+      changedPaths: [],
+      outcome: "declined",
+      reason: "candidate identity fixture",
+    });
+    for (const value of ["a", "b"]) {
+      await backend.validate({
+        ...source.context,
+        artifact,
+        validationInvocation: {
+          kind: "integration-candidate",
+          identityDigest: value.repeat(64),
+          artifactDigest: artifact.digest,
+          baseSha: artifact.baseSha,
+        },
+      });
+    }
+    expect(provider.creates).toHaveLength(2);
+    expect(provider.creates[0]!.params.name).not.toBe(provider.creates[1]!.params.name);
+    expect(provider.creates[0]!.params.labels).toMatchObject({
+      invocationOwner: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(provider.deleted).toEqual(["sandbox-1", "sandbox-2"]);
+    await expect(
+      backend.reconcileStale({
+        repository: source.context.repository,
+        objective: source.context.objective,
+        workItem: source.context.workItem,
+        attempt: source.context.attempt,
+        runId: source.context.runId,
+        directorEpoch: source.context.directorEpoch,
+        policyDigest: source.context.policyDigest,
+        phase: "validation",
+        validationInvocation: {
+          kind: "integration-candidate",
+          identityDigest: "a".repeat(64),
+          artifactDigest: artifact.digest,
+          baseSha: artifact.baseSha,
+        },
+      }),
+    ).rejects.toThrow(/ownership mismatch/);
+    expect(provider.deleted).toEqual(["sandbox-1", "sandbox-2"]);
+  });
+  it("rejects tampered candidate artifact binding before any create or lookup", async () => {
+    const source = await fixture();
+    const provider = fakeProvider();
+    const backend = new DaytonaBackend({
+      repository: source.repository,
+      createClient: () => provider.client,
+      credentialAvailable: () => true,
+    });
+    const artifact = normalizeArtifact({
+      baseSha: source.context.packet.baseSha,
+      patch: "",
+      changedPaths: [],
+      outcome: "declined",
+      reason: "candidate identity fixture",
+    });
+    await expect(
+      backend.validate({
+        ...source.context,
+        artifact,
+        validationInvocation: {
+          kind: "integration-candidate",
+          identityDigest: "a".repeat(64),
+          artifactDigest: "b".repeat(64),
+          baseSha: artifact.baseSha,
+        },
+      }),
+    ).rejects.toThrow(/exact artifact and base/);
+    expect(provider.creates).toEqual([]);
+    expect(provider.lookedUp).toEqual([]);
+  });
+  it("keeps a mismatching create response explicitly cleanup-unknown without deleting an unowned resource", async () => {
+    const source = await fixture();
+    const provider = fakeProvider();
+    const create = provider.client.create.bind(provider.client);
+    vi.spyOn(provider.client, "create").mockImplementation(async (params, options) => {
+      const sandbox = await create(params, options);
+      sandbox.labels.invocationOwner = "f".repeat(64);
+      return sandbox;
+    });
+    const backend = new DaytonaBackend({
+      repository: source.repository,
+      createClient: () => provider.client,
+      credentialAvailable: () => true,
+    });
+    const artifact = normalizeArtifact({
+      baseSha: source.context.packet.baseSha,
+      patch: "",
+      changedPaths: [],
+      outcome: "declined",
+      reason: "candidate ownership fixture",
+    });
+    await expect(
+      backend.validate({
+        ...source.context,
+        artifact,
+        validationInvocation: {
+          kind: "integration-candidate",
+          identityDigest: "a".repeat(64),
+          artifactDigest: artifact.digest,
+          baseSha: artifact.baseSha,
+        },
+      }),
+    ).rejects.toBeInstanceOf(DaytonaResourceCleanupError);
+    expect(provider.creates).toHaveLength(1);
+    expect(provider.deleted).toEqual([]);
+  });
   it("rejects mutable image tags and accepts only digest-pinned environments", async () => {
     const source = await fixture();
     expect(

@@ -398,8 +398,35 @@ These checks do not create a GitHub base-SHA compare-and-swap: an external write
 merge remains detectable by the post-merge parent/tree check, not atomically preventable by the REST
 merge endpoint. Factory serializes its own integrations and preserves the repository/Objective fences.
 
+Native-mode sibling and linear-stack units may use explicitly authorized Daytona execution.
+Provider-managed PRs do not acquire native-stack admission from this exception. Factory still applies
+and publishes the bounded artifact on the host, but an explicitly
+selected isolated validator is always honored, even for a `trusted_local` packet. Candidate validation
+uses Daytona whenever the sibling or an intervening same-run integration was non-host. It receives a
+distinct resource identity bound to the original run/attempt, policy/epoch, source-head candidate,
+target base, and candidate artifact—not a new implementation attempt. Its durable remote capacity and
+sandbox budget are reserved before creation. The immutable completion checkpoint retains measured
+provider-call duration including provision and cleanup; this is native runtime accounting, not a claim
+about the provider's invoice. Restart reuses that completion and accounts it once. Missing completion
+or conflicting resource ownership does not establish cleanup or permit another paid invocation.
+
+Backend location is not itself a trust class. Accepted, independently validated `trusted_local`
+overflow may become the base of local downstream work under the original policy. Work selected as
+`sandbox_untrusted` or with isolated/managed requirements never gains host execution authority merely
+because its PR was merged. Paid burst remains opt-in; the regular-PR fallback still serializes complete
+pipelines and does not qualify concurrent burst.
+
 Native linear stacks separately provide cascading rebase plus fresh validation and semantic review
-after a lower layer changes.
+after a lower layer changes. A non-host or isolated child is revalidated in a fresh Daytona sandbox,
+not on the controller host. Its immutable native-rebase checkpoint binds the original publication,
+rewritten head, new base, exact artifact/tree, source reservation policy/epoch, and measured provider
+resource lifetime. Each rebase has a separate sandbox capacity and native-budget identity, reserved
+before launch. Completion is persisted before paid semantic review and replay reuses those exact
+validation timestamps and review identity. Controller and sandbox intervals are checked independently;
+clock skew is not interpreted as billing or cleanup evidence. Missing completion leaves the paid
+liability unresolved and blocks automatic replacement. A partial rebase publication replays from the
+last complete publication binding rather than pairing an old head with a newer validation receipt.
+The runtime and fault qualification of this path remains open until the implementation testing batch.
 Immediately before each regular or stacked merge, integration is repository-fenced and Factory
 rechecks the exact validated head, current stack/base relationship, current branch rules, required
 checks, leases, and mergeability. A lower-layer rebase invalidates every affected descendant receipt

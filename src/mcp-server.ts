@@ -105,6 +105,11 @@ import { GitHubControlStore } from "./control/github-store.js";
 import { APPLICATION_TOOL_DEFINITIONS, FactoryApplicationService } from "./application/index.js";
 import { assessRecovery } from "./recovery/assessment.js";
 import { recoveryReadPort } from "./recovery/github-read-port.js";
+import {
+  RecoveryRequestService,
+  RecoveryProposalInputSchema,
+  type RecoveryProposalInput,
+} from "./recovery/requests.js";
 import { SystemdControllerLifecycle, SystemdUserService } from "./service/index.js";
 
 /** Never write anything but JSON-RPC to stdout on the stdio transport. */
@@ -167,12 +172,26 @@ function applicationFor(
     concurrency,
     mutationScheduler: mutations,
   });
+  const recoveryReader = recoveryInspection
+    ? new GitHubReader({ token, owner, repo, recoveryInspection: true })
+    : undefined;
   return new FactoryApplicationService({
     owner,
     repo,
-    reader: recoveryInspection
-      ? new GitHubReader({ token, owner, repo, recoveryInspection: true })
-      : readerFor(owner, repo),
+    reader: recoveryReader ?? readerFor(owner, repo),
+    ...(recoveryReader
+      ? {
+          recovery: new RecoveryRequestService({
+            repository: `${owner}/${repo}`,
+            store,
+            readStore: recoveryReadPort(store, owner, repo),
+            readSnapshot: async (objective) => ({
+              snapshot: await recoveryReader.readObjective(objective),
+              historyComplete: true,
+            }),
+          }),
+        }
+      : {}),
     assessRecovery: (snapshot) =>
       assessRecovery({
         repository: `${owner}/${repo}`,
@@ -1340,6 +1359,9 @@ type ApplicationToolInput = {
   reason?: string;
   repository?: string;
   policy?: Record<string, unknown>;
+  planDigest?: string;
+  allowanceIncrement?: RecoveryProposalInput["allowanceIncrement"];
+  unknownUsageAcknowledgementDigest?: string | null;
 };
 
 function registerApplicationTool(
@@ -1348,6 +1370,8 @@ function registerApplicationTool(
     | "doctor"
     | "plan"
     | "recovery-plan"
+    | "recovery-propose"
+    | "recovery-request"
     | "status"
     | "explain"
     | "replay"
@@ -1378,39 +1402,49 @@ function registerApplicationTool(
         repository: z.string().min(1),
         requestId: z.string().min(1).max(160),
       }
-    : operation === "activate"
+    : operation === "recovery-propose" || operation === "recovery-request"
       ? {
           ...RequestToolShape,
-          baseSha: z
-            .string()
-            .regex(/^[0-9a-fA-F]{40}$/)
-            .optional(),
-          policy: z
-            .record(z.unknown())
-            .optional()
-            .describe(
-              "Complete immutable run policy. Omit for adaptive local-only execution; paid backends are never inferred.",
-            ),
+          allowanceIncrement: RecoveryProposalInputSchema.shape.allowanceIncrement,
+          unknownUsageAcknowledgementDigest:
+            RecoveryProposalInputSchema.shape.unknownUsageAcknowledgementDigest,
+          ...(operation === "recovery-request"
+            ? { planDigest: z.string().regex(/^[0-9a-f]{64}$/) }
+            : {}),
         }
-      : ["doctor", "plan", "recovery-plan", "status", "explain", "replay"].includes(operation)
+      : operation === "activate"
         ? {
-            ...ObjectiveToolShape,
-            ...(operation === "explain"
-              ? { workItemNumber: z.number().int().positive().optional() }
-              : {}),
-          }
-        : {
             ...RequestToolShape,
-            ...(operation === "retry" || operation === "priority"
-              ? { workItemNumber: z.number().int().positive() }
-              : {}),
-            ...(operation === "priority"
-              ? { priorityRank: z.number().int().min(0).max(1_000) }
-              : {}),
-            ...(["pause", "drain", "cloud-pause", "retry", "cancel"].includes(operation)
-              ? { reason: z.string().min(1).max(8_000).optional() }
-              : {}),
-          };
+            baseSha: z
+              .string()
+              .regex(/^[0-9a-fA-F]{40}$/)
+              .optional(),
+            policy: z
+              .record(z.unknown())
+              .optional()
+              .describe(
+                "Complete immutable run policy. Omit for adaptive local-only execution; paid backends are never inferred.",
+              ),
+          }
+        : ["doctor", "plan", "recovery-plan", "status", "explain", "replay"].includes(operation)
+          ? {
+              ...ObjectiveToolShape,
+              ...(operation === "explain"
+                ? { workItemNumber: z.number().int().positive().optional() }
+                : {}),
+            }
+          : {
+              ...RequestToolShape,
+              ...(operation === "retry" || operation === "priority"
+                ? { workItemNumber: z.number().int().positive() }
+                : {}),
+              ...(operation === "priority"
+                ? { priorityRank: z.number().int().min(0).max(1_000) }
+                : {}),
+              ...(["pause", "drain", "cloud-pause", "retry", "cancel"].includes(operation)
+                ? { reason: z.string().min(1).max(8_000).optional() }
+                : {}),
+            };
   server.registerTool(
     name,
     {
@@ -1418,14 +1452,32 @@ function registerApplicationTool(
       description:
         operation === "recovery-plan"
           ? "Read-only assessment of historical work, graph and PR evidence, and cumulative usage. Does not authorize successor execution, reset budgets, or modify GitHub."
-          : `${operation} through Factory's shared application-service boundary.`,
+          : operation === "recovery-propose"
+            ? "Read-only proposal of an exact successor plan for explicit approval. Default allowance increments are zero. Unknown usage acknowledgement and any extra allowance must be explicitly supplied; this tool writes nothing and starts no work."
+            : operation === "recovery-request"
+              ? "Persist and acknowledge the exact inspected successor plan digest. Retains predecessor terminal history and cumulative allowance; changed evidence requires a newly acknowledged plan. The controller must independently reconcile resources and adopt before execution."
+              : `${operation} through Factory's shared application-service boundary.`,
       inputSchema,
       annotations,
     },
     tool(async (input: ApplicationToolInput) => {
-      const service = applicationFor(input.owner, input.repo, operation === "recovery-plan");
+      const service = applicationFor(input.owner, input.repo, operation.startsWith("recovery-"));
       if (!operation.startsWith("controller-") && !input.objectiveNumber)
         throw new Error("objectiveNumber is required");
+      if (operation === "recovery-propose" || operation === "recovery-request") {
+        if (!input.requestId) throw new Error("requestId is required");
+        const request = {
+          objective: input.objectiveNumber!,
+          requestId: input.requestId,
+          ...(input.allowanceIncrement ? { allowanceIncrement: input.allowanceIncrement } : {}),
+          ...(input.unknownUsageAcknowledgementDigest !== undefined
+            ? { unknownUsageAcknowledgementDigest: input.unknownUsageAcknowledgementDigest }
+            : {}),
+        };
+        if (operation === "recovery-propose") return service.recoveryPropose(request);
+        if (!input.planDigest) throw new Error("planDigest is required");
+        return service.recoveryRequest({ ...request, planDigest: input.planDigest });
+      }
       if (["doctor", "plan", "recovery-plan", "status", "explain", "replay"].includes(operation)) {
         return service.inspect(
           operation as "doctor" | "plan" | "recovery-plan" | "status" | "explain" | "replay",

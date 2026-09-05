@@ -54,6 +54,14 @@ The [component verification record](release-evidence/parallel-sibling-integratio
 binds the source commit, full release-suite result, exact local package, and freshly reinstalled
 CLI/MCP entry points. The historical qualification remains escalated; installation did not revive it.
 
+A [live native-stack API component test](release-evidence/native-stack-component-2026-09-05.json)
+created and extended a three-layer stack, replayed deliberately lost success responses without
+duplicate writes, merged the lower layers, observed the remaining layer's cascading rebase with
+its complete tree preserved, and merged that final layer. All disposable refs were removed; an
+independent read-only check confirmed three closed/merged PRs and an unchanged default branch.
+This used direct API adapters and no models, not an installed Supervisor. Merge-queue behavior,
+fallback, and Factory's cascading independent validation/review remain live qualification work.
+
 | Surface | Evidence | Status |
 |---|---|---|
 | GitHub custom control refs | Live custom-ref, metadata-commit, workflow-side-effect, and GraphQL compare-and-swap probes against `clockgrove/factory` | Passed |
@@ -87,8 +95,9 @@ resource ownership is still needed to avoid depending on readability of unrelate
 
 ## Definition-of-done evidence map
 
-Terminal-run continuation remains an implementation gap: ordinary resume/retry cannot revive an
-escalated run, and a fresh run cannot yet adopt its execution evidence. The
+Terminal-run continuation remains an open qualification gate: ordinary resume/retry cannot revive
+an escalated run. The branch now has explicit successor requests and a controller adoption path;
+installed execution and complete delivery-lineage coverage remain outstanding. The
 [successor recovery plan](TERMINAL-RECOVERY-IMPLEMENTATION-PLAN.md) covers explicit authority,
 cumulative accounting, resource reconciliation, and reuse of validated publications. A startup
 guard blocks implicit reuse of executed work; it is containment, not a passed recovery gate.
@@ -97,14 +106,21 @@ accounting evidence through a read-only store capability. Historical usage is no
 authority, and an observed terminal resource receipt does not prove host/provider cleanup.
 Recovery-plan persistence, source-history/allowance-chain verification, authenticated successor
 request bindings, cross-run receipt-write fences, immutable pending claims, exact adoption-receipt
-replay inspection, and read-only source-evidence resolution have deterministic fixtures. The run
-manager still rejects successor execution. The internal coordinator now tests dual-lease-fenced
-claim/comment writes and exact response-loss replay against the real evidence/accounting verifiers.
-New local handles bind their Linux host identity; bounded process observation retains unknown states
-for legacy receipts, changed hosts, permission/race failures, and unbound validation processes.
-Validation/provider cleanup and shared resolver integration with execution remain open. An observed
-completion receipt or a descriptive next-event candidate cannot authorize a worker. These
-foundations do not pass the live recovery gate.
+replay inspection, and read-only source-evidence resolution have deterministic fixtures.
+`factory_recovery_propose` is read-only; `factory_recovery_request` binds explicit authority to its
+exact plan without inferring extra allowance. Controller discovery and the Supervisor require that
+identity and verified adoption. Offline `test/successor-supervisor.test.ts` covers an existing
+publication, independently validated combined-tree integration, response-loss replay, and execution
+of its dependent join through Objective completion. These fixtures use real Git with simulated
+GitHub and management responses, not live installed agents.
+
+New Linux execution/validation reservations bind command scopes and their producer generation.
+`test/controller-retirement.test.ts` includes a real no-model, opt-in systemd probe for controlled
+retirement and prevention of a repeated restart. Absence is independently rechecked after restart;
+legacy unbound resources, changed hosts, and incomplete observations still block. Repeated-successor
+delivery lineage, multi-member native-stack restoration, provider cleanup, and installed recovery
+qualification remain open. An observed completion receipt or a descriptive next-event candidate
+cannot authorize a worker. These component results do not pass the live recovery gate.
 
 This table maps every stable contract statement in [`DESIGN.md`](DESIGN.md#definition-of-done) to
 the executable evidence required on a release branch. “Implemented” does not promote an open live
@@ -135,9 +151,9 @@ fixtures in `test/github-reader-history.test.ts`.
 |---|---|---|
 | Linux environment matrix | Open | Run the default Codex SDK route and Codex CLI fallback with adaptive scheduling, pressure, cancellation, restart, service install/uninstall, and clean validation on native Linux, Windows WSL2, and a Linux guest hosted by macOS. Native Win32 and Darwin are not part of this gate. |
 | Live adaptive scheduling matrix | Open | The deterministic scheduler and recovery mechanics are implemented, but native sub-issue/field edits, constrained cgroups, process kills in every phase, two-Director races, and paid burst still need the disposable-repository/live-host matrix in [`ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md`](ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md). |
-| Live native-stack matrix | Open | The versioned adapter and recovery state machines are implemented, but stack create/extend, lower-head cascading rebase, exact-head invalidation, asynchronous merge, merge-queue ejection, partial completion, and regular-PR fallback still need disposable-repository evidence. |
-| Real Daytona Objective | Open | No Daytona credentials are configured on the release host. The SDK adapter and fake sandbox contract are tested, but paid resource creation, TTL, egress, secret brokerage, host publication, and leak cleanup still need one real run. |
-| Two real managed-agent Objectives | Open | Record a stable provider-published Codex actor identity, then run the same bounded Work Item through GitHub Copilot and OpenAI Codex. Verify capability discovery, Factory session accounting and the provider's GitHub Actions-minute billing boundary, exact-head collection, independent validation, cancellation/recovery behavior, provider-controlled credential/egress behavior, and absence of implicit provider fallback. `test/github-managed-live.test.ts` is deliberately only a single-provider backend-plus-Daytona-validator smoke; it cannot satisfy this full Supervisor-level gate. |
+| Live native-stack matrix | Open | [Live API component evidence](release-evidence/native-stack-component-2026-09-05.json) covers create/extend response-loss replay, partial direct merge, cascading rebase/tree preservation, final merge, and cleanup. Installed Supervisor recovery, cascading exact-head validation/review, merge-queue ejection, and regular-PR fallback still need live evidence. |
+| Real Daytona Objective | Open | Credential-free full-Supervisor tests prove local/Daytona independent-sibling overlap, both integration orders, isolated merge-candidate validation, native accounting restart, and cleanup fail-closed behavior. The opt-in installed runner is described in [provider qualification](PROVIDER-QUALIFICATION.md). Paid creation, TTL, egress, secret brokerage and actual leak cleanup remain unexercised. The linear-stack Daytona cascading validation/publication path is implemented but its new runtime fixture and fault matrix remain unexecuted pending the implementation testing batch. |
+| Two real managed-agent Objectives | Open | Credential-free full-Supervisor scenarios cover three-item Objectives for each simulated profile without fallback. The [installed runner](PROVIDER-QUALIFICATION.md) preserves the missing stable Codex actor identity gate and reports Copilot orchestration separately from unqualified session absence/billing. Real capability discovery, provider Actions-minute billing, exact-head collection, independent validation, cancellation/recovery, credential/egress behavior and no fallback remain required. Existing single-provider backend smokes do not satisfy this gate. |
 | Objective-level adversarial E2E | Open | Run a disposable multi-wave Objective through compile, parallel local execution, independent validation, integration, restart recovery, cancellation, failed checks, conflict, budget exhaustion, and final closure. Destructive failure injection belongs in a disposable repository, not `main`. |
 
 Publication requires the checks above to pass. Implemented adapters alone do not establish

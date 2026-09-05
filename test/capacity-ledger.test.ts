@@ -362,6 +362,12 @@ describe("repository-wide capacity ledger", () => {
           memoryMb: 4096,
         },
       ]);
+      const remoteBackend = `factory/integration-sandbox-${"a".repeat(64)}`;
+      expect(
+        derive([...original.slice(0, -1), capacity("CapacityReserved", 4, remoteBackend)]),
+      ).toMatchObject([
+        { backendId: remoteBackend, local: false, paidUnits: 1, admissionClass: "remote-required" },
+      ]);
       expect(
         derive([
           ...original,

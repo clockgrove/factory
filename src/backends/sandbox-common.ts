@@ -15,6 +15,7 @@ import type {
 import { assertNoSecretMaterial } from "../protocol/limits.js";
 import { NPM_VALIDATION_SETUP_COMMAND } from "../validation/plan.js";
 import { CODEX_WORKER_OUTPUT_SCHEMA, workerPacketPrompt } from "./codex-cli-local.js";
+import { validationInvocationOwnership } from "./validation-invocation.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_SOURCE_ARCHIVE_BYTES = 64 * 1024 * 1024;
@@ -92,6 +93,13 @@ export function sandboxResourceName(
     ? (context.phase ?? "execution")
     : "execution",
 ): string {
+  if ("validationInvocation" in context && context.validationInvocation) {
+    if (phase !== "validation") throw new Error("validation invocation cannot identify execution");
+    const owner = validationInvocationOwnership(
+      context as IsolatedValidationContext | StaleAttemptIdentity,
+    )!;
+    return `factory-candidate-${owner.slice(0, 45)}`;
+  }
   const identity = sandboxIdentity(context);
   return phase === "validation" ? `${identity.slice(0, 54)}-validate` : identity;
 }

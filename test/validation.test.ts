@@ -240,6 +240,26 @@ describe("clean validation", () => {
     },
   );
 
+  it("never executes host validation when an isolated validator was explicitly selected", async () => {
+    const fixture = await repositoryFixture();
+    const worker = await createLocalWorktree(fixture.repository, fixture.baseSha);
+    await writeFile(join(worker.path, "value.txt"), "changed\n");
+    const artifact = await collectLocalArtifact(worker);
+    await cleanupLocalWorktree(worker);
+    let invoked = false;
+    await expect(
+      validateArtifactClean({
+        repository: fixture.repository,
+        artifact,
+        packet: packet(fixture.baseSha),
+        isolatedValidator: async () => {
+          invoked = true;
+          throw new Error("isolated provider unavailable");
+        },
+      }),
+    ).rejects.toThrow(/isolated provider unavailable/);
+    expect(invoked).toBe(true);
+  });
   it("retains bounded command diagnostics for the next retry", () => {
     const reason = validationFailureReason("validation", "npm run typecheck", {
       exitCode: 2,

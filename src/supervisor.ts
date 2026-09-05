@@ -11,6 +11,7 @@ import {
 } from "./backends/github-copilot.js";
 import { DaytonaBackend, DaytonaResourceCleanupError } from "./backends/daytona.js";
 import { VercelSandboxBackend } from "./backends/vercel-sandbox.js";
+import { validationInvocationOwnership } from "./backends/validation-invocation.js";
 import { AttemptManager, type AttemptReservation } from "./control/attempts.js";
 import {
   deriveBudgetUsage,
@@ -173,6 +174,7 @@ import {
   capacityReservationKey,
   deriveCapacityReservations,
   isIntegrationValidationBackend,
+  isLocalIntegrationValidationBackend,
   unreconciledCapacityReservations,
   type CapacityReservation,
 } from "./scheduling/capacity-ledger.js";
@@ -2480,7 +2482,7 @@ export class FactorySupervisor {
               isLocalBackend: (id: string) => {
                 const capabilities = this.#registry.get(id)?.capabilities;
                 return (
-                  isIntegrationValidationBackend(id) ||
+                  isLocalIntegrationValidationBackend(id) ||
                   Boolean(capabilities?.hostExecution && !capabilities.requiresPaidRuntime)
                 );
               },
@@ -2557,10 +2559,22 @@ export class FactorySupervisor {
               commandState.cloudPaused,
             );
             if (this.#deliverySelection.selected === "native-stacks") {
+              const metadata = parseGraphItemMetadata(priority.item.body ?? "");
+              const unit = this.#deliveryPlan?.units.find((unit) =>
+                unit.items.includes(metadata.id),
+              );
               for (const candidate of backends) {
-                if (candidate.capabilities && !candidate.capabilities.hostExecution) {
+                if (
+                  candidate.capabilities &&
+                  !candidate.capabilities.hostExecution &&
+                  !(
+                    candidate.id === "codex-cli/daytona" &&
+                    unit?.kind === "sibling" &&
+                    unit.items.length === 1
+                  )
+                ) {
                   candidate.permanentReasons.push(
-                    "native stack delivery requires host-owned local execution so publication and cascading revalidation never cross the host trust boundary",
+                    "native linear stacks require host-owned execution; only independent Daytona sibling artifacts support isolated integration revalidation",
                   );
                 }
               }
@@ -4068,12 +4082,26 @@ export class FactorySupervisor {
       };
       const timeoutMs =
         (requirements.timeoutMinutes ?? this.#policy.workItemTimeoutMinutes) * 60_000;
+      const unit = this.#deliveryPlan?.units.find((unit) => unit.items.includes(item.id));
+      const isolatedSibling =
+        this.#deliverySelection.selected === "native-stacks" &&
+        unit?.kind === "sibling" &&
+        unit.items.length === 1;
       const execution = await this.#registry.select({
-        policy: this.#policy,
+        policy: isolatedSibling
+          ? {
+              ...this.#policy,
+              backendOrder: this.#policy.backendOrder.filter(
+                (id) =>
+                  id === "codex-cli/daytona" || this.#registry.get(id)?.capabilities.hostExecution,
+              ),
+            }
+          : this.#policy,
         requirements,
         budget: budgets,
         estimatedDurationMs: timeoutMs,
-        requireHostExecution: this.#deliverySelection.selected === "native-stacks",
+        requireHostExecution:
+          this.#deliverySelection.selected === "native-stacks" && !isolatedSibling,
       });
       if (requirements.trust !== "trusted_local" || !execution.backend.capabilities.hostExecution) {
         const afterExecution = {
@@ -4968,13 +4996,14 @@ export class FactorySupervisor {
     sourceBaseSha: string,
     targetBaseSha: string,
     currentWorkItem: number,
-  ): Promise<Snapshot> {
+  ): Promise<{ snapshot: Snapshot; requiresIsolation: boolean }> {
     const snapshot = await this.#reader.readObjective(this.#run.objective);
     this.#fenceSnapshot(snapshot);
     this.#sequences.observe(snapshotEvents(snapshot));
     if (this.#recoveryRuntime) await this.#resumeObservedRun(snapshot, new RunManager(this.#store));
     const items = derive(snapshot).items;
     let cursor = targetBaseSha;
+    let requiresIsolation = false;
     const visited = new Set<string>();
     while (cursor !== sourceBaseSha) {
       if (visited.has(cursor) || visited.size >= items.length) {
@@ -5019,6 +5048,8 @@ export class FactorySupervisor {
       }
       const { item, event } = matches[0]!;
       const member = await this.#nativeStackMember(item, true);
+      if (!this.#registry.get(member.reservation.backend)?.capabilities.hostExecution)
+        requiresIsolation = true;
       if (event.kind !== "attempt" || event.attempt !== member.reservation.attempt) {
         throw new Error("integrated trunk commit does not match its published attempt");
       }
@@ -5056,7 +5087,7 @@ export class FactorySupervisor {
       }
       cursor = parent;
     }
-    return snapshot;
+    return { snapshot, requiresIsolation };
   }
 
   async #recordCandidateValidationUsage(
@@ -5064,9 +5095,12 @@ export class FactorySupervisor {
     identityDigest: string,
     item: DerivedWorkItem,
     reservation: AttemptReservation,
+    unit: "validation_milliseconds" | "sandbox_milliseconds" = "validation_milliseconds",
+    measuredAmount?: number,
   ): Promise<void> {
     const usageId = `integration-validation-${identityDigest}`;
     const amount =
+      measuredAmount ??
       new Date(evidence.completedAt).getTime() - new Date(evidence.startedAt).getTime();
     const matches = (events: readonly FactoryEvent[]) =>
       events.filter(
@@ -5075,7 +5109,7 @@ export class FactorySupervisor {
           event.runId === this.#run.runId &&
           event.workItem === item.number &&
           event.attempt === reservation.attempt &&
-          event.unit === "validation_milliseconds" &&
+          event.unit === unit &&
           event.phase === "validation" &&
           event.event === "BudgetReconciled" &&
           event.usageId === usageId,
@@ -5092,7 +5126,7 @@ export class FactorySupervisor {
           reservation,
           sequence: this.#sequences.take(),
           event: "BudgetReconciled",
-          unit: "validation_milliseconds",
+          unit,
           phase: "validation",
           amount,
           usageId,
@@ -5129,31 +5163,101 @@ export class FactorySupervisor {
     assertDeadline();
     const originalPacket = this.#packetFor(item.number);
     const backend = this.#registry.get(member.reservation.backend);
-    if (
+    const { snapshot, requiresIsolation: baseRequiresIsolation } =
+      await this.#assertOwnTrunkAdvance(
+        member.pull.exactHeadValidation.baseSha,
+        targetBaseSha,
+        item.number,
+      );
+    const isolated =
+      baseRequiresIsolation ||
       originalPacket.requirements.trust !== "trusted_local" ||
-      !backend?.capabilities.hostExecution
-    ) {
-      throw new Error("parallel sibling integration requires trusted-local execution provenance");
-    }
-    const snapshot = await this.#assertOwnTrunkAdvance(
-      member.pull.exactHeadValidation.baseSha,
-      targetBaseSha,
-      item.number,
-    );
+      !backend?.capabilities.hostExecution;
+    if (hasCancellationRequest(snapshot, this.#run.runId))
+      throw new RunCancellationRequestedError(
+        "operator cancelled before merge-candidate admission",
+      );
+    if (
+      isolated &&
+      deriveDurableCommandState({
+        events: snapshotEvents(snapshot),
+        objective: snapshot.number,
+        runId: this.#run.runId,
+        runActor: this.#run.actor,
+        runStartSequence: this.#runStartSequence,
+      }).cloudPaused
+    )
+      return null;
+    if (isolated && !this.#policy.allowedPaidBackends.includes("codex-cli/daytona"))
+      throw new Error(
+        "parallel sibling candidate requires explicitly authorized independent Daytona validation",
+      );
     this.#budgetEvents = deduplicateFactoryEvents([
       ...this.#budgetEvents,
       ...snapshotEvents(snapshot).filter((event) => event.runId === this.#run.runId),
     ]);
     const identity = this.#mergeCandidateIdentity(member, targetBaseSha);
     const identityDigest = mergeCandidateIdentityDigest(identity);
+    const invocationOwnership = (artifactDigest: string) =>
+      validationInvocationOwnership({
+        repository: `${this.#options.owner}/${this.#options.repo}`,
+        objective: member.reservation.objective,
+        workItem: item.number,
+        attempt: member.reservation.attempt,
+        runId: member.reservation.runId,
+        directorEpoch: member.reservation.directorEpoch,
+        policyDigest: member.reservation.policyDigest,
+        phase: "validation",
+        validationInvocation: {
+          kind: "integration-candidate",
+          identityDigest,
+          artifactDigest,
+          baseSha: targetBaseSha,
+        },
+      })!;
     let record = await this.#mergeCandidates.load(identity);
+    if (
+      record &&
+      isolated &&
+      (!record.isolatedResource ||
+        record.isolatedResource.invocationOwnershipDigest !==
+          invocationOwnership(record.validation.artifactDigest))
+    )
+      throw new Error(
+        "isolated merge-candidate checkpoint has unknown cleanup or native accounting identity",
+      );
+    const candidateTimeout = Math.min(
+      (originalPacket.requirements.timeoutMinutes ?? this.#policy.workItemTimeoutMinutes) * 60_000,
+      this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000 - Date.now(),
+    );
+    let validator: ExecutionBackend | undefined;
+    if (isolated && !record) {
+      const candidates = await this.#registry.evaluateIsolatedValidators({
+        policy: { ...this.#policy, backendOrder: ["codex-cli/daytona"] },
+        requirements: originalPacket.requirements,
+        probeTtlMs: 0,
+      });
+      const candidate = candidates.find((candidate) => candidate.id === "codex-cli/daytona");
+      if (
+        !candidate?.backend?.validate ||
+        candidate.permanentReasons.length ||
+        candidate.transientReasons.length
+      )
+        throw new Error(
+          "independent Daytona merge-candidate validator is unavailable or unauthorized",
+        );
+      validator = candidate.backend;
+      const available = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
+      if (candidateTimeout <= 0 || available.sandboxMinutes * 60_000 < candidateTimeout)
+        throw new Error("sandbox-minute budget exhausted before merge-candidate validation");
+    }
     if (!record && merged) {
       throw new Error(
         "merged sibling has no pre-merge candidate checkpoint; refusing retrospective validation",
       );
     }
     const packet = parseWorkerPacket({ ...originalPacket, baseSha: targetBaseSha });
-    const capacityBackend = `factory/integration-validation-${identityDigest}`;
+    const capacityBackend = `factory/integration-${isolated ? "sandbox" : "validation"}-${identityDigest}`;
     const priorCapacity = unreconciledCapacityReservations(snapshotEvents(snapshot)).filter(
       (event) =>
         event.runId === this.#run.runId &&
@@ -5220,10 +5324,10 @@ export class FactorySupervisor {
     if (!record) {
       const effective = normalizeSchedulingPolicy(this.#policy);
       const resource =
-        effective.capacity.mode === "adaptive-local"
+        !isolated && effective.capacity.mode === "adaptive-local"
           ? await this.#resourceSampler.sample(Date.now()).catch(() => null)
           : null;
-      if (effective.capacity.mode === "adaptive-local") {
+      if (!isolated && effective.capacity.mode === "adaptive-local") {
         const pressure = resource
           ? resourcePressureReasons(resource, effective.capacity.local)
           : ["resource sample unavailable"];
@@ -5245,11 +5349,11 @@ export class FactorySupervisor {
         attempt: member.reservation.attempt,
         phase: "validation",
         backendId: capacityBackend,
-        admissionClass: "local",
-        local: true,
+        admissionClass: isolated ? "remote-required" : "local",
+        local: !isolated,
         cpu: packet.requirements.cpu ?? effective.capacity.local.defaultCpu,
         memoryMb: packet.requirements.memoryMb ?? effective.capacity.local.defaultMemoryMb,
-        paidUnits: 0,
+        paidUnits: isolated ? 1 : 0,
         paths: packet.allowedPaths,
         exclusiveResources: packet.changeSurface?.exclusiveResources ?? [],
       };
@@ -5271,20 +5375,24 @@ export class FactorySupervisor {
       );
       if (!admitted.reserved) return null;
       let validation: CleanValidationResult | undefined;
+      let providerStarted: Date | undefined;
+      let providerCompleted: Date | undefined;
       let capacityRecorded = false;
       try {
         artifact = await reconstructArtifact();
-        const scopedValidation = await this.#scopedValidation(
-          member.reservation,
-          artifact,
-          packet,
-          new Date(
-            Math.min(
-              Date.now() + this.#policy.workItemTimeoutMinutes * 60_000,
-              this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
-            ),
-          ),
-        );
+        const scopedValidation = isolated
+          ? undefined
+          : await this.#scopedValidation(
+              member.reservation,
+              artifact,
+              packet,
+              new Date(
+                Math.min(
+                  Date.now() + this.#policy.workItemTimeoutMinutes * 60_000,
+                  this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
+                ),
+              ),
+            );
         await this.#lease.use((lease) =>
           this.#attempts.recordCapacity({
             lease,
@@ -5302,12 +5410,78 @@ export class FactorySupervisor {
         );
         capacityRecorded = true;
         assertDeadline();
+        let validationDeadline = new Date(Date.now() + candidateTimeout);
+        if (isolated) {
+          const budget = await this.#lease.use(async (lease) => {
+            const available = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
+            const amount = Math.min(
+              candidateTimeout,
+              this.#run.startedAt.getTime() +
+                this.#policy.objectiveTimeoutMinutes * 60_000 -
+                Date.now(),
+            );
+            if (amount <= 0 || available.sandboxMinutes * 60_000 < amount)
+              throw new Error(
+                "sandbox-minute budget or deadline changed before merge-candidate reservation",
+              );
+            return this.#recorder.budget({
+              lease,
+              workItemNodeId: item.id,
+              reservation: member.reservation,
+              sequence: this.#sequences.take(),
+              event: "BudgetReserved",
+              phase: "validation",
+              unit: "sandbox_milliseconds",
+              amount,
+              usageId: `integration-validation-${identityDigest}`,
+            });
+          });
+          this.#budgetEvents.push(budget);
+          if (budget.kind !== "budget")
+            throw new Error("candidate reservation returned non-budget receipt");
+          validationDeadline = new Date(
+            Math.min(
+              new Date(budget.at).getTime() + budget.amount,
+              this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
+            ),
+          );
+        }
         validation = await this.#externalAdmission(() =>
           validateArtifactClean({
             repository: this.#options.repository,
             artifact: artifact!,
             packet,
             ...(scopedValidation ? { localScope: scopedValidation.hooks } : {}),
+            ...(validator
+              ? {
+                  isolatedValidator: () =>
+                    this.#externalAdmission(async () => {
+                      providerStarted = new Date();
+                      const result = await validator!.validate!({
+                        repository: `${this.#options.owner}/${this.#options.repo}`,
+                        objective: member.reservation.objective,
+                        workItem: item.number,
+                        attempt: member.reservation.attempt,
+                        runId: member.reservation.runId,
+                        directorEpoch: member.reservation.directorEpoch,
+                        policyDigest: member.reservation.policyDigest,
+                        workspace: this.#options.repository,
+                        packet,
+                        artifact: artifact!,
+                        policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                        deadline: validationDeadline,
+                        validationInvocation: {
+                          kind: "integration-candidate",
+                          identityDigest,
+                          artifactDigest: artifact!.digest,
+                          baseSha: targetBaseSha,
+                        },
+                      });
+                      providerCompleted = new Date();
+                      return result;
+                    }),
+                }
+              : {}),
           }),
         );
         if (!validation.evidence.passed) {
@@ -5325,6 +5499,17 @@ export class FactorySupervisor {
             identity,
             source: member.pull.exactHeadValidation,
             validation: validation!.evidence,
+            ...(isolated
+              ? {
+                  isolatedResource: {
+                    backend: "codex-cli/daytona" as const,
+                    invocationOwnershipDigest: invocationOwnership(artifact!.digest),
+                    startedAt: providerStarted!.toISOString(),
+                    completedAt: providerCompleted!.toISOString(),
+                    sandboxMilliseconds: providerCompleted!.getTime() - providerStarted!.getTime(),
+                  },
+                }
+              : {}),
           }),
         );
       } finally {
@@ -5342,6 +5527,15 @@ export class FactorySupervisor {
       item,
       member.reservation,
     );
+    if (isolated)
+      await this.#recordCandidateValidationUsage(
+        record.validation,
+        identityDigest,
+        item,
+        member.reservation,
+        "sandbox_milliseconds",
+        record.isolatedResource!.sandboxMilliseconds,
+      );
     const reviewIdentity = this.#mergeCandidateReviewIdentity(record);
     const existingReview = await this.#reviews.load(reviewIdentity);
     const invocationId = `integration-review-${reviewIdentityDigest(reviewIdentity)}`;

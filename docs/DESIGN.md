@@ -398,6 +398,24 @@ These checks do not create a GitHub base-SHA compare-and-swap: an external write
 merge remains detectable by the post-merge parent/tree check, not atomically preventable by the REST
 merge endpoint. Factory serializes its own integrations and preserves the repository/Objective fences.
 
+Independent native-mode sibling units may also use explicitly authorized Daytona overflow. Actual
+linear stack units remain host-only; provider-managed PRs do not acquire native-stack admission from
+this exception. Factory still applies and publishes the bounded artifact on the host, but an explicitly
+selected isolated validator is always honored, even for a `trusted_local` packet. Candidate validation
+uses Daytona whenever the sibling or an intervening same-run integration was non-host. It receives a
+distinct resource identity bound to the original run/attempt, policy/epoch, source-head candidate,
+target base, and candidate artifact—not a new implementation attempt. Its durable remote capacity and
+sandbox budget are reserved before creation. The immutable completion checkpoint retains measured
+provider-call duration including provision and cleanup; this is native runtime accounting, not a claim
+about the provider's invoice. Restart reuses that completion and accounts it once. Missing completion
+or conflicting resource ownership does not establish cleanup or permit another paid invocation.
+
+Backend location is not itself a trust class. Accepted, independently validated `trusted_local`
+overflow may become the base of local downstream work under the original policy. Work selected as
+`sandbox_untrusted` or with isolated/managed requirements never gains host execution authority merely
+because its PR was merged. Paid burst remains opt-in; the regular-PR fallback still serializes complete
+pipelines and does not qualify concurrent burst.
+
 Native linear stacks separately provide cascading rebase plus fresh validation and semantic review
 after a lower layer changes.
 Immediately before each regular or stacked merge, integration is repository-fenced and Factory

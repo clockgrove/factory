@@ -164,6 +164,7 @@ export async function validateArtifactClean(
   if (
     input.localScope &&
     (plan.isolation === "isolated" ||
+      input.isolatedValidator !== undefined ||
       input.localScope.identity.phase !== "validation" ||
       input.localScope.identity.invocationDigest !== artifact.digest)
   ) {
@@ -221,7 +222,7 @@ export async function validateArtifactClean(
     let evidenceStartedAt = startedAt.toISOString();
     let evidenceCompletedAt: string;
     let environmentIdentity: string | undefined;
-    if (plan.isolation === "isolated") {
+    if (plan.isolation === "isolated" || input.isolatedValidator) {
       const isolated = await input.isolatedValidator!();
       if (isolated.outputTreeSha !== outputTreeSha) {
         throw new Error(

@@ -53,6 +53,22 @@ const CandidateSchema = z
     digest: sha256Digest,
   })
   .strict();
+const IsolatedResourceSchema = z
+  .object({
+    backend: z.literal("codex-cli/daytona"),
+    invocationOwnershipDigest: sha256Digest,
+    startedAt: z.string().datetime({ offset: true }),
+    completedAt: z.string().datetime({ offset: true }),
+    sandboxMilliseconds: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (Date.parse(value.completedAt) - Date.parse(value.startedAt) !== value.sandboxMilliseconds)
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "isolated resource duration differs from completion interval",
+      });
+  });
 const CheckpointSchema = z
   .object({
     protocol: z.literal("clockgrove.factory/merge-candidate-checkpoint-v1"),
@@ -61,6 +77,7 @@ const CheckpointSchema = z
     source: SourceSchema,
     validation: FullValidationSchema,
     evidence: CandidateSchema,
+    isolatedResource: IsolatedResourceSchema.optional(),
   })
   .strict();
 
@@ -73,6 +90,7 @@ export interface MergeCandidateCheckpointRecord {
   source: ExactHeadValidationEvidence;
   validation: ValidationEvidence;
   evidence: MergeCandidateValidationEvidence;
+  isolatedResource?: z.infer<typeof IsolatedResourceSchema>;
 }
 type Checkpoint = z.infer<typeof CheckpointSchema>;
 function requireCheckpoint(condition: unknown, reason: string): asserts condition {
@@ -119,6 +137,8 @@ function sameCandidate(record: MergeCandidateCheckpointRecord, value: Checkpoint
     mergeCandidateIdentityDigest(record.identity) === value.identityDigest &&
     JSON.stringify(record.source) === JSON.stringify(value.source) &&
     record.evidence.candidateOutputTreeSha === value.evidence.candidateOutputTreeSha &&
+    record.isolatedResource?.invocationOwnershipDigest ===
+      value.isolatedResource?.invocationOwnershipDigest &&
     record.evidence.candidateArtifactDigest === value.evidence.candidateArtifactDigest
   );
 }
@@ -162,6 +182,7 @@ export async function loadMergeCandidateCheckpoint(
     source: value.source,
     validation: value.validation,
     evidence: value.evidence,
+    ...(value.isolatedResource ? { isolatedResource: value.isolatedResource } : {}),
   };
 }
 
@@ -179,6 +200,7 @@ export class MergeCandidateCheckpointStore {
     identity: MergeCandidateIdentity;
     source: ExactHeadValidationEvidence;
     validation: ValidationEvidence;
+    isolatedResource?: z.infer<typeof IsolatedResourceSchema>;
   }): Promise<MergeCandidateCheckpointRecord> {
     const identity = IdentitySchema.parse(args.identity);
     requireCheckpoint(
@@ -193,6 +215,7 @@ export class MergeCandidateCheckpointStore {
       source: args.source,
       validation: args.validation,
       evidence: bindMergeCandidateValidation({ source: args.source, validation: args.validation }),
+      ...(args.isolatedResource ? { isolatedResource: args.isolatedResource } : {}),
     });
     const winner = (
       record: MergeCandidateCheckpointRecord | null,

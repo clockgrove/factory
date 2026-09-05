@@ -18,6 +18,7 @@ import {
   type RecoveryPlanRecord,
 } from "./plan.js";
 import { observeRecoveryNativeTransition } from "./native-transition.js";
+import { observeRecoverySiblingRefresh } from "./sibling-refresh.js";
 import {
   createRecoveryEventDigest,
   recoveryEventDigest,
@@ -54,6 +55,7 @@ type Input = {
   events: readonly FactoryEvent[];
   store: RecoveryReadStore;
   workItem: number;
+  proofTraversal?: ReadonlySet<string>;
 };
 export interface RecoverySourceArtifactProof {
   planRecord: RecoveryPlanRecord;
@@ -215,13 +217,34 @@ export async function loadRecoverySourceArtifact(
         pull.baseRepository?.toLowerCase() === plan.repository.toLowerCase() &&
         pull.headRepository?.toLowerCase() === plan.repository.toLowerCase(),
     );
-    if (pull.headSha !== headSha || pull.baseRef !== recordedPublication.baseBranch)
-      await observeRecoveryNativeTransition({
-        planRecord: record,
-        events,
-        store: input.store,
-        workItem: input.workItem,
-      });
+    if (pull.headSha !== headSha || pull.baseRef !== recordedPublication.baseBranch) {
+      const current = await input.store.readCommit(pull.headSha);
+      if (current.parentOids.length === 2) {
+        requireEvidence(pull.baseRef === recordedPublication.baseBranch);
+        await observeRecoverySiblingRefresh(
+          {
+            repository: plan.repository,
+            objective: plan.objective,
+            workItem: input.workItem,
+            source: {
+              ...source,
+              publication: recoverySourcePublicationBinding(recordedPublication, plan.repository),
+            },
+            events,
+            store: input.store,
+            controllingRunIds: [...plan.history.map((entry) => entry.runId), plan.successorRunId],
+            deliveryHeadSha: pull.headSha,
+          },
+          new Set(input.proofTraversal),
+        );
+      } else
+        await observeRecoveryNativeTransition({
+          planRecord: record,
+          events,
+          store: input.store,
+          workItem: input.workItem,
+        });
+    }
     publishedHeadObserved = true;
   }
   requireEvidence(
@@ -425,7 +448,7 @@ export async function verifyRecoverySourcePublication(
       status: "verified";
       publication: RecoverySourcePublishedEvent;
       artifact: RecoverySourceArtifactProof;
-      current: "unchanged" | "native-transition-observed";
+      current: "unchanged" | "native-transition-observed" | "sibling-refresh-observed";
       executionAuthorized: false;
     }
   | { status: "blocked"; blockers: string[]; executionAuthorized: false }
@@ -477,13 +500,34 @@ export async function verifyRecoverySourcePublication(
     const pull = await input.store.readPullRequest(event.pullRequest);
     const changed = pull.headSha !== event.sourceHeadSha || pull.baseRef !== event.baseBranch;
     if (changed) {
-      requireEvidence(recorded && event.mode === "native-stacks" && artifact.delivery.stack);
-      await observeRecoveryNativeTransition({
-        planRecord: artifact.planRecord,
-        events: input.events,
-        store: input.store,
-        workItem: event.workItem,
-      });
+      requireEvidence(recorded && event.mode === "native-stacks");
+      if (!artifact.delivery.stack) {
+        const plan = artifact.planRecord.plan;
+        const source = plan.items.find((item) => item.workItem === event.workItem)?.source;
+        requireEvidence(source && pull.baseRef === event.baseBranch);
+        await observeRecoverySiblingRefresh(
+          {
+            repository: plan.repository,
+            objective: plan.objective,
+            workItem: event.workItem,
+            source: {
+              ...source,
+              publication: recoverySourcePublicationBinding(event, plan.repository),
+            },
+            events: input.events,
+            store: input.store,
+            controllingRunIds: [...plan.history.map((entry) => entry.runId), plan.successorRunId],
+            deliveryHeadSha: pull.headSha,
+          },
+          new Set(input.proofTraversal),
+        );
+      } else
+        await observeRecoveryNativeTransition({
+          planRecord: artifact.planRecord,
+          events: input.events,
+          store: input.store,
+          workItem: event.workItem,
+        });
     }
     requireEvidence(
       pull.nodeId === event.pullRequestNodeId &&
@@ -532,7 +576,11 @@ export async function verifyRecoverySourcePublication(
       status: "verified",
       publication: event,
       artifact,
-      current: changed ? "native-transition-observed" : "unchanged",
+      current: changed
+        ? artifact.delivery.stack
+          ? "native-transition-observed"
+          : "sibling-refresh-observed"
+        : "unchanged",
       executionAuthorized: false,
     };
   } catch {

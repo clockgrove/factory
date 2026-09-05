@@ -20,6 +20,14 @@ import type { RecoveryReadStore } from "../src/recovery/assessment.js";
 import { RecoveryClaimManager } from "../src/recovery/claims.js";
 import { recoveryAdoptionEvents } from "../src/recovery/transaction.js";
 import { recoveryEventDigest, recoverySourceEventsDigest } from "../src/recovery/identity.js";
+import { SiblingRefreshStore } from "../src/control/sibling-refreshes.js";
+import {
+  MergeCandidateCheckpointStore,
+  mergeCandidateIdentityDigest,
+} from "../src/control/merge-candidates.js";
+import { createValidationEvidence } from "../src/validation/evidence.js";
+import { observeRecoverySiblingRefresh } from "../src/recovery/sibling-refresh.js";
+import { resolveRecoveryEvidence } from "../src/recovery/evidence.js";
 
 const sha = (value: string) => value.repeat(40);
 const digest = (value: string) => value.repeat(64);
@@ -477,6 +485,382 @@ async function fixture(withPublications = true, native: "siblings" | "stack" | f
     base,
   };
 }
+
+async function refreshedSiblingFixture() {
+  const f = await fixture(true, "siblings");
+  const originalPlan = (await f.build()).plan!;
+  const source = originalPlan.items[1]!.source!;
+  const publication = source.publication!;
+  const exact = bindValidationToPublishedHead({
+    validation: {
+      passed: true,
+      digest: source.validation!.evidenceDigest,
+      baseSha: source.validation!.baseSha,
+      outputTreeSha: source.validation!.outputTreeSha,
+    },
+    publishedHeadSha: publication.headSha,
+    publishedTreeSha: source.validation!.outputTreeSha,
+    publishedBaseSha: publication.baseSha,
+  });
+  const firstReservation = f.snapshot.workItems[0]!.factoryEvents!.find(
+    (event) => event.event === "AttemptReserved",
+  )!;
+  f.snapshot.workItems[0]!.factoryEvents!.push(
+    parseFactoryEvent({
+      ...firstReservation,
+      event: "AttemptIntegrated",
+      headSha: sha("1"),
+      sequence: 70,
+    }),
+  );
+  const record = await new SiblingRefreshStore(f.storage, f.leases).persist({
+    lease: f.lease,
+    identity: {
+      repository: "o/r",
+      runId: "source",
+      sourceRunId: "source",
+      controllingPolicyDigest: f.lease.policyDigest,
+      objective: 7,
+      workItem: 9,
+      attempt: 1,
+      pullRequest: 19,
+      pullRequestNodeId: "PR_19",
+      branch: publication.branch,
+      reservationRef: source.reservationRef,
+      reservationOid: source.reservationCommitOid,
+      leaseEpoch: 1,
+      policyDigest: f.lease.policyDigest,
+      sourcePublicationDigest: publication.receiptDigest,
+      sourceHeadSha: publication.headSha,
+      sourceExactHeadValidationDigest: exact.digest,
+      targetBaseSha: sha("1"),
+    },
+    source: exact,
+    expectedOldHeadSha: publication.headSha,
+    outputTreeSha: sha("9"),
+  });
+  const validation = createValidationEvidence({
+    protocol: "clockgrove.factory/validation-v1",
+    artifactDigest: digest("8"),
+    baseSha: sha("1"),
+    outputTreeSha: sha("9"),
+    commands: [{ command: "npm test", exitCode: 0, durationMs: 10 }],
+    passed: true,
+    startedAt: now.toISOString(),
+    completedAt: new Date(now.getTime() + 10).toISOString(),
+  });
+  const identity = {
+    runId: "source",
+    objective: 7,
+    workItem: 9,
+    attempt: 1,
+    pullRequest: 19,
+    sourceHeadSha: publication.headSha,
+    sourceExactHeadValidationDigest: exact.digest,
+    targetBaseSha: sha("1"),
+    deliveryHeadSha: record.plannedHeadSha,
+  };
+  const candidate = await new MergeCandidateCheckpointStore(f.storage, f.leases).persist({
+    lease: f.lease,
+    identity,
+    source: exact,
+    validation,
+  });
+  const review = await new ReviewCheckpointManager(f.storage, f.leases).persist({
+    lease: f.lease,
+    identity: {
+      kind: "integration-candidate",
+      runId: "source",
+      objective: 7,
+      workItem: 9,
+      attempt: 1,
+      headSha: record.plannedHeadSha,
+      artifactDigest: validation.artifactDigest,
+      baseSha: validation.baseSha,
+      outputTreeSha: validation.outputTreeSha,
+      evidenceDigest: validation.digest,
+    },
+    result: {
+      review: { accepted: true, summary: "accepted exact refresh", unmetCriteria: [], risks: [] },
+      usage: { inputTokens: 10, outputTokens: 5 },
+    },
+  });
+  f.snapshot.workItems[1]!.factoryEvents!.push(
+    f.event({
+      kind: "budget",
+      event: "BudgetReconciled",
+      workItem: 9,
+      attempt: 1,
+      sequence: 71,
+      phase: "validation",
+      unit: "validation_milliseconds",
+      amount: 10,
+      usageId: `integration-validation-${mergeCandidateIdentityDigest(identity)}`,
+    }),
+    f.event({
+      kind: "budget",
+      event: "BudgetReconciled",
+      workItem: 9,
+      attempt: 1,
+      sequence: 72,
+      phase: "management",
+      unit: "model_tokens",
+      amount: 15,
+      usageId: `integration-review-${review.identityDigest}`,
+    }),
+  );
+  f.pulls.get(19)!.headSha = record.plannedHeadSha;
+  f.snapshot.workItems[1]!.linkedPullRequests![0]!.headSha = record.plannedHeadSha;
+  f.refs.set(`refs/heads/${publication.branch}`, record.plannedHeadSha);
+  const observe = (requireCompletion = true) =>
+    observeRecoverySiblingRefresh({
+      repository: "o/r",
+      objective: 7,
+      workItem: 9,
+      source,
+      store: f.store,
+      events: [
+        ...f.snapshot.factoryEvents!,
+        ...f.snapshot.workItems.flatMap((item) => item.factoryEvents!),
+      ],
+      controllingRunIds: ["source"],
+      deliveryHeadSha: record.plannedHeadSha,
+      requireCompletion,
+    });
+  return { ...f, source, record, candidate, review, observe };
+}
+
+describe("authenticated sibling refresh recovery", () => {
+  it("binds a successor's unfinished refresh to the accepted original source without reviving it", async () => {
+    const f = await refreshedSiblingFixture();
+    f.refs.delete(f.candidate.ref);
+    f.refs.delete(f.review.ref);
+    f.snapshot.workItems[1]!.factoryEvents = f.snapshot.workItems[1]!.factoryEvents!.filter(
+      (event) => event.sequence !== 71 && event.sequence !== 72,
+    );
+    const proposed = await f.build();
+    const lease = { ...f.lease, runId: "successor" };
+    const planRecord = await new RecoveryPlanManager(f.storage, f.leases).persist({
+      lease,
+      plan: proposed.plan!,
+    });
+    const request = f.event({
+      kind: "recovery",
+      event: "RecoveryRequested",
+      sequence: 101,
+      requestId: planRecord.plan.requestId,
+      repository: "o/r",
+      requestedBy: "operator",
+      predecessorRunId: "source",
+      predecessorTerminalDigest: planRecord.plan.predecessor.terminalDigest,
+      successorRunId: "successor",
+      planDigest: planRecord.digest,
+      policyDigest: planRecord.plan.policyDigest,
+      baseSha: planRecord.plan.expectedBaseSha,
+    });
+    if (request.event !== "RecoveryRequested") throw new Error("fixture request");
+    const claim = await new RecoveryClaimManager(f.storage, f.leases).claim({
+      lease,
+      planRecord,
+      authenticatedRequest: request,
+      transaction: {
+        at: now.toISOString(),
+        startSequence: 102,
+        evidenceDigest: digest("a"),
+        accountingDigest: digest("b"),
+        resourceEvidenceDigest: digest("c"),
+      },
+    });
+    const adoption = recoveryAdoptionEvents({
+      planRecord,
+      claim,
+      authenticatedRequest: request,
+      predecessorStart: f.start as Extract<FactoryEvent, { event: "FactoryRunStarted" }>,
+    });
+    f.snapshot.factoryEvents!.push(request, ...adoption);
+    const args = {
+      repository: "o/r",
+      objective: 7,
+      workItem: 9,
+      source: f.source,
+      store: f.store,
+      events: [
+        ...f.snapshot.factoryEvents!,
+        ...f.snapshot.workItems.flatMap((item) => item.factoryEvents!),
+      ],
+      controllingRunIds: ["source", "successor"],
+      deliveryHeadSha: f.record.plannedHeadSha,
+      candidateRunId: "successor",
+    };
+    const proof = await observeRecoverySiblingRefresh(args);
+    expect(proof.lineage.map((entry) => entry.identity.runId)).toEqual(["source"]);
+    expect(proof.candidate).toBeNull();
+    expect(proof.source).toEqual(f.record.source);
+    await expect(
+      observeRecoverySiblingRefresh({ ...args, requireCompletion: true }),
+    ).rejects.toThrow();
+    await expect(
+      observeRecoverySiblingRefresh({ ...args, controllingRunIds: ["source"] }),
+    ).rejects.toThrow();
+    await expect(
+      observeRecoverySiblingRefresh({
+        ...args,
+        events: args.events.filter((event) => event.event !== "RecoveryAdoptionCompleted"),
+      }),
+    ).rejects.toThrow();
+    await expect(
+      observeRecoverySiblingRefresh(args, new Set([f.record.plannedHeadSha])),
+    ).rejects.toThrow();
+    const candidate = await new MergeCandidateCheckpointStore(f.storage, f.leases).persist({
+      lease,
+      identity: proof.candidateIdentity,
+      source: proof.source,
+      validation: f.candidate.validation,
+    });
+    const review = await new ReviewCheckpointManager(f.storage, f.leases).persist({
+      lease,
+      identity: { ...f.review.identity, runId: "successor" },
+      result: { review: f.review.review, usage: f.review.usage },
+    });
+    args.events.push(
+      f.event({
+        kind: "budget",
+        event: "BudgetReconciled",
+        runId: "successor",
+        workItem: 9,
+        attempt: 1,
+        sequence: 110,
+        phase: "validation",
+        unit: "validation_milliseconds",
+        amount: 10,
+        usageId: `integration-validation-${mergeCandidateIdentityDigest(candidate.identity)}`,
+      }),
+      f.event({
+        kind: "budget",
+        event: "BudgetReconciled",
+        runId: "successor",
+        workItem: 9,
+        attempt: 1,
+        sequence: 111,
+        phase: "management",
+        unit: "model_tokens",
+        amount: 15,
+        usageId: `integration-review-${review.identityDigest}`,
+      }),
+    );
+    expect(
+      (await observeRecoverySiblingRefresh({ ...args, requireCompletion: true })).candidateIdentity
+        .runId,
+    ).toBe("successor");
+    const { candidateRunId: _candidateRun, ...discover } = args;
+    expect(
+      (await observeRecoverySiblingRefresh({ ...discover, requireCompletion: true }))
+        .candidateIdentity.runId,
+    ).toBe("successor");
+  });
+  it("proposes the actual refreshed head without changing original source identities", async () => {
+    const f = await refreshedSiblingFixture();
+    const result = await f.build();
+    expect(result.blockers).toEqual([]);
+    const item = result.plan!.items[1]!;
+    expect(item.action).toBe("reuse-publication");
+    expect(item.source!.publication).toEqual(f.source.publication);
+    expect(item.source!.validation).toEqual(f.source.validation);
+    expect(item.source!.siblingRefresh?.deliveryHeadSha).toBe(f.record.plannedHeadSha);
+    expect(item.observedPullRequest!.treeSha).toBe(f.record.outputTreeSha);
+    expect(f.mutations.createCommit).not.toHaveBeenCalled();
+    expect(f.mutations.createRef).not.toHaveBeenCalled();
+    const record = await new RecoveryPlanManager(f.storage, f.leases).persist({
+      lease: { ...f.lease, runId: "successor" },
+      plan: result.plan!,
+    });
+    const resolved = await resolveRecoveryEvidence({
+      claim: null,
+      planRecord: record,
+      events: [
+        ...f.snapshot.factoryEvents!,
+        ...f.snapshot.workItems.flatMap((item) => item.factoryEvents!),
+      ],
+      snapshot: f.snapshot,
+      store: f.store,
+    });
+    expect(resolved.items.find((item) => item.workItem === 9)?.sourceBindings).toBe("verified");
+  });
+  it("recognizes a completed refreshed squash with its original source publication", async () => {
+    const f = await refreshedSiblingFixture();
+    const pull = f.pulls.get(19)!;
+    pull.merged = true;
+    pull.state = "closed";
+    pull.mergeCommitSha = sha("8");
+    f.commits.set(sha("8"), {
+      oid: sha("8"),
+      treeOid: f.record.outputTreeSha,
+      parentOids: [sha("1")],
+      message: "refreshed squash",
+      serverTime: now,
+    });
+    f.snapshot.workItems[1]!.closed = true;
+    f.snapshot.workItems[1]!.linkedPullRequests![0]!.state = "MERGED";
+    expect((await f.build()).plan?.items[1]?.action).toBe("integrated");
+  });
+  it.each(["candidate", "review", "usage", "intent", "source", "target-authority"] as const)(
+    "fails closed on missing or changed %s proof",
+    async (kind) => {
+      const f = await refreshedSiblingFixture();
+      if (kind === "candidate") f.refs.delete(f.candidate.ref);
+      if (kind === "review") f.refs.delete(f.review.ref);
+      if (kind === "intent") f.refs.delete(f.record.ref);
+      if (kind === "source") f.commits.get(f.source.reservationCommitOid)!.message = "unbound";
+      if (kind === "usage")
+        f.snapshot.workItems[1]!.factoryEvents = f.snapshot.workItems[1]!.factoryEvents!.filter(
+          (event) => event.sequence !== 72,
+        );
+      if (kind === "target-authority")
+        f.snapshot.workItems[0]!.factoryEvents = f.snapshot.workItems[0]!.factoryEvents!.filter(
+          (event) => event.sequence !== 70,
+        );
+      const proposed = await f.build();
+      if (kind === "candidate" || kind === "review") {
+        expect(proposed.plan?.items[1]?.action).toBe("revalidate");
+        expect(proposed.executionAuthorized).toBe(false);
+      } else expect(proposed.status).toBe("blocked");
+      await expect(f.observe()).rejects.toThrow();
+    },
+  );
+  it("loads planned lineage without treating an unfinished checkpoint as completed validation", async () => {
+    const f = await refreshedSiblingFixture();
+    f.refs.delete(f.candidate.ref);
+    const proof = await f.observe(false);
+    expect(proof.record.plannedHeadSha).toBe(f.record.plannedHeadSha);
+    expect(proof.candidate).toBeNull();
+    await expect(f.observe()).rejects.toThrow();
+  });
+  it("rejects a rewritten planned parent even when the PR head and output tree are unchanged", async () => {
+    const f = await refreshedSiblingFixture();
+    f.commits.get(f.record.plannedHeadSha)!.parentOids[0] = sha("a");
+    await expect(f.observe(false)).rejects.toThrow();
+  });
+  it("never accepts later review accounting as pre-integration proof", async () => {
+    const f = await refreshedSiblingFixture();
+    await expect(
+      observeRecoverySiblingRefresh({
+        repository: "o/r",
+        objective: 7,
+        workItem: 9,
+        source: f.source,
+        store: f.store,
+        events: [
+          ...f.snapshot.factoryEvents!,
+          ...f.snapshot.workItems.flatMap((item) => item.factoryEvents!),
+        ],
+        controllingRunIds: ["source"],
+        deliveryHeadSha: f.record.plannedHeadSha,
+        requireCompletion: true,
+        beforeSequence: 72,
+      }),
+    ).rejects.toThrow();
+  });
+});
 
 describe("explicit recovery request application", () => {
   it("requires exact acknowledged source and current producer generation before retiring itself", async () => {

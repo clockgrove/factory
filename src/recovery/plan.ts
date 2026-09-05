@@ -87,6 +87,19 @@ const sourceSchema = z
     reservationReceiptDigest: digest,
     artifactDigest: digest.nullable(),
     artifactHead: z.object({ branch, headSha: sha, treeSha: sha }).strict().optional(),
+    // Descriptive only: readers independently verify the immutable refresh lineage.
+    siblingRefresh: z
+      .object({
+        ref: reference,
+        commitOid: sha,
+        identityDigest: digest,
+        deliveryHeadSha: sha,
+        targetBaseSha: sha,
+        outputTreeSha: sha,
+        candidateRunId: identifier,
+      })
+      .strict()
+      .optional(),
     // Descriptive lineage only; outcomes.ts independently loads and verifies the ancestor.
     priorDelivery: z
       .object({
@@ -392,6 +405,15 @@ export function parseRecoveryPlan(input: unknown): RecoveryPlan {
           "ordinary publication cannot name a native stack",
         );
       }
+      if (source.siblingRefresh)
+        requirePlan(
+          source.publication?.mode === "native-stacks" &&
+            source.publication.stackNumber === null &&
+            source.validation &&
+            source.siblingRefresh.deliveryHeadSha !== source.publication.headSha &&
+            plan.history.some((entry) => entry.runId === source.siblingRefresh!.candidateRunId),
+          "sibling refresh requires an exact historical sibling source",
+        );
     }
     if (["integrated", "reuse-publication", "reuse-artifact", "revalidate"].includes(item.action))
       requirePlan(source?.artifactDigest, "reuse requires source artifact provenance");
@@ -431,16 +453,20 @@ export function parseRecoveryPlan(input: unknown): RecoveryPlan {
       const observed = item.observedPullRequest!;
       const publication = source!.publication!;
       requirePlan(
-        observed.headSha === (source!.priorDelivery?.deliveryHeadSha ?? publication.headSha) &&
+        observed.headSha ===
+          (source!.priorDelivery?.deliveryHeadSha ??
+            source!.siblingRefresh?.deliveryHeadSha ??
+            publication.headSha) &&
           // This is a descriptive plan, not admission. Prior candidate integration
           // is independently verified by verifyPriorRecoveryDelivery in BOTH the
           // proposal builder and evidence resolver before it becomes usable.
-          (observed.baseSha === publication.baseSha ||
+          (observed.baseSha === (source!.siblingRefresh?.targetBaseSha ?? publication.baseSha) ||
             (item.action === "integrated" && source!.priorDelivery !== undefined)) &&
           observed.headRef === publication.branch &&
           observed.baseRef === publication.baseBranch &&
           observed.headRepository?.toLowerCase() === publication.headRepository.toLowerCase() &&
-          observed.treeSha === source!.validation!.outputTreeSha,
+          observed.treeSha ===
+            (source!.siblingRefresh?.outputTreeSha ?? source!.validation!.outputTreeSha),
         "publication reuse needs unchanged validated PR identities",
       );
     }

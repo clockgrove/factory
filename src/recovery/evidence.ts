@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { FactoryReadSnapshot } from "../application/status.js";
 import { attemptRef } from "../control/attempts.js";
+import { observeRecoverySiblingRefresh, recoverySiblingRefreshBinding } from "./sibling-refresh.js";
 import {
   assertAuthenticatedGraphProjection,
   assertSnapshotMatchesCompiledGraph,
@@ -669,6 +670,25 @@ export async function resolveRecoveryEvidence(input: {
               publication.validationDigest === source.validation.evidenceDigest &&
               publication.exactHeadValidationDigest === binding.digest,
           );
+          if (source.siblingRefresh) {
+            const refresh = await observeRecoverySiblingRefresh({
+              repository: plan.repository,
+              objective: plan.objective,
+              workItem: item.workItem,
+              source,
+              events,
+              controllingRunIds: plan.history.map((entry) => entry.runId),
+              store,
+              deliveryHeadSha: source.siblingRefresh.deliveryHeadSha,
+              candidateRunId: source.siblingRefresh.candidateRunId,
+              requireCompletion: item.action !== "revalidate",
+            });
+            requireEvidence(
+              JSON.stringify(
+                recoverySiblingRefreshBinding(refresh.record, refresh.candidateIdentity.runId),
+              ) === JSON.stringify(source.siblingRefresh),
+            );
+          }
           resolved.publication = {
             pullRequest: publication.pullRequest,
             branch: publication.branch,

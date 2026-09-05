@@ -26,6 +26,7 @@ import {
   nativePublicationStackNumber,
 } from "./native-source-stacks.js";
 import type { RecoveryRuntime } from "./runtime.js";
+import { observeRecoverySiblingRefresh, recoverySiblingRefreshBinding } from "./sibling-refresh.js";
 import { verifyRecoveryProposalResources } from "./resources.js";
 import {
   RECOVERY_PLAN_PROTOCOL,
@@ -969,22 +970,60 @@ export async function buildRecoveryProposal(input: {
         pull.headSha === publication.headSha &&
         pull.baseSha === publication.baseSha &&
         observedHead.treeOid === validation.outputTreeSha;
+      const refresh =
+        pull.headSha !== publication.headSha && observedHead.parentOids.length === 2
+          ? await observeRecoverySiblingRefresh({
+              repository,
+              objective: snapshot.number,
+              workItem: item.number,
+              source,
+              events,
+              controllingRunIds: history.map((entry) => entry.runId),
+              store: port,
+              deliveryHeadSha: pull.headSha,
+              requireCompletion: pull.merged,
+            })
+          : null;
+      if (refresh) {
+        require(pull.baseSha === refresh.record.identity.targetBaseSha);
+        source.siblingRefresh = recoverySiblingRefreshBinding(
+          refresh.record,
+          refresh.candidateIdentity.runId,
+        );
+      }
+      const completedRefresh =
+        refresh?.candidate && refresh.review?.review.accepted
+          ? await observeRecoverySiblingRefresh({
+              repository,
+              objective: snapshot.number,
+              workItem: item.number,
+              source,
+              events,
+              controllingRunIds: history.map((entry) => entry.runId),
+              store: port,
+              deliveryHeadSha: pull.headSha,
+              requireCompletion: true,
+            })
+          : null;
       if (pull.merged) {
         stage = "merge-candidate-source-unsupported";
-        require(item.closed && pull.mergeCommitSha && unchanged);
+        require(item.closed && pull.mergeCommitSha && (unchanged || refresh));
         const merged = await port.readCommit(pull.mergeCommitSha);
         require(
           merged.oid === pull.mergeCommitSha &&
-            merged.treeOid === validation.outputTreeSha &&
+            merged.treeOid === (refresh?.record.outputTreeSha ?? validation.outputTreeSha) &&
             merged.parentOids.length === 1 &&
-            merged.parentOids[0] === validation.baseSha,
+            merged.parentOids[0] === (refresh?.record.identity.targetBaseSha ?? validation.baseSha),
         );
         planItem.action = "integrated";
       } else {
         stage = "delivery-state";
         require(!item.closed && pull.state === "open");
         planItem.action = "revalidate";
-        if (unchanged && validation.baseSha === base.oid) {
+        if (
+          (unchanged && validation.baseSha === base.oid) ||
+          (completedRefresh && completedRefresh.record.identity.targetBaseSha === base.oid)
+        ) {
           stage = "checks";
           require(linked[0]!.checks === null || linked[0]!.checks === "SUCCESS");
           const rules = await port.readBranchRules(pull.baseRef);

@@ -27,8 +27,9 @@ These are settled. Do not relitigate them.
   structural identity, not state.
 - **Rate-limit discipline is mandatory.** Every GitHub write goes through `platform.ts`'s
   `CircuitBreaker`, `ContentCreationPacer`, and `ConcurrencyLimiter`. Never burst writes; never retry
-  through an open circuit. A `403` alongside `5000/5000` on `/rate_limit` is the documented secondary
-  limit, not a bug.
+  through an open circuit. Classify the failed request's response headers/body: primary exhaustion
+  waits for its reset, and secondary refusals honor their retry delay. A separate `/rate_limit`
+  balance neither proves a secondary refusal nor overrides the failed request's retry boundary.
 - **Verify platform claims live** against current documentation (docs.github.com, agent-plugins.org,
   modelcontextprotocol.io, npm) before writing code that depends on them. Never infer a mutation or
   field shape from training data — schemas change. Reuse applicable captured observations and cheap

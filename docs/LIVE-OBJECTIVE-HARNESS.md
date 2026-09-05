@@ -78,6 +78,26 @@ is not required for preflight. This records `qualification-preflight.json` witho
 Objective or making a model call. Unset preflight mode before the live run. If neither opt-in is set,
 the script exits without calling providers or GitHub.
 
+## Native sibling-refresh qualification
+
+For the complete sibling-refresh path, keep the same setup, authority, namespace, token ceiling and
+phase settings, add `FACTORY_LIVE_NATIVE_REFRESH_OBJECTIVE=1`, and invoke
+`node scripts/verify-native-refresh-objective.mjs`. Delivery must remain `stacked-prs`; the qualifier
+does not permit regular-PR fallback or change the default local backend policy. Use its read-only
+preflight before the live invocation with the exact artifact being qualified.
+
+This variant requires at least one actual refreshed sibling and overlapping sibling attempt
+lifecycles. After completion, its independent read-only collector verifies the original reservation,
+publication and validation alongside the immutable refresh lineage, changed-head candidate validation,
+changed-head semantic review, and exact merged commit. It does not replace the original publication
+head with the current PR head or synthesize GitHub fields. The ordinary collector keeps rejecting an
+unexplained head change. The variant also retains the existing dependent-join, closure, accounted
+resources, installed-artifact and fresh-clone behavior assertions.
+
+A passing branch-update component probe is insufficient: this exercise must observe the installed
+Factory implementation complete the actual Objective. It still does not qualify native linear-stack
+rebases, every recovery/cancellation fault, or other host/provider environments.
+
 ## Evidence and failure handling
 
 The harness reserves `objective-evidence.json` exclusively and records preflight before creating the

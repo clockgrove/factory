@@ -19,7 +19,13 @@ integration matched the fresh default-branch clone. Thirty clone tests and indep
 assertions passed. Seven model-call receipts account for 205,570 tokens; no active reservations
 remained and all nine exact recorded scopes were independently absent. This is a passed explicit
 serialized regular happy path, not native concurrency, automatic fallback or a broad fault/host gate.
-The separately selected CLI route remains pending; SDK-first policy alone does not prove fallback.
+A separate CLI-only run against the same installed subjects also passed: all three first-attempt
+workers used the requested CLI backend, with no SDK worker. Its three serialized pipelines closed
+and merged all PRs, the dependent join and Objective; 46 fresh-clone tests and independent behavior
+assertions passed. Seven model calls account for 199,368 tokens, no active reservations remained,
+and all nine exact recorded scopes were absent. Fresh installed status/replay summaries agree on
+completion and three distinct publications/integrations; replay is write-free without pinned
+scheduler recomputation. Direct CLI selection does not prove observed SDK-failure fallback.
 
 The same candidate passed `npm run verify:release`: 122 files, 2,064 tests and three skips, all
 static/schema/bundle/staged-package checks and zero dependency vulnerabilities. The record binds

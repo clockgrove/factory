@@ -9,7 +9,9 @@ explicit regular qualification now passes at `0c97438f05d721d6cde761b79ae05f5510
 first-attempt SDK pipelines integrate serially through the dependent join and Objective closure,
 with exact validation/commit bindings, 30 fresh-clone tests and independent behavior assertions.
 This does not pass native concurrency, automatic fallback, the broader parallel/fault criterion,
-host/provider matrices or publication gates. Explicit CLI qualification remains pending.
+host/provider matrices or publication gates. A separate explicit CLI-only run against the same
+candidate also passed all three first-attempt serialized pipelines, 46 fresh-clone tests and
+independent behavior checks. This qualifies direct CLI execution, not observed SDK-failure fallback.
 [DESIGN.md](DESIGN.md) defines behavior; [CONFORMANCE.md](CONFORMANCE.md) remains the release-gate
 ledger. This document grants no execution, spending, installation, or publication authority.
 
@@ -22,7 +24,7 @@ ledger. This document grants no execution, spending, installation, or publicatio
 | Generic, economic compilation | Ground commands in observed repository toolchains, accept explicit exclusive-resource claims, and evaluate decomposition costs without fabricated prices or measurements. | Integrated; full offline batch passed |
 | Chat preflight and planning | Doctor performs useful mechanical diagnostics; explicit plan produces or inspects a proposed graph before activation; CLI and MCP share the same write-free inspection contract. | Integrated; offline and installed read-only doctor/existing-graph plan checks passed. Plan did not compile, verify a durable graph or authorize activation. A separate explicit regular Objective passed; broader installed qualification remains open |
 | Managed providers | Prove assignable provider identities and owned session lifecycle observations for both managed targets; preserve explicit unsupported boundaries until evidenced. | Exact Copilot task/session reconciliation integrated and regression-tested; separate paid-run authorization, required credentials, live lifecycle/billing evidence and stable managed Codex identity remain gates |
-| Installed complete Objective | Qualify matching installed artifacts through parallel siblings, independent validation/review, integration, dependent join, final closure, and bounded recovery/cancellation cases. | Explicit serialized regular happy path passed with actual SDK workers, three merged PRs, dependent join and closure. The original parallel/native and recovery/fault criterion remains open; CLI qualification is pending |
+| Installed complete Objective | Qualify matching installed artifacts through parallel siblings, independent validation/review, integration, dependent join, final closure, and bounded recovery/cancellation cases. | Separate explicit serialized regular happy paths passed with actual SDK and CLI-only workers, each with three merged PRs, dependent join and closure. The original parallel/native and recovery/fault criterion remains open; direct CLI selection does not qualify failure-triggered fallback |
 | Release verification | Run the complete integrated suite and package checks; preserve exact-revision evidence and the independent host/provider/publication gates. | Passed at the recorded candidate; external gates remain open |
 
 These are completion gates, not a new architecture or permission to reduce scope. Regression tests
@@ -108,6 +110,9 @@ publications and integrations and 205,570 tokens across seven calls. Corrected r
 the earlier failed regular run preserves its receipt digest, escalated outcome and 131,699 tokens
 across five calls while reporting two publications and one integration. Replay is write-free;
 without pinned admission snapshots it is receipt reconstruction, not scheduler recomputation.
+The separate CLI-only success reports 199,368 tokens across seven calls, three distinct publications
+and integrations, no active reservations, and nine exact recorded scopes absent. Its fresh installed
+status/replay summaries also agree and do not imply scheduler recomputation or a host-wide pass.
 
 Interrupted isolated revalidation without a passing durable completion checkpoint remains blocked
 for resource reconciliation. It does not authorize another invocation or establish zero usage.

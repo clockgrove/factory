@@ -60,6 +60,14 @@ const defaults = {
 
 export function schedulingAuthority(env) {
   if (env.FACTORY_LIVE_LOCAL_SCHEDULING !== "1") return null;
+  // Parent preflight and env-cleared installed MCP must resolve the same local
+  // GitHub identity before either can authorize a model call. Never copy a token
+  // into the service or accept an ambient alternate config only on one side.
+  for (const key of ["GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME"])
+    assert.ok(
+      env[key] === undefined,
+      "scheduling qualifier requires default local GitHub authentication",
+    );
   assert.ok(
     env.FACTORY_LIVE_OBJECTIVE_PREFLIGHT === "1" || env.FACTORY_LIVE_OBJECTIVE === "1",
     "shared explicit phase required",

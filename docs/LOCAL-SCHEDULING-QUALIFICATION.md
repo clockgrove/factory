@@ -47,7 +47,8 @@ export FACTORY_LIVE_OBJECTIVE_NAMESPACE=scheduling-unique-20260905-a
 export FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS=500000
 export FACTORY_LIVE_OBJECTIVE_EVIDENCE=/home/USER/private-evidence/scheduling-unique-20260905-a
 
-FACTORY_LIVE_OBJECTIVE_PREFLIGHT=1 node scripts/verify-local-scheduling.mjs
+env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST -u GH_CONFIG_DIR -u XDG_CONFIG_HOME \
+  FACTORY_LIVE_OBJECTIVE_PREFLIGHT=1 node scripts/verify-local-scheduling.mjs
 ```
 
 Preflight checks existing repository/installed prerequisites and writes only private
@@ -58,7 +59,8 @@ Before the separately authorized execution, unset `FACTORY_LIVE_OBJECTIVE_PREFLI
 export FACTORY_LIVE_OBJECTIVE=1
 export FACTORY_LIVE_OBJECTIVE_MUTATION_ACK=example/disposable
 export FACTORY_LIVE_LOCAL_SCHEDULING_ACK=example/disposable:owned-cpu-priority-contention
-node scripts/verify-local-scheduling.mjs
+env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST -u GH_CONFIG_DIR -u XDG_CONFIG_HOME \
+  node scripts/verify-local-scheduling.mjs
 ```
 
 Leave delivery unset or `regular-prs`, and the backend selector unset or `local-default`.
@@ -74,6 +76,11 @@ copies GitHub/model secrets into systemd properties or command arguments. Unlike
 regular parent process, it cannot rely on an inherited `GITHUB_TOKEN` or `GH_TOKEN`;
 the installed server resolves its existing local authentication itself. Paths with
 spaces or shell expansions are rejected by this bounded qualifier.
+The scheduling-only entry point rejects `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST`,
+`GH_CONFIG_DIR`, and `XDG_CONFIG_HOME` overrides before even preflight authentication.
+The per-process `env -u` examples leave global configuration untouched and make both
+the parent and installed service use the same normal Linux-home GitHub configuration.
+Hookless regular and native qualifiers retain their existing environment behavior.
 
 ## Bounds, evidence, and failure handling
 

@@ -143,6 +143,23 @@ describe("explicit installed scheduling authority", () => {
       }),
     ).not.toBeNull();
   });
+  it.each(["GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME"])(
+    "rejects %s before preflight or any invocation, without logging its value",
+    async (key) => {
+      const run = vi.fn();
+      const sentinel = "private-value-must-not-be-printed";
+      await expect(
+        main({ ...env, FACTORY_LIVE_OBJECTIVE_PREFLIGHT: "1", [key]: sentinel }, run),
+      ).rejects.toThrow("scheduling qualifier requires default local GitHub authentication");
+      expect(run).not.toHaveBeenCalled();
+      expect(() => schedulingAuthority({ ...env, [key]: sentinel })).toThrow(
+        /^scheduling qualifier requires default local GitHub authentication$/,
+      );
+    },
+  );
+  it("does not inspect auth overrides when its own opt-in is absent", () => {
+    expect(schedulingAuthority({ GH_TOKEN: "untouched-parent-value" })).toBeNull();
+  });
   it.each([
     { FACTORY_LIVE_LOCAL_SCHEDULING_ACK: "another/repo:owned-cpu-priority-contention" },
     { FACTORY_LIVE_OBJECTIVE: undefined },

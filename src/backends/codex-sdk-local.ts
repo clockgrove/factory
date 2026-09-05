@@ -181,7 +181,7 @@ function groupExists() {
 }
 
 function exitFromChild() {
-  if (!childResult) return;
+  if (!childResult && !scopeCleanupFailed) return;
   clearInterval(watchdog);
   if (forceTimer) clearTimeout(forceTimer);
   if (groupPoll) clearInterval(groupPoll);
@@ -189,7 +189,6 @@ function exitFromChild() {
 }
 
 function finishWhenGroupIsGone() {
-  if (!childResult) return;
   if (!scopeCleanupDone) return;
   if (scopeCleanupFailed) {
     // Do not wait forever after the bounded cleanup verifier has already failed.
@@ -199,6 +198,7 @@ function finishWhenGroupIsGone() {
     exitFromChild();
     return;
   }
+  if (!childResult) return;
   if (!groupExists()) {
     exitFromChild();
     return;

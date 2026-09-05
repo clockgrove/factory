@@ -140,4 +140,36 @@ process.exitCode=${childExit};
       await rm(f.root, { recursive: true, force: true });
     }
   });
+  it("returns bounded failure even when the launcher never reports its exit", async () => {
+    const f = await fixture("collected");
+    const preload = join(f.root, "unobserved-launcher.cjs");
+    await writeFile(
+      preload,
+      `
+const cp=require('node:child_process'),spawn=cp.spawn;
+cp.spawn=function(...args){const child=spawn(...args),once=child.once;child.once=function(event,...rest){return event==='exit'?child:once.call(child,event,...rest);};return child;};
+require('node:module').syncBuiltinESMExports();
+const kill=process.kill;process.kill=function(pid,signal){if(pid<0)return true;return kill.call(process,pid,signal);};
+process.once('beforeExit',()=>process.emit('SIGTERM'));
+`,
+    );
+    try {
+      await expect(
+        promisify(execFile)(f.wrapper, [], {
+          env: {
+            ...process.env,
+            PATH: `${f.root}:${process.env.PATH}`,
+            NODE_OPTIONS: `--require ${preload}`,
+          },
+          timeout: 6000,
+        }),
+      ).rejects.toMatchObject({
+        code: 1,
+        killed: false,
+        stderr: expect.stringContaining("Factory SDK owned scope cleanup unverified"),
+      });
+    } finally {
+      await rm(f.root, { recursive: true, force: true });
+    }
+  });
 });

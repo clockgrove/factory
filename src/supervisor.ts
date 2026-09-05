@@ -3979,6 +3979,7 @@ export class FactorySupervisor {
         }
       }
       const stopRequested = cancellation || error instanceof PlatformUnavailableError;
+      let cancelledModelUsageObserved = false;
       if (stopRequested && handle && selected && !executionCleanupConfirmed) {
         try {
           await selected.cancel(handle);
@@ -3986,6 +3987,25 @@ export class FactorySupervisor {
           this.#notify(
             `backend cancellation did not confirm absence; cleanup reconciliation will decide: ${cancelError instanceof Error ? cancelError.message : String(cancelError)}`,
           );
+        }
+        if (terminalModelTokens === undefined && selected.capabilities.reportsModelUsage) {
+          try {
+            // Cancellation drains some backends' terminal stream. Read any real
+            // counters before cleanup discards the handle; absence stays unknown.
+            const observation = await selected.observe(handle);
+            if (["succeeded", "failed", "cancelled"].includes(observation.state)) {
+              terminalModelUsage = reportedModelUsage(observation.usage);
+              const tokens = reportedModelTokens(observation.usage);
+              if (tokens !== null) {
+                terminalModelTokens = tokens;
+                cancelledModelUsageObserved = true;
+              }
+            }
+          } catch (observationError) {
+            this.#notify(
+              `cancelled backend usage is unavailable: ${observationError instanceof Error ? observationError.message : String(observationError)}`,
+            );
+          }
         }
       }
       await confirmExecutionCleanup("failed-attempt backend cleanup");
@@ -4022,6 +4042,23 @@ export class FactorySupervisor {
         error instanceof NoExecutionBackendError
       ) {
         throw error;
+      }
+      if (cancelledModelUsageObserved && reservation) {
+        await this.#lease.use(async (lease) => {
+          const event = await this.#recorder.budget({
+            lease,
+            workItemNodeId: item.id,
+            reservation: reservation!,
+            sequence: this.#sequences.take(),
+            event: "BudgetReconciled",
+            unit: "model_tokens",
+            phase: "execution",
+            amount: terminalModelTokens!,
+            usageId: `worker-${item.number}-${reservation!.attempt}`,
+            ...(terminalModelUsage ? { reportedModelUsage: terminalModelUsage } : {}),
+          });
+          this.#budgetEvents.push(event);
+        });
       }
       const reason = error instanceof Error ? error.message : String(error);
       if (!published && selected?.capabilities.providerManagedPublication) {

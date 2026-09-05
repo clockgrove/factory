@@ -36,6 +36,7 @@ export const COPILOT = "github-copilot/github-managed";
 export const CODEX = "openai-codex/github-managed";
 export type ProviderScenario = "daytona-burst" | "copilot-objective" | "codex-objective";
 export interface ProviderFaults {
+  configureLocalBackend?: (backend: ExecutionBackend) => ExecutionBackend;
   controllerActivation?: boolean;
   afterIntegration?: () => void;
   localOnly?: boolean;
@@ -780,7 +781,8 @@ export async function providerSupervisorFixture(
     };
   };
   const registry = new BackendRegistry();
-  registry.register(execution(LOCAL));
+  const local = execution(LOCAL);
+  registry.register(faults.configureLocalBackend?.(local) ?? local);
   registry.register(execution(DAYTONA));
   if (managed) registry.register(execution(provider));
   const management: ManagementBackend = {

@@ -235,7 +235,7 @@ describe("prepared local execution scope bindings", () => {
 });
 
 describe.each(["cli", "sdk"] as const)("%s journaled execution scope", (kind) => {
-  async function fixture() {
+  async function fixture(wrapperCleanupUnverified = false) {
     const directory = await mkdtemp(join(tmpdir(), "factory-owned-backend-"));
     const input = context(directory);
     const f = portFixture(input);
@@ -263,6 +263,18 @@ describe.each(["cli", "sdk"] as const)("%s journaled execution scope", (kind) =>
                     return {
                       events: (async function* () {
                         for (const event of f.events) yield event;
+                        if (wrapperCleanupUnverified) {
+                          f.setState("absent");
+                          yield {
+                            type: "error" as const,
+                            message: "Factory SDK owned scope cleanup unverified",
+                          };
+                          // The real SDK prioritizes spawnError over exit/stderr
+                          // after an AbortSignal, so the marker must survive it.
+                          const error = new Error("The operation was aborted");
+                          error.name = "AbortError";
+                          throw error;
+                        }
                       })(),
                     };
                   },
@@ -367,4 +379,34 @@ describe.each(["cli", "sdk"] as const)("%s journaled execution scope", (kind) =>
       await rm(f.directory, { recursive: true, force: true });
     }
   });
+  it.skipIf(kind !== "sdk")(
+    "does not turn unknown launcher cleanup into success from a momentarily absent scope",
+    async () => {
+      const f = await fixture(true);
+      try {
+        const handle = await f.backend.launch(f.input);
+        await vi.waitFor(async () =>
+          expect((await f.backend.observe(handle)).state).toBe("failed"),
+        );
+        expect((await f.backend.observe(handle)).usage).toMatchObject({
+          inputTokens: 4,
+          outputTokens: 2,
+        });
+        expect(await f.port.show(f.unit)).toContain("LoadState=not-found");
+        await expect(f.backend.cleanup(handle)).rejects.toThrow("automated replacement is blocked");
+        await expect(f.backend.cancel(handle)).rejects.toThrow("automated replacement is blocked");
+        await expect(f.backend.collect(handle)).rejects.toThrow("automated replacement is blocked");
+        await expect(f.backend.launch(f.input)).rejects.toThrow("automated replacement is blocked");
+        await expect(f.backend.launch({ ...f.input, attempt: 2 })).rejects.toThrow(
+          "automated replacement is blocked",
+        );
+        expect(f.log.filter((entry) => entry === "spawn")).toHaveLength(1);
+        expect((await f.backend.observe(handle)).reason).toContain(
+          "launcher cleanup is unverified",
+        );
+      } finally {
+        await rm(f.directory, { recursive: true, force: true });
+      }
+    },
+  );
 });

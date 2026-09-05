@@ -92,6 +92,8 @@ interface SdkAttempt {
   cancelled: boolean;
   timedOut: boolean;
   scopeSettled?: boolean;
+  /** Wrapper failure means its detached launcher may still create the scope late. */
+  launcherCleanupUnverified?: boolean;
 }
 
 export interface CodexSdkLocalOptions {
@@ -220,6 +222,9 @@ function stopGroup() {
   if (scope) {
     cleanupScope().catch(() => {
       scopeCleanupFailed = true;
+      // The pinned SDK discards stderr when abort raises its spawnError. Carry
+      // this denial-only diagnostic through the event stream as well.
+      process.stdout.write(JSON.stringify({ type: "error", message: "Factory SDK owned scope cleanup unverified" }) + "\n");
       process.stderr.write("Factory SDK owned scope cleanup unverified\n");
     }).finally(() => {
       scopeCleanupDone = true;
@@ -536,6 +541,17 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
   }
 
   async launch(context: AttemptContext): Promise<BackendHandle> {
+    if (
+      [...this.#running.values()].some(
+        (running) =>
+          running.launcherCleanupUnverified &&
+          running.context.repository === context.repository &&
+          running.context.runId === context.runId &&
+          running.context.workItem === context.workItem,
+      )
+    ) {
+      throw new Error("SDK launcher cleanup is unverified; automated replacement is blocked");
+    }
     const scope = localExecutionScopeBatch(context);
     if (Date.now() >= context.deadline.getTime()) {
       throw new Error("attempt deadline already elapsed");
@@ -647,6 +663,8 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
     running.cancelled = true;
     running.controller.abort("attempt cancelled by Factory");
     await running.terminal;
+    if (running.launcherCleanupUnverified)
+      throw new Error("SDK launcher cleanup is unverified; automated replacement is blocked");
     handle.metadata = {
       ...handle.metadata,
       terminalState: "cancelled",
@@ -658,6 +676,8 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
   async collect(handle: BackendHandle): Promise<NormalizedArtifact> {
     const running = this.#require(handle);
     await running.terminal;
+    if (running.launcherCleanupUnverified)
+      throw new Error("SDK launcher cleanup is unverified; automated replacement is blocked");
     const collected = await collectLocalArtifact(
       {
         root: join(running.context.workspace, ".."),
@@ -707,6 +727,8 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
     // deleting the only in-process recovery handle.
     running.controller.abort("Factory cleanup");
     await running.terminal;
+    if (running.launcherCleanupUnverified)
+      throw new Error("SDK launcher cleanup is unverified; automated replacement is blocked");
     const scope = localExecutionScopeBatch(running.context);
     if (scope) await stopLocalScope(scope.identity, this.#options.localScopePort);
     else
@@ -807,6 +829,12 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
         signal: running.controller.signal,
       });
       for await (const event of events) {
+        if (
+          running.context.localExecutionScope &&
+          event.type === "error" &&
+          event.message === "Factory SDK owned scope cleanup unverified"
+        )
+          running.launcherCleanupUnverified = true;
         if (event.type === "turn.completed") {
           completionCount += 1;
           running.usage = completionCount === 1 ? event.usage : undefined;
@@ -889,6 +917,13 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
         running.reason = running.final?.summary ?? "SDK worker returned no valid final result";
       }
     } catch (error) {
+      if (
+        running.context.localExecutionScope &&
+        error instanceof Error &&
+        error.message.includes("Factory SDK owned scope cleanup unverified")
+      ) {
+        running.launcherCleanupUnverified = true;
+      }
       running.state = running.cancelled ? "cancelled" : "failed";
       running.reason ??= safeDiagnostic(
         running.timedOut
@@ -908,6 +943,10 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
           running.state = "failed";
           running.reason = "SDK worker resource cleanup is unverified";
         } finally {
+          if (running.launcherCleanupUnverified) {
+            running.state = "failed";
+            running.reason = "SDK launcher cleanup is unverified; automated replacement is blocked";
+          }
           running.scopeSettled = true;
         }
       }

@@ -232,11 +232,13 @@ describe("CircuitBreaker", () => {
   const t0 = new Date("2026-01-01T00:00:00Z");
   const refusal = { kind: "rate_limit" as const, retryAfterMs: 1_000 };
 
-  it("stays closed under the consecutive-refusal threshold", () => {
+  it("honors a refusal immediately without counting it as a threshold trip", () => {
     const cb = new CircuitBreaker({ openAfterConsecutiveRefusals: 3 });
     cb.recordRefusal(refusal, t0);
     cb.recordRefusal(refusal, t0);
-    expect(cb.isOpen(t0)).toBe(false);
+    expect(cb.isOpen(t0)).toBe(true);
+    expect(cb.waitMs(t0)).toBe(1_000);
+    expect(cb.exhausted()).toBe(false);
   });
 
   it("opens once consecutive refusals reach the threshold", () => {
@@ -267,7 +269,8 @@ describe("CircuitBreaker", () => {
     cb.recordRefusal(refusal, t0);
     cb.recordSuccess();
     cb.recordRefusal(refusal, t0);
-    expect(cb.isOpen(t0)).toBe(false);
+    expect(cb.waitMs(t0)).toBe(1_000);
+    expect(cb.isOpen(new Date(t0.getTime() + 1_000))).toBe(false);
   });
 
   it("grows the cooldown on repeated trips, capped at maxCooldownMs", () => {

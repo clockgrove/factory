@@ -147,8 +147,7 @@ describe("repository controller", () => {
     expect(seen.map((item) => item.observation)).toEqual([observed, observed]);
   });
 
-  it("backs off a transient activation failure without terminalizing it", async () => {
-    let now = 1_000;
+  it("retires a transient activation generation without terminalizing or redispatching it", async () => {
     let attempts = 0;
     const activation = {
       objective: 1,
@@ -162,7 +161,6 @@ describe("repository controller", () => {
     const controller = new GitHubRepositoryController({
       store: { discoverObjectiveActivations: async () => [activation] },
       pollIntervalMs: 1_000,
-      nowMs: () => now,
       reconcileObjective: async () => {
         attempts += 1;
         throw new PlatformUnavailableError(
@@ -175,12 +173,11 @@ describe("repository controller", () => {
     expect(await controller.reconcileOnce()).toBe(1);
     await controller.settle();
     expect(await controller.reconcileOnce()).toBe(0);
-    now += 4_999;
     expect(await controller.reconcileOnce()).toBe(0);
-    now += 1;
-    expect(await controller.reconcileOnce()).toBe(1);
+    expect(await controller.reconcileOnce()).toBe(0);
     await controller.settle();
-    expect(attempts).toBe(2);
+    expect(attempts).toBe(1);
+    await expect(controller.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
   });
 
   it("fairly activates two Objectives and never admits a Work Item twice", async () => {

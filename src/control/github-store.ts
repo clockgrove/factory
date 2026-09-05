@@ -463,6 +463,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
           repository: `${this.#owner}/${this.#repo}`,
           objective: issue.number,
           actor: controllerLogin,
+          closed: issue.state === "closed",
           events,
           store: this,
         });

@@ -7,6 +7,7 @@ import { recoveryReadPort } from "../recovery/github-read-port.js";
 import { loadRecoveryPlan } from "../recovery/plan.js";
 import { loadRecoveryRuntime } from "../recovery/runtime.js";
 import type { RepositoryLeaseManager, RepositoryLeaseState } from "./repository-lease.js";
+import { ControllerGenerationRetirement, shouldRetireController } from "./retirement.js";
 
 export interface RecoveryRepositoryOwnership {
   leases: Pick<RepositoryLeaseManager, "assertCurrent">;
@@ -22,6 +23,7 @@ export async function adoptRecoveryActivation(input: {
   store: GitHubControlStore;
   ownership: RecoveryRepositoryOwnership;
   signal: AbortSignal;
+  checkout: string;
 }): Promise<void> {
   const recovery = input.activation.recovery;
   if (!recovery) throw new Error("Recovery activation identity is required");
@@ -99,6 +101,17 @@ export async function adoptRecoveryActivation(input: {
       objectiveLease,
       repositoryLease: input.ownership.current(),
     });
+    if (result.status === "blocked" && result.blockers.includes("resource-absence-unverified")) {
+      const observed = await readSnapshot();
+      if (
+        await shouldRetireController({
+          plan: record.plan,
+          snapshot: observed.snapshot,
+          checkout: input.checkout,
+        })
+      )
+        throw new ControllerGenerationRetirement();
+    }
     if (result.status !== "adopted")
       throw new Error(`Recovery adoption ${result.status}: ${result.blockers.join(", ")}`);
   } finally {

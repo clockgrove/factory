@@ -8,6 +8,7 @@ import { attemptRef } from "../src/control/attempts.js";
 import { decodeEventComments, encodeEventTrailer } from "../src/control/receipts.js";
 import { RecoveryRequestService } from "../src/recovery/requests.js";
 import { discoverRecoveryActivation } from "../src/recovery/discovery.js";
+import { sourceUsesCurrentProducer } from "../src/controller/retirement.js";
 import { renderWorkPacket, type CompiledObjective } from "../src/graph.js";
 import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
@@ -18,7 +19,7 @@ import { parseRecoveryPlan, RecoveryPlanManager } from "../src/recovery/plan.js"
 import type { RecoveryReadStore } from "../src/recovery/assessment.js";
 import { RecoveryClaimManager } from "../src/recovery/claims.js";
 import { recoveryAdoptionEvents } from "../src/recovery/transaction.js";
-import { recoveryEventDigest } from "../src/recovery/identity.js";
+import { recoveryEventDigest, recoverySourceEventsDigest } from "../src/recovery/identity.js";
 
 const sha = (value: string) => value.repeat(40);
 const digest = (value: string) => value.repeat(64);
@@ -478,6 +479,79 @@ async function fixture(withPublications = true, native: "siblings" | "stack" | f
 }
 
 describe("explicit recovery request application", () => {
+  it("requires exact acknowledged source and current producer generation before retiring itself", async () => {
+    const f = await fixture();
+    const proposal = await f.build();
+    const plan = proposal.plan!;
+    const host = {
+      hostIdentity: digest("d"),
+      producerPid: 1234,
+      producerStartTicks: "12345",
+      producerUnit: "clockgrove-factory-aaaaaaaaaaaaaaaa.service",
+      producerInvocationId: "e".repeat(32),
+    };
+    const item = f.snapshot.workItems.find((entry) =>
+      entry.factoryEvents?.some((event) => event.event === "AttemptReserved"),
+    )!;
+    const index = item.factoryEvents!.findIndex((event) => event.event === "AttemptReserved");
+    const reservation = item.factoryEvents![index]!;
+    if (reservation.kind !== "attempt") throw new Error("fixture reservation missing");
+    item.factoryEvents![index] = parseFactoryEvent({
+      ...reservation,
+      localScopeBatch: {
+        identity: {
+          protocol: "clockgrove.factory/local-scope-v1",
+          repository: plan.repository,
+          objective: plan.objective,
+          workItem: reservation.workItem,
+          attempt: reservation.attempt,
+          runId: reservation.runId,
+          directorEpoch: reservation.directorEpoch,
+          policyDigest: reservation.policyDigest,
+          phase: "execution",
+          commandIndex: 0,
+          invocationDigest: digest("a"),
+          hostIdentity: host.hostIdentity,
+          producerUnit: host.producerUnit,
+          producerInvocationId: host.producerInvocationId,
+        },
+        commandCount: 1,
+        producerPid: host.producerPid,
+        producerStartTicks: host.producerStartTicks,
+        deadline: new Date(now.getTime() + 60000).toISOString(),
+      },
+    });
+    const input = { plan, snapshot: f.snapshot, host, expectedUnit: host.producerUnit };
+    // A matching PID from an unacknowledged extra receipt is not retirement authority.
+    expect(sourceUsesCurrentProducer(input)).toBe(false);
+    plan.sourceEventsDigest = recoverySourceEventsDigest({
+      objective: plan.objective,
+      runIds: plan.history.map((entry) => entry.runId),
+      maxSequence: plan.predecessor.terminalSequence,
+      events: [
+        ...f.snapshot.factoryEvents!,
+        ...f.snapshot.workItems.flatMap((entry) => entry.factoryEvents!),
+      ],
+    });
+    expect(sourceUsesCurrentProducer(input)).toBe(true);
+    expect(sourceUsesCurrentProducer({ ...input, host: { ...host, producerPid: 1235 } })).toBe(
+      false,
+    );
+    expect(
+      sourceUsesCurrentProducer({ ...input, host: { ...host, producerStartTicks: "6789" } }),
+    ).toBe(false);
+    expect(
+      sourceUsesCurrentProducer({
+        ...input,
+        host: { ...host, producerInvocationId: "f".repeat(32) },
+      }),
+    ).toBe(false);
+    expect(sourceUsesCurrentProducer({ ...input, expectedUnit: "another.service" })).toBe(false);
+    expect(
+      sourceUsesCurrentProducer({ ...input, host: { ...host, hostIdentity: digest("f") } }),
+    ).toBe(false);
+  });
+
   async function requests() {
     const f = await fixture();
     let actor = "operator";

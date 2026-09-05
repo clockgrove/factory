@@ -11,6 +11,7 @@ export async function discoverRecoveryActivation(input: {
   repository: string;
   objective: number;
   actor: string;
+  closed?: boolean;
   events: FactoryEvent[];
   store: CompiledGraphReadStore;
 }): Promise<DurableObjectiveActivation | null> {
@@ -86,6 +87,7 @@ export async function discoverRecoveryActivation(input: {
       runStartSequence: start.sequence,
     });
     if (
+      !input.closed &&
       commands.admissionGate &&
       events.some(
         (event) =>

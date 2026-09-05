@@ -3,6 +3,10 @@ import { join } from "node:path";
 
 import type { NormalizedArtifact } from "../execution/artifacts.js";
 import type { GitCommitObject } from "../control/lease.js";
+import {
+  verifyPlannedSiblingRefreshCommit,
+  type SiblingRefreshRecord,
+} from "../control/sibling-refreshes.js";
 import { gitSha } from "../protocol/limits.js";
 import type { CleanValidationResult } from "../validation/clean-run.js";
 import { verifyValidationEvidence } from "../validation/evidence.js";
@@ -21,6 +25,9 @@ import {
 export interface PublicationStore {
   readRef(ref: string): Promise<string | null>;
   readCommit(oid: string): Promise<GitCommitObject>;
+  /** Required only for independent immutable sibling-refresh verification. */
+  readTreeEntry?(treeOid: string, path: string): Promise<string | null>;
+  readBlob?(oid: string): Promise<Buffer>;
   createBlob(content: Buffer): Promise<string>;
   createTree(args: {
     baseTreeOid: string;
@@ -99,6 +106,8 @@ export interface IntegrationReadinessOptions {
   mergeCandidateValidation?: MergeCandidateValidationEvidence;
   /** Observed native-stack rewrite; requires the original source-bound candidate proof. */
   mergeCandidateDeliveryHeadSha?: string;
+  /** Separate FF sibling lineage, never the singleton-parent native linear rewrite. */
+  siblingRefresh?: SiblingRefreshRecord;
 }
 
 export async function verifySquashIntegration(
@@ -317,7 +326,32 @@ export async function integrationReadiness(
   const candidate = options.mergeCandidateValidation;
   if (candidate)
     verifyMergeCandidateValidation(candidate, pull.exactHeadValidation, expectedBaseSha);
-  const deliveryHeadSha = options.mergeCandidateDeliveryHeadSha;
+  const refresh = options.siblingRefresh;
+  if (refresh) {
+    if (
+      options.mergeCandidateDeliveryHeadSha ||
+      !candidate ||
+      refresh.source.digest !== pull.exactHeadValidation.digest ||
+      refresh.identity.sourceHeadSha !== pull.commitSha ||
+      refresh.identity.pullRequest !== pull.number ||
+      refresh.identity.branch !== pull.branch ||
+      refresh.identity.targetBaseSha !== candidate.targetBaseSha ||
+      refresh.outputTreeSha !== candidate.candidateOutputTreeSha
+    )
+      throw new Error("sibling refresh does not bind this original source and candidate");
+    if (!store.readTreeEntry || !store.readBlob)
+      throw new Error("sibling refresh requires immutable record read capability");
+    await verifyPlannedSiblingRefreshCommit(
+      {
+        readRef: (ref) => store.readRef(ref),
+        readCommit: (oid) => store.readCommit(oid),
+        readTreeEntry: (tree, path) => store.readTreeEntry!(tree, path),
+        readBlob: (oid) => store.readBlob!(oid),
+      },
+      refresh,
+    );
+  }
+  const deliveryHeadSha = refresh?.plannedHeadSha ?? options.mergeCandidateDeliveryHeadSha;
   if (deliveryHeadSha !== undefined) {
     if (!candidate) throw new Error("merge candidate delivery head requires candidate validation");
     gitSha.parse(deliveryHeadSha);
@@ -326,7 +360,7 @@ export async function integrationReadiness(
   const current = await store.readPullRequest(pull.number);
   if (current.headSha !== (deliveryHeadSha ?? pull.commitSha))
     return { state: "failed", reason: "pull request head changed after validation" };
-  if (deliveryHeadSha !== undefined && candidate) {
+  if (deliveryHeadSha !== undefined && candidate && !refresh) {
     const delivery = await store.readCommit(deliveryHeadSha);
     if (
       delivery.oid !== deliveryHeadSha ||

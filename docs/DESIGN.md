@@ -379,17 +379,35 @@ advances trunk, Factory first proves every intervening commit is an exact, authe
 from this same run. External or unexplained base changes escalate; clean applicability alone does
 not authorize executing changed code.
 
-For trusted-local siblings, Factory applies the original published patch to a fresh checkout of that
-proved target base, reruns the full validation plan, and persists an immutable merge-candidate
-checkpoint before requesting semantic review. A distinct review identity binds the original PR head,
-new base, combined tree, artifact, and validation evidence. The PR head, original reservation, and
-original exact-head validation remain unchanged. Candidate validation has its own local capacity and
+For siblings, Factory applies the original published patch to a private temporary Git index on that
+proved target base and uploads raw Git blobs and the exact proposed tree. Preparation performs no
+checkout and executes no repository hooks, filters, setup, tests, or model work. Before changing the
+owned Factory branch, it persists an immutable refresh intent binding the original reservation/publication/validation,
+exact PR identity, prior head, target base, proposed tree, and planned two-parent commit. Its parents
+are the prior owned head followed by the proved target base. The existing non-force atomic GitHub
+ref update compares the exact prior OID and advances only to that immutable planned OID. A lost
+response is resolved by exact read-back; a third head fails closed. An unapplied update may retry
+only that same atomic old/new pair after all current fences are independently revalidated. GitHub's
+commit timestamps mean the planned OID is immutable, not assumed reproducible. Unreferenced Git
+objects before an intent is durable are neither branch changes nor validation authority.
+Preparation has a 120-second total deadline and a 100-MiB per-blob bound. It does not fetch LFS
+assets or qualify other existing worktree lifecycle paths as hook-free.
+
+After the exact changed head is observed, Factory reruns the full validation plan in the required
+trusted-local or independently isolated boundary and persists its immutable merge-candidate
+checkpoint before requesting semantic review. A distinct identity binds the actual refreshed head,
+new base, combined tree, artifact, and validation evidence. The original reservation, worker artifact,
+publication receipt, and original exact-head validation remain unchanged: they are provenance, not
+assertions that the refreshed head has already passed. Candidate validation has its own capacity and
 native-usage identity; original attempt completion cannot discharge this new resource liability.
 An interrupted validator without an exact completion checkpoint requires resource reconciliation,
 not an automatic duplicate launch. A completed checkpoint is reused after restart, including its
-original evidence timestamps, and its paid review is accounted once.
+original evidence timestamps, and its paid review is accounted once. Completed validation and usage
+are preserved before rechecking mutable trunk. Another proved sibling integration creates a new
+linked refresh/validation/review identity; neither an old review nor an unexplained external advance
+authorizes the next head. Native linear-stack rebase proofs remain separate from sibling refreshes.
 
-Before merging, GitHub's current test-merge commit must name the exact target base and original PR
+Before merging, GitHub's current test-merge commit must name the exact target base and actual PR
 head, with the same combined tree Factory validated. Stale or absent test-merge metadata waits;
 different trees fail closed. The resulting squash commit must have exactly the target base as its
 single parent and the validated combined tree. Response-loss recovery requires the pre-merge

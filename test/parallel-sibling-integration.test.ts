@@ -12,19 +12,31 @@ import { GitHubControlStore } from "../src/control/github-store.js";
 import { CompiledGraphManager, type CompiledGraphStore } from "../src/control/graphs.js";
 import { LeaseManager, type GitCommitObject, type LeaseState } from "../src/control/lease.js";
 import { attemptRef } from "../src/control/attempts.js";
+import {
+  MergeCandidateCheckpointStore,
+  mergeCandidateIdentityDigest,
+} from "../src/control/merge-candidates.js";
+import { ReviewCheckpointManager, reviewIdentityDigest } from "../src/control/reviews.js";
+import { normalizeArtifact } from "../src/execution/artifacts.js";
 import { decodeEventComments, encodeEventTrailer } from "../src/control/receipts.js";
 import { DEFAULT_RUN_POLICY, parseRunPolicy, policyDigest } from "../src/protocol/policy.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
-import { renderWorkPacket, type CompiledObjective } from "../src/graph.js";
+import {
+  renderWorkPacket,
+  parseWorkerPacketFromIssue,
+  type CompiledObjective,
+} from "../src/graph.js";
 import { planDelivery } from "../src/publication/delivery.js";
 import { publicationBranch } from "../src/publication/publisher.js";
 import { bindValidationToPublishedHead } from "../src/validation/plan.js";
+import { createValidationEvidence } from "../src/validation/evidence.js";
 import { BackendRegistry } from "../src/execution/registry.js";
 import { CodexSdkLocalBackend } from "../src/backends/codex-sdk-local.js";
 import type { ManagementBackend } from "../src/management/backend.js";
 import type { ObjectiveSnapshot, LinkedPullRequest } from "../src/types.js";
 import { PlatformUnavailableError } from "../src/platform.js";
 import * as cleanValidation from "../src/validation/clean-run.js";
+const actualValidate = cleanValidation.validateArtifactClean;
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -51,6 +63,10 @@ async function fixture(
     onStatus?: (message: string) => void;
     thirdSibling?: boolean;
     afterMerge?: (number: number) => void;
+    afterRefresh?: (number: number) => void;
+    loseRefreshResponse?: boolean;
+    foreignRefreshHead?: boolean;
+    staleRefreshedHeadReads?: number;
   } = {},
 ) {
   const repository = await mkdtemp(join(tmpdir(), "factory-sibling-integration-"));
@@ -131,12 +147,32 @@ async function fixture(
     },
     readTreeEntry: async (id, path) => trees.get(id)?.get(path) ?? null,
     createBlob: async (bytes) => {
-      const id = createHash("sha1").update(bytes).digest("hex");
+      const id = execFileSync("git", ["hash-object", "-w", "--stdin"], {
+        cwd: repository,
+        input: bytes,
+        encoding: "utf8",
+      }).trim();
       blobs.set(id, bytes);
       return id;
     },
-    createTree: async ({ entries }) => {
-      const id = oid();
+    createTree: async ({ baseTreeOid, entries }) => {
+      const env = { ...process.env, GIT_INDEX_FILE: join(repository, ".git", "upload-index") };
+      execFileSync("git", ["read-tree", baseTreeOid ?? "--empty"], { cwd: repository, env });
+      execFileSync("git", ["update-index", "--index-info"], {
+        cwd: repository,
+        env,
+        input: entries
+          .map(
+            (entry) =>
+              `${entry.sha ? entry.mode : "0"} ${entry.sha ?? "0".repeat(40)}\t${entry.path}\n`,
+          )
+          .join(""),
+      });
+      const id = execFileSync("git", ["write-tree"], {
+        cwd: repository,
+        env,
+        encoding: "utf8",
+      }).trim();
       trees.set(
         id,
         new Map(entries.filter((entry) => entry.sha).map((entry) => [entry.path, entry.sha!])),
@@ -144,7 +180,11 @@ async function fixture(
       return id;
     },
     createCommit: async (args) => {
-      const id = oid();
+      const id = execFileSync(
+        "git",
+        ["commit-tree", args.treeOid, ...args.parentOids.flatMap((parent) => ["-p", parent])],
+        { cwd: repository, input: args.message, encoding: "utf8" },
+      ).trim();
       commits.set(id, { ...args, oid: id, serverTime: new Date() });
       return id;
     },
@@ -274,6 +314,7 @@ async function fixture(
   for (const [index, item] of graph.workItems.entries()) {
     const number = 8 + index;
     const head = heads[index]!;
+    refs.set(`refs/heads/${publicationBranch(7, number, 1)}`, head);
     const tree = (await readCommit(head)).treeOid;
     const validationDigest = createHash("sha256").update(item.id).digest("hex");
     const exact = bindValidationToPublishedHead({
@@ -344,6 +385,18 @@ async function fixture(
       copilotAssignments: [],
       factoryEvents: [
         reserved,
+        event({
+          kind: "capacity",
+          event: "CapacityReserved",
+          workItem: number,
+          attempt: 1,
+          phase: "validation",
+          backend: "codex-sdk/local-worktree",
+          requestedCpu: 1,
+          requestedMemoryMb: 512,
+          directorEpoch: 1,
+          policyDigest: pd,
+        }),
         event({
           kind: "validation",
           event: "ValidationRecorded",
@@ -464,6 +517,40 @@ async function fixture(
   const findPull = (number: number) =>
     snapshot.workItems.find((item) => item.linkedPullRequests[0]!.number === number)!
       .linkedPullRequests[0]!;
+  let refreshResponseLost = false;
+  const staleRefreshHeads = new Map<number, { head: string; remaining: number }>();
+  const refresh = vi
+    .spyOn(GitHubControlStore.prototype, "compareAndSwapRef")
+    .mockImplementation(async ({ ref, beforeOid, afterOid }) => {
+      const item = snapshot.workItems.find(
+        (entry) => `refs/heads/${publicationBranch(7, entry.number, 1)}` === ref,
+      )!;
+      if (!item) throw new Error("fixture refresh tried to update an unowned branch");
+      const current = refs.get(ref);
+      if (options.foreignRefreshHead) {
+        refs.set(ref, baseSha);
+        item.linkedPullRequests[0]!.headSha = baseSha;
+        return false;
+      }
+      if (current !== beforeOid) return false;
+      expect((await readCommit(afterOid)).parentOids[0]).toBe(beforeOid);
+      refs.set(ref, afterOid);
+      item.linkedPullRequests[0]!.headSha = afterOid;
+      if (options.staleRefreshedHeadReads)
+        staleRefreshHeads.set(item.linkedPullRequests[0]!.number, {
+          head: beforeOid,
+          remaining: options.staleRefreshedHeadReads,
+        });
+      options.afterRefresh?.(item.number);
+      if (options.loseRefreshResponse && !refreshResponseLost) {
+        refreshResponseLost = true;
+        throw new PlatformUnavailableError(
+          { kind: "server_error", retryAfterMs: 1 },
+          new Error("fixture refresh response lost"),
+        );
+      }
+      return true;
+    });
   const mergeShas = new Map<number, string>();
   let responseLost = false;
   vi.spyOn(GitHubControlStore.prototype, "findPullRequestForBranch").mockImplementation(
@@ -485,6 +572,8 @@ async function fixture(
     .spyOn(GitHubControlStore.prototype, "readPullRequest")
     .mockImplementation(async (number) => {
       const pull = findPull(number);
+      const lag = staleRefreshHeads.get(number);
+      const observedHead = lag && lag.remaining-- > 0 ? lag.head : pull.headSha;
       const currentBase = git("rev-parse", "main");
       const preview = createHash("sha1")
         .update(`preview:${currentBase}:${pull.headSha}`)
@@ -494,7 +583,7 @@ async function fixture(
           oid: preview,
           treeOid:
             options.wrongPreviewTree && number === 19
-              ? git("rev-parse", `${pull.headSha}^{tree}`)
+              ? git("rev-parse", `${heads[number - 18]}^{tree}`)
               : git("merge-tree", "--write-tree", currentBase, pull.headSha).split("\n")[0]!,
           parentOids: [currentBase, pull.headSha],
           message: "GitHub test merge",
@@ -523,7 +612,7 @@ async function fixture(
         merged: pull.state === "MERGED",
         mergeable: true,
         mergeableState: "clean",
-        headSha: pull.headSha,
+        headSha: observedHead,
         baseRef: "main",
         baseSha: previewState === "stale-base" ? baseSha : currentBase,
         mergeCommitSha: previewState === "absent" ? null : (mergeShas.get(number) ?? preview),
@@ -598,6 +687,7 @@ async function fixture(
     }).run();
   return {
     run,
+    refresh,
     snapshot,
     refs,
     blobs,
@@ -613,6 +703,9 @@ async function fixture(
     pullReads,
     renewLease,
     stalePreviewObserved: () => stalePreviewServed,
+    storage,
+    lease,
+    event,
   };
 }
 
@@ -628,7 +721,10 @@ describe("Supervisor parallel independent sibling integration", () => {
       .spyOn(localScopes, "runScopedLocalProcess")
       .mockImplementation(async (identity, options) => {
         const receipts = f.snapshot.workItems[1]!.factoryEvents!.filter(
-          (entry) => entry.kind === "capacity" && entry.event === "CapacityReserved",
+          (entry) =>
+            entry.kind === "capacity" &&
+            entry.event === "CapacityReserved" &&
+            entry.backend.startsWith("factory/integration-validation-"),
         );
         expect(receipts).toHaveLength(1);
         const receipt = receipts[0]!;
@@ -647,20 +743,49 @@ describe("Supervisor parallel independent sibling integration", () => {
     expect(scoped).toHaveBeenCalled();
     expect(
       f.snapshot.workItems[1]!.factoryEvents!.filter(
-        (entry) => entry.kind === "capacity" && entry.event === "CapacityReserved",
+        (entry) =>
+          entry.kind === "capacity" &&
+          entry.event === "CapacityReserved" &&
+          entry.backend.startsWith("factory/integration-validation-"),
       ),
     ).toHaveLength(1);
     expect(f.launch).not.toHaveBeenCalled();
   });
 
-  it("integrates A then validates unchanged B against the advanced trunk", async () => {
+  it("refreshes only B's delivery head, then fully validates and reviews it on A's exact merge", async () => {
     const f = await fixture();
     const result = await f.run();
     expect(result, result.reason).toMatchObject({ status: "completed", runId: "parallel" });
     expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18, 19]);
     expect(f.review).toHaveBeenCalledOnce();
     expect(f.review.mock.calls[0]![0].evidence.baseSha).toBe(f.mergeShas.get(18));
-    expect(f.snapshot.workItems[1]!.linkedPullRequests[0]!.headSha).toBe(f.heads[1]);
+    const refreshed = f.snapshot.workItems[1]!.linkedPullRequests[0]!.headSha;
+    expect(refreshed).not.toBe(f.heads[1]);
+    expect(f.git("show", "-s", "--format=%P", refreshed)).toBe(
+      `${f.heads[1]} ${f.mergeShas.get(18)}`,
+    );
+    expect(f.refresh).toHaveBeenCalledOnce();
+    expect(
+      f.snapshot.workItems[1]!.factoryEvents!.filter(
+        (event) => event.kind === "publication" && event.event === "PublicationRecorded",
+      ),
+    ).toEqual([expect.objectContaining({ headSha: f.heads[1], baseSha: f.baseSha })]);
+    const documents = [...f.blobs.values()].flatMap((bytes) => {
+      try {
+        return [JSON.parse(bytes.toString())];
+      } catch {
+        return [];
+      }
+    });
+    expect(
+      documents.find(
+        (record) => record.protocol === "clockgrove.factory/merge-candidate-checkpoint-v1",
+      )?.identity.deliveryHeadSha,
+    ).toBe(refreshed);
+    expect(
+      documents.find((record) => record.protocol === "clockgrove.factory/review-checkpoint-v1")
+        ?.identity.headSha,
+    ).toBe(refreshed);
     expect(f.git("show", `${f.mergeShas.get(19)}:a.txt`)).toBe("a");
     expect(f.git("show", `${f.mergeShas.get(19)}:b.txt`)).toBe("b");
     expect([...f.refs.keys()].filter((ref) => ref.includes("/merge-candidates/"))).toHaveLength(1);
@@ -674,6 +799,316 @@ describe("Supervisor parallel independent sibling integration", () => {
     expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
     expect(f.review).not.toHaveBeenCalled();
     expect(f.snapshot.workItems[1]!.closed).toBe(false);
+    expect(f.launch).not.toHaveBeenCalled();
+  });
+
+  it("accounts returned validation duration but rejects a divergent refreshed tree before review", async () => {
+    const f = await fixture();
+    let duration = -1;
+    f.validate.mockImplementationOnce(async (input) => {
+      const result = await actualValidate(input);
+      const { digest: _digest, ...evidence } = result.evidence;
+      duration = Date.parse(evidence.completedAt) - Date.parse(evidence.startedAt);
+      result.evidence = createValidationEvidence({
+        ...evidence,
+        outputTreeSha: f.git("rev-parse", `${f.heads[1]}^{tree}`),
+      });
+      return result;
+    });
+    const result = await f.run();
+    expect(result).toMatchObject({ status: "escalated" });
+    expect(result.reason).toContain("differs from the full newly validated tree");
+    expect(
+      f.snapshot.workItems[1]!.factoryEvents!.filter(
+        (event) =>
+          event.kind === "budget" &&
+          event.event === "BudgetReconciled" &&
+          event.unit === "validation_milliseconds",
+      ),
+    ).toEqual([expect.objectContaining({ amount: duration })]);
+    expect([...f.refs.keys()].filter((ref) => ref.includes("/merge-candidates/"))).toHaveLength(0);
+    expect(f.review).not.toHaveBeenCalled();
+    expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
+  });
+
+  it("accounts but rejects a contradictory accepted review with unmet criteria before merging", async () => {
+    const f = await fixture();
+    f.review.mockImplementationOnce(async (_context, checkpoint) => {
+      const result = {
+        review: {
+          accepted: true,
+          summary: "Contradictory review",
+          unmetCriteria: ["Unmet criterion"],
+          risks: [],
+        },
+        usage: { inputTokens: 10, outputTokens: 5 },
+      };
+      await checkpoint(result);
+      return result;
+    });
+    expect(await f.run()).toMatchObject({ status: "escalated" });
+    expect(f.review).toHaveBeenCalledOnce();
+    expect(
+      f.snapshot.workItems[1]!.factoryEvents!.filter(
+        (event) =>
+          event.kind === "budget" &&
+          event.event === "BudgetReconciled" &&
+          event.unit === "model_tokens" &&
+          event.usageId?.startsWith("integration-review-"),
+      ),
+    ).toEqual([expect.objectContaining({ amount: 15 })]);
+    expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
+  });
+
+  it("recovers an applied refresh with a lost CAS response without a second mutation or replacement worker", async () => {
+    const f = await fixture({ loseRefreshResponse: true });
+    await expect(f.run()).rejects.toThrow(PlatformUnavailableError);
+    const head = f.snapshot.workItems[1]!.linkedPullRequests[0]!.headSha;
+    expect(head).not.toBe(f.heads[1]);
+    expect(f.refresh).toHaveBeenCalledOnce();
+    expect(f.validate).not.toHaveBeenCalled();
+    expect(f.review).not.toHaveBeenCalled();
+    const result = await f.run();
+    expect(result, result.reason).toMatchObject({ status: "completed" });
+    expect(f.snapshot.workItems[1]!.linkedPullRequests[0]!.headSha).toBe(head);
+    expect(f.refresh).toHaveBeenCalledOnce();
+    expect(f.validate).toHaveBeenCalledOnce();
+    expect(f.review).toHaveBeenCalledOnce();
+    expect(f.launch).not.toHaveBeenCalled();
+  });
+
+  it("reuses one immutable plan after an unapplied CAS response loss, only with the same exact old/new CAS", async () => {
+    const f = await fixture();
+    const original = f.refresh.getMockImplementation()!;
+    f.refresh.mockImplementationOnce(async () => {
+      throw new PlatformUnavailableError(
+        { kind: "server_error", retryAfterMs: 1 },
+        new Error("CAS outcome unavailable"),
+      );
+    });
+    await expect(f.run()).rejects.toThrow(PlatformUnavailableError);
+    const first = f.refresh.mock.calls[0]![0];
+    expect([...f.refs.keys()].filter((ref) => ref.includes("/sibling-refreshes/"))).toHaveLength(1);
+    f.refresh.mockImplementation(original);
+    const result = await f.run();
+    expect(result, result.reason).toMatchObject({ status: "completed" });
+    expect(f.refresh.mock.calls[1]![0]).toEqual(first);
+    expect([...f.refs.keys()].filter((ref) => ref.includes("/sibling-refreshes/"))).toHaveLength(1);
+    expect(f.validate).toHaveBeenCalledOnce();
+    expect(f.review).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a third branch head without validating, reviewing, merging, or retrying the mutation", async () => {
+    const f = await fixture({ foreignRefreshHead: true });
+    const result = await f.run();
+    expect(result.status).toBe("escalated");
+    expect(f.refresh).toHaveBeenCalledOnce();
+    expect(f.validate).not.toHaveBeenCalled();
+    expect(f.review).not.toHaveBeenCalled();
+    expect(f.merge.mock.calls.map(([call]) => call.number)).toEqual([18]);
+  });
+
+  it("honors cancellation immediately after the exact refresh without admitting validation or review", async () => {
+    const controller = new AbortController();
+    const f = await fixture({ signal: controller.signal, afterRefresh: () => controller.abort() });
+    const result = await f.run();
+    expect(result.status).toBe("cancelled");
+    expect(f.refresh).toHaveBeenCalledOnce();
+    expect(f.validate).not.toHaveBeenCalled();
+    expect(f.review).not.toHaveBeenCalled();
+    expect(f.launch).not.toHaveBeenCalled();
+  });
+
+  it("paces old-head PR metadata after a proved applied CAS without mutating the branch again", async () => {
+    const statuses: string[] = [];
+    const f = await fixture({
+      staleRefreshedHeadReads: 1,
+      onStatus: (message) => statuses.push(message),
+    });
+    const result = await f.run();
+    expect(result, result.reason).toMatchObject({ status: "completed" });
+    expect(statuses.some((message) => message.includes("observe the exact refreshed head"))).toBe(
+      true,
+    );
+    expect(f.refresh).toHaveBeenCalledOnce();
+    expect(f.validate).toHaveBeenCalledOnce();
+    expect(f.review).toHaveBeenCalledOnce();
+    expect(f.merge).toHaveBeenCalledTimes(2);
+  });
+
+  it("replans after another sibling integration with a new changed-head validation and review identity", async () => {
+    let state: "stale-parents" | "fresh" = "stale-parents";
+    const f = await fixture({
+      thirdSibling: true,
+      previewState: () => state,
+      afterMerge: (number) => {
+        if (number === 20) state = "fresh";
+      },
+    });
+    const result = await f.run();
+    expect(result, result.reason).toMatchObject({ status: "completed" });
+    expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18, 20, 19]);
+    expect(f.refresh).toHaveBeenCalledTimes(3);
+    expect(f.validate).toHaveBeenCalledTimes(3);
+    expect(f.review).toHaveBeenCalledTimes(3);
+    const records = [...f.blobs.values()]
+      .flatMap((bytes) => {
+        try {
+          return [JSON.parse(bytes.toString())];
+        } catch {
+          return [];
+        }
+      })
+      .filter(
+        (record) =>
+          record.protocol === "clockgrove.factory/sibling-refresh-v1" &&
+          record.identity.workItem === 9,
+      );
+    expect(records).toHaveLength(2);
+    const latest = records.find((record) => record.previous)!;
+    expect(latest.expectedOldHeadSha).toBe(
+      records.find((record) => !record.previous)!.plannedHeadSha,
+    );
+    expect(latest.identity.targetBaseSha).toBe(f.mergeShas.get(20));
+    expect(f.launch).not.toHaveBeenCalled();
+  });
+
+  it("durably accounts completed validation before a concurrently observed, fully proved sibling advances trunk", async () => {
+    const f = await fixture({ thirdSibling: true });
+    let advanced = false;
+    f.validate.mockImplementation(async (input) => {
+      const completed = await actualValidate(input);
+      if (advanced) return completed;
+      advanced = true;
+      // C has an independently completed original-head candidate (the existing
+      // pre-refresh contract). Its real merge becomes observable while B validates.
+      const item = f.snapshot.workItems[2]!;
+      const sourceValidation = item.factoryEvents!.find((event) => event.kind === "validation")!;
+      if (sourceValidation.kind !== "validation") throw new Error("missing C validation");
+      const target = f.mergeShas.get(18)!;
+      const source = bindValidationToPublishedHead({
+        validation: {
+          passed: true,
+          digest: sourceValidation.evidenceDigest,
+          baseSha: f.baseSha,
+          outputTreeSha: sourceValidation.outputTreeSha,
+        },
+        publishedHeadSha: f.heads[2]!,
+        publishedTreeSha: sourceValidation.outputTreeSha,
+        publishedBaseSha: f.baseSha,
+      });
+      const artifact = normalizeArtifact({
+        baseSha: target,
+        outcome: "succeeded",
+        changedPaths: ["c.txt"],
+        patch: `${f.git("diff", "--binary", f.baseSha, f.heads[2]!)}\n`,
+      });
+      const packet = { ...parseWorkerPacketFromIssue(item.body!), baseSha: target };
+      const validation = await actualValidate({ repository: f.repository, artifact, packet });
+      const identity = {
+        runId: "parallel",
+        objective: 7,
+        workItem: 10,
+        attempt: 1,
+        pullRequest: 20,
+        sourceHeadSha: f.heads[2]!,
+        sourceExactHeadValidationDigest: source.digest,
+        targetBaseSha: target,
+      };
+      const leases = { assertCurrent: async () => {} } as unknown as LeaseManager;
+      const candidate = await new MergeCandidateCheckpointStore(f.storage, leases).persist({
+        lease: f.lease,
+        identity,
+        source,
+        validation: validation.evidence,
+      });
+      const reviewIdentity = {
+        kind: "integration-candidate" as const,
+        runId: "parallel",
+        objective: 7,
+        workItem: 10,
+        attempt: 1,
+        artifactDigest: candidate.validation.artifactDigest,
+        baseSha: target,
+        outputTreeSha: candidate.validation.outputTreeSha,
+        evidenceDigest: candidate.validation.digest,
+        headSha: f.heads[2]!,
+      };
+      await new ReviewCheckpointManager(f.storage, leases).persist({
+        lease: f.lease,
+        identity: reviewIdentity,
+        result: {
+          review: {
+            accepted: true,
+            summary: "C exact candidate accepted",
+            unmetCriteria: [],
+            risks: [],
+          },
+          usage: { inputTokens: 10, outputTokens: 5 },
+        },
+      });
+      await cleanValidation.discardValidationResult(validation);
+      item.factoryEvents!.push(
+        f.event({
+          kind: "budget",
+          event: "BudgetReconciled",
+          workItem: 10,
+          attempt: 1,
+          phase: "validation",
+          unit: "validation_milliseconds",
+          amount:
+            Date.parse(candidate.validation.completedAt) -
+            Date.parse(candidate.validation.startedAt),
+          usageId: `integration-validation-${mergeCandidateIdentityDigest(identity)}`,
+        }),
+        f.event({
+          kind: "budget",
+          event: "BudgetReconciled",
+          workItem: 10,
+          attempt: 1,
+          phase: "management",
+          unit: "model_tokens",
+          amount: 15,
+          usageId: `integration-review-${reviewIdentityDigest(reviewIdentity)}`,
+        }),
+      );
+      const sha = await f.merge({ number: 20, headSha: f.heads[2]!, commitTitle: "merge C" });
+      const reserved = item.factoryEvents!.find(
+        (event) => event.kind === "attempt" && event.event === "AttemptReserved",
+      )!;
+      item.factoryEvents!.push(
+        f.event({
+          ...reserved,
+          event: "AttemptIntegrated",
+          sequence:
+            Math.max(
+              ...f.snapshot.workItems.flatMap((work) =>
+                work.factoryEvents!.map((event) => event.sequence),
+              ),
+            ) + 1,
+          headSha: sha,
+        }),
+      );
+      item.closed = true;
+      return completed;
+    });
+    const result = await f.run();
+    expect(result, result.reason).toMatchObject({ status: "completed" });
+    expect(f.validate).toHaveBeenCalledTimes(2);
+    expect(f.review).toHaveBeenCalledOnce();
+    expect(f.refresh).toHaveBeenCalledTimes(2);
+    expect(
+      f.snapshot.workItems[2]!.factoryEvents!.filter(
+        (event) => event.event === "AttemptIntegrated",
+      ),
+    ).toHaveLength(1);
+    const events = f.snapshot.workItems[1]!.factoryEvents!;
+    expect(
+      events.filter((event) => event.kind === "capacity" && event.event === "CapacityReconciled"),
+    ).toHaveLength(2);
+    expect(
+      events.filter((event) => event.kind === "budget" && event.unit === "validation_milliseconds"),
+    ).toHaveLength(2);
     expect(f.launch).not.toHaveBeenCalled();
   });
 
@@ -786,7 +1221,9 @@ describe("Supervisor parallel independent sibling integration", () => {
       // Initial read, then 1m/3m/7m: not one full immutable-proof/API cycle per snapshot.
       const readsWhileWaiting = f.pullReads.mock.calls.length - readsBefore;
       expect(readsWhileWaiting).toBeGreaterThan(0);
-      expect(readsWhileWaiting).toBeLessThanOrEqual(24);
+      // Each due observation now additionally rebinds the immutable refresh to
+      // current PR/ref/base; pacing still bounds reads independently of loop ticks.
+      expect(readsWhileWaiting).toBeLessThanOrEqual(36);
       expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
       expect(f.validate).toHaveBeenCalledOnce();
       expect(f.review).toHaveBeenCalledOnce();
@@ -879,7 +1316,12 @@ describe("Supervisor parallel independent sibling integration", () => {
     expect(f.review).not.toHaveBeenCalled();
     const events = f.snapshot.workItems[1]!.factoryEvents!;
     expect(
-      events.filter((entry) => entry.kind === "capacity" && entry.event === "CapacityReserved"),
+      events.filter(
+        (entry) =>
+          entry.kind === "capacity" &&
+          entry.event === "CapacityReserved" &&
+          entry.backend.startsWith("factory/integration-validation-"),
+      ),
     ).toHaveLength(1);
     expect(
       events.filter((entry) => entry.kind === "capacity" && entry.event === "CapacityReconciled"),

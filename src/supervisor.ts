@@ -72,6 +72,7 @@ import {
 import { verifyRecoveryResources } from "./recovery/resources.js";
 import { recoveryReadPort } from "./recovery/github-read-port.js";
 import { observeRecoveryNativeTransition } from "./recovery/native-transition.js";
+import { observeRecoverySiblingRefresh } from "./recovery/sibling-refresh.js";
 import {
   createRecoverySourceIntegratedEvent,
   verifyRecoverySourceIntegration,
@@ -85,6 +86,13 @@ import {
   type MergeCandidateIdentity,
 } from "./control/merge-candidates.js";
 import { verifyMergeCandidateSquash } from "./publication/merge-candidate.js";
+import {
+  SiblingRefreshStore,
+  loadSiblingRefreshLineage,
+  verifyPlannedSiblingRefreshCommit,
+  type SiblingRefreshIdentity,
+  type SiblingRefreshRecord,
+} from "./control/sibling-refreshes.js";
 import {
   NativeRebaseCheckpointStore,
   nativeRebaseIdentityDigest,
@@ -157,6 +165,7 @@ import {
   verifySquashIntegration,
   type PublishedPullRequest,
 } from "./publication/publisher.js";
+import { prepareSiblingRefreshTree } from "./publication/sibling-refresh-tree.js";
 import {
   branchRuleBlockers,
   missingRequiredChecks,
@@ -329,6 +338,9 @@ interface DeliveryExecutionBase {
   branch: string;
   sha: string;
 }
+
+class SiblingRefreshTargetAdvancedError extends Error {}
+class SiblingRefreshObservationPendingError extends Error {}
 
 interface NativeStackMember {
   receipt: PublicationReceipt;
@@ -955,6 +967,7 @@ export class FactorySupervisor {
   readonly #attempts: AttemptManager;
   readonly #reviews: ReviewCheckpointManager;
   readonly #mergeCandidates: MergeCandidateCheckpointStore;
+  readonly #siblingRefreshes: SiblingRefreshStore;
   readonly #nativeRebases: NativeRebaseCheckpointStore;
   readonly #recorder: LifecycleRecorder;
   #management: ManagementBackend;
@@ -1060,6 +1073,7 @@ export class FactorySupervisor {
     });
     this.#reviews = new ReviewCheckpointManager(this.#store, this.#leases);
     this.#mergeCandidates = new MergeCandidateCheckpointStore(this.#store, this.#leases);
+    this.#siblingRefreshes = new SiblingRefreshStore(this.#store, this.#leases);
     this.#nativeRebases = new NativeRebaseCheckpointStore(this.#store, this.#leases);
     this.#recorder = new LifecycleRecorder(this.#store, this.#leases);
     this.#management =
@@ -1567,11 +1581,21 @@ export class FactorySupervisor {
             observations.set(linked.number, pull);
           }
           if (!pull.merged || pull.mergeCommitSha !== cursor) continue;
+          const publication = [...events]
+            .reverse()
+            .find(
+              (event) =>
+                event.kind === "publication" &&
+                event.event === "PublicationRecorded" &&
+                event.pullRequest === linked.number,
+            );
+          if (publication?.kind !== "publication") return false;
           const published = events.find(
             (event) =>
               event.kind === "attempt" &&
               event.event === "AttemptPublished" &&
-              event.headSha === pull.headSha &&
+              event.headSha === publication.headSha &&
+              event.attempt === publication.attempt &&
               event.policyDigest === run.policyDigest,
           );
           if (published?.kind !== "attempt" || !published.artifactDigest) return false;
@@ -1581,6 +1605,7 @@ export class FactorySupervisor {
               (event) =>
                 event.kind === "validation" &&
                 event.attempt === published.attempt &&
+                event.evidenceDigest === publication.validationDigest &&
                 event.passed &&
                 event.sequence < published.sequence &&
                 (event.policyDigest === undefined || event.policyDigest === run.policyDigest),
@@ -1617,7 +1642,13 @@ export class FactorySupervisor {
             pull.headRepository?.toLowerCase() !== run.repository?.toLowerCase()
           )
             return false;
-          const head = await this.#store.readCommit(pull.headSha);
+          const head = await this.#store.readCommit(publication.headSha);
+          if (
+            head.oid !== publication.headSha ||
+            head.parentOids.length !== 1 ||
+            head.parentOids[0] !== validation.baseSha
+          )
+            return false;
           const exactHeadValidation = bindValidationToPublishedHead({
             validation: {
               passed: true,
@@ -1625,7 +1656,7 @@ export class FactorySupervisor {
               baseSha: validation.baseSha,
               outputTreeSha: validation.outputTreeSha,
             },
-            publishedHeadSha: pull.headSha,
+            publishedHeadSha: publication.headSha,
             publishedTreeSha: head.treeOid,
             publishedBaseSha: validation.baseSha,
           });
@@ -1635,11 +1666,19 @@ export class FactorySupervisor {
           const publishedPull: PublishedPullRequest = {
             number: linked.number,
             branch: pull.headRef!,
-            commitSha: pull.headSha,
+            commitSha: publication.headSha,
             htmlUrl: `https://github.com/${run.repository}/pull/${linked.number}`,
             exactHeadValidation,
           };
+          const refresh = await this.#observedSiblingRefresh(
+            item,
+            { reservation, pull: publishedPull },
+            pull.headSha,
+            run,
+          );
+          if (refresh && refresh.identity.targetBaseSha !== parent) return false;
           if (parent === validation.baseSha) {
+            if (refresh) return false;
             await verifySquashIntegration(this.#store, publishedPull, cursor, parent);
           } else {
             const candidate = await this.#mergeCandidates.load({
@@ -1648,14 +1687,20 @@ export class FactorySupervisor {
               workItem: item.number,
               attempt: published.attempt,
               pullRequest: linked.number,
-              sourceHeadSha: pull.headSha,
+              sourceHeadSha: publication.headSha,
               sourceExactHeadValidationDigest: exactHeadValidation.digest,
               targetBaseSha: parent,
+              ...(refresh ? { deliveryHeadSha: refresh.plannedHeadSha } : {}),
             });
             const review = candidate
               ? await this.#reviews.load(this.#mergeCandidateReviewIdentity(candidate))
               : null;
-            if (!candidate || !review?.review.accepted || review.review.unmetCriteria.length)
+            if (
+              !candidate ||
+              !review?.review.accepted ||
+              review.review.unmetCriteria.length ||
+              (refresh && candidate.validation.outputTreeSha !== refresh.outputTreeSha)
+            )
               return false;
             await verifyMergeCandidateSquash(
               this.#store,
@@ -6115,6 +6160,7 @@ export class FactorySupervisor {
   #mergeCandidateIdentity(
     member: NativeStackMember,
     targetBaseSha: string,
+    deliveryHeadSha?: string,
   ): MergeCandidateIdentity {
     return {
       runId: this.#run.runId,
@@ -6125,6 +6171,7 @@ export class FactorySupervisor {
       sourceHeadSha: member.pull.commitSha,
       sourceExactHeadValidationDigest: member.pull.exactHeadValidation.digest,
       targetBaseSha,
+      ...(deliveryHeadSha ? { deliveryHeadSha } : {}),
     };
   }
 
@@ -6139,8 +6186,332 @@ export class FactorySupervisor {
       baseSha: record.validation.baseSha,
       outputTreeSha: record.validation.outputTreeSha,
       evidenceDigest: record.validation.digest,
-      headSha: record.identity.sourceHeadSha,
+      headSha: record.identity.deliveryHeadSha ?? record.identity.sourceHeadSha,
     };
+  }
+
+  async #siblingRefreshIdentity(
+    item: Pick<DerivedWorkItem, "number" | "factoryEvents">,
+    member: Pick<NativeStackMember, "reservation" | "pull">,
+    targetBaseSha: string,
+    run = this.#run,
+  ): Promise<SiblingRefreshIdentity> {
+    const publication = deduplicateFactoryEvents([
+      ...(this.#recoveryRuntime?.events ?? item.factoryEvents ?? []),
+    ]).filter(
+      (event) =>
+        event.kind === "publication" &&
+        event.event === "PublicationRecorded" &&
+        event.runId === member.reservation.runId &&
+        event.workItem === item.number &&
+        event.attempt === member.reservation.attempt &&
+        event.headSha === member.pull.commitSha &&
+        event.pullRequest === member.pull.number &&
+        event.validationDigest === member.pull.exactHeadValidation.validationDigest,
+    );
+    const restored = this.#recoveryRuntime?.sourcePublications.find(
+      (proof) =>
+        proof.publication.workItem === item.number &&
+        proof.publication.sourceRunId === member.reservation.runId &&
+        proof.publication.sourceAttempt === member.reservation.attempt &&
+        proof.publication.sourceHeadSha === member.pull.commitSha,
+    );
+    if (publication.length !== 1 && !(publication.length === 0 && restored))
+      throw new Error("sibling refresh lacks one authenticated original publication");
+    const pull = await this.#store.readPullRequest(member.pull.number);
+    if (
+      !pull.nodeId ||
+      pull.number !== member.pull.number ||
+      pull.headRef !== member.pull.branch ||
+      pull.baseRepository?.toLowerCase() !==
+        `${this.#options.owner}/${this.#options.repo}`.toLowerCase() ||
+      pull.headRepository?.toLowerCase() !==
+        `${this.#options.owner}/${this.#options.repo}`.toLowerCase()
+    )
+      throw new Error("sibling refresh repository or PR identity changed");
+    return {
+      repository: `${this.#options.owner}/${this.#options.repo}`,
+      runId: run.runId,
+      sourceRunId: member.reservation.runId,
+      objective: run.objective,
+      workItem: item.number,
+      attempt: member.reservation.attempt,
+      pullRequest: member.pull.number,
+      pullRequestNodeId: pull.nodeId,
+      branch: member.pull.branch,
+      reservationRef: member.reservation.ref,
+      reservationOid: member.reservation.oid,
+      leaseEpoch: member.reservation.directorEpoch,
+      policyDigest: member.reservation.policyDigest,
+      controllingPolicyDigest: run.policyDigest,
+      sourcePublicationDigest: recoveryEventDigest(publication[0] ?? restored!.publication),
+      sourceHeadSha: member.pull.commitSha,
+      sourceExactHeadValidationDigest: member.pull.exactHeadValidation.digest,
+      targetBaseSha,
+    };
+  }
+
+  async #observedSiblingRefresh(
+    item: Pick<DerivedWorkItem, "number" | "factoryEvents">,
+    member: Pick<NativeStackMember, "reservation" | "pull">,
+    headSha: string,
+    run = this.#run,
+  ): Promise<SiblingRefreshRecord | null> {
+    if (headSha === member.pull.commitSha) return null;
+    const runtime = this.#recoveryRuntime;
+    if (runtime && member.reservation.runId !== run.runId) {
+      const source = runtime.planRecord.plan.items.find(
+        (entry) => entry.workItem === item.number,
+      )?.source;
+      const restored = runtime.sourcePublications.find(
+        (proof) => proof.publication.workItem === item.number,
+      );
+      const publication =
+        source?.publication ??
+        (restored
+          ? recoverySourcePublicationBinding(
+              restored.publication,
+              runtime.planRecord.plan.repository,
+            )
+          : null);
+      if (!source || !publication)
+        throw new Error("refreshed adopted source publication is unavailable");
+      return (
+        await observeRecoverySiblingRefresh({
+          repository: runtime.planRecord.plan.repository,
+          objective: runtime.planRecord.plan.objective,
+          workItem: item.number,
+          source: { ...source, publication },
+          events: runtime.events,
+          controllingRunIds: [
+            ...runtime.planRecord.plan.history.map((entry) => entry.runId),
+            runtime.controllingRun.runId,
+          ],
+          store: this.#recoveryStore,
+          deliveryHeadSha: headSha,
+          requireCompletion: false,
+        })
+      ).record;
+    }
+    const head = await this.#store.readCommit(headSha);
+    if (head.oid !== headSha || head.parentOids.length !== 2)
+      throw new Error("changed sibling head has no exact two-parent refresh lineage");
+    const identity = await this.#siblingRefreshIdentity(item, member, head.parentOids[1]!, run);
+    const record = await this.#siblingRefreshes.load(identity);
+    if (!record || record.plannedHeadSha !== headSha)
+      throw new Error("changed sibling head is not this run's immutable planned refresh");
+    await loadSiblingRefreshLineage(this.#store, record);
+    await verifyPlannedSiblingRefreshCommit(this.#store, record);
+    return record;
+  }
+
+  async #siblingArtifact(
+    member: NativeStackMember,
+    targetBaseSha: string,
+  ): Promise<NormalizedArtifact> {
+    await ensureLocalCommit(this.#options.repository, member.pull.exactHeadValidation.baseSha);
+    await ensureLocalCommit(this.#options.repository, member.pull.commitSha);
+    await ensureLocalCommit(this.#options.repository, targetBaseSha);
+    const source = [member.pull.exactHeadValidation.baseSha, member.pull.commitSha];
+    const changedPaths = (
+      await hostGit(
+        this.#options.repository,
+        ["diff", "--name-only", "-z", ...source],
+        MAX_ARTIFACT_PATCH_BYTES + 1_024,
+        true,
+      )
+    )
+      .split("\0")
+      .filter(Boolean);
+    const patch = await hostGit(
+      this.#options.repository,
+      ["diff", "--binary", "--no-ext-diff", "--no-textconv", ...source],
+      MAX_ARTIFACT_PATCH_BYTES + 1_024,
+      true,
+    );
+    return normalizeArtifact({ baseSha: targetBaseSha, changedPaths, patch, outcome: "succeeded" });
+  }
+
+  async #assertSiblingRefreshCurrent(
+    member: Pick<NativeStackMember, "reservation" | "pull">,
+    record: SiblingRefreshRecord,
+    merged = false,
+  ): Promise<void> {
+    const pull = await this.#store.readPullRequest(member.pull.number);
+    if (
+      pull.number !== record.identity.pullRequest ||
+      pull.nodeId !== record.identity.pullRequestNodeId ||
+      pull.headRef !== record.identity.branch ||
+      pull.baseRef !== this.#baseBranch ||
+      pull.draft ||
+      (!merged && (pull.merged || pull.state !== "open")) ||
+      pull.headRepository?.toLowerCase() !== record.identity.repository.toLowerCase() ||
+      pull.baseRepository?.toLowerCase() !== record.identity.repository.toLowerCase()
+    )
+      throw new Error("sibling refresh current PR no longer matches its immutable intent");
+    if (pull.headSha !== record.plannedHeadSha) {
+      if (
+        !pull.merged &&
+        pull.headSha === record.expectedOldHeadSha &&
+        (await this.#store.readRef(`refs/heads/${record.identity.branch}`)) ===
+          record.plannedHeadSha
+      )
+        throw new SiblingRefreshObservationPendingError(
+          "waiting for GitHub PR metadata to observe the exact refreshed head",
+        );
+      throw new Error("sibling refresh current PR head differs from its immutable intent");
+    }
+    if (!pull.merged) {
+      if (
+        (await this.#store.readRef(`refs/heads/${record.identity.branch}`)) !==
+        record.plannedHeadSha
+      )
+        throw new Error("sibling refresh branch changed before validation");
+      await this.#assertRefreshTarget(record.identity.targetBaseSha, member.reservation.workItem);
+    }
+    await verifyPlannedSiblingRefreshCommit(this.#store, record);
+  }
+
+  async #assertRefreshTarget(targetBaseSha: string, workItem: number): Promise<void> {
+    const current = (await this.#store.getBranchHead(this.#baseBranch)).oid;
+    if (current === targetBaseSha) return;
+    await this.#assertOwnTrunkAdvance(targetBaseSha, current, workItem);
+    throw new SiblingRefreshTargetAdvancedError(
+      "another evidenced sibling advanced the refresh target",
+    );
+  }
+
+  /** A write-ahead two-parent commit is a proposed head, never a validation receipt. */
+  async #prepareSiblingRefresh(
+    item: DerivedWorkItem,
+    member: NativeStackMember,
+    targetBaseSha: string,
+    merged: boolean,
+  ): Promise<SiblingRefreshRecord> {
+    const { snapshot, requiresIsolation } = await this.#assertOwnTrunkAdvance(
+      member.pull.exactHeadValidation.baseSha,
+      targetBaseSha,
+      item.number,
+    );
+    const assertAdmission = () => {
+      this.#options.signal?.throwIfAborted();
+      if (
+        Date.now() >=
+        this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000
+      )
+        throw new Error("Objective timeout exhausted before sibling refresh");
+      if (hasCancellationRequest(snapshot, this.#run.runId))
+        throw new RunCancellationRequestedError("operator cancelled before sibling refresh");
+    };
+    assertAdmission();
+    const identity = await this.#siblingRefreshIdentity(item, member, targetBaseSha);
+    let record = await this.#siblingRefreshes.load(identity);
+    const observed = await this.#store.readPullRequest(member.pull.number);
+    const previous = await this.#observedSiblingRefresh(item, member, observed.headSha);
+    if (previous?.identity.targetBaseSha === targetBaseSha) {
+      if (record && previous.commitOid !== record.commitOid)
+        throw new Error("sibling refresh intent conflicts with observed head");
+      return previous;
+    }
+    if (merged) throw new Error("merged sibling lacks its pre-merge refresh intent");
+    if (!record) {
+      if (
+        (requiresIsolation ||
+          this.#packetFor(item.number).requirements.trust !== "trusted_local" ||
+          !this.#registry.get(member.reservation.backend)?.capabilities.hostExecution) &&
+        !this.#policy.allowedPaidBackends.includes("codex-cli/daytona")
+      )
+        throw new Error(
+          "sibling refresh requires explicitly authorized independent isolated validation",
+        );
+      this.#budgetEvents = deduplicateFactoryEvents([
+        ...this.#budgetEvents,
+        ...snapshotEvents(snapshot).filter((event) => event.runId === this.#run.runId),
+      ]);
+      const budget = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
+      if (budget.modelTokens !== null && budget.modelTokens <= 0)
+        throw new Error("model-token budget exhausted before sibling refresh");
+      const artifact = await this.#siblingArtifact(member, targetBaseSha);
+      const packet = parseWorkerPacket({ ...this.#packetFor(item.number), baseSha: targetBaseSha });
+      const outputTreeSha = await prepareSiblingRefreshTree({
+        repository: this.#options.repository,
+        artifact,
+        packet,
+        store: this.#store,
+        assertCurrent: () => this.#externalAdmission(async () => {}),
+      });
+      record = await this.#lease.use((lease) =>
+        this.#siblingRefreshes.persist({
+          lease,
+          identity,
+          source: member.pull.exactHeadValidation,
+          expectedOldHeadSha: observed.headSha,
+          outputTreeSha,
+          ...(previous
+            ? {
+                previous: {
+                  ref: previous.ref,
+                  commitOid: previous.commitOid,
+                  identityDigest: previous.identityDigest,
+                },
+              }
+            : {}),
+        }),
+      );
+    }
+    const pinned = record;
+    await this.#serializeIntegration(() =>
+      this.#externalAdmission(async () => {
+        assertAdmission();
+        const { snapshot } = await this.#assertOwnTrunkAdvance(
+          member.pull.exactHeadValidation.baseSha,
+          targetBaseSha,
+          item.number,
+        );
+        if (hasCancellationRequest(snapshot, this.#run.runId))
+          throw new RunCancellationRequestedError("operator cancelled before sibling refresh");
+        const current = await this.#store.readPullRequest(member.pull.number);
+        if (
+          current.nodeId !== identity.pullRequestNodeId ||
+          current.headRef !== identity.branch ||
+          current.baseRef !== this.#baseBranch ||
+          current.draft ||
+          current.merged ||
+          current.state !== "open" ||
+          current.headRepository?.toLowerCase() !== identity.repository.toLowerCase() ||
+          current.baseRepository?.toLowerCase() !== identity.repository.toLowerCase()
+        )
+          throw new Error("sibling refresh PR or target changed before branch CAS");
+        await this.#assertRefreshTarget(targetBaseSha, item.number);
+        const branchHead = await this.#store.readRef(`refs/heads/${identity.branch}`);
+        if (branchHead === pinned.plannedHeadSha && current.headSha === pinned.expectedOldHeadSha)
+          throw new SiblingRefreshObservationPendingError(
+            "waiting for GitHub PR metadata to observe the exact refreshed head",
+          );
+        if (
+          current.headSha !== branchHead ||
+          (branchHead !== pinned.expectedOldHeadSha && branchHead !== pinned.plannedHeadSha)
+        )
+          throw new Error("sibling refresh branch contains an unauthorized third head");
+        const rules = await this.#store.readBranchRules(this.#baseBranch);
+        if (branchRuleBlockers(rules).length)
+          throw new Error("branch policy blocks sibling refresh");
+        if (branchHead === pinned.expectedOldHeadSha) {
+          await this.#lease.use(async () => {
+            if (
+              !(await this.#store.compareAndSwapRef({
+                ref: `refs/heads/${identity.branch}`,
+                beforeOid: pinned.expectedOldHeadSha,
+                afterOid: pinned.plannedHeadSha,
+              }))
+            )
+              throw new Error("sibling refresh exact branch CAS lost ownership");
+          });
+        }
+        await this.#assertSiblingRefreshCurrent(member, pinned);
+      }),
+    );
+    return pinned;
   }
 
   /** External trunk changes never acquire execution authority from being cleanly applicable. */
@@ -6209,7 +6580,6 @@ export class FactorySupervisor {
       const commit = await this.#store.readCommit(cursor);
       if (
         !pull.merged ||
-        pull.headSha !== member.pull.commitSha ||
         pull.mergeCommitSha !== cursor ||
         pull.baseRef !== this.#baseBranch ||
         commit.oid !== cursor ||
@@ -6218,16 +6588,25 @@ export class FactorySupervisor {
         throw new Error("trunk advancement lacks an exact Factory squash integration");
       }
       const parent = commit.parentOids[0]!;
+      const refresh = await this.#observedSiblingRefresh(item, member, pull.headSha);
+      if (refresh && refresh.identity.targetBaseSha !== parent)
+        throw new Error("prior sibling refresh does not bind its actual squash parent");
       if (parent === member.pull.exactHeadValidation.baseSha) {
+        if (refresh) throw new Error("unexpected refresh on an unchanged source base");
         await verifySquashIntegration(this.#store, member.pull, cursor, parent);
       } else {
         const candidate = await this.#mergeCandidates.load(
-          this.#mergeCandidateIdentity(member, parent),
+          this.#mergeCandidateIdentity(member, parent, refresh?.plannedHeadSha),
         );
         const review = candidate
           ? await this.#reviews.load(this.#mergeCandidateReviewIdentity(candidate))
           : null;
-        if (!candidate || !review?.review.accepted) {
+        if (
+          !candidate ||
+          !review?.review.accepted ||
+          review.review.unmetCriteria.length ||
+          (refresh && candidate.validation.outputTreeSha !== refresh.outputTreeSha)
+        ) {
           throw new Error("prior sibling integration has no accepted candidate checkpoint");
         }
         await verifyMergeCandidateSquash(
@@ -6302,6 +6681,7 @@ export class FactorySupervisor {
     member: NativeStackMember,
     targetBaseSha: string,
     merged: boolean,
+    refresh?: SiblingRefreshRecord,
   ): Promise<MergeCandidateCheckpointRecord | null> {
     const assertDeadline = () => {
       if (
@@ -6348,7 +6728,7 @@ export class FactorySupervisor {
       ...this.#budgetEvents,
       ...snapshotEvents(snapshot).filter((event) => event.runId === this.#run.runId),
     ]);
-    const identity = this.#mergeCandidateIdentity(member, targetBaseSha);
+    const identity = this.#mergeCandidateIdentity(member, targetBaseSha, refresh?.plannedHeadSha);
     const identityDigest = mergeCandidateIdentityDigest(identity);
     const invocationOwnership = (artifactDigest: string) =>
       validationInvocationOwnership({
@@ -6530,6 +6910,7 @@ export class FactorySupervisor {
       let providerStarted: Date | undefined;
       let providerCompleted: Date | undefined;
       let capacityRecorded = false;
+      let validationLaunched = false;
       try {
         artifact = await reconstructArtifact();
         const scopedValidation = isolated
@@ -6598,8 +6979,10 @@ export class FactorySupervisor {
             ),
           );
         }
-        validation = await this.#externalAdmission(() =>
-          validateArtifactClean({
+        validation = await this.#externalAdmission(async () => {
+          if (refresh) await this.#assertSiblingRefreshCurrent(member, refresh);
+          validationLaunched = true;
+          return validateArtifactClean({
             repository: this.#options.repository,
             artifact: artifact!,
             packet,
@@ -6634,8 +7017,8 @@ export class FactorySupervisor {
                     }),
                 }
               : {}),
-          }),
-        );
+          });
+        });
         if (!validation.evidence.passed) {
           await this.#recordCandidateValidationUsage(
             validation.evidence,
@@ -6644,6 +7027,26 @@ export class FactorySupervisor {
             member.reservation,
           );
           throw new Error(validation.evidence.failureReason ?? "merge-candidate validation failed");
+        }
+        if (refresh) {
+          if (validation.evidence.outputTreeSha !== refresh.outputTreeSha) {
+            await this.#recordCandidateValidationUsage(
+              validation.evidence,
+              identityDigest,
+              item,
+              member.reservation,
+            );
+            if (isolated)
+              await this.#recordCandidateValidationUsage(
+                validation.evidence,
+                identityDigest,
+                item,
+                member.reservation,
+                "sandbox_milliseconds",
+                providerCompleted!.getTime() - providerStarted!.getTime(),
+              );
+            throw new Error("refreshed head differs from the full newly validated tree");
+          }
         }
         record = await this.#lease.use((lease) =>
           this.#mergeCandidates.persist({
@@ -6667,11 +7070,17 @@ export class FactorySupervisor {
       } finally {
         try {
           if (validation) await discardValidationResult(validation);
-          if (capacityRecorded && record) await reconcileCapacity(capacity.cpu, capacity.memoryMb);
+          if (capacityRecorded && (record || !validationLaunched))
+            await reconcileCapacity(capacity.cpu, capacity.memoryMb);
         } finally {
-          if (!capacityRecorded || record) this.#capacity.release(capacity.key);
+          if (!capacityRecorded || record || !validationLaunched)
+            this.#capacity.release(capacity.key);
         }
       }
+    }
+    if (refresh) {
+      if (record.validation.outputTreeSha !== refresh.outputTreeSha)
+        throw new Error("refreshed head checkpoint differs from its planned tree");
     }
     await this.#recordCandidateValidationUsage(
       record.validation,
@@ -6688,6 +7097,9 @@ export class FactorySupervisor {
         "sandbox_milliseconds",
         record.isolatedResource!.sandboxMilliseconds,
       );
+    // A completed exact validation is durable/accounted before observing mutable trunk.
+    // A later same-run merge creates a new target, not lost usage or a duplicate validator.
+    if (refresh) await this.#assertSiblingRefreshCurrent(member, refresh, merged);
     const reviewIdentity = this.#mergeCandidateReviewIdentity(record);
     const existingReview = await this.#reviews.load(reviewIdentity);
     const invocationId = `integration-review-${reviewIdentityDigest(reviewIdentity)}`;
@@ -6738,7 +7150,7 @@ export class FactorySupervisor {
       recordFailureUsage: (usage) =>
         this.#recordFailedManagementUsage(invocationId, usage, item.id, member.reservation),
       recordOutcome: async (review) => {
-        if (!review.review.accepted)
+        if (!review.review.accepted || review.review.unmetCriteria.length > 0)
           throw new Error(
             `integration-candidate semantic review rejected: ${review.review.summary}; ${review.review.unmetCriteria.join("; ")}`,
           );
@@ -7248,6 +7660,21 @@ export class FactorySupervisor {
   }
 
   async #resumeAdoptedSource(item: DerivedWorkItem): Promise<void> {
+    try {
+      await this.#resumeAdoptedSourceNow(item);
+    } catch (error) {
+      if (
+        error instanceof SiblingRefreshTargetAdvancedError ||
+        error instanceof SiblingRefreshObservationPendingError
+      ) {
+        this.#deferIntegration(item.number, error.message);
+        return;
+      }
+      throw error;
+    }
+  }
+
+  async #resumeAdoptedSourceNow(item: DerivedWorkItem): Promise<void> {
     let runtime = this.#recoveryRuntime!;
     const planItem = runtime.planRecord.plan.items.find((entry) => entry.workItem === item.number)!;
     const source = planItem.source!;
@@ -7376,8 +7803,62 @@ export class FactorySupervisor {
       !(await this.#linkRecoveryNativeUnit(item))
     )
       return;
+    const target = observed.merged
+      ? (await this.#store.readCommit(observed.mergeCommitSha!)).parentOids[0]!
+      : (await this.#store.getBranchHead(this.#baseBranch)).oid;
+    const unit = this.#deliveryPlan?.units.find((entry) =>
+      entry.items.includes(planItem.compilerId),
+    );
+    let siblingRefresh: SiblingRefreshRecord | undefined;
+    if (
+      publication.mode === "native-stacks" &&
+      unit?.kind === "sibling" &&
+      target !== exactHeadValidation.baseSha &&
+      (!observed.merged || observed.headSha !== pull.commitSha)
+    ) {
+      const member = await this.#nativeStackMember(item, true);
+      siblingRefresh = await this.#prepareSiblingRefresh(item, member, target, observed.merged);
+      if (
+        source.siblingRefresh &&
+        source.siblingRefresh.targetBaseSha === target &&
+        source.siblingRefresh.deliveryHeadSha === siblingRefresh.plannedHeadSha &&
+        (planItem.action === "reuse-publication" || planItem.action === "integrated")
+      ) {
+        const prior = await observeRecoverySiblingRefresh({
+          repository: runtime.planRecord.plan.repository,
+          objective: runtime.planRecord.plan.objective,
+          workItem: item.number,
+          source: { ...source, publication },
+          events: runtime.events,
+          controllingRunIds: [
+            ...runtime.planRecord.plan.history.map((entry) => entry.runId),
+            runtime.controllingRun.runId,
+          ],
+          store: this.#recoveryStore,
+          deliveryHeadSha: siblingRefresh.plannedHeadSha,
+          candidateRunId: source.siblingRefresh.candidateRunId,
+          requireCompletion: true,
+        });
+        if (!prior.candidate) throw new Error("accepted prior sibling candidate is unavailable");
+        await this.#integrate(
+          item,
+          reserved,
+          pull,
+          this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
+          true,
+          prior.candidate,
+          true,
+          undefined,
+          siblingRefresh,
+        );
+        return;
+      }
+    }
     let deliveryHeadSha: string | undefined;
-    if (observed.headSha !== pull.commitSha || observed.baseRef !== this.#baseBranch) {
+    if (
+      !siblingRefresh &&
+      (observed.headSha !== pull.commitSha || observed.baseRef !== this.#baseBranch)
+    ) {
       if (publication.mode !== "native-stacks")
         throw new Error("adopted ordinary source head/base changed");
       const transition = await observeRecoveryNativeTransition({
@@ -7397,9 +7878,6 @@ export class FactorySupervisor {
       throw new Error(
         "adopted publication changed; original source authority cannot be relabelled",
       );
-    const target = observed.merged
-      ? (await this.#store.readCommit(observed.mergeCommitSha!)).parentOids[0]!
-      : (await this.#store.getBranchHead(this.#baseBranch)).oid;
     let candidate: MergeCandidateCheckpointRecord | undefined;
     if (target !== exactHeadValidation.baseSha) {
       const identity: MergeCandidateIdentity = {
@@ -7411,6 +7889,7 @@ export class FactorySupervisor {
         sourceHeadSha: pull.commitSha,
         sourceExactHeadValidationDigest: exactHeadValidation.digest,
         targetBaseSha: target,
+        ...(siblingRefresh ? { deliveryHeadSha: siblingRefresh.plannedHeadSha } : {}),
       };
       const digest = mergeCandidateIdentityDigest(identity);
       const backendId = `factory/integration-validation-${digest}`;
@@ -7544,6 +8023,7 @@ export class FactorySupervisor {
           return;
         let validation: CleanValidationResult | undefined;
         let recorded = false;
+        let validationLaunched = false;
         try {
           artifact = await reconstruct();
           const scope = await this.#scopedValidation(
@@ -7561,14 +8041,20 @@ export class FactorySupervisor {
           if (!scope) throw new Error("adopted validation requires observable owned local scopes");
           await recordCapacity("CapacityReserved", capacity.cpu, capacity.memoryMb, scope.batch);
           recorded = true;
-          validation = await this.#externalAdmission(() =>
-            validateArtifactClean({
+          validation = await this.#externalAdmission(async () => {
+            if (siblingRefresh)
+              await this.#assertSiblingRefreshCurrent(
+                { reservation: reserved, pull },
+                siblingRefresh,
+              );
+            validationLaunched = true;
+            return validateArtifactClean({
               repository: this.#options.repository,
               artifact: artifact!,
               packet,
               localScope: scope.hooks,
-            }),
-          );
+            });
+          });
           if (!validation.evidence.passed) {
             await this.#sourceUsage(
               item,
@@ -7581,6 +8067,19 @@ export class FactorySupervisor {
               validation.evidence.failureReason ?? "adopted candidate validation failed",
             );
           }
+          if (
+            siblingRefresh &&
+            validation.evidence.outputTreeSha !== siblingRefresh.outputTreeSha
+          ) {
+            await this.#sourceUsage(
+              item,
+              `integration-validation-${digest}`,
+              Date.parse(validation.evidence.completedAt) -
+                Date.parse(validation.evidence.startedAt),
+              "validation_milliseconds",
+            );
+            throw new Error("adopted refreshed head differs from its newly validated tree");
+          }
           candidate = await this.#lease.use((lease) =>
             this.#mergeCandidates.persist({
               lease,
@@ -7592,10 +8091,10 @@ export class FactorySupervisor {
         } finally {
           try {
             if (validation) await discardValidationResult(validation);
-            if (recorded && candidate)
+            if (recorded && (candidate || !validationLaunched))
               await recordCapacity("CapacityReconciled", capacity.cpu, capacity.memoryMb);
           } finally {
-            if (!recorded || candidate) this.#capacity.release(capacity.key);
+            if (!recorded || candidate || !validationLaunched) this.#capacity.release(capacity.key);
           }
         }
       }
@@ -7605,6 +8104,15 @@ export class FactorySupervisor {
         Date.parse(candidate.validation.completedAt) - Date.parse(candidate.validation.startedAt),
         "validation_milliseconds",
       );
+      if (siblingRefresh) {
+        if (candidate.validation.outputTreeSha !== siblingRefresh.outputTreeSha)
+          throw new Error("adopted refresh checkpoint differs from its planned tree");
+        await this.#assertSiblingRefreshCurrent(
+          { reservation: reserved, pull },
+          siblingRefresh,
+          observed.merged,
+        );
+      }
       const reviewIdentity = this.#mergeCandidateReviewIdentity(candidate);
       const existing = await this.#reviews.load(reviewIdentity);
       if (!existing && observed.merged)
@@ -7661,7 +8169,7 @@ export class FactorySupervisor {
             "model_tokens",
           ),
         recordOutcome: async (review) => {
-          if (!review.review.accepted)
+          if (!review.review.accepted || review.review.unmetCriteria.length > 0)
             throw new Error("adopted candidate semantic review rejected");
         },
       });
@@ -7681,6 +8189,7 @@ export class FactorySupervisor {
       candidate,
       true,
       deliveryHeadSha,
+      siblingRefresh,
     );
   }
 
@@ -7707,7 +8216,13 @@ export class FactorySupervisor {
     candidate?: MergeCandidateCheckpointRecord,
     adoptedSource = false,
     deliveryHeadSha?: string,
+    siblingRefresh?: SiblingRefreshRecord,
   ): Promise<boolean> {
+    if (siblingRefresh) {
+      if (deliveryHeadSha || candidate?.identity.deliveryHeadSha !== siblingRefresh.plannedHeadSha)
+        throw new Error("sibling integration lacks its distinct changed-head validation identity");
+      deliveryHeadSha = siblingRefresh.plannedHeadSha;
+    }
     for (;;) {
       await this.#lease.renewIfNeeded();
       const readiness = await this.#serializeIntegration(async () => {
@@ -7732,7 +8247,11 @@ export class FactorySupervisor {
           {
             ciExpected: this.#ciExpectedOnPullRequests,
             ...(candidate ? { mergeCandidateValidation: candidate.evidence } : {}),
-            ...(deliveryHeadSha ? { mergeCandidateDeliveryHeadSha: deliveryHeadSha } : {}),
+            ...(siblingRefresh
+              ? { siblingRefresh }
+              : deliveryHeadSha
+                ? { mergeCandidateDeliveryHeadSha: deliveryHeadSha }
+                : {}),
           },
         );
         if (current.state !== "ready") return current;
@@ -7872,15 +8391,27 @@ export class FactorySupervisor {
           if (!item.closed) await this.#store.closeIssue(item.number);
           return true;
         }
-        if (!item.closed) await this.#store.closeIssue(item.number);
-        const alreadyRecorded = (item.factoryEvents ?? []).some(
+        // Candidate validation can span another completed sibling observation.
+        // Do not project a second integration from the earlier loop snapshot.
+        const latest = await this.#reader.readObjective(this.#run.objective);
+        this.#fenceSnapshot(latest);
+        this.#sequences.observe(snapshotEvents(latest));
+        const latestItem = latest.workItems.find((entry) => entry.number === item.number);
+        if (!latestItem)
+          throw new Error("integrated Work Item disappeared before outcome projection");
+        const recorded = (latestItem.factoryEvents ?? []).filter(
           (candidate) =>
             candidate.kind === "attempt" &&
             candidate.runId === reservation.runId &&
             candidate.attempt === reservation.attempt &&
             candidate.event === "AttemptIntegrated",
         );
-        if (!alreadyRecorded) {
+        if (
+          recorded.some((event) => event.kind !== "attempt" || event.headSha !== readiness.headSha)
+        )
+          throw new Error("existing integration receipt conflicts with the exact observed squash");
+        if (!latestItem.closed) await this.#store.closeIssue(item.number);
+        if (recorded.length === 0) {
           await this.#lease.use((lease) =>
             this.#attempts.record({
               lease,
@@ -7909,42 +8440,65 @@ export class FactorySupervisor {
   async #resumeIntegration(item: DerivedWorkItem): Promise<boolean> {
     if (!this.#integrationDue(item.number)) return false;
     if (this.#deliverySelection.selected === "native-stacks") {
-      const member = await this.#nativeStackMember(item);
-      const current = await this.#store.readPullRequest(member.pull.number);
-      if (
-        current.headSha !== member.pull.commitSha ||
-        current.baseRef !== this.#baseBranch ||
-        (current.state !== "open" && !current.merged)
-      ) {
-        throw new Error("sibling pull request identity or target changed after publication");
-      }
-      let targetBaseSha: string;
-      if (current.merged) {
-        if (!current.mergeCommitSha) throw new Error("merged sibling has no merge commit identity");
-        const merge = await this.#store.readCommit(current.mergeCommitSha);
-        if (merge.parentOids.length !== 1) throw new Error("merged sibling is not a squash commit");
-        targetBaseSha = merge.parentOids[0]!;
-      } else {
-        targetBaseSha = (await this.#store.getBranchHead(this.#baseBranch)).oid;
-      }
-      const candidate =
-        targetBaseSha === member.pull.exactHeadValidation.baseSha
-          ? undefined
-          : await this.#prepareSiblingMergeCandidate(item, member, targetBaseSha, current.merged);
-      if (candidate === null) {
-        return this.#deferIntegration(
-          item.number,
-          "waiting for merge-candidate validation capacity",
+      try {
+        const member = await this.#nativeStackMember(item);
+        const current = await this.#store.readPullRequest(member.pull.number);
+        if (current.baseRef !== this.#baseBranch || (current.state !== "open" && !current.merged)) {
+          throw new Error("sibling pull request identity or target changed after publication");
+        }
+        let targetBaseSha: string;
+        if (current.merged) {
+          if (!current.mergeCommitSha)
+            throw new Error("merged sibling has no merge commit identity");
+          const merge = await this.#store.readCommit(current.mergeCommitSha);
+          if (merge.parentOids.length !== 1)
+            throw new Error("merged sibling is not a squash commit");
+          targetBaseSha = merge.parentOids[0]!;
+        } else {
+          targetBaseSha = (await this.#store.getBranchHead(this.#baseBranch)).oid;
+        }
+        const refresh =
+          targetBaseSha === member.pull.exactHeadValidation.baseSha ||
+          (current.merged && current.headSha === member.pull.commitSha)
+            ? undefined
+            : await this.#prepareSiblingRefresh(item, member, targetBaseSha, current.merged);
+        if (!refresh && current.headSha !== member.pull.commitSha)
+          throw new Error("sibling head changed without an authorized refresh");
+        const candidate =
+          targetBaseSha === member.pull.exactHeadValidation.baseSha
+            ? undefined
+            : await this.#prepareSiblingMergeCandidate(
+                item,
+                member,
+                targetBaseSha,
+                current.merged,
+                refresh,
+              );
+        if (candidate === null) {
+          return this.#deferIntegration(
+            item.number,
+            "waiting for merge-candidate validation capacity",
+          );
+        }
+        return await this.#integrate(
+          item,
+          member.reservation,
+          member.pull,
+          this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
+          true,
+          candidate,
+          false,
+          undefined,
+          refresh,
         );
+      } catch (error) {
+        if (
+          error instanceof SiblingRefreshTargetAdvancedError ||
+          error instanceof SiblingRefreshObservationPendingError
+        )
+          return this.#deferIntegration(item.number, error.message);
+        throw error;
       }
-      return await this.#integrate(
-        item,
-        member.reservation,
-        member.pull,
-        this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
-        true,
-        candidate,
-      );
     }
     const event = [...(item.factoryEvents ?? [])]
       .sort((left, right) => right.sequence - left.sequence)

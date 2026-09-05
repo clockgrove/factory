@@ -114,7 +114,8 @@ export function discoverValidationCommands(factsInput: RepositoryFacts): string[
       .filter(
         (name) =>
           !VALIDATION_SCRIPT_NAMES.includes(name) &&
-          /^[A-Za-z0-9][A-Za-z0-9:_.-]{0,127}$/.test(name),
+          /^[A-Za-z0-9][A-Za-z0-9:_.-]{0,127}$/.test(name) &&
+          validationEntryPoint(name),
       )
       .sort(),
   ];
@@ -129,6 +130,13 @@ export function discoverValidationCommands(factsInput: RepositoryFacts): string[
     ...uniqueSorted(recipes),
     ...discoverOtherCommands(facts),
   ];
+}
+
+/** Observing a task name does not turn a deployment or persistent server into a check. */
+function validationEntryPoint(name: string): boolean {
+  return !/^(?:deploy|publish|release|install|uninstall|preinstall|postinstall|prepare|start|dev|serve|watch|clean|destroy|migrate|seed)(?:$|[:._-])/i.test(
+    name,
+  );
 }
 
 /** Exact observed commands only; documents cannot grant shell/eval/download authority. */
@@ -162,7 +170,8 @@ function discoverOtherCommands(facts: RepositoryFacts): string[] {
     for (const line of (documents[makefile] ?? "").split(/\r?\n/)) {
       // Literal target lists only: no pattern rules, expansions, includes, or recipes.
       const targets = /^([A-Za-z0-9][A-Za-z0-9_. -]*):(?!=)/.exec(line)?.[1];
-      for (const target of targets?.split(/ +/) ?? []) if (target) commands.push(`make ${target}`);
+      for (const target of targets?.split(/ +/) ?? [])
+        if (target && validationEntryPoint(target)) commands.push(`make ${target}`);
     }
   }
   for (const [path, text] of Object.entries(documents)) {

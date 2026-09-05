@@ -163,6 +163,30 @@ describe("generic repository command grounding", () => {
     };
     expect(discoverValidationCommands(observed)).toEqual(["make check-all", "make verify"]);
   });
+  it("does not offer deployment, installation, destructive, or persistent entry points as validation", () => {
+    const observed = {
+      files: [{ path: "Makefile" }],
+      scripts: {
+        "quality:ci": "checker",
+        "test:release": "release-contract-tests",
+        "release:publish": "publisher",
+        "deploy-production": "deployer",
+        dev: "development-server",
+        start: "server",
+        "watch:tests": "watcher",
+        install: "installer",
+        destroy: "destroyer",
+      },
+      documents: {
+        Makefile: "verify: input\nrelease: input\ninstall: input\nclean: input\nserve: input\n",
+      },
+    };
+    expect(discoverValidationCommands(observed)).toEqual([
+      "npm run quality:ci",
+      "npm run test:release",
+      "make verify",
+    ]);
+  });
   it("refuses symlinked and oversized facts without reading external content", async () => {
     const external = await repository({ secret: "external content" });
     const root = await repository({});

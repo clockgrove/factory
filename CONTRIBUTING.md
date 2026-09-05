@@ -130,6 +130,12 @@ than opening a separate PR or stack layer for each helper or Work Item. The batc
 the end-to-end acceptance criteria are met and the integrated result is ready for verification and
 review.
 
+Independent capabilities may advance concurrently in isolated worktrees, each with one owner and
+explicit acceptance criteria. Optimize delivery of the overall goal, not utilization alone: keep
+available agents on high-impact unblocked work within authorized budgets, and serialize only genuine
+dependencies or conflicting edits. One PR per capability is a delivery boundary, not a global
+one-capability-at-a-time limit.
+
 Run targeted checks while iterating. At the batch boundary, run the full required integration and
 release checks and rebuild/reinstall the updated plugin when the batch changes it. Do not pay this
 overhead after every intermediate commit. Repeat checks when relevant changes or failures invalidate

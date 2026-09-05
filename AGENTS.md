@@ -65,6 +65,11 @@ These are settled. Do not relitigate them.
   do not turn each into a separate PR or stack layer merely because it can be committed independently.
 - Use parallel subagents for bounded independent work and incremental commits inside the capability's
   integration branch. Keep file ownership explicit and integrate their work before the PR handoff.
+- Optimize time to the overall goal by running independent capabilities concurrently, not only
+  subtasks within one capability. Give each capability an owner, isolated worktree, and end-to-end
+  acceptance criteria. Keep available agents on the highest-impact unblocked work within authorized
+  budgets; serialize only genuine dependencies or conflicting changes. One PR per capability does
+  not mean one capability at a time.
 - Run targeted checks during development. Run the full required integration and release checks at
   the completed batch boundary, and rebuild/reinstall the updated plugin there when the batch changes
   it. Do not repeat full release verification or plugin reinstall after every helper change or commit.

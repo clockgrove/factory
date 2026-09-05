@@ -490,16 +490,28 @@ export async function verifyRecoverySourcePublication(
     if (event.mode === "native-stacks") {
       requireEvidence(artifact.planRecord.plan.acceptedPolicy.delivery?.mode === "stacked-prs");
       if (artifact.delivery.stack) {
-        requireEvidence(event.stackNumber && input.store.readStack);
-        const stack = await input.store.readStack(event.stackNumber);
-        const member = stack.pullRequests.find((value) => value.number === event.pullRequest);
-        requireEvidence(
-          member &&
-            member.number === event.pullRequest &&
-            member.headSha === pull.headSha &&
-            member.headRef === event.branch &&
-            member.baseRef === pull.baseRef,
-        );
+        if (event.stackNumber) {
+          requireEvidence(input.store.readStack);
+          const stack = await input.store.readStack(event.stackNumber);
+          const member = stack.pullRequests.find((value) => value.number === event.pullRequest);
+          requireEvidence(
+            member &&
+              member.number === event.pullRequest &&
+              member.headSha === pull.headSha &&
+              member.headRef === event.branch &&
+              member.baseRef === pull.baseRef,
+          );
+        } else {
+          // A singleton retained root is published before its fresh child exists.
+          // This proves a PR, not native membership or permission to merge it.
+          requireEvidence(
+            artifact.delivery.position === 0 &&
+              !artifact.delivery.parentItemId &&
+              !changed &&
+              event.baseBranch === artifact.planRecord.plan.baseBranch &&
+              (pull.merged || pull.baseSha === artifact.exactHeadValidation.baseSha),
+          );
+        }
       } else
         requireEvidence(
           !event.stackNumber && event.baseBranch === artifact.planRecord.plan.baseBranch,

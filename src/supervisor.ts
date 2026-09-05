@@ -64,6 +64,8 @@ import {
 } from "./recovery/source-publications.js";
 import {
   ensureRecoveryNativeSourceStack,
+  isNativePublicationStackLink,
+  verifiedNativeStackSuffix,
   type RecoveryNativeExistingMember,
 } from "./recovery/native-source-stacks.js";
 import { verifyRecoveryResources } from "./recovery/resources.js";
@@ -1262,13 +1264,30 @@ export class FactorySupervisor {
         const integrated = this.#recoveryRuntime!.sourceIntegrations.some(
           (proof) => proof.outcome.workItem === item.number,
         );
+        const parentId = this.#deliveryPlan?.items.find(
+          (entry) => entry.itemId === planned.compilerId,
+        )?.parentItemId;
+        const parentNumber = this.#recoveryRuntime!.planRecord.plan.items.find(
+          (entry) => entry.compilerId === parentId,
+        )?.workItem;
+        const nativeParentOnly =
+          this.#deliverySelection?.selected === "native-stacks" &&
+          parentNumber &&
+          item.blockedBy.every((blocker) => blocker.closed || blocker.number === parentNumber) &&
+          (planned.source.artifactHead ||
+            planned.source.publication ||
+            this.#recoveryRuntime!.sourcePublications.some(
+              (proof) => proof.publication.workItem === item.number,
+            ));
         return {
           ...item,
           attempts: count,
           state:
             integrated && item.closed
               ? ("done" as const)
-              : planned.action !== "integrated" && item.blockedBy.some((blocker) => !blocker.closed)
+              : planned.action !== "integrated" &&
+                  item.blockedBy.some((blocker) => !blocker.closed) &&
+                  !nativeParentOnly
                 ? ("blocked" as const)
                 : ("for_review" as const),
           doneWithoutMergedPullRequest: false,
@@ -2526,7 +2545,29 @@ export class FactorySupervisor {
             const planned = this.#recoveryRuntime!.planRecord.plan.items.find(
               (entry) => entry.workItem === item.number,
             );
-            return planned?.source && planned.action !== "execute" && item.state === "for_review";
+            if (!planned?.source || planned.action === "execute" || item.state !== "for_review")
+              return false;
+            if (planned.action === "integrated") return true;
+            const unit = this.#deliveryPlan?.units.find((entry) =>
+              entry.items.includes(planned.compilerId),
+            );
+            if (this.#deliverySelection.selected !== "native-stacks" || unit?.kind !== "stack")
+              return true;
+            const published =
+              planned.source.publication ||
+              this.#recoveryRuntime!.sourcePublications.some(
+                (proof) => proof.publication.workItem === item.number,
+              );
+            return (
+              !published ||
+              unit.items.every((id) =>
+                objective.items.some(
+                  (member) =>
+                    parseGraphItemMetadata(member.body ?? "").id === id &&
+                    ["for_review", "done"].includes(member.state),
+                ),
+              )
+            );
           });
         if (adoptedPublication) {
           await this.#resumeAdoptedSource(adoptedPublication);
@@ -2741,6 +2782,19 @@ export class FactorySupervisor {
                   ),
                 );
                 if (!waitsSatisfied) return false;
+                const sourcePublication = this.#recoveryRuntime?.sourcePublications.find(
+                  (proof) => proof.publication.workItem === parent.number,
+                );
+                const original = this.#recoveryRuntime?.planRecord.plan.items.find(
+                  (entry) => entry.workItem === parent.number && entry.action !== "execute",
+                )?.source?.publication;
+                if (sourcePublication || original) {
+                  deliveryBases.set(item.number, {
+                    branch: sourcePublication?.publication.branch ?? original!.branch,
+                    sha: sourcePublication?.publication.sourceHeadSha ?? original!.headSha,
+                  });
+                  return true;
+                }
                 const published = [...(parent.factoryEvents ?? [])]
                   .sort((left, right) => right.sequence - left.sequence)
                   .find(
@@ -2763,6 +2817,10 @@ export class FactorySupervisor {
         const commandedRetries = objective.items.filter((item) => retryEligible.has(item.number));
         const runnable = [...ready(objective), ...stackReady, ...commandedRetries].filter(
           (item, index, all) =>
+            (!this.#recoveryRuntime ||
+              this.#recoveryRuntime.planRecord.plan.items.some(
+                (planned) => planned.workItem === item.number && planned.action === "execute",
+              )) &&
             !activeExecutions.has(item.number) &&
             item.attempts < this.#policy.maxAttemptsPerItem &&
             all.findIndex((candidate) => candidate.number === item.number) === index,
@@ -3072,6 +3130,13 @@ export class FactorySupervisor {
     deliveryBase?: DeliveryExecutionBase,
     executionSignal?: AbortSignal,
   ): Promise<void> {
+    if (
+      this.#recoveryRuntime &&
+      !this.#recoveryRuntime.planRecord.plan.items.some(
+        (planned) => planned.workItem === item.number && planned.action === "execute",
+      )
+    )
+      throw new Error("successor execution is not authorized for a retained source");
     let reservation: AttemptReservation | undefined;
     let worker: LocalWorktree | undefined;
     let validation: CleanValidationResult | undefined;
@@ -4470,6 +4535,87 @@ export class FactorySupervisor {
     item: DerivedWorkItem,
     requireRecordedPublication = false,
   ): Promise<NativeStackMember> {
+    const runtime = this.#recoveryRuntime;
+    const planned = runtime?.planRecord.plan.items.find((entry) => entry.workItem === item.number);
+    if (runtime && planned?.source && planned.action !== "execute") {
+      const source = planned.source;
+      const restored = runtime.sourcePublications.find(
+        (proof) => proof.publication.workItem === item.number,
+      );
+      const publication =
+        source.publication ??
+        (restored
+          ? recoverySourcePublicationBinding(
+              restored.publication,
+              runtime.planRecord.plan.repository,
+            )
+          : null);
+      if (!publication || !source.validation)
+        throw new Error("native retained source is not published");
+      const commit = await this.#store.readCommit(publication.headSha);
+      if (commit.parentOids.length !== 1 || commit.parentOids[0] !== source.validation.baseSha)
+        throw new Error("native retained source ancestry changed");
+      const exactHeadValidation = bindValidationToPublishedHead({
+        validation: {
+          passed: true,
+          digest: source.validation.evidenceDigest,
+          baseSha: source.validation.baseSha,
+          outputTreeSha: source.validation.outputTreeSha,
+        },
+        publishedHeadSha: publication.headSha,
+        publishedTreeSha: commit.treeOid,
+        publishedBaseSha: source.validation.baseSha,
+      });
+      const reservation = (await this.#attempts.list(this.#run.objective, item.number)).find(
+        (entry) => entry.runId === source.runId && entry.attempt === source.attempt,
+      );
+      if (
+        !reservation ||
+        reservation.ref !== source.reservationRef ||
+        reservation.oid !== source.reservationCommitOid
+      )
+        throw new Error("native retained source reservation changed");
+      const observed = await this.#store.readPullRequest(publication.pullRequest);
+      const plan = this.#deliveryPlan?.items.find((entry) => entry.itemId === planned.compilerId);
+      if (
+        !plan ||
+        observed.nodeId !== publication.pullRequestNodeId ||
+        observed.headRef !== publication.branch
+      )
+        throw new Error("native retained source PR identity changed");
+      return {
+        reservation,
+        receipt: {
+          protocol: PUBLICATION_RECEIPT_PROTOCOL,
+          runId: source.runId,
+          unitId: plan.unitId,
+          itemId: planned.compilerId,
+          workItem: item.number,
+          attempt: source.attempt,
+          revision: 1,
+          mode: "native-stacks",
+          position: plan.position,
+          ...(plan.parentItemId ? { parentItemId: plan.parentItemId } : {}),
+          branch: publication.branch,
+          baseBranch: publication.baseBranch,
+          baseSha: publication.baseSha,
+          headSha: publication.headSha,
+          pullRequest: publication.pullRequest,
+          ...(publication.stackNumber ? { stackNumber: publication.stackNumber } : {}),
+          capabilityVersion: this.#deliverySelection.capabilityVersion,
+          exactHeadValidation,
+          state: "published",
+        },
+        pull: {
+          number: publication.pullRequest,
+          branch: publication.branch,
+          commitSha: publication.headSha,
+          htmlUrl: "",
+          exactHeadValidation,
+        },
+        observedHeadSha: observed.headSha,
+      };
+    }
     // A completed publication receipt is the commit point for a rebase. Validation and
     // AttemptPublished may have been written before a lost final publication response.
     // Replay the prior complete binding until that exact checkpoint transaction repairs it.
@@ -4643,6 +4789,14 @@ export class FactorySupervisor {
     });
     if (remaining.length === 0) return;
     const members = await Promise.all(ordered.map((item) => this.#nativeStackMember(item)));
+    if (
+      members.some(
+        (member) =>
+          member.reservation.runId !== this.#run.runId &&
+          remaining.some((item) => item.number === member.receipt.workItem),
+      )
+    )
+      throw new Error("retained native sources require successor-owned integration outcomes");
     const mergePolicy = this.#policy.delivery?.merge ?? "bottom-up";
     const target =
       mergePolicy === "atomic-stack"
@@ -4656,6 +4810,8 @@ export class FactorySupervisor {
 
     const completeIntegrated = async (integrated: readonly NativeStackMember[]): Promise<void> => {
       for (const member of integrated) {
+        if (member.reservation.runId !== this.#run.runId)
+          throw new Error("cannot rewrite retained native source attempt history");
         const current = await this.#store.readPullRequest(member.pull.number);
         if (!current.merged || !current.mergeCommitSha) {
           throw new Error(
@@ -4810,6 +4966,11 @@ export class FactorySupervisor {
     const mergedDuringRecovery: NativeStackMember[] = [];
     for (let index = 0; index < members.length; index += 1) {
       const member = members[index]!;
+      // A retained member keeps its ORIGINAL exact-head proof even when GitHub
+      // rebased it before the successor integrated it. The verified successor
+      // outcome, not relabelling that proof, accounts for its delivered head.
+      if (member.reservation.runId !== this.#run.runId && ordered[index]!.state === "done")
+        continue;
       const current = await this.#store.readPullRequest(member.pull.number);
       if (current.headSha !== member.pull.commitSha) {
         throw new Error(`stack Work Item ${member.receipt.itemId} changed after validation`);
@@ -4871,9 +5032,36 @@ export class FactorySupervisor {
       const member = members.find((candidate) => candidate.receipt.itemId === link.itemId)!;
       assertPublicationEventMatchesReceipt(link, member.receipt);
     }
-    const durableStackNumbers = new Set(
-      durableLinks.flatMap((event) => (event.stackNumber ? [event.stackNumber] : [])),
-    );
+    const durableStackNumbers = new Set([
+      ...durableLinks.flatMap((event) => (event.stackNumber ? [event.stackNumber] : [])),
+      ...members.flatMap((member) => {
+        const events =
+          ordered.find((item) => item.number === member.receipt.workItem)!.factoryEvents ?? [];
+        const original = events.filter(
+          (event) =>
+            event.kind === "publication" &&
+            event.event === "PublicationRecorded" &&
+            event.runId === member.reservation.runId &&
+            event.attempt === member.reservation.attempt &&
+            event.workItem === member.receipt.workItem &&
+            event.unitId === unitId,
+        );
+        const numbers = events.flatMap((event) =>
+          event.kind === "publication" &&
+          event.stackNumber &&
+          original.some(
+            (publication) =>
+              publication.kind === "publication" &&
+              isNativePublicationStackLink(publication, event),
+          )
+            ? [event.stackNumber]
+            : [],
+        );
+        if (member.reservation.runId !== this.#run.runId && member.receipt.stackNumber)
+          numbers.push(member.receipt.stackNumber);
+        return numbers;
+      }),
+    ]);
     if (durableStackNumbers.size > 1) {
       throw new Error("delivery unit has conflicting durable GitHub stack numbers");
     }
@@ -4889,13 +5077,17 @@ export class FactorySupervisor {
     const remainingPulls = members
       .filter((member) => remaining.some((item) => item.number === member.receipt.workItem))
       .map((member) => member.pull.number);
-    if (
-      JSON.stringify(observedPulls) !== JSON.stringify(fullPulls) &&
-      JSON.stringify(observedPulls) !== JSON.stringify(remainingPulls)
-    ) {
+    const suffix = verifiedNativeStackSuffix(
+      fullPulls,
+      fullPulls.filter((number) => !remainingPulls.includes(number)),
+      observedPulls,
+    );
+    const verifiedSuffix = suffix && JSON.stringify(observedPulls) === JSON.stringify(suffix);
+    if (JSON.stringify(observedPulls) !== JSON.stringify(fullPulls) && !verifiedSuffix) {
       throw new Error("GitHub stack topology differs from Factory's immutable delivery plan");
     }
     for (const member of members) {
+      if (member.reservation.runId !== this.#run.runId) continue;
       const durableLink = durableLinks.find(
         (event) => event.itemId === member.receipt.itemId && event.stackNumber === stack.number,
       );
@@ -6475,7 +6667,8 @@ export class FactorySupervisor {
     for (const compilerId of unit.items) {
       const item = runtime.planRecord.plan.items.find((entry) => entry.compilerId === compilerId)!;
       const source = item.source;
-      if (!source || item.action === "execute" || !source.validation)
+      if (item.action === "execute") continue;
+      if (!source || !source.validation)
         throw new Error(
           "native source restoration requires complete independently validated unit artifacts",
         );
@@ -6574,21 +6767,34 @@ export class FactorySupervisor {
         await this.#lease.assertGeneration("publication");
       },
     });
-    if (linked.status !== "observed") throw new Error("native source stack is incomplete");
+    if (
+      linked.status !== "observed" &&
+      (artifacts.length !== 1 ||
+        existingMembers.length !== 0 ||
+        artifacts[0]!.delivery.position !== 0)
+    )
+      throw new Error("native source stack is incomplete");
     const recorded: FactoryEvent[] = [];
     for (const artifact of artifacts) {
       if (
         runtime.sourcePublications.some((proof) => proof.publication.workItem === artifact.workItem)
       )
         continue;
-      const member = linked.members.find((entry) => entry.workItem === artifact.workItem)!;
+      const member =
+        linked.status === "observed"
+          ? linked.members.find((entry) => entry.workItem === artifact.workItem)!
+          : {
+              pullRequest: pullRequests[0]!.number,
+              pullRequestNodeId: pullRequests[0]!.nodeId,
+              baseBranch: this.#baseBranch,
+            };
       const publication = createRecoverySourcePublishedEvent({
         artifact,
         pullRequest: member.pullRequest,
         pullRequestNodeId: member.pullRequestNodeId,
         baseBranch: member.baseBranch,
         mode: "native-stacks",
-        stackNumber: linked.stack.number,
+        ...(linked.status === "observed" ? { stackNumber: linked.stack.number } : {}),
         sequence: this.#sequences.take(),
         at: (await this.#store.serverTime()).toISOString(),
       });
@@ -6609,6 +6815,227 @@ export class FactorySupervisor {
     }
   }
 
+  async #linkRecoveryNativeUnit(item: DerivedWorkItem): Promise<boolean> {
+    const id = parseGraphItemMetadata(item.body ?? "").id;
+    const unit = this.#deliveryPlan?.units.find((entry) => entry.items.includes(id));
+    if (unit?.kind !== "stack") return true;
+    const snapshot = await this.#reader.readObjective(this.#run.objective);
+    this.#fenceSnapshot(snapshot);
+    const objective = this.#deriveObjective(snapshot);
+    const ordered = unit.items.map(
+      (entry) =>
+        objective.items.find(
+          (candidate) => parseGraphItemMetadata(candidate.body ?? "").id === entry,
+        )!,
+    );
+    if (ordered.some((member) => !member || !["done", "for_review"].includes(member.state)))
+      return false;
+    const members = await Promise.all(ordered.map((member) => this.#nativeStackMember(member)));
+    const expected = members.map((member) => member.pull.number);
+    const recordedNumbers = new Set<number>();
+    for (const member of members) {
+      if (member.receipt.stackNumber) recordedNumbers.add(member.receipt.stackNumber);
+      for (const event of snapshotEvents(snapshot))
+        if (
+          event.kind === "publication" &&
+          event.event === "StackLinked" &&
+          (event.runId === this.#run.runId ||
+            (event.runId === member.reservation.runId &&
+              event.workItem === member.receipt.workItem &&
+              event.attempt === member.reservation.attempt)) &&
+          event.unitId === unit.id &&
+          event.stackNumber
+        )
+          recordedNumbers.add(event.stackNumber);
+    }
+    if (recordedNumbers.size > 1)
+      throw new Error("mixed native unit has conflicting stack identities");
+    // Once integration has begun, verify the remaining observed membership;
+    // never recreate a stack from rebased heads or infer it from an old link.
+    if (ordered.some((member) => member.state === "done")) {
+      const number = [...recordedNumbers][0];
+      if (!number)
+        throw new Error("partially integrated native unit has no durable stack identity");
+      let stack = await this.#stacks.get(number);
+      const remaining = members
+        .filter((_, index) => ordered[index]!.state !== "done")
+        .map((member) => member.pull.number);
+      let observed = stack.pullRequests.map((pull) => pull.number);
+      const complete = verifiedNativeStackSuffix(
+        expected,
+        expected.filter((number) => !remaining.includes(number)),
+        observed,
+      );
+      if (!complete) throw new Error("partially integrated native stack membership changed");
+      if (
+        observed.length > 0 &&
+        observed.length < complete.length &&
+        observed.every((pull, index) => pull === complete[index])
+      ) {
+        const additions = members.filter((member) =>
+          complete.slice(observed.length).includes(member.pull.number),
+        );
+        for (const member of additions) {
+          if (
+            member.reservation.runId !== this.#run.runId ||
+            snapshotEvents(snapshot).some(
+              (event) =>
+                event.kind === "publication" &&
+                event.event === "StackLinked" &&
+                event.runId === this.#run.runId &&
+                event.workItem === member.receipt.workItem,
+            )
+          )
+            throw new Error("partially integrated native stack membership changed");
+          const current = await this.#store.readPullRequest(member.pull.number);
+          const index = members.indexOf(member);
+          if (
+            current.merged ||
+            current.state !== "open" ||
+            current.draft ||
+            current.headSha !== member.pull.commitSha ||
+            current.headRef !== member.receipt.branch ||
+            current.baseSha !== member.receipt.baseSha ||
+            current.baseRef !== members[index - 1]?.receipt.branch ||
+            current.baseSha !== members[index - 1]?.observedHeadSha
+          )
+            throw new Error("fresh native extension differs from its validated parent");
+        }
+        await this.#serializeIntegration(async () => {
+          await this.#lease.assertGeneration("publication");
+          await this.#stacks.ensureExtended(
+            number,
+            observed,
+            additions.map((member) => member.pull.number),
+          );
+        });
+        stack = await this.#stacks.get(number);
+        observed = stack.pullRequests.map((pull) => pull.number);
+      }
+      if (
+        stack.number !== number ||
+        !stack.open ||
+        stack.baseRef !== this.#baseBranch ||
+        JSON.stringify(observed) !== JSON.stringify(complete)
+      )
+        throw new Error("partially integrated native stack membership changed");
+      for (const pull of stack.pullRequests) {
+        const index = members.findIndex((member) => member.pull.number === pull.number);
+        const current = await this.#store.readPullRequest(pull.number);
+        if (
+          current.headSha !== pull.headSha ||
+          current.headRef !== pull.headRef ||
+          current.headRef !== members[index]!.receipt.branch ||
+          (ordered[index]!.state !== "done" &&
+            current.baseRef !==
+              (index === 0 || ordered[index - 1]!.state === "done"
+                ? this.#baseBranch
+                : members[index - 1]!.receipt.branch))
+        )
+          throw new Error("partially integrated native stack head/base observation changed");
+      }
+      for (const member of members) {
+        if (member.reservation.runId !== this.#run.runId) continue;
+        const recorded = snapshotEvents(snapshot).find(
+          (event) =>
+            event.kind === "publication" &&
+            event.event === "StackLinked" &&
+            event.runId === this.#run.runId &&
+            event.workItem === member.receipt.workItem &&
+            event.headSha === member.receipt.headSha,
+        );
+        if (recorded) continue;
+        await this.#lease.use((lease) =>
+          this.#recorder.publication({
+            lease,
+            workItemNodeId: ordered.find((entry) => entry.number === member.receipt.workItem)!.id,
+            sequence: this.#sequences.take(),
+            receipt: { ...member.receipt, revision: 2, state: "stack-linked", stackNumber: number },
+            event: "StackLinked",
+          }),
+        );
+      }
+      await this.#lease.assertGeneration("integration");
+      return true;
+    }
+    const assertMembers = async () => {
+      await this.#externalAdmission(async () => {});
+      for (const [index, member] of members.entries()) {
+        const observed = await this.#store.readPullRequest(member.pull.number);
+        if (
+          observed.merged ||
+          observed.state !== "open" ||
+          observed.draft ||
+          observed.headSha !== member.pull.commitSha ||
+          observed.headRef !== member.receipt.branch ||
+          observed.baseRef !== (index ? members[index - 1]!.receipt.branch : this.#baseBranch) ||
+          observed.baseSha !== member.receipt.baseSha ||
+          (index > 0 && observed.baseSha !== members[index - 1]!.pull.commitSha)
+        )
+          throw new Error("mixed native unit head/base evidence changed");
+      }
+    };
+    await assertMembers();
+    const stack = await this.#serializeIntegration(async () => {
+      await this.#lease.assertGeneration("publication");
+      const stackNumber = [...recordedNumbers][0];
+      if (!stackNumber) return this.#stacks.ensureStack(expected);
+      const current = await this.#stacks.get(stackNumber);
+      const prefix = current.pullRequests.map((pull) => pull.number);
+      if (
+        !prefix.every((number, index) => number === expected[index]) ||
+        prefix.length > expected.length
+      )
+        throw new Error("mixed native unit has foreign stack members");
+      return prefix.length === expected.length
+        ? current
+        : this.#stacks.ensureExtended(stackNumber, prefix, expected.slice(prefix.length));
+    });
+    const observed = await this.#stacks.get(stack.number);
+    if (
+      !observed.open ||
+      observed.baseRef !== this.#baseBranch ||
+      JSON.stringify(observed.pullRequests.map((pull) => pull.number)) !==
+        JSON.stringify(expected) ||
+      observed.pullRequests.some(
+        (pull, index) =>
+          pull.headSha !== members[index]!.pull.commitSha ||
+          pull.headRef !== members[index]!.receipt.branch,
+      )
+    )
+      throw new Error("mixed native stack read-back differs from exact publication unit");
+    await assertMembers();
+    for (const member of members) {
+      if (member.reservation.runId !== this.#run.runId) continue;
+      const recorded = snapshotEvents(snapshot).find(
+        (event) =>
+          event.kind === "publication" &&
+          event.event === "StackLinked" &&
+          event.runId === this.#run.runId &&
+          event.workItem === member.receipt.workItem &&
+          event.headSha === member.receipt.headSha,
+      );
+      const linked: PublicationReceipt = {
+        ...member.receipt,
+        revision: 2,
+        state: "stack-linked",
+        stackNumber: observed.number,
+      };
+      if (recorded?.kind === "publication") assertPublicationEventMatchesReceipt(recorded, linked);
+      else
+        await this.#lease.use((lease) =>
+          this.#recorder.publication({
+            lease,
+            workItemNodeId: ordered.find((entry) => entry.number === member.receipt.workItem)!.id,
+            sequence: this.#sequences.take(),
+            receipt: linked,
+            event: "StackLinked",
+          }),
+        );
+    }
+    return true;
+  }
+
   async #resumeAdoptedSource(item: DerivedWorkItem): Promise<void> {
     let runtime = this.#recoveryRuntime!;
     const planItem = runtime.planRecord.plan.items.find((entry) => entry.workItem === item.number)!;
@@ -6622,6 +7049,7 @@ export class FactorySupervisor {
           ? runtime.planRecord.plan.items.find(
               (entry) =>
                 unit.items.includes(entry.compilerId) &&
+                entry.action !== "execute" &&
                 entry.source &&
                 !entry.source.publication &&
                 !runtime.sourcePublications.some(
@@ -6731,6 +7159,12 @@ export class FactorySupervisor {
       exactHeadValidation,
     };
     const observed = await this.#store.readPullRequest(pull.number);
+    if (
+      !observed.merged &&
+      this.#deliverySelection.selected === "native-stacks" &&
+      !(await this.#linkRecoveryNativeUnit(item))
+    )
+      return;
     let deliveryHeadSha: string | undefined;
     if (observed.headSha !== pull.commitSha || observed.baseRef !== this.#baseBranch) {
       if (publication.mode !== "native-stacks")
@@ -7052,6 +7486,9 @@ export class FactorySupervisor {
     for (;;) {
       await this.#lease.renewIfNeeded();
       const readiness = await this.#serializeIntegration(async () => {
+        const validatedBase =
+          candidate?.identity.targetBaseSha ??
+          (adoptedSource ? pull.exactHeadValidation.baseSha : reservation.baseSha);
         if (candidate) {
           const observed = await this.#store.readPullRequest(pull.number);
           if (!observed.merged && observed.baseSha !== candidate.identity.targetBaseSha) {
@@ -7064,7 +7501,7 @@ export class FactorySupervisor {
         const current = await integrationReadiness(
           this.#store,
           pull,
-          candidate?.identity.targetBaseSha ?? reservation.baseSha,
+          validatedBase,
           this.#baseBranch,
           {
             ciExpected: this.#ciExpectedOnPullRequests,
@@ -7112,7 +7549,6 @@ export class FactorySupervisor {
           }
         }
         const currentBase = await this.#store.getBranchHead(this.#baseBranch);
-        const validatedBase = candidate?.identity.targetBaseSha ?? reservation.baseSha;
         if (currentBase.oid !== validatedBase) {
           return {
             state: candidate ? ("wait" as const) : ("failed" as const),
@@ -7156,7 +7592,7 @@ export class FactorySupervisor {
               mergeSha,
             );
           } else {
-            await verifySquashIntegration(this.#store, pull, mergeSha, reservation.baseSha);
+            await verifySquashIntegration(this.#store, pull, mergeSha, validatedBase);
           }
         } catch (error) {
           return {

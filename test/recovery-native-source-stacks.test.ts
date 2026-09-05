@@ -11,6 +11,9 @@ import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
 import { GitHubStacks, type GitHubStackTransport } from "../src/publication/github-stacks.js";
 import {
   ensureRecoveryNativeSourceStack,
+  isNativePublicationStackLink,
+  nativePublicationStackNumber,
+  verifiedNativeStackSuffix,
   type RecoveryNativeSourceStackInput,
 } from "../src/recovery/native-source-stacks.js";
 import { recoveryClaimRef, recoveryEventDigest } from "../src/recovery/identity.js";
@@ -30,7 +33,7 @@ const digest = (value: string) => value.repeat(64);
 const repository = "fixture/native-recovery";
 const branch = (index: number) => `factory/objective-7/work-item-${index + 8}/attempt-1`;
 
-function fixture(originals = 0) {
+function fixture(originals = 0, retained = 3, failedSuffix = false) {
   const policy = {
     ...DEFAULT_RUN_POLICY,
     delivery: {
@@ -229,7 +232,25 @@ function fixture(originals = 0) {
       },
     },
     unknownUsageAcknowledgementDigest: null,
-    items,
+    items: items.map((item, index) =>
+      index < retained
+        ? item
+        : {
+            ...item,
+            action: "execute",
+            source: failedSuffix
+              ? {
+                  ...item.source!,
+                  artifactDigest: null,
+                  artifactHead: undefined,
+                  validation: null,
+                  review: null,
+                  publication: null,
+                }
+              : null,
+            observedPullRequest: null,
+          },
+    ),
   });
   const planDigest = recoveryPlanDigest(plan);
   const planRecord = {
@@ -350,11 +371,11 @@ function fixture(originals = 0) {
     },
   };
   const input: RecoveryNativeSourceStackInput = {
-    artifacts: allArtifacts.slice(originals),
+    artifacts: allArtifacts.slice(originals, retained),
     existingMembers: publications
       .slice(0, originals)
       .map((publication, index) => ({ publication, exactHeadValidation: exact[index]! })),
-    pullRequests: pulls.slice(originals).map((pull, index) => ({
+    pullRequests: pulls.slice(originals, retained).map((pull, index) => ({
       workItem: index + originals + 8,
       number: pull.number,
       nodeId: pull.nodeId,
@@ -397,6 +418,89 @@ function fixture(originals = 0) {
 }
 
 describe("recovery native source stack restoration", () => {
+  it("shares exact completed-prefix suffix proof across linkage and integration", () => {
+    expect(verifiedNativeStackSuffix([18, 19, 20, 21], [18, 19], [19, 20, 21])).toEqual([
+      19, 20, 21,
+    ]);
+    expect(verifiedNativeStackSuffix([18, 19, 20, 21], [18, 19], [19, 20])).toEqual([19, 20, 21]);
+    expect(verifiedNativeStackSuffix([18, 19, 20, 21], [18], [20, 21])).toBeNull();
+    expect(verifiedNativeStackSuffix([18, 19, 20, 21], [18, 19], [19, 21])).toBeNull();
+    expect(verifiedNativeStackSuffix([18, 19, 20, 21], [18, 19], [20, 19])).toBeNull();
+  });
+  it("resolves exact later linkage without changing the original publication identity", () => {
+    const publication = fixture(2).input.existingMembers[0]!.publication;
+    const before = recoveryEventDigest(publication);
+    const link = {
+      ...publication,
+      event: "StackLinked" as const,
+      sequence: publication.sequence + 1,
+      stackNumber: 90,
+    };
+    expect(nativePublicationStackNumber(publication, [link])).toBe(90);
+    expect(recoveryEventDigest(publication)).toBe(before);
+    expect(publication.stackNumber).toBeUndefined();
+    expect(() =>
+      nativePublicationStackNumber(publication, [link, { ...link, stackNumber: 91 }]),
+    ).toThrow(/conflicting/);
+  });
+  it.each([
+    "runId",
+    "attempt",
+    "headSha",
+    "baseSha",
+    "validationDigest",
+    "exactHeadValidationDigest",
+    "branch",
+    "position",
+    "sequence",
+  ] as const)(
+    "rejects unrelated later linkage with changed %s even if its stack number matches",
+    (field) => {
+      const original = fixture(2).input.existingMembers[0]!.publication;
+      const publication = { ...original, stackNumber: 90 };
+      const link = {
+        ...publication,
+        event: "StackLinked" as const,
+        sequence: publication.sequence + 1,
+      };
+      Object.assign(link, {
+        [field]:
+          field === "sequence"
+            ? publication.sequence
+            : typeof link[field] === "number"
+              ? Number(link[field]) + 1
+              : "f".repeat(64),
+      });
+      expect(isNativePublicationStackLink(publication, link)).toBe(false);
+      expect(nativePublicationStackNumber(original, [link])).toBeNull();
+    },
+  );
+  it("retains a singleton pending publication without pretending a stack exists", async () => {
+    const f = fixture(0, 1);
+    expect(await ensureRecoveryNativeSourceStack(f.input)).toEqual({
+      status: "pending",
+      reason: "native-stack-members-incomplete",
+    });
+    expect(f.writes).toEqual([]);
+  });
+  it("links the complete retained prefix before its fresh upper exists", async () => {
+    const f = fixture(0, 2);
+    expect(await ensureRecoveryNativeSourceStack(f.input)).toMatchObject({
+      status: "observed",
+      members: [{ workItem: 8 }, { workItem: 9 }],
+    });
+    expect(f.writes).toHaveLength(1);
+  });
+  it("retains a failed upper's source identity while linking its validated lower prefix", async () => {
+    const f = fixture(0, 2, true);
+    const before = structuredClone(f.input.artifacts[0]!.planRecord.plan.items[2]!.source);
+    expect(before?.runId).toBe("source");
+    expect(await ensureRecoveryNativeSourceStack(f.input)).toMatchObject({
+      status: "observed",
+      members: [{ workItem: 8 }, { workItem: 9 }],
+    });
+    expect(f.input.artifacts[0]!.planRecord.plan.items[2]!.source).toEqual(before);
+  });
   it("creates a real full stack and replays without another mutation", async () => {
     const f = fixture();
     const first = await ensureRecoveryNativeSourceStack(f.input);

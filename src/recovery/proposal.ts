@@ -21,6 +21,10 @@ import { recoveryClaimRef, recoveryEventDigest, recoverySourceEventsDigest } fro
 import { verifyRecoverySourceIntegration, verifyPriorRecoveryDelivery } from "./outcomes.js";
 import { recoverySourcePublicationBinding } from "./source-publications.js";
 import { loadHistoricalRecoveryRuntimes } from "./historical-runtime.js";
+import {
+  isNativePublicationStackLink,
+  nativePublicationStackNumber,
+} from "./native-source-stacks.js";
 import type { RecoveryRuntime } from "./runtime.js";
 import { verifyRecoveryProposalResources } from "./resources.js";
 import {
@@ -760,7 +764,10 @@ export async function buildRecoveryProposal(input: {
       stage = "publication";
       require(
         !sourceEvents.some(
-          (event) => event.kind === "publication" && event.sequence > publication.sequence,
+          (event) =>
+            event.kind === "publication" &&
+            event.sequence > publication.sequence &&
+            !isNativePublicationStackLink(publication, event),
         ),
       );
       const exact = bindValidationToPublishedHead({
@@ -872,21 +879,84 @@ export async function buildRecoveryProposal(input: {
             planned.parentItemId === publication.parentItemId,
         );
         if (unit.kind === "stack") {
-          require(publication.stackNumber && port.readStack);
-          const stack = await port.readStack(publication.stackNumber);
-          const member = stack.pullRequests[publication.position];
-          require(
-            stack.number === publication.stackNumber &&
-              stack.baseRef === snapshot.defaultBranch &&
-              (pull.merged || stack.open) &&
-              member?.number === pull.number &&
-              member.headSha === pull.headSha &&
-              member.headRef === pull.headRef &&
-              member.baseSha === pull.baseSha &&
-              member.baseRef === pull.baseRef,
-          );
-          if (publication.position > 0)
-            require(stack.pullRequests[publication.position - 1]?.headRef === pull.baseRef);
+          const stackNumber = nativePublicationStackNumber(publication, events);
+          if (!stackNumber) {
+            // A validated first layer may precede native linkage. This preserves
+            // publication evidence only; the Supervisor must link the complete
+            // unit before permitting its first merge.
+            require(
+              publication.position === 0 &&
+                !publication.parentItemId &&
+                !pull.merged &&
+                !item.closed &&
+                pull.state === "open" &&
+                pull.headSha === publication.headSha &&
+                pull.baseSha === publication.baseSha &&
+                pull.baseRef === snapshot.defaultBranch &&
+                observedHead.treeOid === validation.outputTreeSha,
+            );
+          } else {
+            require(stackNumber && port.readStack);
+            const stack = await port.readStack(stackNumber);
+            const member = stack.pullRequests.find((entry) => entry.number === pull.number);
+            const stackIds = stack.pullRequests.map((entry) => {
+              const work = snapshot.workItems.filter((work) =>
+                (work.linkedPullRequests ?? []).some((pr) => pr.number === entry.number),
+              );
+              require(work.length === 1);
+              const binding = projection.bindings.find(
+                (binding) => binding.issueNumber === work[0]!.number,
+              );
+              require(binding);
+              return binding.compilerId;
+            });
+            const start = unit.items.indexOf(stackIds[0]!);
+            require(
+              start >= 0 &&
+                stackIds.length > 0 &&
+                stackIds.every((id, index) => unit.items[start + index] === id) &&
+                unit.items.slice(0, start).every((id) => {
+                  const binding = projection.bindings.find((binding) => binding.compilerId === id);
+                  return snapshot.workItems.some(
+                    (work) =>
+                      work.number === binding?.issueNumber &&
+                      work.closed &&
+                      (work.linkedPullRequests ?? []).some((pr) => pr.state === "MERGED"),
+                  );
+                }),
+            );
+            require(
+              stack.number === stackNumber &&
+                stack.baseRef === snapshot.defaultBranch &&
+                (pull.merged || stack.open) &&
+                ((!member && pull.merged && item.closed && publication.position < start) ||
+                  (member?.number === pull.number &&
+                    member.headSha === pull.headSha &&
+                    member.headRef === pull.headRef &&
+                    member.baseSha === pull.baseSha &&
+                    member.baseRef === pull.baseRef)),
+            );
+            if (publication.position > 0) {
+              const parentId = unit.items[publication.position - 1]!;
+              const binding = projection.bindings.find(
+                (binding) => binding.compilerId === parentId,
+              );
+              const parent = snapshot.workItems.find(
+                (work) => work.number === binding?.issueNumber,
+              );
+              require(parent);
+              const parentPulls = (parent.linkedPullRequests ?? []).filter((pr) =>
+                parent.closed ? pr.state === "MERGED" : pr.state === "OPEN",
+              );
+              require(parentPulls.length === 1);
+              const parentPull = await port.readPullRequest(parentPulls[0]!.number);
+              require(
+                parentPull.merged === parent.closed &&
+                  pull.baseRef === (parent.closed ? snapshot.defaultBranch : parentPull.headRef) &&
+                  pull.baseSha === (parent.closed ? parentPull.mergeCommitSha : parentPull.headSha),
+              );
+            }
+          }
         } else
           require(
             publication.position === 0 &&

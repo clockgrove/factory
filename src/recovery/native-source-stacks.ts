@@ -56,6 +56,81 @@ function requireStack(value: unknown, reason: string): asserts value {
   if (!value) throw new Error(`Recovery native source stack: ${reason}`);
 }
 
+/** Resolve an observed prefix of the exact remaining native suffix. Omitted
+ * members must already have independently verified integration outcomes. The
+ * caller must demand the entire returned suffix before merging, or extend only
+ * freshly published, never-before-linked members and read back the full suffix. */
+export function verifiedNativeStackSuffix(
+  full: readonly number[],
+  integrated: readonly number[],
+  observed: readonly number[],
+): readonly number[] | null {
+  if (!full.length || full.length > 100 || new Set(full).size !== full.length || !observed.length)
+    return null;
+  const start = full.indexOf(observed[0]!);
+  if (start < 0 || !full.slice(0, start).every((number) => integrated.includes(number)))
+    return null;
+  const suffix = full.slice(start);
+  return observed.length <= suffix.length &&
+    observed.every((number, index) => suffix[index] === number)
+    ? suffix
+    : null;
+}
+
+/** Resolve linkage without relabelling the immutable publication receipt. Input
+ * events must come from the authenticated reader and acknowledged history. */
+export function isNativePublicationStackLink(
+  publication: Extract<FactoryEvent, { kind: "publication" }>,
+  event: FactoryEvent,
+): boolean {
+  const fields = [
+    "objective",
+    "runId",
+    "workItem",
+    "attempt",
+    "unitId",
+    "itemId",
+    "mode",
+    "position",
+    "parentItemId",
+    "branch",
+    "baseBranch",
+    "baseSha",
+    "headSha",
+    "pullRequest",
+    "validationDigest",
+    "exactHeadValidationDigest",
+    "capabilityVersion",
+  ] as const;
+  return (
+    publication.event === "PublicationRecorded" &&
+    publication.mode === "native-stacks" &&
+    event.kind === "publication" &&
+    event.event === "StackLinked" &&
+    event.sequence > publication.sequence &&
+    Boolean(event.stackNumber) &&
+    fields.every((field) => event[field] === publication[field])
+  );
+}
+
+export function nativePublicationStackNumber(
+  publication: Extract<FactoryEvent, { kind: "publication" }>,
+  events: readonly FactoryEvent[],
+): number | null {
+  requireStack(events.length <= 10_000, "stack linkage history bound");
+  const numbers = new Set<number>(publication.stackNumber ? [publication.stackNumber] : []);
+  for (const event of events) {
+    if (
+      event.kind === "publication" &&
+      event.stackNumber &&
+      isNativePublicationStackLink(publication, event)
+    )
+      numbers.add(event.stackNumber);
+  }
+  requireStack(numbers.size <= 1, "conflicting exact publication stack links");
+  return [...numbers][0] ?? null;
+}
+
 /** Link only proved source PRs. This never creates PRs, changes heads/bases, emits
  * receipts, or selects regular delivery. A result is evidence, not merge authority. */
 export async function ensureRecoveryNativeSourceStack(
@@ -196,8 +271,21 @@ export async function ensureRecoveryNativeSourceStack(
     verifyExactHeadValidation(member.exactHeadValidation, member.headSha);
   }
   members.sort((left, right) => left.delivery.position - right.delivery.position);
-  if (members.length !== unit.items.length)
+  // A retained prefix may precede never-executed successor work. Do not require
+  // that future work to exist before preserving the exact source publications.
+  // Missing retained members and holes are not a prefix and remain fail closed.
+  requireStack(
+    members.every((member, index) => member.delivery.itemId === unit.items[index]),
+    "native source batch is not a contiguous prefix",
+  );
+  if (
+    !unit.items.slice(members.length).every((id) => {
+      const item = plan.items.find((entry) => entry.compilerId === id);
+      return item?.action === "execute";
+    })
+  )
     return { status: "pending", reason: "native-stack-members-incomplete" };
+  if (members.length < 2) return { status: "pending", reason: "native-stack-members-incomplete" };
   requireStack(
     members.length >= 2 &&
       members.every((member, index) => member.delivery.itemId === unit.items[index]),

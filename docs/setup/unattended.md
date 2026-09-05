@@ -87,3 +87,43 @@ Verify [the environment that executes](configuration.md#7-verify-the-same-enviro
 not only a successful probe from chat. For Linux startup and recovery constraints, read
 [host scheduling](../HOST-SCHEDULING.md). On credential or binary changes, drain before restarting
 when an orderly stop is needed. Neither a new chat nor a shell export updates an existing service.
+
+## Continue after terminal escalation
+
+Restarting the controller resumes eligible non-terminal work; it does not revive an escalated or
+cancelled run. For an escalated Objective, ask the Director to inspect `factory_recovery_plan`,
+then propose a successor with `factory_recovery_propose`. The proposal is read-only and binds the
+existing graph, issues, source artifacts, historical usage, and continuation actions to a digest.
+
+When you authorize that continuation, the Director submits `factory_recovery_request` with the
+exact proposal digest and request ID. The controller discovers that request, independently proves
+resource absence and source evidence under its leases, and then adopts the successor. An accepted
+request is not proof that those execution gates have passed. A stopped or missing controller still
+needs explicit authorization to start or install on this host.
+
+The npm CLI equivalents are:
+
+```text
+factory recovery-propose OWNER/REPO#NUMBER --request-id UNIQUE_STABLE_ID
+factory recovery-request OWNER/REPO#NUMBER --request-id UNIQUE_STABLE_ID --plan-digest PROPOSED_DIGEST
+```
+
+With a plugin-only installation, use the installed CLI path described above. Substitute the
+proposal's exact digest, not a locally invented value. Retry an uncertain request response with
+the same ID, digest, and inputs. If the proposal changes, review and authorize the changed plan.
+
+The default allowance increment is zero: prior usage and attempts remain charged. Additional
+allowance requires explicit amounts, supplied identically to both commands with
+`--allowance-increment FILE`. That JSON file has four nonnegative integer fields: `modelTokens`,
+`sandboxMinutes`, `managedSessions`, and `implementationAttemptsPerItem`. It adds allowance; it
+does not change trust or backend policy. Unknown historical usage remains unknown and requires
+explicit acknowledgement of the returned `unknownUsageDigest` (not `planDigest`) via
+`--acknowledge-unknown-usage DIGEST` on both commands. Restored credentials or an account quota reset
+grant neither increment nor acknowledgement.
+
+Local recovery can require the existing owned service to exit and restart into a new launcher
+generation. Factory uses only its already configured restart policy; it does not reconfigure a
+service to pass recovery. The next process still checks the old generation and its command scopes.
+Legacy resources without sufficient ownership evidence remain blocked, rather than being killed
+by a guessed PID or ignored. Current live qualification gaps remain in
+[verification status](../CONFORMANCE.md).

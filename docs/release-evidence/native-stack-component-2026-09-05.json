@@ -1,0 +1,90 @@
+{
+  "component": "GitHub native stacked pull-request API lifecycle",
+  "date": "2026-09-05",
+  "result": "passed",
+  "qualification": "component-only",
+  "scope": "Completed opt-in source-level live API test against one private disposable repository, followed by independent read-only cleanup verification; not an installed Factory Supervisor run",
+  "source": {
+    "commit": "67da888e94848671b532a16a8718713afc4f8331",
+    "test": "test/github-stacks-live.test.ts",
+    "testSha256": "f7855b1341f73ba7ac5ffcb1ac1adbbfe79406ffac751a89d4b08242411aa489",
+    "responseLossHelper": "test/helpers/github-stack-response-loss.ts",
+    "responseLossHelperSha256": "27537cc10ee9e06e67df8dc9a4ce53c22c59e3a81f5a2356edfa66a024d454cc",
+    "completedLogSha256": "55bb6f227078306c5ed381a69caf01a143a3008c1142f9ecdd699cfa4a7bb705",
+    "reviewedFilesMatchCommit": true,
+    "githubApiVersion": "2026-03-10"
+  },
+  "completedRun": {
+    "testFilesPassed": 1,
+    "testsPassed": 1,
+    "suiteElapsedMs": 44740,
+    "testElapsedMs": 44440,
+    "modelCalls": 0,
+    "paidExecutionResources": 0,
+    "fixture": {
+      "disposableBaseBranches": 1,
+      "stackHeadBranches": 3,
+      "pullRequests": 3,
+      "targetedDefaultBranchForMerge": false
+    }
+  },
+  "verifiedBehaviors": {
+    "capabilityProbe": "observed available",
+    "create": {
+      "initialLayers": 2,
+      "successfulCreateMutations": 1,
+      "acknowledgedResponseLossRecovered": true
+    },
+    "extend": {
+      "additionalLayers": 1,
+      "successfulExtendMutations": 1,
+      "acknowledgedResponseLossRecovered": true
+    },
+    "replay": {
+      "freshAdapterInstances": true,
+      "additionalCreateOrExtendMutations": 0,
+      "orderedMembershipPreserved": true
+    },
+    "partialMergeAndRebase": {
+      "action": "direct_merge",
+      "lowerLayersMerged": 2,
+      "remainingLayerOpen": true,
+      "remainingLayerRetargetedToDisposableBase": true,
+      "remainingLayerHeadChanged": true,
+      "remainingLayerCompleteTreePreserved": true
+    },
+    "finalMerge": {
+      "action": "direct_merge",
+      "allThreePullRequestsMergedAndClosed": true
+    },
+    "cleanupAssertions": {
+      "stackTerminalOrAbsent": true,
+      "pullRequestsClosed": true,
+      "allFourDisposableRefsAbsent": true,
+      "cleanupErrorsFailTheTest": true
+    }
+  },
+  "independentReadOnlyVerification": {
+    "observedAt": "2026-09-05T05:10:10.610Z",
+    "mutationsPerformed": 0,
+    "repositoryPrivate": true,
+    "defaultBranchMain": true,
+    "defaultBranchUnchangedFromSuppliedBaseline": true,
+    "remainingDisposableBaseRefs": 0,
+    "remainingDisposableStackRefs": 0,
+    "runWindowPullDiscoveryComplete": true,
+    "runWindowFixtureGroups": 1,
+    "runWindowPullRequests": 3,
+    "runWindowClosedPullRequests": 3,
+    "runWindowMergedPullRequests": 3
+  },
+  "limitations": [
+    "Response loss was injected after real GitHub success responses; this is not evidence of a naturally occurring transport outage.",
+    "Replay used fresh API adapter instances, not a restarted installed Supervisor or repository controller.",
+    "Rebase content preservation was checked against the exact fixture tree; no independent validation or semantic-review model ran.",
+    "Only direct_merge was exercised. Merge-queue behavior and unsupported-capability fallback remain unqualified.",
+    "No installed end-to-end Objective, dual-lease integration, cascading Supervisor revalidation, required-check policy matrix, or cross-provider execution was qualified.",
+    "One repository observation does not establish general host, repository-policy, or provider support. Full installed native-stack release qualification remains open.",
+    "Private repository identifiers, URLs, pull-request identifiers, random fixture suffixes, default-branch commit identity, and raw logs are intentionally omitted."
+  ]
+}

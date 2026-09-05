@@ -33,7 +33,7 @@ const controllerLifecycle = new SystemdControllerLifecycle(
 const USAGE = [
   "usage:",
   "  factory run OWNER/REPO#NUMBER --until-terminal [--repo DIR] [--policy FILE]",
-  "  factory recover OWNER/REPO#NUMBER --until-terminal [--repo DIR] [--policy FILE]",
+  "  factory recover OWNER/REPO#NUMBER --until-terminal [--repo DIR] [--policy FILE]  (non-terminal restart only)",
   "  factory activate OWNER/REPO#NUMBER --request-id ID [--base-sha SHA] [--policy FILE]",
   "  factory controller run OWNER/REPO --repo DIR [--max-active-objectives N] [--max-local-workers N] [--max-paid-workers N]",
   "  factory controller install|start|stop|restart|status|uninstall OWNER/REPO --repo DIR",

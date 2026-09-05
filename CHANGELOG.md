@@ -7,11 +7,13 @@ Notable changes to Factory. See [the delivery plan](docs/DELIVERY-PLAN.md) for u
 ### Added
 
 - Immutable recovery-plan and predecessor-chain verification contracts, with authenticated request
-  bindings and explicit cumulative allowance increments. Execution remains gated on the unfinished
-  adoption and resource-reconciliation transaction.
+  bindings and explicit cumulative allowance increments. Read-only successor proposals and exact
+  plan approval are exposed through MCP and CLI, with controller-discovered, dual-lease adoption.
 - Read-only recovery assessment through chat/MCP and CLI, with graph/PR identity checks and
-  historical cumulative accounting. Successor execution and additional spending still require
-  a separate implemented authorization path.
+  historical cumulative accounting. Successor execution and additional spending require separate
+  explicit authority; ordinary activation, resume, and retry cannot revive terminal runs.
+- Linux execution/validation scope reservations bound to an owned launcher generation, with
+  independently observed cleanup and controlled service retirement under its existing restart policy.
 - GitHub-only control protocol with immutable compiled graphs, compare-and-swap leases,
   deterministic attempts, and restart reconstruction.
 - Repository controller and explicit Linux `systemd` lifecycle.
@@ -44,7 +46,7 @@ Notable changes to Factory. See [the delivery plan](docs/DELIVERY-PLAN.md) for u
   lease; same-run fenced takeover remains supported.
 - New activations reject predecessor execution that cannot yet be adopted safely, including
   reservation refs with missing comments and startup races. Existing PRs and accounting remain
-  untouched; explicit successor-run recovery is still an open implementation task.
+  untouched; installed successor qualification and complete delivery-lineage coverage remain open.
 - Rejected management output retains observed token usage, with checkpoint-first recovery and
   failed-invocation replay protection.
 

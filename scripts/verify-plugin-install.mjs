@@ -288,6 +288,8 @@ async function main() {
     "factory_explain",
     "factory_replay",
     "factory_recovery_plan",
+    "factory_recovery_propose",
+    "factory_recovery_request",
     "factory_controller_start",
   ]) {
     if (!toolNames.includes(required)) {

@@ -3045,8 +3045,11 @@ export class FactorySupervisor {
             error.message,
           ));
       if (unsafeCleanup) throw error;
-      if (error instanceof RunCancellationRequestedError) {
-        return await terminalAfterDrain("FactoryRunCancelled", error.message);
+      if (error instanceof RunCancellationRequestedError || this.#options.signal?.aborted) {
+        return await terminalAfterDrain(
+          "FactoryRunCancelled",
+          error instanceof RunCancellationRequestedError ? error.message : "operator cancelled run",
+        );
       }
       const reason = error instanceof Error ? error.message : String(error);
       return await terminalAfterDrain("FactoryRunEscalated", reason);

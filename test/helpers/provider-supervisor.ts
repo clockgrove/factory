@@ -51,6 +51,12 @@ export interface ProviderFaults {
   candidateReviewRejects?: boolean;
   sandboxUntrusted?: boolean;
   nativeStack?: boolean;
+  nativeRebaseConflict?: boolean;
+  nativeHeadChangeAfterValidation?: boolean;
+  nativeAfterParentMerge?: () => void;
+  nativeDuringRebaseValidation?: () => void;
+  nativeRebaseReviewRejects?: boolean;
+  nativeRebaseBudgetExhaustion?: boolean;
 }
 
 export async function providerSupervisorFixture(
@@ -507,14 +513,44 @@ export async function providerSupervisorFixture(
         for (const child of pulls.values()) {
           if (child.merged || child.baseRef !== value.branch) continue;
           const oldHead = child.pull.headSha;
-          const newHead = rawGit(
-            ["commit-tree", git("rev-parse", `${oldHead}^{tree}`), "-p", value.merged],
-            "simulated GitHub cascading rebase",
-          ).trim();
+          const newHead = faults.nativeRebaseConflict
+            ? oldHead
+            : rawGit(
+                ["commit-tree", git("rev-parse", `${oldHead}^{tree}`), "-p", value.merged],
+                "simulated GitHub cascading rebase",
+              ).trim();
           child.pull.headSha = newHead;
           child.baseRef = "main";
           child.base = value.merged;
           refs.set(`refs/heads/${child.branch}`, newHead);
+        }
+        if (number === 108) {
+          if (faults.nativeRebaseBudgetExhaustion) {
+            // Supply distinct, completed provider usage before the separately
+            // admitted rebase validator; never rewrite an existing receipt.
+            const usage = events().find(
+              (entry) =>
+                entry.kind === "budget" &&
+                entry.event === "BudgetReconciled" &&
+                entry.workItem === 9 &&
+                entry.unit === "sandbox_milliseconds",
+            );
+            if (!usage || usage.kind !== "budget") throw new Error("missing child sandbox usage");
+            const priorSequence = Math.max(...events().map((entry) => entry.sequence));
+            for (const [index, event] of ["BudgetReserved", "BudgetReconciled"].entries())
+              snapshot.workItems[1]!.factoryEvents!.push(
+                parseFactoryEvent({
+                  ...usage,
+                  event,
+                  usageId: "fixture-completed-prior-validation",
+                  phase: "validation",
+                  amount: policy.maxSandboxMinutes * 60_000,
+                  sequence: priorSequence + index + 1,
+                  at: new Date().toISOString(),
+                }),
+              );
+          }
+          faults.nativeAfterParentMerge?.();
         }
       }
       if (faults.externalAdvance) {
@@ -694,6 +730,7 @@ export async function providerSupervisorFixture(
                   : {}),
               });
               const candidate = Boolean(input.validationInvocation);
+              if (faults.nativeStack && candidate) faults.nativeDuringRebaseValidation?.();
               const failed =
                 faults.validationFailure || (candidate && faults.candidateValidationFailure);
               const name = `validator:${input.workItem}:${input.validationInvocation?.identityDigest ?? "initial"}`;
@@ -707,6 +744,15 @@ export async function providerSupervisorFixture(
                 },
               });
               try {
+                if (faults.nativeStack && candidate && faults.nativeHeadChangeAfterValidation) {
+                  const child = pulls.get(109)!;
+                  const changed = rawGit(
+                    ["commit-tree", result.evidence.outputTreeSha, "-p", input.packet.baseSha],
+                    "external head replacement during native validation",
+                  ).trim();
+                  child.pull.headSha = changed;
+                  refs.set(`refs/heads/${child.branch}`, changed);
+                }
                 return {
                   outputTreeSha: result.evidence.outputTreeSha,
                   commands: result.evidence.commands,
@@ -742,14 +788,18 @@ export async function providerSupervisorFixture(
     },
     review: async (context, checkpoint) => {
       const candidate = context.workItemNumber < 10 && context.packet.baseSha !== baseSha;
+      const nativeRebase =
+        faults.nativeStack && context.workItemNumber === 9 && Boolean(pulls.get(108)?.merged);
       activity.push({
-        operation: candidate ? "candidate-review" : "review",
+        operation: nativeRebase ? "rebase-review" : candidate ? "candidate-review" : "review",
         backend: "fixture-management",
         workItem: context.workItemNumber,
       });
       const result = {
         review: {
-          accepted: !(candidate && faults.candidateReviewRejects),
+          accepted:
+            !(candidate && faults.candidateReviewRejects) &&
+            !(nativeRebase && faults.nativeRebaseReviewRejects),
           summary: "Fixture semantic acceptance",
           unmetCriteria: [],
           risks: [],

@@ -331,89 +331,95 @@ function fakeProvider() {
 }
 
 describe("Daytona supported provider contract", () => {
-  it("isolates repeated merge-candidate validations and binds cleanup to exact ownership", async () => {
-    const source = await fixture();
-    const provider = fakeProvider();
-    const backend = new DaytonaBackend({
-      repository: source.repository,
-      createClient: () => provider.client,
-      credentialAvailable: () => true,
-    });
-    const artifact = normalizeArtifact({
-      baseSha: source.context.packet.baseSha,
-      patch: "",
-      changedPaths: [],
-      outcome: "declined",
-      reason: "candidate identity fixture",
-    });
-    for (const value of ["a", "b"]) {
-      await backend.validate({
-        ...source.context,
-        artifact,
-        validationInvocation: {
-          kind: "integration-candidate",
-          identityDigest: value.repeat(64),
-          artifactDigest: artifact.digest,
-          baseSha: artifact.baseSha,
-        },
+  it.each(["integration-candidate", "native-stack-rebase"] as const)(
+    "isolates repeated %s validations and binds cleanup to exact ownership",
+    async (kind) => {
+      const source = await fixture();
+      const provider = fakeProvider();
+      const backend = new DaytonaBackend({
+        repository: source.repository,
+        createClient: () => provider.client,
+        credentialAvailable: () => true,
       });
-    }
-    expect(provider.creates).toHaveLength(2);
-    expect(provider.creates[0]!.params.name).not.toBe(provider.creates[1]!.params.name);
-    expect(provider.creates[0]!.params.labels).toMatchObject({
-      invocationOwner: expect.stringMatching(/^[a-f0-9]{64}$/),
-    });
-    expect(provider.deleted).toEqual(["sandbox-1", "sandbox-2"]);
-    await expect(
-      backend.reconcileStale({
-        repository: source.context.repository,
-        objective: source.context.objective,
-        workItem: source.context.workItem,
-        attempt: source.context.attempt,
-        runId: source.context.runId,
-        directorEpoch: source.context.directorEpoch,
-        policyDigest: source.context.policyDigest,
-        phase: "validation",
-        validationInvocation: {
-          kind: "integration-candidate",
-          identityDigest: "a".repeat(64),
-          artifactDigest: artifact.digest,
-          baseSha: artifact.baseSha,
-        },
-      }),
-    ).rejects.toThrow(/ownership mismatch/);
-    expect(provider.deleted).toEqual(["sandbox-1", "sandbox-2"]);
-  });
-  it("rejects tampered candidate artifact binding before any create or lookup", async () => {
-    const source = await fixture();
-    const provider = fakeProvider();
-    const backend = new DaytonaBackend({
-      repository: source.repository,
-      createClient: () => provider.client,
-      credentialAvailable: () => true,
-    });
-    const artifact = normalizeArtifact({
-      baseSha: source.context.packet.baseSha,
-      patch: "",
-      changedPaths: [],
-      outcome: "declined",
-      reason: "candidate identity fixture",
-    });
-    await expect(
-      backend.validate({
-        ...source.context,
-        artifact,
-        validationInvocation: {
-          kind: "integration-candidate",
-          identityDigest: "a".repeat(64),
-          artifactDigest: "b".repeat(64),
-          baseSha: artifact.baseSha,
-        },
-      }),
-    ).rejects.toThrow(/exact artifact and base/);
-    expect(provider.creates).toEqual([]);
-    expect(provider.lookedUp).toEqual([]);
-  });
+      const artifact = normalizeArtifact({
+        baseSha: source.context.packet.baseSha,
+        patch: "",
+        changedPaths: [],
+        outcome: "declined",
+        reason: "candidate identity fixture",
+      });
+      for (const value of ["a", "b"]) {
+        await backend.validate({
+          ...source.context,
+          artifact,
+          validationInvocation: {
+            kind,
+            identityDigest: value.repeat(64),
+            artifactDigest: artifact.digest,
+            baseSha: artifact.baseSha,
+          },
+        });
+      }
+      expect(provider.creates).toHaveLength(2);
+      expect(provider.creates[0]!.params.name).not.toBe(provider.creates[1]!.params.name);
+      expect(provider.creates[0]!.params.labels).toMatchObject({
+        invocationOwner: expect.stringMatching(/^[a-f0-9]{64}$/),
+      });
+      expect(provider.deleted).toEqual(["sandbox-1", "sandbox-2"]);
+      await expect(
+        backend.reconcileStale({
+          repository: source.context.repository,
+          objective: source.context.objective,
+          workItem: source.context.workItem,
+          attempt: source.context.attempt,
+          runId: source.context.runId,
+          directorEpoch: source.context.directorEpoch,
+          policyDigest: source.context.policyDigest,
+          phase: "validation",
+          validationInvocation: {
+            kind,
+            identityDigest: "a".repeat(64),
+            artifactDigest: artifact.digest,
+            baseSha: artifact.baseSha,
+          },
+        }),
+      ).rejects.toThrow(/ownership mismatch/);
+      expect(provider.deleted).toEqual(["sandbox-1", "sandbox-2"]);
+    },
+  );
+  it.each(["integration-candidate", "native-stack-rebase"] as const)(
+    "rejects tampered %s artifact binding before any create or lookup",
+    async (kind) => {
+      const source = await fixture();
+      const provider = fakeProvider();
+      const backend = new DaytonaBackend({
+        repository: source.repository,
+        createClient: () => provider.client,
+        credentialAvailable: () => true,
+      });
+      const artifact = normalizeArtifact({
+        baseSha: source.context.packet.baseSha,
+        patch: "",
+        changedPaths: [],
+        outcome: "declined",
+        reason: "candidate identity fixture",
+      });
+      await expect(
+        backend.validate({
+          ...source.context,
+          artifact,
+          validationInvocation: {
+            kind,
+            identityDigest: "a".repeat(64),
+            artifactDigest: "b".repeat(64),
+            baseSha: artifact.baseSha,
+          },
+        }),
+      ).rejects.toThrow(/exact artifact and base/);
+      expect(provider.creates).toEqual([]);
+      expect(provider.lookedUp).toEqual([]);
+    },
+  );
   it("keeps a mismatching create response explicitly cleanup-unknown without deleting an unowned resource", async () => {
     const source = await fixture();
     const provider = fakeProvider();

@@ -10,7 +10,28 @@ checks still required before publication. Tasks are organized in the [delivery p
 
 ## Proven on this branch
 
-A later [explicit regular-delivery observation](release-evidence/regular-delivery-failure-2026-09-05.json)
+The [corrected explicit regular-delivery qualification](release-evidence/regular-delivery-component-2026-09-05.json)
+passed through the installed candidate `0c97438f05d721d6cde761b79ae05f5510659199`. Its SDK-first
+policy used actual SDK workers for all three first-attempt pipelines: two independent roots and a
+dependent join. Each next reservation/start followed the preceding integration on its new base.
+All three PRs were validated, reviewed, merged and closed, the Objective closed, and the join's
+integration matched the fresh default-branch clone. Thirty clone tests and independent behavior
+assertions passed. Seven model-call receipts account for 205,570 tokens; no active reservations
+remained and all nine exact recorded scopes were independently absent. This is a passed explicit
+serialized regular happy path, not native concurrency, automatic fallback or a broad fault/host gate.
+The separately selected CLI route remains pending; SDK-first policy alone does not prove fallback.
+
+The same candidate passed `npm run verify:release`: 122 files, 2,064 tests and three skips, all
+static/schema/bundle/staged-package checks and zero dependency vulnerabilities. The record binds
+its exact 74-file local tarball and installed executable identities. Fresh installed status, explain
+and replay observations reconstruct the completed run; status/replay summaries agree on three
+distinct publications and integrations. Corrected read-only reconstruction of the earlier failed
+regular run reports two distinct publications and one integration, with unchanged receipt digest
+and 131,699 tokens across five calls. Replay remains write-free and explicitly does not recompute
+the scheduler without pinned admission snapshots. Neither correction rewrites the earlier failure.
+All six prepublication gates remain Open; subsequent historical records retain their own scopes.
+
+The earlier [explicit regular-delivery observation](release-evidence/regular-delivery-failure-2026-09-05.json)
 failed despite passing the offline release batch at `657d746bb8a2708d03f55a898ee04e3da2e0d725`
 (121 files, 2,051 tests, three skips). The installed unchanged runtime ran two SDK workers, passed
 both independent validations, recorded two review calls, and merged one PR; the other PR was closed

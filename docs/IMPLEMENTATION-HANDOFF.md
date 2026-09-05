@@ -5,8 +5,11 @@ staged-package results are recorded in the conformance ledger below. A fresh ins
 exercise exposed premature admission while a prior publication still awaited integration. The
 current branch fixes that gate and prevents integration recovery from racing an active execution;
 four full-Supervisor regressions fail on the prior code and pass with the correction. Fresh installed
-qualification of the corrected candidate remains required. Implementation completion is not a claim
-that Objective, fault, host or provider gates passed.
+explicit regular qualification now passes at `0c97438f05d721d6cde761b79ae05f5510659199`: three
+first-attempt SDK pipelines integrate serially through the dependent join and Objective closure,
+with exact validation/commit bindings, 30 fresh-clone tests and independent behavior assertions.
+This does not pass native concurrency, automatic fallback, the broader parallel/fault criterion,
+host/provider matrices or publication gates. Explicit CLI qualification remains pending.
 [DESIGN.md](DESIGN.md) defines behavior; [CONFORMANCE.md](CONFORMANCE.md) remains the release-gate
 ledger. This document grants no execution, spending, installation, or publication authority.
 
@@ -17,9 +20,9 @@ ledger. This document grants no execution, spending, installation, or publicatio
 | Ordinary restart and receipt repair | Resume after authenticated same-run merges; reject external trunk changes; reconstruct reservation receipts without losing immutable resource identity. | Integrated; full offline batch passed |
 | Partial native-stack recovery | Retain validated lower work and execute unfinished upper work through exact-evidence publication and integration without duplicate work. | Integrated; mixed-artifact and historical-prefix regressions passed in the full offline batch |
 | Generic, economic compilation | Ground commands in observed repository toolchains, accept explicit exclusive-resource claims, and evaluate decomposition costs without fabricated prices or measurements. | Integrated; full offline batch passed |
-| Chat preflight and planning | Doctor performs useful mechanical diagnostics; explicit plan produces or inspects a proposed graph before activation; CLI and MCP share the same write-free inspection contract. | Integrated; offline and installed read-only doctor/existing-graph plan checks passed. Plan did not compile, verify a durable graph or authorize activation; complete installed Objective qualification remains open |
+| Chat preflight and planning | Doctor performs useful mechanical diagnostics; explicit plan produces or inspects a proposed graph before activation; CLI and MCP share the same write-free inspection contract. | Integrated; offline and installed read-only doctor/existing-graph plan checks passed. Plan did not compile, verify a durable graph or authorize activation. A separate explicit regular Objective passed; broader installed qualification remains open |
 | Managed providers | Prove assignable provider identities and owned session lifecycle observations for both managed targets; preserve explicit unsupported boundaries until evidenced. | Exact Copilot task/session reconciliation integrated and regression-tested; separate paid-run authorization, required credentials, live lifecycle/billing evidence and stable managed Codex identity remain gates |
-| Installed complete Objective | Qualify matching installed artifacts through parallel siblings, independent validation/review, integration, dependent join, final closure, and bounded recovery/cancellation cases. | Qualification open; no complete happy-path or fault pass claimed |
+| Installed complete Objective | Qualify matching installed artifacts through parallel siblings, independent validation/review, integration, dependent join, final closure, and bounded recovery/cancellation cases. | Explicit serialized regular happy path passed with actual SDK workers, three merged PRs, dependent join and closure. The original parallel/native and recovery/fault criterion remains open; CLI qualification is pending |
 | Release verification | Run the complete integrated suite and package checks; preserve exact-revision evidence and the independent host/provider/publication gates. | Passed at the recorded candidate; external gates remain open |
 
 These are completion gates, not a new architecture or permission to reduce scope. Regression tests
@@ -79,7 +82,7 @@ the selected escalation or lease-release outcome. These paths passed in the full
 | Portable installation and Linux host runner | Installed npm/plugin identity verification and reusable no-model host qualification runner. Fresh staged WSL2 checks passed against the recorded candidate's exact bundles; the complete host matrix remains open. |
 | Event schemas | Recovery source-publication/integration fields, source-capacity and scope-batch envelopes. Runtime still enforces cross-field identity, chronology and authenticated lineage. |
 | Successor recovery | Plan-bound requests, adoption, cumulative accounting, repeated-successor lineage, source-delivery restoration, failed-attempt eligibility and leased completed-merge reconciliation. Original source attempts and terminal history are not rewritten as successor authority. |
-| Distributable artifacts | CLI and MCP bundles, dependency inventory and notices match the recorded candidate. Reproducibility, clean staged npm/plugin installation and the exact 71-file local tarball passed verification. No registry publication or published-artifact install is claimed. |
+| Distributable artifacts | CLI and MCP bundles, dependency inventory and notices match the recorded candidate. Reproducibility, clean staged npm/plugin installation and the exact 74-file local tarball passed verification. No registry publication or published-artifact install is claimed. |
 
 ## Implementation closeout
 
@@ -90,15 +93,21 @@ the selected escalation or lease-release outcome. These paths passed in the full
   artifact/validation bindings, exact native membership, checkpoint/review reuse and resource
   ownership remain intact. Never fabricate stack receipts or turn unknown cleanup into absence.
 
-The [local lifecycle component record](release-evidence/local-lifecycle-component-2026-09-05.json)
-records `npm run verify:release`: 121 passing test files, 2,032 passing tests and three skips;
+The [regular-delivery component record](release-evidence/regular-delivery-component-2026-09-05.json)
+records `npm run verify:release`: 122 passing test files, 2,064 passing tests and three skips;
 typecheck, lint, formatting, schemas, deterministic bundles, clean plugin/npm installation and
-dependency audit all passed. It also binds the staged WSL2 no-model observations to the same
-executable digests and local tarball. The record is component evidence, not a passed live gate.
+dependency audit all passed. It binds the exact installed SDK regular-delivery success to its
+executable digests and local tarball. Earlier staged WSL2 no-model observations remain bound to
+their historical candidates. The record is component evidence, not a passed broad release gate.
 This documentation update was not part of that tested tarball; final publication must use its own
 exact tested subjects and artifact identity.
 Earlier completion and failed installed-run records remain unchanged and apply only to their own
 recorded candidates; the partial native run and undiscovered activation are not retroactive passes.
+Fresh installed status/replay summaries of the completed regular run agree on three distinct
+publications and integrations and 205,570 tokens across seven calls. Corrected reconstruction of
+the earlier failed regular run preserves its receipt digest, escalated outcome and 131,699 tokens
+across five calls while reporting two publications and one integration. Replay is write-free;
+without pinned admission snapshots it is receipt reconstruction, not scheduler recomputation.
 
 Interrupted isolated revalidation without a passing durable completion checkpoint remains blocked
 for resource reconciliation. It does not authorize another invocation or establish zero usage.

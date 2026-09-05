@@ -80,8 +80,9 @@ The explicit request path is connected to controller discovery and dual-lease ad
 path supplies the verified recovery identity to the Supervisor; ordinary activation or foreground
 run cannot silently adopt predecessor work. Offline Supervisor fixtures cover reuse of a published
 source, fresh combined-tree validation/review, integration response-loss replay, and subsequent
-dependent execution through Objective completion. Multi-member native-stack restoration,
-repeated-successor delivery lineage, and installed live qualification remain completion work.
+dependent execution through Objective completion. Multi-member native-stack restoration and
+repeated-successor delivery lineage are implemented; the combined runtime and installed-live
+qualification remain deferred to the testing phase in [the implementation handoff](IMPLEMENTATION-HANDOFF.md).
 Pending claims must be reconciled to an evidenced outcome; they must not be deleted or overwritten
 to try another plan.
 Validation and budget writers reject reservations from a different run, Objective, policy, or
@@ -95,6 +96,20 @@ the next process independently proves absence before adoption. A real no-model s
 probe covers retirement and prevention of a restart loop. Legacy unbound resources still fail
 closed, and neither local scope evidence nor an accepted request proves paid-provider cleanup.
 
+Repeated successors retain the original attempt and publication identities. Historical adopted
+runs are independently checked at their next accepted plan's exact cutoff; complete current
+accounting and resource observations still include later liabilities. Failed local attempts use
+verified remaining cumulative allowance, including unused original allowance, without an automatic
+increment. A read-only proposal can describe pending resource reconciliation; adoption must still
+prove absence before replacement execution.
+
+Native source delivery preserves original exact-head validation while binding any observed
+tree-preserving upper-layer rewrite to its actual lower integration and fresh candidate acceptance.
+If a lower merge succeeds before its outcome receipt is recorded, startup first inspects that
+actual merge read-only. Only the leased reconciliation stage may append its real outcome. It
+re-reads between layers and must pass full runtime verification before any worker, review or merge;
+it does not synthesize history, close issues, or treat merge observation as execution authority.
+
 ## Outcome and observed gap
 
 An operator can resolve an escalation and explicitly continue the same Objective, retaining its
@@ -102,11 +117,10 @@ Work Items, valid artifacts, PRs, and complete accounting. Factory then runs una
 or the next evidenced boundary. Restarting must not recompile completed work, duplicate a PR,
 reinterpret an old validation receipt, or silently replenish a budget.
 
-Installed conformance runs reached independently validated PRs but escalated before Objective
-completion. Those installed builds cannot adopt the existing execution evidence. Resume and retry
-correctly reject terminal runs; ordinary activation is not evidence-preserving continuation of
-executed work. The successor implementation above still needs installed qualification, including
-honest treatment of those runs' legacy resource-ownership gaps.
+Installed qualification is still required. Ordinary resume and retry reject terminal runs;
+ordinary activation is not evidence-preserving continuation of executed work. Legacy execution
+receipts without sufficient resource ownership remain ineligible for automatic replacement even
+when their artifacts are valid. The installed qualification must demonstrate these boundaries.
 
 The containment change rejects that activation before creating its run/budget ledger. It checks
 Objective and child receipts, existing PRs, completed issues, managed-agent assignment history,

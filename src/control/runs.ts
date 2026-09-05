@@ -5,6 +5,7 @@ import { PROTOCOL_V2 } from "../protocol/limits.js";
 import { parseRunPolicy, policyDigest, type RunPolicy } from "../protocol/policy.js";
 import { encodeEventComment, latestSupportedRun, nextEventSequence } from "./receipts.js";
 import { loadRecoveryRuntime, type RecoveryRuntime } from "../recovery/runtime.js";
+import { loadRecoverySourceReconciliation } from "../recovery/reconciliation.js";
 
 export interface RunEventStore {
   addIssueComment(issueNodeId: string, body: string): Promise<void>;
@@ -29,6 +30,31 @@ export interface RunState {
 
 export class RunManager {
   constructor(private readonly store: RunEventStore) {}
+
+  /** Startup metadata only: this cannot substitute for resumeRecovery's execution runtime. */
+  async inspectRecoveryReconciliation(
+    input: Parameters<typeof loadRecoverySourceReconciliation>[0],
+  ) {
+    const reconciliation = await loadRecoverySourceReconciliation(input);
+    if (!reconciliation.mergedSources.length)
+      throw new Error("no verified completed source merge requires reconciliation");
+    const start = reconciliation.controllingRun;
+    const run: RunState = {
+      objective: start.objective,
+      runId: start.runId,
+      sequence: Math.max(...reconciliation.events.map((event) => event.sequence)),
+      actor: start.actor,
+      policy: start.policy,
+      policyDigest: start.policyDigest,
+      startedAt: new Date(start.at),
+      ...(start.baseSha ? { baseSha: start.baseSha } : {}),
+      repository: start.repository,
+      baseBranch: start.baseBranch,
+      fork: start.fork,
+      recoveryPlanDigest: reconciliation.planRecord.digest,
+    };
+    return { reconciliationOnly: true as const, run, reconciliation };
+  }
 
   /** A real authenticated repository read, never an eligibility flag, opens the successor path. */
   async resumeRecovery(
@@ -71,7 +97,7 @@ export class RunManager {
     }
     if (active.recoveryRequestId) {
       throw new Error(
-        "Successor execution requires the fenced adoption transaction and shared evidence resolver; it is not available yet",
+        "Successor execution requires its acknowledged recovery request and verified runtime; ordinary resume cannot supply that authority",
       );
     }
     const policy = parseRunPolicy(active.policy);

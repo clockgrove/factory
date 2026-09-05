@@ -55,10 +55,24 @@ import {
 } from "./control/receipts.js";
 import { RunManager, type RunState } from "./control/runs.js";
 import { loadRecoveryRuntime, type RecoveryRuntime } from "./recovery/runtime.js";
+import {
+  loadRecoverySourceArtifact,
+  createRecoverySourcePublishedEvent,
+  verifyRecoverySourcePublication,
+  recoverySourcePublicationBinding,
+  type RecoverySourceArtifactProof,
+} from "./recovery/source-publications.js";
+import {
+  ensureRecoveryNativeSourceStack,
+  type RecoveryNativeExistingMember,
+} from "./recovery/native-source-stacks.js";
 import { verifyRecoveryResources } from "./recovery/resources.js";
+import { recoveryReadPort } from "./recovery/github-read-port.js";
+import { observeRecoveryNativeTransition } from "./recovery/native-transition.js";
 import {
   createRecoverySourceIntegratedEvent,
   verifyRecoverySourceIntegration,
+  verifyPriorRecoveryDelivery,
 } from "./recovery/outcomes.js";
 import { inspectImplicitRestart } from "./control/recovery.js";
 import {
@@ -913,6 +927,7 @@ export class FactorySupervisor {
   readonly #notify: (message: string) => void;
   readonly #reader: GitHubReader;
   readonly #store: GitHubControlStore;
+  readonly #recoveryStore: ReturnType<typeof recoveryReadPort>;
   readonly #stacks: GitHubStacks;
   readonly #leases: LeaseManager;
   readonly #attempts: AttemptManager;
@@ -1004,6 +1019,7 @@ export class FactorySupervisor {
       ...(options.recovery ? { recoveryInspection: true } : {}),
     });
     this.#store = new GitHubControlStore(controls);
+    this.#recoveryStore = recoveryReadPort(this.#store, options.owner, options.repo);
     this.#stacks = new GitHubStacks(
       {
         request: (route, parameters, mutating) =>
@@ -1087,7 +1103,11 @@ export class FactorySupervisor {
     return events.filter((event) => runs.has(event.runId));
   }
 
-  async #resumeObservedRun(snapshot: Snapshot, manager: RunManager): Promise<RunState | null> {
+  async #resumeObservedRun(
+    snapshot: Snapshot,
+    manager: RunManager,
+    reconciliationMode: "none" | "inspect" | "repair" = "none",
+  ): Promise<RunState | null> {
     const active = latestSupportedRun(snapshot.factoryEvents ?? []);
     const recovery = this.#options.recovery;
     if (recovery && (active?.event !== "FactoryRunStarted" || !active.recoveryRequestId)) {
@@ -1107,7 +1127,7 @@ export class FactorySupervisor {
         const completed = await loadRecoveryRuntime({
           objective: snapshot.number,
           runId: recovery.successorRunId,
-          store: this.#store,
+          store: this.#recoveryStore,
           readSnapshot: async () => ({ snapshot, historyComplete: true }),
         });
         if (
@@ -1137,16 +1157,93 @@ export class FactorySupervisor {
       throw new Error(
         "successor resume requires its exact acknowledged recovery request, plan, and run",
       );
-    const recovered = await manager.resumeRecovery({
+    const input = {
       objective: snapshot.number,
       runId: active.runId,
-      store: this.#store,
+      store: this.#recoveryStore,
       readSnapshot: async () => ({ snapshot, historyComplete: true }),
-    });
+    };
+    let recovered: Awaited<ReturnType<RunManager["resumeRecovery"]>>;
+    try {
+      recovered = await manager.resumeRecovery(input);
+    } catch (error) {
+      // Ordinary execution/admission never uses this startup-only repair path.
+      if (reconciliationMode === "none" || this.#recoveryRuntime) throw error;
+      const inspection = await manager.inspectRecoveryReconciliation({
+        ...input,
+        planDigest: recovery.planDigest,
+        requestId: recovery.requestId,
+      });
+      if (reconciliationMode === "inspect") return inspection.run;
+      recovered = await this.#reconcileRecoverySourceMerges(snapshot.number, manager);
+    }
     if (this.#recoveryRuntime && this.#recoveryRuntime.controllingRun.runId !== recovered.run.runId)
       throw new Error("successor runtime changed during execution");
     this.#recoveryRuntime = recovered.runtime;
     return recovered.run;
+  }
+
+  /** Append only proved, already-completed merges under both configured fences.
+   * No worker, review, PR mutation or issue closure is permitted in this stage. */
+  async #reconcileRecoverySourceMerges(objective: number, manager: RunManager) {
+    const recovery = this.#options.recovery;
+    if (!recovery) throw new Error("source reconciliation requires its acknowledged recovery");
+    for (let repaired = 0; repaired <= 100; repaired++) {
+      await this.#guardMutation(0);
+      const snapshot = await this.#reader.readObjective(objective);
+      const input = {
+        objective,
+        runId: recovery.successorRunId,
+        store: this.#recoveryStore,
+        readSnapshot: async () => ({ snapshot, historyComplete: true }),
+      };
+      this.#sequences.observe(snapshotEvents(snapshot));
+      try {
+        // Full runtime verification, with every real receipt, is the only exit.
+        const recovered = await manager.resumeRecovery(input);
+        if (
+          recovered.runtime.planRecord.digest !== recovery.planDigest ||
+          recovered.runtime.planRecord.plan.requestId !== recovery.requestId
+        )
+          throw new Error("source reconciliation authority changed during startup");
+        return recovered;
+      } catch (error) {
+        if (repaired === 100) throw error;
+      }
+      const { reconciliation } = await manager.inspectRecoveryReconciliation({
+        ...input,
+        planDigest: recovery.planDigest,
+        requestId: recovery.requestId,
+      });
+      const source = reconciliation.mergedSources[0]!;
+      const event = createRecoverySourceIntegratedEvent({
+        planRecord: reconciliation.planRecord,
+        claim: reconciliation.claim,
+        ...source,
+        sequence: this.#sequences.take(),
+        at: (await this.#store.serverTime()).toISOString(),
+      });
+      await this.#guardMutation(0);
+      try {
+        await this.#lease.use(() =>
+          this.#store.addIssueComment(
+            source.issueNodeId,
+            encodeEventComment("Factory reconciled a verified completed source merge.", event),
+          ),
+        );
+      } catch (error) {
+        // A lost write response is recovered only from the exact real receipt.
+        const observed = await this.#reader.readObjective(objective);
+        if (
+          !snapshotEvents(observed).some(
+            (value) => recoveryEventDigest(value) === recoveryEventDigest(event),
+          )
+        )
+          throw error;
+        this.#sequences.observe(snapshotEvents(observed));
+      }
+    }
+    throw new Error("source reconciliation exceeded the compiled work-item bound");
   }
 
   #deriveObjective(snapshot: Snapshot): ReturnType<typeof derive> {
@@ -1161,8 +1258,7 @@ export class FactorySupervisor {
         const count =
           this.#recoveryRuntime!.attemptCounts.find((entry) => entry.workItem === item.number)
             ?.count ?? 0;
-        if (!planned?.source?.publication || planned.action === "execute")
-          return { ...item, attempts: count };
+        if (!planned?.source || planned.action === "execute") return { ...item, attempts: count };
         const integrated = this.#recoveryRuntime!.sourceIntegrations.some(
           (proof) => proof.outcome.workItem === item.number,
         );
@@ -1186,7 +1282,8 @@ export class FactorySupervisor {
     const compiled = runtime.graph.objective;
     if (
       runtime.planRecord.plan.items.some(
-        (item) => item.action !== "execute" && !item.source?.publication,
+        (item) =>
+          item.action !== "execute" && !item.source?.publication && !item.source?.artifactHead,
       )
     )
       throw new Error(
@@ -1347,7 +1444,7 @@ export class FactorySupervisor {
     const facts = await this.#store.getRepositoryFacts();
     const actor = await this.#store.getAuthenticatedLogin();
     const runManager = new RunManager(this.#store);
-    const resumedRun = await this.#resumeObservedRun(snapshot, runManager);
+    const resumedRun = await this.#resumeObservedRun(snapshot, runManager, "inspect");
     if (resumedRun) {
       if (
         resumedRun.objective !== snapshot.number ||
@@ -1638,8 +1735,15 @@ export class FactorySupervisor {
     try {
       // Preflight is not a lock: the previous holder may have finished or spent
       // more budget before this lease was acquired. Refresh both new and resumed runs.
-      const current = await this.#reader.readObjective(snapshot.number);
-      const currentRun = await this.#resumeObservedRun(current, runManager);
+      let current = await this.#reader.readObjective(snapshot.number);
+      const needsReconciliation = Boolean(this.#options.recovery && !this.#recoveryRuntime);
+      let currentRun = await this.#resumeObservedRun(current, runManager, "repair");
+      // Repair may append actual merge receipts. Refresh the startup accounting
+      // and derive state from those receipts, never from the pre-repair snapshot.
+      if (needsReconciliation) {
+        current = await this.#reader.readObjective(snapshot.number);
+        currentRun = await this.#resumeObservedRun(current, runManager);
+      }
       if (
         current.closed ||
         current.number !== snapshot.number ||
@@ -2269,11 +2373,7 @@ export class FactorySupervisor {
             const planned = this.#recoveryRuntime!.planRecord.plan.items.find(
               (entry) => entry.workItem === item.number,
             );
-            return (
-              planned?.source?.publication &&
-              planned.action !== "execute" &&
-              item.state === "for_review"
-            );
+            return planned?.source && planned.action !== "execute" && item.state === "for_review";
           });
         if (adoptedPublication) {
           await this.#resumeAdoptedSource(adoptedPublication);
@@ -2524,6 +2624,17 @@ export class FactorySupervisor {
           this.#policy,
           deriveBudgetUsage(this.#budgetEvents),
         );
+        if (
+          this.#recoveryRuntime &&
+          activeExecutions.size === 0 &&
+          runnable.length > 0 &&
+          availableBudget.modelTokens !== null &&
+          availableBudget.modelTokens <= 0
+        )
+          return await terminalAfterDrain(
+            "FactoryRunEscalated",
+            "cumulative model-token budget exhausted before successor work admission",
+          );
         const nowMs = snapshot.readAt.getTime();
         let resource: ResourceSnapshot | null = null;
         if (scheduling.capacity.mode === "adaptive-local") {
@@ -6112,16 +6223,304 @@ export class FactorySupervisor {
     );
   }
 
-  async #resumeAdoptedSource(item: DerivedWorkItem): Promise<void> {
+  async #restoreAdoptedPublication(item: DerivedWorkItem): Promise<void> {
+    await this.#externalAdmission(async () => {});
     const runtime = this.#recoveryRuntime!;
+    const artifact = await loadRecoverySourceArtifact({
+      planRecord: runtime.planRecord,
+      claim: runtime.claim,
+      events: runtime.events,
+      store: this.#recoveryStore,
+      workItem: item.number,
+    });
+    const native = this.#deliverySelection.selected === "native-stacks";
+    if (native && artifact.delivery.stack) {
+      await this.#restoreNativeAdoptedStack(artifact);
+      return;
+    }
+    let pull = await this.#store.findPullRequestForBranch(artifact.branch);
+    if (!pull) {
+      try {
+        pull = await this.#lease.use(async () => {
+          await this.#lease.assertGeneration("publication");
+          if ((await this.#store.readRef(`refs/heads/${artifact.branch}`)) !== artifact.headSha)
+            throw new Error("acknowledged source artifact branch changed before PR creation");
+          const created = await this.#store.createPullRequest({
+            title: item.title,
+            body: `Implements Work Item #${item.number} for Objective #${this.#run.objective}.\n\nCloses #${item.number}\n\nRecovered exact validated source artifact; no replacement worker ran.`,
+            head: artifact.branch,
+            base: this.#baseBranch,
+          });
+          return { ...created, state: "open", merged: false };
+        });
+      } catch (error) {
+        pull = await this.#store.findPullRequestForBranch(artifact.branch);
+        if (!pull) throw error;
+      }
+    }
+    if (pull.headSha !== artifact.headSha || (!pull.merged && pull.state !== "open"))
+      throw new Error("recovered source PR differs from acknowledged artifact");
+    const observed = await this.#store.readPullRequest(pull.number);
+    if (!observed.nodeId) throw new Error("recovered source PR node identity unavailable");
+    const publication = createRecoverySourcePublishedEvent({
+      artifact,
+      pullRequest: pull.number,
+      pullRequestNodeId: observed.nodeId,
+      baseBranch: this.#baseBranch,
+      mode: native ? "native-stacks" : "regular-prs",
+      sequence: this.#sequences.take(),
+      at: (await this.#store.serverTime()).toISOString(),
+    });
+    const proof = await verifyRecoverySourcePublication({
+      planRecord: runtime.planRecord,
+      claim: runtime.claim,
+      events: runtime.events,
+      store: this.#recoveryStore,
+      publication,
+    });
+    if (proof.status !== "verified")
+      throw new Error("restored source publication evidence is unavailable");
+    await this.#appendSuccessorEvent(item.id, publication);
+  }
+
+  async #restoreNativeAdoptedStack(first: RecoverySourceArtifactProof): Promise<void> {
+    const runtime = this.#recoveryRuntime!;
+    const unit = this.#deliveryPlan?.units.find((entry) => entry.id === first.delivery.unitId);
+    if (unit?.kind !== "stack") throw new Error("acknowledged native source unit unavailable");
+    const artifacts: RecoverySourceArtifactProof[] = [];
+    const existingMembers: RecoveryNativeExistingMember[] = [];
+    for (const compilerId of unit.items) {
+      const item = runtime.planRecord.plan.items.find((entry) => entry.compilerId === compilerId)!;
+      const source = item.source;
+      if (!source || item.action === "execute" || !source.validation)
+        throw new Error(
+          "native source restoration requires complete independently validated unit artifacts",
+        );
+      if (!source.publication)
+        artifacts.push(
+          await loadRecoverySourceArtifact({
+            planRecord: runtime.planRecord,
+            claim: runtime.claim,
+            events: runtime.events,
+            store: this.#recoveryStore,
+            workItem: item.workItem,
+          }),
+        );
+      else {
+        const publication = runtime.events.find(
+          (event) => recoveryEventDigest(event) === source.publication!.receiptDigest,
+        );
+        if (publication?.kind !== "publication")
+          throw new Error("original native publication unavailable");
+        const head = await this.#store.readCommit(publication.headSha);
+        existingMembers.push({
+          publication,
+          exactHeadValidation: bindValidationToPublishedHead({
+            validation: {
+              passed: true,
+              digest: source.validation.evidenceDigest,
+              baseSha: source.validation.baseSha,
+              outputTreeSha: source.validation.outputTreeSha,
+            },
+            publishedHeadSha: publication.headSha,
+            publishedBaseSha: publication.baseSha,
+            publishedTreeSha: head.treeOid,
+          }),
+        });
+      }
+    }
+    const pullRequests: Array<{ workItem: number; number: number; nodeId: string }> = [];
+    for (const artifact of artifacts.sort((a, b) => a.delivery.position - b.delivery.position)) {
+      const parent = artifact.delivery.parentItemId
+        ? runtime.planRecord.plan.items.find(
+            (entry) => entry.compilerId === artifact.delivery.parentItemId,
+          )?.source
+        : null;
+      const base = parent?.publication?.branch ?? parent?.artifactHead?.branch ?? this.#baseBranch;
+      if (artifact.delivery.position > 0 && !parent)
+        throw new Error("native source parent branch unavailable");
+      let pull = await this.#store.findPullRequestForBranch(artifact.branch);
+      if (!pull) {
+        try {
+          pull = await this.#externalAdmission(() =>
+            this.#lease.use(async () => {
+              await this.#lease.assertGeneration("publication");
+              if ((await this.#store.readRef(`refs/heads/${artifact.branch}`)) !== artifact.headSha)
+                throw new Error("native source branch changed before publication");
+              const title = runtime.graph.objective.workItems.find(
+                (entry) => entry.id === artifact.delivery.itemId,
+              )!.title;
+              const created = await this.#store.createPullRequest({
+                title,
+                body: `Implements Work Item #${artifact.workItem} for Objective #${this.#run.objective}.\n\nCloses #${artifact.workItem}\n\nRecovered exact validated source artifact; no replacement worker ran.`,
+                head: artifact.branch,
+                base,
+              });
+              return { ...created, state: "open", merged: false };
+            }),
+          );
+        } catch (error) {
+          pull = await this.#store.findPullRequestForBranch(artifact.branch);
+          if (!pull) throw error;
+        }
+      }
+      const observed = await this.#store.readPullRequest(pull.number);
+      if (
+        !observed.nodeId ||
+        observed.headSha !== artifact.headSha ||
+        observed.baseRef !== base ||
+        observed.merged ||
+        observed.state !== "open"
+      )
+        throw new Error("native source PR differs from acknowledged branch");
+      pullRequests.push({
+        workItem: artifact.workItem,
+        number: pull.number,
+        nodeId: observed.nodeId,
+      });
+    }
+    const linked = await ensureRecoveryNativeSourceStack({
+      artifacts,
+      existingMembers,
+      pullRequests,
+      store: this.#store,
+      stacks: this.#stacks,
+      baseBranch: this.#baseBranch,
+      assertCurrent: async () => {
+        await this.#externalAdmission(async () => {});
+        await this.#lease.assertGeneration("publication");
+      },
+    });
+    if (linked.status !== "observed") throw new Error("native source stack is incomplete");
+    const recorded: FactoryEvent[] = [];
+    for (const artifact of artifacts) {
+      if (
+        runtime.sourcePublications.some((proof) => proof.publication.workItem === artifact.workItem)
+      )
+        continue;
+      const member = linked.members.find((entry) => entry.workItem === artifact.workItem)!;
+      const publication = createRecoverySourcePublishedEvent({
+        artifact,
+        pullRequest: member.pullRequest,
+        pullRequestNodeId: member.pullRequestNodeId,
+        baseBranch: member.baseBranch,
+        mode: "native-stacks",
+        stackNumber: linked.stack.number,
+        sequence: this.#sequences.take(),
+        at: (await this.#store.serverTime()).toISOString(),
+      });
+      const proof = await verifyRecoverySourcePublication({
+        planRecord: runtime.planRecord,
+        claim: runtime.claim,
+        events: [...runtime.events, ...recorded],
+        store: this.#recoveryStore,
+        publication,
+      });
+      if (proof.status !== "verified")
+        throw new Error("native source publication proof unavailable");
+      const item = runtime.planRecord.plan.items.find(
+        (entry) => entry.workItem === artifact.workItem,
+      )!;
+      await this.#appendSuccessorEvent(item.issueNodeId, publication);
+      recorded.push(publication);
+    }
+  }
+
+  async #resumeAdoptedSource(item: DerivedWorkItem): Promise<void> {
+    let runtime = this.#recoveryRuntime!;
     const planItem = runtime.planRecord.plan.items.find((entry) => entry.workItem === item.number)!;
     const source = planItem.source!;
-    const publication = source.publication!;
+    if (this.#deliverySelection.selected === "native-stacks") {
+      const unit = this.#deliveryPlan?.units.find((entry) =>
+        entry.items.includes(planItem.compilerId),
+      );
+      const missing =
+        unit?.kind === "stack"
+          ? runtime.planRecord.plan.items.find(
+              (entry) =>
+                unit.items.includes(entry.compilerId) &&
+                entry.source &&
+                !entry.source.publication &&
+                !runtime.sourcePublications.some(
+                  (proof) => proof.publication.workItem === entry.workItem,
+                ),
+            )
+          : undefined;
+      if (missing) {
+        const snapshot = await this.#reader.readObjective(this.#run.objective);
+        const unresolved = this.#deriveObjective(snapshot).items.find(
+          (entry) => entry.number === missing.workItem,
+        )!;
+        await this.#restoreAdoptedPublication(unresolved);
+        await this.#resumeObservedRun(
+          await this.#reader.readObjective(this.#run.objective),
+          new RunManager(this.#store),
+        );
+        runtime = this.#recoveryRuntime!;
+      }
+    }
+    if (
+      !source.publication &&
+      !runtime.sourcePublications.some((proof) => proof.publication.workItem === item.number)
+    ) {
+      await this.#restoreAdoptedPublication(item);
+      await this.#resumeObservedRun(
+        await this.#reader.readObjective(this.#run.objective),
+        new RunManager(this.#store),
+      );
+      runtime = this.#recoveryRuntime!;
+    }
+    const restored = runtime.sourcePublications.find(
+      (proof) => proof.publication.workItem === item.number,
+    );
+    const publication =
+      source.publication ??
+      (restored
+        ? recoverySourcePublicationBinding(restored.publication, runtime.planRecord.plan.repository)
+        : null);
+    if (!publication) throw new Error("source publication receipt unavailable");
     const existingOutcome = runtime.sourceIntegrations.find(
       (entry) => entry.outcome.workItem === item.number,
     );
     if (existingOutcome) {
       await this.#lease.assertGeneration("integration");
+      if (!item.closed) await this.#store.closeIssue(item.number);
+      return;
+    }
+    if (source.priorDelivery) {
+      await this.#externalAdmission(async () => {});
+      runtime = this.#recoveryRuntime!;
+      const prior = await verifyPriorRecoveryDelivery({
+        plan: runtime.planRecord.plan,
+        item: planItem,
+        events: runtime.events,
+        store: this.#recoveryStore,
+      });
+      const outcome = createRecoverySourceIntegratedEvent({
+        planRecord: runtime.planRecord,
+        claim: runtime.claim,
+        workItem: item.number,
+        mergeCommitSha: prior.outcome.mergeCommitSha,
+        ...(prior.outcome.mergeCandidateIdentityDigest
+          ? { mergeCandidateIdentityDigest: prior.outcome.mergeCandidateIdentityDigest }
+          : {}),
+        ...(prior.outcome.deliveryHeadSha
+          ? { deliveryHeadSha: prior.outcome.deliveryHeadSha }
+          : {}),
+        sequence: this.#sequences.take(),
+        at: (await this.#store.serverTime()).toISOString(),
+      });
+      const proof = await verifyRecoverySourceIntegration({
+        planRecord: runtime.planRecord,
+        claim: runtime.claim,
+        events: runtime.events,
+        store: this.#recoveryStore,
+        outcome,
+      });
+      if (proof.status !== "verified")
+        throw new Error("prior source delivery could not be independently verified");
+      await this.#lease.assertGeneration("integration");
+      await this.#appendSuccessorEvent(item.id, outcome);
       if (!item.closed) await this.#store.closeIssue(item.number);
       return;
     }
@@ -6149,11 +6548,24 @@ export class FactorySupervisor {
       exactHeadValidation,
     };
     const observed = await this.#store.readPullRequest(pull.number);
-    if (
-      observed.headSha !== pull.commitSha ||
-      observed.baseRef !== this.#baseBranch ||
-      (!observed.merged && observed.state !== "open")
-    )
+    let deliveryHeadSha: string | undefined;
+    if (observed.headSha !== pull.commitSha || observed.baseRef !== this.#baseBranch) {
+      if (publication.mode !== "native-stacks")
+        throw new Error("adopted ordinary source head/base changed");
+      const transition = await observeRecoveryNativeTransition({
+        planRecord: runtime.planRecord,
+        events: runtime.events,
+        store: this.#recoveryStore,
+        workItem: item.number,
+      });
+      if (
+        transition.deliveryHeadSha !== observed.headSha ||
+        transition.sourceHeadSha !== pull.commitSha
+      )
+        throw new Error("native source transition changed during observation");
+      if (observed.headSha !== pull.commitSha) deliveryHeadSha = observed.headSha;
+    }
+    if (observed.baseRef !== this.#baseBranch || (!observed.merged && observed.state !== "open"))
       throw new Error(
         "adopted publication changed; original source authority cannot be relabelled",
       );
@@ -6440,6 +6852,7 @@ export class FactorySupervisor {
       true,
       candidate,
       true,
+      deliveryHeadSha,
     );
   }
 
@@ -6451,6 +6864,7 @@ export class FactorySupervisor {
     allowRecovery = false,
     candidate?: MergeCandidateCheckpointRecord,
     adoptedSource = false,
+    deliveryHeadSha?: string,
   ): Promise<void> {
     for (;;) {
       await this.#lease.renewIfNeeded();
@@ -6472,6 +6886,7 @@ export class FactorySupervisor {
           {
             ciExpected: this.#ciExpectedOnPullRequests,
             ...(candidate ? { mergeCandidateValidation: candidate.evidence } : {}),
+            ...(deliveryHeadSha ? { mergeCandidateDeliveryHeadSha: deliveryHeadSha } : {}),
           },
         );
         if (current.state !== "ready") return current;
@@ -6479,7 +6894,10 @@ export class FactorySupervisor {
           // REST mergeable/test-merge metadata can lag a trunk update. Check GitHub's
           // actual proposed tree as well as our clean application before any merge.
           const preview = await this.#store.readPullRequest(pull.number);
-          if (preview.headSha !== pull.commitSha || preview.baseRef !== this.#baseBranch) {
+          if (
+            preview.headSha !== (deliveryHeadSha ?? pull.commitSha) ||
+            preview.baseRef !== this.#baseBranch
+          ) {
             return {
               state: "failed" as const,
               reason: "pull request changed before candidate merge",
@@ -6496,7 +6914,7 @@ export class FactorySupervisor {
             testMerge.oid !== preview.mergeCommitSha ||
             testMerge.parentOids.length !== 2 ||
             testMerge.parentOids[0] !== candidate.identity.targetBaseSha ||
-            testMerge.parentOids[1] !== pull.commitSha
+            testMerge.parentOids[1] !== (deliveryHeadSha ?? pull.commitSha)
           ) {
             return {
               state: "wait" as const,
@@ -6575,12 +6993,22 @@ export class FactorySupervisor {
             planRecord: runtime.planRecord,
             claim: runtime.claim,
             workItem: item.number,
+            ...(runtime.sourcePublications.find(
+              (proof) => proof.publication.workItem === item.number,
+            )
+              ? {
+                  sourcePublication: runtime.sourcePublications.find(
+                    (proof) => proof.publication.workItem === item.number,
+                  )!.publication,
+                }
+              : {}),
             mergeCommitSha: readiness.headSha,
             sequence: this.#sequences.take(),
             at: (await this.#store.serverTime()).toISOString(),
             ...(candidate
               ? { mergeCandidateIdentityDigest: mergeCandidateIdentityDigest(candidate.identity) }
               : {}),
+            ...(deliveryHeadSha ? { deliveryHeadSha } : {}),
           });
           const proof = await verifyRecoverySourceIntegration({
             planRecord: runtime.planRecord,
@@ -6589,7 +7017,7 @@ export class FactorySupervisor {
               ...runtime.events,
               ...this.#budgetEvents.filter((event) => event.runId === this.#run.runId),
             ],
-            store: this.#store,
+            store: this.#recoveryStore,
             outcome,
           });
           if (proof.status !== "verified")

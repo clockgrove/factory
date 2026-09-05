@@ -24,6 +24,8 @@ Notable changes to Factory. See [the delivery plan](docs/DELIVERY-PLAN.md) for u
 - Cost-aware Objective compiler, native sub-issue dependencies, adaptive local scheduling, priority,
   bounded cloud burst, independent validation, replay, explanations, and economic evidence.
 - Regular and native stacked pull-request delivery with exact-head validation and recovery.
+- Repeated-successor accounting and delivery lineage, native source-PR restoration, and leased
+  reconciliation of completed source merges before execution can resume.
 - Daytona execution adapter and provider-neutral managed-agent contract.
 - Labs adapters for Vercel Sandbox and Codex App Server.
 - Formal npm package contract for `@clockgrove/factory` alongside the Agent Plugin.

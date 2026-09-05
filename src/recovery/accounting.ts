@@ -63,6 +63,41 @@ const compilationUsage = (event: BudgetEvent) =>
   event.workItem === undefined &&
   event.attempt === undefined &&
   /^(?:compile-[0-9a-f]{64}|failed-compile-[0-9a-f]{40})$/.test(event.usageId ?? "");
+
+/** Exact authenticated adoption declares graph reuse, not a zero-cost compiler invocation.
+ * This remains accounting coverage only: the chain verifier independently loads the plan/claim. */
+function adoptedGraphReuse(events: readonly FactoryEvent[], runId: string): boolean {
+  const run = events.filter((event) => event.runId === runId);
+  const starts = run.filter((event) => event.event === "FactoryRunStarted");
+  const start = starts[0];
+  const consumed = run.filter((event) => event.event === "RecoveryConsumed");
+  const completed = run.filter((event) => event.event === "RecoveryAdoptionCompleted");
+  const consume = consumed[0],
+    complete = completed[0];
+  return (
+    starts.length === 1 &&
+    start?.event === "FactoryRunStarted" &&
+    !!start.recoveryRequestId &&
+    !!start.recoveryPlanDigest &&
+    !!start.predecessorRunId &&
+    consumed.length === 1 &&
+    consume?.event === "RecoveryConsumed" &&
+    completed.length === 1 &&
+    complete?.event === "RecoveryAdoptionCompleted" &&
+    consume.sequence === start.sequence + 1 &&
+    complete.sequence === start.sequence + 2 &&
+    [consume, complete].every(
+      (event) =>
+        event.recoveryRequestId === start.recoveryRequestId &&
+        event.planDigest === start.recoveryPlanDigest &&
+        event.predecessorRunId === start.predecessorRunId,
+    ) &&
+    consume.claimRef === complete.claimRef &&
+    consume.claimOid === complete.claimOid &&
+    consume.predecessorTerminalDigest === complete.predecessorTerminalDigest &&
+    !run.some((event) => event.kind === "graph")
+  );
+}
 const reservationSource = (event: BudgetEvent): BudgetEvent => ({
   protocol: event.protocol,
   kind: event.kind,
@@ -186,7 +221,10 @@ export function assessRecoveryAccounting(input: {
       start.repository.toLowerCase() !== input.repository.toLowerCase() ||
       policyDigest(start.policy) !== start.policyDigest ||
       runEvents.some(
-        (event) => "policyDigest" in event && event.policyDigest !== start.policyDigest,
+        (event) =>
+          event.kind !== "recovery" &&
+          "policyDigest" in event &&
+          event.policyDigest !== start.policyDigest,
       ) ||
       runEvents.some((event) => event.sequence < start.sequence)
     ) {
@@ -345,7 +383,10 @@ export function assessRecoveryAccounting(input: {
     }
   }
   for (const runId of input.runIds) {
-    if (!budgets.some((event) => event.runId === runId && compilationUsage(event))) {
+    if (
+      !budgets.some((event) => event.runId === runId && compilationUsage(event)) &&
+      !adoptedGraphReuse(events, runId)
+    ) {
       unknown({
         runId,
         phase: "management",

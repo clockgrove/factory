@@ -4,7 +4,7 @@ import { decodeEventTrailer, deduplicateFactoryEvents } from "../control/receipt
 import type { StaleAttemptIdentity } from "../execution/backend.js";
 import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
 import type { RecoveryReadStore } from "./assessment.js";
-import type { RecoveryPlanRecord } from "./plan.js";
+import { parseRecoveryPlan, type RecoveryPlan, type RecoveryPlanRecord } from "./plan.js";
 import { recoveryEventDigest } from "./identity.js";
 import {
   localRecoveryResourceIdentityDigest,
@@ -29,12 +29,11 @@ function requireGate(condition: unknown, code: string): asserts condition {
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 async function resourceEvidence(
-  record: RecoveryPlanRecord,
+  plan: RecoveryPlan,
   events: FactoryEvent[],
   store: RecoveryReadStore,
   ports: RecoveryResourcePorts,
 ): Promise<string> {
-  const plan = record.plan;
   const sourceRuns = new Set(plan.history.map((entry) => entry.runId));
   const reservations = events.filter(
     (event): event is Attempt =>
@@ -214,14 +213,26 @@ export async function verifyRecoveryResources(
   evidenceDigest: string | null;
   blockers: string[];
 }> {
+  return verifyRecoveryProposalResources({ ...input, plan: input.planRecord.plan });
+}
+
+/** Current resource observation for an unpersisted proposal, never an admission grant. */
+export async function verifyRecoveryProposalResources(
+  input: {
+    plan: RecoveryPlan;
+    events: readonly FactoryEvent[];
+    store: RecoveryReadStore;
+  } & RecoveryResourcePorts,
+): Promise<{ status: "verified" | "blocked"; evidenceDigest: string | null; blockers: string[] }> {
   try {
+    const plan = parseRecoveryPlan(input.plan);
     requireGate(input.events.length <= 10_000, "resource-history-bound");
     const events = deduplicateFactoryEvents(input.events.map(parseFactoryEvent));
     requireGate(
-      events.every((event) => event.objective === input.planRecord.plan.objective),
+      events.every((event) => event.objective === plan.objective),
       "resource-objective-mismatch",
     );
-    const evidenceDigest = await resourceEvidence(input.planRecord, events, input.store, input);
+    const evidenceDigest = await resourceEvidence(plan, events, input.store, input);
     return { status: "verified", evidenceDigest, blockers: [] };
   } catch (error) {
     return {

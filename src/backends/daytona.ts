@@ -658,9 +658,13 @@ export class DaytonaBackend implements ExecutionBackend {
       invocationOwner &&
       (sandbox.name !== resourceName || sandbox.labels?.invocationOwner !== invocationOwner)
     )
-      throw new Error(
-        "Daytona created validation resource has mismatching ownership; refusing use or cleanup",
-      );
+      throw new DaytonaResourceCleanupError({
+        resourceId: sandbox.id,
+        resourceName,
+        ttlMinutes,
+        operation: "created validation ownership mismatch",
+        cause: "refusing use or cleanup of unowned resource",
+      });
 
     const tracked: TrackedDaytona = {
       sandbox,
@@ -738,7 +742,12 @@ export class DaytonaBackend implements ExecutionBackend {
         (tracked.sandbox.name !== resourceName ||
           tracked.sandbox.labels?.invocationOwner !== invocationOwner)
       )
-        throw new Error("Daytona tracked validation resource ownership mismatch; refusing cleanup");
+        throw new DaytonaResourceCleanupError({
+          resourceId: tracked.sandbox.id,
+          resourceName,
+          operation: "tracked validation ownership mismatch",
+          cause: "refusing cleanup of unowned resource",
+        });
       await this.#deleteTracked(tracked, "stale-attempt reconciliation");
       return;
     }
@@ -800,9 +809,12 @@ export class DaytonaBackend implements ExecutionBackend {
       invocationOwner &&
       (sandbox.name !== resourceName || sandbox.labels?.invocationOwner !== invocationOwner)
     )
-      throw new Error(
-        "Daytona validation invocation resource ownership mismatch; refusing cleanup",
-      );
+      throw new DaytonaResourceCleanupError({
+        resourceId: sandbox.id,
+        resourceName,
+        operation: "validation invocation ownership mismatch",
+        cause: "refusing cleanup of unowned resource",
+      });
     this.#track(recovered);
     await this.#deleteTracked(recovered, "stale-attempt reconciliation");
   }
@@ -982,7 +994,13 @@ export class DaytonaBackend implements ExecutionBackend {
       invocationOwner &&
       (sandbox.name !== resourceName || sandbox.labels?.invocationOwner !== invocationOwner)
     )
-      throw new Error("Daytona ambiguous validation resource ownership mismatch; refusing cleanup");
+      throw new DaytonaResourceCleanupError({
+        resourceId: sandbox.id,
+        resourceName,
+        ttlMinutes,
+        operation: "ambiguous validation ownership mismatch",
+        cause: "refusing cleanup of unowned resource",
+      });
     const tracked: TrackedDaytona = {
       sandbox,
       resourceName,

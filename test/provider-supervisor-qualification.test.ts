@@ -8,12 +8,39 @@ import {
 } from "./helpers/provider-supervisor.js";
 
 describe("credential-free provider Supervisor qualification", () => {
+  it("never promotes sandbox-untrusted work or its join to host execution", async () => {
+    const f = await providerSupervisorFixture("daytona-burst", { sandboxUntrusted: true });
+    try {
+      const result = await f.run();
+      expect(result, result.reason).toMatchObject({ status: "completed" });
+      expect(
+        f.activity.filter((entry) => entry.operation === "launch").map((entry) => entry.backend),
+      ).toEqual([DAYTONA, DAYTONA, DAYTONA]);
+      expect(f.resources.size).toBe(0);
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
+  it("does not substitute local or another provider when the selected managed profile is unavailable", async () => {
+    const f = await providerSupervisorFixture("copilot-objective", { unavailable: true });
+    try {
+      const result = await f.run(AbortSignal.timeout(500));
+      expect(["cancelled", "escalated"]).toContain(result.status);
+      expect(f.activity.filter((entry) => entry.operation === "launch")).toEqual([]);
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
   it("bursts a second independent item while local work is active, then releases its join", async () => {
     const f = await providerSupervisorFixture("daytona-burst");
     try {
       const result = await f.run();
       expect(result, result.reason).toMatchObject({ status: "completed" });
-      expect(f.activity.filter((entry) => entry.operation === "launch")).toEqual([
+      expect(
+        f.activity
+          .filter((entry) => entry.operation === "launch")
+          .sort((a, b) => a.workItem - b.workItem),
+      ).toEqual([
         { operation: "launch", backend: LOCAL, workItem: 8 },
         { operation: "launch", backend: DAYTONA, workItem: 9 },
         { operation: "launch", backend: LOCAL, workItem: 10 },

@@ -170,7 +170,7 @@ export function boundedPolicy(delivery = "regular-prs") {
   };
 }
 
-export function assertCompletion(evidence) {
+export function assertCompletion(evidence, allowedBackends = localBackends) {
   const runId = evidence.runResult?.runId;
   assert.ok(typeof runId === "string" && runId.length > 0, "explicit executed run ID required");
   assert.equal(evidence.status?.run?.runId, runId, "status belongs to another run");
@@ -277,7 +277,12 @@ export function assertCompletion(evidence) {
   assert.ok(starts.length >= 3, "fewer than three workers started");
   for (const start of starts) {
     assert.ok(childNumbers.has(start.workItem), "worker outside observed graph");
-    assert.ok(localBackends.includes(start.backend), "nonlocal worker used");
+    assert.ok(
+      allowedBackends.includes(start.backend),
+      allowedBackends === localBackends
+        ? "nonlocal worker used"
+        : "worker outside qualified backend selection",
+    );
   }
   const terminalAttempts = new Set([
     "AttemptSucceeded",
@@ -445,7 +450,7 @@ function sha256(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
-export async function main() {
+export async function main(qualification = {}) {
   if (process.env.FACTORY_LIVE_OBJECTIVE !== "1") {
     console.log(
       "Not exercised: set FACTORY_LIVE_OBJECTIVE=1 and explicit disposable-repository inputs.",
@@ -521,6 +526,7 @@ export async function main() {
     }
   };
   const info = (await request("GET /repos/{owner}/{repo}")).data;
+  const actor = (await octokit.request("GET /user")).data;
   assert.ok(!info.archived && info.permissions?.push, "target must permit fixture integration");
   const base = (
     await request("GET /repos/{owner}/{repo}/commits/{ref}", {
@@ -541,7 +547,7 @@ export async function main() {
   mkdirSync(output, { recursive: true });
   const evidence = {
     schemaVersion: 1,
-    scope: "installed-local-objective-happy-path",
+    scope: qualification.scope ?? "installed-local-objective-happy-path",
     startedAt: new Date().toISOString(),
     repository,
     base,
@@ -549,7 +555,8 @@ export async function main() {
     codexManifestVersion: identity.codexManifestVersion,
     pluginId: identity.pluginId,
     bundleSha256: sha256(join(pluginRoot, "dist/mcp-server.js")),
-    policy: boundedPolicy(process.env.FACTORY_LIVE_OBJECTIVE_DELIVERY),
+    policy: qualification.policy ?? boundedPolicy(process.env.FACTORY_LIVE_OBJECTIVE_DELIVERY),
+    actor: { id: actor.id, login: actor.login },
     objective: null,
     status: null,
     children: [],
@@ -596,7 +603,13 @@ export async function main() {
       "installed server version mismatch",
     );
     assertMcpSurface((await client.listTools()).tools);
+    const hooks = { call, request, octokit, evidence, checkout, owner, repo };
+    if (qualification.beforeRun) await qualification.beforeRun(hooks);
     const retryNumber = process.env.FACTORY_LIVE_OBJECTIVE_NUMBER;
+    assert.ok(
+      !qualification.scope || retryNumber === undefined,
+      "provider qualification requires a fresh Objective, never terminal-run retry",
+    );
     if (retryNumber !== undefined) {
       assert.match(retryNumber, /^[1-9]\d*$/, "invalid retry Objective number");
       const issueNumber = Number(retryNumber);
@@ -638,8 +651,8 @@ export async function main() {
     } else
       evidence.objective = (
         await request("POST /repos/{owner}/{repo}/issues", {
-          title: `Factory installed local Objective ${suffix}`,
-          body: objectiveBody,
+          title: `Factory ${qualification.scope ?? "installed local Objective"} ${suffix}`,
+          body: qualification.objectiveBody ?? objectiveBody,
         })
       ).data;
     save();
@@ -683,6 +696,7 @@ export async function main() {
             ...JSON.parse(match[1]),
             receiptUrl: comment.html_url,
             author: comment.user?.login,
+            authorId: comment.user?.id,
           });
       }
       if (issue.number !== evidence.objective.number)
@@ -708,7 +722,8 @@ export async function main() {
           })
         ).data,
       );
-    evidence.completionAssessment = assessCompletion(evidence);
+    if (qualification.afterRun) await qualification.afterRun(hooks);
+    evidence.completionAssessment = (qualification.assessCompletion ?? assessCompletion)(evidence);
     save();
     assert.equal(
       evidence.completionAssessment.result,
@@ -731,9 +746,7 @@ export async function main() {
     evidence.result = "passed";
     evidence.finishedAt = new Date().toISOString();
     save();
-    console.log(
-      `Passed installed local Objective happy path; evidence: ${join(output, "objective-evidence.json")}`,
-    );
+    console.log(`Passed ${evidence.scope}; evidence: ${join(output, "objective-evidence.json")}`);
   } catch (error) {
     evidence.result = "failed";
     evidence.failure = error instanceof Error ? error.message : String(error);
@@ -748,7 +761,17 @@ export async function main() {
         // The durable Objective URL remains available even if the MCP transport died.
       }
     }
-    evidence.completionAssessment = assessCompletion(evidence);
+    if (qualification.onFailure) {
+      try {
+        await qualification.onFailure({ call, request, octokit, evidence, checkout, owner, repo });
+      } catch {
+        evidence.cleanupObservation = {
+          state: "unknown",
+          reason: "cleanup observation unavailable; manual reconciliation required",
+        };
+      }
+    }
+    evidence.completionAssessment = (qualification.assessCompletion ?? assessCompletion)(evidence);
     save();
     throw error;
   } finally {

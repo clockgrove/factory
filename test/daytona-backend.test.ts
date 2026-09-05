@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 
 import type { Daytona } from "@daytona/sdk";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 
 import {
   DAYTONA_DEFAULT_IMAGE,
@@ -413,6 +413,42 @@ describe("Daytona supported provider contract", () => {
     ).rejects.toThrow(/exact artifact and base/);
     expect(provider.creates).toEqual([]);
     expect(provider.lookedUp).toEqual([]);
+  });
+  it("keeps a mismatching create response explicitly cleanup-unknown without deleting an unowned resource", async () => {
+    const source = await fixture();
+    const provider = fakeProvider();
+    const create = provider.client.create.bind(provider.client);
+    vi.spyOn(provider.client, "create").mockImplementation(async (params, options) => {
+      const sandbox = await create(params, options);
+      sandbox.labels.invocationOwner = "f".repeat(64);
+      return sandbox;
+    });
+    const backend = new DaytonaBackend({
+      repository: source.repository,
+      createClient: () => provider.client,
+      credentialAvailable: () => true,
+    });
+    const artifact = normalizeArtifact({
+      baseSha: source.context.packet.baseSha,
+      patch: "",
+      changedPaths: [],
+      outcome: "declined",
+      reason: "candidate ownership fixture",
+    });
+    await expect(
+      backend.validate({
+        ...source.context,
+        artifact,
+        validationInvocation: {
+          kind: "integration-candidate",
+          identityDigest: "a".repeat(64),
+          artifactDigest: artifact.digest,
+          baseSha: artifact.baseSha,
+        },
+      }),
+    ).rejects.toBeInstanceOf(DaytonaResourceCleanupError);
+    expect(provider.creates).toHaveLength(1);
+    expect(provider.deleted).toEqual([]);
   });
   it("rejects mutable image tags and accepts only digest-pinned environments", async () => {
     const source = await fixture();

@@ -43,6 +43,7 @@ export interface ProviderFaults {
   externalAdvance?: boolean;
   loseCandidateCheckpointResponse?: boolean;
   candidateReviewRejects?: boolean;
+  sandboxUntrusted?: boolean;
 }
 
 export async function providerSupervisorFixture(
@@ -82,6 +83,7 @@ export async function providerSupervisorFixture(
     scenario === "copilot-objective" ? COPILOT : scenario === "codex-objective" ? CODEX : DAYTONA;
   const policy = parseRunPolicy({
     ...DEFAULT_RUN_POLICY,
+    ...(faults.sandboxUntrusted ? { trust: "sandbox_untrusted" } : {}),
     backendOrder: managed ? [provider, DAYTONA] : [LOCAL, DAYTONA],
     maxParallel: managed ? 1 : 2,
     maxAttemptsPerItem: 1,
@@ -541,9 +543,15 @@ export async function providerSupervisorFixture(
       observe: async (handle) => ({
         state:
           !managed &&
-          (faults.localFinishesFirst ? id === DAYTONA : id === LOCAL) &&
-          running.get(handle.resourceId)!.workItem === (faults.localFinishesFirst ? 9 : 8) &&
-          !snapshot.workItems[faults.localFinishesFirst ? 0 : 1]!.closed
+          ((running.get(handle.resourceId)!.workItem < 10 &&
+            !activity.some(
+              (entry) =>
+                entry.operation === "launch" &&
+                entry.workItem === (running.get(handle.resourceId)!.workItem === 8 ? 9 : 8),
+            )) ||
+            ((faults.localFinishesFirst ? id === DAYTONA : id === LOCAL) &&
+              running.get(handle.resourceId)!.workItem === (faults.localFinishesFirst ? 9 : 8) &&
+              !snapshot.workItems[faults.localFinishesFirst ? 0 : 1]!.closed))
             ? "running"
             : "succeeded",
         observedAt: new Date().toISOString(),
@@ -687,7 +695,7 @@ export async function providerSupervisorFixture(
     resources,
     events,
     refs,
-    run: () =>
+    run: (signal?: AbortSignal) =>
       new FactorySupervisor({
         token: "fixture-only",
         owner: "fixture",
@@ -699,6 +707,7 @@ export async function providerSupervisorFixture(
         backendRegistry: registry,
         repositoryResources: shared,
         pollIntervalMs: 20,
+        ...(signal ? { signal } : {}),
         onStatus: (message) => notifications.push(message),
       }).run(),
     dispose: async () => {

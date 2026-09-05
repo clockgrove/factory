@@ -3757,12 +3757,26 @@ export class FactorySupervisor {
       };
       const timeoutMs =
         (requirements.timeoutMinutes ?? this.#policy.workItemTimeoutMinutes) * 60_000;
+      const unit = this.#deliveryPlan?.units.find((unit) => unit.items.includes(item.id));
+      const isolatedSibling =
+        this.#deliverySelection.selected === "native-stacks" &&
+        unit?.kind === "sibling" &&
+        unit.items.length === 1;
       const execution = await this.#registry.select({
-        policy: this.#policy,
+        policy: isolatedSibling
+          ? {
+              ...this.#policy,
+              backendOrder: this.#policy.backendOrder.filter(
+                (id) =>
+                  id === "codex-cli/daytona" || this.#registry.get(id)?.capabilities.hostExecution,
+              ),
+            }
+          : this.#policy,
         requirements,
         budget: budgets,
         estimatedDurationMs: timeoutMs,
-        requireHostExecution: this.#deliverySelection.selected === "native-stacks",
+        requireHostExecution:
+          this.#deliverySelection.selected === "native-stacks" && !isolatedSibling,
       });
       if (requirements.trust !== "trusted_local" || !execution.backend.capabilities.hostExecution) {
         const afterExecution = {

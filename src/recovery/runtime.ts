@@ -23,6 +23,10 @@ import { recoveryClaimRef, recoveryEventDigest } from "./identity.js";
 import { loadRecoveryPlan, type RecoveryPlanRecord } from "./plan.js";
 import { recoveryAdoptionEvents } from "./transaction.js";
 import {
+  verifyRecoverySourcePublication,
+  recoverySourcePublicationBinding,
+} from "./source-publications.js";
+import {
   verifyRecoverySourceIntegration,
   type RecoverySourceIntegrationProof,
 } from "./outcomes.js";
@@ -58,6 +62,12 @@ export interface RecoveryRuntime {
   currentEvents: readonly FactoryEvent[];
   sourceEvidence: RecoveryEvidenceResolution;
   sourceIntegrations: readonly RecoverySourceIntegrationProof[];
+  /** Exact source-bound capacity envelopes independently validated against candidate checkpoints. */
+  verifiedSourceCapacity: readonly FactoryEvent[];
+  sourcePublications: readonly Extract<
+    Awaited<ReturnType<typeof verifyRecoverySourcePublication>>,
+    { status: "verified" }
+  >[];
   historicalAccounting: RecoveryAccountingAssessment;
   usage: BudgetUsage;
   remaining: ReturnType<typeof remainingBudget>;
@@ -259,7 +269,9 @@ export async function loadRecoveryRuntime(input: {
     requireRuntime(
       suffix.every(
         (event) =>
-          (event.kind !== "recovery" || event.event === "RecoverySourceIntegrated") &&
+          (event.kind !== "recovery" ||
+            event.event === "RecoverySourceIntegrated" ||
+            event.event === "RecoverySourcePublished") &&
           event.kind !== "graph" &&
           event.event !== "FactoryRunStarted" &&
           event.event !== "ActivationRequested" &&
@@ -281,7 +293,8 @@ export async function loadRecoveryRuntime(input: {
               (["attempt", "capacity", "validation", "publication", "budget"].includes(
                 event.kind,
               ) ||
-                event.event === "RecoverySourceIntegrated"),
+                event.event === "RecoverySourceIntegrated" ||
+                event.event === "RecoverySourcePublished"),
           )),
       "successor-terminal-conflict",
     );
@@ -323,19 +336,41 @@ export async function loadRecoveryRuntime(input: {
         "successor-reservation-binding-invalid",
       );
     }
+    const sourcePublications: RecoveryRuntime["sourcePublications"][number][] = [];
+    for (const publication of suffix)
+      if (publication.event === "RecoverySourcePublished") {
+        const proof = await verifyRecoverySourcePublication({
+          planRecord: record,
+          claim,
+          events,
+          store: input.store,
+          publication,
+        });
+        requireRuntime(proof.status === "verified", "source-publication-unverified");
+        sourcePublications.push(proof);
+      }
     const sourceCapacity = new Set<FactoryEvent>();
     for (const event of suffix) {
       if (event.kind !== "capacity" || !event.sourceRunId) continue;
       const source = items.get(event.workItem)?.source;
+      const adoptedPublication = sourcePublications.find(
+        (proof) => proof.publication.workItem === event.workItem,
+      );
+      const publication =
+        source?.publication ??
+        (adoptedPublication
+          ? recoverySourcePublicationBinding(adoptedPublication.publication, plan.repository)
+          : null);
       requireRuntime(
-        source?.publication &&
+        source &&
+          publication &&
           source.validation &&
           source.runId === event.sourceRunId &&
           source.attempt === event.attempt &&
           items.get(event.workItem)?.action !== "execute",
         "source-capacity-binding-invalid",
       );
-      const head = await input.store.readCommit(source.publication.headSha);
+      const head = await input.store.readCommit(publication.headSha);
       const proof = bindValidationToPublishedHead({
         validation: {
           passed: true,
@@ -343,9 +378,9 @@ export async function loadRecoveryRuntime(input: {
           baseSha: source.validation.baseSha,
           outputTreeSha: source.validation.outputTreeSha,
         },
-        publishedHeadSha: source.publication.headSha,
+        publishedHeadSha: publication.headSha,
         publishedTreeSha: head.treeOid,
-        publishedBaseSha: source.publication.baseSha,
+        publishedBaseSha: publication.baseSha,
       });
       requireRuntime(
         event.targetBaseSha &&
@@ -356,8 +391,8 @@ export async function loadRecoveryRuntime(input: {
               objective: input.objective,
               workItem: event.workItem,
               attempt: source.attempt,
-              pullRequest: source.publication.pullRequest,
-              sourceHeadSha: source.publication.headSha,
+              pullRequest: publication.pullRequest,
+              sourceHeadSha: publication.headSha,
               sourceExactHeadValidationDigest: proof.digest,
               targetBaseSha: event.targetBaseSha,
             })}`,
@@ -397,8 +432,8 @@ export async function loadRecoveryRuntime(input: {
             objective: input.objective,
             workItem: event.workItem,
             attempt: source.attempt,
-            pullRequest: source.publication.pullRequest,
-            sourceHeadSha: source.publication.headSha,
+            pullRequest: publication.pullRequest,
+            sourceHeadSha: publication.headSha,
             sourceExactHeadValidationDigest: proof.digest,
             targetBaseSha: event.targetBaseSha!,
           }),
@@ -589,6 +624,8 @@ export async function loadRecoveryRuntime(input: {
       currentEvents,
       sourceEvidence,
       sourceIntegrations,
+      verifiedSourceCapacity: [...sourceCapacity],
+      sourcePublications,
       historicalAccounting: chain.accounting,
       usage,
       remaining: remainingBudget(plan.acceptedPolicy, usage),

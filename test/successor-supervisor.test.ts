@@ -17,6 +17,7 @@ import { DEFAULT_RUN_POLICY, parseRunPolicy, policyDigest } from "../src/protoco
 import { parseFactoryEvent } from "../src/protocol/events.js";
 import { renderWorkPacket, type CompiledObjective } from "../src/graph.js";
 import { planDelivery } from "../src/publication/delivery.js";
+import { GitHubStacks } from "../src/publication/github-stacks.js";
 import { publicationBranch } from "../src/publication/publisher.js";
 import { bindValidationToPublishedHead } from "../src/validation/plan.js";
 import { BackendRegistry } from "../src/execution/registry.js";
@@ -32,6 +33,7 @@ import { RecoveryClaimManager } from "../src/recovery/claims.js";
 import { recoveryAdoptionEvents } from "../src/recovery/transaction.js";
 import { normalizeArtifact } from "../src/execution/artifacts.js";
 import { loadRecoveryRuntime } from "../src/recovery/runtime.js";
+import { verifyPriorRecoveryDelivery } from "../src/recovery/outcomes.js";
 import { localExecutionScopeBatch, type AttemptContext } from "../src/execution/backend.js";
 
 const directories: string[] = [];
@@ -53,6 +55,10 @@ async function fixture(
     loseIntegrationReceipt?: boolean;
     stalePreviewOnce?: boolean;
     tokenLimit?: number;
+    artifactOnly?: boolean;
+    loseArtifactPrResponse?: boolean;
+    nativeSource?: boolean;
+    failC?: boolean;
   } = {},
 ) {
   const repository = await mkdtemp(join(tmpdir(), "factory-successor-integration-"));
@@ -92,6 +98,7 @@ async function fixture(
   const now = new Date();
   const policy = parseRunPolicy({
     ...DEFAULT_RUN_POLICY,
+    ...(options.failC ? { maxAttemptsPerItem: 1 } : {}),
     ...(options.tokenLimit === undefined
       ? {}
       : {
@@ -104,7 +111,11 @@ async function fixture(
         }),
     backendOrder: ["codex-sdk/local-worktree"],
     capacity: { ...DEFAULT_RUN_POLICY.capacity, mode: "fixed" },
-    delivery: { mode: "regular-prs", onUnavailable: "regular-prs", merge: "bottom-up" },
+    delivery: {
+      mode: options.nativeSource ? "stacked-prs" : "regular-prs",
+      onUnavailable: "regular-prs",
+      merge: "bottom-up",
+    },
   });
   const pd = policyDigest(policy);
   let sequence = 1;
@@ -284,8 +295,8 @@ async function fixture(
       event({
         kind: "delivery",
         event: "DeliverySelected",
-        requested: "regular-prs",
-        selected: "regular-prs",
+        requested: options.nativeSource ? "stacked-prs" : "regular-prs",
+        selected: options.nativeSource ? "native-stacks" : "regular-prs",
         capabilityVersion: "2026-03-10",
         reason: "Fixture observed native support",
       }),
@@ -402,7 +413,7 @@ async function fixture(
           attempt: 1,
           unitId: plan.unitId,
           itemId: item.id,
-          mode: "regular-prs",
+          mode: options.nativeSource ? "native-stacks" : "regular-prs",
           position: plan.position,
           branch: publicationBranch(7, number, 1),
           baseBranch: "main",
@@ -488,14 +499,14 @@ async function fixture(
   vi.spyOn(LeaseManager.prototype, "assertGeneration").mockResolvedValue(undefined);
   vi.spyOn(LeaseManager.prototype, "release").mockImplementation(async (value) => value);
   const findPull = (number: number) =>
-    snapshot.workItems.find((item) => item.linkedPullRequests[0]!.number === number)!
+    snapshot.workItems.find((item) => item.linkedPullRequests[0]?.number === number)!
       .linkedPullRequests[0]!;
   const mergeShas = new Map<number, string>();
   let responseLost = false;
   vi.spyOn(GitHubControlStore.prototype, "findPullRequestForBranch").mockImplementation(
     async (branch) => {
-      const item = snapshot.workItems.find(
-        (entry) => publicationBranch(7, entry.number, 1) === branch,
+      const item = snapshot.workItems.find((entry) =>
+        branch.startsWith(`factory/objective-7/work-item-${entry.number}/attempt-`),
       )!;
       const pull = item?.linkedPullRequests[0];
       if (!pull) return null;
@@ -539,7 +550,10 @@ async function fixture(
       nodeId: pull.id,
       baseRepository: "o/r",
       headRepository: "o/r",
-      headRef: publicationBranch(7, number - 10, 1),
+      headRef:
+        number === 20 && options.failC
+          ? publicationBranch(7, 10, 2)
+          : publicationBranch(7, number - 10, 1),
       state: pull.state === "OPEN" ? "open" : "closed",
       draft: false,
       merged: pull.state === "MERGED",
@@ -613,6 +627,12 @@ async function fixture(
   });
   const validate = vi.spyOn(cleanValidation, "validateArtifactClean");
   const messages: string[] = [];
+  vi.spyOn(GitHubStacks.prototype, "probe").mockResolvedValue({
+    available: true,
+    observed: true,
+    version: "2026-03-10",
+    reason: "fixture observed native API",
+  });
   const run = (recovery?: SupervisorOptions["recovery"]) =>
     new FactorySupervisor({
       token: "fixture-token",
@@ -859,6 +879,14 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
     reason: "original sibling base advanced",
   });
   f.snapshot.factoryEvents!.push(terminal);
+  if (options.artifactOnly) {
+    const b = f.snapshot.workItems[1]!;
+    b.factoryEvents = b.factoryEvents!.filter(
+      (event) => event.event !== "PublicationRecorded" && event.event !== "AttemptPublished",
+    );
+    b.linkedPullRequests = [];
+    f.refs.set(`refs/heads/${publicationBranch(7, 9, 1)}`, f.heads[1]!);
+  }
   const proposal = await buildRecoveryProposal({
     repository: "o/r",
     snapshot: f.snapshot,
@@ -936,7 +964,7 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
   });
   vi.spyOn(GitHubReader.prototype, "readRunCancellationRequest").mockResolvedValue(null);
   vi.spyOn(CodexSdkLocalBackend.prototype, "observe").mockImplementation(async () => ({
-    state: "succeeded",
+    state: options.failC && context.runId === "successor" ? "failed" : "succeeded",
     observedAt: new Date().toISOString(),
     usage: { inputTokens: 12, outputTokens: 8, cachedInputTokens: 0 },
   }));
@@ -951,20 +979,30 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
   );
   vi.spyOn(CodexSdkLocalBackend.prototype, "cleanup").mockResolvedValue(undefined);
   vi.spyOn(GitHubControlStore.prototype, "createPullRequest").mockImplementation(async (args) => {
-    expect(args.head).toBe(publicationBranch(7, 10, 1));
+    const workItem = args.head === publicationBranch(7, 9, 1) ? 9 : 10;
+    expect(args.head).toBe(publicationBranch(7, workItem, workItem === 10 ? context.attempt : 1));
     const pull: LinkedPullRequest = {
       ...f.snapshot.workItems[0]!.linkedPullRequests[0]!,
-      id: "PR_20",
-      number: 20,
-      title: "c",
+      id: `PR_${workItem + 10}`,
+      number: workItem + 10,
+      title: workItem === 9 ? "b" : "c",
       state: "OPEN",
       headSha: f.refs.get(`refs/heads/${args.head}`)!,
       mergedAt: null,
       closedAt: null,
       changedFilePaths: ["c.txt"],
     };
-    f.snapshot.workItems[2]!.linkedPullRequests.push(pull);
-    return { number: 20, htmlUrl: "https://github.com/o/r/pull/20", headSha: pull.headSha };
+    f.snapshot.workItems[workItem - 8]!.linkedPullRequests.push(pull);
+    if (options.loseArtifactPrResponse && workItem === 9)
+      throw new PlatformUnavailableError(
+        { kind: "server_error", retryAfterMs: 1 },
+        new Error("fixture source PR response lost"),
+      );
+    return {
+      number: pull.number,
+      htmlUrl: `https://github.com/o/r/pull/${pull.number}`,
+      headSha: pull.headSha,
+    };
   });
   const original = structuredClone(
     [
@@ -979,6 +1017,7 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
     claim,
     original,
     runtime,
+    runRecovery: f.run,
     run: () =>
       f.run({
         requestId: planRecord.plan.requestId,
@@ -989,6 +1028,221 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
 }
 
 describe("Supervisor authenticated successor execution", () => {
+  it.each([
+    { artifactOnly: false, failC: false },
+    { artifactOnly: true, failC: false },
+    { artifactOnly: false, failC: true },
+  ])(
+    "continues an explicit second successor without recompilation or repeated source delivery (%j)",
+    async ({ artifactOnly, failC }) => {
+      const f = await successorFixture({ tokenLimit: failC ? 1000 : 45, artifactOnly, failC });
+      expect(await f.run(), JSON.stringify(f.messages)).toMatchObject({ status: "escalated" });
+      expect(f.snapshot.workItems.slice(0, 2).every((item) => item.closed)).toBe(true);
+      expect(f.launch).toHaveBeenCalledTimes(failC ? 1 : 0);
+      if (failC) {
+        const withoutIncrement = await buildRecoveryProposal({
+          repository: "o/r",
+          snapshot: f.snapshot,
+          historyComplete: true,
+          store: f.store,
+          requestId: "no-increment",
+          successorRunId: "unapproved-retry",
+        });
+        expect(withoutIncrement.plan?.items[2]?.action).toBe("reconcile");
+        vi.mocked(localScopes.linuxLocalScopeReadPort.hostIdentity).mockResolvedValue(
+          "c".repeat(64),
+        );
+        const dirty = await buildRecoveryProposal({
+          repository: "o/r",
+          snapshot: f.snapshot,
+          historyComplete: true,
+          store: f.store,
+          requestId: "dirty-resource",
+          successorRunId: "blocked-retry",
+          allowanceIncrement: {
+            modelTokens: 100,
+            sandboxMinutes: 0,
+            managedSessions: 0,
+            implementationAttemptsPerItem: 1,
+          },
+        });
+        expect(dirty).toMatchObject({ status: "blocked", plan: null });
+        vi.mocked(localScopes.linuxLocalScopeReadPort.hostIdentity).mockResolvedValue(
+          "b".repeat(64),
+        );
+      }
+      const proposal = await buildRecoveryProposal({
+        repository: "o/r",
+        snapshot: f.snapshot,
+        historyComplete: true,
+        store: f.store,
+        requestId: "second-request",
+        successorRunId: "second-successor",
+        allowanceIncrement: {
+          modelTokens: 100,
+          sandboxMinutes: 0,
+          managedSessions: 0,
+          implementationAttemptsPerItem: failC ? 1 : 0,
+        },
+      });
+      expect(proposal.blockers).toEqual([]);
+      expect(proposal.plan!.items[1]!.source!.priorDelivery).toMatchObject({
+        runId: "successor",
+        planDigest: f.planRecord.digest,
+      });
+      const priorItem = structuredClone(proposal.plan!.items[1]!);
+      priorItem.source!.priorDelivery!.planDigest = "0".repeat(64);
+      await expect(
+        verifyPriorRecoveryDelivery({
+          plan: proposal.plan!,
+          item: priorItem,
+          events: [
+            ...f.snapshot.factoryEvents!,
+            ...f.snapshot.workItems.flatMap((item) => item.factoryEvents!),
+          ],
+          store: f.store,
+        }),
+      ).rejects.toThrow();
+      const successorLease = {
+        ...f.lease,
+        runId: "second-successor",
+        policyDigest: proposal.plan!.policyDigest,
+      };
+      const planRecord = await new RecoveryPlanManager(f.storage, f.leases).persist({
+        lease: successorLease,
+        plan: proposal.plan!,
+      });
+      const all = [
+        ...f.snapshot.factoryEvents!,
+        ...f.snapshot.workItems.flatMap((item) => item.factoryEvents!),
+      ];
+      const sequence = Math.max(...all.map((event) => event.sequence)) + 1;
+      const request = parseFactoryEvent({
+        protocol: "clockgrove.factory/v2",
+        kind: "recovery",
+        event: "RecoveryRequested",
+        objective: 7,
+        runId: "successor",
+        sequence,
+        at: new Date().toISOString(),
+        requestedBy: "operator",
+        requestId: planRecord.plan.requestId,
+        repository: "o/r",
+        planDigest: planRecord.digest,
+        predecessorRunId: "successor",
+        predecessorTerminalDigest: planRecord.plan.predecessor.terminalDigest,
+        successorRunId: "second-successor",
+        policyDigest: planRecord.plan.policyDigest,
+        baseSha: planRecord.plan.expectedBaseSha,
+      });
+      if (request.event !== "RecoveryRequested") throw new Error("request fixture");
+      f.snapshot.factoryEvents!.push(request);
+      const claim = await new RecoveryClaimManager(f.storage, f.leases).claim({
+        lease: successorLease,
+        planRecord,
+        authenticatedRequest: request,
+        transaction: {
+          at: new Date().toISOString(),
+          startSequence: sequence + 1,
+          evidenceDigest: "1".repeat(64),
+          accountingDigest: "2".repeat(64),
+          resourceEvidenceDigest: "3".repeat(64),
+        },
+      });
+      const start = all.find(
+        (event) => event.event === "FactoryRunStarted" && event.runId === "successor",
+      );
+      if (start?.event !== "FactoryRunStarted") throw new Error("start fixture");
+      f.snapshot.factoryEvents!.push(
+        ...recoveryAdoptionEvents({
+          planRecord,
+          claim,
+          authenticatedRequest: request,
+          predecessorStart: start,
+        }),
+      );
+      const loaded = await loadRecoveryRuntime({
+        objective: 7,
+        runId: "second-successor",
+        store: f.store,
+        readSnapshot: async () => ({ snapshot: f.snapshot, historyComplete: true }),
+      });
+      expect(loaded).toMatchObject({
+        status: "verified",
+        usage: { modelTokens: failC ? 65 : 45 },
+        historicalAccounting: { unknownModelUsageCount: 0 },
+      });
+      expect(
+        await f.runRecovery({
+          requestId: planRecord.plan.requestId,
+          planDigest: planRecord.digest,
+          successorRunId: "second-successor",
+        }),
+        JSON.stringify(f.messages),
+      ).toMatchObject({ status: "completed" });
+      expect(f.launch).toHaveBeenCalledTimes(failC ? 2 : 1);
+      expect(f.review).toHaveBeenCalledTimes(2);
+      expect(
+        await loadRecoveryRuntime({
+          objective: 7,
+          runId: "second-successor",
+          store: f.store,
+          readSnapshot: async () => ({ snapshot: f.snapshot, historyComplete: true }),
+        }),
+      ).toMatchObject({ status: "verified", usage: { modelTokens: failC ? 100 : 80 } });
+    },
+    60000,
+  );
+  it.each([false, true])(
+    "preserves native sibling/join topology with artifact-only recovery %s",
+    async (artifactOnly) => {
+      const f = await successorFixture({ artifactOnly, nativeSource: true });
+      const result = await f.run();
+      expect(result, JSON.stringify(f.messages)).toMatchObject({ status: "completed" });
+      expect(f.launch).toHaveBeenCalledTimes(1);
+      expect(f.review).toHaveBeenCalledTimes(2);
+      expect(
+        f.snapshot.factoryEvents!.find(
+          (event) => event.kind === "delivery" && event.runId === "successor",
+        ),
+      ).toMatchObject({ selected: "native-stacks" });
+      expect(await f.runtime()).toMatchObject({ status: "verified", usage: { modelTokens: 80 } });
+    },
+    30000,
+  );
+  it("restores a verified artifact branch after lost PR creation response without rerunning its worker", async () => {
+    const f = await successorFixture({ artifactOnly: true, loseArtifactPrResponse: true });
+    expect(f.planRecord.plan.items[1]!.source?.artifactHead?.headSha).toBe(f.heads[1]);
+    expect(await f.run()).toMatchObject({ status: "completed" });
+    expect(f.launch).toHaveBeenCalledTimes(1);
+    expect(f.launch.mock.calls[0]![0].workItem).toBe(10);
+    expect(
+      f.snapshot.workItems[1]!.factoryEvents!.filter(
+        (event) => event.event === "RecoverySourcePublished",
+      ),
+    ).toHaveLength(1);
+    expect(
+      f.snapshot.workItems[1]!.factoryEvents!.filter(
+        (event) => event.event === "RecoverySourceIntegrated",
+      ),
+    ).toHaveLength(1);
+    expect(
+      f.snapshot.workItems[1]!.factoryEvents!.some(
+        (event) => event.kind === "attempt" && event.runId === "successor",
+      ),
+    ).toBe(false);
+    expect(f.snapshot.workItems[1]!.linkedPullRequests[0]!.headSha).toBe(f.heads[1]);
+    expect(await f.runtime()).toMatchObject({ status: "verified", usage: { modelTokens: 80 } });
+  }, 30000);
+
+  it("rejects an artifact branch replacement after acknowledgement before opening a PR", async () => {
+    const f = await successorFixture({ artifactOnly: true });
+    f.refs.set(`refs/heads/${publicationBranch(7, 9, 1)}`, f.heads[0]!);
+    expect(await f.run()).toMatchObject({ status: "escalated" });
+    expect(f.launch).not.toHaveBeenCalled();
+    expect(f.review).not.toHaveBeenCalled();
+    expect(GitHubControlStore.prototype.createPullRequest).not.toHaveBeenCalled();
+  }, 30000);
   it("replays a lost B merge response without a second B validation, review, or worker", async () => {
     const f = await successorFixture({ loseMergeResponse: true });
     await expect(f.run()).rejects.toThrow(PlatformUnavailableError);

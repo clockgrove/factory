@@ -390,6 +390,111 @@ describe("host-owned publication", () => {
     },
   );
 
+  function deliveryFixture() {
+    const f = candidateFixture();
+    const delivery = {
+      ...f.commit,
+      oid: "8".repeat(40),
+      parentOids: [f.candidate.targetBaseSha],
+      message: "native stack rewrite",
+    };
+    f.current.headSha = delivery.oid;
+    f.reads.readCommit.mockImplementation(async (oid?: string) =>
+      oid === delivery.oid ? delivery : f.commit,
+    );
+    const options = { ...f.options, mergeCandidateDeliveryHeadSha: delivery.oid };
+    const ready = () =>
+      integrationReadiness(f.store, f.pull, f.candidate.targetBaseSha, "main", options);
+    return { ...f, delivery, options, ready };
+  }
+
+  it("uses the proven native delivery head for checks and mutation without changing source evidence", async () => {
+    const f = deliveryFixture();
+    const original = structuredClone(f.pull);
+    await expect(f.ready()).resolves.toEqual({ state: "ready", headSha: f.delivery.oid });
+    expect(f.reads.readCommit).toHaveBeenCalledWith(f.delivery.oid);
+    expect(f.reads.readChecks).toHaveBeenCalledWith(f.delivery.oid);
+    expect(f.pull).toEqual(original);
+    await expect(
+      integrationReadiness(f.store, f.pull, f.candidate.targetBaseSha, "main", {
+        mergeCandidateValidation: f.candidate,
+      }),
+    ).resolves.toMatchObject({ state: "failed", reason: expect.stringContaining("head changed") });
+  });
+
+  it("does not accept a delivery head as candidate authority", async () => {
+    const f = deliveryFixture();
+    await expect(
+      integrationReadiness(f.store, f.pull, undefined, "main", {
+        mergeCandidateDeliveryHeadSha: f.delivery.oid,
+      }),
+    ).rejects.toThrow("requires candidate validation");
+    await expect(
+      integrationReadiness(f.store, f.pull, undefined, "main", {
+        ...f.options,
+        mergeCandidateDeliveryHeadSha: "",
+      }),
+    ).rejects.toThrow();
+    await expect(
+      integrationReadiness(f.store, f.pull, undefined, "main", {
+        ...f.options,
+        mergeCandidateValidation: { ...f.candidate, sourceHeadSha: f.delivery.oid },
+      }),
+    ).rejects.toThrow("digest mismatch");
+    expect(f.reads.readPullRequest).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    "requires the rewritten head proof even when merged=%s",
+    async (merged) => {
+      for (const defect of ["identity", "tree", "parent", "two-parents", "no-parent", "head"]) {
+        const f = deliveryFixture();
+        f.current.merged = merged;
+        if (merged) f.current.state = "closed";
+        if (defect === "identity") f.delivery.oid = "7".repeat(40);
+        if (defect === "tree") f.delivery.treeOid = f.source.outputTreeSha;
+        if (defect === "parent") f.delivery.parentOids = [f.source.baseSha];
+        if (defect === "two-parents") f.delivery.parentOids.push(f.source.publishedHeadSha);
+        if (defect === "no-parent") f.delivery.parentOids = [];
+        if (defect === "head") f.current.headSha = f.source.publishedHeadSha;
+        await expect(f.ready(), defect).resolves.toMatchObject({ state: "failed" });
+        expect(f.reads.readChecks).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it("recovers a merged rewritten head only with the separate candidate squash proof", async () => {
+    const f = deliveryFixture();
+    f.current.merged = true;
+    f.current.state = "closed";
+    f.current.baseSha = "9".repeat(40);
+    await expect(f.ready()).resolves.toEqual({ state: "integrated", headSha: f.commit.oid });
+    expect(f.reads.readCommit).toHaveBeenCalledWith(f.delivery.oid);
+    expect(f.reads.readCommit).toHaveBeenCalledWith(f.commit.oid);
+    f.commit.treeOid = f.source.outputTreeSha;
+    await expect(f.ready()).resolves.toMatchObject({
+      state: "failed",
+      reason: expect.stringContaining("irreversible merge"),
+    });
+    expect(f.reads.readChecks).not.toHaveBeenCalled();
+  });
+
+  it.each(["base", "base-ref", "failed-check", "pending-check", "conflict", "draft"])(
+    "retains the %s guard for a proven native delivery head",
+    async (kind) => {
+      const f = deliveryFixture();
+      if (kind === "base") f.current.baseSha = "9".repeat(40);
+      if (kind === "base-ref") f.current.baseRef = "other";
+      if (kind === "failed-check") f.checks.failed = ["test"];
+      if (kind === "pending-check") f.checks.pending = ["test"];
+      if (kind === "conflict") f.current.mergeable = false;
+      if (kind === "draft") f.current.draft = true;
+      await expect(f.ready()).resolves.toMatchObject({
+        state: kind === "pending-check" ? "wait" : "failed",
+      });
+    },
+  );
+
   it("uploads exactly the independently validated tree and is idempotent", async () => {
     const { repository, base } = await fixture();
     const packet: WorkerPacket = {

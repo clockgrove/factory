@@ -122,6 +122,48 @@ const RecoveryAdoptionCompleted = Common.extend({
 
 // A successor records its own delivery outcome while retaining the exact original
 // attempt identity. It must never manufacture a cross-run AttemptIntegrated.
+const RecoverySourcePublished = Common.extend({
+  kind: z.literal("recovery"),
+  event: z.literal("RecoverySourcePublished"),
+  recoveryRequestId: safeId,
+  planDigest: sha256Digest,
+  claimRef: boundedText(500),
+  claimOid: gitSha,
+  workItem: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  sourceRunId: safeId,
+  sourceAttempt: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  sourceReservationRef: boundedText(500),
+  sourceReservationCommitOid: gitSha,
+  sourceReservationReceiptDigest: sha256Digest,
+  sourceHeadSha: gitSha,
+  sourceBaseSha: gitSha,
+  sourceTreeSha: gitSha,
+  sourceArtifactDigest: sha256Digest,
+  sourceValidationDigest: sha256Digest,
+  sourceReviewIdentityDigest: sha256Digest,
+  branch: boundedText(500),
+  baseBranch: boundedText(500),
+  pullRequest: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  pullRequestNodeId: safeId,
+  mode: z.enum(["regular-prs", "native-stacks"]),
+  unitId: safeId,
+  itemId: safeId,
+  position: z.number().int().nonnegative().max(100),
+  parentItemId: safeId.optional(),
+  stackNumber: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+  exactHeadValidationDigest: sha256Digest,
+}).superRefine((value, context) => {
+  if (
+    value.runId === value.sourceRunId ||
+    (value.mode === "regular-prs" &&
+      (value.position !== 0 || value.parentItemId || value.stackNumber))
+  )
+    context.addIssue({
+      code: "custom",
+      message: "source publication must retain distinct source ownership and observed topology",
+    });
+});
+
 const RecoverySourceIntegrated = Common.extend({
   kind: z.literal("recovery"),
   event: z.literal("RecoverySourceIntegrated"),
@@ -139,7 +181,16 @@ const RecoverySourceIntegrated = Common.extend({
   sourceHeadSha: gitSha,
   mergeCommitSha: gitSha,
   mergeCandidateIdentityDigest: sha256Digest.optional(),
+  deliveryHeadSha: gitSha.optional(),
 }).superRefine((value, context) => {
+  if (
+    value.deliveryHeadSha &&
+    (value.deliveryHeadSha === value.sourceHeadSha || !value.mergeCandidateIdentityDigest)
+  )
+    context.addIssue({
+      code: "custom",
+      message: "Distinct native delivery head requires candidate validation identity",
+    });
   if (value.runId === value.sourceRunId)
     context.addIssue({
       code: "custom",
@@ -576,6 +627,7 @@ export const FactoryEventSchema = z.union([
   RecoveryRequested,
   RecoveryConsumed,
   RecoveryAdoptionCompleted,
+  RecoverySourcePublished,
   RecoverySourceIntegrated,
   RunControlRequested,
   RunControlAcknowledged,

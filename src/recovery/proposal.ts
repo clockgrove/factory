@@ -18,6 +18,11 @@ import type { RecoveryBlocker, RecoveryReadStore } from "./assessment.js";
 import { loadRecoveryClaim, type RecoveryClaimRecord } from "./claims.js";
 import { recoveryUnknownUsageDigest, verifyRecoveryChain } from "./chain.js";
 import { recoveryClaimRef, recoveryEventDigest, recoverySourceEventsDigest } from "./identity.js";
+import { verifyRecoverySourceIntegration, verifyPriorRecoveryDelivery } from "./outcomes.js";
+import { recoverySourcePublicationBinding } from "./source-publications.js";
+import { loadHistoricalRecoveryRuntimes } from "./historical-runtime.js";
+import type { RecoveryRuntime } from "./runtime.js";
+import { verifyRecoveryProposalResources } from "./resources.js";
 import {
   RECOVERY_PLAN_PROTOCOL,
   loadRecoveryPlan,
@@ -262,6 +267,20 @@ export async function buildRecoveryProposal(input: {
           (claims.find((claim) => claim.predecessorRunId === start.runId)?.oid ?? null),
       );
 
+    stage = "authenticated-historical-runtimes";
+    const historicalRuntimes = predecessorStart.recoveryPlanDigest
+      ? await loadHistoricalRecoveryRuntimes({
+          snapshot,
+          historyComplete: true,
+          latestRunId: predecessorStart.runId,
+          store: port,
+        })
+      : new Map<string, RecoveryRuntime>();
+    const verifiedCapacity = new Set(
+      [...historicalRuntimes.values()].flatMap((runtime) =>
+        runtime.verifiedSourceCapacity.map(recoveryEventDigest),
+      ),
+    );
     stage = "graph";
     const graphs = new Map<
       string,
@@ -275,6 +294,17 @@ export async function buildRecoveryProposal(input: {
       const runEvents = events.filter((event) => event.runId === start.runId);
       const compiled = runEvents.filter((event) => event.event === "GraphCompiled");
       if (!graph) {
+        const runtime = historicalRuntimes.get(start.runId);
+        if (runtime) {
+          require(compiled.length === 0 && runtime.planRecord.digest === start.recoveryPlanDigest);
+          // Actual independently loaded graph/projection returned by authenticated
+          // runtime verification, not a synthetic graph receipt under this run.
+          graphs.set(runtime.planRecord.plan.graph.sourceRunId, {
+            graph: runtime.graph,
+            projection: runtime.projection,
+          });
+          continue;
+        }
         require(
           compiled.length === 0 &&
             !runEvents.some((event) =>
@@ -341,7 +371,14 @@ export async function buildRecoveryProposal(input: {
           reserved.event === "AttemptReserved" &&
           reserved.objective === snapshot.number &&
           reserved.policyDigest === byRun.get(reserved.runId)?.policyDigest &&
-          graphs.has(reserved.runId),
+          (graphs.has(reserved.runId) ||
+            historicalRuntimes
+              .get(reserved.runId)
+              ?.currentEvents.some(
+                (event) =>
+                  event.event === "AttemptReserved" &&
+                  recoveryEventDigest(event) === recoveryEventDigest(reserved),
+              )),
       );
       const matching = events.filter(
         (event) =>
@@ -383,6 +420,10 @@ export async function buildRecoveryProposal(input: {
     // not just the latest selected artifact, must bind its own immutable reservation.
     for (const event of events) {
       if (!["attempt", "capacity", "validation", "publication"].includes(event.kind)) continue;
+      if (event.kind === "capacity" && event.sourceRunId) {
+        require(verifiedCapacity.has(recoveryEventDigest(event)));
+        continue;
+      }
       const reservation = reservations.get(`${event.workItem}:${event.attempt}`)?.event;
       require(
         reservation &&
@@ -399,6 +440,7 @@ export async function buildRecoveryProposal(input: {
     }
 
     const items: RecoveryPlanItem[] = [];
+    const failedRetries = new Set<number>();
     for (const binding of projection.bindings) {
       currentWorkItem = binding.issueNumber;
       stage = "item-history";
@@ -420,6 +462,86 @@ export async function buildRecoveryProposal(input: {
         resources: { state: "not-required", receiptDigest: null, identities: [] },
       };
       items.push(planItem);
+      const priorOutcomes = itemEvents.filter(
+        (event) => event.event === "RecoverySourceIntegrated" && priorPlans[event.planDigest],
+      );
+      const priorOutcome = priorOutcomes.at(-1);
+      if (priorOutcome?.event === "RecoverySourceIntegrated") {
+        stage = "prior-source-delivery";
+        const prior = priorPlans[priorOutcome.planDigest]!;
+        const priorItem = prior.plan.items.find((value) => value.workItem === item.number);
+        const claim = claims.find((value) => value.planDigest === prior.digest);
+        require(
+          priorItem?.source &&
+            claim &&
+            selected &&
+            selected.event.runId === priorItem.source.runId &&
+            selected.event.attempt === priorItem.source.attempt &&
+            item.closed,
+        );
+        const proof = await verifyRecoverySourceIntegration({
+          planRecord: prior,
+          claim,
+          events,
+          store: port,
+          outcome: priorOutcome,
+        });
+        require(proof.status === "verified");
+        let publication = priorItem.source.publication;
+        if (!publication) {
+          const restored = events.find(
+            (event) => recoveryEventDigest(event) === priorOutcome.sourcePublicationReceiptDigest,
+          );
+          require(restored?.event === "RecoverySourcePublished");
+          publication = recoverySourcePublicationBinding(restored, repository);
+        }
+        const pull = await port.readPullRequest(publication.pullRequest);
+        const head = await port.readCommit(pull.headSha);
+        require(
+          pull.number &&
+            pull.nodeId &&
+            pull.headRef &&
+            pull.baseRepository &&
+            pull.headRepository &&
+            pull.merged &&
+            pull.mergeCommitSha === priorOutcome.mergeCommitSha &&
+            item.linkedPullRequests!.filter(
+              (value) =>
+                value.number === pull.number &&
+                value.id === pull.nodeId &&
+                value.state === "MERGED" &&
+                value.headSha === pull.headSha,
+            ).length === 1 &&
+            !item.linkedPullRequests!.some((value) => value.state === "OPEN"),
+        );
+        planItem.source = {
+          ...priorItem.source,
+          publication,
+          priorDelivery: {
+            runId: priorOutcome.runId,
+            planDigest: prior.digest,
+            integrationReceiptDigest: recoveryEventDigest(priorOutcome),
+            ...(priorOutcome.deliveryHeadSha
+              ? { deliveryHeadSha: priorOutcome.deliveryHeadSha }
+              : {}),
+          },
+        };
+        planItem.action = "integrated";
+        planItem.resources = { state: "unknown", receiptDigest: null, identities: [] };
+        planItem.observedPullRequest = {
+          number: pull.number,
+          nodeId: pull.nodeId,
+          headSha: pull.headSha,
+          baseSha: pull.baseSha,
+          treeSha: head.treeOid,
+          headRef: pull.headRef,
+          baseRef: pull.baseRef,
+          headRepository: pull.headRepository,
+          baseRepository: pull.baseRepository,
+          state: "merged",
+        };
+        continue;
+      }
       if (!selected) {
         require(
           !item.closed &&
@@ -487,6 +609,56 @@ export async function buildRecoveryProposal(input: {
         !source.artifactDigest
       ) {
         require(!publication && !item.closed && item.linkedPullRequests!.length === 0);
+        // Retry describes a candidate only: exact counters/reconciliation and
+        // cumulative remaining attempts are mandatory. Resource observations stay
+        // explicit; acknowledged adoption must prove absence before admission.
+        const failed = sourceEvents.filter((event) => event.kind === "attempt").at(-1);
+        if (
+          !validation &&
+          !source.artifactDigest &&
+          reserved.localScopeBatch &&
+          failed?.kind === "attempt" &&
+          failed.event === "AttemptFailed" &&
+          failed.reportedModelTokens !== undefined
+        ) {
+          const usage = sourceEvents.filter(
+            (event) =>
+              event.kind === "budget" &&
+              event.event === "BudgetReconciled" &&
+              event.phase === "execution" &&
+              event.unit === "model_tokens",
+          );
+          const capacity = sourceEvents.filter(
+            (event) => event.kind === "capacity" && event.event === "CapacityReserved",
+          );
+          // Execution capacity is journaled on AttemptReserved itself; separate
+          // CapacityReserved envelopes describe validation only. The owned
+          // execution batch still requires actual absence below even if none exist.
+          require(
+            usage.length === 1 &&
+              usage[0]!.amount === failed.reportedModelTokens &&
+              usage[0]!.sequence < failed.sequence &&
+              capacity.every((reservation) =>
+                sourceEvents.some(
+                  (event) =>
+                    event.kind === "capacity" &&
+                    event.event === "CapacityReconciled" &&
+                    event.backend === reservation.backend &&
+                    event.phase === reservation.phase &&
+                    event.requestedCpu === reservation.requestedCpu &&
+                    event.requestedMemoryMb === reservation.requestedMemoryMb &&
+                    event.sequence > reservation.sequence,
+                ),
+              ),
+          );
+          require(
+            (await port.readRef(
+              `refs/heads/${publicationBranch(snapshot.number, item.number, reserved.attempt)}`,
+            )) === null,
+          );
+          planItem.action = "execute";
+          failedRetries.add(item.number);
+        }
         continue;
       }
       stage = "artifact";
@@ -577,6 +749,11 @@ export async function buildRecoveryProposal(input: {
         );
       if (!publication || publication.kind !== "publication") {
         require(!item.closed && item.linkedPullRequests!.length === 0);
+        source.artifactHead = {
+          branch: publicationBranch(snapshot.number, item.number, reserved.attempt),
+          headSha: head,
+          treeSha: commit.treeOid,
+        };
         planItem.action = validation.baseSha === base.oid ? "reuse-artifact" : "revalidate";
         continue;
       }
@@ -802,6 +979,13 @@ export async function buildRecoveryProposal(input: {
       policy,
     });
     require(accounting.usage !== null);
+    for (const workItem of failedRetries)
+      if (
+        (accounting.attemptCounts.find((entry) => entry.workItem === workItem)?.remaining ?? 0) <= 0
+      ) {
+        items.find((item) => item.workItem === workItem)!.action = "reconcile";
+        failedRetries.delete(workItem);
+      }
     result.unknownUsageDigest = accounting.unknownModelUsageCount
       ? recoveryUnknownUsageDigest(sourceEventsDigest, accounting)
       : null;
@@ -840,7 +1024,23 @@ export async function buildRecoveryProposal(input: {
       unknownUsageAcknowledgementDigest: input.unknownUsageAcknowledgementDigest ?? null,
       items,
     });
+    if (failedRetries.size) {
+      stage = "failed-retry-accounting";
+      require(
+        accounting.unknownModelUsageCount === 0 &&
+          accounting.unreconciledReservationCount === 0 &&
+          accounting.blockerCount === accounting.blockers.length &&
+          accounting.blockers.every((blocker) => blocker.code === "historical-policy-difference"),
+      );
+      const resources = await verifyRecoveryProposalResources({ plan, events, store: port });
+      for (const workItem of failedRetries)
+        plan.items.find((item) => item.workItem === workItem)!.resources.state =
+          resources.status === "verified" ? "unknown" : "reconciliation-required";
+    }
     stage = "chain";
+    for (const item of plan.items)
+      if (item.source?.priorDelivery)
+        await verifyPriorRecoveryDelivery({ plan, item, events, store: port });
     const chain = verifyRecoveryChain({
       repository,
       repositoryId: snapshot.repositoryId,

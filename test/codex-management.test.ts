@@ -88,8 +88,8 @@ describe("Codex management backend", () => {
       JSON.stringify({ scripts: { test: "node --test", dev: "node server.js" } }),
     );
     const runStructured = vi.fn(async (_cwd: string, _schema: unknown, prompt: string) => {
-      expect(prompt).toContain('"declaredScripts":{"test":"node --test","dev":"node server.js"}');
-      expect(prompt).toContain('"validationCommands":["npm test","node --test"]');
+      expect(prompt).toContain('"declaredScripts":{"dev":"node server.js","test":"node --test"}');
+      expect(prompt).toContain('"validationCommands":["npm test","npm run dev","node --test"]');
       expect(prompt).toContain("created within this Work Item's declared scope");
       throw new Error("prompt inspected");
     });

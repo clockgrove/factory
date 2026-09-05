@@ -1,4 +1,7 @@
 import { posix } from "node:path";
+import { assertSafeValidationCommand } from "../validation/plan.js";
+
+export { readRepositoryFacts } from "./read.js";
 
 export const MAX_REPOSITORY_FILES = 10_000;
 export const MAX_MANIFEST_PATHS = 64;
@@ -20,6 +23,8 @@ export type ExecutionProfile = {
 export type RepositoryFacts = {
   files: RepositoryFile[];
   scripts?: Record<string, string>;
+  /** Bounded contents of observed repository files, never model-supplied recipes. */
+  documents?: Record<string, string>;
 };
 export type ContextManifest = { mustRead: string[]; searchSeeds: string[] };
 
@@ -77,16 +82,42 @@ export function normalizeRepositoryFacts(input: RepositoryFacts): RepositoryFact
   const scripts = Object.fromEntries(
     Object.entries(input.scripts ?? {}).sort(([a], [b]) => a.localeCompare(b)),
   );
+  const documents = Object.fromEntries(
+    Object.entries(input.documents ?? {})
+      .map(([path, text]) => {
+        const normalized = cleanPath(path);
+        if (!byPath.has(normalized)) throw new Error(`unobserved repository document: ${path}`);
+        if (Buffer.byteLength(text) > 256 * 1024)
+          throw new Error(`repository document exceeds byte bound: ${path}`);
+        return [normalized, text] as const;
+      })
+      .sort(([a], [b]) => a.localeCompare(b)),
+  );
+  if (
+    Object.keys(documents).length > 64 ||
+    Buffer.byteLength(JSON.stringify(documents)) > 2 * 1024 * 1024
+  )
+    throw new Error("repository documents exceed aggregate bound");
   return {
     files: [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path)),
     scripts,
+    ...(input.documents === undefined ? {} : { documents }),
   };
 }
 
 export function discoverValidationCommands(factsInput: RepositoryFacts): string[] {
   const facts = normalizeRepositoryFacts(factsInput);
   const scripts = facts.scripts ?? {};
-  const names = VALIDATION_SCRIPT_NAMES.filter((name) => typeof scripts[name] === "string");
+  const names = [
+    ...VALIDATION_SCRIPT_NAMES.filter((name) => typeof scripts[name] === "string"),
+    ...Object.keys(scripts)
+      .filter(
+        (name) =>
+          !VALIDATION_SCRIPT_NAMES.includes(name) &&
+          /^[A-Za-z0-9][A-Za-z0-9:_.-]{0,127}$/.test(name),
+      )
+      .sort(),
+  ];
   const observedPaths = new Set(facts.files.map((file) => file.path));
   const recipes = names.flatMap((name) => {
     const recipe = scripts[name]!;
@@ -96,7 +127,73 @@ export function discoverValidationCommands(factsInput: RepositoryFacts): string[
   return [
     ...names.map((name) => (name === "test" ? "npm test" : `npm run ${name}`)),
     ...uniqueSorted(recipes),
+    ...discoverOtherCommands(facts),
   ];
+}
+
+/** Exact observed commands only; documents cannot grant shell/eval/download authority. */
+function safeObservedCommand(command: string): boolean {
+  if (command.length > 1_000 || !/^[A-Za-z0-9_.+-]+(?: [A-Za-z0-9_./:=+-]+)*$/.test(command))
+    return false;
+  if (command.split(" ").some((token) => token.startsWith("/") || token.split("/").includes("..")))
+    return false;
+  const runner = command.split(" ")[0]!;
+  try {
+    assertSafeValidationCommand(command, [runner]);
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+function discoverOtherCommands(facts: RepositoryFacts): string[] {
+  const documents = facts.documents ?? {};
+  const paths = new Set(facts.files.map((file) => file.path));
+  const commands: string[] = [];
+  if (paths.has("Cargo.toml")) commands.push("cargo check", "cargo test");
+  if (paths.has("go.mod")) commands.push("go test ./...", "go vet ./...");
+  const pytestConfigured =
+    paths.has("pytest.ini") ||
+    /\[tool\.pytest(?:\.ini_options)?\]/.test(documents["pyproject.toml"] ?? "") ||
+    /\[tool:pytest\]/.test(documents["setup.cfg"] ?? "");
+  if (pytestConfigured) commands.push("python -m pytest", "python3 -m pytest");
+  const makefile = ["GNUmakefile", "makefile", "Makefile"].find((path) => paths.has(path));
+  if (makefile) {
+    for (const line of (documents[makefile] ?? "").split(/\r?\n/)) {
+      // Literal target lists only: no pattern rules, expansions, includes, or recipes.
+      const targets = /^([A-Za-z0-9][A-Za-z0-9_. -]*):(?!=)/.exec(line)?.[1];
+      for (const target of targets?.split(/ +/) ?? []) if (target) commands.push(`make ${target}`);
+    }
+  }
+  for (const [path, text] of Object.entries(documents)) {
+    if (!/(?:^|\/)(?:README|CONTRIBUTING|AGENTS)(?:\.md)?$/i.test(path)) continue;
+    let fenced = false;
+    for (const line of text.split(/\r?\n/)) {
+      if (/^\s*```/.test(line)) {
+        fenced = !fenced;
+        continue;
+      }
+      const candidates = fenced
+        ? [line.trim().replace(/^\$ /, "")]
+        : [...line.matchAll(/`([^`\n]+)`/g)].map((match) => match[1]!);
+      for (const command of candidates) {
+        if (!safeObservedCommand(command)) continue;
+        const [runner, verb, target] = command.split(" ");
+        const validationRunner =
+          /^(?:pytest|ruff|mypy|tsc|eslint|vitest|jest)$/.test(runner!) ||
+          (runner === "cargo" &&
+            ["check", "test", "build", "clippy", "fmt"].includes(verb ?? "")) ||
+          (runner === "go" && ["test", "vet", "build"].includes(verb ?? "")) ||
+          (runner === "make" && commands.includes(`make ${verb}`)) ||
+          (["python", "python3"].includes(runner!) &&
+            verb === "-m" &&
+            ["pytest", "unittest", "compileall"].includes(target ?? "")) ||
+          (["node", "python", "python3"].includes(runner!) && !!verb && paths.has(verb));
+        if (validationRunner) commands.push(command);
+      }
+    }
+  }
+  return uniqueSorted(commands.filter(safeObservedCommand));
 }
 
 export function isGroundedValidationCommand(
@@ -126,6 +223,9 @@ export function profileRepository(factsInput: RepositoryFacts): ExecutionProfile
   const languages: string[] = [];
   if (paths.some((p) => /\.(?:ts|tsx|mts|cts)$/.test(p))) languages.push("typescript");
   if (paths.some((p) => /\.(?:js|jsx|mjs|cjs)$/.test(p))) languages.push("javascript");
+  if (paths.some((p) => p.endsWith(".py"))) languages.push("python");
+  if (paths.some((p) => p.endsWith(".rs"))) languages.push("rust");
+  if (paths.some((p) => p.endsWith(".go"))) languages.push("go");
   const generatedOutput = facts.files.some(
     (f) => f.generated === true || /(^|\/)(?:dist|build|generated)\//i.test(f.path),
   );
@@ -156,9 +256,18 @@ export function buildContextManifest(
     .filter((path) =>
       scope.some((entry) => (entry.endsWith("/") ? path.startsWith(entry) : path === entry)),
     );
-  const roots = ["AGENTS.md", "package.json", "tsconfig.json"].filter((p) =>
-    facts.files.some((f) => f.path === p),
-  );
+  const roots = [
+    "AGENTS.md",
+    "package.json",
+    "tsconfig.json",
+    "pyproject.toml",
+    "pytest.ini",
+    "Cargo.toml",
+    "go.mod",
+    "Makefile",
+    "GNUmakefile",
+    "makefile",
+  ].filter((p) => facts.files.some((f) => f.path === p));
   const mustRead = uniqueSorted([...roots, ...scoped]).slice(0, MAX_MANIFEST_PATHS);
   return {
     mustRead,

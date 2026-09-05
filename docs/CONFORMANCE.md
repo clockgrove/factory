@@ -50,6 +50,9 @@ test-merge metadata, wrong test-merge trees, external trunk changes, failed test
 review, and unknown validator cleanup. The candidate proof/checkpoint, publication, review, and
 capacity suites cover their lower-level binding and durability contracts. These are offline
 component results, not a completed installed Objective, live native stack, or dependent-join gate.
+The [component verification record](release-evidence/parallel-sibling-integration-component-2026-09-05.json)
+binds the source commit, full release-suite result, exact local package, and freshly reinstalled
+CLI/MCP entry points. The historical qualification remains escalated; installation did not revive it.
 
 | Surface | Evidence | Status |
 |---|---|---|

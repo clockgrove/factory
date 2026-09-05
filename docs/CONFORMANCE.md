@@ -11,6 +11,15 @@ the [delivery plan](DELIVERY-PLAN.md) retains the accepted waves.
 
 ## Proven on this branch
 
+The [foreground-recovery candidate](release-evidence/foreground-recovery-candidate-component-2026-09-05.json)
+passed full integrated checks and exact matching Linux installation at `007cd8c`. The installed
+successor then adopted the original work, refreshed and integrated the retained publication, and
+implemented the dependent item. All three Work Items are done, with 219,769 cumulative known tokens
+under the unchanged 500,000 threshold. [Objective closure remains incomplete](release-evidence/recovery-quota-closure-component-2026-09-05.json):
+GitHub REST exhaustion exposed repeated immutable reads and a controller restart loop. The exact
+controller was stopped; quota/closure corrections and independent successor qualification remain
+required. These observed results do not erase earlier failures or close any broad release gate.
+
 The [installed foreground-resource component](release-evidence/recovery-foreground-resource-component-2026-09-05.json)
 records discovery repair at `0363c5e`: replaying the exact accepted request restored the structural
 label and the controller reached adoption. Adoption then blocked at `resource-absence-unverified`

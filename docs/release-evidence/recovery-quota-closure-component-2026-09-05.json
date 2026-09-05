@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "kind": "installed-retained-work-delivery-with-quota-blocked-closure-component",
+  "sourceCommit": "007cd8c22fcb99473637d1ded7865c6ffb6ff018",
+  "observedAt": "2026-09-05T22:06:46.117Z",
+  "result": "all Work Items done; Objective closure interrupted by GitHub quota and controller restart loop",
+  "observations": {
+    "successorAdoptionCompleted": true,
+    "originalRunRemainsEscalated": true,
+    "workItemsDone": 3,
+    "newImplementationAttempts": 1,
+    "reusedPendingPublicationIntegrated": true,
+    "objectiveClosed": false,
+    "successorState": "active",
+    "modelTokensBefore": 131622,
+    "successorModelTokens": 88147,
+    "cumulativeModelTokens": 219769,
+    "approvedModelTokenThreshold": 500000,
+    "allowanceIncrement": 0,
+    "unknownUsageAcknowledgement": false,
+    "outstandingRecordedNativeReservations": 0,
+    "controller": "normal installed Stop; independently inactive with MainPID zero, no job or control group; ten service restarts had been observed"
+  },
+  "failure": {
+    "firstPrimaryRefusalAt": "2026-09-05T22:01:34Z",
+    "primaryResource": "core",
+    "limit": 5000,
+    "remaining": 0,
+    "reportedResetAt": "2026-09-05T22:32:18Z",
+    "recordedObjectiveDeadline": "2026-09-05T22:28:37Z",
+    "escapedPath": "rate-limited lease release after an Objective reconciliation refusal; later bootstrap refusals also escaped into service restarts",
+    "diagnosis": "Recovery repeatedly reloaded immutable Git content across proof calls; transient controller bootstrap/discovery/lease failures lacked one shared cooldown boundary. Timeout ordering would escalate before observing already-completed delivery on a late restart.",
+    "separateRateEndpointCaveat": "A later dedicated rate endpoint returned a different full balance. It did not override the failed request's zero-remaining/reset headers or authorize resuming the stopped controller."
+  },
+  "retainedEvidenceSha256": {
+    "lastStatus": "69022a76402341b374a2ade5ba2615567fe4f5d568e63dda9a0b4ef81726812a",
+    "filteredControllerLog": "8a3b1334bf852a3908e07039dd48089756483b2eae335f40ecf74663dcfe90a6",
+    "installedStop": "62e20a2ef2f3eacb110436b7a8f8dbd8092e9230722fd09941a0140cc547655b",
+    "controllerAbsence": "fbac9351a0fd38fe3704dbbfcb53fd9e2441ccbb2eec8cd6fdad82df98b99497"
+  },
+  "limitations": [
+    "Delivery is observed through installed status and authenticated receipts; the frozen independent successor qualifier has not been run because Objective closure is incomplete.",
+    "Recorded reservation reconciliation and controller absence do not substitute for the final independent all-resource observation.",
+    "The three quota/closure corrections are subsequent implementation, not part of the identified tested/installed candidate.",
+    "No regeneration, extra allowance, timeout extension, credential switch, or provider execution is authorized by this failure.",
+    "All broad prepublication gates remain Open. This document is later than the identified installed package."
+  ]
+}

@@ -30,7 +30,7 @@ describe("same-run controller restart after integration", () => {
         const resumed = await f.run();
         expect(resumed, resumed.reason).toMatchObject({
           status: "completed",
-          runId: "provider-fixture",
+          runId: f.runId,
         });
         expect(
           f.events().filter((event) => event.event === "AttemptIntegrated" && event.workItem === 8),
@@ -97,7 +97,7 @@ describe("same-run controller restart after integration", () => {
       const resumed = await f.run();
       expect(resumed, resumed.reason).toMatchObject({
         status: "completed",
-        runId: "provider-fixture",
+        runId: f.runId,
       });
       expect(
         f.activity

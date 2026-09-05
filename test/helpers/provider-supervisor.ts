@@ -2,6 +2,7 @@
  * stores, scheduler, validation, review checkpoints and publication decisions.
  * GitHub transport and execution resources are simulations, never live evidence. */
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -182,7 +183,9 @@ export async function providerSupervisorFixture(
   };
   const lease: LeaseState = {
     objective: 7,
-    runId: "provider-fixture",
+    // Separate fixtures share the host user manager but are distinct durable runs.
+    // A fixed ID can collide even when temporary checkout paths differ.
+    runId: `provider-fixture-${randomUUID()}`,
     holder: "operator",
     policyDigest: pd,
     ref: "lease",
@@ -829,6 +832,7 @@ export async function providerSupervisorFixture(
   let controllerGeneration = 0;
   return {
     repository,
+    runId: lease.runId,
     policy,
     snapshot,
     activity,

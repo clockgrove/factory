@@ -234,7 +234,7 @@ it.each([
       const result = await fixture.run();
       expect(result, result.reason).toMatchObject({
         status: "completed",
-        runId: "provider-fixture",
+        runId: fixture.runId,
       });
       expect(
         [...fixture.refs.entries()].filter(([ref]) => ref.includes("/native-rebases/")),

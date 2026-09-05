@@ -541,17 +541,7 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
   }
 
   async launch(context: AttemptContext): Promise<BackendHandle> {
-    if (
-      [...this.#running.values()].some(
-        (running) =>
-          running.launcherCleanupUnverified &&
-          running.context.repository === context.repository &&
-          running.context.runId === context.runId &&
-          running.context.workItem === context.workItem,
-      )
-    ) {
-      throw new Error("SDK launcher cleanup is unverified; automated replacement is blocked");
-    }
+    this.#assertNoUnverifiedLauncher(context);
     const scope = localExecutionScopeBatch(context);
     if (Date.now() >= context.deadline.getTime()) {
       throw new Error("attempt deadline already elapsed");
@@ -747,6 +737,7 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
   }
 
   async reconcileStale(identity: StaleAttemptIdentity): Promise<void> {
+    this.#assertNoUnverifiedLauncher(identity);
     if (process.platform === "win32") {
       throw new Error("stale SDK process reconciliation is supported only on Linux/WSL");
     }
@@ -960,5 +951,20 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
     const running = this.#running.get(handle.resourceId);
     if (!running) throw new Error(`unknown SDK worker ${handle.resourceId}`);
     return running;
+  }
+
+  #assertNoUnverifiedLauncher(
+    identity: Pick<StaleAttemptIdentity, "repository" | "runId" | "workItem">,
+  ): void {
+    if (
+      [...this.#running.values()].some(
+        (running) =>
+          running.launcherCleanupUnverified &&
+          running.context.repository === identity.repository &&
+          running.context.runId === identity.runId &&
+          running.context.workItem === identity.workItem,
+      )
+    )
+      throw new Error("SDK launcher cleanup is unverified; automated replacement is blocked");
   }
 }

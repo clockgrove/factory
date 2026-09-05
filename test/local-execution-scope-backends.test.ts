@@ -394,6 +394,18 @@ describe.each(["cli", "sdk"] as const)("%s journaled execution scope", (kind) =>
         });
         expect(await f.port.show(f.unit)).toContain("LoadState=not-found");
         await expect(f.backend.cleanup(handle)).rejects.toThrow("automated replacement is blocked");
+        await expect(
+          f.backend.reconcileStale({
+            repository: f.input.repository,
+            objective: f.input.objective,
+            workItem: f.input.workItem,
+            attempt: f.input.attempt,
+            runId: f.input.runId,
+            directorEpoch: f.input.directorEpoch,
+            phase: "execution",
+            providerResourceId: handle.resourceId,
+          }),
+        ).rejects.toThrow("automated replacement is blocked");
         await expect(f.backend.cancel(handle)).rejects.toThrow("automated replacement is blocked");
         await expect(f.backend.collect(handle)).rejects.toThrow("automated replacement is blocked");
         await expect(f.backend.launch(f.input)).rejects.toThrow("automated replacement is blocked");

@@ -85,6 +85,12 @@ These are settled. Do not relitigate them.
 - Give each agent an outcome, file ownership, acceptance criteria, relevant context, and a concise
   return format. Keep shared-file edits under one owner. The coordinating agent owns integration
   and checks the returned evidence; do not duplicate an assigned investigation without a reason.
+- Use additional Codex sessions as needed for genuinely independent work when a session's agent
+  pool would otherwise serialize the project. The user has authorized this coordination pattern;
+  each additional session needs an isolated worktree, explicit ownership, a bounded deliverable,
+  and a handoff to the integration owner. Respect platform and account limits across sessions.
+  Optimize completed capability throughput and quota use, not session count; do not duplicate
+  active work, expand scope, or start deferred testing merely to occupy more workers.
 - Process delivered user corrections and agent messages before further dependent work. Use the
   harness's supported steering and wait mechanisms. Verify its message-delivery behavior before
   relying on it; do not assume messages require a completed turn or end turns merely as a ritual.

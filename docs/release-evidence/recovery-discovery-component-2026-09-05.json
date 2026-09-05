@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "kind": "installed-successor-request-discovery-failure-component",
+  "sourceCommit": "f67fd05ac97ffd68803e1fea299c7977e5b3c73c",
+  "observedAt": "2026-09-05T20:47:07.853Z",
+  "result": "incomplete: accepted successor request was not discovered",
+  "observations": {
+    "explicitSuccessorApproval": true,
+    "exactPlanRequested": true,
+    "allowanceIncrement": 0,
+    "unknownUsageAcknowledgement": false,
+    "modelTokensBefore": 131622,
+    "modelTokensAfter": 131622,
+    "successorWorkerStarted": false,
+    "objectiveStructuralLabels": [],
+    "controller": "started and acquired repository lease, but did not discover the unlabeled foreground-created Objective",
+    "cleanup": "normal installed Stop; exact controller independently inactive/dead, MainPID zero, no pending job"
+  },
+  "retainedEvidenceSha256": {
+    "proposal": "a546501ad195ab81beb46d077a7dcbab7ed13cdaab37ae2ddf627b79edabf7cd",
+    "acceptedRequest": "1b8c402eeca5b02744c80a93843ab7624055e761c1f86c5c104332d31fc82935",
+    "lastStatus": "6ded4a3f65517eb7719e39ad3a0313311af3f54c1732e8c5bdb305b40ff2cda1",
+    "objectiveDiscovery": "f3bced3fe6ff26e89bcbb7419434158edfc98957a92a9d3f647e88a3f9a3c592",
+    "controllerLog": "356753561581033fbb1ee6316076d8f8d0e66e6575d09abdd839f8a4dfbb173d",
+    "controllerAbsence": "f595e40ca11fac6cfd3ab48782e128130ab85dbf84b4f17c82a1c0da99f57e74"
+  },
+  "correction": "Accepted requests and exact authenticated replays repair the structural Objective discovery label; same request and plan digest retain authority without another activation or allowance.",
+  "limitations": [
+    "The accepted request remains durable. This record is not successor adoption or execution qualification.",
+    "The original failed native run remains escalated, with its artifacts and accounting retained.",
+    "The correction and this evidence document are later changes, not part of the identified installed candidate.",
+    "All six broad prepublication gates remain Open."
+  ]
+}

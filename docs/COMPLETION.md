@@ -13,6 +13,14 @@ regressions for duplicate-equivalent receipts, immutable bindings, and actual SD
 The three implementation lanes found no additional concrete unblocked code gap at `ba924292`.
 That is an implementation assessment, not a claim that all installed scenarios pass.
 
+The authorized successor exercise subsequently exposed two concrete gaps: a stale assessment
+diagnostic and missing structural discovery-label repair for recovery of a foreground-created
+Objective. Both corrections are integrated with focused regressions and independent discovery review.
+The [original discovery failure](release-evidence/recovery-discovery-component-2026-09-05.json) remains
+preserved; installed continuation on the corrected artifact is the next qualification step.
+The accepted recovery request remains durable and unchanged; no successor worker started before
+the controller was stopped for correction.
+
 **Managed Codex is still blocked implementation**, not a finished adapter awaiting a key. Its profile
 is disabled; enabling it requires authoritative actor discovery and a provider-specific task/session
 lifecycle binding. The shared implementation currently observes Copilot Agent Tasks. Populating a
@@ -26,7 +34,8 @@ active agents. Each row closes only when its stated acceptance is evidenced.
 | Target / capability | Acceptance | Kind | Owner / status | Dependency → next deliverable |
 | --- | --- | --- | --- | --- |
 | Pilot — corrected integrated artifact | Frozen source passes integrated checks; matching staged package installs with recorded hashes. | Testing | Coordinator / completed | Passed at `f67fd05`; exact matching Linux CLI artifact installed. [Candidate evidence](release-evidence/publication-recovery-candidate-component-2026-09-05.json) → use this identity for the authorized continuation. |
-| Pilot — concurrent native delivery and recovery | Installed corrected runtime reuses authenticated completed work, validates/reviews each changed head, integrates remaining sibling and dependent join, closes the Objective, and proves accounting/resource cleanup. Original failed attempt stays failed. | Testing, External input | Local runtime / waiting | Candidate above + explicit successor approval → bounded successor qualification within existing authority; no fresh replacement Objective merely to erase history. |
+| Pilot — discoverable explicit recovery | A foreground-created Objective without discovery labels becomes discoverable after an authorized recovery request; replay repairs a lost label without new authority, request or allowance. | Testing | Recovery requests / implemented | Focused request/replay correction passed review → matching corrected artifact and same-request installed replay. |
+| Pilot — concurrent native delivery and recovery | Installed corrected runtime reuses authenticated completed work, validates/reviews each changed head, integrates remaining sibling and dependent join, closes the Objective, and proves accounting/resource cleanup. Original failed attempt stays failed. | Testing | Local runtime / waiting | Successor approved; exact request accepted. Discovery repair above → bounded continuation with unchanged authority; no fresh replacement Objective merely to erase history. |
 | Pilot — local-only adopter handoff | Installed doctor/plan and explicit bounded activation are usable on the actual pilot checkout; scope, trust, delivery policy and allowance are accepted. SDK is the chosen route; direct CLI evidence is not automatic fallback evidence. | Testing, External input | Coordinator + operator / waiting | Corrected local qualification + pilot Objective/authority → ready-to-start local pilot handoff; no cloud prerequisite or silent production activation. |
 | Release — remaining Linux and local fault cases | Native Linux, WSL2 and macOS-hosted Linux satisfy lifecycle/resource checks; SDK-failure fallback, broader adaptive priority/pressure/lease cases, native stacks/merge queue, and adversarial restart/cancel/conflict/budget cases pass. | Testing, External input | Local qualification / waiting | Stable candidate + missing host access and scoped fault authority → remaining cases in the four local [gate rows](CONFORMANCE.md#verification-required-before-publication), retaining existing exact-candidate evidence. |
 | Release — Daytona burst | Real local/cloud overlap, fresh validation, TTL, egress, secret isolation, cancellation/restart, native accounting and exact cleanup pass. | Testing, External input | Provider qualification / blocked | Provider prerequisites below → authorized installed multi-worker Objective and lifecycle observations. |
@@ -46,12 +55,14 @@ or published distribution from the product contract. Vercel Sandbox and Codex Ap
 | Local runtime closure | Completed | No additional unblocked implementation defect identified. Restart only for a concrete defect or authorized qualification deliverable. |
 | Compilation/chat/economics/scheduling | Completed | No additional unblocked implementation gap identified. No make-work test lane. |
 | Provider implementation closure | Completed | Daytona/Copilot implementation classified; Codex's externally blocked implementation remains explicit. |
-| Coordination and candidate qualification | Completed | Guidance applied; frozen `f67fd05` passed integrated checks and matching installation. Capability PR handoff retains all remaining gates; execution waits for the named approvals. |
+| Recovery request discovery correction | Completed | Integrated fresh acceptance/replay repair with unchanged identity/authority; focused regressions and independent review passed. |
+| Coordination and candidate qualification | Running | `f67fd05` passed offline checks/install; its accepted successor request was not discovered. Preserve that failure, integrate the concrete correction, then continue the authorized qualification using a separately identified artifact. |
 
 ## External inputs — one actionable list
 
-1. **Successor execution:** approve the pending exact disposable Objective continuation under its
-   existing allowance. No allowance increase, unknown-usage waiver, or approval is inferred here.
+1. **Successor execution — approved:** the exact disposable continuation is authorized under its
+   existing allowance and its digest-bound request is accepted. This is no longer an external blocker.
+   No allowance increase or unknown-usage waiver is authorized; discovery repair is implementation work.
 2. **Daytona:** supply `DAYTONA_API_KEY`; workers also need `FACTORY_DAYTONA_MODEL_SECRET` naming one
    organization Secret restricted to `["api.openai.com"]`. Managed validation also needs Daytona
    credentials, but not its worker model Secret. See [setup](setup/daytona.md).
@@ -75,7 +86,8 @@ source/artifact identities, original failures and prior component results. The p
 failed; its separate planning pass does not qualify recovery. The interrupted later release check is
 not a pass. The [corrected candidate component](release-evidence/publication-recovery-candidate-component-2026-09-05.json)
 passes integrated checks and exact installation at `f67fd05`, but has not qualified installed
-continuation. This board update is subsequent documentation, not part of that installed package.
+continuation. The later approved request revealed missing discovery repair, not a passed recovery
+scenario. This board update is subsequent documentation, not part of that installed package.
 
 Finish implementation and integration review first. Then freeze a candidate, run integrated checks,
 build/install matching bytes and execute authorized end-to-end cases. After a defect, run affected

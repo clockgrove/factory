@@ -11,6 +11,13 @@ the [delivery plan](DELIVERY-PLAN.md) retains the accepted waves.
 
 ## Proven on this branch
 
+The [installed recovery-discovery component](release-evidence/recovery-discovery-component-2026-09-05.json)
+preserves a later failure at `f67fd05`: explicit successor authority was accepted, but a foreground-created
+Objective lacked its structural discovery label, so the healthy controller did not adopt it. No
+successor worker started; known usage stayed unchanged. The controller was normally stopped and
+independently observed inactive. Request/replay discovery repair is separately implemented and
+regression-tested; its installed continuation is not yet qualified.
+
 The [corrected publication-recovery candidate](release-evidence/publication-recovery-candidate-component-2026-09-05.json)
 passed integrated release checks and matching Linux CLI installation at
 `f67fd05ac97ffd68803e1fea299c7977e5b3c73c`. The installed package matches the tarball verified by those

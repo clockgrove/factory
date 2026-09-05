@@ -2,7 +2,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +20,120 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const localBackends = ["codex-sdk/local-worktree", "codex-cli/local-worktree"];
+const minimumGitHubQuota = 1_000;
+const minimumModelTokens = 250_000;
+const maximumModelTokens = 500_000;
+
+export function installedPluginPath({ listed, codexHome, requestedRoot }) {
+  const matches = (listed.installed ?? []).filter(
+    (entry) =>
+      entry.name === "factory" &&
+      entry.installed === true &&
+      entry.enabled === true &&
+      typeof entry.version === "string" &&
+      typeof entry.marketplaceName === "string" &&
+      /^[\w.-]+$/.test(entry.marketplaceName) &&
+      entry.pluginId === `factory@${entry.marketplaceName}`,
+  );
+  assert.equal(matches.length, 1, "one enabled installed Factory plugin is required");
+  const entry = matches[0];
+  const path = join(
+    resolve(codexHome),
+    "plugins",
+    "cache",
+    entry.marketplaceName,
+    "factory",
+    entry.version,
+  );
+  if (requestedRoot)
+    assert.equal(
+      resolve(requestedRoot),
+      path,
+      "requested plugin root differs from installed receipt",
+    );
+  return path;
+}
+
+export function installedBundleIdentity(pluginRoot) {
+  const root = realpathSync(pluginRoot);
+  assert.ok(
+    root !== sourceRoot && !root.startsWith(`${sourceRoot}${sep}`),
+    "development worktree is not an installation",
+  );
+  const packageManifest = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const inventoryPath = realpathSync(join(root, "dist", "bundle-inventory.json"));
+  assert.ok(inventoryPath.startsWith(`${root}${sep}`), "installed inventory escapes its artifact");
+  const inventoryBytes = readFileSync(inventoryPath);
+  const inventory = JSON.parse(inventoryBytes.toString("utf8"));
+  assert.equal(inventory.protocol, "clockgrove.factory/bundle-inventory-v1");
+  assert.ok(Array.isArray(inventory.bundles), "installed bundle inventory is missing");
+  const bundles = [];
+  for (const file of ["factory.js", "mcp-server.js"]) {
+    const records = inventory.bundles.filter((entry) => entry.file === file);
+    assert.equal(records.length, 1, `missing or duplicate installed ${file} identity`);
+    const path = realpathSync(join(root, "dist", file));
+    assert.ok(path.startsWith(`${root}${sep}`), `installed ${file} escapes its artifact`);
+    const bytes = readFileSync(path);
+    assert.equal(records[0].bytes, bytes.length, `installed ${file} byte count differs`);
+    const digest = createHash("sha256").update(bytes).digest("hex");
+    assert.equal(records[0].sha256, digest, `installed ${file} digest differs`);
+    bundles.push({ file, bytes: bytes.length, sha256: digest });
+  }
+  return {
+    version: packageManifest.version,
+    inventorySha256: createHash("sha256").update(inventoryBytes).digest("hex"),
+    bundles,
+  };
+}
+
+export function modelTokenLimit(value) {
+  assert.match(value ?? "", /^[1-9]\d*$/, "explicit model-token limit required");
+  const limit = Number(value);
+  assert.ok(
+    Number.isSafeInteger(limit) && limit >= minimumModelTokens && limit <= maximumModelTokens,
+    `model-token limit must be ${minimumModelTokens}-${maximumModelTokens}`,
+  );
+  return limit;
+}
+
+export function assessQualificationPreflight(input) {
+  const blockers = [];
+  if (input.checkout?.clean !== true) blockers.push("checkout-is-not-clean");
+  if (input.checkout?.headMatchesDefault !== true)
+    blockers.push("checkout-head-differs-from-default-branch");
+  if (input.checkout?.fixturePathsAbsent !== true)
+    blockers.push("qualification-output-paths-already-exist");
+  if (input.harness?.sourceTreeClean !== true)
+    blockers.push("qualification-harness-is-not-committed");
+  if (input.harness?.candidateInventorySha256 !== input.installedArtifact?.inventorySha256)
+    blockers.push("installed-bundle-differs-from-qualification-candidate");
+  if (input.repository?.private !== true) blockers.push("qualification-repository-must-be-private");
+  if (input.repository?.archived || input.repository?.permissions?.push !== true)
+    blockers.push("repository-is-not-writable");
+  if (input.branch?.protected) blockers.push("default-branch-is-protected");
+  if ((input.rulesets ?? []).some((ruleset) => ruleset.enforcement === "active"))
+    blockers.push("active-repository-ruleset");
+  if (
+    (input.workflows ?? []).some(
+      (workflow) =>
+        workflow.state === "active" &&
+        /^dynamic\/agents\/(?:copilot-)?pull-request-reviewer$/.test(workflow.path ?? ""),
+    )
+  )
+    blockers.push("automatic-pull-request-review-is-active");
+  if ((input.openFactoryPulls ?? []).length > 0)
+    blockers.push("prior-factory-pull-requests-remain-open");
+  for (const plane of ["core", "graphql"])
+    if (!Number.isSafeInteger(input.rateLimit?.[plane]?.remaining))
+      blockers.push(`${plane}-quota-unavailable`);
+    else if (input.rateLimit[plane].remaining < minimumGitHubQuota)
+      blockers.push(`${plane}-quota-below-${minimumGitHubQuota}`);
+  return {
+    result: blockers.length === 0 ? "passed" : "blocked",
+    blockers,
+    requiredMinimumRemaining: { core: minimumGitHubQuota, graphql: minimumGitHubQuota },
+  };
+}
 
 export function installedIdentity({
   manifest,
@@ -126,8 +248,14 @@ export function assertRetryableObjective({ issue, actorId, status, children, eve
   );
 }
 
-export function boundedPolicy(delivery = "regular-prs") {
+export function boundedPolicy(delivery = "stacked-prs", maxModelTokens = maximumModelTokens) {
   assert.ok(["regular-prs", "stacked-prs"].includes(delivery), "unsupported delivery mode");
+  assert.ok(
+    Number.isSafeInteger(maxModelTokens) &&
+      maxModelTokens >= minimumModelTokens &&
+      maxModelTokens <= maximumModelTokens,
+    "model-token limit is outside qualification bounds",
+  );
   return {
     backendOrder: localBackends,
     maxParallel: 2,
@@ -142,14 +270,14 @@ export function boundedPolicy(delivery = "regular-prs") {
     managementBackend: "codex-cli/local",
     allowedNetworkDestinations: ["api.openai.com"],
     economics: {
-      maxModelTokens: 150_000,
+      maxModelTokens,
       maxSandboxMinutes: 0,
       maxManagedSessions: 0,
       minCloudTimeSavedMinutes: 0,
     },
     delivery: {
       mode: delivery,
-      onUnavailable: "regular-prs",
+      onUnavailable: "escalate",
       merge: "bottom-up",
     },
     capacity: {
@@ -418,7 +546,7 @@ export function assertCompletion(evidence, allowedBackends = localBackends) {
 /** Pure assessment of captured evidence, not a live authentication or provider-leak audit. */
 export function assessCompletion(evidence) {
   try {
-    assertCompletion(evidence);
+    assertQualificationCompletion(evidence);
     return { result: "passed", scope: "installed-local-objective-happy-path" };
   } catch (error) {
     return {
@@ -429,6 +557,148 @@ export function assessCompletion(evidence) {
       reason: (error instanceof Error ? error.message : String(error)).slice(0, 2000),
     };
   }
+}
+
+export function assertQualificationCompletion(evidence) {
+  assertCompletion(evidence);
+  assert.equal(
+    evidence.preflight?.harness?.candidateInventorySha256,
+    evidence.installedArtifact?.inventorySha256,
+    "installed bundle is not the qualification candidate",
+  );
+  assert.deepEqual(
+    evidence.finishedInstalledArtifact,
+    evidence.installedArtifact,
+    "installed bundle changed during qualification",
+  );
+  const runId = evidence.runResult.runId;
+  const rawEvents = evidence.events.filter((event) => event.runId === runId);
+  assert.ok(Number.isSafeInteger(evidence.actor?.id) && evidence.actor.id > 0, "actor ID missing");
+  assert.ok(
+    rawEvents.every(
+      (event) =>
+        event.authorId === evidence.actor.id &&
+        event.author?.toLowerCase() === evidence.actor.login?.toLowerCase() &&
+        typeof event.receiptUrl === "string" &&
+        event.receiptUrl.startsWith(`https://github.com/${evidence.repository}/`),
+    ),
+    "run receipt lacks the authenticated GitHub actor or location",
+  );
+  const eventsBySequence = new Map();
+  for (const event of rawEvents) {
+    const envelope = { ...event };
+    delete envelope.receiptUrl;
+    delete envelope.author;
+    delete envelope.authorId;
+    const prior = eventsBySequence.get(event.sequence);
+    if (prior)
+      assert.deepEqual(prior, envelope, "same run sequence contains conflicting GitHub receipts");
+    else eventsBySequence.set(event.sequence, envelope);
+  }
+  const events = [...eventsBySequence.values()].sort(
+    (left, right) => left.sequence - right.sequence,
+  );
+  const starts = events.filter((event) => event.event === "FactoryRunStarted");
+  const completions = events.filter((event) => event.event === "FactoryRunCompleted");
+  assert.equal(starts.length, 1, "exactly one authenticated run start is required");
+  assert.equal(completions.length, 1, "exactly one authenticated run completion is required");
+  assert.equal(starts[0].actor?.toLowerCase(), evidence.actor.login.toLowerCase());
+  assert.equal(starts[0].repository?.toLowerCase(), evidence.repository.toLowerCase());
+  assert.deepEqual(starts[0].policy?.backendOrder, localBackends, "run backend policy changed");
+  assert.equal(starts[0].policy?.maxParallel, 2, "run parallel bound changed");
+  assert.deepEqual(starts[0].policy?.allowedPaidBackends, [], "paid backend authority appeared");
+  assert.equal(starts[0].policy?.maxSandboxMinutes, 0, "sandbox authority appeared");
+  assert.equal(starts[0].policy?.maxManagedAgentSessions, 0, "managed authority appeared");
+  assert.equal(
+    starts[0].policy?.economics?.maxModelTokens,
+    evidence.policy.economics.maxModelTokens,
+    "durable model-token ceiling differs from requested policy",
+  );
+  assert.equal(evidence.status.run.policyDigest, starts[0].policyDigest, "status policy differs");
+
+  assert.equal(evidence.children.length, 3, "qualification requires exactly three Work Items");
+  const roots = evidence.dependencies.filter((entry) => entry.blockedBy.length === 0);
+  const joins = evidence.dependencies.filter((entry) => entry.blockedBy.length === 2);
+  assert.equal(roots.length, 2, "qualification requires exactly two independent roots");
+  assert.equal(joins.length, 1, "qualification requires exactly one two-parent join");
+  assert.deepEqual(
+    joins[0].blockedBy.map((item) => item.number).sort((a, b) => a - b),
+    roots.map((item) => item.workItem).sort((a, b) => a - b),
+    "join does not depend on both independent roots",
+  );
+  const delivery = events.filter((event) => event.event === "DeliverySelected");
+  assert.equal(delivery.length, 1, "exactly one delivery selection is required");
+  assert.equal(delivery[0].requested, "stacked-prs", "native delivery was not requested");
+  assert.equal(delivery[0].selected, "native-stacks", "native delivery was not selected");
+  assert.ok(
+    events
+      .filter((event) => event.event === "PublicationRecorded")
+      .every((event) => event.mode === "native-stacks"),
+    "publication escaped native delivery mode",
+  );
+  const attemptStarts = events.filter((event) => event.event === "AttemptStarted");
+  const attemptSuccesses = events.filter((event) => event.event === "AttemptSucceeded");
+  for (const root of roots) {
+    const start = attemptStarts.find((event) => event.workItem === root.workItem);
+    assert.ok(start, `root Work Item #${root.workItem} did not start`);
+    assert.ok(
+      roots
+        .filter((other) => other.workItem !== root.workItem)
+        .every((other) =>
+          attemptSuccesses.some(
+            (success) => success.workItem === other.workItem && success.sequence > start.sequence,
+          ),
+        ),
+      "independent sibling attempt lifecycles did not overlap",
+    );
+  }
+
+  const modelReceipts = events.filter(
+    (event) => event.event === "BudgetReconciled" && event.unit === "model_tokens",
+  );
+  assert.ok(modelReceipts.length >= 7, "too few attributable model-call receipts");
+  assert.ok(
+    modelReceipts.every(
+      (event) => typeof event.usageId === "string" && event.usageId.length > 0 && event.amount > 0,
+    ),
+    "model usage lacks a positive, stable call identity",
+  );
+  const latestModelCalls = new Map(
+    modelReceipts.map((event) => [
+      JSON.stringify([
+        event.workItem ?? "management",
+        event.attempt ?? "management",
+        event.phase,
+        event.unit,
+        event.usageId,
+      ]),
+      event,
+    ]),
+  );
+  const modelTokens = [...latestModelCalls.values()].reduce((sum, event) => sum + event.amount, 0);
+  const economics = evidence.status.summary.economics;
+  assert.equal(economics.usage.model_tokens?.availability, "observed");
+  assert.equal(
+    economics.usage.model_tokens?.value,
+    modelTokens,
+    "status model usage is not attributable to the captured GitHub receipts",
+  );
+  assert.equal(
+    economics.budgets.modelTokens?.value?.configured,
+    evidence.policy.economics.maxModelTokens,
+    "status model-token ceiling differs",
+  );
+  assert.equal(
+    economics.budgets.modelTokens?.value?.committed,
+    modelTokens,
+    "status model-token commitment differs",
+  );
+  for (const unit of ["local_milliseconds", "validation_milliseconds"])
+    assert.equal(
+      economics.usage[unit]?.availability,
+      "observed",
+      `${unit} usage is not attributable to GitHub receipts`,
+    );
 }
 
 function required(name) {
@@ -446,14 +716,11 @@ function run(command, args, cwd) {
   assert.equal(result.status, 0, `${command} failed: ${result.stderr}`);
   return result.stdout.trim();
 }
-function sha256(path) {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
-}
-
 export async function main(qualification = {}) {
-  if (process.env.FACTORY_LIVE_OBJECTIVE !== "1") {
+  const preflightOnly = process.env.FACTORY_LIVE_OBJECTIVE_PREFLIGHT === "1";
+  if (process.env.FACTORY_LIVE_OBJECTIVE !== "1" && !preflightOnly) {
     console.log(
-      "Not exercised: set FACTORY_LIVE_OBJECTIVE=1 and explicit disposable-repository inputs.",
+      "Not exercised: set FACTORY_LIVE_OBJECTIVE_PREFLIGHT=1 or FACTORY_LIVE_OBJECTIVE=1.",
     );
     return;
   }
@@ -461,29 +728,41 @@ export async function main(qualification = {}) {
   const repository = required("FACTORY_LIVE_OBJECTIVE_REPOSITORY");
   assert.match(repository, /^[\w.-]+\/[\w.-]+$/);
   assert.notEqual(repository.toLowerCase(), "clockgrove/factory", "use a disposable repository");
-  assert.equal(
-    required("FACTORY_LIVE_OBJECTIVE_MUTATION_ACK"),
-    repository,
-    "acknowledge the exact disposable repository",
-  );
+  if (!preflightOnly)
+    assert.equal(
+      required("FACTORY_LIVE_OBJECTIVE_MUTATION_ACK"),
+      repository,
+      "acknowledge the exact disposable repository",
+    );
   const [owner, repo] = repository.split("/");
   const checkout = realpathSync(required("FACTORY_LIVE_OBJECTIVE_CHECKOUT"));
   assert.ok(!checkout.startsWith("/mnt/"), "checkout must reside on the Linux filesystem");
-  assert.equal(run("git", ["status", "--porcelain"], checkout), "", "fixture must start clean");
-  for (const name of ["clamp", "slugify", "describe"]) {
-    assert.ok(
+  const checkoutClean = run("git", ["status", "--porcelain"], checkout) === "";
+  const fixturePathsAbsent = ["clamp", "slugify", "describe"].every(
+    (name) =>
       !existsSync(join(checkout, "src", `${name}.js`)) &&
-        !existsSync(join(checkout, "test", `${name}.test.js`)),
-      "use a fresh fixture without previous Objective output",
-    );
-  }
+      !existsSync(join(checkout, "test", `${name}.test.js`)),
+  );
   const origin = run("git", ["remote", "get-url", "origin"], checkout).replace(/\.git$/, "");
   assert.ok(
     origin === `https://github.com/${repository}` || origin === `git@github.com:${repository}`,
     "checkout origin differs from approved repository",
   );
-  const pluginRoot = realpathSync(required("FACTORY_LIVE_OBJECTIVE_PLUGIN_ROOT"));
-  const codexHome = realpathSync(process.env.CODEX_HOME || join(homedir(), ".codex"));
+  const codexHome = realpathSync(join(homedir(), ".codex"));
+  if (process.env.CODEX_HOME)
+    assert.equal(
+      realpathSync(process.env.CODEX_HOME),
+      codexHome,
+      "unset non-Linux-home CODEX_HOME for installed qualification",
+    );
+  const listed = JSON.parse(run("codex", ["plugin", "list", "--json"], checkout));
+  const pluginRoot = realpathSync(
+    installedPluginPath({
+      listed,
+      codexHome,
+      requestedRoot: process.env.FACTORY_LIVE_OBJECTIVE_PLUGIN_ROOT?.trim(),
+    }),
+  );
   assert.ok(
     pluginRoot.startsWith(`${join(codexHome, "plugins", "cache")}${sep}`),
     "use the plugin installed in this Codex home's cache",
@@ -493,7 +772,6 @@ export async function main(qualification = {}) {
     "development worktree is not an installation",
   );
   const manifest = JSON.parse(readFileSync(join(pluginRoot, ".codex-plugin/plugin.json"), "utf8"));
-  const listed = JSON.parse(run("codex", ["plugin", "list", "--json"], checkout));
   const identity = installedIdentity({
     manifest,
     listed,
@@ -502,6 +780,20 @@ export async function main(qualification = {}) {
     portable: JSON.parse(readFileSync(join(pluginRoot, "plugin.json"), "utf8")),
     packageManifest: JSON.parse(readFileSync(join(pluginRoot, "package.json"), "utf8")),
   });
+  const artifact = installedBundleIdentity(pluginRoot);
+  assert.equal(artifact.version, identity.version, "installed inventory version differs");
+  const candidateInventorySha256 = createHash("sha256")
+    .update(readFileSync(join(sourceRoot, "dist", "bundle-inventory.json")))
+    .digest("hex");
+  const harness = {
+    sourceCommit: run("git", ["rev-parse", "HEAD"], sourceRoot),
+    sourceTreeClean:
+      run("git", ["status", "--porcelain", "--untracked-files=no"], sourceRoot) === "",
+    candidateInventorySha256,
+  };
+  const modelTokenCeiling =
+    qualification.policy?.economics?.maxModelTokens ??
+    modelTokenLimit(required("FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS"));
   const mcp = manifest.mcpServers?.factory;
   assert.equal(mcp?.command, "node");
   const token =
@@ -527,24 +819,90 @@ export async function main(qualification = {}) {
   };
   const info = (await request("GET /repos/{owner}/{repo}")).data;
   const actor = (await octokit.request("GET /user")).data;
-  assert.ok(!info.archived && info.permissions?.push, "target must permit fixture integration");
   const base = (
     await request("GET /repos/{owner}/{repo}/commits/{ref}", {
       ref: info.default_branch,
     })
   ).data.sha;
-  assert.equal(
-    run("git", ["rev-parse", "HEAD"], checkout),
+  const checkoutHead = run("git", ["rev-parse", "HEAD"], checkout);
+  const branch = (
+    await request("GET /repos/{owner}/{repo}/branches/{branch}", { branch: info.default_branch })
+  ).data;
+  const rulesets = await list("GET /repos/{owner}/{repo}/rulesets");
+  const workflows = (
+    await request("GET /repos/{owner}/{repo}/actions/workflows", { per_page: 100 })
+  ).data.workflows;
+  const openFactoryPulls = (await list("GET /repos/{owner}/{repo}/pulls", { state: "open" }))
+    .filter((pull) => pull.head?.ref?.startsWith("factory/"))
+    .map((pull) => ({ number: pull.number, head: pull.head.ref, title: pull.title }));
+  const rateLimit = (await octokit.request("GET /rate_limit")).data.resources;
+  const preflight = {
+    ...assessQualificationPreflight({
+      checkout: {
+        clean: checkoutClean,
+        headMatchesDefault: checkoutHead === base,
+        fixturePathsAbsent,
+      },
+      harness,
+      installedArtifact: artifact,
+      repository: info,
+      branch,
+      rulesets,
+      workflows,
+      openFactoryPulls,
+      rateLimit,
+    }),
+    observedAt: new Date().toISOString(),
+    repository,
     base,
-    "fixture must match GitHub default branch",
-  );
+    checkout: {
+      clean: checkoutClean,
+      head: checkoutHead,
+      headMatchesDefault: checkoutHead === base,
+      fixturePathsAbsent,
+    },
+    installedArtifact: artifact,
+    harness,
+    pluginId: identity.pluginId,
+    codexManifestVersion: identity.codexManifestVersion,
+    modelTokenCeiling: {
+      configured: modelTokenCeiling,
+      semantics: "observed stop-before-next-call threshold; concurrent calls may overshoot",
+    },
+    openFactoryPulls,
+    activeWorkflows: workflows
+      .filter((workflow) => workflow.state === "active")
+      .map((workflow) => ({ name: workflow.name, path: workflow.path })),
+    rateLimit: {
+      core: rateLimit.core,
+      graphql: rateLimit.graphql,
+    },
+  };
   const suffix = randomUUID();
   const output = resolve(required("FACTORY_LIVE_OBJECTIVE_EVIDENCE"));
-  assert.ok(
-    !existsSync(join(output, "objective-evidence.json")),
-    "preserve prior run evidence; use a fresh output directory",
-  );
   mkdirSync(output, { recursive: true });
+  const evidencePath = join(
+    output,
+    preflightOnly ? "qualification-preflight.json" : "objective-evidence.json",
+  );
+  const reservation = openSync(evidencePath, "wx", 0o600);
+  closeSync(reservation);
+  writeFileSync(evidencePath, `${JSON.stringify(preflight, null, 2)}\n`, { mode: 0o600 });
+  if (preflightOnly) {
+    console.log(`${preflight.result} installed Objective preflight; evidence: ${evidencePath}`);
+    if (preflight.result !== "passed") process.exitCode = 2;
+    return;
+  }
+  assert.equal(preflight.result, "passed", `preflight blocked: ${preflight.blockers.join(", ")}`);
+  if (!qualification.policy)
+    assert.equal(
+      process.env.FACTORY_LIVE_OBJECTIVE_DELIVERY ?? "stacked-prs",
+      "stacked-prs",
+      "installed local qualification requires native delivery",
+    );
+  const policy =
+    qualification.policy ??
+    boundedPolicy(process.env.FACTORY_LIVE_OBJECTIVE_DELIVERY ?? "stacked-prs", modelTokenCeiling);
   const evidence = {
     schemaVersion: 1,
     scope: qualification.scope ?? "installed-local-objective-happy-path",
@@ -554,8 +912,9 @@ export async function main(qualification = {}) {
     pluginVersion: identity.version,
     codexManifestVersion: identity.codexManifestVersion,
     pluginId: identity.pluginId,
-    bundleSha256: sha256(join(pluginRoot, "dist/mcp-server.js")),
-    policy: qualification.policy ?? boundedPolicy(process.env.FACTORY_LIVE_OBJECTIVE_DELIVERY),
+    installedArtifact: artifact,
+    preflight,
+    policy,
     actor: { id: actor.id, login: actor.login },
     objective: null,
     status: null,
@@ -565,11 +924,7 @@ export async function main(qualification = {}) {
     pulls: [],
   };
   const save = () =>
-    writeFileSync(
-      join(output, "objective-evidence.json"),
-      `${JSON.stringify(evidence, null, 2)}\n`,
-      { mode: 0o600 },
-    );
+    writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });
   const client = new Client({
     name: "factory-live-objective",
     version: "1.0.0",
@@ -722,17 +1077,40 @@ export async function main(qualification = {}) {
           })
         ).data,
       );
-    if (qualification.afterRun) await qualification.afterRun(hooks);
-    evidence.completionAssessment = (qualification.assessCompletion ?? assessCompletion)(evidence);
-    save();
-    assert.equal(
-      evidence.completionAssessment.result,
-      "passed",
-      evidence.completionAssessment.reason,
+    evidence.finishedInstalledArtifact = installedBundleIdentity(pluginRoot);
+    assert.deepEqual(
+      evidence.finishedInstalledArtifact,
+      evidence.installedArtifact,
+      "installed bundle changed during qualification",
     );
+    if (qualification.afterRun) await qualification.afterRun(hooks);
+    const completionAssessment = (qualification.assessCompletion ?? assessCompletion)(evidence);
+    assert.equal(completionAssessment.result, "passed", completionAssessment.reason);
     const verified = join(output, "merged-fixture");
     run("git", ["clone", "--depth", "1", `https://github.com/${repository}.git`, verified], output);
     evidence.finalSha = run("git", ["rev-parse", "HEAD"], verified);
+    const finalDefaultSha = (
+      await request("GET /repos/{owner}/{repo}/commits/{ref}", { ref: info.default_branch })
+    ).data.sha;
+    assert.equal(
+      evidence.finalSha,
+      finalDefaultSha,
+      "verified clone is not the current default branch",
+    );
+    const joinWorkItem = evidence.dependencies.find(
+      (entry) => entry.blockedBy.length === 2,
+    ).workItem;
+    const joinIntegration = evidence.events.find(
+      (event) =>
+        event.runId === evidence.runResult.runId &&
+        event.event === "AttemptIntegrated" &&
+        event.workItem === joinWorkItem,
+    );
+    assert.equal(
+      evidence.finalSha,
+      joinIntegration?.headSha,
+      "default branch does not end at the dependent join integration",
+    );
     evidence.testOutput = run("node", ["--test"], verified);
     evidence.behaviorOutput = run(
       "node",
@@ -743,10 +1121,11 @@ export async function main(qualification = {}) {
       ],
       verified,
     );
+    evidence.completionAssessment = completionAssessment;
     evidence.result = "passed";
     evidence.finishedAt = new Date().toISOString();
     save();
-    console.log(`Passed ${evidence.scope}; evidence: ${join(output, "objective-evidence.json")}`);
+    console.log(`Passed ${evidence.scope}; evidence: ${evidencePath}`);
   } catch (error) {
     evidence.result = "failed";
     evidence.failure = error instanceof Error ? error.message : String(error);

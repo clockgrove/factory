@@ -1,26 +1,135 @@
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   assertCompletion,
   assessCompletion,
+  assessQualificationPreflight,
   assertRetryableObjective,
+  assertQualificationCompletion,
   boundedPolicy,
+  installedBundleIdentity,
   installedIdentity,
+  installedPluginPath,
+  modelTokenLimit,
   objectiveBody,
 } from "../scripts/verify-live-objective.mjs";
 import { parseRunPolicy } from "../src/protocol/policy.js";
 
+type HarnessEvent = {
+  event: string;
+  sequence: number;
+  [key: string]: unknown;
+};
+
 function evidence() {
   const children = [2, 3, 4].map((number) => ({ number, state: "closed" }));
+  const policy = boundedPolicy();
+  const reservation = (number: number) => [
+    {
+      event: "BudgetReserved",
+      workItem: number,
+      attempt: 1,
+      phase: "execution",
+      unit: "local_milliseconds",
+      amount: 1000,
+    },
+    {
+      event: "CapacityReserved",
+      workItem: number,
+      attempt: 1,
+      phase: "execution",
+      backend: "codex-sdk/local-worktree",
+    },
+    {
+      event: "AttemptStarted",
+      workItem: number,
+      attempt: 1,
+      backend: "codex-sdk/local-worktree",
+    },
+  ];
+  const completion = (number: number) => [
+    {
+      event: "AttemptSucceeded",
+      workItem: number,
+      attempt: 1,
+      backend: "codex-sdk/local-worktree",
+    },
+    {
+      event: "AttemptValidated",
+      workItem: number,
+      attempt: 1,
+      artifactDigest: `artifact-${number}`,
+    },
+    {
+      event: "AttemptPublished",
+      workItem: number,
+      attempt: 1,
+      artifactDigest: `artifact-${number}`,
+      headSha: `head-${number}`,
+    },
+    {
+      event: "PublicationRecorded",
+      workItem: number,
+      attempt: 1,
+      headSha: `head-${number}`,
+      pullRequest: number + 10,
+      mode: "native-stacks",
+    },
+    {
+      event: "AttemptIntegrated",
+      workItem: number,
+      attempt: 1,
+      headSha: `merge-${number}`,
+    },
+    {
+      event: "BudgetReconciled",
+      workItem: number,
+      attempt: 1,
+      phase: "execution",
+      unit: "local_milliseconds",
+      amount: 500,
+    },
+    {
+      event: "CapacityReconciled",
+      workItem: number,
+      attempt: 1,
+      phase: "execution",
+      backend: "codex-sdk/local-worktree",
+    },
+  ];
+  const modelReceipts = Array.from({ length: 7 }, (_, index) => ({
+    event: "BudgetReconciled",
+    phase: "management",
+    unit: "model_tokens",
+    amount: 100,
+    usageId: `model-call-${index + 1}`,
+  }));
   return {
     runResult: { status: "completed", runId: "fixture", objective: 1 },
     status: {
-      run: { state: "completed", runId: "fixture" },
       objective: { number: 1, closed: true },
       summary: {
         runId: "fixture",
         outcome: "completed",
         attempts: { active: 0 },
+        economics: {
+          usage: {
+            model_tokens: { availability: "observed", value: 700 },
+            local_milliseconds: { availability: "observed", value: 1500 },
+            validation_milliseconds: { availability: "observed", value: 300 },
+          },
+          budgets: {
+            modelTokens: {
+              availability: "observed",
+              value: { configured: 500_000, committed: 700, remaining: 499_300 },
+            },
+          },
+        },
       },
+      run: { state: "completed", runId: "fixture", policyDigest: "policy-digest" },
       capacity: { observed: { active: 0 }, activeReservations: [] },
       workItems: children.map(({ number }) => ({
         number,
@@ -35,83 +144,42 @@ function evidence() {
       { workItem: 3, blockedBy: [] },
       { workItem: 4, blockedBy: [{ number: 2 }, { number: 3 }] },
     ],
+    policy,
+    installedArtifact: { inventorySha256: "candidate", bundles: [] },
+    finishedInstalledArtifact: { inventorySha256: "candidate", bundles: [] },
+    preflight: { harness: { candidateInventorySha256: "candidate" } },
+    actor: { id: 42, login: "operator" },
+    repository: "clockgrove/factory-conformance",
     events: [
+      {
+        event: "FactoryRunStarted",
+        actor: "operator",
+        repository: "clockgrove/factory-conformance",
+        policy,
+        policyDigest: "policy-digest",
+      },
       { runId: "fixture", event: "GraphProjected", graphSize: 3 },
-      ...children.flatMap(({ number }) => [
-        {
-          runId: "fixture",
-          event: "BudgetReserved",
-          workItem: number,
-          attempt: 1,
-          phase: "execution",
-          unit: "local_milliseconds",
-          amount: 1000,
-        },
-        {
-          runId: "fixture",
-          event: "CapacityReserved",
-          workItem: number,
-          attempt: 1,
-          phase: "execution",
-          backend: "codex-sdk/local-worktree",
-        },
-        {
-          runId: "fixture",
-          event: "AttemptStarted",
-          workItem: number,
-          attempt: 1,
-          backend: "codex-sdk/local-worktree",
-        },
-        {
-          runId: "fixture",
-          event: "AttemptValidated",
-          workItem: number,
-          attempt: 1,
-          artifactDigest: `artifact-${number}`,
-        },
-        {
-          runId: "fixture",
-          event: "AttemptPublished",
-          workItem: number,
-          attempt: 1,
-          artifactDigest: `artifact-${number}`,
-          headSha: `head-${number}`,
-        },
-        {
-          runId: "fixture",
-          event: "PublicationRecorded",
-          workItem: number,
-          attempt: 1,
-          headSha: `head-${number}`,
-          pullRequest: number + 10,
-        },
-        {
-          runId: "fixture",
-          event: "AttemptIntegrated",
-          workItem: number,
-          attempt: 1,
-          headSha: `merge-${number}`,
-        },
-        {
-          runId: "fixture",
-          event: "BudgetReconciled",
-          workItem: number,
-          attempt: 1,
-          phase: "execution",
-          unit: "local_milliseconds",
-          amount: 500,
-        },
-        {
-          runId: "fixture",
-          event: "CapacityReconciled",
-          workItem: number,
-          attempt: 1,
-          phase: "execution",
-          backend: "codex-sdk/local-worktree",
-        },
-      ]),
+      { event: "DeliverySelected", requested: "stacked-prs", selected: "native-stacks" },
+      ...modelReceipts,
+      ...reservation(2),
+      ...reservation(3),
+      ...completion(2),
+      ...completion(3),
+      ...reservation(4),
+      ...completion(4),
       { runId: "fixture", event: "FactoryRunCompleted" },
-    ].map((event, sequence) => ({ ...event, sequence, objective: 1 })),
+    ].map(
+      (event, sequence) =>
+        ({
+          runId: "fixture",
+          ...event,
+          sequence,
+          objective: 1,
+          receiptUrl: `https://github.com/clockgrove/factory-conformance/issues/1#issuecomment-${sequence}`,
+          author: "operator",
+          authorId: 42,
+        }) as HarnessEvent,
+    ),
     pulls: children.map(({ number }) => ({
       number: number + 10,
       state: "closed",
@@ -195,16 +263,148 @@ describe("installed live Objective harness evidence boundary", () => {
       }),
     ).toThrow(/versions differ/);
   });
+  it("derives the default Linux-home cache path from exactly one enabled receipt", () => {
+    const listed = {
+      installed: [
+        {
+          name: "factory",
+          installed: true,
+          enabled: true,
+          version: "2.0.26",
+          pluginId: "factory@clockgrove-factory",
+          marketplaceName: "clockgrove-factory",
+        },
+      ],
+    };
+    const expected = "/home/example/.codex/plugins/cache/clockgrove-factory/factory/2.0.26";
+    expect(installedPluginPath({ listed, codexHome: "/home/example/.codex" })).toBe(expected);
+    expect(() =>
+      installedPluginPath({ listed, codexHome: "/home/example/.codex", requestedRoot: expected }),
+    ).not.toThrow();
+    expect(() =>
+      installedPluginPath({
+        listed: { installed: [...listed.installed, ...listed.installed] },
+        codexHome: "/home/example/.codex",
+      }),
+    ).toThrow(/one enabled/);
+  });
+  it("binds both installed bundles to their inventory", async () => {
+    const root = await mkdtemp(join(tmpdir(), "factory-live-installed-"));
+    try {
+      await mkdir(join(root, "dist"));
+      await writeFile(
+        join(root, "package.json"),
+        JSON.stringify({ name: "@clockgrove/factory", version: "2.0.26" }),
+      );
+      const bundles = ["factory.js", "mcp-server.js"].map((file) => {
+        const bytes = Buffer.from(file);
+        return {
+          file,
+          bytes: bytes.length,
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+        };
+      });
+      await Promise.all(
+        bundles.map((bundle) => writeFile(join(root, "dist", bundle.file), bundle.file)),
+      );
+      await writeFile(
+        join(root, "dist", "bundle-inventory.json"),
+        JSON.stringify({ protocol: "clockgrove.factory/bundle-inventory-v1", bundles }),
+      );
+      expect(installedBundleIdentity(root)).toMatchObject({ version: "2.0.26", bundles });
+      await writeFile(join(root, "dist", "mcp-server.js"), "tampered");
+      expect(() => installedBundleIdentity(root)).toThrow(/mcp-server.js/);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  it("requires an explicit bounded model quota", () => {
+    expect(modelTokenLimit("500000")).toBe(500_000);
+    for (const value of [undefined, "249999", "500001", "3.5", "tokens"])
+      expect(() => modelTokenLimit(value)).toThrow();
+  });
+  it("blocks stale Factory PRs, automatic review, or insufficient GitHub quota", () => {
+    const ready = {
+      checkout: { clean: true, headMatchesDefault: true, fixturePathsAbsent: true },
+      harness: { sourceTreeClean: true, candidateInventorySha256: "candidate" },
+      installedArtifact: { inventorySha256: "candidate" },
+      repository: { private: true, archived: false, permissions: { push: true } },
+      branch: { protected: false },
+      rulesets: [],
+      workflows: [],
+      openFactoryPulls: [],
+      rateLimit: { core: { remaining: 5000 }, graphql: { remaining: 5000 } },
+    };
+    expect(assessQualificationPreflight(ready)).toMatchObject({
+      result: "passed",
+      blockers: [],
+    });
+    expect(
+      assessQualificationPreflight({
+        ...ready,
+        workflows: [
+          {
+            state: "active",
+            path: "dynamic/agents/copilot-pull-request-reviewer",
+          },
+        ],
+        openFactoryPulls: [{ number: 5 }],
+        rateLimit: { core: { remaining: 999 }, graphql: { remaining: 5000 } },
+      }),
+    ).toMatchObject({
+      result: "blocked",
+      blockers: [
+        "automatic-pull-request-review-is-active",
+        "prior-factory-pull-requests-remain-open",
+        "core-quota-below-1000",
+      ],
+    });
+  });
   it("uses a valid bounded local-only policy", () => {
     for (const mode of ["regular-prs", "stacked-prs"]) {
       const policy = parseRunPolicy(boundedPolicy(mode));
       expect(policy.allowedPaidBackends).toEqual([]);
-      expect(policy.economics?.maxModelTokens).toBe(150_000);
+      expect(policy.economics?.maxModelTokens).toBe(500_000);
       expect(policy.maxParallel).toBe(2);
     }
   });
   it("accepts a complete multi-wave transcript with distinct PR and merge heads", () => {
     expect(() => assertCompletion(evidence())).not.toThrow();
+    expect(() => assertQualificationCompletion(evidence())).not.toThrow();
+  });
+  it("does not pass ordinary-PR fallback, unauthenticated receipts, or serial siblings", () => {
+    const fallback = evidence();
+    Object.assign(fallback.events.find((event) => event.event === "DeliverySelected")!, {
+      selected: "regular-prs",
+    });
+    expect(() => assertQualificationCompletion(fallback)).toThrow(/native delivery/);
+    const unauthenticated = evidence();
+    unauthenticated.events.find((event) => event.event === "FactoryRunCompleted")!.authorId = 7;
+    expect(() => assertQualificationCompletion(unauthenticated)).toThrow(/authenticated/);
+    const serial = evidence();
+    const laterStart = serial.events.find(
+      (event) => event.event === "AttemptStarted" && event.workItem === 3,
+    )!;
+    const earlierSuccess = serial.events.find(
+      (event) => event.event === "AttemptSucceeded" && event.workItem === 2,
+    )!;
+    [laterStart.sequence, earlierSuccess.sequence] = [earlierSuccess.sequence, laterStart.sequence];
+    expect(() => assertQualificationCompletion(serial)).toThrow(/did not overlap/);
+  });
+  it("tolerates identical at-least-once comments but rejects a conflicting sequence", () => {
+    const duplicated = evidence();
+    const start = duplicated.events.find((event) => event.event === "FactoryRunStarted")!;
+    duplicated.events.push({
+      ...start,
+      receiptUrl: `${start.receiptUrl}-duplicate`,
+    });
+    expect(() => assertQualificationCompletion(duplicated)).not.toThrow();
+    duplicated.events.push({
+      ...start,
+      policyDigest: "different-policy-digest",
+      receiptUrl: `${start.receiptUrl}-conflict`,
+    });
+    expect(() => assertQualificationCompletion(duplicated)).toThrow(/conflicting GitHub receipts/);
   });
   it.each(["AttemptValidated", "AttemptIntegrated", "GraphProjected"])(
     "rejects missing %s evidence",
@@ -273,9 +473,15 @@ describe("installed live Objective harness evidence boundary", () => {
     "does not let a mismatched %s receipt settle a budget reservation",
     (field) => {
       const value = evidence();
-      Object.assign(value.events.find((event) => event.event === "BudgetReconciled")!, {
-        [field]: "different",
-      });
+      Object.assign(
+        value.events.find(
+          (event) =>
+            event.event === "BudgetReconciled" &&
+            event.unit === "local_milliseconds" &&
+            event.workItem === 2,
+        )!,
+        { [field]: "different" },
+      );
       expect(() => assertCompletion(value)).toThrow(/unreconciled/);
     },
   );

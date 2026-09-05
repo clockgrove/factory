@@ -10,6 +10,46 @@ checks still required before publication. Tasks are organized in the [delivery p
 
 ## Proven on this branch
 
+The latest lifecycle candidate `136983af385413c971bf3f5cd0f744542a56cdf2` passed
+`npm run verify:release`: 121 test files, 2,032 passing tests and three skips, typecheck,
+lint, formatting, schemas, reproducible bundles, staged clean plugin/npm installation,
+and a dependency audit with zero vulnerabilities. The
+[local lifecycle component record](release-evidence/local-lifecycle-component-2026-09-05.json)
+binds its exact 71-file staged tarball and matching executable digests. Fresh staged npm/plugin
+WSL2 no-model startup, controller installation lifecycle and disposable host-process checks also
+passed. These host probes did not start a Factory controller or qualify model-backed cancellation.
+
+The exact personal plugin installation accepted withdrawal of the previously queued activation.
+Installed status reported `activation.state: withdrawn`, matching request identities, and
+`run.state: not-started`, with no Work Items, active reservations or run summary. This is a
+never-started activation withdrawal, not cancellation of an active worker.
+
+A separate fresh installed cancellation scenario captured an active worker, recorded the operator's
+durable cancellation request, observed the exact captured scope absent, and reached a cancelled run
+with one cancelled attempt and no active reservations. It performed no validation, PR publication or
+integration. Both exercise and read-only verification remained incomplete because the interrupted
+worker's model counters were unavailable. The 14,431 recorded compiler tokens are known partial
+usage, not total consumption and not evidence that the worker used zero tokens.
+
+The separate installed restart scenario observed its captured active scope become absent and the
+controller invocation change. Installed status then showed the original run paused, one cancelled
+attempt and no active reservations. The harness stopped during takeover evidence processing; no
+retry or resume was requested and recovered completion was not demonstrated. Its 14,406 known
+compiler tokens likewise exclude unavailable interrupted-worker usage. A separate operator cleanup
+request subsequently cancelled that same run, with one cancelled attempt, no active reservations or
+pending retries, and no publication or integration. The controller was then explicitly stopped and
+reported inactive. Cleanup is not recovered completion. These mixed component results close no
+complete live gate.
+
+The retained restart diagnostic attributes the reader failure to a harness-only global sequence
+uniqueness assumption: an authenticated pause request and an independently written local-budget
+reconciliation both used sequence 12. The later authenticated controller observation and exact
+resource measurements remain useful evidence, but a verifier correction cannot retroactively turn
+the original exercise into a recovered-completion pass. Its original evidence is preserved.
+
+The earlier records below remain bound to their own revisions. In particular, their test counts,
+tarball identities and installed observations are not evidence for the latest candidate.
+
 The integrated implementation and matching bundles at `efb9578edd959a23d23e8e9ab0ae97e619b675e8`
 passed `npm run verify:release`: 118 test files, 1,996 passing tests and three skips, typecheck,
 lint, formatting, schema checks, reproducible bundles, staged clean plugin/npm installation,
@@ -39,6 +79,9 @@ start. All eight exact recorded execution/validation scopes were subsequently ab
 partial execution evidence, not an end-to-end pass. GitHub's
 [documented test-merge generation policy](https://github.blog/changelog/2026-02-19-changes-to-test-merge-commit-generation-for-pull-requests/)
 invalidates an assumption that polling alone will promptly refresh that preview.
+The decision whether to permit changing a sibling PR head to obtain fresh preview evidence remains
+unanswered. Current integration pacing preserves the unchanged-head and exact-merge guards; it does
+not resolve that product decision. This blocker is independent of API keys or paid-provider access.
 
 The same observation records a separate pre-worker failure: durable activation of a plain human
 issue was accepted but remained undiscovered because its structural Objective label was missing.
@@ -190,7 +233,7 @@ unknown resources still block replacement. These are deterministic regressions, 
 
 | Gate | Status | Evidence or open reason |
 |---|---|---|
-| Linux environment matrix | Open | [Current staged WSL2 component evidence](release-evidence/completion-batch-component-2026-09-05.json) covers no-model installation and host-process checks only. Run the default Codex SDK route and Codex CLI fallback with adaptive scheduling, pressure, cancellation, restart, service install/uninstall, and clean validation on native Linux, Windows WSL2, and a Linux guest hosted by macOS. Native Win32 and Darwin are not part of this gate. |
+| Linux environment matrix | Open | [Current staged WSL2 component evidence](release-evidence/local-lifecycle-component-2026-09-05.json) covers no-model installation and host-process checks only. Run the default Codex SDK route and Codex CLI fallback with adaptive scheduling, pressure, cancellation, restart, service install/uninstall, and clean validation on native Linux, Windows WSL2, and a Linux guest hosted by macOS. Native Win32 and Darwin are not part of this gate. |
 | Live adaptive scheduling matrix | Open | The deterministic scheduler and recovery mechanics are implemented, but native sub-issue/field edits, constrained cgroups, process kills in every phase, two-Director races, and paid burst still need the disposable-repository/live-host matrix in [`ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md`](ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md). |
 | Live native-stack matrix | Open | [Live API component evidence](release-evidence/native-stack-component-2026-09-05.json) covers create/extend response-loss replay, partial direct merge, cascading rebase/tree preservation, final merge, and cleanup. Installed Supervisor recovery, cascading exact-head validation/review, merge-queue ejection, and regular-PR fallback still need live evidence. |
 | Real Daytona Objective | Open | Credential-free full-Supervisor tests prove local/Daytona independent-sibling overlap, both integration orders, isolated merge-candidate validation, native accounting restart, and cleanup fail-closed behavior. Sixteen native linear-stack scenarios include four fresh-controller checkpoint/review/receipt replay boundaries without duplicated sandbox, review, or accounting. The opt-in installed runner is described in [provider qualification](PROVIDER-QUALIFICATION.md). Paid creation, TTL, egress, secret brokerage and actual leak cleanup remain unexercised; simulated-provider results do not satisfy this live gate. |

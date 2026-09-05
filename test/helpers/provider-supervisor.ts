@@ -41,6 +41,7 @@ export interface ProviderFaults {
   controllerActivation?: boolean;
   afterIntegration?: () => void;
   localOnly?: boolean;
+  localMaxParallel?: 2;
   loseIntegrationReceipt?: "before" | "after";
   unavailable?: boolean;
   validationFailure?: boolean;
@@ -101,7 +102,7 @@ export async function providerSupervisorFixture(
     ...DEFAULT_RUN_POLICY,
     ...(faults.sandboxUntrusted ? { trust: "sandbox_untrusted" } : {}),
     backendOrder: faults.localOnly ? [LOCAL] : managed ? [provider, DAYTONA] : [LOCAL, DAYTONA],
-    maxParallel: managed || faults.localOnly ? 1 : 2,
+    maxParallel: faults.localOnly ? (faults.localMaxParallel ?? 1) : managed ? 1 : 2,
     maxAttemptsPerItem: 1,
     workItemTimeoutMinutes: 2,
     objectiveTimeoutMinutes: 20,
@@ -118,7 +119,10 @@ export async function providerSupervisorFixture(
     capacity: {
       ...DEFAULT_RUN_POLICY.capacity,
       mode: "fixed",
-      local: { ...DEFAULT_RUN_POLICY.capacity!.local, maxWorkers: 1 },
+      local: {
+        ...DEFAULT_RUN_POLICY.capacity!.local,
+        maxWorkers: faults.localOnly ? (faults.localMaxParallel ?? 1) : 1,
+      },
     },
     burst: {
       ...DEFAULT_RUN_POLICY.burst,

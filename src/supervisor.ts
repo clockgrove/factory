@@ -2717,7 +2717,7 @@ export class FactorySupervisor {
         const unrecordedNative =
           this.#deliverySelection.selected === "native-stacks"
             ? objective.items.find((item) => {
-                if (item.state !== "done") return false;
+                if (item.state !== "done" || activeExecutions.has(item.number)) return false;
                 const metadata = parseGraphItemMetadata(item.body ?? "");
                 const unit = this.#deliveryPlan?.units.find((candidate) =>
                   candidate.items.includes(metadata.id),
@@ -2819,7 +2819,10 @@ export class FactorySupervisor {
         }
 
         const reviews = objective.items.filter(
-          (item) => item.state === "for_review" && this.#integrationDue(item.number),
+          (item) =>
+            item.state === "for_review" &&
+            !activeExecutions.has(item.number) &&
+            this.#integrationDue(item.number),
         );
         if (reviews.length > 0) {
           if (this.#deliverySelection.selected !== "native-stacks") {
@@ -2846,6 +2849,7 @@ export class FactorySupervisor {
             if (
               !typedMembers.every((member) => new Set(["for_review", "done"]).has(member.state)) ||
               !typedMembers.some((member) => member.state === "for_review") ||
+              typedMembers.some((member) => activeExecutions.has(member.number)) ||
               typedMembers.some((member) => !this.#integrationDue(member.number))
             ) {
               continue;
@@ -2877,6 +2881,28 @@ export class FactorySupervisor {
               this.#options.signal,
             );
             if (settled?.error) throw settled.error;
+          }
+          continue;
+        }
+
+        // A worker promise may finish while its published PR is still waiting for
+        // checks/mergeability. Regular delivery owns the whole pipeline, not just
+        // that promise or the current integration-backoff window. Reconstruct
+        // this gate on every snapshot so restart cannot admit a sibling on the
+        // retained publication's old base. Native units keep their concurrency.
+        if (
+          this.#deliverySelection.selected === "regular-prs" &&
+          objective.items.some((item) => item.state === "for_review")
+        ) {
+          this.#fairness.reportDemand(objective.number, 0);
+          if (activeExecutions.size > 0) {
+            const settled = await activeExecutions.waitForChange(
+              this.#options.pollIntervalMs ?? 2_000,
+              this.#options.signal,
+            );
+            if (settled?.error) throw settled.error;
+          } else {
+            await sleep(this.#options.pollIntervalMs ?? 60_000, this.#options.signal);
           }
           continue;
         }

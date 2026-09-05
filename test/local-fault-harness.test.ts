@@ -17,6 +17,8 @@ import {
 import { parseRunPolicy } from "../src/protocol/policy.js";
 import { localScopeUnit } from "../src/runtime/local-scope.js";
 import { parseLocalScopeIdentity } from "../src/protocol/local-scope.js";
+import { deduplicateFactoryEvents } from "../src/control/receipts.js";
+import { parseFactoryEvent } from "../src/protocol/events.js";
 
 describe("bounded local-fault progress diagnostics", () => {
   it("reports fixed stage/failure codes and elapsed time without unchanged polling chatter", () => {
@@ -332,7 +334,9 @@ describe("installed local fault qualification harness", () => {
       objective: 7,
       runId: "fixture",
       sequence: 1,
+      kind: "run",
       event: "FactoryRunCancelled",
+      reason: "first",
     };
     const comment = {
       id: 1,
@@ -345,14 +349,158 @@ describe("installed local fault qualification harness", () => {
     );
     expect(() =>
       authenticatedFaultEvents(
-        [
-          comment,
-          { ...comment, body: comment.body.replace("FactoryRunCancelled", "FactoryRunCompleted") },
-        ],
+        [comment, { ...comment, body: comment.body.replace("first", "contradictory") }],
         actor,
         7,
       ),
     ).toThrow(/conflicting/);
+  });
+
+  it("preserves simultaneous pause and budget receipts followed by actual takeover", () => {
+    const actor = { id: 3, login: "operator" };
+    const common = { protocol: "clockgrove.factory/v2", objective: 7, runId: "fixture" };
+    const records = [
+      {
+        ...common,
+        kind: "run",
+        event: "RunPauseRequested",
+        sequence: 12,
+        at: "2026-09-05T11:17:23.000Z",
+        requestId: "pause",
+        requestedBy: "operator",
+      },
+      {
+        ...common,
+        kind: "budget",
+        event: "BudgetReconciled",
+        sequence: 12,
+        at: "2026-09-05T11:17:24.000Z",
+        workItem: 8,
+        attempt: 1,
+        unit: "local_milliseconds",
+        phase: "execution",
+        amount: 29000,
+      },
+      {
+        ...common,
+        kind: "controller",
+        event: "ControllerObserved",
+        sequence: 16,
+        at: "2026-09-05T11:17:52.000Z",
+        controllerId: "replacement-controller",
+        epoch: 2,
+        controllerPolicyDigest: "a".repeat(64),
+        expiresAt: "2026-09-05T11:27:52.000Z",
+        protocolMin: "clockgrove.factory/v2",
+        protocolMax: "clockgrove.factory/v2",
+      },
+      {
+        ...common,
+        kind: "run",
+        event: "RunPauseAcknowledged",
+        sequence: 17,
+        at: "2026-09-05T11:18:02.000Z",
+        commandRequestId: "pause",
+      },
+    ].map(parseFactoryEvent);
+    const comment = (event: unknown, id: number, user = actor) => ({
+      id,
+      user,
+      body: `<!-- clockgrove-factory:event\n${JSON.stringify(event)}\n-->`,
+    });
+    const comments = records.map((event, index) => comment(event, index + 1));
+    const parsed = authenticatedFaultEvents(comments, actor, 7);
+    expect(parsed.map((receipt) => receipt.event)).toEqual(deduplicateFactoryEvents(records));
+    expect(parsed.map((receipt) => receipt.commentId)).toEqual([1, 2, 3, 4]);
+    expect(parsed.filter(({ event }) => event.sequence === 12)).toHaveLength(2);
+    expect(parsed.filter(({ event }) => event.event === "BudgetReconciled")).toHaveLength(1);
+    expect(() =>
+      authenticatedFaultEvents(
+        [...comments, comment({ ...records[1], amount: 30000 }, 5)],
+        actor,
+        7,
+      ),
+    ).toThrow(/conflicting authenticated receipt identity/);
+    expect(() =>
+      authenticatedFaultEvents(
+        [...comments, comment({ ...records[0], reason: "changed authority" }, 5)],
+        actor,
+        7,
+      ),
+    ).toThrow(/conflicting authenticated application request/);
+    expect(
+      authenticatedFaultEvents(
+        [...comments, comment({ ...records[1], amount: 30000 }, 5, { id: 999, login: "operator" })],
+        actor,
+        7,
+      ),
+    ).toEqual(parsed);
+  });
+
+  it("uses exact request semantics and retains earliest authenticated receipt on response-loss replay", () => {
+    const actor = { id: 3, login: "operator" };
+    const first = parseFactoryEvent({
+      protocol: "clockgrove.factory/v2",
+      objective: 7,
+      runId: "fixture",
+      kind: "run",
+      event: "RunPauseRequested",
+      sequence: 12,
+      at: "2026-09-05T11:17:23.000Z",
+      requestId: "pause",
+      requestedBy: "operator",
+      reason: "qualification",
+    });
+    const replay = parseFactoryEvent({
+      ...first,
+      sequence: 18,
+      at: "2026-09-05T11:18:23.000Z",
+      requestedBy: "Operator",
+    });
+    const comments = [replay, first].map((event, index) => ({
+      id: index + 1,
+      user: actor,
+      body: `<!-- clockgrove-factory:event\n${JSON.stringify(event)}\n-->`,
+    }));
+    const parsed = authenticatedFaultEvents(comments, actor, 7);
+    expect(parsed.map(({ event }) => event)).toEqual(deduplicateFactoryEvents([replay, first]));
+    expect(parsed[0]!.commentId).toBe(2);
+    const transplanted = { ...first, runId: "unrelated-run" };
+    expect(() =>
+      authenticatedFaultEvents(
+        [
+          ...comments,
+          {
+            ...comments[0],
+            body: `<!-- clockgrove-factory:event\n${JSON.stringify(transplanted)}\n-->`,
+          },
+        ],
+        actor,
+        7,
+      ),
+    ).toThrow(/conflicting authenticated application request/);
+    expect(() =>
+      authenticatedFaultEvents(
+        [
+          {
+            ...comments[0],
+            body: `<!-- clockgrove-factory:event\n${JSON.stringify({ ...first, objective: 8 })}\n-->`,
+          },
+        ],
+        actor,
+        7,
+      ),
+    ).toThrow();
+  });
+
+  it("never resolves contradictory terminal outcomes merely because their numeric sequence is equal", () => {
+    const evidence = fixture();
+    const ended = evidence.receipts.find(({ event }) => event.event === "FactoryRunCancelled")!;
+    evidence.receipts.push({ ...ended, event: { ...ended.event, event: "FactoryRunCompleted" } });
+    expect(assessLocalFault(evidence)).toMatchObject({
+      result: "incomplete",
+      blockers: expect.arrayContaining(["expected-terminal-unobserved"]),
+    });
   });
   it.each(["cancel", "restart"] as const)(
     "accepts only the bounded evidenced %s scenario",

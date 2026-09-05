@@ -16,6 +16,29 @@ export interface LifecycleEventStore {
   serverTime(): Promise<Date>;
 }
 
+function assertReservationLease(reservation: AttemptReservation, lease: LeaseState): void {
+  if (
+    reservation.objective !== lease.objective ||
+    reservation.runId !== lease.runId ||
+    reservation.policyDigest !== lease.policyDigest
+  ) {
+    throw new Error(
+      "validation or budget reservation is fenced from the current Objective, run, or policy",
+    );
+  }
+  // A later holder of this same run may reconcile the original attempt's evidence.
+  // It cannot borrow a reservation from a future epoch or a different run.
+  if (
+    !Number.isSafeInteger(reservation.directorEpoch) ||
+    reservation.directorEpoch <= 0 ||
+    !Number.isSafeInteger(lease.epoch) ||
+    lease.epoch <= 0 ||
+    reservation.directorEpoch > lease.epoch
+  ) {
+    throw new Error("validation or budget reservation is fenced from the current lease epoch");
+  }
+}
+
 export class LifecycleRecorder {
   constructor(
     private readonly store: LifecycleEventStore,
@@ -264,6 +287,7 @@ export class LifecycleRecorder {
     sequence: number;
   }): Promise<FactoryEvent> {
     await this.leases.assertCurrent(args.lease);
+    assertReservationLease(args.reservation, args.lease);
     const now = await this.store.serverTime();
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
@@ -310,6 +334,7 @@ export class LifecycleRecorder {
     reportedModelUsage?: ReportedModelUsage;
   }): Promise<FactoryEvent> {
     await this.leases.assertCurrent(args.lease);
+    assertReservationLease(args.reservation, args.lease);
     const now = await this.store.serverTime();
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,

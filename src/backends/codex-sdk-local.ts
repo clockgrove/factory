@@ -3,6 +3,7 @@ import { access, chmod, readFile, rm, symlink, writeFile } from "node:fs/promise
 import { arch } from "node:os";
 import { join } from "node:path";
 
+import { readLocalResourceHostIdentity } from "../recovery/local-resources.js";
 import {
   Codex,
   type CodexOptions,
@@ -20,6 +21,15 @@ import type {
   ExecutionBackendCapabilities,
   StaleAttemptIdentity,
 } from "../execution/backend.js";
+import { localExecutionScopeBatch } from "../execution/backend.js";
+import {
+  assertLocalScopeLaunch,
+  localScopeUnit,
+  scopedLocalCommand,
+  stopLocalScope,
+  type LocalScopeIdentity,
+  type LocalScopeProcessPort,
+} from "../runtime/local-scope.js";
 import { normalizeArtifact, type NormalizedArtifact } from "../execution/artifacts.js";
 import {
   durableAttemptId,
@@ -81,9 +91,12 @@ interface SdkAttempt {
   reason?: string;
   cancelled: boolean;
   timedOut: boolean;
+  scopeSettled?: boolean;
 }
 
 export interface CodexSdkLocalOptions {
+  /** Low-level owned-resource port for deterministic lifecycle conformance. */
+  localScopePort?: LocalScopeProcessPort;
   codexPathOverride?: string;
   model?: string;
   modelReasoningEffort?: ThreadOptions["modelReasoningEffort"];
@@ -99,11 +112,43 @@ const MAX_EVENT_LOG_BYTES = 256 * 1024;
 export const CODEX_SDK_COMPATIBLE_CLI_MINOR = "0.153" as const;
 
 const CODEX_SDK_CONTAINMENT_SOURCE = String.raw`
-import { spawn } from "node:child_process";
+import { spawn, execFile, execFileSync } from "node:child_process";
 
 const supervisorPid = __FACTORY_SUPERVISOR_PID__;
 const command = __FACTORY_CODEX_COMMAND__;
 const prefixArgs = __FACTORY_CODEX_ARGS__;
+const scope = __FACTORY_LOCAL_SCOPE__;
+function unitProperties(unit) {
+  let text;
+  try {
+    text = execFileSync("systemctl", ["--user", "show", unit, "--property=Id,LoadState,ActiveState,ControlGroup,Job,InvocationID,KillMode", "--no-pager"], { encoding: "utf8", timeout: 10000, maxBuffer: 16384, stdio: ["ignore", "pipe", "pipe"] });
+  } catch (error) {
+    if (![1, 4].includes(error.status) || typeof error.stdout !== "string") throw new Error("Factory SDK scope observation unavailable");
+    text = error.stdout;
+  }
+  const fields = {};
+  for (const line of text.trim().split("\n")) {
+    const at = line.indexOf("=");
+    const name = line.slice(0, at);
+    if (at < 1 || Object.hasOwn(fields, name)) throw new Error("Factory SDK scope observation invalid");
+    fields[name] = line.slice(at + 1);
+  }
+  if (fields.Id !== unit || fields.ControlGroup === undefined || !["", "0", "0 /"].includes(fields.Job)) throw new Error("Factory SDK scope observation invalid");
+  return fields;
+}
+if (scope) {
+  const before = unitProperties(scope.unit);
+  if (before.LoadState !== "not-found" || before.ActiveState !== "inactive" || before.ControlGroup !== "") throw new Error("Factory SDK scope is already present");
+  if (scope.producerUnit) {
+    const producer = unitProperties(scope.producerUnit);
+    if (producer.LoadState !== "loaded" || producer.ActiveState !== "active" || producer.InvocationID !== scope.producerInvocationId || producer.KillMode !== "control-group") throw new Error("Factory SDK producer generation changed");
+  }
+  const remaining = Date.parse(scope.deadline) - Date.now();
+  if (!Number.isFinite(remaining) || remaining <= 0) throw new Error("Factory SDK scope launch deadline expired");
+  const ttl = prefixArgs.findIndex((arg) => arg.startsWith("--property=RuntimeMaxSec="));
+  if (ttl < 0) throw new Error("Factory SDK scope runtime bound missing");
+  prefixArgs[ttl] = "--property=RuntimeMaxSec=" + Math.floor(remaining) + "ms";
+}
 const child = spawn(command, [...prefixArgs, ...process.argv.slice(2)], {
   detached: true,
   env: process.env,
@@ -116,6 +161,8 @@ let forceTimer;
 let groupPoll;
 let childResult;
 let outputViolation;
+let scopeCleanupDone = !scope;
+let scopeCleanupFailed = false;
 const MAX_STREAM_BYTES = 8 * 1024 * 1024;
 const MAX_LINE_BYTES = 1024 * 1024;
 const outputState = {
@@ -137,11 +184,12 @@ function exitFromChild() {
   clearInterval(watchdog);
   if (forceTimer) clearTimeout(forceTimer);
   if (groupPoll) clearInterval(groupPoll);
-  process.exit(outputViolation ? 1 : childResult.signal ? 1 : childResult.code ?? 1);
+  process.exit(outputViolation || scopeCleanupFailed ? 1 : childResult.signal ? 1 : childResult.code ?? 1);
 }
 
 function finishWhenGroupIsGone() {
   if (!childResult) return;
+  if (!scopeCleanupDone) return;
   if (!groupExists()) {
     exitFromChild();
     return;
@@ -156,6 +204,14 @@ function finishWhenGroupIsGone() {
 function stopGroup() {
   if (stopping) return;
   stopping = true;
+  if (scope) {
+    execFile("systemctl", ["--user", "stop", scope.unit], { timeout: 10000, maxBuffer: 16384 }, (error) => {
+      scopeCleanupFailed = Boolean(error);
+      scopeCleanupDone = true;
+      if (error) process.stderr.write("Factory SDK owned scope cleanup unverified\n");
+      finishWhenGroupIsGone();
+    });
+  }
   try { process.kill(-child.pid, "SIGTERM"); } catch {}
   forceTimer = setTimeout(() => {
     try { process.kill(-child.pid, "SIGKILL"); } catch {}
@@ -199,7 +255,7 @@ child.once("error", (error) => {
 });
 child.once("exit", (code, signal) => {
   childResult = { code, signal };
-  if (!stopping && groupExists()) stopGroup();
+  if (!stopping && (scope || groupExists())) stopGroup();
   if (stopping) finishWhenGroupIsGone();
   else exitFromChild();
 });
@@ -209,15 +265,33 @@ export async function createSdkContainmentWrapper(
   home: string,
   target: CodexCommand,
   supervisorPid = process.pid,
+  preparedScope?: { identity: LocalScopeIdentity; deadline: Date },
 ): Promise<string> {
   if (!Number.isInteger(supervisorPid) || supervisorPid <= 0) {
     throw new Error("SDK containment wrapper requires a positive supervisor PID");
   }
   const wrapper = join(home, "factory-sdk-codex-wrapper.mjs");
+  const scope = preparedScope
+    ? {
+        unit: localScopeUnit(preparedScope.identity),
+        deadline: preparedScope.deadline.toISOString(),
+        producerUnit: preparedScope.identity.producerUnit,
+        producerInvocationId: preparedScope.identity.producerInvocationId,
+      }
+    : null;
+  const executable = preparedScope
+    ? scopedLocalCommand(
+        preparedScope.identity,
+        target.command,
+        target.args,
+        preparedScope.deadline.getTime() - Date.now(),
+      )
+    : target;
   const source = `#!/usr/bin/env node\n${CODEX_SDK_CONTAINMENT_SOURCE}`
     .replace("__FACTORY_SUPERVISOR_PID__", String(supervisorPid))
-    .replace("__FACTORY_CODEX_COMMAND__", JSON.stringify(target.command))
-    .replace("__FACTORY_CODEX_ARGS__", JSON.stringify(target.args));
+    .replace("__FACTORY_CODEX_COMMAND__", () => JSON.stringify(executable.command))
+    .replace("__FACTORY_CODEX_ARGS__", () => JSON.stringify(executable.args))
+    .replace("__FACTORY_LOCAL_SCOPE__", () => JSON.stringify(scope));
   await writeFile(wrapper, source, { mode: 0o700 });
   await chmod(wrapper, 0o700);
   return wrapper;
@@ -413,6 +487,7 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
   }
 
   async launch(context: AttemptContext): Promise<BackendHandle> {
+    const scope = localExecutionScopeBatch(context);
     if (Date.now() >= context.deadline.getTime()) {
       throw new Error("attempt deadline already elapsed");
     }
@@ -433,15 +508,29 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
       );
       const attemptId = durableAttemptId(context);
       env.FACTORY_ATTEMPT_ID = attemptId;
+      const resourceHostIdentity = await readLocalResourceHostIdentity();
       const config = restrictedCodexConfig(
         "workspace-write",
         context.packet.requirements.networkDestinations,
       );
       const sdkConfig = config as unknown as NonNullable<CodexOptions["config"]>;
       const clientOptions: CodexOptions = { env, config: sdkConfig };
-      if (!this.#options.createClient) {
+      if (!this.#options.createClient || scope) {
         const command = await resolveCodexCommand(this.#options.codexPathOverride);
-        clientOptions.codexPathOverride = await createSdkContainmentWrapper(home, command);
+        clientOptions.codexPathOverride = await createSdkContainmentWrapper(
+          home,
+          command,
+          process.pid,
+          scope ? { identity: scope.identity, deadline: context.deadline } : undefined,
+        );
+      }
+      if (scope) {
+        await context.localExecutionScope!.assertCurrent();
+        await assertLocalScopeLaunch(
+          scope.identity,
+          context.deadline,
+          this.#options.localScopePort,
+        );
       }
       const client = this.#client(clientOptions);
       const model = context.modelSelection?.model ?? this.#options.model;
@@ -465,6 +554,7 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
           workspace: context.workspace,
           baseSha: context.packet.baseSha,
           attemptId,
+          ...(resourceHostIdentity ? { resourceHostIdentity } : {}),
           codexHome: home,
         },
       };
@@ -490,12 +580,14 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
 
   async observe(handle: BackendHandle): Promise<BackendObservation> {
     const running = this.#require(handle);
+    const state =
+      running.context.localExecutionScope && !running.scopeSettled ? "running" : running.state;
     return {
-      state: running.state,
+      state,
       observedAt: new Date().toISOString(),
       usage: normalizeExecutionUsage(running.usage),
       ...(running.progress ? { progress: running.progress } : {}),
-      ...(running.state === "failed"
+      ...(state === "failed"
         ? { reason: running.reason ?? running.final?.summary ?? "SDK worker failed" }
         : {}),
     };
@@ -566,16 +658,19 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
     // deleting the only in-process recovery handle.
     running.controller.abort("Factory cleanup");
     await running.terminal;
-    await this.reconcileStale({
-      repository: running.context.repository,
-      objective: running.context.objective,
-      workItem: running.context.workItem,
-      attempt: running.context.attempt,
-      runId: running.context.runId,
-      directorEpoch: running.context.directorEpoch,
-      phase: "execution",
-      providerResourceId: handle.resourceId,
-    });
+    const scope = localExecutionScopeBatch(running.context);
+    if (scope) await stopLocalScope(scope.identity, this.#options.localScopePort);
+    else
+      await this.reconcileStale({
+        repository: running.context.repository,
+        objective: running.context.objective,
+        workItem: running.context.workItem,
+        attempt: running.context.attempt,
+        runId: running.context.runId,
+        directorEpoch: running.context.directorEpoch,
+        phase: "execution",
+        providerResourceId: handle.resourceId,
+      });
     this.#running.delete(handle.resourceId);
     await rm(running.home, { recursive: true, force: true });
   }
@@ -756,6 +851,17 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
       running.logs = appendBounded(running.logs, running.reason);
     } finally {
       clearTimeout(timeout);
+      const scope = localExecutionScopeBatch(running.context);
+      if (scope) {
+        try {
+          await stopLocalScope(scope.identity, this.#options.localScopePort);
+        } catch {
+          running.state = "failed";
+          running.reason = "SDK worker resource cleanup is unverified";
+        } finally {
+          running.scopeSettled = true;
+        }
+      }
     }
   }
 

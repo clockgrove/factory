@@ -3,7 +3,13 @@ import { readFile } from "node:fs/promises";
 
 import { describe, expect, it } from "vitest";
 
-import { CompiledGraphManager, type CompiledGraphStore } from "../src/control/graphs.js";
+import {
+  CompiledGraphManager,
+  loadCompiledGraph,
+  loadCompiledGraphProjection,
+  type CompiledGraphReadStore,
+  type CompiledGraphStore,
+} from "../src/control/graphs.js";
 import { ReviewCheckpointManager } from "../src/control/reviews.js";
 import { LeaseManager, type GitCommitObject, type LeaseStore } from "../src/control/lease.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
@@ -155,6 +161,87 @@ function objective(goal = "Implement the feature."): CompiledObjective {
 }
 
 describe("durable compiled graph", () => {
+  it("loads graph and projection using only a frozen read-only port, without a lease", async () => {
+    const store = new MemoryGraphStore();
+    const leases = new LeaseManager({ store });
+    const base = await store.readCommit(BASE_SHA);
+    const lease = await leases.acquire(
+      {
+        objective: 42,
+        runId: "read-only",
+        holder: "director",
+        policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+      },
+      base,
+    );
+    const manager = new CompiledGraphManager(store, leases);
+    const graph = await manager.persist({ lease, base, objective: objective() });
+    const projection = await manager.persistProjection({
+      lease,
+      graph,
+      bindings: [{ compilerId: "feature", issueNodeId: "issue-43", issueNumber: 43 }],
+    });
+    const reads: CompiledGraphReadStore = Object.freeze({
+      readRef: store.readRef.bind(store),
+      readCommit: store.readCommit.bind(store),
+      readBlob: store.readBlob.bind(store),
+      readTreeEntry: store.readTreeEntry.bind(store),
+    });
+    const before = structuredClone({ refs: store.refs, commits: store.commits, next: store.next });
+    await expect(loadCompiledGraph(reads, 42, "read-only")).resolves.toEqual(graph);
+    await expect(loadCompiledGraphProjection(reads, 42, "read-only", graph)).resolves.toEqual(
+      projection,
+    );
+    await expect(loadCompiledGraph(reads, 42, "absent")).resolves.toBeNull();
+    await expect(loadCompiledGraphProjection(reads, 42, "absent", graph)).resolves.toBeNull();
+    expect({ refs: store.refs, commits: store.commits, next: store.next }).toEqual(before);
+
+    store.commits.get(projection.commitOid)!.parentOids = [BASE_SHA];
+    await expect(loadCompiledGraphProjection(reads, 42, "read-only", graph)).rejects.toThrow(
+      "not bound to its immutable graph commit",
+    );
+  });
+
+  it.each([
+    ["compiled-objective.json", 2 * 1024 * 1024, "compiled graph exceeds 2 MiB"],
+    ["compilation-receipt.json", 16 * 1024, "compilation receipt exceeds 16 KiB"],
+    ["graph-projection.json", 256 * 1024, "compiled graph projection exceeds 256 KiB"],
+  ] as const)("read-only loading retains the %s size bound", async (path, limit, message) => {
+    const store = new MemoryGraphStore();
+    const leases = new LeaseManager({ store });
+    const base = await store.readCommit(BASE_SHA);
+    const lease = await leases.acquire(
+      {
+        objective: 42,
+        runId: "bounded",
+        holder: "director",
+        policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+      },
+      base,
+    );
+    const manager = new CompiledGraphManager(store, leases);
+    const graph = await manager.persist({
+      lease,
+      base,
+      objective: objective(),
+      compilation: { invocationId: "compile", inputTokens: 1, outputTokens: 1 },
+    });
+    const projection = await manager.persistProjection({
+      lease,
+      graph,
+      bindings: [{ compilerId: "feature", issueNodeId: "issue-43", issueNumber: 43 }],
+    });
+    const projectionPath = path === "graph-projection.json";
+    const commit = await store.readCommit(projectionPath ? projection.commitOid : graph.commitOid);
+    const blob = await store.readTreeEntry(commit.treeOid, `.clockgrove-factory/control/${path}`);
+    store.blobs.set(blob!, Buffer.alloc(limit + 1));
+    await expect(
+      projectionPath
+        ? loadCompiledGraphProjection(store, 42, "bounded", graph)
+        : loadCompiledGraph(store, 42, "bounded"),
+    ).rejects.toThrow(message);
+  });
+
   it("persists before issue creation and replays the exact graph", async () => {
     const store = new MemoryGraphStore();
     const leases = new LeaseManager({ store });

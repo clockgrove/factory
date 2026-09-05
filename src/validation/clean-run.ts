@@ -15,7 +15,17 @@ import {
   createLocalWorktree,
   type LocalWorktree,
 } from "../runtime/local-worktree.js";
-import { runContainedProcess, sanitizedWorkerEnvironment } from "../runtime/process-group.js";
+import {
+  runContainedProcess,
+  sanitizedWorkerEnvironment,
+  type StartProcessOptions,
+} from "../runtime/process-group.js";
+import {
+  LocalScopeCleanupError,
+  parseLocalScopeIdentity,
+  runScopedLocalProcess,
+  type LocalScopeIdentity,
+} from "../runtime/local-scope.js";
 import { createValidationEvidence, type ValidationEvidence } from "./evidence.js";
 import { NPM_VALIDATION_SETUP_COMMAND, validationPlanFromPacket } from "./plan.js";
 
@@ -39,6 +49,14 @@ export interface CleanValidationInput {
   artifact: NormalizedArtifact;
   packet: WorkerPacket;
   isolatedValidator?: () => Promise<IsolatedValidationResult>;
+  /** The Supervisor journals each exact scope before launch and fences each
+   * command. This never authorizes a local substitute for isolated validation. */
+  localScope?: {
+    identity: Omit<LocalScopeIdentity, "commandIndex">;
+    deadline: string;
+    beforeLaunch(identity: LocalScopeIdentity): Promise<void>;
+    afterStop(identity: LocalScopeIdentity): Promise<void>;
+  };
 }
 
 export interface CleanValidationResult {
@@ -143,6 +161,35 @@ export async function validateArtifactClean(
   if (plan.isolation === "isolated" && !input.isolatedValidator) {
     throw new Error("untrusted validation requires an isolated validation backend");
   }
+  if (
+    input.localScope &&
+    (plan.isolation === "isolated" ||
+      input.isolatedValidator !== undefined ||
+      input.localScope.identity.phase !== "validation" ||
+      input.localScope.identity.invocationDigest !== artifact.digest)
+  ) {
+    throw new Error("local validation scope must bind this exact trusted-local artifact");
+  }
+
+  let commandIndex = 0;
+  const runLocalCommand = async (options: StartProcessOptions) => {
+    if (!input.localScope) return runContainedProcess(options);
+    const identity = parseLocalScopeIdentity({
+      ...input.localScope.identity,
+      commandIndex: commandIndex++,
+    });
+    await input.localScope.beforeLaunch(identity);
+    const remaining = Date.parse(input.localScope.deadline) - Date.now();
+    if (!Number.isFinite(remaining) || remaining <= 0)
+      throw new Error("local validation launch deadline expired");
+    const result = await runScopedLocalProcess(identity, {
+      ...options,
+      timeoutMs: Math.min(options.timeoutMs, remaining),
+      launchDeadline: new Date(input.localScope.deadline),
+    });
+    await input.localScope.afterStop(identity);
+    return result;
+  };
 
   const startedAt = new Date();
   const worktree = await createLocalWorktree(input.repository, artifact.baseSha);
@@ -175,7 +222,7 @@ export async function validateArtifactClean(
     let evidenceStartedAt = startedAt.toISOString();
     let evidenceCompletedAt: string;
     let environmentIdentity: string | undefined;
-    if (plan.isolation === "isolated") {
+    if (plan.isolation === "isolated" || input.isolatedValidator) {
       const isolated = await input.isolatedValidator!();
       if (isolated.outputTreeSha !== outputTreeSha) {
         throw new Error(
@@ -203,7 +250,7 @@ export async function validateArtifactClean(
           ]
         : [];
       for (const setup of localCommands) {
-        const result = await runContainedProcess({
+        const result = await runLocalCommand({
           command: setup.executable,
           args: setup.args,
           cwd: worktree.path,
@@ -221,7 +268,7 @@ export async function validateArtifactClean(
         }
       }
       for (const command of failureReason ? [] : plan.commands) {
-        const result = await runContainedProcess({
+        const result = await runLocalCommand({
           command: "/bin/sh",
           args: ["-c", command],
           cwd: worktree.path,
@@ -255,6 +302,9 @@ export async function validateArtifactClean(
     });
     return { evidence, worktree };
   } catch (error) {
+    // Do not remove a workspace while an escaped command may still be using it.
+    // The unresolved scope remains a recovery liability, not successful validation.
+    if (error instanceof LocalScopeCleanupError) throw error;
     await cleanupLocalWorktree(worktree);
     throw error;
   }

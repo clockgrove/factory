@@ -10,7 +10,8 @@ Read [`docs/DESIGN.md`](docs/DESIGN.md) first. It states the goals, the non-goal
 changes are judged against; [`AGENTS.md`](AGENTS.md) states the engineering conventions.
 The current implementation waves are tracked in [`docs/DELIVERY-PLAN.md`](docs/DELIVERY-PLAN.md).
 
-Keep changes narrowly scoped. GitHub is Factory's durable state: do not add sidecar state, status
+Keep each change focused on one complete, testable capability, not an arbitrary number of files or
+helper modules. GitHub is Factory's durable state: do not add sidecar state, status
 labels, queues, services, or workflows that reconstruct the orchestration loop outside the harness.
 All GitHub access in `src/` must use Octokit, and every write must pass through the pacing,
 concurrency, and circuit-breaker controls in `src/platform.ts`.
@@ -123,7 +124,26 @@ decision and reproducible evidence instead.
 
 ## Commit and release discipline
 
-Work on a branch and submit a pull request. Do not commit credentials, local Factory state,
+Use one integration branch and one PR per complete, testable capability. Develop with incremental
+commits and bounded parallel subagents where useful; consolidate their work in that branch rather
+than opening a separate PR or stack layer for each helper or Work Item. The batch boundary is when
+the end-to-end acceptance criteria are met and the integrated result is ready for verification and
+review.
+
+Independent capabilities may advance concurrently in isolated worktrees, each with one owner and
+explicit acceptance criteria. Optimize delivery of the overall goal, not utilization alone: keep
+available agents on high-impact unblocked work within authorized budgets, and serialize only genuine
+dependencies or conflicting edits. One PR per capability is a delivery boundary, not a global
+one-capability-at-a-time limit.
+
+Run targeted checks while iterating. At the batch boundary, run the full required integration and
+release checks and rebuild/reinstall the updated plugin when the batch changes it. Do not pay this
+overhead after every intermediate commit. Repeat checks when relevant changes or failures invalidate
+their evidence; installation-specific work may need earlier targeted install tests. Documentation-only
+batches use the proportional checks described above. All applicable release and live-conformance gates
+still apply.
+
+Do not commit credentials, local Factory state,
 installation receipts, provider output, or private fixtures. A release candidate is published only
 after `npm run verify:release` and the applicable prepublication gates in
 [docs/CONFORMANCE.md](docs/CONFORMANCE.md). The final verified tag also requires that candidate's

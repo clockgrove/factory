@@ -27,6 +27,8 @@ import {
   parseRunPolicy,
 } from "../protocol/policy.js";
 import { PlatformUnavailableError } from "../platform.js";
+import { adoptRecoveryActivation, type RecoveryRepositoryOwnership } from "./recovery.js";
+import { ControllerGenerationRetirement } from "./retirement.js";
 
 export interface DiscoveredObjective {
   number: number;
@@ -165,9 +167,15 @@ export class GitHubRepositoryController {
   readonly #running = new Map<number, Promise<void>>();
   readonly #retryNotBefore = new Map<number, number>();
   #cursor = 0;
+  readonly #shutdown = new AbortController();
+  readonly #signal: AbortSignal;
+  #retirement: ControllerGenerationRetirement | undefined;
 
   constructor(options: GitHubRepositoryControllerOptions) {
     this.#options = options;
+    this.#signal = options.signal
+      ? AbortSignal.any([options.signal, this.#shutdown.signal])
+      : this.#shutdown.signal;
     if (!Number.isInteger(options.capacity ?? 1) || (options.capacity ?? 1) < 1)
       throw new Error("capacity must be positive");
     this.#resources = options.resources ?? createRepositorySupervisorResources();
@@ -187,8 +195,7 @@ export class GitHubRepositoryController {
     this.#cursor = (this.#cursor + 1) % discovered.length;
     let started = 0;
     for (const activation of ordered) {
-      if (this.#options.signal?.aborted || this.#running.size >= (this.#options.capacity ?? 1))
-        break;
+      if (this.#signal.aborted || this.#running.size >= (this.#options.capacity ?? 1)) break;
       if (this.#running.has(activation.objective)) continue;
       if (
         (this.#retryNotBefore.get(activation.objective) ?? 0) >
@@ -196,13 +203,17 @@ export class GitHubRepositoryController {
       ) {
         continue;
       }
-      const signal = this.#options.signal ?? new AbortController().signal;
+      const signal = this.#signal;
       const task = this.#options
         .reconcileObjective(activation, signal, this.#resources)
         .then(() => {
           this.#retryNotBefore.delete(activation.objective);
         })
         .catch((error) => {
+          if (error instanceof ControllerGenerationRetirement) {
+            this.#retirement = error;
+            this.#shutdown.abort();
+          }
           if (error instanceof PlatformUnavailableError) {
             const now = this.#options.nowMs?.() ?? Date.now();
             this.#retryNotBefore.set(
@@ -220,11 +231,12 @@ export class GitHubRepositoryController {
   }
 
   async run(): Promise<void> {
-    while (!this.#options.signal?.aborted) {
+    while (!this.#signal.aborted) {
       await this.reconcileOnce();
-      await interruptibleDelay(this.#options.pollIntervalMs ?? 60_000, this.#options.signal);
+      await interruptibleDelay(this.#options.pollIntervalMs ?? 60_000, this.#signal);
     }
     await this.settle();
+    if (this.#retirement) throw this.#retirement;
   }
   async settle(): Promise<void> {
     await Promise.allSettled(this.#running.values());
@@ -246,6 +258,8 @@ export interface RunRepositoryControllerOptions {
   repositoryFence?: () => Promise<void>;
   /** Current repository-controller lease identity for durable observations. */
   controllerObservation?: () => ControllerObservation;
+  /** Concrete repository ownership for dual-lease successor adoption. */
+  recoveryOwnership?: RecoveryRepositoryOwnership;
   /** Injection point for deterministic conformance tests. */
   activationStore?: DurableActivationSource;
   resources?: RepositorySupervisorResources;
@@ -296,6 +310,20 @@ export function createGitHubRepositoryController(
     reconcileObjective: async (activation, signal, shared) => {
       shared.fairness.register(activation.objective);
       try {
+        if (activation.recovery && !options.supervisorFactory) {
+          if (!options.recoveryOwnership || !(store instanceof GitHubControlStore))
+            throw new Error("Successor adoption requires concrete repository ownership");
+          await adoptRecoveryActivation({
+            token: options.token,
+            owner: options.owner,
+            repo: options.repo,
+            activation,
+            signal,
+            store,
+            ownership: options.recoveryOwnership,
+            checkout: options.repository,
+          });
+        }
         const supervisor =
           options.supervisorFactory?.(activation, shared, options.controllerObservation) ??
           new FactorySupervisor({
@@ -305,10 +333,14 @@ export function createGitHubRepositoryController(
             objective: activation.objective,
             repository: options.repository,
             policy: activation.policy,
-            activation: {
-              requestId: activation.requestId,
-              baseSha: activation.baseSha,
-            },
+            ...(activation.recovery
+              ? { recovery: activation.recovery }
+              : {
+                  activation: {
+                    requestId: activation.requestId,
+                    baseSha: activation.baseSha,
+                  },
+                }),
             signal,
             repositoryResources: shared,
             shutdownBehavior: "release-lease",
@@ -355,7 +387,7 @@ export async function runGitHubRepositoryController(
       ...(options.signal ? { signal: options.signal } : {}),
       ...(options.onStatus ? { onStatus: options.onStatus } : {}),
     },
-    async ({ store, signal, fence, observation }) =>
+    async ({ store, signal, fence, observation, recoveryOwnership }) =>
       createGitHubRepositoryController({
         ...options,
         capacity: policy.maxActiveObjectives,
@@ -365,6 +397,7 @@ export async function runGitHubRepositoryController(
         activationStore: store,
         repositoryFence: fence,
         controllerObservation: observation,
+        recoveryOwnership,
       }).run(),
   );
 }
@@ -427,6 +460,7 @@ interface RepositoryOwnership {
   signal: AbortSignal;
   fence: () => Promise<void>;
   observation: () => ControllerObservation;
+  recoveryOwnership: RecoveryRepositoryOwnership;
 }
 
 async function withRepositoryOwnership<T>(
@@ -497,7 +531,13 @@ async function withRepositoryOwnership<T>(
   });
 
   try {
-    const result = await operation({ store, signal, fence, observation });
+    const result = await operation({
+      store,
+      signal,
+      fence,
+      observation,
+      recoveryOwnership: { leases, current: () => lease },
+    });
     if (renewalFailure) throw renewalFailure;
     return result;
   } finally {

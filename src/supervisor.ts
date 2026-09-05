@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 
 import { CodexCliLocalBackend } from "./backends/codex-cli-local.js";
@@ -11,6 +11,7 @@ import {
 } from "./backends/github-copilot.js";
 import { DaytonaBackend, DaytonaResourceCleanupError } from "./backends/daytona.js";
 import { VercelSandboxBackend } from "./backends/vercel-sandbox.js";
+import { validationInvocationOwnership } from "./backends/validation-invocation.js";
 import { AttemptManager, type AttemptReservation } from "./control/attempts.js";
 import {
   deriveBudgetUsage,
@@ -25,10 +26,19 @@ import {
 import { LifecycleRecorder } from "./control/events.js";
 import {
   CompiledGraphManager,
-  type CompiledGraphProjectionBinding,
   type CompiledGraphProjectionRecord,
   type CompiledGraphRecord,
 } from "./control/graphs.js";
+import {
+  assertSnapshotMatchesCompiledGraph,
+  assertAuthenticatedGraphProjection,
+} from "./control/graph-evidence.js";
+export {
+  assertSnapshotMatchesCompiledGraph,
+  assertAuthenticatedGraphProjection,
+  type CompiledGraphSnapshot,
+  type GraphProjectionExpectation,
+} from "./control/graph-evidence.js";
 import { GitHubControlStore } from "./control/github-store.js";
 import {
   DEFAULT_LEASE_RENEWAL_INTERVAL_MS,
@@ -41,8 +51,45 @@ import {
   deduplicateFactoryEvents,
   encodeEventComment,
   nextEventSequence,
+  latestSupportedRun,
 } from "./control/receipts.js";
 import { RunManager, type RunState } from "./control/runs.js";
+import { loadRecoveryRuntime, type RecoveryRuntime } from "./recovery/runtime.js";
+import {
+  loadRecoverySourceArtifact,
+  createRecoverySourcePublishedEvent,
+  verifyRecoverySourcePublication,
+  recoverySourcePublicationBinding,
+  type RecoverySourceArtifactProof,
+} from "./recovery/source-publications.js";
+import {
+  ensureRecoveryNativeSourceStack,
+  type RecoveryNativeExistingMember,
+} from "./recovery/native-source-stacks.js";
+import { verifyRecoveryResources } from "./recovery/resources.js";
+import { recoveryReadPort } from "./recovery/github-read-port.js";
+import { observeRecoveryNativeTransition } from "./recovery/native-transition.js";
+import {
+  createRecoverySourceIntegratedEvent,
+  verifyRecoverySourceIntegration,
+  verifyPriorRecoveryDelivery,
+} from "./recovery/outcomes.js";
+import { inspectImplicitRestart } from "./control/recovery.js";
+import {
+  MergeCandidateCheckpointStore,
+  mergeCandidateIdentityDigest,
+  type MergeCandidateCheckpointRecord,
+  type MergeCandidateIdentity,
+} from "./control/merge-candidates.js";
+import { verifyMergeCandidateSquash } from "./publication/merge-candidate.js";
+import {
+  NativeRebaseCheckpointStore,
+  nativeRebaseIdentityDigest,
+  nativeRebaseResourceOwnership,
+  nativeRebaseValidationInvocation,
+  type NativeRebaseIdentity,
+  type NativeRebaseCheckpointRecord,
+} from "./control/native-rebases.js";
 import {
   ReviewCheckpointManager,
   reviewIdentityDigest,
@@ -62,7 +109,12 @@ import {
   resolveModelSelection,
   type RunPolicy,
 } from "./protocol/policy.js";
-import { parseWorkerPacket, type WorkerPacket } from "./protocol/worker-packet.js";
+import {
+  parseWorkerPacket,
+  workerPacketDigest,
+  type WorkerPacket,
+} from "./protocol/worker-packet.js";
+import { recoveryEventDigest } from "./recovery/identity.js";
 import {
   BackendRegistry,
   NoExecutionBackendError,
@@ -81,7 +133,6 @@ import {
   GithubOctokitGraphWriter,
   parseGraphItemMetadata,
   parseWorkerPacketFromIssue,
-  renderWorkPacket,
   workerPacketFromCompiled,
   type CompiledObjective,
   type ExistingGraphWorkItem,
@@ -144,6 +195,8 @@ import {
   CapacityLedger,
   capacityReservationKey,
   deriveCapacityReservations,
+  isIntegrationValidationBackend,
+  isLocalIntegrationValidationBackend,
   unreconciledCapacityReservations,
   type CapacityReservation,
 } from "./scheduling/capacity-ledger.js";
@@ -162,8 +215,12 @@ import {
   discardValidationResult,
   validateArtifactClean,
   type CleanValidationResult,
+  type CleanValidationInput,
 } from "./validation/clean-run.js";
-import { bindValidationToPublishedHead } from "./validation/plan.js";
+import { bindValidationToPublishedHead, validationPlanFromPacket } from "./validation/plan.js";
+import { discoverLocalScopeHost } from "./runtime/local-scope.js";
+import { LocalScopeBatchSchema, type LocalScopeBatch } from "./protocol/local-scope.js";
+import type { ValidationEvidence } from "./validation/evidence.js";
 import {
   CircuitBreaker,
   ConcurrencyLimiter,
@@ -199,6 +256,8 @@ export interface SupervisorOptions {
   shutdownBehavior?: "cancel-run" | "release-lease";
   /** Durable controller activation fence. Foreground runs omit this. */
   activation?: { requestId: string; baseSha: string };
+  /** Exact acknowledged successor; selects complete authenticated recovery history reads. */
+  recovery?: { requestId: string; planDigest: string; successorRunId: string };
   /** Current fenced repository-controller identity, sampled for durable status. */
   controllerObservation?: () => ControllerObservation;
 }
@@ -626,6 +685,7 @@ async function hostGit(
   repository: string,
   args: string[],
   maxOutputBytes = 256 * 1024,
+  preserveOutput = false,
 ): Promise<string> {
   const result = await runContainedProcess({
     command: "git",
@@ -638,7 +698,7 @@ async function hostGit(
   if (result.exitCode !== 0) {
     throw new Error(`git ${args.join(" ")} failed: ${result.stderr || result.stdout}`);
   }
-  return result.stdout.trim();
+  return preserveOutput ? result.stdout : result.stdout.trim();
 }
 
 async function ensureLocalCommit(repository: string, sha: string): Promise<void> {
@@ -822,156 +882,6 @@ function inspectCompiledGraph(snapshot: Snapshot): {
   };
 }
 
-export interface CompiledGraphSnapshot {
-  workItems: Array<{
-    id: string;
-    number: number;
-    title: string;
-    body?: string | null;
-    blockedBy: Array<{ number: number }>;
-  }>;
-}
-
-/**
- * Fence every mutable GitHub projection against the immutable per-run graph.
- * This runs after each fresh Objective read and before state derivation, so an
- * issue edit cannot widen a Worker Packet, remove a dependency, or make a
- * missing Work Item look like a completed Objective.
- */
-export function assertSnapshotMatchesCompiledGraph(
-  graph: CompiledObjective,
-  snapshot: CompiledGraphSnapshot,
-  projection?: readonly CompiledGraphProjectionBinding[],
-): Map<number, WorkerPacket> {
-  if (snapshot.workItems.length !== graph.workItems.length) {
-    throw new Error(
-      `Objective Work Item count ${snapshot.workItems.length} differs from immutable graph count ${graph.workItems.length}`,
-    );
-  }
-  const digest = compiledGraphDigest(graph);
-  const compiledById = new Map(graph.workItems.map((item) => [item.id, item]));
-  const observedById = new Map<
-    string,
-    { item: CompiledGraphSnapshot["workItems"][number]; index: number }
-  >();
-  for (const item of snapshot.workItems) {
-    let metadata;
-    try {
-      metadata = parseGraphItemMetadata(item.body ?? "");
-    } catch (error) {
-      throw new Error(
-        `Work Item #${item.number} does not match the immutable graph: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-    if (observedById.has(metadata.id)) {
-      throw new Error(`immutable graph Work Item ${metadata.id} appears more than once`);
-    }
-    observedById.set(metadata.id, { item, index: metadata.index });
-  }
-
-  const packets = new Map<number, WorkerPacket>();
-  const bindingById = projection
-    ? new Map(projection.map((binding) => [binding.compilerId, binding]))
-    : null;
-  if (projection && bindingById!.size !== graph.workItems.length) {
-    throw new Error("immutable graph projection cardinality differs from the compiled graph");
-  }
-  for (const [index, expected] of graph.workItems.entries()) {
-    const observed = observedById.get(expected.id);
-    if (!observed) {
-      throw new Error(`immutable graph Work Item ${expected.id} is missing from the Objective`);
-    }
-    const binding = bindingById?.get(expected.id);
-    if (
-      bindingById &&
-      (!binding ||
-        binding.issueNodeId !== observed.item.id ||
-        binding.issueNumber !== observed.item.number)
-    ) {
-      throw new Error(`Work Item ${expected.id} moved from its immutable GitHub issue binding`);
-    }
-    const expectedMetadata = {
-      protocol: "clockgrove.factory/graph-v1" as const,
-      id: expected.id,
-      graphDigest: digest,
-      graphSize: graph.workItems.length,
-      index,
-      dependsOn: expected.dependsOn,
-    };
-    const actualMetadata = parseGraphItemMetadata(observed.item.body ?? "");
-    if (JSON.stringify(actualMetadata) !== JSON.stringify(expectedMetadata)) {
-      throw new Error(`Work Item #${observed.item.number} graph metadata was modified`);
-    }
-    if (observed.item.title !== expected.title) {
-      throw new Error(`Work Item #${observed.item.number} title was modified`);
-    }
-    const expectedBody = renderWorkPacket(expected, expectedMetadata).trim();
-    if ((observed.item.body ?? "").trim() !== expectedBody) {
-      throw new Error(`Work Item #${observed.item.number} body was modified`);
-    }
-    packets.set(observed.item.number, workerPacketFromCompiled(expected));
-  }
-  if (observedById.size !== compiledById.size) {
-    throw new Error("Objective contains Work Items outside the immutable graph");
-  }
-
-  const numberById = new Map(
-    [...observedById].map(([id, observed]) => [id, observed.item.number] as const),
-  );
-  for (const expected of graph.workItems) {
-    const observed = observedById.get(expected.id)!;
-    const expectedBlockers = expected.dependsOn
-      .map((id) => numberById.get(id)!)
-      .sort((left, right) => left - right);
-    const actualBlockers = observed.item.blockedBy
-      .map(({ number }) => number)
-      .sort((left, right) => left - right);
-    if (JSON.stringify(actualBlockers) !== JSON.stringify(expectedBlockers)) {
-      throw new Error(`Work Item #${observed.item.number} blocker edges were modified`);
-    }
-  }
-  return packets;
-}
-
-export interface GraphProjectionExpectation {
-  ref: string;
-  blobOid: string;
-  graphDigest: string;
-  graphSize: number;
-}
-
-/** Require one run-actor-authenticated journal receipt for the immutable projection. */
-export function assertAuthenticatedGraphProjection(
-  events: readonly FactoryEvent[],
-  objective: number,
-  runId: string,
-  expected: GraphProjectionExpectation,
-): void {
-  const receipts = events.filter(
-    (event) =>
-      event.kind === "graph" &&
-      event.event === "GraphProjected" &&
-      event.objective === objective &&
-      event.runId === runId,
-  );
-  if (receipts.length !== 1) {
-    throw new Error(
-      receipts.length === 0
-        ? "immutable graph projection has no authenticated Objective receipt"
-        : "immutable graph projection has multiple authenticated Objective receipts",
-    );
-  }
-  const receipt = receipts[0]!;
-  if (
-    receipt.graphDigest !== expected.graphDigest ||
-    receipt.graphSize !== expected.graphSize ||
-    receipt.projectionRef !== expected.ref ||
-    receipt.projectionBlobSha !== expected.blobOid
-  ) {
-    throw new Error("authenticated graph projection receipt differs from its immutable ref");
-  }
-}
-
 const MAX_RETRY_CHECKPOINT_CACHE_BYTES = 32 * 1024 * 1024;
 
 class RetryArtifactCache {
@@ -1017,10 +927,13 @@ export class FactorySupervisor {
   readonly #notify: (message: string) => void;
   readonly #reader: GitHubReader;
   readonly #store: GitHubControlStore;
+  readonly #recoveryStore: ReturnType<typeof recoveryReadPort>;
   readonly #stacks: GitHubStacks;
   readonly #leases: LeaseManager;
   readonly #attempts: AttemptManager;
   readonly #reviews: ReviewCheckpointManager;
+  readonly #mergeCandidates: MergeCandidateCheckpointStore;
+  readonly #nativeRebases: NativeRebaseCheckpointStore;
   readonly #recorder: LifecycleRecorder;
   #management: ManagementBackend;
   readonly #managementOverride: boolean;
@@ -1051,7 +964,9 @@ export class FactorySupervisor {
   readonly #retryArtifacts = new RetryArtifactCache();
   #durablePackets = new Map<number, WorkerPacket>();
   #compiledGraph: CompiledObjective | null = null;
+  #recoveryRuntime: RecoveryRuntime | null = null;
   #compiledProjection: CompiledGraphProjectionRecord | null = null;
+  #localScopeHost: ReturnType<typeof discoverLocalScopeHost> | undefined;
 
   constructor(options: SupervisorOptions) {
     this.#options = { ...options, repository: resolve(options.repository) };
@@ -1099,8 +1014,12 @@ export class FactorySupervisor {
         }
       },
     };
-    this.#reader = new GitHubReader(github);
+    this.#reader = new GitHubReader({
+      ...github,
+      ...(options.recovery ? { recoveryInspection: true } : {}),
+    });
     this.#store = new GitHubControlStore(controls);
+    this.#recoveryStore = recoveryReadPort(this.#store, options.owner, options.repo);
     this.#stacks = new GitHubStacks(
       {
         request: (route, parameters, mutating) =>
@@ -1115,6 +1034,8 @@ export class FactorySupervisor {
       leases: this.#leases,
     });
     this.#reviews = new ReviewCheckpointManager(this.#store, this.#leases);
+    this.#mergeCandidates = new MergeCandidateCheckpointStore(this.#store, this.#leases);
+    this.#nativeRebases = new NativeRebaseCheckpointStore(this.#store, this.#leases);
     this.#recorder = new LifecycleRecorder(this.#store, this.#leases);
     this.#management =
       options.managementBackend ??
@@ -1153,12 +1074,307 @@ export class FactorySupervisor {
     await this.#lease.guardMutation(waitedMs);
   }
 
-  #externalAdmission<T>(operation: () => Promise<T>): Promise<T> {
+  async #externalAdmission<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.#recoveryRuntime) {
+      await this.#resumeObservedRun(
+        await this.#reader.readObjective(this.#run.objective),
+        new RunManager(this.#store),
+      );
+      const resources = await verifyRecoveryResources({
+        planRecord: this.#recoveryRuntime.planRecord,
+        events: this.#recoveryRuntime.events,
+        store: this.#store,
+      });
+      if (resources.status !== "verified")
+        throw new Error(`successor resources unavailable: ${resources.blockers.join(", ")}`);
+      if (this.#recoveryRuntime.currentUnknownModelUsageCount > 0)
+        throw new Error("successor model usage is unknown; refusing another invocation");
+      this.#budgetEvents = this.#accountingEvents([...this.#recoveryRuntime.events]);
+    }
     return runWithExternalAdmissionBoundary(
       this.#options.repositoryFence ?? (async () => {}),
       () => this.#lease.assertGeneration("admission"),
       operation,
     );
+  }
+
+  #accountingEvents(events: FactoryEvent[], currentRunId = this.#run.runId): FactoryEvent[] {
+    const runs = new Set(this.#recoveryRuntime?.accountingRunIds ?? [currentRunId]);
+    return events.filter((event) => runs.has(event.runId));
+  }
+
+  async #resumeObservedRun(
+    snapshot: Snapshot,
+    manager: RunManager,
+    reconciliationMode: "none" | "inspect" | "repair" = "none",
+  ): Promise<RunState | null> {
+    const active = latestSupportedRun(snapshot.factoryEvents ?? []);
+    const recovery = this.#options.recovery;
+    if (recovery && (active?.event !== "FactoryRunStarted" || !active.recoveryRequestId)) {
+      if (
+        !this.#recoveryRuntime &&
+        !active &&
+        snapshot.closed &&
+        snapshot.factoryEvents?.some(
+          (event) =>
+            event.event === "FactoryRunCompleted" && event.runId === recovery.successorRunId,
+        ) &&
+        snapshot.factoryEvents
+          .filter((event) => event.event === "FactoryRunStarted")
+          .sort((a, b) => a.sequence - b.sequence)
+          .at(-1)?.runId === recovery.successorRunId
+      ) {
+        const completed = await loadRecoveryRuntime({
+          objective: snapshot.number,
+          runId: recovery.successorRunId,
+          store: this.#recoveryStore,
+          readSnapshot: async () => ({ snapshot, historyComplete: true }),
+        });
+        if (
+          completed.status !== "verified" ||
+          completed.planRecord.digest !== recovery.planDigest ||
+          completed.planRecord.plan.requestId !== recovery.requestId
+        )
+          throw new Error("completed successor authority is unavailable");
+        return null;
+      }
+      throw new Error("recovery request does not name the current active successor");
+    }
+    if (
+      this.#recoveryRuntime &&
+      (active?.event !== "FactoryRunStarted" ||
+        active.runId !== this.#recoveryRuntime.controllingRun.runId)
+    )
+      throw new Error("successor is no longer the current non-terminal run");
+    if (active?.event !== "FactoryRunStarted" || !active.recoveryRequestId)
+      return manager.resume(snapshot.factoryEvents ?? []);
+    if (
+      !recovery ||
+      active.recoveryRequestId !== recovery.requestId ||
+      active.recoveryPlanDigest !== recovery.planDigest ||
+      active.runId !== recovery.successorRunId
+    )
+      throw new Error(
+        "successor resume requires its exact acknowledged recovery request, plan, and run",
+      );
+    const input = {
+      objective: snapshot.number,
+      runId: active.runId,
+      store: this.#recoveryStore,
+      readSnapshot: async () => ({ snapshot, historyComplete: true }),
+    };
+    let recovered: Awaited<ReturnType<RunManager["resumeRecovery"]>>;
+    try {
+      recovered = await manager.resumeRecovery(input);
+    } catch (error) {
+      // Ordinary execution/admission never uses this startup-only repair path.
+      if (reconciliationMode === "none" || this.#recoveryRuntime) throw error;
+      const inspection = await manager.inspectRecoveryReconciliation({
+        ...input,
+        planDigest: recovery.planDigest,
+        requestId: recovery.requestId,
+      });
+      if (reconciliationMode === "inspect") return inspection.run;
+      recovered = await this.#reconcileRecoverySourceMerges(snapshot.number, manager);
+    }
+    if (this.#recoveryRuntime && this.#recoveryRuntime.controllingRun.runId !== recovered.run.runId)
+      throw new Error("successor runtime changed during execution");
+    this.#recoveryRuntime = recovered.runtime;
+    return recovered.run;
+  }
+
+  /** Append only proved, already-completed merges under both configured fences.
+   * No worker, review, PR mutation or issue closure is permitted in this stage. */
+  async #reconcileRecoverySourceMerges(objective: number, manager: RunManager) {
+    const recovery = this.#options.recovery;
+    if (!recovery) throw new Error("source reconciliation requires its acknowledged recovery");
+    for (let repaired = 0; repaired <= 100; repaired++) {
+      await this.#guardMutation(0);
+      const snapshot = await this.#reader.readObjective(objective);
+      const input = {
+        objective,
+        runId: recovery.successorRunId,
+        store: this.#recoveryStore,
+        readSnapshot: async () => ({ snapshot, historyComplete: true }),
+      };
+      this.#sequences.observe(snapshotEvents(snapshot));
+      try {
+        // Full runtime verification, with every real receipt, is the only exit.
+        const recovered = await manager.resumeRecovery(input);
+        if (
+          recovered.runtime.planRecord.digest !== recovery.planDigest ||
+          recovered.runtime.planRecord.plan.requestId !== recovery.requestId
+        )
+          throw new Error("source reconciliation authority changed during startup");
+        return recovered;
+      } catch (error) {
+        if (repaired === 100) throw error;
+      }
+      const { reconciliation } = await manager.inspectRecoveryReconciliation({
+        ...input,
+        planDigest: recovery.planDigest,
+        requestId: recovery.requestId,
+      });
+      const source = reconciliation.mergedSources[0]!;
+      const event = createRecoverySourceIntegratedEvent({
+        planRecord: reconciliation.planRecord,
+        claim: reconciliation.claim,
+        ...source,
+        sequence: this.#sequences.take(),
+        at: (await this.#store.serverTime()).toISOString(),
+      });
+      await this.#guardMutation(0);
+      try {
+        await this.#lease.use(() =>
+          this.#store.addIssueComment(
+            source.issueNodeId,
+            encodeEventComment("Factory reconciled a verified completed source merge.", event),
+          ),
+        );
+      } catch (error) {
+        // A lost write response is recovered only from the exact real receipt.
+        const observed = await this.#reader.readObjective(objective);
+        if (
+          !snapshotEvents(observed).some(
+            (value) => recoveryEventDigest(value) === recoveryEventDigest(event),
+          )
+        )
+          throw error;
+        this.#sequences.observe(snapshotEvents(observed));
+      }
+    }
+    throw new Error("source reconciliation exceeded the compiled work-item bound");
+  }
+
+  #deriveObjective(snapshot: Snapshot): ReturnType<typeof derive> {
+    const objective = derive(snapshot);
+    if (!this.#recoveryRuntime) return objective;
+    return {
+      ...objective,
+      items: objective.items.map((item) => {
+        const planned = this.#recoveryRuntime!.planRecord.plan.items.find(
+          (entry) => entry.workItem === item.number,
+        );
+        const count =
+          this.#recoveryRuntime!.attemptCounts.find((entry) => entry.workItem === item.number)
+            ?.count ?? 0;
+        if (!planned?.source || planned.action === "execute") return { ...item, attempts: count };
+        const integrated = this.#recoveryRuntime!.sourceIntegrations.some(
+          (proof) => proof.outcome.workItem === item.number,
+        );
+        return {
+          ...item,
+          attempts: count,
+          state:
+            integrated && item.closed
+              ? ("done" as const)
+              : planned.action !== "integrated" && item.blockedBy.some((blocker) => !blocker.closed)
+                ? ("blocked" as const)
+                : ("for_review" as const),
+          doneWithoutMergedPullRequest: false,
+        };
+      }),
+    };
+  }
+
+  async #prepareRecoveryGraph(snapshot: Snapshot): Promise<void> {
+    const runtime = this.#recoveryRuntime!;
+    const compiled = runtime.graph.objective;
+    if (
+      runtime.planRecord.plan.items.some(
+        (item) =>
+          item.action !== "execute" && !item.source?.publication && !item.source?.artifactHead,
+      )
+    )
+      throw new Error(
+        "successor artifact-only recovery requires an explicit artifact consumer; no replacement worker is authorized",
+      );
+    assertGraphWithinRunPolicy(compiled, this.#policy);
+    if (this.#deliverySelection.selected === "native-stacks") {
+      const planned = planDelivery(
+        compiled.workItems.map((item) => {
+          if (!item.delivery) throw new Error(`Work Item ${item.id} has no delivery hint`);
+          return {
+            id: item.id,
+            dependsOn: item.dependsOn,
+            delivery: {
+              group: item.delivery.group,
+              relationship: item.delivery.relationship,
+              ...(item.delivery.parentWorkItem
+                ? { parentWorkItem: item.delivery.parentWorkItem }
+                : {}),
+            },
+          };
+        }),
+      );
+      if (planned.result === "unsupported")
+        throw new Error(`unsupported recovery delivery: ${planned.reason}`);
+      this.#deliveryPlan = planned;
+    }
+    await this.#preflightCompiledGraph(compiled);
+    this.#compiledGraph = compiled;
+    this.#compiledProjection = runtime.projection;
+    this.#fenceSnapshot(snapshot);
+  }
+
+  async #scopedValidation(
+    reservation: Pick<
+      AttemptReservation,
+      "objective" | "runId" | "workItem" | "attempt" | "policyDigest"
+    >,
+    artifact: NormalizedArtifact,
+    packet: WorkerPacket,
+    deadline: Date,
+  ): Promise<{
+    batch: LocalScopeBatch;
+    hooks: NonNullable<CleanValidationInput["localScope"]>;
+  } | null> {
+    if (validationPlanFromPacket(packet).isolation === "isolated") return null;
+    const host = await (this.#localScopeHost ??= discoverLocalScopeHost());
+    if (!host) return null;
+    const batch = await this.#lease.use(async (lease) =>
+      LocalScopeBatchSchema.parse({
+        identity: {
+          protocol: "clockgrove.factory/local-scope-v1",
+          repository: `${this.#options.owner}/${this.#options.repo}`.toLowerCase(),
+          objective: reservation.objective,
+          runId: reservation.runId,
+          workItem: reservation.workItem,
+          attempt: reservation.attempt,
+          directorEpoch: lease.epoch,
+          policyDigest: reservation.policyDigest,
+          phase: "validation",
+          commandIndex: 0,
+          invocationDigest: artifact.digest,
+          hostIdentity: host.hostIdentity,
+          ...(host.producerUnit
+            ? { producerUnit: host.producerUnit, producerInvocationId: host.producerInvocationId }
+            : {}),
+        },
+        // The optional npm setup consumes at most one additional index. Unused
+        // scopes stay absent; each actual command is covered before the first launch.
+        commandCount: validationPlanFromPacket(packet).commands.length + 1,
+        producerPid: host.producerPid,
+        producerStartTicks: host.producerStartTicks,
+        deadline: deadline.toISOString(),
+      }),
+    );
+    return {
+      batch,
+      hooks: {
+        identity: batch.identity,
+        deadline: batch.deadline,
+        beforeLaunch: async (identity) => {
+          if (identity.commandIndex >= batch.commandCount)
+            throw new Error("local validation command exceeds reserved scope batch");
+          await this.#externalAdmission(async () => {
+            if (Date.now() >= deadline.getTime())
+              throw new Error("local validation deadline expired");
+          });
+        },
+        afterStop: async () => {},
+      },
+    };
   }
 
   async #recordControllerObservation(snapshot: Snapshot): Promise<void> {
@@ -1218,6 +1434,7 @@ export class FactorySupervisor {
   }
 
   async run(): Promise<SupervisorResult> {
+    this.#recoveryRuntime = null;
     this.#compiledGraph = null;
     this.#compiledProjection = null;
     this.#durablePackets.clear();
@@ -1227,14 +1444,15 @@ export class FactorySupervisor {
     const facts = await this.#store.getRepositoryFacts();
     const actor = await this.#store.getAuthenticatedLogin();
     const runManager = new RunManager(this.#store);
-    const resumedRun = runManager.resume(snapshot.factoryEvents ?? []);
+    const resumedRun = await this.#resumeObservedRun(snapshot, runManager, "inspect");
     if (resumedRun) {
       if (
         resumedRun.objective !== snapshot.number ||
         resumedRun.repository?.toLowerCase() !== facts.fullName.toLowerCase() ||
         resumedRun.baseBranch !== snapshot.defaultBranch ||
         resumedRun.fork !== facts.fork ||
-        (this.#options.activation !== undefined &&
+        (!this.#options.recovery &&
+          this.#options.activation !== undefined &&
           (resumedRun.activationRequestId !== this.#options.activation.requestId ||
             resumedRun.baseSha !== this.#options.activation.baseSha))
       ) {
@@ -1344,13 +1562,19 @@ export class FactorySupervisor {
       );
       this.#lease = new LeaseController(this.#leases, acquired, this.#sequences);
       this.#run = resumedRun;
-      const completed = allDone(derive(snapshot));
+      const completed = allDone(this.#deriveObjective(snapshot));
       return this.#terminal(
         runManager,
         snapshot,
         completed ? "FactoryRunCompleted" : "FactoryRunEscalated",
         completed ? undefined : "Objective was closed externally before all Work Items completed",
       );
+    }
+    const recoveryBlocker = await inspectImplicitRestart(snapshot, (prefix) =>
+      this.#store.listRefs(prefix),
+    );
+    if (recoveryBlocker) {
+      return this.#startlessEscalation(recoveryBlocker, snapshot, actor);
     }
     const priorityPolicy = normalizeSchedulingPolicy(this.#policy).priority;
     if (priorityPolicy.source === "issue-field-then-subissue-order") {
@@ -1495,7 +1719,7 @@ export class FactorySupervisor {
       previousLease ?? undefined,
     );
     const runId = resumedRun?.runId ?? randomUUID();
-    this.#budgetEvents = initialEvents.filter((event) => event.runId === runId);
+    this.#budgetEvents = this.#accountingEvents(initialEvents, runId);
     const acceptedPolicyDigest = resumedRun?.policyDigest ?? policyDigest(this.#policy);
     const acquired = await this.#leases.acquire(
       {
@@ -1509,8 +1733,55 @@ export class FactorySupervisor {
     );
     this.#lease = new LeaseController(this.#leases, acquired, this.#sequences);
     try {
+      // Preflight is not a lock: the previous holder may have finished or spent
+      // more budget before this lease was acquired. Refresh both new and resumed runs.
+      let current = await this.#reader.readObjective(snapshot.number);
+      const needsReconciliation = Boolean(this.#options.recovery && !this.#recoveryRuntime);
+      let currentRun = await this.#resumeObservedRun(current, runManager, "repair");
+      // Repair may append actual merge receipts. Refresh the startup accounting
+      // and derive state from those receipts, never from the pre-repair snapshot.
+      if (needsReconciliation) {
+        current = await this.#reader.readObjective(snapshot.number);
+        currentRun = await this.#resumeObservedRun(current, runManager);
+      }
+      if (
+        current.closed ||
+        current.number !== snapshot.number ||
+        current.id !== snapshot.id ||
+        current.repositoryId !== snapshot.repositoryId ||
+        current.defaultBranch !== snapshot.defaultBranch ||
+        current.authorLogin !== snapshot.authorLogin ||
+        (resumedRun
+          ? !currentRun ||
+            currentRun.runId !== resumedRun.runId ||
+            currentRun.objective !== resumedRun.objective ||
+            currentRun.repository !== resumedRun.repository ||
+            currentRun.baseBranch !== resumedRun.baseBranch ||
+            currentRun.fork !== resumedRun.fork ||
+            currentRun.policyDigest !== resumedRun.policyDigest ||
+            currentRun.actor !== resumedRun.actor ||
+            currentRun.baseSha !== resumedRun.baseSha ||
+            currentRun.activationRequestId !== resumedRun.activationRequestId ||
+            currentRun.startedAt.getTime() !== resumedRun.startedAt.getTime()
+          : Boolean(currentRun))
+      ) {
+        throw new Error("Objective run changed during startup; re-read its current state");
+      }
+      if (!resumedRun) {
+        const blocker = await inspectImplicitRestart(current, (prefix) =>
+          this.#store.listRefs(prefix),
+        );
+        if (blocker) {
+          const rejected = await this.#startlessEscalation(blocker, current, actor);
+          await this.#lease.release();
+          return rejected;
+        }
+      }
+      snapshot = current;
+      this.#sequences.observe(snapshotEvents(snapshot));
+      this.#budgetEvents = this.#accountingEvents(snapshotEvents(snapshot), runId);
       this.#run =
-        resumedRun ??
+        currentRun ??
         (await runManager.start({
           objective: snapshot.number,
           objectiveNodeId: snapshot.id,
@@ -1673,389 +1944,397 @@ export class FactorySupervisor {
           `stacked delivery unavailable: ${this.#deliverySelection.reason}`,
         );
       }
-      const observedGraph = inspectCompiledGraph(snapshot);
-      const graphManager = new CompiledGraphManager(this.#store, this.#leases);
-      let durableGraph = await graphManager.load(snapshot.number, this.#run.runId);
-      const sourceGraph =
-        durableGraph ??
-        (observedGraph.receiptRunId && observedGraph.receiptRunId !== this.#run.runId
-          ? await graphManager.load(snapshot.number, observedGraph.receiptRunId)
-          : null);
-      if (sourceGraph && observedGraph.expectedDigest) {
-        if (
-          sourceGraph.graphDigest !== observedGraph.expectedDigest ||
-          sourceGraph.graphSize !== observedGraph.expectedSize ||
-          sourceGraph.ref !== observedGraph.expectedRef ||
-          sourceGraph.blobOid !== observedGraph.expectedBlobSha
-        ) {
-          throw new Error("durable compiled graph does not match its Objective receipt");
+      if (this.#recoveryRuntime) {
+        await this.#prepareRecoveryGraph(snapshot);
+      } else {
+        const observedGraph = inspectCompiledGraph(snapshot);
+        const graphManager = new CompiledGraphManager(this.#store, this.#leases);
+        let durableGraph = await graphManager.load(snapshot.number, this.#run.runId);
+        const sourceGraph =
+          durableGraph ??
+          (observedGraph.receiptRunId && observedGraph.receiptRunId !== this.#run.runId
+            ? await graphManager.load(snapshot.number, observedGraph.receiptRunId)
+            : null);
+        if (sourceGraph && observedGraph.expectedDigest) {
+          if (
+            sourceGraph.graphDigest !== observedGraph.expectedDigest ||
+            sourceGraph.graphSize !== observedGraph.expectedSize ||
+            sourceGraph.ref !== observedGraph.expectedRef ||
+            sourceGraph.blobOid !== observedGraph.expectedBlobSha
+          ) {
+            throw new Error("durable compiled graph does not match its Objective receipt");
+          }
         }
-      }
-      const recoverableObjective = sourceGraph?.objective ?? observedGraph.completeObjective;
-      let invokeCompilation:
-        | ((checkpoint: CompilationCheckpoint) => Promise<CompilationResult>)
-        | undefined;
-      const compilationInvocationId = `compile-${base.oid}`;
-      if (!recoverableObjective) {
-        this.#assertManagementInvocationNotFailed(compilationInvocationId);
-        this.#notify("compiling Objective into a dependency graph");
-        if (observedGraph.hasReceipt || observedGraph.existing.length > 0) {
-          throw new Error("compiled graph receipt exists but its durable graph record is missing");
-        }
-        const layout = await this.#reader.readRepositoryLayout(undefined, 5_000);
-        if (layout.truncated) {
-          throw new Error("repository layout is incomplete; compilation would be under-grounded");
-        }
-        const compilationBudget = remainingBudget(
-          this.#policy,
-          deriveBudgetUsage(this.#budgetEvents),
-        );
-        if (compilationBudget.modelTokens !== null && compilationBudget.modelTokens <= 0) {
-          throw new Error("model-token budget is exhausted; refusing Objective compilation");
-        }
-        const compilationModel = resolveModelSelection(this.#policy, "compile");
-        invokeCompilation = (checkpoint) =>
-          this.#externalAdmission(() =>
-            this.#management.compile(
-              {
-                repository: this.#options.repository,
-                objective: {
-                  number: snapshot.number,
-                  title: snapshot.title,
-                  body: snapshot.body,
-                },
-                defaultBranch: snapshot.defaultBranch,
-                baseSha: base.oid,
-                repositoryFiles: layout.files,
-                allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
-                ...(compilationModel ? { modelSelection: compilationModel } : {}),
-              },
-              checkpoint,
-            ),
+        const recoverableObjective = sourceGraph?.objective ?? observedGraph.completeObjective;
+        let invokeCompilation:
+          | ((checkpoint: CompilationCheckpoint) => Promise<CompilationResult>)
+          | undefined;
+        const compilationInvocationId = `compile-${base.oid}`;
+        if (!recoverableObjective) {
+          this.#assertManagementInvocationNotFailed(compilationInvocationId);
+          this.#notify("compiling Objective into a dependency graph");
+          if (observedGraph.hasReceipt || observedGraph.existing.length > 0) {
+            throw new Error(
+              "compiled graph receipt exists but its durable graph record is missing",
+            );
+          }
+          const layout = await this.#reader.readRepositoryLayout(undefined, 5_000);
+          if (layout.truncated) {
+            throw new Error("repository layout is incomplete; compilation would be under-grounded");
+          }
+          const compilationBudget = remainingBudget(
+            this.#policy,
+            deriveBudgetUsage(this.#budgetEvents),
           );
-      } else if (!durableGraph) {
-        // A graph recovered from an older run or issue receipt is copied into
-        // this run's immutable ref before any backend preflight can fail.
-        durableGraph = await this.#lease.use((lease) =>
-          graphManager.persist({
-            lease,
-            base,
-            objective: recoverableObjective,
-          }),
-        );
-      }
-      durableGraph = await runDurableCompilationTransaction({
-        existing: durableGraph,
-        ...(invokeCompilation ? { invoke: invokeCompilation } : {}),
-        persist: (result) =>
-          this.#lease.use((lease) =>
+          if (compilationBudget.modelTokens !== null && compilationBudget.modelTokens <= 0) {
+            throw new Error("model-token budget is exhausted; refusing Objective compilation");
+          }
+          const compilationModel = resolveModelSelection(this.#policy, "compile");
+          invokeCompilation = (checkpoint) =>
+            this.#externalAdmission(() =>
+              this.#management.compile(
+                {
+                  repository: this.#options.repository,
+                  objective: {
+                    number: snapshot.number,
+                    title: snapshot.title,
+                    body: snapshot.body,
+                  },
+                  defaultBranch: snapshot.defaultBranch,
+                  baseSha: base.oid,
+                  repositoryFiles: layout.files,
+                  allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                  ...(compilationModel ? { modelSelection: compilationModel } : {}),
+                },
+                checkpoint,
+              ),
+            );
+        } else if (!durableGraph) {
+          // A graph recovered from an older run or issue receipt is copied into
+          // this run's immutable ref before any backend preflight can fail.
+          durableGraph = await this.#lease.use((lease) =>
             graphManager.persist({
               lease,
               base,
-              objective: result.objective,
-              compilation: {
-                invocationId: compilationInvocationId,
-                inputTokens: result.usage.inputTokens,
-                outputTokens: result.usage.outputTokens,
-                ...(result.usage.cachedInputTokens === undefined
-                  ? {}
-                  : { cachedInputTokens: result.usage.cachedInputTokens }),
-              },
+              objective: recoverableObjective,
             }),
-          ),
-        recover: () => graphManager.load(snapshot.number, this.#run.runId),
-        recordFailureUsage: (usage) =>
-          this.#recordFailedManagementUsage(compilationInvocationId, usage, snapshot.id),
-        recordUsage: async (record) => {
-          if (!record.compilation) return;
-          const amount = record.compilation.inputTokens + record.compilation.outputTokens;
-          const usageId = `compile-${record.graphDigest}`;
-          const matching = this.#budgetEvents.filter(
-            (event) =>
-              event.kind === "budget" &&
-              event.runId === this.#run.runId &&
-              event.event === "BudgetReconciled" &&
-              event.phase === "management" &&
-              event.unit === "model_tokens" &&
-              event.usageId === usageId,
           );
-          if (matching.some((event) => event.amount !== amount)) {
-            throw new Error("durable compilation usage conflicts with its budget receipt");
-          }
-          if (matching.length > 0) return;
-          try {
-            const event = await this.#lease.use((lease) =>
-              this.#recorder.objectiveBudget({
+        }
+        durableGraph = await runDurableCompilationTransaction({
+          existing: durableGraph,
+          ...(invokeCompilation ? { invoke: invokeCompilation } : {}),
+          persist: (result) =>
+            this.#lease.use((lease) =>
+              graphManager.persist({
                 lease,
-                objectiveNodeId: snapshot.id,
-                sequence: this.#sequences.take(),
-                event: "BudgetReconciled",
-                unit: "model_tokens",
-                amount,
-                usageId,
-                reportedModelUsage: reportedModelUsage(record.compilation)!,
+                base,
+                objective: result.objective,
+                compilation: {
+                  invocationId: compilationInvocationId,
+                  inputTokens: result.usage.inputTokens,
+                  outputTokens: result.usage.outputTokens,
+                  ...(result.usage.cachedInputTokens === undefined
+                    ? {}
+                    : { cachedInputTokens: result.usage.cachedInputTokens }),
+                },
               }),
-            );
-            this.#budgetEvents.push(event);
-          } catch (error) {
-            const recoveredSnapshot = await this.#reader.readObjective(snapshot.number);
-            const recoveredEvent = snapshotEvents(recoveredSnapshot).find(
+            ),
+          recover: () => graphManager.load(snapshot.number, this.#run.runId),
+          recordFailureUsage: (usage) =>
+            this.#recordFailedManagementUsage(compilationInvocationId, usage, snapshot.id),
+          recordUsage: async (record) => {
+            if (!record.compilation) return;
+            const amount = record.compilation.inputTokens + record.compilation.outputTokens;
+            const usageId = `compile-${record.graphDigest}`;
+            const matching = this.#budgetEvents.filter(
               (event) =>
                 event.kind === "budget" &&
                 event.runId === this.#run.runId &&
                 event.event === "BudgetReconciled" &&
                 event.phase === "management" &&
                 event.unit === "model_tokens" &&
-                event.usageId === usageId &&
-                event.amount === amount,
+                event.usageId === usageId,
             );
-            if (!recoveredEvent) throw error;
-            snapshot = recoveredSnapshot;
-            this.#sequences.observe(snapshotEvents(snapshot));
-            if (
-              !this.#budgetEvents.some(
+            if (matching.some((event) => event.amount !== amount)) {
+              throw new Error("durable compilation usage conflicts with its budget receipt");
+            }
+            if (matching.length > 0) return;
+            try {
+              const event = await this.#lease.use((lease) =>
+                this.#recorder.objectiveBudget({
+                  lease,
+                  objectiveNodeId: snapshot.id,
+                  sequence: this.#sequences.take(),
+                  event: "BudgetReconciled",
+                  unit: "model_tokens",
+                  amount,
+                  usageId,
+                  reportedModelUsage: reportedModelUsage(record.compilation)!,
+                }),
+              );
+              this.#budgetEvents.push(event);
+            } catch (error) {
+              const recoveredSnapshot = await this.#reader.readObjective(snapshot.number);
+              const recoveredEvent = snapshotEvents(recoveredSnapshot).find(
                 (event) =>
                   event.kind === "budget" &&
-                  event.sequence === recoveredEvent.sequence &&
-                  event.runId === recoveredEvent.runId,
-              )
-            ) {
-              this.#budgetEvents.push(recoveredEvent);
-            }
-          }
-        },
-        preflight: async (objective) => {
-          assertGraphWithinRunPolicy(objective, this.#policy);
-          if (this.#deliverySelection.selected === "native-stacks") {
-            const deliveryItems = objective.workItems.map((item) => {
-              if (!item.delivery) {
-                throw new Error(`Work Item ${item.id} has no delivery hint for stacked delivery`);
+                  event.runId === this.#run.runId &&
+                  event.event === "BudgetReconciled" &&
+                  event.phase === "management" &&
+                  event.unit === "model_tokens" &&
+                  event.usageId === usageId &&
+                  event.amount === amount,
+              );
+              if (!recoveredEvent) throw error;
+              snapshot = recoveredSnapshot;
+              this.#sequences.observe(snapshotEvents(snapshot));
+              if (
+                !this.#budgetEvents.some(
+                  (event) =>
+                    event.kind === "budget" &&
+                    event.sequence === recoveredEvent.sequence &&
+                    event.runId === recoveredEvent.runId,
+                )
+              ) {
+                this.#budgetEvents.push(recoveredEvent);
               }
-              return {
-                id: item.id,
-                dependsOn: item.dependsOn,
-                delivery: {
-                  group: item.delivery.group,
-                  relationship: item.delivery.relationship,
-                  ...(item.delivery.parentWorkItem
-                    ? { parentWorkItem: item.delivery.parentWorkItem }
-                    : {}),
-                },
-              };
-            });
-            const planned = planDelivery(deliveryItems);
-            if (planned.result === "unsupported") {
-              throw new Error(`unsupported delivery topology: ${planned.reason}`);
             }
-            this.#deliveryPlan = planned;
-          }
-          await this.#preflightCompiledGraph(objective);
-        },
-      });
-      const compiled = durableGraph.objective;
-      let durableProjection = await graphManager.loadProjection(
-        snapshot.number,
-        this.#run.runId,
-        durableGraph,
-      );
-      const existingProjectionReceipts = snapshotEvents(snapshot).filter(
-        (event): event is Extract<FactoryEvent, { kind: "graph"; event: "GraphProjected" }> =>
-          event.kind === "graph" &&
-          event.event === "GraphProjected" &&
-          event.runId === this.#run.runId,
-      );
-      if (existingProjectionReceipts.length > 1) {
-        throw new Error("immutable graph projection has multiple authenticated Objective receipts");
-      }
-      if (durableProjection) {
-        assertAuthenticatedGraphProjection(
-          snapshotEvents(snapshot),
-          snapshot.number,
-          this.#run.runId,
-          durableProjection,
-        );
-        assertSnapshotMatchesCompiledGraph(compiled, snapshot, durableProjection.bindings);
-      } else if (existingProjectionReceipts[0]) {
-        const receipt = existingProjectionReceipts[0];
-        const staged = await graphManager.loadStagedProjection(
+          },
+          preflight: async (objective) => {
+            assertGraphWithinRunPolicy(objective, this.#policy);
+            if (this.#deliverySelection.selected === "native-stacks") {
+              const deliveryItems = objective.workItems.map((item) => {
+                if (!item.delivery) {
+                  throw new Error(`Work Item ${item.id} has no delivery hint for stacked delivery`);
+                }
+                return {
+                  id: item.id,
+                  dependsOn: item.dependsOn,
+                  delivery: {
+                    group: item.delivery.group,
+                    relationship: item.delivery.relationship,
+                    ...(item.delivery.parentWorkItem
+                      ? { parentWorkItem: item.delivery.parentWorkItem }
+                      : {}),
+                  },
+                };
+              });
+              const planned = planDelivery(deliveryItems);
+              if (planned.result === "unsupported") {
+                throw new Error(`unsupported delivery topology: ${planned.reason}`);
+              }
+              this.#deliveryPlan = planned;
+            }
+            await this.#preflightCompiledGraph(objective);
+          },
+        });
+        const compiled = durableGraph.objective;
+        let durableProjection = await graphManager.loadProjection(
           snapshot.number,
           this.#run.runId,
           durableGraph,
-          receipt.projectionBlobSha,
         );
-        assertAuthenticatedGraphProjection(
-          snapshotEvents(snapshot),
-          snapshot.number,
-          this.#run.runId,
-          staged,
+        const existingProjectionReceipts = snapshotEvents(snapshot).filter(
+          (event): event is Extract<FactoryEvent, { kind: "graph"; event: "GraphProjected" }> =>
+            event.kind === "graph" &&
+            event.event === "GraphProjected" &&
+            event.runId === this.#run.runId,
         );
-        assertSnapshotMatchesCompiledGraph(compiled, snapshot, staged.bindings);
-      }
-      let existingGraphItems = observedGraph.existing;
-      assertGraphQlAdmissionHeadroom(
-        snapshot.graphQlRateLimit,
-        this.#policy,
-        Math.min(this.#policy.maxParallel, compiled.workItems.length),
-        this.#notify,
-        pendingGraphQlGraphMutations(compiled, existingGraphItems),
-      );
-      if (observedGraph.receiptRunId !== this.#run.runId) {
-        await this.#lease.use((lease) =>
-          this.#recorder.graph({
-            lease,
-            objectiveNodeId: snapshot.id,
-            sequence: this.#sequences.take(),
-            graphDigest: durableGraph!.graphDigest,
-            graphSize: durableGraph!.graphSize,
-            baseSha: base.oid,
-            graphRef: durableGraph!.ref,
-            graphBlobSha: durableGraph!.blobOid,
+        if (existingProjectionReceipts.length > 1) {
+          throw new Error(
+            "immutable graph projection has multiple authenticated Objective receipts",
+          );
+        }
+        if (durableProjection) {
+          assertAuthenticatedGraphProjection(
+            snapshotEvents(snapshot),
+            snapshot.number,
+            this.#run.runId,
+            durableProjection,
+          );
+          assertSnapshotMatchesCompiledGraph(compiled, snapshot, durableProjection.bindings);
+        } else if (existingProjectionReceipts[0]) {
+          const receipt = existingProjectionReceipts[0];
+          const staged = await graphManager.loadStagedProjection(
+            snapshot.number,
+            this.#run.runId,
+            durableGraph,
+            receipt.projectionBlobSha,
+          );
+          assertAuthenticatedGraphProjection(
+            snapshotEvents(snapshot),
+            snapshot.number,
+            this.#run.runId,
+            staged,
+          );
+          assertSnapshotMatchesCompiledGraph(compiled, snapshot, staged.bindings);
+        }
+        let existingGraphItems = observedGraph.existing;
+        assertGraphQlAdmissionHeadroom(
+          snapshot.graphQlRateLimit,
+          this.#policy,
+          Math.min(this.#policy.maxParallel, compiled.workItems.length),
+          this.#notify,
+          pendingGraphQlGraphMutations(compiled, existingGraphItems),
+        );
+        if (observedGraph.receiptRunId !== this.#run.runId) {
+          await this.#lease.use((lease) =>
+            this.#recorder.graph({
+              lease,
+              objectiveNodeId: snapshot.id,
+              sequence: this.#sequences.take(),
+              graphDigest: durableGraph!.graphDigest,
+              graphSize: durableGraph!.graphSize,
+              baseSha: base.oid,
+              graphRef: durableGraph!.ref,
+              graphBlobSha: durableGraph!.blobOid,
+            }),
+          );
+        }
+        const graph = new GraphApplier({
+          writer: new GithubOctokitGraphWriter({
+            token: this.#options.token,
+            owner: this.#options.owner,
+            repo: this.#options.repo,
+            onThrottle: this.#notify,
           }),
-        );
-      }
-      const graph = new GraphApplier({
-        writer: new GithubOctokitGraphWriter({
-          token: this.#options.token,
-          owner: this.#options.owner,
-          repo: this.#options.repo,
+          circuitBreaker: this.#breaker,
+          pacer: this.#pacer,
+          concurrency: this.#concurrency,
+          mutationScheduler: this.#mutations,
+          beforeMutation: (waitedMs) => this.#guardMutation(waitedMs),
           onThrottle: this.#notify,
-        }),
-        circuitBreaker: this.#breaker,
-        pacer: this.#pacer,
-        concurrency: this.#concurrency,
-        mutationScheduler: this.#mutations,
-        beforeMutation: (waitedMs) => this.#guardMutation(waitedMs),
-        onThrottle: this.#notify,
-      });
-      let appliedWorkItems: Map<string, { id: string; number: number }> | null = null;
-      for (let recovery = 0; ; recovery += 1) {
-        const before = JSON.stringify(
-          existingGraphItems.map((item) => [
-            item.compilerId,
-            [...item.blockedByNumbers].sort((a, b) => a - b),
-          ]),
-        );
-        try {
-          appliedWorkItems = await graph.apply(compiled, {
-            repositoryId: snapshot.repositoryId,
-            objectiveIssueId: snapshot.id,
-            ...(snapshot.workItemLabelId ? { workItemLabelId: snapshot.workItemLabelId } : {}),
-            existingWorkItems: existingGraphItems,
-          });
-          break;
-        } catch (error) {
-          if (recovery >= 4) throw error;
-          if (error instanceof PlatformUnavailableError) {
-            // The breaker cooldown can outlive the lease. Stop this Director
-            // and let the host scheduler resume from the immutable graph after
-            // connectivity returns instead of mutating under an expired lease.
-            throw error;
-          } else {
-            // A mutation response can be lost after GitHub commits the write.
-            // Give the relationship snapshot a moment to become observable
-            // before deciding that no idempotent repair is possible.
-            await sleep(1_000, this.#options.signal);
-          }
-          snapshot = await this.#reader.readObjective(snapshot.number);
-          const recovered = inspectCompiledGraph(snapshot);
-          if (
-            recovered.expectedDigest !== durableGraph.graphDigest ||
-            recovered.expectedRef !== durableGraph.ref ||
-            recovered.expectedBlobSha !== durableGraph.blobOid
-          ) {
-            throw error;
-          }
-          const after = JSON.stringify(
-            recovered.existing.map((item) => [
+        });
+        let appliedWorkItems: Map<string, { id: string; number: number }> | null = null;
+        for (let recovery = 0; ; recovery += 1) {
+          const before = JSON.stringify(
+            existingGraphItems.map((item) => [
               item.compilerId,
               [...item.blockedByNumbers].sort((a, b) => a - b),
             ]),
           );
-          if (after === before && !(error instanceof PlatformUnavailableError)) throw error;
-          existingGraphItems = recovered.existing;
-          this.#notify("replaying the immutable graph after a partially observed GitHub write");
+          try {
+            appliedWorkItems = await graph.apply(compiled, {
+              repositoryId: snapshot.repositoryId,
+              objectiveIssueId: snapshot.id,
+              ...(snapshot.workItemLabelId ? { workItemLabelId: snapshot.workItemLabelId } : {}),
+              existingWorkItems: existingGraphItems,
+            });
+            break;
+          } catch (error) {
+            if (recovery >= 4) throw error;
+            if (error instanceof PlatformUnavailableError) {
+              // The breaker cooldown can outlive the lease. Stop this Director
+              // and let the host scheduler resume from the immutable graph after
+              // connectivity returns instead of mutating under an expired lease.
+              throw error;
+            } else {
+              // A mutation response can be lost after GitHub commits the write.
+              // Give the relationship snapshot a moment to become observable
+              // before deciding that no idempotent repair is possible.
+              await sleep(1_000, this.#options.signal);
+            }
+            snapshot = await this.#reader.readObjective(snapshot.number);
+            const recovered = inspectCompiledGraph(snapshot);
+            if (
+              recovered.expectedDigest !== durableGraph.graphDigest ||
+              recovered.expectedRef !== durableGraph.ref ||
+              recovered.expectedBlobSha !== durableGraph.blobOid
+            ) {
+              throw error;
+            }
+            const after = JSON.stringify(
+              recovered.existing.map((item) => [
+                item.compilerId,
+                [...item.blockedByNumbers].sort((a, b) => a - b),
+              ]),
+            );
+            if (after === before && !(error instanceof PlatformUnavailableError)) throw error;
+            existingGraphItems = recovered.existing;
+            this.#notify("replaying the immutable graph after a partially observed GitHub write");
+          }
         }
-      }
-      if (!appliedWorkItems) {
-        throw new Error("compiled graph application returned no GitHub issue projection");
-      }
-      const projectionBindings = compiled.workItems.map((item) => {
-        const issue = appliedWorkItems!.get(item.id);
-        if (!issue) {
-          throw new Error(`compiled graph application omitted Work Item ${item.id}`);
+        if (!appliedWorkItems) {
+          throw new Error("compiled graph application returned no GitHub issue projection");
         }
-        return {
-          compilerId: item.id,
-          issueNodeId: issue.id,
-          issueNumber: issue.number,
-        };
-      });
-      const stagedProjection = await this.#lease.use((lease) =>
-        graphManager.stageProjection({
-          lease,
-          graph: durableGraph!,
-          bindings: projectionBindings,
-        }),
-      );
-      let projectionReceiptEvents: readonly FactoryEvent[] = snapshotEvents(snapshot);
-      const authenticateProjection = () =>
+        const projectionBindings = compiled.workItems.map((item) => {
+          const issue = appliedWorkItems!.get(item.id);
+          if (!issue) {
+            throw new Error(`compiled graph application omitted Work Item ${item.id}`);
+          }
+          return {
+            compilerId: item.id,
+            issueNodeId: issue.id,
+            issueNumber: issue.number,
+          };
+        });
+        const stagedProjection = await this.#lease.use((lease) =>
+          graphManager.stageProjection({
+            lease,
+            graph: durableGraph!,
+            bindings: projectionBindings,
+          }),
+        );
+        let projectionReceiptEvents: readonly FactoryEvent[] = snapshotEvents(snapshot);
+        const authenticateProjection = () =>
+          assertAuthenticatedGraphProjection(
+            projectionReceiptEvents,
+            snapshot.number,
+            this.#run.runId,
+            stagedProjection,
+          );
+        const priorProjectionReceipt = snapshotEvents(snapshot).some(
+          (event) =>
+            event.kind === "graph" &&
+            event.event === "GraphProjected" &&
+            event.runId === this.#run.runId,
+        );
+        if (priorProjectionReceipt) {
+          authenticateProjection();
+        } else {
+          try {
+            const projectionEvent = await this.#lease.use((lease) =>
+              this.#recorder.graphProjection({
+                lease,
+                objectiveNodeId: snapshot.id,
+                sequence: this.#sequences.take(),
+                graphDigest: stagedProjection.graphDigest,
+                graphSize: stagedProjection.graphSize,
+                projectionRef: stagedProjection.ref,
+                projectionBlobSha: stagedProjection.blobOid,
+              }),
+            );
+            projectionReceiptEvents = [projectionEvent];
+            authenticateProjection();
+          } catch (error) {
+            const recoveredSnapshot = await this.#reader.readObjective(snapshot.number);
+            snapshot = recoveredSnapshot;
+            this.#sequences.observe(snapshotEvents(snapshot));
+            projectionReceiptEvents = snapshotEvents(snapshot);
+            try {
+              authenticateProjection();
+            } catch {
+              throw error;
+            }
+          }
+        }
+        durableProjection = await this.#lease.use((lease) =>
+          graphManager.persistProjection({
+            lease,
+            graph: durableGraph!,
+            bindings: projectionBindings,
+            expectedBlobOid: stagedProjection.blobOid,
+          }),
+        );
         assertAuthenticatedGraphProjection(
           projectionReceiptEvents,
           snapshot.number,
           this.#run.runId,
-          stagedProjection,
+          durableProjection,
         );
-      const priorProjectionReceipt = snapshotEvents(snapshot).some(
-        (event) =>
-          event.kind === "graph" &&
-          event.event === "GraphProjected" &&
-          event.runId === this.#run.runId,
-      );
-      if (priorProjectionReceipt) {
-        authenticateProjection();
-      } else {
-        try {
-          const projectionEvent = await this.#lease.use((lease) =>
-            this.#recorder.graphProjection({
-              lease,
-              objectiveNodeId: snapshot.id,
-              sequence: this.#sequences.take(),
-              graphDigest: stagedProjection.graphDigest,
-              graphSize: stagedProjection.graphSize,
-              projectionRef: stagedProjection.ref,
-              projectionBlobSha: stagedProjection.blobOid,
-            }),
-          );
-          projectionReceiptEvents = [projectionEvent];
-          authenticateProjection();
-        } catch (error) {
-          const recoveredSnapshot = await this.#reader.readObjective(snapshot.number);
-          snapshot = recoveredSnapshot;
-          this.#sequences.observe(snapshotEvents(snapshot));
-          projectionReceiptEvents = snapshotEvents(snapshot);
-          try {
-            authenticateProjection();
-          } catch {
-            throw error;
-          }
-        }
+        this.#compiledGraph = compiled;
+        this.#compiledProjection = durableProjection;
       }
-      durableProjection = await this.#lease.use((lease) =>
-        graphManager.persistProjection({
-          lease,
-          graph: durableGraph!,
-          bindings: projectionBindings,
-          expectedBlobOid: stagedProjection.blobOid,
-        }),
-      );
-      assertAuthenticatedGraphProjection(
-        projectionReceiptEvents,
-        snapshot.number,
-        this.#run.runId,
-        durableProjection,
-      );
-      this.#compiledGraph = compiled;
-      this.#compiledProjection = durableProjection;
       for (;;) {
         if (heartbeatError) throw heartbeatError;
         if (this.#options.signal?.aborted) {
@@ -2086,8 +2365,66 @@ export class FactorySupervisor {
           runActor: this.#run.actor,
           runStartSequence: this.#runStartSequence,
         });
-        const objective = derive(snapshot);
+        if (this.#recoveryRuntime) await this.#resumeObservedRun(snapshot, runManager);
+        const objective = this.#deriveObjective(snapshot);
+        const adoptedPublication =
+          this.#recoveryRuntime &&
+          objective.items.find((item) => {
+            const planned = this.#recoveryRuntime!.planRecord.plan.items.find(
+              (entry) => entry.workItem === item.number,
+            );
+            return planned?.source && planned.action !== "execute" && item.state === "for_review";
+          });
+        if (adoptedPublication) {
+          await this.#resumeAdoptedSource(adoptedPublication);
+          continue;
+        }
         if (await this.#repairReservationReceipts(objective.items)) continue;
+        // GitHub can report MERGED before the response or our closure receipt arrives.
+        // Reconstruct exact integration before derived "done" can close the Objective.
+        const unrecordedNative =
+          this.#deliverySelection.selected === "native-stacks"
+            ? objective.items.find((item) => {
+                if (item.state !== "done") return false;
+                const metadata = parseGraphItemMetadata(item.body ?? "");
+                const unit = this.#deliveryPlan?.units.find((candidate) =>
+                  candidate.items.includes(metadata.id),
+                );
+                if (!unit) return false;
+                const published = [...(item.factoryEvents ?? [])]
+                  .reverse()
+                  .find(
+                    (event) =>
+                      event.kind === "attempt" &&
+                      event.runId === this.#run.runId &&
+                      event.event === "AttemptPublished",
+                  );
+                return (
+                  published?.kind === "attempt" &&
+                  !(item.factoryEvents ?? []).some(
+                    (event) =>
+                      event.kind === "attempt" &&
+                      event.runId === this.#run.runId &&
+                      event.event === "AttemptIntegrated" &&
+                      event.attempt === published.attempt,
+                  )
+                );
+              })
+            : undefined;
+        if (unrecordedNative) {
+          const metadata = parseGraphItemMetadata(unrecordedNative.body ?? "");
+          const unit = this.#deliveryPlan!.units.find((unit) => unit.items.includes(metadata.id))!;
+          if (unit.kind === "sibling") await this.#resumeIntegration(unrecordedNative);
+          else {
+            const members = unit.items.map((id) =>
+              objective.items.find((item) => parseGraphItemMetadata(item.body ?? "").id === id),
+            );
+            if (members.some((item) => !item || !["done", "for_review"].includes(item.state)))
+              throw new Error("native integration recovery has an incomplete publication unit");
+            await this.#integrateNativeStack(unit.id, members as DerivedWorkItem[], deadline);
+          }
+          continue;
+        }
         if (allDone(objective)) {
           const settlements = await activeExecutions.settle();
           const failure = settlements.find((settlement) => settlement.error);
@@ -2095,7 +2432,8 @@ export class FactorySupervisor {
           snapshot = await this.#reader.readObjective(snapshot.number);
           this.#fenceSnapshot(snapshot);
           this.#sequences.observe(snapshotEvents(snapshot));
-          if (!allDone(derive(snapshot))) continue;
+          if (this.#recoveryRuntime) await this.#resumeObservedRun(snapshot, runManager);
+          if (!allDone(this.#deriveObjective(snapshot))) continue;
           await this.#lease.assert();
           await this.#store.closeIssue(snapshot.number);
           return await this.#terminal(runManager, snapshot, "FactoryRunCompleted");
@@ -2263,7 +2601,10 @@ export class FactorySupervisor {
               exclusiveResources: packet.changeSurface?.exclusiveResources ?? [],
               isLocalBackend: (id: string) => {
                 const capabilities = this.#registry.get(id)?.capabilities;
-                return Boolean(capabilities?.hostExecution && !capabilities.requiresPaidRuntime);
+                return (
+                  isLocalIntegrationValidationBackend(id) ||
+                  Boolean(capabilities?.hostExecution && !capabilities.requiresPaidRuntime)
+                );
               },
             };
           }),
@@ -2277,12 +2618,23 @@ export class FactorySupervisor {
         );
         this.#budgetEvents = deduplicateFactoryEvents([
           ...this.#budgetEvents,
-          ...snapshotEvents(snapshot).filter((event) => event.runId === this.#run.runId),
+          ...this.#accountingEvents(snapshotEvents(snapshot)),
         ]);
         const availableBudget = remainingBudget(
           this.#policy,
           deriveBudgetUsage(this.#budgetEvents),
         );
+        if (
+          this.#recoveryRuntime &&
+          activeExecutions.size === 0 &&
+          runnable.length > 0 &&
+          availableBudget.modelTokens !== null &&
+          availableBudget.modelTokens <= 0
+        )
+          return await terminalAfterDrain(
+            "FactoryRunEscalated",
+            "cumulative model-token budget exhausted before successor work admission",
+          );
         const nowMs = snapshot.readAt.getTime();
         let resource: ResourceSnapshot | null = null;
         if (scheduling.capacity.mode === "adaptive-local") {
@@ -2338,10 +2690,22 @@ export class FactorySupervisor {
               commandState.cloudPaused,
             );
             if (this.#deliverySelection.selected === "native-stacks") {
+              const metadata = parseGraphItemMetadata(priority.item.body ?? "");
+              const unit = this.#deliveryPlan?.units.find((unit) =>
+                unit.items.includes(metadata.id),
+              );
               for (const candidate of backends) {
-                if (candidate.capabilities && !candidate.capabilities.hostExecution) {
+                if (
+                  candidate.capabilities &&
+                  !candidate.capabilities.hostExecution &&
+                  !(
+                    candidate.id === "codex-cli/daytona" &&
+                    unit &&
+                    (unit.kind === "stack" || (unit.kind === "sibling" && unit.items.length === 1))
+                  )
+                ) {
                   candidate.permanentReasons.push(
-                    "native stack delivery requires host-owned local execution so publication and cascading revalidation never cross the host trust boundary",
+                    "native publication requires host-owned artifacts or Daytona with independent isolated revalidation",
                   );
                 }
               }
@@ -2586,6 +2950,7 @@ export class FactorySupervisor {
       }
     };
     try {
+      if (this.#recoveryRuntime) await this.#externalAdmission(async () => {});
       const originalPacket = this.#packetFor(item.number);
       const base = deliveryBase
         ? await this.#store.readCommit(deliveryBase.sha)
@@ -2625,18 +2990,21 @@ export class FactorySupervisor {
       noHandleReplacementNotBefore = new Date(attemptDeadline.getTime() + 60_000).toISOString();
       await this.#lease.use(async (lease) => {
         const prior = (await this.#attempts.list(this.#run.objective, item.number)).filter(
-          (attempt) => attempt.runId === this.#run.runId,
+          (attempt) =>
+            (this.#recoveryRuntime?.accountingRunIds ?? [this.#run.runId]).includes(attempt.runId),
         );
         const deferred = new Set(
           (item.factoryEvents ?? []).flatMap((event) =>
             event.kind === "attempt" &&
-            event.runId === this.#run.runId &&
+            (this.#recoveryRuntime?.accountingRunIds ?? [this.#run.runId]).includes(event.runId) &&
             event.event === "AttemptDeferred"
-              ? [event.attempt]
+              ? [`${event.runId}:${event.attempt}`]
               : [],
           ),
         );
-        const consumed = prior.filter((attempt) => !deferred.has(attempt.attempt)).length;
+        const consumed = prior.filter(
+          (attempt) => !deferred.has(`${attempt.runId}:${attempt.attempt}`),
+        ).length;
         if (consumed >= this.#policy.maxAttemptsPerItem) {
           throw new Error(`attempt budget exhausted (${consumed})`);
         }
@@ -2731,6 +3099,41 @@ export class FactorySupervisor {
           backend: selected.capabilities.id,
           base,
           sequence: this.#sequences.take(),
+          prepareLocalScope: async (attempt) => {
+            if (!selected!.capabilities.hostExecution) return null;
+            const host = await (this.#localScopeHost ??= discoverLocalScopeHost());
+            if (!host) {
+              if (this.#recoveryRuntime)
+                throw new Error("successor execution requires observable owned local scopes");
+              return null;
+            }
+            return LocalScopeBatchSchema.parse({
+              identity: {
+                protocol: "clockgrove.factory/local-scope-v1",
+                repository: `${this.#options.owner}/${this.#options.repo}`.toLowerCase(),
+                objective: this.#run.objective,
+                runId: this.#run.runId,
+                workItem: item.number,
+                attempt,
+                directorEpoch: lease.epoch,
+                policyDigest: this.#run.policyDigest,
+                phase: "execution",
+                commandIndex: 0,
+                invocationDigest: workerPacketDigest(packet),
+                hostIdentity: host.hostIdentity,
+                ...(host.producerUnit
+                  ? {
+                      producerUnit: host.producerUnit,
+                      producerInvocationId: host.producerInvocationId,
+                    }
+                  : {}),
+              },
+              commandCount: 1,
+              producerPid: host.producerPid,
+              producerStartTicks: host.producerStartTicks,
+              deadline: attemptDeadline.toISOString(),
+            });
+          },
           admission: {
             admissionClass: admission.admissionClass,
             admissionReason: admission.admissionReason,
@@ -2821,6 +3224,18 @@ export class FactorySupervisor {
           policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
           providerBaseRef: publicationBaseBranch,
           deadline: attemptDeadline,
+          ...(reservation!.localScopeBatch
+            ? {
+                localExecutionScope: {
+                  batch: reservation!.localScopeBatch,
+                  assertCurrent: () =>
+                    this.#externalAdmission(async () => {
+                      if (Date.now() >= attemptDeadline.getTime())
+                        throw new Error("execution scope deadline expired");
+                    }),
+                },
+              }
+            : {}),
           ...(workerModelSelection ? { modelSelection: workerModelSelection } : {}),
           ...(retryCheckpoint ? { seededFromArtifact: true } : {}),
         });
@@ -2833,6 +3248,9 @@ export class FactorySupervisor {
           event: "AttemptStarted",
           sequence: this.#sequences.take(),
           providerResourceId: handle!.resourceId,
+          ...(handle!.metadata?.resourceHostIdentity
+            ? { resourceHostIdentity: handle!.metadata.resourceHostIdentity }
+            : {}),
           ...(handle!.metadata?.environmentIdentity
             ? { environmentIdentity: handle!.metadata.environmentIdentity }
             : {}),
@@ -2995,6 +3413,14 @@ export class FactorySupervisor {
         await sleep(this.#options.pollIntervalMs ?? 2_000, executionSignal);
       }
       releaseExecutionCapacity();
+      const scopedValidation = validator
+        ? null
+        : await this.#scopedValidation(
+            reservation!,
+            artifact,
+            packet,
+            new Date(Date.now() + timeoutMs),
+          );
       await this.#lease.use(async (lease) => {
         const capacityEvent = await this.#attempts.recordCapacity({
           lease,
@@ -3006,6 +3432,7 @@ export class FactorySupervisor {
           backend: validationCapacity!.backendId,
           requestedCpu: validationCapacity!.cpu,
           requestedMemoryMb: validationCapacity!.memoryMb,
+          ...(scopedValidation ? { localScopeBatch: scopedValidation.batch } : {}),
         });
         const validationDeadline = new Date(new Date(capacityEvent.at).getTime() + timeoutMs);
         if (validationDeadline.getTime() <= Date.now()) {
@@ -3034,6 +3461,7 @@ export class FactorySupervisor {
           repository: this.#options.repository,
           artifact,
           packet,
+          ...(scopedValidation ? { localScope: scopedValidation.hooks } : {}),
           ...(validator
             ? {
                 isolatedValidator: () =>
@@ -3485,7 +3913,12 @@ export class FactorySupervisor {
   }
 
   #reviewUsageId(record: ReviewCheckpointRecord): string {
-    const prefix = record.identity.kind === "rebase" ? "rebase-review" : "review";
+    const prefix =
+      record.identity.kind === "integration-candidate"
+        ? "integration-review"
+        : record.identity.kind === "rebase"
+          ? "rebase-review"
+          : "review";
     return `${prefix}-${record.identityDigest}`;
   }
 
@@ -3656,7 +4089,7 @@ export class FactorySupervisor {
     record: ReviewCheckpointRecord,
     item: DerivedWorkItem,
     reservation: AttemptReservation,
-    validation: CleanValidationResult,
+    validation: Pick<CleanValidationResult, "evidence">,
     receipt: PublicationReceipt,
   ): Promise<void> {
     if (!record.review.accepted) {
@@ -3780,12 +4213,26 @@ export class FactorySupervisor {
       };
       const timeoutMs =
         (requirements.timeoutMinutes ?? this.#policy.workItemTimeoutMinutes) * 60_000;
+      const unit = this.#deliveryPlan?.units.find((unit) => unit.items.includes(item.id));
+      const isolatedNativeUnit =
+        this.#deliverySelection.selected === "native-stacks" &&
+        unit &&
+        (unit.kind === "stack" || (unit.kind === "sibling" && unit.items.length === 1));
       const execution = await this.#registry.select({
-        policy: this.#policy,
+        policy: isolatedNativeUnit
+          ? {
+              ...this.#policy,
+              backendOrder: this.#policy.backendOrder.filter(
+                (id) =>
+                  id === "codex-cli/daytona" || this.#registry.get(id)?.capabilities.hostExecution,
+              ),
+            }
+          : this.#policy,
         requirements,
         budget: budgets,
         estimatedDurationMs: timeoutMs,
-        requireHostExecution: this.#deliverySelection.selected === "native-stacks",
+        requireHostExecution:
+          this.#deliverySelection.selected === "native-stacks" && !isolatedNativeUnit,
       });
       if (requirements.trust !== "trusted_local" || !execution.backend.capabilities.hostExecution) {
         const afterExecution = {
@@ -3831,12 +4278,27 @@ export class FactorySupervisor {
     assertAuthenticatedGraphProjection(
       snapshotEvents(snapshot),
       snapshot.number,
-      this.#run.runId,
+      this.#recoveryRuntime?.planRecord.plan.graph.sourceRunId ?? this.#run.runId,
       this.#compiledProjection,
     );
   }
 
-  async #nativeStackMember(item: DerivedWorkItem): Promise<NativeStackMember> {
+  async #nativeStackMember(
+    item: DerivedWorkItem,
+    requireRecordedPublication = false,
+  ): Promise<NativeStackMember> {
+    // A completed publication receipt is the commit point for a rebase. Validation and
+    // AttemptPublished may have been written before a lost final publication response.
+    // Replay the prior complete binding until that exact checkpoint transaction repairs it.
+    const recordedPublication = [...(item.factoryEvents ?? [])]
+      .sort((left, right) => right.sequence - left.sequence)
+      .find(
+        (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
+          event.kind === "publication" &&
+          event.runId === this.#run.runId &&
+          event.workItem === item.number &&
+          event.event === "PublicationRecorded",
+      );
     const publishedEvent = [...(item.factoryEvents ?? [])]
       .sort((left, right) => right.sequence - left.sequence)
       .find(
@@ -3844,6 +4306,9 @@ export class FactorySupervisor {
           event.kind === "attempt" &&
           event.runId === this.#run.runId &&
           event.event === "AttemptPublished" &&
+          (!recordedPublication ||
+            (event.headSha === recordedPublication.headSha &&
+              event.attempt === recordedPublication.attempt)) &&
           Boolean(event.headSha),
       );
     if (!publishedEvent || publishedEvent.kind !== "attempt" || !publishedEvent.headSha) {
@@ -3856,6 +4321,9 @@ export class FactorySupervisor {
           event.kind === "validation" &&
           event.runId === this.#run.runId &&
           event.attempt === publishedEvent.attempt &&
+          (recordedPublication
+            ? event.evidenceDigest === recordedPublication.validationDigest
+            : event.sequence <= publishedEvent.sequence) &&
           event.passed,
       );
     if (!validation || validation.kind !== "validation") {
@@ -3903,7 +4371,7 @@ export class FactorySupervisor {
       );
     const baseBranch =
       publicationEvent?.kind === "publication" ? publicationEvent.baseBranch : this.#baseBranch;
-    if (!publicationEvent && plan.parentItemId) {
+    if (!publicationEvent && (plan.parentItemId || requireRecordedPublication)) {
       throw new Error(`stack Work Item ${metadata.id} is missing its publication receipt`);
     }
     const receipt: PublicationReceipt = {
@@ -3968,7 +4436,28 @@ export class FactorySupervisor {
         this.#deliveryPlan?.items.find((candidate) => candidate.itemId === rightId)?.position ?? 0;
       return leftPosition - rightPosition;
     });
-    const remaining = ordered.filter((item) => item.state === "for_review");
+    const remaining = ordered.filter((item) => {
+      if (item.state === "for_review") return true;
+      if (item.state !== "done") return false;
+      const published = [...(item.factoryEvents ?? [])]
+        .sort((a, b) => b.sequence - a.sequence)
+        .find(
+          (event) =>
+            event.kind === "attempt" &&
+            event.runId === this.#run.runId &&
+            event.event === "AttemptPublished",
+        );
+      return (
+        published?.kind === "attempt" &&
+        !(item.factoryEvents ?? []).some(
+          (event) =>
+            event.kind === "attempt" &&
+            event.runId === this.#run.runId &&
+            event.event === "AttemptIntegrated" &&
+            event.attempt === published.attempt,
+        )
+      );
+    });
     if (remaining.length === 0) return;
     const members = await Promise.all(ordered.map((item) => this.#nativeStackMember(item)));
     const mergePolicy = this.#policy.delivery?.merge ?? "bottom-up";
@@ -4151,7 +4640,7 @@ export class FactorySupervisor {
           `stack Work Item ${member.receipt.itemId} targets ${current.baseRef}, expected ${expectedBaseBranch}`,
         );
       }
-      if (ordered[index]!.state === "done") continue;
+      if (ordered[index]!.state === "done" && !remaining.includes(ordered[index]!)) continue;
       if (current.merged) {
         mergedDuringRecovery.push(member);
         continue;
@@ -4368,6 +4857,377 @@ export class FactorySupervisor {
     await completeIntegrated(integrated);
   }
 
+  async #nativeRebaseAdmissionCurrent(
+    member: NativeStackMember,
+    headSha: string,
+    baseSha: string,
+    baseBranch: string,
+    alreadyAdmitted = false,
+  ): Promise<boolean> {
+    this.#options.signal?.throwIfAborted();
+    const snapshot = await this.#reader.readObjective(this.#run.objective);
+    this.#fenceSnapshot(snapshot);
+    this.#sequences.observe(snapshotEvents(snapshot));
+    if (hasCancellationRequest(snapshot, this.#run.runId))
+      throw new RunCancellationRequestedError("operator cancelled before native rebase admission");
+    const commands = deriveDurableCommandState({
+      events: snapshotEvents(snapshot),
+      objective: snapshot.number,
+      runId: this.#run.runId,
+      runActor: this.#run.actor,
+      runStartSequence: this.#runStartSequence,
+    });
+    // Cloud pause stops new reservations; it does not cancel an already admitted phase.
+    if (commands.cloudPaused && !alreadyAdmitted) return false;
+    const current = await this.#store.readPullRequest(member.pull.number);
+    if (
+      current.merged ||
+      current.state !== "open" ||
+      current.headSha !== headSha ||
+      current.baseSha !== baseSha ||
+      current.baseRef !== baseBranch
+    )
+      throw new Error(
+        "native rebase head or base changed before exact validation/review admission",
+      );
+    const commit = await this.#store.readCommit(headSha);
+    if (
+      commit.oid !== headSha ||
+      commit.parentOids.length !== 1 ||
+      commit.parentOids[0] !== baseSha
+    )
+      throw new Error("native rebase head does not descend from its exact observed base");
+    return true;
+  }
+
+  /** Revalidation is a new paid resource, never a new implementation attempt. */
+  async #prepareNativeRebaseValidation(
+    item: DerivedWorkItem,
+    member: NativeStackMember,
+    headSha: string,
+    artifact: NormalizedArtifact,
+    packet: WorkerPacket,
+    baseBranch: string,
+  ): Promise<NativeRebaseCheckpointRecord | null> {
+    const reservation = member.reservation;
+    const identity: NativeRebaseIdentity = {
+      repository: `${this.#options.owner}/${this.#options.repo}`,
+      runId: reservation.runId,
+      objective: reservation.objective,
+      workItem: item.number,
+      attempt: reservation.attempt,
+      directorEpoch: reservation.directorEpoch,
+      policyDigest: reservation.policyDigest,
+      pullRequest: member.pull.number,
+      sourceHeadSha: member.pull.commitSha,
+      sourceExactHeadValidationDigest: member.pull.exactHeadValidation.digest,
+      headSha,
+      baseSha: packet.baseSha,
+    };
+    const digest = nativeRebaseIdentityDigest(identity);
+    const capacityBackend = `factory/integration-sandbox-${digest}`;
+    const snapshot = await this.#reader.readObjective(this.#run.objective);
+    this.#fenceSnapshot(snapshot);
+    this.#sequences.observe(snapshotEvents(snapshot));
+    const events = snapshotEvents(snapshot);
+    this.#budgetEvents = deduplicateFactoryEvents([
+      ...this.#budgetEvents,
+      ...events.filter((event) => event.runId === this.#run.runId),
+    ]);
+    let record = await this.#nativeRebases.load(identity);
+    if (record && record.validation.artifactDigest !== artifact.digest)
+      throw new Error("native rebase checkpoint does not match the current rewritten artifact");
+    if (record) {
+      const history = deduplicateFactoryEvents(events);
+      const capacity = history.filter(
+        (event) =>
+          event.kind === "capacity" &&
+          event.event === "CapacityReserved" &&
+          event.runId === reservation.runId &&
+          event.objective === reservation.objective &&
+          event.workItem === item.number &&
+          event.attempt === reservation.attempt &&
+          event.phase === "validation" &&
+          event.backend === capacityBackend &&
+          event.policyDigest === reservation.policyDigest &&
+          event.directorEpoch === reservation.directorEpoch,
+      );
+      const budget = history.filter(
+        (event) =>
+          event.kind === "budget" &&
+          event.event === "BudgetReserved" &&
+          event.runId === reservation.runId &&
+          event.objective === reservation.objective &&
+          event.workItem === item.number &&
+          event.attempt === reservation.attempt &&
+          event.phase === "validation" &&
+          event.unit === "sandbox_milliseconds" &&
+          event.usageId === `integration-validation-${digest}`,
+      );
+      if (
+        capacity.length !== 1 ||
+        budget.length !== 1 ||
+        capacity[0]!.sequence >= budget[0]!.sequence
+      )
+        throw new Error(
+          "native rebase checkpoint has no exact authenticated capacity and budget admission",
+        );
+    }
+    const pending = unreconciledCapacityReservations(events).filter(
+      (event) =>
+        event.runId === reservation.runId &&
+        event.workItem === item.number &&
+        event.attempt === reservation.attempt &&
+        event.backend === capacityBackend,
+    );
+    if (!record && pending.length)
+      throw new Error(
+        "native rebase completion is unavailable; automated replacement is blocked until exact resource reconciliation",
+      );
+    const reconcile = (cpu: number, memoryMb: number) =>
+      this.#lease.use((lease) =>
+        this.#attempts.recordCapacity({
+          lease,
+          workItemNodeId: item.id,
+          reservation,
+          sequence: this.#sequences.take(),
+          event: "CapacityReconciled",
+          phase: "validation",
+          backend: capacityBackend,
+          requestedCpu: cpu,
+          requestedMemoryMb: memoryMb,
+          allowRecovery: true,
+        }),
+      );
+    if (record) {
+      for (const capacity of pending)
+        await reconcile(capacity.requestedCpu, capacity.requestedMemoryMb);
+    } else {
+      this.#options.signal?.throwIfAborted();
+      if (hasCancellationRequest(snapshot, this.#run.runId))
+        throw new RunCancellationRequestedError(
+          "operator cancelled before native rebase validation",
+        );
+      const commandState = deriveDurableCommandState({
+        events,
+        objective: snapshot.number,
+        runId: this.#run.runId,
+        runActor: this.#run.actor,
+        runStartSequence: this.#runStartSequence,
+      });
+      if (commandState.cloudPaused) return null;
+      if (!(await this.#nativeRebaseAdmissionCurrent(member, headSha, packet.baseSha, baseBranch)))
+        return null;
+      const objectiveDeadline =
+        this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000;
+      const timeout = Math.min(
+        (packet.requirements.timeoutMinutes ?? this.#policy.workItemTimeoutMinutes) * 60_000,
+        objectiveDeadline - Date.now(),
+      );
+      const available = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
+      if (timeout <= 0 || available.sandboxMinutes * 60_000 < timeout)
+        throw new Error(
+          "sandbox-minute budget or deadline exhausted before native rebase validation",
+        );
+      const validator = await this.#registry.selectIsolatedValidator({
+        policy: { ...this.#policy, backendOrder: ["codex-cli/daytona"] },
+        requirements: packet.requirements,
+        budget: available,
+        estimatedDurationMs: timeout,
+      });
+      if (validator.backend.capabilities.id !== "codex-cli/daytona" || !validator.backend.validate)
+        throw new Error(
+          "native rebase requires explicitly authorized independent Daytona validation",
+        );
+      const effective = normalizeSchedulingPolicy(this.#policy);
+      const capacity: CapacityReservation = {
+        key: capacityReservationKey({
+          objective: reservation.objective,
+          workItem: item.number,
+          attempt: reservation.attempt,
+          phase: "validation",
+          backendId: capacityBackend,
+        }),
+        objective: reservation.objective,
+        workItem: item.number,
+        attempt: reservation.attempt,
+        phase: "validation",
+        backendId: capacityBackend,
+        admissionClass: "remote-required",
+        local: false,
+        cpu: packet.requirements.cpu ?? effective.capacity.local.defaultCpu,
+        memoryMb: packet.requirements.memoryMb ?? effective.capacity.local.defaultMemoryMb,
+        paidUnits: 1,
+        paths: packet.allowedPaths,
+        exclusiveResources: packet.changeSurface?.exclusiveResources ?? [],
+      };
+      const current = this.#capacity.snapshot();
+      const admitted = this.#capacity.tryReserve(
+        current.generation,
+        capacity,
+        admissionCapacityLimits(
+          this.#policy,
+          null,
+          this.#run.objective,
+          this.#fairness.localMaximum(
+            this.#run.objective,
+            Math.min(effective.capacity.local.maxWorkers, this.#controllerLimits.maxLocalWorkers),
+            current.reservations,
+          ),
+          this.#controllerLimits,
+        ),
+      );
+      if (!admitted.reserved) return null;
+      let capacityRecorded = false;
+      let validation: CleanValidationResult | undefined;
+      let providerStarted: Date | undefined;
+      let providerCompleted: Date | undefined;
+      let budgetReserved = false;
+      try {
+        await this.#lease.use((lease) =>
+          this.#attempts.recordCapacity({
+            lease,
+            workItemNodeId: item.id,
+            reservation,
+            sequence: this.#sequences.take(),
+            event: "CapacityReserved",
+            phase: "validation",
+            backend: capacityBackend,
+            requestedCpu: capacity.cpu,
+            requestedMemoryMb: capacity.memoryMb,
+            allowRecovery: true,
+          }),
+        );
+        capacityRecorded = true;
+        const budget = await this.#lease.use(async (lease) => {
+          const available = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
+          const amount = Math.min(timeout, objectiveDeadline - Date.now());
+          if (amount <= 0 || available.sandboxMinutes * 60_000 < amount)
+            throw new Error("sandbox budget or deadline changed before native rebase reservation");
+          return this.#recorder.budget({
+            lease,
+            workItemNodeId: item.id,
+            reservation,
+            sequence: this.#sequences.take(),
+            event: "BudgetReserved",
+            phase: "validation",
+            unit: "sandbox_milliseconds",
+            amount,
+            usageId: `integration-validation-${digest}`,
+          });
+        });
+        this.#budgetEvents.push(budget);
+        budgetReserved = true;
+        if (budget.kind !== "budget") throw new Error("native rebase budget receipt is invalid");
+        const deadline = new Date(
+          Math.min(Date.parse(budget.at) + budget.amount, objectiveDeadline),
+        );
+        validation = await this.#externalAdmission(() =>
+          validateArtifactClean({
+            repository: this.#options.repository,
+            artifact,
+            packet,
+            isolatedValidator: () =>
+              this.#externalAdmission(async () => {
+                await this.#nativeRebaseAdmissionCurrent(
+                  member,
+                  headSha,
+                  packet.baseSha,
+                  baseBranch,
+                  true,
+                );
+                providerStarted = new Date();
+                const result = await validator.backend.validate!({
+                  repository: identity.repository,
+                  objective: reservation.objective,
+                  workItem: item.number,
+                  attempt: reservation.attempt,
+                  runId: reservation.runId,
+                  directorEpoch: reservation.directorEpoch,
+                  policyDigest: reservation.policyDigest,
+                  workspace: this.#options.repository,
+                  packet,
+                  artifact,
+                  policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                  deadline,
+                  validationInvocation: nativeRebaseValidationInvocation(identity, artifact.digest),
+                });
+                providerCompleted = new Date();
+                return result;
+              }),
+          }),
+        );
+        if (!validation.evidence.passed)
+          throw new Error(validation.evidence.failureReason ?? "native rebase validation failed");
+        record = await this.#lease.use((lease) =>
+          this.#nativeRebases.persist({
+            lease,
+            identity,
+            source: member.pull.exactHeadValidation,
+            validation: validation!.evidence,
+            isolatedResource: {
+              backend: "codex-cli/daytona",
+              invocationOwnershipDigest: nativeRebaseResourceOwnership(identity, artifact.digest),
+              startedAt: providerStarted!.toISOString(),
+              completedAt: providerCompleted!.toISOString(),
+              sandboxMilliseconds: providerCompleted!.getTime() - providerStarted!.getTime(),
+            },
+          }),
+        );
+      } catch (error) {
+        if (providerStarted && !record) {
+          // A response may have been lost after immutable persistence. Never launch twice.
+          const recovered = await this.#nativeRebases.load(identity);
+          if (recovered && recovered.validation.artifactDigest !== artifact.digest)
+            throw new Error(
+              "native rebase recovered checkpoint artifact conflicts; automated replacement is blocked",
+            );
+          record = recovered;
+          if (!record)
+            throw new Error(
+              "native rebase validation lacks durable completion; automated replacement is blocked until exact resource reconciliation",
+              { cause: error },
+            );
+        }
+        if (!record) throw error;
+      } finally {
+        try {
+          if (validation) await discardValidationResult(validation);
+          if (!providerStarted && budgetReserved) {
+            const event = await this.#lease.use((lease) =>
+              this.#recorder.budget({
+                lease,
+                workItemNodeId: item.id,
+                reservation,
+                sequence: this.#sequences.take(),
+                event: "BudgetReconciled",
+                phase: "validation",
+                unit: "sandbox_milliseconds",
+                amount: 0,
+                usageId: `integration-validation-${digest}`,
+              }),
+            );
+            this.#budgetEvents.push(event);
+          }
+          if (capacityRecorded && (record || !providerStarted))
+            await reconcile(capacity.cpu, capacity.memoryMb);
+        } finally {
+          if (!capacityRecorded || record || !providerStarted) this.#capacity.release(capacity.key);
+        }
+      }
+    }
+    await this.#recordCandidateValidationUsage(record.validation, digest, item, reservation);
+    await this.#recordCandidateValidationUsage(
+      record.validation,
+      digest,
+      item,
+      reservation,
+      "sandbox_milliseconds",
+      record.isolatedResource.sandboxMilliseconds,
+    );
+    return record;
+  }
+
   async #revalidateNativeStackMember(
     item: DerivedWorkItem,
     member: NativeStackMember,
@@ -4377,14 +5237,9 @@ export class FactorySupervisor {
   ): Promise<void> {
     const originalPacket = this.#packetFor(item.number);
     const executionBackend = this.#registry.get(member.reservation.backend);
-    if (
+    const isolated =
       originalPacket.requirements.trust !== "trusted_local" ||
-      !executionBackend?.capabilities.hostExecution
-    ) {
-      throw new Error(
-        `stack Work Item ${member.receipt.itemId} cannot be revalidated on the host because its execution provenance was not trusted-local`,
-      );
-    }
+      !executionBackend?.capabilities.hostExecution;
     await ensureLocalCommit(this.#options.repository, baseSha);
     await ensureLocalCommit(this.#options.repository, headSha);
     const changedPaths = (
@@ -4392,14 +5247,16 @@ export class FactorySupervisor {
         this.#options.repository,
         ["diff", "--name-only", "-z", baseSha, headSha],
         MAX_ARTIFACT_PATCH_BYTES + 1_024,
+        true,
       )
     )
       .split("\0")
       .filter(Boolean);
     const patch = await hostGit(
       this.#options.repository,
-      ["diff", "--binary", "--no-ext-diff", baseSha, headSha],
+      ["diff", "--binary", "--no-ext-diff", "--no-textconv", baseSha, headSha],
       MAX_ARTIFACT_PATCH_BYTES + 1_024,
+      true,
     );
     const artifact = normalizeArtifact({
       baseSha,
@@ -4412,11 +5269,159 @@ export class FactorySupervisor {
       ...originalPacket,
       baseSha,
     });
-    const validation = await validateArtifactClean({
-      repository: this.#options.repository,
-      artifact,
-      packet,
-    });
+    // Keep local scoped capacity separate from the isolated provider checkpoint.
+    const prepareLocal = async () => {
+      const invocation = createHash("sha256")
+        .update(
+          JSON.stringify([
+            "native-rebase",
+            this.#run.runId,
+            item.number,
+            member.reservation.attempt,
+            artifact.digest,
+            headSha,
+          ]),
+        )
+        .digest("hex");
+      const capacityBackend = `factory/integration-validation-${invocation}`;
+      const currentSnapshot = await this.#reader.readObjective(this.#run.objective);
+      if (
+        unreconciledCapacityReservations(snapshotEvents(currentSnapshot)).some(
+          (event) => event.runId === this.#run.runId && event.backend === capacityBackend,
+        )
+      )
+        throw new Error(
+          "interrupted native-rebase validation requires owned-resource reconciliation",
+        );
+      const scoped = await this.#scopedValidation(
+        member.reservation,
+        artifact,
+        packet,
+        new Date(
+          Math.min(
+            Date.now() + this.#policy.workItemTimeoutMinutes * 60_000,
+            this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
+          ),
+        ),
+      );
+      if (this.#recoveryRuntime && !scoped)
+        throw new Error("successor native rebase requires owned local scopes");
+      const scheduling = normalizeSchedulingPolicy(this.#policy);
+      const capacity: CapacityReservation = {
+        key: capacityReservationKey({
+          objective: this.#run.objective,
+          workItem: item.number,
+          attempt: member.reservation.attempt,
+          phase: "validation",
+          backendId: capacityBackend,
+        }),
+        objective: this.#run.objective,
+        workItem: item.number,
+        attempt: member.reservation.attempt,
+        phase: "validation",
+        backendId: capacityBackend,
+        admissionClass: "local",
+        local: true,
+        cpu: packet.requirements.cpu ?? scheduling.capacity.local.defaultCpu,
+        memoryMb: packet.requirements.memoryMb ?? scheduling.capacity.local.defaultMemoryMb,
+        paidUnits: 0,
+        paths: packet.allowedPaths,
+        exclusiveResources: packet.changeSurface?.exclusiveResources ?? [],
+      };
+      const resource =
+        scheduling.capacity.mode === "adaptive-local"
+          ? await this.#resourceSampler.sample(Date.now())
+          : null;
+      if (
+        resource &&
+        (resourcePressureReasons(resource, scheduling.capacity.local).length ||
+          this.#resourceSampler.coolingDown(Date.now()))
+      )
+        throw new Error("local capacity pressure blocks native-rebase validation");
+      if (
+        !this.#capacity.tryReserve(
+          this.#capacity.snapshot().generation,
+          capacity,
+          admissionCapacityLimits(
+            this.#policy,
+            resource,
+            this.#run.objective,
+            Math.min(scheduling.capacity.local.maxWorkers, this.#controllerLimits.maxLocalWorkers),
+            this.#controllerLimits,
+          ),
+        ).reserved
+      )
+        throw new Error("local capacity unavailable for native-rebase validation");
+      const recordCapacity = (event: "CapacityReserved" | "CapacityReconciled") =>
+        this.#lease.use((lease) =>
+          this.#attempts.recordCapacity({
+            lease,
+            workItemNodeId: item.id,
+            reservation: member.reservation,
+            sequence: this.#sequences.take(),
+            event,
+            phase: "validation",
+            backend: capacityBackend,
+            requestedCpu: capacity.cpu,
+            requestedMemoryMb: capacity.memoryMb,
+            allowRecovery: true,
+            ...(event === "CapacityReserved" && scoped ? { localScopeBatch: scoped.batch } : {}),
+          }),
+        );
+      let validation: CleanValidationResult;
+      let pendingValidation: CleanValidationResult | undefined;
+      let capacityRecorded = false;
+      try {
+        await recordCapacity("CapacityReserved");
+        capacityRecorded = true;
+        validation = await this.#externalAdmission(() =>
+          validateArtifactClean({
+            repository: this.#options.repository,
+            artifact,
+            packet,
+            ...(scoped ? { localScope: scoped.hooks } : {}),
+          }),
+        );
+        pendingValidation = validation;
+        await this.#recordCandidateValidationUsage(
+          validation.evidence,
+          invocation,
+          item,
+          member.reservation,
+        );
+      } catch (error) {
+        if (pendingValidation) await discardValidationResult(pendingValidation);
+        if (!capacityRecorded) this.#capacity.release(capacity.key);
+        throw error;
+      }
+      const releaseCapacity = () => this.#capacity.release(capacity.key);
+      return {
+        validation,
+        async finish(recorded: boolean) {
+          await discardValidationResult(validation);
+          if (recorded) {
+            await recordCapacity("CapacityReconciled");
+            releaseCapacity();
+          }
+        },
+      };
+    };
+    const remoteRecord = isolated
+      ? await this.#prepareNativeRebaseValidation(
+          item,
+          member,
+          headSha,
+          artifact,
+          packet,
+          baseBranch,
+        )
+      : null;
+    if (isolated && !remoteRecord) return;
+    const localResult = isolated ? undefined : await prepareLocal();
+    const validation: Pick<CleanValidationResult, "evidence"> = remoteRecord
+      ? { evidence: remoteRecord.validation }
+      : localResult!.validation;
+    let validatedAndRecorded = false;
     try {
       if (!validation.evidence.passed) {
         throw new Error(validation.evidence.failureReason ?? "rebased stack validation failed");
@@ -4440,6 +5445,11 @@ export class FactorySupervisor {
           ) => ReturnType<ManagementBackend["review"]>)
         | undefined;
       if (!existingReview) {
+        if (
+          isolated &&
+          !(await this.#nativeRebaseAdmissionCurrent(member, headSha, baseSha, baseBranch))
+        )
+          return;
         const reviewBudget = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
         if (reviewBudget.modelTokens !== null && reviewBudget.modelTokens <= 0) {
           throw new Error("model-token budget is exhausted; refusing rebased semantic review");
@@ -4510,9 +5520,1340 @@ export class FactorySupervisor {
             rebasedReceipt,
           ),
       });
+      validatedAndRecorded = true;
     } finally {
-      await discardValidationResult(validation);
+      if (localResult) await localResult.finish(validatedAndRecorded);
     }
+  }
+
+  #mergeCandidateIdentity(
+    member: NativeStackMember,
+    targetBaseSha: string,
+  ): MergeCandidateIdentity {
+    return {
+      runId: this.#run.runId,
+      objective: this.#run.objective,
+      workItem: member.reservation.workItem,
+      attempt: member.reservation.attempt,
+      pullRequest: member.pull.number,
+      sourceHeadSha: member.pull.commitSha,
+      sourceExactHeadValidationDigest: member.pull.exactHeadValidation.digest,
+      targetBaseSha,
+    };
+  }
+
+  #mergeCandidateReviewIdentity(record: MergeCandidateCheckpointRecord): ReviewIdentity {
+    return {
+      kind: "integration-candidate",
+      runId: record.identity.runId,
+      objective: record.identity.objective,
+      workItem: record.identity.workItem,
+      attempt: record.identity.attempt,
+      artifactDigest: record.validation.artifactDigest,
+      baseSha: record.validation.baseSha,
+      outputTreeSha: record.validation.outputTreeSha,
+      evidenceDigest: record.validation.digest,
+      headSha: record.identity.sourceHeadSha,
+    };
+  }
+
+  /** External trunk changes never acquire execution authority from being cleanly applicable. */
+  async #assertOwnTrunkAdvance(
+    sourceBaseSha: string,
+    targetBaseSha: string,
+    currentWorkItem: number,
+  ): Promise<{ snapshot: Snapshot; requiresIsolation: boolean }> {
+    const snapshot = await this.#reader.readObjective(this.#run.objective);
+    this.#fenceSnapshot(snapshot);
+    this.#sequences.observe(snapshotEvents(snapshot));
+    if (this.#recoveryRuntime) await this.#resumeObservedRun(snapshot, new RunManager(this.#store));
+    const items = derive(snapshot).items;
+    let cursor = targetBaseSha;
+    let requiresIsolation = false;
+    const visited = new Set<string>();
+    while (cursor !== sourceBaseSha) {
+      if (visited.has(cursor) || visited.size >= items.length) {
+        throw new Error("base advancement is not a bounded chain of this run's integrations");
+      }
+      visited.add(cursor);
+      const adopted =
+        this.#recoveryRuntime?.sourceIntegrations.filter(
+          (proof) =>
+            proof.outcome.workItem !== currentWorkItem && proof.outcome.mergeCommitSha === cursor,
+        ) ?? [];
+      if (adopted.length) {
+        if (adopted.length !== 1) throw new Error("conflicting source integration ancestry");
+        const commit = await this.#store.readCommit(cursor);
+        if (
+          commit.oid !== cursor ||
+          commit.parentOids.length !== 1 ||
+          commit.parentOids[0] !== adopted[0]!.targetBaseSha ||
+          commit.treeOid !== adopted[0]!.outputTreeSha
+        )
+          throw new Error("adopted source integration ancestry changed");
+        cursor = commit.parentOids[0]!;
+        continue;
+      }
+      const matches = items.flatMap((item) =>
+        deduplicateFactoryEvents(item.factoryEvents ?? [])
+          .filter(
+            (event) =>
+              event.kind === "attempt" &&
+              event.event === "AttemptIntegrated" &&
+              event.runId === this.#run.runId &&
+              event.workItem === item.number &&
+              event.workItem !== currentWorkItem &&
+              event.headSha === cursor,
+          )
+          .map((event) => ({ item, event })),
+      );
+      if (matches.length !== 1) {
+        throw new Error(
+          `base branch advanced outside this run's evidenced integrations: ${cursor}`,
+        );
+      }
+      const { item, event } = matches[0]!;
+      const member = await this.#nativeStackMember(item, true);
+      if (!this.#registry.get(member.reservation.backend)?.capabilities.hostExecution)
+        requiresIsolation = true;
+      if (event.kind !== "attempt" || event.attempt !== member.reservation.attempt) {
+        throw new Error("integrated trunk commit does not match its published attempt");
+      }
+      const pull = await this.#store.readPullRequest(member.pull.number);
+      const commit = await this.#store.readCommit(cursor);
+      if (
+        !pull.merged ||
+        pull.headSha !== member.pull.commitSha ||
+        pull.mergeCommitSha !== cursor ||
+        pull.baseRef !== this.#baseBranch ||
+        commit.oid !== cursor ||
+        commit.parentOids.length !== 1
+      ) {
+        throw new Error("trunk advancement lacks an exact Factory squash integration");
+      }
+      const parent = commit.parentOids[0]!;
+      if (parent === member.pull.exactHeadValidation.baseSha) {
+        await verifySquashIntegration(this.#store, member.pull, cursor, parent);
+      } else {
+        const candidate = await this.#mergeCandidates.load(
+          this.#mergeCandidateIdentity(member, parent),
+        );
+        const review = candidate
+          ? await this.#reviews.load(this.#mergeCandidateReviewIdentity(candidate))
+          : null;
+        if (!candidate || !review?.review.accepted) {
+          throw new Error("prior sibling integration has no accepted candidate checkpoint");
+        }
+        await verifyMergeCandidateSquash(
+          this.#store,
+          member.pull.exactHeadValidation,
+          candidate.evidence,
+          cursor,
+        );
+      }
+      cursor = parent;
+    }
+    return { snapshot, requiresIsolation };
+  }
+
+  async #recordCandidateValidationUsage(
+    evidence: ValidationEvidence,
+    identityDigest: string,
+    item: DerivedWorkItem,
+    reservation: AttemptReservation,
+    unit: "validation_milliseconds" | "sandbox_milliseconds" = "validation_milliseconds",
+    measuredAmount?: number,
+  ): Promise<void> {
+    const usageId = `integration-validation-${identityDigest}`;
+    const amount =
+      measuredAmount ??
+      new Date(evidence.completedAt).getTime() - new Date(evidence.startedAt).getTime();
+    const matches = (events: readonly FactoryEvent[]) =>
+      events.filter(
+        (event) =>
+          event.kind === "budget" &&
+          event.runId === this.#run.runId &&
+          event.workItem === item.number &&
+          event.attempt === reservation.attempt &&
+          event.unit === unit &&
+          event.phase === "validation" &&
+          event.event === "BudgetReconciled" &&
+          event.usageId === usageId,
+      );
+    const existing = matches(this.#budgetEvents);
+    if (existing.some((event) => event.amount !== amount))
+      throw new Error("merge-candidate validation usage conflicts with its evidence");
+    if (existing.length > 0) return;
+    try {
+      const event = await this.#lease.use((lease) =>
+        this.#recorder.budget({
+          lease,
+          workItemNodeId: item.id,
+          reservation,
+          sequence: this.#sequences.take(),
+          event: "BudgetReconciled",
+          unit,
+          phase: "validation",
+          amount,
+          usageId,
+        }),
+      );
+      this.#budgetEvents.push(event);
+    } catch (error) {
+      const snapshot = await this.#reader.readObjective(this.#run.objective);
+      this.#fenceSnapshot(snapshot);
+      const recovered = matches(snapshotEvents(snapshot));
+      if (recovered.length === 0) throw error;
+      if (recovered.some((event) => event.amount !== amount))
+        throw new Error("recovered merge-candidate validation usage conflicts with its evidence");
+      this.#sequences.observe(snapshotEvents(snapshot));
+      this.#budgetEvents.push(...recovered);
+    }
+  }
+
+  async #prepareSiblingMergeCandidate(
+    item: DerivedWorkItem,
+    member: NativeStackMember,
+    targetBaseSha: string,
+    merged: boolean,
+  ): Promise<MergeCandidateCheckpointRecord | null> {
+    const assertDeadline = () => {
+      if (
+        Date.now() >=
+        this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000
+      ) {
+        throw new Error("Objective timeout exhausted before merge-candidate admission");
+      }
+      this.#options.signal?.throwIfAborted();
+    };
+    assertDeadline();
+    const originalPacket = this.#packetFor(item.number);
+    const backend = this.#registry.get(member.reservation.backend);
+    const { snapshot, requiresIsolation: baseRequiresIsolation } =
+      await this.#assertOwnTrunkAdvance(
+        member.pull.exactHeadValidation.baseSha,
+        targetBaseSha,
+        item.number,
+      );
+    const isolated =
+      baseRequiresIsolation ||
+      originalPacket.requirements.trust !== "trusted_local" ||
+      !backend?.capabilities.hostExecution;
+    if (hasCancellationRequest(snapshot, this.#run.runId))
+      throw new RunCancellationRequestedError(
+        "operator cancelled before merge-candidate admission",
+      );
+    if (
+      isolated &&
+      deriveDurableCommandState({
+        events: snapshotEvents(snapshot),
+        objective: snapshot.number,
+        runId: this.#run.runId,
+        runActor: this.#run.actor,
+        runStartSequence: this.#runStartSequence,
+      }).cloudPaused
+    )
+      return null;
+    if (isolated && !this.#policy.allowedPaidBackends.includes("codex-cli/daytona"))
+      throw new Error(
+        "parallel sibling candidate requires explicitly authorized independent Daytona validation",
+      );
+    this.#budgetEvents = deduplicateFactoryEvents([
+      ...this.#budgetEvents,
+      ...snapshotEvents(snapshot).filter((event) => event.runId === this.#run.runId),
+    ]);
+    const identity = this.#mergeCandidateIdentity(member, targetBaseSha);
+    const identityDigest = mergeCandidateIdentityDigest(identity);
+    const invocationOwnership = (artifactDigest: string) =>
+      validationInvocationOwnership({
+        repository: `${this.#options.owner}/${this.#options.repo}`,
+        objective: member.reservation.objective,
+        workItem: item.number,
+        attempt: member.reservation.attempt,
+        runId: member.reservation.runId,
+        directorEpoch: member.reservation.directorEpoch,
+        policyDigest: member.reservation.policyDigest,
+        phase: "validation",
+        validationInvocation: {
+          kind: "integration-candidate",
+          identityDigest,
+          artifactDigest,
+          baseSha: targetBaseSha,
+        },
+      })!;
+    let record = await this.#mergeCandidates.load(identity);
+    if (
+      record &&
+      isolated &&
+      (!record.isolatedResource ||
+        record.isolatedResource.invocationOwnershipDigest !==
+          invocationOwnership(record.validation.artifactDigest))
+    )
+      throw new Error(
+        "isolated merge-candidate checkpoint has unknown cleanup or native accounting identity",
+      );
+    const candidateTimeout = Math.min(
+      (originalPacket.requirements.timeoutMinutes ?? this.#policy.workItemTimeoutMinutes) * 60_000,
+      this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000 - Date.now(),
+    );
+    let validator: ExecutionBackend | undefined;
+    if (isolated && !record) {
+      const candidates = await this.#registry.evaluateIsolatedValidators({
+        policy: { ...this.#policy, backendOrder: ["codex-cli/daytona"] },
+        requirements: originalPacket.requirements,
+        probeTtlMs: 0,
+      });
+      const candidate = candidates.find((candidate) => candidate.id === "codex-cli/daytona");
+      if (
+        !candidate?.backend?.validate ||
+        candidate.permanentReasons.length ||
+        candidate.transientReasons.length
+      )
+        throw new Error(
+          "independent Daytona merge-candidate validator is unavailable or unauthorized",
+        );
+      validator = candidate.backend;
+      const available = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
+      if (candidateTimeout <= 0 || available.sandboxMinutes * 60_000 < candidateTimeout)
+        throw new Error("sandbox-minute budget exhausted before merge-candidate validation");
+    }
+    if (!record && merged) {
+      throw new Error(
+        "merged sibling has no pre-merge candidate checkpoint; refusing retrospective validation",
+      );
+    }
+    const packet = parseWorkerPacket({ ...originalPacket, baseSha: targetBaseSha });
+    const capacityBackend = `factory/integration-${isolated ? "sandbox" : "validation"}-${identityDigest}`;
+    const priorCapacity = unreconciledCapacityReservations(snapshotEvents(snapshot)).filter(
+      (event) =>
+        event.runId === this.#run.runId &&
+        event.workItem === item.number &&
+        event.attempt === member.reservation.attempt &&
+        event.backend === capacityBackend,
+    );
+    // A checkpoint is written only after the clean validator has returned. Without it, a
+    // crashed validator may still be alive: do not manufacture absence or duplicate its work.
+    if (!record && priorCapacity.length > 0) {
+      throw new Error(
+        "interrupted merge-candidate validation has no completion evidence; resource reconciliation required",
+      );
+    }
+    const reconcileCapacity = async (cpu: number, memoryMb: number) =>
+      this.#lease.use((lease) =>
+        this.#attempts.recordCapacity({
+          lease,
+          workItemNodeId: item.id,
+          reservation: member.reservation,
+          sequence: this.#sequences.take(),
+          event: "CapacityReconciled",
+          phase: "validation",
+          backend: capacityBackend,
+          requestedCpu: cpu,
+          requestedMemoryMb: memoryMb,
+          allowRecovery: true,
+        }),
+      );
+    if (record) {
+      for (const capacity of priorCapacity) {
+        await reconcileCapacity(capacity.requestedCpu, capacity.requestedMemoryMb);
+      }
+    }
+    let artifact: NormalizedArtifact | undefined;
+    const reconstructArtifact = async () => {
+      await ensureLocalCommit(this.#options.repository, member.pull.exactHeadValidation.baseSha);
+      await ensureLocalCommit(this.#options.repository, member.pull.commitSha);
+      await ensureLocalCommit(this.#options.repository, targetBaseSha);
+      const source = [member.pull.exactHeadValidation.baseSha, member.pull.commitSha];
+      const changedPaths = (
+        await hostGit(
+          this.#options.repository,
+          ["diff", "--name-only", "-z", ...source],
+          MAX_ARTIFACT_PATCH_BYTES + 1_024,
+          true,
+        )
+      )
+        .split("\0")
+        .filter(Boolean);
+      const patch = await hostGit(
+        this.#options.repository,
+        ["diff", "--binary", "--no-ext-diff", "--no-textconv", ...source],
+        MAX_ARTIFACT_PATCH_BYTES + 1_024,
+        true,
+      );
+      return normalizeArtifact({
+        baseSha: targetBaseSha,
+        changedPaths,
+        patch,
+        outcome: "succeeded",
+      });
+    };
+    if (!record) {
+      const effective = normalizeSchedulingPolicy(this.#policy);
+      const resource =
+        !isolated && effective.capacity.mode === "adaptive-local"
+          ? await this.#resourceSampler.sample(Date.now()).catch(() => null)
+          : null;
+      if (!isolated && effective.capacity.mode === "adaptive-local") {
+        const pressure = resource
+          ? resourcePressureReasons(resource, effective.capacity.local)
+          : ["resource sample unavailable"];
+        if (pressure.length > 0 || this.#resourceSampler.coolingDown(Date.now())) {
+          if (pressure.length > 0) this.#resourceSampler.notePressure(Date.now());
+          return null;
+        }
+      }
+      const capacity: CapacityReservation = {
+        key: capacityReservationKey({
+          objective: this.#run.objective,
+          workItem: item.number,
+          attempt: member.reservation.attempt,
+          phase: "validation",
+          backendId: capacityBackend,
+        }),
+        objective: this.#run.objective,
+        workItem: item.number,
+        attempt: member.reservation.attempt,
+        phase: "validation",
+        backendId: capacityBackend,
+        admissionClass: isolated ? "remote-required" : "local",
+        local: !isolated,
+        cpu: packet.requirements.cpu ?? effective.capacity.local.defaultCpu,
+        memoryMb: packet.requirements.memoryMb ?? effective.capacity.local.defaultMemoryMb,
+        paidUnits: isolated ? 1 : 0,
+        paths: packet.allowedPaths,
+        exclusiveResources: packet.changeSurface?.exclusiveResources ?? [],
+      };
+      const current = this.#capacity.snapshot();
+      const admitted = this.#capacity.tryReserve(
+        current.generation,
+        capacity,
+        admissionCapacityLimits(
+          this.#policy,
+          resource,
+          this.#run.objective,
+          this.#fairness.localMaximum(
+            this.#run.objective,
+            Math.min(effective.capacity.local.maxWorkers, this.#controllerLimits.maxLocalWorkers),
+            current.reservations,
+          ),
+          this.#controllerLimits,
+        ),
+      );
+      if (!admitted.reserved) return null;
+      let validation: CleanValidationResult | undefined;
+      let providerStarted: Date | undefined;
+      let providerCompleted: Date | undefined;
+      let capacityRecorded = false;
+      try {
+        artifact = await reconstructArtifact();
+        const scopedValidation = isolated
+          ? undefined
+          : await this.#scopedValidation(
+              member.reservation,
+              artifact,
+              packet,
+              new Date(
+                Math.min(
+                  Date.now() + this.#policy.workItemTimeoutMinutes * 60_000,
+                  this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
+                ),
+              ),
+            );
+        await this.#lease.use((lease) =>
+          this.#attempts.recordCapacity({
+            lease,
+            workItemNodeId: item.id,
+            reservation: member.reservation,
+            sequence: this.#sequences.take(),
+            event: "CapacityReserved",
+            phase: "validation",
+            backend: capacityBackend,
+            requestedCpu: capacity.cpu,
+            requestedMemoryMb: capacity.memoryMb,
+            allowRecovery: true,
+            ...(scopedValidation ? { localScopeBatch: scopedValidation.batch } : {}),
+          }),
+        );
+        capacityRecorded = true;
+        assertDeadline();
+        let validationDeadline = new Date(Date.now() + candidateTimeout);
+        if (isolated) {
+          const budget = await this.#lease.use(async (lease) => {
+            const available = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
+            const amount = Math.min(
+              candidateTimeout,
+              this.#run.startedAt.getTime() +
+                this.#policy.objectiveTimeoutMinutes * 60_000 -
+                Date.now(),
+            );
+            if (amount <= 0 || available.sandboxMinutes * 60_000 < amount)
+              throw new Error(
+                "sandbox-minute budget or deadline changed before merge-candidate reservation",
+              );
+            return this.#recorder.budget({
+              lease,
+              workItemNodeId: item.id,
+              reservation: member.reservation,
+              sequence: this.#sequences.take(),
+              event: "BudgetReserved",
+              phase: "validation",
+              unit: "sandbox_milliseconds",
+              amount,
+              usageId: `integration-validation-${identityDigest}`,
+            });
+          });
+          this.#budgetEvents.push(budget);
+          if (budget.kind !== "budget")
+            throw new Error("candidate reservation returned non-budget receipt");
+          validationDeadline = new Date(
+            Math.min(
+              new Date(budget.at).getTime() + budget.amount,
+              this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
+            ),
+          );
+        }
+        validation = await this.#externalAdmission(() =>
+          validateArtifactClean({
+            repository: this.#options.repository,
+            artifact: artifact!,
+            packet,
+            ...(scopedValidation ? { localScope: scopedValidation.hooks } : {}),
+            ...(validator
+              ? {
+                  isolatedValidator: () =>
+                    this.#externalAdmission(async () => {
+                      providerStarted = new Date();
+                      const result = await validator!.validate!({
+                        repository: `${this.#options.owner}/${this.#options.repo}`,
+                        objective: member.reservation.objective,
+                        workItem: item.number,
+                        attempt: member.reservation.attempt,
+                        runId: member.reservation.runId,
+                        directorEpoch: member.reservation.directorEpoch,
+                        policyDigest: member.reservation.policyDigest,
+                        workspace: this.#options.repository,
+                        packet,
+                        artifact: artifact!,
+                        policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                        deadline: validationDeadline,
+                        validationInvocation: {
+                          kind: "integration-candidate",
+                          identityDigest,
+                          artifactDigest: artifact!.digest,
+                          baseSha: targetBaseSha,
+                        },
+                      });
+                      providerCompleted = new Date();
+                      return result;
+                    }),
+                }
+              : {}),
+          }),
+        );
+        if (!validation.evidence.passed) {
+          await this.#recordCandidateValidationUsage(
+            validation.evidence,
+            identityDigest,
+            item,
+            member.reservation,
+          );
+          throw new Error(validation.evidence.failureReason ?? "merge-candidate validation failed");
+        }
+        record = await this.#lease.use((lease) =>
+          this.#mergeCandidates.persist({
+            lease,
+            identity,
+            source: member.pull.exactHeadValidation,
+            validation: validation!.evidence,
+            ...(isolated
+              ? {
+                  isolatedResource: {
+                    backend: "codex-cli/daytona" as const,
+                    invocationOwnershipDigest: invocationOwnership(artifact!.digest),
+                    startedAt: providerStarted!.toISOString(),
+                    completedAt: providerCompleted!.toISOString(),
+                    sandboxMilliseconds: providerCompleted!.getTime() - providerStarted!.getTime(),
+                  },
+                }
+              : {}),
+          }),
+        );
+      } finally {
+        try {
+          if (validation) await discardValidationResult(validation);
+          if (capacityRecorded && record) await reconcileCapacity(capacity.cpu, capacity.memoryMb);
+        } finally {
+          if (!capacityRecorded || record) this.#capacity.release(capacity.key);
+        }
+      }
+    }
+    await this.#recordCandidateValidationUsage(
+      record.validation,
+      identityDigest,
+      item,
+      member.reservation,
+    );
+    if (isolated)
+      await this.#recordCandidateValidationUsage(
+        record.validation,
+        identityDigest,
+        item,
+        member.reservation,
+        "sandbox_milliseconds",
+        record.isolatedResource!.sandboxMilliseconds,
+      );
+    const reviewIdentity = this.#mergeCandidateReviewIdentity(record);
+    const existingReview = await this.#reviews.load(reviewIdentity);
+    const invocationId = `integration-review-${reviewIdentityDigest(reviewIdentity)}`;
+    if (!existingReview && merged)
+      throw new Error("merged sibling has no pre-merge semantic review checkpoint");
+    let invokeReview:
+      | ((
+          checkpoint: Parameters<ManagementBackend["review"]>[1],
+        ) => ReturnType<ManagementBackend["review"]>)
+      | undefined;
+    if (!existingReview) {
+      assertDeadline();
+      const budget = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
+      if (budget.modelTokens !== null && budget.modelTokens <= 0)
+        throw new Error(
+          "model-token budget is exhausted; refusing integration-candidate semantic review",
+        );
+      this.#assertManagementInvocationNotFailed(invocationId);
+      artifact ??= await reconstructArtifact();
+      if (artifact.digest !== record.validation.artifactDigest)
+        throw new Error("merge candidate no longer matches the original published patch");
+      const reviewModel = resolveModelSelection(this.#policy, "review");
+      invokeReview = (checkpoint) =>
+        this.#externalAdmission(() =>
+          this.#management.review(
+            {
+              repository: this.#options.repository,
+              objectiveNumber: this.#run.objective,
+              workItemNumber: item.number,
+              packet,
+              artifact: artifact!,
+              evidence: record.validation,
+              ...(reviewModel ? { modelSelection: reviewModel } : {}),
+            },
+            checkpoint,
+          ),
+        );
+    }
+    await runDurableReviewTransaction({
+      existing: existingReview,
+      ...(invokeReview ? { invoke: invokeReview } : {}),
+      persist: (result) =>
+        this.#lease.use((lease) =>
+          this.#reviews.persist({ lease, identity: reviewIdentity, result }),
+        ),
+      recover: () => this.#reviews.load(reviewIdentity),
+      recordUsage: (review) => this.#recordReviewUsage(review, item, member.reservation),
+      recordFailureUsage: (usage) =>
+        this.#recordFailedManagementUsage(invocationId, usage, item.id, member.reservation),
+      recordOutcome: async (review) => {
+        if (!review.review.accepted)
+          throw new Error(
+            `integration-candidate semantic review rejected: ${review.review.summary}; ${review.review.unmetCriteria.join("; ")}`,
+          );
+      },
+    });
+    return record;
+  }
+
+  async #appendSuccessorEvent(nodeId: string, event: FactoryEvent): Promise<void> {
+    if (!this.#recoveryRuntime || event.runId !== this.#run.runId)
+      throw new Error("successor event lacks its verified controlling run");
+    try {
+      await this.#lease.use(async () =>
+        this.#store.addIssueComment(
+          nodeId,
+          encodeEventComment("Factory recorded evidence-preserving successor progress.", event),
+        ),
+      );
+    } catch (error) {
+      const snapshot = await this.#reader.readObjective(this.#run.objective);
+      this.#fenceSnapshot(snapshot);
+      if (
+        !snapshotEvents(snapshot).some(
+          (value) => recoveryEventDigest(value) === recoveryEventDigest(event),
+        )
+      )
+        throw error;
+      this.#sequences.observe(snapshotEvents(snapshot));
+    }
+    if (event.kind === "budget") this.#budgetEvents.push(event);
+  }
+
+  async #sourceUsage(
+    item: DerivedWorkItem,
+    usageId: string,
+    amount: number,
+    unit: "model_tokens" | "validation_milliseconds",
+  ): Promise<void> {
+    const existing = this.#budgetEvents.filter(
+      (event) =>
+        event.kind === "budget" &&
+        event.runId === this.#run.runId &&
+        event.workItem === item.number &&
+        event.attempt === undefined &&
+        event.unit === unit &&
+        event.usageId === usageId &&
+        event.event === "BudgetReconciled",
+    );
+    if (existing.some((event) => event.amount !== amount))
+      throw new Error("successor usage conflicts with immutable evidence");
+    if (existing.length) return;
+    await this.#appendSuccessorEvent(
+      item.id,
+      parseFactoryEvent({
+        protocol: "clockgrove.factory/v2",
+        kind: "budget",
+        event: "BudgetReconciled",
+        objective: this.#run.objective,
+        runId: this.#run.runId,
+        sequence: this.#sequences.take(),
+        at: (await this.#store.serverTime()).toISOString(),
+        workItem: item.number,
+        phase: unit === "model_tokens" ? "management" : "validation",
+        unit,
+        amount,
+        usageId,
+      }),
+    );
+  }
+
+  async #restoreAdoptedPublication(item: DerivedWorkItem): Promise<void> {
+    await this.#externalAdmission(async () => {});
+    const runtime = this.#recoveryRuntime!;
+    const artifact = await loadRecoverySourceArtifact({
+      planRecord: runtime.planRecord,
+      claim: runtime.claim,
+      events: runtime.events,
+      store: this.#recoveryStore,
+      workItem: item.number,
+    });
+    const native = this.#deliverySelection.selected === "native-stacks";
+    if (native && artifact.delivery.stack) {
+      await this.#restoreNativeAdoptedStack(artifact);
+      return;
+    }
+    let pull = await this.#store.findPullRequestForBranch(artifact.branch);
+    if (!pull) {
+      try {
+        pull = await this.#lease.use(async () => {
+          await this.#lease.assertGeneration("publication");
+          if ((await this.#store.readRef(`refs/heads/${artifact.branch}`)) !== artifact.headSha)
+            throw new Error("acknowledged source artifact branch changed before PR creation");
+          const created = await this.#store.createPullRequest({
+            title: item.title,
+            body: `Implements Work Item #${item.number} for Objective #${this.#run.objective}.\n\nCloses #${item.number}\n\nRecovered exact validated source artifact; no replacement worker ran.`,
+            head: artifact.branch,
+            base: this.#baseBranch,
+          });
+          return { ...created, state: "open", merged: false };
+        });
+      } catch (error) {
+        pull = await this.#store.findPullRequestForBranch(artifact.branch);
+        if (!pull) throw error;
+      }
+    }
+    if (pull.headSha !== artifact.headSha || (!pull.merged && pull.state !== "open"))
+      throw new Error("recovered source PR differs from acknowledged artifact");
+    const observed = await this.#store.readPullRequest(pull.number);
+    if (!observed.nodeId) throw new Error("recovered source PR node identity unavailable");
+    const publication = createRecoverySourcePublishedEvent({
+      artifact,
+      pullRequest: pull.number,
+      pullRequestNodeId: observed.nodeId,
+      baseBranch: this.#baseBranch,
+      mode: native ? "native-stacks" : "regular-prs",
+      sequence: this.#sequences.take(),
+      at: (await this.#store.serverTime()).toISOString(),
+    });
+    const proof = await verifyRecoverySourcePublication({
+      planRecord: runtime.planRecord,
+      claim: runtime.claim,
+      events: runtime.events,
+      store: this.#recoveryStore,
+      publication,
+    });
+    if (proof.status !== "verified")
+      throw new Error("restored source publication evidence is unavailable");
+    await this.#appendSuccessorEvent(item.id, publication);
+  }
+
+  async #restoreNativeAdoptedStack(first: RecoverySourceArtifactProof): Promise<void> {
+    const runtime = this.#recoveryRuntime!;
+    const unit = this.#deliveryPlan?.units.find((entry) => entry.id === first.delivery.unitId);
+    if (unit?.kind !== "stack") throw new Error("acknowledged native source unit unavailable");
+    const artifacts: RecoverySourceArtifactProof[] = [];
+    const existingMembers: RecoveryNativeExistingMember[] = [];
+    for (const compilerId of unit.items) {
+      const item = runtime.planRecord.plan.items.find((entry) => entry.compilerId === compilerId)!;
+      const source = item.source;
+      if (!source || item.action === "execute" || !source.validation)
+        throw new Error(
+          "native source restoration requires complete independently validated unit artifacts",
+        );
+      if (!source.publication)
+        artifacts.push(
+          await loadRecoverySourceArtifact({
+            planRecord: runtime.planRecord,
+            claim: runtime.claim,
+            events: runtime.events,
+            store: this.#recoveryStore,
+            workItem: item.workItem,
+          }),
+        );
+      else {
+        const publication = runtime.events.find(
+          (event) => recoveryEventDigest(event) === source.publication!.receiptDigest,
+        );
+        if (publication?.kind !== "publication")
+          throw new Error("original native publication unavailable");
+        const head = await this.#store.readCommit(publication.headSha);
+        existingMembers.push({
+          publication,
+          exactHeadValidation: bindValidationToPublishedHead({
+            validation: {
+              passed: true,
+              digest: source.validation.evidenceDigest,
+              baseSha: source.validation.baseSha,
+              outputTreeSha: source.validation.outputTreeSha,
+            },
+            publishedHeadSha: publication.headSha,
+            publishedBaseSha: publication.baseSha,
+            publishedTreeSha: head.treeOid,
+          }),
+        });
+      }
+    }
+    const pullRequests: Array<{ workItem: number; number: number; nodeId: string }> = [];
+    for (const artifact of artifacts.sort((a, b) => a.delivery.position - b.delivery.position)) {
+      const parent = artifact.delivery.parentItemId
+        ? runtime.planRecord.plan.items.find(
+            (entry) => entry.compilerId === artifact.delivery.parentItemId,
+          )?.source
+        : null;
+      const base = parent?.publication?.branch ?? parent?.artifactHead?.branch ?? this.#baseBranch;
+      if (artifact.delivery.position > 0 && !parent)
+        throw new Error("native source parent branch unavailable");
+      let pull = await this.#store.findPullRequestForBranch(artifact.branch);
+      if (!pull) {
+        try {
+          pull = await this.#externalAdmission(() =>
+            this.#lease.use(async () => {
+              await this.#lease.assertGeneration("publication");
+              if ((await this.#store.readRef(`refs/heads/${artifact.branch}`)) !== artifact.headSha)
+                throw new Error("native source branch changed before publication");
+              const title = runtime.graph.objective.workItems.find(
+                (entry) => entry.id === artifact.delivery.itemId,
+              )!.title;
+              const created = await this.#store.createPullRequest({
+                title,
+                body: `Implements Work Item #${artifact.workItem} for Objective #${this.#run.objective}.\n\nCloses #${artifact.workItem}\n\nRecovered exact validated source artifact; no replacement worker ran.`,
+                head: artifact.branch,
+                base,
+              });
+              return { ...created, state: "open", merged: false };
+            }),
+          );
+        } catch (error) {
+          pull = await this.#store.findPullRequestForBranch(artifact.branch);
+          if (!pull) throw error;
+        }
+      }
+      const observed = await this.#store.readPullRequest(pull.number);
+      if (
+        !observed.nodeId ||
+        observed.headSha !== artifact.headSha ||
+        observed.baseRef !== base ||
+        observed.merged ||
+        observed.state !== "open"
+      )
+        throw new Error("native source PR differs from acknowledged branch");
+      pullRequests.push({
+        workItem: artifact.workItem,
+        number: pull.number,
+        nodeId: observed.nodeId,
+      });
+    }
+    const linked = await ensureRecoveryNativeSourceStack({
+      artifacts,
+      existingMembers,
+      pullRequests,
+      store: this.#store,
+      stacks: this.#stacks,
+      baseBranch: this.#baseBranch,
+      assertCurrent: async () => {
+        await this.#externalAdmission(async () => {});
+        await this.#lease.assertGeneration("publication");
+      },
+    });
+    if (linked.status !== "observed") throw new Error("native source stack is incomplete");
+    const recorded: FactoryEvent[] = [];
+    for (const artifact of artifacts) {
+      if (
+        runtime.sourcePublications.some((proof) => proof.publication.workItem === artifact.workItem)
+      )
+        continue;
+      const member = linked.members.find((entry) => entry.workItem === artifact.workItem)!;
+      const publication = createRecoverySourcePublishedEvent({
+        artifact,
+        pullRequest: member.pullRequest,
+        pullRequestNodeId: member.pullRequestNodeId,
+        baseBranch: member.baseBranch,
+        mode: "native-stacks",
+        stackNumber: linked.stack.number,
+        sequence: this.#sequences.take(),
+        at: (await this.#store.serverTime()).toISOString(),
+      });
+      const proof = await verifyRecoverySourcePublication({
+        planRecord: runtime.planRecord,
+        claim: runtime.claim,
+        events: [...runtime.events, ...recorded],
+        store: this.#recoveryStore,
+        publication,
+      });
+      if (proof.status !== "verified")
+        throw new Error("native source publication proof unavailable");
+      const item = runtime.planRecord.plan.items.find(
+        (entry) => entry.workItem === artifact.workItem,
+      )!;
+      await this.#appendSuccessorEvent(item.issueNodeId, publication);
+      recorded.push(publication);
+    }
+  }
+
+  async #resumeAdoptedSource(item: DerivedWorkItem): Promise<void> {
+    let runtime = this.#recoveryRuntime!;
+    const planItem = runtime.planRecord.plan.items.find((entry) => entry.workItem === item.number)!;
+    const source = planItem.source!;
+    if (this.#deliverySelection.selected === "native-stacks") {
+      const unit = this.#deliveryPlan?.units.find((entry) =>
+        entry.items.includes(planItem.compilerId),
+      );
+      const missing =
+        unit?.kind === "stack"
+          ? runtime.planRecord.plan.items.find(
+              (entry) =>
+                unit.items.includes(entry.compilerId) &&
+                entry.source &&
+                !entry.source.publication &&
+                !runtime.sourcePublications.some(
+                  (proof) => proof.publication.workItem === entry.workItem,
+                ),
+            )
+          : undefined;
+      if (missing) {
+        const snapshot = await this.#reader.readObjective(this.#run.objective);
+        const unresolved = this.#deriveObjective(snapshot).items.find(
+          (entry) => entry.number === missing.workItem,
+        )!;
+        await this.#restoreAdoptedPublication(unresolved);
+        await this.#resumeObservedRun(
+          await this.#reader.readObjective(this.#run.objective),
+          new RunManager(this.#store),
+        );
+        runtime = this.#recoveryRuntime!;
+      }
+    }
+    if (
+      !source.publication &&
+      !runtime.sourcePublications.some((proof) => proof.publication.workItem === item.number)
+    ) {
+      await this.#restoreAdoptedPublication(item);
+      await this.#resumeObservedRun(
+        await this.#reader.readObjective(this.#run.objective),
+        new RunManager(this.#store),
+      );
+      runtime = this.#recoveryRuntime!;
+    }
+    const restored = runtime.sourcePublications.find(
+      (proof) => proof.publication.workItem === item.number,
+    );
+    const publication =
+      source.publication ??
+      (restored
+        ? recoverySourcePublicationBinding(restored.publication, runtime.planRecord.plan.repository)
+        : null);
+    if (!publication) throw new Error("source publication receipt unavailable");
+    const existingOutcome = runtime.sourceIntegrations.find(
+      (entry) => entry.outcome.workItem === item.number,
+    );
+    if (existingOutcome) {
+      await this.#lease.assertGeneration("integration");
+      if (!item.closed) await this.#store.closeIssue(item.number);
+      return;
+    }
+    if (source.priorDelivery) {
+      await this.#externalAdmission(async () => {});
+      runtime = this.#recoveryRuntime!;
+      const prior = await verifyPriorRecoveryDelivery({
+        plan: runtime.planRecord.plan,
+        item: planItem,
+        events: runtime.events,
+        store: this.#recoveryStore,
+      });
+      const outcome = createRecoverySourceIntegratedEvent({
+        planRecord: runtime.planRecord,
+        claim: runtime.claim,
+        workItem: item.number,
+        mergeCommitSha: prior.outcome.mergeCommitSha,
+        ...(prior.outcome.mergeCandidateIdentityDigest
+          ? { mergeCandidateIdentityDigest: prior.outcome.mergeCandidateIdentityDigest }
+          : {}),
+        ...(prior.outcome.deliveryHeadSha
+          ? { deliveryHeadSha: prior.outcome.deliveryHeadSha }
+          : {}),
+        sequence: this.#sequences.take(),
+        at: (await this.#store.serverTime()).toISOString(),
+      });
+      const proof = await verifyRecoverySourceIntegration({
+        planRecord: runtime.planRecord,
+        claim: runtime.claim,
+        events: runtime.events,
+        store: this.#recoveryStore,
+        outcome,
+      });
+      if (proof.status !== "verified")
+        throw new Error("prior source delivery could not be independently verified");
+      await this.#lease.assertGeneration("integration");
+      await this.#appendSuccessorEvent(item.id, outcome);
+      if (!item.closed) await this.#store.closeIssue(item.number);
+      return;
+    }
+    const reserved = (await this.#attempts.list(this.#run.objective, item.number)).find(
+      (entry) => entry.runId === source.runId && entry.attempt === source.attempt,
+    );
+    if (!reserved) throw new Error("adopted source reservation is unavailable");
+    const head = await this.#store.readCommit(publication.headSha);
+    const exactHeadValidation = bindValidationToPublishedHead({
+      validation: {
+        passed: true,
+        digest: source.validation!.evidenceDigest,
+        baseSha: source.validation!.baseSha,
+        outputTreeSha: source.validation!.outputTreeSha,
+      },
+      publishedHeadSha: publication.headSha,
+      publishedTreeSha: head.treeOid,
+      publishedBaseSha: publication.baseSha,
+    });
+    const pull: PublishedPullRequest = {
+      number: publication.pullRequest,
+      branch: publication.branch,
+      commitSha: publication.headSha,
+      htmlUrl: `https://github.com/${this.#options.owner}/${this.#options.repo}/pull/${publication.pullRequest}`,
+      exactHeadValidation,
+    };
+    const observed = await this.#store.readPullRequest(pull.number);
+    let deliveryHeadSha: string | undefined;
+    if (observed.headSha !== pull.commitSha || observed.baseRef !== this.#baseBranch) {
+      if (publication.mode !== "native-stacks")
+        throw new Error("adopted ordinary source head/base changed");
+      const transition = await observeRecoveryNativeTransition({
+        planRecord: runtime.planRecord,
+        events: runtime.events,
+        store: this.#recoveryStore,
+        workItem: item.number,
+      });
+      if (
+        transition.deliveryHeadSha !== observed.headSha ||
+        transition.sourceHeadSha !== pull.commitSha
+      )
+        throw new Error("native source transition changed during observation");
+      if (observed.headSha !== pull.commitSha) deliveryHeadSha = observed.headSha;
+    }
+    if (observed.baseRef !== this.#baseBranch || (!observed.merged && observed.state !== "open"))
+      throw new Error(
+        "adopted publication changed; original source authority cannot be relabelled",
+      );
+    const target = observed.merged
+      ? (await this.#store.readCommit(observed.mergeCommitSha!)).parentOids[0]!
+      : (await this.#store.getBranchHead(this.#baseBranch)).oid;
+    let candidate: MergeCandidateCheckpointRecord | undefined;
+    if (target !== exactHeadValidation.baseSha) {
+      const identity: MergeCandidateIdentity = {
+        runId: this.#run.runId,
+        objective: this.#run.objective,
+        workItem: item.number,
+        attempt: source.attempt,
+        pullRequest: pull.number,
+        sourceHeadSha: pull.commitSha,
+        sourceExactHeadValidationDigest: exactHeadValidation.digest,
+        targetBaseSha: target,
+      };
+      const digest = mergeCandidateIdentityDigest(identity);
+      const backendId = `factory/integration-validation-${digest}`;
+      candidate = (await this.#mergeCandidates.load(identity)) ?? undefined;
+      if (!candidate && observed.merged)
+        throw new Error("merged adopted source lacks pre-merge validation");
+      if (!observed.merged)
+        await this.#assertOwnTrunkAdvance(
+          runtime.planRecord.plan.expectedBaseSha,
+          target,
+          item.number,
+        );
+      const original = this.#packetFor(item.number);
+      if (original.requirements.trust !== "trusted_local")
+        throw new Error("adopted source validation requires trusted local scope");
+      const packet = parseWorkerPacket({ ...original, baseSha: target });
+      const deadline = new Date(
+        this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
+      );
+      let artifact: NormalizedArtifact | undefined;
+      const reconstruct = async () => {
+        for (const sha of [exactHeadValidation.baseSha, pull.commitSha, target])
+          await ensureLocalCommit(this.#options.repository, sha);
+        const range = [exactHeadValidation.baseSha, pull.commitSha];
+        const changedPaths = (
+          await hostGit(
+            this.#options.repository,
+            ["diff", "--name-only", "-z", ...range],
+            MAX_ARTIFACT_PATCH_BYTES + 1024,
+            true,
+          )
+        )
+          .split("\0")
+          .filter(Boolean);
+        const patch = await hostGit(
+          this.#options.repository,
+          ["diff", "--binary", "--no-ext-diff", "--no-textconv", ...range],
+          MAX_ARTIFACT_PATCH_BYTES + 1024,
+          true,
+        );
+        return normalizeArtifact({ baseSha: target, changedPaths, patch, outcome: "succeeded" });
+      };
+      const outstanding = unreconciledCapacityReservations([...runtime.events]).filter(
+        (event) =>
+          event.runId === this.#run.runId &&
+          event.workItem === item.number &&
+          event.backend === backendId,
+      );
+      const recordCapacity = async (
+        event: "CapacityReserved" | "CapacityReconciled",
+        cpu: number,
+        memoryMb: number,
+        batch?: LocalScopeBatch,
+      ) =>
+        this.#appendSuccessorEvent(
+          item.id,
+          parseFactoryEvent({
+            protocol: "clockgrove.factory/v2",
+            kind: "capacity",
+            event,
+            objective: this.#run.objective,
+            runId: this.#run.runId,
+            workItem: item.number,
+            attempt: source.attempt,
+            sourceRunId: source.runId,
+            targetBaseSha: target,
+            directorEpoch: await this.#lease.use(async (lease) => lease.epoch),
+            policyDigest: this.#run.policyDigest,
+            phase: "validation",
+            backend: backendId,
+            sequence: this.#sequences.take(),
+            at: (await this.#store.serverTime()).toISOString(),
+            requestedCpu: cpu,
+            requestedMemoryMb: memoryMb,
+            ...(batch ? { localScopeBatch: batch } : {}),
+          }),
+        );
+      if (!candidate && outstanding.length)
+        throw new Error("interrupted adopted validation requires exact scope reconciliation");
+      if (candidate)
+        for (const entry of outstanding)
+          await recordCapacity("CapacityReconciled", entry.requestedCpu, entry.requestedMemoryMb);
+      if (!candidate) {
+        const effective = normalizeSchedulingPolicy(this.#policy);
+        const resource =
+          effective.capacity.mode === "adaptive-local"
+            ? await this.#resourceSampler.sample(Date.now()).catch(() => null)
+            : null;
+        if (
+          effective.capacity.mode === "adaptive-local" &&
+          (!resource ||
+            resourcePressureReasons(resource, effective.capacity.local).length ||
+            this.#resourceSampler.coolingDown(Date.now()))
+        )
+          return;
+        const capacity: CapacityReservation = {
+          key: capacityReservationKey({
+            objective: this.#run.objective,
+            workItem: item.number,
+            attempt: source.attempt,
+            phase: "validation",
+            backendId,
+          }),
+          objective: this.#run.objective,
+          workItem: item.number,
+          attempt: source.attempt,
+          phase: "validation",
+          backendId,
+          admissionClass: "local",
+          local: true,
+          cpu: packet.requirements.cpu ?? effective.capacity.local.defaultCpu,
+          memoryMb: packet.requirements.memoryMb ?? effective.capacity.local.defaultMemoryMb,
+          paidUnits: 0,
+          paths: packet.allowedPaths,
+          exclusiveResources: packet.changeSurface?.exclusiveResources ?? [],
+        };
+        const state = this.#capacity.snapshot();
+        if (
+          !this.#capacity.tryReserve(
+            state.generation,
+            capacity,
+            admissionCapacityLimits(
+              this.#policy,
+              resource,
+              this.#run.objective,
+              Math.min(effective.capacity.local.maxWorkers, this.#controllerLimits.maxLocalWorkers),
+              this.#controllerLimits,
+            ),
+          ).reserved
+        )
+          return;
+        let validation: CleanValidationResult | undefined;
+        let recorded = false;
+        try {
+          artifact = await reconstruct();
+          const scope = await this.#scopedValidation(
+            {
+              objective: this.#run.objective,
+              runId: this.#run.runId,
+              workItem: item.number,
+              attempt: source.attempt,
+              policyDigest: this.#run.policyDigest,
+            },
+            artifact,
+            packet,
+            deadline,
+          );
+          if (!scope) throw new Error("adopted validation requires observable owned local scopes");
+          await recordCapacity("CapacityReserved", capacity.cpu, capacity.memoryMb, scope.batch);
+          recorded = true;
+          validation = await this.#externalAdmission(() =>
+            validateArtifactClean({
+              repository: this.#options.repository,
+              artifact: artifact!,
+              packet,
+              localScope: scope.hooks,
+            }),
+          );
+          if (!validation.evidence.passed) {
+            await this.#sourceUsage(
+              item,
+              `integration-validation-${digest}`,
+              Date.parse(validation.evidence.completedAt) -
+                Date.parse(validation.evidence.startedAt),
+              "validation_milliseconds",
+            );
+            throw new Error(
+              validation.evidence.failureReason ?? "adopted candidate validation failed",
+            );
+          }
+          candidate = await this.#lease.use((lease) =>
+            this.#mergeCandidates.persist({
+              lease,
+              identity,
+              source: exactHeadValidation,
+              validation: validation!.evidence,
+            }),
+          );
+        } finally {
+          try {
+            if (validation) await discardValidationResult(validation);
+            if (recorded && candidate)
+              await recordCapacity("CapacityReconciled", capacity.cpu, capacity.memoryMb);
+          } finally {
+            if (!recorded || candidate) this.#capacity.release(capacity.key);
+          }
+        }
+      }
+      await this.#sourceUsage(
+        item,
+        `integration-validation-${digest}`,
+        Date.parse(candidate.validation.completedAt) - Date.parse(candidate.validation.startedAt),
+        "validation_milliseconds",
+      );
+      const reviewIdentity = this.#mergeCandidateReviewIdentity(candidate);
+      const existing = await this.#reviews.load(reviewIdentity);
+      if (!existing && observed.merged)
+        throw new Error("merged adopted source lacks pre-merge semantic review");
+      const invocationId = `integration-review-${reviewIdentityDigest(reviewIdentity)}`;
+      let invoke: Parameters<typeof runDurableReviewTransaction>[0]["invoke"];
+      if (!existing) {
+        if (Date.now() >= deadline.getTime())
+          throw new Error("successor Objective timeout exhausted");
+        const remaining = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
+        if (remaining.modelTokens !== null && remaining.modelTokens <= 0)
+          throw new Error("cumulative model-token budget exhausted");
+        this.#assertManagementInvocationNotFailed(invocationId);
+        artifact ??= await reconstruct();
+        if (artifact.digest !== candidate.validation.artifactDigest)
+          throw new Error("adopted candidate artifact changed");
+        const model = resolveModelSelection(this.#policy, "review");
+        invoke = (checkpoint) =>
+          this.#externalAdmission(() =>
+            this.#management.review(
+              {
+                repository: this.#options.repository,
+                objectiveNumber: this.#run.objective,
+                workItemNumber: item.number,
+                packet,
+                artifact: artifact!,
+                evidence: candidate!.validation,
+                ...(model ? { modelSelection: model } : {}),
+              },
+              checkpoint,
+            ),
+          );
+      }
+      await runDurableReviewTransaction({
+        existing,
+        ...(invoke ? { invoke } : {}),
+        persist: (result) =>
+          this.#lease.use((lease) =>
+            this.#reviews.persist({ lease, identity: reviewIdentity, result }),
+          ),
+        recover: () => this.#reviews.load(reviewIdentity),
+        recordUsage: (review) =>
+          this.#sourceUsage(
+            item,
+            invocationId,
+            review.usage.inputTokens + review.usage.outputTokens,
+            "model_tokens",
+          ),
+        recordFailureUsage: (usage) =>
+          this.#sourceUsage(
+            item,
+            `failed-${invocationId}`,
+            usage.inputTokens + usage.outputTokens,
+            "model_tokens",
+          ),
+        recordOutcome: async (review) => {
+          if (!review.review.accepted)
+            throw new Error("adopted candidate semantic review rejected");
+        },
+      });
+    } else if (!observed.merged && target !== runtime.planRecord.plan.expectedBaseSha) {
+      await this.#assertOwnTrunkAdvance(
+        runtime.planRecord.plan.expectedBaseSha,
+        target,
+        item.number,
+      );
+    }
+    await this.#integrate(
+      item,
+      reserved,
+      pull,
+      this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
+      true,
+      candidate,
+      true,
+      deliveryHeadSha,
+    );
   }
 
   async #integrate(
@@ -4521,24 +6862,79 @@ export class FactorySupervisor {
     pull: PublishedPullRequest,
     deadline: number,
     allowRecovery = false,
+    candidate?: MergeCandidateCheckpointRecord,
+    adoptedSource = false,
+    deliveryHeadSha?: string,
   ): Promise<void> {
     for (;;) {
       await this.#lease.renewIfNeeded();
       const readiness = await this.#serializeIntegration(async () => {
+        if (candidate) {
+          const observed = await this.#store.readPullRequest(pull.number);
+          if (!observed.merged && observed.baseSha !== candidate.identity.targetBaseSha) {
+            return {
+              state: "wait" as const,
+              reason: "candidate base changed; fresh validation is required",
+            };
+          }
+        }
         const current = await integrationReadiness(
           this.#store,
           pull,
-          reservation.baseSha,
+          candidate?.identity.targetBaseSha ?? reservation.baseSha,
           this.#baseBranch,
-          { ciExpected: this.#ciExpectedOnPullRequests },
+          {
+            ciExpected: this.#ciExpectedOnPullRequests,
+            ...(candidate ? { mergeCandidateValidation: candidate.evidence } : {}),
+            ...(deliveryHeadSha ? { mergeCandidateDeliveryHeadSha: deliveryHeadSha } : {}),
+          },
         );
         if (current.state !== "ready") return current;
+        if (candidate) {
+          // REST mergeable/test-merge metadata can lag a trunk update. Check GitHub's
+          // actual proposed tree as well as our clean application before any merge.
+          const preview = await this.#store.readPullRequest(pull.number);
+          if (
+            preview.headSha !== (deliveryHeadSha ?? pull.commitSha) ||
+            preview.baseRef !== this.#baseBranch
+          ) {
+            return {
+              state: "failed" as const,
+              reason: "pull request changed before candidate merge",
+            };
+          }
+          if (preview.merged || preview.mergeable !== true || !preview.mergeCommitSha) {
+            return {
+              state: "wait" as const,
+              reason: "waiting for current GitHub test-merge evidence",
+            };
+          }
+          const testMerge = await this.#store.readCommit(preview.mergeCommitSha);
+          if (
+            testMerge.oid !== preview.mergeCommitSha ||
+            testMerge.parentOids.length !== 2 ||
+            testMerge.parentOids[0] !== candidate.identity.targetBaseSha ||
+            testMerge.parentOids[1] !== (deliveryHeadSha ?? pull.commitSha)
+          ) {
+            return {
+              state: "wait" as const,
+              reason: "GitHub test-merge evidence is stale for the validated candidate",
+            };
+          }
+          if (testMerge.treeOid !== candidate.validation.outputTreeSha) {
+            return {
+              state: "failed" as const,
+              reason: "GitHub test-merge tree differs from the independently validated candidate",
+            };
+          }
+        }
         const currentBase = await this.#store.getBranchHead(this.#baseBranch);
-        if (currentBase.oid !== reservation.baseSha) {
+        const validatedBase = candidate?.identity.targetBaseSha ?? reservation.baseSha;
+        if (currentBase.oid !== validatedBase) {
           return {
-            state: "failed" as const,
+            state: candidate ? ("wait" as const) : ("failed" as const),
             reason:
-              `base branch advanced from validated commit ${reservation.baseSha} ` +
+              `base branch advanced from validated commit ${validatedBase} ` +
               `to ${currentBase.oid}`,
           };
         }
@@ -4569,7 +6965,16 @@ export class FactorySupervisor {
           commitTitle: item.title,
         });
         try {
-          await verifySquashIntegration(this.#store, pull, mergeSha, reservation.baseSha);
+          if (candidate) {
+            await verifyMergeCandidateSquash(
+              this.#store,
+              pull.exactHeadValidation,
+              candidate.evidence,
+              mergeSha,
+            );
+          } else {
+            await verifySquashIntegration(this.#store, pull, mergeSha, reservation.baseSha);
+          }
         } catch (error) {
           return {
             state: "failed" as const,
@@ -4582,6 +6987,45 @@ export class FactorySupervisor {
       });
       if (readiness.state === "integrated") {
         await this.#lease.assertGeneration("integration");
+        if (adoptedSource) {
+          const runtime = this.#recoveryRuntime!;
+          const outcome = createRecoverySourceIntegratedEvent({
+            planRecord: runtime.planRecord,
+            claim: runtime.claim,
+            workItem: item.number,
+            ...(runtime.sourcePublications.find(
+              (proof) => proof.publication.workItem === item.number,
+            )
+              ? {
+                  sourcePublication: runtime.sourcePublications.find(
+                    (proof) => proof.publication.workItem === item.number,
+                  )!.publication,
+                }
+              : {}),
+            mergeCommitSha: readiness.headSha,
+            sequence: this.#sequences.take(),
+            at: (await this.#store.serverTime()).toISOString(),
+            ...(candidate
+              ? { mergeCandidateIdentityDigest: mergeCandidateIdentityDigest(candidate.identity) }
+              : {}),
+            ...(deliveryHeadSha ? { deliveryHeadSha } : {}),
+          });
+          const proof = await verifyRecoverySourceIntegration({
+            planRecord: runtime.planRecord,
+            claim: runtime.claim,
+            events: [
+              ...runtime.events,
+              ...this.#budgetEvents.filter((event) => event.runId === this.#run.runId),
+            ],
+            store: this.#recoveryStore,
+            outcome,
+          });
+          if (proof.status !== "verified")
+            throw new Error("adopted source integration evidence is unavailable");
+          await this.#appendSuccessorEvent(item.id, outcome);
+          if (!item.closed) await this.#store.closeIssue(item.number);
+          return;
+        }
         if (!item.closed) await this.#store.closeIssue(item.number);
         const alreadyRecorded = (item.factoryEvents ?? []).some(
           (candidate) =>
@@ -4619,12 +7063,38 @@ export class FactorySupervisor {
   async #resumeIntegration(item: DerivedWorkItem): Promise<void> {
     if (this.#deliverySelection.selected === "native-stacks") {
       const member = await this.#nativeStackMember(item);
+      const current = await this.#store.readPullRequest(member.pull.number);
+      if (
+        current.headSha !== member.pull.commitSha ||
+        current.baseRef !== this.#baseBranch ||
+        (current.state !== "open" && !current.merged)
+      ) {
+        throw new Error("sibling pull request identity or target changed after publication");
+      }
+      let targetBaseSha: string;
+      if (current.merged) {
+        if (!current.mergeCommitSha) throw new Error("merged sibling has no merge commit identity");
+        const merge = await this.#store.readCommit(current.mergeCommitSha);
+        if (merge.parentOids.length !== 1) throw new Error("merged sibling is not a squash commit");
+        targetBaseSha = merge.parentOids[0]!;
+      } else {
+        targetBaseSha = (await this.#store.getBranchHead(this.#baseBranch)).oid;
+      }
+      const candidate =
+        targetBaseSha === member.pull.exactHeadValidation.baseSha
+          ? undefined
+          : await this.#prepareSiblingMergeCandidate(item, member, targetBaseSha, current.merged);
+      if (candidate === null) {
+        await sleep(this.#options.pollIntervalMs ?? 2_000, this.#options.signal);
+        return;
+      }
       await this.#integrate(
         item,
         member.reservation,
         member.pull,
         this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
         true,
+        candidate,
       );
       return;
     }
@@ -4826,6 +7296,11 @@ export class FactorySupervisor {
         capacity.attempt !== reservation.attempt
       ) {
         continue;
+      }
+      if (isIntegrationValidationBackend(capacity.backend)) {
+        throw new Error(
+          "integration-candidate capacity requires its exact completion checkpoint; ordinary validation cannot reconcile it",
+        );
       }
       if (!validationFinished && capacity.backend !== "factory/local-validation") {
         const backend = this.#registry.get(capacity.backend);

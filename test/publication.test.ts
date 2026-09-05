@@ -3,7 +3,7 @@ import { mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { GitCommitObject } from "../src/control/lease.js";
 import {
@@ -15,6 +15,8 @@ import type { PublicationStore } from "../src/publication/publisher.js";
 import { integrationReadiness, publishValidated } from "../src/publication/publisher.js";
 import { discardValidationResult, validateArtifactClean } from "../src/validation/clean-run.js";
 import { bindValidationToPublishedHead } from "../src/validation/plan.js";
+import { createValidationEvidence } from "../src/validation/evidence.js";
+import { bindMergeCandidateValidation } from "../src/publication/merge-candidate.js";
 import type { WorkerPacket } from "../src/protocol/worker-packet.js";
 
 function git(repository: string, args: string[], input?: Buffer | string): string {
@@ -222,6 +224,277 @@ class GitObjectStore implements PublicationStore {
 }
 
 describe("host-owned publication", () => {
+  function candidateFixture() {
+    const source = exactHeadValidation("c".repeat(40));
+    const validation = createValidationEvidence({
+      protocol: "clockgrove.factory/validation-v1",
+      artifactDigest: "a".repeat(64),
+      baseSha: "a".repeat(40),
+      outputTreeSha: "e".repeat(40),
+      commands: [{ command: "npm test", exitCode: 0, durationMs: 1 }],
+      passed: true,
+      startedAt: "2026-09-05T00:00:00Z",
+      completedAt: "2026-09-05T00:00:01Z",
+    });
+    const candidate = bindMergeCandidateValidation({ source, validation });
+    const pull = {
+      branch: "factory/x",
+      commitSha: source.publishedHeadSha,
+      number: 7,
+      htmlUrl: "",
+      exactHeadValidation: source,
+    };
+    const current = {
+      state: "open",
+      merged: false,
+      mergeable: true,
+      mergeableState: "clean",
+      draft: false,
+      headSha: source.publishedHeadSha,
+      baseSha: candidate.targetBaseSha,
+      baseRef: "main",
+      mergeCommitSha: "f".repeat(40) as string | null,
+    };
+    const checks = { failed: [] as string[], pending: [] as string[], observed: ["test"] };
+    const commit = {
+      oid: "f".repeat(40),
+      treeOid: candidate.candidateOutputTreeSha,
+      parentOids: [candidate.targetBaseSha],
+      message: "merge",
+      serverTime: new Date(),
+    };
+    const reads = {
+      readPullRequest: vi.fn(async () => current),
+      readChecks: vi.fn(async () => checks),
+      readCommit: vi.fn(async () => commit),
+    };
+    // Only read methods participate in integration readiness; any unexpected write is absent.
+    const store = reads as unknown as PublicationStore;
+    const options = { mergeCandidateValidation: candidate, ciExpected: true };
+    const ready = () => integrationReadiness(store, pull, candidate.targetBaseSha, "main", options);
+    return { source, candidate, pull, current, checks, commit, reads, store, options, ready };
+  }
+
+  it("accepts a separately validated advanced-base candidate without relabeling the original head", async () => {
+    const f = candidateFixture();
+    const source = structuredClone(f.source);
+    await expect(f.ready()).resolves.toEqual({
+      state: "ready",
+      headSha: f.source.publishedHeadSha,
+    });
+    await expect(
+      integrationReadiness(f.store, f.pull, undefined, "main", f.options),
+    ).resolves.toMatchObject({ state: "ready" });
+    expect(f.source).toEqual(source);
+    expect(f.candidate.candidateOutputTreeSha).not.toBe(f.source.outputTreeSha);
+    await expect(
+      integrationReadiness(f.store, f.pull, f.source.baseSha, "main"),
+    ).resolves.toMatchObject({
+      state: "failed",
+      reason: expect.stringContaining("base branch advanced"),
+    });
+  });
+
+  it.each(["base", "head", "base-ref", "failed-check", "pending-check", "conflict", "draft"])(
+    "retains the %s guard with candidate evidence",
+    async (kind) => {
+      const f = candidateFixture();
+      if (kind === "base") f.current.baseSha = "9".repeat(40);
+      if (kind === "head") f.current.headSha = "9".repeat(40);
+      if (kind === "base-ref") f.current.baseRef = "other";
+      if (kind === "failed-check") f.checks.failed = ["test"];
+      if (kind === "pending-check") f.checks.pending = ["test"];
+      if (kind === "conflict") f.current.mergeable = false;
+      if (kind === "draft") f.current.draft = true;
+      await expect(f.ready()).resolves.toMatchObject({
+        state: kind === "pending-check" ? "wait" : "failed",
+      });
+    },
+  );
+
+  it("checks the candidate base even when no separate expected base was supplied", async () => {
+    const f = candidateFixture();
+    f.current.baseSha = f.source.baseSha;
+    await expect(
+      integrationReadiness(f.store, f.pull, undefined, "main", f.options),
+    ).resolves.toMatchObject({
+      state: "failed",
+      reason: expect.stringContaining("base branch advanced"),
+    });
+  });
+
+  it("rejects mismatched candidate evidence before reading mutable GitHub state", async () => {
+    const f = candidateFixture();
+    await expect(
+      integrationReadiness(f.store, f.pull, f.source.baseSha, "main", f.options),
+    ).rejects.toThrow("expected base");
+    await expect(
+      integrationReadiness(f.store, f.pull, undefined, "main", {
+        ...f.options,
+        mergeCandidateValidation: {
+          ...f.candidate,
+          candidateOutputTreeSha: f.source.outputTreeSha,
+        },
+      }),
+    ).rejects.toThrow("digest mismatch");
+    const otherSource = bindValidationToPublishedHead({
+      validation: {
+        passed: true,
+        digest: "f".repeat(64),
+        baseSha: f.source.baseSha,
+        outputTreeSha: f.source.outputTreeSha,
+      },
+      publishedBaseSha: f.source.baseSha,
+      publishedTreeSha: f.source.outputTreeSha,
+      publishedHeadSha: f.source.publishedHeadSha,
+    });
+    await expect(
+      integrationReadiness(
+        f.store,
+        { ...f.pull, exactHeadValidation: otherSource },
+        undefined,
+        "main",
+        f.options,
+      ),
+    ).rejects.toThrow("original published head");
+    expect(f.reads.readPullRequest).not.toHaveBeenCalled();
+  });
+
+  it("recovers a merged candidate from its actual target parent and candidate tree, not current trunk", async () => {
+    const f = candidateFixture();
+    f.current.merged = true;
+    f.current.state = "closed";
+    f.current.baseSha = "9".repeat(40);
+    await expect(f.ready()).resolves.toEqual({ state: "integrated", headSha: f.commit.oid });
+    expect(f.reads.readChecks).not.toHaveBeenCalled();
+    await expect(
+      integrationReadiness(f.store, f.pull, f.candidate.targetBaseSha, "main"),
+    ).resolves.toMatchObject({
+      state: "failed",
+      reason: expect.stringContaining("irreversible merge"),
+    });
+  });
+
+  it.each(["source-tree", "source-base", "two-parents", "changed-head", "missing-merge"])(
+    "rejects incorrect merged candidate %s",
+    async (kind) => {
+      const f = candidateFixture();
+      f.current.merged = true;
+      f.current.state = "closed";
+      if (kind === "source-tree") f.commit.treeOid = f.source.outputTreeSha;
+      if (kind === "source-base") f.commit.parentOids = [f.source.baseSha];
+      if (kind === "two-parents") f.commit.parentOids.push(f.source.publishedHeadSha);
+      if (kind === "changed-head") f.current.headSha = "9".repeat(40);
+      if (kind === "missing-merge") f.current.mergeCommitSha = null;
+      await expect(f.ready()).resolves.toMatchObject({ state: "failed" });
+    },
+  );
+
+  function deliveryFixture() {
+    const f = candidateFixture();
+    const delivery = {
+      ...f.commit,
+      oid: "8".repeat(40),
+      parentOids: [f.candidate.targetBaseSha],
+      message: "native stack rewrite",
+    };
+    f.current.headSha = delivery.oid;
+    f.reads.readCommit.mockImplementation(async (oid?: string) =>
+      oid === delivery.oid ? delivery : f.commit,
+    );
+    const options = { ...f.options, mergeCandidateDeliveryHeadSha: delivery.oid };
+    const ready = () =>
+      integrationReadiness(f.store, f.pull, f.candidate.targetBaseSha, "main", options);
+    return { ...f, delivery, options, ready };
+  }
+
+  it("uses the proven native delivery head for checks and mutation without changing source evidence", async () => {
+    const f = deliveryFixture();
+    const original = structuredClone(f.pull);
+    await expect(f.ready()).resolves.toEqual({ state: "ready", headSha: f.delivery.oid });
+    expect(f.reads.readCommit).toHaveBeenCalledWith(f.delivery.oid);
+    expect(f.reads.readChecks).toHaveBeenCalledWith(f.delivery.oid);
+    expect(f.pull).toEqual(original);
+    await expect(
+      integrationReadiness(f.store, f.pull, f.candidate.targetBaseSha, "main", {
+        mergeCandidateValidation: f.candidate,
+      }),
+    ).resolves.toMatchObject({ state: "failed", reason: expect.stringContaining("head changed") });
+  });
+
+  it("does not accept a delivery head as candidate authority", async () => {
+    const f = deliveryFixture();
+    await expect(
+      integrationReadiness(f.store, f.pull, undefined, "main", {
+        mergeCandidateDeliveryHeadSha: f.delivery.oid,
+      }),
+    ).rejects.toThrow("requires candidate validation");
+    await expect(
+      integrationReadiness(f.store, f.pull, undefined, "main", {
+        ...f.options,
+        mergeCandidateDeliveryHeadSha: "",
+      }),
+    ).rejects.toThrow();
+    await expect(
+      integrationReadiness(f.store, f.pull, undefined, "main", {
+        ...f.options,
+        mergeCandidateValidation: { ...f.candidate, sourceHeadSha: f.delivery.oid },
+      }),
+    ).rejects.toThrow("digest mismatch");
+    expect(f.reads.readPullRequest).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    "requires the rewritten head proof even when merged=%s",
+    async (merged) => {
+      for (const defect of ["identity", "tree", "parent", "two-parents", "no-parent", "head"]) {
+        const f = deliveryFixture();
+        f.current.merged = merged;
+        if (merged) f.current.state = "closed";
+        if (defect === "identity") f.delivery.oid = "7".repeat(40);
+        if (defect === "tree") f.delivery.treeOid = f.source.outputTreeSha;
+        if (defect === "parent") f.delivery.parentOids = [f.source.baseSha];
+        if (defect === "two-parents") f.delivery.parentOids.push(f.source.publishedHeadSha);
+        if (defect === "no-parent") f.delivery.parentOids = [];
+        if (defect === "head") f.current.headSha = f.source.publishedHeadSha;
+        await expect(f.ready(), defect).resolves.toMatchObject({ state: "failed" });
+        expect(f.reads.readChecks).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it("recovers a merged rewritten head only with the separate candidate squash proof", async () => {
+    const f = deliveryFixture();
+    f.current.merged = true;
+    f.current.state = "closed";
+    f.current.baseSha = "9".repeat(40);
+    await expect(f.ready()).resolves.toEqual({ state: "integrated", headSha: f.commit.oid });
+    expect(f.reads.readCommit).toHaveBeenCalledWith(f.delivery.oid);
+    expect(f.reads.readCommit).toHaveBeenCalledWith(f.commit.oid);
+    f.commit.treeOid = f.source.outputTreeSha;
+    await expect(f.ready()).resolves.toMatchObject({
+      state: "failed",
+      reason: expect.stringContaining("irreversible merge"),
+    });
+    expect(f.reads.readChecks).not.toHaveBeenCalled();
+  });
+
+  it.each(["base", "base-ref", "failed-check", "pending-check", "conflict", "draft"])(
+    "retains the %s guard for a proven native delivery head",
+    async (kind) => {
+      const f = deliveryFixture();
+      if (kind === "base") f.current.baseSha = "9".repeat(40);
+      if (kind === "base-ref") f.current.baseRef = "other";
+      if (kind === "failed-check") f.checks.failed = ["test"];
+      if (kind === "pending-check") f.checks.pending = ["test"];
+      if (kind === "conflict") f.current.mergeable = false;
+      if (kind === "draft") f.current.draft = true;
+      await expect(f.ready()).resolves.toMatchObject({
+        state: kind === "pending-check" ? "wait" : "failed",
+      });
+    },
+  );
+
   it("uploads exactly the independently validated tree and is idempotent", async () => {
     const { repository, base } = await fixture();
     const packet: WorkerPacket = {

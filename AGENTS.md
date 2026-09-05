@@ -58,6 +58,25 @@ These are settled. Do not relitigate them.
   gaps, and choose the next substantial authorized deliverable. Recalibrate when evidence changes;
   do not repeatedly replan settled work or expand the goal without authority.
 
+## Capability-sized delivery
+
+- Use **one PR per complete, testable capability**, with acceptance criteria spanning its end-to-end
+  behavior. Helper modules, intermediate plumbing, and individual Work Items belong in that batch;
+  do not turn each into a separate PR or stack layer merely because it can be committed independently.
+- Use parallel subagents for bounded independent work and incremental commits inside the capability's
+  integration branch. Keep file ownership explicit and integrate their work before the PR handoff.
+- Optimize time to the overall goal by running independent capabilities concurrently, not only
+  subtasks within one capability. Give each capability an owner, isolated worktree, and end-to-end
+  acceptance criteria. Keep available agents on the highest-impact unblocked work within authorized
+  budgets; serialize only genuine dependencies or conflicting changes. One PR per capability does
+  not mean one capability at a time.
+- Run targeted checks during development. Run the full required integration and release checks at
+  the completed batch boundary, and rebuild/reinstall the updated plugin there when the batch changes
+  it. Do not repeat full release verification or plugin reinstall after every helper change or commit.
+  Repeat affected checks earlier only when changed behavior or a concrete failure invalidates the
+  evidence, including installation-specific tests when relevant. Documentation-only batches retain
+  their proportional checks; batching never waives required release or live-conformance gates.
+
 ## Parallel work and responsiveness
 
 - When the harness permits delegation, delegate bounded independent work when it improves delivery
@@ -66,6 +85,12 @@ These are settled. Do not relitigate them.
 - Give each agent an outcome, file ownership, acceptance criteria, relevant context, and a concise
   return format. Keep shared-file edits under one owner. The coordinating agent owns integration
   and checks the returned evidence; do not duplicate an assigned investigation without a reason.
+- Use additional Codex sessions as needed for genuinely independent work when a session's agent
+  pool would otherwise serialize the project. The user has authorized this coordination pattern;
+  each additional session needs an isolated worktree, explicit ownership, a bounded deliverable,
+  and a handoff to the integration owner. Respect platform and account limits across sessions.
+  Optimize completed capability throughput and quota use, not session count; do not duplicate
+  active work, expand scope, or start deferred testing merely to occupy more workers.
 - Process delivered user corrections and agent messages before further dependent work. Use the
   harness's supported steering and wait mechanisms. Verify its message-delivery behavior before
   relying on it; do not assume messages require a completed turn or end turns merely as a ritual.

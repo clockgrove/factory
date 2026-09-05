@@ -1,8 +1,8 @@
 # Implementation handoff
 
 Implementation and qualification are in progress. Completing an integration batch does not establish
-that the product contract is complete. The last bundled checkpoint is `3780a29`; the completion work
-below must be integrated, tested, and rebuilt before it can replace that checkpoint.
+that the product contract is complete. The completion source and matching bundles are integrated;
+release verification and installed qualification must pass before this candidate is ready.
 [DESIGN.md](DESIGN.md) defines behavior; [CONFORMANCE.md](CONFORMANCE.md) remains the release-gate
 ledger. This document grants no execution, spending, installation, or publication authority.
 
@@ -55,7 +55,7 @@ mixed-recovery integration, whose required full release batch follows next.
   artifact/validation bindings, exact native membership, checkpoint/review reuse and resource
   ownership remain intact. Never fabricate stack receipts or turn unknown cleanup into absence.
 
-Static checks passed on the combined source: `npm run typecheck`, `npm run lint`,
+Historical static checks on checkpoint `3780a29` passed: `npm run typecheck`, `npm run lint`,
 `npm run format:check`, `npm run verify:schemas`, `npm run verify:dist`, and `git diff --check`.
 The schema check compiles all nine schemas; it is not a runtime protocol-conformance test.
 Independent source review covered the local/isolated validation merge, new event wire shapes,

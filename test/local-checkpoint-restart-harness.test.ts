@@ -5,6 +5,7 @@ import {
   assertControllerUnit,
   checkpointAuthority,
   checkpointFacts,
+  checkpointFailure,
   checkpointReady,
   checkpointLease,
   assertScopeCoverage,
@@ -148,6 +149,31 @@ function observation(count = 1, completed = false) {
 }
 
 describe("explicit checkpoint restart authority", () => {
+  it.each(["ERR_ASSERTION", "EACCES", "EPERM", "ENOENT", "ESRCH", "ETIMEDOUT", "ABORT_ERR"])(
+    "retains only allowlisted observation stage and %s code",
+    (code) => {
+      const error = Object.assign(new Error("private executable path and token"), {
+        code,
+        path: "/private/path",
+        actual: "private arguments",
+        expected: "private token",
+      });
+      expect(checkpointFailure(error, "controller-process-cwd")).toEqual({
+        boundary: "controller-process-cwd",
+        code,
+      });
+    },
+  );
+  it("never emits arbitrary diagnostic strings or misinterprets an unavailable observation as absence", () => {
+    expect(
+      checkpointFailure({ code: "private secret", message: "raw private log" }, "/private/path"),
+    ).toEqual({ boundary: "scenario", code: "UNAVAILABLE" });
+    expect(checkpointFailure(undefined)).toEqual({ boundary: "scenario", code: "UNAVAILABLE" });
+    expect(checkpointFailure({ code: "ENOENT" }, "controller-process-birth")).toEqual({
+      boundary: "controller-process-birth",
+      code: "ENOENT",
+    });
+  });
   it("is import/no-opt-in inert", async () => {
     const runner = vi.fn();
     const output = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -379,6 +405,15 @@ function scenario() {
 }
 
 describe("one-shot checkpoint lifecycle", () => {
+  it("never creates an Objective or repeats start after the first active observation is unavailable", async () => {
+    const f = scenario();
+    vi.mocked(f.port.controller).mockRejectedValue(
+      Object.assign(new Error("unavailable"), { code: "EACCES" }),
+    );
+    await expect(runCheckpointScenario(f.port, authority)).rejects.toThrow(/unavailable/);
+    expect(f.actions).toEqual(["start"]);
+    expect(f.port.controller).toHaveBeenCalledTimes(1);
+  });
   it("does not inspect scopes or restart until the post-ack integration becomes visible", async () => {
     const f = scenario();
     const ack = f.checkpoint.receipts.find(({ event }) => event.event === "RunPauseAcknowledged")!;

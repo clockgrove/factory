@@ -17,6 +17,10 @@ export function checkpointFacts(
   requirePaused?: boolean,
 ): { runId: string; modelTokens: number; integrated: number; stable: unknown[] };
 export function assertScopeCoverage(events: Record<string, unknown>[]): void;
+export function checkpointFailure(
+  error: unknown,
+  boundary?: string,
+): { boundary: string; code: string };
 export function checkpointReady(
   observation: unknown,
   authority: CheckpointAuthority,

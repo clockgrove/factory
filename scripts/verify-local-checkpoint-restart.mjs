@@ -86,6 +86,34 @@ export function checkpointAuthority(env) {
 
 class CheckpointPending extends Error {}
 
+export function checkpointFailure(error, boundary) {
+  const boundaries = new Set([
+    "controller-config",
+    "controller-properties",
+    "controller-host",
+    "controller-state",
+    "controller-process-owner",
+    "controller-process-cwd",
+    "controller-process-command",
+    "controller-process-birth",
+    "controller-process-cgroup",
+    "controller-generation",
+  ]);
+  const codes = new Set([
+    "ERR_ASSERTION",
+    "EACCES",
+    "EPERM",
+    "ENOENT",
+    "ESRCH",
+    "ETIMEDOUT",
+    "ABORT_ERR",
+  ]);
+  return {
+    boundary: boundaries.has(boundary) ? boundary : "scenario",
+    code: codes.has(error?.code) ? error.code : "UNAVAILABLE",
+  };
+}
+
 export function checkpointReady(observation, authority, pauseRequestId) {
   try {
     checkpointFacts(observation, authority, pauseRequestId, true, true);
@@ -514,7 +542,9 @@ function command(name, args, cwd) {
       Buffer.byteLength(error.stdout) <= 65536
     )
       return error.stdout.trim();
-    throw Error("bounded local operation unavailable");
+    throw Object.assign(Error("bounded local operation unavailable"), {
+      code: checkpointFailure(error).code,
+    });
   }
 }
 function readBounded(path, maximum = 65536) {
@@ -662,12 +692,15 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
     bundle: realpathSync(join(pluginRoot, "dist/factory.js")),
   };
   const unitPath = join(home, ".config/systemd/user", authority.unit);
+  let controllerBoundary;
   const controller = async (state, prior) => {
+    controllerBoundary = "controller-config";
     const meta = statSync(unitPath);
     assert.equal(meta.uid, process.getuid());
     assert.ok(meta.isFile());
     const configDigest = assertControllerUnit(readBounded(unitPath, 16384), expected);
     if (evidence.configDigest) assert.equal(configDigest, evidence.configDigest);
+    controllerBoundary = "controller-properties";
     const raw = command("systemctl", [
       "--user",
       "show",
@@ -693,20 +726,26 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
     assert.equal(fields.NeedDaemonReload, "no");
     assert.equal(fields.KillMode, "control-group");
     assert.ok(["", "0", "0 /"].includes(fields.Job));
+    controllerBoundary = "controller-host";
     const host = hostIdentity();
     if (prior) assert.equal(host, prior.hostIdentity);
+    controllerBoundary = "controller-state";
     if (state === "inactive") {
       assert.equal(fields.ActiveState, "inactive");
       assert.equal(fields.MainPID, "0");
       assert.equal(fields.ControlGroup, "");
+      controllerBoundary = undefined;
       return { unit: authority.unit, state, hostIdentity: host, configDigest };
     }
     assert.equal(fields.ActiveState, "active");
     assert.match(fields.InvocationID, /^[a-f0-9]{32}$/);
     const pid = Number(fields.MainPID);
     assert.ok(Number.isSafeInteger(pid) && pid > 1);
+    controllerBoundary = "controller-process-owner";
     assert.equal(statSync(`/proc/${pid}`).uid, process.getuid());
+    controllerBoundary = "controller-process-cwd";
     assert.equal(readlinkSync(`/proc/${pid}/cwd`), authority.checkout);
+    controllerBoundary = "controller-process-command";
     assert.deepEqual(readBounded(`/proc/${pid}/cmdline`).split("\0").filter(Boolean), [
       expected.node,
       expected.bundle,
@@ -716,6 +755,7 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
       "--repo",
       authority.checkout,
     ]);
+    controllerBoundary = "controller-process-birth";
     const stat = readBounded(`/proc/${pid}/stat`);
     assert.ok(stat.startsWith(`${pid} (`));
     const startTicks = stat
@@ -723,6 +763,7 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
       .trim()
       .split(/\s+/)[19];
     assert.match(startTicks, /^\d+$/);
+    controllerBoundary = "controller-process-cgroup";
     assert.ok(fields.ControlGroup.endsWith(`/${authority.unit}`));
     assert.ok(readBounded(`/proc/${pid}/cgroup`).split("\n").includes(`0::${fields.ControlGroup}`));
     const result = {
@@ -734,6 +775,7 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
       hostIdentity: host,
       configDigest,
     };
+    controllerBoundary = "controller-generation";
     if (prior)
       for (const key of [
         "unit",
@@ -744,6 +786,7 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
         "configDigest",
       ])
         assert.equal(result[key], prior[key], "controller generation changed");
+    controllerBoundary = undefined;
     return result;
   };
   const call = async (name, args = {}) => {
@@ -1075,11 +1118,12 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
         evidence: authority.evidence,
       }),
     );
-  } catch {
+  } catch (error) {
     evidence.result = {
       result: "incomplete",
       reason:
         "checkpoint boundary unavailable; inspect exact retained authority before any further action",
+      diagnostic: checkpointFailure(error, controllerBoundary),
       automaticRetry: false,
       automaticRestart: false,
     };

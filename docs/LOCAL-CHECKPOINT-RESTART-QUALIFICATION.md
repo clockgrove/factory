@@ -113,6 +113,12 @@ evidence and use the normal installed operator inspection surfaces to establish 
 identity and state before separately authorizing intervention. Do not rerun with a new filename
 to bypass an uncertain result or an existing namespace.
 
+Failures retain only an allowlisted observation-stage name and fixed error code, never raw
+assertion values, process arguments, executable configuration, stack traces or token-bearing errors.
+An unavailable `/proc` or service observation is not resource-absence evidence; host identity
+checks require the same real-host permissions as the authorized exercise. Diagnostics do not
+authorize retries or change any readiness/identity predicate.
+
 The passed evidence records the original and replacement controller identities, checkpoint and
 final receipt/accounting facts, exact absence observations, takeover lease and action results.
 Its claim is limited to the specified installed checkpoint restart. Deterministic verification is:

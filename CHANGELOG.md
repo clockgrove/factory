@@ -38,6 +38,9 @@ Notable changes to Factory. See [the delivery plan](docs/DELIVERY-PLAN.md) for u
   observations. Platform refusals retain their retry boundary through proof reconstruction.
 - The repository controller settles ownership before abortable in-process quota cooldown and fresh
   acquisition. Queued calls respect the same boundary; quota failures do not cause restart storms.
+- After a delayed restart, already finished local work can receive Objective completion only with
+  exact on-time delivery, review, accounting and fresh cleanup proof. The deadline is not extended;
+  new execution, validation, review, merging and missing-receipt repair remain prohibited.
 - Completed original-local foreground work can prove launcher closure from exact authenticated
   completion chains plus fresh producer/host and reserved-scope observations. Missing, partial or
   conflicting evidence still blocks recovery; no service identity or command output is invented.

@@ -1,0 +1,176 @@
+{
+  "protocol": "clockgrove.factory/component-evidence-v1",
+  "capability": "installed-local-scheduling",
+  "status": "passed-with-explicit-scope",
+  "scope": "director-leaf-cpu-admission-native-subissue-priority-outer-repository-lease-contention",
+  "harnessCommit": "98ce207650e76b2f1aed114b89749c80b34e0e34",
+  "runtimeImplementationCommit": "0c97438f05d721d6cde761b79ae05f5510659199",
+  "verification": {
+    "fullRelease": {
+      "sourceCommit": "13d4efea2b8eaf7ca8ed764492c0f8b2091ad9f8",
+      "command": "npm run verify:release",
+      "exitCode": 0,
+      "testFilesPassed": 123,
+      "testsPassed": 2140,
+      "testsSkipped": 3,
+      "testDurationSeconds": 294.78,
+      "coveragePercent": {
+        "statements": 80.47,
+        "branches": 77.13,
+        "functions": 84.75,
+        "lines": 81.65
+      },
+      "staticSchemaBundlePluginAndNpmChecks": "passed",
+      "dependencyAuditVulnerabilities": 0,
+      "sourceLogSha256": "259e0814477505c58624375a293a3923ee8dc30758d9c8f55d977df470cf4d78"
+    },
+    "finalHarnessChecks": {
+      "sourceCommit": "98ce207650e76b2f1aed114b89749c80b34e0e34",
+      "testFilesPassed": 2,
+      "testsPassed": 148,
+      "typecheckAndScopedBiome": "passed",
+      "sourceLogSha256": "f9b6a2767ac0a361edab2d8b3f3c78c24028ec104c4c70733e19db33a8f98708"
+    }
+  },
+  "package": {
+    "sourceCommit": "98ce207650e76b2f1aed114b89749c80b34e0e34",
+    "name": "@clockgrove/factory",
+    "version": "2.0.26",
+    "origin": "local npm pack of the recorded harness candidate; not the public registry",
+    "files": 76,
+    "bytes": 2926295,
+    "unpackedBytes": 8124204,
+    "sha256": "a5076b65a637c180829f68625f730a5c15e7f369dd90a699e3d04aeed95372a5",
+    "containsThisEvidenceUpdate": false,
+    "sameTarballAsEarlierFullRelease": false
+  },
+  "installedSubjects": {
+    "personalPluginManifestVersion": "2.0.26+codex.20260905123336",
+    "inventorySha256": "5fb46822fa636a2d612d5421f337cbee1b72de5b0e1ab97be49f2f031e971713",
+    "runtimeBundlesUnchangedFromRecordedRuntimeCommit": true,
+    "candidateAndInstalledInventoryMatch": true,
+    "unchangedThroughoutRun": true,
+    "bundles": [
+      {
+        "file": "factory.js",
+        "bytes": 2955522,
+        "sha256": "234564ee24e06c8d859333ee382addbe5988a2311373fb0d81af02db50fb8dc3"
+      },
+      {
+        "file": "mcp-server.js",
+        "bytes": 3247846,
+        "sha256": "d837fa3dd60027fe8b8b9eb5a0fba30a9dddd786335f46befa94e76659949b59"
+      }
+    ]
+  },
+  "installedSchedulingQualification": {
+    "command": "node scripts/verify-local-scheduling.mjs",
+    "result": "passed",
+    "completionScope": "installed-director-scheduling-subset",
+    "sourceRecordSha256": "a88dbcc67faaf3aaf936b403d8d5624865b48db0eec7c071209e1dd943caccc6",
+    "preflightRecordSha256": "225d00eae0c295b21b7816d349f1ad330da291dae48c36f244232e1cf902363d",
+    "sourceLogSha256": "58adebfecc78be9b64e7dbba02d91396264e0ca644c916fb8737dd5037407330",
+    "runStartedAt": "2026-09-05T13:52:48.000Z",
+    "runCompletedAt": "2026-09-05T14:05:29.000Z",
+    "qualificationFinishedAt": "2026-09-05T14:05:43.352Z",
+    "requestedAndSelectedDelivery": "regular-prs",
+    "requestedBackendOrder": ["codex-sdk/local-worktree", "codex-cli/local-worktree"],
+    "actualWorkerBackend": "codex-sdk/local-worktree",
+    "workItems": 3,
+    "independentRoots": 2,
+    "twoParentJoins": 1,
+    "firstAttemptWorkerSuccesses": 3,
+    "independentValidationsPassed": 3,
+    "reviewCalls": 3,
+    "closedMergedPullRequests": 3,
+    "objectiveClosed": true,
+    "terminalState": "completed",
+    "activeReservations": 0,
+    "completePipelineSerializationVerified": true,
+    "eachNextAdmissionUsesPreviousIntegrationBase": true,
+    "publicationAndMergeParentsAndTreesMatchExactValidation": true,
+    "capturedRequestAndAuthenticatedPolicyBindingVerified": true,
+    "compiledBaseMatchesPreflight": true,
+    "joinIntegrationMatchesVerifiedDefaultBranch": true,
+    "freshCloneTestsPassed": 63,
+    "freshCloneTestsFailed": 0,
+    "independentMergedBehaviorAssertions": "passed",
+    "cpuAdmission": {
+      "initialDirectorLeafEffectiveCpu": 0.5,
+      "bothRootsMechanicallyQueued": true,
+      "preReleaseWorkerAdmissions": 0,
+      "releaseRequestedAt": "2026-09-05T13:54:47.492Z",
+      "releasedObservedAt": "2026-09-05T13:54:47.514Z",
+      "releasedDirectorLeafEffectiveCpu": 4,
+      "sameServiceInvocationAndProcessBirth": true,
+      "everyReservationFollowsBarrierSequence": true,
+      "everyReservationRecordsFreshFourCpuSample": true,
+      "firstReservationCapacityMeasuredAt": "2026-09-05T13:55:33.290Z",
+      "firstReservationAt": "2026-09-05T13:55:38.000Z"
+    },
+    "priority": {
+      "input": "native-subissue-order",
+      "secondReadyRootMovedAheadOfFirst": true,
+      "exactIssueIdentitiesPreservedInReadback": true,
+      "firstReservationMatchesPromotedRootAndRecordedPosition": true
+    },
+    "contention": {
+      "boundary": "outer-repository-controller-lease",
+      "identicalForegroundRequestRefused": true,
+      "sameAuthenticatedControllerEpochAndPolicyBeforeAndAfter": true,
+      "contenderAbsentBeforeCpuRelease": true
+    },
+    "modelUsage": {
+      "reconciledCalls": 7,
+      "tokens": 221536,
+      "inputTokens": 217562,
+      "outputTokens": 3974,
+      "cachedInputTokens": 99712,
+      "cachedTokensAreSubsetOfInput": true,
+      "initialAdmissionThreshold": 500000,
+      "thresholdIsProviderHardCap": false,
+      "providerBilling": "unavailable"
+    },
+    "freshInstalledReconstruction": {
+      "statusSourceSha256": "ae29a5d046610802216ed499594e8df82ade47f46287568b8a771ed7c9fb5bfc",
+      "replaySourceSha256": "430dffafa5d8065fec017904ae92c8a7bf5e5b309e0fb5c3a10ea7821625360f",
+      "statusObservedAt": "2026-09-05T14:07:35.038Z",
+      "replayObservedAt": "2026-09-05T14:08:42.204Z",
+      "statusReplayAndOriginalSummariesIdentical": true,
+      "terminalOutcome": "completed",
+      "distinctPublications": 3,
+      "distinctIntegrations": 3,
+      "replayWriteFree": true,
+      "schedulerRecomputation": "unavailable-no-pinned-admission-snapshot"
+    },
+    "exactScopeCleanup": {
+      "executionReservationsCovered": 3,
+      "validationReservationsCovered": 3,
+      "executionScopesAbsent": 3,
+      "validationCommandScopesAbsent": 6,
+      "totalRecordedScopesAbsent": 9,
+      "sourceScopeBatchesBoundToExactProducerAndInvocation": true,
+      "validatorInvocationsBoundToCollectedArtifact": true,
+      "scopeAbsenceObservedFrom": "2026-09-05T14:05:41.846Z",
+      "scopeAbsenceObservedThrough": "2026-09-05T14:05:41.895Z",
+      "contenderServiceAbsentAt": "2026-09-05T13:54:45.344Z",
+      "primaryServiceAbsentAt": "2026-09-05T14:05:41.964Z",
+      "primaryStoppedAfterRunCompletionAndRecordedScopeAbsence": true,
+      "globalAbsenceClaimed": false
+    }
+  },
+  "scopeLimits": [
+    "Director leaf CPU admission, not worker throttling or whole-host stress",
+    "Native subissue order, not organization priority fields or factory_priority commands",
+    "Outer repository-controller lease refusal, not an inner Objective CAS race or multi-host contention",
+    "Explicit serialized regular delivery, not native stack concurrency or observed failure-triggered fallback",
+    "No abrupt-crash, interrupted-usage, checkpoint-restart or budget-fault pass inferred",
+    "No paid-provider, additional-host or published-artifact qualification"
+  ],
+  "authority": {
+    "privateEvidencePublished": false,
+    "allSixPrepublicationGatesRemainOpen": true,
+    "releasePublicationPerformed": false,
+    "historicalFailuresReclassified": false
+  }
+}

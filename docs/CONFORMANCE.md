@@ -10,6 +10,26 @@ checks still required before publication. Tasks are organized in the [delivery p
 
 ## Proven on this branch
 
+The [installed local scheduling component](release-evidence/local-scheduling-component-2026-09-05.json)
+passed with harness `98ce207650e76b2f1aed114b89749c80b34e0e34` and the unchanged installed
+`0c97438` runtime. A 0.5-CPU Director leaf admitted no workers while both roots queued; native
+subissue reordering promoted the first eventual reservation, and a second installed runner was
+refused by the outer repository-controller lease. Releasing that same Director to 4 CPUs preceded
+every admission's fresh capacity sample. Three first-attempt SDK pipelines then integrated serially
+through the join and Objective closure; 63 fresh-clone tests and independent behavior checks passed.
+Seven calls accounted for 221,536 tokens, no active reservations remained, and all three execution
+plus six validation-command scopes and both temporary services were observed absent. This qualifies
+only the recorded admission/priority/outer-lease subset, not worker throttling, inner Director CAS,
+native concurrency, abrupt recovery, paid burst or the complete adaptive/host matrix.
+Fresh installed status and write-free replay agree with the original completed summary, including
+three publications/integrations and all seven usage calls. Replay explicitly lacks pinned admission
+snapshots and does not recompute the scheduler; the separate captured barriers prove this subset.
+
+Its record separately binds the full release at `13d4efea2b8eaf7ca8ed764492c0f8b2091ad9f8`
+(123 files, 2,140 passing tests, three skips, all static/schema/package checks and zero vulnerabilities),
+148 final affected tests with typecheck/scoped Biome at `98ce207`, and that later candidate's exact
+76-file tarball. Those are distinct source/package checkpoints; neither closes a broad live gate.
+
 The [corrected explicit regular-delivery qualification](release-evidence/regular-delivery-component-2026-09-05.json)
 passed through the installed candidate `0c97438f05d721d6cde761b79ae05f5510659199`. Its SDK-first
 policy used actual SDK workers for all three first-attempt pipelines: two independent roots and a
@@ -284,7 +304,7 @@ unknown resources still block replacement. These are deterministic regressions, 
 | Gate | Status | Evidence or open reason |
 |---|---|---|
 | Linux environment matrix | Open | [Current staged WSL2 component evidence](release-evidence/local-lifecycle-component-2026-09-05.json) covers no-model installation and host-process checks only. Run the default Codex SDK route and Codex CLI fallback with adaptive scheduling, pressure, cancellation, restart, service install/uninstall, and clean validation on native Linux, Windows WSL2, and a Linux guest hosted by macOS. Native Win32 and Darwin are not part of this gate. |
-| Live adaptive scheduling matrix | Open | The deterministic scheduler and recovery mechanics are implemented, but native sub-issue/field edits, constrained cgroups, process kills in every phase, two-Director races, and paid burst still need the disposable-repository/live-host matrix in [`ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md`](ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md). |
+| Live adaptive scheduling matrix | Open | [Installed component evidence](release-evidence/local-scheduling-component-2026-09-05.json) passes native subissue-order admission, a 0.5-to-4-CPU Director leaf barrier and outer repository-controller lease refusal. Organization field edits, broader pressure and phase-kill recovery, inner Director races, paid burst and the remaining host matrix still require [`ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md`](ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md). |
 | Live native-stack matrix | Open | [Live API component evidence](release-evidence/native-stack-component-2026-09-05.json) covers create/extend response-loss replay, partial direct merge, cascading rebase/tree preservation, final merge, and cleanup. Installed Supervisor recovery, cascading exact-head validation/review, merge-queue ejection, and regular-PR fallback still need live evidence. |
 | Real Daytona Objective | Open | Credential-free full-Supervisor tests prove local/Daytona independent-sibling overlap, both integration orders, isolated merge-candidate validation, native accounting restart, and cleanup fail-closed behavior. Sixteen native linear-stack scenarios include four fresh-controller checkpoint/review/receipt replay boundaries without duplicated sandbox, review, or accounting. The opt-in installed runner is described in [provider qualification](PROVIDER-QUALIFICATION.md). Paid creation, TTL, egress, secret brokerage and actual leak cleanup remain unexercised; simulated-provider results do not satisfy this live gate. |
 | Two real managed-agent Objectives | Open | Credential-free full-Supervisor scenarios cover three-item Objectives for each simulated profile without fallback. The [installed runner](PROVIDER-QUALIFICATION.md) preserves the missing stable Codex actor identity gate and reports Copilot orchestration separately from unqualified session absence/billing. Real capability discovery, provider Actions-minute billing, exact-head collection, independent validation, cancellation/recovery, credential/egress behavior and no fallback remain required. Existing single-provider backend smokes do not satisfy this gate. |

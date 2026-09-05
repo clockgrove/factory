@@ -12,6 +12,15 @@ This does not pass native concurrency, automatic fallback, the broader parallel/
 host/provider matrices or publication gates. A separate explicit CLI-only run against the same
 candidate also passed all three first-attempt serialized pipelines, 46 fresh-clone tests and
 independent behavior checks. This qualifies direct CLI execution, not observed SDK-failure fallback.
+The installed [local scheduling subset](release-evidence/local-scheduling-component-2026-09-05.json)
+also passed: a constrained Director leaf blocked admission, native subissue order determined the
+first released reservation, and an outer repository-lease contender was refused. After the exact
+Director's CPU release, three SDK pipelines completed serially with 63 fresh-clone tests, independent
+behavior checks, 221,536 tokens across seven calls, no active reservations and all nine recorded
+execution/validation scopes plus both temporary services absent. This is not worker throttling,
+inner Director CAS, native concurrency or complete pressure/recovery/host qualification.
+Fresh installed status and write-free replay reproduce its completed summary; replay still cannot
+recompute scheduling without pinned admission snapshots.
 [DESIGN.md](DESIGN.md) defines behavior; [CONFORMANCE.md](CONFORMANCE.md) remains the release-gate
 ledger. This document grants no execution, spending, installation, or publication authority.
 
@@ -25,6 +34,7 @@ ledger. This document grants no execution, spending, installation, or publicatio
 | Chat preflight and planning | Doctor performs useful mechanical diagnostics; explicit plan produces or inspects a proposed graph before activation; CLI and MCP share the same write-free inspection contract. | Integrated; offline and installed read-only doctor/existing-graph plan checks passed. Plan did not compile, verify a durable graph or authorize activation. A separate explicit regular Objective passed; broader installed qualification remains open |
 | Managed providers | Prove assignable provider identities and owned session lifecycle observations for both managed targets; preserve explicit unsupported boundaries until evidenced. | Exact Copilot task/session reconciliation integrated and regression-tested; separate paid-run authorization, required credentials, live lifecycle/billing evidence and stable managed Codex identity remain gates |
 | Installed complete Objective | Qualify matching installed artifacts through parallel siblings, independent validation/review, integration, dependent join, final closure, and bounded recovery/cancellation cases. | Separate explicit serialized regular happy paths passed with actual SDK and CLI-only workers, each with three merged PRs, dependent join and closure. The original parallel/native and recovery/fault criterion remains open; direct CLI selection does not qualify failure-triggered fallback |
+| Installed scheduling subset | Observe constrained local admission, native priority changes and competing repository-controller refusal without changing policy or resource authority. | Passed for the exact Director leaf 0.5-to-4-CPU barrier, native subissue order and outer repository lease. Broader adaptive scheduling and all six prepublication gates remain open |
 | Release verification | Run the complete integrated suite and package checks; preserve exact-revision evidence and the independent host/provider/publication gates. | Passed at the recorded candidate; external gates remain open |
 
 These are completion gates, not a new architecture or permission to reduce scope. Regression tests
@@ -87,6 +97,13 @@ the selected escalation or lease-release outcome. These paths passed in the full
 | Distributable artifacts | CLI and MCP bundles, dependency inventory and notices match the recorded candidate. Reproducibility, clean staged npm/plugin installation and the exact 74-file local tarball passed verification. No registry publication or published-artifact install is claimed. |
 
 ## Implementation closeout
+
+The latest [scheduling component record](release-evidence/local-scheduling-component-2026-09-05.json)
+binds the full release at `13d4efea2b8eaf7ca8ed764492c0f8b2091ad9f8` (2,140 passing tests,
+three skips, 123 files, all static/schema/package checks and zero vulnerabilities), final 148 affected
+tests and static checks at harness `98ce207`, and its distinct 76-file local tarball. The installed
+runtime bundles remain the recorded `0c97438` subjects. This later evidence document is not included
+in that tested tarball and does not reclassify earlier incomplete lifecycle or native observations.
 
 - [x] Integrate exact source/proof recovery and leased lost-lower-merge-response reconciliation.
 - [x] Reconcile source changes with schemas and documentation and regenerate both bundles,

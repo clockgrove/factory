@@ -14,6 +14,8 @@ import { bindValidationToPublishedHead } from "../validation/plan.js";
 import type { RecoveryReadStore } from "./assessment.js";
 import { loadRecoveryClaim, type RecoveryClaimRecord } from "./claims.js";
 import { recoveryEventDigest, recoverySourceEventsDigest } from "./identity.js";
+import { verifyPriorRecoveryDelivery } from "./outcomes.js";
+import { recoveryAdoptionEvents } from "./transaction.js";
 import {
   loadRecoveryPlan,
   parseRecoveryPlan,
@@ -157,12 +159,24 @@ export async function resolveRecoveryEvidence(input: {
     cache.set(key, promise);
     return promise;
   };
-  const store = {
+  const store: RecoveryReadStore = {
     readRef: (ref: string) => read(`ref:${ref}`, () => input.store.readRef(ref)),
     readCommit: (oid: string) => read(`commit:${oid}`, () => input.store.readCommit(oid)),
     readBlob: (oid: string) => read(`blob:${oid}`, () => input.store.readBlob(oid)),
     readTreeEntry: (oid: string, path: string) =>
       read(`tree:${oid}:${path}`, () => input.store.readTreeEntry(oid, path)),
+    readPullRequest: (number) => read(`pull:${number}`, () => input.store.readPullRequest(number)),
+    listRefs: (prefix) => read(`refs:${prefix}`, () => input.store.listRefs(prefix)),
+    getRepositoryFacts: () => read("facts", () => input.store.getRepositoryFacts()),
+    getBranchHead: (branch) => read(`base:${branch}`, () => input.store.getBranchHead(branch)),
+    readBranchRules: (branch) => read(`rules:${branch}`, () => input.store.readBranchRules(branch)),
+    readChecks: (head) => read(`checks:${head}`, () => input.store.readChecks(head)),
+    ...(input.store.readStack
+      ? {
+          readStack: (number: number) =>
+            read(`stack:${number}`, () => input.store.readStack!(number)),
+        }
+      : {}),
   };
   try {
     requireEvidence(input.events.length <= 10_000);
@@ -248,6 +262,45 @@ export async function resolveRecoveryEvidence(input: {
       if (previous) return previous;
       const promise = (async () => {
         const graph = await loadCompiledGraph(store, plan.objective, runId);
+        if (!graph) {
+          const start = starts.get(runId);
+          requireEvidence(start?.recoveryPlanDigest);
+          const adopted = await loadRecoveryPlan(store, plan.objective, start!.recoveryPlanDigest!);
+          requireEvidence(
+            adopted &&
+              adopted.plan.successorRunId === runId &&
+              adopted.plan.graph.sourceRunId !== runId &&
+              adopted.plan.graph.digest === plan.graph.digest &&
+              adopted.plan.graph.projection.bindingDigest === plan.graph.projection.bindingDigest &&
+              adopted.plan.history.length < plan.history.length,
+          );
+          const claim = await loadRecoveryClaim(
+            store,
+            plan.objective,
+            adopted!.plan.predecessor.runId,
+          );
+          const request = events.find(
+            (event) =>
+              event.event === "RecoveryRequested" && event.requestId === adopted!.plan.requestId,
+          );
+          const predecessor = starts.get(adopted!.plan.predecessor.runId);
+          requireEvidence(claim && request?.event === "RecoveryRequested" && predecessor);
+          if (!claim || request?.event !== "RecoveryRequested" || !predecessor)
+            throw new Error("missing graph adoption");
+          const expected = recoveryAdoptionEvents({
+            planRecord: adopted!,
+            claim,
+            authenticatedRequest: request,
+            predecessorStart: predecessor,
+          });
+          requireEvidence(
+            expected.every((receipt) =>
+              events.some((event) => recoveryEventDigest(event) === recoveryEventDigest(receipt)),
+            ),
+          );
+          await verifyGraph(adopted!.plan.graph.sourceRunId);
+          return;
+        }
         requireEvidence(
           graph && graph.graphDigest === plan.graph.digest && graph.graphSize === plan.items.length,
         );
@@ -547,7 +600,34 @@ export async function resolveRecoveryEvidence(input: {
           );
           resolved.review = { ...source.review };
         }
-        if (source.publication) {
+        if (source.priorDelivery) {
+          const prior = await verifyPriorRecoveryDelivery({ plan, item, events, store });
+          const publication = source.publication!;
+          const receipt = events.find(
+            (event) => recoveryEventDigest(event) === publication.receiptDigest,
+          );
+          requireEvidence(receipt);
+          resolved.publication = { ...publication, receipt: receiptIdentity(receipt!) };
+          const pull = await store.readPullRequest(publication.pullRequest);
+          const head = await store.readCommit(pull.headSha);
+          const observed = item.observedPullRequest;
+          requireEvidence(
+            observed &&
+              pull.merged &&
+              pull.mergeCommitSha === prior.outcome.mergeCommitSha &&
+              pull.number === observed.number &&
+              pull.nodeId === observed.nodeId &&
+              pull.headSha === observed.headSha &&
+              head.treeOid === observed.treeSha &&
+              pull.baseSha === observed.baseSha &&
+              pull.headRef === observed.headRef &&
+              pull.baseRef === observed.baseRef &&
+              pull.headRepository === observed.headRepository &&
+              pull.baseRepository === observed.baseRepository,
+          );
+          resolved.current.publication = { ...observed! };
+          resolved.current.head = "unchanged";
+        } else if (source.publication) {
           const publication = exact(source.publication.receiptDigest);
           requireEvidence(
             publication.kind === "publication" &&

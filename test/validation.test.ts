@@ -1,9 +1,11 @@
 import { execFileSync } from "node:child_process";
 import { access, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import * as localScopeRuntime from "../src/runtime/local-scope.js";
+import { runContainedProcess } from "../src/runtime/process-group.js";
 
 import { normalizeArtifact } from "../src/execution/artifacts.js";
 import type { WorkerPacket } from "../src/protocol/worker-packet.js";
@@ -104,6 +106,160 @@ function packet(baseSha: string, over: Partial<WorkerPacket> = {}): WorkerPacket
 }
 
 describe("clean validation", () => {
+  it("fences scoped npm setup and tests in order and retains actual command evidence", async () => {
+    const fixture = await nodeRepositoryFixture();
+    const worker = await createLocalWorktree(fixture.repository, fixture.baseSha);
+    await writeFile(join(worker.path, "value.txt"), "changed\n");
+    const artifact = await collectLocalArtifact(worker);
+    await cleanupLocalWorktree(worker);
+    const stages: string[] = [];
+    const scoped = vi
+      .spyOn(localScopeRuntime, "runScopedLocalProcess")
+      .mockImplementation(async (identity, options) => {
+        stages.push(`run-${identity.commandIndex}`);
+        expect(identity.invocationDigest).toBe(artifact.digest);
+        return runContainedProcess(options);
+      });
+    try {
+      const result = await validateArtifactClean({
+        repository: fixture.repository,
+        artifact,
+        packet: packet(fixture.baseSha, {
+          validationCommands: ["npm test"],
+          requirements: {
+            ...packet(fixture.baseSha).requirements,
+            tools: ["npm", "node"],
+          },
+        }),
+        localScope: {
+          identity: {
+            protocol: "clockgrove.factory/local-scope-v1",
+            repository: "o/r",
+            objective: 1,
+            workItem: 2,
+            attempt: 1,
+            runId: "source",
+            directorEpoch: 1,
+            policyDigest: "a".repeat(64),
+            phase: "validation",
+            invocationDigest: artifact.digest,
+            hostIdentity: "b".repeat(64),
+          },
+          deadline: new Date(Date.now() + 60_000).toISOString(),
+          beforeLaunch: async (identity) => {
+            stages.push(`fence-${identity.commandIndex}`);
+          },
+          afterStop: async (identity) => {
+            stages.push(`stop-${identity.commandIndex}`);
+          },
+        },
+      });
+      expect(stages).toEqual(["fence-0", "run-0", "stop-0", "fence-1", "run-1", "stop-1"]);
+      expect(result.evidence.passed).toBe(true);
+      expect(result.evidence.commands.map((entry) => entry.command)).toEqual([
+        "npm ci --no-audit --no-fund",
+        "npm test",
+      ]);
+      await discardValidationResult(result);
+    } finally {
+      scoped.mockRestore();
+    }
+  });
+
+  it.each(["fence", "deadline", "cleanup"] as const)(
+    "does not fall back to unscoped tests after %s failure",
+    async (failure) => {
+      const fixture = await repositoryFixture();
+      const worker = await createLocalWorktree(fixture.repository, fixture.baseSha);
+      await writeFile(join(worker.path, "value.txt"), "changed\n");
+      const artifact = await collectLocalArtifact(worker);
+      await cleanupLocalWorktree(worker);
+      let retainedPath = "";
+      const scoped = vi
+        .spyOn(localScopeRuntime, "runScopedLocalProcess")
+        .mockImplementation(async (identity, options) => {
+          retainedPath = options.cwd;
+          throw new localScopeRuntime.LocalScopeCleanupError(identity, {
+            exitCode: 0,
+            signal: null,
+            stdout: "",
+            stderr: "",
+            durationMs: 1,
+            timedOut: false,
+          });
+        });
+      const afterStop = vi.fn(async () => {});
+      try {
+        await expect(
+          validateArtifactClean({
+            repository: fixture.repository,
+            artifact,
+            packet: packet(fixture.baseSha),
+            localScope: {
+              identity: {
+                protocol: "clockgrove.factory/local-scope-v1",
+                repository: "o/r",
+                objective: 1,
+                workItem: 2,
+                attempt: 1,
+                runId: "source",
+                directorEpoch: 1,
+                policyDigest: "a".repeat(64),
+                phase: "validation",
+                invocationDigest: artifact.digest,
+                hostIdentity: "b".repeat(64),
+              },
+              deadline: new Date(Date.now() + (failure === "deadline" ? -1 : 60_000)).toISOString(),
+              beforeLaunch: async () => {
+                if (failure === "fence") throw new Error("fence lost");
+              },
+              afterStop,
+            },
+          }),
+        ).rejects.toThrow(
+          failure === "cleanup"
+            ? /cleanup is unverified/
+            : failure === "deadline"
+              ? /deadline expired/
+              : /fence lost/,
+        );
+        expect(scoped).toHaveBeenCalledTimes(failure === "cleanup" ? 1 : 0);
+        expect(afterStop).not.toHaveBeenCalled();
+        if (retainedPath) {
+          await expect(access(retainedPath)).resolves.toBeUndefined();
+          await cleanupLocalWorktree({
+            path: retainedPath,
+            root: dirname(retainedPath),
+            repository: fixture.repository,
+            baseSha: fixture.baseSha,
+          });
+        }
+      } finally {
+        scoped.mockRestore();
+      }
+    },
+  );
+
+  it("never executes host validation when an isolated validator was explicitly selected", async () => {
+    const fixture = await repositoryFixture();
+    const worker = await createLocalWorktree(fixture.repository, fixture.baseSha);
+    await writeFile(join(worker.path, "value.txt"), "changed\n");
+    const artifact = await collectLocalArtifact(worker);
+    await cleanupLocalWorktree(worker);
+    let invoked = false;
+    await expect(
+      validateArtifactClean({
+        repository: fixture.repository,
+        artifact,
+        packet: packet(fixture.baseSha),
+        isolatedValidator: async () => {
+          invoked = true;
+          throw new Error("isolated provider unavailable");
+        },
+      }),
+    ).rejects.toThrow(/isolated provider unavailable/);
+    expect(invoked).toBe(true);
+  });
   it("retains bounded command diagnostics for the next retry", () => {
     const reason = validationFailureReason("validation", "npm run typecheck", {
       exitCode: 2,

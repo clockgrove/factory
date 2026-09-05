@@ -66,10 +66,32 @@ When the user asks to continue an escalated Objective or inspect its remaining w
 without writing GitHub or launching workers. Report reusable candidates separately from missing
 evidence, required revalidation, resource reconciliation, and exhausted allowance.
 
-The assessment is not execution authority. Successor-run adoption is not yet implemented; do not
-use `factory_activate`, `factory_run`, or low-level dispatch to work around that boundary. Preserve
-existing issues, PRs, and budget history. A fixed check or newly available credential does not
-authorize additional spending. Resume/retry applies to non-terminal runs, not terminal revival.
+The assessment is not execution authority. For an explicitly authorized continuation:
+
+1. Call `factory_recovery_propose` with a unique, stable `requestId`. Omit `allowanceIncrement`
+   unless the user explicitly authorized additional amounts; the default increment is zero.
+   Report the proposed reuse, required fresh validation, cumulative usage, and blockers. A blocked
+   proposal is not a runnable plan.
+2. Resolve any missing authority before writing: an exhausted allowance needs an explicit increment;
+   unknown historical usage needs the user's acknowledgement of the returned `unknownUsageDigest`.
+   Pass that digest as `unknownUsageAcknowledgementDigest` and propose again when authorized.
+   Neither a quota reset nor a repaired check or credential grants extra Factory allowance.
+3. Call `factory_recovery_request` with the exact proposed `planDigest`, the same `requestId`, and
+   the same increment/acknowledgement inputs. This writes a digest-bound successor request, not a
+   revival of the terminal run. After an uncertain response, retry those exact inputs with the same
+   ID; do not generate a replacement request. A changed plan needs authorization for that plan.
+4. The repository controller discovers the request and verifies leases, source evidence, resource
+   absence, and cumulative accounting before adoption and execution. Use `factory_status` to inspect
+   progress. If the controller is stopped or absent, starting/installing it requires the same host
+   execution authority as ordinary unattended mode. Do not substitute `factory_run` for adoption.
+
+An owned Linux service may retire its current launcher generation before adopting a successor,
+using its existing restart policy. This does not prove resource cleanup: the next generation must
+independently establish absence. Legacy unbound resources or missing evidence can still block
+adoption; report the gate instead of killing unrelated processes or inventing cleanup receipts.
+
+Preserve existing issues, PRs, and budget history. Do not use `factory_activate` or low-level
+dispatch to bypass recovery gates. Resume/retry applies to non-terminal runs, not terminal revival.
 
 ## Status only
 

@@ -1,7 +1,8 @@
 # Agent operating rules
 
-Rules for an AI agent working in this repository. [`docs/DESIGN.md`](docs/DESIGN.md) is the source of
-truth for what Factory is and why; this file is about how to work on it.
+Contributor rules for AI agents building Factory. These are not instructions for the agents that
+Factory runs for adopters. [`docs/DESIGN.md`](docs/DESIGN.md) defines the product;
+[`CONTRIBUTING.md`](CONTRIBUTING.md) covers development procedures and workflow evaluation.
 
 ## Orientation
 
@@ -44,24 +45,50 @@ These are settled. Do not relitigate them.
   local worktree and not hand-copied skills. A local bundle tests something no adopter will ever run,
   and a worktree can change underneath a live run.
 
-## Staying steerable while orchestrating a child session
+## Complete the authorized development task
 
-When driving or monitoring a child session, do not chain long, uninterrupted sequences of your own
-tool calls. Cross-session messages, and redirections from the user, are only delivered between turns,
-so a long unbroken run of tool calls silently queues them.
+- Carry implementation requests through the agreed acceptance criteria, required verification, and
+  PR handoff. Resolve routine engineering choices from repository evidence and record consequential
+  assumptions. A review or status request alone does not authorize implementation.
+- Ask when a missing decision materially changes scope, architecture, authorization, spending, or
+  correctness. Complete independent authorized work first. If blocked, identify the concrete missing
+  decision or evidence; cite the instruction when a rule causes the stop. Do not bypass permissions,
+  settled product boundaries, or required checks to keep moving.
+- After each PR, compare delivered outcomes with the active goal, identify remaining acceptance
+  gaps, and choose the next substantial authorized deliverable. Recalibrate when evidence changes;
+  do not repeatedly replan settled work or expand the goal without authority.
 
-- Prefer several short responses over one long one: do a small batch of checks or edits, then let the
-  turn end.
-- Read what has already arrived before doing more independent verification. Re-deriving status you
-  could simply read is a sign your own inbox is unprocessed.
-- A human correction should be actionable in your next turn, not stuck behind minutes of self-directed
-  work you had already decided to do.
+## Parallel work and responsiveness
+
+- When the harness permits delegation, delegate bounded independent work when it improves delivery
+  time or review quality. Stay within the authorized concurrency and budget limits; trivial tasks
+  and overlapping implementation usually do not justify another agent.
+- Give each agent an outcome, file ownership, acceptance criteria, relevant context, and a concise
+  return format. Keep shared-file edits under one owner. The coordinating agent owns integration
+  and checks the returned evidence; do not duplicate an assigned investigation without a reason.
+- Process delivered user corrections and agent messages before further dependent work. Use the
+  harness's supported steering and wait mechanisms. Verify its message-delivery behavior before
+  relying on it; do not assume messages require a completed turn or end turns merely as a ritual.
+- Keep progress updates concise: completed outcomes, evidence, blockers, and the next action.
+  Avoid repeating plans and transcripts. Pause or redirect promptly when the user asks.
+
+## Proportional verification
+
+- During development, run checks targeted to the changed behavior and meaningful regression risks.
+  Complete the required integration and release checks at their applicable gates; see
+  [`CONTRIBUTING.md`](CONTRIBUTING.md#validate-changes).
+- Broaden or repeat checks when relevant changes, failures, or unresolved concerns invalidate the
+  existing evidence. Record the checked revision or working-tree state and commands so results can
+  be reused only while applicable. Do not repeatedly run the full suite without a concrete reason.
+- Verify observable behavior rather than adding tests that merely mirror implementation. This does
+  not waive mandatory checks, independent validation, semantic review, or live conformance evidence.
 
 ## Cost discipline and context carry
 
-Billing is dominated by carried context, not just by model choice or request count. A large tool
-result produced early can be re-read on many later requests, so cost scales roughly with:
-`result size × number of later requests`.
+Large tool results can be carried into later requests and increase token usage. Actual cost depends
+on the model, caching, reasoning/output usage, harness, and delegated sessions. Use observed usage
+when available; context size alone is not a billing formula. Optimize cost and elapsed time per
+accepted deliverable without weakening correctness or changing the selected model without authority.
 
 - Keep tool output intentionally small by default: narrow scope first (`view_range`, targeted `rg`
   globs), cap rows/lines (`Select-Object -First`, `LIMIT`), and avoid full-file/full-log dumps
@@ -73,8 +100,8 @@ result produced early can be re-read on many later requests, so cost scales roug
   concise, structured returns. Do not paste raw blobs back into the parent session unless necessary.
 - Be strict with high-AIU-per-call tools (for example, large task/read-agent outputs): use them
   when they change a decision, not by default.
-- Front-load precision early in a session. Early oversized outputs are the most expensive because
-  they accumulate carrying cost over many downstream requests.
+- Front-load precision early in a session. Early oversized outputs can accumulate carrying cost
+  over many downstream requests.
 
 ## When resuming after a gap
 

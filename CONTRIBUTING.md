@@ -35,7 +35,11 @@ npm ci
 npm run verify:release
 ```
 
-Add the narrowest unit or fault-injection test that would fail without your change. Changes to a
+For behavior changes, add the narrowest meaningful unit or fault-injection test that would fail
+without the change. Documentation-only edits need relevant formatting, link, and consistency checks,
+not new implementation tests. Run targeted checks while iterating; retain the full required gates
+for integration and release. Repeat checks when intervening changes invalidate their evidence,
+and state which checks were not run rather than implying release qualification. Changes to a
 provider, GitHub behavior, platform lifecycle, install path, or other external contract also need
 the applicable conformance evidence; do not convert a fake-provider test into a live-support claim.
 
@@ -46,6 +50,36 @@ MCP and repository-controller executables. The check does not use the developmen
 configuration or credentials and does not create a paid provider resource. `npm run verify:release`
 runs typecheck, lint, formatting, coverage, schema, deterministic-build, plugin, npm-package, and
 production-audit gates as one command.
+
+## AI-assisted development workflow
+
+This section and root `AGENTS.md` guide contributors building Factory. Changes here do not change
+the packaged plugin skills, generated worker prompts, runtime policies, or model defaults. Changes
+to those product surfaces require a separately scoped proposal and validation.
+
+The [OpenAI GPT-6 Astra prompting guidance](https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices)
+describes increased sensitivity to instruction files, unnecessary clarification pauses, less
+delegation than some workflows need, and overly broad verification. The contributor rules make
+completion, delegation, and verification expectations explicit while retaining authorization and
+quality gates. They remain useful with other models; using Astra is not a contribution requirement.
+API-level steering capabilities do not establish how a particular development harness delivers
+messages. Check the harness before relying on that behavior.
+
+When evaluating an instruction change, compare similar bounded development tasks with the prior
+workflow, keeping the model, reasoning effort, acceptance criteria, and required checks fixed where
+practical. Record a compact summary in the PR:
+
+- completion and review outcome, including defects, scope drift, or rework;
+- unnecessary approval pauses, distinguished from required user decisions;
+- useful parallel work, duplicate investigations, and integration conflicts;
+- repeated checks and whether a changed revision, failure, or unresolved risk justified them;
+- elapsed time and total observed model tokens across the coordinator and all delegated agents;
+  report cached usage or monetary cost only when available, and mark missing measurements unknown.
+
+Use cost and time per accepted deliverable to judge improvement. Token reductions are not a win if
+the work is incomplete or less reliable. Do not launch paid evaluations or change model settings
+without authorization. Until measured, describe efficiency gains as hypotheses, not demonstrated
+results. Keep private prompts, transcripts, and credentials out of public evidence.
 
 ## Verify platform claims against the platform
 

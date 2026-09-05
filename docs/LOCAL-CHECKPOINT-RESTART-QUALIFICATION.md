@@ -117,7 +117,18 @@ Failures retain only an allowlisted observation-stage name and fixed error code,
 assertion values, process arguments, executable configuration, stack traces or token-bearing errors.
 An unavailable `/proc` or service observation is not resource-absence evidence; host identity
 checks require the same real-host permissions as the authorized exercise. Diagnostics do not
-authorize retries or change any readiness/identity predicate.
+authorize another lifecycle action.
+
+Only the initial active observation immediately after the single Start or Restart has a short
+read-only readiness window. Before a retry, the configuration, unit, host, InvocationID, PID and
+process birth identity must already be pinned; every observation revalidates that exact identity.
+Only `EACCES` while reading that process's executable or working-directory symlink is eligible.
+There are at most four observations, with 100/200/300 ms waits inside a 1,500 ms deadline;
+the service-property command receives only the remaining observation time. Persistent denial,
+changed identity, any other error, or deadline exhaustion fails without a further action.
+The first safe diagnostic and readiness outcome are retained. Prior-bound checks immediately
+before Restart, Resume and Stop remain single-shot, with no readiness retry. This never relaxes
+the required exact executable, command, working directory or cgroup proof.
 
 The passed evidence records the original and replacement controller identities, checkpoint and
 final receipt/accounting facts, exact absence observations, takeover lease and action results.

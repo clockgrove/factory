@@ -7,6 +7,7 @@ import {
   checkpointFacts,
   checkpointFailure,
   assertCheckpointExecutable,
+  checkpointStartupObservation,
   checkpointReady,
   checkpointLease,
   assertScopeCoverage,
@@ -148,6 +149,149 @@ function observation(count = 1, completed = false) {
     },
   };
 }
+
+describe("same-generation initial startup observation", () => {
+  const identity = {
+    unit: "exact.service",
+    pid: 123,
+    startTicks: "456",
+    invocationId: "a".repeat(32),
+    hostIdentity: "host",
+    configDigest: "config",
+  };
+  const unavailable = (code = "EACCES") =>
+    Object.assign(new Error("private observation detail"), { code });
+  function options(boundary = "controller-process-executable", eligible = true) {
+    let now = 0;
+    return {
+      eligible,
+      diagnostic: (error: unknown) => checkpointFailure(error, boundary),
+      record: vi.fn(),
+      wait: vi.fn(async (ms: number) => {
+        now += ms;
+      }),
+      now: () => now,
+    };
+  }
+  it.each(["controller-process-executable", "controller-process-cwd"])(
+    "rechecks the exact generation after transient %s EACCES and retains the first diagnostic",
+    async (boundary) => {
+      const opts = options(boundary);
+      let count = 0;
+      const observe = vi.fn((capture: (value: unknown) => void, remainingMs: () => number) => {
+        expect(remainingMs()).toBeLessThanOrEqual(1500);
+        capture({ ...identity });
+        if (++count === 1) throw unavailable();
+        return identity;
+      });
+      await expect(checkpointStartupObservation(observe, opts)).resolves.toEqual(identity);
+      expect(observe).toHaveBeenCalledTimes(2);
+      expect(opts.wait.mock.calls).toEqual([[100]]);
+      expect(opts.record).toHaveBeenLastCalledWith({
+        firstDiagnostic: { boundary, code: "EACCES" },
+        attempts: 2,
+        outcome: "ready-after-observation-retry",
+        identity,
+      });
+    },
+  );
+  it("bounds persistent EACCES to four observations and 600ms of waiting", async () => {
+    const opts = options();
+    const observe = vi.fn((capture: (value: unknown) => void) => {
+      capture(identity);
+      throw unavailable();
+    });
+    await expect(checkpointStartupObservation(observe, opts)).rejects.toMatchObject({
+      code: "EACCES",
+    });
+    expect(observe).toHaveBeenCalledTimes(4);
+    expect(opts.now()).toBe(600);
+    expect(opts.record.mock.lastCall?.[0]).toMatchObject({ attempts: 4, outcome: "unavailable" });
+  });
+  it.each(["unit", "pid", "startTicks", "invocationId", "hostIdentity", "configDigest"])(
+    "rejects changed pinned %s before further process verification",
+    async (key) => {
+      const opts = options();
+      let verified = 0;
+      const observe = vi.fn((capture: (value: unknown) => void) => {
+        capture(verified === 0 ? identity : { ...identity, [key]: "changed" });
+        verified++;
+        throw unavailable();
+      });
+      await expect(checkpointStartupObservation(observe, opts)).rejects.toThrow(
+        /generation changed/,
+      );
+      expect(verified).toBe(1);
+      expect(observe).toHaveBeenCalledTimes(2);
+    },
+  );
+  it.each([
+    ["controller-process-executable", "EPERM"],
+    ["controller-process-executable", "ENOENT"],
+    ["controller-process-command", "EACCES"],
+    ["controller-process-birth", "EACCES"],
+    ["controller-process-executable", "ERR_ASSERTION"],
+  ])("never retries %s %s", async (boundary, code) => {
+    const opts = options(boundary);
+    const observe = vi.fn((capture: (value: unknown) => void) => {
+      capture(identity);
+      throw unavailable(code);
+    });
+    await expect(checkpointStartupObservation(observe, opts)).rejects.toMatchObject({ code });
+    expect(observe).toHaveBeenCalledTimes(1);
+    expect(opts.wait).not.toHaveBeenCalled();
+  });
+  it("keeps prior-bound pre-mutation checks single-shot even for executable EACCES", async () => {
+    const opts = options("controller-process-executable", false);
+    const observe = vi.fn((capture: (value: unknown) => void) => {
+      capture(identity);
+      throw unavailable();
+    });
+    await expect(checkpointStartupObservation(observe, opts)).rejects.toMatchObject({
+      code: "EACCES",
+    });
+    expect(observe).toHaveBeenCalledTimes(1);
+    expect(opts.wait).not.toHaveBeenCalled();
+  });
+  it("never retries without a complete pinned identity", async () => {
+    const opts = options();
+    const observe = vi.fn(() => {
+      throw unavailable();
+    });
+    await expect(checkpointStartupObservation(observe, opts)).rejects.toMatchObject({
+      code: "EACCES",
+    });
+    expect(observe).toHaveBeenCalledTimes(1);
+  });
+  it("does not accept or repeat an observation past the 1500ms deadline", async () => {
+    const opts = options();
+    let time = 0;
+    opts.now = () => time;
+    const observe = vi.fn((capture: (value: unknown) => void) => {
+      capture(identity);
+      time = 1501;
+      return identity;
+    });
+    await expect(checkpointStartupObservation(observe, opts)).rejects.toThrow(/deadline/);
+    expect(observe).toHaveBeenCalledTimes(1);
+  });
+  it("supplies only the remaining deadline to a delayed property read", async () => {
+    const opts = options();
+    let time = 0;
+    opts.now = () => time;
+    await expect(
+      checkpointStartupObservation((capture, remainingMs) => {
+        capture(identity);
+        time = 1000;
+        expect(remainingMs()).toBe(500);
+        time = 1500;
+        remainingMs();
+        return identity;
+      }, opts),
+    ).rejects.toThrow(/deadline/);
+    expect(opts.wait).not.toHaveBeenCalled();
+  });
+});
 
 describe("explicit checkpoint restart authority", () => {
   it("checks only the captured PID executable and rejects a different or deleted executable", () => {

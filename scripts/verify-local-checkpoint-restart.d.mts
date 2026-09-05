@@ -22,6 +22,16 @@ export function assertCheckpointExecutable(
   expectedNode: string,
   readLink?: (path: string) => string,
 ): void;
+export function checkpointStartupObservation(
+  observe: (capture: (identity: unknown) => void, remainingMs: () => number) => unknown,
+  options: {
+    eligible: boolean;
+    diagnostic(error: unknown): { boundary: string; code: string };
+    record(value: Record<string, unknown>): void;
+    wait?(milliseconds: number): Promise<unknown>;
+    now?(): number;
+  },
+): Promise<unknown>;
 export function checkpointFailure(
   error: unknown,
   boundary?: string,

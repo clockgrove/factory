@@ -120,6 +120,70 @@ export function assertCheckpointExecutable(pid, expectedNode, readLink = readlin
   assert.equal(readLink(`/proc/${pid}/exe`), expectedNode);
 }
 
+export async function checkpointStartupObservation(
+  observe,
+  { eligible, diagnostic, record, wait = sleep, now = () => performance.now() },
+) {
+  const deadline = now() + 1500;
+  let pinned;
+  let firstDiagnostic;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    let captured = false;
+    try {
+      assert.ok(!eligible || now() < deadline, "startup observation deadline exhausted");
+      const result = observe(
+        (identity) => {
+          assert.ok(!captured, "controller identity captured twice");
+          captured = true;
+          if (pinned)
+            assert.deepEqual(
+              identity,
+              pinned,
+              "controller generation changed during startup observation",
+            );
+          else pinned = structuredClone(identity);
+        },
+        () => {
+          if (!eligible) return 15000;
+          assert.ok(now() < deadline, "startup observation deadline exhausted");
+          return Math.max(1, Math.floor(deadline - now()));
+        },
+      );
+      assert.ok(!eligible || captured, "startup observation lacks pinned identity");
+      assert.ok(!eligible || now() < deadline, "startup observation deadline exhausted");
+      if (eligible)
+        record({
+          firstDiagnostic: firstDiagnostic ?? null,
+          attempts: attempt + 1,
+          outcome: firstDiagnostic ? "ready-after-observation-retry" : "ready",
+          identity: pinned,
+        });
+      return result;
+    } catch (error) {
+      const failure = diagnostic(error);
+      firstDiagnostic ??= failure;
+      const retry =
+        eligible &&
+        captured &&
+        failure.code === "EACCES" &&
+        ["controller-process-executable", "controller-process-cwd"].includes(failure.boundary) &&
+        attempt < 3 &&
+        now() + 100 * (attempt + 1) < deadline;
+      if (eligible)
+        record({
+          firstDiagnostic,
+          lastDiagnostic: failure,
+          attempts: attempt + 1,
+          outcome: retry ? "waiting-same-generation" : "unavailable",
+          identity: pinned,
+        });
+      if (!retry) throw error;
+      await wait(100 * (attempt + 1));
+    }
+  }
+  throw Error("startup observation exhausted");
+}
+
 export function checkpointReady(observation, authority, pauseRequestId) {
   try {
     checkpointFacts(observation, authority, pauseRequestId, true, true);
@@ -530,12 +594,12 @@ export function checkpointLease(commit, oid) {
   return lease;
 }
 
-function command(name, args, cwd) {
+function command(name, args, cwd, timeoutMs = 15000) {
   try {
     return execFileSync(name, args, {
       cwd,
       encoding: "utf8",
-      timeout: 15000,
+      timeout: timeoutMs,
       maxBuffer: 1048576,
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
@@ -700,102 +764,127 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
   const unitPath = join(home, ".config/systemd/user", authority.unit);
   let controllerBoundary;
   const controller = async (state, prior) => {
-    controllerBoundary = "controller-config";
-    const meta = statSync(unitPath);
-    assert.equal(meta.uid, process.getuid());
-    assert.ok(meta.isFile());
-    const configDigest = assertControllerUnit(readBounded(unitPath, 16384), expected);
-    if (evidence.configDigest) assert.equal(configDigest, evidence.configDigest);
-    controllerBoundary = "controller-properties";
-    const raw = command("systemctl", [
-      "--user",
-      "show",
-      authority.unit,
-      "--property=Id,LoadState,ActiveState,SubState,Job,InvocationID,ControlGroup,MainPID,KillMode,FragmentPath,DropInPaths,NeedDaemonReload",
-    ]);
-    const fields = Object.fromEntries(
-      raw.split("\n").map((line) => {
-        const i = line.indexOf("=");
-        assert.ok(i > 0);
-        return [line.slice(0, i), line.slice(i + 1)];
-      }),
+    const eligible = state === "active" && !prior;
+    const observation = { state, priorBound: Boolean(prior) };
+    return checkpointStartupObservation(
+      (capture, remainingMs) => {
+        controllerBoundary = "controller-config";
+        const meta = statSync(unitPath);
+        assert.equal(meta.uid, process.getuid());
+        assert.ok(meta.isFile());
+        const configDigest = assertControllerUnit(readBounded(unitPath, 16384), expected);
+        if (evidence.configDigest) assert.equal(configDigest, evidence.configDigest);
+        controllerBoundary = "controller-properties";
+        const raw = command(
+          "systemctl",
+          [
+            "--user",
+            "show",
+            authority.unit,
+            "--property=Id,LoadState,ActiveState,SubState,Job,InvocationID,ControlGroup,MainPID,KillMode,FragmentPath,DropInPaths,NeedDaemonReload",
+          ],
+          undefined,
+          remainingMs(),
+        );
+        const fields = Object.fromEntries(
+          raw.split("\n").map((line) => {
+            const i = line.indexOf("=");
+            assert.ok(i > 0);
+            return [line.slice(0, i), line.slice(i + 1)];
+          }),
+        );
+        assert.equal(
+          Object.keys(fields).length,
+          raw.split("\n").length,
+          "duplicate controller property",
+        );
+        assert.equal(fields.Id, authority.unit);
+        assert.equal(fields.LoadState, "loaded");
+        assert.equal(fields.FragmentPath, unitPath);
+        assert.equal(fields.DropInPaths, "");
+        assert.equal(fields.NeedDaemonReload, "no");
+        assert.equal(fields.KillMode, "control-group");
+        assert.ok(["", "0", "0 /"].includes(fields.Job));
+        controllerBoundary = "controller-host";
+        const host = hostIdentity();
+        if (prior) assert.equal(host, prior.hostIdentity);
+        controllerBoundary = "controller-state";
+        if (state === "inactive") {
+          assert.equal(fields.ActiveState, "inactive");
+          assert.equal(fields.MainPID, "0");
+          assert.equal(fields.ControlGroup, "");
+          controllerBoundary = undefined;
+          return { unit: authority.unit, state, hostIdentity: host, configDigest };
+        }
+        assert.equal(fields.ActiveState, "active");
+        assert.match(fields.InvocationID, /^[a-f0-9]{32}$/);
+        const pid = Number(fields.MainPID);
+        assert.ok(Number.isSafeInteger(pid) && pid > 1);
+        controllerBoundary = "controller-process-owner";
+        assert.equal(statSync(`/proc/${pid}`).uid, process.getuid());
+        controllerBoundary = "controller-process-birth";
+        const stat = readBounded(`/proc/${pid}/stat`);
+        assert.ok(stat.startsWith(`${pid} (`));
+        const startTicks = stat
+          .slice(stat.lastIndexOf(")") + 2)
+          .trim()
+          .split(/\s+/)[19];
+        assert.match(startTicks, /^\d+$/);
+        controllerBoundary = "controller-process-cgroup";
+        assert.ok(fields.ControlGroup.endsWith(`/${authority.unit}`));
+        assert.ok(
+          readBounded(`/proc/${pid}/cgroup`).split("\n").includes(`0::${fields.ControlGroup}`),
+        );
+        const result = {
+          unit: authority.unit,
+          state,
+          pid,
+          startTicks,
+          invocationId: fields.InvocationID,
+          hostIdentity: host,
+          configDigest,
+        };
+        controllerBoundary = "controller-generation";
+        if (prior)
+          for (const key of [
+            "unit",
+            "pid",
+            "startTicks",
+            "invocationId",
+            "hostIdentity",
+            "configDigest",
+          ])
+            assert.equal(result[key], prior[key], "controller generation changed");
+        capture(result);
+        controllerBoundary = "controller-process-executable";
+        assertCheckpointExecutable(pid, expected.node);
+        controllerBoundary = "controller-process-cwd";
+        assert.equal(readlinkSync(`/proc/${pid}/cwd`), authority.checkout);
+        controllerBoundary = "controller-process-command";
+        assert.deepEqual(readBounded(`/proc/${pid}/cmdline`).split("\0").filter(Boolean), [
+          expected.node,
+          expected.bundle,
+          "controller",
+          "run",
+          authority.repository,
+          "--repo",
+          authority.checkout,
+        ]);
+        controllerBoundary = undefined;
+        return result;
+      },
+      {
+        eligible,
+        diagnostic: (error) => checkpointFailure(error, controllerBoundary),
+        record: (value) => {
+          if (!evidence.controllerReadiness) evidence.controllerReadiness = [];
+          if (!evidence.controllerReadiness.includes(observation))
+            evidence.controllerReadiness.push(observation);
+          Object.assign(observation, value);
+          save();
+        },
+      },
     );
-    assert.equal(
-      Object.keys(fields).length,
-      raw.split("\n").length,
-      "duplicate controller property",
-    );
-    assert.equal(fields.Id, authority.unit);
-    assert.equal(fields.LoadState, "loaded");
-    assert.equal(fields.FragmentPath, unitPath);
-    assert.equal(fields.DropInPaths, "");
-    assert.equal(fields.NeedDaemonReload, "no");
-    assert.equal(fields.KillMode, "control-group");
-    assert.ok(["", "0", "0 /"].includes(fields.Job));
-    controllerBoundary = "controller-host";
-    const host = hostIdentity();
-    if (prior) assert.equal(host, prior.hostIdentity);
-    controllerBoundary = "controller-state";
-    if (state === "inactive") {
-      assert.equal(fields.ActiveState, "inactive");
-      assert.equal(fields.MainPID, "0");
-      assert.equal(fields.ControlGroup, "");
-      controllerBoundary = undefined;
-      return { unit: authority.unit, state, hostIdentity: host, configDigest };
-    }
-    assert.equal(fields.ActiveState, "active");
-    assert.match(fields.InvocationID, /^[a-f0-9]{32}$/);
-    const pid = Number(fields.MainPID);
-    assert.ok(Number.isSafeInteger(pid) && pid > 1);
-    controllerBoundary = "controller-process-owner";
-    assert.equal(statSync(`/proc/${pid}`).uid, process.getuid());
-    controllerBoundary = "controller-process-executable";
-    assertCheckpointExecutable(pid, expected.node);
-    controllerBoundary = "controller-process-cwd";
-    assert.equal(readlinkSync(`/proc/${pid}/cwd`), authority.checkout);
-    controllerBoundary = "controller-process-command";
-    assert.deepEqual(readBounded(`/proc/${pid}/cmdline`).split("\0").filter(Boolean), [
-      expected.node,
-      expected.bundle,
-      "controller",
-      "run",
-      authority.repository,
-      "--repo",
-      authority.checkout,
-    ]);
-    controllerBoundary = "controller-process-birth";
-    const stat = readBounded(`/proc/${pid}/stat`);
-    assert.ok(stat.startsWith(`${pid} (`));
-    const startTicks = stat
-      .slice(stat.lastIndexOf(")") + 2)
-      .trim()
-      .split(/\s+/)[19];
-    assert.match(startTicks, /^\d+$/);
-    controllerBoundary = "controller-process-cgroup";
-    assert.ok(fields.ControlGroup.endsWith(`/${authority.unit}`));
-    assert.ok(readBounded(`/proc/${pid}/cgroup`).split("\n").includes(`0::${fields.ControlGroup}`));
-    const result = {
-      unit: authority.unit,
-      state,
-      pid,
-      startTicks,
-      invocationId: fields.InvocationID,
-      hostIdentity: host,
-      configDigest,
-    };
-    controllerBoundary = "controller-generation";
-    if (prior)
-      for (const key of [
-        "unit",
-        "pid",
-        "startTicks",
-        "invocationId",
-        "hostIdentity",
-        "configDigest",
-      ])
-        assert.equal(result[key], prior[key], "controller generation changed");
-    controllerBoundary = undefined;
-    return result;
   };
   const call = async (name, args = {}) => {
     const response = await client.callTool(

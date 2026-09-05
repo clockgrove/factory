@@ -93,6 +93,7 @@ export function checkpointFailure(error, boundary) {
     "controller-host",
     "controller-state",
     "controller-process-owner",
+    "controller-process-executable",
     "controller-process-cwd",
     "controller-process-command",
     "controller-process-birth",
@@ -112,6 +113,11 @@ export function checkpointFailure(error, boundary) {
     boundary: boundaries.has(boundary) ? boundary : "scenario",
     code: codes.has(error?.code) ? error.code : "UNAVAILABLE",
   };
+}
+
+export function assertCheckpointExecutable(pid, expectedNode, readLink = readlinkSync) {
+  assert.ok(Number.isSafeInteger(pid) && pid > 1);
+  assert.equal(readLink(`/proc/${pid}/exe`), expectedNode);
 }
 
 export function checkpointReady(observation, authority, pauseRequestId) {
@@ -743,6 +749,8 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
     assert.ok(Number.isSafeInteger(pid) && pid > 1);
     controllerBoundary = "controller-process-owner";
     assert.equal(statSync(`/proc/${pid}`).uid, process.getuid());
+    controllerBoundary = "controller-process-executable";
+    assertCheckpointExecutable(pid, expected.node);
     controllerBoundary = "controller-process-cwd";
     assert.equal(readlinkSync(`/proc/${pid}/cwd`), authority.checkout);
     controllerBoundary = "controller-process-command";

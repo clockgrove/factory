@@ -6,6 +6,7 @@ import {
   checkpointAuthority,
   checkpointFacts,
   checkpointFailure,
+  assertCheckpointExecutable,
   checkpointReady,
   checkpointLease,
   assertScopeCoverage,
@@ -149,6 +150,29 @@ function observation(count = 1, completed = false) {
 }
 
 describe("explicit checkpoint restart authority", () => {
+  it("checks only the captured PID executable and rejects a different or deleted executable", () => {
+    const read = vi.fn(() => "/usr/bin/node");
+    expect(() => assertCheckpointExecutable(123, "/usr/bin/node", read)).not.toThrow();
+    expect(read.mock.calls).toEqual([["/proc/123/exe"]]);
+    for (const observed of ["/tmp/spoofed-node", "/usr/bin/node (deleted)"]) {
+      expect(() => assertCheckpointExecutable(123, "/usr/bin/node", () => observed)).toThrow();
+    }
+  });
+  it("preserves unavailable executable observation as a fixed diagnostic without retry", () => {
+    const read = vi.fn(() => {
+      throw Object.assign(new Error("private path"), { code: "EACCES" });
+    });
+    try {
+      assertCheckpointExecutable(123, "/usr/bin/node", read);
+      expect.fail("inaccessible executable accepted");
+    } catch (error) {
+      expect(checkpointFailure(error, "controller-process-executable")).toEqual({
+        boundary: "controller-process-executable",
+        code: "EACCES",
+      });
+    }
+    expect(read).toHaveBeenCalledTimes(1);
+  });
   it.each(["ERR_ASSERTION", "EACCES", "EPERM", "ENOENT", "ESRCH", "ETIMEDOUT", "ABORT_ERR"])(
     "retains only allowlisted observation stage and %s code",
     (code) => {

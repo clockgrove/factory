@@ -41,6 +41,11 @@ export function checkpointReady(
   authority: CheckpointAuthority,
   pauseRequestId: string,
 ): boolean;
+export function checkpointCompletionReady(
+  observation: unknown,
+  authority: CheckpointAuthority,
+  pauseRequestId: string,
+): boolean;
 export function checkpointLease(commit: unknown, oid: string): Record<string, unknown>;
 export function assertControllerUnit(
   body: string,

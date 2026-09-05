@@ -93,6 +93,10 @@ The acknowledgement authorizes only this one-shot sequence:
    Items and the Objective closed. Recheck installed artifact identity and all exact resource
    scopes from both controller incarnations. Stop only the exact replacement controller once,
    then observe it inactive.
+   Comment receipts and installed status are separate reads. A completed status without its
+   matching authenticated completion receipt (or the inverse) remains pending within the existing
+   polling bound. Both must agree on the original run before strict terminal proof, artifact checks
+   or Stop; conflicting outcomes or identities fail closed.
 
 The immutable policy is regular PR delivery, local SDK with local CLI fallback, a 500,000 observed
 model-token ceiling, two attempts per item, and 45 minutes. The qualifier itself requires first

@@ -194,6 +194,39 @@ export function checkpointReady(observation, authority, pauseRequestId) {
   }
 }
 
+export function checkpointCompletionReady(observation, authority, pauseRequestId) {
+  const events = observation.receipts.map(({ event }) => event);
+  const start = unique(
+    events.filter((event) => event.event === "FactoryRunStarted"),
+    "one original run required",
+  );
+  assert.equal(
+    observation.status.run.runId,
+    start.runId,
+    "completion status belongs to another run",
+  );
+  assert.equal(
+    observation.status.summary.runId,
+    start.runId,
+    "completion summary belongs to another run",
+  );
+  assert.ok(
+    !["cancelled", "escalated"].includes(observation.status.run.state),
+    "run ended without completion",
+  );
+  const outcomes = events.filter((event) => terminal.has(event.event));
+  assert.ok(outcomes.length <= 1, "conflicting terminal outcome");
+  if (outcomes.length) {
+    assert.equal(outcomes[0].runId, start.runId, "terminal receipt belongs to another run");
+    assert.equal(outcomes[0].event, "FactoryRunCompleted", "run ended without completion");
+  }
+  // Comments and installed status are separate bounded reads. Either can lead;
+  // neither one-sided observation proves the complete terminal snapshot.
+  if (outcomes.length === 0 || observation.status.run.state !== "completed") return false;
+  checkpointFacts(observation, authority, pauseRequestId, false);
+  return true;
+}
+
 export function checkpointFacts(
   observation,
   authority,
@@ -510,9 +543,8 @@ export async function runCheckpointScenario(port, authority) {
   await port.absence(paused, [original]);
   await port.controller("active", replacement);
   await port.action("resume");
-  const completed = await port.poll(
-    "completed",
-    (observation) => observation.status.run.state === "completed",
+  const completed = await port.poll("completed", (observation) =>
+    checkpointCompletionReady(observation, authority, port.pauseRequestId),
   );
   const final = checkpointFacts(completed, authority, port.pauseRequestId, false);
   assert.equal(final.runId, facts.runId, "replacement run forbidden");
@@ -1036,7 +1068,11 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
         const observation = await observe();
         if (accept(observation)) return observation;
         assert.ok(
-          !observation.receipts.some(({ event }) => terminal.has(event.event)),
+          !observation.receipts.some(
+            ({ event }) =>
+              terminal.has(event.event) &&
+              !(phase === "completed" && event.event === "FactoryRunCompleted"),
+          ),
           "run ended before checkpoint qualification",
         );
         assert.ok(Date.now() < deadline, "bounded checkpoint observation incomplete");

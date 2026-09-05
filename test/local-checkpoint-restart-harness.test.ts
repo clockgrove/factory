@@ -9,6 +9,7 @@ import {
   assertCheckpointExecutable,
   checkpointStartupObservation,
   checkpointReady,
+  checkpointCompletionReady,
   checkpointLease,
   assertScopeCoverage,
   main,
@@ -573,6 +574,36 @@ function scenario() {
 }
 
 describe("one-shot checkpoint lifecycle", () => {
+  it("waits for the completed receipt when status is ahead, then completes without another lifecycle action", async () => {
+    const f = scenario();
+    vi.mocked(f.port.poll).mockImplementation(async (phase, accept) => {
+      if (phase === "completed") {
+        const stale = structuredClone(f.final);
+        stale.receipts = stale.receipts.filter(
+          ({ event }) => event.event !== "FactoryRunCompleted",
+        );
+        expect(accept(stale)).toBe(false);
+        expect(f.actions).toEqual(["start", "create", "activate", "pause", "restart", "resume"]);
+        expect(f.port.finalProof).not.toHaveBeenCalled();
+        expect(accept(f.final)).toBe(true);
+        return f.final;
+      }
+      expect(accept(f.checkpoint)).toBe(true);
+      return f.checkpoint;
+    });
+    await expect(runCheckpointScenario(f.port, authority)).resolves.toMatchObject({
+      result: "passed",
+    });
+    expect(f.actions).toEqual([
+      "start",
+      "create",
+      "activate",
+      "pause",
+      "restart",
+      "resume",
+      "stop",
+    ]);
+  });
   it("never creates an Objective or repeats start after the first active observation is unavailable", async () => {
     const f = scenario();
     vi.mocked(f.port.controller).mockRejectedValue(
@@ -681,6 +712,50 @@ describe("one-shot checkpoint lifecycle", () => {
     vi.mocked(f.port.controller).mockResolvedValue(original);
     await expect(runCheckpointScenario(f.port, authority)).rejects.toThrow(/did not restart/);
     expect(f.actions).not.toContain("resume");
+  });
+});
+
+describe("coherent terminal checkpoint observation", () => {
+  it("reproduces completed-status/missing-terminal assertion but treats the one-sided snapshot as pending", () => {
+    const value = observation(3, true);
+    value.receipts = value.receipts.filter(({ event }) => event.event !== "FactoryRunCompleted");
+    expect(() => checkpointFacts(value, authority, pause, false)).toThrow(/conflicting terminal/);
+    expect(checkpointCompletionReady(value, authority, pause)).toBe(false);
+  });
+  it("also waits for completed status when its terminal receipt is ahead", () => {
+    const value = observation(3, true);
+    value.status.run.state = "running";
+    expect(checkpointCompletionReady(value, authority, pause)).toBe(false);
+    value.status.run.state = "completed";
+    expect(checkpointCompletionReady(value, authority, pause)).toBe(true);
+  });
+  it.each(["FactoryRunCancelled", "FactoryRunEscalated"])(
+    "rejects contradictory %s without waiting",
+    (eventName) => {
+      const value = observation(3, true);
+      value.receipts.find(({ event }) => event.event === "FactoryRunCompleted")!.event.event =
+        eventName;
+      expect(() => checkpointCompletionReady(value, authority, pause)).toThrow(
+        /without completion/,
+      );
+    },
+  );
+  it("rejects duplicate or cross-run terminal receipts and status", () => {
+    for (const variant of ["duplicate", "receipt-run", "status-run"]) {
+      const value = observation(3, true);
+      const receipt = value.receipts.find(({ event }) => event.event === "FactoryRunCompleted")!;
+      if (variant === "duplicate") value.receipts.push(structuredClone(receipt));
+      else if (variant === "receipt-run") receipt.event.runId = "different";
+      else value.status.run.runId = "different";
+      expect(() => checkpointCompletionReady(value, authority, pause)).toThrow();
+    }
+  });
+  it("still requires complete accounting when both terminal observations agree", () => {
+    const value = observation(3, true);
+    value.receipts = value.receipts.filter(
+      ({ event }) => !(event.unit === "model_tokens" && event.phase === "execution"),
+    );
+    expect(() => checkpointCompletionReady(value, authority, pause)).toThrow(/usage missing/);
   });
 });
 

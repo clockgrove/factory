@@ -11,7 +11,11 @@ import {
   type LeaseStore,
 } from "../src/control/lease.js";
 import { LifecycleRecorder } from "../src/control/events.js";
-import { decodeEventComments, encodeEventComment } from "../src/control/receipts.js";
+import {
+  decodeEventComments,
+  decodeEventTrailer,
+  encodeEventComment,
+} from "../src/control/receipts.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
 import { policyDigest, DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 import { RunManager, type RunState } from "../src/control/runs.js";
@@ -398,6 +402,64 @@ describe("attempt reservation", () => {
         sequence: 2,
       }),
     ).rejects.toBeInstanceOf(LeaseLostError);
+  });
+
+  it("repairs the exact scoped reservation after a crash between ref and comment creation", async () => {
+    const store = new MemoryStore();
+    const leases = new LeaseManager({ store, durationMs: 60_000 });
+    const base = await store.readCommit(BASE_SHA);
+    const lease = await leases.acquire(identity, base);
+    const attempts = new AttemptManager({ store, leases });
+    const write = store.addIssueComment.bind(store);
+    store.addIssueComment = async () => {
+      throw new Error("crash before comment");
+    };
+    await expect(
+      attempts.reserve({
+        lease,
+        workItem: 43,
+        workItemNodeId: "I_43",
+        backend: "codex-cli/local-worktree",
+        base,
+        sequence: 2,
+        prepareLocalScope: async (attempt) => ({
+          identity: {
+            protocol: "clockgrove.factory/local-scope-v1",
+            repository: "o/r",
+            objective: identity.objective,
+            runId: identity.runId,
+            workItem: 43,
+            attempt,
+            directorEpoch: lease.epoch,
+            policyDigest: identity.policyDigest,
+            phase: "execution",
+            commandIndex: 0,
+            invocationDigest: "b".repeat(64),
+            hostIdentity: "c".repeat(64),
+            producerUnit: "factory-test.service",
+            producerInvocationId: "d".repeat(32),
+          },
+          commandCount: 1,
+          producerPid: 123,
+          producerStartTicks: "456",
+          deadline: "2026-09-03T00:30:00Z",
+        }),
+      }),
+    ).rejects.toThrow("crash before comment");
+    store.addIssueComment = write;
+    store.now = new Date(lease.expiresAt.getTime() + 1);
+    const takeover = await leases.acquire({ ...identity, holder: "host-2" }, base);
+    const restarted = new AttemptManager({ store, leases });
+    const [reservation] = await restarted.list(identity.objective, 43);
+    expect(reservation?.localScopeBatch).toBeDefined();
+    const original = decodeEventTrailer((await store.readCommit(reservation!.oid)).message);
+    await restarted.repairReservationComment({
+      lease: takeover,
+      workItemNodeId: "I_43",
+      reservation: reservation!,
+    });
+    expect(decodeEventComments(store.comments.at(-1)!.body)).toEqual([original]);
+    expect(await restarted.list(identity.objective, 43)).toEqual([reservation]);
   });
 
   it("allows only an older attempt epoch to reconcile capacity", async () => {

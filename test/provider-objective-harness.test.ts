@@ -4,6 +4,7 @@ import {
   providerPolicy,
   providerObjective,
   assessProviderCompletion,
+  observeManagedAgentTermination,
   observeProviderAbsence,
   type ProviderAuthority,
 } from "../scripts/verify-provider-objective.mjs";
@@ -145,7 +146,9 @@ describe("installed provider Objective harness (no live calls)", () => {
       expect(policy.maxAttemptsPerItem).toBe(1);
       expect(policy.delivery?.onUnavailable).toBe("escalate");
       expect(policy.maxSandboxMinutes).toBe(30);
-      expect(providerObjective(profile)).toContain(
+      const objective = providerObjective(profile, "provider-20260905-a");
+      expect(objective).toContain("src/factory-qualification/provider-20260905-a/clamp.js");
+      expect(objective).toContain(
         profile === "daytona-burst" ? "join-after-merge" : "managed execution trust",
       );
     },
@@ -198,5 +201,68 @@ describe("installed provider Objective harness (no live calls)", () => {
         input,
       ),
     ).toMatchObject({ state: "unknown" });
+  });
+
+  it("observes managed termination only through exact owned task, PR and session bindings", async () => {
+    const input = {
+      actor: { id: 123 },
+      startedAt: "2026-09-04T00:00:00.000Z",
+      pulls: [
+        {
+          id: 9001,
+          number: 12,
+          base: { repo: { id: 77 } },
+          head: { ref: "copilot/work-12" },
+        },
+      ],
+    };
+    let sessionState = "completed";
+    const request = async (route: string, parameters: Record<string, unknown> = {}) => {
+      if (route.endsWith("/{task_id}"))
+        return {
+          data: {
+            id: "task-12",
+            creator: { id: 123 },
+            repository: { id: 77 },
+            state: sessionState,
+            session_count: 1,
+            artifacts: [{ provider: "github", type: "pull", data: { id: 9001 } }],
+            sessions: [
+              {
+                id: "session-12",
+                task_id: "task-12",
+                user: { id: 123 },
+                repository: { id: 77 },
+                state: sessionState,
+                head_ref: "copilot/work-12",
+              },
+            ],
+          },
+        };
+      return {
+        data: {
+          tasks:
+            parameters.is_archived === true
+              ? []
+              : [
+                  {
+                    id: "task-12",
+                    creator: { id: 123 },
+                    repository: { id: 77 },
+                    artifacts: [{ provider: "github", type: "pull", data: { id: 9001 } }],
+                  },
+                ],
+        },
+      };
+    };
+    await expect(observeManagedAgentTermination(request, input)).resolves.toMatchObject({
+      state: "terminated",
+      bindings: [{ pullNumber: 12, taskId: "task-12" }],
+    });
+    sessionState = "in_progress";
+    await expect(observeManagedAgentTermination(request, input)).resolves.toMatchObject({
+      state: "present",
+      active: [{ taskId: "task-12", taskState: "in_progress" }],
+    });
   });
 });

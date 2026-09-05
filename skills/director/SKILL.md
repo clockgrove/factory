@@ -38,6 +38,10 @@ disconnects, resume after login/boot, or process work in the background:
 4. Call `factory_status` to confirm the request/controller state. Do not poll it in a model loop;
    later user status requests are separate read-only calls.
 
+After an uncertain activation response, retry the exact same request and `requestId`. Factory repairs
+discovery of the accepted Objective without replacing its recorded base or policy. Do not create a
+replacement Objective or a new activation merely because the response was lost.
+
 Use **foreground mode** for a one-shot interactive run, or when the supported Linux host cannot run
 the controller lifecycle. Call `factory_run` once with `untilTerminal: true` and keep the call alive.
 It performs the same Supervisor workflow, but its process lifetime remains coupled to the client.
@@ -55,9 +59,16 @@ Report the terminal result:
 - `cancelled`: the operator requested a fenced stop;
 - `escalated`: quote the concrete reason and identify the affected Work Item when present.
 
-If the user asks to stop an active Objective, call `factory_cancel` once. Only the GitHub identity
-that activated the run may request cancellation. Do not simulate cancellation by closing issues or
-pull requests.
+If the user asks to stop an active or queued Objective, call `factory_cancel` with a unique, stable
+`requestId`. Only the GitHub identity that requested the relevant activation may cancel it. Retry
+the exact same request after an uncertain response, not a new cancellation identity.
+
+Before a run starts, cancellation returns an `ActivationCancellationRequested` receipt for that
+exact activation. Use `factory_status` to report `activation.state` as `withdrawn` separately from a
+cancelled run; withdrawal does not claim that a worker started or was cleaned up. If startup races
+with withdrawal, inspect the matching run's cancellation and resource-reconciliation outcome.
+Do not treat the withdrawal receipt as cleanup proof. Replaying the original activation does not
+undo its withdrawal. Do not simulate cancellation by closing issues or PRs.
 
 ## After terminal escalation
 

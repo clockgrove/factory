@@ -89,13 +89,13 @@ See [verification status](docs/CONFORMANCE.md) for current installation limitati
 
 ### Choose your setup
 
-| Goal | Guide |
-|---|---|
-| First run on Linux, WSL2, or a Linux guest on macOS | [Local runner](docs/setup/local.md) |
-| Continue working after chat disconnects | [Unattended controller](docs/setup/unattended.md) |
-| Add sandbox execution or local-to-cloud burst | [Daytona](docs/setup/daytona.md) |
-| Use GitHub-managed coding agents | [Managed agents](docs/setup/github-managed.md) |
-| Try alternative Labs runners | [Vercel Sandbox](docs/setup/vercel-sandbox.md) · [Codex App Server](docs/setup/codex-app-server.md) |
+| Goal                                                | Guide                                                                                               |
+| --------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| First run on Linux, WSL2, or a Linux guest on macOS | [Local runner](docs/setup/local.md)                                                                 |
+| Continue working after chat disconnects             | [Unattended controller](docs/setup/unattended.md)                                                   |
+| Add sandbox execution or local-to-cloud burst       | [Daytona](docs/setup/daytona.md)                                                                    |
+| Use GitHub-managed coding agents                    | [Managed agents](docs/setup/github-managed.md)                                                      |
+| Try alternative Labs runners                        | [Vercel Sandbox](docs/setup/vercel-sandbox.md) · [Codex App Server](docs/setup/codex-app-server.md) |
 
 The **plugin is the entry point**, the **controller supplies unattended scheduling**, and the
 **runner executes work**. Installing the plugin neither starts a service nor authenticates a cloud
@@ -110,6 +110,11 @@ For exact environment placement, service boundaries, paid-capacity gates, and tr
 
 The Director skill uses bounded, read-only operations when the user is inspecting a run:
 
+- `factory_doctor` checks the requested repository and checkout, GitHub access and branch rules,
+  available runners, repository-specific validation tools, and measured Linux resource headroom.
+- `factory_plan` inspects existing Work Items without model execution. Explicit `compile: true`
+  compiles a proposed graph against a clean selected checkout without creating issues or starting
+  workers. Compilation consumes model quota; its usage is returned, not persisted as run authority.
 - `factory_status` returns the current Objective/run state, active and queued Work Items, resource
   pressure, burst activity, and aggregate execution economics.
 - `factory_explain` returns stable reason codes, policy gates, observed evidence, and the concrete

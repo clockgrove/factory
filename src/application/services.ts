@@ -1,6 +1,7 @@
 import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
 import { PROTOCOL_V2 } from "../protocol/limits.js";
 import { implicitRestartBlocker } from "../control/recovery.js";
+import { latestActivation } from "../control/activations.js";
 import { DEFAULT_RUN_POLICY, parseRunPolicy, policyDigest } from "../protocol/policy.js";
 import {
   deduplicateFactoryEvents,
@@ -17,6 +18,8 @@ import type {
   RecoveryProposalInput,
   RecoveryRequestInput,
 } from "../recovery/requests.js";
+import { buildDoctorReport, type DoctorChecks } from "./doctor.js";
+import { buildPlanReport, type PlanInput, type PlanningContext } from "./plan.js";
 
 export const APPLICATION_OPERATIONS = [
   "doctor",
@@ -51,6 +54,8 @@ export interface ApplicationReader {
 }
 
 export interface ApplicationCommandStore {
+  /** Required for activation; other command-only ports may omit discovery repair. */
+  ensureObjectiveLabel?(objective: number): Promise<void>;
   addIssueComment(issueNodeId: string, body: string): Promise<void>;
   serverTime(): Promise<Date>;
   getAuthenticatedLogin(): Promise<string>;
@@ -125,6 +130,8 @@ export interface ServiceContext {
   readBaseSha?: (defaultBranch: string) => Promise<string>;
   assessRecovery?: (snapshot: ApplicationSnapshot) => Promise<RecoveryAssessment>;
   recovery?: RecoveryRequestService;
+  diagnostics?: DoctorChecks;
+  planning?: PlanningContext;
 }
 
 export type ReadOperation = "doctor" | "plan" | "recovery-plan" | "status" | "explain" | "replay";
@@ -152,6 +159,8 @@ export class FactoryApplicationService {
   }
 
   async inspect(operation: ReadOperation, objective: number, workItem?: number): Promise<unknown> {
+    if (operation === "doctor") return this.doctor(objective);
+    if (operation === "plan") return this.plan({ objective });
     if (operation === "recovery-plan") {
       if (workItem !== undefined) throw new Error("recovery-plan assesses the whole Objective");
       if (!this.context.assessRecovery) {
@@ -185,11 +194,30 @@ export class FactoryApplicationService {
     };
   }
 
-  doctor(objective: number) {
-    return this.inspect("doctor", objective);
+  doctor(objective: number, checkout?: string) {
+    checkout ??= this.context.planning?.repositoryPath;
+    return buildDoctorReport({
+      repository: `${this.context.owner}/${this.context.repo}`,
+      objective,
+      ...(checkout ? { checkout } : {}),
+      readObjective: () => this.context.reader.readObjective(objective),
+      checks: {
+        ...this.context.diagnostics,
+        ...((this.context.diagnostics?.controller ?? this.context.controller)
+          ? { controller: this.context.diagnostics?.controller ?? this.context.controller! }
+          : {}),
+      },
+    });
   }
-  plan(objective: number) {
-    return this.inspect("plan", objective);
+  async plan(input: number | PlanInput) {
+    const request = typeof input === "number" ? { objective: input } : input;
+    const snapshot = await this.context.reader.readObjective(request.objective);
+    return buildPlanReport({
+      repository: `${this.context.owner}/${this.context.repo}`,
+      request,
+      snapshot,
+      ...(this.context.planning ? { planning: this.context.planning } : {}),
+    });
   }
   status(objective: number) {
     return this.inspect("status", objective);
@@ -207,17 +235,33 @@ export class FactoryApplicationService {
     baseSha?: string;
     policy?: unknown;
   }): Promise<FactoryEvent> {
+    if (!this.context.store?.ensureObjectiveLabel)
+      throw new Error("activation requires Objective discovery-label support");
     const snapshot = await this.context.reader.readObjective(input.objective);
-    const policy = parseRunPolicy(input.policy ?? DEFAULT_RUN_POLICY);
-    const baseSha = input.baseSha ?? (await this.requireBaseSha(snapshot.defaultBranch));
-    return this.append(snapshot, input.requestId, {
-      event: "ActivationRequested",
-      repository: `${this.context.owner}/${this.context.repo}`,
-      baseSha,
-      policy,
-      policyDigest: policyDigest(policy),
-      controllerProtocolMin: PROTOCOL_V2,
-      controllerProtocolMax: PROTOCOL_V2,
+    return this.append(snapshot, input.requestId, async (current) => {
+      const prior = this.allEvents(current).find(
+        (event) =>
+          event.kind === "run" &&
+          event.event === "ActivationRequested" &&
+          event.requestId === input.requestId,
+      );
+      const activation =
+        prior?.kind === "run" && prior.event === "ActivationRequested" ? prior : undefined;
+      // Omitted fields on exact replay mean the accepted immutable binding,
+      // not today's branch head or defaults. Resolve under the request gate.
+      const policy = parseRunPolicy(input.policy ?? activation?.policy ?? DEFAULT_RUN_POLICY);
+      const baseSha =
+        input.baseSha ?? activation?.baseSha ?? (await this.requireBaseSha(current.defaultBranch));
+      return {
+        event: "ActivationRequested",
+        runId: input.requestId,
+        repository: `${this.context.owner}/${this.context.repo}`,
+        baseSha,
+        policy,
+        policyDigest: policyDigest(policy),
+        controllerProtocolMin: PROTOCOL_V2,
+        controllerProtocolMax: PROTOCOL_V2,
+      };
     });
   }
 
@@ -232,6 +276,58 @@ export class FactoryApplicationService {
     },
   ): Promise<FactoryEvent> {
     const snapshot = await this.context.reader.readObjective(input.objective);
+    if (operation === "cancel")
+      return this.append(snapshot, input.requestId, async (current) => {
+        const events = this.allEvents(current);
+        const prior = events.find(
+          (event) => "requestId" in event && event.requestId === input.requestId,
+        );
+        if (prior?.kind === "run" && prior.event === "ActivationCancellationRequested")
+          return {
+            event: prior.event,
+            runId: prior.runId,
+            activationRequestId: prior.activationRequestId,
+            repository: prior.repository,
+            baseSha: prior.baseSha,
+            policyDigest: prior.policyDigest,
+            ...(input.reason ? { reason: input.reason } : {}),
+          };
+        const active = latestSupportedRun(current.factoryEvents ?? []);
+        if (active || prior)
+          return {
+            event: "FactoryRunCancellationRequested",
+            runId: prior?.runId ?? active!.runId,
+            ...(input.reason ? { reason: input.reason } : {}),
+          };
+        const activation = latestActivation(events, current.number);
+        if (
+          !activation ||
+          events.some(
+            (event) =>
+              event.kind === "run" &&
+              ((event.event === "FactoryRunStarted" &&
+                event.activationRequestId === activation.requestId) ||
+                (event.event === "ActivationRejected" &&
+                  event.activationRequestId === activation.requestId &&
+                  event.runId === activation.runId &&
+                  event.requestedBy.toLowerCase() === activation.requestedBy.toLowerCase() &&
+                  event.baseSha === activation.baseSha &&
+                  event.policyDigest === activation.policyDigest)),
+          )
+        )
+          throw new Error(
+            `Objective #${current.number} has no active Factory run or pending activation`,
+          );
+        return {
+          event: "ActivationCancellationRequested",
+          runId: activation.runId,
+          activationRequestId: activation.requestId,
+          repository: activation.repository,
+          baseSha: activation.baseSha,
+          policyDigest: activation.policyDigest,
+          ...(input.reason ? { reason: input.reason } : {}),
+        };
+      });
     if ((operation === "retry" || operation === "priority") && !input.workItem) {
       throw new Error(`${operation} requires a Work Item number`);
     }
@@ -329,14 +425,20 @@ export class FactoryApplicationService {
   private async append(
     snapshot: ApplicationSnapshot,
     requestId: string,
-    fields: Record<string, unknown>,
+    fields:
+      | Record<string, unknown>
+      | ((current: ApplicationSnapshot) => Promise<Record<string, unknown>>),
   ): Promise<FactoryEvent> {
     return this.serialize(snapshot.number, async () => {
       // A request may have waited behind an equivalent request. Reconstruct
       // from GitHub while holding the process-wide repository/objective gate;
       // never decide idempotency from the caller's stale snapshot.
       snapshot = await this.context.reader.readObjective(snapshot.number);
-      return this.appendLocked(snapshot, requestId, fields);
+      return this.appendLocked(
+        snapshot,
+        requestId,
+        typeof fields === "function" ? await fields(snapshot) : fields,
+      );
     });
   }
 
@@ -350,11 +452,39 @@ export class FactoryApplicationService {
     const existing = this.allEvents(snapshot).find(
       (event) => "requestId" in event && event.requestId === requestId,
     );
+    if (fields.event === "ActivationCancellationRequested") {
+      const activation = this.allEvents(snapshot).find(
+        (event) =>
+          event.kind === "run" &&
+          event.event === "ActivationRequested" &&
+          event.requestId === fields.activationRequestId,
+      );
+      const actor = await store.getAuthenticatedLogin();
+      if (
+        activation?.kind !== "run" ||
+        activation.event !== "ActivationRequested" ||
+        activation.requestedBy.toLowerCase() !== actor.toLowerCase()
+      )
+        throw new Error("only the activating actor may withdraw this activation");
+      if (
+        activation.objective !== snapshot.number ||
+        activation.runId !== activation.requestId ||
+        activation.repository.toLowerCase() !==
+          `${this.context.owner}/${this.context.repo}`.toLowerCase() ||
+        policyDigest(activation.policy) !== activation.policyDigest ||
+        fields.runId !== activation.runId ||
+        fields.repository !== activation.repository ||
+        fields.baseSha !== activation.baseSha ||
+        fields.policyDigest !== activation.policyDigest
+      )
+        throw new Error("activation cancellation differs from its immutable activation binding");
+    }
     if (existing) {
       const comparableKeys = [
         "event",
         "operation",
         "repository",
+        "activationRequestId",
         "baseSha",
         "policyDigest",
         "workItem",
@@ -368,6 +498,8 @@ export class FactoryApplicationService {
       );
       if (conflict)
         throw new Error(`idempotency key ${requestId} was already used for a different request`);
+      if (fields.event === "ActivationRequested")
+        await store.ensureObjectiveLabel!(snapshot.number);
       return existing;
     }
     if (fields.event === "ActivationRequested") {
@@ -424,6 +556,7 @@ export class FactoryApplicationService {
       snapshot.id,
       encodeEventComment(`Factory accepted ${String(fields.event)} from ${actor}.`, event),
     );
+    if (fields.event === "ActivationRequested") await store.ensureObjectiveLabel!(snapshot.number);
     return event;
   }
 

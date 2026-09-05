@@ -352,6 +352,9 @@ export class AttemptManager {
       directorEpoch: args.reservation.directorEpoch,
       policyDigest: args.reservation.policyDigest,
       ...(args.reservation.admission ?? {}),
+      ...(args.reservation.localScopeBatch
+        ? { localScopeBatch: args.reservation.localScopeBatch }
+        : {}),
     };
     await this.#store.addIssueComment(
       args.workItemNodeId,

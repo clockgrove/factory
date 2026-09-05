@@ -227,12 +227,17 @@ describe("successor authority protocol", () => {
 
   it("does not make successor execution available just because request binding is valid", async () => {
     const f = fixture();
+    // Authentic request/start envelopes establish actor binding, not adoption
+    // or the independently loaded immutable runtime required for execution.
+    expect(() => bindAuthenticatedRunActors(entries(Object.values(f)))).not.toThrow();
     const store = {
       addIssueComment: vi.fn(async () => {}),
       serverTime: vi.fn(async () => new Date()),
     };
     const manager = new RunManager(store);
-    expect(() => manager.resume(Object.values(f))).toThrow(/fenced adoption transaction/);
+    expect(() => manager.resume(Object.values(f))).toThrow(
+      /acknowledged recovery request and verified runtime/,
+    );
     await expect(
       manager.start({
         objective: 7,
@@ -245,7 +250,7 @@ describe("successor authority protocol", () => {
         policy: DEFAULT_RUN_POLICY,
         existingEvents: Object.values(f),
       }),
-    ).rejects.toThrow(/fenced adoption transaction/);
+    ).rejects.toThrow(/acknowledged recovery request and verified runtime/);
     expect(store.addIssueComment).not.toHaveBeenCalled();
     expect(store.serverTime).not.toHaveBeenCalled();
   });

@@ -4,6 +4,7 @@ import {
   localScopeUnit,
   runScopedLocalProcess,
   startScopedLocalProcess,
+  stopLocalScope,
   type LocalScopeIdentity,
   type LocalScopeProcessPort,
 } from "../src/runtime/local-scope.js";
@@ -285,9 +286,20 @@ describe("owned local scope process runner", () => {
   it("also cleans surviving descendants when a process port resolves before running its exit hook", async () => {
     const f = fixture();
     const child = await startScopedLocalProcess(identity, options, f.port);
+    let stopped = false;
+    let postStopReads = 0;
+    const show = f.port.show;
+    f.port.show = async (unit) => {
+      if (stopped && ++postStopReads === 2) f.setState("absent");
+      return show(unit);
+    };
+    f.stop.mockImplementation(async () => {
+      stopped = true;
+    });
     f.resolve(result);
     expect(await child.completed).toBe(result);
     expect(f.stop.mock.calls).toEqual([[f.unit]]);
+    expect(postStopReads).toBeGreaterThanOrEqual(3);
   });
 
   it("does not stop an already absent scope", async () => {
@@ -325,6 +337,38 @@ describe("owned local scope process runner", () => {
     await f.finish();
     await expect(child.completed).rejects.toBeInstanceOf(LocalScopeCleanupError);
     expect(f.stop.mock.calls.every(([unit]) => unit === f.unit)).toBe(true);
+  });
+
+  it("drains a stopped scope until exact absence is independently observable", async () => {
+    const f = fixture();
+    f.setState("active");
+    let stopped = false;
+    let postStopReads = 0;
+    const show = f.port.show;
+    f.port.show = async (unit) => {
+      if (stopped && ++postStopReads === 2) f.setState("absent");
+      return show(unit);
+    };
+    f.stop.mockImplementation(async () => {
+      stopped = true;
+    });
+
+    await expect(stopLocalScope(identity, f.port)).resolves.toBeUndefined();
+    expect(f.stop).toHaveBeenCalledExactlyOnceWith(f.unit);
+    expect(postStopReads).toBeGreaterThanOrEqual(3);
+  });
+
+  it("never converts an unknown post-stop observation into absence", async () => {
+    const f = fixture();
+    f.setState("active");
+    f.stop.mockImplementation(async () => {
+      f.setState("unknown");
+    });
+
+    await expect(stopLocalScope(identity, f.port)).rejects.toThrow(
+      "owned local scope cleanup unverified",
+    );
+    expect(f.stop).toHaveBeenCalledExactlyOnceWith(f.unit);
   });
 
   it("turns a failed exact-scope stop into unverified cleanup, not successful completion", async () => {

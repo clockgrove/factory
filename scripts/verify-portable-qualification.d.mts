@@ -10,4 +10,9 @@ export function assessPortableQualification(
   publishedDistribution: string;
   artifactVersionsAndBundlesAgree: boolean;
 };
+export function runBoundedVerifier(
+  command: string,
+  args: string[],
+  options?: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number },
+): Promise<boolean>;
 export function main(args?: string[]): Promise<void>;

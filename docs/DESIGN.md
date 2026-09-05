@@ -676,6 +676,21 @@ to the exact request, base SHA, policy digest, and activating actor. That receip
 discovery of only that activation. Classified transient platform failures do not write a rejection;
 the repository controller keeps the request eligible and applies a bounded retry-after backoff.
 
+The activating actor may withdraw a queued activation with `factory_cancel`. Before a run starts,
+this writes `ActivationCancellationRequested`, binding the original activation request, repository,
+base SHA, policy digest, and actor. It neither invents a run nor records a run terminal. Exact
+request-ID replay returns that original cancellation receipt even if startup raced with the first
+response. Discovery suppresses only the withdrawn activation; a later distinct explicit activation
+is unaffected. Activation replay may repair its structural label but never restores withdrawn
+authority. Status reports the activation as `withdrawn` while the run remains `not-started`.
+
+Startup rechecks withdrawal after acquiring its lease. If a matching run start already raced ahead,
+that run remains discoverable for ordinary cancellation and cleanup. Activation-bound external
+admissions and active-worker cancellation polls check the same immutable withdrawal binding; no
+different activation or successor inherits it. Once a run is already active when `factory_cancel`
+is observed, the existing actor-authenticated run cancellation protocol applies. Terminal history
+does not become a new pending activation.
+
 The target environment is Linux: native Linux, Windows WSL2, or a Linux guest hosted by macOS.
 Codex SDK is the preferred local route and Codex CLI is its supported portable fallback. Daytona and
 the two GitHub-managed release targets extend local execution only after their publication-blocking

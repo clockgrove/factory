@@ -4,6 +4,9 @@ import {
   type ExecutionRequirements,
 } from "../protocol/worker-packet.js";
 import { addScopeSerializationEdges } from "../graph.js";
+import { z } from "zod";
+import { assessDecomposition, economicRationale } from "./economics.js";
+export { assessDecomposition, type DecompositionAssessment } from "./economics.js";
 import {
   buildContextManifest,
   discoverValidationCommands,
@@ -52,10 +55,23 @@ export type CompilerObjective = {
   title: string;
   workItems: CompilerWorkItem[];
 };
+export const ExclusiveResourcesSchema = z
+  .array(
+    z
+      .string()
+      .min(1)
+      .max(160)
+      .regex(/^[a-z0-9][a-z0-9:._/-]*$/)
+      .refine(
+        (value) => !value.split("/").some((part) => part === ".." || part === "." || part === ""),
+        "resource identity contains traversal or empty components",
+      ),
+  )
+  .max(64);
 export type CompilerWorkItemInput = Omit<
   CompilerWorkItem,
   "context" | "changeSurface" | "validation" | "delivery" | "economicReview"
->;
+> & { exclusiveResources?: string[] | undefined };
 export type CompileInput = {
   title: string;
   baseSha: string;
@@ -303,9 +319,10 @@ export function validateCompiledObjective(
 
 export function compileObjective(input: CompileInput): CompilerObjective {
   if (!/^[0-9a-f]{40}$/i.test(input.baseSha)) throw new Error("invalid base SHA");
-  const facts = normalizeRepositoryFacts(input.repositoryFacts),
-    commands = discoverValidationCommands(facts);
+  const facts = normalizeRepositoryFacts(input.repositoryFacts);
   const analyzed = input.workItems.map((w) => {
+    const explicitResources = sorted(ExclusiveResourcesSchema.parse(w.exclusiveResources ?? []));
+    const { exclusiveResources: _claims, ...source } = w;
     const scope = w.scope.map((p) => RepositoryScopePathSchema.parse(p));
     const manifest = buildContextManifest(facts, scope);
     const scopedFacts = facts.files.filter((f) =>
@@ -321,7 +338,9 @@ export function compileObjective(input: CompileInput): CompilerObjective {
       ? "large-binary"
       : generated
         ? "generated"
-        : "parallel-safe";
+        : explicitResources.length
+          ? "exclusive"
+          : "parallel-safe";
     const scopedProfile = profileRepository({
       files: scopedFacts,
       ...(facts.scripts === undefined ? {} : { scripts: facts.scripts }),
@@ -332,27 +351,12 @@ export function compileObjective(input: CompileInput): CompilerObjective {
       ...(scopedProfile.deterministicSimulation ? ["deterministic-simulation" as const] : []),
       ...(scopedProfile.visualValidation ? ["visual" as const] : []),
     ];
-    const resources =
-      mergeClass === "parallel-safe"
-        ? []
-        : sorted(scopedFacts.length ? scopedFacts.map((f) => f.path) : scope);
-    const req = ExecutionRequirementsSchema.parse(w.requirements);
-    const runtime = [
-      `trust ${req.trust}`,
-      req.timeoutMinutes ? `timeout ${req.timeoutMinutes}m` : undefined,
-      req.cpu ? `cpu ${req.cpu}` : undefined,
-      req.memoryMb ? `memory ${req.memoryMb}MB` : undefined,
-      req.diskMb ? `disk ${req.diskMb}MB` : undefined,
-      req.tools.length ? `tools ${sorted(req.tools).join(",")}` : undefined,
-      req.services.length ? `services ${sorted(req.services).join(",")}` : undefined,
-      req.networkDestinations.length
-        ? `network ${sorted(req.networkDestinations).join(",")}`
-        : undefined,
-    ]
-      .filter(Boolean)
-      .join("; ");
+    const resources = sorted([
+      ...explicitResources,
+      ...(generated || binary ? (scopedFacts.length ? scopedFacts.map((f) => f.path) : scope) : []),
+    ]);
     return {
-      ...w,
+      ...source,
       baseSha: input.baseSha,
       validationCommands: w.validationCommands,
       context: { ...manifest, dependencyEvidence: [] },
@@ -360,7 +364,7 @@ export function compileObjective(input: CompileInput): CompilerObjective {
       validation: tiers.map((tier) => ({ tier, criteria: w.acceptance })),
       economicReview: {
         conservative: true,
-        rationale: `Repository-observed commands: ${commands.join(", ")}; validation tiers: ${tiers.join(", ")}; runtime requirements: ${runtime}. No live paid measurement was assumed.`,
+        rationale: "Assessment pending graph validation",
         paidMeasurementRequired: false,
       },
     };
@@ -373,6 +377,31 @@ export function compileObjective(input: CompileInput): CompilerObjective {
     title: input.title,
     workItems: analyzed,
   }).workItems;
+  const depends = (from: string, to: string): boolean => {
+    const pending = [from],
+      seen = new Set<string>();
+    while (pending.length) {
+      const id = pending.pop()!;
+      if (id === to) return true;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      pending.push(...(serialized.find((item) => item.id === id)?.dependsOn ?? []));
+    }
+    return false;
+  };
+  for (let i = 0; i < serialized.length; i++)
+    for (let j = i + 1; j < serialized.length; j++) {
+      const a = serialized[i]!,
+        b = serialized[j]!;
+      if (
+        a.changeSurface.exclusiveResources.some((resource) =>
+          b.changeSurface.exclusiveResources.includes(resource),
+        ) &&
+        !depends(a.id, b.id) &&
+        !depends(b.id, a.id)
+      )
+        b.dependsOn = sorted([...b.dependsOn, a.id]);
+    }
   const analyzedById = new Map(serialized.map((w) => [w.id, w]));
   const childCounts = new Map<string, number>();
   for (const item of serialized) {
@@ -426,6 +455,13 @@ export function compileObjective(input: CompileInput): CompilerObjective {
     workItems: items,
   });
   validateCompiledObjective(result, facts);
+  const assessment = assessDecomposition(result.workItems);
+  if (assessment.redundantItemPairs.length)
+    throw new Error(
+      `uneconomic duplicate deliverables: ${assessment.redundantItemPairs.map((pair) => pair.join(" / ")).join(", ")}. ${assessment.feedback[0]}`,
+    );
+  for (const item of result.workItems)
+    item.economicReview.rationale = economicRationale(assessment);
   return result;
 }
 

@@ -337,7 +337,7 @@ describe("conservative economic feedback", () => {
       delivery: {
         selected: "regular-prs",
         publications: 1,
-        integrationsCompleted: 0,
+        integrationsCompleted: 1,
       },
     });
     expect(summary!.economics.usage.local_milliseconds).toMatchObject({
@@ -353,5 +353,118 @@ describe("conservative economic feedback", () => {
       reconciliations: 1,
     });
     expect(summary!.economics.providerCost.availability).toBe("unavailable");
+  });
+
+  it("counts a recovered publication once while retaining its separate audit receipt", () => {
+    const receipts = runEvidence();
+    const publication = receipts.find((entry) => entry.event === "PublicationRecorded")!;
+    const recovered = event({
+      ...publication,
+      sequence: 12,
+      reason: "recovered publication receipt before integration",
+    });
+    const summary = summarizeRun([...receipts, recovered, recovered])!;
+    expect(summary.delivery).toMatchObject({ publications: 1, integrationsCompleted: 1 });
+    expect(summary.evidence.eventCount).toBe(receipts.length + 1);
+    expect(summary.attempts).toMatchObject({ total: 1, integrated: 1 });
+  });
+
+  it("preserves genuinely distinct publication attempts and PRs", () => {
+    const receipts = runEvidence();
+    const publication = receipts.find((entry) => entry.event === "PublicationRecorded")!;
+    const integrated = receipts.find((entry) => entry.event === "AttemptIntegrated")!;
+    const summary = summarizeRun([
+      ...receipts,
+      event({ ...publication, sequence: 12, attempt: 2, pullRequest: 100 }),
+      event({ ...integrated, sequence: 13, attempt: 2 }),
+      event({ ...publication, sequence: 14, workItem: 9, itemId: "item-9", pullRequest: 101 }),
+    ])!;
+    expect(summary.delivery).toMatchObject({ publications: 3, integrationsCompleted: 2 });
+    expect(summary.attempts).toMatchObject({ total: 2, integrated: 2 });
+  });
+
+  it("counts native members, not duplicate completion receipts or revalidated heads", () => {
+    const receipts = runEvidence();
+    const publication = receipts.find((entry) => entry.event === "PublicationRecorded")!;
+    const integrated = receipts.find((entry) => entry.event === "AttemptIntegrated")!;
+    const native = { ...publication, mode: "native-stacks", unitId: "stack-8", stackNumber: 1 };
+    const summary = summarizeRun([
+      ...receipts.filter((entry) => entry.kind !== "publication" && entry.kind !== "delivery"),
+      event({
+        kind: "delivery",
+        event: "DeliverySelected",
+        sequence: 8,
+        requested: "stacked-prs",
+        selected: "native-stacks",
+        capabilityVersion: "rest-v1",
+        reason: "observed native capability",
+      }),
+      event(native),
+      event({ ...native, sequence: 12, headSha: "c".repeat(40) }),
+      event({ ...native, sequence: 13, event: "IntegrationCompleted", operationId: "merge-1" }),
+      event({ ...native, sequence: 14, event: "IntegrationCompleted", operationId: "merge-1" }),
+      event({ ...native, sequence: 15, workItem: 9, itemId: "item-9", pullRequest: 100 }),
+      event({
+        ...native,
+        sequence: 16,
+        workItem: 9,
+        itemId: "item-9",
+        pullRequest: 100,
+        event: "IntegrationCompleted",
+        operationId: "merge-1",
+      }),
+      event({ ...integrated, sequence: 17, workItem: 9 }),
+    ])!;
+    expect(summary.delivery).toEqual({
+      selected: "native-stacks",
+      publications: 2,
+      integrationsCompleted: 2,
+    });
+    expect(summary.attempts).toMatchObject({ total: 2, integrated: 2 });
+  });
+
+  it("does not carry publication or integration counts across run boundaries", () => {
+    const receipts = runEvidence();
+    const start = receipts[0]!;
+    const publication = receipts.find((entry) => entry.event === "PublicationRecorded")!;
+    const summary = summarizeRun([
+      ...receipts,
+      event({ ...start, sequence: 20, runId: "run-8" }),
+      event({ ...publication, sequence: 21, runId: "run-8" }),
+    ])!;
+    expect(summary.runId).toBe("run-8");
+    expect(summary.delivery).toMatchObject({ publications: 1, integrationsCompleted: 0 });
+  });
+
+  it("retains a native completion even before its attempt completion copy is recorded", () => {
+    const receipts = runEvidence()
+      .filter((entry) => entry.event !== "AttemptIntegrated")
+      .map((entry) =>
+        entry.kind === "delivery"
+          ? event({ ...entry, requested: "stacked-prs", selected: "native-stacks" })
+          : entry.kind === "publication"
+            ? event({ ...entry, mode: "native-stacks", stackNumber: 1 })
+            : entry,
+      );
+    const publication = receipts.find((entry) => entry.event === "PublicationRecorded")!;
+    const summary = summarizeRun([
+      ...receipts,
+      event({
+        ...publication,
+        sequence: 12,
+        event: "IntegrationCompleted",
+        operationId: "merge-1",
+      }),
+    ])!;
+    expect(summary.delivery.integrationsCompleted).toBe(1);
+    expect(summary.attempts.integrated).toBe(0);
+  });
+
+  it("still rejects conflicting authenticated publication receipts at the same identity", () => {
+    const receipts = runEvidence();
+    const publication = receipts.find((entry) => entry.event === "PublicationRecorded")!;
+    expect(() => summarizeRun([...receipts, event({ ...publication, pullRequest: 100 })])).toThrow(
+      /conflicting/i,
+    );
   });
 });

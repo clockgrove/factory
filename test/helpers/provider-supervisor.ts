@@ -2,6 +2,7 @@
  * stores, scheduler, validation, review checkpoints and publication decisions.
  * GitHub transport and execution resources are simulations, never live evidence. */
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -27,6 +28,7 @@ import type { ManagementBackend } from "../../src/management/backend.js";
 import { validateArtifactClean, discardValidationResult } from "../../src/validation/clean-run.js";
 import type { ObjectiveSnapshot, LinkedPullRequest } from "../../src/types.js";
 import { GitHubStacks } from "../../src/publication/github-stacks.js";
+import { PlatformUnavailableError } from "../../src/platform.js";
 
 export const LOCAL = "codex-sdk/local-worktree";
 export const DAYTONA = "codex-cli/daytona";
@@ -34,6 +36,13 @@ export const COPILOT = "github-copilot/github-managed";
 export const CODEX = "openai-codex/github-managed";
 export type ProviderScenario = "daytona-burst" | "copilot-objective" | "codex-objective";
 export interface ProviderFaults {
+  repositoryFence?: () => Promise<void>;
+  configureLocalBackend?: (backend: ExecutionBackend) => ExecutionBackend;
+  controllerActivation?: boolean;
+  afterIntegration?: () => void;
+  localOnly?: boolean;
+  localMaxParallel?: 2;
+  loseIntegrationReceipt?: "before" | "after";
   unavailable?: boolean;
   validationFailure?: boolean;
   cleanupFailure?: boolean;
@@ -46,6 +55,12 @@ export interface ProviderFaults {
   candidateReviewRejects?: boolean;
   sandboxUntrusted?: boolean;
   nativeStack?: boolean;
+  nativeRebaseConflict?: boolean;
+  nativeHeadChangeAfterValidation?: boolean;
+  nativeAfterParentMerge?: () => void;
+  nativeDuringRebaseValidation?: () => void;
+  nativeRebaseReviewRejects?: boolean;
+  nativeRebaseBudgetExhaustion?: boolean;
 }
 
 export async function providerSupervisorFixture(
@@ -86,13 +101,13 @@ export async function providerSupervisorFixture(
   const policy = parseRunPolicy({
     ...DEFAULT_RUN_POLICY,
     ...(faults.sandboxUntrusted ? { trust: "sandbox_untrusted" } : {}),
-    backendOrder: managed ? [provider, DAYTONA] : [LOCAL, DAYTONA],
-    maxParallel: managed ? 1 : 2,
+    backendOrder: faults.localOnly ? [LOCAL] : managed ? [provider, DAYTONA] : [LOCAL, DAYTONA],
+    maxParallel: faults.localOnly ? (faults.localMaxParallel ?? 1) : managed ? 1 : 2,
     maxAttemptsPerItem: 1,
     workItemTimeoutMinutes: 2,
     objectiveTimeoutMinutes: 20,
-    allowedPaidBackends: managed ? [provider, DAYTONA] : [DAYTONA],
-    cloudFallback: "explicit",
+    allowedPaidBackends: faults.localOnly ? [] : managed ? [provider, DAYTONA] : [DAYTONA],
+    cloudFallback: faults.localOnly ? "never" : "explicit",
     maxSandboxMinutes: 30,
     maxManagedAgentSessions: managed ? 3 : 0,
     economics: {
@@ -104,18 +119,21 @@ export async function providerSupervisorFixture(
     capacity: {
       ...DEFAULT_RUN_POLICY.capacity,
       mode: "fixed",
-      local: { ...DEFAULT_RUN_POLICY.capacity!.local, maxWorkers: 1 },
+      local: {
+        ...DEFAULT_RUN_POLICY.capacity!.local,
+        maxWorkers: faults.localOnly ? (faults.localMaxParallel ?? 1) : 1,
+      },
     },
     burst: {
       ...DEFAULT_RUN_POLICY.burst,
-      mode: "saturation",
-      backendOrder: [provider],
+      mode: faults.localOnly ? "never" : "saturation",
+      backendOrder: faults.localOnly ? [] : [provider],
       maxCloudParallel: 2,
       queueDelaySeconds: 0,
       deadlineReserveMinutes: 1,
     },
     delivery: {
-      mode: managed ? "regular-prs" : "stacked-prs",
+      mode: managed || faults.localOnly ? "regular-prs" : "stacked-prs",
       onUnavailable: "escalate",
       merge: "bottom-up",
     },
@@ -171,7 +189,9 @@ export async function providerSupervisorFixture(
   };
   const lease: LeaseState = {
     objective: 7,
-    runId: "provider-fixture",
+    // Separate fixtures share the host user manager but are distinct durable runs.
+    // A fixed ID can collide even when temporary checkout paths differ.
+    runId: `provider-fixture-${randomUUID()}`,
     holder: "operator",
     policyDigest: pd,
     ref: "lease",
@@ -266,14 +286,15 @@ export async function providerSupervisorFixture(
         fork: false,
         baseBranch: "main",
         baseSha,
+        ...(faults.controllerActivation ? { activationRequestId: "fixture-activation" } : {}),
         policy,
         policyDigest: pd,
       }),
       event({
         kind: "delivery",
         event: "DeliverySelected",
-        requested: managed ? "regular-prs" : "stacked-prs",
-        selected: managed ? "regular-prs" : "native-stacks",
+        requested: managed || faults.localOnly ? "regular-prs" : "stacked-prs",
+        selected: managed || faults.localOnly ? "regular-prs" : "native-stacks",
         capabilityVersion: "2026-03-10",
         reason: "Simulated transport capability",
       }),
@@ -348,11 +369,27 @@ export async function providerSupervisorFixture(
   vi.spyOn(GitHubControlStore.prototype, "getBranchHead").mockImplementation(async (branch) =>
     readCommit(refs.get(`refs/heads/${branch}`) ?? git("rev-parse", branch)),
   );
+  let receiptTransportUnavailable = false;
   vi.spyOn(GitHubControlStore.prototype, "addIssueComment").mockImplementation(
     async (node, body) => {
+      const receipt = decodeEventComments(body);
+      const integration = receipt.some((event) => event.event === "AttemptIntegrated");
+      const loss = integration ? faults.loseIntegrationReceipt : undefined;
+      if (loss) {
+        delete faults.loseIntegrationReceipt;
+        receiptTransportUnavailable = true;
+      }
+      const unavailable = () =>
+        new PlatformUnavailableError(
+          { kind: "server_error", retryAfterMs: 1 },
+          new Error("simulated integration receipt transport outage"),
+        );
+      if (receiptTransportUnavailable && loss !== "after") throw unavailable();
       const target =
         node === snapshot.id ? snapshot : snapshot.workItems.find((item) => item.id === node)!;
-      target.factoryEvents!.push(...decodeEventComments(body));
+      target.factoryEvents!.push(...receipt);
+      if (loss === "after") throw unavailable();
+      if (integration) faults.afterIntegration?.();
     },
   );
   vi.spyOn(GitHubControlStore.prototype, "closeIssue").mockImplementation(async (number) => {
@@ -375,9 +412,11 @@ export async function providerSupervisorFixture(
   vi.spyOn(GitHubReader.prototype, "resolveUserId").mockResolvedValue("U_operator");
   vi.spyOn(GitHubReader.prototype, "readRunCancellationRequest").mockResolvedValue(null);
   vi.spyOn(LeaseManager.prototype, "read").mockResolvedValue(null);
+  let leaseGeneration = 0;
   vi.spyOn(LeaseManager.prototype, "acquire").mockImplementation(async (identity) => ({
     ...lease,
     ...identity,
+    ...(faults.controllerActivation ? { epoch: ++leaseGeneration } : {}),
   }));
   vi.spyOn(LeaseManager.prototype, "assertCurrent").mockResolvedValue(undefined);
   vi.spyOn(LeaseManager.prototype, "assertGeneration").mockResolvedValue(undefined);
@@ -452,6 +491,11 @@ export async function providerSupervisorFixture(
     ).trim();
     return {
       state: value.merged ? "closed" : "open",
+      number,
+      nodeId: value.pull.id,
+      headRef: value.branch,
+      headRepository: "fixture/provider-qualification",
+      baseRepository: "fixture/provider-qualification",
       merged: Boolean(value.merged),
       mergeable: true,
       mergeableState: "clean",
@@ -478,14 +522,44 @@ export async function providerSupervisorFixture(
         for (const child of pulls.values()) {
           if (child.merged || child.baseRef !== value.branch) continue;
           const oldHead = child.pull.headSha;
-          const newHead = rawGit(
-            ["commit-tree", git("rev-parse", `${oldHead}^{tree}`), "-p", value.merged],
-            "simulated GitHub cascading rebase",
-          ).trim();
+          const newHead = faults.nativeRebaseConflict
+            ? oldHead
+            : rawGit(
+                ["commit-tree", git("rev-parse", `${oldHead}^{tree}`), "-p", value.merged],
+                "simulated GitHub cascading rebase",
+              ).trim();
           child.pull.headSha = newHead;
           child.baseRef = "main";
           child.base = value.merged;
           refs.set(`refs/heads/${child.branch}`, newHead);
+        }
+        if (number === 108) {
+          if (faults.nativeRebaseBudgetExhaustion) {
+            // Supply distinct, completed provider usage before the separately
+            // admitted rebase validator; never rewrite an existing receipt.
+            const usage = events().find(
+              (entry) =>
+                entry.kind === "budget" &&
+                entry.event === "BudgetReconciled" &&
+                entry.workItem === 9 &&
+                entry.unit === "sandbox_milliseconds",
+            );
+            if (!usage || usage.kind !== "budget") throw new Error("missing child sandbox usage");
+            const priorSequence = Math.max(...events().map((entry) => entry.sequence));
+            for (const [index, event] of ["BudgetReserved", "BudgetReconciled"].entries())
+              snapshot.workItems[1]!.factoryEvents!.push(
+                parseFactoryEvent({
+                  ...usage,
+                  event,
+                  usageId: "fixture-completed-prior-validation",
+                  phase: "validation",
+                  amount: policy.maxSandboxMinutes * 60_000,
+                  sequence: priorSequence + index + 1,
+                  at: new Date().toISOString(),
+                }),
+              );
+          }
+          faults.nativeAfterParentMerge?.();
         }
       }
       if (faults.externalAdvance) {
@@ -600,6 +674,7 @@ export async function providerSupervisorFixture(
       observe: async (handle) => ({
         state:
           !managed &&
+          !faults.localOnly &&
           !faults.nativeStack &&
           ((running.get(handle.resourceId)!.workItem < 10 &&
             !activity.some(
@@ -664,6 +739,7 @@ export async function providerSupervisorFixture(
                   : {}),
               });
               const candidate = Boolean(input.validationInvocation);
+              if (faults.nativeStack && candidate) faults.nativeDuringRebaseValidation?.();
               const failed =
                 faults.validationFailure || (candidate && faults.candidateValidationFailure);
               const name = `validator:${input.workItem}:${input.validationInvocation?.identityDigest ?? "initial"}`;
@@ -677,6 +753,15 @@ export async function providerSupervisorFixture(
                 },
               });
               try {
+                if (faults.nativeStack && candidate && faults.nativeHeadChangeAfterValidation) {
+                  const child = pulls.get(109)!;
+                  const changed = rawGit(
+                    ["commit-tree", result.evidence.outputTreeSha, "-p", input.packet.baseSha],
+                    "external head replacement during native validation",
+                  ).trim();
+                  child.pull.headSha = changed;
+                  refs.set(`refs/heads/${child.branch}`, changed);
+                }
                 return {
                   outputTreeSha: result.evidence.outputTreeSha,
                   commands: result.evidence.commands,
@@ -701,7 +786,8 @@ export async function providerSupervisorFixture(
     };
   };
   const registry = new BackendRegistry();
-  registry.register(execution(LOCAL));
+  const local = execution(LOCAL);
+  registry.register(faults.configureLocalBackend?.(local) ?? local);
   registry.register(execution(DAYTONA));
   if (managed) registry.register(execution(provider));
   const management: ManagementBackend = {
@@ -712,14 +798,18 @@ export async function providerSupervisorFixture(
     },
     review: async (context, checkpoint) => {
       const candidate = context.workItemNumber < 10 && context.packet.baseSha !== baseSha;
+      const nativeRebase =
+        faults.nativeStack && context.workItemNumber === 9 && Boolean(pulls.get(108)?.merged);
       activity.push({
-        operation: candidate ? "candidate-review" : "review",
+        operation: nativeRebase ? "rebase-review" : candidate ? "candidate-review" : "review",
         backend: "fixture-management",
         workItem: context.workItemNumber,
       });
       const result = {
         review: {
-          accepted: !(candidate && faults.candidateReviewRejects),
+          accepted:
+            !(candidate && faults.candidateReviewRejects) &&
+            !(nativeRebase && faults.nativeRebaseReviewRejects),
           summary: "Fixture semantic acceptance",
           unmetCriteria: [],
           risks: [],
@@ -746,16 +836,22 @@ export async function providerSupervisorFixture(
       source: "host",
     }),
   };
+  let controllerGeneration = 0;
   return {
     repository,
+    runId: lease.runId,
     policy,
     snapshot,
+    management,
     activity,
     resources,
     events,
     refs,
-    run: (signal?: AbortSignal) =>
-      new FactorySupervisor({
+    run: (signal?: AbortSignal) => {
+      receiptTransportUnavailable = false;
+      const generation = ++controllerGeneration;
+      const controllerExpiresAt = new Date(Date.now() + 600_000).toISOString();
+      return new FactorySupervisor({
         token: "fixture-only",
         owner: "fixture",
         repo: "provider-qualification",
@@ -765,10 +861,24 @@ export async function providerSupervisorFixture(
         managementBackend: management,
         backendRegistry: registry,
         repositoryResources: shared,
+        ...(faults.repositoryFence ? { repositoryFence: faults.repositoryFence } : {}),
         pollIntervalMs: 20,
+        ...(faults.controllerActivation
+          ? {
+              activation: { requestId: "fixture-activation", baseSha },
+              shutdownBehavior: "release-lease" as const,
+              controllerObservation: () => ({
+                controllerId: `fixture-controller-${generation}`,
+                epoch: generation,
+                expiresAt: controllerExpiresAt,
+                controllerPolicyDigest: pd,
+              }),
+            }
+          : {}),
         ...(signal ? { signal } : {}),
         onStatus: (message) => notifications.push(message),
-      }).run(),
+      }).run();
+    },
     dispose: async () => {
       vi.restoreAllMocks();
       vi.unstubAllGlobals();

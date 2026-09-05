@@ -9,6 +9,51 @@ import { qualificationEnvironment } from "./qualify-linux-host.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const sha256 = (value) => createHash("sha256").update(value).digest("hex");
+const verifierTimeoutMs = 15 * 60_000;
+
+export function runBoundedVerifier(
+  command,
+  args,
+  { cwd = root, env = qualificationEnvironment(), timeoutMs = verifierTimeoutMs } = {},
+) {
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > verifierTimeoutMs)
+    throw new Error("invalid verifier timeout");
+  return new Promise((done) => {
+    let settled = false;
+    let timedOut = false;
+    let killTimer;
+    const child = spawn(command, args, {
+      cwd,
+      env,
+      stdio: ["ignore", "ignore", "ignore"],
+      detached: true,
+    });
+    const finish = (passed) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (killTimer) clearTimeout(killTimer);
+      done(passed);
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try {
+        process.kill(-child.pid, "SIGTERM");
+      } catch {
+        // The exact child process group already exited.
+      }
+      killTimer = setTimeout(() => {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+          // The exact child process group already exited.
+        }
+      }, 5_000);
+    }, timeoutMs);
+    child.once("error", () => finish(false));
+    child.once("close", (code) => finish(!timedOut && code === 0));
+  });
+}
 
 export function assessPortableQualification(artifacts) {
   const npm = artifacts.find((entry) => entry.artifactKind === "npm");
@@ -49,14 +94,9 @@ async function verify(script, output, claimedHost) {
       : {}),
     ...(process.env.FACTORY_NPM_CACHE ? { FACTORY_NPM_CACHE: process.env.FACTORY_NPM_CACHE } : {}),
   };
-  return new Promise((done) => {
-    const child = spawn(process.execPath, [join(root, "scripts", script)], {
-      cwd: root,
-      env,
-      stdio: ["ignore", "ignore", "ignore"],
-    });
-    child.once("error", () => done(false));
-    child.once("close", (code) => done(code === 0));
+  return runBoundedVerifier(process.execPath, [join(root, "scripts", script)], {
+    cwd: root,
+    env,
   });
 }
 

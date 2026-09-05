@@ -33,6 +33,8 @@ import { RecoveryClaimManager } from "../src/recovery/claims.js";
 import { recoveryAdoptionEvents } from "../src/recovery/transaction.js";
 import { normalizeArtifact } from "../src/execution/artifacts.js";
 import { loadRecoveryRuntime } from "../src/recovery/runtime.js";
+import { recoveryReadPort } from "../src/recovery/github-read-port.js";
+import { verifyRecoveryProposalResources } from "../src/recovery/resources.js";
 import { verifyPriorRecoveryDelivery } from "../src/recovery/outcomes.js";
 import { localExecutionScopeBatch, type AttemptContext } from "../src/execution/backend.js";
 
@@ -58,6 +60,13 @@ async function fixture(
     artifactOnly?: boolean;
     loseArtifactPrResponse?: boolean;
     nativeSource?: boolean;
+    retainedPrefix?: 1 | 2 | 3;
+    stackLength?: 2 | 3 | 4;
+    loseStackLinkResponse?: boolean;
+    dropUpperAfterMerge?: boolean;
+    premergedNativeRoot?: boolean;
+    mixedRetainedPublication?: boolean;
+    omitMergedNativePrefix?: boolean;
     failC?: boolean;
   } = {},
 ) {
@@ -83,8 +92,14 @@ async function fixture(
   git("commit", "-qm", "base");
   const baseSha = git("rev-parse", "HEAD");
   const heads: string[] = [];
-  for (const name of ["a", "b"]) {
-    git("checkout", "-q", "-b", name, baseSha);
+  for (const name of ["a", "b", "c"].slice(0, Math.max(2, options.retainedPrefix ?? 2))) {
+    git(
+      "checkout",
+      "-q",
+      "-b",
+      name,
+      options.retainedPrefix && heads.length ? heads.at(-1)! : baseSha,
+    );
     await writeFile(join(repository, `${name}.txt`), `${name}\n`);
     git("add", ".");
     git(
@@ -136,17 +151,23 @@ async function fixture(
   let stalePreviewOid: string | undefined;
   let counter = 0;
   const oid = () => createHash("sha1").update(`metadata-${counter++}`).digest("hex");
+  const immutableCommits = new Map<string, Omit<GitCommitObject, "serverTime">>();
+  const previewTrees = new Map<string, string>();
   const readCommit = async (id: string): Promise<GitCommitObject> => {
     if (id === stalePreviewOid) stalePreviewServed = true;
-    return (
-      commits.get(id) ?? {
+    const synthetic = commits.get(id);
+    if (synthetic) return synthetic;
+    let immutable = immutableCommits.get(id);
+    if (!immutable) {
+      immutable = {
         oid: id,
         treeOid: git("rev-parse", `${id}^{tree}`),
         parentOids: git("show", "-s", "--format=%P", id).split(" ").filter(Boolean),
         message: git("show", "-s", "--format=%B", id),
-        serverTime: new Date(),
-      }
-    );
+      };
+      immutableCommits.set(id, immutable);
+    }
+    return { ...immutable, parentOids: [...immutable.parentOids], serverTime: new Date() };
   };
   const storage: CompiledGraphStore = {
     readRef: async (ref) => refs.get(ref) ?? null,
@@ -218,7 +239,7 @@ async function fixture(
   const leases = { assertCurrent: async () => {} } as unknown as LeaseManager;
   const graph: CompiledObjective = {
     title: "Parallel siblings",
-    workItems: ["a", "b", "c"].map((name) => ({
+    workItems: ["a", "b", "c", "d"].slice(0, options.stackLength ?? 3).map((name, index) => ({
       id: name,
       title: name,
       goal: `Add ${name}`,
@@ -227,7 +248,13 @@ async function fixture(
       preconditions: [],
       outOfScope: [],
       conventions: [],
-      dependsOn: name === "c" ? ["a", "b"] : [],
+      dependsOn: options.retainedPrefix
+        ? index
+          ? [["a", "b", "c"][index - 1]!]
+          : []
+        : name === "c"
+          ? ["a", "b"]
+          : [],
       baseSha,
       validationCommands: ["node --test"],
       requirements: {
@@ -240,7 +267,13 @@ async function fixture(
         trust: "trusted_local",
       },
       artifactContract: "clockgrove.factory/artifact-v1",
-      delivery: { group: name, relationship: name === "c" ? "join-after-merge" : "root" },
+      delivery: options.retainedPrefix
+        ? {
+            group: "a",
+            relationship: index ? "continue-stack" : "root",
+            ...(index ? { parentWorkItem: ["a", "b", "c"][index - 1]! } : {}),
+          }
+        : { group: name, relationship: name === "c" ? "join-after-merge" : "root" },
     })),
   };
   const graphManager = new CompiledGraphManager(storage, leases);
@@ -262,7 +295,11 @@ async function fixture(
     graph.workItems.map((item) => ({
       id: item.id,
       dependsOn: item.dependsOn,
-      delivery: { group: item.delivery!.group, relationship: item.delivery!.relationship },
+      delivery: {
+        group: item.delivery!.group,
+        relationship: item.delivery!.relationship,
+        ...(item.delivery!.parentWorkItem ? { parentWorkItem: item.delivery!.parentWorkItem } : {}),
+      },
     })),
   );
   if (delivery.result !== "supported") throw new Error("fixture delivery unsupported");
@@ -321,14 +358,20 @@ async function fixture(
     workItems: [],
   };
   for (const [index, item] of graph.workItems.entries()) {
-    if (index === 2) continue;
+    if (index >= (options.retainedPrefix ?? 2)) continue;
+    const itemBase = options.retainedPrefix && index ? heads[index - 1]! : baseSha;
     const number = 8 + index;
     const head = heads[index]!;
     const tree = (await readCommit(head)).treeOid;
     const validationDigest = createHash("sha256").update(item.id).digest("hex");
     const exact = bindValidationToPublishedHead({
-      validation: { passed: true, digest: validationDigest, baseSha, outputTreeSha: tree },
-      publishedBaseSha: baseSha,
+      validation: {
+        passed: true,
+        digest: validationDigest,
+        baseSha: itemBase,
+        outputTreeSha: tree,
+      },
+      publishedBaseSha: itemBase,
       publishedTreeSha: tree,
       publishedHeadSha: head,
     });
@@ -338,7 +381,7 @@ async function fixture(
         workItem: number,
         attempt: 1,
         backend: "codex-sdk/local-worktree",
-        baseSha,
+        baseSha: itemBase,
         directorEpoch: 1,
         policyDigest: pd,
         ...fields,
@@ -348,8 +391,8 @@ async function fixture(
     refs.set(attemptRef(7, number, 1), reservationOid);
     commits.set(reservationOid, {
       oid: reservationOid,
-      treeOid: (await readCommit(baseSha)).treeOid,
-      parentOids: [baseSha],
+      treeOid: (await readCommit(itemBase)).treeOid,
+      parentOids: [itemBase],
       message: encodeEventTrailer(reserved),
       serverTime: now,
     });
@@ -382,14 +425,17 @@ async function fixture(
         protocol: "clockgrove.factory/graph-v1",
         id: item.id,
         graphDigest: record.graphDigest,
-        graphSize: 3,
+        graphSize: graph.workItems.length,
         index,
-        dependsOn: [],
+        dependsOn: item.dependsOn,
       }),
       closed: false,
       assignees: [],
       labels: [],
-      blockedBy: [],
+      blockedBy: item.dependsOn.map((id) => ({
+        number: 8 + graph.workItems.findIndex((entry) => entry.id === id),
+        closed: false,
+      })),
       linkedPullRequests: [pull],
       copilotAssignments: [],
       factoryEvents: [
@@ -399,7 +445,7 @@ async function fixture(
           event: "ValidationRecorded",
           workItem: number,
           attempt: 1,
-          baseSha,
+          baseSha: itemBase,
           outputTreeSha: tree,
           evidenceDigest: validationDigest,
           passed: true,
@@ -415,9 +461,11 @@ async function fixture(
           itemId: item.id,
           mode: options.nativeSource ? "native-stacks" : "regular-prs",
           position: plan.position,
+          ...(plan.parentItemId ? { parentItemId: plan.parentItemId } : {}),
           branch: publicationBranch(7, number, 1),
-          baseBranch: "main",
-          baseSha,
+          baseBranch:
+            index && options.retainedPrefix ? publicationBranch(7, number - 1, 1) : "main",
+          baseSha: itemBase,
           headSha: head,
           pullRequest: pull.number,
           capabilityVersion: "2026-03-10",
@@ -502,6 +550,12 @@ async function fixture(
     snapshot.workItems.find((item) => item.linkedPullRequests[0]?.number === number)!
       .linkedPullRequests[0]!;
   const mergeShas = new Map<number, string>();
+  const pullBases = new Map<number, string>(
+    snapshot.workItems.map((item, index) => [
+      item.number + 10,
+      options.retainedPrefix && index ? publicationBranch(7, item.number - 1, 1) : "main",
+    ]),
+  );
   let responseLost = false;
   vi.spyOn(GitHubControlStore.prototype, "findPullRequestForBranch").mockImplementation(
     async (branch) => {
@@ -521,21 +575,29 @@ async function fixture(
   );
   vi.spyOn(GitHubControlStore.prototype, "readPullRequest").mockImplementation(async (number) => {
     const pull = findPull(number);
-    const currentBase = git("rev-parse", "main");
+    const baseRef = pullBases.get(number) ?? "main";
+    const currentBase =
+      baseRef === "main" ? git("rev-parse", "main") : refs.get(`refs/heads/${baseRef}`)!;
     const preview = createHash("sha1")
       .update(`preview:${currentBase}:${pull.headSha}`)
       .digest("hex");
-    if (pull.state === "OPEN")
-      commits.set(preview, {
-        oid: preview,
-        treeOid:
+    if (pull.state === "OPEN") {
+      let treeOid = previewTrees.get(preview);
+      if (!treeOid) {
+        treeOid =
           options.wrongPreviewTree && number === 19
             ? git("rev-parse", `${pull.headSha}^{tree}`)
-            : git("merge-tree", "--write-tree", currentBase, pull.headSha).split("\n")[0]!,
+            : git("merge-tree", "--write-tree", currentBase, pull.headSha).split("\n")[0]!;
+        previewTrees.set(preview, treeOid);
+      }
+      commits.set(preview, {
+        oid: preview,
+        treeOid,
         parentOids: [currentBase, pull.headSha],
         message: "GitHub test merge",
         serverTime: new Date(),
       });
+    }
     if (
       options.stalePreviewOnce &&
       !stalePreviewServed &&
@@ -560,7 +622,7 @@ async function fixture(
       mergeable: true,
       mergeableState: "clean",
       headSha: pull.headSha,
-      baseRef: "main",
+      baseRef,
       baseSha:
         pull.state === "MERGED"
           ? (await readCommit(mergeShas.get(number)!)).parentOids[0]!
@@ -578,6 +640,30 @@ async function fixture(
       const merged = git("rev-parse", "HEAD");
       mergeShas.set(number, merged);
       findPull(number).state = "MERGED";
+      if (options.retainedPrefix) {
+        const branch = publicationBranch(7, number - 10, 1);
+        const pending = [{ branch, base: merged, baseRef: "main" }];
+        while (pending.length) {
+          const parent = pending.shift()!;
+          for (const [childNumber, childBase] of pullBases) {
+            if (childBase !== parent.branch) continue;
+            const child = findPull(childNumber);
+            const tree = git("rev-parse", `${child.headSha}^{tree}`);
+            child.headSha = git(
+              "commit-tree",
+              tree,
+              "-p",
+              parent.base,
+              "-m",
+              "provider cascading rebase",
+            );
+            const childBranch = publicationBranch(7, childNumber - 10, 1);
+            refs.set(`refs/heads/${childBranch}`, child.headSha);
+            pullBases.set(childNumber, parent.baseRef);
+            pending.push({ branch: childBranch, base: child.headSha, baseRef: childBranch });
+          }
+        }
+      }
       if (number === 19 && options.loseMergeResponse && !responseLost) {
         responseLost = true;
         throw new PlatformUnavailableError(
@@ -653,6 +739,7 @@ async function fixture(
     blobs,
     merge,
     mergeShas,
+    pullBases,
     review,
     launch,
     heads,
@@ -682,7 +769,32 @@ async function fixture(
 
 async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
   const f = await fixture(options);
+  const sourceNativePulls = Array.from(
+    { length: options.retainedPrefix ?? 2 },
+    (_, index) => 18 + index,
+  ).filter((number) => !options.omitMergedNativePrefix || number !== 18);
   const store = new GitHubControlStore({ token: "fixture-token", owner: "o", repo: "r" });
+  if (options.premergedNativeRoot)
+    vi.spyOn(GitHubStacks.prototype, "get").mockImplementation(async (number) => ({
+      number,
+      baseRef: "main",
+      open: true,
+      pullRequests: await Promise.all(
+        sourceNativePulls.map(async (number) => {
+          const pull = await store.readPullRequest(number);
+          return {
+            number,
+            state: pull.state,
+            draft: false,
+            mergedAt: pull.merged ? new Date().toISOString() : null,
+            headRef: pull.headRef!,
+            headSha: pull.headSha,
+            baseRef: pull.baseRef,
+            baseSha: pull.baseSha,
+          };
+        }),
+      ),
+    }));
   const hostIdentity = "b".repeat(64);
   vi.spyOn(localScopes.linuxLocalScopeReadPort, "hostIdentity").mockResolvedValue(hostIdentity);
   vi.spyOn(localScopes.linuxLocalScopeReadPort, "read").mockRejectedValue(
@@ -743,7 +855,7 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
         workItem: item.number,
         attempt: 1,
         artifactDigest,
-        baseSha: f.baseSha,
+        baseSha: validated.baseSha,
         outputTreeSha: validated.outputTreeSha,
         evidenceDigest: validated.evidenceDigest,
       },
@@ -820,49 +932,194 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
     f.commits.get(f.refs.get(attemptRef(7, item.number, 1))!)!.message =
       encodeEventTrailer(reserved);
   }
-  f.snapshot.workItems.push({
-    id: "I_10",
-    number: 10,
-    title: "c",
-    body: renderWorkPacket(c, {
-      protocol: "clockgrove.factory/graph-v1",
-      id: "c",
-      graphDigest: f.record.graphDigest,
-      graphSize: 3,
-      index: 2,
-      dependsOn: ["a", "b"],
-    }),
-    closed: false,
-    assignees: [],
-    labels: [],
-    blockedBy: [
-      { number: 8, closed: false },
-      { number: 9, closed: false },
-    ],
-    linkedPullRequests: [],
-    copilotAssignments: [],
-    factoryEvents: [],
-  });
+  if (!options.retainedPrefix)
+    f.snapshot.workItems.push({
+      id: "I_10",
+      number: 10,
+      title: "c",
+      body: renderWorkPacket(c, {
+        protocol: "clockgrove.factory/graph-v1",
+        id: "c",
+        graphDigest: f.record.graphDigest,
+        graphSize: 3,
+        index: 2,
+        dependsOn: ["a", "b"],
+      }),
+      closed: false,
+      assignees: [],
+      labels: [],
+      blockedBy: [
+        { number: 8, closed: false },
+        { number: 9, closed: false },
+      ],
+      linkedPullRequests: [],
+      copilotAssignments: [],
+      factoryEvents: [],
+    });
+  if (options.retainedPrefix) {
+    for (const [index, packet] of f.graph.workItems.entries()) {
+      if (index < options.retainedPrefix) continue;
+      f.snapshot.workItems.push({
+        id: `I_${8 + index}`,
+        number: 8 + index,
+        title: packet.title,
+        body: renderWorkPacket(packet, {
+          protocol: "clockgrove.factory/graph-v1",
+          id: packet.id,
+          graphDigest: f.record.graphDigest,
+          graphSize: f.graph.workItems.length,
+          index,
+          dependsOn: packet.dependsOn,
+        }),
+        closed: false,
+        assignees: [],
+        labels: [],
+        blockedBy: packet.dependsOn.map((id) => ({
+          number: 8 + f.graph.workItems.findIndex((entry) => entry.id === id),
+          closed: false,
+        })),
+        linkedPullRequests: [],
+        copilotAssignments: [],
+        factoryEvents: [],
+      });
+    }
+  }
   const read = vi.mocked(GitHubReader.prototype.readObjective).getMockImplementation()!;
   vi.mocked(GitHubReader.prototype.readObjective).mockImplementation(async (...args) => {
-    f.snapshot.workItems[2]!.blockedBy = f.snapshot.workItems
-      .slice(0, 2)
-      .map((item) => ({ number: item.number, closed: item.closed }));
+    for (const [index, packet] of f.graph.workItems.entries())
+      f.snapshot.workItems[index]!.blockedBy = packet.dependsOn.map((id) => {
+        const parent =
+          f.snapshot.workItems[f.graph.workItems.findIndex((entry) => entry.id === id)]!;
+        return { number: parent.number, closed: parent.closed };
+      });
     return read.apply({} as GitHubReader, args);
   });
-  await store.mergePullRequest({ number: 18, headSha: f.heads[0]!, commitTitle: "A" });
-  f.snapshot.workItems[0]!.closed = true;
-  const a = f.snapshot.workItems[0]!;
-  const aReserved = a.factoryEvents!.find((entry) => entry.event === "AttemptReserved")!;
-  a.factoryEvents!.push(
-    f.event({
-      ...aReserved,
-      localScopeBatch: undefined,
-      event: "AttemptIntegrated",
-      sequence: f.sequence,
-      headSha: f.mergeShas.get(18),
-    }),
-  );
+  if (!options.retainedPrefix || options.premergedNativeRoot) {
+    if (options.premergedNativeRoot)
+      for (const [index, head] of f.heads.entries())
+        f.refs.set(`refs/heads/${publicationBranch(7, 8 + index, 1)}`, head);
+    await store.mergePullRequest({ number: 18, headSha: f.heads[0]!, commitTitle: "A" });
+    f.snapshot.workItems[0]!.closed = true;
+    const a = f.snapshot.workItems[0]!;
+    const aReserved = a.factoryEvents!.find((entry) => entry.event === "AttemptReserved")!;
+    a.factoryEvents!.push(
+      f.event({
+        ...aReserved,
+        localScopeBatch: undefined,
+        event: "AttemptIntegrated",
+        sequence: f.sequence,
+        headSha: f.mergeShas.get(18),
+      }),
+    );
+    if (options.premergedNativeRoot) {
+      const aPublication = a.factoryEvents!.find((event) => event.event === "PublicationRecorded")!;
+      a.factoryEvents!.push(
+        f.event({ ...aPublication, event: "StackLinked", sequence: f.sequence, stackNumber: 90 }),
+      );
+      for (const b of f.snapshot.workItems.slice(1, options.retainedPrefix ?? 2)) {
+        const old = b.factoryEvents!.find((entry) => entry.event === "PublicationRecorded")!;
+        if (old.kind !== "publication") throw new Error("native fixture original publication");
+        const head = b.linkedPullRequests[0]!.headSha;
+        const current = await store.readPullRequest(b.linkedPullRequests[0]!.number);
+        const base = current.baseSha;
+        const tree = (await f.readCommit(head)).treeOid;
+        const digest = createHash("sha256").update(`${b.title}-revalidated`).digest("hex");
+        const artifactDigest = createHash("sha256").update(b.title).digest("hex");
+        const review = await new ReviewCheckpointManager(f.storage, f.leases).persist({
+          lease: f.lease,
+          identity: {
+            kind: "rebase",
+            runId: "parallel",
+            objective: 7,
+            workItem: b.number,
+            attempt: 1,
+            artifactDigest,
+            baseSha: base,
+            outputTreeSha: tree,
+            evidenceDigest: digest,
+            headSha: head,
+          },
+          result: {
+            review: {
+              accepted: true,
+              summary: "revalidated exact rebased head",
+              unmetCriteria: [],
+              risks: [],
+            },
+            usage: { inputTokens: 10, outputTokens: 5 },
+          },
+        });
+        const exact = bindValidationToPublishedHead({
+          validation: { passed: true, digest, baseSha: base, outputTreeSha: tree },
+          publishedHeadSha: head,
+          publishedTreeSha: tree,
+          publishedBaseSha: base,
+        });
+        const priorCapacity = b.factoryEvents!.find(
+          (event) => event.kind === "capacity" && event.event === "CapacityReserved",
+        )!;
+        if (priorCapacity.kind !== "capacity" || !priorCapacity.localScopeBatch)
+          throw new Error("fixture scoped source validation");
+        b.factoryEvents!.push(
+          f.event({
+            ...priorCapacity,
+            sequence: f.sequence,
+            backend: `factory/integration-validation-${digest}`,
+            localScopeBatch: {
+              ...priorCapacity.localScopeBatch,
+              identity: { ...priorCapacity.localScopeBatch.identity, invocationDigest: digest },
+            },
+          }),
+          f.event({
+            kind: "validation",
+            event: "ValidationRecorded",
+            workItem: b.number,
+            attempt: 1,
+            baseSha: base,
+            outputTreeSha: tree,
+            evidenceDigest: digest,
+            passed: true,
+          }),
+          f.event({
+            kind: "budget",
+            event: "BudgetReconciled",
+            workItem: b.number,
+            attempt: 1,
+            phase: "management",
+            unit: "model_tokens",
+            amount: 15,
+            usageId: `rebase-review-${review.identityDigest}`,
+          }),
+          f.event({
+            ...b.factoryEvents!.find((event) => event.event === "AttemptReserved")!,
+            event: "AttemptPublished",
+            sequence: f.sequence,
+            localScopeBatch: undefined,
+            headSha: head,
+            artifactDigest,
+          }),
+          f.event({
+            ...old,
+            sequence: f.sequence,
+            event: "PublicationRecorded",
+            headSha: head,
+            baseSha: base,
+            baseBranch: current.baseRef,
+            validationDigest: digest,
+            exactHeadValidationDigest: exact.digest,
+            stackNumber: 90,
+          }),
+          f.event({
+            ...priorCapacity,
+            event: "CapacityReconciled",
+            sequence: f.sequence,
+            backend: `factory/integration-validation-${digest}`,
+            localScopeBatch: undefined,
+          }),
+        );
+      }
+    }
+  }
   f.snapshot.factoryEvents!.push(
     f.event({
       kind: "budget",
@@ -879,19 +1136,26 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
     reason: "original sibling base advanced",
   });
   f.snapshot.factoryEvents!.push(terminal);
-  if (options.artifactOnly) {
-    const b = f.snapshot.workItems[1]!;
-    b.factoryEvents = b.factoryEvents!.filter(
-      (event) => event.event !== "PublicationRecorded" && event.event !== "AttemptPublished",
-    );
-    b.linkedPullRequests = [];
-    f.refs.set(`refs/heads/${publicationBranch(7, 9, 1)}`, f.heads[1]!);
+  if ((options.artifactOnly || options.retainedPrefix) && !options.premergedNativeRoot) {
+    for (const b of options.retainedPrefix
+      ? f.snapshot.workItems.slice(0, options.retainedPrefix)
+      : [f.snapshot.workItems[1]!]) {
+      if (options.mixedRetainedPublication && b.number === 8) {
+        f.refs.set(`refs/heads/${publicationBranch(7, b.number, 1)}`, f.heads[0]!);
+        continue;
+      }
+      b.factoryEvents = b.factoryEvents!.filter(
+        (event) => event.event !== "PublicationRecorded" && event.event !== "AttemptPublished",
+      );
+      b.linkedPullRequests = [];
+      f.refs.set(`refs/heads/${publicationBranch(7, b.number, 1)}`, f.heads[b.number - 8]!);
+    }
   }
   const proposal = await buildRecoveryProposal({
     repository: "o/r",
     snapshot: f.snapshot,
     historyComplete: true,
-    store,
+    store: recoveryReadPort(store, "o", "r"),
     requestId: "fixture-recovery",
     successorRunId: "successor",
   });
@@ -944,20 +1208,26 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
     loadRecoveryRuntime({
       objective: 7,
       runId: "successor",
-      store,
+      store: recoveryReadPort(store, "o", "r"),
       readSnapshot: async () => ({ snapshot: f.snapshot, historyComplete: true }),
     });
   expect(await runtime()).toMatchObject({ status: "verified" });
   let context: AttemptContext;
   f.launch.mockImplementation(async (value) => {
-    expect(value.workItem).toBe(10);
-    expect(f.snapshot.workItems.slice(0, 2).every((item) => item.closed)).toBe(true);
+    if (options.retainedPrefix) {
+      expect(value.workItem).toBeGreaterThanOrEqual(8 + options.retainedPrefix);
+      const parent = f.snapshot.workItems[value.workItem - 9]!;
+      expect(value.packet.baseSha).toBe(parent.linkedPullRequests[0]!.headSha);
+    } else {
+      expect(value.workItem).toBe(10);
+      expect(f.snapshot.workItems.slice(0, 2).every((item) => item.closed)).toBe(true);
+    }
     expect(localExecutionScopeBatch(value)).toBeTruthy();
     await value.localExecutionScope!.assertCurrent();
     context = value;
     return {
       backendId: "codex-sdk/local-worktree",
-      resourceId: "fixture-worker-C",
+      resourceId: `fixture-worker-${value.workItem}`,
       startedAt: new Date().toISOString(),
       metadata: { resourceHostIdentity: hostIdentity },
     };
@@ -971,18 +1241,29 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
   vi.spyOn(CodexSdkLocalBackend.prototype, "collect").mockImplementation(async () =>
     normalizeArtifact({
       baseSha: context.packet.baseSha,
-      changedPaths: ["c.txt"],
-      patch:
-        "diff --git a/c.txt b/c.txt\nnew file mode 100644\n--- /dev/null\n+++ b/c.txt\n@@ -0,0 +1 @@\n+c\n",
+      changedPaths: [`${options.retainedPrefix ? context.packet.goal.slice(-1) : "c"}.txt`],
+      patch: `diff --git a/${options.retainedPrefix ? context.packet.goal.slice(-1) : "c"}.txt b/${options.retainedPrefix ? context.packet.goal.slice(-1) : "c"}.txt\nnew file mode 100644\n--- /dev/null\n+++ b/${options.retainedPrefix ? context.packet.goal.slice(-1) : "c"}.txt\n@@ -0,0 +1 @@\n+${options.retainedPrefix ? context.packet.goal.slice(-1) : "c"}\n`,
       outcome: "succeeded",
     }),
   );
   vi.spyOn(CodexSdkLocalBackend.prototype, "cleanup").mockResolvedValue(undefined);
   vi.spyOn(GitHubControlStore.prototype, "createPullRequest").mockImplementation(async (args) => {
-    const workItem = args.head === publicationBranch(7, 9, 1) ? 9 : 10;
+    const workItem = Number(args.head.match(/work-item-(\d+)/)![1]);
     expect(args.head).toBe(publicationBranch(7, workItem, workItem === 10 ? context.attempt : 1));
     const pull: LinkedPullRequest = {
-      ...f.snapshot.workItems[0]!.linkedPullRequests[0]!,
+      ...(f.snapshot.workItems.find((item) => item.linkedPullRequests.length)
+        ?.linkedPullRequests[0] ?? {
+        isDraft: false,
+        body: "",
+        changedLines: 1,
+        changedFiles: 1,
+        commitSubjects: [],
+        checks: null,
+        mergeable: "MERGEABLE",
+        createdAt: new Date(),
+        headCommittedAt: new Date(),
+        agentWorkEvents: [],
+      }),
       id: `PR_${workItem + 10}`,
       number: workItem + 10,
       title: workItem === 9 ? "b" : "c",
@@ -993,6 +1274,7 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
       changedFilePaths: ["c.txt"],
     };
     f.snapshot.workItems[workItem - 8]!.linkedPullRequests.push(pull);
+    f.pullBases.set(pull.number, args.base);
     if (options.loseArtifactPrResponse && workItem === 9)
       throw new PlatformUnavailableError(
         { kind: "server_error", retryAfterMs: 1 },
@@ -1004,6 +1286,70 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
       headSha: pull.headSha,
     };
   });
+  if (options.retainedPrefix) {
+    let stackMembers: number[] = options.premergedNativeRoot ? [...sourceNativePulls] : [];
+    let lostStackResponse = false;
+    const observedStack = async () => ({
+      number: 90,
+      baseRef: "main",
+      open: true,
+      pullRequests: await Promise.all(
+        stackMembers
+          .filter(
+            (number) => !(options.dropUpperAfterMerge && f.mergeShas.has(18) && number === 20),
+          )
+          .map(async (number) => {
+            const pull = await store.readPullRequest(number);
+            return {
+              number,
+              state: pull.state,
+              draft: false,
+              mergedAt: pull.merged ? new Date().toISOString() : null,
+              headRef: pull.headRef!,
+              headSha: pull.headSha,
+              baseRef: pull.baseRef,
+              baseSha: pull.baseSha,
+            };
+          }),
+      ),
+    });
+    vi.spyOn(GitHubStacks.prototype, "list").mockImplementation(async (number) =>
+      number !== undefined && stackMembers.includes(number) ? [await observedStack()] : [],
+    );
+    vi.spyOn(GitHubStacks.prototype, "get").mockImplementation(async (number) => {
+      expect(number).toBe(90);
+      return observedStack();
+    });
+    vi.spyOn(GitHubStacks.prototype, "ensureStack").mockImplementation(async (numbers) => {
+      expect(
+        stackMembers.length === 0 || JSON.stringify(stackMembers) === JSON.stringify(numbers),
+      ).toBe(true);
+      stackMembers = [...numbers];
+      if (options.loseStackLinkResponse && !lostStackResponse) {
+        lostStackResponse = true;
+        throw new PlatformUnavailableError(
+          { kind: "server_error", retryAfterMs: 1 },
+          new Error("stack link response lost"),
+        );
+      }
+      return observedStack();
+    });
+    vi.spyOn(GitHubStacks.prototype, "ensureExtended").mockImplementation(
+      async (_number, prefix, additional) => {
+        expect(prefix).toEqual(stackMembers);
+        stackMembers = [...prefix, ...additional];
+        return observedStack();
+      },
+    );
+    vi.spyOn(GitHubStacks.prototype, "requestMerge").mockImplementation(async (input) => ({
+      state: "merged",
+      mergeSha: await store.mergePullRequest({
+        number: input.pullRequest,
+        headSha: input.expectedHeadSha,
+        commitTitle: input.title,
+      }),
+    }));
+  }
   const original = structuredClone(
     [
       ...f.snapshot.factoryEvents!,
@@ -1028,6 +1374,111 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
 }
 
 describe("Supervisor authenticated successor execution", () => {
+  it("restores retained artifact B beside published A and executes only fresh C", async () => {
+    const f = await successorFixture({
+      retainedPrefix: 2,
+      stackLength: 3,
+      nativeSource: true,
+      mixedRetainedPublication: true,
+    });
+    expect(f.planRecord.plan.items[0]!.source!.publication).not.toBeNull();
+    expect(f.planRecord.plan.items[1]!.source!.publication).toBeNull();
+    const result = await f.run();
+    expect(result, JSON.stringify(result)).toMatchObject({ status: "completed" });
+    expect(f.launch).toHaveBeenCalledTimes(1);
+    expect(await f.runtime()).toMatchObject({ status: "verified" });
+  }, 60_000);
+  it.each([
+    { omitMergedNativePrefix: false, retainedPrefix: 2 as const, stackLength: 3 as const },
+    { omitMergedNativePrefix: true, retainedPrefix: 2 as const, stackLength: 3 as const },
+    { omitMergedNativePrefix: true, retainedPrefix: 3 as const, stackLength: 4 as const },
+  ])(
+    "preserves revalidated source reservations across $stackLength layers, omitted prefix=$omitMergedNativePrefix",
+    async ({ omitMergedNativePrefix, retainedPrefix, stackLength }) => {
+      const f = await successorFixture({
+        retainedPrefix,
+        stackLength,
+        nativeSource: true,
+        premergedNativeRoot: true,
+        omitMergedNativePrefix,
+      });
+      const reserved = f.snapshot.workItems[1]!.factoryEvents!.find(
+        (event) => event.event === "AttemptReserved",
+      )!;
+      if (reserved.kind !== "attempt") throw new Error("fixture original reservation");
+      expect(f.planRecord.plan.items[1]!.source!.validation!.baseSha).not.toBe(reserved.baseSha);
+      const result = await f.run();
+      expect(result, JSON.stringify(result)).toMatchObject({ status: "completed" });
+      expect(f.launch).toHaveBeenCalledTimes(1);
+      expect(await f.runtime()).toMatchObject({ status: "verified" });
+    },
+    60_000,
+  );
+  it("rejects a changed remaining stack membership before integrating a retained upper", async () => {
+    const f = await successorFixture({
+      retainedPrefix: 2,
+      stackLength: 3,
+      nativeSource: true,
+      dropUpperAfterMerge: true,
+    });
+    expect(await f.run()).toMatchObject({
+      status: "escalated",
+      reason: "partially integrated native stack membership changed",
+    });
+    expect(f.mergeShas.has(18)).toBe(true);
+    expect(f.mergeShas.has(19)).toBe(false);
+    expect(f.mergeShas.has(20)).toBe(false);
+  }, 60_000);
+  it("rejects a changed retained root without launching its child", async () => {
+    const f = await successorFixture({ retainedPrefix: 1, stackLength: 2, nativeSource: true });
+    f.refs.set(`refs/heads/${publicationBranch(7, 8, 1)}`, f.baseSha);
+    const result = await f.run().catch((error: unknown) => ({ status: "blocked", error }));
+    expect(result.status).not.toBe("completed");
+    expect(f.launch).not.toHaveBeenCalled();
+    expect(f.merge).not.toHaveBeenCalled();
+  });
+  it("restarts a mixed native unit after linking loses its response without duplicate execution", async () => {
+    const f = await successorFixture({
+      retainedPrefix: 1,
+      stackLength: 3,
+      nativeSource: true,
+      loseStackLinkResponse: true,
+    });
+    await expect(f.run()).rejects.toThrow("platform unavailable");
+    expect(f.launch).toHaveBeenCalledTimes(2);
+    expect(await f.run()).toMatchObject({ status: "completed" });
+    expect(f.launch).toHaveBeenCalledTimes(2);
+  }, 30_000);
+  it.each([
+    { retainedPrefix: 1 as const, stackLength: 2 as const },
+    { retainedPrefix: 1 as const, stackLength: 3 as const },
+    { retainedPrefix: 2 as const, stackLength: 3 as const },
+  ])(
+    "completes retained native prefix $retainedPrefix of $stackLength without rebuilding it",
+    async (options) => {
+      const f = await successorFixture({ ...options, nativeSource: true });
+      const result = await f.run();
+      expect(result, JSON.stringify(f.snapshot.factoryEvents?.at(-1))).toMatchObject({
+        status: "completed",
+      });
+      expect(f.launch).toHaveBeenCalledTimes(options.stackLength - options.retainedPrefix);
+      expect(f.snapshot.workItems.every((item) => item.closed)).toBe(true);
+      const events = [
+        ...f.snapshot.factoryEvents!,
+        ...f.snapshot.workItems.flatMap((item) => item.factoryEvents!),
+      ];
+      expect(events.filter((event) => event.runId === "parallel")).toEqual(f.original);
+      expect(events.filter((event) => event.event === "RecoverySourceIntegrated")).toHaveLength(
+        options.retainedPrefix,
+      );
+      const terminalRuntime = await f.runtime();
+      expect(
+        terminalRuntime,
+        JSON.stringify(terminalRuntime.status === "blocked" ? terminalRuntime : null),
+      ).toMatchObject({ status: "verified" });
+    },
+    60_000,
+  );
   it.each([
     { artifactOnly: false, failC: false },
     { artifactOnly: true, failC: false },
@@ -1066,7 +1517,21 @@ describe("Supervisor authenticated successor execution", () => {
             implementationAttemptsPerItem: 1,
           },
         });
-        expect(dirty).toMatchObject({ status: "blocked", plan: null });
+        expect(dirty.status).toBe("proposed");
+        expect(dirty.plan!.items[2]).toMatchObject({
+          action: "execute",
+          resources: { state: "reconciliation-required" },
+        });
+        expect(
+          await verifyRecoveryProposalResources({
+            plan: dirty.plan!,
+            store: recoveryReadPort(f.store, "o", "r"),
+            events: [
+              ...f.snapshot.factoryEvents!,
+              ...f.snapshot.workItems.flatMap((item) => item.factoryEvents!),
+            ],
+          }),
+        ).toMatchObject({ status: "blocked" });
         vi.mocked(localScopes.linuxLocalScopeReadPort.hostIdentity).mockResolvedValue(
           "b".repeat(64),
         );
@@ -1262,7 +1727,7 @@ describe("Supervisor authenticated successor execution", () => {
     f.snapshot.factoryEvents = f.snapshot.factoryEvents!.filter(
       (event) => event.event !== "RecoveryAdoptionCompleted",
     );
-    await expect(f.run()).rejects.toThrow("successor runtime unavailable");
+    await expect(f.run()).rejects.toThrow(/authority.*unavailable|successor runtime unavailable/);
     expect(f.launch).not.toHaveBeenCalled();
     expect(f.review).not.toHaveBeenCalled();
     expect(f.merge).toHaveBeenCalledTimes(1);

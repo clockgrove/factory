@@ -1,0 +1,252 @@
+{
+  "protocol": "clockgrove.factory/component-evidence-v1",
+  "capability": "local-lifecycle-and-activation-qualification",
+  "implementationCommit": "136983af385413c971bf3f5cd0f744542a56cdf2",
+  "status": "mixed-component-results",
+  "scope": "offline-release-batch-staged-no-model-wsl2-queued-withdrawal-and-partial-worker-faults",
+  "finalVerifierBatch": {
+    "sourceCommit": "35ea74c00d1f0eba9a963fde9256dba5190b5716",
+    "command": "npm run verify:release",
+    "exitCode": 0,
+    "testFilesPassed": 121,
+    "testsPassed": 2035,
+    "testsSkipped": 3,
+    "testDurationSeconds": 281.79,
+    "coveragePercent": {
+      "statements": 81.01,
+      "branches": 77.04,
+      "functions": 85.52,
+      "lines": 82.28
+    },
+    "staticSchemaBundlePluginAndNpmChecks": "passed",
+    "dependencyAuditVulnerabilities": 0,
+    "sourceLogSha256": "3e6962518fcb8bed19fe0dd0cd7b91815693504cc6d0c8e724f29f60fedca1a2",
+    "runtimeBundlesUnchangedFromInstalledSubject": true,
+    "package": {
+      "origin": "local npm pack of this source commit; not the public registry",
+      "files": 72,
+      "bytes": 2914538,
+      "sha256": "f2c8e135318c20d68ffff4a601eb735078449ee57b323201b384d59f7632b9d0",
+      "containsThisFinalEvidenceUpdate": false
+    },
+    "liveGatePassed": false
+  },
+  "correctedRestartParser": {
+    "sourceCommit": "1edf4acf73a56d52466ed9a4d1c23e25ba021f2e",
+    "integratedCommit": "35ea74c00d1f0eba9a963fde9256dba5190b5716",
+    "observedAt": "2026-09-05T11:33:33.974Z",
+    "sourceDiagnosticSha256": "6f7090caf3e691b2c9eaeb9b2236fa8937d9da46048a83168b9e68a3adf04f39",
+    "result": "parser-and-takeover-subset-observed",
+    "independentSameSequenceReceiptsPreserved": true,
+    "controllerTakeoverAndPauseAcknowledgementObserved": true,
+    "retryOrResumeReceipts": 0,
+    "workerModelUsage": "unavailable",
+    "capturedScopeAbsentAt": "2026-09-05T11:34:03.235Z",
+    "originalFailureEvidenceUnchanged": true,
+    "recoveredCompletionQualified": false,
+    "scope": "Read-only authenticated receipt parsing and exact-scope observation; no lifecycle actions, reinjection, retry, model call, or original evidence rewrite."
+  },
+  "verification": {
+    "command": "npm run verify:release",
+    "exitCode": 0,
+    "testFilesPassed": 121,
+    "testsPassed": 2032,
+    "testsSkipped": 3,
+    "testDurationSeconds": 279.43,
+    "coveragePercent": {
+      "statements": 80.97,
+      "branches": 77.01,
+      "functions": 85.48,
+      "lines": 82.24
+    },
+    "typecheck": "passed",
+    "lint": "passed",
+    "format": "passed",
+    "schemas": "passed",
+    "reproducibleBundles": "passed",
+    "cleanStagedPluginInstall": "passed",
+    "cleanStagedNpmTarballInstall": "passed",
+    "dependencyAuditVulnerabilities": 0,
+    "sourceLogSha256": "0a2cf83090c68c60b4553ae6a59c5899ac1c9a9bb2346eebe2fd3f99956e5c45"
+  },
+  "package": {
+    "name": "@clockgrove/factory",
+    "version": "2.0.26",
+    "origin": "local npm pack of the recorded candidate; not the public registry",
+    "files": 71,
+    "bytes": 2908439,
+    "sha256": "77f50c2fdd71cde79e03d4c09a0b5943219c532ebb30edfedfaf7108a6a9dbe2",
+    "containsThisEvidenceUpdate": false
+  },
+  "installedSubjects": {
+    "npmAndPluginAgree": true,
+    "personalPluginManifestVersion": "2.0.26+codex.20260905110917",
+    "inventorySha256": "82ca3993e2c09f3cb524dfbfb5c9d282c3c11a8c71045b4f341f17f971189dd2",
+    "bundles": [
+      {
+        "file": "factory.js",
+        "bytes": 2954992,
+        "sha256": "8d051d8af7d1b3fb3126095e71a4c01248c27c3df6487c6873b1903c295f38bf"
+      },
+      {
+        "file": "mcp-server.js",
+        "bytes": 3247316,
+        "sha256": "91fdfefffc4e92c08072c4bbf613b3311d8785578f72a49229a2c0a2662a7534"
+      }
+    ]
+  },
+  "portableComponents": {
+    "observedAt": "2026-09-05T11:09:30.521Z",
+    "sourceRecordSha256": "ad2a00db271bf18e5d22e3ae6776040c82c63c1a5b2733a7839cb657ffb99b9e",
+    "result": "passed",
+    "scope": "fresh-staged-installs-and-no-model-linux-host-components",
+    "host": {
+      "class": "wsl2",
+      "architecture": "x64",
+      "kernel": "6.18.33.2-microsoft-standard-WSL2",
+      "node": "24.20.0",
+      "systemd": 259
+    },
+    "installedCliStartup": "passed",
+    "controllerInstallIdempotencyAndUninstall": "passed",
+    "controllerStarted": false,
+    "hostProcessLifecycle": {
+      "npm": { "throttledPeriods": 11, "memoryBytes": 38633472, "memoryLimitBytes": 402653184 },
+      "plugin": { "throttledPeriods": 11, "memoryBytes": 21422080, "memoryLimitBytes": 402653184 },
+      "detachedDescendantCancelled": true,
+      "restartGenerationChanged": true,
+      "originalProcessesGone": true,
+      "cleanupVerified": true
+    }
+  },
+  "queuedActivationWithdrawal": {
+    "requestTool": "factory_cancel",
+    "requestObservedAt": "2026-09-05T11:09:46.343Z",
+    "requestSourceSha256": "cfce3011667347348b217eb5d2ea2ca256e17ef4dc02ae3b68229f35e7938ee7",
+    "receiptEvent": "ActivationCancellationRequested",
+    "statusTool": "factory_status",
+    "statusObservedAt": "2026-09-05T11:10:02.699Z",
+    "statusSourceSha256": "d4f8d4100203776edf2bca332ad609fe37722ba97564128101a4b4d42af97b6a",
+    "activationState": "withdrawn",
+    "requestIdentitiesMatch": true,
+    "runAvailability": "unavailable",
+    "runState": "not-started",
+    "workItems": 0,
+    "activeReservations": 0,
+    "summary": null,
+    "activeWorkerCancellationQualified": false
+  },
+  "installedActiveWorkerFaults": {
+    "cancellation": {
+      "command": "node scripts/verify-local-faults.mjs",
+      "result": "incomplete",
+      "exerciseExitCode": 2,
+      "readOnlyVerifyExitCode": 2,
+      "sourceRecordSha256": "562fc2b05659c71f7b365e22476ea9948d84e501be55eccd1648e644ce985c8e",
+      "verifyLogSha256": "81c9718456d86140bea65b73ba0e90fe0f0b6e3b9003bf739716e70e7ff33d00",
+      "statusSourceSha256": "e0b3a1f8fcd1e441b92ab1d7bb9f6a3e4f9bbbb625fd73f6651d15d1c9f80c00",
+      "runStartedAt": "2026-09-05T11:11:41.000Z",
+      "workerStartedAt": "2026-09-05T11:12:52.000Z",
+      "cancellationRequestedAt": "2026-09-05T11:13:04.000Z",
+      "workerCancelledAt": "2026-09-05T11:13:08.000Z",
+      "runCancelledAt": "2026-09-05T11:13:11.000Z",
+      "capturedWorkerInitiallyActive": true,
+      "capturedScopeAbsentAt": "2026-09-05T11:14:31.464Z",
+      "installedArtifactUnchanged": true,
+      "terminalState": "cancelled",
+      "attempts": 1,
+      "cancelledAttempts": 1,
+      "activeAttempts": 0,
+      "activeReservations": 0,
+      "validations": 0,
+      "publications": 0,
+      "integrations": 0,
+      "knownCompilerModelTokens": 14431,
+      "workerModelTokens": "unavailable",
+      "totalModelTokens": "unavailable",
+      "blockers": ["worker-model-usage-unavailable"],
+      "limitation": "Physical absence covers only the exact captured worker scope. Known compiler tokens are not total usage; absent interrupted-worker counters are not zero."
+    },
+    "controllerRestart": {
+      "command": "node scripts/verify-local-faults.mjs",
+      "result": "incomplete",
+      "sourceRecordSha256": "eed563d37c43f8db8ba84960684b1e1fae419bb374e30f97a693596f9a26ef8a",
+      "exerciseLogSha256": "664c38e77a7737b6d03dab000c4026c99b19b07a499b71178138080ff908fca8",
+      "statusSourceSha256": "0351f824a8e558da6fb978e5c6d7a399d4f84727726d1355f280650290f5c3ff",
+      "faultInjected": true,
+      "capturedWorkerInitiallyActive": true,
+      "capturedScopeAbsentAt": "2026-09-05T11:17:34.978Z",
+      "controllerInvocationChanged": true,
+      "replacementControllerObservedActive": true,
+      "statusRunMatchesOriginal": true,
+      "observedRunState": "paused",
+      "attempts": 1,
+      "cancelledAttempts": 1,
+      "activeAttempts": 0,
+      "activeReservations": 0,
+      "knownCompilerModelTokens": 14406,
+      "workerModelTokens": "unavailable",
+      "totalModelTokens": "unavailable",
+      "failedStage": "takeover-reconciliation",
+      "diagnosticCode": "local-fault-takeover-reconciliation-incomplete",
+      "attribution": {
+        "sourceDiagnosticSha256": "0dc3faa420d0b47a5358f3399d74a03e95ae17c4732c65b089413f129c8b039b",
+        "finding": "The harness incorrectly required global same-run sequence uniqueness across independent request and leased-event writers.",
+        "collidingEvents": ["RunPauseRequested", "BudgetReconciled"],
+        "sequence": 12,
+        "pauseRequestedAt": "2026-09-05T11:17:23.000Z",
+        "localBudgetReconciledAt": "2026-09-05T11:17:24.000Z",
+        "replacementControllerReceiptAt": "2026-09-05T11:17:52.000Z",
+        "originalEvidencePreserved": true,
+        "historicalFailurePromotedToPass": false
+      },
+      "retryRequested": false,
+      "resumeRequested": false,
+      "recoveredCompletionQualified": false,
+      "operatorCleanup": {
+        "requestTool": "factory_cancel",
+        "requestAt": "2026-09-05T11:22:18.000Z",
+        "requestSourceSha256": "0b9f1355af0265848cbcbcb6eb5e8ebd229879bc3b29b8c2be65baf1435fa5d3",
+        "statusSourceSha256": "3dee40dd6277720a05aa5c62d99184b7ca5db1385fbbe79541c09f320d8ae9e8",
+        "sameRun": true,
+        "terminalState": "cancelled",
+        "finishedAt": "2026-09-05T11:23:11.000Z",
+        "cancelledAttempts": 1,
+        "activeAttempts": 0,
+        "activeReservations": 0,
+        "pendingRetries": 0,
+        "publications": 0,
+        "integrations": 0,
+        "restartQualificationPassed": false
+      },
+      "limitation": "The recorded exercise stopped during takeover evidence processing. Scope absence and a changed controller invocation do not prove successful recovered completion or known interrupted-worker usage."
+    }
+  },
+  "finalControllerStop": {
+    "tool": "factory_controller_stop",
+    "observedAt": "2026-09-05T11:24:10.361Z",
+    "sourceRecordSha256": "c020e09e2ea99764fed64387d2bd2df8ac1c455e3a2e0cecdf495b6c74d46eaa",
+    "accepted": true,
+    "installed": true,
+    "active": false,
+    "qualificationPassImplied": false
+  },
+  "remainingGates": [
+    "complete-installed-objective-happy-path-and-adversarial-fault-matrix",
+    "full-model-backed-linux-sdk-and-cli-host-matrix",
+    "live-adaptive-scheduling-and-native-stack-validation-review",
+    "native-linux-and-macos-hosted-linux-observations",
+    "separately-authorized-daytona-and-both-managed-agent-objectives",
+    "publication-and-exact-published-artifact-install"
+  ],
+  "limitations": [
+    "This component record does not close a schema-2 publication gate or claim a complete installed Objective.",
+    "No-model host probes do not qualify a model-backed Factory controller, durable worker cancellation or same-run restart.",
+    "Queued activation withdrawal is not a cancelled execution: no run, worker, terminal run receipt or model-usage claim is fabricated.",
+    "The installed happy path remains blocked by stale native test-merge evidence; whether to permit changing a sibling PR head to obtain fresh preview evidence is an unanswered product decision, not an API-key shortage. Poll pacing alone does not refresh the preview.",
+    "Paid qualification requires separate provider, target, billable-unit and cleanup authorization plus any required credentials; existing GitHub authentication does not qualify managed billing, session absence or a stable managed Codex identity.",
+    "Raw records remain private. Their hashes identify retained source evidence, not publicly reproducible logs.",
+    "This documentation update was not included in the tested tarball. Later candidates and publication must bind their own exact source and artifact subjects."
+  ],
+  "sanitization": "Only aggregate observations and public artifact identities are included; no private repository, actor, Objective identity, host path, process identifier, credentials or raw receipts are published."
+}

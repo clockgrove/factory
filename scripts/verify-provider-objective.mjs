@@ -8,7 +8,8 @@ import {
   assertCompletion,
   boundedPolicy,
   main as runInstalledObjective,
-  objectiveBody,
+  objectiveBodyFor,
+  qualificationNamespace,
 } from "./verify-live-objective.mjs";
 
 const DAYTONA = "codex-cli/daytona";
@@ -18,6 +19,17 @@ const PROFILES = {
   "github-copilot": "github-copilot/github-managed",
   "openai-codex": "openai-codex/github-managed",
 };
+const TERMINAL_AGENT_TASK_STATES = new Set(["completed", "failed", "timed_out", "cancelled"]);
+const AGENT_TASK_STATES = new Set([
+  "queued",
+  "in_progress",
+  "completed",
+  "failed",
+  "idle",
+  "waiting_for_user",
+  "timed_out",
+  "cancelled",
+]);
 
 function integer(value, name, min, max) {
   assert.match(value ?? "", /^[1-9]\d*$/, `${name} requires an explicit positive integer`);
@@ -110,9 +122,9 @@ export function providerPolicy(authority) {
   };
 }
 
-export function providerObjective(profile) {
+export function providerObjective(profile, namespace) {
   return (
-    objectiveBody.replace("cloud workers, ", "") +
+    objectiveBodyFor(namespace).replace("cloud workers, ", "") +
     (profile === "daytona-burst"
       ? "\nThe two foundations must be independent root sibling delivery units; the final unit must join-after-merge. Their code is trusted_local. Factory may overflow one concurrent worker to the explicitly authorized Daytona sandbox; independent provider validation must remain isolated."
       : `\nEvery Work Item must declare managed execution trust and use only the ${PROFILES[profile]} managed profile. Daytona is authorized only for independent validation. Do not substitute local execution or a different managed profile.`)
@@ -231,17 +243,33 @@ export function assessProviderCompletion(evidence, authority) {
         .reduce((sum, event) => sum + event.amount, 0) <= authority.managedSessions,
       "observed managed sessions exceeded authorized ceiling",
     );
-    assert.equal(
-      evidence.cleanupObservation?.state,
-      "absent",
-      "Daytona cleanup is not independently observed absent",
-    );
-    if (authority.profile !== "daytona-burst") {
+    if (authority.profile === "daytona-burst") {
+      assert.equal(
+        evidence.cleanupObservation?.state,
+        "absent",
+        "Daytona cleanup is not independently observed absent",
+      );
+    } else {
+      assert.equal(
+        evidence.managedSessionObservation?.state,
+        "terminated",
+        "managed provider sessions are not independently observed terminal",
+      );
+      assert.equal(
+        evidence.managedSessionObservation.bindings?.length,
+        3,
+        "managed Objective requires three exact task/session bindings",
+      );
+      assert.equal(
+        evidence.billingObservation?.state,
+        "unavailable",
+        "managed billing boundary must remain explicit",
+      );
       return {
         result: "incomplete",
         scope,
         reason:
-          "Objective orchestration passed; provider session absence and billing are not qualified by a merged PR",
+          "Objective orchestration and exact Agent Task session termination passed; GitHub exposes no documented per-task billing-settlement API, so billing cessation remains unqualified",
       };
     }
     return {
@@ -298,6 +326,139 @@ export async function observeProviderAbsence(daytona, evidence) {
   }
 }
 
+/**
+ * Read-only Copilot lifecycle evidence. A task is owned only when its creator,
+ * repository, exact PR artifact, task ID, session task ID and session ref all agree.
+ */
+export async function observeManagedAgentTermination(request, evidence) {
+  if (
+    !Number.isSafeInteger(evidence.actor?.id) ||
+    !evidence.startedAt ||
+    !Array.isArray(evidence.pulls) ||
+    evidence.pulls.length === 0
+  ) {
+    return { state: "unknown", reason: "managed task identity inputs unavailable" };
+  }
+  try {
+    const tasks = [];
+    for (const archived of [false, true]) {
+      for (let page = 1; page <= 2; page += 1) {
+        const response = await request("GET /agents/repos/{owner}/{repo}/tasks", {
+          creator_id: [evidence.actor.id],
+          since: new Date(evidence.startedAt).toISOString(),
+          is_archived: archived,
+          per_page: 100,
+          page,
+          headers: { "x-github-api-version": "2026-03-10" },
+        });
+        const pageTasks = response.data?.tasks;
+        if (!Array.isArray(pageTasks))
+          return { state: "unknown", reason: "Agent Tasks returned an invalid collection" };
+        if (page === 2 && pageTasks.length > 0)
+          return { state: "unknown", reason: "Agent Tasks observation bound exceeded" };
+        tasks.push(...pageTasks);
+        if (tasks.length > 100)
+          return { state: "unknown", reason: "Agent Tasks observation bound exceeded" };
+        if (pageTasks.length < 100) break;
+      }
+    }
+    const bindings = [];
+    const taskIds = new Set();
+    for (const pull of evidence.pulls) {
+      if (
+        !Number.isSafeInteger(pull.id) ||
+        !Number.isSafeInteger(pull.base?.repo?.id) ||
+        typeof pull.head?.ref !== "string"
+      ) {
+        return { state: "unknown", reason: "pull request lacks an exact REST identity" };
+      }
+      const matches = tasks.filter(
+        (task) =>
+          task.creator?.id === evidence.actor.id &&
+          task.repository?.id === pull.base.repo.id &&
+          task.artifacts?.some(
+            (artifact) =>
+              artifact.provider === "github" &&
+              artifact.type === "pull" &&
+              artifact.data?.id === pull.id,
+          ),
+      );
+      if (matches.length !== 1 || typeof matches[0].id !== "string") {
+        return {
+          state: "unknown",
+          reason: `expected one exact Agent Task for pull request #${pull.number}`,
+        };
+      }
+      const task = (
+        await request("GET /agents/repos/{owner}/{repo}/tasks/{task_id}", {
+          task_id: matches[0].id,
+          headers: { "x-github-api-version": "2026-03-10" },
+        })
+      ).data;
+      if (
+        task.id !== matches[0].id ||
+        taskIds.has(task.id) ||
+        task.creator?.id !== evidence.actor.id ||
+        task.repository?.id !== pull.base.repo.id ||
+        !task.artifacts?.some(
+          (artifact) =>
+            artifact.provider === "github" &&
+            artifact.type === "pull" &&
+            artifact.data?.id === pull.id,
+        ) ||
+        !AGENT_TASK_STATES.has(task.state) ||
+        task.session_count !== task.sessions?.length ||
+        !Array.isArray(task.sessions) ||
+        task.sessions.length === 0 ||
+        task.sessions.length > 100
+      ) {
+        return { state: "unknown", reason: "Agent Task binding changed or is incomplete" };
+      }
+      taskIds.add(task.id);
+      const sessions = [];
+      const sessionIds = new Set();
+      for (const session of task.sessions) {
+        if (
+          typeof session.id !== "string" ||
+          session.task_id !== task.id ||
+          session.user?.id !== evidence.actor.id ||
+          session.repository?.id !== pull.base.repo.id ||
+          session.head_ref !== pull.head.ref ||
+          !AGENT_TASK_STATES.has(session.state) ||
+          sessionIds.has(session.id)
+        ) {
+          return { state: "unknown", reason: "session is outside the exact Agent Task binding" };
+        }
+        sessionIds.add(session.id);
+        sessions.push({ id: session.id, state: session.state });
+      }
+      bindings.push({
+        pullNumber: pull.number,
+        pullDatabaseId: pull.id,
+        taskId: task.id,
+        taskState: task.state,
+        sessions,
+      });
+    }
+    const active = bindings.flatMap((binding) =>
+      TERMINAL_AGENT_TASK_STATES.has(binding.taskState) &&
+      binding.sessions.every((session) => TERMINAL_AGENT_TASK_STATES.has(session.state))
+        ? []
+        : [{ taskId: binding.taskId, taskState: binding.taskState }],
+    );
+    return {
+      state: active.length === 0 ? "terminated" : "present",
+      observedAt: new Date().toISOString(),
+      bindings,
+      ...(active.length > 0 ? { active } : {}),
+      scope:
+        "authenticated creator + repository + exact PR artifact + task/session/ref binding; not billing evidence",
+    };
+  } catch {
+    return { state: "unknown", reason: "GitHub Agent Tasks observation unavailable" };
+  }
+}
+
 export async function main() {
   const authority = providerAuthority(process.env);
   if (!authority) {
@@ -313,8 +474,18 @@ export async function main() {
     "Not exercised: Codex managed profile lacks qualified stable provider actor identity; no Objective or session was created",
   );
   const policy = providerPolicy(authority);
-  const observe = async ({ evidence }) => {
-    evidence.cleanupObservation = await observeProviderAbsence(new Daytona(), evidence);
+  const namespace = qualificationNamespace(process.env.FACTORY_LIVE_OBJECTIVE_NAMESPACE);
+  const observe = async ({ evidence, request }) => {
+    if (authority.profile === "daytona-burst") {
+      evidence.cleanupObservation = await observeProviderAbsence(new Daytona(), evidence);
+    } else {
+      evidence.managedSessionObservation = await observeManagedAgentTermination(request, evidence);
+      evidence.billingObservation = {
+        state: "unavailable",
+        reason:
+          "GitHub billing reports are aggregate and expose no Agent Task/session identity or per-task settlement state",
+      };
+    }
   };
   await runInstalledObjective({
     scope:
@@ -322,9 +493,10 @@ export async function main() {
         ? "installed-daytona-burst-objective-happy-path"
         : "installed-managed-objective-happy-path",
     policy,
-    objectiveBody: providerObjective(authority.profile),
+    namespace,
+    objectiveBody: providerObjective(authority.profile, namespace),
     assessCompletion: (evidence) => assessProviderCompletion(evidence, authority),
-    beforeRun: async ({ call, checkout, evidence }) => {
+    beforeRun: async ({ call, checkout, evidence, request }) => {
       evidence.providerAuthority = authority;
       assert.ok(process.env.DAYTONA_API_KEY, "Daytona validation credentials are unavailable");
       if (authority.profile === "daytona-burst") {
@@ -334,6 +506,17 @@ export async function main() {
             (row) => row.id === DAYTONA && row.probe.available && row.probe.authenticated,
           ),
           "Daytona worker preflight failed before Objective creation",
+        );
+      } else {
+        const response = await request("GET /agents/repos/{owner}/{repo}/tasks", {
+          creator_id: [evidence.actor.id],
+          per_page: 1,
+          page: 1,
+          headers: { "x-github-api-version": "2026-03-10" },
+        });
+        assert.ok(
+          Array.isArray(response.data?.tasks),
+          "Agent Tasks read preflight returned invalid data",
         );
       }
     },

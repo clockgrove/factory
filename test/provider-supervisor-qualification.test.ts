@@ -8,6 +8,16 @@ import {
 } from "./helpers/provider-supervisor.js";
 
 describe("credential-free provider Supervisor qualification", () => {
+  it("uses independent durable run identities for separate host-sharing fixtures", async () => {
+    const first = await providerSupervisorFixture("daytona-burst");
+    const second = await providerSupervisorFixture("daytona-burst");
+    try {
+      expect(first.runId).not.toBe(second.runId);
+    } finally {
+      await second.dispose();
+      await first.dispose();
+    }
+  });
   it("never promotes sandbox-untrusted work or its join to host execution", async () => {
     const f = await providerSupervisorFixture("daytona-burst", { sandboxUntrusted: true });
     try {

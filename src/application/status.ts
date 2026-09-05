@@ -1,4 +1,5 @@
 import type { FactoryEvent } from "../protocol/events.js";
+import { activationCancellation, latestActivation } from "../control/activations.js";
 import {
   isManagedAgentBackendId,
   isSandboxBackendId,
@@ -90,6 +91,11 @@ export interface StatusWorkItem {
 
 export interface FactoryStatusReport {
   operation: "status";
+  activation?: {
+    requestId: string;
+    state: "queued" | "withdrawn" | "started" | "cancellation-requested" | "rejected";
+    cancellationRequestId?: string;
+  };
   repository: string;
   objective: {
     number: number;
@@ -325,6 +331,28 @@ export function buildStatusReport(input: {
   const observedAt = evidenceTime(input.snapshot, events);
   const items = derivedItems(input.snapshot, observedAt);
   const run = latestRunReceipts(events);
+  const activation = latestActivation(events, input.snapshot.number);
+  const withdrawal = activation && activationCancellation(events, activation);
+  const activationStarted =
+    activation &&
+    events.some(
+      (event) =>
+        event.kind === "run" &&
+        event.event === "FactoryRunStarted" &&
+        event.activationRequestId === activation.requestId,
+    );
+  const activationRejected =
+    activation &&
+    events.some(
+      (event) =>
+        event.kind === "run" &&
+        event.event === "ActivationRejected" &&
+        event.activationRequestId === activation.requestId &&
+        event.runId === activation.runId &&
+        event.requestedBy.toLowerCase() === activation.requestedBy.toLowerCase() &&
+        event.baseSha === activation.baseSha &&
+        event.policyDigest === activation.policyDigest,
+    );
   const policy = policyFor(events);
   const runEvents = run?.events ?? [];
   const effective = policy ? normalizeSchedulingPolicy(policy) : null;
@@ -505,6 +533,23 @@ export function buildStatusReport(input: {
     });
   return {
     operation: "status",
+    ...(activation
+      ? {
+          activation: {
+            requestId: activation.requestId,
+            state: withdrawal
+              ? activationStarted
+                ? ("cancellation-requested" as const)
+                : ("withdrawn" as const)
+              : activationStarted
+                ? ("started" as const)
+                : activationRejected
+                  ? ("rejected" as const)
+                  : ("queued" as const),
+            ...(withdrawal ? { cancellationRequestId: withdrawal.requestId } : {}),
+          },
+        }
+      : {}),
     repository: input.repository,
     objective: {
       number: input.snapshot.number,

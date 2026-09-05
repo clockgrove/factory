@@ -55,6 +55,28 @@ repository.
 Before adding any sandbox or managed agent, follow [shared provider configuration](configuration.md).
 Provider credentials, repository selection, and permission to spend are three separate settings.
 
+### Inspect prerequisites and a proposed plan
+
+Ask for `factory_doctor` with the exact Objective and checkout. It checks local repository identity,
+GitHub access, branch restrictions, configured runners, available repository validation tools, and
+current Linux/cgroup capacity. Optional cloud providers or a stopped controller do not prevent a
+foreground local run. Missing observations are reported rather than treated as success.
+
+Ask for `factory_plan` to inspect existing Work Items without a model call. To compile before
+activation, explicitly request `compile: true` and supply the checkout; the CLI equivalent is
+`factory plan OWNER/REPO#OBJECTIVE --compile --repo /absolute/linux/checkout`.
+This consumes model quota but creates no issues, starts no worker, and grants no execution authority.
+The proposed graph and observed usage are returned only to the caller; later activation compiles
+independently. An existing issue graph's claimed digest is not proof of immutable graph authority.
+
+Compilation checks that the checkout matches the requested repository and selected base before
+and after the model call. Its read-only clean check refuses tracked, staged, or untracked changes
+without running repository Git filters. Submodules, content-filtered checkouts such as materialized
+LFS files, and more than 256 MiB of tracked content currently exceed this preactivation check's
+support boundary; a diagnostic does not authorize bypassing it or changing the checkout.
+
+### Authorize execution
+
 In a supported harness, invoke the `director` skill with:
 
 - `OWNER/REPO#OBJECTIVE`
@@ -93,7 +115,6 @@ node dist/factory.js cancel OWNER/REPO#OBJECTIVE --request-id cancel-001 --reaso
 
 The request is a durable GitHub event. The active Supervisor stops workers, records terminal attempt
 and run receipts, and releases the lease; killing a process is not used as the cancellation record.
-
 
 ## Environment and troubleshooting
 

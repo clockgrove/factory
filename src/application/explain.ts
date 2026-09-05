@@ -84,7 +84,15 @@ export function buildExplanationReport(input: {
   }
   const explanations: Array<Explanation & { workItem?: number }> = [];
   if (!run) {
-    explanations.push(explainGate({ gate: "authority", reason: "run-inactive" }));
+    const inactive = explainGate({ gate: "authority", reason: "run-inactive" });
+    explanations.push(
+      status.activation?.state === "withdrawn"
+        ? {
+            ...inactive,
+            summary: `Activation ${status.activation.requestId} was withdrawn by request ${status.activation.cancellationRequestId}; no Factory run started.`,
+          }
+        : inactive,
+    );
   }
   for (const item of selected) {
     if (item.openDependencies.length > 0) {

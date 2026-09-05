@@ -118,7 +118,11 @@ The Director skill uses bounded, read-only operations when the user is inspectin
   admission snapshot without writing GitHub or launching a worker.
 - `factory_recovery_plan` inspects historical work, graph/PR evidence, and cumulative recorded usage
   after escalation. Its CLI equivalent is `factory recovery-plan OWNER/REPO#NUMBER`. It neither
-  authorizes execution nor resets budgets; explicit successor-run adoption remains unfinished.
+  authorizes execution nor resets budgets.
+- `factory_recovery_propose` builds a read-only, digest-bound successor plan. With explicit user
+  authorization, `factory_recovery_request` records that exact plan for controller adoption;
+  it preserves the original issues and cumulative allowance. Resource and evidence checks still
+  gate execution. See [terminal recovery](docs/setup/unattended.md#continue-after-terminal-escalation).
 
 These reports mark unavailable observations explicitly. They do not invent token counts, provider
 costs, capacity readings, or timing data that were not durably observed.

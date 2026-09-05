@@ -206,7 +206,7 @@ function admitted(plan: RecoveryPlan) {
     kind: "recovery",
     event: "RecoveryConsumed",
     runId: plan.successorRunId,
-    sequence: sequence + 2,
+    sequence: sequence + 3,
     recoveryRequestId: plan.requestId,
     planDigest,
     predecessorRunId: plan.predecessor.runId,
@@ -214,13 +214,24 @@ function admitted(plan: RecoveryPlan) {
     claimRef: claim.ref,
     claimOid: claim.oid,
   });
-  const source = history(plan.successorRunId, sequence + 2, plan.acceptedPolicy);
+  const source = history(plan.successorRunId, sequence + 1, plan.acceptedPolicy);
+  source[1]!.sequence = sequence + 5;
   Object.assign(source[0]!, {
     recoveryRequestId: plan.requestId,
     recoveryPlanDigest: planDigest,
     predecessorRunId: plan.predecessor.runId,
   });
-  return { events: [request, consumed, ...source], claim };
+  const completed = event({
+    ...consumed,
+    event: "RecoveryAdoptionCompleted",
+    sequence: sequence + 4,
+    evidenceDigest: digest("1"),
+    sourceEventsDigest: plan.sourceEventsDigest,
+    accountingDigest: digest("2"),
+    resourceEvidenceDigest: digest("3"),
+    baseSha: plan.expectedBaseSha,
+  });
+  return { events: [request, consumed, completed, ...source], claim };
 }
 function fixture() {
   const events = history();
@@ -254,6 +265,48 @@ const codes = (value: ReturnType<typeof verifyRecoveryChain>) =>
   value.blockers.map((blocker) => blocker.code);
 
 describe("pure authenticated recovery chain verification", () => {
+  it.each(["complete", "missing-adoption", "conflicting-claim"])(
+    "accounts reused-graph successor history without inventing a compiler charge: %s",
+    (mode) => {
+      const value = successorFixture();
+      const prior = Object.values(value.plansByDigest)[0]!.plan;
+      value.events = value.events.filter(
+        (event) =>
+          !(
+            event.runId === "successor" &&
+            (event.kind === "budget" || event.event === "RecoveryAdoptionCompleted")
+          ),
+      );
+      const start = value.events.find(
+        (event) => event.event === "FactoryRunStarted" && event.runId === "successor",
+      )!;
+      const consumed = value.events.find((event) => event.event === "RecoveryConsumed")!;
+      consumed.sequence = start.sequence + 1;
+      if (consumed.event !== "RecoveryConsumed") throw new Error("fixture consumption");
+      if (mode !== "missing-adoption")
+        value.events.push(
+          event({
+            ...consumed,
+            event: "RecoveryAdoptionCompleted",
+            sequence: start.sequence + 2,
+            claimOid: mode === "conflicting-claim" ? sha("a") : consumed.claimOid,
+            evidenceDigest: digest("1"),
+            sourceEventsDigest: prior.sourceEventsDigest,
+            accountingDigest: digest("2"),
+            resourceEvidenceDigest: digest("3"),
+            baseSha: prior.expectedBaseSha,
+          }),
+        );
+      value.candidatePlan = proposal(value.events, "third", prior);
+      const before = structuredClone(value.events);
+      const result = verifyRecoveryChain(value);
+      expect(result.status).toBe("verified");
+      expect(result.accounting?.usage?.modelTokens).toBe(10);
+      expect(result.accounting?.unknownModelUsageCount).toBe(mode === "complete" ? 0 : 1);
+      expect(result.accounting?.remaining?.modelTokens).toBe(1090);
+      expect(value.events).toEqual(before);
+    },
+  );
   it("verifies a bootstrap proposal without creating authority or resetting usage", () => {
     const value = fixture();
     const before = structuredClone(value);

@@ -1,0 +1,40 @@
+{
+  "kind": "installed-controller-command-discovery",
+  "recordedOn": "2026-09-04",
+  "platform": "Linux under Windows WSL2",
+  "sourceCommit": "f87bdecc68e7f944ac7458b843ad6ea153193d33",
+  "artifact": {
+    "origin": "npm pack of committed source, installed through the personal Codex marketplace",
+    "publishedToRegistry": false,
+    "sha256": "451b6a413004e07de3bc470323d100fd535ccc0f156dbc686909911cf6d2212c",
+    "installedCliSha256": "8bb27a8a7893e8e14b34d3ed093d741af28114ae4790da106d0f06a01b68d09a",
+    "installedMcpSha256": "ff50159221fa845bcff88cd7f4f27203859359a5861d0f809984e090cdf64322"
+  },
+  "before": {
+    "servicePathFindsGitHubCli": false,
+    "servicePathFindsCodexCli": false,
+    "failure": "ENOENT"
+  },
+  "after": {
+    "generatedServicePathUsed": true,
+    "realSystemdInvocation": true,
+    "gitHubCliVersion": "2.97.0",
+    "codexCliVersion": "0.153.0",
+    "installedReadOnlyDoctorSucceeded": true,
+    "forwardedGitHubTokenEnvironmentRemoved": true,
+    "exitCode": 0,
+    "runtimeSeconds": 2.092,
+    "modelWorkersLaunched": 0,
+    "cloudResourcesLaunched": 0,
+    "objectiveActivated": false,
+    "repositoryControllerActive": false
+  },
+  "verification": {
+    "adversarialReview": "executable precedence finding fixed and regression-tested; no remaining findings",
+    "releaseChecksPassed": true,
+    "testsPassed": 1383,
+    "testsSkipped": 1,
+    "dependencyVulnerabilities": 0
+  },
+  "scope": "Proves installed executable discovery and read-only GitHub access in a real systemd process. Does not prove Objective execution, restart recovery, the full supported-host matrix, or published-registry installation. Private repository identities, credentials, and raw provider responses are omitted."
+}

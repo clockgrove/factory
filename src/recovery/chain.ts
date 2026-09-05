@@ -34,6 +34,7 @@ export interface RecoveryClaimObservation {
 export interface RecoveryChainVerification {
   status: "verified" | "blocked";
   executionAuthorized: false;
+  candidatePlanDigest: string | null;
   rootPlanDigest: string | null;
   verifiedAccountingRunIds: string[];
   allowance: RecoveryPlan["allowance"] | null;
@@ -96,6 +97,7 @@ export function verifyRecoveryChain(input: {
   const result: RecoveryChainVerification = {
     status: "verified",
     executionAuthorized: false,
+    candidatePlanDigest: null,
     rootPlanDigest: null,
     verifiedAccountingRunIds: [],
     allowance: null,
@@ -331,7 +333,9 @@ export function verifyRecoveryChain(input: {
       const historical = events.filter(
         (event) =>
           selected.has(event.runId) &&
-          event.kind !== "recovery" &&
+          (event.kind !== "recovery" ||
+            event.event === "RecoveryConsumed" ||
+            event.event === "RecoveryAdoptionCompleted") &&
           (!current ? event.sequence <= plan.sourceEventMaxSequence : true),
       );
       const accounting = assessRecoveryAccounting({
@@ -376,6 +380,7 @@ export function verifyRecoveryChain(input: {
         ),
     ), "unlinked-claim", "A historical predecessor has an unbound pending claim; its outcome must be reconciled rather than ignored.");
     result.rootPlanDigest = chain[0]!.digest;
+    result.candidatePlanDigest = candidateDigest;
     result.verifiedAccountingRunIds = candidate.history.map((entry) => entry.runId);
   } catch {
     if (result.status !== "blocked")

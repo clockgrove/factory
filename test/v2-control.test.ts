@@ -287,10 +287,12 @@ describe("attempt reservation", () => {
       event: "AttemptStarted",
       sequence: 19,
       providerResourceId: "sandbox-1",
+      resourceHostIdentity: "c".repeat(64),
       environmentIdentity: `registry.example.invalid/factory@sha256:${"a".repeat(64)}`,
     });
     expect(started).toMatchObject({
       providerResourceId: "sandbox-1",
+      resourceHostIdentity: "c".repeat(64),
       environmentIdentity: `registry.example.invalid/factory@sha256:${"a".repeat(64)}`,
     });
 

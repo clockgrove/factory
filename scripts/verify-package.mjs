@@ -58,6 +58,8 @@ const EXPECTED_TOOLS = [
   "factory_pause_cloud",
   "factory_plan",
   "factory_recovery_plan",
+  "factory_recovery_propose",
+  "factory_recovery_request",
   "factory_priority",
   "factory_replay",
   "factory_resume",
@@ -391,11 +393,28 @@ if (tools) {
 
   const replayTool = tools.find((tool) => tool.name === "factory_replay");
   const recoveryTool = tools.find((tool) => tool.name === "factory_recovery_plan");
+  const recoveryProposal = tools.find((tool) => tool.name === "factory_recovery_propose");
+  const recoveryRequest = tools.find((tool) => tool.name === "factory_recovery_request");
   check(
     recoveryTool?.annotations?.readOnlyHint === true &&
       recoveryTool?.annotations?.destructiveHint === false &&
       !recoveryTool?.inputSchema?.properties?.requestId,
     "factory_recovery_plan is a read-only observation without command authority",
+  );
+  check(
+    recoveryProposal?.annotations?.readOnlyHint === true &&
+      recoveryProposal?.inputSchema?.required?.includes("requestId") &&
+      !recoveryProposal?.inputSchema?.properties?.planDigest,
+    "factory_recovery_propose binds an identity without approving execution",
+  );
+  check(
+    recoveryRequest?.annotations?.readOnlyHint === false &&
+      recoveryRequest?.annotations?.idempotentHint === true &&
+      recoveryRequest?.inputSchema?.required?.includes("requestId") &&
+      recoveryRequest?.inputSchema?.required?.includes("planDigest") &&
+      !recoveryRequest?.inputSchema?.required?.includes("allowanceIncrement") &&
+      !recoveryRequest?.inputSchema?.properties?.policy,
+    "factory_recovery_request requires exact plan authority without a policy override",
   );
   check(
     replayTool?.annotations?.readOnlyHint === true &&

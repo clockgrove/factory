@@ -1,5 +1,6 @@
 /** Opt-in installed-plugin Supervisor exercise; never part of offline release checks. */
 import assert from "node:assert/strict";
+import { deduplicateQualificationReceipts } from "./qualification-receipts.mjs";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -9,6 +10,7 @@ import {
   openSync,
   readFileSync,
   realpathSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -660,7 +662,11 @@ export function assertQualificationNamespace(evidence) {
   );
 }
 
-export function assertQualificationCompletion(evidence) {
+export function assertQualificationCompletion(evidence, deliveryMode = "stacked-prs") {
+  assert.ok(
+    ["stacked-prs", "regular-prs"].includes(deliveryMode),
+    "unsupported qualification mode",
+  );
   assertCompletion(evidence);
   assertQualificationNamespace(evidence);
   assert.equal(
@@ -686,20 +692,15 @@ export function assertQualificationCompletion(evidence) {
     ),
     "run receipt lacks the authenticated GitHub actor or location",
   );
-  const eventsBySequence = new Map();
-  for (const event of rawEvents) {
-    const envelope = { ...event };
-    delete envelope.receiptUrl;
-    delete envelope.author;
-    delete envelope.authorId;
-    const prior = eventsBySequence.get(event.sequence);
-    if (prior)
-      assert.deepEqual(prior, envelope, "same run sequence contains conflicting GitHub receipts");
-    else eventsBySequence.set(event.sequence, envelope);
-  }
-  const events = [...eventsBySequence.values()].sort(
-    (left, right) => left.sequence - right.sequence,
-  );
+  const events = deduplicateQualificationReceipts(
+    rawEvents.map((event) => {
+      const envelope = { ...event };
+      delete envelope.receiptUrl;
+      delete envelope.author;
+      delete envelope.authorId;
+      return { event: envelope };
+    }),
+  ).map(({ event }) => event);
   const starts = events.filter((event) => event.event === "FactoryRunStarted");
   const completions = events.filter((event) => event.event === "FactoryRunCompleted");
   assert.equal(starts.length, 1, "exactly one authenticated run start is required");
@@ -730,30 +731,59 @@ export function assertQualificationCompletion(evidence) {
   );
   const delivery = events.filter((event) => event.event === "DeliverySelected");
   assert.equal(delivery.length, 1, "exactly one delivery selection is required");
-  assert.equal(delivery[0].requested, "stacked-prs", "native delivery was not requested");
-  assert.equal(delivery[0].selected, "native-stacks", "native delivery was not selected");
+  const selectedMode = deliveryMode === "stacked-prs" ? "native-stacks" : "regular-prs";
+  assert.equal(
+    delivery[0].requested,
+    deliveryMode,
+    "requested native delivery or explicit regular delivery differs",
+  );
+  assert.equal(
+    delivery[0].selected,
+    selectedMode,
+    "selected native delivery or explicit regular delivery differs",
+  );
   assert.ok(
     events
       .filter((event) => event.event === "PublicationRecorded")
-      .every((event) => event.mode === "native-stacks"),
-    "publication escaped native delivery mode",
+      .every((event) => event.mode === selectedMode),
+    "publication escaped selected delivery mode",
   );
   const attemptStarts = events.filter((event) => event.event === "AttemptStarted");
   const attemptSuccesses = events.filter((event) => event.event === "AttemptSucceeded");
-  for (const root of roots) {
-    const start = attemptStarts.find((event) => event.workItem === root.workItem);
-    assert.ok(start, `root Work Item #${root.workItem} did not start`);
-    assert.ok(
-      roots
-        .filter((other) => other.workItem !== root.workItem)
-        .every((other) =>
-          attemptSuccesses.some(
-            (success) => success.workItem === other.workItem && success.sequence > start.sequence,
-          ),
-        ),
-      "independent sibling attempt lifecycles did not overlap",
+  if (deliveryMode === "regular-prs") {
+    const admissions = events.filter((event) =>
+      ["AttemptReserved", "AttemptStarted"].includes(event.event),
     );
-  }
+    const seen = new Set();
+    for (const admission of admissions) {
+      for (const prior of seen)
+        if (prior !== admission.workItem)
+          assert.ok(
+            events.some(
+              (event) =>
+                event.event === "AttemptIntegrated" &&
+                event.workItem === prior &&
+                event.sequence < admission.sequence,
+            ),
+            "regular Work Item admitted before previous pipeline integrated",
+          );
+      seen.add(admission.workItem);
+    }
+  } else
+    for (const root of roots) {
+      const start = attemptStarts.find((event) => event.workItem === root.workItem);
+      assert.ok(start, `root Work Item #${root.workItem} did not start`);
+      assert.ok(
+        roots
+          .filter((other) => other.workItem !== root.workItem)
+          .every((other) =>
+            attemptSuccesses.some(
+              (success) => success.workItem === other.workItem && success.sequence > start.sequence,
+            ),
+          ),
+        "independent sibling attempt lifecycles did not overlap",
+      );
+    }
 
   const modelReceipts = events.filter(
     (event) => event.event === "BudgetReconciled" && event.unit === "model_tokens",
@@ -1009,7 +1039,16 @@ export async function main(qualification = {}) {
     },
   };
   const output = resolve(required("FACTORY_LIVE_OBJECTIVE_EVIDENCE"));
-  mkdirSync(output, { recursive: true });
+  mkdirSync(output, { recursive: true, ...(qualification.privateEvidence ? { mode: 0o700 } : {}) });
+  if (qualification.privateEvidence) {
+    const directory = statSync(output);
+    assert.ok(
+      directory.isDirectory() &&
+        directory.uid === process.getuid() &&
+        (directory.mode & 0o077) === 0,
+      "regular qualification evidence directory must be owner-only",
+    );
+  }
   const evidencePath = join(
     output,
     preflightOnly ? "qualification-preflight.json" : "objective-evidence.json",
@@ -1102,9 +1141,9 @@ export async function main(qualification = {}) {
     console.log(
       `Created disposable Objective ${evidence.objective.html_url} for ${namespace}; installed Factory is running.`,
     );
-    evidence.runResult = await call(
-      "factory_run",
-      {
+    evidence.runRequest = {
+      tool: "factory_run",
+      arguments: {
         owner,
         repo,
         objectiveNumber: evidence.objective.number,
@@ -1112,6 +1151,11 @@ export async function main(qualification = {}) {
         untilTerminal: true,
         policy: evidence.policy,
       },
+    };
+    save();
+    evidence.runResult = await call(
+      evidence.runRequest.tool,
+      evidence.runRequest.arguments,
       48 * 60_000,
     );
     evidence.status = await call("factory_status", {

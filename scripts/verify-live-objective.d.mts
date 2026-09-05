@@ -16,7 +16,10 @@ export function waitForCreatedObjectiveNamespace(input: {
 export function boundedPolicy(delivery?: string, maxModelTokens?: number): unknown;
 export function assertCompletion(evidence: unknown, allowedBackends?: string[]): void;
 export function assertQualificationNamespace(evidence: unknown): void;
-export function assertQualificationCompletion(evidence: unknown): void;
+export function assertQualificationCompletion(
+  evidence: unknown,
+  deliveryMode?: "stacked-prs" | "regular-prs",
+): void;
 export function assessCompletion(evidence: unknown): {
   result: "passed" | "failed" | "incomplete";
   scope: "installed-local-objective-happy-path";

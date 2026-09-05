@@ -21,7 +21,15 @@ import {
   qualificationPaths,
   waitForCreatedObjectiveNamespace,
 } from "../scripts/verify-live-objective.mjs";
-import { parseRunPolicy } from "../src/protocol/policy.js";
+import { parseRunPolicy, policyDigest } from "../src/protocol/policy.js";
+import { bindValidationToPublishedHead } from "../src/validation/plan.js";
+import {
+  assertRegularCompletion,
+  assessRegularCompletion,
+  regularQualification,
+  main as regularMain,
+  observeRegularCommits,
+} from "../scripts/verify-regular-objective.mjs";
 
 type HarnessEvent = {
   event: string;
@@ -284,6 +292,263 @@ function evidence() {
     })),
   };
 }
+
+function regularEvidence() {
+  const fixture = evidence();
+  const policy = parseRunPolicy(boundedPolicy("regular-prs"));
+  const digest = policyDigest(policy);
+  const base = "a".repeat(40);
+  const graphDigest = "b".repeat(64);
+  const regularCommits: { sha: string; treeSha: string; parents: string[] }[] = [];
+  const runStart = fixture.events.find((event) => event.event === "FactoryRunStarted")!;
+  Object.assign(runStart, { policy, policyDigest: digest });
+  const prefix = [
+    runStart,
+    { event: "GraphCompiled", baseSha: base, graphDigest },
+    fixture.events.find((event) => event.event === "GraphProjected")!,
+    { event: "DeliverySelected", requested: "regular-prs", selected: "regular-prs" },
+    {
+      event: "BudgetReconciled",
+      unit: "model_tokens",
+      phase: "management",
+      usageId: `compile-${graphDigest}`,
+      amount: 100,
+    },
+  ];
+  let previous = base;
+  const pipeline = [2, 3, 4].flatMap((number) => {
+    const head = String(number).repeat(40);
+    const merge = String(number + 3).repeat(40);
+    const tree = (number + 6).toString(16).repeat(40);
+    const validation = {
+      passed: true,
+      digest: String(number).repeat(64),
+      baseSha: previous,
+      outputTreeSha: tree,
+    };
+    const exact = bindValidationToPublishedHead({
+      validation,
+      publishedHeadSha: head,
+      publishedTreeSha: tree,
+      publishedBaseSha: previous,
+    });
+    regularCommits.push(
+      { sha: head, treeSha: tree, parents: [previous] },
+      { sha: merge, treeSha: tree, parents: [previous] },
+    );
+    Object.assign(fixture.pulls.find((pull) => pull.number === number + 10)!, {
+      head: { sha: head },
+      merge_commit_sha: merge,
+    });
+    const records = fixture.events.filter((event) => event.workItem === number);
+    const started = records.find((event) => event.event === "AttemptStarted")!;
+    const published = records.find((event) => event.event === "AttemptPublished")!;
+    const publication = records.find((event) => event.event === "PublicationRecorded")!;
+    Object.assign(published, { headSha: head });
+    Object.assign(publication, {
+      kind: "publication",
+      mode: "regular-prs",
+      position: 0,
+      headSha: head,
+      baseSha: previous,
+      validationDigest: validation.digest,
+      exactHeadValidationDigest: exact.digest,
+    });
+    records.find((event) => event.event === "AttemptIntegrated")!.headSha = merge;
+    records.splice(records.indexOf(started), 0, {
+      event: "AttemptReserved",
+      workItem: number,
+      attempt: 1,
+      sequence: 0,
+    });
+    records.splice(
+      records.indexOf(publication),
+      0,
+      {
+        event: "ValidationRecorded",
+        kind: "validation",
+        workItem: number,
+        attempt: 1,
+        passed: true,
+        baseSha: previous,
+        outputTreeSha: tree,
+        evidenceDigest: validation.digest,
+        sequence: 0,
+      },
+      {
+        event: "BudgetReconciled",
+        unit: "model_tokens",
+        phase: "execution",
+        workItem: number,
+        attempt: 1,
+        usageId: `worker-${number}-1`,
+        amount: 100,
+        sequence: 0,
+      },
+      {
+        event: "BudgetReconciled",
+        unit: "model_tokens",
+        phase: "management",
+        workItem: number,
+        attempt: 1,
+        usageId: `review-${String(number).repeat(64)}`,
+        amount: 100,
+        sequence: 0,
+      },
+    );
+    previous = merge;
+    return records;
+  });
+  return {
+    ...fixture,
+    scope: "installed-local-explicit-regular-objective",
+    base,
+    policy,
+    regularCommits,
+    preflight: { ...fixture.preflight, base },
+    runRequest: {
+      tool: "factory_run",
+      arguments: {
+        owner: "example",
+        repo: "factory-qualification",
+        objectiveNumber: 1,
+        repository: "/home/example/fixture",
+        untilTerminal: true,
+        policy,
+      },
+    },
+    status: { ...fixture.status, run: { ...fixture.status.run, policyDigest: digest } },
+    events: [...prefix, ...pipeline, { event: "FactoryRunCompleted" }].map(
+      (event, index) =>
+        ({
+          ...event,
+          runId: "fixture",
+          objective: 1,
+          sequence: index + 1,
+          policyDigest: digest,
+          at: new Date(index * 1000).toISOString(),
+          author: "operator",
+          authorId: 42,
+          receiptUrl: `https://github.com/example/factory-qualification/issues/1#issuecomment-${index}`,
+        }) as HarnessEvent,
+    ),
+  };
+}
+
+describe("explicit installed regular qualification", () => {
+  it("is inert without its own opt-in and refuses implicit selection overrides", async () => {
+    const run = vi.fn();
+    await regularMain({}, run);
+    expect(run).not.toHaveBeenCalled();
+    const env = {
+      FACTORY_LIVE_REGULAR_OBJECTIVE: "1",
+      FACTORY_LIVE_OBJECTIVE: "1",
+      FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS: "500000",
+    };
+    expect(() =>
+      regularQualification({ ...env, FACTORY_LIVE_OBJECTIVE_DELIVERY: "stacked-prs" }),
+    ).toThrow();
+    expect(() =>
+      regularQualification({ ...env, FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS: "500001" }),
+    ).toThrow();
+    await regularMain(env, run);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0]![0].policy).toEqual(boundedPolicy("regular-prs"));
+  });
+  it("passes only explicit serialized regular delivery and leaves native gate unchanged", () => {
+    const value = regularEvidence();
+    expect(() => assertRegularCompletion(value)).not.toThrow();
+    expect(assessRegularCompletion(value).result).toBe("passed");
+    expect(() => assertQualificationCompletion(value)).toThrow(/native delivery/);
+    expect(() => assertRegularCompletion(evidence())).toThrow();
+  });
+  it.each(["AttemptReserved", "AttemptStarted"])(
+    "rejects next %s after worker success but before prior integration",
+    (kind) => {
+      const value = regularEvidence();
+      const next = value.events.find((event) => event.workItem === 3 && event.event === kind)!;
+      next.sequence =
+        value.events.find((event) => event.workItem === 2 && event.event === "AttemptSucceeded")!
+          .sequence + 0.5;
+      // Keep integral production sequences while placing the new admission in the gap.
+      for (const event of value.events) event.sequence *= 2;
+      expect(() => assertRegularCompletion(value)).toThrow(/before previous pipeline integrated/);
+    },
+  );
+  it.each(["mode", "stackNumber", "parentItemId"])(
+    "rejects hidden publication topology %s",
+    (field) => {
+      const value = regularEvidence();
+      value.events.find((event) => event.event === "PublicationRecorded")![field] =
+        field === "mode" ? "native-stacks" : field === "stackNumber" ? 90 : "parent";
+      expect(() => assertRegularCompletion(value)).toThrow();
+    },
+  );
+  it.each(["treeSha", "parents", "sha"])("rejects changed exact commit %s", (field) => {
+    const value = regularEvidence();
+    Object.assign(value.regularCommits[0]!, {
+      [field]: field === "parents" ? ["e".repeat(40)] : "e".repeat(40),
+    });
+    expect(() => assertRegularCompletion(value)).toThrow();
+  });
+  it.each(["exactHeadValidationDigest", "validationDigest", "baseSha"])(
+    "rejects transplanted publication %s",
+    (field) => {
+      const value = regularEvidence();
+      value.events.find((event) => event.event === "PublicationRecorded")![field] = "f".repeat(
+        field === "baseSha" ? 40 : 64,
+      );
+      expect(() => assertRegularCompletion(value)).toThrow();
+    },
+  );
+  it("rejects requested policy drift, unauthenticated closure and missing worker usage", () => {
+    const policy = regularEvidence();
+    policy.runRequest.arguments.objectiveNumber = 99;
+    expect(() => assertRegularCompletion(policy)).toThrow(/request Objective/);
+    const unauth = regularEvidence();
+    unauth.events.at(-1)!.authorId = 99;
+    expect(() => assertRegularCompletion(unauth)).toThrow(/authenticated/);
+    const missing = regularEvidence();
+    missing.events = missing.events.filter((event) => event.usageId !== "worker-2-1");
+    expect(assessRegularCompletion(missing).result).toBe("incomplete");
+  });
+  it("accepts legitimate partial-order collision but rejects same-identity contradictions", () => {
+    const value = regularEvidence();
+    const budget = value.events.find((event) => event.event === "BudgetReconciled")!;
+    value.events.push({
+      ...budget,
+      kind: "run",
+      event: "RunPauseRequested",
+      requestId: "pause",
+      requestedBy: "operator",
+      repository: value.repository,
+    });
+    expect(() => assertRegularCompletion(value)).not.toThrow();
+    value.events.push({ ...budget, amount: 101 });
+    expect(() => assertRegularCompletion(value)).toThrow(/conflicting/);
+  });
+  it("performs only bounded exact commit reads and rejects transplanted read results", async () => {
+    const value = regularEvidence();
+    const original = structuredClone(value.regularCommits);
+    const request = vi.fn(async (_route: string, args: Record<string, string>) => {
+      const commit = original.find((commit) => commit.sha === args.commit_sha)!;
+      return {
+        data: {
+          sha: commit.sha,
+          tree: { sha: commit.treeSha },
+          parents: commit.parents.map((sha) => ({ sha })),
+        },
+      };
+    });
+    await observeRegularCommits({ evidence: value, request });
+    expect(request).toHaveBeenCalledTimes(6);
+    expect(request.mock.calls.every(([route]) => route.startsWith("GET "))).toBe(true);
+    expect(() => assertRegularCompletion(value)).not.toThrow();
+    await expect(
+      observeRegularCommits({ evidence: value, request: async () => ({ data: { sha: "other" } }) }),
+    ).rejects.toThrow(/another identity/);
+  });
+});
 
 describe("installed live Objective harness evidence boundary", () => {
   it("permits only an acknowledged same-actor failure before graph creation", () => {

@@ -1,5 +1,6 @@
 /** Opt-in installed local cancellation/orderly-restart qualification; never a release-suite test. */
 import assert from "node:assert/strict";
+import { deduplicateQualificationReceipts } from "./qualification-receipts.mjs";
 import { spawnSync } from "node:child_process";
 import { createHash, createHmac } from "node:crypto";
 import {
@@ -299,17 +300,7 @@ export function authenticatedFaultEvents(comments, actor, objective) {
       evidenceByteLimit,
     "authenticated receipt input exceeds bound",
   );
-  const result = new Map();
-  const requests = new Map();
-  const canonical = (value) => {
-    if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
-    if (value !== null && typeof value === "object")
-      return `{${Object.keys(value)
-        .sort()
-        .map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`)
-        .join(",")}}`;
-    return JSON.stringify(value);
-  };
+  const receipts = [];
   for (const comment of comments) {
     if (
       comment.user?.id !== actor.id ||
@@ -327,57 +318,10 @@ export function authenticatedFaultEvents(comments, actor, objective) {
           typeof event.kind === "string" &&
           typeof event.event === "string",
       );
-      const receipt = { event, commentId: comment.id, actorId: actor.id };
-      // Application commands and the leased Supervisor are independent writers.
-      // Their equal numeric sequence is a partial order, not a shared identity.
-      // Keep this semantic identity aligned with control/receipts.ts.
-      if (event.requestId !== undefined) {
-        assert.ok(typeof event.requestId === "string" && event.requestId.length > 0);
-        const key = JSON.stringify([event.objective, event.requestId]);
-        const semantic = { ...event };
-        delete semantic.at;
-        delete semantic.sequence;
-        for (const field of ["requestedBy", "repository"])
-          if (typeof semantic[field] === "string") semantic[field] = semantic[field].toLowerCase();
-        const encoded = canonical(semantic);
-        const previous = requests.get(key);
-        assert.ok(
-          !previous || previous.encoded === encoded,
-          "conflicting authenticated application request",
-        );
-        if (
-          !previous ||
-          event.sequence < previous.receipt.event.sequence ||
-          (event.sequence === previous.receipt.event.sequence &&
-            event.at < previous.receipt.event.at)
-        )
-          requests.set(key, { encoded, receipt });
-        continue;
-      }
-      const key = JSON.stringify([
-        event.runId,
-        event.sequence,
-        event.kind,
-        event.event,
-        event.workItem ?? "",
-        event.attempt ?? "",
-        event.phase ?? "",
-        event.unit ?? "",
-      ]);
-      const previous = result.get(key);
-      assert.ok(
-        !previous || hash(previous.event) === hash(event),
-        "conflicting authenticated receipt identity",
-      );
-      if (!previous) result.set(key, receipt);
+      receipts.push({ event, commentId: comment.id, actorId: actor.id });
     }
   }
-  return [...result.values(), ...[...requests.values()].map((entry) => entry.receipt)].sort(
-    (a, b) =>
-      a.event.sequence - b.event.sequence ||
-      String(a.event.at ?? "").localeCompare(String(b.event.at ?? "")) ||
-      a.event.event.localeCompare(b.event.event),
-  );
+  return deduplicateQualificationReceipts(receipts);
 }
 export function assessLocalFault(evidence) {
   const blockers = [];

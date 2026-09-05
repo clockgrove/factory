@@ -4,6 +4,7 @@ import {
   CapacityLedger,
   capacityReservationKey,
   deriveCapacityReservations,
+  isIntegrationValidationBackend,
   unreconciledCapacityReservations,
   type CapacityLimits,
   type CapacityReservation,
@@ -283,5 +284,103 @@ describe("repository-wide capacity ledger", () => {
         capacity("CapacityReserved", 3),
       ]),
     ).toMatchObject([{ event: "CapacityReserved", sequence: 3 }]);
+  });
+
+  it.each([
+    "AttemptFailed",
+    "AttemptTimedOut",
+    "AttemptCancelled",
+    "AttemptDeferred",
+    "AttemptIntegrated",
+  ])(
+    "keeps integration validation local and reserved despite source %s and passing validation",
+    (terminal) => {
+      const backend = `factory/integration-validation-${"a".repeat(64)}`;
+      const capacity = (
+        event: "CapacityReserved" | "CapacityReconciled",
+        sequence: number,
+        id = backend,
+      ) =>
+        parseFactoryEvent({
+          protocol: "clockgrove.factory/v2",
+          kind: "capacity",
+          event,
+          objective: 1,
+          runId: "run-1",
+          sequence,
+          at: "2026-09-05T00:00:00Z",
+          workItem: 10,
+          attempt: 1,
+          phase: "validation",
+          backend: id,
+          requestedCpu: 2,
+          requestedMemoryMb: 4096,
+          directorEpoch: 1,
+          policyDigest: DIGEST,
+        });
+      const validation = parseFactoryEvent({
+        protocol: "clockgrove.factory/v2",
+        kind: "validation",
+        event: "ValidationRecorded",
+        objective: 1,
+        runId: "run-1",
+        sequence: 2,
+        at: "2026-09-05T00:00:00Z",
+        workItem: 10,
+        attempt: 1,
+        baseSha: SHA,
+        outputTreeSha: SHA,
+        artifactDigest: "a".repeat(64),
+        evidenceDigest: "b".repeat(64),
+        passed: true,
+        policyDigest: DIGEST,
+      });
+      const original = [
+        attemptEvent("AttemptReserved", 1),
+        validation,
+        attemptEvent("AttemptFailed", 3, { event: terminal }),
+        capacity("CapacityReserved", 4),
+      ];
+      const derive = (events: FactoryEvent[]) =>
+        deriveCapacityReservations([
+          {
+            objective: 1,
+            workItem: 10,
+            events,
+            defaultCpu: 1,
+            defaultMemoryMb: 2048,
+            isLocalBackend: () => false,
+          },
+        ]);
+      expect(derive(original)).toMatchObject([
+        {
+          backendId: backend,
+          local: true,
+          paidUnits: 0,
+          admissionClass: "local",
+          cpu: 2,
+          memoryMb: 4096,
+        },
+      ]);
+      expect(
+        derive([
+          ...original,
+          capacity("CapacityReconciled", 5, `factory/integration-validation-${"b".repeat(64)}`),
+        ]),
+      ).toHaveLength(1);
+      expect(derive([...original, capacity("CapacityReconciled", 5)])).toEqual([]);
+      expect(
+        derive([...original, capacity("CapacityReconciled", 5), capacity("CapacityReserved", 6)]),
+      ).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    "factory/local-validation",
+    "factory/integration-validation-a",
+    `factory/integration-validation-${"A".repeat(64)}`,
+    `factory/integration-validation-${"a".repeat(64)}-extra`,
+  ])("does not classify malformed or ordinary backend %s as integration validation", (backend) => {
+    expect(isIntegrationValidationBackend(backend)).toBe(false);
   });
 });

@@ -27,6 +27,10 @@ Notable changes to Factory. See [the delivery plan](docs/DELIVERY-PLAN.md) for u
 
 ### Changed
 
+- Native-mode independent siblings retain parallel execution and validate the combined merge tree
+  after another Work Item in the same run advances trunk. Durable candidate/review checkpoints
+  preserve original PR heads, budget history, and response-loss recovery; external advances remain
+  an escalation boundary.
 - Recovery inspection distinguishes graph-derived native-stack units from independent sibling PRs.
 - Local Codex execution is the default; paid execution is always explicitly authorized and bounded.
 - The supported runtime is Linux on native Linux, Windows WSL2, or a Linux guest hosted by macOS.

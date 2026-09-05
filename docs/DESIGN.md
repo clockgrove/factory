@@ -373,9 +373,33 @@ closed. Human-approval, code-owner, last-push approval, and incompatible merge-m
 escalate rather than being bypassed. Regular sibling PRs are the default. Explicit stacked delivery
 uses GitHub's pinned REST surface only after an observed repository capability probe; an
 unavailable capability produces a durable configured fallback or escalation before publication.
-The regular-PR fallback admits one complete Work Item pipeline at a time. This is an intentional
-correctness boundary: ordinary sibling PRs share the trunk base, while only native stacks currently
-provide cascading rebase plus fresh validation and semantic review after a lower layer changes.
+The regular-PR fallback admits one complete Work Item pipeline at a time. In native-stack mode,
+independent Work Items remain sibling PRs and may execute concurrently. When an earlier sibling
+advances trunk, Factory first proves every intervening commit is an exact, authenticated integration
+from this same run. External or unexplained base changes escalate; clean applicability alone does
+not authorize executing changed code.
+
+For trusted-local siblings, Factory applies the original published patch to a fresh checkout of that
+proved target base, reruns the full validation plan, and persists an immutable merge-candidate
+checkpoint before requesting semantic review. A distinct review identity binds the original PR head,
+new base, combined tree, artifact, and validation evidence. The PR head, original reservation, and
+original exact-head validation remain unchanged. Candidate validation has its own local capacity and
+native-usage identity; original attempt completion cannot discharge this new resource liability.
+An interrupted validator without an exact completion checkpoint requires resource reconciliation,
+not an automatic duplicate launch. A completed checkpoint is reused after restart, including its
+original evidence timestamps, and its paid review is accounted once.
+
+Before merging, GitHub's current test-merge commit must name the exact target base and original PR
+head, with the same combined tree Factory validated. Stale or absent test-merge metadata waits;
+different trees fail closed. The resulting squash commit must have exactly the target base as its
+single parent and the validated combined tree. Response-loss recovery requires the pre-merge
+candidate and accepted review checkpoints; it never validates a completed merge retrospectively.
+These checks do not create a GitHub base-SHA compare-and-swap: an external writer racing the final
+merge remains detectable by the post-merge parent/tree check, not atomically preventable by the REST
+merge endpoint. Factory serializes its own integrations and preserves the repository/Objective fences.
+
+Native linear stacks separately provide cascading rebase plus fresh validation and semantic review
+after a lower layer changes.
 Immediately before each regular or stacked merge, integration is repository-fenced and Factory
 rechecks the exact validated head, current stack/base relationship, current branch rules, required
 checks, leases, and mergeability. A lower-layer rebase invalidates every affected descendant receipt

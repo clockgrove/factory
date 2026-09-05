@@ -27,6 +27,20 @@ documented to behave. This document records what was measured, so that every des
   detached commands, and stop. Factory startup probes credentials without creating paid resources;
   paid-resource creation remains an opt-in integration test.
 
+## Sibling test-merge freshness (September 2026)
+
+A read-only check of an existing open qualification PR found that its `base.sha` and test-merge
+parents still named the original trunk commit while a separate default-branch ref read named the
+newly integrated sibling. The PR nevertheless reported `mergeable: true`. No run was restarted and
+no issue, branch, or PR was changed by this observation. Private repository identifiers are omitted.
+
+GitHub [documents the test-merge identity](https://docs.github.com/en/rest/pulls/pulls#get-a-pull-request):
+before integration, `merge_commit_sha` names a synthetic test merge; after squash integration it
+names the actual squash commit. Factory therefore reads the test commit and compares its exact
+parents and tree before candidate integration, rather than treating a truthy mergeability flag as
+fresh combined-tree evidence. This observation establishes a stale-metadata case, not completed
+live conformance for the candidate integration path.
+
 ## Documented native-stack contract (not yet live conformance)
 
 Factory isolates GitHub's versioned stacked-pull-request surface behind a capability probe and pins

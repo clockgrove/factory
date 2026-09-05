@@ -34,6 +34,23 @@ Observed model usage was 157,125 tokens across compilation, two workers, and two
 issues, diffs, and job logs are retained outside this public repository. These partial results do not
 close the environment, scheduling, native-stack, or Objective E2E gates below.
 
+A subsequent installed local-only qualification compiled three Work Items and completed two
+independent worker/validation/review pipelines. Their recorded attempt lifecycles overlapped for
+41 seconds; that is not a measurement of physical CPU or model-session concurrency. One sibling
+merged, then integration of the other escalated because trunk no longer matched its original base.
+The dependent join did not execute. Observed usage was 196,220 model tokens against a 250,000-token
+stop threshold, so this failure was not budget exhaustion. The run remains terminal and its
+controller was stopped; no replacement run or extra allowance was created to bypass that history.
+
+`test/parallel-sibling-integration.test.ts` now exercises the real Supervisor with local Git and
+simulated GitHub/management responses: sequential integration of two independently published
+siblings, unchanged PR heads, fresh combined-tree validation, immutable candidate/review reuse
+after merge-response loss and lease takeover, repair of a missing integration receipt, stale
+test-merge metadata, wrong test-merge trees, external trunk changes, failed tests, rejected semantic
+review, and unknown validator cleanup. The candidate proof/checkpoint, publication, review, and
+capacity suites cover their lower-level binding and durability contracts. These are offline
+component results, not a completed installed Objective, live native stack, or dependent-join gate.
+
 | Surface | Evidence | Status |
 |---|---|---|
 | GitHub custom control refs | Live custom-ref, metadata-commit, workflow-side-effect, and GraphQL compare-and-swap probes against `clockgrove/factory` | Passed |
@@ -98,7 +115,7 @@ gate into a platform or paid-provider support claim.
 | DOD-4 — Adaptive local-first execution | `test/admission.test.ts`, `test/capacity-ledger.test.ts`, `test/resource-sampler.test.ts`, `test/scheduling-priority.test.ts`, `test/local-runtime.test.ts`, `test/codex-sdk-backend.test.ts`, `test/codex-cli-backend.test.ts` | Implemented; broad live-host matrix remains gated below |
 | DOD-5 — Explicit bounded cloud burst | `test/admission.test.ts`, `test/budget.test.ts`, `test/economics.test.ts`, `test/backend-conformance.test.ts`, `test/daytona-backend.test.ts`, `test/github-managed.test.ts`, `test/sandbox-contract.test.ts`, `test/supervisor-preflight.test.ts` | Implemented with fake/credential-free adapters; paid-provider runs remain gated below |
 | DOD-6 — Durable recovery | `test/repository-controller-faults.test.ts`, `test/compilation-durability.test.ts`, `test/review-durability.test.ts`, `test/scheduling-recovery.test.ts`, `test/session-recovery.test.ts`, `test/integration-recovery.test.ts`, `test/publication.test.ts` | Implemented and injected-fault fixtures pass |
-| DOD-7 — Evidence-bound delivery | `test/validation.test.ts`, `test/exact-head-validation.test.ts`, `test/delivery-topology.test.ts`, `test/stack-publication.test.ts`, `test/integration-recovery.test.ts`, `test/checks.test.ts` | Implemented; live native-stack matrix remains gated below |
+| DOD-7 — Evidence-bound delivery | `test/validation.test.ts`, `test/exact-head-validation.test.ts`, `test/delivery-topology.test.ts`, `test/stack-publication.test.ts`, `test/integration-recovery.test.ts`, `test/checks.test.ts`, `test/merge-candidate.test.ts`, `test/merge-candidates.test.ts`, `test/parallel-sibling-integration.test.ts` | Implemented; combined-tree sibling integration has offline Supervisor coverage; installed Objective and live native-stack matrix remain gated below |
 | DOD-8 — Explainable, replayable economics | `test/status-output.test.ts`, `test/explanations.test.ts`, `test/replay.test.ts`, `test/economics.test.ts`, `test/model-economics.test.ts`, `test/budget.test.ts`, `test/admission.test.ts`, installed MCP surface verification | Implemented and read-only contract verified; model tokens are an observed stop threshold with documented one-call overshoot, not a provider hard cap |
 | DOD-9 — Evidenced human boundaries | `test/approval.test.ts`, `test/branch-policy.test.ts`, `test/supervisor-preflight.test.ts`, `test/budget.test.ts`, `test/explanations.test.ts`, `test/execution-contract.test.ts` | Implemented and fail-closed fixtures pass |
 

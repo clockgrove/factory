@@ -52,6 +52,21 @@ function fixture() {
 }
 
 describe("read-only semantic review checkpoint", () => {
+  it("separates integration candidate reviews from original artifact and rebase acceptance", async () => {
+    const { store, receipt } = fixture();
+    const candidate: ReviewIdentity = { ...identity, kind: "integration-candidate" };
+    receipt.identity = candidate;
+    receipt.identityDigest = reviewIdentityDigest(candidate);
+    expect(reviewCheckpointRef(candidate)).not.toBe(reviewCheckpointRef(identity));
+    const loaded = await loadReviewCheckpoint(store, candidate);
+    expect(loaded?.identity).toEqual(candidate);
+    expect(loaded?.review.accepted).toBe(true);
+    await expect(loadReviewCheckpoint(store, identity)).rejects.toThrow(
+      "different immutable identity",
+    );
+    const { headSha: _head, ...withoutHead } = candidate;
+    expect(() => reviewIdentityDigest(withoutHead)).toThrow("headSha");
+  });
   it("loads exact acceptance and reported usage with only four read methods and no lease", async () => {
     const { store, receipt, readRef, readTreeEntry } = fixture();
     expect(Object.isFrozen(store)).toBe(true);

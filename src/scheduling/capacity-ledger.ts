@@ -5,6 +5,11 @@ import { isManagedAgentBackendId, isSandboxBackendId } from "../protocol/policy.
 export type CapacityPhase = "execution" | "validation";
 export type AdmissionClass = "local" | "remote-required" | "burst";
 
+/** Each integration candidate owns a distinct local validation obligation. */
+export function isIntegrationValidationBackend(backend: string): boolean {
+  return /^factory\/integration-validation-[a-f0-9]{64}$/.test(backend);
+}
+
 export interface CapacityReservation {
   key: string;
   objective: number;
@@ -484,8 +489,11 @@ export function deriveCapacityReservations(
           event.workItem === input.workItem &&
           event.attempt === reserved.attempt,
       );
-      if (terminalAttempt || validationFinished) continue;
-      const local = input.isLocalBackend?.(reserved.backend) ?? false;
+      const integrationValidation = isIntegrationValidationBackend(reserved.backend);
+      // Original attempt/validation completion cannot discharge a later candidate validator.
+      // Only that exact backend's durable CapacityReconciled receipt removes its obligation.
+      if (!integrationValidation && (terminalAttempt || validationFinished)) continue;
+      const local = integrationValidation || (input.isLocalBackend?.(reserved.backend) ?? false);
       const reservation: CapacityReservation = {
         key: capacityReservationKey({
           objective: input.objective,

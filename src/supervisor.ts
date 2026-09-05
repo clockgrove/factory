@@ -54,6 +54,13 @@ import {
 import { RunManager, type RunState } from "./control/runs.js";
 import { inspectImplicitRestart } from "./control/recovery.js";
 import {
+  MergeCandidateCheckpointStore,
+  mergeCandidateIdentityDigest,
+  type MergeCandidateCheckpointRecord,
+  type MergeCandidateIdentity,
+} from "./control/merge-candidates.js";
+import { verifyMergeCandidateSquash } from "./publication/merge-candidate.js";
+import {
   ReviewCheckpointManager,
   reviewIdentityDigest,
   runDurableReviewTransaction,
@@ -153,6 +160,7 @@ import {
   CapacityLedger,
   capacityReservationKey,
   deriveCapacityReservations,
+  isIntegrationValidationBackend,
   unreconciledCapacityReservations,
   type CapacityReservation,
 } from "./scheduling/capacity-ledger.js";
@@ -173,6 +181,7 @@ import {
   type CleanValidationResult,
 } from "./validation/clean-run.js";
 import { bindValidationToPublishedHead } from "./validation/plan.js";
+import type { ValidationEvidence } from "./validation/evidence.js";
 import {
   CircuitBreaker,
   ConcurrencyLimiter,
@@ -635,6 +644,7 @@ async function hostGit(
   repository: string,
   args: string[],
   maxOutputBytes = 256 * 1024,
+  preserveOutput = false,
 ): Promise<string> {
   const result = await runContainedProcess({
     command: "git",
@@ -647,7 +657,7 @@ async function hostGit(
   if (result.exitCode !== 0) {
     throw new Error(`git ${args.join(" ")} failed: ${result.stderr || result.stdout}`);
   }
-  return result.stdout.trim();
+  return preserveOutput ? result.stdout : result.stdout.trim();
 }
 
 async function ensureLocalCommit(repository: string, sha: string): Promise<void> {
@@ -880,6 +890,7 @@ export class FactorySupervisor {
   readonly #leases: LeaseManager;
   readonly #attempts: AttemptManager;
   readonly #reviews: ReviewCheckpointManager;
+  readonly #mergeCandidates: MergeCandidateCheckpointStore;
   readonly #recorder: LifecycleRecorder;
   #management: ManagementBackend;
   readonly #managementOverride: boolean;
@@ -974,6 +985,7 @@ export class FactorySupervisor {
       leases: this.#leases,
     });
     this.#reviews = new ReviewCheckpointManager(this.#store, this.#leases);
+    this.#mergeCandidates = new MergeCandidateCheckpointStore(this.#store, this.#leases);
     this.#recorder = new LifecycleRecorder(this.#store, this.#leases);
     this.#management =
       options.managementBackend ??
@@ -1993,6 +2005,41 @@ export class FactorySupervisor {
         });
         const objective = derive(snapshot);
         if (await this.#repairReservationReceipts(objective.items)) continue;
+        // GitHub can report MERGED before the response or our closure receipt arrives.
+        // Reconstruct sibling integration before derived "done" can close the Objective.
+        const unrecordedSibling =
+          this.#deliverySelection.selected === "native-stacks"
+            ? objective.items.find((item) => {
+                if (item.state !== "done") return false;
+                const metadata = parseGraphItemMetadata(item.body ?? "");
+                const unit = this.#deliveryPlan?.units.find((candidate) =>
+                  candidate.items.includes(metadata.id),
+                );
+                if (unit?.kind !== "sibling") return false;
+                const published = [...(item.factoryEvents ?? [])]
+                  .reverse()
+                  .find(
+                    (event) =>
+                      event.kind === "attempt" &&
+                      event.runId === this.#run.runId &&
+                      event.event === "AttemptPublished",
+                  );
+                return (
+                  published?.kind === "attempt" &&
+                  !(item.factoryEvents ?? []).some(
+                    (event) =>
+                      event.kind === "attempt" &&
+                      event.runId === this.#run.runId &&
+                      event.event === "AttemptIntegrated" &&
+                      event.attempt === published.attempt,
+                  )
+                );
+              })
+            : undefined;
+        if (unrecordedSibling) {
+          await this.#resumeIntegration(unrecordedSibling);
+          continue;
+        }
         if (allDone(objective)) {
           const settlements = await activeExecutions.settle();
           const failure = settlements.find((settlement) => settlement.error);
@@ -2168,7 +2215,10 @@ export class FactorySupervisor {
               exclusiveResources: packet.changeSurface?.exclusiveResources ?? [],
               isLocalBackend: (id: string) => {
                 const capabilities = this.#registry.get(id)?.capabilities;
-                return Boolean(capabilities?.hostExecution && !capabilities.requiresPaidRuntime);
+                return (
+                  isIntegrationValidationBackend(id) ||
+                  Boolean(capabilities?.hostExecution && !capabilities.requiresPaidRuntime)
+                );
               },
             };
           }),
@@ -3393,7 +3443,12 @@ export class FactorySupervisor {
   }
 
   #reviewUsageId(record: ReviewCheckpointRecord): string {
-    const prefix = record.identity.kind === "rebase" ? "rebase-review" : "review";
+    const prefix =
+      record.identity.kind === "integration-candidate"
+        ? "integration-review"
+        : record.identity.kind === "rebase"
+          ? "rebase-review"
+          : "review";
     return `${prefix}-${record.identityDigest}`;
   }
 
@@ -3744,7 +3799,10 @@ export class FactorySupervisor {
     );
   }
 
-  async #nativeStackMember(item: DerivedWorkItem): Promise<NativeStackMember> {
+  async #nativeStackMember(
+    item: DerivedWorkItem,
+    requireRecordedPublication = false,
+  ): Promise<NativeStackMember> {
     const publishedEvent = [...(item.factoryEvents ?? [])]
       .sort((left, right) => right.sequence - left.sequence)
       .find(
@@ -3811,7 +3869,7 @@ export class FactorySupervisor {
       );
     const baseBranch =
       publicationEvent?.kind === "publication" ? publicationEvent.baseBranch : this.#baseBranch;
-    if (!publicationEvent && plan.parentItemId) {
+    if (!publicationEvent && (plan.parentItemId || requireRecordedPublication)) {
       throw new Error(`stack Work Item ${metadata.id} is missing its publication receipt`);
     }
     const receipt: PublicationReceipt = {
@@ -4300,14 +4358,16 @@ export class FactorySupervisor {
         this.#options.repository,
         ["diff", "--name-only", "-z", baseSha, headSha],
         MAX_ARTIFACT_PATCH_BYTES + 1_024,
+        true,
       )
     )
       .split("\0")
       .filter(Boolean);
     const patch = await hostGit(
       this.#options.repository,
-      ["diff", "--binary", "--no-ext-diff", baseSha, headSha],
+      ["diff", "--binary", "--no-ext-diff", "--no-textconv", baseSha, headSha],
       MAX_ARTIFACT_PATCH_BYTES + 1_024,
+      true,
     );
     const artifact = normalizeArtifact({
       baseSha,
@@ -4423,30 +4483,516 @@ export class FactorySupervisor {
     }
   }
 
+  #mergeCandidateIdentity(
+    member: NativeStackMember,
+    targetBaseSha: string,
+  ): MergeCandidateIdentity {
+    return {
+      runId: this.#run.runId,
+      objective: this.#run.objective,
+      workItem: member.reservation.workItem,
+      attempt: member.reservation.attempt,
+      pullRequest: member.pull.number,
+      sourceHeadSha: member.pull.commitSha,
+      sourceExactHeadValidationDigest: member.pull.exactHeadValidation.digest,
+      targetBaseSha,
+    };
+  }
+
+  #mergeCandidateReviewIdentity(record: MergeCandidateCheckpointRecord): ReviewIdentity {
+    return {
+      kind: "integration-candidate",
+      runId: record.identity.runId,
+      objective: record.identity.objective,
+      workItem: record.identity.workItem,
+      attempt: record.identity.attempt,
+      artifactDigest: record.validation.artifactDigest,
+      baseSha: record.validation.baseSha,
+      outputTreeSha: record.validation.outputTreeSha,
+      evidenceDigest: record.validation.digest,
+      headSha: record.identity.sourceHeadSha,
+    };
+  }
+
+  /** External trunk changes never acquire execution authority from being cleanly applicable. */
+  async #assertOwnTrunkAdvance(
+    sourceBaseSha: string,
+    targetBaseSha: string,
+    currentWorkItem: number,
+  ): Promise<Snapshot> {
+    const snapshot = await this.#reader.readObjective(this.#run.objective);
+    this.#fenceSnapshot(snapshot);
+    this.#sequences.observe(snapshotEvents(snapshot));
+    const items = derive(snapshot).items;
+    let cursor = targetBaseSha;
+    const visited = new Set<string>();
+    while (cursor !== sourceBaseSha) {
+      if (visited.has(cursor) || visited.size >= items.length) {
+        throw new Error("base advancement is not a bounded chain of this run's integrations");
+      }
+      visited.add(cursor);
+      const matches = items.flatMap((item) =>
+        deduplicateFactoryEvents(item.factoryEvents ?? [])
+          .filter(
+            (event) =>
+              event.kind === "attempt" &&
+              event.event === "AttemptIntegrated" &&
+              event.runId === this.#run.runId &&
+              event.workItem === item.number &&
+              event.workItem !== currentWorkItem &&
+              event.headSha === cursor,
+          )
+          .map((event) => ({ item, event })),
+      );
+      if (matches.length !== 1) {
+        throw new Error(
+          `base branch advanced outside this run's evidenced integrations: ${cursor}`,
+        );
+      }
+      const { item, event } = matches[0]!;
+      const member = await this.#nativeStackMember(item, true);
+      if (event.kind !== "attempt" || event.attempt !== member.reservation.attempt) {
+        throw new Error("integrated trunk commit does not match its published attempt");
+      }
+      const pull = await this.#store.readPullRequest(member.pull.number);
+      const commit = await this.#store.readCommit(cursor);
+      if (
+        !pull.merged ||
+        pull.headSha !== member.pull.commitSha ||
+        pull.mergeCommitSha !== cursor ||
+        pull.baseRef !== this.#baseBranch ||
+        commit.oid !== cursor ||
+        commit.parentOids.length !== 1
+      ) {
+        throw new Error("trunk advancement lacks an exact Factory squash integration");
+      }
+      const parent = commit.parentOids[0]!;
+      if (parent === member.pull.exactHeadValidation.baseSha) {
+        await verifySquashIntegration(this.#store, member.pull, cursor, parent);
+      } else {
+        const candidate = await this.#mergeCandidates.load(
+          this.#mergeCandidateIdentity(member, parent),
+        );
+        const review = candidate
+          ? await this.#reviews.load(this.#mergeCandidateReviewIdentity(candidate))
+          : null;
+        if (!candidate || !review?.review.accepted) {
+          throw new Error("prior sibling integration has no accepted candidate checkpoint");
+        }
+        await verifyMergeCandidateSquash(
+          this.#store,
+          member.pull.exactHeadValidation,
+          candidate.evidence,
+          cursor,
+        );
+      }
+      cursor = parent;
+    }
+    return snapshot;
+  }
+
+  async #recordCandidateValidationUsage(
+    evidence: ValidationEvidence,
+    identityDigest: string,
+    item: DerivedWorkItem,
+    reservation: AttemptReservation,
+  ): Promise<void> {
+    const usageId = `integration-validation-${identityDigest}`;
+    const amount =
+      new Date(evidence.completedAt).getTime() - new Date(evidence.startedAt).getTime();
+    const matches = (events: readonly FactoryEvent[]) =>
+      events.filter(
+        (event) =>
+          event.kind === "budget" &&
+          event.runId === this.#run.runId &&
+          event.workItem === item.number &&
+          event.attempt === reservation.attempt &&
+          event.unit === "validation_milliseconds" &&
+          event.phase === "validation" &&
+          event.event === "BudgetReconciled" &&
+          event.usageId === usageId,
+      );
+    const existing = matches(this.#budgetEvents);
+    if (existing.some((event) => event.amount !== amount))
+      throw new Error("merge-candidate validation usage conflicts with its evidence");
+    if (existing.length > 0) return;
+    try {
+      const event = await this.#lease.use((lease) =>
+        this.#recorder.budget({
+          lease,
+          workItemNodeId: item.id,
+          reservation,
+          sequence: this.#sequences.take(),
+          event: "BudgetReconciled",
+          unit: "validation_milliseconds",
+          phase: "validation",
+          amount,
+          usageId,
+        }),
+      );
+      this.#budgetEvents.push(event);
+    } catch (error) {
+      const snapshot = await this.#reader.readObjective(this.#run.objective);
+      this.#fenceSnapshot(snapshot);
+      const recovered = matches(snapshotEvents(snapshot));
+      if (recovered.length === 0) throw error;
+      if (recovered.some((event) => event.amount !== amount))
+        throw new Error("recovered merge-candidate validation usage conflicts with its evidence");
+      this.#sequences.observe(snapshotEvents(snapshot));
+      this.#budgetEvents.push(...recovered);
+    }
+  }
+
+  async #prepareSiblingMergeCandidate(
+    item: DerivedWorkItem,
+    member: NativeStackMember,
+    targetBaseSha: string,
+    merged: boolean,
+  ): Promise<MergeCandidateCheckpointRecord | null> {
+    const assertDeadline = () => {
+      if (
+        Date.now() >=
+        this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000
+      ) {
+        throw new Error("Objective timeout exhausted before merge-candidate admission");
+      }
+      this.#options.signal?.throwIfAborted();
+    };
+    assertDeadline();
+    const originalPacket = this.#packetFor(item.number);
+    const backend = this.#registry.get(member.reservation.backend);
+    if (
+      originalPacket.requirements.trust !== "trusted_local" ||
+      !backend?.capabilities.hostExecution
+    ) {
+      throw new Error("parallel sibling integration requires trusted-local execution provenance");
+    }
+    const snapshot = await this.#assertOwnTrunkAdvance(
+      member.pull.exactHeadValidation.baseSha,
+      targetBaseSha,
+      item.number,
+    );
+    this.#budgetEvents = deduplicateFactoryEvents([
+      ...this.#budgetEvents,
+      ...snapshotEvents(snapshot).filter((event) => event.runId === this.#run.runId),
+    ]);
+    const identity = this.#mergeCandidateIdentity(member, targetBaseSha);
+    const identityDigest = mergeCandidateIdentityDigest(identity);
+    let record = await this.#mergeCandidates.load(identity);
+    if (!record && merged) {
+      throw new Error(
+        "merged sibling has no pre-merge candidate checkpoint; refusing retrospective validation",
+      );
+    }
+    const packet = parseWorkerPacket({ ...originalPacket, baseSha: targetBaseSha });
+    const capacityBackend = `factory/integration-validation-${identityDigest}`;
+    const priorCapacity = unreconciledCapacityReservations(snapshotEvents(snapshot)).filter(
+      (event) =>
+        event.runId === this.#run.runId &&
+        event.workItem === item.number &&
+        event.attempt === member.reservation.attempt &&
+        event.backend === capacityBackend,
+    );
+    // A checkpoint is written only after the clean validator has returned. Without it, a
+    // crashed validator may still be alive: do not manufacture absence or duplicate its work.
+    if (!record && priorCapacity.length > 0) {
+      throw new Error(
+        "interrupted merge-candidate validation has no completion evidence; resource reconciliation required",
+      );
+    }
+    const reconcileCapacity = async (cpu: number, memoryMb: number) =>
+      this.#lease.use((lease) =>
+        this.#attempts.recordCapacity({
+          lease,
+          workItemNodeId: item.id,
+          reservation: member.reservation,
+          sequence: this.#sequences.take(),
+          event: "CapacityReconciled",
+          phase: "validation",
+          backend: capacityBackend,
+          requestedCpu: cpu,
+          requestedMemoryMb: memoryMb,
+          allowRecovery: true,
+        }),
+      );
+    if (record) {
+      for (const capacity of priorCapacity) {
+        await reconcileCapacity(capacity.requestedCpu, capacity.requestedMemoryMb);
+      }
+    }
+    let artifact: NormalizedArtifact | undefined;
+    const reconstructArtifact = async () => {
+      await ensureLocalCommit(this.#options.repository, member.pull.exactHeadValidation.baseSha);
+      await ensureLocalCommit(this.#options.repository, member.pull.commitSha);
+      await ensureLocalCommit(this.#options.repository, targetBaseSha);
+      const source = [member.pull.exactHeadValidation.baseSha, member.pull.commitSha];
+      const changedPaths = (
+        await hostGit(
+          this.#options.repository,
+          ["diff", "--name-only", "-z", ...source],
+          MAX_ARTIFACT_PATCH_BYTES + 1_024,
+          true,
+        )
+      )
+        .split("\0")
+        .filter(Boolean);
+      const patch = await hostGit(
+        this.#options.repository,
+        ["diff", "--binary", "--no-ext-diff", "--no-textconv", ...source],
+        MAX_ARTIFACT_PATCH_BYTES + 1_024,
+        true,
+      );
+      return normalizeArtifact({
+        baseSha: targetBaseSha,
+        changedPaths,
+        patch,
+        outcome: "succeeded",
+      });
+    };
+    if (!record) {
+      const effective = normalizeSchedulingPolicy(this.#policy);
+      const resource =
+        effective.capacity.mode === "adaptive-local"
+          ? await this.#resourceSampler.sample(Date.now()).catch(() => null)
+          : null;
+      if (effective.capacity.mode === "adaptive-local") {
+        const pressure = resource
+          ? resourcePressureReasons(resource, effective.capacity.local)
+          : ["resource sample unavailable"];
+        if (pressure.length > 0 || this.#resourceSampler.coolingDown(Date.now())) {
+          if (pressure.length > 0) this.#resourceSampler.notePressure(Date.now());
+          return null;
+        }
+      }
+      const capacity: CapacityReservation = {
+        key: capacityReservationKey({
+          objective: this.#run.objective,
+          workItem: item.number,
+          attempt: member.reservation.attempt,
+          phase: "validation",
+          backendId: capacityBackend,
+        }),
+        objective: this.#run.objective,
+        workItem: item.number,
+        attempt: member.reservation.attempt,
+        phase: "validation",
+        backendId: capacityBackend,
+        admissionClass: "local",
+        local: true,
+        cpu: packet.requirements.cpu ?? effective.capacity.local.defaultCpu,
+        memoryMb: packet.requirements.memoryMb ?? effective.capacity.local.defaultMemoryMb,
+        paidUnits: 0,
+        paths: packet.allowedPaths,
+        exclusiveResources: packet.changeSurface?.exclusiveResources ?? [],
+      };
+      const current = this.#capacity.snapshot();
+      const admitted = this.#capacity.tryReserve(
+        current.generation,
+        capacity,
+        admissionCapacityLimits(
+          this.#policy,
+          resource,
+          this.#run.objective,
+          this.#fairness.localMaximum(
+            this.#run.objective,
+            Math.min(effective.capacity.local.maxWorkers, this.#controllerLimits.maxLocalWorkers),
+            current.reservations,
+          ),
+          this.#controllerLimits,
+        ),
+      );
+      if (!admitted.reserved) return null;
+      let validation: CleanValidationResult | undefined;
+      let capacityRecorded = false;
+      try {
+        artifact = await reconstructArtifact();
+        await this.#lease.use((lease) =>
+          this.#attempts.recordCapacity({
+            lease,
+            workItemNodeId: item.id,
+            reservation: member.reservation,
+            sequence: this.#sequences.take(),
+            event: "CapacityReserved",
+            phase: "validation",
+            backend: capacityBackend,
+            requestedCpu: capacity.cpu,
+            requestedMemoryMb: capacity.memoryMb,
+            allowRecovery: true,
+          }),
+        );
+        capacityRecorded = true;
+        assertDeadline();
+        validation = await this.#externalAdmission(() =>
+          validateArtifactClean({
+            repository: this.#options.repository,
+            artifact: artifact!,
+            packet,
+          }),
+        );
+        if (!validation.evidence.passed) {
+          await this.#recordCandidateValidationUsage(
+            validation.evidence,
+            identityDigest,
+            item,
+            member.reservation,
+          );
+          throw new Error(validation.evidence.failureReason ?? "merge-candidate validation failed");
+        }
+        record = await this.#lease.use((lease) =>
+          this.#mergeCandidates.persist({
+            lease,
+            identity,
+            source: member.pull.exactHeadValidation,
+            validation: validation!.evidence,
+          }),
+        );
+      } finally {
+        try {
+          if (validation) await discardValidationResult(validation);
+          if (capacityRecorded && record) await reconcileCapacity(capacity.cpu, capacity.memoryMb);
+        } finally {
+          if (!capacityRecorded || record) this.#capacity.release(capacity.key);
+        }
+      }
+    }
+    await this.#recordCandidateValidationUsage(
+      record.validation,
+      identityDigest,
+      item,
+      member.reservation,
+    );
+    const reviewIdentity = this.#mergeCandidateReviewIdentity(record);
+    const existingReview = await this.#reviews.load(reviewIdentity);
+    const invocationId = `integration-review-${reviewIdentityDigest(reviewIdentity)}`;
+    if (!existingReview && merged)
+      throw new Error("merged sibling has no pre-merge semantic review checkpoint");
+    let invokeReview:
+      | ((
+          checkpoint: Parameters<ManagementBackend["review"]>[1],
+        ) => ReturnType<ManagementBackend["review"]>)
+      | undefined;
+    if (!existingReview) {
+      assertDeadline();
+      const budget = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
+      if (budget.modelTokens !== null && budget.modelTokens <= 0)
+        throw new Error(
+          "model-token budget is exhausted; refusing integration-candidate semantic review",
+        );
+      this.#assertManagementInvocationNotFailed(invocationId);
+      artifact ??= await reconstructArtifact();
+      if (artifact.digest !== record.validation.artifactDigest)
+        throw new Error("merge candidate no longer matches the original published patch");
+      const reviewModel = resolveModelSelection(this.#policy, "review");
+      invokeReview = (checkpoint) =>
+        this.#externalAdmission(() =>
+          this.#management.review(
+            {
+              repository: this.#options.repository,
+              objectiveNumber: this.#run.objective,
+              workItemNumber: item.number,
+              packet,
+              artifact: artifact!,
+              evidence: record.validation,
+              ...(reviewModel ? { modelSelection: reviewModel } : {}),
+            },
+            checkpoint,
+          ),
+        );
+    }
+    await runDurableReviewTransaction({
+      existing: existingReview,
+      ...(invokeReview ? { invoke: invokeReview } : {}),
+      persist: (result) =>
+        this.#lease.use((lease) =>
+          this.#reviews.persist({ lease, identity: reviewIdentity, result }),
+        ),
+      recover: () => this.#reviews.load(reviewIdentity),
+      recordUsage: (review) => this.#recordReviewUsage(review, item, member.reservation),
+      recordFailureUsage: (usage) =>
+        this.#recordFailedManagementUsage(invocationId, usage, item.id, member.reservation),
+      recordOutcome: async (review) => {
+        if (!review.review.accepted)
+          throw new Error(
+            `integration-candidate semantic review rejected: ${review.review.summary}; ${review.review.unmetCriteria.join("; ")}`,
+          );
+      },
+    });
+    return record;
+  }
+
   async #integrate(
     item: DerivedWorkItem,
     reservation: AttemptReservation,
     pull: PublishedPullRequest,
     deadline: number,
     allowRecovery = false,
+    candidate?: MergeCandidateCheckpointRecord,
   ): Promise<void> {
     for (;;) {
       await this.#lease.renewIfNeeded();
       const readiness = await this.#serializeIntegration(async () => {
+        if (candidate) {
+          const observed = await this.#store.readPullRequest(pull.number);
+          if (!observed.merged && observed.baseSha !== candidate.identity.targetBaseSha) {
+            return {
+              state: "wait" as const,
+              reason: "candidate base changed; fresh validation is required",
+            };
+          }
+        }
         const current = await integrationReadiness(
           this.#store,
           pull,
-          reservation.baseSha,
+          candidate?.identity.targetBaseSha ?? reservation.baseSha,
           this.#baseBranch,
-          { ciExpected: this.#ciExpectedOnPullRequests },
+          {
+            ciExpected: this.#ciExpectedOnPullRequests,
+            ...(candidate ? { mergeCandidateValidation: candidate.evidence } : {}),
+          },
         );
         if (current.state !== "ready") return current;
+        if (candidate) {
+          // REST mergeable/test-merge metadata can lag a trunk update. Check GitHub's
+          // actual proposed tree as well as our clean application before any merge.
+          const preview = await this.#store.readPullRequest(pull.number);
+          if (preview.headSha !== pull.commitSha || preview.baseRef !== this.#baseBranch) {
+            return {
+              state: "failed" as const,
+              reason: "pull request changed before candidate merge",
+            };
+          }
+          if (preview.merged || preview.mergeable !== true || !preview.mergeCommitSha) {
+            return {
+              state: "wait" as const,
+              reason: "waiting for current GitHub test-merge evidence",
+            };
+          }
+          const testMerge = await this.#store.readCommit(preview.mergeCommitSha);
+          if (
+            testMerge.oid !== preview.mergeCommitSha ||
+            testMerge.parentOids.length !== 2 ||
+            testMerge.parentOids[0] !== candidate.identity.targetBaseSha ||
+            testMerge.parentOids[1] !== pull.commitSha
+          ) {
+            return {
+              state: "wait" as const,
+              reason: "GitHub test-merge evidence is stale for the validated candidate",
+            };
+          }
+          if (testMerge.treeOid !== candidate.validation.outputTreeSha) {
+            return {
+              state: "failed" as const,
+              reason: "GitHub test-merge tree differs from the independently validated candidate",
+            };
+          }
+        }
         const currentBase = await this.#store.getBranchHead(this.#baseBranch);
-        if (currentBase.oid !== reservation.baseSha) {
+        const validatedBase = candidate?.identity.targetBaseSha ?? reservation.baseSha;
+        if (currentBase.oid !== validatedBase) {
           return {
-            state: "failed" as const,
+            state: candidate ? ("wait" as const) : ("failed" as const),
             reason:
-              `base branch advanced from validated commit ${reservation.baseSha} ` +
+              `base branch advanced from validated commit ${validatedBase} ` +
               `to ${currentBase.oid}`,
           };
         }
@@ -4477,7 +5023,16 @@ export class FactorySupervisor {
           commitTitle: item.title,
         });
         try {
-          await verifySquashIntegration(this.#store, pull, mergeSha, reservation.baseSha);
+          if (candidate) {
+            await verifyMergeCandidateSquash(
+              this.#store,
+              pull.exactHeadValidation,
+              candidate.evidence,
+              mergeSha,
+            );
+          } else {
+            await verifySquashIntegration(this.#store, pull, mergeSha, reservation.baseSha);
+          }
         } catch (error) {
           return {
             state: "failed" as const,
@@ -4527,12 +5082,38 @@ export class FactorySupervisor {
   async #resumeIntegration(item: DerivedWorkItem): Promise<void> {
     if (this.#deliverySelection.selected === "native-stacks") {
       const member = await this.#nativeStackMember(item);
+      const current = await this.#store.readPullRequest(member.pull.number);
+      if (
+        current.headSha !== member.pull.commitSha ||
+        current.baseRef !== this.#baseBranch ||
+        (current.state !== "open" && !current.merged)
+      ) {
+        throw new Error("sibling pull request identity or target changed after publication");
+      }
+      let targetBaseSha: string;
+      if (current.merged) {
+        if (!current.mergeCommitSha) throw new Error("merged sibling has no merge commit identity");
+        const merge = await this.#store.readCommit(current.mergeCommitSha);
+        if (merge.parentOids.length !== 1) throw new Error("merged sibling is not a squash commit");
+        targetBaseSha = merge.parentOids[0]!;
+      } else {
+        targetBaseSha = (await this.#store.getBranchHead(this.#baseBranch)).oid;
+      }
+      const candidate =
+        targetBaseSha === member.pull.exactHeadValidation.baseSha
+          ? undefined
+          : await this.#prepareSiblingMergeCandidate(item, member, targetBaseSha, current.merged);
+      if (candidate === null) {
+        await sleep(this.#options.pollIntervalMs ?? 2_000, this.#options.signal);
+        return;
+      }
       await this.#integrate(
         item,
         member.reservation,
         member.pull,
         this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
         true,
+        candidate,
       );
       return;
     }
@@ -4734,6 +5315,11 @@ export class FactorySupervisor {
         capacity.attempt !== reservation.attempt
       ) {
         continue;
+      }
+      if (isIntegrationValidationBackend(capacity.backend)) {
+        throw new Error(
+          "integration-candidate capacity requires its exact completion checkpoint; ordinary validation cannot reconcile it",
+        );
       }
       if (!validationFinished && capacity.backend !== "factory/local-validation") {
         const backend = this.#registry.get(capacity.backend);

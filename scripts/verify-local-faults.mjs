@@ -2,7 +2,19 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash, createHmac } from "node:crypto";
-import { existsSync, readFileSync, realpathSync, readlinkSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fchmodSync,
+  fstatSync,
+  ftruncateSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  readlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -44,6 +56,53 @@ const scopeFields = [
   "producerInvocationId",
 ];
 const sha = /^[a-f0-9]{64}$/;
+const evidenceByteLimit = 8 * 1024 * 1024;
+
+export function privateEvidenceFile(path, value) {
+  const parent = realpathSync(dirname(path));
+  assert.ok(
+    resolve(path).startsWith("/tmp/") && (parent === "/tmp" || parent.startsWith("/tmp/")),
+    "private evidence must stay in /tmp",
+  );
+  const flags =
+    constants.O_NOFOLLOW |
+    (value === undefined ? constants.O_RDONLY : constants.O_WRONLY | constants.O_CREAT);
+  const fd = openSync(path, flags, 0o600);
+  try {
+    const stat = fstatSync(fd);
+    assert.ok(
+      stat.isFile() &&
+        stat.uid === process.getuid() &&
+        stat.nlink === 1 &&
+        stat.size <= evidenceByteLimit,
+      "private evidence must be an owned bounded regular file",
+    );
+    if (value === undefined) return JSON.parse(readFileSync(fd, "utf8"));
+    const bytes = `${JSON.stringify(value, null, 2)}\n`;
+    assert.ok(Buffer.byteLength(bytes) <= evidenceByteLimit, "private evidence exceeds bound");
+    fchmodSync(fd, 0o600);
+    // Truncate only after verifying the opened descriptor; never follow a symlink.
+    ftruncateSync(fd, 0);
+    writeFileSync(fd, bytes);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function assertScopeReceipt(reservation, start, repository, objective) {
+  const batch = reservation.localScopeBatch;
+  assert.equal(batch.commandCount, 1);
+  assert.equal(batch.identity.phase, "execution");
+  assert.equal(batch.identity.commandIndex, 0);
+  assert.equal(batch.identity.repository, repository);
+  assert.equal(batch.identity.objective, objective);
+  assert.equal(reservation.objective, objective);
+  assert.equal(reservation.runId, start.runId);
+  assert.equal(reservation.policyDigest, start.policyDigest);
+  for (const key of ["runId", "workItem", "attempt", "directorEpoch", "policyDigest"])
+    assert.equal(batch.identity[key], reservation[key]);
+  return scopeUnit(batch.identity);
+}
 
 export function faultPolicy(tokens, scenario = "cancel") {
   assert.ok(["cancel", "restart"].includes(scenario));
@@ -109,7 +168,7 @@ export function parseUnitObservation(unit, output, at = new Date().toISOString()
     fields.ActiveState === "inactive" &&
     fields.SubState === "dead" &&
     fields.ControlGroup === "" &&
-    fields.Job === "" &&
+    ["", "0", "0 /"].includes(fields.Job) &&
     fields.InvocationID === "";
   const active =
     bound &&
@@ -127,6 +186,11 @@ export function parseUnitObservation(unit, output, at = new Date().toISOString()
 }
 export function authenticatedFaultEvents(comments, actor, objective) {
   assert.ok(comments.length <= 2000);
+  assert.ok(
+    comments.reduce((total, comment) => total + Buffer.byteLength(comment.body ?? ""), 0) <=
+      evidenceByteLimit,
+    "authenticated receipt input exceeds bound",
+  );
   const result = new Map();
   for (const comment of comments) {
     if (
@@ -178,6 +242,22 @@ export function assessLocalFault(evidence) {
     blockers.push("run-authority-mismatch");
   const expected = evidence.scenario === "restart" ? "FactoryRunCompleted" : "FactoryRunCancelled";
   const ended = events.find((event) => event.event === expected);
+  const expectedState = evidence.scenario === "restart" ? "completed" : "cancelled";
+  if (
+    evidence.status?.run?.availability !== "observed" ||
+    evidence.status.run.runId !== evidence.runId ||
+    evidence.status.run.state !== expectedState ||
+    evidence.status.summary?.runId !== evidence.runId ||
+    evidence.status.summary.outcome !== expectedState
+  )
+    blockers.push("installed-status-run-mismatch");
+  const tokens = evidence.status?.summary?.economics?.usage?.model_tokens;
+  if (
+    tokens?.availability !== "observed" ||
+    !Number.isSafeInteger(tokens.value) ||
+    tokens.value < 0
+  )
+    blockers.push("model-usage-unavailable");
   if (
     events.filter((event) => terminal.has(event.event)).length !== 1 ||
     !events.some((event) => event.event === expected)
@@ -207,18 +287,23 @@ export function assessLocalFault(evidence) {
   )
     blockers.push("captured-scope-receipt-unbound");
   try {
-    if (scopeUnit(captured?.localScopeBatch?.identity) !== evidence.before?.scope?.unit)
+    if (
+      assertScopeReceipt(captured, starts[0], evidence.repository, evidence.objective) !==
+      evidence.before?.scope?.unit
+    )
       blockers.push("captured-scope-receipt-unbound");
   } catch {
     blockers.push("captured-scope-receipt-unbound");
   }
+  const capturedStart = events.find(
+    (event) =>
+      event.event === "AttemptStarted" &&
+      event.workItem === captured?.workItem &&
+      event.attempt === captured?.attempt,
+  );
   if (
-    !events.some(
-      (event) =>
-        event.event === "AttemptStarted" &&
-        event.workItem === captured?.workItem &&
-        event.attempt === captured?.attempt,
-    )
+    !capturedStart ||
+    !(capturedStart.sequence > captured?.sequence && capturedStart.sequence < ended?.sequence)
   )
     blockers.push("captured-worker-start-unobserved");
   const workerIdentities = new Map();
@@ -236,6 +321,7 @@ export function assessLocalFault(evidence) {
           later.workItem === event.workItem &&
           later.attempt === event.attempt &&
           later.sequence > event.sequence &&
+          later.sequence < ended?.sequence &&
           [
             "AttemptSucceeded",
             "AttemptFailed",
@@ -268,6 +354,20 @@ export function assessLocalFault(evidence) {
     reservations.set(key, event.event.endsWith("Reserved"));
   }
   if ([...reservations.values()].some(Boolean)) blockers.push("unreconciled-receipt-reservation");
+  for (const event of events.filter((event) => event.event === "AttemptStarted")) {
+    const amount = events.filter(
+      (later) =>
+        later.kind === "budget" &&
+        later.event === "BudgetReconciled" &&
+        later.unit === "model_tokens" &&
+        later.phase === "execution" &&
+        later.workItem === event.workItem &&
+        later.attempt === event.attempt &&
+        Number.isSafeInteger(later.amount) &&
+        later.amount >= 0,
+    );
+    if (amount.length === 0) blockers.push("worker-model-usage-unavailable");
+  }
   if (evidence.scenario === "restart") {
     if (
       !evidence.resumeAfterAbsence ||
@@ -353,6 +453,14 @@ export function assessLocalFault(evidence) {
     (!cancel || !(cancel.sequence > captured?.sequence && cancel.sequence < ended?.sequence))
   )
     blockers.push("durable-cancellation-unobserved");
+  if (
+    evidence.scenario === "cancel" &&
+    (events.some(
+      (event) => event.event === "AttemptReserved" && event.sequence > cancel?.sequence,
+    ) ||
+      !(capturedStart?.sequence < cancel?.sequence))
+  )
+    blockers.push("post-cancellation-admission");
   return {
     result: blockers.length ? "incomplete" : "passed",
     scope: `installed-local-${evidence.scenario}-captured-active-worker`,
@@ -520,8 +628,7 @@ export async function main() {
     stderr: "pipe",
   });
   let evidence;
-  const save = () =>
-    writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });
+  const save = () => privateEvidenceFile(evidencePath, evidence);
   try {
     await client.connect(transport);
     transport.stderr?.on("data", () => {});
@@ -643,7 +750,7 @@ export async function main() {
       console.log("Prepared one new disposable Objective; no activation or worker was launched.");
       return;
     }
-    evidence = JSON.parse(readFileSync(evidencePath, "utf8"));
+    evidence = privateEvidenceFile(evidencePath);
     assert.equal(evidence.protocol, "clockgrove.factory/installed-local-fault-v1");
     for (const [key, expected] of Object.entries({
       repository,
@@ -714,7 +821,9 @@ export async function main() {
           assert.equal(identity.objective, evidence.objective);
           assert.equal(identity.hostIdentity, currentHost());
           assert.equal(identity.producerUnit, controller.unit);
-          const scope = observeUnit(scopeUnit(identity));
+          const scope = observeUnit(
+            assertScopeReceipt(event, start, repository, evidence.objective),
+          );
           if (scope.status === "active") {
             const producer = observeUnit(controller.unit);
             assert.equal(
@@ -815,6 +924,20 @@ export async function main() {
         });
         evidence.resumeAfterAbsence = true;
         save();
+        assert.ok(
+          evidence.receipts.some(
+            ({ event }) =>
+              event.runId === evidence.runId &&
+              event.event === "BudgetReconciled" &&
+              event.unit === "model_tokens" &&
+              event.phase === "execution" &&
+              event.workItem === identity.workItem &&
+              event.attempt === identity.attempt &&
+              Number.isSafeInteger(event.amount) &&
+              event.amount >= 0,
+          ),
+          "interrupted worker model usage is unknown; keep admissions paused rather than assume zero",
+        );
         await call("factory_retry", {
           objectiveNumber: evidence.objective,
           workItemNumber: identity.workItem,

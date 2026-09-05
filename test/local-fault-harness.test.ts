@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   assessLocalFault,
@@ -7,6 +8,7 @@ import {
   faultObjective,
   faultPolicy,
   parseUnitObservation,
+  privateEvidenceFile,
   scopeUnit,
 } from "../scripts/verify-local-faults.mjs";
 import { parseRunPolicy } from "../src/protocol/policy.js";
@@ -33,15 +35,24 @@ const identity = parseLocalScopeIdentity({
 function fixture(scenario: "cancel" | "restart" = "cancel") {
   const reserved = {
     runId: "fixture",
+    objective: 7,
+    policyDigest: identity.policyDigest,
+    directorEpoch: identity.directorEpoch,
     event: "AttemptReserved",
     sequence: 3,
     workItem: 8,
     attempt: 1,
-    localScopeBatch: { identity },
+    localScopeBatch: { identity, commandCount: 1 },
   };
   const policy = parseRunPolicy(faultPolicy(250000, scenario));
   const events: Record<string, unknown>[] = [
-    { runId: "fixture", event: "FactoryRunStarted", sequence: 1, policy },
+    {
+      runId: "fixture",
+      event: "FactoryRunStarted",
+      sequence: 1,
+      policy,
+      policyDigest: identity.policyDigest,
+    },
     { runId: "fixture", event: "ControllerObserved", controllerId: "first", sequence: 2 },
     reserved,
     {
@@ -94,8 +105,35 @@ function fixture(scenario: "cancel" | "restart" = "cancel") {
       { runId: "fixture", event: "AttemptIntegrated", sequence: 12, workItem: 8, attempt: 2 },
       { runId: "fixture", event: "FactoryRunCompleted", sequence: 13 },
     );
+  events.push({
+    runId: "fixture",
+    kind: "budget",
+    event: "BudgetReconciled",
+    phase: "execution",
+    unit: "model_tokens",
+    usageId: "worker-8-1",
+    sequence: 6,
+    workItem: 8,
+    attempt: 1,
+    amount: 50,
+  });
+  if (scenario === "restart")
+    events.push({
+      runId: "fixture",
+      kind: "budget",
+      event: "BudgetReconciled",
+      phase: "execution",
+      unit: "model_tokens",
+      usageId: "worker-8-2",
+      sequence: 12,
+      workItem: 8,
+      attempt: 2,
+      amount: 50,
+    });
   return {
     scenario,
+    repository: identity.repository,
+    objective: identity.objective,
     runId: "fixture",
     injected: true,
     maxModelTokens: 250000,
@@ -108,7 +146,20 @@ function fixture(scenario: "cancel" | "restart" = "cancel") {
     resumeRequestId: "resume",
     resumeAfterAbsence: true,
     receipts: events.map((event) => ({ event })),
-    status: { summary: { attempts: { active: 0 } }, capacity: { activeReservations: [] } },
+    status: {
+      run: {
+        availability: "observed",
+        runId: "fixture",
+        state: scenario === "restart" ? "completed" : "cancelled",
+      },
+      summary: {
+        runId: "fixture",
+        outcome: scenario === "restart" ? "completed" : "cancelled",
+        economics: { usage: { model_tokens: { availability: "observed", value: 100 } } },
+        attempts: { active: 0 },
+      },
+      capacity: { activeReservations: [] },
+    },
     before: {
       identity,
       reservationDigest: digest(reserved),
@@ -124,6 +175,21 @@ function fixture(scenario: "cancel" | "restart" = "cancel") {
   };
 }
 describe("installed local fault qualification harness", () => {
+  it("keeps private evidence bounded, owned, nonsymlinked, and correctly truncated", () => {
+    const directory = mkdtempSync("/tmp/factory-fault-harness-test-");
+    try {
+      const path = `${directory}/evidence.json`;
+      privateEvidenceFile(path, { long: "previous long result" });
+      privateEvidenceFile(path, { ok: true });
+      expect(privateEvidenceFile(path)).toEqual({ ok: true });
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+      symlinkSync(path, `${directory}/linked.json`);
+      expect(() => privateEvidenceFile(`${directory}/linked.json`, { wrong: true })).toThrow();
+      expect(JSON.parse(readFileSync(path, "utf8"))).toEqual({ ok: true });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
   it("uses bounded local-only authority and namespaced single-item paths", () => {
     const policy = parseRunPolicy(faultPolicy(250000));
     expect(policy.maxParallel).toBe(1);
@@ -145,6 +211,7 @@ describe("installed local fault qualification harness", () => {
     const unit = scopeUnit(identity);
     const absent = `Id=${unit}\nLoadState=not-found\nActiveState=inactive\nSubState=dead\nControlGroup=\nJob=\nInvocationID=\nKillMode=control-group`;
     expect(parseUnitObservation(unit, absent).status).toBe("absent");
+    expect(parseUnitObservation(unit, absent.replace("Job=", "Job=0 /")).status).toBe("absent");
     expect(parseUnitObservation(unit, absent.replace("Job=", "Job=12")).status).toBe("unknown");
     expect(parseUnitObservation(unit, absent.replace("not-found", "error")).status).toBe("unknown");
     expect(() => parseUnitObservation(unit, `${absent}\nId=foreign`)).toThrow();
@@ -275,5 +342,32 @@ describe("installed local fault qualification harness", () => {
       ),
     ).rejects.toThrow("bounded-observation-incomplete");
     expect(calls).toBe(3);
+  });
+  it.each([
+    "foreign-status",
+    "late-attempt-end",
+    "late-reservation",
+    "unknown-usage",
+    "scope-policy",
+  ])("rejects %s evidence", (fault) => {
+    const evidence = fixture();
+    if (fault === "foreign-status") evidence.status.run.runId = "foreign";
+    if (fault === "late-attempt-end")
+      evidence.receipts.find(({ event }) => event.event === "AttemptCancelled")!.event.sequence =
+        11;
+    if (fault === "late-reservation")
+      evidence.receipts.push({
+        event: { runId: "fixture", event: "AttemptReserved", sequence: 8, workItem: 8, attempt: 2 },
+      });
+    if (fault === "unknown-usage")
+      evidence.receipts = evidence.receipts.filter(({ event }) => event.unit !== "model_tokens");
+    if (fault === "scope-policy") {
+      const reservation = evidence.receipts.find(
+        ({ event }) => event.event === "AttemptReserved",
+      )!.event;
+      reservation.policyDigest = "f".repeat(64);
+      evidence.before.reservationDigest = digest(reservation);
+    }
+    expect(assessLocalFault(evidence).result).toBe("incomplete");
   });
 });

@@ -33,6 +33,8 @@ An explicit 250,000–500,000 model-token stop threshold is required initially. 
 is an observed admission threshold, not a provider-enforced hard token cap.
 Missing usage, uncertain cleanup, lost authority, or exhausted allowance must
 remain blocked/incomplete. The harness does not override those gates.
+In particular, absence alone does not supply a killed worker's token counters:
+restart stops before retry/resume if its actual model-usage receipt is missing.
 
 ## Explicit phases
 
@@ -86,6 +88,7 @@ policy, exact journaled scope identity, hashed host identity, controller
 invocations, and before/after unit observations. It contains no raw machine ID,
 credentials, model prompts, or process environment; receipt reason text and
 private repository details still make it unsuitable for a public artifact.
+Files are bounded to 8 MiB, owner-only, and opened without following symlinks.
 
 Only authenticated receipt identities can demonstrate no duplicate resource per
 attempt. Physical absence is proved for the **captured active worker scope**;

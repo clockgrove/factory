@@ -1,5 +1,6 @@
 export function faultPolicy(tokens: number, scenario?: "cancel" | "restart"): unknown;
 export function faultObjective(namespace: string): string;
+export function privateEvidenceFile(path: string, value?: unknown): unknown;
 export function scopeUnit(identity: unknown): string;
 export function parseUnitObservation(
   unit: string,

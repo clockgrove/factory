@@ -16,8 +16,9 @@ records discovery repair at `0363c5e`: replaying the exact accepted request rest
 label and the controller reached adoption. Adoption then blocked at `resource-absence-unverified`
 because the original foreground batches lack a producer service identity. No successor worker
 started or additional model usage was observed; the controller was stopped. Focused checks and
-matching installation passed, not a new full release suite. A completed-invocation proof is now
-implementation work; PID/scope absence alone is not accepted and the failed observations remain intact.
+matching installation passed, not a new full release suite. A completed-invocation proof is separately
+implemented and reviewed; installed adoption is still unqualified. PID/scope absence alone is not
+accepted and the failed observations remain intact.
 
 The [installed recovery-discovery component](release-evidence/recovery-discovery-component-2026-09-05.json)
 preserves a later failure at `f67fd05`: explicit successor authority was accepted, but a foreground-created

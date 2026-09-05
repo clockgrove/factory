@@ -96,6 +96,17 @@ the next process independently proves absence before adoption. A real no-model s
 probe covers retirement and prevention of a restart loop. Legacy unbound resources still fail
 closed, and neither local scope evidence nor an accepted request proves paid-provider cleanup.
 
+Completed first-attempt trusted-local foreground invocations use a narrower resource proof when their
+reservations bind command scopes but not a producer service generation. Derive finite completion
+from the authenticated original-local reservation, pinned graph, exact artifact, ordered successful
+execution/collection and passed validation receipts, and matching capacity/native accounting.
+Then independently observe the original producer generation and every reserved command scope absent,
+with same-host and producer checks repeated afterward. A successful synchronous validation receipt
+proves the command loop returned after cleanup; it does not reconstruct missing command output or
+assert that optional setup ran. All reserved slots, including the optional setup slot, are checked.
+Partial, conflicting, unbound or unsupported invocations remain blocked. Generic PID/scope absence
+alone is still insufficient; no old receipt acquires an invented service identity.
+
 Repeated successors retain the original attempt and publication identities. Historical adopted
 runs are independently checked at their next accepted plan's exact cutoff; complete current
 accounting and resource observations still include later liabilities. Failed local attempts use

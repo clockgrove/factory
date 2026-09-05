@@ -34,6 +34,9 @@ Notable changes to Factory. See [the delivery plan](docs/DELIVERY-PLAN.md) for u
 
 ### Changed
 
+- Completed original-local foreground work can prove launcher closure from exact authenticated
+  completion chains plus fresh producer/host and reserved-scope observations. Missing, partial or
+  conflicting evidence still blocks recovery; no service identity or command output is invented.
 - Accepted successor recovery requests and exact retries repair Objective discovery without creating
   another activation or allowance. Read-only assessment directs users to the explicit proposal path
   instead of incorrectly reporting successor execution as unavailable.

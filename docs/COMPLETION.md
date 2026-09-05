@@ -17,11 +17,13 @@ The authorized successor exercise subsequently exposed a stale assessment diagno
 structural discovery-label repair. Both corrections are integrated; installed exact-request replay
 at `0363c5e` repaired discovery without changing authority. Adoption then reached a concrete resource
 gap: completed foreground invocations lack a recorded launcher service identity. A narrowly bound
-completion-receipt proof is being implemented; generic PID/scope absence alone remains insufficient.
+completion-receipt proof is implemented and independently reviewed; generic PID/scope absence alone
+remains insufficient. It covers completed first-attempt trusted-local ordinary invocations; other
+foreground variants remain blocked rather than receiving inferred ownership.
 The [discovery failure](release-evidence/recovery-discovery-component-2026-09-05.json) and
 [resource gate](release-evidence/recovery-foreground-resource-component-2026-09-05.json) are preserved.
 The accepted request and allowance remain unchanged; no successor worker has started, and the
-controller is stopped until the proof implementation and review are complete.
+controller is stopped while the integrated corrected candidate is qualified.
 
 **Managed Codex is still blocked implementation**, not a finished adapter awaiting a key. Its profile
 is disabled; enabling it requires authoritative actor discovery and a provider-specific task/session
@@ -37,7 +39,7 @@ active agents. Each row closes only when its stated acceptance is evidenced.
 | --- | --- | --- | --- | --- |
 | Pilot — corrected integrated artifact | Frozen source passes integrated checks; matching staged package installs with recorded hashes. | Testing | Coordinator / waiting | `f67fd05` passed full checks; `0363c5e` passed affected checks and matching installation, not the full suite. Resource correction and review → next stable candidate with separate exact identities. |
 | Pilot — discoverable explicit recovery | A foreground-created Objective without discovery labels becomes discoverable after an authorized recovery request; replay repairs a lost label without new authority, request or allowance. | Testing | Recovery requests / completed | Installed exact-request replay at `0363c5e` repaired the label and the controller reached adoption; original failure is retained. |
-| Pilot — completed foreground resource proof | Authenticated original-local completion chains bind every invocation to its reservation, graph, artifact and accounting; fresh producer-generation/host and all reserved scope observations prove absence. Partial, conflicting or unsupported chains remain blocked. | Code, Testing | Recovery resources / running | Finite completion-proof contract reviewed → focused implementation and independent safety review; no invented service identity or missing command transcript. |
+| Pilot — completed foreground resource proof | Authenticated original-local completion chains bind every invocation to its reservation, graph, artifact and accounting; fresh producer-generation/host and all reserved scope observations prove absence. Partial, conflicting or unsupported chains remain blocked. | Code, Testing | Recovery resources / implemented | First-attempt trusted-local ordinary path passed focused regressions and independent safety review → exact installed adoption observation; no invented service identity or missing command transcript. |
 | Pilot — concurrent native delivery and recovery | Installed corrected runtime reuses authenticated completed work, validates/reviews each changed head, integrates remaining sibling and dependent join, closes the Objective, and proves accounting/resource cleanup. Original failed attempt stays failed. | Testing | Local runtime / waiting | Successor approved; exact request accepted. Resource proof above → bounded continuation with unchanged authority; no fresh replacement Objective merely to erase history. |
 | Pilot — local-only adopter handoff | Installed doctor/plan and explicit bounded activation are usable on the actual pilot checkout; scope, trust, delivery policy and allowance are accepted. SDK is the chosen route; direct CLI evidence is not automatic fallback evidence. | Testing, External input | Coordinator + operator / waiting | Corrected local qualification + pilot Objective/authority → ready-to-start local pilot handoff; no cloud prerequisite or silent production activation. |
 | Release — remaining Linux and local fault cases | Native Linux, WSL2 and macOS-hosted Linux satisfy lifecycle/resource checks; SDK-failure fallback, broader adaptive priority/pressure/lease cases, native stacks/merge queue, and adversarial restart/cancel/conflict/budget cases pass. | Testing, External input | Local qualification / waiting | Stable candidate + missing host access and scoped fault authority → remaining cases in the four local [gate rows](CONFORMANCE.md#verification-required-before-publication), retaining existing exact-candidate evidence. |
@@ -59,8 +61,8 @@ or published distribution from the product contract. Vercel Sandbox and Codex Ap
 | Compilation/chat/economics/scheduling | Completed | No additional unblocked implementation gap identified. No make-work test lane. |
 | Provider implementation closure | Completed | Daytona/Copilot implementation classified; Codex's externally blocked implementation remains explicit. |
 | Recovery request discovery correction | Completed | Integrated fresh acceptance/replay repair with unchanged identity/authority; focused regressions and independent review passed. |
-| Completed foreground resource proof | Running | Implement exact authenticated finite-invocation completion proof and focused fail-closed regressions in an isolated worktree. |
-| Resource proof safety review | Waiting | Contract accepted; restart reviewer when the implementation is frozen for independent patch review. |
+| Completed foreground resource proof | Completed | Integrated finite-invocation proof and focused fail-closed regressions, including captured receipt shape and second-pass resource reappearance. |
+| Resource proof safety review | Completed | Independent review cleared exact source at `3f3aa5c`; generic and unsupported-path gates remain strict. |
 | Coordination and candidate qualification | Running | Discovery is qualified at `0363c5e`; resource absence blocks adoption with no new worker usage. Preserve evidence, integrate the reviewed resource correction, then continue the exact authorized successor. |
 
 ## External inputs — one actionable list

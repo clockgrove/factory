@@ -58,6 +58,20 @@ These are settled. Do not relitigate them.
   gaps, and choose the next substantial authorized deliverable. Recalibrate when evidence changes;
   do not repeatedly replan settled work or expand the goal without authority.
 
+## Capability-sized delivery
+
+- Use **one PR per complete, testable capability**, with acceptance criteria spanning its end-to-end
+  behavior. Helper modules, intermediate plumbing, and individual Work Items belong in that batch;
+  do not turn each into a separate PR or stack layer merely because it can be committed independently.
+- Use parallel subagents for bounded independent work and incremental commits inside the capability's
+  integration branch. Keep file ownership explicit and integrate their work before the PR handoff.
+- Run targeted checks during development. Run the full required integration and release checks at
+  the completed batch boundary, and rebuild/reinstall the updated plugin there when the batch changes
+  it. Do not repeat full release verification or plugin reinstall after every helper change or commit.
+  Repeat affected checks earlier only when changed behavior or a concrete failure invalidates the
+  evidence, including installation-specific tests when relevant. Documentation-only batches retain
+  their proportional checks; batching never waives required release or live-conformance gates.
+
 ## Parallel work and responsiveness
 
 - When the harness permits delegation, delegate bounded independent work when it improves delivery

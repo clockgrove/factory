@@ -275,19 +275,25 @@ describe("immutable recovery proposal", () => {
     expect(parseRecoveryPlan(plan)).toEqual(plan);
   });
 
-  it("requires validation and semantic acceptance for artifact reuse; raw artifacts need revalidation", () => {
+  it("requires acknowledged Git head, validation and semantic acceptance for artifact-only reuse", () => {
     const plan = publicationProposal();
     const item = plan.items[0]!;
     item.action = "reuse-artifact";
     item.source!.publication = null;
     item.observedPullRequest = null;
+    expect(() => parseRecoveryPlan(plan)).toThrow("acknowledged immutable source head");
+    item.source!.artifactHead = {
+      branch: `factory/objective-${plan.objective}/work-item-${item.workItem}/attempt-${item.source!.attempt}`,
+      headSha: sha("5"),
+      treeSha: item.source!.validation!.outputTreeSha,
+    };
     expect(parseRecoveryPlan(plan)).toEqual(plan);
     item.source!.review = null;
-    expect(() => parseRecoveryPlan(plan)).toThrow("semantic-review");
+    expect(() => parseRecoveryPlan(plan)).toThrow("artifact-only recovery");
     item.source!.validation = null;
-    expect(() => parseRecoveryPlan(plan)).toThrow("validation");
+    expect(() => parseRecoveryPlan(plan)).toThrow("validated tree");
     item.action = "revalidate";
-    expect(parseRecoveryPlan(plan)).toEqual(plan);
+    expect(() => parseRecoveryPlan(plan)).toThrow();
   });
 
   it.each([

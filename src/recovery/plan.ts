@@ -86,6 +86,17 @@ const sourceSchema = z
     reservationCommitOid: sha,
     reservationReceiptDigest: digest,
     artifactDigest: digest.nullable(),
+    artifactHead: z.object({ branch, headSha: sha, treeSha: sha }).strict().optional(),
+    // Descriptive lineage only; outcomes.ts independently loads and verifies the ancestor.
+    priorDelivery: z
+      .object({
+        runId: identifier,
+        planDigest: digest,
+        integrationReceiptDigest: digest,
+        deliveryHeadSha: sha.optional(),
+      })
+      .strict()
+      .optional(),
     validation: z
       .object({ receiptDigest: digest, evidenceDigest: digest, baseSha: sha, outputTreeSha: sha })
       .strict()
@@ -328,6 +339,19 @@ export function parseRecoveryPlan(input: unknown): RecoveryPlan {
     );
     const source = item.source;
     if (source) {
+      if (source.artifactHead)
+        requirePlan(
+          source.validation &&
+            source.artifactHead.treeSha === source.validation.outputTreeSha &&
+            source.artifactHead.branch ===
+              `factory/objective-${plan.objective}/work-item-${item.workItem}/attempt-${source.attempt}`,
+          "artifact head must bind its deterministic source branch and validated tree",
+        );
+      if (!source.publication && ["reuse-artifact", "revalidate"].includes(item.action))
+        requirePlan(
+          source.artifactHead && source.validation && source.review,
+          "artifact-only recovery requires an acknowledged immutable source head",
+        );
       requirePlan(runIds.has(source.runId), "item source is outside history");
       requirePlan(
         source.reservationRef === attemptRef(plan.objective, item.workItem, source.attempt),
@@ -407,8 +431,12 @@ export function parseRecoveryPlan(input: unknown): RecoveryPlan {
       const observed = item.observedPullRequest!;
       const publication = source!.publication!;
       requirePlan(
-        observed.headSha === publication.headSha &&
-          observed.baseSha === publication.baseSha &&
+        observed.headSha === (source!.priorDelivery?.deliveryHeadSha ?? publication.headSha) &&
+          // This is a descriptive plan, not admission. Prior candidate integration
+          // is independently verified by verifyPriorRecoveryDelivery in BOTH the
+          // proposal builder and evidence resolver before it becomes usable.
+          (observed.baseSha === publication.baseSha ||
+            (item.action === "integrated" && source!.priorDelivery !== undefined)) &&
           observed.headRef === publication.branch &&
           observed.baseRef === publication.baseBranch &&
           observed.headRepository?.toLowerCase() === publication.headRepository.toLowerCase() &&
@@ -416,6 +444,15 @@ export function parseRecoveryPlan(input: unknown): RecoveryPlan {
         "publication reuse needs unchanged validated PR identities",
       );
     }
+    if (source?.priorDelivery)
+      requirePlan(
+        item.action === "integrated" &&
+          source.publication &&
+          plan.history.some((entry) => entry.runId === source.priorDelivery!.runId) &&
+          source.priorDelivery.runId !== plan.successorRunId &&
+          plan.priorPlanDigest !== null,
+        "prior delivery requires an integrated historical source and explicit plan chain",
+      );
     requirePlan(
       item.resources.state !== "verified-clean" || item.resources.receiptDigest !== null,
       "resource cleanup needs evidence identity",

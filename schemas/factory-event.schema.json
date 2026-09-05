@@ -4,6 +4,46 @@
   "title": "Factory Event",
   "type": "object",
   "additionalProperties": true,
+  "description": "Persisted event wire shapes. Cross-field identity equality, timestamp ordering, authenticated lineage and receipt verification are additionally enforced by the runtime; schema acceptance is not execution authority.",
+  "definitions": {
+    "positiveSafeInteger": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "digest": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+    "safeId": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9._:/+-]+$" },
+    "gitSha": { "type": "string", "pattern": "^[0-9a-fA-F]{40}$" },
+    "localScopeBatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "commandCount", "producerPid", "producerStartTicks", "deadline"],
+      "properties": {
+        "commandCount": { "type": "integer", "minimum": 1, "maximum": 257 },
+        "producerPid": { "$ref": "#/definitions/positiveSafeInteger" },
+        "producerStartTicks": { "type": "string", "pattern": "^[0-9]{1,30}$" },
+        "deadline": { "type": "string", "format": "date-time" },
+        "identity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["protocol", "repository", "objective", "workItem", "attempt", "runId", "directorEpoch", "policyDigest", "phase", "commandIndex", "invocationDigest", "hostIdentity"],
+          "properties": {
+            "protocol": { "const": "clockgrove.factory/local-scope-v1" },
+            "repository": { "type": "string", "pattern": "^[a-z0-9_.-]+/[a-z0-9_.-]+$" },
+            "objective": { "$ref": "#/definitions/positiveSafeInteger" },
+            "workItem": { "$ref": "#/definitions/positiveSafeInteger" },
+            "attempt": { "$ref": "#/definitions/positiveSafeInteger" },
+            "runId": { "$ref": "#/definitions/safeId" },
+            "directorEpoch": { "$ref": "#/definitions/positiveSafeInteger" },
+            "policyDigest": { "$ref": "#/definitions/digest" },
+            "phase": { "enum": ["execution", "validation"] },
+            "commandIndex": { "const": 0 },
+            "invocationDigest": { "$ref": "#/definitions/digest" },
+            "hostIdentity": { "$ref": "#/definitions/digest" },
+            "producerUnit": { "type": "string", "pattern": "^[A-Za-z0-9_.@:-]+\\.service$", "maxLength": 255 },
+            "producerInvocationId": { "type": "string", "pattern": "^[a-f0-9]{32}$" }
+          },
+          "dependencies": { "producerUnit": ["producerInvocationId"], "producerInvocationId": ["producerUnit"] }
+        }
+      }
+    }
+  },
   "required": ["protocol", "kind", "event", "objective", "runId", "sequence", "at"],
   "properties": {
     "protocol": { "const": "clockgrove.factory/v2" },
@@ -25,7 +65,7 @@
     },
     "event": { "type": "string" },
     "objective": { "type": "integer", "minimum": 1 },
-    "runId": { "type": "string", "pattern": "^[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)?$" },
+    "runId": { "$ref": "#/definitions/safeId" },
     "sequence": { "type": "integer", "minimum": 0 },
     "at": { "type": "string", "format": "date-time" },
     "workItem": { "type": "integer", "minimum": 1 },
@@ -33,38 +73,61 @@
     "backend": { "type": "string" },
     "baseSha": { "type": "string", "pattern": "^[0-9a-fA-F]{40}$" },
     "outputTreeSha": { "type": "string", "pattern": "^[0-9a-fA-F]{40}$" },
-    "artifactDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "artifactDigest": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
     "environmentIdentity": { "type": "string", "minLength": 1, "maxLength": 500 },
-    "evidenceDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-    "graphDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "resourceHostIdentity": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+    "evidenceDigest": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+    "graphDigest": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
     "graphSize": { "type": "integer", "minimum": 1, "maximum": 100 },
     "graphRef": { "type": "string", "minLength": 1, "maxLength": 500 },
     "graphBlobSha": { "type": "string", "pattern": "^[0-9a-fA-F]{40}$" },
     "projectionRef": { "type": "string", "minLength": 1, "maxLength": 500 },
     "projectionBlobSha": { "type": "string", "pattern": "^[0-9a-fA-F]{40}$" },
     "controllerId": { "type": "string" },
-    "controllerPolicyDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "controllerPolicyDigest": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
     "controllerProtocolMin": { "type": "string" },
     "controllerProtocolMax": { "type": "string" },
     "protocolMin": { "type": "string" },
     "protocolMax": { "type": "string" },
     "expiresAt": { "type": "string", "format": "date-time" },
     "requestedBy": { "type": "string", "minLength": 1, "maxLength": 160 },
-    "requestId": { "type": "string", "pattern": "^[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)?$" },
-    "commandRequestId": { "type": "string", "pattern": "^[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)?$" },
+    "requestId": { "$ref": "#/definitions/safeId" },
+    "commandRequestId": { "$ref": "#/definitions/safeId" },
     "activationRequestId": {
       "type": "string",
       "pattern": "^[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)?$"
     },
-    "policyDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-    "recoveryRequestId": { "type": "string", "pattern": "^[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)?$" },
-    "recoveryPlanDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-    "planDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-    "predecessorRunId": { "type": "string", "pattern": "^[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)?$" },
-    "successorRunId": { "type": "string", "pattern": "^[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)?$" },
-    "predecessorTerminalDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "policyDigest": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+    "recoveryRequestId": { "$ref": "#/definitions/safeId" },
+    "recoveryPlanDigest": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+    "planDigest": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+    "predecessorRunId": { "$ref": "#/definitions/safeId" },
+    "successorRunId": { "$ref": "#/definitions/safeId" },
+    "predecessorTerminalDigest": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
     "claimRef": { "type": "string", "minLength": 1, "maxLength": 500 },
     "claimOid": { "type": "string", "pattern": "^[0-9a-fA-F]{40}$" },
+    "sourceEventsDigest": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+    "accountingDigest": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+    "resourceEvidenceDigest": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+    "repository": { "type": "string", "minLength": 1, "maxLength": 300 },
+    "sourceRunId": { "$ref": "#/definitions/safeId" },
+    "sourceAttempt": { "$ref": "#/definitions/positiveSafeInteger" },
+    "sourceReservationRef": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "sourceReservationCommitOid": { "$ref": "#/definitions/gitSha" },
+    "sourceReservationReceiptDigest": { "$ref": "#/definitions/digest" },
+    "sourcePublicationReceiptDigest": { "$ref": "#/definitions/digest" },
+    "sourceHeadSha": { "$ref": "#/definitions/gitSha" },
+    "sourceBaseSha": { "$ref": "#/definitions/gitSha" },
+    "sourceTreeSha": { "$ref": "#/definitions/gitSha" },
+    "sourceArtifactDigest": { "$ref": "#/definitions/digest" },
+    "sourceValidationDigest": { "$ref": "#/definitions/digest" },
+    "sourceReviewIdentityDigest": { "$ref": "#/definitions/digest" },
+    "mergeCommitSha": { "$ref": "#/definitions/gitSha" },
+    "mergeCandidateIdentityDigest": { "$ref": "#/definitions/digest" },
+    "deliveryHeadSha": { "$ref": "#/definitions/gitSha" },
+    "targetBaseSha": { "$ref": "#/definitions/gitSha" },
+    "pullRequestNodeId": { "$ref": "#/definitions/safeId" },
+    "localScopeBatch": { "$ref": "#/definitions/localScopeBatch" },
     "passed": { "type": "boolean" },
     "phase": { "enum": ["management", "execution", "validation"] },
     "sessionId": { "type": "string", "minLength": 1, "maxLength": 500 },
@@ -150,16 +213,16 @@
     "selected": { "enum": ["regular-prs", "native-stacks", "escalate"] },
     "capabilityVersion": { "type": "string", "minLength": 1, "maxLength": 80 },
     "unitId": { "type": "string", "minLength": 1, "maxLength": 200 },
-    "itemId": { "type": "string", "pattern": "^[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)?$" },
+    "itemId": { "$ref": "#/definitions/safeId" },
     "mode": { "enum": ["regular-prs", "native-stacks"] },
     "position": { "type": "integer", "minimum": 0 },
-    "parentItemId": { "type": "string", "pattern": "^[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)?$" },
+    "parentItemId": { "$ref": "#/definitions/safeId" },
     "branch": { "type": "string", "minLength": 1, "maxLength": 500 },
     "baseBranch": { "type": "string", "minLength": 1, "maxLength": 500 },
     "headSha": { "type": "string", "pattern": "^[0-9a-fA-F]{40}$" },
     "pullRequest": { "type": "integer", "minimum": 1 },
-    "validationDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-    "exactHeadValidationDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "validationDigest": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+    "exactHeadValidationDigest": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
     "stackNumber": { "type": "integer", "minimum": 1 },
     "operationId": { "type": "string", "pattern": "^[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)?$" },
     "asynchronousMergeUuid": { "type": "string", "minLength": 1, "maxLength": 200 },
@@ -183,7 +246,56 @@
   "allOf": [
     {
       "if": { "properties": { "kind": { "const": "recovery" } } },
-      "then": { "properties": { "event": { "enum": ["RecoveryRequested", "RecoveryConsumed"] } } }
+      "then": { "properties": { "event": { "enum": ["RecoveryRequested", "RecoveryConsumed", "RecoveryAdoptionCompleted", "RecoverySourcePublished", "RecoverySourceIntegrated"] } } }
+    },
+    {
+      "if": { "properties": { "event": { "const": "RecoverySourcePublished" } } },
+      "then": {
+        "properties": {
+          "kind": { "const": "recovery" },
+          "workItem": { "$ref": "#/definitions/positiveSafeInteger" },
+          "pullRequest": { "$ref": "#/definitions/positiveSafeInteger" },
+          "stackNumber": { "$ref": "#/definitions/positiveSafeInteger" },
+          "unitId": { "$ref": "#/definitions/safeId" },
+          "position": { "type": "integer", "minimum": 0, "maximum": 100 }
+        },
+        "required": ["recoveryRequestId", "planDigest", "claimRef", "claimOid", "workItem", "sourceRunId", "sourceAttempt", "sourceReservationRef", "sourceReservationCommitOid", "sourceReservationReceiptDigest", "sourceHeadSha", "sourceBaseSha", "sourceTreeSha", "sourceArtifactDigest", "sourceValidationDigest", "sourceReviewIdentityDigest", "branch", "baseBranch", "pullRequest", "pullRequestNodeId", "mode", "unitId", "itemId", "position", "exactHeadValidationDigest"],
+        "if": { "properties": { "mode": { "const": "regular-prs" } } },
+        "then": { "properties": { "position": { "const": 0 } }, "not": { "anyOf": [{ "required": ["parentItemId"] }, { "required": ["stackNumber"] }] } }
+      }
+    },
+    {
+      "if": { "properties": { "event": { "const": "RecoverySourceIntegrated" } } },
+      "then": {
+        "properties": { "kind": { "const": "recovery" }, "workItem": { "$ref": "#/definitions/positiveSafeInteger" } },
+        "required": ["recoveryRequestId", "planDigest", "claimRef", "claimOid", "workItem", "sourceRunId", "sourceAttempt", "sourceReservationRef", "sourceReservationCommitOid", "sourceReservationReceiptDigest", "sourcePublicationReceiptDigest", "sourceHeadSha", "mergeCommitSha"],
+        "dependencies": { "deliveryHeadSha": ["mergeCandidateIdentityDigest"] }
+      }
+    },
+    {
+      "if": { "properties": { "kind": { "const": "capacity" } } },
+      "then": {
+        "dependencies": { "sourceRunId": ["targetBaseSha"], "targetBaseSha": ["sourceRunId"] },
+        "if": { "required": ["sourceRunId"] },
+        "then": {
+          "required": ["workItem", "attempt", "phase", "backend", "requestedCpu", "requestedMemoryMb", "directorEpoch", "policyDigest"],
+          "properties": { "event": { "enum": ["CapacityReserved", "CapacityReconciled"] }, "phase": { "const": "validation" }, "backend": { "type": "string", "pattern": "^factory/integration-validation-[a-f0-9]{64}$" } }
+        }
+      }
+    },
+    {
+      "if": { "required": ["localScopeBatch"], "properties": { "kind": { "const": "attempt" } } },
+      "then": {
+        "required": ["workItem", "attempt", "directorEpoch", "policyDigest"],
+        "properties": { "event": { "const": "AttemptReserved" }, "localScopeBatch": { "properties": { "commandCount": { "const": 1 }, "identity": { "properties": { "phase": { "const": "execution" } } } } } }
+      }
+    },
+    {
+      "if": { "required": ["localScopeBatch"], "properties": { "kind": { "const": "capacity" } } },
+      "then": {
+        "required": ["workItem", "attempt", "phase", "backend", "requestedCpu", "requestedMemoryMb", "directorEpoch", "policyDigest"],
+        "properties": { "event": { "const": "CapacityReserved" }, "phase": { "const": "validation" }, "localScopeBatch": { "properties": { "identity": { "properties": { "phase": { "const": "validation" } } } } } }
+      }
     },
     {
       "if": { "properties": { "event": { "const": "RecoveryRequested" } } },
@@ -197,6 +309,13 @@
       "then": {
         "properties": { "kind": { "const": "recovery" } },
         "required": ["recoveryRequestId", "planDigest", "predecessorRunId", "predecessorTerminalDigest", "claimRef", "claimOid"]
+      }
+    },
+    {
+      "if": { "properties": { "event": { "const": "RecoveryAdoptionCompleted" } } },
+      "then": {
+        "properties": { "kind": { "const": "recovery" } },
+        "required": ["recoveryRequestId", "planDigest", "predecessorRunId", "predecessorTerminalDigest", "claimRef", "claimOid", "evidenceDigest", "sourceEventsDigest", "accountingDigest", "resourceEvidenceDigest", "baseSha"]
       }
     },
     {

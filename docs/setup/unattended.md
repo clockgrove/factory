@@ -55,15 +55,17 @@ the service separately even if a foreground plugin probe already works.
    intentionally fails service startup when the configured file is missing; silently running
    without required credentials is not the desired setup. Do not place secret values directly in
    the unit, command line, or committed files.
-4. Ensure the service can also find its prerequisites. The generated unit pins Node and Factory
-   executable paths, but other tools, such as a host-installed `codex` or `gh`, still need to be
-   discoverable in the service's `PATH`. An interactive shell's version-manager setup is not
-   automatically available to systemd. If setting `PATH` or a custom `CODEX_HOME` in a drop-in,
-   use the actual absolute Linux paths; do not rely on shell expansion. The service user must be
-   able to read the intended GitHub/Codex logins and checkout.
-   `FACTORY_CODEX_PATH` can explicitly select a Codex executable instead of bundled/PATH resolution;
-   set it to the real absolute executable path, not a command string with arguments. This is a
-   runtime-location override, not an authentication setting.
+4. Install from the Linux environment where the required tools are available. The generated unit
+   pins Node and Factory executable paths and records a limited service `PATH`: directories where
+   the installer finds `gh` and `codex`, the running Node directory, and standard Linux tool
+   directories. It does not copy the shell's full environment, credentials, or startup files.
+   An explicit `FACTORY_CODEX_PATH` is resolved to an absolute executable during installation and
+   preserved separately; it selects a runtime, not a login or model. Reinstall the controller after
+   moving those executables. Missing tools are not installed for you.
+   The service user must still be able to read the intended GitHub/Codex logins and checkout.
+   Configure a deliberate custom `CODEX_HOME` or additional tool directories in a service drop-in
+   using absolute Linux paths, without shell expansion. Installer credentials and custom login
+   directories are not automatically copied to the service.
 5. Before restarting an active controller, ask Factory to drain it and confirm acknowledgement if
    you need an orderly stop. Restarting can interrupt active workers. Then run
    `systemctl --user daemon-reload` and restart the **exact configured unit**. Changing the file
@@ -85,3 +87,43 @@ Verify [the environment that executes](configuration.md#7-verify-the-same-enviro
 not only a successful probe from chat. For Linux startup and recovery constraints, read
 [host scheduling](../HOST-SCHEDULING.md). On credential or binary changes, drain before restarting
 when an orderly stop is needed. Neither a new chat nor a shell export updates an existing service.
+
+## Continue after terminal escalation
+
+Restarting the controller resumes eligible non-terminal work; it does not revive an escalated or
+cancelled run. For an escalated Objective, ask the Director to inspect `factory_recovery_plan`,
+then propose a successor with `factory_recovery_propose`. The proposal is read-only and binds the
+existing graph, issues, source artifacts, historical usage, and continuation actions to a digest.
+
+When you authorize that continuation, the Director submits `factory_recovery_request` with the
+exact proposal digest and request ID. The controller discovers that request, independently proves
+resource absence and source evidence under its leases, and then adopts the successor. An accepted
+request is not proof that those execution gates have passed. A stopped or missing controller still
+needs explicit authorization to start or install on this host.
+
+The npm CLI equivalents are:
+
+```text
+factory recovery-propose OWNER/REPO#NUMBER --request-id UNIQUE_STABLE_ID
+factory recovery-request OWNER/REPO#NUMBER --request-id UNIQUE_STABLE_ID --plan-digest PROPOSED_DIGEST
+```
+
+With a plugin-only installation, use the installed CLI path described above. Substitute the
+proposal's exact digest, not a locally invented value. Retry an uncertain request response with
+the same ID, digest, and inputs. If the proposal changes, review and authorize the changed plan.
+
+The default allowance increment is zero: prior usage and attempts remain charged. Additional
+allowance requires explicit amounts, supplied identically to both commands with
+`--allowance-increment FILE`. That JSON file has four nonnegative integer fields: `modelTokens`,
+`sandboxMinutes`, `managedSessions`, and `implementationAttemptsPerItem`. It adds allowance; it
+does not change trust or backend policy. Unknown historical usage remains unknown and requires
+explicit acknowledgement of the returned `unknownUsageDigest` (not `planDigest`) via
+`--acknowledge-unknown-usage DIGEST` on both commands. Restored credentials or an account quota reset
+grant neither increment nor acknowledgement.
+
+Local recovery can require the existing owned service to exit and restart into a new launcher
+generation. Factory uses only its already configured restart policy; it does not reconfigure a
+service to pass recovery. The next process still checks the old generation and its command scopes.
+Legacy resources without sufficient ownership evidence remain blocked, rather than being killed
+by a guessed PID or ignored. Current live qualification gaps remain in
+[verification status](../CONFORMANCE.md).

@@ -33,6 +33,7 @@ describe("CLI and MCP control surface", () => {
       "doctor",
       "plan",
       "recovery-plan",
+      "recovery-propose",
       "status",
       "explain",
       "replay",

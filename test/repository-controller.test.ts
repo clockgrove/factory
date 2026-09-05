@@ -12,6 +12,7 @@ import {
 } from "../src/controller/repository-controls.js";
 import type { LeaseManager, LeaseState } from "../src/control/lease.js";
 import { PlatformUnavailableError } from "../src/platform.js";
+import { ControllerGenerationRetirement } from "../src/controller/retirement.js";
 
 function lease(objective: number, epoch = 1): LeaseState {
   return {
@@ -43,6 +44,41 @@ function manager(
 }
 
 describe("repository controller", () => {
+  it("retires its generation only after all admitted reconciliations settle, without redispatch", async () => {
+    let cleaned = false;
+    let calls = 0;
+    const controller = new GitHubRepositoryController({
+      capacity: 1,
+      pollIntervalMs: 1,
+      store: {
+        discoverObjectiveActivations: async () => [
+          {
+            objective: 1,
+            activatedAt: "2026-01-01T00:00:00Z",
+            requestId: "recovery",
+            policy: {},
+            policyDigest: "c".repeat(64),
+            baseSha: "a".repeat(40),
+            requestedBy: "operator",
+          },
+        ],
+      },
+      reconcileObjective: async () => {
+        calls++;
+        try {
+          throw new ControllerGenerationRetirement();
+        } finally {
+          await Promise.resolve();
+          cleaned = true;
+        }
+      },
+    });
+    await expect(controller.run()).rejects.toBeInstanceOf(ControllerGenerationRetirement);
+    expect(cleaned).toBe(true);
+    expect(calls).toBe(1);
+    expect(await controller.reconcileOnce()).toBe(0);
+  });
+
   it("connects durable discovery to fair per-Objective supervisors with shared resources", async () => {
     const observed = {
       controllerId: "controller-1",

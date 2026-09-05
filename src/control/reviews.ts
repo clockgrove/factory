@@ -17,7 +17,7 @@ const REVIEW_PATH = ".clockgrove-factory/control/semantic-review.json";
 
 const ReviewIdentitySchema = z
   .object({
-    kind: z.enum(["artifact", "rebase"]),
+    kind: z.enum(["artifact", "rebase", "integration-candidate"]),
     runId: z.string().min(1).max(200),
     objective: z.number().int().positive(),
     workItem: z.number().int().positive(),
@@ -30,11 +30,11 @@ const ReviewIdentitySchema = z
   })
   .strict()
   .superRefine((value, issue) => {
-    if ((value.kind === "rebase") !== Boolean(value.headSha)) {
+    if ((value.kind !== "artifact") !== Boolean(value.headSha)) {
       issue.addIssue({
         code: "custom",
         path: ["headSha"],
-        message: "headSha is required only for rebased semantic reviews",
+        message: "headSha is required for rebase and integration-candidate reviews only",
       });
     }
   });

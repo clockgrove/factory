@@ -1,9 +1,19 @@
 import { execFileSync, spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, readFile: vi.fn(actual.readFile) };
+});
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, readFileSync: vi.fn(actual.readFileSync) };
+});
 
 import {
   CodexCliLocalBackend,
@@ -413,6 +423,152 @@ describe("Codex CLI local backend", () => {
       } finally {
         await cleanupStaleGroup(staleA.groupId, staleA.directory);
         await cleanupStaleGroup(staleB.groupId, staleB.directory);
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "accepts an inaccessible stopped hint only after independently proving its group absent",
+    async () => {
+      const stale = await spawnStaleGroup(false);
+      const other = await spawnStaleGroup(
+        false,
+        durableAttemptId({ ...staleIdentity, repository: "clockgrove/repo-b" }),
+      );
+      const originalRead = vi.mocked(readFile).getMockImplementation()!;
+      const originalKill = process.kill.bind(process);
+      let stopped = false;
+      let inaccessibleReads = 0;
+      const readSpy = vi.mocked(readFile).mockImplementation(((
+        ...args: Parameters<typeof readFile>
+      ) => {
+        if (stopped && args[0] === `/proc/${stale.groupId}/environ`) {
+          inaccessibleReads++;
+          return Promise.reject(
+            Object.assign(new Error("dying worker environment inaccessible"), { code: "EACCES" }),
+          );
+        }
+        return originalRead(...args);
+      }) as typeof readFile);
+      const killSpy = vi.spyOn(process, "kill").mockImplementation(((
+        pid: number,
+        signal?: NodeJS.Signals | number,
+      ) => {
+        const result = signal === undefined ? originalKill(pid) : originalKill(pid, signal);
+        if (pid === -stale.groupId && signal === "SIGTERM") stopped = true;
+        return result;
+      }) as typeof process.kill);
+      try {
+        await new CodexCliLocalBackend({ staleTerminationGraceMs: 50 }).reconcileStale({
+          ...staleIdentity,
+          providerResourceId: `local-${stale.groupId}`,
+        });
+        expect(inaccessibleReads).toBeGreaterThan(0);
+        expect(processGroupExists(stale.groupId)).toBe(false);
+        expect(processGroupExists(other.groupId)).toBe(true);
+      } finally {
+        readSpy.mockRestore();
+        killSpy.mockRestore();
+        await cleanupStaleGroup(stale.groupId, stale.directory);
+        await cleanupStaleGroup(other.groupId, other.directory);
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "linux").each(["EACCES", "EPERM"])(
+    "keeps a live inaccessible hinted worker fail-closed after %s",
+    async (code) => {
+      const stale = await spawnStaleGroup(false);
+      const originalRead = vi.mocked(readFile).getMockImplementation()!;
+      const readSpy = vi
+        .mocked(readFile)
+        .mockImplementation(((...args: Parameters<typeof readFile>) =>
+          args[0] === `/proc/${stale.groupId}/environ`
+            ? Promise.reject(
+                Object.assign(new Error("live worker environment inaccessible"), { code }),
+              )
+            : originalRead(...args)) as typeof readFile);
+      try {
+        await expect(
+          new CodexCliLocalBackend({ staleTerminationGraceMs: 50 }).reconcileStale({
+            ...staleIdentity,
+            providerResourceId: `local-${stale.groupId}`,
+          }),
+        ).rejects.toThrow(`cannot inspect hinted stale worker ${stale.groupId}: ${code}`);
+        expect(processGroupExists(stale.groupId)).toBe(true);
+      } finally {
+        readSpy.mockRestore();
+        await cleanupStaleGroup(stale.groupId, stale.directory);
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "does not treat an inaccessible stopped leader as absence while its descendants remain alive",
+    async () => {
+      const stale = await spawnStaleGroup(true);
+      const originalRead = vi.mocked(readFile).getMockImplementation()!;
+      const readSpy = vi.mocked(readFile).mockImplementation(((
+        ...args: Parameters<typeof readFile>
+      ) =>
+        args[0] === `/proc/${stale.groupId}/environ`
+          ? Promise.reject(
+              Object.assign(new Error("stopped leader environment inaccessible"), {
+                code: "EACCES",
+              }),
+            )
+          : originalRead(...args)) as typeof readFile);
+      try {
+        process.kill(stale.groupId, "SIGTERM");
+        expect(processGroupExists(stale.groupId)).toBe(true);
+        await expect(
+          new CodexCliLocalBackend({ staleTerminationGraceMs: 50 }).reconcileStale({
+            ...staleIdentity,
+            providerResourceId: `local-${stale.groupId}`,
+          }),
+        ).rejects.toThrow(/cannot inspect hinted stale worker/);
+        expect(processGroupExists(stale.groupId)).toBe(true);
+      } finally {
+        readSpy.mockRestore();
+        await cleanupStaleGroup(stale.groupId, stale.directory);
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "keeps an inaccessible hint with unknown procfs state fail-closed",
+    async () => {
+      const stale = await spawnStaleGroup(false);
+      const originalRead = vi.mocked(readFile).getMockImplementation()!;
+      const originalStat = vi.mocked(readFileSync).getMockImplementation()!;
+      const readSpy = vi
+        .mocked(readFile)
+        .mockImplementation(((...args: Parameters<typeof readFile>) =>
+          args[0] === `/proc/${stale.groupId}/environ`
+            ? Promise.reject(
+                Object.assign(new Error("worker environment inaccessible"), { code: "EACCES" }),
+              )
+            : originalRead(...args)) as typeof readFile);
+      const statSpy = vi.mocked(readFileSync).mockImplementation(((
+        ...args: Parameters<typeof readFileSync>
+      ) => {
+        if (args[0] === `/proc/${stale.groupId}/stat`)
+          throw Object.assign(new Error("worker stat inaccessible"), { code: "EACCES" });
+        return originalStat(...args);
+      }) as typeof readFileSync);
+      try {
+        await expect(
+          new CodexCliLocalBackend({ staleTerminationGraceMs: 50 }).reconcileStale({
+            ...staleIdentity,
+            providerResourceId: `local-${stale.groupId}`,
+          }),
+        ).rejects.toMatchObject({ code: "EACCES" });
+        statSpy.mockRestore();
+        expect(processGroupExists(stale.groupId)).toBe(true);
+      } finally {
+        readSpy.mockRestore();
+        statSpy.mockRestore();
+        await cleanupStaleGroup(stale.groupId, stale.directory);
       }
     },
   );

@@ -1,7 +1,7 @@
 # Implementation handoff
 
-Implementation checkpoint, not release approval. Current integrated baseline: `061e419`.
-Finish the remaining recovery edge and synchronize artifacts before deferred testing.
+Implementation complete and ready for the separate testing phase, not release approval.
+Integrated source and distributable artifacts: `3780a29`.
 [DESIGN.md](DESIGN.md) defines behavior; [CONFORMANCE.md](CONFORMANCE.md) remains the release-gate
 ledger. This document grants no execution, spending, installation, or publication authority.
 
@@ -13,17 +13,24 @@ ledger. This document grants no execution, spending, installation, or publicatio
 | Daytona native linear stacks | `f0ab346` + `59f90d6`: native-stack Daytona admission, rewritten-head/base/artifact-bound isolated validation, immutable completion before paid review, separate capacity/budget replay and partial publication/integration repair. Local native validation retains scoped resource ownership. The cloud-child fixture is written but unexecuted. |
 | Portable installation and Linux host runner | `b44742d`: installed npm/plugin identity verification and reusable no-model host qualification runner. Earlier staged WSL2 evidence is not an integrated-tree or complete host-matrix pass. |
 | Event schemas | `e7181d0` + `061e419`: recovery source-publication/integration fields, source-capacity and scope-batch envelopes. Runtime still enforces cross-field identity, chronology and authenticated lineage. |
-| Successor recovery | Plan-bound requests, adoption, cumulative accounting, resource observations and source-delivery restoration are integrated. The final recovery revision remains pending below. Original source attempts and terminal history are not rewritten as successor authority. |
+| Successor recovery | `bf3388a` + `3780a29`: plan-bound requests, adoption, cumulative accounting, repeated-successor lineage, source-delivery restoration, failed-attempt eligibility and leased completed-merge reconciliation. Original source attempts and terminal history are not rewritten as successor authority. |
+| Distributable artifacts | `3780a29`: CLI and MCP bundles regenerated from the combined source, with matching dependency inventory and notices. A separate temporary rebuild reproduced all four artifacts byte-for-byte. No plugin reinstall or publication was performed. |
 
-## Remaining implementation closeout
+## Implementation closeout
 
-- [ ] Integrate the recovery owner's final lost-lower-merge-response reconciliation fix.
-  Record **recovery revision: `<RECOVERY_COMMIT>`**.
-- [ ] Reconcile final source changes with schemas and documentation, then regenerate both bundles,
-  inventory and notices. Record **final source/artifact revision: `<FINAL_BUNDLE_COMMIT>`**.
-- [ ] Confirm immutable policy and cumulative allowances, authenticated requests, original
+- [x] Integrate the recovery owner's source/proof work and the final leased
+  lost-lower-merge-response reconciliation wiring: `3780a29`.
+- [x] Reconcile source changes with schemas and documentation and regenerate both bundles,
+  inventory and notices: `3780a29`.
+- [x] Review immutable policy and cumulative allowances, authenticated requests, original
   artifact/validation bindings, exact native membership, checkpoint/review reuse and resource
   ownership remain intact. Never fabricate stack receipts or turn unknown cleanup into absence.
+
+Static checks passed on the combined source: `npm run typecheck`, `npm run lint`,
+`npm run format:check`, `npm run verify:schemas`, `npm run verify:dist`, and `git diff --check`.
+The schema check compiles all nine schemas; it is not a runtime protocol-conformance test.
+Independent source review covered the local/isolated validation merge, new event wire shapes,
+and the pre-lease inspection / leased repair / strict runtime re-verification boundary.
 
 Interrupted isolated revalidation without a passing durable completion checkpoint remains blocked
 for resource reconciliation. It does not authorize another invocation or establish zero usage.

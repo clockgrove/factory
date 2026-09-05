@@ -258,7 +258,7 @@ describe("FactoryApplicationService", () => {
       activationAuthorized: false,
       compilation: { requested: false, result: "not-requested", usagePersistence: "none" },
       usage: null,
-      graph: { digest, workItemCount: 1 },
+      graph: { claimedDigest: digest, durableGraphVerified: false, workItemCount: 1 },
     });
     expect(backend.compileCalls).toBe(0);
     expect(writes).toBe(0);
@@ -318,10 +318,13 @@ describe("FactoryApplicationService", () => {
         management: backend,
         repositoryPath: "/repo",
         readRepositoryLayout: async () => ({
+          // Checkout/base are independently supplied so this case reaches inventory validation.
           files: ["package.json"],
           truncated: true,
           totalFiles: 8_000,
         }),
+        validateCheckout: async () => {},
+        readBaseSha: async () => "a".repeat(40),
       },
     });
     const report = await service.plan({ objective: 7, compile: true });

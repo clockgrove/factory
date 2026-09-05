@@ -21,6 +21,7 @@ import {
   probeHostResources,
   probeHostToolchain,
   validatePlanningCheckout,
+  readPlanningRepositoryLayout,
 } from "./application/index.js";
 import { assessRecovery } from "./recovery/assessment.js";
 import { recoveryReadPort } from "./recovery/github-read-port.js";
@@ -134,7 +135,8 @@ function applicationFor(
       management,
       repositoryPath: checkout,
       validateCheckout: validatePlanningCheckout,
-      readRepositoryLayout: (maxEntries) => reader.readRepositoryLayout(undefined, maxEntries),
+      readRepositoryLayout: (maxEntries, baseSha) =>
+        readPlanningRepositoryLayout(checkout, maxEntries, baseSha),
       readBaseSha: async (defaultBranch) => {
         const sha = await store.readRef(`refs/heads/${defaultBranch}`);
         if (!sha) throw new Error(`default branch ${defaultBranch} has no readable head`);

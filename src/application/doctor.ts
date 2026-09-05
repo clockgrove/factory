@@ -1,12 +1,19 @@
-import { execFile } from "node:child_process";
-import { cpus, freemem, platform, totalmem } from "node:os";
-import { promisify } from "node:util";
+import { platform } from "node:os";
+import { access, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { delimiter, isAbsolute, join } from "node:path";
 
 import { DEFAULT_RUN_POLICY } from "../protocol/policy.js";
 import { branchRuleBlockers, requiredChecks } from "../publication/branch-policy.js";
 import type { ApplicationSnapshot, ControllerLifecycle } from "./services.js";
-
-const execFileAsync = promisify(execFile);
+import { discoverValidationCommands, readRepositoryFacts } from "../repository-profiles/index.js";
+import {
+  LinuxResourceSampler,
+  resourcePressureReasons,
+  type ResourceSnapshot,
+} from "../scheduling/resource-sampler.js";
+import { normalizeSchedulingPolicy } from "../protocol/policy.js";
+import { inspectLocalCheckout } from "./checkout.js";
 
 export type DiagnosticStatus = "pass" | "warning" | "fail";
 
@@ -39,7 +46,7 @@ export interface DoctorChecks {
   stackCapability?: () => Promise<unknown>;
   managementProbe?: () => Promise<{ id: string; probe: unknown }>;
   backendProbes?: () => Promise<unknown>;
-  toolchainProbe?: () => Promise<unknown>;
+  toolchainProbe?: (checkout?: string) => Promise<unknown>;
   resourceProbe?: () => Promise<unknown>;
   controller?: ControllerLifecycle;
 }
@@ -81,55 +88,53 @@ function safeDiagnosticDetails(value: unknown, depth = 0): unknown {
   return value;
 }
 
-async function commandVersion(command: string, args: string[]): Promise<string> {
-  const result = await execFileAsync(command, args, {
-    encoding: "utf8",
-    timeout: 5_000,
-    maxBuffer: 16_000,
-  });
-  return String(result.stdout || result.stderr)
-    .trim()
-    .split(/\r?\n/, 1)[0]!
-    .slice(0, 200);
-}
-
 /** Bounded, read-only host inspection shared by CLI and MCP wiring. */
-export async function probeHostToolchain(): Promise<{
+export async function probeHostToolchain(checkout?: string): Promise<{
   platform: NodeJS.Platform;
   node: string;
+  validationCommands: string[];
   commands: Record<string, { available: boolean; version?: string; reason?: string }>;
 }> {
+  if (!checkout) throw new Error("toolchain grounding requires a checkout path");
+  const local = await inspectLocalCheckout(checkout);
+  const facts = await readRepositoryFacts(local.root, local.files);
+  const validationCommands = discoverValidationCommands(facts);
+  const runners = [
+    ...new Set(["git", ...validationCommands.map((command) => command.split(" ")[0]!)]),
+  ];
   const commands = await Promise.all(
-    (
-      [
-        ["git", ["--version"]],
-        ["npm", ["--version"]],
-        ["systemctl", ["--version"]],
-      ] satisfies Array<[string, string[]]>
-    ).map(async ([command, args]) => {
-      try {
-        return [
-          command,
-          { available: true, version: await commandVersion(command, args) },
-        ] as const;
-      } catch (error) {
-        return [command, { available: false, reason: safeDiagnosticMessage(error) }] as const;
-      }
+    runners.map(async (command) => {
+      // Test executable availability without running project tools or lifecycle scripts.
+      const paths = (process.env.PATH ?? "").split(delimiter).filter(isAbsolute);
+      const present = await Promise.all(
+        paths.map(async (path) => {
+          try {
+            const executable = join(path, command);
+            await access(executable, constants.X_OK);
+            return (await stat(executable)).isFile();
+          } catch {
+            return false;
+          }
+        }),
+      );
+      return [
+        command,
+        present.some(Boolean)
+          ? { available: true }
+          : { available: false, reason: "executable unavailable on the absolute host PATH" },
+      ] as const;
     }),
   );
-  return { platform: platform(), node: process.version, commands: Object.fromEntries(commands) };
+  return {
+    platform: platform(),
+    node: process.version,
+    validationCommands,
+    commands: Object.fromEntries(commands),
+  };
 }
 
-export function probeHostResources(): {
-  cpuCount: number;
-  totalMemoryMb: number;
-  freeMemoryMb: number;
-} {
-  return {
-    cpuCount: cpus().length,
-    totalMemoryMb: Math.floor(totalmem() / 1024 / 1024),
-    freeMemoryMb: Math.floor(freemem() / 1024 / 1024),
-  };
+export function probeHostResources(): Promise<ResourceSnapshot> {
+  return new LinuxResourceSampler().sample();
 }
 
 export async function buildDoctorReport(input: {
@@ -160,18 +165,28 @@ export async function buildDoctorReport(input: {
   let snapshot: ApplicationSnapshot | undefined;
   await check("repository", async () => {
     snapshot = await input.readObjective();
+    if (snapshot.number !== input.objective)
+      throw new Error("Objective snapshot identity mismatch");
     const facts = await input.checks?.repositoryFacts?.();
+    if (!facts) throw new Error("GitHub repository identity probe is not configured");
     if (facts && facts.fullName.toLowerCase() !== input.repository.toLowerCase()) {
       throw new Error(`GitHub resolved ${facts.fullName}, expected ${input.repository}`);
     }
+    if (!input.checkout) throw new Error("repository identity requires a local checkout path");
+    const checkout = await inspectLocalCheckout(input.checkout, input.repository);
     return {
-      summary: `Objective #${snapshot.number} and repository identity are readable`,
+      summary:
+        facts.fork || !facts.canPush || snapshot.closed
+          ? "repository identity is verified; fork status, push permission, or closed Objective requires attention before activation"
+          : `Objective #${snapshot.number} and repository identity are readable`,
       details: {
         objectiveTitle: snapshot.title,
-        defaultBranch: snapshot.defaultBranch,
+        objectiveDefaultBranch: snapshot.defaultBranch,
         ...(facts ?? {}),
+        checkout,
       },
-      status: facts?.canPush === false ? ("warning" as const) : ("pass" as const),
+      status:
+        facts.fork || !facts.canPush || snapshot.closed ? ("warning" as const) : ("pass" as const),
     };
   });
 
@@ -183,23 +198,36 @@ export async function buildDoctorReport(input: {
       return { summary: `authenticated to GitHub as ${login}`, details: { login } };
     }),
     check("toolchain", async () => {
-      const details = await (input.checks?.toolchainProbe?.() ?? probeHostToolchain());
+      const details = await (input.checks?.toolchainProbe?.(input.checkout) ??
+        probeHostToolchain(input.checkout));
       const observed = details as {
         platform?: string;
         commands?: Record<string, { available?: boolean }>;
+        validationCommands?: string[];
       };
       const missing = Object.entries(observed.commands ?? {})
-        .filter(([, value]) => value.available === false)
+        .filter(([, value]) => value.available !== true)
         .map(([name]) => name);
-      const supported = observed.platform === undefined || observed.platform === "linux";
+      const supported = observed.platform === "linux";
+      const grounded =
+        Array.isArray(observed.validationCommands) && observed.validationCommands.length > 0;
+      const runnable =
+        grounded &&
+        observed.validationCommands!.some(
+          (command) => observed.commands?.[command.split(" ")[0]!]?.available === true,
+        );
+      const coreReady = observed.commands?.git?.available === true;
       return {
         summary: !supported
           ? `unsupported host platform ${observed.platform}`
-          : missing.length
-            ? `toolchain commands unavailable: ${missing.join(", ")}`
-            : "bounded host toolchain probe completed",
+          : !grounded
+            ? "no repository-grounded validation commands were observed; provide an observed validation recipe"
+            : !coreReady || !runnable
+              ? `toolchain commands unavailable: ${missing.join(", ")}`
+              : "repository validation runners are available; tool behavior and dependencies remain unverified",
         details,
-        status: supported && missing.length === 0 ? ("pass" as const) : ("warning" as const),
+        status:
+          supported && grounded && coreReady && runnable ? ("pass" as const) : ("warning" as const),
       };
     }),
     check("management", async () => {
@@ -244,10 +272,43 @@ export async function buildDoctorReport(input: {
         status: localReady ? ("pass" as const) : ("warning" as const),
       };
     }),
-    check("resources", async () => ({
-      summary: "local CPU and memory were inspected",
-      details: await (input.checks?.resourceProbe?.() ?? Promise.resolve(probeHostResources())),
-    })),
+    check("resources", async () => {
+      const details = (await (input.checks?.resourceProbe?.() ??
+        probeHostResources())) as ResourceSnapshot;
+      if (
+        !details ||
+        ![
+          details.effectiveCpu,
+          details.totalMemoryMb,
+          details.availableMemoryMb,
+          details.loadRatio,
+          details.memoryUsageRatio,
+        ].every((value) => typeof value === "number" && Number.isFinite(value) && value >= 0) ||
+        details.effectiveCpu <= 0 ||
+        details.totalMemoryMb <= 0 ||
+        details.availableMemoryMb > details.totalMemoryMb ||
+        details.memoryUsageRatio > 1 ||
+        !["host", "cgroup-v1", "cgroup-v2"].includes(details.source) ||
+        !Number.isFinite(Date.parse(details.measuredAt)) ||
+        Math.abs(Date.now() - Date.parse(details.measuredAt)) > 60_000
+      )
+        throw new Error(
+          "local capacity measurement is unavailable, stale, or malformed; restore Linux resource sampling before activation",
+        );
+      const local = normalizeSchedulingPolicy(DEFAULT_RUN_POLICY).capacity.local;
+      const reasons = resourcePressureReasons(details, local);
+      if (details.effectiveCpu < local.reserveCpu + local.defaultCpu)
+        reasons.push("CPU headroom cannot admit one default local worker");
+      if (details.availableMemoryMb < local.minimumFreeMemoryMb + local.defaultMemoryMb)
+        reasons.push("free memory cannot admit one default local worker");
+      return {
+        summary: reasons.length
+          ? reasons.join("; ")
+          : "measured Linux capacity can admit a default worker; task-specific requirements still apply",
+        details,
+        status: reasons.length ? ("warning" as const) : ("pass" as const),
+      };
+    }),
     check("controller", async () => {
       if (!input.checkout)
         return {
@@ -310,7 +371,11 @@ export async function buildDoctorReport(input: {
     repository: input.repository,
     objective: input.objective,
     activationAuthorized: false,
-    overall: diagnostics.some((item) => item.status !== "pass") ? "attention-required" : "ready",
+    overall: diagnostics.some(
+      (item) => item.status !== "pass" && !["controller", "stacks"].includes(item.area),
+    )
+      ? "attention-required"
+      : "ready",
     effectiveDefaults: DEFAULT_RUN_POLICY,
     diagnostics,
   };

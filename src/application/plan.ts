@@ -1,5 +1,3 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import {
   compiledGraphDigest,
   parseGraphItemMetadata,
@@ -16,8 +14,8 @@ import {
 import { DEFAULT_RUN_POLICY, parseRunPolicy, resolveModelSelection } from "../protocol/policy.js";
 import type { ApplicationSnapshot } from "./services.js";
 import { safeDiagnosticMessage } from "./doctor.js";
+import { assertCleanPlanningFiles, inspectLocalCheckout } from "./checkout.js";
 
-const execFileAsync = promisify(execFile);
 export interface PlanInput {
   objective: number;
   compile?: boolean;
@@ -47,9 +45,16 @@ export interface PlanningContext {
   management?: ManagementBackend;
   /** Local checkout used only for repository-grounded compiler reads. */
   repositoryPath?: string;
-  validateCheckout?: (repositoryPath: string, baseSha: string) => Promise<void>;
+  validateCheckout?: (
+    repositoryPath: string,
+    baseSha: string,
+    repository?: string,
+  ) => Promise<void>;
   readBaseSha?: (defaultBranch: string) => Promise<string>;
-  readRepositoryLayout?: (maxEntries: number) => Promise<{
+  readRepositoryLayout?: (
+    maxEntries: number,
+    baseSha?: string,
+  ) => Promise<{
     files: string[];
     truncated: boolean;
     totalFiles?: number;
@@ -60,24 +65,30 @@ export interface PlanningContext {
 export async function validatePlanningCheckout(
   repositoryPath: string,
   baseSha: string,
+  repository?: string,
 ): Promise<void> {
-  const run = async (args: string[]): Promise<string> => {
-    const result = await execFileAsync("git", ["-C", repositoryPath, ...args], {
-      encoding: "utf8",
-      timeout: 5_000,
-      maxBuffer: 64_000,
-    });
-    return result.stdout.trim();
-  };
-  const head = await run(["rev-parse", "HEAD"]);
+  const { head, root } = await inspectLocalCheckout(repositoryPath, repository);
   if (head.toLowerCase() !== baseSha.toLowerCase()) {
     throw new Error(
       `planning checkout HEAD ${head.slice(0, 12)} does not match selected base ${baseSha.slice(0, 12)}`,
     );
   }
-  const changes = await run(["status", "--porcelain", "--untracked-files=no"]);
-  if (changes)
-    throw new Error("planning checkout has tracked changes; refusing mixed-revision compilation");
+  await assertCleanPlanningFiles(root);
+}
+
+export async function readPlanningRepositoryLayout(
+  checkout: string,
+  maxEntries: number,
+  baseSha?: string,
+) {
+  const local = await inspectLocalCheckout(checkout);
+  if (baseSha && local.head.toLowerCase() !== baseSha.toLowerCase())
+    throw new Error("planning inventory no longer matches selected base");
+  return {
+    files: local.files.slice(0, maxEntries),
+    totalFiles: local.files.length,
+    truncated: local.files.length > maxEntries,
+  };
 }
 function summarizeGraph(objective: CompiledObjective, observedDigest?: string) {
   const edges = objective.workItems.flatMap((item) =>
@@ -90,7 +101,13 @@ function summarizeGraph(objective: CompiledObjective, observedDigest?: string) {
   }
   return {
     title: objective.title,
-    digest: observedDigest ?? compiledGraphDigest(objective),
+    digest: compiledGraphDigest(objective),
+    digestAuthority: observedDigest
+      ? ("reconstructed-issue-content" as const)
+      : ("computed-proposal" as const),
+    ...(observedDigest
+      ? { claimedDigest: observedDigest, durableGraphVerified: false as const }
+      : {}),
     workItemCount: objective.workItems.length,
     dependencyEdges: edges,
     stackGroups: [...stackGroups].map(([group, items]) => ({ group, items })),
@@ -190,7 +207,11 @@ export async function buildPlanReport(input: {
         graph: summarizeGraph(inspected.objective, inspected.digest),
         usage: null,
         diagnostics: [
-          { status: "pass", summary: "complete existing graph inspected without model execution" },
+          {
+            status: "warning",
+            summary:
+              "complete issue graph inspected without model execution; its claimed digest and durable graph authority are unverified, and issue packets may omit compiler analysis",
+          },
         ],
       };
     } catch (error) {
@@ -216,21 +237,24 @@ export async function buildPlanReport(input: {
     if (!management) throw new Error("management compiler is not configured");
     if (!input.planning?.readRepositoryLayout)
       throw new Error("repository layout reader is not configured");
-    const layout = await input.planning.readRepositoryLayout(5_000);
+    const baseSha =
+      input.request.baseSha ?? (await input.planning.readBaseSha?.(input.snapshot.defaultBranch));
+    if (!baseSha || !/^[0-9a-f]{40}$/i.test(baseSha))
+      throw new Error("plan compilation requires a valid base SHA");
+    if (!input.planning.repositoryPath || !input.planning.validateCheckout)
+      throw new Error(
+        "plan compilation requires a configured checkout identity and clean-base validator",
+      );
+    await input.planning.validateCheckout(input.planning.repositoryPath, baseSha, input.repository);
+    const layout = await input.planning.readRepositoryLayout(5_000, baseSha);
     if (layout.truncated)
       throw new Error(
         `repository layout is incomplete${layout.totalFiles ? ` (${layout.totalFiles} files)` : ""}; refusing under-grounded compilation`,
       );
-    const baseSha =
-      input.request.baseSha ?? (await input.planning.readBaseSha?.(input.snapshot.defaultBranch));
-    if (!baseSha) throw new Error("plan compilation requires a readable base SHA");
-    if (input.planning.repositoryPath && input.planning.validateCheckout) {
-      await input.planning.validateCheckout(input.planning.repositoryPath, baseSha);
-    }
     const policy = parseRunPolicy(input.request.policy ?? DEFAULT_RUN_POLICY);
     const modelSelection = resolveModelSelection(policy, "compile");
     const context: CompilationContext = {
-      repository: input.planning.repositoryPath ?? input.repository,
+      repository: input.planning.repositoryPath,
       objective: {
         number: input.snapshot.number,
         title: input.snapshot.title,
@@ -249,7 +273,14 @@ export async function buildPlanReport(input: {
     });
     if (!checkpointed) throw new Error("management compiler returned without its result callback");
     validateGraph(result.objective);
+    if (
+      result.objective.workItems.some(
+        (item) => item.baseSha?.toLowerCase() !== baseSha.toLowerCase(),
+      )
+    )
+      throw new Error("proposed Work Item base does not match the inspected checkout");
     observedUsage = { ...result.usage };
+    await input.planning.validateCheckout(input.planning.repositoryPath, baseSha, input.repository);
     return {
       ...common,
       mode: "compilation",

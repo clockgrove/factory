@@ -192,6 +192,7 @@ export class FactoryApplicationService {
   }
 
   doctor(objective: number, checkout?: string) {
+    checkout ??= this.context.planning?.repositoryPath;
     return buildDoctorReport({
       repository: `${this.context.owner}/${this.context.repo}`,
       objective,

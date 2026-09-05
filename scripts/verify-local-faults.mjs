@@ -58,6 +58,114 @@ const scopeFields = [
 const sha = /^[a-f0-9]{64}$/;
 const evidenceByteLimit = 8 * 1024 * 1024;
 
+const faultStages = Object.freeze({
+  configuration: "Explicit scenario configuration could not be verified",
+  "installed-identity": "Exact installed artifact identity could not be verified",
+  "repository-preflight": "Private disposable repository authority could not be verified",
+  "mcp-connect": "Installed MCP connection or tool contract could not be verified",
+  "controller-preflight":
+    "Exact installed controller identity or active state could not be verified",
+  "repository-quiescence":
+    "Disposable repository quiescence or fresh namespace could not be verified",
+  "objective-create": "New Objective creation was not fully observed; inspect before any retry",
+  "evidence-load": "Prior private evidence identity could not be verified",
+  "activation-request":
+    "Activation request outcome was not fully observed; inspect before any retry",
+  "worker-arm": "An exact active owned worker was not observed within the qualification bound",
+  "pause-request": "Pause request outcome was not fully observed; inspect before any retry",
+  "fault-injection": "Fault injection outcome was not fully observed; never repeat blindly",
+  "resource-absence": "Exact original resource absence or controller takeover was not proven",
+  "takeover-reconciliation": "Same-run takeover, cancellation, or reported usage remained unproven",
+  "retry-request": "Original-authority retry request outcome was not fully observed",
+  "resume-request": "Original-authority resume request outcome was not fully observed",
+  "terminal-observation":
+    "The exact run did not reach an observed terminal outcome within the bound",
+  assessment: "Complete source-bound fault evidence was not established",
+  complete: "Qualification completion evidence could not be persisted",
+});
+
+/** Fixed vocabulary only; exception messages, provider output and inputs never
+ * enter diagnostics. Repeated mechanical reads emit no progress/model chatter. */
+export function createFaultProgress({ now = Date.now, emit = () => {} } = {}) {
+  const startedAt = now();
+  let phase = "unconfigured";
+  let current = "configuration";
+  let steps = 0;
+  const elapsed = () =>
+    Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, Math.floor(now() - startedAt)));
+  return {
+    phase(value) {
+      assert.ok(
+        ["preflight", "prepare", "exercise", "verify"].includes(value),
+        "unknown qualification phase",
+      );
+      phase = value;
+    },
+    stage(stage) {
+      assert.ok(Object.hasOwn(faultStages, stage), "unknown qualification stage");
+      if (stage === current && steps > 0) return;
+      assert.ok(steps < 32, "qualification progress bound exceeded");
+      current = stage;
+      steps++;
+      emit({
+        protocol: "clockgrove.factory/local-fault-progress-v1",
+        phase,
+        stage: current,
+        elapsedMs: elapsed(),
+      });
+    },
+    failure() {
+      return {
+        phase,
+        stage: current,
+        code: `local-fault-${current}-incomplete`,
+        reason: faultStages[current],
+        elapsedMs: elapsed(),
+      };
+    },
+  };
+}
+
+/** Trust only this exact installed, authenticated status response. An old
+ * terminal run does not make a newer queued activation quiescent. */
+export function isQuiescentFaultObjective(status, repository, objective) {
+  if (
+    status?.operation !== "status" ||
+    status.repository !== repository ||
+    status.objective?.number !== objective ||
+    status.activation?.state === "queued"
+  )
+    return false;
+  if (
+    status.activation &&
+    !["withdrawn", "started", "cancellation-requested", "rejected"].includes(
+      status.activation.state,
+    )
+  )
+    return false;
+  if (
+    status.run?.availability === "observed" &&
+    ["completed", "cancelled", "escalated"].includes(status.run.state)
+  )
+    return true;
+  const requestIdentity = (value) =>
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 200 &&
+    value.trim() === value &&
+    [...value].every(
+      (character) => character.charCodeAt(0) > 31 && character.charCodeAt(0) !== 127,
+    );
+  return (
+    status.run?.availability === "unavailable" &&
+    status.run.state === "not-started" &&
+    status.run.runId === undefined &&
+    status.activation?.state === "withdrawn" &&
+    requestIdentity(status.activation.requestId) &&
+    requestIdentity(status.activation.cancellationRequestId)
+  );
+}
+
 export function privateEvidenceFile(path, value) {
   const parent = realpathSync(dirname(path));
   assert.ok(
@@ -538,13 +646,14 @@ export async function boundedPoll(
   throw new Error("bounded-observation-incomplete");
 }
 
-export async function main() {
+async function runQualification(progress) {
   if (process.env.FACTORY_LOCAL_FAULTS !== "1") {
     console.log(
       "Not exercised: FACTORY_LOCAL_FAULTS=1 and explicit phase/repository authority required.",
     );
     return;
   }
+  progress.stage("configuration");
   const required = (key) => {
     const value = process.env[`FACTORY_LOCAL_FAULT_${key}`]?.trim();
     assert.ok(value, `FACTORY_LOCAL_FAULT_${key} required`);
@@ -552,6 +661,7 @@ export async function main() {
   };
   const phase = required("PHASE");
   assert.ok(["preflight", "prepare", "exercise", "verify"].includes(phase));
+  progress.phase(phase);
   const scenario = required("SCENARIO");
   assert.ok(["cancel", "restart"].includes(scenario));
   const repository = required("REPOSITORY");
@@ -569,6 +679,7 @@ export async function main() {
   const evidencePath = resolve(required("EVIDENCE"));
   assert.ok(evidencePath.startsWith("/tmp/"), "private evidence must be in /tmp");
   const codexHome = realpathSync(join(homedir(), ".codex"));
+  progress.stage("installed-identity");
   if (process.env.CODEX_HOME) assert.equal(realpathSync(process.env.CODEX_HOME), codexHome);
   const listed = JSON.parse(command("codex", ["plugin", "list", "--json"], checkout));
   const pluginRoot = installedPluginPath({ listed, codexHome });
@@ -593,6 +704,7 @@ export async function main() {
     "",
     "harness must be committed",
   );
+  progress.stage("repository-preflight");
   const token =
     process.env.GITHUB_TOKEN || process.env.GH_TOKEN || command("gh", ["auth", "token"], checkout);
   const octokit = new Octokit({
@@ -630,6 +742,7 @@ export async function main() {
   let evidence;
   const save = () => privateEvidenceFile(evidencePath, evidence);
   try {
+    progress.stage("mcp-connect");
     await client.connect(transport);
     transport.stderr?.on("data", () => {});
     assert.equal(
@@ -663,6 +776,7 @@ export async function main() {
       "factory_controller_status",
     ])
       assert.ok(definitions.some((tool) => tool.name === name));
+    progress.stage("controller-preflight");
     const controller = await call("factory_controller_status", {
       repository: checkout,
       requestId: `${namespace}-inspect`,
@@ -698,6 +812,7 @@ export async function main() {
       return;
     }
     if (phase === "prepare") {
+      progress.stage("repository-quiescence");
       assert.ok(!existsSync(evidencePath), "never overwrite prior qualification evidence");
       assert.equal(command("git", ["status", "--porcelain"], checkout), "");
       const issues = await list("GET /repos/{owner}/{repo}/issues", { state: "all" });
@@ -712,7 +827,7 @@ export async function main() {
       )) {
         const status = await call("factory_status", { objectiveNumber: issue.number });
         assert.ok(
-          ["completed", "cancelled", "escalated"].includes(status.run?.state),
+          isQuiescentFaultObjective(status, repository, issue.number),
           "another Objective may be active or queued in this disposable repository",
         );
       }
@@ -721,6 +836,7 @@ export async function main() {
         "disposable repository must have no open PRs",
       );
       const body = faultObjective(namespace);
+      progress.stage("objective-create");
       const objective = (
         await request("POST /repos/{owner}/{repo}/issues", {
           title: `Factory local ${scenario} qualification [${namespace}]`,
@@ -750,6 +866,7 @@ export async function main() {
       console.log("Prepared one new disposable Objective; no activation or worker was launched.");
       return;
     }
+    progress.stage("evidence-load");
     evidence = privateEvidenceFile(evidencePath);
     assert.equal(evidence.protocol, "clockgrove.factory/installed-local-fault-v1");
     for (const [key, expected] of Object.entries({
@@ -794,6 +911,7 @@ export async function main() {
         !previous.some((event) => event.event === "FactoryRunStarted" || terminal.has(event.event)),
         "exercise requires the fresh prepared Objective",
       );
+      progress.stage("activation-request");
       await call("factory_activate", {
         objectiveNumber: evidence.objective,
         requestId: evidence.activationRequestId,
@@ -801,6 +919,7 @@ export async function main() {
         policy,
       });
       let identity;
+      progress.stage("worker-arm");
       await boundedPoll(observe, (events) => {
         const start = events.find((event) => event.event === "FactoryRunStarted");
         if (!start) return false;
@@ -848,13 +967,16 @@ export async function main() {
         return false;
       });
       save();
-      if (scenario === "restart")
+      if (scenario === "restart") {
+        progress.stage("pause-request");
         await call("factory_pause", {
           objectiveNumber: evidence.objective,
           requestId: evidence.pauseRequestId,
           reason:
             "Bounded installed restart qualification: pause new admissions until original scope absence is independently observed",
         });
+      }
+      progress.stage("fault-injection");
       assert.equal(
         observeUnit(evidence.before.scope.unit).status,
         "active",
@@ -875,6 +997,7 @@ export async function main() {
         });
       evidence.injected = true;
       save();
+      progress.stage("resource-absence");
       await boundedPoll(
         async () => ({
           hostIdentity: currentHost(),
@@ -894,6 +1017,7 @@ export async function main() {
       );
       save();
       if (scenario === "restart") {
+        progress.stage("takeover-reconciliation");
         await boundedPoll(observe, (events) => {
           const pause = events.find(
             (event) =>
@@ -938,6 +1062,7 @@ export async function main() {
           ),
           "interrupted worker model usage is unknown; keep admissions paused rather than assume zero",
         );
+        progress.stage("retry-request");
         await call("factory_retry", {
           objectiveNumber: evidence.objective,
           workItemNumber: identity.workItem,
@@ -945,12 +1070,14 @@ export async function main() {
           reason:
             "Orderly restart qualification: original worker absence and durable takeover observed; use the remaining original attempt allowance",
         });
+        progress.stage("resume-request");
         await call("factory_resume", {
           objectiveNumber: evidence.objective,
           requestId: evidence.resumeRequestId,
         });
       }
     }
+    progress.stage("terminal-observation");
     assert.ok(evidence.runId, "no captured run to verify");
     await boundedPoll(
       observe,
@@ -965,25 +1092,36 @@ export async function main() {
         scope: observeUnit(evidence.before.scope.unit),
         controller: observeUnit(controller.unit),
       };
+    progress.stage("assessment");
     evidence.assessment = assessLocalFault(evidence);
     save();
     console.log(JSON.stringify(evidence.assessment));
     if (evidence.assessment.result !== "passed") process.exitCode = 2;
+    else progress.stage("complete");
   } catch {
+    const failure = progress.failure();
     if (evidence) {
       evidence.assessment = {
         result: "incomplete",
-        reason:
-          "bounded fault qualification did not obtain complete evidence; inspect private receipts and current installed status",
+        ...failure,
       };
       save();
     }
     process.exitCode = 2;
-    console.error(
-      "Incomplete installed local fault qualification; inspect exact state before any further action. No terminal revival or extra allowance was requested.",
-    );
+    console.error(JSON.stringify({ result: "incomplete", ...failure }));
   } finally {
     await client.close().catch(() => {});
+  }
+}
+export async function main() {
+  const progress = createFaultProgress({ emit: (event) => console.log(JSON.stringify(event)) });
+  try {
+    await runQualification(progress);
+  } catch {
+    // Includes failures before MCP setup and failures to persist private evidence.
+    // Never print raw exceptions, transport payloads, environment or credentials.
+    process.exitCode = 2;
+    console.error(JSON.stringify({ result: "incomplete", ...progress.failure() }));
   }
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();

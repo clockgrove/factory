@@ -1,12 +1,15 @@
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   assessLocalFault,
   authenticatedFaultEvents,
   boundedPoll,
+  createFaultProgress,
   faultObjective,
   faultPolicy,
+  isQuiescentFaultObjective,
   parseUnitObservation,
   privateEvidenceFile,
   scopeUnit,
@@ -14,6 +17,112 @@ import {
 import { parseRunPolicy } from "../src/protocol/policy.js";
 import { localScopeUnit } from "../src/runtime/local-scope.js";
 import { parseLocalScopeIdentity } from "../src/protocol/local-scope.js";
+
+describe("bounded local-fault progress diagnostics", () => {
+  it("reports fixed stage/failure codes and elapsed time without unchanged polling chatter", () => {
+    let now = 1_000;
+    const emitted: unknown[] = [];
+    const progress = createFaultProgress({ now: () => now, emit: (event) => emitted.push(event) });
+    progress.stage("configuration");
+    progress.phase("exercise");
+    now = 2_000;
+    progress.stage("worker-arm");
+    for (let repeat = 0; repeat < 120; repeat++) progress.stage("worker-arm");
+    expect(emitted).toHaveLength(2);
+    expect(progress.failure()).toEqual({
+      phase: "exercise",
+      stage: "worker-arm",
+      code: "local-fault-worker-arm-incomplete",
+      reason: "An exact active owned worker was not observed within the qualification bound",
+      elapsedMs: 1_000,
+    });
+    expect(() => progress.stage("secret-provider-output")).toThrow("unknown qualification stage");
+    expect(() => progress.phase("secret-provider-output")).toThrow("unknown qualification phase");
+    expect(JSON.stringify([...emitted, progress.failure()])).not.toContain(
+      "secret-provider-output",
+    );
+  });
+
+  it("bounds stage changes and never prints caller-supplied configuration in failures", () => {
+    const progress = createFaultProgress();
+    for (let index = 0; index < 32; index++)
+      progress.stage(index % 2 ? "worker-arm" : "configuration");
+    expect(() => progress.stage("fault-injection")).toThrow(
+      "qualification progress bound exceeded",
+    );
+    const result = spawnSync(process.execPath, ["scripts/verify-local-faults.mjs"], {
+      cwd: process.cwd(),
+      env: {
+        PATH: process.env.PATH,
+        FACTORY_LOCAL_FAULTS: "1",
+        FACTORY_LOCAL_FAULT_PHASE: "private-secret-sentinel",
+      },
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    expect(result.status).toBe(2);
+    const diagnostic = JSON.parse(result.stderr.trim());
+    expect(diagnostic).toMatchObject({
+      result: "incomplete",
+      stage: "configuration",
+      code: "local-fault-configuration-incomplete",
+    });
+    expect(`${result.stdout}${result.stderr}`).not.toContain("private-secret-sentinel");
+    expect(`${result.stdout}${result.stderr}`).not.toContain("AssertionError");
+  });
+});
+
+describe("disposable repository quiescence", () => {
+  const withdrawn = () => ({
+    operation: "status",
+    repository: "fixture/private",
+    objective: { number: 7 },
+    run: { availability: "unavailable", state: "not-started" },
+    activation: {
+      requestId: "original-activation",
+      state: "withdrawn",
+      cancellationRequestId: "exact-withdrawal",
+    },
+  });
+  it("accepts only source-bound withdrawn pending activations or observed terminal runs", () => {
+    expect(isQuiescentFaultObjective(withdrawn(), "fixture/private", 7)).toBe(true);
+    for (const state of ["completed", "cancelled", "escalated"])
+      expect(
+        isQuiescentFaultObjective(
+          {
+            ...withdrawn(),
+            activation: undefined,
+            run: { availability: "observed", state, runId: "original-run" },
+          },
+          "fixture/private",
+          7,
+        ),
+      ).toBe(true);
+  });
+  it("rejects queued, unknown, active and transplanted status, including queued activation after terminal run", () => {
+    const valid = withdrawn();
+    const variants = [
+      { ...valid, activation: undefined },
+      { ...valid, activation: { ...valid.activation, cancellationRequestId: undefined } },
+      { ...valid, activation: { ...valid.activation, requestId: "" } },
+      ...["queued", "unknown", "rejected", "cancellation-requested", "started"].map((state) => ({
+        ...valid,
+        activation: { ...valid.activation, state },
+      })),
+      { ...valid, run: { availability: "observed", state: "active", runId: "running" } },
+      { ...valid, run: { ...valid.run, runId: "contradictory-start" } },
+      {
+        ...valid,
+        run: { availability: "observed", state: "completed", runId: "old" },
+        activation: { ...valid.activation, state: "queued" },
+      },
+      { ...valid, repository: "other/private" },
+      { ...valid, objective: { number: 8 } },
+    ];
+    for (const status of variants)
+      expect(isQuiescentFaultObjective(status, "fixture/private", 7)).toBe(false);
+  });
+});
 
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const identity = parseLocalScopeIdentity({

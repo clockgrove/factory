@@ -1,5 +1,18 @@
 export function faultPolicy(tokens: number, scenario?: "cancel" | "restart"): unknown;
+export function createFaultProgress(options?: {
+  now?: () => number;
+  emit?: (event: { protocol: string; phase: string; stage: string; elapsedMs: number }) => void;
+}): {
+  phase(value: string): void;
+  stage(stage: string): void;
+  failure(): { phase: string; stage: string; code: string; reason: string; elapsedMs: number };
+};
 export function faultObjective(namespace: string): string;
+export function isQuiescentFaultObjective(
+  status: unknown,
+  repository: string,
+  objective: number,
+): boolean;
 export function privateEvidenceFile(path: string, value?: unknown): unknown;
 export function scopeUnit(identity: unknown): string;
 export function parseUnitObservation(

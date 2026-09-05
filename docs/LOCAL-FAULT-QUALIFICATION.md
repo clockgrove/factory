@@ -90,6 +90,25 @@ credentials, model prompts, or process environment; receipt reason text and
 private repository details still make it unsuitable for a public artifact.
 Files are bounded to 8 MiB, owner-only, and opened without following symlinks.
 
+The harness emits bounded JSON progress at phase/stage changes, not on each
+unchanged poll. Failures retain the fixed phase, stage, diagnostic code, safe
+reason, and elapsed milliseconds in private assessment evidence when that
+evidence has been established. For example, `local-fault-worker-arm-incomplete`
+distinguishes failure to observe an active owned worker from
+`local-fault-resource-absence-incomplete`. These codes do not disclose raw
+exceptions, provider output, credentials, prompts, or environment values. A
+failure before evidence creation is reported through the same fixed diagnostic
+vocabulary on stderr. Diagnostics never authorize another activation, fault
+injection, cleanup action, retry, or increased allowance.
+
+Preparation accepts an existing labelled Objective with no run only when the
+exact installed authenticated status reports `activation.state: withdrawn`,
+both activation and cancellation request IDs, and `run.availability: unavailable`
+with `run.state: not-started`. Its repository and Objective must match the read.
+Queued, generic unstarted, unknown, or active work remains a blocker; a newer
+queued activation also blocks even if the previous run is terminal. This is
+quiescence evidence only, not execution or retry authority.
+
 Only authenticated receipt identities can demonstrate no duplicate resource per
 attempt. Physical absence is proved for the **captured active worker scope**;
 normal terminal receipts and installed status reconcile subsequent work. This is

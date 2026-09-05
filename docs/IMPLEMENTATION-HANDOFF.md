@@ -11,7 +11,7 @@ ledger. This document grants no execution, spending, installation, or publicatio
 | Capability | Required outcome | Status |
 | --- | --- | --- |
 | Ordinary restart and receipt repair | Resume after authenticated same-run merges; reject external trunk changes; reconstruct reservation receipts without losing immutable resource identity. | Integrated; targeted regression checks passed; full batch pending |
-| Partial native-stack recovery | Retain validated lower work and execute unfinished upper work through exact-evidence publication and integration without duplicate work. | In progress |
+| Partial native-stack recovery | Retain validated lower work and execute unfinished upper work through exact-evidence publication and integration without duplicate work. | Integrated; final mixed-artifact and historical-prefix regressions passed; full batch pending |
 | Generic, economic compilation | Ground commands in observed repository toolchains, accept explicit exclusive-resource claims, and evaluate decomposition costs without fabricated prices or measurements. | Integrated; targeted regression checks passed; full batch pending |
 | Chat preflight and planning | Doctor performs useful mechanical diagnostics; explicit plan produces or inspects a proposed graph before activation; CLI and MCP share the same write-free inspection contract. | Integrated; targeted regression checks passed; installed verification pending |
 | Managed providers | Prove assignable provider identities and owned session lifecycle observations for both managed targets; preserve explicit unsupported boundaries until evidenced. | Exact Copilot task/session reconciliation integrated and regression-tested; live credentials and Codex identity remain external gates |
@@ -26,12 +26,20 @@ The current completion effort proceeds with credential-free verification and loc
 Paid-provider qualification is deferred until the operator supplies credentials; this does not waive
 provider evidence or authorize fallback, extra spending, publication, or a reduced support contract.
 
+Current source integration includes exact later stack-link correlation, artifact-only retained member
+restoration, explicit execute-action admission, independently verified merged-prefix omission, and
+reuse of an authenticated revalidation base without rewriting the original reservation. Final focused
+coverage includes a four-layer retained/fresh stack and unchanged original attempt history. Local
+scope cleanup now drains continuously owned active state to independently observed absence; unknown
+state still blocks. The combined scope/native/provider/resume check passed 83 tests before the final
+mixed-recovery integration, whose required full release batch follows next.
+
 ## Integrated capabilities
 
 | Capability | Integrated implementation |
 | --- | --- |
 | Provider execution | `db15c41`: local/Daytona sibling pipelines, fresh isolated candidate validation, exact invocation ownership, durable native accounting and cleanup-uncertainty handling. Accepted `trusted_local` overflow may feed local work; isolated requirements never become local authority. |
-| Daytona native linear stacks | `f0ab346` + `59f90d6`: native-stack Daytona admission, rewritten-head/base/artifact-bound isolated validation, immutable completion before paid review, separate capacity/budget replay and partial publication/integration repair. Local native validation retains scoped resource ownership. The cloud-child fixture is written but unexecuted. |
+| Daytona native linear stacks | `f0ab346` + `59f90d6`: native-stack Daytona admission, rewritten-head/base/artifact-bound isolated validation, immutable completion before paid review, separate capacity/budget replay and partial publication/integration repair. Sixteen credential-free Supervisor scenarios now pass, including four fresh-controller checkpoint/review/receipt restart boundaries; see [provider qualification](PROVIDER-QUALIFICATION.md). Live cloud evidence remains separate. |
 | Portable installation and Linux host runner | `b44742d`: installed npm/plugin identity verification and reusable no-model host qualification runner. Earlier staged WSL2 evidence is not an integrated-tree or complete host-matrix pass. |
 | Event schemas | `e7181d0` + `061e419`: recovery source-publication/integration fields, source-capacity and scope-batch envelopes. Runtime still enforces cross-field identity, chronology and authenticated lineage. |
 | Successor recovery | `bf3388a` + `3780a29`: plan-bound requests, adoption, cumulative accounting, repeated-successor lineage, source-delivery restoration, failed-attempt eligibility and leased completed-merge reconciliation. Original source attempts and terminal history are not rewritten as successor authority. |

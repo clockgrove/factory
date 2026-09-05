@@ -85,12 +85,15 @@ guesses from timestamps or assumes unassignment stopped compute.
 **Daytona linear-stack runtime qualification remains open.** The implementation now binds a distinct
 stack-rebase invocation to the original publication, rewritten head, new base and artifact, persists
 complete validation and provider resource lifetime before semantic review, and reconstructs separate
-sandbox budget/capacity. Twelve credential-free full-Supervisor native scenarios passed in an isolated
-run: cascading validation, invalidated heads, conflict, validation/review rejection, checkpoint response
-loss, cancellation, native-budget exhaustion, and uncertain cleanup. Combined execution exposed a
-separate local-process cleanup race before native validation; that failure is being repaired rather
-than waived. Fresh-process checkpoint/review replay and the complete integrated batch remain required.
-These fixtures simulate Daytona and GitHub; they are not live cloud or billing evidence.
+sandbox budget/capacity. Sixteen credential-free full-Supervisor native scenarios now cover cascading
+validation, invalidated heads, conflict, validation/review rejection, checkpoint response loss,
+cancellation, native-budget exhaustion, and uncertain cleanup. Four scenarios create a fresh
+controller after checkpoint/review/receipt response loss and prove the sandbox, review, original
+attempts, and accounting are not duplicated. The 69-test native/backend/publication batch passed.
+The combined 83-test local-scope/native/provider/resume batch also passed after fixing post-stop
+scope collection timing and isolating independent test run identities. These fixtures simulate
+Daytona and GitHub; they are not live cloud or billing evidence, and do not replace the final release
+batch or installed qualification.
 
 No live provider launch was performed to implement these tests. A passed Daytona happy-path report
 does not qualify all TTL, crash, egress, secret-brokerage, or provider-invoice cases. The overall live

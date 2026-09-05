@@ -11,7 +11,11 @@ import {
   type ManagementBackend,
   type ManagementUsage,
 } from "../management/backend.js";
-import { DEFAULT_RUN_POLICY, parseRunPolicy, resolveModelSelection } from "../protocol/policy.js";
+import {
+  DEFAULT_RUN_POLICY,
+  parseRunPolicy,
+  resolveModelSelection,
+} from "../protocol/policy.js";
 import type { ApplicationSnapshot } from "./services.js";
 import { safeDiagnosticMessage } from "./doctor.js";
 import { assertCleanPlanningFiles, inspectLocalCheckout } from "./checkout.js";
@@ -135,7 +139,8 @@ function inspectExistingGraph(snapshot: ApplicationSnapshot): {
       "Objective has no existing compiled Work Items; pass compile=true to request bounded compilation",
     );
   const records = snapshot.workItems.map((item) => {
-    if (!item.body) throw new Error(`Work Item #${item.number} has no readable body`);
+    if (!item.body)
+      throw new Error(`Work Item #${item.number} has no readable body`);
     return {
       item,
       metadata: parseGraphItemMetadata(item.body),
@@ -144,12 +149,20 @@ function inspectExistingGraph(snapshot: ApplicationSnapshot): {
   });
   const digests = new Set(records.map((record) => record.metadata.graphDigest));
   const sizes = new Set(records.map((record) => record.metadata.graphSize));
-  if (digests.size !== 1 || sizes.size !== 1 || records[0]!.metadata.graphSize !== records.length) {
-    throw new Error("existing Work Items do not form one complete compiled graph");
+  if (
+    digests.size !== 1 ||
+    sizes.size !== 1 ||
+    records[0]!.metadata.graphSize !== records.length
+  ) {
+    throw new Error(
+      "existing Work Items do not form one complete compiled graph",
+    );
   }
   records.sort((left, right) => left.metadata.index - right.metadata.index);
   if (records.some((record, index) => record.metadata.index !== index)) {
-    throw new Error("existing Work Items have missing or duplicate compiled graph positions");
+    throw new Error(
+      "existing Work Items have missing or duplicate compiled graph positions",
+    );
   }
   const objective: CompiledObjective = {
     title: snapshot.title,
@@ -226,7 +239,9 @@ export async function buildPlanReport(input: {
         },
         graph: null,
         usage: null,
-        diagnostics: [{ status: "warning", summary: safeDiagnosticMessage(error) }],
+        diagnostics: [
+          { status: "warning", summary: safeDiagnosticMessage(error) },
+        ],
       };
     }
   }
@@ -238,14 +253,19 @@ export async function buildPlanReport(input: {
     if (!input.planning?.readRepositoryLayout)
       throw new Error("repository layout reader is not configured");
     const baseSha =
-      input.request.baseSha ?? (await input.planning.readBaseSha?.(input.snapshot.defaultBranch));
+      input.request.baseSha ??
+      (await input.planning.readBaseSha?.(input.snapshot.defaultBranch));
     if (!baseSha || !/^[0-9a-f]{40}$/i.test(baseSha))
       throw new Error("plan compilation requires a valid base SHA");
     if (!input.planning.repositoryPath || !input.planning.validateCheckout)
       throw new Error(
         "plan compilation requires a configured checkout identity and clean-base validator",
       );
-    await input.planning.validateCheckout(input.planning.repositoryPath, baseSha, input.repository);
+    await input.planning.validateCheckout(
+      input.planning.repositoryPath,
+      baseSha,
+      input.repository,
+    );
     const layout = await input.planning.readRepositoryLayout(5_000, baseSha);
     if (layout.truncated)
       throw new Error(
@@ -271,16 +291,25 @@ export async function buildPlanReport(input: {
       observedUsage = { ...candidate.usage };
       checkpointed = true;
     });
-    if (!checkpointed) throw new Error("management compiler returned without its result callback");
+    if (!checkpointed)
+      throw new Error(
+        "management compiler returned without its result callback",
+      );
     validateGraph(result.objective);
     if (
       result.objective.workItems.some(
         (item) => item.baseSha?.toLowerCase() !== baseSha.toLowerCase(),
       )
     )
-      throw new Error("proposed Work Item base does not match the inspected checkout");
+      throw new Error(
+        "proposed Work Item base does not match the inspected checkout",
+      );
     observedUsage = { ...result.usage };
-    await input.planning.validateCheckout(input.planning.repositoryPath, baseSha, input.repository);
+    await input.planning.validateCheckout(
+      input.planning.repositoryPath,
+      baseSha,
+      input.repository,
+    );
     return {
       ...common,
       mode: "compilation",
@@ -301,7 +330,8 @@ export async function buildPlanReport(input: {
       ],
     };
   } catch (error) {
-    if (error instanceof ManagementOutputError) observedUsage = { ...error.usage };
+    if (error instanceof ManagementOutputError)
+      observedUsage = { ...error.usage };
     return {
       ...common,
       mode: "compilation",

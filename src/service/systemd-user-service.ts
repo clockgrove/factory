@@ -1,11 +1,24 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { access, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const FACTORY_UNIT_MARKER = "# Managed by Clockgrove Factory v2";
+const SYSTEM_COMMAND_DIRECTORIES = [
+  "/usr/local/sbin",
+  "/usr/local/bin",
+  "/usr/sbin",
+  "/usr/bin",
+  "/sbin",
+  "/bin",
+];
+type CommandEnvironment = Readonly<{
+  PATH?: string | undefined;
+  FACTORY_CODEX_PATH?: string | undefined;
+}>;
 export interface SystemdServiceInput {
   repository: string;
   checkout: string;
@@ -24,12 +37,15 @@ export interface SystemdUserServiceOptions {
   factoryExecutable?: string;
   unitDirectory?: string;
   run?: (args: readonly string[]) => Promise<unknown>;
+  /** Read at install time only; no credentials or unrelated environment are persisted. */
+  commandEnvironment?: () => CommandEnvironment;
 }
 
 export class SystemdUserService {
   readonly #command: readonly [string, ...string[]];
   readonly #directory: string;
   readonly #run: (args: readonly string[]) => Promise<unknown>;
+  readonly #commandEnvironment: () => CommandEnvironment;
   constructor(options: SystemdUserServiceOptions) {
     if (options.factoryCommand && options.factoryExecutable) {
       throw new Error("configure factoryCommand or factoryExecutable, not both");
@@ -49,6 +65,7 @@ export class SystemdUserService {
       throw new Error("cannot determine systemd user unit directory");
     this.#directory = resolve(options.unitDirectory ?? join(config, "systemd/user"));
     this.#run = options.run ?? (async (args) => execFileAsync("systemctl", ["--user", ...args]));
+    this.#commandEnvironment = options.commandEnvironment ?? (() => process.env);
   }
 
   unitName(input: SystemdServiceInput): string {
@@ -62,7 +79,7 @@ export class SystemdUserService {
   async install(input: SystemdServiceInput): Promise<SystemdStatus> {
     validateInput(input);
     const path = this.unitPath(input);
-    const body = this.#unit(input);
+    const body = this.#unit(input, await this.#discoverCommandEnvironment());
     await mkdir(dirname(path), { recursive: true });
     let old: string | undefined;
     try {
@@ -145,10 +162,73 @@ export class SystemdUserService {
     if (!(await exists(this.unitPath(input))))
       throw new Error(`${this.unitName(input)} is not installed`);
   }
-  #unit(input: SystemdServiceInput): string {
+  async #discoverCommandEnvironment(): Promise<string[]> {
+    const environment = this.#commandEnvironment();
+    // A service does not inherit a login shell's PATH. Retain only directories
+    // that actually supply our command dependencies, never the whole shell PATH.
+    const search = [
+      ...new Set(
+        (environment.PATH ?? "")
+          .split(":")
+          .filter(safeDirectory)
+          .map((path) => resolve(path)),
+      ),
+    ];
+    const find = async (name: string): Promise<string | undefined> => {
+      for (const directory of search) {
+        const path = join(directory, name);
+        if (await executableFile(path)) return path;
+      }
+      return undefined;
+    };
+    const gh = await find("gh");
+    const configured = environment.FACTORY_CODEX_PATH?.trim();
+    let codex: string | undefined;
+    if (configured) {
+      if (unsafeEnvironmentValue(configured))
+        throw new Error("configured Codex executable contains unsupported characters");
+      codex = configured.includes("/") ? resolve(configured) : await find(configured);
+      if (!codex || !safeDirectory(dirname(codex)) || !(await executableFile(codex))) {
+        throw new Error("configured Codex executable is unavailable at service installation");
+      }
+    } else {
+      codex = await find("codex");
+    }
+    const discovered = new Set([gh, codex].flatMap((path) => (path ? [dirname(path)] : [])));
+    const directories = [
+      // Preserve lookup precedence if both selected directories contain Codex or gh.
+      ...search.filter((directory) => discovered.has(directory)),
+      ...discovered,
+      dirname(process.execPath),
+      dirname(this.#command[0]),
+      ...SYSTEM_COMMAND_DIRECTORIES,
+    ];
+    if (!directories.every(safeDirectory))
+      throw new Error("service command directory contains unsupported characters");
+    const assignments = [`PATH=${[...new Set(directories)].join(":")}`];
+    // A custom basename or explicit pinned launcher cannot be represented by PATH alone.
+    if (configured && codex) assignments.push(`FACTORY_CODEX_PATH=${codex}`);
+    return assignments.map((assignment) => `Environment=${systemdQuote(assignment)}\n`);
+  }
+  #unit(input: SystemdServiceInput, environment: string[]): string {
     const checkout = resolve(input.checkout);
     const command = this.#command.map(systemdQuote).join(" ");
-    return `${FACTORY_UNIT_MARKER}\n[Unit]\nDescription=Clockgrove Factory repository controller for ${escapeDescription(input.repository)}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory=${systemdDirectivePath(checkout)}\nExecStart=${command} controller run ${systemdQuote(input.repository)} --repo ${systemdQuote(checkout)}\nRestart=on-failure\nRestartPreventExitStatus=2 130\nRestartSec=30\nTimeoutStopSec=90\nKillMode=control-group\n\n[Install]\nWantedBy=default.target\n`;
+    return `${FACTORY_UNIT_MARKER}\n[Unit]\nDescription=Clockgrove Factory repository controller for ${escapeDescription(input.repository)}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory=${systemdDirectivePath(checkout)}\n${environment.join("")}ExecStart=${command} controller run ${systemdQuote(input.repository)} --repo ${systemdQuote(checkout)}\nRestart=on-failure\nRestartPreventExitStatus=2 130\nRestartSec=30\nTimeoutStopSec=90\nKillMode=control-group\n\n[Install]\nWantedBy=default.target\n`;
+  }
+}
+
+function unsafeEnvironmentValue(value: string): boolean {
+  return /[\p{Cc}\p{Zl}\p{Zp}]/u.test(value);
+}
+function safeDirectory(value: string): boolean {
+  return isAbsolute(value) && !value.includes(":") && !unsafeEnvironmentValue(value);
+}
+async function executableFile(path: string): Promise<boolean> {
+  try {
+    await access(path, fsConstants.X_OK);
+    return (await stat(path)).isFile();
+  } catch {
+    return false;
   }
 }
 

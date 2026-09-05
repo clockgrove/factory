@@ -38,7 +38,7 @@ const start = (runId = "source", sequence = 1) =>
     policyDigest: policyDigest(DEFAULT_RUN_POLICY),
   });
 
-async function fixture() {
+async function fixture(topology: "regular" | "sibling" | "stack" = "regular") {
   let next = 1;
   const oid = () => (next++).toString(16).padStart(40, "0");
   const refs = new Map<string, string>();
@@ -118,11 +118,36 @@ async function fixture() {
       },
     ],
   };
+  const policy =
+    topology === "regular"
+      ? DEFAULT_RUN_POLICY
+      : {
+          ...DEFAULT_RUN_POLICY,
+          delivery: {
+            mode: "stacked-prs" as const,
+            onUnavailable: "escalate" as const,
+            merge: "bottom-up" as const,
+          },
+        };
+  if (topology !== "regular") {
+    objective.workItems[0]!.delivery = { group: "feature", relationship: "root" };
+    objective.workItems.push({
+      ...objective.workItems[0]!,
+      id: "other",
+      title: "Other private feature",
+      scope: ["src/other.ts"],
+      dependsOn: topology === "stack" ? ["feature"] : [],
+      delivery:
+        topology === "stack"
+          ? { group: "feature", relationship: "continue-stack", parentWorkItem: "feature" }
+          : { group: "other", relationship: "root" },
+    });
+  }
   const lease: LeaseState = {
     objective: 7,
     runId: "source",
     holder: "operator",
-    policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+    policyDigest: policyDigest(policy),
     ref: "lease",
     oid: sha("f"),
     treeOid: base.treeOid,
@@ -137,7 +162,11 @@ async function fixture() {
   const projection = await manager.persistProjection({
     lease,
     graph,
-    bindings: [{ compilerId: "feature", issueNodeId: "issue-8", issueNumber: 8 }],
+    bindings: objective.workItems.map((item, index) => ({
+      compilerId: item.id,
+      issueNodeId: `issue-${8 + index}`,
+      issueNumber: 8 + index,
+    })),
   });
   const review = await new ReviewCheckpointManager(graphStore, {
     assertCurrent: async () => {},
@@ -211,6 +240,44 @@ async function fixture() {
       },
     ],
   };
+  if (topology !== "regular") {
+    snapshot.factoryEvents![0] = event({
+      ...start("source", 0),
+      policy,
+      policyDigest: policyDigest(policy),
+    });
+    snapshot.factoryEvents!.push(
+      event({
+        kind: "delivery",
+        event: "DeliverySelected",
+        sequence: 1,
+        requested: "stacked-prs",
+        selected: "native-stacks",
+        capabilityVersion: "2026-03-10",
+        reason: "Observed supported native delivery",
+      }),
+    );
+    for (let index = 1; index <= 2; index++)
+      snapshot.factoryEvents![index] = event({ ...snapshot.factoryEvents![index]!, graphSize: 2 });
+    snapshot.workItems = objective.workItems.map((item, index) => ({
+      id: `issue-${8 + index}`,
+      number: 8 + index,
+      title: item.title,
+      body: renderWorkPacket(item, {
+        protocol: "clockgrove.factory/graph-v1",
+        id: item.id,
+        graphDigest: graph.graphDigest,
+        graphSize: 2,
+        index,
+        dependsOn: item.dependsOn,
+      }),
+      closed: false,
+      blockedBy: item.dependsOn.map(() => ({ number: 8, closed: false })),
+      linkedPullRequests: [],
+      copilotAssignments: [],
+      factoryEvents: [],
+    }));
+  }
   const pull: Awaited<ReturnType<RecoveryReadStore["readPullRequest"]>> = {
     number: 9,
     nodeId: "pull-9",
@@ -262,7 +329,7 @@ async function fixture() {
       backend: "codex-sdk/local-worktree",
       baseSha: base.oid,
       directorEpoch: 1,
-      policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+      policyDigest: policyDigest(policy),
       ...fields,
     });
   const reserve = () => {
@@ -347,7 +414,8 @@ async function fixture() {
         attempt: 1,
         unitId: "delivery/feature",
         itemId: "feature",
-        mode: "regular-prs",
+        mode: topology === "regular" ? "regular-prs" : "native-stacks",
+        ...(topology === "stack" ? { stackNumber: 1 } : {}),
         position: 0,
         branch: pull.headRef,
         baseBranch: "main",
@@ -610,7 +678,7 @@ describe("read-only recovery assessment", () => {
   it.each(["verified", "unavailable", "wrong-head", "wrong-position", "closed-stack"])(
     "checks observed native stack topology: %s",
     async (state) => {
-      const f = await fixture();
+      const f = await fixture("stack");
       f.publish();
       const history = f.snapshot.workItems[0]!.factoryEvents!;
       const index = history.findIndex((receipt) => receipt.kind === "publication");
@@ -642,6 +710,52 @@ describe("read-only recovery assessment", () => {
       if (state !== "unavailable") expect(readStack).toHaveBeenCalledOnce();
     },
   );
+
+  it("accepts an independent native-mode sibling without inventing stack membership", async () => {
+    const f = await fixture("sibling");
+    f.publish();
+    const readStack = vi.fn(async () => {
+      throw new Error("sibling must not query a stack");
+    });
+    const result = await assessRecovery({
+      repository: "o/r",
+      snapshot: f.snapshot,
+      store: { ...f.port, readStack },
+    });
+    expect(result.workItems).toEqual([
+      expect.objectContaining({ number: 8, classification: "reusable-publication" }),
+      expect.objectContaining({ number: 9, classification: "unfinished" }),
+    ]);
+    expect(readStack).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "missing-stack-id",
+    "wrong-unit",
+    "missing-selection",
+    "sibling-with-stack-id",
+    "sibling-wrong-base",
+  ])("rejects native delivery identity mismatch: %s", async (change) => {
+    const f = await fixture(change.startsWith("sibling") ? "sibling" : "stack");
+    f.publish();
+    const history = f.snapshot.workItems[0]!.factoryEvents!;
+    const index = history.findIndex((receipt) => receipt.kind === "publication");
+    if (change === "missing-stack-id") {
+      const changed = { ...history[index]! };
+      delete changed.stackNumber;
+      history[index] = event(changed);
+    }
+    if (change === "wrong-unit")
+      history[index] = event({ ...history[index]!, unitId: "delivery/other" });
+    if (change === "missing-selection")
+      f.snapshot.factoryEvents = f.snapshot.factoryEvents!.filter(
+        (receipt) => receipt.kind !== "delivery",
+      );
+    if (change === "sibling-with-stack-id")
+      history[index] = event({ ...history[index]!, stackNumber: 1 });
+    if (change === "sibling-wrong-base") f.pull.baseRef = "foreign-branch";
+    expect((await f.assess()).workItems[0]!.classification).toBe("blocked");
+  });
 
   it("does not leak provider exceptions or treat unreadable refs as absence", async () => {
     const f = await fixture();

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { createHash } from "node:crypto";
 
 import {
   MAX_WORKER_PACKET_BYTES,
@@ -150,4 +151,22 @@ export function parseWorkerPacket(input: unknown): WorkerPacket {
   assertWithinBytes(packet, MAX_WORKER_PACKET_BYTES, "Worker Packet");
   assertNoSecretMaterial(packet, "Worker Packet");
   return packet;
+}
+
+/** Stable content identity for a prepared execution, including retry context and
+ * policy-grounded requirements. Object key order is not execution authority. */
+export function workerPacketDigest(input: unknown): string {
+  const packet: unknown = JSON.parse(JSON.stringify(parseWorkerPacket(input)));
+  const canonical = (value: unknown): string => {
+    if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+    if (value !== null && typeof value === "object") {
+      const record = value as Record<string, unknown>;
+      return `{${Object.keys(record)
+        .sort()
+        .map((key) => `${JSON.stringify(key)}:${canonical(record[key])}`)
+        .join(",")}}`;
+    }
+    return JSON.stringify(value);
+  };
+  return createHash("sha256").update(canonical(packet)).digest("hex");
 }

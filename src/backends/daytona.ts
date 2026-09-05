@@ -20,6 +20,7 @@ import {
 } from "../execution/artifacts.js";
 import { assertNoSecretMaterial, MAX_LOG_BYTES } from "../protocol/limits.js";
 import { destinationAllowedByPolicy } from "../protocol/policy.js";
+import { validationInvocationOwnership } from "./validation-invocation.js";
 import {
   parseSandboxPaths,
   parseIsolatedValidationResult,
@@ -588,6 +589,7 @@ export class DaytonaBackend implements ExecutionBackend {
   }
 
   async validate(context: IsolatedValidationContext): Promise<IsolatedValidationResult> {
+    const invocationOwner = validationInvocationOwnership(context);
     if (this.#now() >= context.deadline.getTime()) {
       throw new Error("Daytona validation deadline elapsed before sandbox creation");
     }
@@ -613,6 +615,7 @@ export class DaytonaBackend implements ExecutionBackend {
           labels: {
             factory: "v2",
             phase: "validation",
+            ...(invocationOwner ? { invocationOwner } : {}),
             objective: String(context.objective),
             workItem: String(context.workItem),
             attempt: String(context.attempt),
@@ -646,9 +649,22 @@ export class DaytonaBackend implements ExecutionBackend {
         "validation",
         ttlMinutes,
         createFailure,
+        invocationOwner ?? undefined,
       );
       throw safeFailure(createFailure, "Daytona validator creation failure");
     }
+
+    if (
+      invocationOwner &&
+      (sandbox.name !== resourceName || sandbox.labels?.invocationOwner !== invocationOwner)
+    )
+      throw new DaytonaResourceCleanupError({
+        resourceId: sandbox.id,
+        resourceName,
+        ttlMinutes,
+        operation: "created validation ownership mismatch",
+        cause: "refusing use or cleanup of unowned resource",
+      });
 
     const tracked: TrackedDaytona = {
       sandbox,
@@ -711,6 +727,7 @@ export class DaytonaBackend implements ExecutionBackend {
   }
 
   async reconcileStale(identity: StaleAttemptIdentity): Promise<void> {
+    const invocationOwner = validationInvocationOwnership(identity);
     const resourceName = sandboxResourceName(identity, identity.phase);
     const locator = identity.providerResourceId ?? resourceName;
     const durableReplacementFence = identity.providerResourceId
@@ -720,6 +737,17 @@ export class DaytonaBackend implements ExecutionBackend {
       (resource) => resource.resourceName === resourceName || resource.sandbox.id === locator,
     );
     if (tracked) {
+      if (
+        invocationOwner &&
+        (tracked.sandbox.name !== resourceName ||
+          tracked.sandbox.labels?.invocationOwner !== invocationOwner)
+      )
+        throw new DaytonaResourceCleanupError({
+          resourceId: tracked.sandbox.id,
+          resourceName,
+          operation: "tracked validation ownership mismatch",
+          cause: "refusing cleanup of unowned resource",
+        });
       await this.#deleteTracked(tracked, "stale-attempt reconciliation");
       return;
     }
@@ -777,6 +805,16 @@ export class DaytonaBackend implements ExecutionBackend {
       phase: identity.phase === "validation" ? "validation" : "execution",
       ...(ambiguity ? { ttlMinutes: ambiguity.ttlMinutes } : {}),
     };
+    if (
+      invocationOwner &&
+      (sandbox.name !== resourceName || sandbox.labels?.invocationOwner !== invocationOwner)
+    )
+      throw new DaytonaResourceCleanupError({
+        resourceId: sandbox.id,
+        resourceName,
+        operation: "validation invocation ownership mismatch",
+        cause: "refusing cleanup of unowned resource",
+      });
     this.#track(recovered);
     await this.#deleteTracked(recovered, "stale-attempt reconciliation");
   }
@@ -913,6 +951,7 @@ export class DaytonaBackend implements ExecutionBackend {
     phase: "execution" | "validation",
     ttlMinutes: number,
     createFailure: unknown,
+    invocationOwner?: string,
   ): Promise<void> {
     const definitiveRejection = isDefinitiveCreateRejection(createFailure);
     const ambiguity: AmbiguousDaytonaCreate = {
@@ -951,6 +990,17 @@ export class DaytonaBackend implements ExecutionBackend {
         ttlMinutes,
       });
     }
+    if (
+      invocationOwner &&
+      (sandbox.name !== resourceName || sandbox.labels?.invocationOwner !== invocationOwner)
+    )
+      throw new DaytonaResourceCleanupError({
+        resourceId: sandbox.id,
+        resourceName,
+        ttlMinutes,
+        operation: "ambiguous validation ownership mismatch",
+        cause: "refusing cleanup of unowned resource",
+      });
     const tracked: TrackedDaytona = {
       sandbox,
       resourceName,

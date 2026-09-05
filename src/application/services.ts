@@ -12,11 +12,18 @@ import { buildExplanationReport } from "./explain.js";
 import { buildReplayReport } from "./replay.js";
 import { buildStatusReport, type FactoryReadSnapshot } from "./status.js";
 import type { RecoveryAssessment } from "../recovery/assessment.js";
+import type {
+  RecoveryRequestService,
+  RecoveryProposalInput,
+  RecoveryRequestInput,
+} from "../recovery/requests.js";
 
 export const APPLICATION_OPERATIONS = [
   "doctor",
   "plan",
   "recovery-plan",
+  "recovery-propose",
+  "recovery-request",
   "status",
   "explain",
   "activate",
@@ -117,6 +124,7 @@ export interface ServiceContext {
   controller?: ControllerLifecycle;
   readBaseSha?: (defaultBranch: string) => Promise<string>;
   assessRecovery?: (snapshot: ApplicationSnapshot) => Promise<RecoveryAssessment>;
+  recovery?: RecoveryRequestService;
 }
 
 export type ReadOperation = "doctor" | "plan" | "recovery-plan" | "status" | "explain" | "replay";
@@ -132,6 +140,16 @@ export type CommandOperation =
 /** A single, injectable boundary used by transports. Reads can never reach a command store. */
 export class FactoryApplicationService {
   constructor(private readonly context: ServiceContext) {}
+
+  recoveryPropose(input: RecoveryProposalInput) {
+    if (!this.context.recovery) throw new Error("recovery proposal service is not configured");
+    return this.context.recovery.propose(input);
+  }
+
+  recoveryRequest(input: RecoveryRequestInput) {
+    if (!this.context.recovery) throw new Error("recovery request service is not configured");
+    return this.context.recovery.request(input);
+  }
 
   async inspect(operation: ReadOperation, objective: number, workItem?: number): Promise<unknown> {
     if (operation === "recovery-plan") {

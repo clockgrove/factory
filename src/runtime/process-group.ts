@@ -117,6 +117,9 @@ export interface StartProcessOptions {
   timeoutMs: number;
   maxOutputBytes?: number;
   cancellationGraceMs?: number;
+  /** Owned outer resource cleanup, invoked on exit, timeout, and cancellation
+   * before waiting for pipes that escaped descendants may still hold open. */
+  terminateDescendants?: () => Promise<void>;
 }
 
 export interface ProcessGroupControl {
@@ -316,7 +319,16 @@ export function startContainedProcess(options: StartProcessOptions): ContainedPr
   const scanTails = { stdout: "", stderr: "" };
   let groupTermination: Promise<void> | null = null;
   const terminateOnce = (signal: NodeJS.Signals): Promise<void> => {
-    groupTermination ??= terminateGroup(child, signal, options.cancellationGraceMs ?? 2_000);
+    groupTermination ??= Promise.allSettled([
+      terminateGroup(child, signal, options.cancellationGraceMs ?? 2_000),
+      Promise.resolve().then(() => options.terminateDescendants?.()),
+    ]).then((results) => {
+      const failure = results.find((result) => result.status === "rejected");
+      if (failure?.status === "rejected") throw failure.reason;
+    });
+    // Timeout/output watchdogs initiate cleanup before the exit listener can
+    // await it. Preserve the rejection for callers without an unhandled window.
+    void groupTermination.catch(() => undefined);
     return groupTermination;
   };
   const scan = (stream: keyof typeof scanTails, chunk: Buffer): boolean => {
@@ -373,6 +385,11 @@ export function startContainedProcess(options: StartProcessOptions): ContainedPr
         });
       })
       .catch((error: unknown) => {
+        // An escaped descendant can retain the pipes even after its leader and
+        // original process group are gone. Failed owned cleanup must return an
+        // explicit failure, not keep the Supervisor waiting for that descendant.
+        child.stdout?.destroy();
+        child.stderr?.destroy();
         activeGroups.delete(pid);
         settle?.({
           exitCode: 1,

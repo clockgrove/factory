@@ -5066,7 +5066,12 @@ export class FactorySupervisor {
       } catch (error) {
         if (providerStarted && !record) {
           // A response may have been lost after immutable persistence. Never launch twice.
-          record = await this.#nativeRebases.load(identity);
+          const recovered = await this.#nativeRebases.load(identity);
+          if (recovered && recovered.validation.artifactDigest !== artifact.digest)
+            throw new Error(
+              "native rebase recovered checkpoint artifact conflicts; automated replacement is blocked",
+            );
+          record = recovered;
           if (!record)
             throw new Error(
               "native rebase validation lacks durable completion; automated replacement is blocked until exact resource reconciliation",

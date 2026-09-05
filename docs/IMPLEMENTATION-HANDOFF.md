@@ -1,9 +1,12 @@
 # Implementation handoff
 
-The completion implementation and matching bundles are integrated. The full offline release batch
-passed at `136983af385413c971bf3f5cd0f744542a56cdf2`; fresh staged npm/plugin installations also passed
-the no-model WSL2 component checks. Installed Objective, fault, host and provider qualification remain
-required before release readiness. Implementation completion is not a claim that those gates passed.
+The completion implementation and matching bundles are integrated. Exact offline, installed and
+staged-package results are recorded in the conformance ledger below. A fresh installed regular-PR
+exercise exposed premature admission while a prior publication still awaited integration. The
+current branch fixes that gate and prevents integration recovery from racing an active execution;
+four full-Supervisor regressions fail on the prior code and pass with the correction. Fresh installed
+qualification of the corrected candidate remains required. Implementation completion is not a claim
+that Objective, fault, host or provider gates passed.
 [DESIGN.md](DESIGN.md) defines behavior; [CONFORMANCE.md](CONFORMANCE.md) remains the release-gate
 ledger. This document grants no execution, spending, installation, or publication authority.
 
@@ -34,6 +37,13 @@ The installed native happy path separately exposed stale sibling test-merge meta
 advanced. Whether to permit changing a sibling PR head to obtain fresh preview evidence remains an
 unanswered product decision, not an API-key shortage. Integration pacing preserves current exact-head
 and merge-evidence guards and does not itself force GitHub to refresh that preview.
+
+Explicit regular delivery now holds each complete pipeline through integration, including pending
+checks and fresh-controller reconstruction. Its dedicated installed qualifier also supports a
+deliberately selected CLI-only route, distinct from observing SDK-to-CLI failure fallback. Delivery
+summaries count distinct published PR attempts and integrated members, not duplicate recovery rows;
+regular and native completion receipts contribute without counting a native member twice. These
+changes preserve the separate native concurrency contract and require their own live evidence.
 
 The current candidate includes structural discovery-label repair, exact activation replay,
 authenticated queued withdrawal, and startup/admission cancellation fences. Installed withdrawal of

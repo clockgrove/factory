@@ -17,6 +17,16 @@ export function checkpointFacts(
   requirePaused?: boolean,
 ): { runId: string; modelTokens: number; integrated: number; stable: unknown[] };
 export function assertScopeCoverage(events: Record<string, unknown>[]): void;
+export function readCheckpointMergeProof(
+  hooks: { request(route: string, parameters: Record<string, unknown>): Promise<unknown> },
+  input: { repository: string; pull: unknown; publication: unknown; integration: unknown },
+): Promise<{
+  pullRequestNodeId: string;
+  pullRequest: number;
+  repository: string;
+  headSha: string;
+  mergeSha: string;
+}>;
 export function assertCheckpointExecutable(
   pid: number,
   expectedNode: string,

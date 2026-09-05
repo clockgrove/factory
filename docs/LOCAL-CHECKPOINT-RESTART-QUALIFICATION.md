@@ -97,6 +97,13 @@ The acknowledgement authorizes only this one-shot sequence:
    matching authenticated completion receipt (or the inverse) remains pending within the existing
    polling bound. Both must agree on the original run before strict terminal proof, artifact checks
    or Stop; conflicting outcomes or identities fail closed.
+   Actual merge commits come from GraphQL `PullRequest.mergeCommit.oid`, bound to the same REST
+   PR node ID/number, repository, immutable published head and authenticated integration receipt.
+   The bounded query must return an error-free, merged PR with the exact commit; missing data is
+   never guessed or replaced with a legacy REST field. GitHub's
+   [2026-03-10 breaking changes](https://docs.github.com/en/rest/about-the-rest-api/breaking-changes?apiVersion=2026-03-10)
+   remove `merge_commit_sha`; the [GraphQL field](https://docs.github.com/en/graphql/reference/pulls#pullrequest)
+   identifies the commit created by the actual merge.
 
 The immutable policy is regular PR delivery, local SDK with local CLI fallback, a 500,000 observed
 model-token ceiling, two attempts per item, and 45 minutes. The qualifier itself requires first

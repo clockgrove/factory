@@ -227,6 +227,67 @@ export function checkpointCompletionReady(observation, authority, pauseRequestId
   return true;
 }
 
+export async function readCheckpointMergeProof(
+  hooks,
+  { repository, pull, publication, integration },
+) {
+  assert.equal(publication.event, "PublicationRecorded");
+  assert.equal(integration.event, "AttemptIntegrated");
+  for (const field of ["runId", "objective", "workItem", "attempt"])
+    assert.equal(
+      integration[field],
+      publication[field],
+      "integration/publication identity mismatch",
+    );
+  assert.ok(Number.isSafeInteger(publication.pullRequest) && publication.pullRequest > 0);
+  assert.equal(pull.number, publication.pullRequest);
+  assert.ok(
+    typeof pull.node_id === "string" && pull.node_id.length > 0 && pull.node_id.length <= 256,
+  );
+  assert.equal(pull.base.repo.full_name, repository);
+  assert.ok(typeof pull.base.repo.node_id === "string" && pull.base.repo.node_id.length > 0);
+  assert.equal(pull.merged, true);
+  assert.equal(pull.state, "closed");
+  assert.match(publication.headSha, /^[a-f0-9]{40}$/);
+  assert.equal(pull.head.sha, publication.headSha);
+  assert.match(integration.headSha, /^[a-f0-9]{40}$/);
+  const response = await schedulingRequest(hooks, "POST /graphql", {
+    query: `query CheckpointMergeProof($id: ID!) {
+      node(id: $id) { __typename ... on PullRequest {
+        id number repository { id nameWithOwner } headRefOid merged state mergeCommit { oid }
+      } }
+    }`,
+    variables: { id: pull.node_id },
+  });
+  assert.ok(
+    response.data.errors === undefined ||
+      (Array.isArray(response.data.errors) && response.data.errors.length === 0),
+    "GraphQL merge proof unavailable",
+  );
+  const node = response.data.data?.node;
+  assert.equal(node?.__typename, "PullRequest");
+  assert.equal(node.id, pull.node_id);
+  assert.equal(node.number, pull.number);
+  assert.equal(node.repository.id, pull.base.repo.node_id);
+  assert.equal(node.repository.nameWithOwner, repository);
+  assert.equal(node.headRefOid, publication.headSha);
+  assert.equal(node.merged, true);
+  assert.equal(node.state, "MERGED");
+  assert.match(node.mergeCommit?.oid ?? "", /^[a-f0-9]{40}$/);
+  assert.equal(
+    node.mergeCommit.oid,
+    integration.headSha,
+    "actual merge differs from integration receipt",
+  );
+  return {
+    pullRequestNodeId: node.id,
+    pullRequest: node.number,
+    repository,
+    headSha: node.headRefOid,
+    mergeSha: node.mergeCommit.oid,
+  };
+}
+
 export function checkpointFacts(
   observation,
   authority,
@@ -1218,8 +1279,6 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
             pull_number: publication.pullRequest,
           })
         ).data;
-        assert.ok(pull.merged && pull.state === "closed");
-        assert.equal(pull.head.sha, publication.headSha);
         const integration = unique(
           events.filter(
             (event) =>
@@ -1229,7 +1288,12 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
           ),
           "integration identity missing",
         );
-        assert.equal(pull.merge_commit_sha, integration.headSha);
+        const proof = await readCheckpointMergeProof(
+          { request: (route, parameters) => octokit.request(route, parameters) },
+          { repository: authority.repository, pull, publication, integration },
+        );
+        (evidence.mergeProofs ??= []).push(proof);
+        save();
       }
       assert.deepEqual(installedBundleIdentity(pluginRoot), artifact);
       evidence.finishedArtifact = artifact;

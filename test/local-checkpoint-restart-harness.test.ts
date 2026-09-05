@@ -10,6 +10,7 @@ import {
   checkpointStartupObservation,
   checkpointReady,
   checkpointCompletionReady,
+  readCheckpointMergeProof,
   checkpointLease,
   assertScopeCoverage,
   main,
@@ -712,6 +713,132 @@ describe("one-shot checkpoint lifecycle", () => {
     vi.mocked(f.port.controller).mockResolvedValue(original);
     await expect(runCheckpointScenario(f.port, authority)).rejects.toThrow(/did not restart/);
     expect(f.actions).not.toContain("resume");
+  });
+});
+
+describe("exact GraphQL merged commit proof", () => {
+  const repository = "example/fixture";
+  const head = "a".repeat(40),
+    merge = "b".repeat(40);
+  const publication = {
+    event: "PublicationRecorded",
+    runId: "run",
+    objective: 1,
+    workItem: 2,
+    attempt: 1,
+    pullRequest: 3,
+    headSha: head,
+  };
+  const integration = { ...publication, event: "AttemptIntegrated", headSha: merge };
+  const pull = {
+    node_id: "PR_exact",
+    number: 3,
+    merged: true,
+    state: "closed",
+    head: { sha: head },
+    base: { repo: { node_id: "R_exact", full_name: repository } },
+  };
+  const node = {
+    __typename: "PullRequest",
+    id: "PR_exact",
+    number: 3,
+    merged: true,
+    state: "MERGED",
+    headRefOid: head,
+    repository: { id: "R_exact", nameWithOwner: repository },
+    mergeCommit: { oid: merge },
+  };
+  const input = { repository, pull, publication, integration };
+  it("uses authoritative GraphQL mergeCommit when REST omits merge_commit_sha", async () => {
+    const request = vi.fn(async () => ({ data: { data: { node } } }));
+    await expect(readCheckpointMergeProof({ request }, input)).resolves.toEqual({
+      pullRequestNodeId: "PR_exact",
+      pullRequest: 3,
+      repository,
+      headSha: head,
+      mergeSha: merge,
+    });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledWith(
+      "POST /graphql",
+      expect.objectContaining({
+        variables: { id: "PR_exact" },
+        query: expect.stringContaining("mergeCommit { oid }"),
+        request: { signal: expect.any(AbortSignal) },
+      }),
+    );
+  });
+  it.each([
+    { mergeCommit: null },
+    { mergeCommit: { oid: "c".repeat(40) } },
+    { id: "PR_other" },
+    { number: 9 },
+    { repository: { id: "R_other", nameWithOwner: repository } },
+    { repository: { id: "R_exact", nameWithOwner: "other/repo" } },
+    { headRefOid: "c".repeat(40) },
+    { merged: false },
+    { state: "OPEN" },
+    { __typename: "Issue" },
+  ])("rejects unavailable or mismatched GraphQL proof", async (delta) => {
+    const request = vi.fn(async () => ({ data: { data: { node: { ...node, ...delta } } } }));
+    await expect(readCheckpointMergeProof({ request }, input)).rejects.toThrow();
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+  it("rejects partial GraphQL errors without falling back to a legacy REST field", async () => {
+    const request = vi.fn(async () => ({
+      data: { errors: [{ message: "unavailable" }], data: { node } },
+    }));
+    await expect(
+      readCheckpointMergeProof(
+        { request },
+        { ...input, pull: { ...pull, merge_commit_sha: merge } },
+      ),
+    ).rejects.toThrow(/unavailable/);
+  });
+  it.each([{}, { node: null }])(
+    "rejects missing GraphQL data without guessing from REST",
+    async (data) => {
+      const request = vi.fn(async () => ({ data: { data } }));
+      await expect(
+        readCheckpointMergeProof(
+          { request },
+          { ...input, pull: { ...pull, merge_commit_sha: merge } },
+        ),
+      ).rejects.toThrow();
+      expect(request).toHaveBeenCalledTimes(1);
+    },
+  );
+  it("rejects a different REST PR or integration attempt before querying", async () => {
+    const request = vi.fn();
+    await expect(
+      readCheckpointMergeProof({ request }, { ...input, pull: { ...pull, number: 9 } }),
+    ).rejects.toThrow();
+    await expect(
+      readCheckpointMergeProof(
+        { request },
+        { ...input, integration: { ...integration, attempt: 2 } },
+      ),
+    ).rejects.toThrow();
+    expect(request).not.toHaveBeenCalled();
+  });
+  it("passes an actual 15-second abort signal and never retries an aborted read", async () => {
+    const controller = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(controller.signal);
+    const request = vi.fn(async (_route: string, parameters: Record<string, unknown>) => {
+      const { signal } = parameters.request as { signal: AbortSignal };
+      return new Promise((_resolve, reject) =>
+        signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }),
+      );
+    });
+    try {
+      const pending = readCheckpointMergeProof({ request }, input);
+      controller.abort();
+      await expect(pending).rejects.toThrow(/aborted/);
+      expect(timeout).toHaveBeenCalledWith(15000);
+      expect(request).toHaveBeenCalledTimes(1);
+    } finally {
+      timeout.mockRestore();
+    }
   });
 });
 

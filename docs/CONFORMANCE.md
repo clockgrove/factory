@@ -28,9 +28,15 @@ failed in runtime with `sibling refresh lacks one authenticated original publica
 published and validated, one integrated, and the dependent join never started. Five known usage
 receipts account for 131,622 tokens. A separate read-only observation found all six actually reserved
 execution/validation units absent, unchanged installed bundles, and the exact controller inactive;
-it did not invent join scopes or pass the stronger qualifier's missing SDK environment-identity
-check. The original failure remains unchanged. All broad prepublication gates remain
+it did not invent join scopes or satisfy the original qualifier's inapplicable requirement for an
+SDK environment identity. The original failure remains unchanged. All broad prepublication gates remain
 Open; this later documentation update is not part of that tested or installed package.
+
+The corrected implementation rereads publication history before repair and accepts only fully
+equivalent authenticated receipts while preserving exact immutable source bindings. The independent
+qualifier now checks the SDK/CLI resource, backend and host identities actually supplied by those
+adapters; an optional environment identity is validated when present. These corrections do not turn
+the failed attempt into a pass. Installed continuation remains a separate qualification step.
 
 The [final key-free component record](release-evidence/local-keyfree-finalization-component-2026-09-05.json)
 binds the earlier `npm run verify:release` at `1346107ae568099f823a72066316c86d8793b685`:

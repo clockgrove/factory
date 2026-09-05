@@ -77,7 +77,7 @@
       "installedBundleAndInventoryIdentityUnchanged": true,
       "exactController": "loaded, inactive, MainPID zero, no pending job",
       "scope": "Read-only absence of every actual authenticated execution/validation reserved unit on its independently matched host; no stop, cancel, retry, model call or remote write.",
-      "qualificationLimitation": "The stronger native scope qualifier rejected missing environmentIdentity on actual SDK launch receipts. This separate reserved-unit observation does not synthesize that identity or pass the qualifier."
+      "qualificationLimitation": "The original native scope qualifier required an environmentIdentity that the local SDK contract does not supply. This separate reserved-unit observation does not synthesize that identity or pass the original qualifier."
     }
   },
   "limitations": [

@@ -1,6 +1,7 @@
 # Continuing an escalated Objective
 
-Status: implementation in progress; successor execution is not yet available.
+Status: successor request, controller adoption, and local execution are implemented on this branch;
+delivery-lineage completion and installed-product qualification remain in progress.
 
 ## Available inspection
 
@@ -10,10 +11,12 @@ historical accounting. This is a bounded read-only assessment, not an immutable 
 plan. It grants no execution authority. Missing source identity, changed evidence, and unavailable
 observations remain blockers; provider resource cleanup is not inferred from terminal receipts.
 
-The accounting report aggregates the explicitly inspected history, not an authorized predecessor
-chain. It retains source run/usage identities and distinguishes recorded subtotals from unknown
-usage. Successor requests, increased allowance, adoption, and actual resource reconciliation remain
-implementation tasks below.
+The assessment aggregates the explicitly inspected history, not an authorized predecessor chain.
+It retains source run/usage identities and distinguishes recorded subtotals from unknown usage.
+`factory_recovery_propose` separately constructs a digest-bound successor plan; only an explicitly
+authorized `factory_recovery_request` records that exact plan for adoption. Its default allowance
+increment is zero. See the [operator workflow](setup/unattended.md#continue-after-terminal-escalation)
+for both MCP and CLI entry points.
 
 The current classifier conservatively blocks multi-parent artifact ancestry and merged publications
 whose historical base identity cannot be proved. An exact rebase review checkpoint may establish
@@ -73,13 +76,39 @@ Old unbound receipts, changed boots/namespaces, reused PIDs, unreadable or chang
 and validation processes without their own identity remain unknown. This is not proof of sandbox
 or managed-agent cleanup, nor does it release an outstanding billable reservation.
 
-These contracts are not yet a supported continuation command. Validation/provider reconciliation
-and integration of the coordinator and resolver into scheduling, publication, accounting, and
-state reconstruction remain below. The ordinary run manager explicitly rejects successor
-execution until those pieces are connected. Pending claims must be reconciled to an evidenced
-outcome; they must not be deleted or overwritten to try another plan.
+The explicit request path is connected to controller discovery and dual-lease adoption. Only that
+path supplies the verified recovery identity to the Supervisor; ordinary activation or foreground
+run cannot silently adopt predecessor work. Offline Supervisor fixtures cover reuse of a published
+source, fresh combined-tree validation/review, integration response-loss replay, and subsequent
+dependent execution through Objective completion. Multi-member native-stack restoration and
+repeated-successor delivery lineage are implemented; the combined runtime and installed-live
+qualification remain deferred to the testing phase in [the implementation handoff](IMPLEMENTATION-HANDOFF.md).
+Pending claims must be reconciled to an evidenced outcome; they must not be deleted or overwritten
+to try another plan.
 Validation and budget writers reject reservations from a different run, Objective, policy, or
 future lease epoch; successor effects cannot be appended to terminal predecessor history.
+
+New local execution and validation reservations can bind deterministic Linux command scopes to an
+owned launcher generation. Resource observation checks the producer and every reserved command
+scope, including commands not yet observed starting. When the current owned service generation is
+itself the remaining producer, the controller can drain and exit under its existing restart policy;
+the next process independently proves absence before adoption. A real no-model systemd component
+probe covers retirement and prevention of a restart loop. Legacy unbound resources still fail
+closed, and neither local scope evidence nor an accepted request proves paid-provider cleanup.
+
+Repeated successors retain the original attempt and publication identities. Historical adopted
+runs are independently checked at their next accepted plan's exact cutoff; complete current
+accounting and resource observations still include later liabilities. Failed local attempts use
+verified remaining cumulative allowance, including unused original allowance, without an automatic
+increment. A read-only proposal can describe pending resource reconciliation; adoption must still
+prove absence before replacement execution.
+
+Native source delivery preserves original exact-head validation while binding any observed
+tree-preserving upper-layer rewrite to its actual lower integration and fresh candidate acceptance.
+If a lower merge succeeds before its outcome receipt is recorded, startup first inspects that
+actual merge read-only. Only the leased reconciliation stage may append its real outcome. It
+re-reads between layers and must pass full runtime verification before any worker, review or merge;
+it does not synthesize history, close issues, or treat merge observation as execution authority.
 
 ## Outcome and observed gap
 
@@ -88,10 +117,10 @@ Work Items, valid artifacts, PRs, and complete accounting. Factory then runs una
 or the next evidenced boundary. Restarting must not recompile completed work, duplicate a PR,
 reinterpret an old validation receipt, or silently replenish a budget.
 
-The installed conformance run reached independently validated PRs and escalated on an external
-check. A new run can copy its graph, but publication, reservation, and integration recovery select
-only the current run's receipts. Resume and retry correctly reject terminal runs. Ordinary
-activation is therefore not evidence-preserving continuation of executed work.
+Installed qualification is still required. Ordinary resume and retry reject terminal runs;
+ordinary activation is not evidence-preserving continuation of executed work. Legacy execution
+receipts without sufficient resource ownership remain ineligible for automatic replacement even
+when their artifacts are valid. The installed qualification must demonstrate these boundaries.
 
 The containment change rejects that activation before creating its run/budget ledger. It checks
 Objective and child receipts, existing PRs, completed issues, managed-agent assignment history,

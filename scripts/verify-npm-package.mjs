@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { optionalHostQualification } from "./qualify-linux-host.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const temporaryRoot = await mkdtemp(resolve(tmpdir(), "factory-npm-package-"));
@@ -290,6 +291,15 @@ try {
     }
   }
 
+  await optionalHostQualification({
+    installedRoot,
+    artifactKind: "npm",
+    installation: {
+      source: "staged-tarball",
+      cleanInstall: true,
+      tarballSha256: sha256(firstBytes),
+    },
+  });
   process.stdout.write(
     `npm package verified (${paths.size} files, ${first.size} bytes, sha256 ${sha256(firstBytes)})\n`,
   );

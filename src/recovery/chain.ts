@@ -333,7 +333,9 @@ export function verifyRecoveryChain(input: {
       const historical = events.filter(
         (event) =>
           selected.has(event.runId) &&
-          event.kind !== "recovery" &&
+          (event.kind !== "recovery" ||
+            event.event === "RecoveryConsumed" ||
+            event.event === "RecoveryAdoptionCompleted") &&
           (!current ? event.sequence <= plan.sourceEventMaxSequence : true),
       );
       const accounting = assessRecoveryAccounting({

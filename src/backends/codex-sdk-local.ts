@@ -118,7 +118,7 @@ const supervisorPid = __FACTORY_SUPERVISOR_PID__;
 const command = __FACTORY_CODEX_COMMAND__;
 const prefixArgs = __FACTORY_CODEX_ARGS__;
 const scope = __FACTORY_LOCAL_SCOPE__;
-function unitProperties(unit) {
+function unitProperties(unit, allowPendingJob = false) {
   let text;
   try {
     text = execFileSync("systemctl", ["--user", "show", unit, "--property=Id,LoadState,ActiveState,ControlGroup,Job,InvocationID,KillMode", "--no-pager"], { encoding: "utf8", timeout: 10000, maxBuffer: 16384, stdio: ["ignore", "pipe", "pipe"] });
@@ -133,7 +133,7 @@ function unitProperties(unit) {
     if (at < 1 || Object.hasOwn(fields, name)) throw new Error("Factory SDK scope observation invalid");
     fields[name] = line.slice(at + 1);
   }
-  if (fields.Id !== unit || fields.ControlGroup === undefined || !["", "0", "0 /"].includes(fields.Job)) throw new Error("Factory SDK scope observation invalid");
+  if (fields.Id !== unit || fields.ControlGroup === undefined || fields.Job === undefined || (!allowPendingJob && !["", "0", "0 /"].includes(fields.Job))) throw new Error("Factory SDK scope observation invalid");
   return fields;
 }
 if (scope) {
@@ -204,19 +204,59 @@ function finishWhenGroupIsGone() {
 function stopGroup() {
   if (stopping) return;
   stopping = true;
-  if (scope) {
-    execFile("systemctl", ["--user", "stop", scope.unit], { timeout: 10000, maxBuffer: 16384 }, (error) => {
-      scopeCleanupFailed = Boolean(error);
-      scopeCleanupDone = true;
-      if (error) process.stderr.write("Factory SDK owned scope cleanup unverified\n");
-      finishWhenGroupIsGone();
-    });
-  }
   try { process.kill(-child.pid, "SIGTERM"); } catch {}
   forceTimer = setTimeout(() => {
     try { process.kill(-child.pid, "SIGKILL"); } catch {}
   }, 2_000);
+  if (scope) {
+    cleanupScope().catch(() => {
+      scopeCleanupFailed = true;
+      process.stderr.write("Factory SDK owned scope cleanup unverified\n");
+    }).finally(() => {
+      scopeCleanupDone = true;
+      finishWhenGroupIsGone();
+    });
+  }
   finishWhenGroupIsGone();
+}
+
+function scopeMissing(fields) {
+  return fields.LoadState === "not-found" && fields.ActiveState === "inactive" &&
+    fields.ControlGroup === "" && fields.InvocationID === "" &&
+    ["", "0", "0 /"].includes(fields.Job);
+}
+
+async function cleanupScope() {
+  // --collect can remove a successfully completed scope before systemd-run exits.
+  // Neither a stop error nor a successful stop is an absence observation.
+  const before = unitProperties(scope.unit, true);
+  if (!scopeMissing(before) || !childResult || groupExists()) {
+    if (!scopeMissing(before) && (before.LoadState !== "loaded" ||
+      before.KillMode !== "control-group" || !/^[a-f0-9]{32}$/.test(before.InvocationID ?? "") ||
+      !before.ControlGroup.endsWith("/" + scope.unit))) throw new Error("scope ownership unavailable");
+    await new Promise((resolve) => execFile("systemctl", ["--user", "stop", scope.unit],
+      { timeout: 10000, maxBuffer: 16384 }, () => resolve()));
+  }
+  // Allow the existing bounded process-group TERM/KILL drain to finish before
+  // checking absence: a still-live launcher could otherwise create the scope late.
+  const groupDeadline = Date.now() + 3000;
+  while (!childResult || groupExists()) {
+    if (Date.now() >= groupDeadline) throw new Error("scope launcher remains active");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  const drainDeadline = Date.now() + 500;
+  for (;;) {
+    const current = unitProperties(scope.unit, true);
+    if (scopeMissing(current)) {
+      if (scopeMissing(unitProperties(scope.unit))) return;
+      throw new Error("scope observation changed");
+    }
+    if (current.LoadState !== "loaded" || current.KillMode !== "control-group" ||
+      !/^[a-f0-9]{32}$/.test(current.InvocationID ?? "") ||
+      !current.ControlGroup.endsWith("/" + scope.unit) || Date.now() >= drainDeadline)
+      throw new Error("scope absence unavailable");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
 }
 
 function forwardBounded(name, target, chunk) {

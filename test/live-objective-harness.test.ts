@@ -244,12 +244,12 @@ function evidence() {
       harness: { candidateInventorySha256: "candidate" },
     },
     actor: { id: 42, login: "operator" },
-    repository: "clockgrove/factory-conformance",
+    repository: "example/factory-qualification",
     events: [
       {
         event: "FactoryRunStarted",
         actor: "operator",
-        repository: "clockgrove/factory-conformance",
+        repository: "example/factory-qualification",
         policy,
         policyDigest: "policy-digest",
       },
@@ -270,7 +270,7 @@ function evidence() {
           ...event,
           sequence,
           objective: 1,
-          receiptUrl: `https://github.com/clockgrove/factory-conformance/issues/1#issuecomment-${sequence}`,
+          receiptUrl: `https://github.com/example/factory-qualification/issues/1#issuecomment-${sequence}`,
           author: "operator",
           authorId: 42,
         }) as HarnessEvent,

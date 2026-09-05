@@ -10,6 +10,10 @@ export interface QualificationMergeProof {
   headSha: string;
   mergeSha: string;
 }
+export function selectQualificationPublicationRecord<T extends Record<string, unknown>>(
+  records: readonly T[],
+  preferred?: T,
+): T;
 export interface MergeProofInput {
   repository: string;
   pull: unknown;

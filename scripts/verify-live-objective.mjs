@@ -4,6 +4,7 @@ import { deduplicateQualificationReceipts } from "./qualification-receipts.mjs";
 import {
   assertQualificationMergeProof,
   observeQualificationMergeProofs,
+  selectQualificationPublicationRecord,
 } from "./qualification-merge-proof.mjs";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
@@ -592,12 +593,18 @@ export function assertCompletion(
       ),
       `Work Item #${child.number} lacks independent validation for its published artifact`,
     );
-    const publication = events.find(
-      (event) =>
-        event.workItem === child.number &&
-        event.attempt === integrated.attempt &&
-        event.event === "PublicationRecorded" &&
-        event.headSha === published.headSha,
+    const publication = selectQualificationPublicationRecord(
+      events.filter(
+        (event) =>
+          event.workItem === child.number &&
+          event.attempt === integrated.attempt &&
+          event.event === "PublicationRecorded",
+      ),
+    );
+    assert.equal(
+      publication.headSha,
+      published.headSha,
+      "published head differs from publication proof",
     );
     assert.ok(publication?.pullRequest, "missing publication PR identity");
     const pulls = evidence.pulls.filter((pull) => pull.number === publication.pullRequest);

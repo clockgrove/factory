@@ -53,7 +53,7 @@ const canonical = (value) =>
 const time = "2026-09-05T00:00:00Z";
 const hostIdentity = hash("host");
 
-function fixture() {
+function fixture({ recoveredPublication = false, pinRecovered = false } = {}) {
   const repository = "example/fixture";
   const policy = boundedPolicy("stacked-prs");
   const policyDigest = hash(canonical(policy));
@@ -209,6 +209,13 @@ function fixture() {
       validationDigest: sourceValidation.digest,
       exactHeadValidationDigest: source.digest,
     };
+    const recovered = {
+      ...publication,
+      sequence: publication.sequence + 1,
+      at: "2026-09-05T00:00:01Z",
+      reason: "recovered publication receipt",
+    };
+    if (recoveredPublication) events.push(recovered);
     const integration = {
       ...common(number, number * 100 + 20),
       event: "AttemptIntegrated",
@@ -249,8 +256,7 @@ function fixture() {
         event: "AttemptStarted",
         backend: "codex-sdk/local-worktree",
         resourceHostIdentity: hostIdentity,
-        environmentIdentity: "local-fixture-environment",
-        providerResourceId: `local-worker-${number}`,
+        providerResourceId: `sdk-${hash(JSON.stringify(["clockgrove.factory/attempt-v2", repository, "run", 1, number, 1, 1])).slice(0, 24)}`,
       },
       {
         ...common(number, number * 100 + 6),
@@ -334,11 +340,13 @@ function fixture() {
         reservationOid: reserveOid,
         leaseEpoch: 1,
         policyDigest,
-        sourcePublicationDigest: hash(canonical(publication)),
+        sourcePublicationDigest: hash(canonical(pinRecovered ? recovered : publication)),
         sourceHeadSha: head,
         sourceExactHeadValidationDigest: source.digest,
         targetBaseSha: target,
       };
+      commits.get(plannedHead).message =
+        `Factory sibling refresh\n\nFactory-Sibling-Refresh: ${siblingRefreshIdentityDigest(identity)}`;
       addCheckpoint(
         siblingRefreshRef(identity),
         {
@@ -526,8 +534,8 @@ function fixture() {
   return { evidence, inputs, read, request, commits, refs, documents, addCheckpoint };
 }
 
-async function completeFixture() {
-  const f = fixture();
+async function completeFixture(options) {
+  const f = fixture(options);
   const e = f.evidence;
   const start = e.events[0];
   const add = (fields) =>
@@ -693,6 +701,55 @@ function restTransport(f, mutate = () => {}) {
 }
 
 describe("independent native sibling refresh proof", () => {
+  it.each([false, true])(
+    "accepts the complete native gate with equivalent receipts and pin %s",
+    async (pinRecovered) => {
+      const f = await completeFixture({ recoveredPublication: true, pinRecovered });
+      expect(() => assertNativeRefreshCompletion(f.evidence)).not.toThrow();
+    },
+  );
+  it.each([false, true])(
+    "accepts recovered publication receipts while retaining the exact intent pin (%s)",
+    async (pinRecovered) => {
+      const f = fixture({ recoveredPublication: true, pinRecovered });
+      const before = structuredClone(f.evidence.events);
+      const proofs = await observeNativeMergeProofs(f, f.read);
+      for (const [index, input] of f.inputs.entries())
+        expect(() => assertNativeMergeProof(f.evidence, proofs[index], input)).not.toThrow();
+      expect(f.evidence.events).toEqual(before);
+    },
+  );
+  it("rejects a missing exact pinned receipt even when an equivalent original remains", async () => {
+    const f = fixture({ recoveredPublication: true, pinRecovered: true });
+    f.evidence.events = f.evidence.events.filter(
+      (event) => event.reason !== "recovered publication receipt",
+    );
+    await expect(observeNativeMergeProofs(f, f.read)).rejects.toThrow();
+  });
+  it.each([
+    "headSha",
+    "baseSha",
+    "branch",
+    "pullRequest",
+    "validationDigest",
+    "exactHeadValidationDigest",
+    "unitId",
+    "itemId",
+    "mode",
+    "position",
+    "capabilityVersion",
+    "parentItemId",
+    "futureProof",
+    "authorId",
+    "receiptUrl",
+  ])("rejects conflicting or forged recovered publication %s", async (field) => {
+    const f = fixture({ recoveredPublication: true });
+    const recovered = f.evidence.events.find(
+      (event) => event.event === "PublicationRecorded" && event.workItem === 3 && event.reason,
+    );
+    recovered[field] = typeof recovered[field] === "number" ? recovered[field] + 1 : "foreign";
+    await expect(observeNativeMergeProofs(f, f.read)).rejects.toThrow();
+  });
   it.each([
     "original-invocation",
     "candidate-invocation",
@@ -916,7 +973,44 @@ describe("independent native sibling refresh proof", () => {
 });
 
 describe("native terminal scope evidence", () => {
-  it.each(["resourceHostIdentity", "environmentIdentity", "providerResourceId"])(
+  it("accepts the production SDK launch shape without inventing an environment identity", () => {
+    const f = fixture();
+    expect(f.evidence.events.find((event) => event.event === "AttemptStarted")).not.toHaveProperty(
+      "environmentIdentity",
+    );
+    expect(() => nativeOwnedScopes(f.evidence, hostIdentity)).not.toThrow();
+  });
+  it.each([
+    "wrong-sdk-attempt",
+    "wrong-backend",
+    "malformed-environment",
+    "missing-environment-but-foreign-host",
+  ])("rejects production launch substitution %s", (kind) => {
+    const f = fixture();
+    const start = f.evidence.events.find((event) => event.event === "AttemptStarted");
+    if (kind === "wrong-sdk-attempt") start.providerResourceId = `sdk-${"a".repeat(24)}`;
+    if (kind === "wrong-backend") start.backend = "codex-cli/local-worktree";
+    if (kind === "malformed-environment") start.environmentIdentity = 123;
+    if (kind === "missing-environment-but-foreign-host")
+      start.resourceHostIdentity = hash("foreign");
+    expect(() => nativeOwnedScopes(f.evidence, hostIdentity)).toThrow();
+  });
+  it.each(["local-123", "local-0", "local--1", "sdk-other", "local-9007199254740992"])(
+    "validates actual CLI process identity %s",
+    (resourceId) => {
+      const f = fixture();
+      const start = f.evidence.events.find((event) => event.event === "AttemptStarted");
+      start.backend = "codex-cli/local-worktree";
+      start.providerResourceId = resourceId;
+      f.evidence.events.find(
+        (event) => event.event === "AttemptReserved" && event.workItem === start.workItem,
+      ).backend = start.backend;
+      if (resourceId === "local-123")
+        expect(() => nativeOwnedScopes(f.evidence, hostIdentity)).not.toThrow();
+      else expect(() => nativeOwnedScopes(f.evidence, hostIdentity)).toThrow();
+    },
+  );
+  it.each(["resourceHostIdentity", "providerResourceId"])(
     "does not infer actual execution without %s",
     (field) => {
       const f = fixture();

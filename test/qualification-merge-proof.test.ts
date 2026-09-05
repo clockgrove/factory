@@ -3,6 +3,7 @@ import {
   assertQualificationMergeProof,
   observeQualificationMergeProofs,
   readQualificationMergeProof,
+  selectQualificationPublicationRecord,
 } from "../scripts/qualification-merge-proof.mjs";
 import { readCheckpointMergeProof } from "../scripts/verify-local-checkpoint-restart.mjs";
 
@@ -16,6 +17,8 @@ function fixture() {
     attempt: 1,
     pullRequest: 3,
     headSha: "a".repeat(40),
+    sequence: 35,
+    at: "2026-09-05T00:00:00.000Z",
   };
   const integration = { ...publication, event: "AttemptIntegrated", headSha: "b".repeat(40) };
   const pull = {
@@ -49,6 +52,64 @@ function fixture() {
 }
 
 describe("shared installed qualification merge proof", () => {
+  it("preserves the original/recovered pair shape observed live and an explicitly pinned recovered receipt", async () => {
+    const f = fixture();
+    const recovered = {
+      ...f.publication,
+      sequence: 36,
+      at: "2026-09-05T00:00:05.000Z",
+      reason: "recovered publication receipt",
+    };
+    f.evidence.events.push(recovered);
+    const before = structuredClone(f.evidence.events);
+    expect(selectQualificationPublicationRecord([recovered, f.publication])).toBe(f.publication);
+    expect(selectQualificationPublicationRecord([recovered, f.publication], recovered)).toBe(
+      recovered,
+    );
+    await expect(
+      observeQualificationMergeProofs({ request: f.request }, f.evidence),
+    ).resolves.toHaveLength(1);
+    expect(f.evidence.events).toEqual(before);
+  });
+  it.each([
+    "headSha",
+    "pullRequest",
+    "baseSha",
+    "validationDigest",
+    "exactHeadValidationDigest",
+    "mode",
+    "branch",
+    "unitId",
+    "position",
+    "parentItemId",
+    "futureExtension",
+  ])("rejects an alternative %s publication before any query", async (field) => {
+    const f = fixture();
+    const conflicting = { ...f.publication, sequence: 36, [field]: "different" };
+    f.evidence.events.push(conflicting);
+    await expect(
+      observeQualificationMergeProofs({ request: f.request }, f.evidence),
+    ).rejects.toThrow(/conflicting publication/);
+    expect(f.request).not.toHaveBeenCalled();
+  });
+  it("does not replace a pinned envelope with semantic equivalence alone", () => {
+    const f = fixture();
+    expect(() =>
+      selectQualificationPublicationRecord([f.publication], { ...f.publication, sequence: 36 }),
+    ).toThrow(/not authenticated history/);
+  });
+  it.each(["runId", "objective", "workItem", "attempt"])(
+    "rejects a cross-%s equivalence class",
+    (field) => {
+      const f = fixture();
+      expect(() =>
+        selectQualificationPublicationRecord([
+          f.publication,
+          { ...f.publication, [field]: "foreign" },
+        ]),
+      ).toThrow(/conflicting publication/);
+    },
+  );
   it("checkpoint uses exactly the shared reader", () =>
     expect(readCheckpointMergeProof).toBe(readQualificationMergeProof));
   it("collects one exact proof without adding the removed field to raw REST evidence", async () => {

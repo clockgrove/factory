@@ -1,6 +1,51 @@
 /** Read-only exact merge evidence shared by installed qualification harnesses. */
 import assert from "node:assert/strict";
 
+/** Caller authenticates receipts first. Ignore only journal/transport metadata, never proof fields. */
+export function selectQualificationPublicationRecord(records, preferred) {
+  assert.ok(
+    Array.isArray(records) && records.length > 0 && records.length <= 1000,
+    "publication identity missing or exceeds bound",
+  );
+  const envelope = (record) =>
+    Object.fromEntries(
+      Object.entries(record).filter(([key]) => !["author", "authorId", "receiptUrl"].includes(key)),
+    );
+  const semantic = (record) =>
+    Object.fromEntries(
+      Object.entries(envelope(record)).filter(
+        ([key]) => !["sequence", "at", "reason"].includes(key),
+      ),
+    );
+  for (const record of records) {
+    assert.equal(record.event, "PublicationRecorded");
+    assert.deepEqual(
+      semantic(record),
+      semantic(records[0]),
+      "conflicting publication proof receipts",
+    );
+  }
+  if (preferred !== undefined) {
+    assert.ok(
+      records.some((record) => {
+        try {
+          assert.deepEqual(envelope(record), envelope(preferred));
+          return true;
+        } catch {
+          return false;
+        }
+      }),
+      "explicit publication receipt is not authenticated history",
+    );
+    return preferred;
+  }
+  return [...records].sort(
+    (left, right) =>
+      (left.sequence ?? 0) - (right.sequence ?? 0) ||
+      String(left.at ?? "").localeCompare(String(right.at ?? "")),
+  )[0];
+}
+
 function expectedProof({ repository, pull, publication, integration }) {
   assert.equal(publication.event, "PublicationRecorded");
   assert.equal(integration.event, "AttemptIntegrated");
@@ -135,12 +180,18 @@ export async function observeQualificationMergeProofs(hooks, evidence) {
         event.workItem === child.number &&
         event.attempt === integration.attempt,
     );
-    const publication = events.find(
-      (event) =>
-        event.event === "PublicationRecorded" &&
-        event.workItem === child.number &&
-        event.attempt === integration.attempt &&
-        event.headSha === published?.headSha,
+    const publication = selectQualificationPublicationRecord(
+      events.filter(
+        (event) =>
+          event.event === "PublicationRecorded" &&
+          event.workItem === child.number &&
+          event.attempt === integration.attempt,
+      ),
+    );
+    assert.equal(
+      publication.headSha,
+      published?.headSha,
+      "published head differs from publication proof",
     );
     assert.ok(publication, "publication identity missing");
     const pulls = evidence.pulls.filter((pull) => pull.number === publication.pullRequest);

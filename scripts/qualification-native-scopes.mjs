@@ -94,18 +94,60 @@ export function nativeOwnedScopes(evidence, hostIdentity) {
         identity.hostIdentity,
         "actual worker resource host differs from reserved scope",
       );
-      assert.ok(
-        typeof starts[0].environmentIdentity === "string" &&
-          starts[0].environmentIdentity.length > 0 &&
-          starts[0].environmentIdentity.length <= 500,
-        "actual worker environment identity unavailable",
+      assert.equal(
+        starts[0].backend,
+        event.backend,
+        "actual worker backend differs from reservation",
       );
+      if (starts[0].environmentIdentity !== undefined)
+        assert.ok(
+          typeof starts[0].environmentIdentity === "string" &&
+            starts[0].environmentIdentity.length > 0 &&
+            starts[0].environmentIdentity.length <= 500,
+          "invalid optional worker environment identity",
+        );
       assert.ok(
         typeof starts[0].providerResourceId === "string" &&
           starts[0].providerResourceId.length > 0 &&
           starts[0].providerResourceId.length <= 500,
         "actual worker resource identity unavailable",
       );
+      // Local SDK/CLI handles report host and resource identity, not an image/environment identity.
+      if (event.backend === "codex-sdk/local-worktree") {
+        const attemptId = createHash("sha256")
+          .update(
+            JSON.stringify([
+              "clockgrove.factory/attempt-v2",
+              evidence.repository.trim().toLowerCase(),
+              event.runId,
+              event.objective,
+              event.workItem,
+              event.attempt,
+              event.directorEpoch,
+            ]),
+          )
+          .digest("hex");
+        assert.equal(
+          starts[0].providerResourceId,
+          `sdk-${attemptId.slice(0, 24)}`,
+          "actual SDK resource belongs to another attempt",
+        );
+      } else {
+        assert.equal(
+          event.backend,
+          "codex-cli/local-worktree",
+          "unsupported local execution backend",
+        );
+        assert.match(
+          starts[0].providerResourceId,
+          /^local-[1-9][0-9]*$/,
+          "invalid actual CLI process identity",
+        );
+        assert.ok(
+          Number.isSafeInteger(Number(starts[0].providerResourceId.slice(6))),
+          "invalid actual CLI PID",
+        );
+      }
     }
     for (let index = 0; index < batch.commandCount; index++)
       units.add(nativeScopeUnit({ ...identity, commandIndex: index }));

@@ -2,7 +2,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { deduplicateQualificationReceipts } from "./qualification-receipts.mjs";
-import { readQualificationMergeProofForIdentity } from "./qualification-merge-proof.mjs";
+import {
+  readQualificationMergeProofForIdentity,
+  selectQualificationPublicationRecord,
+} from "./qualification-merge-proof.mjs";
 
 const hash = (text) => createHash("sha256").update(text).digest("hex");
 const canonical = (value) => {
@@ -240,7 +243,10 @@ function* readPinnedPacket(evidence, events, publication, start) {
       packet.validationCommands.length > 0 &&
       packet.validationCommands.length <= 128,
   );
-  const publications = events.filter((event) => event.event === "PublicationRecorded");
+  const originals = events.filter((event) => event.event === "PublicationRecorded");
+  const publications = [...new Set(originals.map((event) => event.workItem))].map((workItem) =>
+    selectQualificationPublicationRecord(originals.filter((event) => event.workItem === workItem)),
+  );
   assert.equal(publications.length, 3);
   for (const item of graph.workItems) {
     const itemPublication = one(
@@ -295,15 +301,10 @@ function* prove(evidence, input) {
     !events.some((event) => event.kind === "recovery"),
     "successor evidence is outside this fresh qualification",
   );
-  assert.deepEqual(
-    one(
-      events.filter(
-        (event) => event.event === "PublicationRecorded" && sameAttempt(event, publication),
-      ),
-      "original publication missing or repeated",
-    ),
-    publication,
+  const originalPublications = events.filter(
+    (event) => event.event === "PublicationRecorded" && sameAttempt(event, publication),
   );
+  selectQualificationPublicationRecord(originalPublications, publication);
   assert.deepEqual(
     one(
       events.filter(
@@ -519,10 +520,36 @@ function* prove(evidence, input) {
   let current = final;
   let next;
   let refreshed = 0;
+  let pinnedSourceDigest;
   const targetIntegrationSequences = [];
   while (current.oid !== source.publishedHeadSha) {
     assert.ok(++refreshed <= 100, "refresh lineage exceeds bound");
     assert.equal(current.parentOids.length, 2, "refreshed head requires exact ordered parents");
+    // The planned commit names an immutable intent; its content must still prove the full identity.
+    const trailers = [...current.message.matchAll(/^Factory-Sibling-Refresh: ([a-f0-9]{64})$/gm)];
+    assert.equal(trailers.length, 1, "planned refresh intent trailer missing or repeated");
+    const identityDigest = trailers[0][1];
+    const ref = `${prefix("sibling-refreshes", publication)}refresh-${identityDigest}`;
+    const { document: record, read } = yield* readCheckpoint(
+      ref,
+      "sibling-refresh",
+      current.parentOids[1],
+    );
+    const pinned = one(
+      originalPublications.filter(
+        (event) => hash(canonical(event)) === record.identity.sourcePublicationDigest,
+      ),
+      "immutable intent source publication is not exact authenticated history",
+    );
+    selectQualificationPublicationRecord(originalPublications, pinned);
+    if (pinnedSourceDigest !== undefined)
+      assert.equal(
+        record.identity.sourcePublicationDigest,
+        pinnedSourceDigest,
+        "refresh lineage changed its source receipt",
+      );
+    pinnedSourceDigest = record.identity.sourcePublicationDigest;
+    assert.ok(pinned.sequence < integration.sequence, "source receipt postdates integration");
     const identity = {
       repository,
       runId: start.runId,
@@ -538,17 +565,15 @@ function* prove(evidence, input) {
       reservationOid,
       leaseEpoch: reservation.directorEpoch,
       policyDigest: reservation.policyDigest,
-      sourcePublicationDigest: hash(canonical(publication)),
+      sourcePublicationDigest: pinnedSourceDigest,
       sourceHeadSha: source.publishedHeadSha,
       sourceExactHeadValidationDigest: source.digest,
       targetBaseSha: current.parentOids[1],
     };
-    const identityDigest = hash(JSON.stringify(identity));
-    const ref = `${prefix("sibling-refreshes", publication)}refresh-${identityDigest}`;
-    const { document: record, read } = yield* readCheckpoint(
-      ref,
-      "sibling-refresh",
-      identity.targetBaseSha,
+    assert.equal(
+      identityDigest,
+      hash(JSON.stringify(identity)),
+      "planned commit intent identity differs",
     );
     exactKeys(record, [
       "protocol",
@@ -678,6 +703,11 @@ function* prove(evidence, input) {
         released.sequence > capacity.sequence &&
         released.sequence < integration.sequence,
     );
+    assert.ok(
+      originalPublications.find((event) => hash(canonical(event)) === pinnedSourceDigest).sequence <
+        capacity.sequence,
+      "candidate predates its pinned publication receipt",
+    );
     assert.ok(capacity.localScopeBatch, "candidate validator exact scope batch unavailable");
     assert.ok(
       targetIntegrationSequences.every((sequence) => sequence < capacity.sequence),
@@ -800,11 +830,10 @@ function proofInput(evidence, child) {
     ),
     "integration coverage differs",
   );
-  const publication = one(
+  const publication = selectQualificationPublicationRecord(
     events.filter(
       (event) => event.event === "PublicationRecorded" && sameAttempt(event, integration),
     ),
-    "original publication coverage differs",
   );
   const pull = one(
     evidence.pulls.filter((pull) => pull.number === publication.pullRequest),

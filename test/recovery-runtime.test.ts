@@ -714,13 +714,11 @@ describe("verified successor runtime loader", () => {
         baseSha: base.oid,
       }),
     );
-    const adoption = await f
-      .make()
-      .adopt({
-        ...f.args,
-        planDigest: record.digest,
-        objectiveLease: { ...f.args.objectiveLease, runId: "third" },
-      });
+    const adoption = await f.make().adopt({
+      ...f.args,
+      planDigest: record.digest,
+      objectiveLease: { ...f.args.objectiveLease, runId: "third" },
+    });
     expect(adoption, JSON.stringify(adoption)).toMatchObject({ status: "adopted" });
     const port = recoveryReadPort(f.store as unknown as GitHubControlStore, "o", "r");
     const result = await loadHistoricalRecoveryRuntimes({

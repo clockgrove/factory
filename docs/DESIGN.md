@@ -407,6 +407,13 @@ are preserved before rechecking mutable trunk. Another proved sibling integratio
 linked refresh/validation/review identity; neither an old review nor an unexplained external advance
 authorizes the next head. Native linear-stack rebase proofs remain separate from sibling refreshes.
 
+Publication repair rereads authenticated history before writing a missing receipt. Equivalent
+receipts may still exist after response loss or delayed observation; Factory preserves every audit
+envelope and requires all proof fields to agree, ignoring only sequence, timestamp and reason.
+New refresh intents select a deterministic original receipt. An existing immutable intent keeps its
+exact receipt digest, even when another equivalent envelope is later observed. Conflicting receipts
+or ambiguous intent bindings fail closed; independently proved linear-head revisions remain separate.
+
 Before merging, GitHub's current test-merge commit must name the exact target base and actual PR
 head, with the same combined tree Factory validated. Stale or absent test-merge metadata waits;
 different trees fail closed. The resulting squash commit must have exactly the target base as its

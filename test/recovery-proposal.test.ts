@@ -696,6 +696,45 @@ describe("authenticated sibling refresh recovery", () => {
     expect(proof.lineage.map((entry) => entry.identity.runId)).toEqual(["source"]);
     expect(proof.candidate).toBeNull();
     expect(proof.source).toEqual(f.record.source);
+    // A previous successful observation cannot authorize mutated receipt content,
+    // even when the caller reuses the same input/event objects.
+    const completion = args.events.find((event) => event.event === "RecoveryAdoptionCompleted");
+    if (completion?.event !== "RecoveryAdoptionCompleted") throw new Error("fixture adoption");
+    const originalDigest = completion.planDigest;
+    completion.planDigest = digest("0");
+    await expect(observeRecoverySiblingRefresh(args)).rejects.toThrow();
+    completion.planDigest = originalDigest;
+    expect((await observeRecoverySiblingRefresh(args)).source).toEqual(proof.source);
+    const successorStart = args.events.find(
+      (event) => event.event === "FactoryRunStarted" && event.runId === "successor",
+    );
+    if (successorStart?.event !== "FactoryRunStarted") throw new Error("fixture successor");
+    const originalAttempts = successorStart.policy.maxAttemptsPerItem;
+    let mutated = false;
+    try {
+      await expect(
+        observeRecoverySiblingRefresh({
+          ...args,
+          store: {
+            ...args.store,
+            readCommit: async (oid) => {
+              const commit = await args.store.readCommit(oid);
+              if (!mutated && oid === f.source.publication!.headSha) {
+                // The initial digest scans have already visited this same envelope.
+                // A nested mutation during an await must not reuse the cached digest.
+                mutated = true;
+                successorStart.policy.maxAttemptsPerItem = 0;
+              }
+              return commit;
+            },
+          },
+        }),
+      ).rejects.toThrow();
+      expect(mutated).toBe(true);
+    } finally {
+      successorStart.policy.maxAttemptsPerItem = originalAttempts;
+    }
+    expect((await observeRecoverySiblingRefresh(args)).source).toEqual(proof.source);
     await expect(
       observeRecoverySiblingRefresh({ ...args, requireCompletion: true }),
     ).rejects.toThrow();

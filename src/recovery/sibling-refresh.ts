@@ -14,7 +14,7 @@ import { planDelivery } from "../publication/delivery.js";
 import { bindValidationToPublishedHead } from "../validation/plan.js";
 import type { RecoveryReadStore } from "./assessment.js";
 import { loadRecoveryClaim } from "./claims.js";
-import { recoveryEventDigest } from "./identity.js";
+import { createRecoveryEventDigest } from "./identity.js";
 import { loadRecoveryPlan, type RecoveryPlanItem } from "./plan.js";
 import { recoveryAdoptionEvents } from "./transaction.js";
 import { verifyRecoverySourceIntegration } from "./outcomes.js";
@@ -44,6 +44,7 @@ export async function observeRecoverySiblingRefresh(
   },
   visiting = new Set<string>(),
 ) {
+  const recoveryEventDigest = createRecoveryEventDigest();
   const { source, events } = input;
   let reads = 0;
   const store = new Proxy({} as RecoveryReadStore, {
@@ -230,9 +231,10 @@ export async function observeRecoverySiblingRefresh(
         predecessorStart: predecessor,
       });
       requireRefresh(
-        expected.every((expected) =>
-          events.some((event) => recoveryEventDigest(event) === recoveryEventDigest(expected)),
-        ),
+        expected.every((expected) => {
+          const expectedDigest = recoveryEventDigest(expected);
+          return events.some((event) => recoveryEventDigest(event) === expectedDigest);
+        }),
       );
     }
     return start;

@@ -6,6 +6,9 @@ Notable changes to Factory. See [the delivery plan](docs/DELIVERY-PLAN.md) for u
 
 ### Added
 
+- Opt-in installed Linux qualification that joins fresh npm and Codex plugin installs with
+  disposable service lifecycle, bounded resource pressure, cancellation, and restart observations.
+  Sanitized artifact-bound reports retain explicit physical-host and published-distribution gaps.
 - Immutable recovery-plan and predecessor-chain verification contracts, with authenticated request
   bindings and explicit cumulative allowance increments. Read-only successor proposals and exact
   plan approval are exposed through MCP and CLI, with controller-discovered, dual-lease adoption.
@@ -29,6 +32,8 @@ Notable changes to Factory. See [the delivery plan](docs/DELIVERY-PLAN.md) for u
 
 ### Changed
 
+- Clean plugin verification requires the exact enabled Codex installation receipt and cache path;
+  an available-only listing or staged source directory cannot satisfy installation evidence.
 - Native-mode independent siblings retain parallel execution and validate the combined merge tree
   after another Work Item in the same run advances trunk. Durable candidate/review checkpoints
   preserve original PR heads, budget history, and response-loss recovery; external advances remain

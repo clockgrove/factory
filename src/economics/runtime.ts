@@ -109,7 +109,7 @@ const unavailable = (reason: string): EvidenceMetric<never> => ({ availability: 
 const observed = <T>(value: T, evidenceCount: number): EvidenceMetric<T> => ({
   availability: "observed", value, source: "github-receipts", evidenceCount,
 });
-const key = (event: { runId: string; objective: number; workItem?: number; attempt?: number }) =>
+const key = (event: { runId: string; objective: number; workItem?: number | undefined; attempt?: number | undefined }) =>
   JSON.stringify([event.runId, event.objective, event.workItem, event.attempt]);
 const capacityKey = (event: Capacity) => JSON.stringify([
   key(event), event.phase, event.backend, event.sourceRunId ?? null, event.targetBaseSha ?? null,
@@ -304,7 +304,7 @@ export function summarizeRuntimeEconomics(
   const interventionEvents = events.filter((event) => operatorEvents.has(event.event) || event.event === "FactoryRunEscalated");
   const entries = interventionEvents.slice(0, 100).map((event) => ({
     event: event.event, sequence: event.sequence, at: event.at,
-    ...("workItem" in event && event.workItem !== undefined ? { workItem: event.workItem } : {}),
+    ...(typeof event.workItem === "number" ? { workItem: event.workItem } : {}),
     reason: "reason" in event && typeof event.reason === "string" ? {
       availability: "observed" as const, code: queuedReasonCode(event.reason),
       sha256: createHash("sha256").update(event.reason).digest("hex"),

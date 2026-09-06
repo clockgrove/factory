@@ -175,7 +175,7 @@ describe("durable runtime economics", () => {
   });
 
   it("records known zero usage, rejects arithmetic overflow, and never adds attempt token copies", () => {
-    const values = concurrent().filter((value) => value.kind !== "budget");
+    const values: FactoryEvent[] = concurrent().filter((value) => value.kind !== "budget");
     values.push(budget(18, 8, 0));
     const zero = summarize(values);
     expect(zero.executionModelUsageCoverage).toEqual({ startedAttemptsWithReceipt: 1, startedAttemptsWithoutReceipt: 1 });
@@ -218,12 +218,13 @@ describe("durable runtime economics", () => {
 
   it("reports evidenced intervention codes without echoing free-form reasons or claiming human effort", () => {
     const secret = "private-path-or-provider-secret";
-    const values = [start(), event(2, 1, { kind: "run", event: "CloudPauseRequested", requestedBy: "operator", requestId: "pause-1", reason: secret }),
+    const values = [start(), event(2, 1, { kind: "run", event: "CloudPauseRequested", requestedBy: "operator", requestId: "pause-1", reason: secret,
+      workItem: { unknownFutureField: secret } }),
       event(3, 2, { kind: "run", event: "WorkItemPriorityChanged", requestedBy: "operator", requestId: "priority-1", workItem: 8, priorityRank: 1, prioritySource: "operator-command" }),
       event(4, 3, { kind: "run", event: "FactoryRunEscalated", reason: `budget-exhausted: ${secret}` })];
     const result = summarize(values);
     expect(result.interventions).toMatchObject({ value: { operatorRequests: 2, escalationBoundaries: 1, entries: [
-      { reason: { availability: "observed", code: null } }, { reason: { availability: "unavailable" } },
+      { reason: { availability: "observed", code: null } }, { workItem: 8, reason: { availability: "unavailable" } },
       { reason: { availability: "observed", code: "budget-exhausted" } },
     ] } });
     expect(JSON.stringify(result)).not.toContain(secret);

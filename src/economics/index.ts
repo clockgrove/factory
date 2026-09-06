@@ -1,6 +1,8 @@
 import type { FactoryEvent } from "../protocol/events.js";
 import type { RunPolicy } from "../protocol/policy.js";
 import { deduplicateFactoryEvents, latestRunReceipts } from "../control/receipts.js";
+import { summarizeRuntimeEconomics, type RuntimeEconomics } from "./runtime.js";
+export { summarizeRuntimeEconomics, type RuntimeEconomics } from "./runtime.js";
 
 export type EvidenceMetric<T> =
   | {
@@ -430,6 +432,7 @@ export interface RunSummary {
     integrationsCompleted: number;
   };
   economics: EconomicSummary;
+  runtime: RuntimeEconomics;
   evidence: { eventCount: number; firstSequence: number; lastSequence: number };
 }
 
@@ -535,6 +538,7 @@ export function summarizeRun(
       policy: effectivePolicy,
       runId: receiptSet.runId,
     }),
+    runtime: summarizeRuntimeEconomics(runEvents, receiptSet.runId, receiptSet.start.at, terminal?.at),
     evidence: {
       eventCount: runEvents.length,
       firstSequence: runEvents[0]?.sequence ?? receiptSet.start.sequence,

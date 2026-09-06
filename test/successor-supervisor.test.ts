@@ -1646,9 +1646,9 @@ describe("Supervisor authenticated successor execution", () => {
       expect(f.launch).not.toHaveBeenCalled();
       expect(f.merge).toHaveBeenCalledTimes(merges);
       expect(
-        f.snapshot.workItems.flatMap((item) => item.factoryEvents!).filter(
-          (event) => event.runId === "successor" && event.event === "AttemptReserved",
-        ),
+        f.snapshot.workItems
+          .flatMap((item) => item.factoryEvents!)
+          .filter((event) => event.runId === "successor" && event.event === "AttemptReserved"),
       ).toEqual([]);
     },
     60_000,
@@ -1677,8 +1677,12 @@ describe("Supervisor authenticated successor execution", () => {
       "launch failed before returning a handle and cannot prove that no resource was created",
     );
     expect(f.launch).toHaveBeenCalledTimes(1);
-    expect(evaluate.mock.calls.every(([input]) => input.requirements.trust === "isolated")).toBe(true);
-    expect(validators.mock.calls.some(([input]) => input.requirements.trust === "isolated")).toBe(true);
+    expect(evaluate.mock.calls.every(([input]) => input.requirements.trust === "isolated")).toBe(
+      true,
+    );
+    expect(validators.mock.calls.some(([input]) => input.requirements.trust === "isolated")).toBe(
+      true,
+    );
     const context = f.launch.mock.calls[0]![0];
     const reserved = f.snapshot.workItems[2]!.factoryEvents!.find(
       (event) => event.runId === "successor" && event.event === "AttemptReserved",

@@ -141,7 +141,6 @@ import {
 import type { BackendHandle, ExecutionBackend, ExecutionUsage } from "./execution/backend.js";
 import {
   MAX_ARTIFACT_PATCH_BYTES,
-  normalizeArtifact,
   assertArtifactScope,
   type NormalizedArtifact,
 } from "./execution/artifacts.js";
@@ -374,6 +373,14 @@ class ArtifactCollectionCheckpointError extends Error {
   constructor(cause: unknown) {
     super("collected output is not durably retained; automated replacement is blocked until exact artifact transfer recovery completes", { cause });
     this.name = "ArtifactCollectionCheckpointError";
+  }
+}
+
+/** Missing completion evidence must remain recoverable, not become terminal history. */
+class ArtifactCompletionUnavailableError extends Error {
+  constructor() {
+    super("execution completion is unknown after dispatch; recover the exact original output or obtain explicit recovery direction before replacement");
+    this.name = "ArtifactCompletionUnavailableError";
   }
 }
 
@@ -3939,6 +3946,7 @@ export class FactorySupervisor {
       if (error instanceof LeaseLostError) throw error;
       if (error instanceof PlatformUnavailableError) throw error;
       if (error instanceof SafeArtifactCheckpointHeldError) throw error;
+      if (error instanceof ArtifactCompletionUnavailableError) throw error;
       const unsafeCleanup =
         error instanceof DaytonaResourceCleanupError ||
         (error instanceof Error &&
@@ -7682,6 +7690,8 @@ export class FactorySupervisor {
     if (objectives.length > 100) throw new Error("repository integration provenance exceeds 100 Objectives");
     let proof: { parent: string; requiresIsolation: boolean; executionRequiresIsolation: boolean } | null = null;
     let proofObjective: number | undefined;
+    let priorRequiresIsolation = false;
+    let priorExecutionRequiresIsolation = false;
     for (const number of objectives) {
       const snapshot = await this.#reader.readObjective(number);
       if (snapshot.repositoryId !== receiver.repositoryId || snapshot.defaultBranch !== receiver.defaultBranch)
@@ -7726,7 +7736,7 @@ export class FactorySupervisor {
         if (!recovery) assertAuthenticatedGraphProjection(snapshotEvents(snapshot), number, start.runId, projection);
         const run: RunState = { objective: number, runId: start.runId, actor: start.actor,
           sequence: start.sequence, policy, policyDigest: start.policyDigest, startedAt: new Date(start.at),
-          activationRequestId: start.activationRequestId, baseSha: start.baseSha,
+          ...(start.activationRequestId ? { activationRequestId: start.activationRequestId } : {}), baseSha: start.baseSha,
           repository: start.repository, baseBranch: start.baseBranch, fork: start.fork };
         const commit = await this.#store.readCommit(mergeSha);
         if (commit.parentOids.length !== 1) return null;
@@ -7765,8 +7775,10 @@ export class FactorySupervisor {
           return published.some((event) => event.kind === "attempt" &&
             !this.#registry.get(event.backend)?.capabilities.hostExecution);
         });
-        proof = { parent: commit.parentOids[0]!, requiresIsolation: requiresIsolation || Boolean(proof?.requiresIsolation),
-          executionRequiresIsolation: executionRequiresIsolation || Boolean(proof?.executionRequiresIsolation) };
+        priorRequiresIsolation ||= requiresIsolation;
+        priorExecutionRequiresIsolation ||= executionRequiresIsolation;
+        proof = { parent: commit.parentOids[0]!, requiresIsolation: priorRequiresIsolation,
+          executionRequiresIsolation: priorExecutionRequiresIsolation };
         proofObjective = number;
       }
     }
@@ -10535,9 +10547,7 @@ export class FactorySupervisor {
       !backend.capabilities.providerManagedPublication && dispatchPossible &&
       !knownTerminal && !validation
     )
-      throw new Error(
-        "execution completion is unknown after dispatch; recover the exact original output or obtain explicit recovery direction before replacement",
-      );
+      throw new ArtifactCompletionUnavailableError();
     const attemptStartedAt = events.find(
       (event) => event.kind === "attempt" && event.event === "AttemptStarted",
     )?.at;

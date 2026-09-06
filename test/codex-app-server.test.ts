@@ -208,7 +208,7 @@ async function context(
   };
   const stat = await readFile("/proc/self/stat", "utf8");
   value.localExecutionScope = { assertCurrent: async () => {}, batch: LocalScopeBatchSchema.parse({
-    identity: { repository: value.repository, runId: value.runId, objective: value.objective, workItem: value.workItem,
+    identity: { protocol: "clockgrove.factory/local-scope-v1", repository: value.repository, runId: value.runId, objective: value.objective, workItem: value.workItem,
       attempt: value.attempt, directorEpoch: value.directorEpoch, policyDigest: value.policyDigest, phase: "execution", commandIndex: 0,
       invocationDigest: workerPacketDigest(value.packet), hostIdentity: await readLocalResourceHostIdentity() },
     commandCount: 1, producerPid: process.pid, producerStartTicks: stat.slice(stat.lastIndexOf(")") + 2).split(/\s+/)[19], deadline: value.deadline.toISOString(),
@@ -227,7 +227,7 @@ function factory(
     scopeReadPort: { hostIdentity: readLocalResourceHostIdentity, now: () => new Date(), async read(path) {
       if (options.liveProducer) return readFile(path, "utf8");
       throw Object.assign(new Error("absent"), { code: "ENOENT" }); },
-      async show(unit) { return options.presentScope ? `Id=${unit}\nLoadState=loaded\nActiveState=active\nSubState=running\nControlGroup=/owned\n` : `Id=${unit}\nLoadState=not-found\n`; } },
+      async show(unit) { return options.presentScope ? `Id=${unit}\nLoadState=loaded\nActiveState=active\nSubState=running\nControlGroup=/owned\nJob=0\n` : `Id=${unit}\nLoadState=not-found\nActiveState=inactive\nSubState=dead\nControlGroup=\nJob=0\n`; } },
     resolveCodexHome: (identity) => join(root, durableAttemptId(identity)),
     connect: (home) => {
       const found = connections.get(home);

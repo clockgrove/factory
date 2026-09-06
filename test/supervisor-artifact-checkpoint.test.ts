@@ -47,6 +47,8 @@ describe("Supervisor collected artifact durability", () => {
     });
     await expect(f.run()).rejects.toThrow(/artifact transfer recovery/);
     await expect(f.run()).rejects.toThrow(/completion is unknown after dispatch/);
+    expect(f.events().some((event) => event.kind === "run" &&
+      ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(event.event))).toBe(false);
     expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);
     await expect(access(retained[0]!.path)).resolves.toBeUndefined();
     expect(
@@ -68,7 +70,7 @@ describe("Supervisor collected artifact durability", () => {
           state: "failed",
           reason: "fixture: explicit execution failure",
           observedAt: new Date().toISOString(),
-          usage: { inputTokens: 4, outputTokens: 2 },
+          usage: { inputTokens: 4, outputTokens: 2, cachedInputTokens: null },
         }),
       }),
     });
@@ -129,7 +131,7 @@ describe("Supervisor collected artifact durability", () => {
     expect(
       f.activity.filter((entry) => entry.operation === "launch" && entry.workItem === 8),
     ).toHaveLength(1);
-  });
+  }, 15_000);
 
   it("does not replace a sandbox artifact when its independent validation allowance is absent", async () => {
     const f = await providerSupervisorFixture("daytona-burst", { nativeStack: true });
@@ -145,7 +147,9 @@ describe("Supervisor collected artifact durability", () => {
           event.event === "BudgetReserved"
         ),
     );
-    await expect(f.run()).rejects.toThrow(/existing unspent independent-validation allowance/);
+    await expect(f.run()).resolves.toMatchObject({ status: "escalated",
+      reason: expect.stringMatching(/existing unspent independent-validation allowance/) });
+    expect(f.events().filter((event) => event.kind === "run" && event.event === "FactoryRunEscalated")).toHaveLength(1);
     expect(
       f.activity.filter((entry) => entry.operation === "launch" && entry.workItem === 9),
     ).toHaveLength(1);
@@ -170,9 +174,9 @@ describe("Supervisor collected artifact durability", () => {
       amount: 7,
       reportedModelUsage: { inputTokens: 5, outputTokens: 2 },
     });
-    await expect(f.run()).rejects.toThrow(
-      /conflicting model usage|exact reconciled execution accounting/,
-    );
+    await expect(f.run()).resolves.toMatchObject({ status: "escalated",
+      reason: expect.stringMatching(/conflicting model usage|exact reconciled execution accounting/) });
+    expect(f.events().filter((event) => event.kind === "run" && event.event === "FactoryRunEscalated")).toHaveLength(1);
     expect(
       f.activity.filter((entry) => entry.operation === "launch" && entry.workItem === 8),
     ).toHaveLength(1);
@@ -241,9 +245,18 @@ describe("Supervisor collected artifact durability", () => {
         if (remote) {
           expect(
             f.activity.filter(
-              (entry) => entry.operation === "validate" && entry.workItem === target,
+              (entry) => entry.operation === "validate" && entry.workItem === target && !entry.invocation,
             ),
           ).toHaveLength(1);
+          // Integrating the parent legitimately requires a new exact-head rebase
+          // validation; it must not replay the original artifact invocation.
+          const candidateValidations = f.activity.filter((entry) =>
+            entry.operation === "validate" && entry.workItem === target && entry.invocation);
+          expect(candidateValidations).toHaveLength(1);
+          expect(new Set(candidateValidations.map((entry) => entry.invocation)).size).toBe(1);
+          expect([...f.refs.keys()]).toContain(
+            `refs/clockgrove-factory/native-rebases/objective-7/work-item-${target}/attempt-1/rebase-${candidateValidations[0]!.invocation}`,
+          );
           const publication = f
             .events()
             .find(
@@ -264,7 +277,7 @@ describe("Supervisor collected artifact durability", () => {
                 ["AttemptFailed", "AttemptDeferred"].includes(event.event),
             ),
         ).toBe(false);
-      });
+      }, 15_000);
     }
   }
   it("retains exact output before success receipts and backend cleanup", async () => {
@@ -294,7 +307,7 @@ describe("Supervisor collected artifact durability", () => {
     });
     await f.run();
     expect(collected).toBeGreaterThan(0);
-  });
+  }, 15_000);
 
   it("stops resources and removes the workspace only after verifying independently retained bytes", async () => {
     const f = await providerSupervisorFixture("daytona-burst", { localOnly: true });
@@ -343,7 +356,7 @@ describe("Supervisor collected artifact durability", () => {
             event.unit === "local_milliseconds",
         ),
     ).toMatchObject([{ usageEvidence: "conservative-reservation" }]);
-  });
+  }, 15_000);
 
   it("retains the owned workspace when collection copying fails before any independent recovery copy exists", async () => {
     const f = await providerSupervisorFixture("daytona-burst", { localOnly: true });

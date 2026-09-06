@@ -2,11 +2,14 @@ export function regularQualification(
   env: Record<string, string | undefined>,
 ): Record<string, unknown> | null;
 export function assertRegularCompletion(evidence: unknown): void;
-export function assertRegularPipelineCompletion(evidence: unknown, options: {
-  expected: unknown;
-  scope: string;
-  deliveryMode: "regular-prs" | "native-fallback";
-}): void;
+export function assertRegularPipelineCompletion(
+  evidence: unknown,
+  options: {
+    expected: unknown;
+    scope: string;
+    deliveryMode: "regular-prs" | "native-fallback";
+  },
+): void;
 export function assessRegularCompletion(evidence: unknown): {
   result: "passed" | "failed" | "incomplete";
   scope: string;

@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { boundedPolicy, main as installedMain, modelTokenLimit } from "./verify-live-objective.mjs";
-import { assertRegularPipelineCompletion, observeRegularCommits } from "./verify-regular-objective.mjs";
+import {
+  assertRegularPipelineCompletion,
+  observeRegularCommits,
+} from "./verify-regular-objective.mjs";
 import { assertNativeScopes, observeNativeScopes } from "./qualification-native-scopes.mjs";
 import { nativeQualificationEvents } from "./qualification-sibling-refresh-proof.mjs";
 
@@ -25,7 +28,8 @@ function fallbackPolicy(tokens) {
 function parameters(repository, route) {
   const [owner, repo] = repository.split("/");
   return {
-    owner, repo,
+    owner,
+    repo,
     headers: { accept: "application/vnd.github+json", "x-github-api-version": version },
     ...(route.endsWith("/pulls") ? { state: "all", per_page: 1 } : {}),
     ...(route.endsWith("/stacks") ? { per_page: 1 } : {}),
@@ -35,24 +39,34 @@ function responseRecord(route, args, response) {
   const headers = response?.headers ?? {};
   const data = response?.data;
   return {
-    route, parameters: args, status: response?.status ?? null, url: response?.url ?? null,
+    route,
+    parameters: args,
+    status: response?.status ?? null,
+    url: response?.url ?? null,
     headers: {
       apiVersion: headers["x-github-api-version-selected"] ?? null,
       requestId: headers["x-github-request-id"] ?? null,
       remaining: headers["x-ratelimit-remaining"] ?? null,
       date: headers.date ?? null,
-      refusal: ["retry-after", "x-github-sso", "www-authenticate"].some((key) => headers[key] !== undefined),
+      refusal: ["retry-after", "x-github-sso", "www-authenticate"].some(
+        (key) => headers[key] !== undefined,
+      ),
     },
-    ...(route === routes[0] ? {
-      repository: {
-        id: data?.id ?? null, nodeId: data?.node_id ?? null, fullName: data?.full_name ?? null,
-        private: data?.private ?? null, archived: data?.archived ?? null,
-        push: data?.permissions?.push ?? null,
-      },
-    } : {
-      arrayLength: Array.isArray(data) ? data.length : null,
-      notFound: data?.message === "Not Found",
-    }),
+    ...(route === routes[0]
+      ? {
+          repository: {
+            id: data?.id ?? null,
+            nodeId: data?.node_id ?? null,
+            fullName: data?.full_name ?? null,
+            private: data?.private ?? null,
+            archived: data?.archived ?? null,
+            push: data?.permissions?.push ?? null,
+          },
+        }
+      : {
+          arrayLength: Array.isArray(data) ? data.length : null,
+          notFound: data?.message === "Not Found",
+        }),
   };
 }
 function assertResponse(record, repository, route, status) {
@@ -83,13 +97,21 @@ function assertRepository(record, repository) {
 /** Same authenticated transport; four bounded reads, no retry, mutation or simulated denial. */
 export async function observeNativeFallbackCapability({ request, repository, actor }) {
   assert.match(repository, /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/);
-  const proof = { protocol, repository, actor: { id: actor.id, login: actor.login }, observations: [] };
+  const proof = {
+    protocol,
+    repository,
+    actor: { id: actor.id, login: actor.login },
+    observations: [],
+  };
   try {
     for (const [index, route] of routes.entries()) {
       const args = parameters(repository, route);
       let response;
       try {
-        response = await request(route, { ...args, request: { signal: AbortSignal.timeout(15000) } });
+        response = await request(route, {
+          ...args,
+          request: { signal: AbortSignal.timeout(15000) },
+        });
       } catch (error) {
         // Only an actual REST response can establish 404. Never save raw exceptions/auth headers.
         response = error?.response;
@@ -121,7 +143,11 @@ export function assertNativeFallbackCapability(proof, { repository, actor }) {
   const [before, pulls, stacks, after] = proof.observations;
   assertRepository(before, repository);
   assertRepository(after, repository);
-  assert.deepEqual(after.repository, before.repository, "repository changed across capability read");
+  assert.deepEqual(
+    after.repository,
+    before.repository,
+    "repository changed across capability read",
+  );
   assertResponse(pulls, repository, routes[1], 200);
   assert.ok(pulls.arrayLength !== null && pulls.arrayLength >= 0 && pulls.arrayLength <= 1);
   assertResponse(stacks, repository, routes[2], 404);
@@ -131,18 +157,28 @@ export function assertNativeFallbackCapability(proof, { repository, actor }) {
 export function nativeFallbackQualification(env) {
   if (env.FACTORY_LIVE_NATIVE_FALLBACK_OBJECTIVE !== "1") return null;
   assert.ok(env.FACTORY_LIVE_OBJECTIVE === "1" || env.FACTORY_LIVE_OBJECTIVE_PREFLIGHT === "1");
-  assert.ok(!env.FACTORY_LIVE_OBJECTIVE_DELIVERY || env.FACTORY_LIVE_OBJECTIVE_DELIVERY === "stacked-prs",
-    "fallback qualifier must originally request native delivery");
-  assert.ok(!env.FACTORY_LIVE_REGULAR_OBJECTIVE && !env.FACTORY_LIVE_REGULAR_BACKEND &&
-    !env.FACTORY_LIVE_NATIVE_REFRESH_OBJECTIVE, "conflicting qualification profile");
+  assert.ok(
+    !env.FACTORY_LIVE_OBJECTIVE_DELIVERY || env.FACTORY_LIVE_OBJECTIVE_DELIVERY === "stacked-prs",
+    "fallback qualifier must originally request native delivery",
+  );
+  assert.ok(
+    !env.FACTORY_LIVE_REGULAR_OBJECTIVE &&
+      !env.FACTORY_LIVE_REGULAR_BACKEND &&
+      !env.FACTORY_LIVE_NATIVE_REFRESH_OBJECTIVE,
+    "conflicting qualification profile",
+  );
   const policy = fallbackPolicy(modelTokenLimit(env.FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS));
   return {
-    scope, policy, privateEvidence: true,
+    scope,
+    policy,
+    privateEvidence: true,
     observePreflight: observeNativeFallbackCapability,
     beforeRun: async ({ evidence, request, save }) => {
       assertNativeFallbackCapability(evidence.preflight.scenario, evidence);
       evidence.nativeFallbackCapability = await observeNativeFallbackCapability({
-        request, repository: evidence.repository, actor: evidence.actor,
+        request,
+        repository: evidence.repository,
+        actor: evidence.actor,
       });
       save();
       assertNativeFallbackCapability(evidence.nativeFallbackCapability, evidence);
@@ -150,9 +186,11 @@ export function nativeFallbackQualification(env) {
     afterRun: async (hooks) => {
       await observeRegularCommits({
         ...hooks,
-        request: (route, args) => hooks.request(route, {
-          ...args, request: { signal: AbortSignal.timeout(15000) },
-        }),
+        request: (route, args) =>
+          hooks.request(route, {
+            ...args,
+            request: { signal: AbortSignal.timeout(15000) },
+          }),
       });
       observeNativeScopes(hooks.evidence);
     },
@@ -161,7 +199,9 @@ export function nativeFallbackQualification(env) {
 }
 
 export function assertNativeFallbackCompletion(evidence) {
-  const expected = fallbackPolicy(modelTokenLimit(String(evidence.policy.economics.maxModelTokens)));
+  const expected = fallbackPolicy(
+    modelTokenLimit(String(evidence.policy.economics.maxModelTokens)),
+  );
   assertRegularPipelineCompletion(evidence, { expected, scope, deliveryMode: "native-fallback" });
   assert.equal(evidence.preflight.harness.sourceTreeClean, true);
   assertNativeFallbackCapability(evidence.preflight.scenario, evidence);
@@ -175,11 +215,21 @@ export function assertNativeFallbackCompletion(evidence) {
   const selected = events.find((event) => event.event === "DeliverySelected");
   const start = events.find((event) => event.event === "FactoryRunStarted");
   assert.equal(selected.capabilityVersion, version);
-  assert.equal(selected.reason, unsupportedReason, "fallback reason is not the actual unsupported surface");
+  assert.equal(
+    selected.reason,
+    unsupportedReason,
+    "fallback reason is not the actual unsupported surface",
+  );
   assert.equal(selected.policyDigest, start.policyDigest);
   assert.ok(selected.sequence > start.sequence);
-  assert.ok(events.filter((event) => ["AttemptReserved", "AttemptStarted", "PublicationRecorded"].includes(event.event))
-    .every((event) => selected.sequence < event.sequence), "fallback selected after admission/publication");
+  assert.ok(
+    events
+      .filter((event) =>
+        ["AttemptReserved", "AttemptStarted", "PublicationRecorded"].includes(event.event),
+      )
+      .every((event) => selected.sequence < event.sequence),
+    "fallback selected after admission/publication",
+  );
   assertNativeScopes(evidence);
 }
 
@@ -189,21 +239,29 @@ export function assessNativeFallbackCompletion(evidence) {
     return { result: "passed", scope };
   } catch {
     return {
-      result: ["cancelled", "escalated"].includes(evidence?.status?.run?.state) ? "failed" : "incomplete",
-      scope, reason: "Actual native fallback evidence is incomplete or conflicting; inspect private receipts",
+      result: ["cancelled", "escalated"].includes(evidence?.status?.run?.state)
+        ? "failed"
+        : "incomplete",
+      scope,
+      reason:
+        "Actual native fallback evidence is incomplete or conflicting; inspect private receipts",
     };
   }
 }
 export async function main(env = process.env, run = installedMain) {
   const qualification = nativeFallbackQualification(env);
   if (!qualification) {
-    console.log("Not exercised: set FACTORY_LIVE_NATIVE_FALLBACK_OBJECTIVE=1 with shared explicit guards.");
+    console.log(
+      "Not exercised: set FACTORY_LIVE_NATIVE_FALLBACK_OBJECTIVE=1 with shared explicit guards.",
+    );
     return;
   }
   await run(qualification);
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  try { await main(); } catch {
+  try {
+    await main();
+  } catch {
     console.error("Native fallback qualification incomplete; no automatic retry performed.");
     process.exitCode = 2;
   }

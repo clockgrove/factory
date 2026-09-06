@@ -770,11 +770,15 @@ export function assertQualificationCompletion(
   const requestedMode = deliveryMode === "native-fallback" ? "stacked-prs" : deliveryMode;
   const selectedMode = deliveryMode === "stacked-prs" ? "native-stacks" : "regular-prs";
   if (deliveryMode === "native-fallback")
-    assert.deepEqual(starts[0].policy.delivery, {
-      mode: "stacked-prs",
-      onUnavailable: "regular-prs",
-      merge: "bottom-up",
-    }, "native fallback was not originally authorized");
+    assert.deepEqual(
+      starts[0].policy.delivery,
+      {
+        mode: "stacked-prs",
+        onUnavailable: "regular-prs",
+        merge: "bottom-up",
+      },
+      "native fallback was not originally authorized",
+    );
   assert.equal(
     delivery[0].requested,
     requestedMode,
@@ -1109,7 +1113,9 @@ export async function main(qualification = {}) {
   // Hookless native and explicit-regular qualification retain their original path.
   if (qualification.observePreflight) {
     preflight.scenario = await qualification.observePreflight({
-      request, repository, actor: { id: actor.id, login: actor.login },
+      request,
+      repository,
+      actor: { id: actor.id, login: actor.login },
     });
     if (preflight.scenario.result !== "passed") {
       preflight.result = "blocked";

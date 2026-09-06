@@ -919,9 +919,12 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     const connection = await (this.#options.connect?.(home) ??
       startCodexAppServer({
         command: target.command,
-        args: this.#options.args ?? // shared ~/.codex directory even when CODEX_HOME is overridden. // Current Codex builds default SQLite runtime state in the user's
-        // Pin it explicitly so each attempt's resumable state is isolated.
-        [...target.args, ...codexAppServerArgs(home, this.#options.profile)],
+        // Pin SQLite state explicitly: overriding CODEX_HOME alone can still
+        // leave current Codex builds using the shared user runtime directory.
+        args: this.#options.args ?? [
+          ...target.args,
+          ...codexAppServerArgs(home, this.#options.profile),
+        ],
         cwd,
         env: isolateCodexEnvironment(process.env, home),
         permittedSecretNames: this.#options.permittedModelCredentials ?? [],

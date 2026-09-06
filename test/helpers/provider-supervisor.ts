@@ -42,6 +42,7 @@ export interface ProviderFaults {
   controllerActivation?: boolean;
   afterIntegration?: () => void;
   localOnly?: boolean;
+  dependencyChain?: boolean;
   adaptiveLocal?: boolean;
   localMaxParallel?: 2;
   loseIntegrationReceipt?: "before" | "after";
@@ -214,7 +215,12 @@ export async function providerSupervisorFixture(
       preconditions: [],
       outOfScope: [],
       conventions: [],
-      dependsOn: index === 2 ? ["a", "b"] : faults.nativeStack && index === 1 ? ["a"] : [],
+      dependsOn:
+        index === 2
+          ? ["a", "b"]
+          : (faults.nativeStack || faults.dependencyChain) && index === 1
+            ? ["a"]
+            : [],
       baseSha,
       validationCommands: ["node --test"],
       requirements: {
@@ -362,6 +368,9 @@ export async function providerSupervisorFixture(
   vi.spyOn(GitHubControlStore.prototype, "getAuthenticatedLogin").mockResolvedValue("operator");
   vi.spyOn(GitHubControlStore.prototype, "readRepositoryPermission").mockResolvedValue("write");
   vi.spyOn(GitHubControlStore.prototype, "readBranchRules").mockResolvedValue([]);
+  // This fixture owns one Objective; external commits have no authenticated
+  // co-owned peer provenance. Do not fall through to the blocked live transport.
+  vi.spyOn(GitHubControlStore.prototype, "readCommitObjectiveCandidates").mockResolvedValue([]);
   vi.spyOn(GitHubControlStore.prototype, "readChecks").mockResolvedValue({
     pending: [],
     failed: [],
@@ -706,10 +715,27 @@ export async function providerSupervisorFixture(
             cwd: input.workspace,
             encoding: "utf8",
           }).trim();
-          const head = rawGit(
-            ["commit-tree", tree, "-p", input.packet.baseSha],
-            "provider fixture result",
+          const head = execFileSync(
+            "git",
+            [
+              "-c",
+              "user.name=Factory Fixture",
+              "-c",
+              "user.email=fixture@example.invalid",
+              "commit-tree",
+              tree,
+              "-p",
+              input.packet.baseSha,
+            ],
+            {
+              cwd: input.workspace,
+              input: "provider fixture result",
+              encoding: "utf8",
+            },
           ).trim();
+          // Worker materializations have isolated object stores. Import the exact
+          // produced commit into the simulated provider store before publishing.
+          git("fetch", "--no-tags", "--no-write-fetch-head", input.workspace, head);
           const pull = await createPull(input.workItem, head, `provider/${input.workItem}`);
           handle.metadata = {
             pullNumber: String(pull.number),

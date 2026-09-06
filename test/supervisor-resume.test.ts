@@ -11,6 +11,7 @@ describe("same-run controller restart after integration", () => {
       const f = await providerSupervisorFixture("daytona-burst", {
         controllerActivation: true,
         localOnly: true,
+        dependencyChain: true,
         loseIntegrationReceipt: loss,
       });
       try {
@@ -60,6 +61,7 @@ describe("same-run controller restart after integration", () => {
     const f = await providerSupervisorFixture("daytona-burst", {
       controllerActivation: true,
       localOnly: true,
+      dependencyChain: true,
       loseIntegrationReceipt: "before",
     });
     try {
@@ -68,14 +70,57 @@ describe("same-run controller restart after integration", () => {
       expect(reviewRefs).toHaveLength(1);
       f.refs.delete(reviewRefs[0]!);
       const invocations = [...f.activity];
+      const publications = f.events().filter((event) => event.event === "PublicationRecorded");
       const result = await f.run();
       expect(result).toMatchObject({
         status: "escalated",
-        reason: expect.stringContaining("original acceptance checkpoint"),
+        reason: "completed ordinary integration lacks its original acceptance checkpoint",
       });
       expect(f.events().filter((event) => event.event === "AttemptIntegrated")).toHaveLength(0);
+      expect(f.events().filter((event) => event.event === "PublicationRecorded")).toEqual(
+        publications,
+      );
       expect(f.activity).toEqual(invocations);
       expect(f.snapshot.workItems[0]!.linkedPullRequests[0]!.state).toBe("MERGED");
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
+
+  it("does not redispatch an overlapping reservation after an integration transport outage", async () => {
+    const f = await providerSupervisorFixture("daytona-burst", {
+      controllerActivation: true,
+      localOnly: true,
+      loseIntegrationReceipt: "before",
+    });
+    try {
+      await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
+      expect(
+        f.events().some((event) => event.event === "BudgetReserved" && event.workItem === 9),
+      ).toBe(true);
+      expect(
+        f.events().some((event) => event.event === "AttemptStarted" && event.workItem === 9),
+      ).toBe(false);
+      const launches = f.activity.filter((entry) => entry.operation === "launch");
+      await expect(f.run()).rejects.toThrow("execution completion is unknown after dispatch");
+      expect(f.activity.filter((entry) => entry.operation === "launch")).toEqual(launches);
+      expect(
+        f
+          .events()
+          .some((event) =>
+            ["FactoryRunCompleted", "FactoryRunEscalated", "FactoryRunCancelled"].includes(
+              event.event,
+            ),
+          ),
+      ).toBe(false);
+      expect(
+        f
+          .events()
+          .some(
+            (event) =>
+              event.workItem === 9 && ["AttemptFailed", "AttemptDeferred"].includes(event.event),
+          ),
+      ).toBe(false);
     } finally {
       await f.dispose();
     }

@@ -6693,6 +6693,39 @@ export class FactorySupervisor {
     if (!reservation) {
       throw new Error(`stack Work Item #${item.number} has no attempt reservation`);
     }
+    if (this.#deliverySelection.selected === "regular-prs") {
+      // Regular publications now share sibling integration/recovery. Preserve
+      // the ordinary path's original acceptance proof before repairing any
+      // publication/integration receipt, even if a concurrent merge changes the
+      // mutable PR state after this observation. Never review merged work anew.
+      const accepted = (item.factoryEvents ?? []).some(
+        (event) =>
+          event.kind === "attempt" &&
+          event.event === "AttemptValidated" &&
+          event.runId === reservation.runId &&
+          event.workItem === item.number &&
+          event.attempt === reservation.attempt &&
+          event.policyDigest === reservation.policyDigest &&
+          event.artifactDigest === publishedEvent.artifactDigest &&
+          event.sequence > validation.sequence &&
+          event.sequence < publishedEvent.sequence,
+      );
+      const review = publishedEvent.artifactDigest
+        ? await this.#reviews.load({
+            kind: "artifact",
+            runId: reservation.runId,
+            objective: reservation.objective,
+            workItem: item.number,
+            attempt: reservation.attempt,
+            artifactDigest: publishedEvent.artifactDigest,
+            baseSha: validation.baseSha,
+            outputTreeSha: validation.outputTreeSha,
+            evidenceDigest: validation.evidenceDigest,
+          })
+        : null;
+      if (!accepted || !review?.review.accepted || review.review.unmetCriteria.length)
+        throw new Error("completed ordinary integration lacks its original acceptance checkpoint");
+    }
     let publicationEvent = recordedPublication ?? undefined;
     const baseBranch =
       publicationEvent?.kind === "publication" ? publicationEvent.baseBranch : this.#baseBranch;

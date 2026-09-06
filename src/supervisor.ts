@@ -79,6 +79,7 @@ import {
 } from "./control/receipts.js";
 import { RunManager, type RunState } from "./control/runs.js";
 import { loadRecoveryRuntime, type RecoveryRuntime } from "./recovery/runtime.js";
+import { nativeSourceRequiresIsolation } from "./execution/native-ancestry-trust.js";
 import {
   loadRecoverySourceArtifact,
   createRecoverySourcePublishedEvent,
@@ -3801,19 +3802,58 @@ export class FactorySupervisor {
               // recovery plan's exact base. Its older publication base is source
               // provenance, not a forward trunk advance by the successor.
               const comparisonBase = integratedRoot ? authorityBase : rootBase;
-              const sourceStart = integratedRoot
-                ? this.#recoveryRuntime?.events.find(
-                    (event) =>
-                      event.kind === "run" &&
-                      event.event === "FactoryRunStarted" &&
-                      event.runId === integratedRoot.outcome.sourceRunId,
-                  )
-                : undefined;
-              const inheritedIsolation =
-                integratedRoot !== undefined &&
-                (sourceStart?.kind !== "run" ||
-                  sourceStart.event !== "FactoryRunStarted" ||
-                  parseRunPolicy(sourceStart.policy).trust === "sandbox_untrusted");
+              // The actual parent head contains every native ancestor, not just
+              // the root. Neither a trusted child nor successor policy may
+              // declassify an intermediate retained producer's restrictions.
+              let inheritedIsolation = false;
+              let ancestorId = this.#deliveryPlan?.items.find(
+                (candidate) => candidate.itemId === itemId,
+              )?.parentItemId;
+              const ancestors = new Set<string>();
+              while (ancestorId) {
+                if (!unit || ancestors.has(ancestorId) || !unit.items.includes(ancestorId))
+                  throw new Error("stack execution has invalid ancestor provenance");
+                ancestors.add(ancestorId);
+                const ancestor = objective.items.find(
+                  (candidate) => parseGraphItemMetadata(candidate.body ?? "").id === ancestorId,
+                );
+                if (!ancestor) throw new Error("stack execution lacks an immutable ancestor");
+                inheritedIsolation ||=
+                  this.#packetFor(ancestor.number).requirements.trust !== "trusted_local";
+                const retained = this.#recoveryRuntime?.planRecord.plan.items.find(
+                  (entry) => entry.workItem === ancestor.number,
+                );
+                if (this.#recoveryRuntime && !retained)
+                  throw new Error("stack execution ancestor is outside the recovery plan");
+                if (retained && retained.action !== "execute") {
+                  if (!retained.source)
+                    throw new Error("stack execution ancestor lacks its source run");
+                  // Always resolve provenance, even if another ancestor has
+                  // already required isolation: missing authority must refuse.
+                  const producerRunIds = new Set([
+                    retained.source.runId,
+                    ...(retained.source.priorDelivery ? [retained.source.priorDelivery.runId] : []),
+                    ...(retained.source.siblingRefresh
+                      ? [retained.source.siblingRefresh.candidateRunId]
+                      : []),
+                  ]);
+                  for (const sourceRunId of producerRunIds) {
+                    const sourceIsolation = nativeSourceRequiresIsolation(
+                      sourceRunId,
+                      this.#recoveryRuntime!.events,
+                    );
+                    inheritedIsolation ||= sourceIsolation;
+                  }
+                }
+                const ancestorPlan = this.#deliveryPlan?.items.find(
+                  (candidate) => candidate.itemId === ancestorId,
+                );
+                if (!ancestorPlan)
+                  throw new Error("stack execution ancestor lacks its delivery plan");
+                ancestorId = ancestorPlan.parentItemId;
+              }
+              if (!unit || !ancestors.has(unit.items[0]!))
+                throw new Error("stack execution ancestry does not reach its immutable root");
               const key = `${authorityBase}:${comparisonBase}`;
               if (!executionBaseProofs.has(key))
                 executionBaseProofs.set(

@@ -463,6 +463,13 @@ const Scheduling = Common.extend({
 });
 
 const Capacity = Common.extend({
+  isolatedValidation: z.object({
+    backend: z.literal("codex-cli/daytona"),
+    artifactDigest: sha256Digest,
+    invocationOwnershipDigest: sha256Digest,
+    deadline: z.string().datetime(),
+    noHandleReplacementNotBefore: z.string().datetime(),
+  }).strict().optional(),
   kind: z.literal("capacity"),
   event: z.enum(["CapacityReserved", "CapacityReconciled"]),
   workItem: z.number().int().positive(),
@@ -487,12 +494,20 @@ const Capacity = Common.extend({
     event.sourceRunId &&
     (event.sourceRunId === event.runId ||
       event.phase !== "validation" ||
-      !/^factory\/integration-validation-[a-f0-9]{64}$/.test(event.backend))
+      !/^factory\/integration-(?:validation|sandbox)-[a-f0-9]{64}$/.test(event.backend))
   ) {
     context.addIssue({
       code: "custom",
       message: "source capacity is only a distinct source-bound integration validation",
     });
+  }
+  const isolated = event.isolatedValidation;
+  if ((event.sourceRunId && event.backend.startsWith("factory/integration-sandbox-") && !isolated) ||
+    (isolated && (!event.sourceRunId || event.phase !== "validation" ||
+      !/^factory\/integration-sandbox-[a-f0-9]{64}$/.test(event.backend) || event.localScopeBatch ||
+      Date.parse(isolated.noHandleReplacementNotBefore) !== Date.parse(isolated.deadline) + 60_000 ||
+      (event.event === "CapacityReserved" && Date.parse(isolated.deadline) <= Date.parse(event.at))))) {
+    context.addIssue({ code: "custom", message: "isolated source capacity requires exact invocation and termination fences" });
   }
   const batch = event.localScopeBatch;
   if (!batch) return;

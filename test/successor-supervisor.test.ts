@@ -1827,64 +1827,114 @@ describe("Supervisor authenticated successor execution", () => {
     expect([...f.refs.keys()].filter((ref) => ref.includes("/sibling-refreshes/"))).toEqual([]);
   }, 30000);
 
-  it("repairs the completed old-head review's missing token receipt before ordinary refresh CAS", async () => {
-    const f = await successorFixture({
-      foregroundPredecessor: true,
-      historicalSuccessor: true,
-      staleRetainedBaseUntilRefresh: true,
-    });
-    const old = await retainOldHeadSuccessorCandidate(f);
-    const item = f.snapshot.workItems[1]!;
-    const usageId = `integration-review-${old.review.identityDigest}`;
-    item.factoryEvents = item.factoryEvents!.filter(
-      (entry) => !(entry.kind === "budget" && entry.usageId === usageId),
-    );
-    const cas = f.refresh.getMockImplementation()!;
-    f.refresh.mockImplementation(async (input) => {
-      // The repair is an authenticated usage write from the immutable result,
-      // not another management invocation or a changed-head acceptance.
+  it.each([
+    ["review", "model_tokens", 75_039],
+    ["validation", "validation_milliseconds", 12_963],
+  ] as const)(
+    "repairs the completed old-head %s's missing usage receipt before ordinary refresh CAS",
+    async (phase, unit, amount) => {
+      const f = await successorFixture({
+        foregroundPredecessor: true,
+        historicalSuccessor: true,
+        staleRetainedBaseUntilRefresh: true,
+      });
+      const old = await retainOldHeadSuccessorCandidate(f);
+      const item = f.snapshot.workItems[1]!;
+      const usageId =
+        phase === "review"
+          ? `integration-review-${old.review.identityDigest}`
+          : `integration-validation-${old.digest}`;
+      item.factoryEvents = item.factoryEvents!.filter(
+        (entry) => !(entry.kind === "budget" && entry.usageId === usageId),
+      );
+      const cas = f.refresh.getMockImplementation()!;
+      f.refresh.mockImplementation(async (input) => {
+        // The repair is an authenticated usage write from the immutable result,
+        // not another management invocation or a changed-head acceptance.
+        expect(
+          item.factoryEvents!.filter(
+            (entry) => entry.kind === "budget" && entry.usageId === usageId,
+          ),
+        ).toEqual([
+          expect.objectContaining({
+            runId: "successor",
+            amount,
+            unit,
+            event: "BudgetReconciled",
+          }),
+        ]);
+        expect(f.validate).not.toHaveBeenCalled();
+        expect(f.review).not.toHaveBeenCalled();
+        return cas(input);
+      });
+      expect(await f.run(), JSON.stringify(f.messages)).toMatchObject({ status: "completed" });
+      expect(f.refresh).toHaveBeenCalledOnce();
+      expect(f.review).toHaveBeenCalledTimes(2);
+      expect(f.launch.mock.calls.map(([context]) => context.workItem)).toEqual([10]);
+      expect(
+        await new ReviewCheckpointManager(f.storage, f.leases).load(old.review.identity),
+      ).toEqual(old.review);
       expect(
         item.factoryEvents!.filter((entry) => entry.kind === "budget" && entry.usageId === usageId),
-      ).toEqual([
-        expect.objectContaining({
-          runId: "successor",
-          amount: 75_039,
-          unit: "model_tokens",
-          event: "BudgetReconciled",
-        }),
-      ]);
-      expect(f.review).not.toHaveBeenCalled();
-      return cas(input);
-    });
-    expect(await f.run(), JSON.stringify(f.messages)).toMatchObject({ status: "completed" });
-    expect(f.refresh).toHaveBeenCalledOnce();
-    expect(f.review).toHaveBeenCalledTimes(2);
-    expect(f.launch.mock.calls.map(([context]) => context.workItem)).toEqual([10]);
-    expect(
-      await new ReviewCheckpointManager(f.storage, f.leases).load(old.review.identity),
-    ).toEqual(old.review);
-    expect(
-      item.factoryEvents!.filter((entry) => entry.kind === "budget" && entry.usageId === usageId),
-    ).toHaveLength(1);
-    expect(await f.runtime()).toMatchObject({ status: "verified", usage: { modelTokens: 75_119 } });
-  }, 30000);
+      ).toHaveLength(1);
+      expect(await f.runtime()).toMatchObject({
+        status: "verified",
+        usage: { modelTokens: 75_119 },
+      });
+    },
+    30000,
+  );
 
-  it("refuses conflicting old-head review token accounting before ordinary refresh CAS", async () => {
+  it.each(["review", "validation"] as const)(
+    "refuses conflicting old-head %s accounting before ordinary refresh CAS",
+    async (phase) => {
+      const f = await successorFixture({
+        foregroundPredecessor: true,
+        historicalSuccessor: true,
+        staleRetainedBaseUntilRefresh: true,
+      });
+      const old = await retainOldHeadSuccessorCandidate(f);
+      const usageId =
+        phase === "review"
+          ? `integration-review-${old.review.identityDigest}`
+          : `integration-validation-${old.digest}`;
+      const receipt = f.snapshot.workItems[1]!.factoryEvents!.find(
+        (entry) => entry.kind === "budget" && entry.usageId === usageId,
+      );
+      if (receipt?.kind !== "budget") throw new Error("fixture old usage receipt absent");
+      receipt.amount = 0;
+      expect(await f.run(), JSON.stringify(f.messages)).toMatchObject({
+        status: "escalated",
+        reason: expect.stringContaining("successor usage conflicts with immutable evidence"),
+      });
+      expect(f.refresh).not.toHaveBeenCalled();
+      expect(f.validate).not.toHaveBeenCalled();
+      expect(f.review).not.toHaveBeenCalled();
+      expect(f.launch).not.toHaveBeenCalled();
+      expect(f.refs.get(`refs/heads/${publicationBranch(7, 9, 1)}`)).toBe(f.heads[1]);
+      expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
+      expect(
+        await new ReviewCheckpointManager(f.storage, f.leases).load(old.review.identity),
+      ).toEqual(old.review);
+      expect(receipt.amount).toBe(0);
+    },
+    30000,
+  );
+
+  it("refuses an old reconciled validator whose immutable completion is missing before CAS", async () => {
     const f = await successorFixture({
       foregroundPredecessor: true,
       historicalSuccessor: true,
       staleRetainedBaseUntilRefresh: true,
     });
     const old = await retainOldHeadSuccessorCandidate(f);
-    const usageId = `integration-review-${old.review.identityDigest}`;
-    const receipt = f.snapshot.workItems[1]!.factoryEvents!.find(
-      (entry) => entry.kind === "budget" && entry.usageId === usageId,
-    );
-    if (receipt?.kind !== "budget") throw new Error("fixture old model receipt absent");
-    receipt.amount = 0;
-    expect(await f.run(), JSON.stringify(f.messages)).toMatchObject({
-      status: "escalated",
-      reason: expect.stringContaining("successor usage conflicts with immutable evidence"),
+    f.refs.delete(old.candidate.ref);
+    // Runtime reconstruction sees the completion-bound capacity receipt before
+    // the refresh path: no invented duration or replacement invocation can
+    // repair an absent immutable completion.
+    expect(await f.runtime()).toMatchObject({
+      status: "blocked",
+      blockers: ["source-capacity-completion-unavailable"],
     });
     expect(f.refresh).not.toHaveBeenCalled();
     expect(f.validate).not.toHaveBeenCalled();
@@ -1892,10 +1942,6 @@ describe("Supervisor authenticated successor execution", () => {
     expect(f.launch).not.toHaveBeenCalled();
     expect(f.refs.get(`refs/heads/${publicationBranch(7, 9, 1)}`)).toBe(f.heads[1]);
     expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
-    expect(
-      await new ReviewCheckpointManager(f.storage, f.leases).load(old.review.identity),
-    ).toEqual(old.review);
-    expect(receipt.amount).toBe(0);
   }, 30000);
 
   it.each([

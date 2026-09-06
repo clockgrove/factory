@@ -27,6 +27,7 @@ function policyBoundary(authority) {
     "refusal qualification cannot authorize paid backends");
 }
 function observedEvents(context, observation) {
+  safe(observation);
   assert.ok(Array.isArray(observation.receipts), "authenticated refusal observation unavailable");
   for (const row of observation.receipts) assert.ok(row.actorId === context.evidence.actor.id &&
     Number.isSafeInteger(row.commentId) && row.event.objective === context.evidence.objective.number,
@@ -73,7 +74,7 @@ async function packetProof(context, fixture, read, events, reserved, reservation
   const graphRef = `refs/clockgrove-factory/graphs/objective-${reserved.objective}/run-${hash(reserved.runId).slice(0, 32)}`;
   assert.ok(graphEvent.graphRef === graphRef && graphEvent.baseSha === context.evidence.base, "compiled refusal graph identity differs");
   const demand = { kind: "checkpoint", ref: graphRef, path: ".clockgrove-factory/control/compiled-objective.json", maxBytes: 2 * 1024 * 1024 };
-  const raw = await read(demand), graph = assertQualificationCheckpoint(raw, demand, [context.evidence.base]);
+  const raw = safe(await read(demand)), graph = assertQualificationCheckpoint(raw, demand, [context.evidence.base]);
   assert.ok(raw.blobOid === graphEvent.graphBlobSha && hash(canonical(graph)) === graphEvent.graphDigest && raw.content === canonical(graph),
     "compiled refusal graph content differs");
   assert.ok(Array.isArray(graph.workItems) && graph.workItems.length > 0 && graph.workItems.length <= 3, "refusal graph cardinality unavailable");
@@ -85,7 +86,7 @@ async function packetProof(context, fixture, read, events, reserved, reservation
     reserved.objective, reserved.workItem, reserved.attempt, reserved.directorEpoch]));
   const sessionDemand = { kind: "checkpoint", ref: `refs/clockgrove-factory/sessions/${attemptId}/prepared`,
     path: ".clockgrove-factory/control/app-server-session.json", maxBytes: 196608 };
-  const prepared = await read(sessionDemand), session = assertQualificationCheckpoint(prepared, sessionDemand, [reservation.oid]);
+  const prepared = safe(await read(sessionDemand)), session = assertQualificationCheckpoint(prepared, sessionDemand, [reservation.oid]);
   const binding = session.binding;
   for (const key of identityKeys) assert.ok(binding[key] === (key === "repository" ? context.authority.repository : reserved[key]), "prepared packet attempt identity differs");
   assert.ok(session.protocol === "clockgrove.factory/app-server-session-v1" && session.stage === "prepared" && binding.attemptId === attemptId && session.packet.baseSha === reserved.baseSha &&
@@ -110,7 +111,7 @@ async function symlinkRetention(context, fixture, read, identity, ref, events, r
   const raw = {};
   const load = async (stage, parents) => {
     const demand = { kind: "checkpoint", ref: `${ref}/${stage}`, path: "artifact-transfer.json", maxBytes: 1048576 };
-    raw[stage] = await read(demand);
+    raw[stage] = safe(await read(demand));
     const descriptor = assertQualificationCheckpoint(raw[stage], demand, parents);
     assert.ok(descriptor.protocol === "clockgrove.factory/artifact-transfer-v1" && descriptor.retention === "repository-audit" &&
       canonical(descriptor.identity) === canonical(identity) && Array.isArray(descriptor.chunks) && descriptor.chunks.length === 0,

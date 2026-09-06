@@ -177,7 +177,10 @@ not a contradictory later balance from another observation.
 
 Model quota is protected at retry boundaries as well. After an artifact has passed host scope,
 secret, clean-apply, and sensitive-path checks, the running Supervisor may retain it in a bounded
-32 MiB in-memory cache. A retry at the same base SHA is seeded with that complete patch and receives
+32 MiB in-memory cache, with at most 512 MiB of separately leased file-backed payload content.
+Parallel pipelines retain independent content leases; completing one does not delete another's
+active content. Pending durable-transfer recovery data is separate from this optimization cache.
+A retry at the same base SHA is seeded with that complete patch and receives
 the bounded failure diagnostic, so it repairs prior work instead of recreating it. This cache is a
 non-authoritative optimization: it cannot change derived state, is lost on restart, is never used by
 a provider-managed publication backend, and every resulting complete patch is independently

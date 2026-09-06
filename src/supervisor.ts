@@ -13,7 +13,7 @@ import { DaytonaBackend, DaytonaResourceCleanupError } from "./backends/daytona.
 import { VercelSandboxBackend } from "./backends/vercel-sandbox.js";
 import { validationInvocationOwnership } from "./backends/validation-invocation.js";
 import { AttemptManager, type AttemptReservation } from "./control/attempts.js";
-import { persistArtifactTransfer, type ArtifactTransferIdentity } from "./control/artifact-transfers.js";
+import { persistArtifactTransfer, resumeArtifactTransfer, type ArtifactTransferIdentity } from "./control/artifact-transfers.js";
 import { activationCancellation, type ActivationBinding } from "./control/activations.js";
 import {
   deriveBudgetUsage,
@@ -137,8 +137,12 @@ import type { BackendHandle, ExecutionBackend, ExecutionUsage } from "./executio
 import {
   MAX_ARTIFACT_PATCH_BYTES,
   normalizeArtifact,
+  assertArtifactScope,
   type NormalizedArtifact,
 } from "./execution/artifacts.js";
+import { bindArtifactManifest } from "./runtime/artifact-patch.js";
+import { retainArtifactContent } from "./execution/artifact-content.js";
+import { retainScopedArtifact, withArtifactContentScope } from "./execution/artifact-content-scope.js";
 import { Dispatcher, GithubOctokitWriter } from "./dispatch.js";
 import {
   compiledGraphDigest,
@@ -349,8 +353,8 @@ interface CollectedAttemptContinuation {
   reservation: AttemptReservation;
   packet: WorkerPacket;
   artifact: NormalizedArtifact;
-  modelUsage: ReportedModelUsage & { inputTokens: number; outputTokens: number };
-  nativeMilliseconds: number;
+  modelUsage?: ReportedModelUsage & { inputTokens: number; outputTokens: number };
+  nativeUsage: { unit: "local_milliseconds" | "sandbox_milliseconds" | "managed_sessions"; amount: number };
   worker?: LocalWorktree;
 }
 
@@ -939,16 +943,19 @@ function inspectCompiledGraph(snapshot: Snapshot): {
 }
 
 const MAX_RETRY_CHECKPOINT_CACHE_BYTES = 32 * 1024 * 1024;
+const MAX_RETRY_PAYLOAD_CACHE_BYTES = 512 * 1024 * 1024;
 
 class RetryArtifactCache {
   readonly #entries = new Map<number, NormalizedArtifact>();
+  readonly #releases = new Map<number, () => Promise<void>>();
   #bytes = 0;
+  #payloadBytes = 0;
 
-  get(workItem: number, baseSha: string): NormalizedArtifact | undefined {
+  async get(workItem: number, baseSha: string): Promise<NormalizedArtifact | undefined> {
     const artifact = this.#entries.get(workItem);
     if (!artifact) return undefined;
     if (artifact.baseSha !== baseSha) {
-      this.delete(workItem);
+      await this.delete(workItem);
       return undefined;
     }
     this.#entries.delete(workItem);
@@ -956,24 +963,35 @@ class RetryArtifactCache {
     return artifact;
   }
 
-  set(workItem: number, artifact: NormalizedArtifact): void {
-    this.delete(workItem);
-    const bytes = Buffer.byteLength(artifact.patch) + Buffer.byteLength(artifact.logs);
-    if (bytes > MAX_RETRY_CHECKPOINT_CACHE_BYTES) return;
-    while (this.#bytes + bytes > MAX_RETRY_CHECKPOINT_CACHE_BYTES) {
+  async set(workItem: number, artifact: NormalizedArtifact): Promise<void> {
+    await this.delete(workItem);
+    const bytes = Buffer.byteLength(JSON.stringify(artifact));
+    const payloadBytes = artifact.payload?.bytes ?? 0;
+    if (bytes > MAX_RETRY_CHECKPOINT_CACHE_BYTES || payloadBytes > MAX_RETRY_PAYLOAD_CACHE_BYTES) return;
+    while (this.#bytes + bytes > MAX_RETRY_CHECKPOINT_CACHE_BYTES || this.#payloadBytes + payloadBytes > MAX_RETRY_PAYLOAD_CACHE_BYTES) {
       const oldest = this.#entries.keys().next().value;
       if (oldest === undefined) break;
-      this.delete(oldest);
+      await this.delete(oldest);
     }
     this.#entries.set(workItem, artifact);
+    if (artifact.payload) this.#releases.set(workItem, retainArtifactContent(artifact.payload));
     this.#bytes += bytes;
+    this.#payloadBytes += payloadBytes;
   }
 
-  delete(workItem: number): void {
+  async delete(workItem: number): Promise<void> {
     const artifact = this.#entries.get(workItem);
     if (!artifact) return;
-    this.#bytes -= Buffer.byteLength(artifact.patch) + Buffer.byteLength(artifact.logs);
+    this.#bytes -= Buffer.byteLength(JSON.stringify(artifact));
+    this.#payloadBytes -= artifact.payload?.bytes ?? 0;
     this.#entries.delete(workItem);
+    const release = this.#releases.get(workItem);
+    this.#releases.delete(workItem);
+    await release?.();
+  }
+
+  async clear(): Promise<void> {
+    for (const workItem of [...this.#entries.keys()]) await this.delete(workItem);
   }
 }
 
@@ -2199,6 +2217,11 @@ export class FactorySupervisor {
   }
 
   async run(): Promise<SupervisorResult> {
+    try { return await withArtifactContentScope(() => this.#runWithArtifactContent()); }
+    finally { await this.#retryArtifacts.clear(); }
+  }
+
+  async #runWithArtifactContent(): Promise<SupervisorResult> {
     this.#recoveryRuntime = null;
     this.#compiledGraph = null;
     this.#compiledProjection = null;
@@ -3881,6 +3904,18 @@ export class FactorySupervisor {
     executionSignal?: AbortSignal,
     recovered?: CollectedAttemptContinuation,
   ): Promise<void> {
+    return withArtifactContentScope(() => this.#executeWithArtifactContent(item, objectiveDeadline, admission, releaseExecutionCapacity, deliveryBase, executionSignal, recovered));
+  }
+
+  async #executeWithArtifactContent(
+    item: DerivedWorkItem,
+    objectiveDeadline: number,
+    admission: AdmissionProposal,
+    releaseExecutionCapacity: () => void,
+    deliveryBase?: DeliveryExecutionBase,
+    executionSignal?: AbortSignal,
+    recovered?: CollectedAttemptContinuation,
+  ): Promise<void> {
     if (
       this.#recoveryRuntime &&
       !this.#recoveryRuntime.planRecord.plan.items.some(
@@ -4199,14 +4234,28 @@ export class FactorySupervisor {
       } else {
         selected = this.#registry.get(recovered.reservation.backend) ?? undefined;
         terminalModelUsage = recovered.modelUsage;
-        terminalModelTokens = recovered.modelUsage.inputTokens + recovered.modelUsage.outputTokens;
+        terminalModelTokens = recovered.modelUsage ? recovered.modelUsage.inputTokens + recovered.modelUsage.outputTokens : undefined;
+        budgetUnit = recovered.nativeUsage.unit;
+        executionBudgetReconciled = true;
+        if (admission.validation) {
+          validator = this.#registry.get(admission.validation.backendId) ?? undefined;
+          if (!validator?.validate || !validator.probeValidation)
+            throw new Error("recovered artifact validator is no longer available");
+          if (admission.validation.reservedBudget.unit !== "none") {
+            validationBudgetUnit = admission.validation.reservedBudget.unit;
+            validationBudgetReserved = true;
+          }
+          // Source preparation is not replacement implementation. The exact
+          // original artifact is validated in its required independent boundary.
+          worker ??= await createLocalWorktree(this.#options.repository, base.oid);
+        }
         terminalModelProfile = resolveModelSelection(this.#policy, reservation!.attempt === 1 ? "implement" : "recover")?.profile ?? this.#policy.modelProfile;
       }
       if (!selected || !reservation) throw new Error("backend reservation did not complete");
       if (!recovered) {
       const retryCheckpoint = selected.capabilities.providerManagedPublication
         ? undefined
-        : this.#retryArtifacts.get(item.number, base.oid);
+        : await this.#retryArtifacts.get(item.number, base.oid);
       worker = await createLocalWorktree(this.#options.repository, base.oid);
       if (retryCheckpoint) {
         await seedLocalWorktree(worker, retryCheckpoint);
@@ -4326,7 +4375,11 @@ export class FactorySupervisor {
         await sleep(this.#options.pollIntervalMs ?? 2_000, executionSignal);
       }
       }
-      const artifact = recovered?.artifact ?? await selected.collect(handle!);
+      let artifact = recovered?.artifact ?? await selected.collect(handle!);
+      this.#retainArtifactContent(artifact);
+      assertArtifactScope(artifact, packet.allowedPaths);
+      if (!recovered && artifact.outcome === "succeeded")
+        artifact = await bindArtifactManifest(this.#options.repository, artifact);
       retryableArtifact = artifact;
       if (artifact.outcome !== "succeeded") {
         throw new Error(artifact.reason ?? `worker ${artifact.outcome}`);
@@ -4717,7 +4770,7 @@ export class FactorySupervisor {
       if (this.#deliverySelection.selected !== "native-stacks") {
         await this.#integrate(item, reservation, publication, objectiveDeadline);
       }
-      this.#retryArtifacts.delete(item.number);
+      await this.#retryArtifacts.delete(item.number);
     } catch (error) {
       if (
         retryableArtifact &&
@@ -4726,7 +4779,7 @@ export class FactorySupervisor {
         selected.capabilities.hostExecution &&
         !selected.capabilities.providerManagedPublication
       ) {
-        this.#retryArtifacts.set(item.number, retryableArtifact);
+        await this.#retryArtifacts.set(item.number, retryableArtifact);
       }
       const cancellation =
         error instanceof RunCancellationRequestedError || executionSignal?.aborted;
@@ -5002,41 +5055,82 @@ export class FactorySupervisor {
    * Caller proves original resource absence; this entry independently requires exact
    * reconciled execution accounting and never replays an already-started validation. */
   async #continueCollectedArtifact(item: DerivedWorkItem, deadline: number, recovered: CollectedAttemptContinuation): Promise<void> {
-    const { reservation, packet, artifact, modelUsage, nativeMilliseconds } = recovered;
+    const { reservation, packet, artifact, modelUsage, nativeUsage } = recovered;
     const backend = this.#registry.get(reservation.backend);
     const original = reservation.admission;
-    if (!backend?.capabilities.hostExecution || backend.capabilities.requiresPaidRuntime || backend.capabilities.providerManagedPublication ||
-      !original || original.admissionClass !== "local" || reservation.runId !== this.#run.runId || reservation.objective !== this.#run.objective ||
+    if (!backend || backend.capabilities.providerManagedPublication ||
+      !original || reservation.runId !== this.#run.runId || reservation.objective !== this.#run.objective ||
       reservation.workItem !== item.number || reservation.policyDigest !== policyDigest(this.#policy) ||
       packet.baseSha !== reservation.baseSha || artifact.baseSha !== reservation.baseSha || artifact.outcome !== "succeeded" ||
-      !reservation.localScopeBatch || reservation.localScopeBatch.identity.invocationDigest !== workerPacketDigest(packet))
-      throw new Error("collected attempt continuation is not bound to its original local execution");
-    const prior = [...(item.factoryEvents ?? []), ...this.#budgetEvents].filter((event) =>
+      (backend.capabilities.hostExecution && !reservation.localScopeBatch) ||
+      (reservation.localScopeBatch && reservation.localScopeBatch.identity.invocationDigest !== workerPacketDigest(packet)))
+      throw new Error("collected attempt continuation is not bound to its original execution");
+    const prior = deduplicateFactoryEvents([...(item.factoryEvents ?? []), ...this.#budgetEvents]).filter((event) =>
       event.runId === reservation.runId && "workItem" in event && event.workItem === item.number && "attempt" in event && event.attempt === reservation.attempt);
     if (prior.some((event) => event.kind === "validation" || event.kind === "capacity" && event.phase === "validation" ||
       event.kind === "attempt" && ["AttemptCollected", "AttemptValidated", "AttemptPublished", "AttemptIntegrated", "AttemptFailed", "AttemptCancelled", "AttemptDeferred"].includes(event.event)))
       throw new Error("collected continuation cannot replay terminal or previously invoked validation work");
     const model = prior.filter((event) => event.kind === "budget" && event.event === "BudgetReconciled" && event.phase === "execution" && event.unit === "model_tokens");
-    const native = prior.filter((event) => event.kind === "budget" && event.event === "BudgetReconciled" && event.phase === "execution" && event.unit === "local_milliseconds");
-    if (!model.length || !native.length || model.some((event) => event.kind !== "budget" || event.usageId !== `worker-${item.number}-${reservation.attempt}` ||
-      event.amount !== modelUsage.inputTokens + modelUsage.outputTokens) || native.some((event) => event.kind !== "budget" || event.amount !== nativeMilliseconds) ||
-      !Number.isFinite(nativeMilliseconds) || nativeMilliseconds < 0)
+    const native = prior.filter((event) => event.kind === "budget" && event.event === "BudgetReconciled" && event.phase === "execution" && event.unit === nativeUsage.unit);
+    const expectedUnit = isManagedAgentBackendId(reservation.backend) ? "managed_sessions" : isSandboxBackendId(reservation.backend) ? "sandbox_milliseconds" : "local_milliseconds";
+    if ((this.#policy.economics && backend.capabilities.reportsModelUsage && (!modelUsage || !model.length)) ||
+      (modelUsage && (!model.length || model.some((event) => event.kind !== "budget" || event.usageId !== `worker-${item.number}-${reservation.attempt}` || event.amount !== modelUsage.inputTokens + modelUsage.outputTokens))) ||
+      (!modelUsage && model.length > 0) || nativeUsage.unit !== expectedUnit || !native.length ||
+      native.some((event) => event.kind !== "budget" || event.amount !== nativeUsage.amount) ||
+      !Number.isFinite(nativeUsage.amount) || nativeUsage.amount < 0)
       throw new Error("collected continuation lacks exact reconciled execution accounting");
+    let validation: AdmissionProposal["validation"];
+    if (packet.requirements.trust !== "trusted_local" || !backend.capabilities.hostExecution) {
+      const held = unreconciledBudgetReservations(prior).filter((event) => event.phase === "validation");
+      const remaining = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
+      const duration = Math.min((packet.requirements.timeoutMinutes ?? this.#policy.workItemTimeoutMinutes) * 60_000, deadline - Date.now());
+      if (duration <= 0) throw new Error("Objective deadline exhausted before recovered artifact validation");
+      const selected = await this.#externalAdmission(() => this.#registry.selectIsolatedValidator({
+        policy: this.#policy, requirements: packet.requirements, estimatedDurationMs: duration,
+        budget: { ...remaining, sandboxMinutes: remaining.sandboxMinutes + held.filter((event) => event.unit === "sandbox_milliseconds").reduce((sum, event) => sum + event.amount, 0) / 60_000 },
+      }));
+      const unit = isSandboxBackendId(selected.backend.capabilities.id) ? "sandbox_milliseconds" : isManagedAgentBackendId(selected.backend.capabilities.id) ? "managed_sessions" : "none";
+      const reservationBudget = held.filter((event) => event.unit === unit);
+      if (unit !== "none" && (reservationBudget.length !== 1 || reservationBudget[0]!.amount < (unit === "managed_sessions" ? 1 : duration)))
+        throw new Error("recovered artifact requires its existing unspent independent-validation allowance");
+      validation = { backendId: selected.backend.capabilities.id, reservedBudget: { unit, amount: reservationBudget[0]?.amount ?? 0 } };
+    }
     const executionKey = capacityReservationKey({ objective: reservation.objective, workItem: item.number, attempt: reservation.attempt,
       phase: "execution", backendId: reservation.backend });
     this.#capacity.release(executionKey);
     const admission: AdmissionProposal = {
-      workItem: item.number, backendId: reservation.backend, admissionClass: "local", admissionReason: original.admissionReason,
+      workItem: item.number, backendId: reservation.backend, admissionClass: original.admissionClass, admissionReason: original.admissionReason,
       requirements: { cpu: original.requestedCpu, memoryMb: original.requestedMemoryMb },
       priority: { rank: original.priorityRank, source: original.prioritySource ?? "subissue-order", subIssuePosition: original.subIssuePosition,
         criticalPathLength: original.criticalPathLength, unfinishedDownstream: original.unfinishedDownstream },
       capacityGeneration: this.#capacity.snapshot().generation,
       reservation: { key: executionKey, objective: reservation.objective, workItem: item.number, attempt: reservation.attempt,
-        phase: "execution", backendId: reservation.backend, admissionClass: "local", local: true, cpu: original.requestedCpu,
-        memoryMb: original.requestedMemoryMb, paidUnits: 0, paths: packet.allowedPaths, exclusiveResources: packet.changeSurface?.exclusiveResources ?? [] },
+        phase: "execution", backendId: reservation.backend, admissionClass: original.admissionClass, local: backend.capabilities.hostExecution && !backend.capabilities.requiresPaidRuntime, cpu: original.requestedCpu,
+        memoryMb: original.requestedMemoryMb, paidUnits: backend.capabilities.requiresPaidRuntime ? 1 : 0, paths: packet.allowedPaths, exclusiveResources: packet.changeSurface?.exclusiveResources ?? [] },
       reservedBudget: { unit: "none", amount: 0 },
+      ...(validation ? { validation } : {}),
     };
-    await this.#execute(item, deadline, admission, () => {}, undefined, this.#options.signal, recovered);
+    let deliveryBase: DeliveryExecutionBase | undefined;
+    if (this.#deliverySelection.selected === "native-stacks") {
+      const metadata = parseGraphItemMetadata(item.body ?? "");
+      const planned = this.#deliveryPlan?.items.find((entry) => entry.itemId === metadata.id);
+      if (!planned) throw new Error("retained artifact lacks its immutable delivery plan");
+      if (planned.parentItemId) {
+        const snapshot = await this.#reader.readObjective(this.#run.objective);
+        this.#fenceSnapshot(snapshot);
+        const parent = this.#deriveObjective(snapshot).items.find((entry) => parseGraphItemMetadata(entry.body ?? "").id === planned.parentItemId);
+        if (!parent) throw new Error("retained artifact stack parent is missing");
+        const member = await this.#nativeStackMember(parent, true);
+        if (member.pull.commitSha !== reservation.baseSha || member.observedHeadSha !== reservation.baseSha)
+          throw new Error("retained artifact stack parent advanced; automated replacement is blocked pending exact parent recovery");
+        deliveryBase = { branch: member.pull.branch, sha: reservation.baseSha };
+      }
+    }
+    await this.#execute(item, deadline, admission, () => {}, deliveryBase, this.#options.signal, recovered);
+  }
+
+  #retainArtifactContent(artifact: NormalizedArtifact): NormalizedArtifact {
+    return retainScopedArtifact(artifact);
   }
 
   #artifactTransferIdentity(reservation: AttemptReservation): ArtifactTransferIdentity {
@@ -5047,6 +5141,81 @@ export class FactorySupervisor {
       directorEpoch: reservation.directorEpoch, policyDigest: reservation.policyDigest,
       baseSha: reservation.baseSha,
     };
+  }
+
+  async #recoverRetainedArtifact(
+    item: DerivedWorkItem,
+    reservation: AttemptReservation,
+    events: FactoryEvent[],
+    backend: ExecutionBackend,
+    deadline: number,
+  ): Promise<boolean> {
+    if (backend.capabilities.providerManagedPublication) return false;
+    const original = this.#packetFor(item.number);
+    const packet = parseWorkerPacket({
+      ...original, baseSha: reservation.baseSha,
+      ...(retryContext(item, this.#run.runId) ? { retryContext: retryContext(item, this.#run.runId) } : {}),
+      requirements: {
+        ...original.requirements,
+        ...(this.#policy.trust === "sandbox_untrusted" && original.requirements.trust === "trusted_local" ? { trust: "isolated" as const } : {}),
+      },
+    });
+    if (reservation.localScopeBatch && reservation.localScopeBatch.identity.invocationDigest !== workerPacketDigest(packet))
+      throw new Error("retained artifact packet differs from its original scoped invocation");
+    let artifact: NormalizedArtifact | null;
+    try {
+      artifact = await resumeArtifactTransfer({
+        store: this.#store, identity: this.#artifactTransferIdentity(reservation), allowedPaths: packet.allowedPaths,
+        assertCurrent: () => this.#externalAdmission(async () => {}),
+      });
+    } catch (cause) { throw new ArtifactCollectionCheckpointError(cause); }
+    if (!artifact) return false;
+    this.#retainArtifactContent(artifact);
+    if (events.some((event) => event.kind === "validation" || event.kind === "capacity" && event.phase === "validation" ||
+      event.kind === "attempt" && ["AttemptCollected", "AttemptValidated", "AttemptPublished", "AttemptIntegrated", "AttemptFailed", "AttemptTimedOut", "AttemptCancelled", "AttemptDeferred"].includes(event.event)))
+      throw new Error("retained output has later lifecycle evidence; automated replacement is blocked pending exact validation/publication recovery");
+    const started = events.find((event) => event.kind === "attempt" && event.event === "AttemptStarted");
+    if (!backend.reconcileStale)
+      throw new Error("retained output has no backend absence reconciler; automated replacement is blocked");
+    await backend.reconcileStale({
+      repository: `${this.#options.owner}/${this.#options.repo}`,
+      objective: reservation.objective, workItem: reservation.workItem, attempt: reservation.attempt,
+      runId: reservation.runId, directorEpoch: reservation.directorEpoch, policyDigest: reservation.policyDigest,
+      phase: "execution",
+      ...(reservation.localScopeBatch ? { localScopeBatch: reservation.localScopeBatch } : {}),
+      ...(started?.kind === "attempt" && started.providerResourceId ? { providerResourceId: started.providerResourceId } : {}),
+    });
+    const model = events.filter((event): event is Extract<FactoryEvent, { kind: "budget" }> =>
+      event.kind === "budget" && event.event === "BudgetReconciled" && event.phase === "execution" && event.unit === "model_tokens");
+    const reported = model[0]?.reportedModelUsage;
+    const modelUsage = reported?.inputTokens !== undefined && reported.outputTokens !== undefined
+      ? { ...reported, inputTokens: reported.inputTokens, outputTokens: reported.outputTokens } : undefined;
+    // A content checkpoint does not invent accounting. The session fallback may
+    // restore an exact terminal usage receipt, but must not dispatch a new turn.
+    if (this.#policy.economics && backend.capabilities.reportsModelUsage && !modelUsage)
+      throw new Error("retained output lacks exact terminal model usage; automated replacement is blocked pending usage recovery");
+    const unit = isSandboxBackendId(reservation.backend) ? "sandbox_milliseconds" : "local_milliseconds";
+    let native = events.filter((event): event is Extract<FactoryEvent, { kind: "budget" }> =>
+      event.kind === "budget" && event.event === "BudgetReconciled" && event.phase === "execution" && event.unit === unit);
+    if (!native.length) {
+      const held = unreconciledBudgetReservations(events).filter((event) => event.phase === "execution" && event.unit === unit);
+      if (held.length !== 1) throw new Error("retained output lacks its original native allowance; automated replacement is blocked");
+      const event = await this.#lease.use((lease) => this.#recorder.budget({
+        lease, workItemNodeId: item.id, reservation, sequence: this.#sequences.take(),
+        event: "BudgetReconciled", phase: "execution", unit, amount: held[0]!.amount,
+        usageEvidence: "conservative-reservation",
+        reason: "Original resource absence is proven; charge its reserved duration because exact elapsed usage is unavailable. This is not measured consumption or invoice settlement.",
+      }));
+      this.#budgetEvents.push(event);
+      if (event.kind !== "budget") throw new Error("native recovery did not record a budget receipt");
+      native = [event];
+    }
+    await this.#continueCollectedArtifact(item, deadline, {
+      reservation, packet, artifact,
+      ...(modelUsage ? { modelUsage } : {}),
+      nativeUsage: { unit, amount: native[0]!.amount },
+    });
+    return true;
   }
 
   async #persistCollectedArtifact(
@@ -5676,6 +5845,14 @@ export class FactorySupervisor {
   }
 
   async #integrateNativeStack(
+    unitId: string,
+    items: DerivedWorkItem[],
+    deadline: number,
+  ): Promise<boolean> {
+    return withArtifactContentScope(() => this.#integrateNativeStackWithArtifactContent(unitId, items, deadline));
+  }
+
+  async #integrateNativeStackWithArtifactContent(
     unitId: string,
     items: DerivedWorkItem[],
     deadline: number,
@@ -8372,6 +8549,10 @@ export class FactorySupervisor {
   }
 
   async #resumeAdoptedSourceNow(item: DerivedWorkItem): Promise<void> {
+    return withArtifactContentScope(() => this.#resumeAdoptedSourceWithArtifactContent(item));
+  }
+
+  async #resumeAdoptedSourceWithArtifactContent(item: DerivedWorkItem): Promise<void> {
     let runtime = this.#recoveryRuntime!;
     const planItem = runtime.planRecord.plan.items.find((entry) => entry.workItem === item.number)!;
     const source = planItem.source!;
@@ -9135,6 +9316,10 @@ export class FactorySupervisor {
   }
 
   async #resumeIntegration(item: DerivedWorkItem): Promise<boolean> {
+    return withArtifactContentScope(() => this.#resumeIntegrationWithArtifactContent(item));
+  }
+
+  async #resumeIntegrationWithArtifactContent(item: DerivedWorkItem): Promise<boolean> {
     if (!this.#integrationDue(item.number)) return false;
     if (this.#deliverySelection.selected === "native-stacks") {
       try {
@@ -9484,6 +9669,14 @@ export class FactorySupervisor {
   }
 
   async #recoverInterrupted(
+    item: DerivedWorkItem,
+    deadline: number,
+    objectiveItems: readonly DerivedWorkItem[],
+  ): Promise<void> {
+    return withArtifactContentScope(() => this.#recoverInterruptedWithArtifactContent(item, deadline, objectiveItems));
+  }
+
+  async #recoverInterruptedWithArtifactContent(
     item: DerivedWorkItem,
     deadline: number,
     objectiveItems: readonly DerivedWorkItem[],
@@ -9871,6 +10064,8 @@ export class FactorySupervisor {
         return;
       }
     }
+
+    if (await this.#recoverRetainedArtifact(item, reservation, events, backend, deadline)) return;
 
     if (backend.capabilities.providerManagedPublication) {
       const attemptStartedAt = events.find(

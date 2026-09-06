@@ -56,5 +56,11 @@ describe("Supervisor collected artifact durability", () => {
     expect([...f.refs.keys()].some((ref) => ref.endsWith("/intent"))).toBe(true);
     expect(retained.length).toBe(1);
     await expect(access(retained[0]!.path)).resolves.toBeUndefined();
+    // Restore only the failed transport. Reuse the original exact output and
+    // reservation, then execute the remaining graph; never relaunch item 8.
+    writer.mockImplementation(original);
+    await expect(f.run()).resolves.toMatchObject({ status: "completed" });
+    expect(f.activity.filter((entry) => entry.operation === "launch" && entry.workItem === 8)).toHaveLength(1);
+    expect(f.events().filter((event) => event.kind === "budget" && event.event === "BudgetReconciled" && event.workItem === 8 && event.unit === "local_milliseconds")).toMatchObject([{ usageEvidence: "conservative-reservation" }]);
   });
 });

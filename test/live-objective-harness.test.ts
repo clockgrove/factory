@@ -31,6 +31,15 @@ import {
   main as regularMain,
   observeRegularCommits,
 } from "../scripts/verify-regular-objective.mjs";
+import {
+  assertNativeFallbackCapability,
+  assertNativeFallbackCompletion,
+  assessNativeFallbackCompletion,
+  nativeFallbackQualification,
+  observeNativeFallbackCapability,
+  main as fallbackMain,
+} from "../scripts/verify-native-fallback-objective.mjs";
+import { observeNativeScopes } from "../scripts/qualification-native-scopes.mjs";
 
 type HarnessEvent = {
   event: string;
@@ -457,6 +466,311 @@ function regularEvidence(profile = "local-default") {
     ),
   };
 }
+
+function fallbackTransport(status = 404, override: Record<string, unknown> = {}) {
+  const repository = "example/factory-qualification";
+  return vi.fn(async (route: string, parameters: Record<string, unknown>) => {
+    const stacks = route.endsWith("/stacks");
+    const response = {
+      status: stacks ? status : 200,
+      url: `https://api.github.com/repos/${repository}${route.endsWith("/pulls") ? "/pulls" : stacks ? "/stacks" : ""}`,
+      headers: {
+        "x-github-api-version-selected": "2026-03-10",
+        "x-github-request-id": "ABC:123",
+        "x-ratelimit-remaining": "2000",
+        date: "Sun, 06 Sep 2026 00:00:00 GMT",
+      },
+      data: stacks
+        ? status === 404
+          ? { message: "Not Found" }
+          : []
+        : route.endsWith("/pulls")
+          ? []
+          : {
+              id: 99,
+              node_id: "R_fixture",
+              full_name: repository,
+              private: true,
+              archived: false,
+              permissions: { push: true },
+            },
+      ...(stacks ? override : {}),
+    };
+    if (stacks && override.headers)
+      response.headers = {
+        "x-github-api-version-selected": "2026-03-10",
+        "x-github-request-id": "ABC:123",
+        "x-ratelimit-remaining": "2000",
+        date: "Sun, 06 Sep 2026 00:00:00 GMT",
+        ...(override.headers as object),
+      };
+    expect((parameters.request as { signal: AbortSignal }).signal).toBeInstanceOf(AbortSignal);
+    if (stacks && status >= 400) throw Object.assign(new Error("REST response"), { response });
+    return response;
+  });
+}
+
+async function fallbackEvidence() {
+  const value = regularEvidence();
+  value.scope = "installed-local-native-unavailable-regular-fallback";
+  value.policy.delivery = { mode: "stacked-prs", onUnavailable: "regular-prs", merge: "bottom-up" };
+  const digest = policyDigest(value.policy);
+  value.status.run.policyDigest = digest;
+  const capability = await observeNativeFallbackCapability({
+    repository: value.repository,
+    actor: value.actor,
+    request: fallbackTransport(),
+  });
+  Object.assign(value.preflight.harness, { sourceTreeClean: true });
+  Object.assign(value.preflight, { scenario: capability });
+  const host = "f".repeat(64);
+  const events: HarnessEvent[] = [];
+  for (const event of value.events) {
+    event.policyDigest = digest;
+    event.directorEpoch = 1;
+    if (event.event === "DeliverySelected")
+      Object.assign(event, {
+        requested: "stacked-prs",
+        selected: "regular-prs",
+        capabilityVersion: "2026-03-10",
+        reason: "repository did not expose GitHub stacks API 2026-03-10",
+      });
+    if (event.event === "AttemptReserved") event.backend = "codex-sdk/local-worktree";
+    if (event.event === "AttemptStarted") {
+      const id = createHash("sha256")
+        .update(
+          JSON.stringify([
+            "clockgrove.factory/attempt-v2",
+            value.repository,
+            "fixture",
+            1,
+            event.workItem,
+            1,
+            1,
+          ]),
+        )
+        .digest("hex");
+      event.providerResourceId = `sdk-${id.slice(0, 24)}`;
+      event.resourceHostIdentity = host;
+    }
+    if (event.event === "ValidationRecorded")
+      events.push({
+        ...event,
+        kind: "capacity",
+        event: "CapacityReserved",
+        phase: "validation",
+        backend: "codex-sdk/local-worktree",
+      });
+    events.push(event);
+    if (event.event === "ValidationRecorded")
+      events.push({
+        ...event,
+        kind: "capacity",
+        event: "CapacityReconciled",
+        phase: "validation",
+        backend: "codex-sdk/local-worktree",
+      });
+  }
+  value.events = events.map((event, index) => {
+    event.sequence = index + 1;
+    event.receiptUrl = `https://github.com/${value.repository}/issues/1#issuecomment-${index + 100}`;
+    if (
+      event.event === "AttemptReserved" ||
+      (event.event === "CapacityReserved" && event.phase === "validation")
+    ) {
+      const phase = event.event === "AttemptReserved" ? "execution" : "validation";
+      event.localScopeBatch = {
+        identity: {
+          protocol: "clockgrove.factory/local-scope-v1",
+          repository: value.repository,
+          runId: "fixture",
+          objective: 1,
+          workItem: event.workItem,
+          attempt: 1,
+          directorEpoch: 1,
+          policyDigest: digest,
+          phase,
+          commandIndex: 0,
+          invocationDigest: "a".repeat(64),
+          hostIdentity: host,
+        },
+        commandCount: phase === "execution" ? 1 : 2,
+        producerPid: 123,
+        producerStartTicks: "12345",
+        deadline: "2026-09-06T00:45:00Z",
+      };
+    }
+    return event;
+  });
+  const result = { ...value, nativeFallbackCapability: capability };
+  observeNativeScopes(
+    result,
+    (unit) =>
+      `Id=${unit}\nLoadState=not-found\nActiveState=inactive\nSubState=dead\nControlGroup=\nJob=\nInvocationID=\nKillMode=control-group`,
+    host,
+  );
+  return result;
+}
+
+describe("actual native-unavailability regular fallback", () => {
+  const env = {
+    FACTORY_LIVE_NATIVE_FALLBACK_OBJECTIVE: "1",
+    FACTORY_LIVE_OBJECTIVE_PREFLIGHT: "1",
+    FACTORY_LIVE_OBJECTIVE_MAX_MODEL_TOKENS: "250000",
+  };
+  const identity = {
+    repository: "example/factory-qualification",
+    actor: { id: 42, login: "operator" },
+  };
+  it("is a no-op without its own opt-in and rejects conflicting original selections", async () => {
+    const run = vi.fn();
+    await fallbackMain({}, run);
+    expect(run).not.toHaveBeenCalled();
+    for (const conflict of [
+      { FACTORY_LIVE_OBJECTIVE_DELIVERY: "regular-prs" },
+      { FACTORY_LIVE_REGULAR_OBJECTIVE: "1" },
+      { FACTORY_LIVE_REGULAR_BACKEND: "codex-cli" },
+      { FACTORY_LIVE_NATIVE_REFRESH_OBJECTIVE: "1" },
+    ])
+      expect(() => nativeFallbackQualification({ ...env, ...conflict })).toThrow();
+    const qualification = nativeFallbackQualification(env)!;
+    expect(qualification.policy).toEqual({
+      ...(boundedPolicy("stacked-prs", 250000) as object),
+      delivery: { mode: "stacked-prs", onUnavailable: "regular-prs", merge: "bottom-up" },
+    });
+  });
+  it("accepts only real 404 bracketed by accessible same-repository and PR reads", async () => {
+    const request = fallbackTransport();
+    const proof = await observeNativeFallbackCapability({ ...identity, request });
+    expect(proof.result).toBe("passed");
+    expect(() => assertNativeFallbackCapability(proof, identity)).not.toThrow();
+    expect(request.mock.calls.map(([route]) => route)).toEqual([
+      "GET /repos/{owner}/{repo}",
+      "GET /repos/{owner}/{repo}/pulls",
+      "GET /repos/{owner}/{repo}/stacks",
+      "GET /repos/{owner}/{repo}",
+    ]);
+    expect(() =>
+      assertNativeFallbackCapability(proof, { ...identity, actor: { id: 43, login: "operator" } }),
+    ).toThrow();
+  });
+  it.each([200, 401, 403, 422, 429, 500])(
+    "does not turn HTTP %s into unsupported capability",
+    async (status) => {
+      const request = fallbackTransport(status);
+      const proof = await observeNativeFallbackCapability({ ...identity, request });
+      expect(proof.result).toBe("blocked");
+      expect(request.mock.calls.filter(([route]) => route.endsWith("/stacks"))).toHaveLength(1);
+    },
+  );
+  it.each([
+    { headers: { "x-ratelimit-remaining": "0" } },
+    { headers: { "retry-after": "60" } },
+    { headers: { "x-github-sso": "required" } },
+    { url: "https://api.github.com/repos/other/repository/stacks" },
+    { data: { message: "Bad credentials" } },
+  ])("rejects misleading 404 response provenance %j", async (override) => {
+    const proof = await observeNativeFallbackCapability({
+      ...identity,
+      request: fallbackTransport(404, override),
+    });
+    expect(proof.result).toBe("blocked");
+  });
+  it("does not fabricate unsupported evidence from missing permissions or transport failure", async () => {
+    const unreachable = vi.fn(async () => {
+      throw new Error("transport unavailable");
+    });
+    expect(
+      (await observeNativeFallbackCapability({ ...identity, request: unreachable })).result,
+    ).toBe("blocked");
+    expect(unreachable).toHaveBeenCalledTimes(1);
+    const real = fallbackTransport();
+    const denied = vi.fn(async (route: string, parameters: Record<string, unknown>) => {
+      if (route.endsWith("/pulls"))
+        throw Object.assign(new Error("denied"), { response: { status: 404 } });
+      return real(route, parameters);
+    });
+    expect((await observeNativeFallbackCapability({ ...identity, request: denied })).result).toBe(
+      "blocked",
+    );
+    expect(denied.mock.calls.some(([route]) => route.endsWith("/stacks"))).toBe(false);
+  });
+  it("reobserves before creation and denies capability changes without a write or retry", async () => {
+    const preflight = await observeNativeFallbackCapability({
+      ...identity,
+      request: fallbackTransport(),
+    });
+    const qualification = nativeFallbackQualification(env)!;
+    const hook = qualification.beforeRun as (input: Record<string, unknown>) => Promise<void>;
+    const request = fallbackTransport(200);
+    const save = vi.fn();
+    await expect(
+      hook({ evidence: { ...identity, preflight: { scenario: preflight } }, request, save }),
+    ).rejects.toThrow();
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(request.mock.calls.every(([route]) => route.startsWith("GET "))).toBe(true);
+  });
+  it("rejects repository replacement around an otherwise valid unsupported response", async () => {
+    const original = fallbackTransport();
+    let repositoryReads = 0;
+    const request = vi.fn(async (route: string, parameters: Record<string, unknown>) => {
+      const response = await original(route, parameters);
+      if (route === "GET /repos/{owner}/{repo}" && ++repositoryReads === 2)
+        return { ...response, data: { ...(response.data as object), id: 100 } };
+      return response;
+    });
+    const proof = await observeNativeFallbackCapability({ ...identity, request });
+    expect(proof.result).toBe("blocked");
+    expect(request).toHaveBeenCalledTimes(4);
+  });
+  it("reuses complete regular-pipeline, exact artifact, accounting and all-scope proofs without rewriting receipts", async () => {
+    const value = await fallbackEvidence();
+    expect(() => assertNativeFallbackCompletion(value)).not.toThrow();
+    expect(assessNativeFallbackCompletion(value).result).toBe("passed");
+    expect(() => assertRegularCompletion(value)).toThrow();
+    expect(() => assertQualificationCompletion(value)).toThrow();
+  });
+  it("preserves non-fallback escalation rather than upgrading terminal history to a pass", async () => {
+    const value = await fallbackEvidence();
+    value.status.run.state = "escalated";
+    value.events.find((event) => event.event === "FactoryRunCompleted")!.event =
+      "FactoryRunEscalated";
+    expect(assessNativeFallbackCompletion(value).result).toBe("failed");
+  });
+  it.each([
+    "reason",
+    "version",
+    "requested",
+    "selected",
+    "authorization",
+    "accounting",
+    "scope",
+    "serialization",
+    "merge",
+  ])("rejects false fallback proof: %s", async (mutation) => {
+    const value = await fallbackEvidence();
+    const selected = value.events.find((event) => event.event === "DeliverySelected")!;
+    if (mutation === "reason")
+      selected.reason = "GitHub denied stack capability inspection for this repository";
+    if (mutation === "version") selected.capabilityVersion = "2022-11-28";
+    if (mutation === "requested") selected.requested = "regular-prs";
+    if (mutation === "selected") selected.selected = "native-stacks";
+    if (mutation === "authorization") value.policy.delivery!.onUnavailable = "escalate";
+    if (mutation === "accounting")
+      value.events = value.events.filter(
+        (event) => event.phase !== "execution" || event.unit !== "model_tokens",
+      );
+    if (mutation === "scope")
+      delete (value as unknown as Record<string, unknown>).nativeScopeObservations;
+    if (mutation === "serialization")
+      value.events.find(
+        (event) => event.workItem === 3 && event.event === "AttemptReserved",
+      )!.sequence = selected.sequence + 1;
+    if (mutation === "merge") value.mergeProofs.pop();
+    expect(() => assertNativeFallbackCompletion(value)).toThrow();
+    expect(assessNativeFallbackCompletion(value).result).toBe("incomplete");
+  });
+});
 
 describe("shared versioned REST merge evidence", () => {
   it("default and regular qualification accept field-absent REST only with exact separate proofs", () => {

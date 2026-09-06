@@ -694,7 +694,7 @@ export function assertQualificationCompletion(
   assertMergeProof = assertQualificationMergeProof,
 ) {
   assert.ok(
-    ["stacked-prs", "regular-prs"].includes(deliveryMode),
+    ["stacked-prs", "regular-prs", "native-fallback"].includes(deliveryMode),
     "unsupported qualification mode",
   );
   assert.ok(
@@ -767,10 +767,21 @@ export function assertQualificationCompletion(
   );
   const delivery = events.filter((event) => event.event === "DeliverySelected");
   assert.equal(delivery.length, 1, "exactly one delivery selection is required");
+  const requestedMode = deliveryMode === "native-fallback" ? "stacked-prs" : deliveryMode;
   const selectedMode = deliveryMode === "stacked-prs" ? "native-stacks" : "regular-prs";
+  if (deliveryMode === "native-fallback")
+    assert.deepEqual(
+      starts[0].policy.delivery,
+      {
+        mode: "stacked-prs",
+        onUnavailable: "regular-prs",
+        merge: "bottom-up",
+      },
+      "native fallback was not originally authorized",
+    );
   assert.equal(
     delivery[0].requested,
-    deliveryMode,
+    requestedMode,
     "requested native delivery or explicit regular delivery differs",
   );
   assert.equal(
@@ -786,7 +797,7 @@ export function assertQualificationCompletion(
   );
   const attemptStarts = events.filter((event) => event.event === "AttemptStarted");
   const attemptSuccesses = events.filter((event) => event.event === "AttemptSucceeded");
-  if (deliveryMode === "regular-prs") {
+  if (selectedMode === "regular-prs") {
     const admissions = events.filter((event) =>
       ["AttemptReserved", "AttemptStarted"].includes(event.event),
     );
@@ -1098,6 +1109,19 @@ export async function main(qualification = {}) {
       graphql: rateLimit.graphql,
     },
   };
+  // Opt-in scenario evidence is collected before any Objective creation/model call.
+  // Hookless native and explicit-regular qualification retain their original path.
+  if (qualification.observePreflight) {
+    preflight.scenario = await qualification.observePreflight({
+      request,
+      repository,
+      actor: { id: actor.id, login: actor.login },
+    });
+    if (preflight.scenario.result !== "passed") {
+      preflight.result = "blocked";
+      preflight.blockers.push("scenario-precondition-unobserved");
+    }
+  }
   const output = resolve(required("FACTORY_LIVE_OBJECTIVE_EVIDENCE"));
   mkdirSync(output, { recursive: true, ...(qualification.privateEvidence ? { mode: 0o700 } : {}) });
   if (qualification.privateEvidence) {

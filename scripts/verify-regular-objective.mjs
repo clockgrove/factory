@@ -104,7 +104,13 @@ export function assertRegularCompletion(evidence) {
     profile,
     modelTokenLimit(String(evidence.policy.economics.maxModelTokens)),
   );
-  assertQualificationCompletion(evidence, "regular-prs", expected.backendOrder);
+  assertRegularPipelineCompletion(evidence, { expected, scope, deliveryMode: "regular-prs" });
+}
+
+/** Reuse exact regular-pipeline proof without relabelling the original request or receipts. */
+export function assertRegularPipelineCompletion(evidence, { expected, scope, deliveryMode }) {
+  assert.ok(["regular-prs", "native-fallback"].includes(deliveryMode));
+  assertQualificationCompletion(evidence, deliveryMode, expected.backendOrder);
   assert.equal(evidence.scope, scope, "qualification scope differs");
   assert.deepEqual(evidence.policy, expected, "requested bounded regular policy differs");
   const events = eventsOf(evidence);

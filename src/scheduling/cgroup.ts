@@ -66,7 +66,9 @@ function safeMembershipPath(value: string): string {
   if (
     !value.startsWith("/") ||
     Buffer.byteLength(value, "utf8") > 4096 ||
-    /[\u0000-\u001f\u007f]/.test(value) ||
+    Array.from(value).some(
+      (character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+    ) ||
     value.endsWith(" (deleted)")
   ) {
     throw new Error("cgroup membership path is malformed or exceeds observation bounds");

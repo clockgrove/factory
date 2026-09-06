@@ -1,5 +1,6 @@
 import { DEFAULT_RUN_POLICY } from "../../src/protocol/policy.js";
 import { pinAdmissionSnapshot, type PinnedAdmissionInput } from "../../src/replay/index.js";
+import type { ObjectiveSnapshot } from "../../src/types.js";
 
 export function suppliedReplayInput(): PinnedAdmissionInput {
   return {
@@ -74,10 +75,17 @@ export const suppliedReplaySnapshot = () => pinAdmissionSnapshot(suppliedReplayI
 export const unreproducedReplaySnapshot = () =>
   pinAdmissionSnapshot(suppliedReplayInput(), undefined, { admissions: [], queued: [] });
 
-export const replayObjective = () => ({
+export const replayObjective = (): ObjectiveSnapshot => ({
   id: "objective-node",
   number: 7,
   title: "Objective",
+  body: "Inspect this Objective without execution",
+  closed: false,
+  readAt: new Date("2026-09-04T12:00:00.000Z"),
+  repositoryId: "repository-node",
+  workItemLabelId: null,
+  copilotBotId: null,
+  ciExpectedOnPullRequests: false,
   defaultBranch: "main",
   workItems: [],
   factoryEvents: [],

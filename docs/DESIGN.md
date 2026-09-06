@@ -58,11 +58,19 @@ Coordinating a pool of multiple local computers is also out of scope.
 
 The product scope includes both the Agent Plugins package and the `@clockgrove/factory` npm
 CLI/controller, Codex SDK local execution with Codex CLI fallback, Daytona sandbox burst, GitHub
-Copilot and OpenAI Codex managed-agent execution, and regular or native stacked pull-request
-delivery. The unreleased Codex profile remains fail-closed until live conformance records a stable,
-provider-published actor identity; a display name is not identity evidence. Paid backends always
-require explicit immutable authority and budgets; inclusion in the support contract never makes
-cloud execution the default.
+Copilot and OpenAI Codex managed-agent integration targets, and regular or native stacked
+pull-request delivery. Support is capability-specific, not a promise that every provider exposes
+identical APIs. The Codex managed profile is currently unavailable: it needs a supported actor and
+provider-specific lifecycle binding, not a display name or Copilot API substitution. This limits
+that provider; it does not block Factory as a whole. Paid backends always require explicit immutable
+authority and budgets; inclusion in the package never makes cloud execution the default.
+
+Factory is an open-source orchestrator, not a reseller or billing service. Users retain their own
+paid-provider accounts and relationships. Unsupported provider features are documented, handled by
+a supported workaround, or exposed as a specific human action. An unavailable interface cannot be
+reported as implemented or qualified. Missing credentials are configuration requirements, not
+evidence that a provider interface is unsupported. Claimed execution capabilities still require
+their corresponding qualification evidence.
 
 Labs contains Vercel Sandbox, Codex App Server, and additional harness/provider experiments. Labs
 adapters may reuse the production contracts and tests, but they are not release blockers and must not
@@ -484,9 +492,10 @@ contracts. The planned bundles are:
 - `codex-sdk/local-worktree` — preferred programmatic local backend in every supported Linux environment;
 - `codex-cli/local-worktree` — supported portable local fallback;
 - `codex-cli/daytona` — supported opt-in paid sandbox burst;
-- `github-copilot/github-managed` — supported opt-in GitHub Copilot managed agent; and
-- `openai-codex/github-managed` — bundled opt-in OpenAI Codex release profile; unavailable until its
-  live gate records a stable provider-published identity.
+- `github-copilot/github-managed` — opt-in Copilot integration with explicit task-identity and
+  automatic-cancellation limitations; supported execution claims require live qualification; and
+- `openai-codex/github-managed` — bundled unavailable profile, not a working managed adapter; a
+  supported provider-specific identity/lifecycle interface is required before enabling it.
 
 `codex-cli/vercel-sandbox`, `codex-app-server/local-worktree`, and harness-native child-worker
 adapters are Labs integrations. The installed package must still start when their optional
@@ -494,6 +503,13 @@ credentials or host capabilities are unavailable. The local default/fallback dec
 in [`decisions/0008-codex-sdk-default.md`](decisions/0008-codex-sdk-default.md).
 
 Missing optional credentials or SDK support cannot prevent local plugin or MCP startup.
+
+Capability limitations and execution safety are separate. A missing automatic-stop interface may
+require the operator to stop the exact session in the provider UI. Until actual termination can be
+observed, the affected attempt retains its resource obligations and cannot be replaced on an
+assumption that unassignment or a stop request ended compute. An unavailable provider does not
+prevent local startup or qualify as a working backend. Provider limitations do not block developing
+or releasing unrelated Factory capabilities.
 
 Local work uses an exact-SHA Git worktree and a killable process group. The preferred route uses the
 official Codex SDK as a programmatic boundary; the portable fallback invokes Codex CLI
@@ -624,6 +640,13 @@ boundary. Managed-agent sessions can also consume GitHub Actions minutes outside
 native-unit receipts; Factory installs no workflow and does not treat the Actions allowance as an
 implicit spending authorization.
 
+Factory does not wait for final provider invoice settlement before completing work. Exact execution
+termination and native admission accounting remain necessary; proof that the provider will never
+adjust a later invoice does not. Report available provider usage/cost with its evidence boundary,
+and unavailable values as unavailable, never zero. A managed-session count or sandbox-duration limit
+is not a guaranteed currency-denominated spend cap. No billing API or broader account permission is
+required merely to prove that already-terminated work has completed.
+
 The `models` contract supports `single-profile` only. Every phase mapping must name the same
 profile, whose model and reasoning effort are carried to compile, implement, review, and retry/recover
 invocations. GitHub managed agents do not expose model selection, so Factory rejects combining them
@@ -730,9 +753,11 @@ does not become a new pending activation.
 
 The target environment is Linux: native Linux, Windows WSL2, or a Linux guest hosted by macOS.
 Codex SDK is the preferred local route and Codex CLI is its supported portable fallback. Daytona and
-the two GitHub-managed release targets extend local execution only after their publication-blocking
-live gates pass and under explicit paid-backend policies. Recovery preserves the original recorded
-policy.
+available managed-provider capabilities extend local execution under explicit paid-backend policies.
+Qualify a provider before claiming execution support; document unsupported capabilities instead of
+requiring unavailable APIs to pass a global release gate. The managed-provider capability-boundary
+gate still requires evidence that declarations, admission refusal and supported claims agree.
+Recovery preserves the original recorded policy.
 
 Release evidence and open gates are listed in
 [`CONFORMANCE.md`](CONFORMANCE.md). Optional host restart configuration is documented in

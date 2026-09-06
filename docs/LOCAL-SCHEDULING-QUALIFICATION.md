@@ -1,5 +1,9 @@
 # Installed local scheduling qualification
 
+The separately opted [memory pressure/cooldown/readmission scenario](LOCAL-PRESSURE-QUALIFICATION.md)
+extends qualification under its own acknowledgement and immutable initial policy.
+It does not change the CPU/priority/outer-lease scenario below or relabel its evidence.
+
 `scripts/verify-local-scheduling.mjs` is an explicitly authorized, one-shot installed
 regular-PR scheduling exercise. It has deterministic tests, **not a live pass**.
 It reuses the namespaced clamp/slugify/two-parent-join Objective, its exact installed

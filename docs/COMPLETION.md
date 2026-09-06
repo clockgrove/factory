@@ -30,9 +30,10 @@ and shared provider admission in [#130](https://github.com/clockgrove/factory/is
 Their implementation and regressions are integrated in one recovery capability batch and passed
 [final release checks and matching WSL2 installation](release-evidence/retained-recovery-correction-2026-09-06.json).
 That record preserves the initial receipt/provenance and fixture failures separately. The
-retained live continuation remains paused with an elapsed execution window; supported timeout
-reconciliation and any required new authority precede further execution. Installed qualification,
-not these corrected implementation gaps, is now the critical path.
+retained-work continuation subsequently completed as a bounded installed recovery subset.
+Newly identified explicit-compilation LFS preparation in [#134](https://github.com/clockgrove/factory/issues/134)
+and installed large-file scenario implementation in [#133](https://github.com/clockgrove/factory/issues/133)
+must be integrated before expanding qualification. Prior passing evidence does not cover these changes.
 This does not establish live provider support, actual compiler/chat behavior or measured cost/throughput benefit.
 
 The [recorded integrated local suite](release-evidence/integrated-completion-suite-2026-09-05.json)
@@ -49,7 +50,9 @@ consumption counters are not substitutes. Disputed requirements remain unresolve
 
 | Capability | Issues | Remaining acceptance |
 | --- | --- | --- |
-| Retained regular-PR successor refresh | [#128](https://github.com/clockgrove/factory/issues/128) | Implementation accepted / recovery owner: exact-owned refresh, new-head validation/review, interrupted accounting, restored artifacts and repeated-successor tree proofs passed integrated checks and matching installation. Original artifacts and paid history remain immutable. Next: installed retained-work qualification under supported authority; the paused live window elapsed without a deadline or allowance extension. |
+| Explicit compilation source preparation | [#134](https://github.com/clockgrove/factory/issues/134) | Code / compilation owner: pre-model LFS/tool/cache refusal, exact-base isolated hydration, unchanged source checkout and preserved paid-result accounting. Next: integrate fix and regressions before coordinated checks. |
+| Installed large-file scenarios | [#133](https://github.com/clockgrove/factory/issues/133) | Code / artifact owner: finish the existing intent-to-ready recovery, content and refusal scenario batch. Depends on #134 for pre-compilation refusal. Next: integrated capability PR; live acceptance remains in #123 under separate scenario authority. |
+| Retained regular-PR successor refresh | [#128](https://github.com/clockgrove/factory/issues/128) | Completed / recovery owner: integrated checks and the bounded installed retained-work continuation passed. Original artifacts and paid history remain immutable. This subset does not close remaining session, concurrency, provider or large-file qualification. |
 | Isolated adopted merge candidates | [#129](https://github.com/clockgrove/factory/issues/129) | Implementation accepted / isolated-recovery owner: required independent validation, explicit provider authorization, native budget/capacity, durable completion and crash reconciliation passed integrated checks. A failed validator is not successful work; unknown termination prevents replacement. Next: live provider qualification with separate spending authority. |
 | Shared provider validation capacity | [#130](https://github.com/clockgrove/factory/issues/130) | Implementation accepted / integration owner: candidate reservations and workers share repository/Objective provider ceilings without changing exact receipt/release identity. Independent review and final integrated checks passed. Next: installed provider-capacity qualification within separately authorized scenarios. |
 | Integrated candidate corrections | [#119](https://github.com/clockgrove/factory/issues/119) | Completed / integration owner: reviewed capability stack merged in #120–#122. Final integrated gates passed on the recorded candidate; original failures remain separate. |

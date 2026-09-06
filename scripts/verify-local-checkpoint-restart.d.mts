@@ -80,7 +80,18 @@ export function runAppServerCheckpointScenario(
   port: CheckpointPort,
   authority: CheckpointAuthority,
 ): Promise<unknown>;
+/** Internal committed adapters only; no operator-supplied module is loaded. */
+export interface CheckpointExtension {
+  authority?: CheckpointAuthority;
+  scope?: string;
+  harnessPaths?: string[];
+  objectiveBody?(authority: CheckpointAuthority): string;
+  preflight?(context: Record<string, unknown>): unknown;
+  observe?(context: Record<string, unknown>): unknown;
+  extendPort?(context: Record<string, unknown>): unknown;
+}
 export function main(
   env?: Record<string, string | undefined>,
   runner?: typeof runCheckpointScenario,
+  extension?: CheckpointExtension,
 ): Promise<void>;

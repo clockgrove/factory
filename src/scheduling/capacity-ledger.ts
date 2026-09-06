@@ -14,6 +14,17 @@ export function isLocalIntegrationValidationBackend(backend: string): boolean {
   return /^factory\/integration-validation-[a-f0-9]{64}$/.test(backend);
 }
 
+/**
+ * This exact namespace belongs to the existing Daytona candidate/rebase route.
+ * Keep its invocation identity for release and replay, but share provider ceilings
+ * with other Daytona validation and execution. Unknown identifiers stay distinct.
+ */
+function capacityProvider(backend: string): string {
+  return /^factory\/integration-sandbox-[a-f0-9]{64}$/.test(backend)
+    ? "codex-cli/daytona"
+    : backend;
+}
+
 export interface CapacityReservation {
   key: string;
   objective: number;
@@ -150,7 +161,8 @@ function tally(
       cloud += 1;
     }
     paidUnits += reservation.paidUnits;
-    byBackend[reservation.backendId] = (byBackend[reservation.backendId] ?? 0) + 1;
+    const provider = capacityProvider(reservation.backendId);
+    byBackend[provider] = (byBackend[provider] ?? 0) + 1;
   }
   return { active, local, cloud, cpu, memoryMb, paidUnits, byBackend };
 }
@@ -295,18 +307,20 @@ export class CapacityLedger {
     ) {
       return reject("cloud-capacity");
     }
+    const provider = capacityProvider(input.backendId);
     if (
-      (current.byBackend[input.backendId] ?? 0) + 1 >
-      (limits.backendMaxParallel[input.backendId] ?? limits.maxParallel)
+      (current.byBackend[provider] ?? 0) + 1 >
+      (limits.backendMaxParallel[provider] ?? limits.maxParallel)
     ) {
       return reject("backend-capacity");
     }
     if (
       limits.objectiveBackendMaxParallel?.objective === input.objective &&
-      objectiveReservations.filter((reservation) => reservation.backendId === input.backendId)
-        .length +
+      objectiveReservations.filter(
+        (reservation) => capacityProvider(reservation.backendId) === provider,
+      ).length +
         1 >
-        (limits.objectiveBackendMaxParallel.limits[input.backendId] ??
+        (limits.objectiveBackendMaxParallel.limits[provider] ??
           limits.objectiveMaxParallel?.max ??
           limits.maxParallel)
     ) {

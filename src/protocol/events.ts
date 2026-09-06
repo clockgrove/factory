@@ -463,6 +463,27 @@ const Scheduling = Common.extend({
 });
 
 const Capacity = Common.extend({
+  isolatedFailure: z
+    .object({
+      validationDigest: sha256Digest,
+      validationStartedAt: z.string().datetime(),
+      validationCompletedAt: z.string().datetime(),
+      startedAt: z.string().datetime(),
+      completedAt: z.string().datetime(),
+      sandboxMilliseconds: z.number().int().nonnegative().max(604_800_000),
+    })
+    .strict()
+    .optional(),
+  isolatedValidation: z
+    .object({
+      backend: z.literal("codex-cli/daytona"),
+      artifactDigest: sha256Digest,
+      invocationOwnershipDigest: sha256Digest,
+      deadline: z.string().datetime(),
+      noHandleReplacementNotBefore: z.string().datetime(),
+    })
+    .strict()
+    .optional(),
   kind: z.literal("capacity"),
   event: z.enum(["CapacityReserved", "CapacityReconciled"]),
   workItem: z.number().int().positive(),
@@ -487,11 +508,45 @@ const Capacity = Common.extend({
     event.sourceRunId &&
     (event.sourceRunId === event.runId ||
       event.phase !== "validation" ||
-      !/^factory\/integration-validation-[a-f0-9]{64}$/.test(event.backend))
+      !/^factory\/integration-(?:validation|sandbox)-[a-f0-9]{64}$/.test(event.backend))
   ) {
     context.addIssue({
       code: "custom",
       message: "source capacity is only a distinct source-bound integration validation",
+    });
+  }
+  const isolated = event.isolatedValidation;
+  const failure = event.isolatedFailure;
+  if (
+    failure &&
+    (!isolated ||
+      event.event !== "CapacityReconciled" ||
+      Date.parse(failure.completedAt) - Date.parse(failure.startedAt) !==
+        failure.sandboxMilliseconds ||
+      Date.parse(failure.validationCompletedAt) < Date.parse(failure.validationStartedAt) ||
+      Date.parse(failure.validationCompletedAt) - Date.parse(failure.validationStartedAt) >
+        604_800_000)
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "isolated failure must bind a bounded completed validation and terminated resource",
+    });
+  }
+  if (
+    (event.sourceRunId && event.backend.startsWith("factory/integration-sandbox-") && !isolated) ||
+    (isolated &&
+      (!event.sourceRunId ||
+        event.phase !== "validation" ||
+        !/^factory\/integration-sandbox-[a-f0-9]{64}$/.test(event.backend) ||
+        event.localScopeBatch ||
+        Date.parse(isolated.noHandleReplacementNotBefore) !==
+          Date.parse(isolated.deadline) + 60_000 ||
+        (event.event === "CapacityReserved" &&
+          Date.parse(isolated.deadline) <= Date.parse(event.at))))
+  ) {
+    context.addIssue({
+      code: "custom",
+      message: "isolated source capacity requires exact invocation and termination fences",
     });
   }
   const batch = event.localScopeBatch;

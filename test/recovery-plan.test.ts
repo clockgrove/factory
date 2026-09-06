@@ -267,6 +267,43 @@ function lease(plan: RecoveryPlan): LeaseState {
 }
 
 describe("immutable recovery proposal", () => {
+  it("binds a prior delivered tree without rewriting the original validated artifact", () => {
+    const plan = publicationProposal();
+    const item = plan.items[0]!;
+    const original = structuredClone(item.source!);
+    plan.priorPlanDigest = digest("7");
+    item.action = "integrated";
+    item.observedPullRequest!.state = "merged";
+    item.observedPullRequest!.headSha = sha("8");
+    item.observedPullRequest!.treeSha = sha("9");
+    item.source!.priorDelivery = {
+      runId: "source",
+      planDigest: digest("7"),
+      integrationReceiptDigest: digest("8"),
+      deliveryHeadSha: sha("8"),
+      outputTreeSha: sha("9"),
+    };
+    const parsed = parseRecoveryPlan(plan);
+    expect(parsed.items[0]!.source!.validation).toEqual(original.validation);
+    expect(parsed.items[0]!.source!.publication).toEqual(original.publication);
+    const acceptedDigest = recoveryPlanDigest(parsed);
+    item.source!.priorDelivery.outputTreeSha = sha("a");
+    expect(() => parseRecoveryPlan(plan)).toThrow(
+      "publication reuse needs unchanged validated PR identities",
+    );
+    item.observedPullRequest!.treeSha = sha("a");
+    expect(recoveryPlanDigest(parseRecoveryPlan(plan))).not.toBe(acceptedDigest);
+    delete item.source!.priorDelivery.outputTreeSha;
+    expect(() => parseRecoveryPlan(plan)).toThrow(
+      "publication reuse needs unchanged validated PR identities",
+    );
+    // Older unchanged-head deliveries remain valid without the new descriptor.
+    item.observedPullRequest!.headSha = original.publication!.headSha;
+    item.source!.priorDelivery.deliveryHeadSha = original.publication!.headSha;
+    item.observedPullRequest!.treeSha = original.validation!.outputTreeSha;
+    expect(parseRecoveryPlan(plan).items[0]!.source!.priorDelivery!.outputTreeSha).toBeUndefined();
+  });
+
   it("preserves exact original source provenance for open and integrated publications", () => {
     const plan = publicationProposal();
     expect(parseRecoveryPlan(plan)).toEqual(plan);

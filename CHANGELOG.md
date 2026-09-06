@@ -42,6 +42,15 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- Successor recovery refreshes retained Factory-owned regular PRs after authenticated trunk advances,
+  preserving the original artifact and paid acceptance history while independently validating and
+  reviewing the exact changed head. Provider-owned branches remain outside this refresh authority.
+- Adopted ordinary and native-sibling candidates retain required independent isolation, with
+  explicitly authorized Daytona validation, successor-bound resource ownership, native budget
+  reservations and durable completion reuse. Known rejected validation releases its proven-terminated
+  resource and preserves usage without becoming accepted work. Unknown termination still blocks replacement.
+- Isolated candidate and rebase validations share configured Daytona concurrency ceilings with
+  execution workers; their invocation-specific reservation and recovery identities remain distinct.
 - Unknown completion after dispatch cannot authorize a replacement worker, including failure of the
   first durable artifact-copy write. Exact retained output reuses original accounting and validation
   allowances; corrupt evidence still escalates. Conservative native-duration charges remain distinct

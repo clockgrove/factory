@@ -530,6 +530,7 @@ export async function buildRecoveryProposal(input: {
             runId: priorOutcome.runId,
             planDigest: prior.digest,
             integrationReceiptDigest: recoveryEventDigest(priorOutcome),
+            outputTreeSha: proof.outputTreeSha,
             ...(priorOutcome.deliveryHeadSha
               ? { deliveryHeadSha: priorOutcome.deliveryHeadSha }
               : {}),

@@ -22,7 +22,17 @@ The capability stack is merged. Installed WSL2 qualification exposed two concret
 [#124](https://github.com/clockgrove/factory/issues/124) in cooldown parsing and
 [#125](https://github.com/clockgrove/factory/issues/125) in foreground integration continuation.
 Their corrections passed [integrated checks and matching installation](release-evidence/foreground-continuation-correction-2026-09-06.json).
-Retained-work recovery and the remaining installed scenarios are the current critical path.
+Installed retained-work recovery then exposed [#128](https://github.com/clockgrove/factory/issues/128):
+an older-base retained regular PR was not refreshed through the successor path. Its correction and
+the remaining installed scenarios are the current critical path. Review also confirmed required
+isolated adopted-candidate validation in [#129](https://github.com/clockgrove/factory/issues/129)
+and shared provider admission in [#130](https://github.com/clockgrove/factory/issues/130).
+Their implementation and regressions are integrated in one recovery capability batch and passed
+[final release checks and matching WSL2 installation](release-evidence/retained-recovery-correction-2026-09-06.json).
+That record preserves the initial receipt/provenance and fixture failures separately. The
+retained live continuation remains paused with an elapsed execution window; supported timeout
+reconciliation and any required new authority precede further execution. Installed qualification,
+not these corrected implementation gaps, is now the critical path.
 This does not establish live provider support, actual compiler/chat behavior or measured cost/throughput benefit.
 
 The [recorded integrated local suite](release-evidence/integrated-completion-suite-2026-09-05.json)
@@ -39,6 +49,9 @@ consumption counters are not substitutes. Disputed requirements remain unresolve
 
 | Capability | Issues | Remaining acceptance |
 | --- | --- | --- |
+| Retained regular-PR successor refresh | [#128](https://github.com/clockgrove/factory/issues/128) | Implementation accepted / recovery owner: exact-owned refresh, new-head validation/review, interrupted accounting, restored artifacts and repeated-successor tree proofs passed integrated checks and matching installation. Original artifacts and paid history remain immutable. Next: installed retained-work qualification under supported authority; the paused live window elapsed without a deadline or allowance extension. |
+| Isolated adopted merge candidates | [#129](https://github.com/clockgrove/factory/issues/129) | Implementation accepted / isolated-recovery owner: required independent validation, explicit provider authorization, native budget/capacity, durable completion and crash reconciliation passed integrated checks. A failed validator is not successful work; unknown termination prevents replacement. Next: live provider qualification with separate spending authority. |
+| Shared provider validation capacity | [#130](https://github.com/clockgrove/factory/issues/130) | Implementation accepted / integration owner: candidate reservations and workers share repository/Objective provider ceilings without changing exact receipt/release identity. Independent review and final integrated checks passed. Next: installed provider-capacity qualification within separately authorized scenarios. |
 | Integrated candidate corrections | [#119](https://github.com/clockgrove/factory/issues/119) | Completed / integration owner: reviewed capability stack merged in #120–#122. Final integrated gates passed on the recorded candidate; original failures remain separate. |
 | Installed continuation corrections | [#124](https://github.com/clockgrove/factory/issues/124), [#125](https://github.com/clockgrove/factory/issues/125), [#126](https://github.com/clockgrove/factory/issues/126) | Completed / integration owner: strict cooldown parsing, authenticated foreground graph-base proof and one bounded real-Git fixture corrected and reviewed. Full release checks and matching WSL2 installation passed. Preserve [original failure, partial pressure proof and independent cleanup](release-evidence/wsl2-pressure-original-failure-2026-09-06.json). Next: supported recovery retaining the first merge and second root output; installed qualification remains open. |
 | Restored installed runtime | [#123](https://github.com/clockgrove/factory/issues/123) | Testing / qualification lane: remaining same-host multi-Objective and regular-PR overlap, durable terminal session recovery, LFS/tooling, manifests and oversized transfer cases. Reuse compatible #75/#76 evidence; integrated source checks are not these live passes. |

@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "scope": "Implementation acceptance for retained PR recovery, required isolated candidate validation and shared provider capacity; not live provider or complete product qualification.",
+  "issues": [128, 129, 130],
+  "sourceCommit": "7f2d884106a8f737081fc43d77867b02c69958f9",
+  "sourceTree": "7b5add31e8ddb1c5b5a4fc1b2846af9bc8f66c35",
+  "review": {
+    "independentReviewComplete": true,
+    "invariants": [
+      "Exact Factory-owned non-force refresh; provider-owned branches remain refused.",
+      "Original artifacts, accepted plans and measured usage remain immutable; changed heads require independent validation and review.",
+      "Native ancestry and prior delivered-tree identity are independently proved across repeated successors.",
+      "Required isolation retains explicit provider authorization, successor resource ownership and native accounting.",
+      "Known failed validation is not accepted work; unknown termination prevents replacement.",
+      "Provider ceilings aggregate workers and candidate validation without changing exact reservation/release identities."
+    ]
+  },
+  "releaseGate": {
+    "command": "npm run verify:release",
+    "exitCode": 0,
+    "testFilesPassed": 159,
+    "testsPassed": 3132,
+    "testsSkipped": 3,
+    "testDurationSeconds": 612.43,
+    "coveragePercent": {"statements": 80.12, "branches": 78.04, "functions": 83.82, "lines": 81.27},
+    "coverageThresholdsUnchanged": true,
+    "schemaValidation": "passed",
+    "committedBundlesReproducible": true,
+    "packageAndCleanInstallContracts": "passed",
+    "dependencyVulnerabilities": 0,
+    "logSha256": "b415d8adfb836d8f8b2b0fdbce5b23f36c0e35f18431f929900cb12440c0e1c4"
+  },
+  "installedArtifact": {
+    "host": "WSL2",
+    "packageVersion": "2.0.26",
+    "packageSha256": "2e49336f97a89562de57422572117d47595dd330dbd0eca731338ae61d860abe",
+    "packageFiles": 43,
+    "packageBytes": 2985996,
+    "manifestVersion": "2.0.26+codex.20260906184829",
+    "inventorySha256": "a4da996a182f34284f8c96b0fe60f7f2034d7d2f0372287aef77f9325d7a2ca8",
+    "cliSha256": "25a813722a84a2ac7988b9fb270d2e9e1970f487262bd7fd5a382954748ad784",
+    "mcpSha256": "6c285501a002d4768a68e73dbd98d0dff2f24beb65df5d8e2330bb6e349410f5",
+    "sourceAndCacheExactFileInventoryMatched": true,
+    "onlyPermittedDifference": "Codex manifest cachebuster",
+    "freshInstalledMcpSchemaProbe": "passed",
+    "previousInstallationRetainedForRollback": true,
+    "windowsInstallationChanged": false
+  },
+  "preservedFailures": [
+    {
+      "sourceCommit": "eec38bd177970c38c9735738d77e1fbb35063280",
+      "sourceTree": "808ef3e3c95ebb2ba09de752d787b446e74a41d0",
+      "typecheckExitCode": 2,
+      "typecheckLogSha256": "5b5a77db120ae910ef4b3ef595fbf86a2c51ace409589d16a2e5f9b2ba59cc8c",
+      "affectedTestExitCode": 1,
+      "testFilesPassed": 8,
+      "testFilesFailed": 2,
+      "testsPassed": 248,
+      "testsFailed": 46,
+      "testDurationSeconds": 228.05,
+      "testLogSha256": "b614230bce8847068fdd0041342446e1e2656c6ba6346cad6fc7972e0b1bb5cf",
+      "summary": "Required repository typing, actual delivery receipt binding, native/source publication ancestry, repeated-delivery tree provenance and fixture contract defects were corrected."
+    },
+    {
+      "sourceCommit": "59b8064ae8c579d73fcb3a1170db8055008197ac",
+      "sourceTree": "bdb84efdb54080fa48f984b9dcbd93341dcba54e",
+      "releaseGateExitCode": 1,
+      "testsPassed": 3131,
+      "testsFailed": 1,
+      "testsSkipped": 3,
+      "testDurationSeconds": 604.0,
+      "coverageReported": false,
+      "laterReleaseGatesExecuted": false,
+      "logSha256": "941d703140146b6629c293979d3bcdecaf59cf0907d87ff2b18b72aa2f443284",
+      "summary": "Tampered candidate capacity was correctly rejected by the earlier refreshed-head proof. A stale expected blocker was corrected with direct proof of that rejection and unchanged authority/accounting assertions; runtime and package bytes did not change."
+    }
+  ],
+  "qualificationBoundaries": {
+    "originalLiveFailureAndOutputsPreserved": true,
+    "retainedLocalContinuation": "Acknowledged paused; controller stopped with process/cgroup absence confirmed. Its immutable execution window elapsed during repairs. No successor, deadline extension or allowance increase is authorized by this evidence.",
+    "liveProviderSpending": "none",
+    "remainingInstalledScenarios": [75, 76, 80, 82, 123],
+    "compilerAndEconomicDemonstration": [109, 112],
+    "nativeLinuxAndMacHostedLinux": "explicitly deferred and unrun",
+    "clockgroveActivationAndRegistryPublication": "not performed; separate authority remains required"
+  },
+  "evidenceRule": "Subsequent completion/evidence documentation does not change tested implementation, tests or packaged bytes. Prior failures are not relabelled as passing evidence for a changed candidate."
+}

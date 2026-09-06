@@ -501,8 +501,10 @@ export async function verifyRecoverySourcePublication(
     const pull = await input.store.readPullRequest(event.pullRequest);
     const changed = pull.headSha !== event.sourceHeadSha || pull.baseRef !== event.baseBranch;
     if (changed) {
-      requireEvidence(recorded && event.mode === "native-stacks");
-      if (!artifact.delivery.stack) {
+      requireEvidence(recorded);
+      // A restored ordinary publication may advance only through its exact
+      // authenticated sibling-refresh intent, never a native transition.
+      if (event.mode === "regular-prs" || !artifact.delivery.stack) {
         const plan = artifact.planRecord.plan;
         const source = plan.items.find((item) => item.workItem === event.workItem)?.source;
         requireEvidence(source && pull.baseRef === event.baseBranch);
@@ -578,9 +580,9 @@ export async function verifyRecoverySourcePublication(
       publication: event,
       artifact,
       current: changed
-        ? artifact.delivery.stack
-          ? "native-transition-observed"
-          : "sibling-refresh-observed"
+        ? event.mode === "regular-prs" || !artifact.delivery.stack
+          ? "sibling-refresh-observed"
+          : "native-transition-observed"
         : "unchanged",
       executionAuthorized: false,
     };

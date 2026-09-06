@@ -22,11 +22,18 @@ import { publicationBranch } from "../src/publication/publisher.js";
 import { bindValidationToPublishedHead } from "../src/validation/plan.js";
 import { BackendRegistry } from "../src/execution/registry.js";
 import { CodexSdkLocalBackend } from "../src/backends/codex-sdk-local.js";
+import { DaytonaResourceCleanupError } from "../src/backends/daytona.js";
 import type { ManagementBackend } from "../src/management/backend.js";
 import type { ObjectiveSnapshot, LinkedPullRequest } from "../src/types.js";
 import { PlatformUnavailableError } from "../src/platform.js";
 import * as cleanValidation from "../src/validation/clean-run.js";
 import { ReviewCheckpointManager } from "../src/control/reviews.js";
+import {
+  MergeCandidateCheckpointStore,
+  mergeCandidateIdentityDigest,
+  type MergeCandidateIdentity,
+} from "../src/control/merge-candidates.js";
+import { createValidationEvidence } from "../src/validation/evidence.js";
 import { buildRecoveryProposal } from "../src/recovery/proposal.js";
 import { RecoveryPlanManager } from "../src/recovery/plan.js";
 import { RecoveryClaimManager } from "../src/recovery/claims.js";
@@ -34,10 +41,18 @@ import { recoveryAdoptionEvents } from "../src/recovery/transaction.js";
 import { normalizeArtifact } from "../src/execution/artifacts.js";
 import { workerPacketDigest } from "../src/protocol/worker-packet.js";
 import { loadRecoveryRuntime } from "../src/recovery/runtime.js";
+import * as siblingRefreshProof from "../src/recovery/sibling-refresh.js";
 import { recoveryReadPort } from "../src/recovery/github-read-port.js";
 import { verifyRecoveryProposalResources } from "../src/recovery/resources.js";
 import { verifyPriorRecoveryDelivery } from "../src/recovery/outcomes.js";
-import { localExecutionScopeBatch, type AttemptContext } from "../src/execution/backend.js";
+import {
+  localExecutionScopeBatch,
+  type AttemptContext,
+  type ExecutionBackend,
+} from "../src/execution/backend.js";
+import { validationInvocationOwnership } from "../src/backends/validation-invocation.js";
+
+const validateFixtureTree = cleanValidation.validateArtifactClean;
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -73,6 +88,17 @@ async function fixture(
     completeSourceScopeEvidence?: boolean;
     isolatedItem?: string;
     isolatedWorker?: boolean;
+    foregroundPredecessor?: boolean;
+    historicalSuccessor?: boolean;
+    staleRetainedBaseUntilRefresh?: boolean;
+    providerOwnedRetainedBranch?: boolean;
+    refreshedPreview?: "missing" | "old-parents";
+    noJoin?: boolean;
+    adoptedIsolatedValidation?: {
+      paid?: boolean;
+      available?: boolean;
+      fault?: "validation" | "cleanup";
+    };
   } = {},
 ) {
   const repository = await mkdtemp(join(tmpdir(), "factory-successor-integration-"));
@@ -115,7 +141,7 @@ async function fixture(
     heads.push(git("rev-parse", "HEAD"));
   }
   git("checkout", "-q", "main");
-  const now = new Date();
+  const now = new Date(Date.now() - (options.historicalSuccessor ? 120_000 : 0));
   const policy = parseRunPolicy({
     ...DEFAULT_RUN_POLICY,
     ...(options.failC ? { maxAttemptsPerItem: 1 } : {}),
@@ -133,7 +159,19 @@ async function fixture(
       ...(options.isolatedWorker ? ["fixture/isolated-worker"] : []),
       "codex-sdk/local-worktree",
       ...(options.isolatedItem ? ["fixture/isolated-validator"] : []),
+      ...(options.adoptedIsolatedValidation && options.adoptedIsolatedValidation.paid !== false
+        ? ["codex-cli/daytona"]
+        : []),
     ],
+    ...(options.adoptedIsolatedValidation
+      ? {
+          allowedPaidBackends:
+            options.adoptedIsolatedValidation.paid === false ? [] : ["codex-cli/daytona"],
+          cloudFallback: "explicit",
+          maxSandboxMinutes: 90,
+          workItemTimeoutMinutes: 2,
+        }
+      : {}),
     capacity: { ...DEFAULT_RUN_POLICY.capacity, mode: "fixed" },
     delivery: {
       mode: options.nativeSource ? "stacked-prs" : "regular-prs",
@@ -248,42 +286,44 @@ async function fixture(
   const leases = { assertCurrent: async () => {} } as unknown as LeaseManager;
   const graph: CompiledObjective = {
     title: "Parallel siblings",
-    workItems: ["a", "b", "c", "d"].slice(0, options.stackLength ?? 3).map((name, index) => ({
-      id: name,
-      title: name,
-      goal: `Add ${name}`,
-      acceptance: ["Tests pass"],
-      scope: [`${name}.txt`],
-      preconditions: [],
-      outOfScope: [],
-      conventions: [],
-      dependsOn: options.retainedPrefix
-        ? index
-          ? [["a", "b", "c"][index - 1]!]
-          : []
-        : name === "c"
-          ? ["a", "b"]
-          : [],
-      baseSha,
-      validationCommands: ["node --test"],
-      requirements: {
-        os: ["linux"],
-        architecture: [],
-        tools: ["node"],
-        services: [],
-        networkDestinations: [],
-        permittedSecretNames: [],
-        trust: options.isolatedItem === name ? "isolated" : "trusted_local",
-      },
-      artifactContract: "clockgrove.factory/artifact-v1",
-      delivery: options.retainedPrefix
-        ? {
-            group: "a",
-            relationship: index ? "continue-stack" : "root",
-            ...(index ? { parentWorkItem: ["a", "b", "c"][index - 1]! } : {}),
-          }
-        : { group: name, relationship: name === "c" ? "join-after-merge" : "root" },
-    })),
+    workItems: ["a", "b", "c", "d"]
+      .slice(0, options.noJoin ? 2 : (options.stackLength ?? 3))
+      .map((name, index) => ({
+        id: name,
+        title: name,
+        goal: `Add ${name}`,
+        acceptance: ["Tests pass"],
+        scope: [`${name}.txt`],
+        preconditions: [],
+        outOfScope: [],
+        conventions: [],
+        dependsOn: options.retainedPrefix
+          ? index
+            ? [["a", "b", "c"][index - 1]!]
+            : []
+          : name === "c"
+            ? ["a", "b"]
+            : [],
+        baseSha,
+        validationCommands: ["node --test"],
+        requirements: {
+          os: ["linux"],
+          architecture: [],
+          tools: ["node"],
+          services: [],
+          networkDestinations: [],
+          permittedSecretNames: [],
+          trust: options.isolatedItem === name ? "isolated" : "trusted_local",
+        },
+        artifactContract: "clockgrove.factory/artifact-v1",
+        delivery: options.retainedPrefix
+          ? {
+              group: "a",
+              relationship: index ? "continue-stack" : "root",
+              ...(index ? { parentWorkItem: ["a", "b", "c"][index - 1]! } : {}),
+            }
+          : { group: name, relationship: name === "c" ? "join-after-merge" : "root" },
+      })),
   };
   const graphManager = new CompiledGraphManager(storage, leases);
   const record = await graphManager.persist({
@@ -334,7 +374,7 @@ async function fixture(
         objectiveAuthor: "operator",
         fork: false,
         baseBranch: "main",
-        baseSha,
+        ...(options.foregroundPredecessor ? {} : { baseSha }),
         policy,
         policyDigest: pd,
       }),
@@ -371,7 +411,11 @@ async function fixture(
     const itemBase = options.retainedPrefix && index ? heads[index - 1]! : baseSha;
     const number = 8 + index;
     const head = heads[index]!;
-    refs.set(`refs/heads/${publicationBranch(7, number, 1)}`, head);
+    const branch =
+      options.providerOwnedRetainedBranch && number === 9
+        ? "provider/retained-b"
+        : publicationBranch(7, number, 1);
+    refs.set(`refs/heads/${branch}`, head);
     const tree = (await readCommit(head)).treeOid;
     const validationDigest = createHash("sha256").update(item.id).digest("hex");
     const exact = bindValidationToPublishedHead({
@@ -472,7 +516,7 @@ async function fixture(
           mode: options.nativeSource ? "native-stacks" : "regular-prs",
           position: plan.position,
           ...(plan.parentItemId ? { parentItemId: plan.parentItemId } : {}),
-          branch: publicationBranch(7, number, 1),
+          branch,
           baseBranch:
             index && options.retainedPrefix ? publicationBranch(7, number - 1, 1) : "main",
           baseSha: itemBase,
@@ -559,6 +603,7 @@ async function fixture(
   const findPull = (number: number) =>
     snapshot.workItems.find((item) => item.linkedPullRequests[0]?.number === number)!
       .linkedPullRequests[0]!;
+  const refreshedPulls = new Set<number>();
   let siblingRefreshResponseLost = false;
   const refresh = vi
     .spyOn(GitHubControlStore.prototype, "compareAndSwapRef")
@@ -570,8 +615,10 @@ async function fixture(
       const commit = await readCommit(afterOid);
       expect(commit.parentOids[0]).toBe(beforeOid);
       expect(commit.parentOids).toHaveLength(2);
+      expect(commit.parentOids[1]).toBe(git("rev-parse", "main"));
       refs.set(ref, afterOid);
       item.linkedPullRequests[0]!.headSha = afterOid;
+      refreshedPulls.add(item.linkedPullRequests[0]!.number);
       if (options.loseSiblingRefreshResponse && !siblingRefreshResponseLost) {
         siblingRefreshResponseLost = true;
         throw new PlatformUnavailableError(
@@ -610,25 +657,33 @@ async function fixture(
     const baseRef = pullBases.get(number) ?? "main";
     const currentBase =
       baseRef === "main" ? git("rev-parse", "main") : refs.get(`refs/heads/${baseRef}`)!;
+    // Captured GitHub shape: advancing trunk alone need not update the retained
+    // PR's REST base or test-merge parents. Only the exact owned CAS fixes it.
+    const reportedBase =
+      options.staleRetainedBaseUntilRefresh && number === 19 && !refreshedPulls.has(number)
+        ? baseSha
+        : currentBase;
     const preview = createHash("sha1")
-      .update(`preview:${currentBase}:${pull.headSha}`)
+      .update(`preview:${reportedBase}:${pull.headSha}`)
       .digest("hex");
     if (pull.state === "OPEN") {
       let treeOid = previewTrees.get(preview);
       if (!treeOid) {
         treeOid =
           options.wrongPreviewTree && number === 19
-            ? git("rev-parse", `${pull.headSha}^{tree}`)
-            : git("merge-tree", "--write-tree", currentBase, pull.headSha).split("\n")[0]!;
+            ? git("rev-parse", `${heads[1]}^{tree}`)
+            : git("merge-tree", "--write-tree", reportedBase, pull.headSha).split("\n")[0]!;
         previewTrees.set(preview, treeOid);
       }
       commits.set(preview, {
         oid: preview,
         treeOid,
-        parentOids: [currentBase, pull.headSha],
+        parentOids: [reportedBase, pull.headSha],
         message: "GitHub test merge",
         serverTime: new Date(),
       });
+      if (options.refreshedPreview === "old-parents" && refreshedPulls.has(number))
+        commits.get(preview)!.parentOids = [baseSha, heads[1]!];
     }
     if (
       options.stalePreviewOnce &&
@@ -645,9 +700,11 @@ async function fixture(
       baseRepository: "o/r",
       headRepository: "o/r",
       headRef:
-        number === 20 && options.failC
-          ? publicationBranch(7, 10, 2)
-          : publicationBranch(7, number - 10, 1),
+        number === 19 && options.providerOwnedRetainedBranch
+          ? "provider/retained-b"
+          : number === 20 && options.failC
+            ? publicationBranch(7, 10, 2)
+            : publicationBranch(7, number - 10, 1),
       state: pull.state === "OPEN" ? "open" : "closed",
       draft: false,
       merged: pull.state === "MERGED",
@@ -658,8 +715,13 @@ async function fixture(
       baseSha:
         pull.state === "MERGED"
           ? (await readCommit(mergeShas.get(number)!)).parentOids[0]!
-          : currentBase,
-      mergeCommitSha: mergeShas.get(number) ?? preview,
+          : reportedBase,
+      mergeCommitSha:
+        options.refreshedPreview === "missing" &&
+        refreshedPulls.has(number) &&
+        !mergeShas.has(number)
+          ? null
+          : (mergeShas.get(number) ?? preview),
       createdAt: new Date(now.getTime() - 120_000),
     };
   });
@@ -751,7 +813,62 @@ async function fixture(
     version: "2026-03-10",
     reason: "fixture observed native API",
   });
-  const backendRegistry = options.isolatedItem ? new BackendRegistry() : undefined;
+  const backendRegistry =
+    options.isolatedItem || options.adoptedIsolatedValidation ? new BackendRegistry() : undefined;
+  const isolatedResources = new Set<string>();
+  // Same deterministic provider simulation boundary as helpers/provider-supervisor.ts:
+  // owned local fixture Git substitutes for remote compute, never live provider proof.
+  const isolatedValidate = vi.fn<NonNullable<ExecutionBackend["validate"]>>(async (input) => {
+    const ownership = validationInvocationOwnership(input);
+    if (!ownership) throw new Error("fixture requires exact candidate invocation");
+    isolatedResources.add(ownership);
+    const result = await validateFixtureTree({
+      repository,
+      artifact: input.artifact,
+      packet: {
+        ...input.packet,
+        requirements: { ...input.packet.requirements, trust: "trusted_local" },
+      },
+    });
+    try {
+      return {
+        outputTreeSha: result.evidence.outputTreeSha,
+        commands: result.evidence.commands,
+        passed: result.evidence.passed,
+        startedAt: result.evidence.startedAt,
+        completedAt: result.evidence.completedAt,
+        environmentIdentity: `docker.io/library/node@sha256:${"a".repeat(64)}`,
+        ...(result.evidence.failureReason ? { failureReason: result.evidence.failureReason } : {}),
+      };
+    } finally {
+      await cleanValidation.discardValidationResult(result);
+      if (options.adoptedIsolatedValidation?.fault === "cleanup") {
+        // biome-ignore lint/correctness/noUnsafeFinally: models the existing provider contract's cleanup refusal overriding successful commands
+        throw new DaytonaResourceCleanupError({
+          resourceId: `simulated-${ownership}`,
+          resourceName: `simulated-validation-${ownership}`,
+          operation: "validation cleanup",
+          cause: "simulated isolated candidate termination is unknown",
+        });
+      }
+      isolatedResources.delete(ownership);
+    }
+  });
+  const isolatedReconcile = vi.fn<NonNullable<ExecutionBackend["reconcileStale"]>>(
+    async (input) => {
+      if (isolatedResources.size) {
+        const ownership = validationInvocationOwnership(input);
+        if (!ownership || !isolatedResources.has(ownership))
+          throw new Error("fixture reconciliation does not own its simulated resource");
+        throw new DaytonaResourceCleanupError({
+          resourceId: `simulated-${ownership}`,
+          resourceName: `simulated-validation-${ownership}`,
+          operation: "stale-attempt reconciliation",
+          cause: "simulated isolated candidate termination is still unknown",
+        });
+      }
+    },
+  );
   if (backendRegistry) {
     const local = new CodexSdkLocalBackend();
     backendRegistry.register(local);
@@ -780,6 +897,36 @@ async function fixture(
       cleanup: unused,
       validate: unused,
     });
+    if (options.adoptedIsolatedValidation)
+      backendRegistry.register({
+        capabilities: {
+          ...local.capabilities,
+          id: "codex-cli/daytona",
+          runtimeKind: "simulated-provider",
+          hostExecution: false,
+          isolation: "container",
+          requiresPaidRuntime: true,
+          reportsModelUsage: false,
+          requiredCredentials: [],
+        },
+        probe: async () => ({
+          available: options.adoptedIsolatedValidation?.available !== false,
+          authenticated: true,
+          measuredAt: now.toISOString(),
+        }),
+        probeValidation: async () => ({
+          available: options.adoptedIsolatedValidation?.available !== false,
+          authenticated: true,
+          measuredAt: now.toISOString(),
+        }),
+        launch: unused,
+        observe: unused,
+        cancel: unused,
+        collect: unused,
+        cleanup: unused,
+        validate: isolatedValidate,
+        reconcileStale: isolatedReconcile,
+      });
     if (options.isolatedWorker)
       backendRegistry.register({
         capabilities: {
@@ -841,6 +988,9 @@ async function fixture(
     commits,
     management,
     refresh,
+    isolatedValidate,
+    isolatedReconcile,
+    isolatedResources,
     get sequence() {
       return sequence;
     },
@@ -1028,7 +1178,7 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
     f.commits.get(f.refs.get(attemptRef(7, item.number, 1))!)!.message =
       encodeEventTrailer(reserved);
   }
-  if (!options.retainedPrefix)
+  if (!options.retainedPrefix && !options.noJoin)
     f.snapshot.workItems.push({
       id: "I_10",
       number: 10,
@@ -1281,7 +1431,7 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
     planRecord,
     authenticatedRequest: request,
     transaction: {
-      at: new Date().toISOString(),
+      at: new Date(Date.now() - (options.historicalSuccessor ? 60_000 : 0)).toISOString(),
       startSequence: f.sequence,
       evidenceDigest: "1".repeat(64),
       accountingDigest: "2".repeat(64),
@@ -1469,7 +1619,1014 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
   };
 }
 
+/** Historical fixture for the already-paid old-head candidate captured in #128.
+ * This uses the real immutable checkpoint stores, not a mocked proof decision. */
+async function retainOldHeadSuccessorCandidate(f: Awaited<ReturnType<typeof successorFixture>>) {
+  const item = f.snapshot.workItems[1]!;
+  const source = f.planRecord.plan.items[1]!.source!;
+  const publication = source.publication!;
+  const targetBaseSha = f.planRecord.plan.expectedBaseSha;
+  const exact = bindValidationToPublishedHead({
+    validation: {
+      passed: true,
+      digest: source.validation!.evidenceDigest,
+      baseSha: source.validation!.baseSha,
+      outputTreeSha: source.validation!.outputTreeSha,
+    },
+    publishedBaseSha: publication.baseSha,
+    publishedHeadSha: publication.headSha,
+    publishedTreeSha: (await f.readCommit(publication.headSha)).treeOid,
+  });
+  const artifact = normalizeArtifact({
+    baseSha: targetBaseSha,
+    changedPaths: ["b.txt"],
+    patch: `${f.git("diff", "--binary", publication.baseSha, publication.headSha)}\n`,
+    outcome: "succeeded",
+  });
+  const completedAt = new Date().toISOString();
+  const startedAt = new Date(Date.parse(completedAt) - 12_963).toISOString();
+  const validation = createValidationEvidence({
+    protocol: "clockgrove.factory/validation-v1",
+    artifactDigest: artifact.digest,
+    baseSha: targetBaseSha,
+    outputTreeSha: f
+      .git("merge-tree", "--write-tree", targetBaseSha, publication.headSha)
+      .split("\n")[0]!,
+    commands: [{ command: "node --test", exitCode: 0, durationMs: 12_963 }],
+    passed: true,
+    startedAt,
+    completedAt,
+  });
+  const lease = { ...f.lease, runId: "successor" };
+  const candidate = await new MergeCandidateCheckpointStore(f.storage, f.leases).persist({
+    lease,
+    identity: {
+      runId: "successor",
+      objective: 7,
+      workItem: 9,
+      attempt: source.attempt,
+      pullRequest: publication.pullRequest,
+      sourceHeadSha: publication.headSha,
+      sourceExactHeadValidationDigest: exact.digest,
+      targetBaseSha,
+    },
+    source: exact,
+    validation,
+  });
+  const digest = mergeCandidateIdentityDigest(candidate.identity);
+  const review = await new ReviewCheckpointManager(f.storage, f.leases).persist({
+    lease,
+    identity: {
+      kind: "integration-candidate",
+      runId: "successor",
+      objective: 7,
+      workItem: 9,
+      attempt: source.attempt,
+      artifactDigest: validation.artifactDigest,
+      baseSha: targetBaseSha,
+      outputTreeSha: validation.outputTreeSha,
+      evidenceDigest: validation.digest,
+      headSha: publication.headSha,
+    },
+    result: {
+      review: {
+        accepted: true,
+        summary: "Old head accepted before refresh",
+        unmetCriteria: [],
+        risks: [],
+      },
+      usage: { inputTokens: 75_000, outputTokens: 39 },
+    },
+  });
+  const prior = item.factoryEvents!.find(
+    (entry) => entry.kind === "capacity" && entry.event === "CapacityReserved",
+  );
+  if (prior?.kind !== "capacity" || !prior.localScopeBatch) throw new Error("fixture scope absent");
+  const priorBatch = prior.localScopeBatch;
+  let sequence =
+    Math.max(
+      ...[
+        ...f.snapshot.factoryEvents!,
+        ...f.snapshot.workItems.flatMap((entry) => entry.factoryEvents!),
+      ].map((entry) => entry.sequence),
+    ) + 1;
+  const event = (fields: Record<string, unknown>) =>
+    parseFactoryEvent({
+      protocol: "clockgrove.factory/v2",
+      objective: 7,
+      runId: "successor",
+      workItem: 9,
+      sequence: sequence++,
+      at: completedAt,
+      ...fields,
+    });
+  const receipts = [
+    ...(["CapacityReserved", "CapacityReconciled"] as const).map((name) =>
+      event({
+        kind: "capacity",
+        event: name,
+        attempt: source.attempt,
+        sourceRunId: source.runId,
+        targetBaseSha,
+        directorEpoch: 1,
+        policyDigest: f.pd,
+        phase: "validation",
+        backend: `factory/integration-validation-${digest}`,
+        requestedCpu: 1,
+        requestedMemoryMb: 512,
+        ...(name === "CapacityReserved"
+          ? {
+              localScopeBatch: {
+                ...priorBatch,
+                commandCount: 2,
+                identity: {
+                  ...priorBatch.identity,
+                  runId: "successor",
+                  invocationDigest: artifact.digest,
+                },
+              },
+            }
+          : {}),
+      }),
+    ),
+    event({
+      kind: "budget",
+      event: "BudgetReconciled",
+      phase: "validation",
+      unit: "validation_milliseconds",
+      amount: 12_963,
+      usageId: `integration-validation-${digest}`,
+    }),
+    event({
+      kind: "budget",
+      event: "BudgetReconciled",
+      phase: "management",
+      unit: "model_tokens",
+      amount: 75_039,
+      usageId: `integration-review-${review.identityDigest}`,
+    }),
+  ];
+  item.factoryEvents!.push(...receipts);
+  expect(await f.runtime()).toMatchObject({ status: "verified", usage: { modelTokens: 75_069 } });
+  return { candidate, review, receipts: structuredClone(receipts), digest };
+}
+
+/** Stop a waiting fixture through its transport boundary after the real gate ran. */
+function interruptAfterIntegrationWait(f: Awaited<ReturnType<typeof successorFixture>>) {
+  const unavailable = new PlatformUnavailableError(
+    { kind: "server_error", retryAfterMs: 1 },
+    new Error("fixture stopped after observing exact integration wait"),
+  );
+  const reader = vi.mocked(GitHubReader.prototype.readObjective);
+  const read = reader.getMockImplementation()!;
+  reader.mockImplementation(async (...args) => {
+    if (f.messages.some((message) => message.includes("integration waiting:"))) throw unavailable;
+    return read.apply({} as GitHubReader, args);
+  });
+  return unavailable;
+}
+
+async function isolatedSuccessorFixture(
+  options: {
+    nativeSource?: boolean;
+    paid?: boolean;
+    available?: boolean;
+    fault?: "validation" | "cleanup";
+    loseMergeResponse?: boolean;
+  } = {},
+) {
+  return successorFixture({
+    noJoin: true,
+    foregroundPredecessor: true,
+    staleRetainedBaseUntilRefresh: true,
+    isolatedItem: "b",
+    failCombinedTests: options.fault === "validation",
+    ...(options.nativeSource === undefined ? {} : { nativeSource: options.nativeSource }),
+    ...(options.loseMergeResponse === undefined
+      ? {}
+      : { loseMergeResponse: options.loseMergeResponse }),
+    adoptedIsolatedValidation: {
+      ...(options.paid === undefined ? {} : { paid: options.paid }),
+      ...(options.available === undefined ? {} : { available: options.available }),
+      ...(options.fault === undefined ? {} : { fault: options.fault }),
+    },
+  });
+}
+
+async function isolatedCandidate(f: Awaited<ReturnType<typeof isolatedSuccessorFixture>>) {
+  const refs = [...f.refs].filter(
+    ([ref]) => ref.includes("/merge-candidates/") && ref.includes("/work-item-9/"),
+  );
+  expect(refs).toHaveLength(1);
+  const document = JSON.parse(
+    f.git("show", `${refs[0]![1]}:.clockgrove-factory/control/merge-candidate.json`),
+  ) as { identity: MergeCandidateIdentity };
+  const candidate = await new MergeCandidateCheckpointStore(f.storage, f.leases).load(
+    document.identity,
+  );
+  if (!candidate?.isolatedResource) throw new Error("fixture isolated completion missing");
+  return candidate;
+}
+
+describe("Supervisor adopted isolated candidate validation", () => {
+  it.each([false, true])(
+    "validates a retained sibling in a distinct authorized sandbox, native=%s",
+    async (nativeSource) => {
+      const f = await isolatedSuccessorFixture({ nativeSource });
+      const originalSource = structuredClone(f.planRecord.plan.items[1]!.source);
+      expect(await f.run(), JSON.stringify(f.messages)).toMatchObject({
+        status: "completed",
+        runId: "successor",
+      });
+      expect(f.isolatedValidate).toHaveBeenCalledOnce();
+      expect(f.review).toHaveBeenCalledOnce();
+      expect(f.launch).not.toHaveBeenCalled();
+      expect(f.isolatedResources.size).toBe(0);
+      expect(f.refresh).toHaveBeenCalledOnce();
+      const input = f.isolatedValidate.mock.calls[0]![0];
+      const candidate = await isolatedCandidate(f);
+      expect(input).toMatchObject({
+        repository: "o/r",
+        objective: 7,
+        workItem: 9,
+        attempt: 1,
+        runId: "successor",
+        policyDigest: f.pd,
+        packet: { baseSha: f.planRecord.plan.expectedBaseSha, requirements: { trust: "isolated" } },
+        validationInvocation: {
+          kind: "integration-candidate",
+          identityDigest: mergeCandidateIdentityDigest(candidate.identity),
+          artifactDigest: candidate.validation.artifactDigest,
+          baseSha: candidate.identity.targetBaseSha,
+        },
+      });
+      expect(input.runId).not.toBe(originalSource!.runId);
+      expect(candidate.identity).toMatchObject({
+        sourceHeadSha: originalSource!.publication!.headSha,
+        deliveryHeadSha: f.refresh.mock.calls[0]![0].afterOid,
+      });
+      expect(candidate.isolatedResource).toMatchObject({
+        backend: "codex-cli/daytona",
+        invocationOwnershipDigest: validationInvocationOwnership(input),
+      });
+      expect(candidate.validation.environmentIdentity).toBe(
+        `docker.io/library/node@sha256:${"a".repeat(64)}`,
+      );
+      expect(f.validate.mock.calls.every(([call]) => Boolean(call.isolatedValidator))).toBe(true);
+      expect(f.planRecord.plan.items[1]!.source).toEqual(originalSource);
+      expect(
+        [
+          ...f.snapshot.factoryEvents!,
+          ...f.snapshot.workItems.flatMap((item) => item.factoryEvents!),
+        ].filter((entry) => entry.runId === "parallel"),
+      ).toEqual(f.original);
+      const events = f.snapshot.workItems[1]!.factoryEvents!;
+      const capacity = events.filter(
+        (entry) => entry.kind === "capacity" && entry.runId === "successor",
+      );
+      expect(capacity.map((entry) => entry.event)).toEqual([
+        "CapacityReserved",
+        "CapacityReconciled",
+      ]);
+      expect(capacity[0]).toMatchObject({
+        sourceRunId: "parallel",
+        attempt: 1,
+        directorEpoch: input.directorEpoch,
+        backend: `factory/integration-sandbox-${mergeCandidateIdentityDigest(candidate.identity)}`,
+        isolatedValidation: {
+          backend: "codex-cli/daytona",
+          artifactDigest: input.artifact.digest,
+          invocationOwnershipDigest: validationInvocationOwnership(input),
+        },
+      });
+      expect(capacity[0]).not.toHaveProperty("localScopeBatch");
+      const sandboxUsage = events.filter(
+        (entry) =>
+          entry.kind === "budget" &&
+          entry.unit === "sandbox_milliseconds" &&
+          entry.runId === "successor",
+      );
+      expect(sandboxUsage.map((entry) => entry.event)).toEqual([
+        "BudgetReserved",
+        "BudgetReconciled",
+      ]);
+      expect(sandboxUsage[1]).toMatchObject({
+        amount: candidate.isolatedResource!.sandboxMilliseconds,
+        usageId: `integration-validation-${mergeCandidateIdentityDigest(candidate.identity)}`,
+      });
+      for (const receipt of sandboxUsage) expect(receipt).not.toHaveProperty("attempt");
+      expect(
+        events.filter((entry) => entry.kind === "attempt" && entry.runId === "successor"),
+      ).toEqual([]);
+      expect(await f.runtime()).toMatchObject({
+        status: "verified",
+        usage: {
+          modelTokens: 45,
+          sandboxMinutesReserved: candidate.isolatedResource!.sandboxMilliseconds / 60_000,
+        },
+      });
+    },
+    30000,
+  );
+
+  it.each([
+    { paid: false, available: true },
+    { paid: true, available: false },
+  ])(
+    "refuses isolated successor admission before CAS with paid=$paid available=$available",
+    async (options) => {
+      const f = await isolatedSuccessorFixture(options);
+      if (!options.paid) {
+        // Availability is not paid authority. Keep the run policy valid while
+        // leaving the registered provider outside its permitted routes.
+        expect(f.policy.backendOrder).not.toContain("codex-cli/daytona");
+        expect(f.policy.allowedPaidBackends).not.toContain("codex-cli/daytona");
+      }
+      expect(await f.run(), JSON.stringify(f.messages)).toMatchObject({
+        status: "escalated",
+        reason: expect.stringContaining(
+          options.paid
+            ? "independent Daytona adopted-candidate validator is unavailable or unauthorized"
+            : "adopted candidate requires original and successor authorization for independent Daytona validation",
+        ),
+      });
+      expect(f.refresh).not.toHaveBeenCalled();
+      expect(f.isolatedValidate).not.toHaveBeenCalled();
+      expect(f.validate).not.toHaveBeenCalled();
+      expect(f.review).not.toHaveBeenCalled();
+      expect(f.launch).not.toHaveBeenCalled();
+      expect(f.refs.get(`refs/heads/${publicationBranch(7, 9, 1)}`)).toBe(f.heads[1]);
+      expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
+      expect(f.isolatedResources.size).toBe(0);
+    },
+    30000,
+  );
+
+  it.each(["native-usage", "review-usage", "merge-response"] as const)(
+    "restarts after isolated %s loss without another resource, paid review, or charge",
+    async (point) => {
+      const f = await isolatedSuccessorFixture({ loseMergeResponse: point === "merge-response" });
+      const write = vi
+        .mocked(GitHubControlStore.prototype.addIssueComment)
+        .getMockImplementation()!;
+      let interrupted = false;
+      vi.mocked(GitHubControlStore.prototype.addIssueComment).mockImplementation(
+        async (node, body) => {
+          if (
+            !interrupted &&
+            point !== "merge-response" &&
+            decodeEventComments(body).some(
+              (entry) =>
+                entry.kind === "budget" &&
+                entry.runId === "successor" &&
+                entry.event === "BudgetReconciled" &&
+                entry.unit ===
+                  (point === "native-usage" ? "sandbox_milliseconds" : "model_tokens") &&
+                entry.usageId?.startsWith(
+                  point === "native-usage" ? "integration-validation-" : "integration-review-",
+                ),
+            )
+          ) {
+            interrupted = true;
+            throw new PlatformUnavailableError(
+              { kind: "server_error", retryAfterMs: 1 },
+              new Error("fixture lost isolated accounting write"),
+            );
+          }
+          return write(node, body);
+        },
+      );
+      await expect(f.run()).rejects.toThrow(PlatformUnavailableError);
+      const completed = await isolatedCandidate(f);
+      expect(f.isolatedValidate).toHaveBeenCalledOnce();
+      expect(f.isolatedResources.size).toBe(0);
+      expect(f.review).toHaveBeenCalledTimes(point === "native-usage" ? 0 : 1);
+      expect(f.launch).not.toHaveBeenCalled();
+      expect(await f.run(), JSON.stringify(f.messages)).toMatchObject({ status: "completed" });
+      expect(await isolatedCandidate(f)).toEqual(completed);
+      expect(f.isolatedValidate).toHaveBeenCalledOnce();
+      expect(f.review).toHaveBeenCalledOnce();
+      expect(f.refresh).toHaveBeenCalledOnce();
+      expect(f.launch).not.toHaveBeenCalled();
+      const events = f.snapshot.workItems[1]!.factoryEvents!;
+      expect(
+        events.filter(
+          (entry) =>
+            entry.kind === "budget" &&
+            entry.runId === "successor" &&
+            entry.event === "BudgetReconciled" &&
+            entry.unit === "sandbox_milliseconds",
+        ),
+      ).toEqual([
+        expect.objectContaining({ amount: completed.isolatedResource!.sandboxMilliseconds }),
+      ]);
+      expect(
+        events.filter(
+          (entry) =>
+            entry.kind === "budget" &&
+            entry.runId === "successor" &&
+            entry.event === "BudgetReconciled" &&
+            entry.unit === "model_tokens",
+        ),
+      ).toEqual([expect.objectContaining({ amount: 15 })]);
+      expect(await f.runtime()).toMatchObject({
+        status: "verified",
+        usage: {
+          modelTokens: 45,
+          sandboxMinutesReserved: completed.isolatedResource!.sandboxMilliseconds / 60_000,
+        },
+      });
+    },
+    30000,
+  );
+
+  it.each([false, true])(
+    "preserves failed isolated validation usage without source replacement, unavailable mutable target=%s",
+    async (unavailableTarget) => {
+      const f = await isolatedSuccessorFixture({ fault: "validation" });
+      const write = vi
+        .mocked(GitHubControlStore.prototype.addIssueComment)
+        .getMockImplementation()!;
+      let interrupted = false;
+      vi.mocked(GitHubControlStore.prototype.addIssueComment).mockImplementation(
+        async (node, body) => {
+          if (
+            !interrupted &&
+            decodeEventComments(body).some(
+              (entry) =>
+                entry.kind === "budget" &&
+                entry.runId === "successor" &&
+                entry.event === "BudgetReconciled" &&
+                entry.unit === "sandbox_milliseconds",
+            )
+          ) {
+            interrupted = true;
+            expect(
+              f.snapshot.workItems[1]!.factoryEvents!.some(
+                (entry) =>
+                  entry.kind === "capacity" &&
+                  entry.runId === "successor" &&
+                  entry.event === "CapacityReconciled" &&
+                  entry.isolatedFailure,
+              ),
+            ).toBe(true);
+            expect(f.isolatedResources.size).toBe(0);
+            throw new PlatformUnavailableError(
+              { kind: "server_error", retryAfterMs: 1 },
+              new Error("fixture interrupted failed validation accounting"),
+            );
+          }
+          return write(node, body);
+        },
+      );
+      await expect(f.run()).rejects.toThrow(PlatformUnavailableError);
+      expect(interrupted).toBe(true);
+      expect(f.isolatedValidate).toHaveBeenCalledOnce();
+      expect(f.isolatedResources.size).toBe(0);
+      const result = await f.isolatedValidate.mock.results[0]!.value;
+      expect(result).toMatchObject({
+        passed: false,
+        failureReason: expect.stringContaining("combined regression"),
+      });
+      expect(result.commands.at(-1)!.exitCode).not.toBe(0);
+      expect([...f.refs.keys()].filter((ref) => ref.includes("/merge-candidates/"))).toEqual([]);
+      expect(f.review).not.toHaveBeenCalled();
+      expect(f.launch).not.toHaveBeenCalled();
+      expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
+      const events = f.snapshot.workItems[1]!.factoryEvents!;
+      const capacities = events.filter(
+        (entry) => entry.kind === "capacity" && entry.runId === "successor",
+      );
+      expect(capacities.map((entry) => entry.event)).toEqual([
+        "CapacityReserved",
+        "CapacityReconciled",
+      ]);
+      const completion = capacities[1];
+      if (completion?.kind !== "capacity" || !completion.isolatedFailure)
+        throw new Error("fixture exact failed completion absent");
+      const failure = completion.isolatedFailure;
+      expect(failure).toMatchObject({
+        validationDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+        validationStartedAt: result.startedAt,
+        validationCompletedAt: result.completedAt,
+      });
+      expect(failure.sandboxMilliseconds).toBe(
+        Date.parse(failure.completedAt) - Date.parse(failure.startedAt),
+      );
+      expect(completion.isolatedValidation!.invocationOwnershipDigest).toBe(
+        validationInvocationOwnership(f.isolatedValidate.mock.calls[0]![0]),
+      );
+      const immutableCompletion = structuredClone(completion);
+      const unavailableHead = "f".repeat(40);
+      if (unavailableTarget) {
+        // This is only a changed mutable branch observation, deliberately lacking
+        // commit/provenance evidence. It does not invent an authenticated peer
+        // integration. Historical rejection and usage repair must precede any
+        // attempt to inspect or authorize this new target.
+        expect(unavailableHead).not.toBe(completion.targetBaseSha);
+        const previousHead = await f.store.getBranchHead("main");
+        vi.mocked(GitHubControlStore.prototype.getBranchHead).mockResolvedValue({
+          ...previousHead,
+          oid: unavailableHead,
+        });
+      }
+      const refreshesBeforeRestart = f.refresh.mock.calls.length;
+      // The failed result is a separate durable rejection, never a successful
+      // merge-candidate checkpoint. A restart only repairs its exact usage.
+      expect(await f.run(), JSON.stringify(f.messages)).toMatchObject({
+        status: "escalated",
+        reason: expect.stringContaining(
+          "adopted isolated candidate validation was durably rejected",
+        ),
+      });
+      expect(f.isolatedReconcile).not.toHaveBeenCalled();
+      expect(f.isolatedValidate).toHaveBeenCalledOnce();
+      expect(f.isolatedResources.size).toBe(0);
+      expect(f.review).not.toHaveBeenCalled();
+      expect(f.launch).not.toHaveBeenCalled();
+      expect(f.refresh).toHaveBeenCalledTimes(refreshesBeforeRestart);
+      if (unavailableTarget)
+        expect(
+          vi.mocked(GitHubControlStore.prototype.readCommit).mock.calls.map(([oid]) => oid),
+        ).not.toContain(unavailableHead);
+      const current = f.snapshot.workItems[1]!.factoryEvents!;
+      expect(current).toContainEqual(immutableCompletion);
+      expect(
+        current.filter((entry) => entry.kind === "capacity" && entry.runId === "successor"),
+      ).toEqual(capacities);
+      const usage = current.filter(
+        (entry) =>
+          entry.kind === "budget" &&
+          entry.runId === "successor" &&
+          entry.event === "BudgetReconciled",
+      );
+      expect(usage).toHaveLength(2);
+      expect(usage).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            unit: "sandbox_milliseconds",
+            amount: failure.sandboxMilliseconds,
+            usageId: `integration-validation-${completion.backend.slice("factory/integration-sandbox-".length)}`,
+          }),
+          expect.objectContaining({
+            unit: "validation_milliseconds",
+            amount: Date.parse(result.completedAt) - Date.parse(result.startedAt),
+            usageId: `integration-validation-${completion.backend.slice("factory/integration-sandbox-".length)}`,
+          }),
+        ]),
+      );
+      expect([...f.refs.keys()].filter((ref) => ref.includes("/merge-candidates/"))).toEqual([]);
+      expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
+      expect(f.planRecord.plan.items[1]!.source!.publication!.headSha).toBe(f.heads[1]);
+      expect(f.snapshot.workItems[1]!.closed).toBe(false);
+      expect(await f.runtime()).toMatchObject({
+        status: "verified",
+        usage: { modelTokens: 30, sandboxMinutesReserved: failure.sandboxMilliseconds / 60_000 },
+      });
+    },
+    30000,
+  );
+
+  it("retains unknown isolated termination and refuses a replacement candidate after restart", async () => {
+    const f = await isolatedSuccessorFixture({ fault: "cleanup" });
+    const first = await f.run().catch((error: unknown) => error);
+    expect(first).toBeInstanceOf(DaytonaResourceCleanupError);
+    expect((first as Error).message).toMatch(/termination|completion|reconciliation|replacement/);
+    expect(f.isolatedValidate).toHaveBeenCalledOnce();
+    expect(f.isolatedResources.size).toBe(1);
+    expect([...f.refs.keys()].filter((ref) => ref.includes("/merge-candidates/"))).toEqual([]);
+    const restarted = await f.run().catch((error: unknown) => error);
+    expect(restarted, JSON.stringify(restarted)).toBeInstanceOf(DaytonaResourceCleanupError);
+    expect(f.isolatedValidate).toHaveBeenCalledOnce();
+    expect(f.isolatedReconcile).toHaveBeenCalled();
+    const input = f.isolatedValidate.mock.calls[0]![0];
+    const stale = f.isolatedReconcile.mock.calls.at(-1)![0];
+    expect(stale).toMatchObject({
+      repository: input.repository,
+      objective: input.objective,
+      runId: "successor",
+      workItem: 9,
+      attempt: 1,
+      directorEpoch: input.directorEpoch,
+      policyDigest: input.policyDigest,
+      phase: "validation",
+      validationInvocation: input.validationInvocation,
+    });
+    expect(validationInvocationOwnership(stale)).toBe(validationInvocationOwnership(input));
+    expect(Date.parse(stale.noHandleReplacementNotBefore!)).toBeGreaterThanOrEqual(
+      input.deadline.getTime() + 60_000,
+    );
+    expect(f.review).not.toHaveBeenCalled();
+    expect(f.launch).not.toHaveBeenCalled();
+    expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
+    const events = f.snapshot.workItems[1]!.factoryEvents!;
+    expect(
+      events
+        .filter((entry) => entry.kind === "capacity" && entry.runId === "successor")
+        .map((entry) => entry.event),
+    ).toEqual(["CapacityReserved"]);
+    expect(
+      events
+        .filter(
+          (entry) =>
+            entry.kind === "budget" &&
+            entry.runId === "successor" &&
+            entry.unit === "sandbox_milliseconds",
+        )
+        .map((entry) => entry.event),
+    ).toEqual(["BudgetReserved"]);
+    expect(
+      f.snapshot.factoryEvents!.filter(
+        (entry) =>
+          entry.runId === "successor" &&
+          ["FactoryRunCompleted", "FactoryRunEscalated", "FactoryRunCancelled"].includes(
+            entry.event,
+          ),
+      ),
+    ).toEqual([]);
+  }, 30000);
+});
+
 describe("Supervisor authenticated successor execution", () => {
+  it("refreshes a retained ordinary foreground PR without relabelling its paid old-head candidate", async () => {
+    const f = await successorFixture({
+      foregroundPredecessor: true,
+      historicalSuccessor: true,
+      staleRetainedBaseUntilRefresh: true,
+    });
+    const old = await retainOldHeadSuccessorCandidate(f);
+    const plan = structuredClone(f.planRecord);
+    const before = await f.store.readPullRequest(19);
+    expect(before.baseSha).toBe(f.baseSha);
+    expect((await f.readCommit(before.mergeCommitSha!)).parentOids).toEqual([
+      f.baseSha,
+      f.heads[1],
+    ]);
+    expect(await f.run(), JSON.stringify(f.messages)).toMatchObject({ status: "completed" });
+    expect(f.refresh).toHaveBeenCalledOnce();
+    const cas = f.refresh.mock.calls[0]![0];
+    expect(cas).toMatchObject({
+      ref: `refs/heads/${publicationBranch(7, 9, 1)}`,
+      beforeOid: f.heads[1],
+    });
+    const changedHead = await f.readCommit(cas.afterOid);
+    expect(changedHead.parentOids).toEqual([f.heads[1], plan.plan.expectedBaseSha]);
+    expect(f.planRecord).toEqual(plan);
+    expect(f.launch.mock.calls.map(([context]) => context.workItem)).toEqual([10]);
+    expect(f.review).toHaveBeenCalledTimes(2);
+    const manager = new MergeCandidateCheckpointStore(f.storage, f.leases);
+    expect(await manager.load(old.candidate.identity)).toEqual(old.candidate);
+    expect(
+      await new ReviewCheckpointManager(f.storage, f.leases).load(old.review.identity),
+    ).toEqual(old.review);
+    const current = await manager.load({
+      ...old.candidate.identity,
+      deliveryHeadSha: cas.afterOid,
+    });
+    expect(current).toMatchObject({
+      source: old.candidate.source,
+      identity: { sourceHeadSha: f.heads[1], deliveryHeadSha: cas.afterOid },
+      validation: { outputTreeSha: changedHead.treeOid },
+    });
+    expect(current!.validation.digest).not.toBe(old.candidate.validation.digest);
+    expect(f.review.mock.calls[0]![0].evidence.digest).toBe(current!.validation.digest);
+    expect(
+      await new ReviewCheckpointManager(f.storage, f.leases).load({
+        ...old.review.identity,
+        artifactDigest: current!.validation.artifactDigest,
+        evidenceDigest: current!.validation.digest,
+        outputTreeSha: current!.validation.outputTreeSha,
+        headSha: cas.afterOid,
+      }),
+    ).toMatchObject({ review: { accepted: true }, identity: { headSha: cas.afterOid } });
+    const events = f.snapshot.workItems[1]!.factoryEvents!;
+    for (const receipt of old.receipts) {
+      expect(events).toContainEqual(receipt);
+      if (receipt.kind === "budget")
+        expect(
+          events.filter(
+            (entry) =>
+              entry.kind === "budget" &&
+              entry.runId === receipt.runId &&
+              entry.usageId === receipt.usageId,
+          ),
+        ).toHaveLength(1);
+    }
+    const predecessorEvents = [
+      ...f.snapshot.factoryEvents!,
+      ...f.snapshot.workItems.flatMap((item) => item.factoryEvents!),
+    ].filter((entry) => entry.runId === "parallel");
+    expect(predecessorEvents).toEqual(f.original);
+    expect(
+      events.filter((entry) => entry.kind === "attempt" && entry.runId === "successor"),
+    ).toEqual([]);
+    expect(events.filter((entry) => entry.event === "PublicationRecorded")).toHaveLength(1);
+    expect(events.find((entry) => entry.event === "PublicationRecorded")).toMatchObject({
+      runId: "parallel",
+      headSha: f.heads[1],
+    });
+    const capacities = events.filter(
+      (entry) =>
+        entry.kind === "capacity" &&
+        entry.event === "CapacityReserved" &&
+        entry.runId === "successor",
+    );
+    expect(capacities).toHaveLength(2);
+    expect(capacities).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ backend: `factory/integration-validation-${old.digest}` }),
+        expect.objectContaining({
+          backend: `factory/integration-validation-${mergeCandidateIdentityDigest(current!.identity)}`,
+        }),
+      ]),
+    );
+    expect((await f.readCommit(f.mergeShas.get(19)!)).parentOids).toEqual([
+      plan.plan.expectedBaseSha,
+    ]);
+    expect((await f.readCommit(f.mergeShas.get(19)!)).treeOid).toBe(changedHead.treeOid);
+    expect(await f.runtime()).toMatchObject({ status: "verified", usage: { modelTokens: 75_119 } });
+  }, 30000);
+
+  it("reconciles a lost ordinary refresh CAS response with the same intent and historical accounting", async () => {
+    const f = await successorFixture({
+      foregroundPredecessor: true,
+      historicalSuccessor: true,
+      staleRetainedBaseUntilRefresh: true,
+      loseSiblingRefreshResponse: true,
+    });
+    const old = await retainOldHeadSuccessorCandidate(f);
+    await expect(f.run()).rejects.toThrow(PlatformUnavailableError);
+    expect(f.refresh).toHaveBeenCalledOnce();
+    const plannedHead = f.refresh.mock.calls[0]![0].afterOid;
+    const refreshRefs = [...f.refs].filter(([ref]) => ref.includes("/sibling-refreshes/"));
+    expect(refreshRefs).not.toHaveLength(0);
+    expect(f.review).not.toHaveBeenCalled();
+    expect(f.launch).not.toHaveBeenCalled();
+    expect(await f.run(), JSON.stringify(f.messages)).toMatchObject({ status: "completed" });
+    expect(f.refresh).toHaveBeenCalledOnce();
+    expect([...f.refs].filter(([ref]) => ref.includes("/sibling-refreshes/"))).toEqual(refreshRefs);
+    expect(f.snapshot.workItems[1]!.linkedPullRequests[0]!.headSha).toBe(plannedHead);
+    expect(f.launch.mock.calls.map(([context]) => context.workItem)).toEqual([10]);
+    expect(f.review).toHaveBeenCalledTimes(2);
+    for (const receipt of old.receipts)
+      expect(f.snapshot.workItems[1]!.factoryEvents).toContainEqual(receipt);
+    expect(await f.runtime()).toMatchObject({ status: "verified", usage: { modelTokens: 75_119 } });
+  }, 30000);
+
+  it("does not rewrite a provider-owned retained branch to repair its stale preview", async () => {
+    const f = await successorFixture({
+      providerOwnedRetainedBranch: true,
+      staleRetainedBaseUntilRefresh: true,
+    });
+    const unavailable = interruptAfterIntegrationWait(f);
+    await expect(f.run()).rejects.toBe(unavailable);
+    expect(f.refresh).not.toHaveBeenCalled();
+    expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
+    expect(f.refs.get("refs/heads/provider/retained-b")).toBe(f.heads[1]);
+    expect(f.launch).not.toHaveBeenCalled();
+    expect(f.messages.some((message) => message.includes("integration waiting:"))).toBe(true);
+  }, 30000);
+
+  it("refuses an isolated retained candidate before changing its owned ordinary branch", async () => {
+    const f = await successorFixture({
+      isolatedItem: "b",
+      staleRetainedBaseUntilRefresh: true,
+    });
+    const originalHead = f.snapshot.workItems[1]!.linkedPullRequests[0]!.headSha;
+    expect(await f.run(), JSON.stringify(f.messages)).toMatchObject({
+      status: "escalated",
+      reason: expect.stringContaining(
+        "adopted candidate requires original and successor authorization for independent Daytona validation",
+      ),
+    });
+    expect(f.refresh).not.toHaveBeenCalled();
+    expect(f.validate).not.toHaveBeenCalled();
+    expect(f.review).not.toHaveBeenCalled();
+    expect(f.launch).not.toHaveBeenCalled();
+    expect(f.refs.get(`refs/heads/${publicationBranch(7, 9, 1)}`)).toBe(originalHead);
+    expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
+    expect([...f.refs.keys()].filter((ref) => ref.includes("/sibling-refreshes/"))).toEqual([]);
+  }, 30000);
+
+  it.each([
+    ["review", "model_tokens", 75_039],
+    ["validation", "validation_milliseconds", 12_963],
+  ] as const)(
+    "repairs the completed old-head %s's missing usage receipt before ordinary refresh CAS",
+    async (phase, unit, amount) => {
+      const f = await successorFixture({
+        foregroundPredecessor: true,
+        historicalSuccessor: true,
+        staleRetainedBaseUntilRefresh: true,
+      });
+      const old = await retainOldHeadSuccessorCandidate(f);
+      const item = f.snapshot.workItems[1]!;
+      const usageId =
+        phase === "review"
+          ? `integration-review-${old.review.identityDigest}`
+          : `integration-validation-${old.digest}`;
+      item.factoryEvents = item.factoryEvents!.filter(
+        (entry) => !(entry.kind === "budget" && entry.usageId === usageId),
+      );
+      const cas = f.refresh.getMockImplementation()!;
+      f.refresh.mockImplementation(async (input) => {
+        // The repair is an authenticated usage write from the immutable result,
+        // not another management invocation or a changed-head acceptance.
+        expect(
+          item.factoryEvents!.filter(
+            (entry) => entry.kind === "budget" && entry.usageId === usageId,
+          ),
+        ).toEqual([
+          expect.objectContaining({
+            runId: "successor",
+            amount,
+            unit,
+            event: "BudgetReconciled",
+          }),
+        ]);
+        expect(f.validate).not.toHaveBeenCalled();
+        expect(f.review).not.toHaveBeenCalled();
+        return cas(input);
+      });
+      expect(await f.run(), JSON.stringify(f.messages)).toMatchObject({ status: "completed" });
+      expect(f.refresh).toHaveBeenCalledOnce();
+      expect(f.review).toHaveBeenCalledTimes(2);
+      expect(f.launch.mock.calls.map(([context]) => context.workItem)).toEqual([10]);
+      expect(
+        await new ReviewCheckpointManager(f.storage, f.leases).load(old.review.identity),
+      ).toEqual(old.review);
+      expect(
+        item.factoryEvents!.filter((entry) => entry.kind === "budget" && entry.usageId === usageId),
+      ).toHaveLength(1);
+      expect(await f.runtime()).toMatchObject({
+        status: "verified",
+        usage: { modelTokens: 75_119 },
+      });
+    },
+    30000,
+  );
+
+  it.each(["review", "validation"] as const)(
+    "refuses conflicting old-head %s accounting before ordinary refresh CAS",
+    async (phase) => {
+      const f = await successorFixture({
+        foregroundPredecessor: true,
+        historicalSuccessor: true,
+        staleRetainedBaseUntilRefresh: true,
+      });
+      const old = await retainOldHeadSuccessorCandidate(f);
+      const usageId =
+        phase === "review"
+          ? `integration-review-${old.review.identityDigest}`
+          : `integration-validation-${old.digest}`;
+      const receipt = f.snapshot.workItems[1]!.factoryEvents!.find(
+        (entry) => entry.kind === "budget" && entry.usageId === usageId,
+      );
+      if (receipt?.kind !== "budget") throw new Error("fixture old usage receipt absent");
+      receipt.amount = 0;
+      expect(await f.run(), JSON.stringify(f.messages)).toMatchObject({
+        status: "escalated",
+        reason: expect.stringContaining("successor usage conflicts with immutable evidence"),
+      });
+      expect(f.refresh).not.toHaveBeenCalled();
+      expect(f.validate).not.toHaveBeenCalled();
+      expect(f.review).not.toHaveBeenCalled();
+      expect(f.launch).not.toHaveBeenCalled();
+      expect(f.refs.get(`refs/heads/${publicationBranch(7, 9, 1)}`)).toBe(f.heads[1]);
+      expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
+      expect(
+        await new ReviewCheckpointManager(f.storage, f.leases).load(old.review.identity),
+      ).toEqual(old.review);
+      expect(receipt.amount).toBe(0);
+    },
+    30000,
+  );
+
+  it("refuses an old reconciled validator whose immutable completion is missing before CAS", async () => {
+    const f = await successorFixture({
+      foregroundPredecessor: true,
+      historicalSuccessor: true,
+      staleRetainedBaseUntilRefresh: true,
+    });
+    const old = await retainOldHeadSuccessorCandidate(f);
+    f.refs.delete(old.candidate.ref);
+    // Runtime reconstruction sees the completion-bound capacity receipt before
+    // the refresh path: no invented duration or replacement invocation can
+    // repair an absent immutable completion.
+    expect(await f.runtime()).toMatchObject({
+      status: "blocked",
+      blockers: ["source-capacity-completion-unavailable"],
+    });
+    expect(f.refresh).not.toHaveBeenCalled();
+    expect(f.validate).not.toHaveBeenCalled();
+    expect(f.review).not.toHaveBeenCalled();
+    expect(f.launch).not.toHaveBeenCalled();
+    expect(f.refs.get(`refs/heads/${publicationBranch(7, 9, 1)}`)).toBe(f.heads[1]);
+    expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
+  }, 30000);
+
+  it.each([
+    ["completion", "source-capacity-prior-completion-unavailable"],
+    ["reconciliation", "source-capacity-prior-reconciliation-unavailable"],
+    ["accounting", "source-capacity-prior-accounting-unavailable"],
+    ["artifact", "source-capacity-prior-artifact-mismatch"],
+  ] as const)(
+    "refuses to reinterpret old-head capacity after CAS with missing or conflicting %s",
+    async (fault, blocker) => {
+      const f = await successorFixture({
+        foregroundPredecessor: true,
+        historicalSuccessor: true,
+        staleRetainedBaseUntilRefresh: true,
+        loseSiblingRefreshResponse: true,
+      });
+      const old = await retainOldHeadSuccessorCandidate(f);
+      await expect(f.run()).rejects.toThrow(PlatformUnavailableError);
+      const item = f.snapshot.workItems[1]!;
+      if (fault === "completion") f.refs.delete(old.candidate.ref);
+      if (fault === "reconciliation")
+        item.factoryEvents = item.factoryEvents!.filter(
+          (entry) =>
+            !(
+              entry.kind === "capacity" &&
+              entry.event === "CapacityReconciled" &&
+              entry.backend === `factory/integration-validation-${old.digest}`
+            ),
+        );
+      if (fault === "accounting") {
+        const receipt = item.factoryEvents!.find(
+          (entry) =>
+            entry.kind === "budget" && entry.usageId === `integration-validation-${old.digest}`,
+        );
+        if (receipt?.kind !== "budget") throw new Error("fixture old native usage absent");
+        receipt.amount = 0;
+      }
+      if (fault === "artifact") {
+        const reserved = item.factoryEvents!.find(
+          (entry) =>
+            entry.kind === "capacity" &&
+            entry.event === "CapacityReserved" &&
+            entry.backend === `factory/integration-validation-${old.digest}`,
+        );
+        if (reserved?.kind !== "capacity" || !reserved.localScopeBatch)
+          throw new Error("fixture old validator scope absent");
+        reserved.localScopeBatch.identity.invocationDigest = "0".repeat(64);
+      }
+      expect(await f.runtime()).toMatchObject({ status: "blocked", blockers: [blocker] });
+      expect(f.refresh).toHaveBeenCalledOnce();
+      expect(f.review).not.toHaveBeenCalled();
+      expect(f.launch).not.toHaveBeenCalled();
+      expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
+    },
+    30000,
+  );
+
+  it.each(["missing", "old-parents"] as const)(
+    "does not merge a refreshed ordinary head with %s preview evidence",
+    async (refreshedPreview) => {
+      const f = await successorFixture({ staleRetainedBaseUntilRefresh: true, refreshedPreview });
+      const unavailable = interruptAfterIntegrationWait(f);
+      await expect(f.run()).rejects.toBe(unavailable);
+      expect(f.refresh).toHaveBeenCalledOnce();
+      expect(f.review).toHaveBeenCalledOnce();
+      expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
+      expect(f.launch).not.toHaveBeenCalled();
+      expect(
+        f.snapshot.workItems[1]!.factoryEvents!.some(
+          (entry) => entry.event === "RecoverySourceIntegrated",
+        ),
+      ).toBe(false);
+    },
+    30000,
+  );
+
+  it("refuses a third retained head after fresh review without another CAS or integration", async () => {
+    const f = await successorFixture({ staleRetainedBaseUntilRefresh: true });
+    const review = f.review.getMockImplementation()!;
+    f.review.mockImplementationOnce(async (...args) => {
+      const result = await review(...args);
+      f.snapshot.workItems[1]!.linkedPullRequests[0]!.headSha = f.heads[0]!;
+      f.refs.set(`refs/heads/${publicationBranch(7, 9, 1)}`, f.heads[0]!);
+      return result;
+    });
+    expect(await f.run()).toMatchObject({ status: "escalated" });
+    expect(f.refresh).toHaveBeenCalledOnce();
+    expect(f.review).toHaveBeenCalledOnce();
+    expect(f.launch).not.toHaveBeenCalled();
+    expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
+  }, 30000);
+
+  it("refuses a refreshed ordinary preview whose tree differs from the accepted candidate", async () => {
+    const f = await successorFixture({
+      staleRetainedBaseUntilRefresh: true,
+      wrongPreviewTree: true,
+    });
+    expect(await f.run()).toMatchObject({ status: "escalated" });
+    expect(f.refresh).toHaveBeenCalledOnce();
+    expect(f.review).toHaveBeenCalledOnce();
+    expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
+    expect(f.launch).not.toHaveBeenCalled();
+  }, 30000);
+
   it.each([false, true])(
     "finalizes a fully accounted successor after deadline, prior integration=%s",
     async (premerged) => {
@@ -1829,6 +2986,23 @@ describe("Supervisor authenticated successor execution", () => {
           store: f.store,
         }),
       ).rejects.toThrow();
+      const wrongDeliveredTree = structuredClone(proposal.plan!.items[1]!);
+      expect(wrongDeliveredTree.source!.priorDelivery!.outputTreeSha).toMatch(/^[a-f0-9]{40}$/);
+      expect(wrongDeliveredTree.source!.priorDelivery!.outputTreeSha).not.toBe("0".repeat(40));
+      wrongDeliveredTree.source!.priorDelivery!.outputTreeSha = "0".repeat(40);
+      // This resolver must independently reload the original delivered proof;
+      // a parseable descriptor cannot substitute another tree for that result.
+      await expect(
+        verifyPriorRecoveryDelivery({
+          plan: proposal.plan!,
+          item: wrongDeliveredTree,
+          events: [
+            ...f.snapshot.factoryEvents!,
+            ...f.snapshot.workItems.flatMap((item) => item.factoryEvents!),
+          ],
+          store: f.store,
+        }),
+      ).rejects.toThrow();
       const successorLease = {
         ...f.lease,
         runId: "second-successor",
@@ -2008,7 +3182,13 @@ describe("Supervisor authenticated successor execution", () => {
         (event) => event.kind === "attempt" && event.runId === "successor",
       ),
     ).toBe(false);
-    expect(f.snapshot.workItems[1]!.linkedPullRequests[0]!.headSha).toBe(f.heads[1]);
+    const deliveredHead = f.snapshot.workItems[1]!.linkedPullRequests[0]!.headSha;
+    expect(deliveredHead).not.toBe(f.heads[1]);
+    expect((await f.readCommit(deliveredHead)).parentOids).toEqual([
+      f.heads[1],
+      f.planRecord.plan.expectedBaseSha,
+    ]);
+    expect(f.planRecord.plan.items[1]!.source?.artifactHead?.headSha).toBe(f.heads[1]);
     expect(await f.runtime()).toMatchObject({ status: "verified", usage: { modelTokens: 80 } });
   }, 30000);
 
@@ -2104,11 +3284,27 @@ describe("Supervisor authenticated successor execution", () => {
     expect(sourceCapacity?.kind).toBe("capacity");
     if (sourceCapacity?.kind !== "capacity") throw new Error("missing source capacity fixture");
     const backend = sourceCapacity.backend;
+    const refreshProof = vi.spyOn(siblingRefreshProof, "observeRecoverySiblingRefresh");
     sourceCapacity.backend = `factory/integration-validation-${"0".repeat(64)}`;
+    // B now has an authenticated refreshed head. Its observer must resolve the
+    // receipt's exact candidate digest before the later capacity tuple check;
+    // the forged digest fails that earlier proof, not the unchanged-head gate.
     expect(await f.runtime()).toMatchObject({
       status: "blocked",
-      blockers: ["source-capacity-candidate-mismatch"],
+      adoptionVerified: false,
+      executionAuthorized: false,
+      blockers: ["runtime-binding-unavailable"],
     });
+    const invalidInvocation = refreshProof.mock.calls.findIndex(
+      ([input]) => input.candidateIdentityDigest === "0".repeat(64),
+    );
+    expect(invalidInvocation).toBeGreaterThanOrEqual(0);
+    await expect(refreshProof.mock.results[invalidInvocation]!.value).rejects.toThrow(
+      "sibling refresh recovery binding unavailable",
+    );
     sourceCapacity.backend = backend;
+    expect(await f.runtime()).toMatchObject({ status: "verified", usage: { modelTokens: 80 } });
+    expect(f.launch).toHaveBeenCalledTimes(1);
+    expect(f.review).toHaveBeenCalledTimes(2);
   }, 30000);
 });

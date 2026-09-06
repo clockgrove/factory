@@ -130,6 +130,29 @@
     "targetBaseSha": { "$ref": "#/definitions/gitSha" },
     "pullRequestNodeId": { "$ref": "#/definitions/safeId" },
     "localScopeBatch": { "$ref": "#/definitions/localScopeBatch" },
+    "isolatedValidation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["backend", "artifactDigest", "invocationOwnershipDigest", "deadline", "noHandleReplacementNotBefore"],
+      "properties": {
+        "backend": { "const": "codex-cli/daytona" },
+        "artifactDigest": { "$ref": "#/definitions/digest" },
+        "invocationOwnershipDigest": { "$ref": "#/definitions/digest" },
+        "deadline": { "type": "string", "format": "date-time" },
+        "noHandleReplacementNotBefore": { "type": "string", "format": "date-time" }
+      }
+    },
+    "isolatedFailure": {
+      "type": "object", "additionalProperties": false,
+      "required": ["validationDigest", "validationStartedAt", "validationCompletedAt", "startedAt", "completedAt", "sandboxMilliseconds"],
+      "properties": {
+        "validationDigest": { "$ref": "#/definitions/digest" },
+        "validationStartedAt": { "type": "string", "format": "date-time" },
+        "validationCompletedAt": { "type": "string", "format": "date-time" },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "completedAt": { "type": "string", "format": "date-time" },
+        "sandboxMilliseconds": { "type": "integer", "minimum": 0, "maximum": 604800000 }
+      }
+    },
     "passed": { "type": "boolean" },
     "phase": { "enum": ["management", "execution", "validation"] },
     "sessionId": { "type": "string", "minLength": 1, "maxLength": 500 },
@@ -309,9 +332,18 @@
         "if": { "required": ["sourceRunId"] },
         "then": {
           "required": ["workItem", "attempt", "phase", "backend", "requestedCpu", "requestedMemoryMb", "directorEpoch", "policyDigest"],
-          "properties": { "event": { "enum": ["CapacityReserved", "CapacityReconciled"] }, "phase": { "const": "validation" }, "backend": { "type": "string", "pattern": "^factory/integration-validation-[a-f0-9]{64}$" } }
+          "properties": { "event": { "enum": ["CapacityReserved", "CapacityReconciled"] }, "phase": { "const": "validation" }, "backend": { "type": "string", "pattern": "^factory/integration-(validation|sandbox)-[a-f0-9]{64}$" } }
         }
       }
+    },
+    {
+      "if": { "required": ["isolatedValidation"] },
+      "then": { "required": ["sourceRunId", "targetBaseSha"], "not": { "required": ["localScopeBatch"] },
+        "properties": { "kind": { "const": "capacity" }, "phase": { "const": "validation" }, "backend": { "pattern": "^factory/integration-sandbox-[a-f0-9]{64}$" } } }
+    },
+    {
+      "if": { "required": ["isolatedFailure"] },
+      "then": { "required": ["isolatedValidation"], "properties": { "event": { "const": "CapacityReconciled" } } }
     },
     {
       "if": { "required": ["localScopeBatch"], "properties": { "kind": { "const": "attempt" } } },

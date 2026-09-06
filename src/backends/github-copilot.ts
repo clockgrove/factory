@@ -74,9 +74,9 @@ export const OPENAI_CODEX_MANAGED_PROFILE = frozenProfile({
   assigneeLogins: [],
   requiredCapability: "openai-codex-coding-agent",
   actorDiscoveryBlocker:
-    "OpenAI Codex managed-agent discovery is release-blocked: GitHub does not publish a " +
-    "stable suggestedActors Bot login or app identity, and no live conformance evidence has " +
-    "established one",
+    "OpenAI Codex managed provider is unavailable: a supported assignable actor identity and " +
+    "Codex-specific task/session termination contract have not been established. This optional " +
+    "provider limitation does not block Factory's local backends",
 });
 
 export const GITHUB_MANAGED_AGENT_PROFILES: readonly GitHubManagedAgentProfile[] = Object.freeze([

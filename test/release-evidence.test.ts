@@ -10,7 +10,7 @@ const gates = [
   "Live adaptive scheduling matrix",
   "Live native-stack matrix",
   "Real Daytona Objective",
-  "Two real managed-agent Objectives",
+  "Managed-provider capability boundaries",
   "Objective-level adversarial E2E",
 ];
 const subjects = [
@@ -22,6 +22,14 @@ const subjects = [
   ".codex-plugin/plugin.json",
 ];
 const hash = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
+type ArtifactDescriptor = { path: string; sha256: string };
+type ManagedObservation = {
+  commit: string;
+  reasonKind?: string;
+  checks: Record<string, boolean>;
+  unsupportedCapabilities: { reference: string }[];
+  supportedClaims: { evidence: ArtifactDescriptor }[];
+};
 
 describe("release evidence and publication boundary", () => {
   let root: string;
@@ -52,6 +60,18 @@ describe("release evidence and publication boundary", () => {
     });
   const evidence = (index: number) =>
     JSON.parse(readFileSync(join(root, `docs/release-evidence/${index}.json`), "utf8"));
+  const changeProvider = (index: number, change: (record: ManagedObservation) => void) => {
+    const gate = evidence(4);
+    const descriptor = gate.managedProviders[index].evidence;
+    const observed = JSON.parse(readFileSync(join(root, descriptor.path), "utf8"));
+    change(observed);
+    const bytes = JSON.stringify(observed);
+    write(descriptor.path, bytes);
+    gate.artifacts.find((artifact: ArtifactDescriptor) => artifact.path === descriptor.path).sha256 = hash(bytes);
+    descriptor.sha256 = hash(bytes);
+    write("docs/release-evidence/4.json", JSON.stringify(gate));
+    commit();
+  };
 
   beforeEach(() => {
     root = mkdtempSync(join(tmpdir(), "factory-release-evidence-"));
@@ -93,6 +113,56 @@ describe("release evidence and publication boundary", () => {
         }),
       ),
     );
+    const managed = evidence(4);
+    managed.managedProviders = ["github-copilot/github-managed", "openai-codex/github-managed"].map(
+      (backendId, index) => {
+        const available = index === 0;
+        const claimPath = `docs/release-evidence/provider-${index}-objective.json`;
+        const claimBytes = JSON.stringify({
+          commit: testedCommit,
+          backendId,
+          capability: "objective-delivery",
+          status: "passed",
+        });
+        const claim = { path: claimPath, sha256: hash(claimBytes) };
+        if (available) {
+          write(claimPath, claimBytes);
+          managed.artifacts.push(claim);
+        }
+        const path = `docs/release-evidence/provider-${index}.json`;
+        const bytes = JSON.stringify({
+          schema: 1,
+          kind: "managed-provider-capability",
+          commit: testedCommit,
+          backendId,
+          availability: available ? "available" : "unavailable",
+          status: "passed",
+          ...(!available ? { reasonKind: "provider-interface-unavailable" } : {}),
+          probe: {
+            available,
+            authenticated: available,
+            measuredAt: "2026-09-04T00:00:00Z",
+            ...(!available ? { reason: "Provider task/session identity contract unavailable" } : {}),
+          },
+          checks: {
+            declarationMatchesInstalled: true,
+            localStartupUnaffected: true,
+            ...(!available ? { unavailableLaunchDenied: true, noProviderLaunch: true } : {}),
+          },
+          unsupportedCapabilities: available ? [] : [{
+            capability: "managed-execution",
+            reason: "No supported assignable actor and task/session termination interface",
+            reference: "https://learn.chatgpt.com/docs/cloud",
+          }],
+          supportedClaims: available ? [{ capability: "objective-delivery", evidence: claim }] : [],
+        });
+        write(path, bytes);
+        const descriptor = { path, sha256: hash(bytes) };
+        managed.artifacts.push(descriptor);
+        return { backendId, availability: available ? "available" : "unavailable", evidence: descriptor };
+      },
+    );
+    write("docs/release-evidence/4.json", JSON.stringify(managed));
     write(
       "docs/CONFORMANCE.md",
       `## Verification required before publication\n\n| Gate | Status | Evidence |\n|---|---|---|\n${gates.map((gate, index) => `| ${gate} | Passed | [record](release-evidence/${index}.json) |`).join("\n")}\n`,
@@ -108,6 +178,86 @@ describe("release evidence and publication boundary", () => {
     const result = verify();
     expect(result.stderr).toBe("");
     expect(result.status).toBe(0);
+  });
+
+  it("accepts a qualified available provider and an evidenced unavailable provider without invoice data", () => {
+    expect(evidence(4).managedProviders.map((provider: { availability: string }) => provider.availability)).toEqual([
+      "available", "unavailable",
+    ]);
+    expect(verify().status).toBe(0);
+  });
+
+  it("rejects missing managed-provider declarations instead of treating them as N/A", () => {
+    const record = evidence(4);
+    delete record.managedProviders;
+    write("docs/release-evidence/4.json", JSON.stringify(record));
+    commit();
+    expect(verify().stderr).toContain("requires both exact provider declarations");
+  });
+
+  it("rejects a duplicate profile in place of Codex", () => {
+    const record = evidence(4);
+    record.managedProviders[1] = record.managedProviders[0];
+    write("docs/release-evidence/4.json", JSON.stringify(record));
+    commit();
+    expect(verify().stderr).toContain("exactly once");
+  });
+
+  it("rejects arbitrary N/A status", () => {
+    const record = evidence(4);
+    record.managedProviders[1].availability = "N/A";
+    write("docs/release-evidence/4.json", JSON.stringify(record));
+    commit();
+    expect(verify().stderr).toContain("exact-candidate installed capability observation");
+  });
+
+  it("does not treat missing user credentials as a missing provider interface", () => {
+    changeProvider(1, (observed) => { observed.reasonKind = "credentials-unavailable"; });
+    expect(verify().stderr).toContain("not an evidenced fail-closed boundary");
+  });
+
+  it("rejects unavailable declarations that still launch or lack a documented boundary", () => {
+    changeProvider(1, (observed) => { observed.checks.unavailableLaunchDenied = false; });
+    expect(verify().stderr).toContain("not an evidenced fail-closed boundary");
+    changeProvider(1, (observed) => {
+      observed.checks.unavailableLaunchDenied = true;
+      observed.unsupportedCapabilities = [];
+    });
+    expect(verify().stderr).toContain("not an evidenced fail-closed boundary");
+  });
+
+  it("rejects an unrelated reference as authoritative unsupported-capability evidence", () => {
+    changeProvider(1, (observed) => {
+      observed.unsupportedCapabilities[0].reference = "https://example.test/not-a-provider";
+    });
+    expect(verify().stderr).toContain("invalid unsupported-capability boundary");
+  });
+
+  it("rejects capability observations from another candidate", () => {
+    changeProvider(1, (observed) => { observed.commit = "0".repeat(40); });
+    expect(verify().stderr).toContain("exact-candidate installed capability observation");
+  });
+
+  it("requires evidence for an available provider's supported delivery claim", () => {
+    changeProvider(0, (observed) => { observed.supportedClaims = []; });
+    expect(verify().stderr).toContain("requires qualified supported claims");
+  });
+
+  it("rejects supported claims referencing an artifact absent from the gate manifest", () => {
+    changeProvider(0, (observed) => { observed.supportedClaims[0].evidence.sha256 = "0".repeat(64); });
+    expect(verify().stderr).toContain("unique digest-bound artifact");
+  });
+
+  it("rejects qualification evidence for a different provider or candidate", () => {
+    const gate = evidence(4);
+    const provider = JSON.parse(readFileSync(join(root, gate.managedProviders[0].evidence.path), "utf8"));
+    const claim = provider.supportedClaims[0].evidence;
+    const bytes = JSON.stringify({ commit: "0".repeat(40), backendId: "foreign", capability: "objective-delivery", status: "passed" });
+    write(claim.path, bytes);
+    gate.artifacts.find((artifact: ArtifactDescriptor) => artifact.path === claim.path).sha256 = hash(bytes);
+    write("docs/release-evidence/4.json", JSON.stringify(gate));
+    changeProvider(0, (observed) => { observed.supportedClaims[0].evidence.sha256 = hash(bytes); });
+    expect(verify().stderr).toContain("unqualified supported capability claim");
   });
 
   it("invalidates every gate after any non-evidence source change", () => {

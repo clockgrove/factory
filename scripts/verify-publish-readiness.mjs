@@ -65,7 +65,7 @@ const requiredBeforePublish = [
   "Live adaptive scheduling matrix",
   "Live native-stack matrix",
   "Real Daytona Objective",
-  "Two real managed-agent Objectives",
+  "Managed-provider capability boundaries",
   "Objective-level adversarial E2E",
 ];
 
@@ -86,6 +86,101 @@ const rows = gateSection
   )
   .filter((cells) => cells.length === 3 && cells[0] !== "Gate" && !/^---+$/.test(cells[0]));
 const openGates = [];
+const managedBackendIds = ["github-copilot/github-managed", "openai-codex/github-managed"];
+const verifyManagedProviders = async (record) => {
+  if (!Array.isArray(record.managedProviders) || record.managedProviders.length !== 2) {
+    throw new Error("managed-provider evidence requires both exact provider declarations");
+  }
+  const boundArtifact = async (descriptor) => {
+    if (
+      !descriptor ||
+      typeof descriptor.path !== "string" ||
+      !/^[0-9a-f]{64}$/.test(descriptor.sha256 ?? "") ||
+      record.artifacts.filter(
+        (artifact) => artifact.path === descriptor.path && artifact.sha256 === descriptor.sha256,
+      ).length !== 1
+    ) {
+      throw new Error("managed-provider evidence must reference a unique digest-bound artifact");
+    }
+    const bytes = await readEvidence(descriptor.path);
+    if (createHash("sha256").update(bytes).digest("hex") !== descriptor.sha256) {
+      throw new Error("managed-provider artifact digest mismatch");
+    }
+    return JSON.parse(bytes.toString("utf8"));
+  };
+  for (const backendId of managedBackendIds) {
+    const entries = record.managedProviders.filter((provider) => provider?.backendId === backendId);
+    if (entries.length !== 1) {
+      throw new Error(`managed-provider evidence must declare ${backendId} exactly once`);
+    }
+    const provider = entries[0];
+    const observed = await boundArtifact(provider.evidence);
+    const available = provider.availability === "available";
+    if (
+      (!available && provider.availability !== "unavailable") ||
+      observed.schema !== 1 ||
+      observed.kind !== "managed-provider-capability" ||
+      observed.commit !== record.commit ||
+      observed.backendId !== backendId ||
+      observed.availability !== provider.availability ||
+      observed.status !== "passed" ||
+      observed.probe?.available !== available ||
+      observed.probe?.authenticated !== available ||
+      !Number.isFinite(Date.parse(observed.probe?.measuredAt ?? "")) ||
+      observed.checks?.declarationMatchesInstalled !== true ||
+      observed.checks?.localStartupUnaffected !== true ||
+      !Array.isArray(observed.unsupportedCapabilities) ||
+      !Array.isArray(observed.supportedClaims)
+    ) {
+      throw new Error(`${backendId} lacks an exact-candidate installed capability observation`);
+    }
+    for (const boundary of observed.unsupportedCapabilities) {
+      let reference;
+      try {
+        reference = new URL(boundary.reference);
+      } catch {
+        throw new Error(`${backendId} has an unsupported capability without a source`);
+      }
+      if (
+        typeof boundary.capability !== "string" || !boundary.capability.trim() ||
+        typeof boundary.reason !== "string" || !boundary.reason.trim() ||
+        reference.protocol !== "https:" || reference.username || reference.password ||
+        !["docs.github.com", "developers.openai.com", "learn.chatgpt.com", "platform.openai.com"].includes(reference.hostname)
+      ) {
+        throw new Error(`${backendId} has an invalid unsupported-capability boundary`);
+      }
+    }
+    if (!available) {
+      if (
+        observed.reasonKind !== "provider-interface-unavailable" ||
+        typeof observed.probe.reason !== "string" || !observed.probe.reason.trim() ||
+        observed.unsupportedCapabilities.length === 0 ||
+        observed.supportedClaims.length !== 0 ||
+        observed.checks.unavailableLaunchDenied !== true ||
+        observed.checks.noProviderLaunch !== true
+      ) {
+        throw new Error(`${backendId} unavailability is not an evidenced fail-closed boundary`);
+      }
+      continue;
+    }
+    if (
+      !observed.supportedClaims.some((claim) => claim?.capability === "objective-delivery") ||
+      new Set(observed.supportedClaims.map((claim) => claim?.capability)).size !== observed.supportedClaims.length
+    ) {
+      throw new Error(`${backendId} requires qualified supported claims including objective-delivery`);
+    }
+    for (const claim of observed.supportedClaims) {
+      const qualification = await boundArtifact(claim.evidence);
+      if (
+        typeof claim.capability !== "string" || !claim.capability.trim() ||
+        qualification.commit !== record.commit || qualification.backendId !== backendId ||
+        qualification.capability !== claim.capability || qualification.status !== "passed"
+      ) {
+        throw new Error(`${backendId} has an unqualified supported capability claim`);
+      }
+    }
+  }
+};
 for (const gate of requiredBeforePublish) {
   const matches = rows.filter(([name]) => name === gate);
   if (matches.length !== 1) {
@@ -143,6 +238,7 @@ for (const gate of requiredBeforePublish) {
       throw new Error(`${artifact.path} does not match its recorded SHA-256 digest`);
     }
   }
+  if (gate === "Managed-provider capability boundaries") await verifyManagedProviders(record);
 }
 if (openGates.length > 0) {
   throw new Error(

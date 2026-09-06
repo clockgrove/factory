@@ -10225,8 +10225,46 @@ export class FactorySupervisor {
       return selected.backend;
     };
     if (target !== exactHeadValidation.baseSha) {
+      const nativeLinear = publication.mode === "native-stacks" && unit?.kind === "stack";
+      let nativeAncestorIsolation = false;
+      if (nativeLinear) {
+        const position = unit.items.indexOf(planItem.compilerId);
+        if (position < 0) throw new Error("adopted native candidate lacks its graph position");
+        for (const compilerId of unit.items.slice(0, position)) {
+          const ancestor = runtime.planRecord.plan.items.find(
+            (entry) => entry.compilerId === compilerId,
+          );
+          if (!ancestor) throw new Error("adopted native candidate lacks ancestor provenance");
+          nativeAncestorIsolation ||=
+            this.#packetFor(ancestor.workItem).requirements.trust !== "trusted_local";
+          if (ancestor.action === "execute") continue; // Current integrations are proved below.
+          if (!ancestor.source)
+            throw new Error("adopted native ancestor lacks its retained source");
+          const reservations = runtime.events.filter(
+            (event) => recoveryEventDigest(event) === ancestor.source!.reservationReceiptDigest,
+          );
+          const reservation = reservations[0];
+          if (reservations.length !== 1 || reservation?.event !== "AttemptReserved")
+            throw new Error("adopted native ancestor lacks its exact reservation");
+          nativeAncestorIsolation ||= !this.#registry.get(reservation.backend)?.capabilities
+            .hostExecution;
+          for (const producer of new Set([
+            ancestor.source.runId,
+            ...(ancestor.source.priorDelivery ? [ancestor.source.priorDelivery.runId] : []),
+            ...(ancestor.source.siblingRefresh
+              ? [ancestor.source.siblingRefresh.candidateRunId]
+              : []),
+          ])) {
+            const sourceIsolation = nativeSourceRequiresIsolation(producer, runtime.events);
+            nativeAncestorIsolation ||= sourceIsolation;
+          }
+        }
+      }
       const lineage = await this.#assertOwnTrunkAdvance(
-        exactHeadValidation.baseSha,
+        // A linear member's source base can be its parent's publication, which
+        // is not a trunk commit. Native member/transition proofs preserve that
+        // identity; actual trunk advancement starts at the acknowledged base.
+        nativeLinear ? runtime.planRecord.plan.expectedBaseSha : exactHeadValidation.baseSha,
         target,
         item.number,
       );
@@ -10244,6 +10282,7 @@ export class FactorySupervisor {
         this.#policy.trust === "sandbox_untrusted" ||
         this.#packetFor(item.number).requirements.trust !== "trusted_local" ||
         !this.#registry.get(reserved.backend)?.capabilities.hostExecution ||
+        nativeAncestorIsolation ||
         lineage.requiresIsolation;
       if (
         requiresIsolatedCandidate &&
@@ -10596,7 +10635,7 @@ export class FactorySupervisor {
         if (!isolated || candidate)
           throw new Error("adopted isolated failure conflicts with successful completion");
         assertIsolatedCandidateFailureProof({
-          repository: this.#run.repository,
+          repository: runtime.planRecord.plan.repository,
           sourceRunId: source.runId,
           identity,
           events: runtime.events,

@@ -10100,21 +10100,36 @@ export class FactorySupervisor {
     // validator: an authenticated later trunk advance cannot erase rejection.
     const priorFailures = runtime.verifiedSourceCapacity.filter(
       (event): event is Extract<FactoryEvent, { kind: "capacity" }> =>
-        event.kind === "capacity" && event.event === "CapacityReconciled" &&
-        event.runId === this.#run.runId && event.workItem === item.number &&
-        event.sourceRunId === source.runId && event.attempt === source.attempt &&
+        event.kind === "capacity" &&
+        event.event === "CapacityReconciled" &&
+        event.runId === this.#run.runId &&
+        event.workItem === item.number &&
+        event.sourceRunId === source.runId &&
+        event.attempt === source.attempt &&
         event.isolatedFailure !== undefined,
     );
     if (priorFailures.length) {
-      if (priorFailures.length > 100 || new Set(priorFailures.map((event) => event.backend)).size !== priorFailures.length ||
-        priorFailures.some((event) => !/^factory\/integration-sandbox-[a-f0-9]{64}$/.test(event.backend) ||
-          !event.isolatedValidation || event.policyDigest !== this.#run.policyDigest || !event.targetBaseSha))
+      if (
+        priorFailures.length > 100 ||
+        new Set(priorFailures.map((event) => event.backend)).size !== priorFailures.length ||
+        priorFailures.some(
+          (event) =>
+            !/^factory\/integration-sandbox-[a-f0-9]{64}$/.test(event.backend) ||
+            !event.isolatedValidation ||
+            event.policyDigest !== this.#run.policyDigest ||
+            !event.targetBaseSha,
+        )
+      )
         throw new Error("prior adopted isolated failure inventory is ambiguous");
       for (const event of priorFailures) {
         const failure = event.isolatedFailure!;
         const usageId = `integration-validation-${event.backend.slice("factory/integration-sandbox-".length)}`;
-        await this.#sourceUsage(item, usageId,
-          Date.parse(failure.validationCompletedAt) - Date.parse(failure.validationStartedAt), "validation_milliseconds");
+        await this.#sourceUsage(
+          item,
+          usageId,
+          Date.parse(failure.validationCompletedAt) - Date.parse(failure.validationStartedAt),
+          "validation_milliseconds",
+        );
         await this.#sourceUsage(item, usageId, failure.sandboxMilliseconds, "sandbox_milliseconds");
       }
       throw new Error("adopted isolated candidate validation was durably rejected");

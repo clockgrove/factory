@@ -1,0 +1,178 @@
+{
+  "version": 1,
+  "limits": { "cpu": 2, "memoryMb": 1024, "timeoutMinutes": 5 },
+  "cases": [
+    {
+      "id": "typed-cart",
+      "kind": "typescript",
+      "title": "Add safe discounts to the typed cart",
+      "objective": "The TypeScript cart currently totals positive integer cent amounts. Add a percentage discount argument without losing integer-cent accounting. [discount] Percentages 0 through 100 inclusive are valid; floor the final discounted total, so [101,100] at 25 percent yields 150. Reject fractional, negative, or above-100 percentages. [regression] Keep the default discount zero, retain existing item validation, and extend the executable assertions and types. Keep this a small local TypeScript change; do not introduce services, network access, new dependencies, or a generalized pricing engine.",
+      "baseline": {
+        "command": "npm test",
+        "stdout": "typed-cart baseline ok\n"
+      },
+      "criteria": [
+        {
+          "id": "discount",
+          "text": "A 25 percent discount on [101,100] returns 150 cents; invalid discount inputs throw.",
+          "paths": ["src/cart.ts"],
+          "commands": ["npm test"],
+          "tiers": ["mechanical", "semantic"],
+          "after": []
+        },
+        {
+          "id": "regression",
+          "text": "Existing item guards and default behavior remain executable alongside discount assertions.",
+          "paths": ["check.mjs", "tsconfig.json"],
+          "commands": ["npm test"],
+          "tiers": ["mechanical", "semantic"],
+          "after": ["discount"]
+        }
+      ],
+      "ownership": [],
+      "encodedAssets": []
+    },
+    {
+      "id": "generated-catalog",
+      "kind": "generated",
+      "title": "Extend the generated status catalog",
+      "objective": "The status catalog is generated from data/status.json. [catalog] Add status paused with label Waiting and rank 2, preserving ready rank 1. [regenerate] Regenerate generated/status.mjs from its source and retain deterministic lexical key order and a stale-output check. Update assertions for the new status. The generator owns its output: no output-only hand edits. Keep one small generator and offline Node checks; no new generator framework or package dependencies.",
+      "baseline": {
+        "command": "npm test",
+        "stdout": "generated-catalog baseline ok\n"
+      },
+      "criteria": [
+        {
+          "id": "catalog",
+          "text": "Source data contains ready rank 1 and paused Waiting rank 2, with generator support.",
+          "paths": ["data/status.json", "scripts/generate.mjs"],
+          "commands": ["npm test"],
+          "tiers": ["mechanical", "semantic"],
+          "after": []
+        },
+        {
+          "id": "regenerate",
+          "text": "Generated output matches the generator byte for byte and exports both status records.",
+          "paths": ["generated/status.mjs", "check.mjs"],
+          "commands": ["npm test"],
+          "tiers": ["mechanical", "semantic"],
+          "after": ["catalog"]
+        }
+      ],
+      "ownership": [
+        {
+          "source": "data/status.json",
+          "output": "generated/status.mjs",
+          "mergeClass": "generated"
+        },
+        {
+          "source": "scripts/generate.mjs",
+          "output": "generated/status.mjs",
+          "mergeClass": "generated"
+        }
+      ],
+      "encodedAssets": []
+    },
+    {
+      "id": "binary-module",
+      "kind": "binary",
+      "title": "Add a bounded WebAssembly answer export",
+      "objective": "This repository contains a real, tiny WebAssembly module and its byte generator. [module] Extend scripts/module.mjs to generate a valid module exporting answer() -> i32 with value 42. [artifact] Regenerate assets/answer.wasm and extend check.mjs to instantiate the actual binary and assert answer() returns 42. Keep the artifact below 1024 bytes, non-LFS, reproducible, and owned by the generator; preserve WebAssembly validation and do not add a compiler download, remote service, secret, or external dependency.",
+      "baseline": {
+        "command": "npm test",
+        "stdout": "binary-module baseline ok\n"
+      },
+      "criteria": [
+        {
+          "id": "module",
+          "text": "The byte generator defines a valid answer function returning the i32 value 42.",
+          "paths": ["scripts/module.mjs"],
+          "commands": ["npm test"],
+          "tiers": ["mechanical", "semantic"],
+          "after": []
+        },
+        {
+          "id": "artifact",
+          "text": "The actual regenerated non-LFS module instantiates, returns 42, and remains below 1024 bytes.",
+          "paths": ["assets/answer.wasm", "check.mjs"],
+          "commands": ["npm test"],
+          "tiers": ["mechanical", "semantic"],
+          "after": ["module"]
+        }
+      ],
+      "ownership": [
+        {
+          "source": "scripts/module.mjs",
+          "output": "assets/answer.wasm",
+          "mergeClass": "large-binary"
+        }
+      ],
+      "encodedAssets": [
+        {
+          "source": "assets/answer.wasm.base64",
+          "target": "assets/answer.wasm"
+        }
+      ]
+    },
+    {
+      "id": "seeded-simulation",
+      "kind": "simulation",
+      "title": "Bound deterministic queue simulation admission",
+      "objective": "The offline queue simulator currently admits every arrival. [capacity] Add an explicit positive-integer capacity option and admit only up to capacity arrivals, with deterministic admitted/rejected counts. With seed 7, four ticks, and capacity 2, arrivals remain [3,1,3,2], admitted are [2,1,2,2], and rejected are [1,0,1,0]. [replay] Preserve repeatability for equal seeds, preserve existing arrival generation, reject invalid capacity, and extend executable assertions. Do not use timing, randomness from the host, network, or real queue services.",
+      "baseline": {
+        "command": "npm test",
+        "stdout": "seeded-simulation baseline ok\n"
+      },
+      "criteria": [
+        {
+          "id": "capacity",
+          "text": "Capacity two yields admitted [2,1,2,2] and rejected [1,0,1,0] for seed seven.",
+          "paths": ["src/simulation.mjs"],
+          "commands": ["npm test"],
+          "tiers": ["mechanical", "semantic", "deterministic-simulation"],
+          "after": []
+        },
+        {
+          "id": "replay",
+          "text": "Repeat seeds produce identical bounded-admission traces and invalid capacity is rejected.",
+          "paths": ["check.mjs"],
+          "commands": ["npm test"],
+          "tiers": ["mechanical", "semantic"],
+          "after": ["capacity"]
+        }
+      ],
+      "ownership": [],
+      "encodedAssets": []
+    },
+    {
+      "id": "visual-status",
+      "kind": "visual",
+      "title": "Make paused status visible without color alone",
+      "objective": "The status card is a deterministic SVG produced by a small renderer. [paused] Add paused state with visible text Paused and a double-bar icon, keeping ready state Ready with its checkmark. [snapshot] Refresh visual/status.svg for paused state and extend offline renderer assertions for text, shape, and width 160 height 48. Preserve the viewBox and accessible title. A reviewer must inspect the actual SVG at its intended size for unclipped readable text and the distinct icon; string checks alone do not establish visual quality. Keep deterministic offline SVG output, no browser automation framework or remote assets.",
+      "baseline": {
+        "command": "npm test",
+        "stdout": "visual-status baseline ok\n"
+      },
+      "criteria": [
+        {
+          "id": "paused",
+          "text": "The renderer exposes paused text plus double bars while preserving ready semantics.",
+          "paths": ["src/render.mjs"],
+          "commands": ["npm test"],
+          "tiers": ["mechanical", "semantic"],
+          "after": []
+        },
+        {
+          "id": "snapshot",
+          "text": "The rendered paused SVG remains accessible, readable and unclipped at 160 by 48.",
+          "paths": ["visual/status.svg", "check.mjs"],
+          "commands": ["npm test"],
+          "tiers": ["mechanical", "semantic", "visual"],
+          "after": ["paused"]
+        }
+      ],
+      "ownership": [],
+      "encodedAssets": []
+    }
+  ]
+}

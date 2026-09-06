@@ -1,0 +1,9 @@
+{
+  "name": "factory-corpus-generated-catalog",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate": "node scripts/generate.mjs",
+    "test": "node check.mjs"
+  }
+}

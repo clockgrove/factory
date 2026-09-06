@@ -1,0 +1,10 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { renderStatus } from "./src/render.mjs";
+const svg = renderStatus("ready");
+assert.equal(await readFile(new URL("./visual/status.svg", import.meta.url), "utf8"), svg);
+assert.match(svg, /<title>Ready status<\/title>/);
+assert.match(svg, /viewBox="0 0 160 48"/);
+assert.match(svg, />Ready<\/text>/);
+assert.throws(() => renderStatus("unknown"));
+console.log("visual-status baseline ok");

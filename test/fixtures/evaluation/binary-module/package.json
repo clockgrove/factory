@@ -1,0 +1,9 @@
+{
+  "name": "factory-corpus-binary-module",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "generate": "node scripts/module.mjs",
+    "test": "node check.mjs"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "name": "factory-corpus-visual-status",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "render": "node src/render.mjs",
+    "test": "node check.mjs"
+  }
+}

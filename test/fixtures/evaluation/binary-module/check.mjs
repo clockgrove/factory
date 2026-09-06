@@ -1,0 +1,10 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { moduleBytes } from "./scripts/module.mjs";
+const bytes = await readFile(new URL("./assets/answer.wasm", import.meta.url));
+assert.deepEqual(bytes, moduleBytes());
+assert.ok(bytes.length < 1024);
+assert.equal(WebAssembly.validate(bytes), true);
+const { instance } = await WebAssembly.instantiate(bytes);
+assert.deepEqual(Object.keys(instance.exports), []);
+console.log("binary-module baseline ok");

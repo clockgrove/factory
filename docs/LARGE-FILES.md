@@ -1,9 +1,9 @@
-# Bounded large-file contract (#116–#118)
+# Large-file support and limits
 
-This is implemented code and a regression corpus, not evidence of a live provider run. Execute
-the checks only after all concurrent implementation is integrated. Installed WSL2 qualification,
-provider execution and comparative economics remain separate work; native Linux/macOS runs are
-explicitly deferred by the user. No model-selection or invoice-finality claim follows from this code.
+Factory handles large source files and artifacts within explicit size, integrity and provider
+boundaries. This guide describes those limits; see
+[verification status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md)
+for the exact environments and scenarios demonstrated so far.
 
 ## Content and consumers
 

@@ -65,6 +65,10 @@ and helper absence, show safe memory/load/headroom, and still be attempt one. Mi
 cooldown visibility, a stale sample, premature admission, or an uncertain observation
 leaves the case incomplete. Receipt timestamps are server observations; local kernel
 samples are separately timestamped and are not atomic with GitHub reads.
+The readmission observer has a four-minute wall-clock window from CPU release: the
+accepted two-minute cooldown plus two ordinary one-minute idle intervals for admission
+and durable visibility. This extends observation only, not run policy, resource lifetime
+or execution authority; timeout never triggers another launch or pressure injection.
 
 The same original Objective must then deliver through the shared installed regular
 runner's independent validation, exact PR/head/tree/merge proof and fresh merged-tree

@@ -15,6 +15,7 @@ export function assertPressureReadmission(
   policy: unknown,
 ): Record<string, unknown>;
 export function assertPressureCompletion(evidence: unknown): void;
+export function pressureReadmissionDeadline(releasedAt: string, cooldownSeconds: number): number;
 export function createPressureQualification(
   authority: unknown,
   env?: Record<string, string | undefined>,

@@ -5,6 +5,7 @@ import {
   pressureAuthority,
   assertPressureRun,
   assertPressureReadmission,
+  pressureReadmissionDeadline,
   main,
 } from "../scripts/verify-local-pressure.mjs";
 import {
@@ -21,6 +22,18 @@ import {
 } from "../scripts/local-pressure-resource.mjs";
 
 const unit = `clockgrove-factory-qualification-${"a".repeat(64)}.service`;
+
+describe("pressure readmission observation deadline", () => {
+  it("allows healthy admission after the 120-second cooldown and subsequent idle polling", () => {
+    const released = "2026-09-06T00:00:00.000Z";
+    const deadline = pressureReadmissionDeadline(released, 120);
+    expect(deadline).toBe(Date.parse(released) + 240_000);
+    // A healthy next idle tick plus a durable receipt can arrive beyond the old 120s window.
+    expect(Date.parse(released) + 180_000 + 15_000).toBeLessThan(deadline);
+    expect(() => pressureReadmissionDeadline(released, 600)).toThrow(/unexpected accepted/);
+    expect(() => pressureReadmissionDeadline("not a timestamp", 120)).toThrow(/timestamp/);
+  });
+});
 const primaryUnit = `clockgrove-factory-qualification-${"b".repeat(64)}.service`;
 const sliceUnit = pressureSlice(primaryUnit);
 const cgroup = `/user.slice/user-1000.slice/user@1000.service/${sliceUnit}`;

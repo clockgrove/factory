@@ -56,6 +56,12 @@ function pressurePolicy(limit) {
   return policy;
 }
 
+/** Observation only: keep the accepted policy unchanged and allow two idle ticks after cooldown. */
+export function pressureReadmissionDeadline(releasedAt, cooldownSeconds) {
+  assert.equal(cooldownSeconds, 120, "unexpected accepted pressure cooldown");
+  return instant(releasedAt) + cooldownSeconds * 1000 + 2 * 60000;
+}
+
 function assertPressurePipeline(evidence) {
   assertRegularPipelineCompletion(evidence, {
     expected: pressurePolicy(modelTokenLimit(String(evidence.policy.economics.maxModelTokens))),
@@ -493,8 +499,13 @@ export function createPressureQualification(authority, env = process.env, port =
       proof.releaseRequestedAt = port.now();
       hooks.save();
       proof.released = await changeSchedulingService(primary, "release-cpu", port);
+      const readmissionDeadline = pressureReadmissionDeadline(
+        proof.releaseRequestedAt,
+        authority.policy.capacity.local.admissionCooldownSeconds,
+      );
+      proof.readmissionDeadline = new Date(readmissionDeadline).toISOString();
       hooks.save();
-      for (let index = 0; index < 60; index++) {
+      for (let index = 0; index < 120 && instant(port.now()) < readmissionDeadline; index++) {
         running();
         owned();
         observed = await schedulingSnapshot(hooks);

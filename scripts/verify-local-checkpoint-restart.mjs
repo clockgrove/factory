@@ -473,7 +473,10 @@ export function checkpointFacts(
     observation.status.summary.economics.modelTokenBreakdown.reconciledCalls,
     usage.length,
   );
-  assert.ok(modelTokens < authority.policy.economics.maxModelTokens, "original allowance exhausted");
+  assert.ok(
+    modelTokens < authority.policy.economics.maxModelTokens,
+    "original allowance exhausted",
+  );
   assert.equal(
     unique(
       run.filter((event) => event.event === "GraphCompiled"),

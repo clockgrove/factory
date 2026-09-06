@@ -264,7 +264,11 @@ export function assessProviderCompletion(evidence, authority) {
       const taskIds = new Set();
       const pullIds = new Set();
       let sessionCount = 0;
-      assert.deepEqual(evidence.managedSessionObservation.active ?? [], [], "managed activity remains");
+      assert.deepEqual(
+        evidence.managedSessionObservation.active ?? [],
+        [],
+        "managed activity remains",
+      );
       for (const binding of evidence.managedSessionObservation.bindings) {
         assert.ok(typeof binding.taskId === "string" && binding.taskId.length > 0);
         assert.ok(!taskIds.has(binding.taskId), "managed task binding repeated");

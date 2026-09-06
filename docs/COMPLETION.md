@@ -21,20 +21,26 @@ paid-provider authority. Missing input for one issue does not stop independent i
 
 | Issue / acceptance boundary | Kind | Owner / state | Next deliverable |
 | --- | --- | --- | --- |
-| [#70 Accurate recovery guidance](https://github.com/clockgrove/factory/issues/70): supported recovery instructions without weakening restart fences | Code, known bug | Recovery lane / code integrated; checks deferred | Run written regression coverage in the coordinated phase; keep the issue open until acceptance. |
+| [#70 Accurate recovery guidance](https://github.com/clockgrove/factory/issues/70): supported recovery instructions without weakening restart fences | Code, known bug | Recovery lane / code integrated; final phase | Run written regression coverage in the coordinated phase; keep the issue open until acceptance. |
 | [#71 Codex capability boundary](https://github.com/clockgrove/factory/issues/71): no working-provider claim without its own interface | Code | Capability lane / code integrated; checks deferred | Verify truthful unavailability, denied launch and unaffected local startup; real integration remains a provider follow-up, not a global blocker. |
 | [#72 Copilot limited controls](https://github.com/clockgrove/factory/issues/72): exact task-specific human action where automatic stop is unsupported | Code | Copilot lane / code integrated; checks deferred | Verify unknown identity/termination retains resource obligations and blocks unsafe replacement. |
 | [#73 User-owned provider billing](https://github.com/clockgrove/factory/issues/73): complete proven execution without invoice finality | Code | Accounting lane / code integrated; checks deferred | Verify unavailable billing does not fail otherwise proven execution; actual session/resource/native-bound failures still do. |
 | [#90 Provider-cost replay](https://github.com/clockgrove/factory/issues/90): unique receipts, contradictory evidence and finite totals | Code, known accounting bug | Accounting lane / code integrated; checks deferred | Run written regressions in the coordinated phase; unavailable costs are not zero. |
 | [#74 Retained qualifier corrections](https://github.com/clockgrove/factory/issues/74): bounded, correctly bound cancellation/budget evidence | Code, qualification-tool bugs | Local correction lane / code integrated; checks deferred | Run existing corrected runners' regression coverage with the full integrated suite; live scenarios remain separately authorized. |
+| [#92 Final-check defects](https://github.com/clockgrove/factory/issues/92): independent managed-validator absence and real installed claim proof, with typed fixtures | Code, final verification defects | Both lanes / completed and integrated; focused regressions passed | Run coordinated final verification on the corrected candidate. |
 
 Issue comments carry exact handoffs and blockers. The recovery lane completed its first code task and
 was explicitly restarted for #90 and then #73/#74. The provider-policy lanes delivered source and
 documentation and are completed, not running background tests. The local correction lane delivered
 its existing source fixes. All current implementation lanes are integrated; the coordinator now owns
 the single final verification phase and any concrete defect fixes it identifies.
-No test, typecheck, lint/format, build or live qualification has run since the implementation-only
-directive. Written regression source and old qualifier work are preserved, not claimed as passed.
+Implementation completed before the first build and final verification attempt. Frozen candidate
+`7fa42f75016dcab229d901bc52962e7d96502629` stopped at typecheck with three fixture typing errors;
+tests and package checks had not run. Those failures and two final-review safety defects are tracked
+in #92. Both corrections passed their focused regression files; remaining checks await the
+corrected candidate. [Original failure](release-evidence/final-suite-original-failure-2026-09-05.json)
+is preserved. No paid, model-backed or live qualification has started. Older evidence remains
+bound to its original artifacts, not claimed as proof of this stack.
 
 ## Deferred qualification and distribution
 
@@ -65,8 +71,9 @@ two-working-managed-providers and invoice-finality requirements; the other retai
 ## PR stack
 
 [PR #91](https://github.com/clockgrove/factory/pull/91) contains the initial recovery/accounting
-corrections and issue-first workflow. The provider-capability layer builds on it; the retained
-local-correction layer follows. Run coordinated checks on the integrated tip, not each intermediate
+corrections and issue-first workflow. [PR #93](https://github.com/clockgrove/factory/pull/93) adds the
+provider-capability layer; the retained local-correction layer follows. Run coordinated checks on
+the integrated tip, not each intermediate
 layer. Source-only intermediate PRs are not separate qualified install candidates.
 
 [PR #68](https://github.com/clockgrove/factory/pull/68) delivered native sibling refresh and retained

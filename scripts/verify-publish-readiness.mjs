@@ -95,7 +95,11 @@ const verifyManagedObjective = async (qualification, record, backendId) => {
   assert.equal(observed?.schemaVersion, 1, "structured installed observation missing");
   assert.equal(observed.scope, "installed-managed-objective-happy-path");
   assert.equal(observed.result, "passed", "installed Objective exercise did not pass");
-  assert.equal(observed.completionAssessment?.result, "passed", "completion assessment is incomplete");
+  assert.equal(
+    observed.completionAssessment?.result,
+    "passed",
+    "completion assessment is incomplete",
+  );
   assert.equal(observed.completionAssessment.scope, observed.scope);
   assert.equal(observed.failure, undefined, "qualification retained a failed boundary");
   assert.ok(Number.isFinite(Date.parse(observed.startedAt)));
@@ -104,7 +108,9 @@ const verifyManagedObjective = async (qualification, record, backendId) => {
   assert.deepEqual(observed.preflight.blockers, []);
   assert.equal(observed.preflight.harness?.sourceCommit, record.commit);
   assert.equal(observed.preflight.harness.sourceTreeClean, true);
-  const inventory = record.subjects.find((subject) => subject.path === "dist/bundle-inventory.json");
+  const inventory = record.subjects.find(
+    (subject) => subject.path === "dist/bundle-inventory.json",
+  );
   assert.equal(observed.installedArtifact?.inventorySha256, inventory.sha256);
   assert.equal(observed.preflight.harness.candidateInventorySha256, inventory.sha256);
   assert.deepEqual(observed.preflight.installedArtifact, observed.installedArtifact);
@@ -120,14 +126,27 @@ const verifyManagedObjective = async (qualification, record, backendId) => {
   const packageManifest = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
   assert.equal(observed.installedArtifact.version, packageManifest.version);
   const authority = observed.providerAuthority;
-  assert.equal(authority?.profile, backendId === managedBackendIds[0] ? "github-copilot" : "openai-codex");
+  assert.equal(
+    authority?.profile,
+    backendId === managedBackendIds[0] ? "github-copilot" : "openai-codex",
+  );
   assert.equal(authority.repository, observed.repository);
-  assert.ok(Number.isSafeInteger(authority.sandboxMinutes) && authority.sandboxMinutes >= 10 && authority.sandboxMinutes <= 120);
-  assert.ok(Number.isSafeInteger(authority.modelTokens) && authority.modelTokens >= 1000 && authority.modelTokens <= 500000);
+  assert.ok(
+    Number.isSafeInteger(authority.sandboxMinutes) &&
+      authority.sandboxMinutes >= 10 &&
+      authority.sandboxMinutes <= 120,
+  );
+  assert.ok(
+    Number.isSafeInteger(authority.modelTokens) &&
+      authority.modelTokens >= 1000 &&
+      authority.modelTokens <= 500000,
+  );
   assert.equal(authority.managedSessions, 3);
   // Reuse the runner's pure execution proof, not its caller-supplied passed label.
   // Importing this module does not invoke a provider, controller or live runner.
-  const { assessProviderCompletion, providerPolicy } = await import("./verify-provider-objective.mjs");
+  const { assessProviderCompletion, providerPolicy } = await import(
+    "./verify-provider-objective.mjs"
+  );
   assert.deepEqual(observed.policy, providerPolicy(authority));
   const starts = observed.events.filter((event) => event.event === "FactoryRunStarted");
   assert.equal(starts.length, 1);
@@ -136,13 +155,19 @@ const verifyManagedObjective = async (qualification, record, backendId) => {
   assert.equal(assessment.result, "passed", assessment.reason);
   const joins = observed.dependencies.filter((item) => item.blockedBy.length === 2);
   assert.equal(joins.length, 1);
-  const integrations = observed.events.filter((event) =>
-    event.runId === observed.runResult.runId && event.event === "AttemptIntegrated" && event.workItem === joins[0].workItem);
+  const integrations = observed.events.filter(
+    (event) =>
+      event.runId === observed.runResult.runId &&
+      event.event === "AttemptIntegrated" &&
+      event.workItem === joins[0].workItem,
+  );
   assert.equal(integrations.length, 1);
   assert.match(observed.finalSha ?? "", /^[a-f0-9]{40}$/);
   assert.equal(observed.finalSha, integrations[0].headSha);
   assert.ok(typeof observed.testOutput === "string" && observed.testOutput.trim().length > 0);
-  assert.ok(typeof observed.behaviorOutput === "string" && observed.behaviorOutput.trim().length > 0);
+  assert.ok(
+    typeof observed.behaviorOutput === "string" && observed.behaviorOutput.trim().length > 0,
+  );
 };
 const verifyManagedProviders = async (record) => {
   if (!Array.isArray(record.managedProviders) || record.managedProviders.length !== 2) {
@@ -199,10 +224,19 @@ const verifyManagedProviders = async (record) => {
         throw new Error(`${backendId} has an unsupported capability without a source`);
       }
       if (
-        typeof boundary.capability !== "string" || !boundary.capability.trim() ||
-        typeof boundary.reason !== "string" || !boundary.reason.trim() ||
-        reference.protocol !== "https:" || reference.username || reference.password ||
-        !["docs.github.com", "developers.openai.com", "learn.chatgpt.com", "platform.openai.com"].includes(reference.hostname)
+        typeof boundary.capability !== "string" ||
+        !boundary.capability.trim() ||
+        typeof boundary.reason !== "string" ||
+        !boundary.reason.trim() ||
+        reference.protocol !== "https:" ||
+        reference.username ||
+        reference.password ||
+        ![
+          "docs.github.com",
+          "developers.openai.com",
+          "learn.chatgpt.com",
+          "platform.openai.com",
+        ].includes(reference.hostname)
       ) {
         throw new Error(`${backendId} has an invalid unsupported-capability boundary`);
       }
@@ -210,7 +244,8 @@ const verifyManagedProviders = async (record) => {
     if (!available) {
       if (
         observed.reasonKind !== "provider-interface-unavailable" ||
-        typeof observed.probe.reason !== "string" || !observed.probe.reason.trim() ||
+        typeof observed.probe.reason !== "string" ||
+        !observed.probe.reason.trim() ||
         observed.unsupportedCapabilities.length === 0 ||
         observed.supportedClaims.length !== 0 ||
         observed.checks.unavailableLaunchDenied !== true ||
@@ -222,16 +257,22 @@ const verifyManagedProviders = async (record) => {
     }
     if (
       !observed.supportedClaims.some((claim) => claim?.capability === "objective-delivery") ||
-      new Set(observed.supportedClaims.map((claim) => claim?.capability)).size !== observed.supportedClaims.length
+      new Set(observed.supportedClaims.map((claim) => claim?.capability)).size !==
+        observed.supportedClaims.length
     ) {
-      throw new Error(`${backendId} requires qualified supported claims including objective-delivery`);
+      throw new Error(
+        `${backendId} requires qualified supported claims including objective-delivery`,
+      );
     }
     for (const claim of observed.supportedClaims) {
       const qualification = await boundArtifact(claim.evidence);
       if (
-        typeof claim.capability !== "string" || !claim.capability.trim() ||
-        qualification.commit !== record.commit || qualification.backendId !== backendId ||
-        qualification.capability !== claim.capability || qualification.status !== "passed"
+        typeof claim.capability !== "string" ||
+        !claim.capability.trim() ||
+        qualification.commit !== record.commit ||
+        qualification.backendId !== backendId ||
+        qualification.capability !== claim.capability ||
+        qualification.status !== "passed"
       ) {
         throw new Error(`${backendId} has an unqualified supported capability claim`);
       }

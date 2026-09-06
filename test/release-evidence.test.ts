@@ -1,6 +1,14 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -69,7 +77,9 @@ describe("release evidence and publication boundary", () => {
     change(observed);
     const bytes = JSON.stringify(observed);
     write(descriptor.path, bytes);
-    gate.artifacts.find((artifact: ArtifactDescriptor) => artifact.path === descriptor.path).sha256 = hash(bytes);
+    gate.artifacts.find(
+      (artifact: ArtifactDescriptor) => artifact.path === descriptor.path,
+    ).sha256 = hash(bytes);
     descriptor.sha256 = hash(bytes);
     write("docs/release-evidence/4.json", JSON.stringify(gate));
     commit();
@@ -94,18 +104,33 @@ describe("release evidence and publication boundary", () => {
       }),
     };
     const events: Record<string, unknown>[] = [];
-    const add = (event: string, fields: Record<string, unknown> = {}) => events.push({
-      protocol: "clockgrove.factory/v2", runId: "run", objective: 1,
-      event, sequence: events.length + 1, authorId: 123, ...fields,
-    });
+    const add = (event: string, fields: Record<string, unknown> = {}) =>
+      events.push({
+        protocol: "clockgrove.factory/v2",
+        runId: "run",
+        objective: 1,
+        event,
+        sequence: events.length + 1,
+        authorId: 123,
+        ...fields,
+      });
     add("FactoryRunStarted", { policy });
     add("GraphProjected", { graphSize: 3 });
     for (const workItem of [2, 3, 4]) {
       const attempt = { workItem, attempt: 1 };
       const native = { ...attempt, phase: "execution", unit: "managed_sessions", amount: 1 };
       const validation = { ...attempt, phase: "validation", backend: "codex-cli/daytona" };
-      const validationBudget = { ...attempt, phase: "validation", unit: "sandbox_milliseconds", amount: 100 };
-      const artifact = { ...attempt, artifactDigest: String(workItem).repeat(64), headSha: String(workItem).repeat(40) };
+      const validationBudget = {
+        ...attempt,
+        phase: "validation",
+        unit: "sandbox_milliseconds",
+        amount: 100,
+      };
+      const artifact = {
+        ...attempt,
+        artifactDigest: String(workItem).repeat(64),
+        headSha: String(workItem).repeat(40),
+      };
       add("BudgetReserved", native);
       add("AttemptStarted", { ...attempt, backend: "github-copilot/github-managed" });
       add("AttemptSucceeded", attempt);
@@ -123,56 +148,89 @@ describe("release evidence and publication boundary", () => {
     add("FactoryRunCompleted");
     const scope = "installed-managed-objective-happy-path";
     return {
-      schemaVersion: 1, scope, repository, result: "passed",
-      startedAt: "2026-09-04T00:00:00Z", finishedAt: "2026-09-04T00:10:00Z",
-      providerAuthority: authority, policy, actor: { id: 123 },
-      installedArtifact, finishedInstalledArtifact: installedArtifact,
+      schemaVersion: 1,
+      scope,
+      repository,
+      result: "passed",
+      startedAt: "2026-09-04T00:00:00Z",
+      finishedAt: "2026-09-04T00:10:00Z",
+      providerAuthority: authority,
+      policy,
+      actor: { id: 123 },
+      installedArtifact,
+      finishedInstalledArtifact: installedArtifact,
       preflight: {
-        result: "passed", blockers: [], installedArtifact,
-        harness: { sourceCommit: testedCommit, sourceTreeClean: true, candidateInventorySha256: installedArtifact.inventorySha256 },
+        result: "passed",
+        blockers: [],
+        installedArtifact,
+        harness: {
+          sourceCommit: testedCommit,
+          sourceTreeClean: true,
+          candidateInventorySha256: installedArtifact.inventorySha256,
+        },
       },
       completionAssessment: { result: "passed", scope },
       runResult: { status: "completed", runId: "run", objective: 1 },
       objective: { number: 1, state: "closed" },
       children: [2, 3, 4].map((number) => ({ number, state: "closed" })),
       dependencies: [
-        { workItem: 2, blockedBy: [] }, { workItem: 3, blockedBy: [] },
+        { workItem: 2, blockedBy: [] },
+        { workItem: 3, blockedBy: [] },
         { workItem: 4, blockedBy: [{ number: 2 }, { number: 3 }] },
       ],
       events,
       pulls: [2, 3, 4].map((number) => ({
-        id: number + 100, node_id: `PR_${number + 10}`, number: number + 10,
+        id: number + 100,
+        node_id: `PR_${number + 10}`,
+        number: number + 10,
         base: { repo: { node_id: "R_fixture", full_name: repository } },
-        head: { sha: String(number).repeat(40) }, state: "closed", merged: true,
+        head: { sha: String(number).repeat(40) },
+        state: "closed",
+        merged: true,
       })),
       mergeProofs: [2, 3, 4].map((number) => ({
-        runId: "run", objective: 1, workItem: number, attempt: 1,
-        pullRequest: number + 10, pullRequestNodeId: `PR_${number + 10}`,
-        repository, repositoryNodeId: "R_fixture", headSha: String(number).repeat(40),
+        runId: "run",
+        objective: 1,
+        workItem: number,
+        attempt: 1,
+        pullRequest: number + 10,
+        pullRequestNodeId: `PR_${number + 10}`,
+        repository,
+        repositoryNodeId: "R_fixture",
+        headSha: String(number).repeat(40),
         mergeSha: String(number + 3).repeat(40),
       })),
       status: {
-        run: { state: "completed", runId: "run" }, objective: { number: 1, closed: true },
+        run: { state: "completed", runId: "run" },
+        objective: { number: 1, closed: true },
         summary: { runId: "run", outcome: "completed", attempts: { active: 0 } },
         capacity: { observed: { active: 0 }, activeReservations: [] },
         workItems: [2, 3, 4].map((number) => ({ number, state: "done", openDependencies: [] })),
       },
       cleanupObservation: { state: "absent" },
       managedSessionObservation: {
-        state: "terminated", bindings: [2, 3, 4].map((number) => ({
-          pullNumber: number + 10, pullDatabaseId: number + 100,
-          taskId: `task-${number}`, taskState: "completed",
+        state: "terminated",
+        bindings: [2, 3, 4].map((number) => ({
+          pullNumber: number + 10,
+          pullDatabaseId: number + 100,
+          taskId: `task-${number}`,
+          taskState: "completed",
           sessions: [{ id: `session-${number}`, state: "completed" }],
         })),
       },
-      finalSha: "7".repeat(40), testOutput: "tests 3; pass 3; fail 0",
+      finalSha: "7".repeat(40),
+      testOutput: "tests 3; pass 3; fail 0",
       behaviorOutput: "Independent merged-artifact assertions passed",
     };
   };
 
-  const changeQualification = (change: (qualification: Record<string, unknown> & {
-    observation: ReturnType<typeof installedObservation>;
-  }) => void) => {
+  const changeQualification = (
+    change: (
+      qualification: Record<string, unknown> & {
+        observation: ReturnType<typeof installedObservation>;
+      },
+    ) => void,
+  ) => {
     const gate = evidence(4);
     const descriptor = gate.managedProviders[0].evidence;
     const provider = JSON.parse(readFileSync(join(root, descriptor.path), "utf8"));
@@ -181,9 +239,12 @@ describe("release evidence and publication boundary", () => {
     change(qualification);
     const bytes = JSON.stringify(qualification);
     write(claim.path, bytes);
-    gate.artifacts.find((artifact: ArtifactDescriptor) => artifact.path === claim.path).sha256 = hash(bytes);
+    gate.artifacts.find((artifact: ArtifactDescriptor) => artifact.path === claim.path).sha256 =
+      hash(bytes);
     write("docs/release-evidence/4.json", JSON.stringify(gate));
-    changeProvider(0, (observed) => { observed.supportedClaims[0]!.evidence.sha256 = hash(bytes); });
+    changeProvider(0, (observed) => {
+      observed.supportedClaims[0]!.evidence.sha256 = hash(bytes);
+    });
   };
 
   beforeEach(() => {
@@ -200,11 +261,19 @@ describe("release evidence and publication boundary", () => {
     );
     write("THIRD_PARTY_NOTICES.txt", "fixture notices\n");
     write(".gitignore", "release/\nbin/\nnode_modules/\n");
-    symlinkSync(fileURLToPath(new URL("../node_modules", import.meta.url)), join(root, "node_modules"), "dir");
+    symlinkSync(
+      fileURLToPath(new URL("../node_modules", import.meta.url)),
+      join(root, "node_modules"),
+      "dir",
+    );
     mkdirSync(join(root, "scripts"));
     for (const name of [
-      "verify-publish-readiness.mjs", "publish-release.mjs", "verify-provider-objective.mjs",
-      "verify-live-objective.mjs", "qualification-receipts.mjs", "qualification-merge-proof.mjs",
+      "verify-publish-readiness.mjs",
+      "publish-release.mjs",
+      "verify-provider-objective.mjs",
+      "verify-live-objective.mjs",
+      "qualification-receipts.mjs",
+      "qualification-merge-proof.mjs",
     ]) {
       copyFileSync(new URL(`../scripts/${name}`, import.meta.url), join(root, "scripts", name));
     }
@@ -262,24 +331,34 @@ describe("release evidence and publication boundary", () => {
             available,
             authenticated: available,
             measuredAt: "2026-09-04T00:00:00Z",
-            ...(!available ? { reason: "Provider task/session identity contract unavailable" } : {}),
+            ...(!available
+              ? { reason: "Provider task/session identity contract unavailable" }
+              : {}),
           },
           checks: {
             declarationMatchesInstalled: true,
             localStartupUnaffected: true,
             ...(!available ? { unavailableLaunchDenied: true, noProviderLaunch: true } : {}),
           },
-          unsupportedCapabilities: available ? [] : [{
-            capability: "managed-execution",
-            reason: "No supported assignable actor and task/session termination interface",
-            reference: "https://learn.chatgpt.com/docs/cloud",
-          }],
+          unsupportedCapabilities: available
+            ? []
+            : [
+                {
+                  capability: "managed-execution",
+                  reason: "No supported assignable actor and task/session termination interface",
+                  reference: "https://learn.chatgpt.com/docs/cloud",
+                },
+              ],
           supportedClaims: available ? [{ capability: "objective-delivery", evidence: claim }] : [],
         });
         write(path, bytes);
         const descriptor = { path, sha256: hash(bytes) };
         managed.artifacts.push(descriptor);
-        return { backendId, availability: available ? "available" : "unavailable", evidence: descriptor };
+        return {
+          backendId,
+          availability: available ? "available" : "unavailable",
+          evidence: descriptor,
+        };
       },
     );
     write("docs/release-evidence/4.json", JSON.stringify(managed));
@@ -301,34 +380,53 @@ describe("release evidence and publication boundary", () => {
   });
 
   it("accepts a qualified available provider and an evidenced unavailable provider without invoice data", () => {
-    expect(evidence(4).managedProviders.map((provider: { availability: string }) => provider.availability)).toEqual([
-      "available", "unavailable",
-    ]);
+    expect(
+      evidence(4).managedProviders.map(
+        (provider: { availability: string }) => provider.availability,
+      ),
+    ).toEqual(["available", "unavailable"]);
     expect(verify().status).toBe(0);
   });
 
   it("rejects a four-field passed label without installed execution evidence", () => {
     changeQualification((qualification) => {
       for (const key of Object.keys(qualification))
-        if (!["commit", "backendId", "capability", "status"].includes(key)) delete qualification[key];
+        if (!["commit", "backendId", "capability", "status"].includes(key))
+          delete qualification[key];
     });
     expect(verify().stderr).toContain("installed qualification schema missing");
   });
 
   it.each([
-    "incomplete-assessment", "failed-exercise", "foreign-source", "wrong-bundle",
-    "active-session", "unknown-cleanup", "missing-native", "missing-validation",
-    "wrong-head", "wrong-final-tree", "missing-artifact-tests",
+    "incomplete-assessment",
+    "failed-exercise",
+    "foreign-source",
+    "wrong-bundle",
+    "active-session",
+    "unknown-cleanup",
+    "missing-native",
+    "missing-validation",
+    "wrong-head",
+    "wrong-final-tree",
+    "missing-artifact-tests",
   ])("rejects %s despite the outer passed label", (fault) => {
     changeQualification(({ observation }) => {
       if (fault === "incomplete-assessment") observation.completionAssessment.result = "incomplete";
       if (fault === "failed-exercise") observation.result = "failed";
       if (fault === "foreign-source") observation.preflight.harness.sourceCommit = "0".repeat(40);
-      if (fault === "wrong-bundle") observation.installedArtifact.bundles[0]!.sha256 = "0".repeat(64);
-      if (fault === "active-session") observation.managedSessionObservation.bindings[0]!.sessions[0]!.state = "in_progress";
+      if (fault === "wrong-bundle")
+        observation.installedArtifact.bundles[0]!.sha256 = "0".repeat(64);
+      if (fault === "active-session")
+        observation.managedSessionObservation.bindings[0]!.sessions[0]!.state = "in_progress";
       if (fault === "unknown-cleanup") observation.cleanupObservation.state = "unknown";
-      if (fault === "missing-native") observation.events = observation.events.filter((event) => event.event !== "BudgetReconciled");
-      if (fault === "missing-validation") observation.events = observation.events.filter((event) => event.event !== "CapacityReserved");
+      if (fault === "missing-native")
+        observation.events = observation.events.filter(
+          (event) => event.event !== "BudgetReconciled",
+        );
+      if (fault === "missing-validation")
+        observation.events = observation.events.filter(
+          (event) => event.event !== "CapacityReserved",
+        );
       if (fault === "wrong-head") observation.pulls[0]!.head.sha = "0".repeat(40);
       if (fault === "wrong-final-tree") observation.finalSha = "0".repeat(40);
       if (fault === "missing-artifact-tests") observation.testOutput = "";
@@ -338,8 +436,12 @@ describe("release evidence and publication boundary", () => {
 
   it("rejects new supported claim labels without an applicable release assessor", () => {
     const gate = evidence(4);
-    const provider = JSON.parse(readFileSync(join(root, gate.managedProviders[0].evidence.path), "utf8"));
-    const original = JSON.parse(readFileSync(join(root, provider.supportedClaims[0].evidence.path), "utf8"));
+    const provider = JSON.parse(
+      readFileSync(join(root, gate.managedProviders[0].evidence.path), "utf8"),
+    );
+    const original = JSON.parse(
+      readFileSync(join(root, provider.supportedClaims[0].evidence.path), "utf8"),
+    );
     const path = "docs/release-evidence/unsupported-claim.json";
     const bytes = JSON.stringify({ ...original, capability: "automatic-cancellation" });
     write(path, bytes);
@@ -377,12 +479,16 @@ describe("release evidence and publication boundary", () => {
   });
 
   it("does not treat missing user credentials as a missing provider interface", () => {
-    changeProvider(1, (observed) => { observed.reasonKind = "credentials-unavailable"; });
+    changeProvider(1, (observed) => {
+      observed.reasonKind = "credentials-unavailable";
+    });
     expect(verify().stderr).toContain("not an evidenced fail-closed boundary");
   });
 
   it("rejects unavailable declarations that still launch or lack a documented boundary", () => {
-    changeProvider(1, (observed) => { observed.checks.unavailableLaunchDenied = false; });
+    changeProvider(1, (observed) => {
+      observed.checks.unavailableLaunchDenied = false;
+    });
     expect(verify().stderr).toContain("not an evidenced fail-closed boundary");
     changeProvider(1, (observed) => {
       observed.checks.unavailableLaunchDenied = true;
@@ -399,29 +505,45 @@ describe("release evidence and publication boundary", () => {
   });
 
   it("rejects capability observations from another candidate", () => {
-    changeProvider(1, (observed) => { observed.commit = "0".repeat(40); });
+    changeProvider(1, (observed) => {
+      observed.commit = "0".repeat(40);
+    });
     expect(verify().stderr).toContain("exact-candidate installed capability observation");
   });
 
   it("requires evidence for an available provider's supported delivery claim", () => {
-    changeProvider(0, (observed) => { observed.supportedClaims = []; });
+    changeProvider(0, (observed) => {
+      observed.supportedClaims = [];
+    });
     expect(verify().stderr).toContain("requires qualified supported claims");
   });
 
   it("rejects supported claims referencing an artifact absent from the gate manifest", () => {
-    changeProvider(0, (observed) => { observed.supportedClaims[0]!.evidence.sha256 = "0".repeat(64); });
+    changeProvider(0, (observed) => {
+      observed.supportedClaims[0]!.evidence.sha256 = "0".repeat(64);
+    });
     expect(verify().stderr).toContain("unique digest-bound artifact");
   });
 
   it("rejects qualification evidence for a different provider or candidate", () => {
     const gate = evidence(4);
-    const provider = JSON.parse(readFileSync(join(root, gate.managedProviders[0].evidence.path), "utf8"));
+    const provider = JSON.parse(
+      readFileSync(join(root, gate.managedProviders[0].evidence.path), "utf8"),
+    );
     const claim = provider.supportedClaims[0].evidence;
-    const bytes = JSON.stringify({ commit: "0".repeat(40), backendId: "foreign", capability: "objective-delivery", status: "passed" });
+    const bytes = JSON.stringify({
+      commit: "0".repeat(40),
+      backendId: "foreign",
+      capability: "objective-delivery",
+      status: "passed",
+    });
     write(claim.path, bytes);
-    gate.artifacts.find((artifact: ArtifactDescriptor) => artifact.path === claim.path).sha256 = hash(bytes);
+    gate.artifacts.find((artifact: ArtifactDescriptor) => artifact.path === claim.path).sha256 =
+      hash(bytes);
     write("docs/release-evidence/4.json", JSON.stringify(gate));
-    changeProvider(0, (observed) => { observed.supportedClaims[0]!.evidence.sha256 = hash(bytes); });
+    changeProvider(0, (observed) => {
+      observed.supportedClaims[0]!.evidence.sha256 = hash(bytes);
+    });
     expect(verify().stderr).toContain("unqualified supported capability claim");
   });
 

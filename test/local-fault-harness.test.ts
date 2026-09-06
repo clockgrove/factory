@@ -343,7 +343,9 @@ function validationRaceFixture() {
   };
   evidence.receipts.push(
     { event: capacity },
-    { event: { ...capacity, event: "CapacityReconciled", localScopeBatch: undefined, sequence: 8 } },
+    {
+      event: { ...capacity, event: "CapacityReconciled", localScopeBatch: undefined, sequence: 8 },
+    },
   );
   evidence.finalScopes = faultResourceUnits(evidence).map((unit) => ({ unit, status: "absent" }));
   return { evidence, capacity };
@@ -461,7 +463,8 @@ describe("installed local fault qualification harness", () => {
     (fault) => {
       const { evidence, capacity } = validationRaceFixture();
       if (fault === "missing-batch")
-        evidence.receipts.find(({ event }) => event === capacity)!.event.localScopeBatch = undefined;
+        evidence.receipts.find(({ event }) => event === capacity)!.event.localScopeBatch =
+          undefined;
       if (fault === "wrong-run") capacity.localScopeBatch.identity.runId = "foreign";
       if (fault === "wrong-work") capacity.localScopeBatch.identity.workItem += 1;
       if (fault === "foreign-generation")

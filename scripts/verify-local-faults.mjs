@@ -1212,11 +1212,7 @@ async function runQualification(progress) {
     }
     progress.stage("terminal-observation");
     assert.ok(evidence.runId, "no captured run to verify");
-    await boundedPoll(
-      observe,
-      () => faultTerminalReady(evidence),
-      { milliseconds: 600000 },
-    );
+    await boundedPoll(observe, () => faultTerminalReady(evidence), { milliseconds: 600000 });
     evidence.finishedInstalledArtifact = installedBundleIdentity(pluginRoot);
     if (evidence.before?.scope)
       evidence.after = {

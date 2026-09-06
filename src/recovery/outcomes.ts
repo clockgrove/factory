@@ -886,7 +886,6 @@ async function verifySourceProof(
       );
       let siblingRefresh: Awaited<ReturnType<typeof observeRecoverySiblingRefresh>> | undefined;
       if (outcome.deliveryHeadSha) {
-        requireOutcome(publication.mode === "native-stacks");
         const delivery = await store.readCommit(outcome.deliveryHeadSha);
         if (delivery.parentOids.length === 2) {
           const refreshInput = {
@@ -925,6 +924,7 @@ async function verifySourceProof(
             proofTraversal,
           );
         } else {
+          requireOutcome(publication.mode === "native-stacks");
           const transition = await observeRecoveryNativeTransition({
             planRecord: record,
             events,

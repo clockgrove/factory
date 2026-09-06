@@ -6696,7 +6696,10 @@ export class FactorySupervisor {
       )
         throw new Error("native retained source reservation changed");
       const observed = await this.#store.readPullRequest(publication.pullRequest);
-      const plan = this.#deliveryPlan?.items.find((entry) => entry.itemId === planned.compilerId);
+      const plan = this.#deliveryPlan?.items.find((entry) => entry.itemId === planned.compilerId) ??
+        (this.#deliverySelection.selected === "regular-prs" && publication.mode === "regular-prs"
+          ? { unitId: `delivery/${planned.compilerId}`, position: 0, parentItemId: undefined }
+          : undefined);
       if (
         !plan ||
         observed.nodeId !== publication.pullRequestNodeId ||
@@ -6713,7 +6716,7 @@ export class FactorySupervisor {
           workItem: item.number,
           attempt: source.attempt,
           revision: 1,
-          mode: "native-stacks",
+          mode: publication.mode,
           position: plan.position,
           ...(plan.parentItemId ? { parentItemId: plan.parentItemId } : {}),
           branch: publication.branch,
@@ -8378,6 +8381,13 @@ export class FactorySupervisor {
     targetBaseSha: string,
     merged: boolean,
   ): Promise<SiblingRefreshRecord> {
+    if (
+      isManagedAgentBackendId(member.reservation.backend) ||
+      (member.receipt.mode === "regular-prs" &&
+        (member.pull.branch !== publicationBranch(this.#run.objective, item.number, member.reservation.attempt) ||
+          member.receipt.position !== 0 || member.receipt.parentItemId || member.receipt.stackNumber))
+    )
+      throw new Error("sibling refresh requires an exact Factory-owned publication branch");
     const { snapshot, requiresIsolation } = await this.#assertOwnTrunkAdvance(
       member.pull.exactHeadValidation.baseSha,
       targetBaseSha,
@@ -10113,11 +10123,18 @@ export class FactorySupervisor {
     );
     let siblingRefresh: SiblingRefreshRecord | undefined;
     if (
-      publication.mode === "native-stacks" &&
-      unit?.kind === "sibling" &&
+      ((publication.mode === "native-stacks" && unit?.kind === "sibling") ||
+        (publication.mode === "regular-prs" &&
+          publication.branch === publicationBranch(this.#run.objective, item.number, source.attempt) &&
+          !isManagedAgentBackendId(reserved.backend))) &&
       target !== exactHeadValidation.baseSha &&
       (!observed.merged || observed.headSha !== pull.commitSha)
     ) {
+      if (observed.headSha === pull.commitSha &&
+        unreconciledCapacityReservations([...runtime.events]).some((event) =>
+          event.runId === this.#run.runId && event.workItem === item.number &&
+          event.sourceRunId === source.runId))
+        throw new Error("prior adopted validation requires exact scope reconciliation before refresh");
       const member = await this.#nativeStackMember(item, true);
       siblingRefresh = await this.#prepareSiblingRefresh(item, member, target, observed.merged);
       if (

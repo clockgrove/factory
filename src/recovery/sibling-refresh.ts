@@ -10,7 +10,9 @@ import {
   type SiblingRefreshRecord,
 } from "../control/sibling-refreshes.js";
 import type { FactoryEvent } from "../protocol/events.js";
+import { isManagedAgentBackendId } from "../protocol/policy.js";
 import { planDelivery } from "../publication/delivery.js";
+import { publicationBranch } from "../publication/publisher.js";
 import { selectEquivalentPublicationRecord } from "../publication/recorded-publication.js";
 import { bindValidationToPublishedHead } from "../validation/plan.js";
 import type { RecoveryReadStore } from "./assessment.js";
@@ -62,16 +64,22 @@ export async function observeRecoverySiblingRefresh(
   requireRefresh(publication && source.validation && input.controllingRunIds.length <= 100);
   requireRefresh(!visiting.has(input.deliveryHeadSha) && visiting.size < 100);
   visiting = new Set(visiting).add(input.deliveryHeadSha);
-  requireRefresh(publication.mode === "native-stacks" && publication.stackNumber === null);
+  requireRefresh(publication.stackNumber === null);
   const reserved = events.find(
     (event) => recoveryEventDigest(event) === source.reservationReceiptDigest,
   );
   requireRefresh(
     reserved?.event === "AttemptReserved" &&
       reserved.runId === source.runId &&
+      reserved.objective === input.objective &&
       reserved.workItem === input.workItem &&
-      reserved.attempt === source.attempt,
+      reserved.attempt === source.attempt &&
+      !isManagedAgentBackendId(reserved.backend),
   );
+  if (publication.mode === "regular-prs")
+    requireRefresh(
+      publication.branch === publicationBranch(input.objective, input.workItem, source.attempt),
+    );
   const publicationEvent = events.find(
     (event) => recoveryEventDigest(event) === publication.receiptDigest,
   );
@@ -104,6 +112,17 @@ export async function observeRecoverySiblingRefresh(
       : [];
   if (publicationEvent.event === "PublicationRecorded")
     selectEquivalentPublicationRecord(equivalentPublications, publicationEvent);
+  requireRefresh(
+    publicationEvent.mode === publication.mode &&
+      publicationEvent.branch === publication.branch &&
+      publicationEvent.baseBranch === publication.baseBranch,
+  );
+  if (publication.mode === "regular-prs")
+    requireRefresh(
+      publicationEvent.position === 0 && !publicationEvent.parentItemId && !publicationEvent.stackNumber &&
+        !events.some((event) => event.event === "StackLinked" && event.runId === source.runId &&
+          event.workItem === input.workItem && event.attempt === source.attempt),
+    );
   const publicationDigests = new Set(
     equivalentPublications.length
       ? equivalentPublications.map(recoveryEventDigest)
@@ -148,7 +167,7 @@ export async function observeRecoverySiblingRefresh(
           event.graphBlobSha === graph.blobOid,
       ),
   );
-  const topology = planDelivery(
+  const topology = publication.mode === "native-stacks" ? planDelivery(
     graph.objective.workItems.map((item) => {
       requireRefresh(item.delivery);
       return {
@@ -161,17 +180,18 @@ export async function observeRecoverySiblingRefresh(
         },
       };
     }),
-  );
+  ) : null;
   const itemId =
     publicationEvent.event === "PublicationRecorded" ||
     publicationEvent.event === "RecoverySourcePublished"
       ? publicationEvent.itemId
       : undefined;
   requireRefresh(
-    topology.result === "supported" &&
+    graph.objective.workItems.some((item) => item.id === itemId) &&
+    (publication.mode === "regular-prs" || (topology?.result === "supported" &&
       topology.units.some(
         (unit) => unit.kind === "sibling" && unit.items.length === 1 && unit.items[0] === itemId,
-      ),
+      ))),
   );
   const delivery = await store.readCommit(input.deliveryHeadSha);
   requireRefresh(delivery.oid === input.deliveryHeadSha && delivery.parentOids.length === 2);
@@ -211,9 +231,20 @@ export async function observeRecoverySiblingRefresh(
       start &&
         start.repository.toLowerCase() === input.repository.toLowerCase() &&
         start.objective === input.objective &&
-        start.policy.delivery?.mode === "stacked-prs" &&
+        (publication.mode === "native-stacks"
+          ? start.policy.delivery?.mode === "stacked-prs"
+          : !start.policy.delivery || start.policy.delivery.mode === "regular-prs" ||
+            start.policy.delivery.onUnavailable === "regular-prs") &&
         start.policyDigest === controllingPolicyDigest,
     );
+    if (publication.mode === "regular-prs") {
+      const selections = events.filter((event) => event.event === "DeliverySelected" &&
+        event.runId === start.runId && event.objective === input.objective);
+      requireRefresh(selections.length > 0 && selections.every((event) =>
+        event.event === "DeliverySelected" && event.selected === "regular-prs" &&
+        event.requested === (start.policy.delivery?.mode ?? "regular-prs") &&
+        event.policyDigest === start.policyDigest));
+    }
     if (start.runId !== source.runId) {
       requireRefresh(start.recoveryPlanDigest);
       const adopted = await loadRecoveryPlan(store, input.objective, start.recoveryPlanDigest);
@@ -274,8 +305,27 @@ export async function observeRecoverySiblingRefresh(
     // Every target advance must already be this controller's authenticated integration.
     // An intent, clean applicability, or an arbitrary parent commit cannot authorize trunk.
     let cursor = identity.targetBaseSha;
+    let controllerBase = start.baseSha;
+    if (!controllerBase) {
+      // Foreground runs have no activation base. Recover only the base committed
+      // by their authenticated original compilation, never today's mutable trunk.
+      requireRefresh(!start.activationRequestId && !start.recoveryRequestId && !start.recoveryPlanDigest);
+      const compiled = events.filter((event) => event.event === "GraphCompiled" &&
+        event.runId === start.runId && event.objective === input.objective);
+      const receipt = compiled[0];
+      const originalGraph = start.runId === graphRun ? graph : await loadCompiledGraph(store, input.objective, start.runId);
+      requireRefresh(compiled.length === 1 && receipt?.event === "GraphCompiled" &&
+        receipt.sequence > start.sequence && originalGraph &&
+        receipt.graphRef === originalGraph.ref && receipt.graphBlobSha === originalGraph.blobOid &&
+        receipt.graphDigest === originalGraph.graphDigest && receipt.graphSize === originalGraph.graphSize &&
+        originalGraph.objective.workItems.every((item) => item.baseSha === receipt.baseSha));
+      const graphCommit = await store.readCommit(originalGraph.commitOid);
+      requireRefresh(graphCommit.oid === originalGraph.commitOid && graphCommit.parentOids.length === 1 &&
+        graphCommit.parentOids[0] === receipt.baseSha);
+      controllerBase = receipt.baseSha;
+    }
     const seen = new Set<string>();
-    while (cursor !== start.baseSha) {
+    while (cursor !== controllerBase) {
       requireRefresh(!seen.has(cursor) && seen.size < 100);
       seen.add(cursor);
       const integrations = events.filter(

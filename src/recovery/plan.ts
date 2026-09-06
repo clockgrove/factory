@@ -12,6 +12,7 @@ import {
 import type { LeaseManager, LeaseState } from "../control/lease.js";
 import { assertNoSecretMaterial } from "../protocol/limits.js";
 import { RunPolicySchema, parseRunPolicy, policyDigest } from "../protocol/policy.js";
+import { publicationBranch } from "../publication/publisher.js";
 
 export const RECOVERY_PLAN_PROTOCOL = "clockgrove.factory/recovery-plan-v1" as const;
 export const MAX_RECOVERY_PLAN_BYTES = 256 * 1024;
@@ -408,7 +409,9 @@ export function parseRecoveryPlan(input: unknown): RecoveryPlan {
       }
       if (source.siblingRefresh)
         requirePlan(
-          source.publication?.mode === "native-stacks" &&
+          source.publication &&
+            (source.publication.mode === "native-stacks" ||
+              source.publication.branch === publicationBranch(plan.objective, item.workItem, source.attempt)) &&
             source.publication.stackNumber === null &&
             source.validation &&
             source.siblingRefresh.deliveryHeadSha !== source.publication.headSha &&

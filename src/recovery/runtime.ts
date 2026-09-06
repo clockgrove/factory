@@ -391,6 +391,22 @@ export async function loadRecoveryRuntime(input: {
       });
       const pull = await input.store.readPullRequest(publication.pullRequest);
       const currentHead = await input.store.readCommit(pull.headSha);
+      requireRuntime(event.targetBaseSha && event.targetBaseSha !== source.validation.baseSha,
+        "source-capacity-candidate-mismatch");
+      const originalIdentity = {
+        runId: input.runId,
+        objective: input.objective,
+        workItem: event.workItem,
+        attempt: source.attempt,
+        pullRequest: publication.pullRequest,
+        sourceHeadSha: publication.headSha,
+        sourceExactHeadValidationDigest: proof.digest,
+        targetBaseSha: event.targetBaseSha,
+      };
+      // A later CAS does not rewrite an already paid invocation's identity. Keep
+      // the old immutable-head candidate distinct from new delivery-head work.
+      const originalCandidate = event.backend ===
+        `factory/integration-validation-${mergeCandidateIdentityDigest(originalIdentity)}`;
       const refresh =
         pull.headSha !== publication.headSha && currentHead.parentOids.length === 2
           ? await observeRecoverySiblingRefresh({
@@ -402,9 +418,9 @@ export async function loadRecoveryRuntime(input: {
               controllingRunIds: [...sourceRunIds, input.runId],
               store: input.store,
               deliveryHeadSha: pull.headSha,
-              ...(event.targetBaseSha ? { targetBaseSha: event.targetBaseSha } : {}),
+              ...(!originalCandidate ? { targetBaseSha: event.targetBaseSha } : {}),
               candidateRunId: input.runId,
-              candidateIdentityDigest: event.backend.replace("factory/integration-validation-", ""),
+              ...(!originalCandidate ? { candidateIdentityDigest: event.backend.replace("factory/integration-validation-", "") } : {}),
             })
           : null;
       if (refresh)
@@ -412,21 +428,15 @@ export async function loadRecoveryRuntime(input: {
           refresh.candidateIdentity.runId === input.runId,
           "source-capacity-refresh-owner-mismatch",
         );
+      const candidateIdentity = {
+        ...originalIdentity,
+        ...(!originalCandidate && refresh ? { deliveryHeadSha: refresh.record.plannedHeadSha } : {}),
+      };
       requireRuntime(
         event.targetBaseSha &&
           event.targetBaseSha !== source.validation.baseSha &&
           event.backend ===
-            `factory/integration-validation-${mergeCandidateIdentityDigest({
-              runId: input.runId,
-              objective: input.objective,
-              workItem: event.workItem,
-              attempt: source.attempt,
-              pullRequest: publication.pullRequest,
-              sourceHeadSha: publication.headSha,
-              sourceExactHeadValidationDigest: proof.digest,
-              targetBaseSha: event.targetBaseSha,
-              ...(refresh ? { deliveryHeadSha: refresh.record.plannedHeadSha } : {}),
-            })}`,
+            `factory/integration-validation-${mergeCandidateIdentityDigest(candidateIdentity)}`,
         "source-capacity-candidate-mismatch",
       );
       requireRuntime(
@@ -440,6 +450,27 @@ export async function loadRecoveryRuntime(input: {
             event.localScopeBatch.identity.repository === plan.repository.toLowerCase(),
           "source-capacity-scope-mismatch",
         );
+      if (originalCandidate && refresh) {
+        const completed = await loadMergeCandidateCheckpoint(input.store, originalIdentity);
+        requireRuntime(completed && JSON.stringify(completed.source) === JSON.stringify(proof),
+          "source-capacity-prior-completion-unavailable");
+        if (event.localScopeBatch)
+          requireRuntime(event.localScopeBatch.identity.invocationDigest === completed.validation.artifactDigest,
+            "source-capacity-prior-artifact-mismatch");
+        const reconciliation = suffix.filter((entry) => entry.kind === "capacity" &&
+          entry.event === "CapacityReconciled" && entry.workItem === event.workItem &&
+          entry.attempt === event.attempt && entry.sourceRunId === event.sourceRunId &&
+          entry.backend === event.backend && entry.targetBaseSha === event.targetBaseSha);
+        requireRuntime(reconciliation.length === 1 && reconciliation[0]!.sequence >= event.sequence,
+          "source-capacity-prior-reconciliation-unavailable");
+        const accounted = suffix.filter((entry) => entry.kind === "budget" &&
+          entry.event === "BudgetReconciled" && entry.workItem === event.workItem &&
+          entry.phase === "validation" && entry.unit === "validation_milliseconds" &&
+          entry.usageId === `integration-validation-${mergeCandidateIdentityDigest(originalIdentity)}`);
+        requireRuntime(accounted.length > 0 && accounted.every((entry) => entry.kind === "budget" &&
+          entry.amount === Date.parse(completed.validation.completedAt) - Date.parse(completed.validation.startedAt)),
+          "source-capacity-prior-accounting-unavailable");
+      }
       if (event.event === "CapacityReconciled") {
         const reserved = [...sourceCapacity].filter(
           (entry) =>
@@ -458,17 +489,7 @@ export async function loadRecoveryRuntime(input: {
           "source-capacity-reconciliation-mismatch",
         );
         requireRuntime(
-          await loadMergeCandidateCheckpoint(input.store, {
-            runId: input.runId,
-            objective: input.objective,
-            workItem: event.workItem,
-            attempt: source.attempt,
-            pullRequest: publication.pullRequest,
-            sourceHeadSha: publication.headSha,
-            sourceExactHeadValidationDigest: proof.digest,
-            targetBaseSha: event.targetBaseSha!,
-            ...(refresh ? { deliveryHeadSha: refresh.record.plannedHeadSha } : {}),
-          }),
+          await loadMergeCandidateCheckpoint(input.store, candidateIdentity),
           "source-capacity-completion-unavailable",
         );
       }

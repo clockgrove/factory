@@ -279,8 +279,16 @@ export async function materializeLocalLfsAssets(repository: string, destination:
     const pointer = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     const before = await pointer.stat();
     try {
-      if (before.size >= 1024) throw new Error("LFS destination is no longer the pinned pointer");
-      const bytes = await pointer.readFile();
+      if (!before.isFile() || before.size >= 1024) throw new Error("LFS destination is no longer the pinned pointer");
+      const buffer = Buffer.alloc(1024);
+      let size = 0;
+      while (size < buffer.length) {
+        const { bytesRead } = await pointer.read(buffer, size, buffer.length - size, size);
+        if (!bytesRead) break;
+        size += bytesRead;
+      }
+      if (size !== before.size || size >= 1024) throw new Error("LFS destination changed during bounded pointer read");
+      const bytes = buffer.subarray(0, size);
       const oid = createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
       if (oid !== asset.pointerBlobOid) throw new Error("LFS destination differs from the pinned pointer");
     } finally { await pointer.close(); }

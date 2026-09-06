@@ -1112,11 +1112,10 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     );
   };
   const invoke = async (name, args = {}) =>
-    client.callTool(
-      { name, arguments: { owner, repo, ...args } },
-      undefined,
-      { timeout: 120000, maxTotalTimeout: 120000 },
-    );
+    client.callTool({ name, arguments: { owner, repo, ...args } }, undefined, {
+      timeout: 120000,
+      maxTotalTimeout: 120000,
+    });
   const call = async (name, args = {}) => {
     const response = await invoke(name, args);
     assert.ok(!response.isError, "installed operator call unavailable");
@@ -1569,8 +1568,18 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     assert.equal(client.getServerVersion()?.version, artifact.version);
     const scenarioPort = extension.extendPort
       ? await extension.extendPort({
-          port, authority, evidence, save, request, list, call, invoke,
-          command, readBounded, pluginRoot, artifact,
+          port,
+          authority,
+          evidence,
+          save,
+          request,
+          list,
+          call,
+          invoke,
+          command,
+          readBounded,
+          pluginRoot,
+          artifact,
         })
       : port;
     evidence.result = await runner(scenarioPort, authority);

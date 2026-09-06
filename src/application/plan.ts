@@ -288,12 +288,17 @@ export async function buildPlanReport(input: {
         observedUsage = { ...candidate.usage };
         checkpointed = true;
       });
-      if (!checkpointed) throw new Error("management compiler returned without its result callback");
+      if (!checkpointed)
+        throw new Error("management compiler returned without its result callback");
       validateGraph(result.objective);
       if (result.objective.workItems.some((item) => item.baseSha?.toLowerCase() !== baseSha))
         throw new Error("proposed Work Item base does not match the inspected checkout");
       observedUsage = { ...result.usage };
-      await input.planning.validateCheckout(input.planning.repositoryPath, baseSha, input.repository);
+      await input.planning.validateCheckout(
+        input.planning.repositoryPath,
+        baseSha,
+        input.repository,
+      );
       preparationDiagnostics.push({
         status: "pass",
         summary: `bounded compilation completed through ${management.id}; activation remains separate`,

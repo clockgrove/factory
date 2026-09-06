@@ -273,53 +273,60 @@ describe("FactoryApplicationService", () => {
   it("compiles only on explicit request and returns observed management usage without writes", async () => {
     const checkout = await mkdtemp(join(tmpdir(), "factory-application-plan-"));
     try {
-    const git = (...args: string[]) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-C", checkout, ...args], { encoding: "utf8" }).trim();
-    git("init", "--quiet", "--template=");
-    git("config", "user.name", "Fixture");
-    git("config", "user.email", "fixture@example.invalid");
-    git("remote", "add", "origin", "https://github.com/o/r.git");
-    await mkdir(join(checkout, "src"));
-    await writeFile(join(checkout, "src/feature.ts"), "export const value = 1;\n");
-    await writeFile(join(checkout, "package.json"), '{"scripts":{"test":"vitest run"}}\n');
-    git("add", "package.json", "src/feature.ts");
-    git("commit", "-qm", "planning fixture");
-    const baseSha = git("rev-parse", "HEAD");
-    const graph = proposedGraph(baseSha);
-    const backend = new PlanningBackend(graph);
-    let writes = 0;
-    const service = new FactoryApplicationService({
-      owner: "o",
-      repo: "r",
-      reader: { readObjective: async () => ({ ...snapshot(), body: "Build the feature" }) },
-      store: {
-        getAuthenticatedLogin: async () => "actor",
-        serverTime: async () => new Date(),
-        addIssueComment: async () => {
-          writes += 1;
+      const git = (...args: string[]) =>
+        execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-C", checkout, ...args], {
+          encoding: "utf8",
+        }).trim();
+      git("init", "--quiet", "--template=");
+      git("config", "user.name", "Fixture");
+      git("config", "user.email", "fixture@example.invalid");
+      git("remote", "add", "origin", "https://github.com/o/r.git");
+      await mkdir(join(checkout, "src"));
+      await writeFile(join(checkout, "src/feature.ts"), "export const value = 1;\n");
+      await writeFile(join(checkout, "package.json"), '{"scripts":{"test":"vitest run"}}\n');
+      git("add", "package.json", "src/feature.ts");
+      git("commit", "-qm", "planning fixture");
+      const baseSha = git("rev-parse", "HEAD");
+      const graph = proposedGraph(baseSha);
+      const backend = new PlanningBackend(graph);
+      let writes = 0;
+      const service = new FactoryApplicationService({
+        owner: "o",
+        repo: "r",
+        reader: { readObjective: async () => ({ ...snapshot(), body: "Build the feature" }) },
+        store: {
+          getAuthenticatedLogin: async () => "actor",
+          serverTime: async () => new Date(),
+          addIssueComment: async () => {
+            writes += 1;
+          },
         },
-      },
-      planning: {
-        management: backend,
-        repositoryPath: checkout,
-        validateCheckout: validatePlanningCheckout,
-        readRepositoryLayout: (max, base) => readPlanningRepositoryLayout(checkout, max, base),
-        readBaseSha: async () => baseSha,
-      },
-    });
-    const report = await service.plan({ objective: 7, compile: true });
-    expect(report).toMatchObject({
-      mode: "compilation",
-      activationAuthorized: false,
-      compilation: { requested: true, result: "completed", usagePersistence: "response-only" },
-      usage: { inputTokens: 120, outputTokens: 30 },
-      graph: { workItemCount: 1 },
-      proposedGraph: { title: "Objective" },
-    });
-    expect(backend.compileCalls).toBe(1);
-    expect(backend.lastContext?.repository).not.toBe(checkout);
-    expect(backend.lastContext?.repositoryFiles).toEqual(["package.json", "src/feature.ts"]);
-    expect(backend.lastContext?.repositoryLfs).toMatchObject({ baseSha, assets: [], requiredTools: [] });
-    expect(writes).toBe(0);
+        planning: {
+          management: backend,
+          repositoryPath: checkout,
+          validateCheckout: validatePlanningCheckout,
+          readRepositoryLayout: (max, base) => readPlanningRepositoryLayout(checkout, max, base),
+          readBaseSha: async () => baseSha,
+        },
+      });
+      const report = await service.plan({ objective: 7, compile: true });
+      expect(report).toMatchObject({
+        mode: "compilation",
+        activationAuthorized: false,
+        compilation: { requested: true, result: "completed", usagePersistence: "response-only" },
+        usage: { inputTokens: 120, outputTokens: 30 },
+        graph: { workItemCount: 1 },
+        proposedGraph: { title: "Objective" },
+      });
+      expect(backend.compileCalls).toBe(1);
+      expect(backend.lastContext?.repository).not.toBe(checkout);
+      expect(backend.lastContext?.repositoryFiles).toEqual(["package.json", "src/feature.ts"]);
+      expect(backend.lastContext?.repositoryLfs).toMatchObject({
+        baseSha,
+        assets: [],
+        requiredTools: [],
+      });
+      expect(writes).toBe(0);
     } finally {
       await rm(checkout, { recursive: true, force: true });
     }

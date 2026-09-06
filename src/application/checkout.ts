@@ -16,8 +16,17 @@ export async function readCheckoutGit(checkout: string, args: string[]): Promise
   const result = await execFileAsync(
     "git",
     [
-      "--no-optional-locks", "--no-replace-objects", "-c", "core.fsmonitor=false",
-      "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=", "-C", checkout, ...args,
+      "--no-optional-locks",
+      "--no-replace-objects",
+      "-c",
+      "core.fsmonitor=false",
+      "-c",
+      "core.hooksPath=/dev/null",
+      "-c",
+      "credential.helper=",
+      "-C",
+      checkout,
+      ...args,
     ],
     {
       encoding: "utf8",
@@ -146,7 +155,11 @@ export async function assertCleanPlanningFiles(
       const file = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
       try {
         const before = await file.stat();
-        if (!before.isFile() || before.size !== size || ((before.mode & 0o111) !== 0) !== (mode === "100755"))
+        if (
+          !before.isFile() ||
+          before.size !== size ||
+          ((before.mode & 0o111) !== 0) !== (mode === "100755")
+        )
           throw new Error("planning checkout file changed during observation");
         let observedBytes = 0;
         for await (const chunk of file.createReadStream({ autoClose: false })) {
@@ -157,7 +170,12 @@ export async function assertCleanPlanningFiles(
           contentHash?.update(chunk);
         }
         const after = await file.stat();
-        if (observedBytes !== size || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs)
+        if (
+          observedBytes !== size ||
+          after.size !== before.size ||
+          after.mtimeMs !== before.mtimeMs ||
+          after.ctimeMs !== before.ctimeMs
+        )
           throw new Error("planning checkout file changed during observation");
       } finally {
         await file.close();

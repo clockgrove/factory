@@ -437,8 +437,13 @@ export async function resumeArtifactTransfer(args: {
     await args.assertCurrent();
     const retained = await readLocalDescriptor(args.identity);
     if (!retained) return null;
-    await persistArtifactTransfer({ store: args.store, identity: args.identity,
-      allowedPaths: args.allowedPaths, assertCurrent: args.assertCurrent, artifact: retained.artifact });
+    await persistArtifactTransfer({
+      store: args.store,
+      identity: args.identity,
+      allowedPaths: args.allowedPaths,
+      assertCurrent: args.assertCurrent,
+      artifact: retained.artifact,
+    });
     return recoverArtifactTransfer(args);
   }
   assertArtifactScope(intent.descriptor.artifact, args.allowedPaths);
@@ -467,8 +472,13 @@ export async function resumeArtifactTransfer(args: {
       throw new Error("resumed artifact chunk Git identity mismatch");
     await restoreContentChunk(contentChunk(chunk), bytes);
   }
-  await persistArtifactTransfer({ store: args.store, identity: args.identity,
-    allowedPaths: args.allowedPaths, assertCurrent: args.assertCurrent, artifact: intent.descriptor.artifact });
+  await persistArtifactTransfer({
+    store: args.store,
+    identity: args.identity,
+    allowedPaths: args.allowedPaths,
+    assertCurrent: args.assertCurrent,
+    artifact: intent.descriptor.artifact,
+  });
   return recoverArtifactTransfer(args);
 }
 
@@ -570,11 +580,17 @@ export async function persistArtifactTransfer(args: {
         await args.assertCurrent();
         const local = await readLocalDescriptor(identity);
         const observed = await readDescriptor(args.store, identity, "intent");
-        if (!local || JSON.stringify(local) !== JSON.stringify(descriptor) ||
-          !observed || observed.oid !== intent.oid ||
+        if (
+          !local ||
+          JSON.stringify(local) !== JSON.stringify(descriptor) ||
+          !observed ||
+          observed.oid !== intent.oid ||
           JSON.stringify(observed.descriptor) !== JSON.stringify(descriptor) ||
-          await args.store.readRef(`${artifactTransferRef(identity)}/ready`))
-          throw new Error("qualification requires exact pending intent and complete private content");
+          (await args.store.readRef(`${artifactTransferRef(identity)}/ready`))
+        )
+          throw new Error(
+            "qualification requires exact pending intent and complete private content",
+          );
         await verifyPayload(artifact.payload!);
       },
     });

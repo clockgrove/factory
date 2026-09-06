@@ -10149,15 +10149,50 @@ export class FactorySupervisor {
           event.sourceRunId === source.runId))
         throw new Error("prior adopted validation requires exact scope reconciliation before refresh");
       if (observed.headSha === pull.commitSha) {
-        const priorIdentity: MergeCandidateIdentity = {
-          runId: this.#run.runId, objective: this.#run.objective, workItem: item.number,
-          attempt: source.attempt, pullRequest: pull.number, sourceHeadSha: pull.commitSha,
-          sourceExactHeadValidationDigest: exactHeadValidation.digest, targetBaseSha: target,
-        };
-        const prior = await this.#mergeCandidates.load(priorIdentity);
-        if (prior) {
+        // Only authenticated invocation receipts identify historical targets.
+        // Do not scan refs or drop an earlier paid result when trunk advances.
+        const historicalCapacity = runtime.verifiedSourceCapacity.filter((event) =>
+          event.kind === "capacity" && event.runId === this.#run.runId &&
+          event.workItem === item.number && event.attempt === source.attempt &&
+          event.sourceRunId === source.runId);
+        const priorTargets = new Set([target]);
+        for (const event of historicalCapacity) {
+          if (event.kind !== "capacity" || !event.targetBaseSha)
+            throw new Error("prior adopted candidate target unavailable before refresh");
+          priorTargets.add(event.targetBaseSha);
+          if (priorTargets.size > 100)
+            throw new Error("prior adopted candidate history exceeds the refresh bound");
+        }
+        for (const priorTarget of priorTargets) {
+          const priorIdentity: MergeCandidateIdentity = {
+            runId: this.#run.runId, objective: this.#run.objective, workItem: item.number,
+            attempt: source.attempt, pullRequest: pull.number, sourceHeadSha: pull.commitSha,
+            sourceExactHeadValidationDigest: exactHeadValidation.digest, targetBaseSha: priorTarget,
+          };
+          const priorDigest = mergeCandidateIdentityDigest(priorIdentity);
+          const receipts = historicalCapacity.filter((event) =>
+            event.kind === "capacity" && event.targetBaseSha === priorTarget);
+          if (receipts.some((event) => event.kind !== "capacity" ||
+            event.backend !== `factory/integration-validation-${priorDigest}`))
+            throw new Error("prior adopted candidate invocation changed before refresh");
+          const prior = await this.#mergeCandidates.load(priorIdentity);
+          if (!prior) {
+            if (receipts.length)
+              throw new Error("prior adopted candidate completion unavailable before refresh");
+            continue;
+          }
           if (JSON.stringify(prior.source) !== JSON.stringify(exactHeadValidation))
             throw new Error("prior adopted candidate source changed before refresh");
+          if (receipts.some((event) => event.kind === "capacity" && event.localScopeBatch &&
+            event.localScopeBatch.identity.invocationDigest !== prior.validation.artifactDigest))
+            throw new Error("prior adopted candidate artifact changed before refresh");
+          if (priorTarget !== target)
+            await this.#assertOwnTrunkAdvance(priorTarget, target, item.number);
+          // Completion precedes this fallible receipt in the ordinary path.
+          // Replay its exact duration; never substitute zero or re-run validation.
+          await this.#sourceUsage(item, `integration-validation-${priorDigest}`,
+            Date.parse(prior.validation.completedAt) - Date.parse(prior.validation.startedAt),
+            "validation_milliseconds");
           const reviewIdentity = this.#mergeCandidateReviewIdentity(prior);
           const invocationId = `integration-review-${reviewIdentityDigest(reviewIdentity)}`;
           this.#assertManagementInvocationNotFailed(invocationId);

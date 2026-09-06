@@ -272,6 +272,7 @@ export function modelTokenBreakdown(
 
 export interface ProviderBillingEvidence {
   provider: string;
+  /** Replay identity is the exact provider/receiptId pair, independent of currency. */
   receiptId: string;
   amount: number;
   currency: string;
@@ -293,6 +294,64 @@ export interface EconomicSummary {
   providerCost: EvidenceMetric<Array<{ provider: string; amount: number; currency: string }>>;
 }
 
+function summarizeProviderCost(
+  billing: readonly ProviderBillingEvidence[],
+): EconomicSummary["providerCost"] {
+  if (billing.length === 0) {
+    return {
+      availability: "unavailable",
+      reason: "no provider billing receipt is present; Factory does not infer dollar cost",
+    };
+  }
+  const receipts = new Map<string, ProviderBillingEvidence>();
+  for (const item of billing) {
+    if (
+      typeof item?.provider !== "string" ||
+      item.provider.length === 0 ||
+      typeof item.receiptId !== "string" ||
+      item.receiptId.length === 0 ||
+      !Number.isFinite(item.amount) ||
+      item.amount < 0 ||
+      typeof item.currency !== "string" ||
+      !/^[A-Z]{3}$/.test(item.currency)
+    ) {
+      return { availability: "unavailable", reason: "invalid provider billing evidence" };
+    }
+    const identity = JSON.stringify([item.provider, item.receiptId]);
+    const prior = receipts.get(identity);
+    if (prior && (prior.amount !== item.amount || prior.currency !== item.currency)) {
+      return {
+        availability: "unavailable",
+        reason: "conflicting provider billing receipts share one provider/receipt identity",
+      };
+    }
+    receipts.set(identity, item);
+  }
+  const groups = new Map<string, { provider: string; amount: number; currency: string }>();
+  for (const item of receipts.values()) {
+    const key = JSON.stringify([item.provider, item.currency]);
+    const current = groups.get(key) ?? {
+      provider: item.provider,
+      amount: 0,
+      currency: item.currency,
+    };
+    const amount = current.amount + item.amount;
+    if (!Number.isFinite(amount)) {
+      return { availability: "unavailable", reason: "provider billing aggregate is not finite" };
+    }
+    groups.set(key, { ...current, amount });
+  }
+  return {
+    availability: "observed",
+    value: [...groups.values()].sort(
+      (left, right) =>
+        left.provider.localeCompare(right.provider) || left.currency.localeCompare(right.currency),
+    ),
+    source: "provider-receipt",
+    evidenceCount: receipts.size,
+  };
+}
+
 export function summarizeEconomics(input: {
   events: readonly FactoryEvent[];
   policy: RunPolicy;
@@ -308,25 +367,6 @@ export function summarizeEconomics(input: {
   const managedCommitted = managed.reconciled + managed.outstanding;
   const tokenCommitted = tokens.reconciled + tokens.outstanding;
   const configuredTokens = input.policy.economics?.maxModelTokens;
-  const validBilling = (input.billing ?? []).filter(
-    (item) =>
-      item.provider.length > 0 &&
-      item.receiptId.length > 0 &&
-      Number.isFinite(item.amount) &&
-      item.amount >= 0 &&
-      /^[A-Z]{3}$/.test(item.currency),
-  );
-  const groupedBilling = new Map<string, { provider: string; amount: number; currency: string }>();
-  for (const item of validBilling) {
-    const key = `${item.provider}:${item.currency}`;
-    const current = groupedBilling.get(key) ?? {
-      provider: item.provider,
-      amount: 0,
-      currency: item.currency,
-    };
-    current.amount += item.amount;
-    groupedBilling.set(key, current);
-  }
   return {
     nativeUnits,
     modelTokenBreakdown: modelTokenBreakdown(input.events, input.runId),
@@ -361,22 +401,7 @@ export function summarizeEconomics(input: {
               evidenceCount: tokens.reservations + tokens.reconciliations,
             },
     },
-    providerCost:
-      validBilling.length === 0
-        ? {
-            availability: "unavailable",
-            reason: "no provider billing receipt is present; Factory does not infer dollar cost",
-          }
-        : {
-            availability: "observed",
-            value: [...groupedBilling.values()].sort((left, right) =>
-              `${left.provider}:${left.currency}`.localeCompare(
-                `${right.provider}:${right.currency}`,
-              ),
-            ),
-            source: "provider-receipt",
-            evidenceCount: validBilling.length,
-          },
+    providerCost: summarizeProviderCost(input.billing ?? []),
   };
 }
 

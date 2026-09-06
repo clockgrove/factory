@@ -7,6 +7,7 @@ import {
   summarizeRun,
   type DurationEvidenceSample,
   type DurationFingerprint,
+  type ProviderBillingEvidence,
 } from "../src/economics/index.js";
 import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
@@ -323,6 +324,118 @@ describe("conservative economic feedback", () => {
       availability: "unavailable",
       reason: "no provider billing receipt is present; Factory does not infer dollar cost",
     });
+  });
+
+  it("counts exact provider billing receipt replays once without changing native or model ledgers", () => {
+    const receipt = {
+      provider: "provider-a",
+      receiptId: "receipt-1",
+      amount: 2.5,
+      currency: "USD",
+    };
+    const input = { events: runEvidence(), policy: DEFAULT_RUN_POLICY };
+    const summary = summarizeEconomics({ ...input, billing: [receipt, { ...receipt }, receipt] });
+    expect(summary.providerCost).toEqual({
+      availability: "observed",
+      value: [{ provider: "provider-a", amount: 2.5, currency: "USD" }],
+      source: "provider-receipt",
+      evidenceCount: 1,
+    });
+    expect({ ...summary, providerCost: undefined }).toEqual({
+      ...summarizeEconomics(input),
+      providerCost: undefined,
+    });
+  });
+
+  it.each([{ amount: 3 }, { currency: "EUR" }])(
+    "rejects conflicting receipt replays regardless of input order: %j",
+    (change) => {
+      const receipt = {
+        provider: "provider-a",
+        receiptId: "receipt-1",
+        amount: 2.5,
+        currency: "USD",
+      };
+      const conflicting = { ...receipt, ...change };
+      for (const billing of [
+        [receipt, conflicting],
+        [conflicting, receipt],
+        [receipt, conflicting, receipt],
+      ]) {
+        expect(
+          summarizeEconomics({ events: [], policy: DEFAULT_RUN_POLICY, billing }).providerCost,
+        ).toEqual({
+          availability: "unavailable",
+          reason: "conflicting provider billing receipts share one provider/receipt identity",
+        });
+      }
+    },
+  );
+
+  it("keeps distinct providers, receipts, and currencies separate without delimiter identity collisions", () => {
+    const billing = [
+      { provider: "a", receiptId: "b:c", amount: 2, currency: "USD" },
+      { provider: "a:b", receiptId: "c", amount: 3, currency: "USD" },
+      { provider: "a", receiptId: "other", amount: 4, currency: "USD" },
+      { provider: "a", receiptId: "euro", amount: 5, currency: "EUR" },
+      { provider: "z", receiptId: "b:c", amount: 0, currency: "USD" },
+    ];
+    expect(
+      summarizeEconomics({ events: [], policy: DEFAULT_RUN_POLICY, billing }).providerCost,
+    ).toEqual({
+      availability: "observed",
+      value: [
+        { provider: "a", amount: 5, currency: "EUR" },
+        { provider: "a", amount: 6, currency: "USD" },
+        { provider: "a:b", amount: 3, currency: "USD" },
+        { provider: "z", amount: 0, currency: "USD" },
+      ],
+      source: "provider-receipt",
+      evidenceCount: 5,
+    });
+  });
+
+  it.each([NaN, Infinity, -Infinity, -1])(
+    "keeps invalid billing amount %s unavailable, not a partial total",
+    (amount) => {
+      const receipt = { provider: "provider-a", receiptId: "receipt-1", amount: 2, currency: "USD" };
+      const billing = [receipt, { ...receipt, amount }];
+      expect(
+        summarizeEconomics({ events: [], policy: DEFAULT_RUN_POLICY, billing }).providerCost,
+      ).toMatchObject({ availability: "unavailable" });
+    },
+  );
+
+  it.each([{ provider: "" }, { receiptId: "" }, { currency: "usd" }])(
+    "does not report partial cost when supplied billing identity is invalid: %j",
+    (change) => {
+      const receipt = { provider: "provider-a", receiptId: "receipt-1", amount: 2, currency: "USD" };
+      const billing = [receipt, { ...receipt, ...change }];
+      expect(
+        summarizeEconomics({ events: [], policy: DEFAULT_RUN_POLICY, billing }).providerCost,
+      ).toMatchObject({ availability: "unavailable" });
+    },
+  );
+
+  it("rejects overflowing aggregates but does not overflow on a duplicate finite receipt", () => {
+    const receipt = {
+      provider: "provider-a",
+      receiptId: "receipt-1",
+      amount: Number.MAX_VALUE,
+      currency: "USD",
+    };
+    const summary = (billing: ProviderBillingEvidence[]) =>
+      summarizeEconomics({ events: [], policy: DEFAULT_RUN_POLICY, billing }).providerCost;
+    expect(summary([receipt, { ...receipt }])).toMatchObject({
+      availability: "observed",
+      value: [{ provider: "provider-a", amount: Number.MAX_VALUE, currency: "USD" }],
+      evidenceCount: 1,
+    });
+    expect(summary([receipt, { ...receipt, receiptId: "receipt-2" }])).toEqual({
+      availability: "unavailable",
+      reason: "provider billing aggregate is not finite",
+    });
+    expect(summary([]).availability).toBe("unavailable");
   });
 
   it("reconciles attempts, validation, delivery, native-unit budget, and terminal outcome", () => {

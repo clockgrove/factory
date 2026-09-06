@@ -3780,24 +3780,50 @@ export class FactorySupervisor {
               const adopted = this.#recoveryRuntime?.sourcePublications.find(
                 (proof) => proof.publication.workItem === root.number,
               );
-              const originalSource = this.#recoveryRuntime?.planRecord.plan.items.find(
+              const recoveryRoot = this.#recoveryRuntime?.planRecord.plan.items.find(
                 (entry) => entry.workItem === root.number,
-              )?.source?.publication;
+              );
+              const originalSource = recoveryRoot?.source?.publication;
               const rootBase =
                 publication?.kind === "publication"
                   ? publication.baseSha
                   : (adopted?.publication.sourceBaseSha ?? originalSource?.baseSha);
               if (!rootBase) throw new Error("stack execution root has no exact published base");
               const authorityBase = this.#run.baseSha ?? this.#packetFor(root.number).baseSha;
-              const key = `${authorityBase}:${rootBase}`;
+              const integratedRoot =
+                recoveryRoot?.action === "integrated" &&
+                this.#recoveryRuntime?.planRecord.plan.expectedBaseSha === authorityBase
+                  ? this.#recoveryRuntime?.sourceIntegrations.find(
+                      (proof) => proof.outcome.workItem === root.number,
+                    )
+                  : undefined;
+              // An authenticated pre-activation root is already contained in the
+              // recovery plan's exact base. Its older publication base is source
+              // provenance, not a forward trunk advance by the successor.
+              const comparisonBase = integratedRoot ? authorityBase : rootBase;
+              const sourceStart = integratedRoot
+                ? this.#recoveryRuntime?.events.find(
+                    (event) =>
+                      event.kind === "run" &&
+                      event.event === "FactoryRunStarted" &&
+                      event.runId === integratedRoot.outcome.sourceRunId,
+                  )
+                : undefined;
+              const inheritedIsolation =
+                integratedRoot !== undefined &&
+                (sourceStart?.kind !== "run" ||
+                  sourceStart.event !== "FactoryRunStarted" ||
+                  parseRunPolicy(sourceStart.policy).trust === "sandbox_untrusted");
+              const key = `${authorityBase}:${comparisonBase}`;
               if (!executionBaseProofs.has(key))
                 executionBaseProofs.set(
                   key,
-                  authorityBase === rootBase
+                  authorityBase === comparisonBase
                     ? Promise.resolve({ executionRequiresIsolation: false })
-                    : this.#assertOwnTrunkAdvance(authorityBase, rootBase, 0),
+                    : this.#assertOwnTrunkAdvance(authorityBase, comparisonBase, 0),
                 );
               stackBase.requiresIsolation =
+                inheritedIsolation ||
                 this.#packetFor(root.number).requirements.trust !== "trusted_local" ||
                 (await executionBaseProofs.get(key)!).executionRequiresIsolation;
             }

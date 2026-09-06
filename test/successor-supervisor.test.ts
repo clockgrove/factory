@@ -1515,7 +1515,23 @@ describe("Supervisor authenticated successor execution", () => {
       const result = await f.run();
       expect(result, JSON.stringify(result)).toMatchObject({ status: "completed" });
       expect(f.launch).toHaveBeenCalledTimes(1);
-      expect(await f.runtime()).toMatchObject({ status: "verified" });
+      const runtime = await f.runtime();
+      expect(runtime).toMatchObject({ status: "verified" });
+      if (runtime.status !== "verified") throw new Error("fixture recovery proof unavailable");
+      expect(runtime.sourceIntegrations).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            status: "verified",
+            outcome: expect.objectContaining({ workItem: 8, mergeCommitSha: f.mergeShas.get(18) }),
+          }),
+        ]),
+      );
+      expect(
+        [
+          ...f.snapshot.factoryEvents!,
+          ...f.snapshot.workItems.flatMap((item) => item.factoryEvents!),
+        ].filter((event) => event.runId === "parallel"),
+      ).toEqual(f.original);
     },
     60_000,
   );
@@ -1541,6 +1557,23 @@ describe("Supervisor authenticated successor execution", () => {
     expect(result.status).not.toBe("completed");
     expect(f.launch).not.toHaveBeenCalled();
     expect(f.merge).not.toHaveBeenCalled();
+  });
+  it("rejects a pre-activation root without its authenticated validation before child execution", async () => {
+    const f = await successorFixture({
+      retainedPrefix: 2,
+      stackLength: 3,
+      nativeSource: true,
+      premergedNativeRoot: true,
+    });
+    const root = f.snapshot.workItems[0]!;
+    root.factoryEvents = root.factoryEvents!.filter(
+      (event) => event.event !== "ValidationRecorded",
+    );
+    const merges = f.merge.mock.calls.length;
+    const result = await f.run().catch((error: unknown) => ({ status: "blocked", error }));
+    expect(result.status).not.toBe("completed");
+    expect(f.launch).not.toHaveBeenCalled();
+    expect(f.merge).toHaveBeenCalledTimes(merges);
   });
   it("restarts a mixed native unit after linking loses its response without duplicate execution", async () => {
     const f = await successorFixture({

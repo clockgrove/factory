@@ -30,6 +30,9 @@ consumption counters are not substitutes. Disputed requirements remain unresolve
 
 | Capability | Issues | Remaining acceptance |
 | --- | --- | --- |
+| Same-host multi-Objective and regular-PR concurrency | [#113](https://github.com/clockgrove/factory/issues/113), [#114](https://github.com/clockgrove/factory/issues/114) | Code / concurrency lane: explicitly restored by maintainer. Implement fair shared capacity and concurrent independent work with exact safe integration/recovery before WSL2 qualification. |
+| Durable App Server sessions | [#115](https://github.com/clockgrove/factory/issues/115) | Code / session lane: explicitly restored. Complete supported same-thread resume, immutable identity, lifecycle/accounting and controller integration. |
+| Generic large-file handling | [#116](https://github.com/clockgrove/factory/issues/116), [#117](https://github.com/clockgrove/factory/issues/117), [#118](https://github.com/clockgrove/factory/issues/118) | Code / artifact lane: explicitly restored LFS detection/tooling, binary/media manifests and oversized content-addressed transport with durable lifecycle evidence. |
 | Scope and acceptance reconciliation | [#108](https://github.com/clockgrove/factory/issues/108) | Coordinator has delivered the cross-domain register; maintainer disposition is needed for disputed reductions. Reconcile plans, ADRs and release/pilot acceptance before declaring completion. |
 | Compiler economics and runtime reporting | [#110](https://github.com/clockgrove/factory/issues/110) | Code / economics lane: grounded compilation tradeoffs and measurable active time, concurrency, retries/discards and interventions with explicit unknowns. Depends on durable input contracts. |
 | Representative compiler/chat evaluation | [#111](https://github.com/clockgrove/factory/issues/111), [#112](https://github.com/clockgrove/factory/issues/112) | Code / evaluation lane: implement executable fixtures and direct/indirect/negative prompts, then qualify actual compiler/agent behavior after integration. Existing profile/annotation tests are narrower. |
@@ -61,10 +64,11 @@ The [definition of done](DESIGN.md#definition-of-done), [delivery plan](DELIVERY
 prepublication gates and the post-publication installation gate. The retained economic and
 compiler/chat acceptance is tracked explicitly above. Vercel as an optional second sandbox and
 originally conditional harness-native workers do not imply approval to defer App Server session
-acceptance, LFS detection, binary/media manifests or oversized transfer. Same-host multi-Objective
-sharing, regular-PR pipeline concurrency, the adaptive-default prerequisite, token-limit semantics
-and broader dogfood coverage also require explicit reconciliation in #108. Current limited support
-must remain honestly documented while those decisions are unresolved.
+acceptance, LFS detection, binary/media manifests or oversized transfer. The maintainer explicitly
+restored those four commitments and same-host multi-Objective sharing/regular-PR concurrency;
+#113–#118 own their implementation. The adaptive-default prerequisite, token-limit semantics and
+broader dogfood coverage still require explicit reconciliation in #108. Current limited support
+must remain honestly documented until the restored implementation and qualification are complete.
 
 Unsupported third-party interfaces narrow the affected integration, not Factory globally. Users
 own their provider relationships and billing; invoice finality is not execution qualification.

@@ -157,7 +157,9 @@ async function fixture(
       ...(options.isolatedWorker ? ["fixture/isolated-worker"] : []),
       "codex-sdk/local-worktree",
       ...(options.isolatedItem ? ["fixture/isolated-validator"] : []),
-      ...(options.adoptedIsolatedValidation ? ["codex-cli/daytona"] : []),
+      ...(options.adoptedIsolatedValidation && options.adoptedIsolatedValidation.paid !== false
+        ? ["codex-cli/daytona"]
+        : []),
     ],
     ...(options.adoptedIsolatedValidation
       ? {
@@ -1918,6 +1920,12 @@ describe("Supervisor adopted isolated candidate validation", () => {
     "refuses isolated successor admission before CAS with paid=$paid available=$available",
     async (options) => {
       const f = await isolatedSuccessorFixture(options);
+      if (!options.paid) {
+        // Availability is not paid authority. Keep the run policy valid while
+        // leaving the registered provider outside its permitted routes.
+        expect(f.policy.backendOrder).not.toContain("codex-cli/daytona");
+        expect(f.policy.allowedPaidBackends).not.toContain("codex-cli/daytona");
+      }
       expect(await f.run(), JSON.stringify(f.messages)).toMatchObject({
         status: "escalated",
         reason: expect.stringContaining(

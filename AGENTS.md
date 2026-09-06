@@ -46,6 +46,17 @@ These are settled. Do not relitigate them.
   instructions, run them against the published artifact before claiming they work.
 - **Work on a branch and open a pull request.** Do not push directly to `main`. Single, deliberate
   pushes, never bursts, and confirm what landed with `git fetch origin main` plus a SHA comparison.
+- **Standing Factory merge authority.** The user authorizes agents to merge capability PRs in
+  `clockgrove/factory` after their applicable acceptance, review, and checks are satisfied; do not
+  ask for routine merge confirmation. Handle dependency-correct stack retargeting automatically
+  after parent merges, preserving the intended changes and reviewing the resulting base/head.
+  Merge only the exact reviewed head, respect required checks and branch protection, and never use
+  administrator privileges or bypasses. Fetch `origin/main` afterward and verify the recorded merge
+  commit and intended tree actually arrived before reporting completion or closing issues whose
+  acceptance is satisfied. Retain proportional verification: reuse evidence for an identical
+  validated tree rather than rerunning the full suite merely because a merge changes commit IDs;
+  changed integration content still requires applicable checks. This authority covers only Factory
+  repository PR delivery, not other repositories, provider spending, or package publication.
 - **Exercise Factory through the installed plugin**, not a hand-written MCP config pointing at a
   local worktree and not hand-copied skills. A local bundle tests something no adopter will ever run,
   and a worktree can change underneath a live run. This rule governs installed-product qualification,

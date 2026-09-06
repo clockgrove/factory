@@ -135,6 +135,7 @@
     "sessionId": { "type": "string", "minLength": 1, "maxLength": 500 },
     "modelProfile": { "type": "string", "minLength": 1, "maxLength": 160 },
     "reportedModelTokens": { "type": "integer", "minimum": 0 },
+    "usageEvidence": { "enum": ["as-recorded", "conservative-reservation"] },
     "reportedModelUsage": {
       "type": "object",
       "additionalProperties": false,
@@ -246,6 +247,23 @@
     "amount": { "type": "number", "minimum": 0 }
   },
   "allOf": [
+    {
+      "if": { "properties": { "kind": { "const": "attempt" } }, "anyOf": [{ "required": ["sourceArchiveDigest"] }, { "required": ["sourceArchiveBytes"] }] },
+      "then": { "required": ["sourceArchiveDigest", "sourceArchiveBytes"] }
+    },
+    {
+      "if": { "required": ["usageEvidence"], "properties": { "kind": { "const": "budget" }, "usageEvidence": { "const": "conservative-reservation" } } },
+      "then": {
+        "required": ["phase", "workItem", "attempt", "directorEpoch", "policyDigest", "reason"],
+        "properties": {
+          "event": { "const": "BudgetReconciled" },
+          "phase": { "const": "execution" },
+          "unit": { "enum": ["local_milliseconds", "sandbox_milliseconds"] },
+          "amount": { "type": "number", "exclusiveMinimum": 0 },
+          "reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
     {
       "if": { "properties": { "event": { "const": "ActivationCancellationRequested" } } },
       "then": {

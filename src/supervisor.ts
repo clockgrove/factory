@@ -9495,7 +9495,7 @@ export class FactorySupervisor {
     item: DerivedWorkItem,
     usageId: string,
     amount: number,
-    unit: "model_tokens" | "validation_milliseconds",
+    unit: "model_tokens" | "validation_milliseconds" | "sandbox_milliseconds",
   ): Promise<void> {
     const existing = this.#budgetEvents.filter(
       (event) =>
@@ -10121,18 +10121,53 @@ export class FactorySupervisor {
     const unit = this.#deliveryPlan?.units.find((entry) =>
       entry.items.includes(planItem.compilerId),
     );
-    if (!observed.merged && target !== exactHeadValidation.baseSha) {
+    let requiresIsolatedCandidate = false;
+    let adoptedValidator: ExecutionBackend | undefined;
+    const candidateTimeout = () => Math.min(
+      (this.#packetFor(item.number).requirements.timeoutMinutes ?? this.#policy.workItemTimeoutMinutes) * 60_000,
+      this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000 - Date.now(),
+    );
+    const selectAdoptedValidator = async () => {
+      const amount = candidateTimeout();
+      const available = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
+      if (amount <= 0 || available.sandboxMinutes * 60_000 < amount)
+        throw new Error("sandbox-minute budget exhausted before adopted candidate validation");
+      const candidates = await this.#registry.evaluateIsolatedValidators({
+        policy: { ...this.#policy, backendOrder: ["codex-cli/daytona"] },
+        requirements: this.#packetFor(item.number).requirements, probeTtlMs: 0,
+      });
+      const selected = candidates.find((entry) => entry.id === "codex-cli/daytona");
+      if (!selected?.backend?.validate || !selected.backend.reconcileStale ||
+        selected.permanentReasons.length || selected.transientReasons.length)
+        throw new Error("independent Daytona adopted-candidate validator is unavailable or unauthorized");
+      return selected.backend;
+    };
+    if (target !== exactHeadValidation.baseSha) {
       const lineage = await this.#assertOwnTrunkAdvance(exactHeadValidation.baseSha, target, item.number);
       const sourceStarts = runtime.events.filter((event) => event.event === "FactoryRunStarted" &&
         event.runId === source.runId && event.policyDigest === reserved.policyDigest);
       const sourceStart = sourceStarts[0];
-      // This adopted validation path is local-only. Authorization to buy a
-      // sandbox is not evidence that its local validator executes in one.
-      if (sourceStarts.length !== 1 || sourceStart?.event !== "FactoryRunStarted" ||
+      if (sourceStarts.length !== 1 || sourceStart?.event !== "FactoryRunStarted")
+        throw new Error("adopted candidate source policy is not uniquely authenticated");
+      requiresIsolatedCandidate =
         sourceStart.policy.trust === "sandbox_untrusted" || this.#policy.trust === "sandbox_untrusted" ||
         this.#packetFor(item.number).requirements.trust !== "trusted_local" ||
-        !this.#registry.get(reserved.backend)?.capabilities.hostExecution || lineage.requiresIsolation)
-        throw new Error("adopted candidate requires independent isolated validation; local refresh is unavailable");
+        !this.#registry.get(reserved.backend)?.capabilities.hostExecution || lineage.requiresIsolation;
+      if (requiresIsolatedCandidate &&
+        (!sourceStart.policy.allowedPaidBackends.includes("codex-cli/daytona") ||
+          !this.#policy.allowedPaidBackends.includes("codex-cli/daytona")))
+        throw new Error("adopted candidate requires original and successor authorization for independent Daytona validation");
+      if (!observed.merged && requiresIsolatedCandidate &&
+        deriveDurableCommandState({ events: snapshotEvents(lineage.snapshot),
+          objective: this.#run.objective, runId: this.#run.runId, runActor: this.#run.actor,
+          runStartSequence: this.#runStartSequence }).cloudPaused)
+        return;
+      if (!observed.merged && requiresIsolatedCandidate && observed.headSha === pull.commitSha &&
+        ((publication.mode === "native-stacks" && unit?.kind === "sibling") ||
+          (publication.mode === "regular-prs" &&
+            publication.branch === publicationBranch(this.#run.objective, item.number, source.attempt) &&
+            !isManagedAgentBackendId(reserved.backend))))
+        adoptedValidator = await selectAdoptedValidator();
     }
     let siblingRefresh: SiblingRefreshRecord | undefined;
     if (
@@ -10287,7 +10322,8 @@ export class FactorySupervisor {
         ...(siblingRefresh ? { deliveryHeadSha: siblingRefresh.plannedHeadSha } : {}),
       };
       const digest = mergeCandidateIdentityDigest(identity);
-      const backendId = `factory/integration-validation-${digest}`;
+      const isolated = requiresIsolatedCandidate;
+      const backendId = `factory/integration-${isolated ? "sandbox" : "validation"}-${digest}`;
       candidate = (await this.#mergeCandidates.load(identity)) ?? undefined;
       if (!candidate && observed.merged)
         throw new Error("merged adopted source lacks pre-merge validation");
@@ -10298,9 +10334,8 @@ export class FactorySupervisor {
           item.number,
         );
       const original = this.#packetFor(item.number);
-      if (original.requirements.trust !== "trusted_local")
-        throw new Error("adopted source validation requires trusted local scope");
-      const packet = parseWorkerPacket({ ...original, baseSha: target });
+      const packet = parseWorkerPacket({ ...original, baseSha: target,
+        requirements: { ...original.requirements, trust: isolated ? "isolated" : original.requirements.trust } });
       const deadline = new Date(
         this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
       );
@@ -10336,11 +10371,40 @@ export class FactorySupervisor {
           event.workItem === item.number &&
           event.backend === backendId,
       );
+      type SourceCapacity = Extract<FactoryEvent, { kind: "capacity" }>;
+      const invocation = (artifactDigest: string) => ({ kind: "integration-candidate" as const,
+        identityDigest: digest, artifactDigest, baseSha: target });
+      const ownership = (artifactDigest: string, directorEpoch: number) => validationInvocationOwnership({
+        repository: `${this.#options.owner}/${this.#options.repo}`, objective: this.#run.objective,
+        workItem: item.number, attempt: source.attempt, runId: this.#run.runId, directorEpoch,
+        policyDigest: this.#run.policyDigest, phase: "validation", validationInvocation: invocation(artifactDigest),
+      })!;
+      const recordedReservations = runtime.events.filter((event): event is SourceCapacity =>
+        event.kind === "capacity" && event.event === "CapacityReserved" && event.runId === this.#run.runId &&
+        event.workItem === item.number && event.backend === backendId);
+      let remoteReservation: SourceCapacity | undefined;
+      if (isolated && recordedReservations.length) {
+        if (recordedReservations.length !== 1) throw new Error("ambiguous adopted isolated capacity ownership");
+        remoteReservation = recordedReservations[0]!;
+        const metadata = remoteReservation.isolatedValidation;
+        if (!metadata || remoteReservation.sourceRunId !== source.runId ||
+          remoteReservation.attempt !== source.attempt || remoteReservation.targetBaseSha !== target ||
+          remoteReservation.policyDigest !== this.#run.policyDigest ||
+          metadata.invocationOwnershipDigest !== ownership(metadata.artifactDigest, remoteReservation.directorEpoch))
+          throw new Error("adopted isolated capacity identity changed");
+      }
+      if (candidate && isolated && (!remoteReservation || !candidate.isolatedResource ||
+        candidate.isolatedResource.invocationOwnershipDigest !== remoteReservation.isolatedValidation!.invocationOwnershipDigest ||
+        candidate.validation.artifactDigest !== remoteReservation.isolatedValidation!.artifactDigest))
+        throw new Error("adopted isolated completion lacks its exact resource ownership");
+      if (candidate && !isolated && candidate.isolatedResource)
+        throw new Error("adopted candidate isolation classification changed");
       const recordCapacity = async (
         event: "CapacityReserved" | "CapacityReconciled",
         cpu: number,
         memoryMb: number,
         batch?: LocalScopeBatch,
+        remote?: SourceCapacity,
       ) =>
         this.#appendSuccessorEvent(
           item.id,
@@ -10354,7 +10418,7 @@ export class FactorySupervisor {
             attempt: source.attempt,
             sourceRunId: source.runId,
             targetBaseSha: target,
-            directorEpoch: await this.#lease.use(async (lease) => lease.epoch),
+            directorEpoch: remote?.directorEpoch ?? await this.#lease.use(async (lease) => lease.epoch),
             policyDigest: this.#run.policyDigest,
             phase: "validation",
             backend: backendId,
@@ -10363,21 +10427,38 @@ export class FactorySupervisor {
             requestedCpu: cpu,
             requestedMemoryMb: memoryMb,
             ...(batch ? { localScopeBatch: batch } : {}),
+            ...(remote?.isolatedValidation ? { isolatedValidation: remote.isolatedValidation } : {}),
           }),
         );
+      if (!candidate && isolated && remoteReservation) {
+        const backend = this.#registry.get("codex-cli/daytona");
+        if (!backend?.reconcileStale) throw new Error("adopted isolated resource reconciliation unavailable");
+        await this.#externalAdmission(() => backend.reconcileStale!({
+          repository: `${this.#options.owner}/${this.#options.repo}`, objective: this.#run.objective,
+          workItem: item.number, attempt: source.attempt, runId: this.#run.runId,
+          directorEpoch: remoteReservation!.directorEpoch, policyDigest: this.#run.policyDigest,
+          phase: "validation", validationInvocation: invocation(remoteReservation!.isolatedValidation!.artifactDigest),
+          noHandleReplacementNotBefore: remoteReservation!.isolatedValidation!.noHandleReplacementNotBefore,
+        }));
+        // Absence is not validation completion or measured usage. Retain the native
+        // liability and refuse to dispatch this immutable candidate a second time.
+        throw new Error("interrupted adopted isolated validation reconciled resources but lacks immutable completion");
+      }
       if (!candidate && outstanding.length)
         throw new Error("interrupted adopted validation requires exact scope reconciliation");
       if (candidate)
         for (const entry of outstanding)
-          await recordCapacity("CapacityReconciled", entry.requestedCpu, entry.requestedMemoryMb);
+          await recordCapacity("CapacityReconciled", entry.requestedCpu, entry.requestedMemoryMb, undefined,
+            isolated ? entry : undefined);
       if (!candidate) {
+        if (isolated) adoptedValidator ??= await selectAdoptedValidator();
         const effective = normalizeSchedulingPolicy(this.#policy);
         const resource =
-          effective.capacity.mode === "adaptive-local"
+          !isolated && effective.capacity.mode === "adaptive-local"
             ? await this.#resourceSampler.sample(Date.now()).catch(() => null)
             : null;
         if (
-          effective.capacity.mode === "adaptive-local" &&
+          !isolated && effective.capacity.mode === "adaptive-local" &&
           (!resource ||
             resourcePressureReasons(resource, effective.capacity.local).length ||
             this.#resourceSampler.coolingDown(Date.now()))
@@ -10396,11 +10477,11 @@ export class FactorySupervisor {
           attempt: source.attempt,
           phase: "validation",
           backendId,
-          admissionClass: "local",
-          local: true,
+          admissionClass: isolated ? "remote-required" : "local",
+          local: !isolated,
           cpu: packet.requirements.cpu ?? effective.capacity.local.defaultCpu,
           memoryMb: packet.requirements.memoryMb ?? effective.capacity.local.defaultMemoryMb,
-          paidUnits: 0,
+          paidUnits: isolated ? 1 : 0,
           paths: packet.allowedPaths,
           exclusiveResources: packet.changeSurface?.exclusiveResources ?? [],
         };
@@ -10422,9 +10503,11 @@ export class FactorySupervisor {
         let validation: CleanValidationResult | undefined;
         let recorded = false;
         let validationLaunched = false;
+        let providerStarted: Date | undefined;
+        let providerCompleted: Date | undefined;
         try {
           artifact = await reconstruct();
-          const scope = await this.#scopedValidation(
+          const scope = isolated ? undefined : await this.#scopedValidation(
             {
               objective: this.#run.objective,
               runId: this.#run.runId,
@@ -10436,9 +10519,52 @@ export class FactorySupervisor {
             packet,
             deadline,
           );
-          if (!scope) throw new Error("adopted validation requires observable owned local scopes");
-          await recordCapacity("CapacityReserved", capacity.cpu, capacity.memoryMb, scope.batch);
+          if (!isolated && !scope) throw new Error("adopted validation requires observable owned local scopes");
+          let validationDeadline = deadline;
+          let sandboxAmount = 0;
+          if (isolated) {
+            const available = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
+            sandboxAmount = candidateTimeout();
+            if (sandboxAmount <= 0 || available.sandboxMinutes * 60_000 < sandboxAmount)
+              throw new Error("sandbox-minute budget or deadline changed before adopted validation reservation");
+            if (this.#budgetEvents.some((event) => event.kind === "budget" &&
+              event.runId === this.#run.runId && event.workItem === item.number &&
+              event.unit === "sandbox_milliseconds" && event.usageId === `integration-validation-${digest}`))
+              throw new Error("adopted isolated invocation already has native accounting without a completion");
+            const at = (await this.#store.serverTime()).toISOString();
+            validationDeadline = new Date(Math.min(Date.parse(at) + sandboxAmount, deadline.getTime()));
+            const directorEpoch = await this.#lease.use(async (lease) => lease.epoch);
+            const receipt = parseFactoryEvent({
+              protocol: "clockgrove.factory/v2", kind: "capacity", event: "CapacityReserved",
+              objective: this.#run.objective, runId: this.#run.runId, workItem: item.number,
+              attempt: source.attempt, sourceRunId: source.runId, targetBaseSha: target,
+              directorEpoch, policyDigest: this.#run.policyDigest, phase: "validation", backend: backendId,
+              sequence: this.#sequences.take(), at, requestedCpu: capacity.cpu, requestedMemoryMb: capacity.memoryMb,
+              isolatedValidation: { backend: "codex-cli/daytona", artifactDigest: artifact.digest,
+                invocationOwnershipDigest: ownership(artifact.digest, directorEpoch),
+                deadline: validationDeadline.toISOString(),
+                noHandleReplacementNotBefore: new Date(validationDeadline.getTime() + 60_000).toISOString() },
+            });
+            if (receipt.kind !== "capacity") throw new Error("invalid adopted capacity receipt");
+            remoteReservation = receipt;
+            await this.#appendSuccessorEvent(item.id, receipt);
+          } else {
+            await recordCapacity("CapacityReserved", capacity.cpu, capacity.memoryMb, scope!.batch);
+          }
           recorded = true;
+          if (isolated) {
+            const budgetAt = (await this.#store.serverTime()).toISOString();
+            const remainingWindow = validationDeadline.getTime() - Date.parse(budgetAt);
+            if (remainingWindow <= 0)
+              throw new Error("adopted isolated reservation server-time window changed before native admission");
+            await this.#appendSuccessorEvent(item.id, parseFactoryEvent({
+              protocol: "clockgrove.factory/v2", kind: "budget", event: "BudgetReserved",
+              objective: this.#run.objective, runId: this.#run.runId, workItem: item.number,
+              sequence: this.#sequences.take(), at: budgetAt,
+              phase: "validation", unit: "sandbox_milliseconds", amount: sandboxAmount,
+              usageId: `integration-validation-${digest}`,
+            }));
+          }
           validation = await this.#externalAdmission(async () => {
             if (siblingRefresh)
               await this.#assertSiblingRefreshCurrent(
@@ -10450,7 +10576,26 @@ export class FactorySupervisor {
               repository: this.#options.repository,
               artifact: artifact!,
               packet,
-              localScope: scope.hooks,
+              ...(scope ? { localScope: scope.hooks } : {}),
+              ...(isolated ? { isolatedValidator: () => this.#externalAdmission(async () => {
+                if (Date.now() >= validationDeadline.getTime())
+                  throw new Error("adopted isolated validation deadline exhausted before launch");
+                await this.#lease.use(async (lease) => {
+                  if (lease.epoch !== remoteReservation!.directorEpoch)
+                    throw new Error("adopted isolated invocation lost its reserved controller generation");
+                });
+                providerStarted = new Date();
+                const result = await adoptedValidator!.validate!({
+                  repository: `${this.#options.owner}/${this.#options.repo}`,
+                  objective: this.#run.objective, workItem: item.number, attempt: source.attempt,
+                  runId: this.#run.runId, directorEpoch: remoteReservation!.directorEpoch,
+                  policyDigest: this.#run.policyDigest, workspace: this.#options.repository,
+                  packet, artifact: artifact!, policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                  deadline: validationDeadline, validationInvocation: invocation(artifact!.digest),
+                });
+                providerCompleted = new Date();
+                return result;
+              }) } : {}),
             });
           });
           if (!validation.evidence.passed) {
@@ -10484,13 +10629,23 @@ export class FactorySupervisor {
               identity,
               source: exactHeadValidation,
               validation: validation!.evidence,
+              ...(isolated ? { isolatedResource: {
+                backend: "codex-cli/daytona" as const,
+                invocationOwnershipDigest: remoteReservation!.isolatedValidation!.invocationOwnershipDigest,
+                startedAt: providerStarted!.toISOString(), completedAt: providerCompleted!.toISOString(),
+                sandboxMilliseconds: providerCompleted!.getTime() - providerStarted!.getTime(),
+              } } : {}),
             }),
           );
         } finally {
           try {
             if (validation) await discardValidationResult(validation);
+            if (providerStarted && providerCompleted)
+              await this.#sourceUsage(item, `integration-validation-${digest}`,
+                providerCompleted.getTime() - providerStarted.getTime(), "sandbox_milliseconds");
             if (recorded && (candidate || !validationLaunched))
-              await recordCapacity("CapacityReconciled", capacity.cpu, capacity.memoryMb);
+              await recordCapacity("CapacityReconciled", capacity.cpu, capacity.memoryMb, undefined,
+                isolated ? remoteReservation : undefined);
           } finally {
             if (!recorded || candidate || !validationLaunched) this.#releaseCapacity(capacity.key);
           }
@@ -10502,6 +10657,9 @@ export class FactorySupervisor {
         Date.parse(candidate.validation.completedAt) - Date.parse(candidate.validation.startedAt),
         "validation_milliseconds",
       );
+      if (candidate.isolatedResource)
+        await this.#sourceUsage(item, `integration-validation-${digest}`,
+          candidate.isolatedResource.sandboxMilliseconds, "sandbox_milliseconds");
       if (siblingRefresh) {
         if (candidate.validation.outputTreeSha !== siblingRefresh.outputTreeSha)
           throw new Error("adopted refresh checkpoint differs from its planned tree");
@@ -10577,6 +10735,13 @@ export class FactorySupervisor {
         target,
         item.number,
       );
+    }
+    if (candidate?.isolatedResource) {
+      // Re-read the authenticated capacity/native/completion/review receipts before
+      // an irreversible merge. The entry snapshot predates this paid invocation.
+      const settled = await this.#reader.readObjective(this.#run.objective);
+      this.#fenceSnapshot(settled);
+      await this.#resumeObservedRun(settled, new RunManager(this.#store));
     }
     await this.#integrate(
       item,

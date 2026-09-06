@@ -29,6 +29,25 @@ Native-stack selection does not require independent sibling PRs to have a stack 
 assessment reconstructs delivery units from the immutable graph and authenticated selection:
 sibling units use ordinary trunk-base checks, while actual stack units require exact membership.
 
+Retained ordinary and native-sibling candidates also use independent Daytona validation when
+the original source policy, source packet/backend, current policy, or authenticated incorporated
+ancestry requires isolation. Both original and successor policies must authorize that provider;
+available credentials do not grant permission. Availability and remaining native allowance are
+checked before refreshing an owned branch. No worker is relaunched to reconstruct the artifact.
+The paid validation has its own successor-run capacity epoch, candidate/artifact invocation digest,
+sandbox reservation, fixed deadline, and no-handle termination fence, while the original source
+attempt and publication remain unchanged. Repository commands run in the isolated validator, not
+the host's clean-tree materialization step.
+
+A successful candidate checkpoint records the controller-observed provider interval only after
+validator cleanup returns. Restart reuses that checkpoint, repairs exact native/validation/review
+accounting, and performs no second validation or completed semantic review. Without completion,
+only the exact recorded provider identity may be reconciled; unknown cleanup or usage remains a
+liability. Even proven resource absence does not manufacture successful validation or authorize
+automatic redispatch of the same immutable invocation. Current-head, current-trunk, merge-preview,
+semantic acceptance, and post-squash proof gates still apply. These are implementation contracts;
+simulated-provider regressions do not claim live paid-provider qualification.
+
 ## Implemented authorization foundations
 
 The immutable recovery-plan document binds the proposed successor, exact predecessor terminal,

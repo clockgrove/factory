@@ -120,9 +120,16 @@ export async function observeRecoverySiblingRefresh(
   );
   if (publication.mode === "regular-prs")
     requireRefresh(
-      publicationEvent.position === 0 && !publicationEvent.parentItemId && !publicationEvent.stackNumber &&
-        !events.some((event) => event.event === "StackLinked" && event.runId === source.runId &&
-          event.workItem === input.workItem && event.attempt === source.attempt),
+      publicationEvent.position === 0 &&
+        !publicationEvent.parentItemId &&
+        !publicationEvent.stackNumber &&
+        !events.some(
+          (event) =>
+            event.event === "StackLinked" &&
+            event.runId === source.runId &&
+            event.workItem === input.workItem &&
+            event.attempt === source.attempt,
+        ),
     );
   const publicationDigests = new Set(
     equivalentPublications.length
@@ -168,20 +175,25 @@ export async function observeRecoverySiblingRefresh(
           event.graphBlobSha === graph.blobOid,
       ),
   );
-  const topology = publication.mode === "native-stacks" ? planDelivery(
-    graph.objective.workItems.map((item) => {
-      requireRefresh(item.delivery);
-      return {
-        id: item.id,
-        dependsOn: item.dependsOn,
-        delivery: {
-          group: item.delivery.group,
-          relationship: item.delivery.relationship,
-          ...(item.delivery.parentWorkItem ? { parentWorkItem: item.delivery.parentWorkItem } : {}),
-        },
-      };
-    }),
-  ) : null;
+  const topology =
+    publication.mode === "native-stacks"
+      ? planDelivery(
+          graph.objective.workItems.map((item) => {
+            requireRefresh(item.delivery);
+            return {
+              id: item.id,
+              dependsOn: item.dependsOn,
+              delivery: {
+                group: item.delivery.group,
+                relationship: item.delivery.relationship,
+                ...(item.delivery.parentWorkItem
+                  ? { parentWorkItem: item.delivery.parentWorkItem }
+                  : {}),
+              },
+            };
+          }),
+        )
+      : null;
   const itemId =
     publicationEvent.event === "PublicationRecorded" ||
     publicationEvent.event === "RecoverySourcePublished"
@@ -189,10 +201,12 @@ export async function observeRecoverySiblingRefresh(
       : undefined;
   requireRefresh(
     graph.objective.workItems.some((item) => item.id === itemId) &&
-    (publication.mode === "regular-prs" || (topology?.result === "supported" &&
-      topology.units.some(
-        (unit) => unit.kind === "sibling" && unit.items.length === 1 && unit.items[0] === itemId,
-      ))),
+      (publication.mode === "regular-prs" ||
+        (topology?.result === "supported" &&
+          topology.units.some(
+            (unit) =>
+              unit.kind === "sibling" && unit.items.length === 1 && unit.items[0] === itemId,
+          ))),
   );
   const delivery = await store.readCommit(input.deliveryHeadSha);
   requireRefresh(delivery.oid === input.deliveryHeadSha && delivery.parentOids.length === 2);
@@ -234,17 +248,28 @@ export async function observeRecoverySiblingRefresh(
         start.objective === input.objective &&
         (publication.mode === "native-stacks"
           ? start.policy.delivery?.mode === "stacked-prs"
-          : !start.policy.delivery || start.policy.delivery.mode === "regular-prs" ||
+          : !start.policy.delivery ||
+            start.policy.delivery.mode === "regular-prs" ||
             start.policy.delivery.onUnavailable === "regular-prs") &&
         start.policyDigest === controllingPolicyDigest,
     );
     if (publication.mode === "regular-prs") {
-      const selections = events.filter((event) => event.event === "DeliverySelected" &&
-        event.runId === start.runId && event.objective === input.objective);
-      requireRefresh(selections.length > 0 && selections.every((event) =>
-        event.event === "DeliverySelected" && event.selected === "regular-prs" &&
-        event.requested === (start.policy.delivery?.mode ?? "regular-prs") &&
-        event.policyDigest === start.policyDigest));
+      const selections = events.filter(
+        (event) =>
+          event.event === "DeliverySelected" &&
+          event.runId === start.runId &&
+          event.objective === input.objective,
+      );
+      requireRefresh(
+        selections.length > 0 &&
+          selections.every(
+            (event) =>
+              event.event === "DeliverySelected" &&
+              event.selected === "regular-prs" &&
+              event.requested === (start.policy.delivery?.mode ?? "regular-prs") &&
+              event.policyDigest === start.policyDigest,
+          ),
+      );
     }
     if (start.runId !== source.runId) {
       requireRefresh(start.recoveryPlanDigest);
@@ -310,19 +335,37 @@ export async function observeRecoverySiblingRefresh(
     if (!controllerBase) {
       // Foreground runs have no activation base. Recover only the base committed
       // by their authenticated original compilation, never today's mutable trunk.
-      requireRefresh(!start.activationRequestId && !start.recoveryRequestId && !start.recoveryPlanDigest);
-      const compiled = events.filter((event) => event.event === "GraphCompiled" &&
-        event.runId === start.runId && event.objective === input.objective);
+      requireRefresh(
+        !start.activationRequestId && !start.recoveryRequestId && !start.recoveryPlanDigest,
+      );
+      const compiled = events.filter(
+        (event) =>
+          event.event === "GraphCompiled" &&
+          event.runId === start.runId &&
+          event.objective === input.objective,
+      );
       const receipt = compiled[0];
-      const originalGraph = start.runId === graphRun ? graph : await loadCompiledGraph(store, input.objective, start.runId);
-      requireRefresh(compiled.length === 1 && receipt?.event === "GraphCompiled" &&
-        receipt.sequence > start.sequence && originalGraph &&
-        receipt.graphRef === originalGraph.ref && receipt.graphBlobSha === originalGraph.blobOid &&
-        receipt.graphDigest === originalGraph.graphDigest && receipt.graphSize === originalGraph.graphSize &&
-        originalGraph.objective.workItems.every((item) => item.baseSha === receipt.baseSha));
+      const originalGraph =
+        start.runId === graphRun
+          ? graph
+          : await loadCompiledGraph(store, input.objective, start.runId);
+      requireRefresh(
+        compiled.length === 1 &&
+          receipt?.event === "GraphCompiled" &&
+          receipt.sequence > start.sequence &&
+          originalGraph &&
+          receipt.graphRef === originalGraph.ref &&
+          receipt.graphBlobSha === originalGraph.blobOid &&
+          receipt.graphDigest === originalGraph.graphDigest &&
+          receipt.graphSize === originalGraph.graphSize &&
+          originalGraph.objective.workItems.every((item) => item.baseSha === receipt.baseSha),
+      );
       const graphCommit = await store.readCommit(originalGraph.commitOid);
-      requireRefresh(graphCommit.oid === originalGraph.commitOid && graphCommit.parentOids.length === 1 &&
-        graphCommit.parentOids[0] === receipt.baseSha);
+      requireRefresh(
+        graphCommit.oid === originalGraph.commitOid &&
+          graphCommit.parentOids.length === 1 &&
+          graphCommit.parentOids[0] === receipt.baseSha,
+      );
       controllerBase = receipt.baseSha;
     }
     const seen = new Set<string>();
@@ -451,8 +494,13 @@ export async function observeRecoverySiblingRefresh(
                 candidate.validation.outputTreeSha === merge.treeOid &&
                 JSON.stringify(candidate.source) === JSON.stringify(original),
             );
-            assertIsolatedCandidateProof({ repository: input.repository, sourceRunId: start.runId,
-              candidate, events, beforeSequence: integrated.sequence });
+            assertIsolatedCandidateProof({
+              repository: input.repository,
+              sourceRunId: start.runId,
+              candidate,
+              events,
+              beforeSequence: integrated.sequence,
+            });
             const review = await loadReviewCheckpoint(store, {
               kind: "integration-candidate",
               runId: start.runId,
@@ -608,9 +656,14 @@ export async function observeRecoverySiblingRefresh(
         JSON.stringify(candidate.source) === JSON.stringify(exact),
     );
   if (candidate)
-    assertIsolatedCandidateProof({ repository: input.repository, sourceRunId: source.runId,
-      candidate, events, requireAccounting: input.requireCompletion === true,
-      ...(input.beforeSequence === undefined ? {} : { beforeSequence: input.beforeSequence }) });
+    assertIsolatedCandidateProof({
+      repository: input.repository,
+      sourceRunId: source.runId,
+      candidate,
+      events,
+      requireAccounting: input.requireCompletion === true,
+      ...(input.beforeSequence === undefined ? {} : { beforeSequence: input.beforeSequence }),
+    });
   const review = candidate
     ? await loadReviewCheckpoint(store, {
         kind: "integration-candidate",

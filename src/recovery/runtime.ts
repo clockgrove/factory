@@ -8,7 +8,11 @@ import {
 import { loadReviewCheckpoint } from "../control/reviews.js";
 import { bindValidationToPublishedHead } from "../validation/plan.js";
 import { observeRecoverySiblingRefresh } from "./sibling-refresh.js";
-import { assertIsolatedCandidateFailureProof, assertIsolatedCandidateProof, assertIsolatedCandidateReservation } from "./isolated-candidate.js";
+import {
+  assertIsolatedCandidateFailureProof,
+  assertIsolatedCandidateProof,
+  assertIsolatedCandidateReservation,
+} from "./isolated-candidate.js";
 import { deriveBudgetUsage, remainingBudget, type BudgetUsage } from "../control/budget.js";
 import {
   loadCompiledGraph,
@@ -393,8 +397,10 @@ export async function loadRecoveryRuntime(input: {
       });
       const pull = await input.store.readPullRequest(publication.pullRequest);
       const currentHead = await input.store.readCommit(pull.headSha);
-      requireRuntime(event.targetBaseSha && event.targetBaseSha !== source.validation.baseSha,
-        "source-capacity-candidate-mismatch");
+      requireRuntime(
+        event.targetBaseSha && event.targetBaseSha !== source.validation.baseSha,
+        "source-capacity-candidate-mismatch",
+      );
       const originalIdentity = {
         runId: input.runId,
         objective: input.objective,
@@ -406,11 +412,13 @@ export async function loadRecoveryRuntime(input: {
         targetBaseSha: event.targetBaseSha,
       };
       const remote = event.backend.startsWith("factory/integration-sandbox-");
-      const backendPrefix = remote ? "factory/integration-sandbox-" : "factory/integration-validation-";
+      const backendPrefix = remote
+        ? "factory/integration-sandbox-"
+        : "factory/integration-validation-";
       // A later CAS does not rewrite an already paid invocation's identity. Keep
       // the old immutable-head candidate distinct from new delivery-head work.
-      const originalCandidate = event.backend ===
-        `${backendPrefix}${mergeCandidateIdentityDigest(originalIdentity)}`;
+      const originalCandidate =
+        event.backend === `${backendPrefix}${mergeCandidateIdentityDigest(originalIdentity)}`;
       const refresh =
         pull.headSha !== publication.headSha && currentHead.parentOids.length === 2
           ? await observeRecoverySiblingRefresh({
@@ -424,7 +432,9 @@ export async function loadRecoveryRuntime(input: {
               deliveryHeadSha: pull.headSha,
               ...(!originalCandidate ? { targetBaseSha: event.targetBaseSha } : {}),
               candidateRunId: input.runId,
-              ...(!originalCandidate ? { candidateIdentityDigest: event.backend.slice(backendPrefix.length) } : {}),
+              ...(!originalCandidate
+                ? { candidateIdentityDigest: event.backend.slice(backendPrefix.length) }
+                : {}),
             })
           : null;
       if (refresh)
@@ -434,23 +444,31 @@ export async function loadRecoveryRuntime(input: {
         );
       const candidateIdentity = {
         ...originalIdentity,
-        ...(!originalCandidate && refresh ? { deliveryHeadSha: refresh.record.plannedHeadSha } : {}),
+        ...(!originalCandidate && refresh
+          ? { deliveryHeadSha: refresh.record.plannedHeadSha }
+          : {}),
       };
       requireRuntime(
         event.targetBaseSha &&
           event.targetBaseSha !== source.validation.baseSha &&
-          event.backend ===
-            `${backendPrefix}${mergeCandidateIdentityDigest(candidateIdentity)}`,
+          event.backend === `${backendPrefix}${mergeCandidateIdentityDigest(candidateIdentity)}`,
         "source-capacity-candidate-mismatch",
       );
       requireRuntime(
-        remote ? event.isolatedValidation && !event.localScopeBatch :
-          !event.isolatedValidation && (event.event !== "CapacityReserved" || event.localScopeBatch),
+        remote
+          ? event.isolatedValidation && !event.localScopeBatch
+          : !event.isolatedValidation &&
+              (event.event !== "CapacityReserved" || event.localScopeBatch),
         "source-capacity-scope-unavailable",
       );
       if (remote)
-        assertIsolatedCandidateReservation({ repository: plan.repository, sourceRunId: source.runId,
-          identity: candidateIdentity, reservation: event, events });
+        assertIsolatedCandidateReservation({
+          repository: plan.repository,
+          sourceRunId: source.runId,
+          identity: candidateIdentity,
+          reservation: event,
+          events,
+        });
       if (event.localScopeBatch)
         requireRuntime(
           event.localScopeBatch.identity.runId === input.runId &&
@@ -460,41 +478,90 @@ export async function loadRecoveryRuntime(input: {
         );
       if (originalCandidate && refresh) {
         const completed = await loadMergeCandidateCheckpoint(input.store, originalIdentity);
-        requireRuntime(completed && JSON.stringify(completed.source) === JSON.stringify(proof),
-          "source-capacity-prior-completion-unavailable");
-        assertIsolatedCandidateProof({ repository: plan.repository, sourceRunId: source.runId,
-          candidate: completed, events });
+        requireRuntime(
+          completed && JSON.stringify(completed.source) === JSON.stringify(proof),
+          "source-capacity-prior-completion-unavailable",
+        );
+        assertIsolatedCandidateProof({
+          repository: plan.repository,
+          sourceRunId: source.runId,
+          candidate: completed,
+          events,
+        });
         if (event.localScopeBatch)
-          requireRuntime(event.localScopeBatch.identity.invocationDigest === completed.validation.artifactDigest,
-            "source-capacity-prior-artifact-mismatch");
-        const reconciliation = suffix.filter((entry) => entry.kind === "capacity" &&
-          entry.event === "CapacityReconciled" && entry.workItem === event.workItem &&
-          entry.attempt === event.attempt && entry.sourceRunId === event.sourceRunId &&
-          entry.backend === event.backend && entry.targetBaseSha === event.targetBaseSha);
-        requireRuntime(reconciliation.length === 1 && reconciliation[0]!.sequence >= event.sequence,
-          "source-capacity-prior-reconciliation-unavailable");
-        const accounted = suffix.filter((entry) => entry.kind === "budget" &&
-          entry.event === "BudgetReconciled" && entry.workItem === event.workItem &&
-          entry.phase === "validation" && entry.unit === "validation_milliseconds" &&
-          entry.usageId === `integration-validation-${mergeCandidateIdentityDigest(originalIdentity)}`);
-        requireRuntime(accounted.length > 0 && accounted.every((entry) => entry.kind === "budget" &&
-          entry.amount === Date.parse(completed.validation.completedAt) - Date.parse(completed.validation.startedAt)),
-          "source-capacity-prior-accounting-unavailable");
+          requireRuntime(
+            event.localScopeBatch.identity.invocationDigest === completed.validation.artifactDigest,
+            "source-capacity-prior-artifact-mismatch",
+          );
+        const reconciliation = suffix.filter(
+          (entry) =>
+            entry.kind === "capacity" &&
+            entry.event === "CapacityReconciled" &&
+            entry.workItem === event.workItem &&
+            entry.attempt === event.attempt &&
+            entry.sourceRunId === event.sourceRunId &&
+            entry.backend === event.backend &&
+            entry.targetBaseSha === event.targetBaseSha,
+        );
+        requireRuntime(
+          reconciliation.length === 1 && reconciliation[0]!.sequence >= event.sequence,
+          "source-capacity-prior-reconciliation-unavailable",
+        );
+        const accounted = suffix.filter(
+          (entry) =>
+            entry.kind === "budget" &&
+            entry.event === "BudgetReconciled" &&
+            entry.workItem === event.workItem &&
+            entry.phase === "validation" &&
+            entry.unit === "validation_milliseconds" &&
+            entry.usageId ===
+              `integration-validation-${mergeCandidateIdentityDigest(originalIdentity)}`,
+        );
+        requireRuntime(
+          accounted.length > 0 &&
+            accounted.every(
+              (entry) =>
+                entry.kind === "budget" &&
+                entry.amount ===
+                  Date.parse(completed.validation.completedAt) -
+                    Date.parse(completed.validation.startedAt),
+            ),
+          "source-capacity-prior-accounting-unavailable",
+        );
         const review = await loadReviewCheckpoint(input.store, {
-          kind: "integration-candidate", runId: input.runId, objective: input.objective,
-          workItem: event.workItem, attempt: source.attempt, headSha: publication.headSha,
-          artifactDigest: completed.validation.artifactDigest, baseSha: completed.validation.baseSha,
-          outputTreeSha: completed.validation.outputTreeSha, evidenceDigest: completed.validation.digest,
+          kind: "integration-candidate",
+          runId: input.runId,
+          objective: input.objective,
+          workItem: event.workItem,
+          attempt: source.attempt,
+          headSha: publication.headSha,
+          artifactDigest: completed.validation.artifactDigest,
+          baseSha: completed.validation.baseSha,
+          outputTreeSha: completed.validation.outputTreeSha,
+          evidenceDigest: completed.validation.digest,
         });
         if (review) {
-          const usage = suffix.filter((entry) => entry.kind === "budget" &&
-            entry.event === "BudgetReconciled" && entry.workItem === event.workItem &&
-            entry.attempt === undefined && entry.phase === "management" && entry.unit === "model_tokens" &&
-            entry.usageId === `integration-review-${review.identityDigest}`);
-          requireRuntime(review.review.accepted && review.review.unmetCriteria.length === 0 &&
-            usage.length > 0 && usage.every((entry) => entry.kind === "budget" &&
-              entry.amount === review.usage.inputTokens + review.usage.outputTokens),
-            "source-capacity-prior-review-unaccounted");
+          const usage = suffix.filter(
+            (entry) =>
+              entry.kind === "budget" &&
+              entry.event === "BudgetReconciled" &&
+              entry.workItem === event.workItem &&
+              entry.attempt === undefined &&
+              entry.phase === "management" &&
+              entry.unit === "model_tokens" &&
+              entry.usageId === `integration-review-${review.identityDigest}`,
+          );
+          requireRuntime(
+            review.review.accepted &&
+              review.review.unmetCriteria.length === 0 &&
+              usage.length > 0 &&
+              usage.every(
+                (entry) =>
+                  entry.kind === "budget" &&
+                  entry.amount === review.usage.inputTokens + review.usage.outputTokens,
+              ),
+            "source-capacity-prior-review-unaccounted",
+          );
         }
       }
       if (event.event === "CapacityReconciled") {
@@ -514,18 +581,29 @@ export async function loadRecoveryRuntime(input: {
             reserved[0]!.requestedMemoryMb === event.requestedMemoryMb &&
             (!remote || reserved[0]!.directorEpoch === event.directorEpoch) &&
             reserved[0]!.policyDigest === event.policyDigest &&
-            JSON.stringify(reserved[0]!.isolatedValidation) === JSON.stringify(event.isolatedValidation),
+            JSON.stringify(reserved[0]!.isolatedValidation) ===
+              JSON.stringify(event.isolatedValidation),
           "source-capacity-reconciliation-mismatch",
         );
         const completed = await loadMergeCandidateCheckpoint(input.store, candidateIdentity);
         if (event.isolatedFailure) {
           requireRuntime(remote && !completed, "source-capacity-failure-conflicts-with-candidate");
-          assertIsolatedCandidateFailureProof({ repository: plan.repository, sourceRunId: source.runId,
-            identity: candidateIdentity, events, requireAccounting: false });
+          assertIsolatedCandidateFailureProof({
+            repository: plan.repository,
+            sourceRunId: source.runId,
+            identity: candidateIdentity,
+            events,
+            requireAccounting: false,
+          });
         } else {
           requireRuntime(completed, "source-capacity-completion-unavailable");
-          assertIsolatedCandidateProof({ repository: plan.repository, sourceRunId: source.runId,
-            candidate: completed, events, requireAccounting: false });
+          assertIsolatedCandidateProof({
+            repository: plan.repository,
+            sourceRunId: source.runId,
+            candidate: completed,
+            events,
+            requireAccounting: false,
+          });
         }
       }
       sourceCapacity.add(event);

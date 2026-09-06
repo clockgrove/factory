@@ -316,8 +316,9 @@ export class CapacityLedger {
     }
     if (
       limits.objectiveBackendMaxParallel?.objective === input.objective &&
-      objectiveReservations.filter((reservation) => capacityProvider(reservation.backendId) === provider)
-        .length +
+      objectiveReservations.filter(
+        (reservation) => capacityProvider(reservation.backendId) === provider,
+      ).length +
         1 >
         (limits.objectiveBackendMaxParallel.limits[provider] ??
           limits.objectiveMaxParallel?.max ??

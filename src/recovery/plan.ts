@@ -411,7 +411,8 @@ export function parseRecoveryPlan(input: unknown): RecoveryPlan {
         requirePlan(
           source.publication &&
             (source.publication.mode === "native-stacks" ||
-              source.publication.branch === publicationBranch(plan.objective, item.workItem, source.attempt)) &&
+              source.publication.branch ===
+                publicationBranch(plan.objective, item.workItem, source.attempt)) &&
             source.publication.stackNumber === null &&
             source.validation &&
             source.siblingRefresh.deliveryHeadSha !== source.publication.headSha &&

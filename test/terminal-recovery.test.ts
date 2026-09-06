@@ -84,6 +84,29 @@ const graph = () =>
 afterEach(() => vi.restoreAllMocks());
 
 describe("terminal-run recovery admission", () => {
+  it("directs blocked restarts to explicit supported recovery without granting adoption", async () => {
+    const current = snapshot();
+    current.factoryEvents!.push(attempt());
+    const before = structuredClone(current);
+    const refs = vi.fn(async () => []);
+    const reason = await inspectImplicitRestart(current, refs);
+
+    expect(reason).toBe(TERMINAL_RECOVERY_REQUIRED);
+    expect(reason).not.toContain("not implemented");
+    expect(reason).toContain("factory_recovery_plan for read-only assessment");
+    expect(reason).toContain("factory_recovery_propose with a stable requestId");
+    expect(reason).toContain("After explicit authorization");
+    expect(reason).toContain("factory_recovery_request with that planDigest");
+    expect(reason).toContain("the same requestId, and the same allowance/acknowledgement inputs");
+    expect(reason).toContain("do not authorize execution or additional allowance");
+    expect(reason).toContain("missing source evidence");
+    expect(reason).toContain("unverified resource absence");
+    expect(reason).toContain("unresolved accounting can still block controller adoption");
+    expect(reason).toContain("do not restart with a fresh budget or delete the existing work");
+    expect(refs).not.toHaveBeenCalled();
+    expect(current).toEqual(before);
+  });
+
   it.each([
     "execution",
     "controller-execution",

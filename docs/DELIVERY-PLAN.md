@@ -35,9 +35,8 @@ The scope includes:
 - Daytona sandbox burst with TTL, egress, secret, concurrency, budget, and cleanup controls;
 - GitHub issues, native sub-issues/dependencies, versioned refs/receipts, and no required private
   state service;
-- native stacked pull requests with exact-head validation, restart recovery, and concurrent
-  execution; the regular-PR fallback serializes complete Work Item pipelines to preserve validated
-  base integrity;
+- native stacked pull requests and regular independent PR pipelines with exact-head validation,
+  restart recovery, concurrent execution, and serialized/revalidated integration;
 - chat/MCP and CLI control with no custom UI or required GitHub Action; and
 - public security, support, governance, contribution, release, and conformance documentation.
 

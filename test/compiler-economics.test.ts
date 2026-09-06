@@ -91,9 +91,9 @@ describe("grounded advisory compiler economics", () => {
   it("respects controller, backend, delivery, pressure and cooldown restrictions", () => {
     for (const inputs of [
       evidence({ repositoryLimits: { maxLocalWorkers: 1, maxPaidWorkers: 2 } }),
-      evidence({ deliveryMode: "regular-prs" }),
       evidence({ policy: { ...policy, capacity: { ...policy.capacity!, backendMaxParallel: { [localId]: 1 } } } }),
     ]) expect(assessDecomposition(graph().workItems, inputs).localFit.likelySlots).toBe(1);
+    expect(assessDecomposition(graph().workItems, evidence({ deliveryMode: "regular-prs" })).localFit.likelySlots).toBe(2);
     for (const inputs of [evidence({ cooldownUntilMs: Date.parse(stamp) + 1000 }), evidence({ deliveryMode: "escalate" })])
       expect(assessDecomposition(graph().workItems, inputs).localFit.likelySlots).toBe(0);
     const pressure = evidence();

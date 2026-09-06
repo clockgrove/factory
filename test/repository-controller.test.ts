@@ -44,6 +44,27 @@ function manager(
 }
 
 describe("repository controller", () => {
+  it("resumes the complete durable cohort before considering new activation under a tightened ceiling", async () => {
+    const releases: Array<() => void> = [];
+    const seen: number[] = [];
+    const activations = [1, 2, 3].map((objective) => ({ objective, activatedAt: "2026-01-01T00:00:00Z",
+      requestId: `activation-${objective}`, policy: {}, policyDigest: "c".repeat(64), baseSha: "a".repeat(40),
+      requestedBy: "operator", ...(objective < 3 ? { resuming: true } : {}) }));
+    const controller = new GitHubRepositoryController({ capacity: 1,
+      store: { discoverObjectiveActivations: async () => activations },
+      reconcileObjective: async (activation, _signal, resources) => {
+        seen.push(activation.objective);
+        expect(resources.fairness.reconciled).toBe(false);
+        await new Promise<void>((resolve) => releases.push(resolve));
+      },
+    });
+    expect(await controller.reconcileOnce()).toBe(2);
+    await Promise.resolve();
+    expect(seen.sort()).toEqual([1, 2]);
+    expect(await controller.reconcileOnce()).toBe(0);
+    for (const release of releases) release();
+  });
+
   it("retires its generation only after all admitted reconciliations settle, without redispatch", async () => {
     let cleaned = false;
     let calls = 0;

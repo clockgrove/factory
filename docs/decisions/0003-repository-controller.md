@@ -38,4 +38,9 @@ explicit operation, initially implemented as a systemd user service on Linux and
 - GitHub remains the only durable control plane and restart source.
 - Concurrent chat, MCP, and CLI writers share one idempotency boundary without private IPC.
 - Repository-wide capacity and integration fences prevent independent Objective loops from racing.
+- Restored same-host concurrency defaults to two active Objectives (bounded 1–32); durable capacity
+  reconstruction precedes cohort admission and receipt-seeded fair shares lend idle local capacity.
+- Concurrent ordinary PR workers remain independent; exact candidate validation and the repository
+  integration lock protect merges. Authenticated co-owned historical integrations are ancestry
+  evidence only, never authority to reactivate a completed or terminal Objective.
 - A powered-off laptop cannot wake itself; host restart integration is explicit and optional.

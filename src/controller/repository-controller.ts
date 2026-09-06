@@ -176,8 +176,10 @@ export class GitHubRepositoryController {
     this.#signal = options.signal
       ? AbortSignal.any([options.signal, this.#shutdown.signal])
       : this.#shutdown.signal;
-    if (!Number.isInteger(options.capacity ?? 1) || (options.capacity ?? 1) < 1)
-      throw new Error("capacity must be positive");
+    if (!Number.isInteger(options.capacity ?? DEFAULT_CONTROLLER_POLICY.maxActiveObjectives) ||
+      (options.capacity ?? DEFAULT_CONTROLLER_POLICY.maxActiveObjectives) < 1 ||
+      (options.capacity ?? DEFAULT_CONTROLLER_POLICY.maxActiveObjectives) > 32)
+      throw new Error("capacity must be between 1 and 32");
     this.#resources = options.resources ?? createRepositorySupervisorResources();
   }
 
@@ -194,10 +196,20 @@ export class GitHubRepositoryController {
       (_, index) => discovered[(this.#cursor + index) % discovered.length]!,
     );
     this.#cursor = (this.#cursor + 1) % discovered.length;
+    const available = Math.max(0, (this.#options.capacity ?? DEFAULT_CONTROLLER_POLICY.maxActiveObjectives) - this.#running.size);
+    const pending = ordered.filter((activation) => !this.#running.has(activation.objective));
+    const resuming = pending.filter((activation) => activation.resuming);
+    const selected = [...resuming, ...pending.filter((activation) => !activation.resuming).slice(0, Math.max(0, available - resuming.length))];
+    // Register the complete starting cohort before any promise can reach admission.
+    // Previously started runs reconcile even when a newly tightened controller
+    // ceiling leaves no authority to start another Objective.
+    for (const activation of selected) this.#resources.fairness.register(activation.objective, true);
     let started = 0;
-    for (const activation of ordered) {
-      if (this.#signal.aborted || this.#running.size >= (this.#options.capacity ?? 1)) break;
-      if (this.#running.has(activation.objective)) continue;
+    for (const activation of selected) {
+      if (this.#signal.aborted) {
+        this.#resources.fairness.unregister(activation.objective);
+        continue;
+      }
       const signal = this.#signal;
       const task = Promise.resolve()
         .then(() => this.#options.reconcileObjective(activation, signal, this.#resources))
@@ -224,7 +236,10 @@ export class GitHubRepositoryController {
             this.#shutdown.abort();
           }
         })
-        .finally(() => this.#running.delete(activation.objective));
+        .finally(() => {
+          this.#running.delete(activation.objective);
+          this.#resources.fairness.unregister(activation.objective);
+        });
       this.#running.set(activation.objective, task);
       started += 1;
     }

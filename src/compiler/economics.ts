@@ -140,7 +140,6 @@ function localFit(waves: readonly EconomicItem[][], evidence?: DecompositionEvid
   if ((evidence.cooldownUntilMs ?? 0) > (evidence.nowMs ?? 0)) reasons.push("Observed local admission cooldown is active.");
   if (evidence.deliveryMode === "escalate") reasons.push("Selected delivery mode cannot execute work.");
   const limits = admissionCapacityLimits(policy, resource, evidence.objective, undefined, repositoryLimits);
-  if (evidence.deliveryMode === "regular-prs") limits.objectiveMaxParallel = { objective: evidence.objective, max: 1 };
   const itemNumbers = new Map(waves.flat().map((item, index) => [item.id, index + 1]));
   const waveFits = waves.map((wave): number | null => {
     if (reasons.length) return 0;

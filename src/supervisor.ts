@@ -42,6 +42,8 @@ export {
   type GraphProjectionExpectation,
 } from "./control/graph-evidence.js";
 import { GitHubControlStore } from "./control/github-store.js";
+import { materializePinnedCompilationTree } from "./execution/pinned-compilation-tree.js";
+import { assertLocalLfsAvailable, materializeLocalLfsAssets } from "./repository-profiles/git-lfs.js";
 import {
   DEFAULT_LEASE_RENEWAL_INTERVAL_MS,
   DEFAULT_LEASE_RENEWAL_LEAD_MS,
@@ -347,6 +349,8 @@ export interface SupervisorResult {
 interface DeliveryExecutionBase {
   branch: string;
   sha: string;
+  kind?: "trunk" | "stack";
+  requiresIsolation?: boolean;
 }
 
 /** Already collected original execution, never a replacement worker or new attempt. */
@@ -1386,6 +1390,36 @@ export class FactorySupervisor {
     throw new Error("source reconciliation exceeded the compiled work-item bound");
   }
 
+  #releaseCapacity(key: string): void {
+    this.#capacity.release(key);
+    this.#fairness.changed();
+  }
+
+  #reconcileObjectiveCapacity(objective: number, items: DerivedWorkItem[]) {
+    const scheduling = normalizeSchedulingPolicy(this.#policy);
+    const reservations = deriveCapacityReservations(items.map((item) => {
+      const packet = this.#packetFor(item.number);
+      for (const event of item.factoryEvents ?? []) {
+        if (event.kind === "attempt" && event.event === "AttemptReserved" &&
+          this.#registry.get(event.backend)?.capabilities.hostExecution)
+          this.#fairness.noteAdmission(objective, Date.parse(event.at));
+      }
+      return {
+        objective, workItem: item.number, events: item.factoryEvents ?? [],
+        defaultCpu: scheduling.capacity.local.defaultCpu,
+        defaultMemoryMb: scheduling.capacity.local.defaultMemoryMb,
+        paths: packet.allowedPaths,
+        exclusiveResources: packet.changeSurface?.exclusiveResources ?? [],
+        isLocalBackend: (id: string) => {
+          const capabilities = this.#registry.get(id)?.capabilities;
+          return isLocalIntegrationValidationBackend(id) ||
+            Boolean(capabilities?.hostExecution && !capabilities.requiresPaidRuntime);
+        },
+      };
+    }));
+    return this.#capacity.reconcileObjective(objective, reservations);
+  }
+
   #deriveObjective(snapshot: Snapshot): ReturnType<typeof derive> {
     const objective = derive(snapshot);
     if (!this.#recoveryRuntime) return objective;
@@ -1601,6 +1635,8 @@ export class FactorySupervisor {
     completedSources?: ReadonlyMap<number, { mergeCommitSha: string; targetBaseSha: string }>,
     completedCandidates?: Map<string, MergeCandidateCheckpointRecord>,
     completedMergeOids?: Set<string>,
+    stopBaseSha = run.baseSha,
+    peerProof = false,
   ): Promise<boolean> {
     if (!run.baseSha || snapshot.number !== run.objective) return false;
     const observations = new Map<
@@ -1609,8 +1645,8 @@ export class FactorySupervisor {
     >();
     let cursor = targetBaseSha;
     const visited = new Set<string>();
-    while (cursor !== run.baseSha) {
-      if (visited.has(cursor) || visited.size >= snapshot.workItems.length) return false;
+    while (cursor !== stopBaseSha) {
+      if (visited.has(cursor) || visited.size >= 3200) return false;
       visited.add(cursor);
       const matches = [];
       if (completionDeadline !== undefined) {
@@ -1719,7 +1755,7 @@ export class FactorySupervisor {
             pull.headRepository?.toLowerCase() !== run.repository?.toLowerCase()
           )
             return false;
-          if (completionDeadline !== undefined) {
+          if (completionDeadline !== undefined || peerProof) {
             const review = await this.#reviews.load({
               kind: validation.baseSha === reservation.baseSha ? "artifact" : "rebase",
               runId: run.runId,
@@ -1735,7 +1771,7 @@ export class FactorySupervisor {
                 : { headSha: publication.headSha }),
             });
             if (
-              !this.#completedReviewAccounted(review, snapshotEvents(snapshot), completionDeadline)
+              !this.#completedReviewAccounted(review, snapshotEvents(snapshot), completionDeadline ?? Infinity)
             )
               return false;
           }
@@ -1819,6 +1855,10 @@ export class FactorySupervisor {
           }
           matches.push(parent);
         }
+      }
+      if (matches.length === 0 && !peerProof) {
+        const peer = await this.#peerTrunkIntegration(cursor, snapshot, run);
+        if (peer) matches.push(peer.parent);
       }
       if (matches.length !== 1) return false;
       completedMergeOids?.add(cursor);
@@ -2509,7 +2549,9 @@ export class FactorySupervisor {
     if (
       this.#options.activation &&
       base.oid !== this.#options.activation.baseSha &&
-      (!resumedRun || !(await this.#observedRunOwnsBaseAdvance(snapshot, resumedRun, base.oid)))
+      !(resumedRun
+        ? await this.#observedRunOwnsBaseAdvance(snapshot, resumedRun, base.oid)
+        : await this.#observedPeerBaseAdvance(snapshot, this.#options.activation.baseSha, base.oid))
     ) {
       return this.#startlessEscalation(
         `activation ${this.#options.activation.requestId} is stale: ${snapshot.defaultBranch} advanced from ${this.#options.activation.baseSha} to ${base.oid}; reactivate against the new head`,
@@ -2605,11 +2647,13 @@ export class FactorySupervisor {
       }
       // The original activation remains immutable across restarts. Recheck its
       // permitted progress under the lease before writing any resumed-run effect.
-      if (currentRun && this.#options.activation) {
+      if (this.#options.activation) {
         const currentBase = await this.#store.getBranchHead(current.defaultBranch);
         if (
           currentBase.oid !== this.#options.activation.baseSha &&
-          !(await this.#observedRunOwnsBaseAdvance(current, currentRun, currentBase.oid))
+          !(currentRun
+            ? await this.#observedRunOwnsBaseAdvance(current, currentRun, currentBase.oid)
+            : await this.#observedPeerBaseAdvance(current, this.#options.activation.baseSha, currentBase.oid))
         )
           throw new Error("base branch advanced outside this run during startup");
       }
@@ -2856,10 +2900,6 @@ export class FactorySupervisor {
               "compiled graph receipt exists but its durable graph record is missing",
             );
           }
-          const layout = await this.#reader.readRepositoryLayout(undefined, 5_000);
-          if (layout.truncated) {
-            throw new Error("repository layout is incomplete; compilation would be under-grounded");
-          }
           const compilationBudget = remainingBudget(
             this.#policy,
             deriveBudgetUsage(this.#budgetEvents),
@@ -2869,10 +2909,15 @@ export class FactorySupervisor {
           }
           const compilationModel = resolveModelSelection(this.#policy, "compile");
           invokeCompilation = (checkpoint) =>
-            this.#externalAdmission(() =>
-              this.#management.compile(
+            this.#externalAdmission(async () => {
+              await ensureLocalCommit(this.#options.repository, base.oid);
+              const repositoryLfs = await assertLocalLfsAvailable(this.#options.repository, base.oid);
+              const tree = await materializePinnedCompilationTree(this.#options.repository, base.oid);
+              try {
+                await materializeLocalLfsAssets(this.#options.repository, tree.path, base.oid);
+                return await this.#management.compile(
                 {
-                  repository: this.#options.repository,
+                  repository: tree.path,
                   objective: {
                     number: snapshot.number,
                     title: snapshot.title,
@@ -2880,7 +2925,8 @@ export class FactorySupervisor {
                   },
                   defaultBranch: snapshot.defaultBranch,
                   baseSha: base.oid,
-                  repositoryFiles: layout.files,
+                  repositoryFiles: tree.files,
+                  repositoryLfs,
                   allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
                   economicEvidence: (items) => collectCompilationEvidence(items, {
                     objective: snapshot.number,
@@ -2896,8 +2942,13 @@ export class FactorySupervisor {
                   ...(compilationModel ? { modelSelection: compilationModel } : {}),
                 },
                 checkpoint,
-              ),
-            );
+                );
+              } finally {
+                // A durable successful checkpoint must not become a repeated paid call
+                // merely because this exact owned temporary directory could not be removed.
+                await tree.dispose().catch(() => this.#notify(`compilation tree cleanup needs attention: ${tree.path}`));
+              }
+            });
         } else if (!durableGraph) {
           // A graph recovered from an older run or issue receipt is copied into
           // this run's immutable ref before any backend preflight can fail.
@@ -3256,6 +3307,14 @@ export class FactorySupervisor {
         });
         if (this.#recoveryRuntime) await this.#resumeObservedRun(snapshot, runManager);
         const objective = this.#deriveObjective(snapshot);
+        // All resumed peers seed their durable execution/validation liabilities
+        // before any member of the starting cohort may acquire fresh capacity.
+        this.#reconcileObjectiveCapacity(objective.number, objective.items);
+        this.#fairness.markReconciled(objective.number);
+        if (!this.#fairness.reconciled) {
+          await this.#fairness.waitForChange(this.#options.pollIntervalMs ?? 60_000, this.#options.signal);
+          continue;
+        }
         const adoptedPublication =
           this.#recoveryRuntime &&
           objective.items.find((item) => {
@@ -3497,28 +3556,6 @@ export class FactorySupervisor {
           continue;
         }
 
-        // A worker promise may finish while its published PR is still waiting for
-        // checks/mergeability. Regular delivery owns the whole pipeline, not just
-        // that promise or the current integration-backoff window. Reconstruct
-        // this gate on every snapshot so restart cannot admit a sibling on the
-        // retained publication's old base. Native units keep their concurrency.
-        if (
-          this.#deliverySelection.selected === "regular-prs" &&
-          objective.items.some((item) => item.state === "for_review")
-        ) {
-          this.#fairness.reportDemand(objective.number, 0);
-          if (activeExecutions.size > 0) {
-            const settled = await activeExecutions.waitForChange(
-              this.#options.pollIntervalMs ?? 2_000,
-              this.#options.signal,
-            );
-            if (settled?.error) throw settled.error;
-          } else {
-            await sleep(this.#options.pollIntervalMs ?? 60_000, this.#options.signal);
-          }
-          continue;
-        }
-
         const deliveryBases = new Map<number, DeliveryExecutionBase>();
         const stackReady =
           this.#deliverySelection.selected === "native-stacks"
@@ -3539,7 +3576,7 @@ export class FactorySupervisor {
                   (candidate) =>
                     parseGraphItemMetadata(candidate.body ?? "").id === plan.parentItemId,
                 );
-                if (!parent || parent.state !== "for_review") return false;
+                if (!parent || parent.state !== "for_review" || activeExecutions.has(parent.number)) return false;
                 const waitsSatisfied = plan.waitsForMerge.every((dependencyId) =>
                   objective.items.some(
                     (candidate) =>
@@ -3592,34 +3629,7 @@ export class FactorySupervisor {
             all.findIndex((candidate) => candidate.number === item.number) === index,
         );
         const scheduling = normalizeSchedulingPolicy(this.#policy);
-        const durableCapacity = deriveCapacityReservations(
-          objective.items.map((item) => {
-            const packet = this.#packetFor(item.number);
-            return {
-              objective: objective.number,
-              workItem: item.number,
-              events: item.factoryEvents ?? [],
-              defaultCpu: scheduling.capacity.local.defaultCpu,
-              defaultMemoryMb: scheduling.capacity.local.defaultMemoryMb,
-              paths: packet.allowedPaths,
-              exclusiveResources: packet.changeSurface?.exclusiveResources ?? [],
-              isLocalBackend: (id: string) => {
-                const capabilities = this.#registry.get(id)?.capabilities;
-                return (
-                  isLocalIntegrationValidationBackend(id) ||
-                  Boolean(capabilities?.hostExecution && !capabilities.requiresPaidRuntime)
-                );
-              },
-            };
-          }),
-        );
-        const capacity = this.#capacity.reconcileObjective(objective.number, durableCapacity);
-        this.#fairness.reportDemand(objective.number, runnable.length);
-        const objectiveLocalMax = this.#fairness.localMaximum(
-          objective.number,
-          Math.min(scheduling.capacity.local.maxWorkers, this.#controllerLimits.maxLocalWorkers),
-          capacity.reservations,
-        );
+        const capacity = this.#reconcileObjectiveCapacity(objective.number, objective.items);
         this.#budgetEvents = deduplicateFactoryEvents([
           ...this.#budgetEvents,
           ...this.#accountingEvents(snapshotEvents(snapshot)),
@@ -3661,14 +3671,47 @@ export class FactorySupervisor {
             [...commandState.priorities].map(([workItem, command]) => [workItem, command.rank]),
           ),
         ).filter((rankedItem) => runnable.some((item) => item.number === rankedItem.item.number));
+        const executionBaseProofs = new Map<string, Promise<{ executionRequiresIsolation: boolean }>>();
+        const executionHead = runnable.length ? await this.#store.getBranchHead(this.#baseBranch) : null;
         const admissionItems: AdmissionWorkItem[] = await Promise.all(
           ranked.map(async (priority) => {
             const original = this.#packetFor(priority.item.number);
+            const stackBase = deliveryBases.get(priority.item.number);
+            if (stackBase) {
+              const itemId = parseGraphItemMetadata(priority.item.body ?? "").id;
+              const unit = this.#deliveryPlan?.units.find((candidate) => candidate.items.includes(itemId));
+              const root = objective.items.find((candidate) => parseGraphItemMetadata(candidate.body ?? "").id === unit?.items[0]);
+              if (!root) throw new Error("stack execution lacks its immutable root provenance");
+              const publication = (root.factoryEvents ?? []).find((event) => event.kind === "publication" &&
+                event.runId === this.#run.runId && event.event === "PublicationRecorded");
+              const adopted = this.#recoveryRuntime?.sourcePublications.find((proof) => proof.publication.workItem === root.number);
+              const originalSource = this.#recoveryRuntime?.planRecord.plan.items.find((entry) => entry.workItem === root.number)?.source?.publication;
+              const rootBase = publication?.kind === "publication" ? publication.baseSha
+                : adopted?.publication.sourceBaseSha ?? originalSource?.baseSha;
+              if (!rootBase) throw new Error("stack execution root has no exact published base");
+              const authorityBase = this.#run.baseSha ?? this.#packetFor(root.number).baseSha;
+              const key = `${authorityBase}:${rootBase}`;
+              if (!executionBaseProofs.has(key)) executionBaseProofs.set(key, authorityBase === rootBase
+                ? Promise.resolve({ executionRequiresIsolation: false }) : this.#assertOwnTrunkAdvance(authorityBase, rootBase, 0));
+              stackBase.requiresIsolation = this.#packetFor(root.number).requirements.trust !== "trusted_local" ||
+                (await executionBaseProofs.get(key)!).executionRequiresIsolation;
+            }
+            if (!deliveryBases.has(priority.item.number)) {
+              if (!executionHead) throw new Error("missing pinned execution head");
+              const authorityBase = this.#run.baseSha ?? original.baseSha;
+              const key = `${authorityBase}:${executionHead.oid}`;
+              if (!executionBaseProofs.has(key)) executionBaseProofs.set(key, executionHead.oid === authorityBase
+                ? Promise.resolve({ executionRequiresIsolation: false })
+                : this.#assertOwnTrunkAdvance(authorityBase, executionHead.oid, 0));
+              const proof = await executionBaseProofs.get(key)!;
+              deliveryBases.set(priority.item.number, { branch: this.#baseBranch, sha: executionHead.oid,
+                kind: "trunk", requiresIsolation: proof.executionRequiresIsolation });
+            }
             const packet = parseWorkerPacket({
               ...original,
               requirements: {
                 ...original.requirements,
-                ...(this.#policy.trust === "sandbox_untrusted" &&
+                ...((this.#policy.trust === "sandbox_untrusted" || deliveryBases.get(priority.item.number)?.requiresIsolation) &&
                 original.requirements.trust === "trusted_local"
                   ? { trust: "isolated" as const }
                   : {}),
@@ -3746,6 +3789,26 @@ export class FactorySupervisor {
             };
           }),
         );
+        const physicalLimits = admissionCapacityLimits(this.#policy, resource, objective.number,
+          scheduling.capacity.local.maxWorkers, this.#controllerLimits);
+        const localObservationReady = scheduling.capacity.mode !== "adaptive-local" ||
+          Boolean(resource && resourcePressureReasons(resource, scheduling.capacity.local).length === 0 &&
+            nowMs >= this.#resourceSampler.cooldownUntil);
+        const localDemand = !localObservationReady ? [] : admissionItems.filter((item) =>
+          item.backends.some((candidate) => candidate.local && candidate.permanentReasons.length === 0 &&
+            candidate.transientReasons.length === 0) &&
+          (item.requirements.cpu ?? scheduling.capacity.local.defaultCpu) <= physicalLimits.cpuCapacity &&
+          (item.requirements.memoryMb ?? scheduling.capacity.local.defaultMemoryMb) <= physicalLimits.memoryCapacityMb);
+        this.#fairness.reportDemand(objective.number, localDemand.length, localDemand.map((item) => ({
+          cpu: item.requirements.cpu ?? scheduling.capacity.local.defaultCpu,
+          memoryMb: item.requirements.memoryMb ?? scheduling.capacity.local.defaultMemoryMb,
+          cpuCapacity: physicalLimits.cpuCapacity, memoryCapacityMb: physicalLimits.memoryCapacityMb,
+          paths: item.paths, exclusiveResources: item.exclusiveResources,
+        })));
+        const objectiveLocalMax = this.#fairness.mayAdmit(objective.number, capacity.reservations)
+          ? this.#fairness.localMaximum(objective.number,
+              Math.min(scheduling.capacity.local.maxWorkers, this.#controllerLimits.maxLocalWorkers), capacity.reservations)
+          : capacity.reservations.filter((reservation) => reservation.objective === objective.number && reservation.local).length;
         const plan = planAdmissions({
           objective: objective.number,
           policy: this.#policy,
@@ -3815,6 +3878,7 @@ export class FactorySupervisor {
         const started: number[] = [];
         let capacityChanged = false;
         for (const admission of safeAdmissions) {
+          if (admission.reservation.local && !this.#fairness.mayAdmit(objective.number, this.#capacity.snapshot().reservations)) break;
           const item = objective.items.find(
             (candidate) => candidate.number === admission.workItem,
           )!;
@@ -3829,12 +3893,13 @@ export class FactorySupervisor {
             break;
           }
           expectedCapacityGeneration = committed.generation;
+          if (admission.reservation.local) this.#fairness.noteAdmission(objective.number);
           started.push(item.number);
           let executionCapacityReleased = false;
           const releaseExecutionCapacity = () => {
             if (executionCapacityReleased) return;
             executionCapacityReleased = true;
-            this.#capacity.release(admission.reservation.key);
+            this.#releaseCapacity(admission.reservation.key);
           };
           activeExecutions.start(
             item.number,
@@ -3855,7 +3920,7 @@ export class FactorySupervisor {
         }
         if (capacityChanged) continue;
         if (activeExecutions.size === 0) {
-          await sleep(this.#options.pollIntervalMs ?? 60_000, this.#options.signal);
+          await this.#fairness.waitForChange(this.#options.pollIntervalMs ?? 60_000, this.#options.signal);
           continue;
         }
         const settled = await activeExecutions.waitForChange(
@@ -3992,9 +4057,9 @@ export class FactorySupervisor {
       const originalPacket = recovered?.packet ?? this.#packetFor(item.number);
       const base = recovered ? await this.#store.readCommit(recovered.reservation.baseSha) : deliveryBase
         ? await this.#store.readCommit(deliveryBase.sha)
-        : await this.#store.getBranchHead(this.#baseBranch);
+        : await this.#store.readCommit(originalPacket.baseSha);
       const publicationBaseBranch = deliveryBase?.branch ?? this.#baseBranch;
-      if (deliveryBase) {
+      if (deliveryBase && deliveryBase.kind !== "trunk") {
         const current = await this.#store.readRef(`refs/heads/${deliveryBase.branch}`);
         if (current !== deliveryBase.sha) {
           throw new Error("stack parent branch changed before child admission");
@@ -4008,7 +4073,7 @@ export class FactorySupervisor {
           : {}),
         requirements: {
           ...originalPacket.requirements,
-          ...(this.#policy.trust === "sandbox_untrusted" &&
+          ...((this.#policy.trust === "sandbox_untrusted" || deliveryBase?.requiresIsolation) &&
           originalPacket.requirements.trust === "trusted_local"
             ? { trust: "isolated" as const }
             : {}),
@@ -4593,7 +4658,7 @@ export class FactorySupervisor {
         });
         validationCapacityReconciled = true;
       });
-      this.#capacity.release(validationCapacity.key);
+      this.#releaseCapacity(validationCapacity.key);
       await this.#lease.use(async (lease) => {
         const event = await this.#recorder.budget({
           lease,
@@ -4768,9 +4833,8 @@ export class FactorySupervisor {
           event: "PublicationRecorded",
         }),
       );
-      if (this.#deliverySelection.selected !== "native-stacks") {
-        await this.#integrate(item, reservation, publication, objectiveDeadline);
-      }
+      // Publication ends the worker pipeline. The next reconstructed snapshot
+      // integrates regular and native siblings through exact candidate recovery.
       await this.#retryArtifacts.delete(item.number);
     } catch (error) {
       if (
@@ -5045,7 +5109,7 @@ export class FactorySupervisor {
       } catch (error) {
         finalizationError ??= error;
       } finally {
-        if (validationCapacity) this.#capacity.release(validationCapacity.key);
+        if (validationCapacity) this.#releaseCapacity(validationCapacity.key);
       }
       // biome-ignore lint/correctness/noUnsafeFinally: uncertain cleanup must override success so Factory cannot launch a duplicate paid or local worker
       if (finalizationError) throw finalizationError;
@@ -5691,9 +5755,13 @@ export class FactorySupervisor {
     // AttemptPublished may have been written before a lost final publication response.
     // Replay the prior complete binding until that exact checkpoint transaction repairs it.
     const metadata = parseGraphItemMetadata(item.body ?? "");
-    const plan = this.#deliveryPlan?.items.find((candidate) => candidate.itemId === metadata.id);
+    const plan = this.#deliveryPlan?.items.find((candidate) => candidate.itemId === metadata.id) ??
+      (this.#deliverySelection.selected === "regular-prs" ? {
+        itemId: metadata.id, unitId: `delivery/${metadata.id}`, position: 0,
+        waitsForMerge: [] as string[], parentItemId: undefined,
+      } : undefined);
     if (!plan) throw new Error(`Work Item ${metadata.id} is absent from the delivery plan`);
-    const sibling =
+    const sibling = this.#deliverySelection.selected === "regular-prs" ||
       this.#deliveryPlan?.units.find((unit) => unit.id === plan.unitId)?.kind === "sibling";
     const recordedPublications = [...(item.factoryEvents ?? [])]
       .sort((left, right) => right.sequence - left.sequence)
@@ -5783,7 +5851,7 @@ export class FactorySupervisor {
       workItem: item.number,
       attempt: publishedEvent.attempt,
       revision: 1,
-      mode: "native-stacks",
+      mode: this.#deliverySelection.selected === "native-stacks" ? "native-stacks" : "regular-prs",
       position: plan.position,
       ...(plan.parentItemId ? { parentItemId: plan.parentItemId } : {}),
       branch,
@@ -6694,7 +6762,7 @@ export class FactorySupervisor {
           if (capacityRecorded && (record || !providerStarted))
             await reconcile(capacity.cpu, capacity.memoryMb);
         } finally {
-          if (!capacityRecorded || record || !providerStarted) this.#capacity.release(capacity.key);
+          if (!capacityRecorded || record || !providerStarted) this.#releaseCapacity(capacity.key);
         }
       }
     }
@@ -6887,10 +6955,10 @@ export class FactorySupervisor {
         );
       } catch (error) {
         if (pendingValidation) await discardValidationResult(pendingValidation);
-        if (!capacityRecorded) this.#capacity.release(capacity.key);
+        if (!capacityRecorded) this.#releaseCapacity(capacity.key);
         throw error;
       }
-      const releaseCapacity = () => this.#capacity.release(capacity.key);
+      const releaseCapacity = () => this.#releaseCapacity(capacity.key);
       return {
         validation,
         async finish(recorded: boolean) {
@@ -7061,8 +7129,10 @@ export class FactorySupervisor {
     targetBaseSha: string,
     run = this.#run,
   ): Promise<SiblingRefreshIdentity> {
+    const ownRecovery = run.runId === this.#run?.runId && run.objective === this.#run?.objective
+      ? this.#recoveryRuntime : undefined;
     const publications = deduplicateFactoryEvents([
-      ...(this.#recoveryRuntime?.events ?? item.factoryEvents ?? []),
+      ...(ownRecovery?.events ?? item.factoryEvents ?? []),
     ]).filter(
       (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
         event.kind === "publication" &&
@@ -7072,7 +7142,7 @@ export class FactorySupervisor {
         event.attempt === member.reservation.attempt,
     );
     const publication = selectEquivalentPublicationRecord(publications);
-    const restored = this.#recoveryRuntime?.sourcePublications.find(
+    const restored = ownRecovery?.sourcePublications.find(
       (proof) =>
         proof.publication.workItem === item.number &&
         proof.publication.sourceRunId === member.reservation.runId &&
@@ -7405,12 +7475,134 @@ export class FactorySupervisor {
     return pinned;
   }
 
+  async #observedPeerBaseAdvance(snapshot: Snapshot, source: string, target: string): Promise<boolean> {
+    const seen = new Set<string>();
+    let cursor = target;
+    while (cursor !== source) {
+      if (seen.has(cursor) || seen.size >= 3200) return false;
+      seen.add(cursor);
+      const peer = await this.#peerTrunkIntegration(cursor, snapshot);
+      if (!peer) return false;
+      cursor = peer.parent;
+    }
+    return true;
+  }
+
+  /** Read historical peers, never resume them. A shared controller observation identifies
+   * an explicitly co-owned generation; exact-commit PR associations are discovery hints only. */
+  async #peerTrunkIntegration(
+    mergeSha: string,
+    receiver: Snapshot,
+    receiverRun?: RunState,
+  ): Promise<{ parent: string; requiresIsolation: boolean; executionRequiresIsolation: boolean } | null> {
+    const currentController = this.#options.controllerObservation?.();
+    const observations = (receiver.factoryEvents ?? []).filter((event) =>
+      event.kind === "controller" && event.runId === receiverRun?.runId);
+    const generations = new Set(observations.flatMap((event) => event.kind === "controller"
+      ? [`${event.controllerId}:${event.epoch}:${event.controllerPolicyDigest}`] : []));
+    if (currentController) generations.add(`${currentController.controllerId}:${currentController.epoch}:${currentController.controllerPolicyDigest}`);
+    if (!generations.size) return null;
+    const objectives = (await this.#store.readCommitObjectiveCandidates(mergeSha)).filter((number) => number !== receiver.number);
+    if (objectives.length > 100) throw new Error("repository integration provenance exceeds 100 Objectives");
+    let proof: { parent: string; requiresIsolation: boolean; executionRequiresIsolation: boolean } | null = null;
+    let proofObjective: number | undefined;
+    for (const number of objectives) {
+      const snapshot = await this.#reader.readObjective(number);
+      if (snapshot.repositoryId !== receiver.repositoryId || snapshot.defaultBranch !== receiver.defaultBranch)
+        throw new Error("peer Objective repository identity changed");
+      const starts = (snapshot.factoryEvents ?? []).filter((event) => event.kind === "run" && event.event === "FactoryRunStarted");
+      for (const start of starts) {
+        if (start.kind !== "run" || start.event !== "FactoryRunStarted" || !start.baseSha ||
+          (!start.activationRequestId && !start.recoveryRequestId) ||
+          start.repository.toLowerCase() !== `${this.#options.owner}/${this.#options.repo}`.toLowerCase() ||
+          start.baseBranch !== receiver.defaultBranch) continue;
+        const events = snapshotEvents(snapshot).filter((event) => event.runId === start.runId);
+        if (!events.some((event) => event.kind === "controller" &&
+          generations.has(`${event.controllerId}:${event.epoch}:${event.controllerPolicyDigest}`))) continue;
+        // Do not read every PR in every peer unless authenticated publication history
+        // and the observed linked merge identify a possible source for this exact commit.
+        const mergedItems = snapshot.workItems.filter((item) => item.linkedPullRequests.some((pull) =>
+          pull.state === "MERGED") && (item.factoryEvents ?? []).some((event) =>
+          event.kind === "publication" && (event.runId === start.runId || Boolean(start.recoveryRequestId)) && event.event === "PublicationRecorded"));
+        if (!mergedItems.length) continue;
+        let exactAssociation = false;
+        for (const item of mergedItems) {
+          for (const linked of item.linkedPullRequests.filter((pull) => pull.state === "MERGED")) {
+            const pull = await this.#store.readPullRequest(linked.number);
+            if (pull.merged && pull.mergeCommitSha === mergeSha) exactAssociation = true;
+          }
+        }
+        if (!exactAssociation) continue;
+        const policy = parseRunPolicy(start.policy);
+        if (policyDigest(policy) !== start.policyDigest) throw new Error("peer run policy digest changed");
+        const recovery = start.recoveryRequestId ? await loadRecoveryRuntime({
+          objective: number, runId: start.runId, store: this.#recoveryStore,
+          readSnapshot: async () => ({ snapshot, historyComplete: true }),
+        }) : undefined;
+        if (recovery && recovery.status !== "verified")
+          throw new Error("peer recovery integration lacks verified adoption provenance");
+        const graphManager = new CompiledGraphManager(this.#store, this.#leases);
+        const graph = recovery?.graph ?? await graphManager.load(number, start.runId);
+        const projection = recovery?.projection ?? (graph ? await graphManager.loadProjection(number, start.runId, graph) : null);
+        if (!graph || !projection) throw new Error("peer integration lacks immutable graph/projection evidence");
+        assertGraphWithinRunPolicy(graph.objective, policy);
+        const packets = assertSnapshotMatchesCompiledGraph(graph.objective, snapshot, projection.bindings);
+        if (!recovery) assertAuthenticatedGraphProjection(snapshotEvents(snapshot), number, start.runId, projection);
+        const run: RunState = { objective: number, runId: start.runId, actor: start.actor,
+          sequence: start.sequence, policy, policyDigest: start.policyDigest, startedAt: new Date(start.at),
+          activationRequestId: start.activationRequestId, baseSha: start.baseSha,
+          repository: start.repository, baseBranch: start.baseBranch, fork: start.fork };
+        const commit = await this.#store.readCommit(mergeSha);
+        if (commit.parentOids.length !== 1) return null;
+        const adopted = recovery?.sourceIntegrations.filter((source) => source.outcome.mergeCommitSha === mergeSha) ?? [];
+        if (adopted.length > 1) throw new Error("peer adopted integration ownership is ambiguous");
+        if (adopted.length) {
+          if (adopted[0]!.targetBaseSha !== commit.parentOids[0] || adopted[0]!.outputTreeSha !== commit.treeOid)
+            throw new Error("peer adopted integration squash changed");
+        } else if (!(await this.#observedRunOwnsBaseAdvance(snapshot, run, mergeSha,
+          undefined, undefined, undefined, undefined, commit.parentOids[0], true))) continue;
+        if (proof && proofObjective !== number) throw new Error("trunk commit has ambiguous cross-Objective ownership");
+        const matched = mergedItems.filter((item) => (item.factoryEvents ?? []).some((event) =>
+          event.kind === "attempt" && event.runId === start.runId && event.event === "AttemptIntegrated" && event.headSha === mergeSha));
+        // A lost final integration receipt is allowed only because the helper above
+        // proved the real squash and pre-merge accepted checkpoints. Conservatively
+        // propagate isolation from every candidate source if its exact item is unknown.
+        const sources = matched.length ? matched : mergedItems;
+        const adoptedIsolation = adopted.some((source) => {
+          const original = recovery?.events.find((event) => event.kind === "run" &&
+            event.event === "FactoryRunStarted" && event.runId === source.outcome.sourceRunId);
+          return original?.kind !== "run" || original.event !== "FactoryRunStarted" ||
+            parseRunPolicy(original.policy).trust === "sandbox_untrusted";
+        });
+        const executionRequiresIsolation = adoptedIsolation || policy.trust === "sandbox_untrusted" || sources.some((item) => {
+          const packet = packets.get(item.number);
+          return !packet || packet.requirements.trust !== "trusted_local" ||
+            (item.factoryEvents ?? []).some((event) => event.kind === "attempt" &&
+              (event.runId === start.runId || Boolean(adopted.length)) && event.event === "AttemptPublished" &&
+              isManagedAgentBackendId(event.backend));
+        });
+        const requiresIsolation = adoptedIsolation || policy.trust === "sandbox_untrusted" || sources.some((item) => {
+          const packet = packets.get(item.number);
+          if (!packet || packet.requirements.trust !== "trusted_local") return true;
+          const published = (item.factoryEvents ?? []).filter((event) => event.kind === "attempt" &&
+            (event.runId === start.runId || Boolean(adopted.length)) && event.event === "AttemptPublished");
+          return published.some((event) => event.kind === "attempt" &&
+            !this.#registry.get(event.backend)?.capabilities.hostExecution);
+        });
+        proof = { parent: commit.parentOids[0]!, requiresIsolation: requiresIsolation || Boolean(proof?.requiresIsolation),
+          executionRequiresIsolation: executionRequiresIsolation || Boolean(proof?.executionRequiresIsolation) };
+        proofObjective = number;
+      }
+    }
+    return proof;
+  }
+
   /** External trunk changes never acquire execution authority from being cleanly applicable. */
   async #assertOwnTrunkAdvance(
     sourceBaseSha: string,
     targetBaseSha: string,
     currentWorkItem: number,
-  ): Promise<{ snapshot: Snapshot; requiresIsolation: boolean }> {
+  ): Promise<{ snapshot: Snapshot; requiresIsolation: boolean; executionRequiresIsolation: boolean }> {
     const snapshot = await this.#reader.readObjective(this.#run.objective);
     this.#fenceSnapshot(snapshot);
     this.#sequences.observe(snapshotEvents(snapshot));
@@ -7418,9 +7610,10 @@ export class FactorySupervisor {
     const items = derive(snapshot).items;
     let cursor = targetBaseSha;
     let requiresIsolation = false;
+    let executionRequiresIsolation = false;
     const visited = new Set<string>();
     while (cursor !== sourceBaseSha) {
-      if (visited.has(cursor) || visited.size >= items.length) {
+      if (visited.has(cursor) || visited.size >= 3200) {
         throw new Error("base advancement is not a bounded chain of this run's integrations");
       }
       visited.add(cursor);
@@ -7439,6 +7632,14 @@ export class FactorySupervisor {
           commit.treeOid !== adopted[0]!.outputTreeSha
         )
           throw new Error("adopted source integration ancestry changed");
+        const source = adopted[0]!.outcome;
+        const originalStart = this.#recoveryRuntime!.events.find((event) => event.kind === "run" &&
+          event.event === "FactoryRunStarted" && event.runId === source.sourceRunId);
+        const inheritedTrust = originalStart?.kind !== "run" || originalStart.event !== "FactoryRunStarted" ||
+          parseRunPolicy(originalStart.policy).trust === "sandbox_untrusted" ||
+          this.#packetFor(source.workItem).requirements.trust !== "trusted_local";
+        executionRequiresIsolation ||= inheritedTrust;
+        requiresIsolation ||= inheritedTrust;
         cursor = commit.parentOids[0]!;
         continue;
       }
@@ -7455,61 +7656,53 @@ export class FactorySupervisor {
           )
           .map((event) => ({ item, event })),
       );
+      if (matches.length === 0) {
+        const commit = await this.#store.readCommit(cursor);
+        if (commit.parentOids.length === 1 && await this.#observedRunOwnsBaseAdvance(snapshot,
+          this.#run, cursor, undefined, undefined, undefined, undefined, commit.parentOids[0], true)) {
+          // Recover a peer worker's lost final receipt from its original accepted
+          // publication and observed squash, never by re-reviewing a completed merge.
+          requiresIsolation ||= items.some((item) => (item.factoryEvents ?? []).some((event) =>
+            event.kind === "attempt" && event.runId === this.#run.runId && event.event === "AttemptPublished" &&
+            (!this.#registry.get(event.backend)?.capabilities.hostExecution ||
+              this.#packetFor(item.number).requirements.trust !== "trusted_local")));
+          executionRequiresIsolation ||= items.some((item) => (item.factoryEvents ?? []).some((event) =>
+            event.kind === "attempt" && event.runId === this.#run.runId && event.event === "AttemptPublished" &&
+            (isManagedAgentBackendId(event.backend) || this.#packetFor(item.number).requirements.trust !== "trusted_local")));
+          cursor = commit.parentOids[0]!;
+          continue;
+        }
+        const peer = await this.#peerTrunkIntegration(cursor, snapshot, this.#run);
+        if (peer) {
+          requiresIsolation ||= peer.requiresIsolation;
+          executionRequiresIsolation ||= peer.executionRequiresIsolation;
+          cursor = peer.parent;
+          continue;
+        }
+      }
       if (matches.length !== 1) {
         throw new Error(
           `base branch advanced outside this run's evidenced integrations: ${cursor}`,
         );
       }
       const { item, event } = matches[0]!;
-      const member = await this.#nativeStackMember(item, true);
-      if (!this.#registry.get(member.reservation.backend)?.capabilities.hostExecution)
+      if (event.kind !== "attempt") throw new Error("invalid integration receipt");
+      executionRequiresIsolation ||= isManagedAgentBackendId(event.backend) ||
+        this.#packetFor(item.number).requirements.trust !== "trusted_local";
+      if (!this.#registry.get(event.backend)?.capabilities.hostExecution ||
+        this.#packetFor(item.number).requirements.trust !== "trusted_local")
         requiresIsolation = true;
-      if (event.kind !== "attempt" || event.attempt !== member.reservation.attempt) {
-        throw new Error("integrated trunk commit does not match its published attempt");
-      }
-      const pull = await this.#store.readPullRequest(member.pull.number);
       const commit = await this.#store.readCommit(cursor);
-      if (
-        !pull.merged ||
-        pull.mergeCommitSha !== cursor ||
-        pull.baseRef !== this.#baseBranch ||
-        commit.oid !== cursor ||
-        commit.parentOids.length !== 1
-      ) {
+      if (commit.oid !== cursor || commit.parentOids.length !== 1) {
         throw new Error("trunk advancement lacks an exact Factory squash integration");
       }
       const parent = commit.parentOids[0]!;
-      const refresh = await this.#observedSiblingRefresh(item, member, pull.headSha);
-      if (refresh && refresh.identity.targetBaseSha !== parent)
-        throw new Error("prior sibling refresh does not bind its actual squash parent");
-      if (parent === member.pull.exactHeadValidation.baseSha) {
-        if (refresh) throw new Error("unexpected refresh on an unchanged source base");
-        await verifySquashIntegration(this.#store, member.pull, cursor, parent);
-      } else {
-        const candidate = await this.#mergeCandidates.load(
-          this.#mergeCandidateIdentity(member, parent, refresh?.plannedHeadSha),
-        );
-        const review = candidate
-          ? await this.#reviews.load(this.#mergeCandidateReviewIdentity(candidate))
-          : null;
-        if (
-          !candidate ||
-          !review?.review.accepted ||
-          review.review.unmetCriteria.length ||
-          (refresh && candidate.validation.outputTreeSha !== refresh.outputTreeSha)
-        ) {
-          throw new Error("prior sibling integration has no accepted candidate checkpoint");
-        }
-        await verifyMergeCandidateSquash(
-          this.#store,
-          member.pull.exactHeadValidation,
-          candidate.evidence,
-          cursor,
-        );
-      }
+      if (!(await this.#observedRunOwnsBaseAdvance(snapshot, this.#run, cursor,
+        undefined, undefined, undefined, undefined, parent, true)))
+        throw new Error("prior integration lacks its authenticated accepted exact-head checkpoint");
       cursor = parent;
     }
-    return { snapshot, requiresIsolation };
+    return { snapshot, requiresIsolation, executionRequiresIsolation };
   }
 
   async #recordCandidateValidationUsage(
@@ -7963,7 +8156,7 @@ export class FactorySupervisor {
             await reconcileCapacity(capacity.cpu, capacity.memoryMb);
         } finally {
           if (!capacityRecorded || record || !validationLaunched)
-            this.#capacity.release(capacity.key);
+            this.#releaseCapacity(capacity.key);
         }
       }
     }
@@ -8990,7 +9183,7 @@ export class FactorySupervisor {
             if (recorded && (candidate || !validationLaunched))
               await recordCapacity("CapacityReconciled", capacity.cpu, capacity.memoryMb);
           } finally {
-            if (!recorded || candidate || !validationLaunched) this.#capacity.release(capacity.key);
+            if (!recorded || candidate || !validationLaunched) this.#releaseCapacity(capacity.key);
           }
         }
       }
@@ -9339,7 +9532,10 @@ export class FactorySupervisor {
 
   async #resumeIntegrationWithArtifactContent(item: DerivedWorkItem): Promise<boolean> {
     if (!this.#integrationDue(item.number)) return false;
-    if (this.#deliverySelection.selected === "native-stacks") {
+    if (this.#deliverySelection.selected === "native-stacks" ||
+      (item.factoryEvents ?? []).some((event) => event.kind === "publication" &&
+        event.runId === this.#run.runId && event.event === "PublicationRecorded" &&
+        event.branch === publicationBranch(this.#run.objective, item.number, event.attempt))) {
       try {
         const member = await this.#nativeStackMember(item);
         const current = await this.#store.readPullRequest(member.pull.number);
@@ -9576,18 +9772,30 @@ export class FactorySupervisor {
         }),
       );
     }
+    const published: PublishedPullRequest = {
+      branch: receipt.branch, commitSha: event.headSha, number: pull.number,
+      htmlUrl: pull.htmlUrl, exactHeadValidation,
+    };
+    const current = await this.#store.readPullRequest(pull.number);
+    const merge = current.merged && current.mergeCommitSha ? await this.#store.readCommit(current.mergeCommitSha) : null;
+    if (current.merged && (!merge || merge.parentOids.length !== 1))
+      throw new Error("completed ordinary integration lacks an exact squash parent");
+    const targetBaseSha = merge ? merge.parentOids[0]! : (await this.#store.getBranchHead(this.#baseBranch)).oid;
+    // Provider-managed branches remain provider-owned. Validate GitHub's exact
+    // test-merge candidate under the independently authorized validator instead
+    // of rewriting their head or bypassing stale-base checks.
+    const candidate = targetBaseSha === validation.baseSha ? undefined
+      : await this.#prepareSiblingMergeCandidate(item, {
+          receipt, pull: published, reservation, observedHeadSha: current.headSha,
+        }, targetBaseSha, current.merged);
+    if (candidate === null) return this.#deferIntegration(item.number, "waiting for ordinary merge-candidate validation capacity");
     return await this.#integrate(
       item,
       reservation,
-      {
-        branch: receipt.branch,
-        commitSha: event.headSha,
-        number: pull.number,
-        htmlUrl: pull.htmlUrl,
-        exactHeadValidation,
-      },
+      published,
       this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
       true,
+      candidate,
     );
   }
 

@@ -231,16 +231,17 @@ reconciles before another controller admits work.
 ### Objective queue behavior
 
 Multiple durable activations are supported because a developer can legitimately queue a second
-feature while the first runs. Factory admits one Objective per repository controller so a trunk merge
-cannot invalidate another Objective's immutable base; concurrency is within its Work Item DAG. This
-is not a multi-host or enterprise scheduler.
+feature while the first runs. One repository controller admits concurrent explicitly activated
+Objectives (default two, configurable one through 32). Each preserves its immutable compilation
+base and shares the host ledger; only authenticated co-owned integrations may advance a worker's
+base, with fresh exact candidate validation before serialized merges. This remains one local host.
 
 The controller:
 
 - maintains one repository-wide local and cloud capacity ledger;
 - enforces each Objective's immutable budget independently;
 - enforces repository-wide hard concurrency and provider ceilings;
-- selects the next queued Objective deterministically after the active Objective finishes;
+- gives waiting Objectives least-recently-served local admission and lends unused shares;
 - never lets one large, temporarily unplaceable item block smaller eligible work;
 - reconstructs active path and resource claims from attempt receipts after restart.
 
@@ -259,7 +260,7 @@ Keep local host safety separate from per-Objective execution authority. Add a lo
 ```json
 {
   "scope": "repository",
-  "maxActiveObjectives": 1,
+  "maxActiveObjectives": 2,
   "maxLocalWorkers": 8,
   "maxPaidWorkers": 3,
   "pollIntervalSeconds": 15
@@ -575,7 +576,8 @@ enhancement.
 - A maximal linear chain of code dependencies may become one stack.
 - The bottom PR targets the recorded trunk; each higher PR targets the branch immediately below it.
 - When native-stack delivery is selected, independent Work Items produce sibling PRs and may
-  validate concurrently. Regular-PR delivery serializes complete Work Item pipelines.
+  validate concurrently. Regular-PR delivery also runs independent pipelines concurrently, with
+  serialized exact-head integration and changed-base candidate revalidation.
 - A Work Item with multiple unfinished parents does not invent a multi-base stack. It waits for the
   parents to merge, refreshes from trunk, and starts a new stack.
 - A dependency that expresses ordering but does not consume code need not share a stack.
@@ -915,9 +917,9 @@ Factory satisfies this plan when:
   required repository configuration;
 - a user can install and manage one local repository controller through chat or mirrored CLI;
 - explicit activation is durable and execution continues after the initiating chat turn;
-- the controller safely serializes Objectives on one machine, runs dependency-ready Work Items
-  concurrently when native-stack delivery supplies cascading revalidation, serializes complete
-  pipelines under regular-PR delivery, and never exceeds host or policy ceilings;
+- the controller fairly runs explicitly activated Objectives on one machine, runs dependency-ready
+  independent pipelines concurrently with regular or native delivery, serializes and revalidates
+  exact-head integrations, and never exceeds host or policy ceilings;
 - Work Item count, scope, dependencies, context, resources, validation, and stack topology are
   compiler outputs grounded in the repository;
 - local Codex sessions are isolated, recoverable, non-interactive, and attributable to exact Work

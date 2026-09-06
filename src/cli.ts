@@ -382,15 +382,11 @@ async function runRepositoryController(args: string[]): Promise<void> {
   }
   const repository = parseRepository(args[0]);
   const checkout = resolve(option(args, "--repo") ?? process.cwd());
-  const maxActiveObjectives = positiveIntegerOption(args, "--max-active-objectives", 1);
+  const maxActiveObjectives = positiveIntegerOption(args, "--max-active-objectives", 2);
   const pollIntervalSeconds = positiveIntegerOption(args, "--poll-interval-seconds", 15);
   const maxLocalWorkers = positiveIntegerOption(args, "--max-local-workers", 8);
   const maxPaidWorkers = nonNegativeIntegerOption(args, "--max-paid-workers", 0);
-  if (maxActiveObjectives !== 1) {
-    fail(
-      "v2 requires --max-active-objectives 1; Work Items remain concurrent within the Objective",
-    );
-  }
+  if (maxActiveObjectives > 32) fail("--max-active-objectives cannot exceed 32");
   if (pollIntervalSeconds > 300) {
     fail("--poll-interval-seconds cannot exceed 300");
   }

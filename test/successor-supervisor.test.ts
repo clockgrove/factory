@@ -2985,6 +2985,23 @@ describe("Supervisor authenticated successor execution", () => {
           store: f.store,
         }),
       ).rejects.toThrow();
+      const wrongDeliveredTree = structuredClone(proposal.plan!.items[1]!);
+      expect(wrongDeliveredTree.source!.priorDelivery!.outputTreeSha).toMatch(/^[a-f0-9]{40}$/);
+      expect(wrongDeliveredTree.source!.priorDelivery!.outputTreeSha).not.toBe("0".repeat(40));
+      wrongDeliveredTree.source!.priorDelivery!.outputTreeSha = "0".repeat(40);
+      // This resolver must independently reload the original delivered proof;
+      // a parseable descriptor cannot substitute another tree for that result.
+      await expect(
+        verifyPriorRecoveryDelivery({
+          plan: proposal.plan!,
+          item: wrongDeliveredTree,
+          events: [
+            ...f.snapshot.factoryEvents!,
+            ...f.snapshot.workItems.flatMap((item) => item.factoryEvents!),
+          ],
+          store: f.store,
+        }),
+      ).rejects.toThrow();
       const successorLease = {
         ...f.lease,
         runId: "second-successor",

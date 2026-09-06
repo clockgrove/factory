@@ -21,7 +21,7 @@ import {
   qualificationPaths,
   waitForCreatedObjectiveNamespace,
 } from "../scripts/verify-live-objective.mjs";
-import { parseRunPolicy, policyDigest } from "../src/protocol/policy.js";
+import { parseRunPolicy } from "../src/protocol/policy.js";
 import { assertSchedulingCompletion } from "../scripts/verify-local-scheduling.mjs";
 import {
   assertRegularCompletion,
@@ -686,6 +686,12 @@ describe("explicit installed regular qualification", () => {
     });
     expect(() => assertRegularCompletion(value)).toThrow();
   });
+  it("rejects a native linkage receipt hidden beside an otherwise regular publication", async () => {
+    const value = await regularEvidence();
+    const publication = value.events.find((event) => event.event === "PublicationRecorded")!;
+    value.events.push({ ...publication, event: "StackLinked", sequence: publication.sequence + 1, stackNumber: 90 });
+    expect(() => assertRegularCompletion(value)).toThrow(/regular publication has native stack linkage/);
+  });
   it.each(["exactHeadValidationDigest", "validationDigest", "baseSha"])(
     "rejects transplanted publication %s",
     async (field) => {
@@ -702,7 +708,7 @@ describe("explicit installed regular qualification", () => {
     expect(() => assertRegularCompletion(policy)).toThrow(/request Objective/);
     const unauth = await regularEvidence();
     unauth.events.at(-1)!.authorId = 99;
-    expect(() => assertRegularCompletion(unauth)).toThrow(/authenticated/);
+    expect(() => assertRegularCompletion(unauth)).toThrow(/foreign receipt actor/);
     const missing = await regularEvidence();
     missing.events = missing.events.filter((event) => event.usageId !== "worker-2-1");
     expect(assessRegularCompletion(missing).result).toBe("incomplete");

@@ -472,7 +472,7 @@ function* prove(evidence, input) {
     originalReview.usage.inputTokens + originalReview.usage.outputTokens,
   );
   assert.ok(originalUsage.sequence < publication.sequence);
-  assert.ok(
+  if (selected === "native-stacks") assert.ok(
     events.some(
       (event) =>
         event.event === "StackLinked" &&
@@ -493,6 +493,12 @@ function* prove(evidence, input) {
     ),
     "original native stack linkage is missing",
   );
+  else {
+    assert.ok(!events.some((event) => event.event === "StackLinked" && sameAttempt(event, publication)),
+      "regular publication has native stack linkage");
+    assert.equal(publication.position, 0, "regular publication has native position");
+    assert.ok(!publication.stackNumber && !publication.parentItemId, "regular publication has native topology");
+  }
   assert.equal(pull.number, publication.pullRequest);
   assert.equal(pull.head.ref, branch);
   assert.equal(pull.head.repo.full_name, repository);

@@ -460,7 +460,7 @@ async function fixture(
     const peerLease = { ...lease, objective: 6, runId: "peer" };
     const peerItem = { ...graph.workItems[0]!, id: "peer", title: "peer", goal: "Add peer",
       scope: ["peer.txt"], delivery: { group: "peer", relationship: "root" as const },
-      requirements: { ...graph.workItems[0]!.requirements,
+      requirements: { ...graph.workItems[0]!.requirements!,
         ...(options.peerIsolated ? { trust: "isolated" as const } : {}) } };
     const peerGraph = await graphManager.persist({ lease: peerLease, base: await readCommit(baseSha),
       objective: { title: "Peer Objective", workItems: [peerItem] } });
@@ -1189,7 +1189,7 @@ describe("Supervisor parallel independent sibling integration", () => {
     );
     expect(latest.identity.targetBaseSha).toBe(f.mergeShas.get(20));
     expect(f.launch).not.toHaveBeenCalled();
-  });
+  }, 15_000); // Three real Git integrations and two distinct full revalidation rounds.
 
   it("durably accounts completed validation before a concurrently observed, fully proved sibling advances trunk", async () => {
     const f = await fixture({ thirdSibling: true });

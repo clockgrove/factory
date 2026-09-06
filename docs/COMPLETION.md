@@ -20,21 +20,22 @@ The [recorded integrated local suite](release-evidence/integrated-completion-sui
 passed on its exact candidate; the
 [original failed candidate](release-evidence/final-suite-original-failure-2026-09-05.json) remains
 separate. That evidence does not qualify changed source or close the six live release gates.
-New defects and documentation corrections remain tracked implementation work.
+The [sanitization and fallback qualifier implementation checks](release-evidence/sanitization-fallback-implementation-2026-09-06.json)
+passed on their separate exact candidate. New defects remain tracked implementation work.
 
 | Capability | Issues | Remaining acceptance |
 | --- | --- | --- |
 | WSL2 resilience | [#75](https://github.com/clockgrove/factory/issues/75) | Orderly [accounted checkpoint restart passed](release-evidence/accounted-checkpoint-restart-component-2026-09-06.json). [Active cancellation is incomplete](release-evidence/active-cancellation-incomplete-2026-09-06.json) because interrupted worker usage is unavailable; resource absence alone does not complete accounting. Remaining cases need their own bounded evidence. |
 | Adaptive scheduling and organization priority | [#76](https://github.com/clockgrove/factory/issues/76), [#77](https://github.com/clockgrove/factory/issues/77) | Extend the [installed scheduling subset](release-evidence/local-scheduling-component-2026-09-05.json) with pressure, fairness, phase recovery, inner Director contention and organization-field edits. |
 | Genuine SDK-to-CLI fallback | [#75](https://github.com/clockgrove/factory/issues/75) | Qualify unchanged-policy fallback caused by actual SDK unavailability; direct CLI selection is not equivalent. |
-| Native-unavailable regular-PR fallback qualifier | [#99](https://github.com/clockgrove/factory/issues/99), [#82](https://github.com/clockgrove/factory/issues/82) | Implement the qualifier and prove recorded regular-PR fallback when native-stack delivery is unavailable. Direct regular-PR selection is not equivalent. |
+| Native-unavailable regular-PR fallback qualifier | [#99](https://github.com/clockgrove/factory/issues/99), [#82](https://github.com/clockgrove/factory/issues/82) | Qualifier implemented and affected checks passed. Live #82 still requires genuinely unavailable native-stack delivery; direct regular-PR selection or synthetic errors are not equivalent. |
 | Supported Linux hosts | [#78](https://github.com/clockgrove/factory/issues/78), [#79](https://github.com/clockgrove/factory/issues/79) | Complete native Linux and macOS-hosted Linux guest coverage, independently of WSL2 results. |
 | Native delivery, merge queue and regular fallback | [#80](https://github.com/clockgrove/factory/issues/80), [#81](https://github.com/clockgrove/factory/issues/81), [#82](https://github.com/clockgrove/factory/issues/82) | Qualify the remaining installed native-stack, queue/ejection and recorded fallback cases. [Retained successor completion](release-evidence/quota-safe-successor-completion-component-2026-09-05.json) is a bounded component result. |
 | Daytona and supported managed capabilities | [#83](https://github.com/clockgrove/factory/issues/83), [#84](https://github.com/clockgrove/factory/issues/84) | Exact installed execution, independent validation, native admission and resource/session termination evidence, within provider-specific capabilities. |
 | Codex managed interface | [#85](https://github.com/clockgrove/factory/issues/85) | External interface follow-up. The profile remains unavailable and unlaunchable, not a required working-provider release gate. |
 | Bounded pilot | [#86](https://github.com/clockgrove/factory/issues/86) | Pilot-specific Objective, trust, delivery and resource boundaries; pilot acceptance is separate from release qualification. |
 | Integrated verification | [#87](https://github.com/clockgrove/factory/issues/87) | Completed for the recorded candidate. Verify subsequent implementation at the next integrated candidate boundary. |
-| Public presentation and sanitization | [#98](https://github.com/clockgrove/factory/issues/98), [#100](https://github.com/clockgrove/factory/issues/100) | Review #98 completed; implementation and verification of linked remediation #100 remain. Preserve legitimate attribution, support limitations and reproducibility evidence. Review completion does not itself close remediation. |
+| Public presentation and sanitization | [#98](https://github.com/clockgrove/factory/issues/98), [#100](https://github.com/clockgrove/factory/issues/100) | Review and current-tree/package remediation completed and affected checks passed. Historical public commits and previously copied artifacts are not retracted or relabelled as sanitized. |
 | Publication and published installation | [#88](https://github.com/clockgrove/factory/issues/88), [#89](https://github.com/clockgrove/factory/issues/89) | All required gates, compatible exact-candidate evidence and distribution authority, followed by clean installation of the actual published bytes. |
 
 ## Completion rules

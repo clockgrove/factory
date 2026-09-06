@@ -96,7 +96,24 @@ describe("credential-free provider Supervisor qualification", () => {
         expect(
           f.activity.filter((entry) => entry.operation === "launch").map((entry) => entry.backend),
         ).toEqual([backend, backend, backend]);
-        expect(f.activity.filter((entry) => entry.operation === "validate")).toHaveLength(3);
+        const original = f.activity.filter(
+          (entry) => entry.operation === "validate" && !entry.invocation,
+        );
+        expect(original.map((entry) => entry.workItem).sort((left, right) => left - right)).toEqual(
+          [8, 9, 10],
+        );
+        const candidates = f.activity.filter(
+          (entry) => entry.operation === "validate" && entry.invocation,
+        );
+        expect(candidates).toHaveLength(1);
+        expect(f.activity.filter((entry) => entry.operation === "candidate-review")).toHaveLength(
+          1,
+        );
+        expect(
+          [...f.refs.keys()].some(
+            (ref) => ref.includes("/merge-candidates/") && ref.endsWith(candidates[0]!.invocation!),
+          ),
+        ).toBe(true);
         expect(f.resources.size).toBe(0);
       } finally {
         await f.dispose();

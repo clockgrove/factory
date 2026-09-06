@@ -72,7 +72,12 @@ reported as implemented or qualified. Missing credentials are configuration requ
 evidence that a provider interface is unsupported. Claimed execution capabilities still require
 their corresponding qualification evidence.
 
-Labs contains Vercel Sandbox, Codex App Server, and additional harness/provider experiments. Labs
+Durable App Server sessions are a supported explicit local route and retain required WSL2
+qualification. They do not replace the SDK/CLI default chain. The
+[session contract](CODEX-APP-SERVER-SESSIONS.md) specifies exact terminal recovery and the pinned
+provider's unavailable cold-repair accounting subscription.
+
+Labs contains Vercel Sandbox and additional harness/provider experiments. Labs
 adapters may reuse the production contracts and tests, but they are not release blockers and must not
 be selected implicitly. The boundary and its rationale are recorded in
 [`decisions/0007-product-scope.md`](decisions/0007-product-scope.md).
@@ -114,10 +119,10 @@ factory controller run OWNER/REPO --repo /absolute/path/to/repository
 
 An explicit chat/MCP activation writes a durable request and returns; the controller discovers it,
 acquires the repository and Objective leases, and continues without holding the chat turn open. The
-controller shares one CPU, memory, backend, and GitHub-rate-limit pool. Factory admits one
-Objective at a time in that repository. Native-stack delivery may admit dependency-ready Work Items
-concurrently; regular-PR delivery admits one complete Work Item pipeline at a time. Additional
-activations remain durable and queued. Plugin installation never starts or installs the controller;
+controller shares one CPU, memory, backend, and GitHub-rate-limit pool across active Objectives.
+The immutable controller ceiling defaults to two Objectives (configurable 1–32); fair admission
+allows dependency-ready regular or native-stack workers to run concurrently within shared limits.
+Activations beyond that ceiling remain durable and queued. Plugin installation never starts or installs the controller;
 service installation is a separate explicit user action.
 
 Each controller process acquires the repository lease under one generated controller identity and
@@ -177,7 +182,10 @@ not a contradictory later balance from another observation.
 
 Model quota is protected at retry boundaries as well. After an artifact has passed host scope,
 secret, clean-apply, and sensitive-path checks, the running Supervisor may retain it in a bounded
-32 MiB in-memory cache. A retry at the same base SHA is seeded with that complete patch and receives
+32 MiB in-memory cache, with at most 512 MiB of separately leased file-backed payload content.
+Parallel pipelines retain independent content leases; completing one does not delete another's
+active content. Pending durable-transfer recovery data is separate from this optimization cache.
+A retry at the same base SHA is seeded with that complete patch and receives
 the bounded failure diagnostic, so it repairs prior work instead of recreating it. This cache is a
 non-authoritative optimization: it cannot change derived state, is lost on restart, is never used by
 a provider-managed publication backend, and every resulting complete patch is independently
@@ -393,11 +401,12 @@ closed. Human-approval, code-owner, last-push approval, and incompatible merge-m
 escalate rather than being bypassed. Regular sibling PRs are the default. Explicit stacked delivery
 uses GitHub's pinned REST surface only after an observed repository capability probe; an
 unavailable capability produces a durable configured fallback or escalation before publication.
-The regular-PR fallback admits one complete Work Item pipeline at a time. In native-stack mode,
-independent Work Items remain sibling PRs and may execute concurrently. When an earlier sibling
-advances trunk, Factory first proves every intervening commit is an exact, authenticated integration
-from this same run. External or unexplained base changes escalate; clean applicability alone does
-not authorize executing changed code.
+Regular and native-stack delivery both admit independent Work Items concurrently. When an earlier
+sibling advances trunk, Factory first proves every intervening commit is an exact, authenticated
+integration from this run or an authenticated peer Objective owned by the same repository controller.
+Peer proof preserves the original activation, graph, policy, reservation and review identities;
+external or unexplained base changes escalate. Clean applicability alone does not authorize
+executing changed code.
 
 For siblings, Factory applies the original published patch to a private temporary Git index on that
 proved target base and uploads raw Git blobs and the exact proposed tree. Preparation performs no
@@ -458,8 +467,27 @@ or conflicting resource ownership does not establish cleanup or permit another p
 Backend location is not itself a trust class. Accepted, independently validated `trusted_local`
 overflow may become the base of local downstream work under the original policy. Work selected as
 `sandbox_untrusted` or with isolated/managed requirements never gains host execution authority merely
-because its PR was merged. Paid burst remains opt-in; the regular-PR fallback still serializes complete
-pipelines and does not qualify concurrent burst.
+because its PR was merged. Paid burst remains opt-in. Regular PRs and native independent siblings
+both keep scheduler-authorized execution concurrent; integration alone is serialized. Provider-owned
+ordinary PR heads are never rewritten by Factory: their changed-base GitHub test-merge candidate
+requires independently authorized validation and an accepted exact checkpoint.
+
+The single-host controller defaults to two active Objectives (configurable 1–32), sharing local,
+paid, backend, path, and exclusive-resource limits. Starting cohorts reconstruct every resumed run's
+durable capacity before fresh admission. Receipt timestamps seed least-recently-served local
+fairness; unused shares are lent and releases wake waiting Supervisors. Historical peer receipts
+never activate a terminal run. An exact-commit PR association only discovers candidate Objectives;
+authenticated explicit activation/recovery, a shared observed controller generation, immutable
+graph/projection, reservation, original acceptance/accounting, and actual exact squash/candidate
+proof establish permissible ancestry. Unrelated trunk changes remain a hard stop.
+Discovery uses GitHub's documented [Issue parent relationship](https://docs.github.com/en/graphql/reference/issues#issue)
+for closing-issue hints; those mutable hints never replace the immutable integration proof.
+
+Compilation reads a separate exact Git-object tree and index, not the controller's mutable checkout.
+Preparation runs no checkout hooks or filters; verified locally available LFS objects are hydrated
+explicitly. Raw trees are bounded to 5,000 regular/executable entries, 100 MiB per raw blob, 256 MiB
+aggregate, and a 120-second preparation deadline; symlinks/gitlinks fail closed. Cleanup targets only
+the exact owned temporary root, and cleanup failure cannot invalidate a successful paid checkpoint.
 
 Native linear stacks separately provide cascading rebase plus fresh validation and semantic review
 after a lower layer changes. A non-host or isolated child is revalidated in a fresh Daytona sandbox,
@@ -497,8 +525,10 @@ contracts. The planned bundles are:
 - `openai-codex/github-managed` — bundled unavailable profile, not a working managed adapter; a
   supported provider-specific identity/lifecycle interface is required before enabling it.
 
-`codex-cli/vercel-sandbox`, `codex-app-server/local-worktree`, and harness-native child-worker
-adapters are Labs integrations. The installed package must still start when their optional
+`codex-cli/vercel-sandbox` and harness-native child-worker adapters are Labs integrations.
+`codex-app-server/local-worktree` is an explicit supported route with durable session acceptance;
+its provider restrictions do not turn it into a nonblocking Labs exclusion.
+The installed package must still start when optional
 credentials or host capabilities are unavailable. The local default/fallback decision is recorded
 in [`decisions/0008-codex-sdk-default.md`](decisions/0008-codex-sdk-default.md).
 

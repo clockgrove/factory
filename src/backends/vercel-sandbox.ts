@@ -12,6 +12,7 @@ import type {
   StaleAttemptIdentity,
 } from "../execution/backend.js";
 import { normalizeArtifact, type NormalizedArtifact } from "../execution/artifacts.js";
+import { inspectPinnedLfs } from "../repository-profiles/git-lfs.js";
 import {
   parseSandboxPaths,
   parseIsolatedValidationResult,
@@ -92,6 +93,10 @@ export class VercelSandboxBackend implements ExecutionBackend {
   async launch(context: AttemptContext): Promise<BackendHandle> {
     const modelKey = process.env[this.#modelCredential];
     if (!modelKey) throw new Error(`${this.#modelCredential} is unavailable`);
+    if ((await inspectPinnedLfs(this.#repository, context.packet.baseSha)).assets.length)
+      throw new Error(
+        "Vercel Labs source transport does not support LFS hydration; select a local backend",
+      );
     const archive = await repositoryArchive(this.#repository, context.packet.baseSha);
     const allow: Record<
       string,
@@ -212,6 +217,14 @@ export class VercelSandboxBackend implements ExecutionBackend {
   }
 
   async validate(context: IsolatedValidationContext): Promise<IsolatedValidationResult> {
+    if (context.artifact.payload)
+      throw new Error(
+        "Labs Vercel validation does not support the content-addressed large-artifact channel; select Daytona or local validation",
+      );
+    if ((await inspectPinnedLfs(this.#repository, context.packet.baseSha)).assets.length)
+      throw new Error(
+        "Vercel Labs validation does not support LFS hydration; select a local validator",
+      );
     const archive = await repositoryArchive(this.#repository, context.packet.baseSha);
     const allow: Record<string, never[]> = {
       "registry.npmjs.org": [],

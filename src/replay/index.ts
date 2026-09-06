@@ -315,12 +315,16 @@ export function normalizePinnedAdmissionInput(value: PinnedAdmissionInput): Pinn
       paths: [...item.paths],
       exclusiveResources: [...item.exclusiveResources],
       ...(item.queuedSince ? { queuedSince: item.queuedSince } : {}),
-      ...(item.previousQueueObservation === undefined ? {} : {
-        previousQueueObservation: {
-          code: item.previousQueueObservation.code,
-          ...(item.previousQueueObservation.gate === undefined ? {} : { gate: item.previousQueueObservation.gate }),
-        },
-      }),
+      ...(item.previousQueueObservation === undefined
+        ? {}
+        : {
+            previousQueueObservation: {
+              code: item.previousQueueObservation.code,
+              ...(item.previousQueueObservation.gate === undefined
+                ? {}
+                : { gate: item.previousQueueObservation.gate }),
+            },
+          }),
     };
   });
   if (new Set(workItems.map((item) => item.number)).size !== workItems.length) {
@@ -399,9 +403,11 @@ function hydrate(input: PinnedAdmissionInput): AdmissionInput {
       paths: [...item.paths],
       exclusiveResources: [...item.exclusiveResources],
       ...(item.queuedSince ? { queuedSince: item.queuedSince } : {}),
-      ...(item.previousQueueObservation === undefined ? {} : {
-        previousQueueObservation: { ...item.previousQueueObservation },
-      }),
+      ...(item.previousQueueObservation === undefined
+        ? {}
+        : {
+            previousQueueObservation: { ...item.previousQueueObservation },
+          }),
     })),
   };
 }

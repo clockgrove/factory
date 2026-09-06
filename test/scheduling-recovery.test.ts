@@ -14,6 +14,77 @@ function deferred(): { promise: Promise<void>; resolve(): void } {
 }
 
 describe("continuous refill and recovery", () => {
+  it("reconstructs every peer before admission, rotates scarce CPU service and lends idle shares", () => {
+    const fairness = new ObjectiveFairness();
+    fairness.register(10, true);
+    fairness.register(20, true);
+    fairness.reportDemand(10, 20);
+    fairness.reportDemand(20, 20);
+    fairness.markReconciled(10);
+    expect(fairness.mayAdmit(10, [])).toBe(false);
+    fairness.noteAdmission(10, 100);
+    fairness.noteAdmission(20, 200);
+    fairness.markReconciled(20);
+    expect(fairness.mayAdmit(10, [])).toBe(true);
+    expect(fairness.mayAdmit(20, [])).toBe(false);
+    fairness.noteAdmission(10, 300);
+    const occupied = [{ objective: 10, local: true } as CapacityReservation];
+    expect(fairness.mayAdmit(10, occupied)).toBe(false);
+    expect(fairness.mayAdmit(20, occupied)).toBe(true);
+    // A single physical CPU can rotate even when the configured slot ceiling is eight.
+    expect(fairness.mayAdmit(20, [])).toBe(true);
+    fairness.noteAdmission(10, 100); // replaying older receipts cannot reset the order
+    expect(fairness.mayAdmit(20, [])).toBe(true);
+    fairness.reportDemand(20, 0); // no presently placeable local work
+    expect(fairness.mayAdmit(10, [])).toBe(true);
+    expect(fairness.localMaximum(10, 8, [])).toBe(8);
+  });
+
+  it("wakes an idle Objective when another releases capacity and removes retired barriers", async () => {
+    const fairness = new ObjectiveFairness();
+    fairness.register(10, true);
+    fairness.register(20, true);
+    fairness.markReconciled(10);
+    const wake = fairness.waitForChange(60_000);
+    fairness.unregister(20);
+    await wake;
+    expect(fairness.reconciled).toBe(true);
+  });
+
+  it("scans past currently oversized/path-blocked demand without forgetting its next free-resource turn", () => {
+    const fairness = new ObjectiveFairness();
+    const requirement = (cpu: number, path: string) => ({
+      cpu,
+      memoryMb: 1,
+      cpuCapacity: 8,
+      memoryCapacityMb: 100,
+      paths: [path],
+      exclusiveResources: [],
+    });
+    for (const objective of [10, 20, 30]) fairness.register(objective);
+    fairness.reportDemand(10, 1, [requirement(8, "large")]);
+    fairness.reportDemand(20, 0, []);
+    fairness.reportDemand(30, 1, [requirement(1, "small")]);
+    const occupied = [
+      {
+        objective: 20,
+        local: true,
+        cpu: 1,
+        memoryMb: 1,
+        paths: ["busy"],
+        exclusiveResources: [],
+      } as unknown as CapacityReservation,
+    ];
+    expect(fairness.mayAdmit(30, occupied)).toBe(true);
+    expect(fairness.localMaximum(30, 8, occupied)).toBe(7);
+    // Without another polling/report round, a fresh ledger makes the older large
+    // request first again. A cached lack of free CPU never loses that turn.
+    fairness.noteAdmission(30, 100);
+    expect(fairness.mayAdmit(10, [])).toBe(true);
+    expect(fairness.mayAdmit(30, [])).toBe(false);
+    fairness.reportDemand(10, 1, [requirement(1, "busy")]);
+    expect(fairness.mayAdmit(30, occupied)).toBe(true);
+  });
   it("refills a safe slot while a sibling remains a straggler", async () => {
     const pool = new ContinuousExecutionPool<number>();
     const first = deferred();

@@ -21,8 +21,7 @@ import {
   qualificationPaths,
   waitForCreatedObjectiveNamespace,
 } from "../scripts/verify-live-objective.mjs";
-import { parseRunPolicy, policyDigest } from "../src/protocol/policy.js";
-import { bindValidationToPublishedHead } from "../src/validation/plan.js";
+import { parseRunPolicy } from "../src/protocol/policy.js";
 import { assertSchedulingCompletion } from "../scripts/verify-local-scheduling.mjs";
 import {
   assertRegularCompletion,
@@ -39,7 +38,8 @@ import {
   observeNativeFallbackCapability,
   main as fallbackMain,
 } from "../scripts/verify-native-fallback-objective.mjs";
-import { observeNativeScopes } from "../scripts/qualification-native-scopes.mjs";
+import { assertNativeMergeProof } from "../scripts/qualification-sibling-refresh-proof.mjs";
+import { completeSiblingQualificationFixture } from "./helpers/sibling-qualification-evidence.mjs";
 
 type HarnessEvent = {
   event: string;
@@ -316,154 +316,47 @@ function evidence() {
   };
 }
 
-function regularEvidence(profile = "local-default") {
-  const fixture = evidence();
-  const policy = parseRunPolicy(boundedPolicy("regular-prs"));
+async function regularEvidence(profile = "local-default", fallback = false) {
+  const policy = parseRunPolicy(boundedPolicy(fallback ? "stacked-prs" : "regular-prs"));
+  if (fallback) policy.delivery!.onUnavailable = "regular-prs";
   if (profile === "codex-cli") policy.backendOrder = ["codex-cli/local-worktree"];
-  const digest = policyDigest(policy);
-  const base = "a".repeat(40);
-  const graphDigest = "b".repeat(64);
-  const regularCommits: { sha: string; treeSha: string; parents: string[] }[] = [];
-  const runStart = fixture.events.find((event) => event.event === "FactoryRunStarted")!;
-  Object.assign(runStart, { policy, policyDigest: digest });
-  const prefix = [
-    runStart,
-    { event: "GraphCompiled", baseSha: base, graphDigest },
-    fixture.events.find((event) => event.event === "GraphProjected")!,
-    { event: "DeliverySelected", requested: "regular-prs", selected: "regular-prs" },
-    {
-      event: "BudgetReconciled",
-      unit: "model_tokens",
-      phase: "management",
-      usageId: `compile-${graphDigest}`,
-      amount: 100,
-    },
-  ];
-  let previous = base;
-  const pipeline = [2, 3, 4].flatMap((number) => {
-    const head = String(number).repeat(40);
-    const merge = String(number + 3).repeat(40);
-    const tree = (number + 6).toString(16).repeat(40);
-    const validation = {
-      passed: true,
-      digest: String(number).repeat(64),
-      baseSha: previous,
-      outputTreeSha: tree,
-    };
-    const exact = bindValidationToPublishedHead({
-      validation,
-      publishedHeadSha: head,
-      publishedTreeSha: tree,
-      publishedBaseSha: previous,
-    });
-    regularCommits.push(
-      { sha: head, treeSha: tree, parents: [previous] },
-      { sha: merge, treeSha: tree, parents: [previous] },
-    );
-    Object.assign(fixture.pulls.find((pull) => pull.number === number + 10)!, {
-      head: { sha: head },
-    });
-    Object.assign(fixture.mergeProofs.find((proof) => proof.workItem === number)!, {
-      headSha: head,
-      mergeSha: merge,
-    });
-    const records = fixture.events.filter((event) => event.workItem === number);
-    if (profile === "codex-cli")
-      for (const event of records)
-        if (event.backend === "codex-sdk/local-worktree")
-          event.backend = "codex-cli/local-worktree";
-    const started = records.find((event) => event.event === "AttemptStarted")!;
-    const published = records.find((event) => event.event === "AttemptPublished")!;
-    const publication = records.find((event) => event.event === "PublicationRecorded")!;
-    Object.assign(published, { headSha: head });
-    Object.assign(publication, {
-      kind: "publication",
-      mode: "regular-prs",
-      position: 0,
-      headSha: head,
-      baseSha: previous,
-      validationDigest: validation.digest,
-      exactHeadValidationDigest: exact.digest,
-    });
-    records.find((event) => event.event === "AttemptIntegrated")!.headSha = merge;
-    records.splice(records.indexOf(started), 0, {
-      event: "AttemptReserved",
-      workItem: number,
-      attempt: 1,
-      sequence: 0,
-    });
-    records.splice(
-      records.indexOf(publication),
-      0,
-      {
-        event: "ValidationRecorded",
-        kind: "validation",
-        workItem: number,
-        attempt: 1,
-        passed: true,
-        baseSha: previous,
-        outputTreeSha: tree,
-        evidenceDigest: validation.digest,
-        sequence: 0,
-      },
-      {
-        event: "BudgetReconciled",
-        unit: "model_tokens",
-        phase: "execution",
-        workItem: number,
-        attempt: 1,
-        usageId: `worker-${number}-1`,
-        amount: 100,
-        sequence: 0,
-      },
-      {
-        event: "BudgetReconciled",
-        unit: "model_tokens",
-        phase: "management",
-        workItem: number,
-        attempt: 1,
-        usageId: `review-${String(number).repeat(64)}`,
-        amount: 100,
-        sequence: 0,
-      },
-    );
-    previous = merge;
-    return records;
-  });
-  return {
-    ...fixture,
-    regularBackendProfile: profile,
-    scope: "installed-local-explicit-regular-objective",
-    base,
+  const f = await completeSiblingQualificationFixture({
     policy,
-    regularCommits,
-    preflight: { ...fixture.preflight, base },
+    repository: "example/factory-qualification",
+    ...(profile === "fallback-cli" ? { backend: "codex-cli/local-worktree" } : {}),
+  });
+  const generated = f.evidence as ReturnType<typeof evidence> & {
+    base: string;
+    nativeMergeEvidence: unknown[];
+    nativeScopeObservations: unknown[];
+    nativeScopeFinalHostIdentity: string;
+    nativeDefaultBranch: string;
     runRequest: {
-      tool: "factory_run",
+      tool: string;
       arguments: {
-        owner: "example",
-        repo: "factory-qualification",
-        objectiveNumber: 1,
-        repository: "/home/example/fixture",
-        untilTerminal: true,
-        policy,
-      },
-    },
-    status: { ...fixture.status, run: { ...fixture.status.run, policyDigest: digest } },
-    events: [...prefix, ...pipeline, { event: "FactoryRunCompleted" }].map(
-      (event, index) =>
-        ({
-          ...event,
-          runId: "fixture",
-          objective: 1,
-          sequence: index + 1,
-          policyDigest: digest,
-          at: new Date(index * 1000).toISOString(),
-          author: "operator",
-          authorId: 42,
-          receiptUrl: `https://github.com/example/factory-qualification/issues/1#issuecomment-${index}`,
-        }) as HarnessEvent,
-    ),
+        owner: string;
+        repo: string;
+        objectiveNumber: number;
+        untilTerminal: boolean;
+        policy: typeof policy;
+      };
+    };
+  };
+  const shas = new Set(
+    generated.events
+      .filter((event) => ["PublicationRecorded", "AttemptIntegrated"].includes(event.event))
+      .map((event) => String(event.headSha)),
+  );
+  return {
+    ...generated,
+    regularBackendProfile: profile === "fallback-cli" ? "local-default" : profile,
+    scope: "installed-local-explicit-regular-objective",
+    policy,
+    regularCommits: [...shas].map((sha) => {
+      const commit = f.commits.get(sha)!;
+      return { sha, treeSha: commit.treeOid, parents: commit.parentOids };
+    }),
+    preflight: { ...generated.preflight, base: generated.base },
   };
 }
 
@@ -511,11 +404,8 @@ function fallbackTransport(status = 404, override: Record<string, unknown> = {})
 }
 
 async function fallbackEvidence() {
-  const value = regularEvidence();
+  const value = await regularEvidence("local-default", true);
   value.scope = "installed-local-native-unavailable-regular-fallback";
-  value.policy.delivery = { mode: "stacked-prs", onUnavailable: "regular-prs", merge: "bottom-up" };
-  const digest = policyDigest(value.policy);
-  value.status.run.policyDigest = digest;
   const capability = await observeNativeFallbackCapability({
     repository: value.repository,
     actor: value.actor,
@@ -523,93 +413,7 @@ async function fallbackEvidence() {
   });
   Object.assign(value.preflight.harness, { sourceTreeClean: true });
   Object.assign(value.preflight, { scenario: capability });
-  const host = "f".repeat(64);
-  const events: HarnessEvent[] = [];
-  for (const event of value.events) {
-    event.policyDigest = digest;
-    event.directorEpoch = 1;
-    if (event.event === "DeliverySelected")
-      Object.assign(event, {
-        requested: "stacked-prs",
-        selected: "regular-prs",
-        capabilityVersion: "2026-03-10",
-        reason: "repository did not expose GitHub stacks API 2026-03-10",
-      });
-    if (event.event === "AttemptReserved") event.backend = "codex-sdk/local-worktree";
-    if (event.event === "AttemptStarted") {
-      const id = createHash("sha256")
-        .update(
-          JSON.stringify([
-            "clockgrove.factory/attempt-v2",
-            value.repository,
-            "fixture",
-            1,
-            event.workItem,
-            1,
-            1,
-          ]),
-        )
-        .digest("hex");
-      event.providerResourceId = `sdk-${id.slice(0, 24)}`;
-      event.resourceHostIdentity = host;
-    }
-    if (event.event === "ValidationRecorded")
-      events.push({
-        ...event,
-        kind: "capacity",
-        event: "CapacityReserved",
-        phase: "validation",
-        backend: "codex-sdk/local-worktree",
-      });
-    events.push(event);
-    if (event.event === "ValidationRecorded")
-      events.push({
-        ...event,
-        kind: "capacity",
-        event: "CapacityReconciled",
-        phase: "validation",
-        backend: "codex-sdk/local-worktree",
-      });
-  }
-  value.events = events.map((event, index) => {
-    event.sequence = index + 1;
-    event.receiptUrl = `https://github.com/${value.repository}/issues/1#issuecomment-${index + 100}`;
-    if (
-      event.event === "AttemptReserved" ||
-      (event.event === "CapacityReserved" && event.phase === "validation")
-    ) {
-      const phase = event.event === "AttemptReserved" ? "execution" : "validation";
-      event.localScopeBatch = {
-        identity: {
-          protocol: "clockgrove.factory/local-scope-v1",
-          repository: value.repository,
-          runId: "fixture",
-          objective: 1,
-          workItem: event.workItem,
-          attempt: 1,
-          directorEpoch: 1,
-          policyDigest: digest,
-          phase,
-          commandIndex: 0,
-          invocationDigest: "a".repeat(64),
-          hostIdentity: host,
-        },
-        commandCount: phase === "execution" ? 1 : 2,
-        producerPid: 123,
-        producerStartTicks: "12345",
-        deadline: "2026-09-06T00:45:00Z",
-      };
-    }
-    return event;
-  });
-  const result = { ...value, nativeFallbackCapability: capability };
-  observeNativeScopes(
-    result,
-    (unit) =>
-      `Id=${unit}\nLoadState=not-found\nActiveState=inactive\nSubState=dead\nControlGroup=\nJob=\nInvocationID=\nKillMode=control-group`,
-    host,
-  );
-  return result;
+  return { ...value, nativeFallbackCapability: capability };
 }
 
 describe("actual native-unavailability regular fallback", () => {
@@ -745,7 +549,7 @@ describe("actual native-unavailability regular fallback", () => {
     "authorization",
     "accounting",
     "scope",
-    "serialization",
+    "missing-overlap",
     "merge",
   ])("rejects false fallback proof: %s", async (mutation) => {
     const value = await fallbackEvidence();
@@ -762,10 +566,14 @@ describe("actual native-unavailability regular fallback", () => {
       );
     if (mutation === "scope")
       delete (value as unknown as Record<string, unknown>).nativeScopeObservations;
-    if (mutation === "serialization")
+    if (mutation === "missing-overlap")
       value.events.find(
-        (event) => event.workItem === 3 && event.event === "AttemptReserved",
-      )!.sequence = selected.sequence + 1;
+        (event) => event.workItem === 3 && event.event === "AttemptStarted",
+      )!.sequence =
+        Number(
+          value.events.find((event) => event.workItem === 2 && event.event === "AttemptSucceeded")!
+            .sequence,
+        ) + 1;
     if (mutation === "merge") value.mergeProofs.pop();
     expect(() => assertNativeFallbackCompletion(value)).toThrow();
     expect(assessNativeFallbackCompletion(value).result).toBe("incomplete");
@@ -773,18 +581,26 @@ describe("actual native-unavailability regular fallback", () => {
 });
 
 describe("shared versioned REST merge evidence", () => {
-  it("default and regular qualification accept field-absent REST only with exact separate proofs", () => {
+  it("default and regular qualification accept field-absent REST only with exact separate proofs", async () => {
     const native = evidence();
-    const regular = regularEvidence();
+    const regular = await regularEvidence();
     for (const value of [native, regular]) {
       expect(value.pulls.every((pull) => !("merge_commit_sha" in pull))).toBe(true);
-      expect(() => assertCompletion(value)).not.toThrow();
+      expect(() =>
+        assertCompletion(
+          value,
+          undefined,
+          value === regular
+            ? (proof, input) => assertNativeMergeProof(regular, proof, input)
+            : undefined,
+        ),
+      ).not.toThrow();
       value.mergeProofs.pop();
       expect(() => assertCompletion(value)).toThrow(/merge commit proof coverage/);
     }
   });
-  it("regular and scheduling qualification reject cross-run stored proof before accepting delivery", () => {
-    const value = regularEvidence();
+  it("regular and scheduling qualification reject cross-run stored proof before accepting delivery", async () => {
+    const value = await regularEvidence();
     value.mergeProofs[0]!.runId = "other";
     expect(() => assertRegularCompletion(value)).toThrow(/merge commit proof missing/);
     expect(() => assertSchedulingCompletion(value)).toThrow(/merge commit proof missing/);
@@ -814,26 +630,25 @@ describe("explicit installed regular qualification", () => {
     });
     expect(captured.regularBackendProfile).toBe("codex-cli");
   });
-  it("requires CLI for every attempt under explicit CLI policy", () => {
-    const value = regularEvidence("codex-cli");
+  it("requires CLI for every attempt under explicit CLI policy", async () => {
+    const value = await regularEvidence("codex-cli");
     expect(() => assertRegularCompletion(value)).not.toThrow();
     for (const start of value.events.filter((event) => event.event === "AttemptStarted")) {
       const changed = structuredClone(value);
-      changed.events.find((event) => event.sequence === start.sequence)!.backend =
-        "codex-sdk/local-worktree";
+      changed.events.find(
+        (event) => event.sequence === start.sequence && event.workItem === start.workItem,
+      )!.backend = "codex-sdk/local-worktree";
       expect(() => assertRegularCompletion(changed)).toThrow(/backend selection/);
     }
-    const relabelled = regularEvidence();
+    const relabelled = await regularEvidence();
     relabelled.regularBackendProfile = "codex-cli";
     expect(() => assertRegularCompletion(relabelled)).toThrow();
-    const wrongDefault = regularEvidence("codex-cli");
+    const wrongDefault = await regularEvidence("codex-cli");
     wrongDefault.regularBackendProfile = "local-default";
     expect(() => assertRegularCompletion(wrongDefault)).toThrow(/policy changed/);
   });
-  it("retains default SDK-first fallback authority without pretending SDK-only selection", () => {
-    const value = regularEvidence();
-    for (const event of value.events)
-      if (event.backend === "codex-sdk/local-worktree") event.backend = "codex-cli/local-worktree";
+  it("retains default SDK-first fallback authority without pretending SDK-only selection", async () => {
+    const value = await regularEvidence("fallback-cli");
     expect(() => assertRegularCompletion(value)).not.toThrow();
     expect(value.policy.backendOrder).toEqual([
       "codex-sdk/local-worktree",
@@ -865,65 +680,80 @@ describe("explicit installed regular qualification", () => {
     expect(run).toHaveBeenCalledTimes(1);
     expect(run.mock.calls[0]![0].policy).toEqual(boundedPolicy("regular-prs"));
   });
-  it("passes only explicit serialized regular delivery and leaves native gate unchanged", () => {
-    const value = regularEvidence();
+  it("passes only genuinely concurrent regular delivery with exact candidate proof and leaves native API gate unchanged", async () => {
+    const value = await regularEvidence();
     expect(() => assertRegularCompletion(value)).not.toThrow();
     expect(assessRegularCompletion(value).result).toBe("passed");
-    expect(() => assertQualificationCompletion(value)).toThrow(/native delivery/);
+    expect(() =>
+      assertQualificationCompletion(value, "stacked-prs", undefined, (proof, input) =>
+        assertNativeMergeProof(value, proof, input),
+      ),
+    ).toThrow(/native delivery/);
     expect(() => assertRegularCompletion(evidence())).toThrow();
   });
   it.each(["AttemptReserved", "AttemptStarted"])(
-    "rejects next %s after worker success but before prior integration",
-    (kind) => {
-      const value = regularEvidence();
+    "rejects delayed %s that contradicts its immutable reservation or loses root overlap",
+    async (kind) => {
+      const value = await regularEvidence();
       const next = value.events.find((event) => event.workItem === 3 && event.event === kind)!;
       next.sequence =
         value.events.find((event) => event.workItem === 2 && event.event === "AttemptSucceeded")!
-          .sequence + 0.5;
-      // Keep integral production sequences while placing the new admission in the gap.
-      for (const event of value.events) event.sequence *= 2;
-      expect(() => assertRegularCompletion(value)).toThrow(/before previous pipeline integrated/);
+          .sequence + 1;
+      expect(() => assertRegularCompletion(value)).toThrow();
     },
   );
   it.each(["mode", "stackNumber", "parentItemId"])(
     "rejects hidden publication topology %s",
-    (field) => {
-      const value = regularEvidence();
+    async (field) => {
+      const value = await regularEvidence();
       value.events.find((event) => event.event === "PublicationRecorded")![field] =
         field === "mode" ? "native-stacks" : field === "stackNumber" ? 90 : "parent";
       expect(() => assertRegularCompletion(value)).toThrow();
     },
   );
-  it.each(["treeSha", "parents", "sha"])("rejects changed exact commit %s", (field) => {
-    const value = regularEvidence();
+  it.each(["treeSha", "parents", "sha"])("rejects changed exact commit %s", async (field) => {
+    const value = await regularEvidence();
     Object.assign(value.regularCommits[0]!, {
       [field]: field === "parents" ? ["e".repeat(40)] : "e".repeat(40),
     });
     expect(() => assertRegularCompletion(value)).toThrow();
   });
+  it("rejects a native linkage receipt hidden beside an otherwise regular publication", async () => {
+    const value = await regularEvidence();
+    const publication = value.events.find((event) => event.event === "PublicationRecorded")!;
+    value.events.push({
+      ...publication,
+      event: "StackLinked",
+      sequence: publication.sequence + 1,
+      stackNumber: 90,
+    });
+    expect(() => assertRegularCompletion(value)).toThrow(
+      /regular publication has native stack linkage/,
+    );
+  });
   it.each(["exactHeadValidationDigest", "validationDigest", "baseSha"])(
     "rejects transplanted publication %s",
-    (field) => {
-      const value = regularEvidence();
+    async (field) => {
+      const value = await regularEvidence();
       value.events.find((event) => event.event === "PublicationRecorded")![field] = "f".repeat(
         field === "baseSha" ? 40 : 64,
       );
       expect(() => assertRegularCompletion(value)).toThrow();
     },
   );
-  it("rejects requested policy drift, unauthenticated closure and missing worker usage", () => {
-    const policy = regularEvidence();
+  it("rejects requested policy drift, unauthenticated closure and missing worker usage", async () => {
+    const policy = await regularEvidence();
     policy.runRequest.arguments.objectiveNumber = 99;
     expect(() => assertRegularCompletion(policy)).toThrow(/request Objective/);
-    const unauth = regularEvidence();
+    const unauth = await regularEvidence();
     unauth.events.at(-1)!.authorId = 99;
-    expect(() => assertRegularCompletion(unauth)).toThrow(/authenticated/);
-    const missing = regularEvidence();
+    expect(() => assertRegularCompletion(unauth)).toThrow(/foreign receipt actor/);
+    const missing = await regularEvidence();
     missing.events = missing.events.filter((event) => event.usageId !== "worker-2-1");
     expect(assessRegularCompletion(missing).result).toBe("incomplete");
   });
-  it("accepts legitimate partial-order collision but rejects same-identity contradictions", () => {
-    const value = regularEvidence();
+  it("accepts legitimate partial-order collision but rejects same-identity contradictions", async () => {
+    const value = await regularEvidence();
     const budget = value.events.find((event) => event.event === "BudgetReconciled")!;
     value.events.push({
       ...budget,
@@ -938,7 +768,7 @@ describe("explicit installed regular qualification", () => {
     expect(() => assertRegularCompletion(value)).toThrow(/conflicting/);
   });
   it("performs only bounded exact commit reads and rejects transplanted read results", async () => {
-    const value = regularEvidence();
+    const value = await regularEvidence();
     const original = structuredClone(value.regularCommits);
     const request = vi.fn(async (_route: string, args: Record<string, string>) => {
       const commit = original.find((commit) => commit.sha === args.commit_sha)!;

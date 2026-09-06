@@ -56,16 +56,18 @@ Factory's target capabilities are:
 
 - the Codex plugin and a formally packaged `@clockgrove/factory` npm CLI/controller;
 - local Codex SDK workers, with Codex CLI fallback and adaptive Linux CPU and memory admission;
+- fair sharing across Objectives on one computer, and explicit durable App Server sessions with
+  exact terminal recovery and documented provider limits;
 - GitHub Objectives, native Work Item sub-issues and dependencies, and GitHub-only durable state;
-- native stacked pull requests with concurrent execution and cascading revalidation, plus a recorded
-  regular-PR fallback that conservatively runs one complete Work Item pipeline at a time so a
-  sibling merge cannot invalidate another Work Item's validated base;
+- concurrent regular or native stacked pull requests, with serialized integration and exact-head
+  revalidation when an authenticated sibling advances the base;
 - optional managed-agent integrations with per-provider capability limits: Copilot has limited
   automation; Codex managed execution remains unavailable pending a real identity/lifecycle interface;
 - local-to-cloud burst through Daytona, with hard TTL, concurrency, credential, and cost boundaries;
 - independent validation, crash recovery, cancellation, replay, explanation, and economic evidence.
+- verified local LFS assets, content-bound binary/media manifests, and bounded large-file transport.
 
-Labs contains Vercel Sandbox, Codex App Server, and additional harness/provider adapters. Labs
+Labs contains Vercel Sandbox and additional harness/provider adapters. Labs
 features are bundled where useful but are not part of the initial delivery scope. Coordinating
 multiple local machines, native Windows/macOS lifecycle support, a custom UI, and a required hosted
 Factory service are deliberately out of scope.
@@ -93,7 +95,9 @@ for current installation limitations.
 | Continue working after chat disconnects             | [Unattended controller](docs/setup/unattended.md)                                                   |
 | Add sandbox execution or local-to-cloud burst       | [Daytona](docs/setup/daytona.md)                                                                    |
 | Use GitHub-managed coding agents                    | [Managed agents](docs/setup/github-managed.md)                                                      |
-| Try alternative Labs runners                        | [Vercel Sandbox](docs/setup/vercel-sandbox.md) · [Codex App Server](docs/setup/codex-app-server.md) |
+| Use durable local agent sessions                    | [Codex App Server](docs/setup/codex-app-server.md) |
+| Work with binary assets and large files              | [Large-file support](docs/LARGE-FILES.md) |
+| Try an alternative Labs runner                      | [Vercel Sandbox](docs/setup/vercel-sandbox.md) |
 
 The **plugin is the entry point**, the **controller supplies unattended scheduling**, and the
 **runner executes work**. Installing the plugin neither starts a service nor authenticates a cloud
@@ -225,8 +229,10 @@ the user owns provider billing, subscriptions and provider-side spending limits.
 are not zero, and billing settlement finality is not a completion requirement. Unknown active compute,
 resource ownership or cleanup still blocks unsafe replacement and further spending.
 
-Vercel Sandbox and Codex App Server are Labs adapters. They use the same execution contract but are
-not part of the initial delivery scope.
+Vercel Sandbox is an optional Labs adapter. Codex App Server is a supported explicit local route,
+not the default: its [session contract](docs/CODEX-APP-SERVER-SESSIONS.md) distinguishes durable
+terminal recovery from currently unavailable cold repair turns. Required qualification remains
+visible in [verification status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md).
 
 Use native sub-issue order as the zero-configuration priority. To configure an organization
 single-select issue field, inspect its stable field and option IDs without writing GitHub:

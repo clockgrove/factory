@@ -57,20 +57,16 @@ export interface DeliverySelection {
 }
 
 /**
- * Regular pull requests all target trunk. Until Factory can rebase and
- * revalidate an arbitrary provider artifact after a sibling merge, admitting
- * more than one complete regular-PR pipeline can invalidate every sibling's
- * observed base. Native stacks have their own cascading revalidation path and
- * retain full scheduler concurrency.
+ * Both delivery modes admit independent resource-compatible work. Exact-head
+ * integration is serialized and changed candidates are independently revalidated;
+ * a delivery selection alone never overrides the scheduler's reservations.
  */
 export function admissionsWithinDeliverySafety<T>(args: {
   selected: DeliverySelection["selected"];
   activeExecutions: number;
   admissions: readonly T[];
 }): T[] {
-  if (args.selected !== "regular-prs") return [...args.admissions];
-  if (args.activeExecutions > 0) return [];
-  return args.admissions.slice(0, 1);
+  return args.selected === "escalate" ? [] : [...args.admissions];
 }
 
 /**

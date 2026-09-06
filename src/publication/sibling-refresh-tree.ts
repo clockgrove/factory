@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { executionAffectingReason } from "../approval.js";
@@ -7,11 +7,13 @@ import {
   MAX_ARTIFACT_PATCH_BYTES,
   assertArtifactScope,
   verifyArtifact,
+  materializeArtifactPatch,
   type NormalizedArtifact,
 } from "../execution/artifacts.js";
 import { assertNoSecretMaterial, gitSha } from "../protocol/limits.js";
 import type { WorkerPacket } from "../protocol/worker-packet.js";
 import { runContainedProcess, sanitizedWorkerEnvironment } from "../runtime/process-group.js";
+import { inspectPatchManifest } from "../runtime/artifact-patch.js";
 import type { PublicationStore } from "./publisher.js";
 
 // GitHub's ordinary Git-blob read contract is bounded at 100 MB. Large assets
@@ -131,10 +133,27 @@ export async function prepareSiblingRefreshTree(input: {
     )
       throw new Error("sibling tree remote base identity differs");
     const patchPath = join(root, "artifact.patch");
-    await writeFile(patchPath, artifact.patch, { flag: "wx", mode: 0o600 });
+    await materializeArtifactPatch(artifact, patchPath);
+    const trustedManifest = await inspectPatchManifest(
+      input.repository,
+      baseSha,
+      patchPath,
+      artifact.changedPaths,
+      { allowSymlinkBlobs: true },
+    );
+    if (
+      artifact.fileManifest &&
+      JSON.stringify(artifact.fileManifest) !== JSON.stringify(trustedManifest)
+    )
+      throw new Error("sibling artifact manifest differs from actual Git blob identities");
     await git(["read-tree", baseSha]);
     await git(["apply", "--cached", "--binary", "--whitespace=error-all", patchPath]);
     const outputTreeSha = gitSha.parse((await git(["write-tree"])).trim());
+    if (
+      trustedManifest.baseTreeSha !== base.treeOid ||
+      trustedManifest.resultTreeSha !== outputTreeSha
+    )
+      throw new Error("sibling preparation differs from artifact content manifest");
     const changed = (
       await git([
         "diff-tree",
@@ -196,6 +215,7 @@ export async function prepareSiblingRefreshTree(input: {
           .update(content)
           .digest("hex");
         if (actual !== blobOid) throw new Error("raw blob object identity changed");
+        assertNoSecretMaterial(content.toString("latin1"), "sibling publication content");
         await input.assertCurrent();
         remaining();
         if ((await input.store.createBlob(content)) !== blobOid)

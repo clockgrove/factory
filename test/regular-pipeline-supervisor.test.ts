@@ -12,37 +12,41 @@ function deferred() {
   return { promise, resolve };
 }
 
-function assertSerialized(f: Awaited<ReturnType<typeof providerSupervisorFixture>>) {
+function assertConcurrent(f: Awaited<ReturnType<typeof providerSupervisorFixture>>) {
   const events = f.events();
   const integrations = events.filter(
     (event) => event.kind === "attempt" && event.event === "AttemptIntegrated",
   );
   expect(integrations).toHaveLength(3);
-  for (let index = 1; index < integrations.length; index++) {
-    const prior = integrations[index - 1]!;
-    const current = integrations[index]!;
-    if (current.kind !== "attempt" || prior.kind !== "attempt") throw Error("bad fixture event");
+  for (const number of [8, 9]) {
     const admissions = events.filter(
       (event) =>
         event.kind === "attempt" &&
-        event.workItem === current.workItem &&
+        event.workItem === number &&
         ["AttemptReserved", "AttemptStarted"].includes(event.event),
     );
     expect(admissions).toHaveLength(2);
     for (const admission of admissions) {
-      expect(admission.sequence).toBeGreaterThan(prior.sequence);
-      if (admission.kind === "attempt") expect(admission.baseSha).toBe(prior.headSha);
+      expect(admission.sequence).toBeLessThan(integrations[0]!.sequence);
     }
   }
+  const join = events.find(
+    (event) =>
+      event.kind === "attempt" && event.event === "AttemptStarted" && event.workItem === 10,
+  )!;
+  for (const integrated of integrations.filter((event) => event.workItem !== 10))
+    expect(join.sequence).toBeGreaterThan(integrated.sequence);
   expect(
     f.activity.filter((entry) => entry.operation === "launch").map((entry) => entry.workItem),
   ).toEqual([8, 9, 10]);
-  expect(f.activity.filter((entry) => entry.operation.endsWith("review"))).toHaveLength(3);
+  expect(
+    f.activity.filter((entry) => entry.operation.endsWith("review")).length,
+  ).toBeGreaterThanOrEqual(3);
 }
 
 describe("regular delivery owns the complete Supervisor pipeline", () => {
   it.each(["mergeability", "checks"])(
-    "holds the next item during %s waits, then uses the merged base",
+    "runs both independent pipelines during %s waits and joins only after exact integration",
     async (kind) => {
       const shutdown = new AbortController();
       const f = await providerSupervisorFixture("daytona-burst", {
@@ -55,7 +59,7 @@ describe("regular delivery owns the complete Supervisor pipeline", () => {
       const original = readPull.getMockImplementation()!;
       readPull.mockImplementation(async (number) => {
         const result = await original(number);
-        if (number === 108 && held && kind === "mergeability") {
+        if (held && kind === "mergeability") {
           waits++;
           return { ...result, mergeable: null };
         }
@@ -83,12 +87,12 @@ describe("regular delivery owns the complete Supervisor pipeline", () => {
             .events()
             .filter((event) => event.kind === "attempt" && event.event === "AttemptStarted")
             .map((event) => ("workItem" in event ? event.workItem : null)),
-        ).toEqual([8]);
+        ).toEqual([8, 9]);
         expect(f.events().filter((event) => event.event === "AttemptIntegrated")).toHaveLength(0);
         held = false;
         const result = await running;
         expect(result, result.reason).toMatchObject({ status: "completed" });
-        assertSerialized(f);
+        assertConcurrent(f);
       } finally {
         held = false;
         shutdown.abort();
@@ -99,7 +103,7 @@ describe("regular delivery owns the complete Supervisor pipeline", () => {
     30_000,
   );
 
-  it("reconstructs a pending publication after controller restart without a duplicate worker or old-base sibling", async () => {
+  it("reconstructs both pending publications after restart without duplicate workers or stale-base merging", async () => {
     const shutdown = new AbortController();
     const resumedShutdown = new AbortController();
     const f = await providerSupervisorFixture("daytona-burst", {
@@ -113,7 +117,7 @@ describe("regular delivery owns the complete Supervisor pipeline", () => {
     const original = readPull.getMockImplementation()!;
     readPull.mockImplementation(async (number) => {
       const result = await original(number);
-      if (number === 108 && held) {
+      if (held) {
         reads++;
         return { ...result, mergeable: null };
       }
@@ -145,12 +149,12 @@ describe("regular delivery owns the complete Supervisor pipeline", () => {
       });
       expect(
         f.activity.filter((entry) => entry.operation === "launch").map((entry) => entry.workItem),
-      ).toEqual([8]);
+      ).toEqual([8, 9]);
       held = false;
       const result = await second;
       expect(result, result.reason).toMatchObject({ status: "completed", runId: f.runId });
       expect(f.events().filter((event) => event.event === "FactoryRunStarted")).toHaveLength(1);
-      assertSerialized(f);
+      assertConcurrent(f);
     } finally {
       held = false;
       shutdown.abort();
@@ -203,8 +207,15 @@ describe("regular delivery owns the complete Supervisor pipeline", () => {
         interval: 20,
       });
       expect(publicationWrites).toBe(1);
-      expect(f.events().filter((event) => event.event === "AttemptIntegrated")).toHaveLength(0);
-      expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);
+      expect(
+        f
+          .events()
+          .filter(
+            (event) =>
+              event.event === "AttemptIntegrated" && "workItem" in event && event.workItem === 8,
+          ),
+      ).toHaveLength(0);
+      expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(2);
       release.resolve();
       const result = await running;
       expect(result, result.reason).toMatchObject({ status: "completed" });
@@ -218,7 +229,7 @@ describe("regular delivery owns the complete Supervisor pipeline", () => {
               event.workItem === 8,
           ),
       ).toHaveLength(1);
-      assertSerialized(f);
+      assertConcurrent(f);
     } finally {
       release.resolve();
       shutdown.abort();

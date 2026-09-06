@@ -6,7 +6,12 @@ import {
 import { addScopeSerializationEdges } from "../graph.js";
 import { z } from "zod";
 import { assessDecomposition, economicRationale, type DecompositionEvidence } from "./economics.js";
-export { assessDecomposition, economicRequirements, type DecompositionAssessment, type DecompositionEvidence } from "./economics.js";
+export {
+  assessDecomposition,
+  economicRequirements,
+  type DecompositionAssessment,
+  type DecompositionEvidence,
+} from "./economics.js";
 import {
   buildContextManifest,
   discoverValidationCommands,
@@ -321,6 +326,8 @@ export function validateCompiledObjective(
 export function compileObjective(input: CompileInput): CompilerObjective {
   if (!/^[0-9a-f]{40}$/i.test(input.baseSha)) throw new Error("invalid base SHA");
   const facts = normalizeRepositoryFacts(input.repositoryFacts);
+  if (facts.lfs !== undefined && facts.lfs.baseSha !== input.baseSha)
+    throw new Error("LFS repository facts do not match the pinned compilation base");
   const analyzed = input.workItems.map((w) => {
     const explicitResources = sorted(ExclusiveResourcesSchema.parse(w.exclusiveResources ?? []));
     const { exclusiveResources: _claims, ...source } = w;
@@ -359,6 +366,10 @@ export function compileObjective(input: CompileInput): CompilerObjective {
     return {
       ...source,
       baseSha: input.baseSha,
+      requirements: {
+        ...w.requirements,
+        tools: sorted([...w.requirements.tools, ...(facts.lfs?.requiredTools ?? [])]),
+      },
       validationCommands: w.validationCommands,
       context: { ...manifest, dependencyEvidence: [] },
       changeSurface: { mergeClass, exclusiveResources: resources },
@@ -461,7 +472,10 @@ export function compileObjective(input: CompileInput): CompilerObjective {
 }
 
 /** Applied before the immutable compilation checkpoint; never rerun on recovered graphs. */
-export function applyEconomicReview(result: CompilerObjective, evidence?: DecompositionEvidence): void {
+export function applyEconomicReview(
+  result: CompilerObjective,
+  evidence?: DecompositionEvidence,
+): void {
   const assessment = assessDecomposition(result.workItems, evidence);
   if (assessment.redundantItemPairs.length)
     throw new Error(

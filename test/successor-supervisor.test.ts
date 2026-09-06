@@ -32,6 +32,7 @@ import { RecoveryPlanManager } from "../src/recovery/plan.js";
 import { RecoveryClaimManager } from "../src/recovery/claims.js";
 import { recoveryAdoptionEvents } from "../src/recovery/transaction.js";
 import { normalizeArtifact } from "../src/execution/artifacts.js";
+import { workerPacketDigest } from "../src/protocol/worker-packet.js";
 import { loadRecoveryRuntime } from "../src/recovery/runtime.js";
 import { recoveryReadPort } from "../src/recovery/github-read-port.js";
 import { verifyRecoveryProposalResources } from "../src/recovery/resources.js";
@@ -70,6 +71,8 @@ async function fixture(
     failC?: boolean;
     loseSiblingRefreshResponse?: boolean;
     completeSourceScopeEvidence?: boolean;
+    isolatedItem?: string;
+    isolatedWorker?: boolean;
   } = {},
 ) {
   const repository = await mkdtemp(join(tmpdir(), "factory-successor-integration-"));
@@ -126,7 +129,11 @@ async function fixture(
             minCloudTimeSavedMinutes: 0,
           },
         }),
-    backendOrder: ["codex-sdk/local-worktree"],
+    backendOrder: [
+      ...(options.isolatedWorker ? ["fixture/isolated-worker"] : []),
+      "codex-sdk/local-worktree",
+      ...(options.isolatedItem ? ["fixture/isolated-validator"] : []),
+    ],
     capacity: { ...DEFAULT_RUN_POLICY.capacity, mode: "fixed" },
     delivery: {
       mode: options.nativeSource ? "stacked-prs" : "regular-prs",
@@ -266,7 +273,7 @@ async function fixture(
         services: [],
         networkDestinations: [],
         permittedSecretNames: [],
-        trust: "trusted_local",
+        trust: options.isolatedItem === name ? "isolated" : "trusted_local",
       },
       artifactContract: "clockgrove.factory/artifact-v1",
       delivery: options.retainedPrefix
@@ -744,6 +751,50 @@ async function fixture(
     version: "2026-03-10",
     reason: "fixture observed native API",
   });
+  const backendRegistry = options.isolatedItem ? new BackendRegistry() : undefined;
+  if (backendRegistry) {
+    const local = new CodexSdkLocalBackend();
+    backendRegistry.register(local);
+    const unused = async (): Promise<never> => {
+      throw new Error("fixture isolated validator must not execute before denied child admission");
+    };
+    // A separately available validator allows graph preflight to reach the
+    // worker admission boundary; it cannot serve as an execution backend.
+    backendRegistry.register({
+      capabilities: {
+        ...local.capabilities,
+        id: "fixture/isolated-validator",
+        isolation: "container",
+      },
+      policyRejectionReasons: ({ phase }) => (phase === "execution" ? ["validation only"] : []),
+      probe: async () => ({ available: true, authenticated: true, measuredAt: now.toISOString() }),
+      probeValidation: async () => ({
+        available: true,
+        authenticated: true,
+        measuredAt: now.toISOString(),
+      }),
+      launch: unused,
+      observe: unused,
+      cancel: unused,
+      collect: unused,
+      cleanup: unused,
+      validate: unused,
+    });
+    if (options.isolatedWorker)
+      backendRegistry.register({
+        capabilities: {
+          ...local.capabilities,
+          id: "fixture/isolated-worker",
+          isolation: "container",
+        },
+        probe: (requirements) => local.probe(requirements),
+        launch: (context) => local.launch(context),
+        observe: unused,
+        cancel: unused,
+        collect: unused,
+        cleanup: unused,
+      });
+  }
   const run = (recovery?: SupervisorOptions["recovery"]) =>
     new FactorySupervisor({
       token: "fixture-token",
@@ -753,7 +804,11 @@ async function fixture(
       repository,
       policy,
       managementBackend: management,
-      pollIntervalMs: 1,
+      ...(backendRegistry ? { backendRegistry } : {}),
+      // Snapshot/recovery mocks execute real synchronous Git. A 1ms polling
+      // cadence monopolizes the worker between each streamed artifact I/O step;
+      // retain the 180-read guard while yielding enough for that pipeline to run.
+      pollIntervalMs: 50,
       onStatus: (message) => messages.push(message),
       ...(recovery ? { recovery } : {}),
     }).run();
@@ -1512,7 +1567,23 @@ describe("Supervisor authenticated successor execution", () => {
       const result = await f.run();
       expect(result, JSON.stringify(result)).toMatchObject({ status: "completed" });
       expect(f.launch).toHaveBeenCalledTimes(1);
-      expect(await f.runtime()).toMatchObject({ status: "verified" });
+      const runtime = await f.runtime();
+      expect(runtime).toMatchObject({ status: "verified" });
+      if (runtime.status !== "verified") throw new Error("fixture recovery proof unavailable");
+      expect(runtime.sourceIntegrations).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            status: "verified",
+            outcome: expect.objectContaining({ workItem: 8, mergeCommitSha: f.mergeShas.get(18) }),
+          }),
+        ]),
+      );
+      expect(
+        [
+          ...f.snapshot.factoryEvents!,
+          ...f.snapshot.workItems.flatMap((item) => item.factoryEvents!),
+        ].filter((event) => event.runId === "parallel"),
+      ).toEqual(f.original);
     },
     60_000,
   );
@@ -1539,6 +1610,94 @@ describe("Supervisor authenticated successor execution", () => {
     expect(f.launch).not.toHaveBeenCalled();
     expect(f.merge).not.toHaveBeenCalled();
   });
+  it("rejects a pre-activation root without its authenticated validation before child execution", async () => {
+    const f = await successorFixture({
+      retainedPrefix: 2,
+      stackLength: 3,
+      nativeSource: true,
+      premergedNativeRoot: true,
+    });
+    const root = f.snapshot.workItems[0]!;
+    root.factoryEvents = root.factoryEvents!.filter(
+      (event) => event.event !== "ValidationRecorded",
+    );
+    const merges = f.merge.mock.calls.length;
+    const result = await f.run().catch((error: unknown) => ({ status: "blocked", error }));
+    expect(result.status).not.toBe("completed");
+    expect(f.launch).not.toHaveBeenCalled();
+    expect(f.merge).toHaveBeenCalledTimes(merges);
+  });
+  it.each([
+    { retainedPrefix: 2 as const, stackLength: 3 as const, premergedNativeRoot: false },
+    { retainedPrefix: 2 as const, stackLength: 3 as const, premergedNativeRoot: true },
+    { retainedPrefix: 3 as const, stackLength: 4 as const, premergedNativeRoot: true },
+  ])(
+    "inherits isolated intermediate B before fresh native admission across $stackLength layers, premerged=$premergedNativeRoot",
+    async (options) => {
+      const f = await successorFixture({ ...options, nativeSource: true, isolatedItem: "b" });
+      const evaluate = vi.spyOn(BackendRegistry.prototype, "evaluate");
+      const merges = f.merge.mock.calls.length;
+      const result = await f.run();
+      expect(result.status).toBe("escalated");
+      expect(evaluate, JSON.stringify(result)).toHaveBeenCalled();
+      expect(evaluate.mock.calls.every(([input]) => input.requirements.trust === "isolated")).toBe(
+        true,
+      );
+      expect(f.launch).not.toHaveBeenCalled();
+      expect(f.merge).toHaveBeenCalledTimes(merges);
+      expect(
+        f.snapshot.workItems
+          .flatMap((item) => item.factoryEvents!)
+          .filter((event) => event.runId === "successor" && event.event === "AttemptReserved"),
+      ).toEqual([]);
+    },
+    60_000,
+  );
+  it("binds inherited intermediate isolation into the reserved and launched child packet", async () => {
+    const f = await successorFixture({
+      retainedPrefix: 2,
+      stackLength: 3,
+      nativeSource: true,
+      premergedNativeRoot: true,
+      isolatedItem: "b",
+      isolatedWorker: true,
+    });
+    const evaluate = vi.spyOn(BackendRegistry.prototype, "evaluate");
+    const validators = vi.spyOn(BackendRegistry.prototype, "evaluateIsolatedValidators");
+    const stop = new PlatformUnavailableError(
+      { kind: "server_error", retryAfterMs: 1 },
+      new Error("fixture stops at isolated child dispatch boundary"),
+    );
+    f.launch.mockImplementation(async (context) => {
+      expect(context.packet.requirements.trust).toBe("isolated");
+      expect(context.packet.baseSha).toBe(f.snapshot.workItems[1]!.linkedPullRequests[0]!.headSha);
+      throw stop;
+    });
+    await expect(f.run()).rejects.toThrow(
+      "launch failed before returning a handle and cannot prove that no resource was created",
+    );
+    expect(f.launch).toHaveBeenCalledTimes(1);
+    expect(evaluate.mock.calls.every(([input]) => input.requirements.trust === "isolated")).toBe(
+      true,
+    );
+    expect(validators.mock.calls.some(([input]) => input.requirements.trust === "isolated")).toBe(
+      true,
+    );
+    const context = f.launch.mock.calls[0]![0];
+    const reserved = f.snapshot.workItems[2]!.factoryEvents!.find(
+      (event) => event.runId === "successor" && event.event === "AttemptReserved",
+    );
+    expect(reserved).toMatchObject({
+      backend: "fixture/isolated-worker",
+      localScopeBatch: { identity: { invocationDigest: workerPacketDigest(context.packet) } },
+    });
+    expect(
+      [
+        ...f.snapshot.factoryEvents!,
+        ...f.snapshot.workItems.flatMap((item) => item.factoryEvents!),
+      ].filter((event) => event.runId === "parallel"),
+    ).toEqual(f.original);
+  }, 30_000);
   it("restarts a mixed native unit after linking loses its response without duplicate execution", async () => {
     const f = await successorFixture({
       retainedPrefix: 1,

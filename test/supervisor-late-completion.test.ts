@@ -79,17 +79,35 @@ describe("completion-only restart beyond the original Objective deadline", () =>
   it("closes on-time completed work without another worker, validation, review or merge", async () => {
     const f = await completedBeforeOutage();
     try {
+      const expectedUnits = new Set(
+        f.events().flatMap((event) => {
+          if (
+            (event.kind !== "attempt" || event.event !== "AttemptReserved") &&
+            (event.kind !== "capacity" || event.event !== "CapacityReserved")
+          )
+            return [];
+          const batch = event.localScopeBatch;
+          return batch
+            ? Array.from({ length: batch.commandCount }, (_, commandIndex) =>
+                scopes.localScopeUnit({ ...batch.identity, commandIndex }),
+              )
+            : [];
+        }),
+      );
+      vi.mocked(scopes.linuxLocalScopeReadPort.show).mockClear();
       expect(await f.run()).toMatchObject({ status: "completed", runId: f.runId });
       expect(f.snapshot.closed).toBe(true);
       expect(f.activity).toEqual(f.before);
       expect(f.events().filter((event) => event.event === "AttemptIntegrated")).toHaveLength(3);
       expect(f.events().filter((event) => event.event === "FactoryRunCompleted")).toHaveLength(1);
       // Two independent observations per slot, repeated at the final proof fence.
-      expect(scopes.linuxLocalScopeReadPort.show).toHaveBeenCalledTimes(36);
-      expect(
-        new Set(vi.mocked(scopes.linuxLocalScopeReadPort.show).mock.calls.map(([unit]) => unit))
-          .size,
-      ).toBe(9);
+      const observedUnits = vi
+        .mocked(scopes.linuxLocalScopeReadPort.show)
+        .mock.calls.map(([unit]) => unit);
+      expect(expectedUnits.size).toBeGreaterThanOrEqual(9);
+      expect(new Set(observedUnits)).toEqual(expectedUnits);
+      for (const unit of expectedUnits)
+        expect(observedUnits.filter((observed) => observed === unit)).toHaveLength(4);
     } finally {
       await f.dispose();
     }
@@ -176,7 +194,16 @@ describe("completion-only restart beyond the original Objective deadline", () =>
         }
         expect(await f.run()).toMatchObject({
           status: "escalated",
-          reason: "Objective timeout exhausted",
+          // Without the original review, the activation's own-trunk proof fails
+          // before the completion-only gate may acquire any run authority.
+          ...(fault === "missing-review"
+            ? {
+                runId: "not-started",
+                reason: expect.stringMatching(
+                  /^activation fixture-activation is stale: main advanced from [a-f0-9]{40} to [a-f0-9]{40}; reactivate against the new head$/,
+                ),
+              }
+            : { reason: "Objective timeout exhausted" }),
         });
         expect(f.snapshot.closed).toBe(false);
         expect(f.activity).toEqual(f.before);

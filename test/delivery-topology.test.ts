@@ -29,7 +29,7 @@ function permutations<T>(values: T[]): T[][] {
 }
 
 describe("delivery topology planning", () => {
-  it("serializes ordinary-PR pipelines while native stacks keep scheduler concurrency", () => {
+  it("keeps scheduler-authorized independent admissions in both publication modes", () => {
     const admissions = ["a", "b", "c"];
     expect(
       admissionsWithinDeliverySafety({
@@ -37,14 +37,14 @@ describe("delivery topology planning", () => {
         activeExecutions: 0,
         admissions,
       }),
-    ).toEqual(["a"]);
+    ).toEqual(admissions);
     expect(
       admissionsWithinDeliverySafety({
         selected: "regular-prs",
         activeExecutions: 1,
         admissions,
       }),
-    ).toEqual([]);
+    ).toEqual(admissions);
     expect(
       admissionsWithinDeliverySafety({
         selected: "native-stacks",

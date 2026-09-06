@@ -1,6 +1,14 @@
 import { createHash } from "node:crypto";
 
 import { z } from "zod";
+import { writeFile } from "node:fs/promises";
+import {
+  ArtifactFileManifestSchema,
+  ArtifactPayloadSchema,
+  materializePayload,
+  type ArtifactFileManifest,
+  type ArtifactPayload,
+} from "./artifact-content.js";
 
 import {
   MAX_LOG_BYTES,
@@ -41,6 +49,8 @@ export const NormalizedArtifactSchema = z
     baseSha: gitSha,
     digest: sha256Digest,
     patch: z.string().max(MAX_ARTIFACT_PATCH_BYTES),
+    payload: ArtifactPayloadSchema.optional(),
+    fileManifest: ArtifactFileManifestSchema.optional(),
     changedPaths: z.array(relativePath).max(10_000),
     commands: z.array(CommandResultSchema).max(128),
     logs: z.string().max(MAX_LOG_BYTES),
@@ -55,6 +65,8 @@ export type NormalizedArtifact = z.infer<typeof NormalizedArtifactSchema>;
 export interface ArtifactInput {
   baseSha: string;
   patch: string;
+  payload?: ArtifactPayload | undefined;
+  fileManifest?: ArtifactFileManifest | undefined;
   changedPaths: string[];
   commands?: Array<{ command: string; exitCode: number; durationMs: number }>;
   logs?: string;
@@ -67,14 +79,26 @@ export function artifactDigest(input: {
   baseSha: string;
   patch: string;
   changedPaths: string[];
+  payload?: ArtifactPayload | undefined;
+  fileManifest?: ArtifactFileManifest | undefined;
 }): string {
-  return createHash("sha256")
+  const hash = createHash("sha256")
     .update(input.baseSha)
     .update("\0")
     .update(input.changedPaths.slice().sort().join("\0"))
     .update("\0")
-    .update(input.patch)
-    .digest("hex");
+    .update(input.patch);
+  // Preserve the exact old digest for old inline artifacts.
+  if (input.payload || input.fileManifest)
+    hash.update("\0content-v1\0").update(
+      JSON.stringify({
+        ...(input.payload ? { payload: ArtifactPayloadSchema.parse(input.payload) } : {}),
+        ...(input.fileManifest
+          ? { fileManifest: ArtifactFileManifestSchema.parse(input.fileManifest) }
+          : {}),
+      }),
+    );
+  return hash.digest("hex");
 }
 
 const TRUNCATED_LOG_PREFIX = "[Factory truncated worker logs; retained final output]\n";
@@ -114,6 +138,8 @@ export function normalizeArtifact(input: ArtifactInput): NormalizedArtifact {
     protocol: "clockgrove.factory/artifact-v1" as const,
     baseSha: input.baseSha,
     patch: input.patch,
+    ...(input.payload ? { payload: input.payload } : {}),
+    ...(input.fileManifest ? { fileManifest: input.fileManifest } : {}),
     changedPaths: [...new Set(input.changedPaths)].sort(),
     commands: input.commands ?? [],
     logs: boundWorkerLogs(rawLogs),
@@ -126,6 +152,7 @@ export function normalizeArtifact(input: ArtifactInput): NormalizedArtifact {
     digest: artifactDigest(core),
   });
   assertWithinBytes(artifact.logs, MAX_LOG_BYTES, "worker logs");
+  assertArtifactContentBinding(artifact);
   return artifact;
 }
 
@@ -135,7 +162,36 @@ export function verifyArtifact(artifact: NormalizedArtifact): NormalizedArtifact
   if (parsed.digest !== expected) throw new Error("artifact digest does not match its contents");
   assertWithinBytes(parsed.logs, MAX_LOG_BYTES, "worker logs");
   assertNoSecretMaterial(parsed.logs, "worker logs");
+  assertArtifactContentBinding(parsed);
   return parsed;
+}
+
+export const payloadPatchMarker = (payload: ArtifactPayload) =>
+  `# Factory content-addressed Git patch sha256:${payload.digest} bytes:${payload.bytes}\n`;
+
+function assertArtifactContentBinding(artifact: NormalizedArtifact): void {
+  if (artifact.payload && artifact.patch !== payloadPatchMarker(artifact.payload))
+    throw new Error("external payload must use its exact non-executable display marker");
+  if (
+    artifact.fileManifest &&
+    JSON.stringify(artifact.fileManifest.files.map((file) => file.path).sort()) !==
+      JSON.stringify([...artifact.changedPaths].sort())
+  )
+    throw new Error("artifact file manifest differs from changed paths");
+  assertNoSecretMaterial(
+    { payload: artifact.payload, fileManifest: artifact.fileManifest },
+    "artifact content descriptor",
+  );
+}
+
+/** The only materialization path for inline and externalized patches. Never apply the display marker. */
+export async function materializeArtifactPatch(
+  artifact: NormalizedArtifact,
+  destination: string,
+): Promise<void> {
+  const verified = verifyArtifact(artifact);
+  if (verified.payload) await materializePayload(verified.payload, destination);
+  else await writeFile(destination, verified.patch, { flag: "wx", mode: 0o600 });
 }
 
 export function assertArtifactScope(artifact: NormalizedArtifact, allowedPaths: string[]): void {

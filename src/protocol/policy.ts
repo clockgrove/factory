@@ -208,7 +208,7 @@ export const EconomicsPolicySchema = z
 export const ControllerPolicySchema = z
   .object({
     scope: z.literal("repository"),
-    maxActiveObjectives: z.literal(1),
+    maxActiveObjectives: z.number().int().min(1).max(32),
     maxLocalWorkers: z.number().int().min(1).max(32),
     maxPaidWorkers: z.number().int().min(0).max(32),
     pollIntervalSeconds: z.number().int().min(1).max(300),
@@ -219,7 +219,7 @@ export type ControllerPolicy = z.infer<typeof ControllerPolicySchema>;
 
 export const DEFAULT_CONTROLLER_POLICY: ControllerPolicy = Object.freeze({
   scope: "repository",
-  maxActiveObjectives: 1,
+  maxActiveObjectives: 2,
   maxLocalWorkers: 8,
   maxPaidWorkers: 0,
   pollIntervalSeconds: 15,

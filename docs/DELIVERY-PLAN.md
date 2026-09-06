@@ -16,7 +16,8 @@ burst within explicit cost authority, validate every artifact independently, and
 native stacked pull requests until the Objective ships or one evidenced human decision is required.
 
 The waves below group tasks by outcome. Independent tasks may run concurrently; each wave has
-explicit completion checks. Vercel Sandbox and Codex App Server are follow-on integrations.
+explicit completion checks. Durable App Server sessions, same-host Objective sharing, concurrent
+regular PRs and large-file handling are included. Vercel Sandbox is an optional follow-on integration.
 
 ## Product outcome
 
@@ -35,9 +36,8 @@ The scope includes:
 - Daytona sandbox burst with TTL, egress, secret, concurrency, budget, and cleanup controls;
 - GitHub issues, native sub-issues/dependencies, versioned refs/receipts, and no required private
   state service;
-- native stacked pull requests with exact-head validation, restart recovery, and concurrent
-  execution; the regular-PR fallback serializes complete Work Item pipelines to preserve validated
-  base integrity;
+- native stacked pull requests and regular independent PR pipelines with exact-head validation,
+  restart recovery, concurrent execution, and serialized/revalidated integration;
 - chat/MCP and CLI control with no custom UI or required GitHub Action; and
 - public security, support, governance, contribution, release, and conformance documentation.
 
@@ -217,7 +217,7 @@ If the gate fails, document the failure and prepare a new version rather than ov
 
 ## Labs and non-goals
 
-Labs: Vercel Sandbox, Codex App Server, and additional provider/harness adapters. Their deterministic
+Labs: Vercel Sandbox and additional provider/harness adapters. Their deterministic
 tests should stay green, but live evidence is not a release gate.
 
 Non-goals: a demo application, a custom Factory UI, GitHub Actions as Factory's scheduler, a

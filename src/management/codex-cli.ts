@@ -31,7 +31,11 @@ import type {
   SemanticReview,
 } from "./backend.js";
 import { restrictedCodexArgs } from "../backends/codex-cli-policy.js";
-import { compileObjective, applyEconomicReview, ExclusiveResourcesSchema } from "../compiler/index.js";
+import {
+  compileObjective,
+  applyEconomicReview,
+  ExclusiveResourcesSchema,
+} from "../compiler/index.js";
 import { ManagementOutputError } from "./backend.js";
 import { discoverValidationCommands, readRepositoryFacts } from "../repository-profiles/index.js";
 
@@ -481,7 +485,11 @@ export class CodexCliManagementBackend implements ManagementBackend {
   ): Promise<CompilationResult> {
     assertWithinBytes(context, 512 * 1024, "compilation context");
     assertNoSecretMaterial(context, "compilation context");
-    const repositoryFacts = await readRepositoryFacts(context.repository, context.repositoryFiles);
+    const repositoryFacts = await readRepositoryFacts(
+      context.repository,
+      context.repositoryFiles,
+      context.repositoryLfs,
+    );
     const validationCommands = discoverValidationCommands(repositoryFacts);
     const validationGrounding = {
       packageJson: context.repositoryFiles.includes("package.json") ? "observed" : "not observed",
@@ -557,7 +565,10 @@ export class CodexCliManagementBackend implements ManagementBackend {
         baseSha: context.artifact.baseSha,
         digest: context.artifact.digest,
         changedPaths: context.artifact.changedPaths,
-        patch: context.artifact.patch,
+        patch: context.artifact.fileManifest
+          ? "Content is bound by the file manifest below. Inspect relevant actual files in this independently validated checkout; the manifest alone is not semantic acceptance evidence. Binary contents and oversized patches are not embedded in this prompt."
+          : context.artifact.patch,
+        ...(context.artifact.fileManifest ? { fileManifest: context.artifact.fileManifest } : {}),
       },
       evidence: context.evidence,
     };

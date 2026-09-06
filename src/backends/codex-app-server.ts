@@ -13,14 +13,33 @@ import type {
   ExecutionBackendCapabilities,
   StaleAttemptIdentity,
 } from "../execution/backend.js";
-import { normalizeArtifact, type NormalizedArtifact } from "../execution/artifacts.js";
+import { localExecutionScopeBatch } from "../execution/backend.js";
 import {
-  assertSessionIdentity,
-  durableAttemptId,
-  legacyDurableAttemptId,
-  normalizeExecutionUsage,
-  type DurableSessionIdentity,
-} from "../execution/session.js";
+  APP_SERVER_SESSION_PROTOCOL,
+  appServerBoundaryDigest,
+  assertAppServerSessionContext,
+  canonicalSessionJson,
+  completeSessionUsage,
+  parseAppServerSessionCheckpoint,
+  AppServerResponseUsageSchema,
+  completedAppServerUsage,
+  EMPTY_APP_SERVER_USAGE,
+  type AppServerResponseUsage,
+  type AppServerSessionBinding,
+  type AppServerSessionCheckpoint,
+} from "../execution/app-server-session.js";
+import { workerPacketDigest } from "../protocol/worker-packet.js";
+import { LocalScopeBatchSchema } from "../protocol/local-scope.js";
+import { readLocalResourceHostIdentity } from "../recovery/local-resources.js";
+import {
+  linuxLocalScopeReadPort,
+  observeLocalScope,
+  stopLocalScope,
+  type LocalScopeReadPort,
+} from "../runtime/local-scope.js";
+import { resolveCodexCommand } from "../runtime/codex-command.js";
+import { normalizeArtifact, type NormalizedArtifact } from "../execution/artifacts.js";
+import { durableAttemptId, normalizeExecutionUsage } from "../execution/session.js";
 import type { ExecutionRequirements } from "../protocol/worker-packet.js";
 import {
   createIsolatedCodexHome,
@@ -29,7 +48,6 @@ import {
   resolveCodexHomeRoot,
 } from "../runtime/codex-home.js";
 import { collectLocalArtifact } from "../runtime/local-worktree.js";
-import { linuxProcessIds } from "../runtime/process-group.js";
 import {
   startCodexAppServer,
   type AppServerConnection,
@@ -67,6 +85,14 @@ interface AppAttempt {
   reason?: string;
   progress?: string;
   usage?: unknown;
+  rawTokenUsage?: AppServerSessionCheckpoint["rawTokenUsage"];
+  binding?: AppServerSessionBinding;
+  providerTerminal?: boolean;
+  terminalPersisted?: boolean;
+  responseUsage: Map<string, AppServerResponseUsage>;
+  usageStreamComplete: boolean;
+  providerCompleted?: boolean;
+  providerStatus?: "completed" | "interrupted" | "failed";
   final?: WorkerFinal;
   cancellationRequested: boolean;
   interruptSent: boolean;
@@ -95,6 +121,8 @@ export interface CodexAppServerOptions {
   resolveCodexHome?: (identity: AttemptIdentity) => string | Promise<string>;
   /** Injectable transport for protocol/conformance tests. */
   connect?: (home: string) => Promise<AppServerConnection> | AppServerConnection;
+  readHostIdentity?: () => Promise<string | null>;
+  scopeReadPort?: LocalScopeReadPort;
 }
 
 const MAX_REPOSITORY_INSTRUCTIONS_BYTES = 32 * 1024;
@@ -179,8 +207,7 @@ function finalFromItems(items: unknown): WorkerFinal | undefined {
   for (const value of [...items].reverse()) {
     const item = record(value);
     if (item.type !== "agentMessage") continue;
-    const final = parseWorkerFinal(item.text);
-    if (final) return final;
+    return parseWorkerFinal(item.text);
   }
   return undefined;
 }
@@ -277,54 +304,30 @@ async function wait(ms: number): Promise<void> {
   await new Promise((resolveWait) => setTimeout(resolveWait, ms));
 }
 
-async function processGroupsForAttempt(attemptId: string): Promise<number[]> {
-  const expected = `FACTORY_ATTEMPT_ID=${attemptId}`;
-  const groups = new Set<number>();
-  for (const pid of await linuxProcessIds()) {
-    const environment = await readFile(`/proc/${pid}/environ`).catch(() => null);
-    if (!environment || !environment.toString("utf8").split("\0").includes(expected)) {
-      continue;
-    }
-    const stat = await readFile(`/proc/${pid}/stat`, "utf8").catch(() => null);
-    if (!stat) continue;
-    const suffix = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-    const processGroup = Number(suffix[2]);
-    if (Number.isInteger(processGroup) && processGroup > 1) {
-      groups.add(processGroup);
-    }
-  }
-  return [...groups];
-}
-
-async function stopProcessGroup(group: number): Promise<void> {
-  const signal = (value: NodeJS.Signals): void => {
-    try {
-      process.kill(-group, value);
-    } catch {
-      // Already gone.
-    }
+export function appServerHandleFromCheckpoint(input: AppServerSessionCheckpoint): BackendHandle {
+  const checkpoint = parseAppServerSessionCheckpoint(input),
+    binding = checkpoint.binding;
+  return {
+    backendId: "codex-app-server/local-worktree",
+    resourceId: binding.threadId,
+    startedAt: binding.startedAt,
+    metadata: {
+      threadId: binding.threadId,
+      sessionId: binding.sessionId,
+      attemptId: binding.attemptId,
+      workspace: binding.workspace,
+      baseSha: binding.baseSha,
+      codexHome: binding.codexHome,
+      resourceHostIdentity: binding.hostIdentity,
+      ...(checkpoint.turnId ? { turnId: checkpoint.turnId } : {}),
+    },
   };
-  const alive = (): boolean => {
-    try {
-      process.kill(-group, 0);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  signal("SIGTERM");
-  for (let check = 0; check < 20 && alive(); check += 1) await wait(100);
-  if (alive()) signal("SIGKILL");
-  for (let check = 0; check < 20 && alive(); check += 1) await wait(100);
-  if (alive()) {
-    throw new Error(`could not stop stale Codex App Server process group ${group}`);
-  }
 }
 
 export class CodexAppServerLocalBackend implements ExecutionBackend {
   readonly capabilities: ExecutionBackendCapabilities = {
     id: "codex-app-server/local-worktree",
-    supportTier: "labs",
+    supportTier: "supported",
     agentKind: "codex-app-server",
     runtimeKind: "local-worktree",
     hostExecution: true,
@@ -336,6 +339,13 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     supportsCancellation: true,
     supportsObservation: true,
     supportsResume: true,
+    durableSession: {
+      providerStorage: "local",
+      recovery: "exact-terminal-read-only",
+      coldRepair: "unavailable-raw-usage-subscription",
+      supportedCodexVersion: "0.153.0",
+      preferredRouteQualification: "required",
+    },
     supportsLocalInference: false,
     reportsModelUsage: true,
     supportsModelSelection: true,
@@ -347,6 +357,10 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
   readonly #options: CodexAppServerOptions;
   readonly #attempts = new Map<string, AppAttempt>();
   readonly #connections = new Map<string, AppServerConnection>();
+  readonly #ownedScopes = new Map<
+    string,
+    NonNullable<AttemptContext["localExecutionScope"]>["batch"]
+  >();
 
   constructor(options: CodexAppServerOptions = {}) {
     this.#options = options;
@@ -396,7 +410,7 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
         measuredAt,
       };
     } finally {
-      await connection?.close().catch(() => {});
+      await connection?.close();
       await rm(home, { recursive: true, force: true });
     }
   }
@@ -405,21 +419,102 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     if (Date.now() >= context.deadline.getTime()) {
       throw new Error("attempt deadline already elapsed");
     }
+    const journal = context.sessionJournal;
+    if (!journal)
+      throw new Error("durable App Server execution requires the fenced GitHub session journal");
+    const scope = localExecutionScopeBatch(context);
+    if (!scope)
+      throw new Error(
+        "durable App Server execution requires independently observable local scopes",
+      );
+    const host = await (this.#options.readHostIdentity ?? readLocalResourceHostIdentity)();
+    if (!host || host !== scope.identity.hostIdentity)
+      throw new Error("App Server launch host differs from its reservation");
+    if (await journal.load("prepared"))
+      throw new Error(
+        "App Server turn dispatch already has a durable intent; use read-only recovery",
+      );
+    const previous = journal.previous && parseAppServerSessionCheckpoint(journal.previous);
+    if (
+      previous &&
+      (previous.stage !== "terminal" ||
+        !completeSessionUsage(previous.usage) ||
+        previous.binding.repository !== context.repository.toLowerCase() ||
+        previous.binding.runId !== context.runId ||
+        previous.binding.workItem !== context.workItem ||
+        previous.binding.attempt >= context.attempt ||
+        previous.binding.policyDigest !== context.policyDigest ||
+        previous.binding.baseSha !== context.packet.baseSha ||
+        previous.binding.hostIdentity !== host)
+    )
+      throw new Error("prior thread does not authorize an exact known-usage repair attempt");
+    // Pinned 0.153.0 cold thread/resume cannot opt into rawResponse/completed.
+    // Never dispatch a repair with a knowingly unavailable accounting stream.
+    if (previous)
+      throw new Error(
+        "cold same-thread repair is unavailable in Codex 0.153.0: thread/resume cannot enable exact raw-response accounting",
+      );
     const attemptId = durableAttemptId(context);
+    this.#ownedScopes.set(attemptId, scope);
     const home = await this.#prepareHome(context);
     let connection: AppServerConnection | undefined;
     let resourceId: string | undefined;
     try {
       await this.#installAuth(home);
-      connection = await this.#connection(home, context.workspace, attemptId);
+      connection = await this.#connection(home, context.workspace, attemptId, context);
+      await journal.assertCurrent();
       const threadResult = await connection.request("thread/start", {
         ...(await threadBoundary(context)),
         ...((context.modelSelection?.model ?? this.#options.model)
           ? { model: context.modelSelection?.model ?? this.#options.model }
           : {}),
         ephemeral: false,
+        experimentalRawEvents: true,
       });
       const threadId = idOf(threadResult, "thread");
+      const response = record(threadResult),
+        thread = record(response.thread);
+      if (
+        typeof thread.sessionId !== "string" ||
+        !thread.sessionId ||
+        thread.cwd !== context.workspace ||
+        typeof thread.modelProvider !== "string" ||
+        typeof response.model !== "string" ||
+        thread.cliVersion !== "0.153.0" ||
+        response.approvalPolicy !== "never" ||
+        ((context.modelSelection?.model ?? this.#options.model) &&
+          response.model !== (context.modelSelection?.model ?? this.#options.model))
+      )
+        throw new Error("App Server returned an incompatible thread, model, or permission binding");
+      const priorTurns = Array.isArray(thread.turns) ? thread.turns.map(turnFrom) : [];
+      if (!Array.isArray(thread.turns) || priorTurns.length)
+        throw new Error("App Server thread contains missing, active, or unexpected prior turns");
+      const binding: AppServerSessionBinding = {
+        attemptId,
+        repository: context.repository.toLowerCase(),
+        runId: context.runId,
+        objective: context.objective,
+        workItem: context.workItem,
+        attempt: context.attempt,
+        directorEpoch: context.directorEpoch,
+        policyDigest: context.policyDigest,
+        baseSha: context.packet.baseSha,
+        packetDigest: workerPacketDigest(context.packet),
+        boundaryDigest: appServerBoundaryDigest(context),
+        hostIdentity: host,
+        workspace: context.workspace,
+        codexHome: home,
+        threadId,
+        sessionId: thread.sessionId,
+        modelProvider: thread.modelProvider,
+        model: response.model,
+        cliVersion: "0.153.0",
+        usageBaseline: { ...EMPTY_APP_SERVER_USAGE },
+        startedAt: new Date().toISOString(),
+        deadline: context.deadline.toISOString(),
+        priorTurnIds: priorTurns.map((turn) => turn!.id),
+        localScopeBatch: scope,
+      };
       resourceId = threadId;
       const handle: BackendHandle = {
         backendId: this.capabilities.id,
@@ -432,13 +527,22 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
           baseSha: context.packet.baseSha,
           attemptId,
           codexHome: home,
+          resourceHostIdentity: host,
+          sessionId: binding.sessionId,
           ...(connection.pid === null ? {} : { pid: String(connection.pid) }),
         },
       };
       const attempt = this.#newAttempt(context, handle, threadId, "", home);
+      attempt.binding = binding;
       this.#attempts.set(threadId, attempt);
       this.#attach(attempt, connection);
-
+      await journal.persist({
+        protocol: APP_SERVER_SESSION_PROTOCOL,
+        stage: "prepared",
+        binding,
+        packet: context.packet,
+      });
+      await journal.assertCurrent();
       const turnResult = await connection.request("turn/start", {
         threadId,
         input: [
@@ -451,23 +555,66 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
         outputSchema: CODEX_WORKER_OUTPUT_SCHEMA,
       });
       const turnId = idOf(turnResult, "turn");
+      if ((attempt.turnId && attempt.turnId !== turnId) || binding.priorTurnIds.includes(turnId))
+        throw new Error("App Server turn dispatch returned a different invocation");
       attempt.turnId = turnId;
       handle.metadata = { ...handle.metadata, turnId };
+      await journal.persist({
+        protocol: APP_SERVER_SESSION_PROTOCOL,
+        stage: "turn",
+        binding,
+        packet: context.packet,
+        turnId,
+      });
+      const returnedTurn = turnFrom(record(turnResult).turn);
+      if (returnedTurn && !attempt.providerTerminal) this.#applyTurn(attempt, returnedTurn);
       return handle;
     } catch (error) {
       if (resourceId) this.#attempts.delete(resourceId);
-      await connection?.close().catch(() => {});
+      await connection?.close();
       this.#connections.delete(home);
-      await rm(home, { recursive: true, force: true });
+      // Even a lost turn/start response may have consumed model work. Preserve
+      // provider history and its immutable intent; never re-dispatch here.
       throw error;
     }
   }
 
   async observe(handle: BackendHandle): Promise<BackendObservation> {
     const attempt = this.#require(handle);
+    if (
+      attempt.providerTerminal &&
+      !attempt.terminalPersisted &&
+      attempt.binding &&
+      attempt.context.sessionJournal
+    ) {
+      attempt.usage = completedAppServerUsage({
+        completed: attempt.providerCompleted === true,
+        baseline: attempt.binding.usageBaseline,
+        total: attempt.rawTokenUsage?.total,
+        responses: [...attempt.responseUsage.values()],
+        streamComplete: attempt.usageStreamComplete,
+      });
+      await attempt.context.sessionJournal.persist({
+        protocol: APP_SERVER_SESSION_PROTOCOL,
+        stage: "terminal",
+        binding: attempt.binding,
+        packet: attempt.context.packet,
+        turnId: attempt.turnId,
+        state: attempt.state as "succeeded" | "failed" | "cancelled",
+        providerStatus: attempt.providerStatus!,
+        ...(attempt.rawTokenUsage ? { rawTokenUsage: attempt.rawTokenUsage } : {}),
+        responseUsage: [...attempt.responseUsage.values()],
+        usageStreamComplete: attempt.usageStreamComplete,
+        ...(attempt.usage ? { usage: normalizeExecutionUsage(attempt.usage) } : {}),
+        ...(attempt.final ? { final: attempt.final } : {}),
+      });
+      attempt.terminalPersisted = true;
+    }
     return {
       state: attempt.state,
       observedAt: new Date().toISOString(),
+      // Thread-level total/last notifications are retained verbatim, not
+      // relabelled as authoritative final turn counters.
       usage: normalizeExecutionUsage(attempt.usage),
       ...(attempt.reason ? { reason: attempt.reason } : {}),
       ...(attempt.progress ? { progress: attempt.progress } : {}),
@@ -488,13 +635,10 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     await Promise.race([attempt.terminal, wait(this.#options.cancellationWaitMs ?? 5_000)]);
     await this.#closeConnection(attempt.home);
     if (!terminalState(attempt.state)) {
-      this.#markTerminal(
-        attempt,
-        "cancelled",
-        interruptError
-          ? `attempt cancelled after interrupt failed: ${interruptError instanceof Error ? interruptError.message : String(interruptError)}`
-          : "attempt cancelled by Factory",
-      );
+      attempt.state = "unknown";
+      attempt.reason = interruptError
+        ? "App Server interruption outcome unavailable"
+        : "App Server stopped without a terminal turn receipt";
     }
   }
 
@@ -522,6 +666,8 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     return normalizeArtifact({
       baseSha: local.baseSha,
       patch: local.patch,
+      payload: local.payload,
+      fileManifest: local.fileManifest,
       changedPaths: local.changedPaths,
       commands: (attempt.final?.commands ?? []).map((command) => ({
         ...command,
@@ -543,117 +689,172 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     if (!terminalState(attempt.state)) await this.cancel(handle);
     attempt.unsubscribeNotification?.();
     attempt.unsubscribeRequest?.();
+    let checkpointError: unknown;
+    try {
+      if (attempt.providerTerminal) await this.observe(handle);
+    } catch (error) {
+      checkpointError = error;
+    }
     await this.#closeConnection(attempt.home);
     this.#attempts.delete(handle.resourceId);
-    await rm(attempt.home, { recursive: true, force: true });
+    // Retain provider-owned thread history. It is not a Factory scheduler DB.
+    if (checkpointError) throw checkpointError;
   }
 
   async resume(context: AttemptContext, handle: BackendHandle): Promise<BackendHandle> {
-    if (handle.backendId !== this.capabilities.id) {
-      throw new Error(`handle belongs to ${handle.backendId}, not ${this.capabilities.id}`);
+    if (handle.backendId !== this.capabilities.id || !context.sessionJournal)
+      throw new Error("App Server resume requires its exact backend and durable journal");
+    const journal = context.sessionJournal;
+    const prepared = await journal.load("prepared");
+    if (!prepared) throw new Error("App Server session preparation is unavailable");
+    assertAppServerSessionContext(context, prepared.binding);
+    const binding = prepared.binding;
+    if (
+      handle.resourceId !== binding.threadId ||
+      (handle.metadata?.turnId && binding.priorTurnIds.includes(handle.metadata.turnId))
+    )
+      throw new Error("App Server handle differs from its durable thread");
+    const current = this.#attempts.get(handle.resourceId);
+    if (current) {
+      if (canonicalSessionJson(current.binding) !== canonicalSessionJson(binding))
+        throw new Error("active App Server binding changed");
+      return current.handle;
     }
-    const metadata = handle.metadata ?? {};
-    const identity: DurableSessionIdentity = {
-      attemptId: metadata.attemptId ?? "",
-      repository: context.repository,
-      backendId: handle.backendId,
-      resourceId: handle.resourceId,
-      threadId: metadata.threadId ?? handle.resourceId,
-      workspace: metadata.workspace ?? "",
-      baseSha: metadata.baseSha ?? "",
-      runId: context.runId,
-      objective: context.objective,
-      workItem: context.workItem,
-      attempt: context.attempt,
-      directorEpoch: context.directorEpoch,
-      startedAt: handle.startedAt,
-    };
-    assertSessionIdentity(context, identity);
-    const expectedHome = await this.#homeFor(context);
-    const home = metadata.codexHome ?? expectedHome;
-    if (resolve(home) !== resolve(expectedHome)) {
-      throw new Error("durable session Codex home does not match the fenced attempt");
-    }
-
-    const terminal = metadata.terminalState;
-    if (["succeeded", "failed", "cancelled"].includes(terminal ?? "")) {
-      const resumed = {
-        ...handle,
-        metadata: { ...metadata, threadId: identity.threadId, codexHome: home },
-      };
+    const terminalCheckpoint = await journal.load("terminal");
+    await journal.assertCurrent();
+    await this.#assertPriorStopped(binding, terminalCheckpoint !== null);
+    if (!(await exists(binding.codexHome)))
+      throw new Error(
+        "durable App Server provider state is unavailable; no replacement turn authorized",
+      );
+    await journal.assertCurrent();
+    // A separate read-only connection may inspect persisted history only. It
+    // never reloads an agent or dispatches a model turn during reconciliation.
+    const connection = await this.#connection(
+      binding.codexHome,
+      context.workspace,
+      `${binding.attemptId}-read`,
+    );
+    try {
+      const response = record(
+        await connection.request("thread/read", { threadId: binding.threadId, includeTurns: true }),
+      );
+      const thread = record(response.thread);
+      if (
+        thread.id !== binding.threadId ||
+        thread.sessionId !== binding.sessionId ||
+        thread.cwd !== binding.workspace ||
+        thread.modelProvider !== binding.modelProvider ||
+        thread.cliVersion !== binding.cliVersion ||
+        (thread.model !== null && thread.model !== binding.model) ||
+        !Array.isArray(thread.turns) ||
+        thread.turns.length > 101
+      )
+        throw new Error("stored App Server thread identity or complete history changed");
+      const turns = thread.turns.map(turnFrom);
+      if (
+        turns.some((turn) => !turn) ||
+        turns.length !== binding.priorTurnIds.length + 1 ||
+        binding.priorTurnIds.some((id, index) => turns[index]!.id !== id)
+      )
+        throw new Error(
+          "App Server dispatch outcome is unavailable or ambiguous; no duplicate turn authorized",
+        );
+      const selected = turns.at(-1)!;
+      const started = await journal.load("turn"),
+        terminal = await journal.load("terminal");
+      if (canonicalSessionJson(terminal) !== canonicalSessionJson(terminalCheckpoint))
+        throw new Error("durable terminal session changed during recovery");
+      if (
+        (started && started.turnId !== selected.id) ||
+        (terminal && terminal.turnId !== selected.id) ||
+        (handle.metadata?.turnId && handle.metadata.turnId !== selected.id)
+      )
+        throw new Error("stored App Server turn differs from its immutable dispatch");
+      if (selected.status === "inProgress")
+        throw new Error(
+          "App Server turn has no terminal provider outcome; stopped process is not completion",
+        );
+      await journal.assertCurrent();
+      await this.#assertPriorStopped(binding, terminal !== null);
+      if (!started) await journal.persist({ ...prepared, stage: "turn", turnId: selected.id });
+      const resumed = appServerHandleFromCheckpoint({
+        ...prepared,
+        stage: "turn",
+        turnId: selected.id,
+      });
       const attempt = this.#newAttempt(
         context,
         resumed,
-        identity.threadId,
-        metadata.turnId ?? "",
-        home,
+        binding.threadId,
+        selected.id,
+        binding.codexHome,
       );
-      this.#attempts.set(resumed.resourceId, attempt);
-      this.#markTerminal(
-        attempt,
-        terminal as "succeeded" | "failed" | "cancelled",
-        metadata.terminalReason,
-      );
-      return resumed;
-    }
-
-    if (!(await exists(home))) {
-      throw new Error("durable session Codex home is missing");
-    }
-    const connection = await this.#connection(home, context.workspace, identity.attemptId);
-    const resumed: BackendHandle = {
-      ...handle,
-      metadata: { ...metadata, threadId: identity.threadId, codexHome: home },
-    };
-    const attempt = this.#newAttempt(
-      context,
-      resumed,
-      identity.threadId,
-      metadata.turnId ?? "",
-      home,
-    );
-    this.#attempts.set(resumed.resourceId, attempt);
-    this.#attach(attempt, connection);
-    try {
-      const response = record(
-        await connection.request("thread/resume", {
-          threadId: identity.threadId,
-          ...(await threadBoundary(context)),
-          initialTurnsPage: {
-            limit: 20,
-            sortDirection: "desc",
-            itemsView: "full",
-          },
-        }),
-      );
-      const thread = record(response.thread);
-      if (thread.id !== identity.threadId) {
-        throw new Error("resumed thread identity does not match the fenced attempt");
-      }
-      const initialTurns = record(response.initialTurnsPage).data;
-      const turns = Array.isArray(initialTurns)
-        ? initialTurns
-        : Array.isArray(thread.turns)
-          ? thread.turns
-          : [];
-      const selected = turns
-        .map(turnFrom)
-        .filter((turn): turn is AppServerTurn => turn !== undefined)
-        .find((turn) => !attempt.turnId || turn.id === attempt.turnId);
-      if (!selected) {
-        throw new Error("durable session did not contain the fenced turn");
-      }
-      attempt.turnId = selected.id;
-      resumed.metadata = { ...resumed.metadata, turnId: selected.id };
+      attempt.binding = binding;
+      attempt.cancellationRequested = terminal?.state === "cancelled";
+      attempt.usageStreamComplete = false;
       this.#applyTurn(attempt, selected);
+      if (terminal) {
+        if (
+          terminal.state !== attempt.state ||
+          terminal.providerStatus !== selected.status ||
+          canonicalSessionJson(terminal.final) !== canonicalSessionJson(attempt.final)
+        )
+          throw new Error("provider terminal differs from its durable completion");
+        attempt.usage = terminal.usage;
+        attempt.rawTokenUsage = terminal.rawTokenUsage;
+        attempt.responseUsage = new Map(
+          (terminal.responseUsage ?? []).map((entry) => [entry.responseId, entry]),
+        );
+        attempt.usageStreamComplete = terminal.usageStreamComplete === true;
+        attempt.terminalPersisted = true;
+      }
+      this.#attempts.set(resumed.resourceId, attempt);
+      this.#ownedScopes.set(binding.attemptId, binding.localScopeBatch);
+      await this.observe(resumed);
       return resumed;
-    } catch (error) {
-      attempt.unsubscribeNotification?.();
-      attempt.unsubscribeRequest?.();
-      this.#attempts.delete(resumed.resourceId);
-      await this.#closeConnection(home);
-      throw error;
+    } finally {
+      await this.#closeConnection(binding.codexHome);
     }
+  }
+
+  async #assertPriorStopped(
+    binding: AppServerSessionBinding,
+    terminalCheckpoint: boolean,
+  ): Promise<void> {
+    const port = this.#options.scopeReadPort ?? linuxLocalScopeReadPort;
+    if ((await port.hostIdentity()) !== binding.hostIdentity)
+      throw new Error("durable session host is unavailable or changed");
+    const batch = binding.localScopeBatch;
+    let producerGone = false;
+    try {
+      const stat = await port.read(`/proc/${batch.producerPid}/stat`);
+      const fields = stat
+        .slice(stat.lastIndexOf(")") + 2)
+        .trim()
+        .split(/\s+/);
+      if (!stat.startsWith(`${batch.producerPid} (`) || !/^\d+$/.test(fields[19] ?? ""))
+        throw new Error("producer identity unavailable");
+      producerGone =
+        fields[19] !== batch.producerStartTicks || fields[0] === "Z" || fields[0] === "X";
+    } catch (error) {
+      if (
+        (error as NodeJS.ErrnoException).code !== "ENOENT" &&
+        (error as NodeJS.ErrnoException).code !== "ESRCH"
+      )
+        throw error;
+      producerGone = true;
+    }
+    // An immutable provider-terminal checkpoint closes this invocation's launcher.
+    // Its owning controller may remain alive. Without that checkpoint, an alive
+    // producer is ambiguous even when the service is momentarily absent.
+    if (
+      (!producerGone && !terminalCheckpoint) ||
+      (await observeLocalScope(batch.identity, port)).status !== "absent"
+    )
+      throw new Error(
+        "prior App Server producer or exact worker scope is not independently absent",
+      );
   }
 
   async reconcileStale(identity: StaleAttemptIdentity): Promise<void> {
@@ -667,70 +868,19 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
       return;
     }
 
-    const home = await this.#homeFor(identity);
-    if (process.platform === "linux") {
-      for (const group of await processGroupsForAttempt(attemptId)) {
-        await stopProcessGroup(group);
-      }
-      const legacyAttemptId = legacyDurableAttemptId(identity);
-      const ambiguousLegacyGroups = await processGroupsForAttempt(legacyAttemptId);
-      if (ambiguousLegacyGroups.length > 0) {
-        throw new Error(
-          `legacy App Server worker identity ${legacyAttemptId.slice(0, 12)} has no repository namespace; automated replacement is blocked`,
-        );
-      }
-      if (!this.#options.resolveCodexHome) {
-        const legacyHome = join(resolveCodexHomeRoot(), `app-server-${legacyAttemptId}`);
-        if (await exists(legacyHome)) {
-          throw new Error(
-            `legacy App Server home ${legacyHome} has no repository namespace; automated replacement is blocked`,
-          );
-        }
-      }
-      await rm(home, { recursive: true, force: true });
-      return;
-    }
-    if (!(await exists(home))) return;
-    if (!identity.providerResourceId) {
+    const value = identity.localScopeBatch ?? this.#ownedScopes.get(attemptId);
+    const batch = value ? LocalScopeBatchSchema.parse(value) : undefined;
+    if (
+      !batch ||
+      durableAttemptId(batch.identity) !== attemptId ||
+      batch.identity.phase !== "execution" ||
+      (identity.policyDigest && batch.identity.policyDigest !== identity.policyDigest)
+    )
       throw new Error(
-        "cannot reconcile a stale App Server thread without its provider resource ID",
+        "stale App Server execution lacks its exact durable scope; automatic replacement is blocked",
       );
-    }
-    const connection = await this.#connection(home, home, attemptId);
-    try {
-      const response = record(
-        await connection.request("thread/resume", {
-          threadId: identity.providerResourceId,
-          initialTurnsPage: {
-            limit: 20,
-            sortDirection: "desc",
-            itemsView: "full",
-          },
-        }),
-      );
-      const thread = record(response.thread);
-      if (thread.id !== identity.providerResourceId) {
-        throw new Error("stale thread identity changed during reconciliation");
-      }
-      const initial = record(response.initialTurnsPage).data;
-      const turns = Array.isArray(initial)
-        ? initial
-        : Array.isArray(thread.turns)
-          ? thread.turns
-          : [];
-      for (const value of turns) {
-        const turn = turnFrom(value);
-        if (turn?.status === "inProgress") {
-          await connection.request("turn/interrupt", {
-            threadId: identity.providerResourceId,
-            turnId: turn.id,
-          });
-        }
-      }
-    } finally {
-      await this.#closeConnection(home);
-    }
-    await rm(home, { recursive: true, force: true });
+    await stopLocalScope(batch.identity);
+    // Absence settles compute only, never missing usage or provider history.
   }
 
   async #homeFor(identity: AttemptIdentity): Promise<string> {
@@ -763,48 +913,73 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     home: string,
     cwd: string,
     attemptId: string,
+    context?: AttemptContext,
   ): Promise<AppServerConnection> {
+    const target = await resolveCodexCommand(this.#options.command);
     const connection = await (this.#options.connect?.(home) ??
       startCodexAppServer({
-        ...(this.#options.command ? { command: this.#options.command } : {}),
-        args:
-          this.#options.args ??
-          // Current Codex builds default SQLite runtime state in the user's
-          // shared ~/.codex directory even when CODEX_HOME is overridden.
-          // Pin it explicitly so each attempt's resumable state is isolated.
-          codexAppServerArgs(home, this.#options.profile),
+        command: target.command,
+        // Pin SQLite state explicitly: overriding CODEX_HOME alone can still
+        // leave current Codex builds using the shared user runtime directory.
+        args: this.#options.args ?? [
+          ...target.args,
+          ...codexAppServerArgs(home, this.#options.profile),
+        ],
         cwd,
         env: isolateCodexEnvironment(process.env, home),
         permittedSecretNames: this.#options.permittedModelCredentials ?? [],
         attemptIdentity: attemptId,
+        ...(context?.localExecutionScope
+          ? {
+              localScope: {
+                identity: context.localExecutionScope.batch.identity,
+                deadline: context.deadline,
+                assertCurrent: context.localExecutionScope.assertCurrent,
+              },
+            }
+          : {}),
       }));
     try {
-      await connection.request("initialize", {
-        clientInfo: {
-          name: "clockgrove-factory",
-          title: "Clockgrove Factory",
-          version: "2",
-        },
-        capabilities: {
-          experimentalApi: true,
-          requestAttestation: false,
-          mcpServerOpenaiFormElicitation: false,
-          optOutNotificationMethods: null,
-          extensions: null,
-        },
-      });
+      const initialization = record(
+        await connection.request("initialize", {
+          clientInfo: {
+            name: "clockgrove-factory",
+            title: "Clockgrove Factory",
+            version: "2",
+          },
+          capabilities: {
+            experimentalApi: true,
+            requestAttestation: false,
+            mcpServerOpenaiFormElicitation: false,
+            optOutNotificationMethods: null,
+            extensions: null,
+          },
+        }),
+      );
+      if (
+        typeof initialization.userAgent !== "string" ||
+        !/(?:^|[^\d])0\.153\.0(?:[^\d]|$)/.test(initialization.userAgent)
+      )
+        throw new Error(
+          "durable App Server requires the source-pinned Codex 0.153.0 protocol before dispatch",
+        );
       connection.notify("initialized");
       return connection;
     } catch (error) {
-      await connection.close().catch(() => {});
+      await connection.close();
       throw error;
     }
   }
 
-  async #connection(home: string, cwd: string, attemptId: string): Promise<AppServerConnection> {
+  async #connection(
+    home: string,
+    cwd: string,
+    attemptId: string,
+    context?: AttemptContext,
+  ): Promise<AppServerConnection> {
     const existing = this.#connections.get(home);
     if (existing) return existing;
-    const connection = await this.#openConnection(home, cwd, attemptId);
+    const connection = await this.#openConnection(home, cwd, attemptId, context);
     this.#connections.set(home, connection);
     return connection;
   }
@@ -829,6 +1004,8 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
       state: "running",
       cancellationRequested: false,
       interruptSent: false,
+      responseUsage: new Map(),
+      usageStreamComplete: true,
       terminal,
       resolveTerminal,
     };
@@ -841,14 +1018,11 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     attempt.unsubscribeRequest = connection.onRequest((request) => {
       void this.#serverRequest(attempt, connection, request);
     });
-    void connection.closed.then((exit) => {
+    void connection.closed.then(() => {
       if (!terminalState(attempt.state)) {
-        this.#markTerminal(
-          attempt,
-          attempt.cancellationRequested ? "cancelled" : "failed",
-          (attempt.reason ?? exit.stderr.trim()) ||
-            "Codex App Server exited before the turn completed",
-        );
+        attempt.state = "unknown";
+        attempt.reason = "Codex App Server exited before a provider terminal turn was observed";
+        attempt.resolveTerminal();
       }
     });
   }
@@ -856,14 +1030,68 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
   #notification(attempt: AppAttempt, event: AppServerNotification): void {
     const ids = eventIds(event);
     if (
-      (ids.thread && ids.thread !== attempt.threadId) ||
+      ids.thread !== attempt.threadId ||
       (ids.turn && attempt.turnId && ids.turn !== attempt.turnId)
     ) {
       return;
     }
     const params = record(event.params);
+    if (event.method === "turn/started") {
+      const turn = turnFrom(params.turn);
+      if (
+        !turn ||
+        turn.status !== "inProgress" ||
+        attempt.binding?.priorTurnIds.includes(turn.id)
+      ) {
+        attempt.usageStreamComplete = false;
+        return;
+      }
+      if (!attempt.turnId) attempt.turnId = turn.id;
+      return;
+    }
+    if (event.method === "rawResponse/completed") {
+      if (!ids.turn || ids.turn !== attempt.turnId || attempt.providerTerminal) {
+        attempt.usageStreamComplete = false;
+        return;
+      }
+      const parsed = AppServerResponseUsageSchema.safeParse({
+        responseId: params.responseId,
+        usage: params.usage,
+      });
+      if (!parsed.success || attempt.responseUsage.size >= 1000) {
+        attempt.usageStreamComplete = false;
+        return;
+      }
+      const previous = attempt.responseUsage.get(parsed.data.responseId);
+      if (previous && canonicalSessionJson(previous) !== canonicalSessionJson(parsed.data))
+        attempt.usageStreamComplete = false;
+      else attempt.responseUsage.set(parsed.data.responseId, parsed.data);
+      return;
+    }
     if (event.method === "thread/tokenUsage/updated") {
-      attempt.usage = record(params.tokenUsage).last;
+      if (!ids.turn || !attempt.turnId || ids.turn !== attempt.turnId || attempt.providerTerminal)
+        return;
+      const usage = record(params.tokenUsage);
+      const tokens = (value: unknown) => {
+        const raw = record(value);
+        return Object.fromEntries(
+          [
+            "totalTokens",
+            "inputTokens",
+            "outputTokens",
+            "cachedInputTokens",
+            "cacheWriteInputTokens",
+            "reasoningOutputTokens",
+          ].map((name) => [
+            name,
+            Number.isSafeInteger(raw[name]) && Number(raw[name]) >= 0 ? Number(raw[name]) : null,
+          ]),
+        );
+      };
+      attempt.rawTokenUsage = {
+        total: tokens(usage.total),
+        last: tokens(usage.last),
+      } as AppServerSessionCheckpoint["rawTokenUsage"];
       return;
     }
     if (event.method === "item/completed") {
@@ -873,6 +1101,7 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
         if (final) {
           attempt.final = final;
         } else {
+          delete attempt.final;
           attempt.reason = "Codex worker returned malformed structured output";
         }
       }
@@ -905,7 +1134,8 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     const rejection = "Factory workers are unattended and cannot grant approvals";
     const ids = eventIds(request);
     const identityMismatch =
-      (ids.thread !== undefined && ids.thread !== attempt.threadId) ||
+      ids.thread !== attempt.threadId ||
+      !ids.turn ||
       (ids.turn !== undefined && attempt.turnId !== "" && ids.turn !== attempt.turnId);
     if (!identityMismatch && !attempt.turnId && ids.turn) {
       attempt.turnId = ids.turn;
@@ -953,11 +1183,20 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     if (turn.id !== attempt.turnId && attempt.turnId) return;
     attempt.turnId = turn.id;
     const final = finalFromItems(turn.items);
-    if (final) attempt.final = final;
+    if (
+      Array.isArray(turn.items) &&
+      turn.items.some((item) => record(item).type === "agentMessage")
+    ) {
+      if (final) attempt.final = final;
+      else delete attempt.final;
+    }
     if (turn.status === "inProgress") {
       attempt.state = "running";
       return;
     }
+    attempt.providerTerminal = true;
+    attempt.providerCompleted = turn.status === "completed";
+    attempt.providerStatus = turn.status;
     if (turn.status === "interrupted") {
       this.#markTerminal(
         attempt,

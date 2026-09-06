@@ -3,6 +3,7 @@ import type { ExecutionRequirements, WorkerPacket } from "../protocol/worker-pac
 import { workerPacketDigest } from "../protocol/worker-packet.js";
 import type { NormalizedArtifact } from "./artifacts.js";
 import { LocalScopeBatchSchema, type LocalScopeBatch } from "../protocol/local-scope.js";
+import type { AppServerSessionJournal } from "./app-server-session.js";
 
 export type IsolationKind = "none" | "process" | "container" | "microvm" | "managed";
 
@@ -21,6 +22,14 @@ export interface ExecutionBackendCapabilities {
   supportsCancellation: boolean;
   supportsObservation: boolean;
   supportsResume: boolean;
+  /** Public probe/doctor semantics; supportsResume does not promise another turn. */
+  durableSession?: {
+    providerStorage: "local";
+    recovery: "exact-terminal-read-only";
+    coldRepair: "unavailable-raw-usage-subscription";
+    supportedCodexVersion: "0.153.0";
+    preferredRouteQualification: "required";
+  };
   supportsLocalInference: boolean;
   /** Terminal observations include provider model-token counters. */
   reportsModelUsage?: boolean;
@@ -59,6 +68,8 @@ export interface AttemptContext {
   deadline: Date;
   /** A prior host-validated patch is already present for an incremental retry. */
   seededFromArtifact?: boolean;
+  /** Current fenced GitHub journal, required by durable App Server execution. */
+  sessionJournal?: AppServerSessionJournal;
   /** Prepared and durably journaled by the Supervisor, never by a backend. */
   localExecutionScope?: {
     batch: LocalScopeBatch;
@@ -148,6 +159,8 @@ export interface IsolatedValidationResult {
 }
 
 export interface StaleAttemptIdentity {
+  /** Original journaled local invocation; never synthesized from a current process. */
+  localScopeBatch?: LocalScopeBatch;
   /** Required with validationInvocation to bind the original resource authority. */
   policyDigest?: string;
   validationInvocation?: IntegrationValidationInvocation;

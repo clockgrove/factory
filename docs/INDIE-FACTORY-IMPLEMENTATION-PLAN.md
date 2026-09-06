@@ -91,7 +91,8 @@ The canonical success path is:
 | Hosted boundary | A hosted MCP/coordinator may be a later paid target, but it cannot become a dependency of the open-source local product. |
 | Sandbox provider | Daytona is the supported third-party sandbox target. Vercel Sandbox is Labs. |
 | Managed agents | Opt-in, qualified per provider: Copilot has limited automation; Codex managed execution is unavailable until real identity/lifecycle interfaces are implemented and qualified. Unsupported third-party features are documented limits, not global product blockers. |
-| Labs | Vercel Sandbox, Codex App Server, and additional harness/provider adapters. |
+| Durable local sessions | Explicit Codex App Server execution and exact terminal recovery; SDK/CLI remain the default chain. |
+| Labs | Vercel Sandbox and additional harness/provider adapters. |
 | Native host lifecycle | Win32 and Darwin execution and lifecycle are out of scope; Windows and macOS host supported Linux environments. |
 
 Official OpenAI plugin guidance supports skills plus an MCP server with structured, model-readable
@@ -231,16 +232,17 @@ reconciles before another controller admits work.
 ### Objective queue behavior
 
 Multiple durable activations are supported because a developer can legitimately queue a second
-feature while the first runs. Factory admits one Objective per repository controller so a trunk merge
-cannot invalidate another Objective's immutable base; concurrency is within its Work Item DAG. This
-is not a multi-host or enterprise scheduler.
+feature while the first runs. One repository controller admits concurrent explicitly activated
+Objectives (default two, configurable one through 32). Each preserves its immutable compilation
+base and shares the host ledger; only authenticated co-owned integrations may advance a worker's
+base, with fresh exact candidate validation before serialized merges. This remains one local host.
 
 The controller:
 
 - maintains one repository-wide local and cloud capacity ledger;
 - enforces each Objective's immutable budget independently;
 - enforces repository-wide hard concurrency and provider ceilings;
-- selects the next queued Objective deterministically after the active Objective finishes;
+- gives waiting Objectives least-recently-served local admission and lends unused shares;
 - never lets one large, temporarily unplaceable item block smaller eligible work;
 - reconstructs active path and resource claims from attempt receipts after restart.
 
@@ -259,7 +261,7 @@ Keep local host safety separate from per-Objective execution authority. Add a lo
 ```json
 {
   "scope": "repository",
-  "maxActiveObjectives": 1,
+  "maxActiveObjectives": 2,
   "maxLocalWorkers": 8,
   "maxPaidWorkers": 3,
   "pollIntervalSeconds": 15
@@ -540,17 +542,19 @@ signal, artifact collection, and cleanup. `codex-cli/local-worktree` implements 
 the supported portable fallback. Neither local route gains GitHub publication, validation, merge,
 Director, or budget authority.
 
-## Durable Codex sessions (Labs)
+## Durable Codex sessions
 
-`codex-app-server/local-worktree` is a Labs adapter for durable local sessions.
+`codex-app-server/local-worktree` is the explicit supported adapter for durable local sessions.
 The release baseline remains `codex-sdk/local-worktree` with `codex-cli/local-worktree` fallback.
 
 The adapter owns one supervised App Server process and starts one Codex thread per attempt in its
 exact-SHA worktree. Attempt receipts record the thread ID, model/profile identity, worktree, base
-SHA, start time, and normalized usage fields. On restart, the controller starts or reconnects to App
-Server, reads the durable attempt, and resumes the same thread when safe. If the local Codex thread
-store is unavailable, GitHub evidence still determines whether to collect an artifact, retry under
-policy, or escalate; local thread state never overrides GitHub.
+SHA, start time, and normalized usage fields. On restart, immutable session and artifact evidence
+permits exact terminal continuation without another model turn. Ambiguous dispatch uses read-only
+recovery, never automatic redispatch. The pinned provider cannot prove complete cold repair-turn
+usage, so new cold repair turns are refused. If the local thread store is unavailable, GitHub evidence
+still determines whether an exact artifact can continue or recovery must escalate; local thread
+state never overrides GitHub. See [session boundaries](CODEX-APP-SERVER-SESSIONS.md).
 
 The adapter must normalize:
 
@@ -575,7 +579,8 @@ enhancement.
 - A maximal linear chain of code dependencies may become one stack.
 - The bottom PR targets the recorded trunk; each higher PR targets the branch immediately below it.
 - When native-stack delivery is selected, independent Work Items produce sibling PRs and may
-  validate concurrently. Regular-PR delivery serializes complete Work Item pipelines.
+  validate concurrently. Regular-PR delivery also runs independent pipelines concurrently, with
+  serialized exact-head integration and changed-base candidate revalidation.
 - A Work Item with multiple unfinished parents does not invent a multi-base stack. It waits for the
   parents to merge, refreshes from trunk, and starts a new stack.
 - A dependency that expresses ordering but does not consume code need not share a stack.
@@ -915,9 +920,9 @@ Factory satisfies this plan when:
   required repository configuration;
 - a user can install and manage one local repository controller through chat or mirrored CLI;
 - explicit activation is durable and execution continues after the initiating chat turn;
-- the controller safely serializes Objectives on one machine, runs dependency-ready Work Items
-  concurrently when native-stack delivery supplies cascading revalidation, serializes complete
-  pipelines under regular-PR delivery, and never exceeds host or policy ceilings;
+- the controller fairly runs explicitly activated Objectives on one machine, runs dependency-ready
+  independent pipelines concurrently with regular or native delivery, serializes and revalidates
+  exact-head integrations, and never exceeds host or policy ceilings;
 - Work Item count, scope, dependencies, context, resources, validation, and stack topology are
   compiler outputs grounded in the repository;
 - local Codex sessions are isolated, recoverable, non-interactive, and attributable to exact Work
@@ -985,16 +990,19 @@ game-development wave to the core roadmap.
 These are not game features. They solve common software-repository problems and therefore remain in
 the generic design. Factory implements repository-fact classification, `large-binary` and
 `generated` change-surface classes, exclusive-resource serialization, binary Git patches, artifact
-digests, and clean validation. Its normalized patch is capped at 5 MiB, and a Daytona source archive
-is capped at 64 MiB. Work that cannot be represented inside those bounds fails closed.
+digests, and clean validation. Restored issues #116–#118 add bounded local LFS cache preflight and
+hydration, content-bound file/media manifests, 4 MiB GitHub content chunks for patches above the
+unchanged 5 MiB inline limit, and streaming Daytona source archives above the former 64 MiB limit.
+The total patch/source ceiling is 256 MiB; regular result files are capped at 100,000,000 bytes.
+See [the concrete large-file contract](LARGE-FILES.md) for consumers, lifecycle, compatibility and
+remaining provider-specific boundaries. These are implementation claims, not completed installed,
+paid-provider, or WSL2 qualification claims. The dedicated regressions must run after integration.
 
-The current implementation does **not** include Git LFS lifecycle management, an oversized content-addressed transfer
-service, media-type inspection, or a provider object-store artifact channel. The bullets below are
-design requirements for adding those capabilities in later delivery waves; they are not current
-support claims. A future implementation must add executable conformance evidence before changing
-that boundary.
+Authenticated remote LFS fetch/upload and automatic migration remain unsupported. Existing LFS
+assets must already exist in the authorized local standard cache; changed/new LFS pointer outputs
+fail closed. No extra hosted Factory service or generalized storage framework is introduced.
 
-#### Future large and binary artifact extensions
+#### Large and binary artifact requirements
 
 - Classify a path from repository evidence as text, generated, large/binary, or otherwise
   non-mergeable.

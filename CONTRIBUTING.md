@@ -32,9 +32,9 @@ Codex remains unavailable until its identity and provider-specific lifecycle int
 Missing third-party APIs are provider limitations, not categorical blockers to Factory publication.
 Billing settlement finality is not required; users own their provider billing relationship. Do not
 weaken active-compute, exact-identity, replacement, cleanup or spending safeguards to claim support.
-Vercel Sandbox and Codex App Server are Labs.
-A Labs adapter must remain optional and
-cannot change default startup or release behavior.
+Vercel Sandbox remains Labs; an optional Labs adapter cannot change default startup or release
+behavior. Explicit Codex App Server execution and durable terminal recovery are part of supported
+local qualification; the SDK/CLI default chain remains unchanged.
 
 ## Validate changes
 

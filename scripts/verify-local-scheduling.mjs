@@ -16,6 +16,7 @@ import {
   qualificationNamespace,
 } from "./verify-live-objective.mjs";
 import { assertRegularCompletion, observeRegularCommits } from "./verify-regular-objective.mjs";
+import { observeNativeMergeProofs } from "./qualification-sibling-refresh-proof.mjs";
 import {
   authenticatedFaultEvents,
   parseUnitObservation,
@@ -592,7 +593,7 @@ export function ownedSchedulingScopes(evidence, primary) {
     assert.equal(batch.identity.workItem, event.workItem);
     assert.equal(batch.identity.attempt, event.attempt);
     assert.equal(batch.identity.policyDigest, event.policyDigest);
-    assert.equal(batch.identity.directorEpoch, event.directorEpoch);
+    assert.equal(batch.identity.directorEpoch, event.recoveryEpoch ?? event.directorEpoch);
     assert.equal(batch.identity.phase, event.phase ?? "execution");
     assert.equal(batch.identity.commandIndex, 0);
     assert.ok(
@@ -881,6 +882,11 @@ export function createSchedulingQualification(authority, env = process.env, port
       proof.released = await changeSchedulingService(primary, "release-cpu", port);
       hooks.save();
     }),
+    observeMergeProofs: (hooks) =>
+      observeNativeMergeProofs({
+        ...hooks,
+        request: (route, parameters) => schedulingRequest(hooks, route, parameters),
+      }),
     afterRun: safe(async (hooks) => {
       await observeRegularCommits({
         ...hooks,

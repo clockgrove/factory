@@ -1,7 +1,7 @@
 Factory third-party notices
 
 This file is generated from the exact dependency inputs embedded in dist/factory.js and dist/mcp-server.js.
-Bundle inventory SHA-256: 320a236c978f23008f87b994832dffab00da6d5967589105a2440b180a17fdfb
+Bundle inventory SHA-256: 5e0aedb503a6eb40bafa48b4b074dec64e369758cbdbe8e5b9593945e0abd6dd
 
 ================================================================================
 @daytona/analytics-api-client@0.207.1
@@ -2015,7 +2015,7 @@ SOFTWARE.
 ================================================================================
 ajv-formats@3.0.1
 License: MIT
-Bundled in: mcp-server.js
+Bundled in: factory.js, mcp-server.js
 Attribution: Evgeny Poberezkin
 Source: git+https://github.com/ajv-validator/ajv-formats.git
 
@@ -2046,7 +2046,7 @@ SOFTWARE.
 ================================================================================
 ajv@8.20.0
 License: MIT
-Bundled in: mcp-server.js
+Bundled in: factory.js, mcp-server.js
 Attribution: Evgeny Poberezkin
 Source: ajv-validator/ajv
 
@@ -3219,7 +3219,7 @@ SOFTWARE.
 ================================================================================
 fast-deep-equal@3.1.3
 License: MIT
-Bundled in: mcp-server.js
+Bundled in: factory.js, mcp-server.js
 Attribution: Evgeny Poberezkin
 Source: git+https://github.com/epoberezkin/fast-deep-equal.git
 
@@ -3281,7 +3281,7 @@ THE SOFTWARE.
 ================================================================================
 fast-uri@3.1.6
 License: BSD-3-Clause
-Bundled in: mcp-server.js
+Bundled in: factory.js, mcp-server.js
 Attribution: Vincent Le Goff <vince.legoff@gmail.com> (https://github.com/zekth)
 Source: git+https://github.com/fastify/fast-uri.git
 
@@ -3705,7 +3705,7 @@ SOFTWARE.
 ================================================================================
 json-schema-traverse@1.0.0
 License: MIT
-Bundled in: mcp-server.js
+Bundled in: factory.js, mcp-server.js
 Attribution: Evgeny Poberezkin
 Source: git+https://github.com/epoberezkin/json-schema-traverse.git
 

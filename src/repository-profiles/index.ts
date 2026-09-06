@@ -1,5 +1,6 @@
 import { posix } from "node:path";
 import { assertSafeValidationCommand } from "../validation/plan.js";
+import { normalizePinnedLfsFacts, type PinnedLfsFacts } from "./git-lfs.js";
 
 export { readRepositoryFacts } from "./read.js";
 
@@ -22,6 +23,8 @@ export type ExecutionProfile = {
 };
 export type RepositoryFacts = {
   files: RepositoryFile[];
+  /** Host-observed exact-commit pointers and required tooling, never model-authored. */
+  lfs?: PinnedLfsFacts;
   scripts?: Record<string, string>;
   /** Bounded contents of observed repository files, never model-supplied recipes. */
   documents?: Record<string, string>;
@@ -82,6 +85,13 @@ export function normalizeRepositoryFacts(input: RepositoryFacts): RepositoryFact
   const scripts = Object.fromEntries(
     Object.entries(input.scripts ?? {}).sort(([a], [b]) => a.localeCompare(b)),
   );
+  const lfs = input.lfs === undefined ? undefined : normalizePinnedLfsFacts(input.lfs);
+  for (const asset of lfs?.assets ?? []) {
+    const file = byPath.get(asset.path);
+    if (!file) throw new Error(`unobserved LFS asset: ${asset.path}`);
+    // Conservatively serialize LFS assets even when their eventual bytes are text.
+    byPath.set(asset.path, { ...file, size: asset.size, binary: true });
+  }
   const documents = Object.fromEntries(
     Object.entries(input.documents ?? {})
       .map(([path, text]) => {
@@ -101,6 +111,7 @@ export function normalizeRepositoryFacts(input: RepositoryFacts): RepositoryFact
   return {
     files: [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path)),
     scripts,
+    ...(lfs === undefined ? {} : { lfs }),
     ...(input.documents === undefined ? {} : { documents }),
   };
 }

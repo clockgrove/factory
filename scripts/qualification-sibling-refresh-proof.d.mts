@@ -1,5 +1,10 @@
 import type { MergeProofInput, QualificationMergeProof } from "./qualification-merge-proof.mjs";
 export function nativeQualificationEvents(evidence: unknown): Record<string, unknown>[];
+export function assertQualificationCheckpoint(
+  value: unknown,
+  request: { ref: string; path: string; maxBytes: number },
+  parents: string | string[],
+): Record<string, unknown>;
 export function nativeProofReader(
   request: (route: string, parameters: Record<string, unknown>) => Promise<unknown>,
 ): (demand: unknown) => Promise<unknown>;

@@ -21,7 +21,9 @@ import {
 
 const directories: string[] = [];
 afterEach(async () => {
-  await Promise.all(directories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
+  await Promise.all(
+    directories.splice(0).map((path) => rm(path, { recursive: true, force: true })),
+  );
 });
 
 describe("supplied replay application boundary", () => {
@@ -31,11 +33,14 @@ describe("supplied replay application boundary", () => {
       owner: "o",
       repo: "r",
       reader: { readObjective: read },
-      store: new Proxy({} as NonNullable<ConstructorParameters<typeof FactoryApplicationService>[0]["store"]>, {
-        get() {
-          throw new Error("replay reached the mutation store");
+      store: new Proxy(
+        {} as NonNullable<ConstructorParameters<typeof FactoryApplicationService>[0]["store"]>,
+        {
+          get() {
+            throw new Error("replay reached the mutation store");
+          },
         },
-      }),
+      ),
     });
     return { service, read };
   }
@@ -74,18 +79,20 @@ describe("supplied replay application boundary", () => {
     });
   });
 
-  it.each([
-    null,
-    {},
-    [null],
-    Array.from({ length: 9 }, suppliedReplaySnapshot),
-    [{ ...suppliedReplaySnapshot(), capturedAt: "not-a-date" }],
-    [{ ...suppliedReplaySnapshot(), policyDigest: "0".repeat(64) }],
-    [{ ...suppliedReplaySnapshot(), snapshotDigest: "0".repeat(64) }],
-    [pinAdmissionSnapshot({ ...suppliedReplayInput(), objective: 99 })],
-    [{ ...suppliedReplaySnapshot(), input: { ...suppliedReplayInput(), leaseValid: "true" } }],
-    [{ ...suppliedReplaySnapshot(), privateData: "private request payload" }],
-  ].map((value) => ({ value })))("rejects malformed or mismatched input before reading GitHub", async ({ value }) => {
+  it.each(
+    [
+      null,
+      {},
+      [null],
+      Array.from({ length: 9 }, suppliedReplaySnapshot),
+      [{ ...suppliedReplaySnapshot(), capturedAt: "not-a-date" }],
+      [{ ...suppliedReplaySnapshot(), policyDigest: "0".repeat(64) }],
+      [{ ...suppliedReplaySnapshot(), snapshotDigest: "0".repeat(64) }],
+      [pinAdmissionSnapshot({ ...suppliedReplayInput(), objective: 99 })],
+      [{ ...suppliedReplaySnapshot(), input: { ...suppliedReplayInput(), leaseValid: "true" } }],
+      [{ ...suppliedReplaySnapshot(), privateData: "private request payload" }],
+    ].map((value) => ({ value })),
+  )("rejects malformed or mismatched input before reading GitHub", async ({ value }) => {
     const { service, read } = application();
     await expect(service.replay(7, value)).rejects.toThrow(SUPPLIED_REPLAY_ERROR);
     expect(read).not.toHaveBeenCalled();
@@ -108,8 +115,18 @@ describe("supplied replay application boundary", () => {
     for (const input of [
       [{ ...suppliedReplaySnapshot(), protocol: secret }],
       [{ ...suppliedReplaySnapshot(), credential: secret }],
-      [{ ...suppliedReplaySnapshot(), input: { ...suppliedReplayInput(), capacity: { byBackend: { [secret]: -1 } } } }],
-      [{ ...suppliedReplaySnapshot(), input: { ...suppliedReplayInput(), workItems: [{ backends: [{ id: secret }] }] } }],
+      [
+        {
+          ...suppliedReplaySnapshot(),
+          input: { ...suppliedReplayInput(), capacity: { byBackend: { [secret]: -1 } } },
+        },
+      ],
+      [
+        {
+          ...suppliedReplaySnapshot(),
+          input: { ...suppliedReplayInput(), workItems: [{ backends: [{ id: secret }] }] },
+        },
+      ],
     ]) {
       expect(() => parseSuppliedReplaySnapshots(input, 7)).toThrow(SUPPLIED_REPLAY_ERROR);
       try {
@@ -151,7 +168,9 @@ describe("bounded replay JSON file", () => {
     const { file } = await paths();
     const snapshots = [suppliedReplaySnapshot(), unreproducedReplaySnapshot()];
     await writeFile(file, JSON.stringify(snapshots));
-    expect(await readSuppliedReplayFile(file, 7)).toEqual(parseSuppliedReplaySnapshots(snapshots, 7));
+    expect(await readSuppliedReplayFile(file, 7)).toEqual(
+      parseSuppliedReplaySnapshots(snapshots, 7),
+    );
   });
 
   it("rejects oversized, missing, malformed UTF-8/JSON, directory and symlink inputs safely", async () => {

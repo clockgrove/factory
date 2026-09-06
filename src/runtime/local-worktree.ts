@@ -6,10 +6,24 @@ import {
   MAX_ARTIFACT_PATCH_BYTES,
   assertChangedPathScope,
   normalizeArtifact,
+  materializeArtifactPatch,
   verifyArtifact,
   type NormalizedArtifact,
 } from "../execution/artifacts.js";
 import { runContainedProcess, sanitizedWorkerEnvironment } from "./process-group.js";
+import { materializePinnedCompilationTree } from "../execution/pinned-compilation-tree.js";
+import {
+  assertLocalLfsAvailable,
+  inspectPinnedLfs,
+  materializeLocalLfsAssets,
+  MAX_LOCAL_LFS_FILE_BYTES,
+} from "../repository-profiles/git-lfs.js";
+import {
+  assertFilesystemArtifactManifest,
+  inspectContentFile,
+  regularContentPath,
+} from "../execution/artifact-content.js";
+import { artifactFromPatchFile, inspectPatchManifest, streamGitFile } from "./artifact-patch.js";
 
 const MARKER = ".factory-worktree";
 
@@ -47,14 +61,15 @@ export async function createLocalWorktree(
   const repo = resolve(repository);
   const verified = (await git(repo, ["rev-parse", "--verify", `${baseSha}^{commit}`])).trim();
   if (verified !== baseSha) throw new Error(`base SHA did not resolve exactly: ${baseSha}`);
-  const root = await mkdtemp(join(tmpdir(), "clockgrove-factory-worktree-"));
-  const path = join(root, "worktree");
-  await writeFile(join(root, MARKER), `${repo}\n${baseSha}\n`, { mode: 0o600 });
+  await assertLocalLfsAvailable(repo, baseSha);
+  const prepared = await materializePinnedCompilationTree(repo, baseSha, { purpose: "worktree" });
+  const { root, path } = prepared;
   try {
-    await git(repo, ["worktree", "add", "--detach", path, baseSha]);
+    await writeFile(join(root, MARKER), `${repo}\n${baseSha}\nraw-tree-v1\n`, { mode: 0o600 });
+    await materializeLocalLfsAssets(repo, path, baseSha);
     return { root, path, repository: repo, baseSha };
   } catch (error) {
-    await rm(root, { recursive: true, force: true });
+    await prepared.dispose();
     throw error;
   }
 }
@@ -92,25 +107,57 @@ export async function collectLocalArtifact(
     MAX_ARTIFACT_PATCH_BYTES + 1024,
   );
   const changedPaths = pathsRaw.split("\0").filter(Boolean);
+  const lfs = await inspectPinnedLfs(worktree.path, worktree.baseSha);
+  for (const asset of lfs.assets) {
+    const index = changedPaths.indexOf(asset.path);
+    if (index < 0) continue;
+    const actual = await inspectContentFile(
+      await regularContentPath(worktree.path, asset.path),
+      MAX_LOCAL_LFS_FILE_BYTES,
+    );
+    if (actual.digest !== asset.oid || actual.bytes !== asset.size || actual.mode !== asset.mode)
+      throw new Error(
+        `changed LFS asset ${asset.path} requires unsupported authenticated LFS upload; restore the original asset or publish it explicitly outside Factory`,
+      );
+    changedPaths.splice(index, 1);
+  }
   if (allowedPaths) assertChangedPathScope(changedPaths, allowedPaths);
-  // Allow the complete protocol-sized payload through the process collector.
-  // A smaller generic command-output cap would silently turn a valid large
-  // patch or manifest into an invalid tail fragment.
-  const artifactOutputLimit = MAX_ARTIFACT_PATCH_BYTES + 1024;
-  const patch = await git(
-    worktree.path,
-    ["diff", "--binary", "--no-ext-diff", worktree.baseSha],
-    120_000,
-    artifactOutputLimit,
-  );
-  return normalizeArtifact({
-    baseSha: worktree.baseSha,
-    patch,
-    changedPaths,
-    logs,
-    outcome: patch.trim() ? "succeeded" : "declined",
-    ...(patch.trim() ? {} : { reason: "worker produced no repository changes" }),
-  });
+  if (!changedPaths.length)
+    return normalizeArtifact({
+      baseSha: worktree.baseSha,
+      patch: "",
+      changedPaths,
+      logs,
+      outcome: "declined",
+      reason: "worker produced no repository changes",
+    });
+  const root = await mkdtemp(join(tmpdir(), "factory-collected-patch-"));
+  try {
+    const patchPath = join(root, "artifact.patch");
+    await streamGitFile(
+      worktree.path,
+      [
+        "diff",
+        "--binary",
+        "--no-ext-diff",
+        "--no-textconv",
+        worktree.baseSha,
+        "--",
+        ...changedPaths,
+      ],
+      patchPath,
+    );
+    return await artifactFromPatchFile({
+      repository: worktree.path,
+      baseSha: worktree.baseSha,
+      patchPath,
+      changedPaths,
+      logs,
+      outcome: "succeeded",
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -127,8 +174,15 @@ export async function seedLocalWorktree(
     throw new Error("retry checkpoint base SHA does not match the worktree");
   }
   const patchPath = join(worktree.root, "retry-checkpoint.patch");
-  await writeFile(patchPath, verified.patch, { mode: 0o600 });
+  await materializeArtifactPatch(verified, patchPath);
   try {
+    const manifest = await inspectPatchManifest(
+      worktree.repository,
+      verified.baseSha,
+      patchPath,
+      verified.changedPaths,
+    );
+    assertFilesystemArtifactManifest(manifest);
     await git(worktree.path, ["apply", "--binary", "--whitespace=error-all", patchPath]);
   } finally {
     await rm(patchPath, { force: true });
@@ -138,12 +192,13 @@ export async function seedLocalWorktree(
 export async function cleanupLocalWorktree(worktree: LocalWorktree): Promise<void> {
   assertOwnedWorktree(worktree);
   const marker = await readFile(join(worktree.root, MARKER), "utf8");
-  const [repository, baseSha] = marker.trim().split("\n");
+  const [repository, baseSha, kind] = marker.trim().split("\n");
   if (repository !== worktree.repository || baseSha !== worktree.baseSha) {
     throw new Error("worktree ownership marker does not match cleanup request");
   }
   try {
-    await git(worktree.repository, ["worktree", "remove", "--force", worktree.path]);
+    if (kind !== "raw-tree-v1")
+      await git(worktree.repository, ["worktree", "remove", "--force", worktree.path]);
   } finally {
     // The exact root was created by us, is marker-verified, and has no sibling
     // content. This is deliberately narrower than deleting a supplied path.

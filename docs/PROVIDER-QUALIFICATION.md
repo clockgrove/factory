@@ -35,7 +35,8 @@ fallback. That does not supply Codex's missing live actor identity.
 
 Independent Daytona siblings use native delivery mode for concurrent pipelines. The linear-stack
 Daytona path now includes durable isolated cascading revalidation; its runtime qualification is still
-pending. Regular PR mode remains serialized and cannot pass the burst-overlap gate. Every non-host
+pending. Restored regular PR pipelines may also overlap; this does not itself establish a live
+provider qualification pass. Their changed-base candidates retain independent paid-validator gates. Every non-host
 worker receives fresh independent validation, including `trusted_local` work that overflowed for
 capacity. Accepted trusted-local work may feed local descendants; sandbox-untrusted work stays isolated.
 

@@ -261,6 +261,8 @@ export class AttemptManager {
     reason?: string;
     providerResourceId?: string;
     resourceHostIdentity?: string;
+    sourceArchiveDigest?: string;
+    sourceArchiveBytes?: number;
     environmentIdentity?: string;
     artifactDigest?: string;
     headSha?: string;
@@ -306,6 +308,10 @@ export class AttemptManager {
       ...(args.reason ? { reason: args.reason } : {}),
       ...(args.providerResourceId ? { providerResourceId: args.providerResourceId } : {}),
       ...(args.resourceHostIdentity ? { resourceHostIdentity: args.resourceHostIdentity } : {}),
+      ...(args.sourceArchiveDigest ? { sourceArchiveDigest: args.sourceArchiveDigest } : {}),
+      ...(args.sourceArchiveBytes === undefined
+        ? {}
+        : { sourceArchiveBytes: args.sourceArchiveBytes }),
       ...(args.environmentIdentity ? { environmentIdentity: args.environmentIdentity } : {}),
       ...(args.artifactDigest ? { artifactDigest: args.artifactDigest } : {}),
       ...(args.headSha ? { headSha: args.headSha } : {}),

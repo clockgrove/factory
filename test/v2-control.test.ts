@@ -403,12 +403,19 @@ describe("attempt reservation", () => {
       }),
     ).rejects.toBeInstanceOf(LeaseLostError);
     const commentsBefore = store.comments.length;
-    await expect(attempts.recordQueued({
-      lease, workItem: 43, workItemNodeId: "I_43", sequence: 3,
-      reason: "local-pressure: load pressure exceeds policy ceiling",
-      reasonCode: "local-pressure", gate: "capacity",
-      observedPriorityRank: 1, observedSubIssuePosition: 0,
-    })).rejects.toBeInstanceOf(LeaseLostError);
+    await expect(
+      attempts.recordQueued({
+        lease,
+        workItem: 43,
+        workItemNodeId: "I_43",
+        sequence: 3,
+        reason: "local-pressure: load pressure exceeds policy ceiling",
+        reasonCode: "local-pressure",
+        gate: "capacity",
+        observedPriorityRank: 1,
+        observedSubIssuePosition: 0,
+      }),
+    ).rejects.toBeInstanceOf(LeaseLostError);
     expect(store.comments).toHaveLength(commentsBefore);
   });
 

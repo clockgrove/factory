@@ -80,8 +80,9 @@ may consume GitHub Actions minutes under the provider's billing boundary; Factor
 workflow and cannot treat an Actions allowance as launch authority or as one of its own usage
 receipts.
 
-Vercel Sandbox and Codex App Server are Labs integrations. They inherit the same worker and artifact
-contracts but are not publication gates in the
+Vercel Sandbox remains an optional Labs integration. Explicit Codex App Server execution and durable
+terminal recovery are supported local capabilities requiring qualification. Both inherit the same
+worker, artifact, accounting and cleanup contracts; neither can widen authority. See the
 [delivery plan](https://github.com/clockgrove/factory/blob/main/docs/DELIVERY-PLAN.md).
 
 ## Known limitations and non-goals

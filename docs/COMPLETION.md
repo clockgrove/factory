@@ -16,6 +16,11 @@ are implementation work; exercising an existing qualifier is testing work.
 
 ## Capability status
 
+The restored implementation is complete, reviewed and passed the
+[integrated release checks and exact-artifact installation](release-evidence/restored-capabilities-integrated-2026-09-06.json).
+The next deliverable is installed WSL2 qualification, starting with pressure/cooldown/readmission.
+This does not establish live provider support, actual compiler/chat behavior or measured cost/throughput benefit.
+
 The [recorded integrated local suite](release-evidence/integrated-completion-suite-2026-09-05.json)
 passed on its exact candidate; the
 [original failed candidate](release-evidence/final-suite-original-failure-2026-09-05.json) remains
@@ -23,16 +28,29 @@ separate. That evidence does not qualify changed source or close the six live re
 The [sanitization and fallback qualifier implementation checks](release-evidence/sanitization-fallback-implementation-2026-09-06.json)
 passed on their separate exact candidate. New defects remain tracked implementation work.
 
+The [scope audit](https://github.com/clockgrove/factory/issues/108) found unverified reductions
+and retained implementation gaps. Earlier blanket completion and accepted-deferral claims are
+withdrawn. The comparative cost/throughput benefit is not yet demonstrated; safe execution and
+consumption counters are not substitutes. Disputed requirements remain unresolved, not waived.
+
 | Capability | Issues | Remaining acceptance |
 | --- | --- | --- |
+| Integrated candidate corrections | [#119](https://github.com/clockgrove/factory/issues/119) | Completed / integration owner: strict contracts, cache races, Git-only compatibility, original acceptance repair and cumulative native-ancestor isolation corrected and reviewed. Final integrated gates passed; original failures remain separate. Next: deliver the accepted capability stack. |
+| Same-host multi-Objective and regular-PR concurrency | [#113](https://github.com/clockgrove/factory/issues/113), [#114](https://github.com/clockgrove/factory/issues/114) | Completed / concurrency lane: fair shared capacity, concurrent regular work, pinned compilation and exact peer/sibling integration implemented and covered by passing integrated checks. Next: installed overlap, fairness and recovery qualification. |
+| Durable App Server sessions | [#115](https://github.com/clockgrove/factory/issues/115) | Completed / session lane: exact session identity, terminal recovery without another model turn, complete-usage accounting and deterministic recovery qualifier implemented; integrated checks passed. Next: installed WSL2 recovery scenario. [Unsupported cold repair turns](CODEX-APP-SERVER-SESSIONS.md) remain an explicit provider boundary. |
+| Generic large-file handling | [#116](https://github.com/clockgrove/factory/issues/116), [#117](https://github.com/clockgrove/factory/issues/117), [#118](https://github.com/clockgrove/factory/issues/118) | Completed / artifact lane: LFS/tooling, manifests, streamed content, durable transfer recovery, cache ownership and exact continuation implemented; integrated checks passed. Unknown replacement remains refused. Next: installed local large-file cases and separately authorized provider transfer qualification. |
+| Scope and acceptance reconciliation | [#108](https://github.com/clockgrove/factory/issues/108) | All six restored commitments implemented. Maintainer decisions remain on the adaptive-default prerequisite, token-threshold semantics and broader dogfood acceptance; these are not waived by implementation completion. |
+| Compiler economics and runtime reporting | [#110](https://github.com/clockgrove/factory/issues/110) | Completed / economics lane: grounded compilation tradeoffs, runtime intervals/concurrency, attributed consumption and explicit evidence gaps implemented, reviewed and covered by passing integrated checks. Next: measured comparison under #109, not a savings claim. |
+| Representative compiler/chat evaluation | [#111](https://github.com/clockgrove/factory/issues/111), [#112](https://github.com/clockgrove/factory/issues/112) | Corpus implementation completed / evaluation lane: five executable projects, twelve selection cases and production-contract consumers; integrated checks passed. Next: actual compiler/agent behavior under #112. |
+| Measured product benefit | [#109](https://github.com/clockgrove/factory/issues/109) | Testing / qualification lane: compare equivalent accepted outcomes against controlled baselines after implementation. Depends on #110/#111 and scope reconciliation; coordinate with #112 without duplicating runs. |
 | WSL2 resilience | [#75](https://github.com/clockgrove/factory/issues/75) | Orderly [accounted checkpoint restart](release-evidence/accounted-checkpoint-restart-component-2026-09-06.json) and [pre-projection budget refusal](release-evidence/budget-refusal-component-2026-09-06.json) passed. Budget refusal recorded 16,437 compilation tokens, durable escalation and no implementation admission; the compiler graph was not inspected. [Active cancellation remains incomplete](release-evidence/active-cancellation-incomplete-2026-09-06.json) on unavailable worker usage. These component results do not close the full resilience matrix. |
 | Adaptive scheduling and organization priority | [#76](https://github.com/clockgrove/factory/issues/76), [#77](https://github.com/clockgrove/factory/issues/77) | Extend the [installed scheduling subset](release-evidence/local-scheduling-component-2026-09-05.json) with pressure, fairness, phase recovery, inner Director contention and organization-field edits. |
 | Genuine SDK-to-CLI fallback | [#75](https://github.com/clockgrove/factory/issues/75) | [Passed on the recorded installed candidate](release-evidence/genuine-sdk-cli-fallback-component-2026-09-06.json): authentic CLI incompatibility refused SDK admission; unchanged SDK-first policy delivered through CLI, with complete reported usage and exact resource absence. Other WSL2 fault cases remain open. |
-| Supplied-snapshot replay interface | [#103](https://github.com/clockgrove/factory/issues/103) | Code: expose bounded, validated pinned admission snapshots through MCP and CLI. Preserve read-only receipt reconstruction and distinguish supplied simulations from authenticated history. |
-| Pressure/cooldown qualification scenario | [#104](https://github.com/clockgrove/factory/issues/104), [#76](https://github.com/clockgrove/factory/issues/76) | Code: extend existing installed qualification with bounded genuine pressure, cooldown and safe readmission observations. Implementation is not a live pass or the whole scheduling matrix. |
-| Hierarchical capacity and queued-reason correctness | [#105](https://github.com/clockgrove/factory/issues/105), [#106](https://github.com/clockgrove/factory/issues/106) | Code: honor applicable ancestor CPU/memory limits and persist genuine queued-reason changes without repeated writes or reset waiting age. These fixes precede pressure qualification. |
+| Supplied-snapshot replay interface | [#103](https://github.com/clockgrove/factory/issues/103) | Completed / admission lane: bounded pinned admission inputs exposed through MCP/CLI, explicitly distinct from authenticated history; review and integrated checks passed. |
+| Pressure/cooldown qualification scenario | [#104](https://github.com/clockgrove/factory/issues/104), [#76](https://github.com/clockgrove/factory/issues/76) | Qualifier implementation completed / admission lane; integrated checks passed. Next: execute owned pressure/cooldown/readmission through the matching WSL2 installation. No changed-candidate live pass yet. |
+| Hierarchical capacity and queued-reason correctness | [#105](https://github.com/clockgrove/factory/issues/105), [#106](https://github.com/clockgrove/factory/issues/106) | Completed / admission lane: ancestor CPU/memory limits and genuine queued-reason transitions are implemented, reviewed and covered by the passing integrated checks. |
 | Native-unavailable regular-PR fallback qualifier | [#99](https://github.com/clockgrove/factory/issues/99), [#82](https://github.com/clockgrove/factory/issues/82) | Qualifier implemented and affected checks passed. Live #82 still requires genuinely unavailable native-stack delivery; direct regular-PR selection or synthetic errors are not equivalent. |
-| Supported Linux hosts | [#78](https://github.com/clockgrove/factory/issues/78), [#79](https://github.com/clockgrove/factory/issues/79) | Complete native Linux and macOS-hosted Linux guest coverage, independently of WSL2 results. |
+| Other supported Linux hosts — deferred | [#78](https://github.com/clockgrove/factory/issues/78), [#79](https://github.com/clockgrove/factory/issues/79) | Maintainer-approved availability deferral: only WSL2 is available. Leave native non-WSL Linux and macOS-hosted Linux tests unrun for now; no host requests. They are not on the current WSL2 qualification critical path and are not passed by WSL2 evidence. |
 | Native delivery, merge queue and regular fallback | [#80](https://github.com/clockgrove/factory/issues/80), [#81](https://github.com/clockgrove/factory/issues/81), [#82](https://github.com/clockgrove/factory/issues/82) | Qualify the remaining installed native-stack, queue/ejection and recorded fallback cases. [Retained successor completion](release-evidence/quota-safe-successor-completion-component-2026-09-05.json) is a bounded component result. |
 | Daytona and supported managed capabilities | [#83](https://github.com/clockgrove/factory/issues/83), [#84](https://github.com/clockgrove/factory/issues/84) | Exact installed execution, independent validation, native admission and resource/session termination evidence, within provider-specific capabilities. |
 | Codex managed interface | [#85](https://github.com/clockgrove/factory/issues/85) | External interface follow-up. The profile remains unavailable and unlaunchable, not a required working-provider release gate. |
@@ -49,9 +67,14 @@ artifact and scope boundaries; issue closure is not a substitute for acceptance 
 
 The [definition of done](DESIGN.md#definition-of-done), [delivery plan](DELIVERY-PLAN.md), and
 [conformance ledger](CONFORMANCE.md#verification-required-before-publication) retain all six
-prepublication gates and the post-publication installation gate. Vercel Sandbox, Codex App Server
-and harness-native child workers remain Labs; Git LFS lifecycle and oversized artifact transfer
-remain future extensions rather than current support claims.
+prepublication gates and the post-publication installation gate. The retained economic and
+compiler/chat acceptance is tracked explicitly above. Vercel as an optional second sandbox and
+originally conditional harness-native workers do not imply approval to defer App Server session
+acceptance, LFS detection, binary/media manifests or oversized transfer. The maintainer explicitly
+restored those four commitments and same-host multi-Objective sharing/regular-PR concurrency;
+#113–#118 own their implementation. The adaptive-default prerequisite, token-limit semantics and
+broader dogfood coverage still require explicit reconciliation in #108. Current limited support
+must remain honestly documented until the restored implementation and qualification are complete.
 
 Unsupported third-party interfaces narrow the affected integration, not Factory globally. Users
 own their provider relationships and billing; invoice finality is not execution qualification.

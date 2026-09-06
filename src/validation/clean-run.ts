@@ -1,12 +1,18 @@
-import { access, writeFile } from "node:fs/promises";
+import { access } from "node:fs/promises";
 import { join } from "node:path";
 
 import { executionAffectingReason } from "../approval.js";
 import {
   assertArtifactScope,
   verifyArtifact,
+  materializeArtifactPatch,
   type NormalizedArtifact,
 } from "../execution/artifacts.js";
+import {
+  assertFilesystemArtifactManifest,
+  verifyMaterializedFiles,
+} from "../execution/artifact-content.js";
+import { inspectPatchManifest } from "../runtime/artifact-patch.js";
 import { assertNoSecretMaterial } from "../protocol/limits.js";
 import type { WorkerPacket } from "../protocol/worker-packet.js";
 import type { IsolatedValidationResult } from "../execution/backend.js";
@@ -198,7 +204,19 @@ export async function validateArtifactClean(
   let failureReason: string | undefined;
   try {
     const patchPath = join(worktree.root, "artifact.patch");
-    await writeFile(patchPath, artifact.patch, { mode: 0o600 });
+    await materializeArtifactPatch(artifact, patchPath);
+    const trustedManifest = await inspectPatchManifest(
+      input.repository,
+      artifact.baseSha,
+      patchPath,
+      artifact.changedPaths,
+    );
+    if (
+      artifact.fileManifest &&
+      JSON.stringify(artifact.fileManifest) !== JSON.stringify(trustedManifest)
+    )
+      throw new Error("artifact manifest differs from actual Git blob identities");
+    assertFilesystemArtifactManifest(trustedManifest);
     const apply = await runContainedProcess({
       command: "git",
       args: ["apply", "--index", "--binary", "--whitespace=error-all", patchPath],
@@ -219,6 +237,15 @@ export async function validateArtifactClean(
     }
 
     const outputTreeSha = await git(worktree, ["write-tree"]);
+    if (trustedManifest) {
+      if (
+        trustedManifest.resultTreeSha !== outputTreeSha ||
+        trustedManifest.baseTreeSha !==
+          (await git(worktree, ["rev-parse", `${artifact.baseSha}^{tree}`]))
+      )
+        throw new Error("applied artifact tree differs from trusted collection manifest");
+      await verifyMaterializedFiles(worktree.path, trustedManifest);
+    }
     let evidenceStartedAt = startedAt.toISOString();
     let evidenceCompletedAt: string;
     let environmentIdentity: string | undefined;

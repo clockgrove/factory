@@ -6,6 +6,14 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Added
 
+- Fair same-machine multi-Objective sharing and concurrent regular-PR execution, with immutable
+  peer provenance and serialized, independently revalidated integration.
+- Durable explicit App Server preparation, dispatch, terminal usage and same-attempt artifact
+  recovery, plus an installed checkpoint scenario that proves continuation without another turn.
+- Existing LFS detection and verified local hydration, binary/media manifests, bounded streamed
+  source/artifact content and immutable content-addressed transfer recovery.
+- Supplied-snapshot replay, hierarchical Linux capacity observation, grounded compiler economics,
+  runtime delivery/consumption reporting and executable compiler/chat evaluation cases.
 - Opt-in installed Linux qualification that joins fresh npm and Codex plugin installs with
   disposable service lifecycle, bounded resource pressure, cancellation, and restart observations.
   Sanitized artifact-bound reports retain explicit physical-host and published-distribution gaps.
@@ -27,13 +35,17 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 - Repeated-successor accounting and delivery lineage, native source-PR restoration, and leased
   reconciliation of completed source merges before execution can resume.
 - Daytona execution adapter and provider-neutral managed-agent contract.
-- Labs adapters for Vercel Sandbox and Codex App Server.
+- Optional Labs adapter for Vercel Sandbox.
 - Formal npm package contract for `@clockgrove/factory` alongside the Agent Plugin.
 - Provider-reported input/output/cached-input token breakdowns in existing durable receipts, with
   explicit partial-coverage reporting and unchanged model-token budget totals.
 
 ### Changed
 
+- Unknown completion after dispatch cannot authorize a replacement worker, including failure of the
+  first durable artifact-copy write. Exact retained output reuses original accounting and validation
+  allowances; corrupt evidence still escalates. Conservative native-duration charges remain distinct
+  from measured usage, and unsupported cold App Server repair turns remain refused.
 - Provider support is capability-specific. An unsupported managed-provider interface no longer
   blocks Factory globally, and final provider invoice settlement is not required for proven
   execution completion. User-owned billing, unknown costs and exact active-resource safeguards

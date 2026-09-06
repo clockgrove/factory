@@ -8,11 +8,11 @@ Maintainers and the community provide best-effort help with Factory. There is no
 |---|---|
 | Runtime | Linux: native Linux, Windows WSL2, or a Linux guest hosted by macOS |
 | Distribution | Agent Plugin plus `@clockgrove/factory` npm CLI/controller |
-| Local execution | Codex SDK in exact-SHA worktrees, with Codex CLI as supported fallback |
-| Delivery | Regular PRs serialize complete Work Item pipelines; native stacks retain dependency-ready concurrency with cascading revalidation |
+| Local execution | Codex SDK in exact-SHA worktrees, Codex CLI fallback, and explicit Codex App Server with durable terminal recovery |
+| Delivery | Dependency-ready regular or native-stack work executes concurrently; exact-head integration is serialized and revalidated |
 | Cloud sandbox | Daytona, only with explicit provider and budget authority |
-| Managed agents | GitHub Copilot and OpenAI Codex release targets, only with explicit session authority and after their publication-blocking live gates pass |
-| Labs | Vercel Sandbox, Codex App Server, and additional harness/provider adapters |
+| Managed agents | Copilot's supported capabilities require explicit session authority and live qualification; Codex managed execution remains unavailable pending supported identity/lifecycle interfaces |
+| Labs | Vercel Sandbox and additional harness/provider adapters |
 | Out of scope | Native Win32/Darwin execution or lifecycle, multi-local-machine clusters, custom UI, required hosted service |
 
 Current proof and open release gates are listed in

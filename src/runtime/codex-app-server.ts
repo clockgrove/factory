@@ -2,7 +2,13 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 
 import { MAX_LOG_BYTES } from "../protocol/limits.js";
-import { PARENT_DEATH_WATCHDOG, sanitizedWorkerEnvironment } from "./process-group.js";
+import {
+  PARENT_DEATH_WATCHDOG,
+  sanitizedWorkerEnvironment,
+  terminateProcessGroup,
+} from "./process-group.js";
+import { assertLocalScopeLaunch, scopedLocalCommand, stopLocalScope } from "./local-scope.js";
+import type { LocalScopeIdentity } from "../protocol/local-scope.js";
 
 export type AppServerRequestId = number | string;
 
@@ -43,6 +49,7 @@ export interface AppServerOptions {
   requestTimeoutMs?: number;
   cancellationGraceMs?: number;
   maxStderrBytes?: number;
+  localScope?: { identity: LocalScopeIdentity; deadline: Date; assertCurrent(): Promise<void> };
 }
 
 interface JsonRpcMessage {
@@ -85,14 +92,26 @@ function jsonRpcKey(id: AppServerRequestId): string {
  * Start one supervised App Server process. Factory deliberately uses one
  * process per attempt so forced cancellation can never stop a sibling worker.
  */
-export function startCodexAppServer(options: AppServerOptions): AppServerConnection {
+export async function startCodexAppServer(options: AppServerOptions): Promise<AppServerConnection> {
   const environment = sanitizedWorkerEnvironment(options.env, options.permittedSecretNames);
   if (options.attemptIdentity) {
     environment.FACTORY_ATTEMPT_ID = options.attemptIdentity;
   }
 
-  const executable = options.command ?? "codex";
-  const executableArgs = options.args ?? ["app-server", "--stdio"];
+  let executable = options.command ?? "codex";
+  let executableArgs = options.args ?? ["app-server", "--stdio"];
+  if (options.localScope) {
+    await assertLocalScopeLaunch(options.localScope.identity, options.localScope.deadline);
+    await options.localScope.assertCurrent();
+    const scoped = scopedLocalCommand(
+      options.localScope.identity,
+      executable,
+      executableArgs,
+      options.localScope.deadline.getTime() - Date.now(),
+    );
+    executable = scoped.command;
+    executableArgs = scoped.args;
+  }
   const command = process.platform === "win32" ? executable : "/bin/sh";
   const args =
     process.platform === "win32"
@@ -278,17 +297,19 @@ export function startCodexAppServer(options: AppServerOptions): AppServerConnect
     async close(): Promise<void> {
       if (closePromise) return closePromise;
       closePromise = (async () => {
-        if (exited) return;
-        terminate(child, "SIGTERM");
-        const grace = options.cancellationGraceMs ?? 2_000;
-        const stopped = await Promise.race([
-          closed.then(() => true),
-          new Promise<false>((resolve) => setTimeout(() => resolve(false), grace)),
-        ]);
-        if (!stopped) {
-          terminate(child, "SIGKILL");
-          await closed;
+        // A leader exit does not prove that its shell/tool descendants stopped.
+        // Use the same strict group/scope retirement used by other local workers.
+        let groupError: unknown;
+        try {
+          if (child.pid && process.platform !== "win32")
+            await terminateProcessGroup(child.pid, "SIGTERM", options.cancellationGraceMs ?? 2000);
+          else if (!exited) terminate(child, "SIGKILL");
+        } catch (error) {
+          groupError = error;
         }
+        if (options.localScope) await stopLocalScope(options.localScope.identity);
+        if (groupError) throw groupError;
+        await closed;
       })();
       return closePromise;
     },

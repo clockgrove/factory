@@ -1,4 +1,8 @@
-import { economicRequirements, type CompilerWorkItem, type DecompositionEvidence } from "./index.js";
+import {
+  economicRequirements,
+  type CompilerWorkItem,
+  type DecompositionEvidence,
+} from "./index.js";
 import type { BackendCandidate, BackendRegistry } from "../execution/registry.js";
 import { normalizeSchedulingPolicy, type RunPolicy } from "../protocol/policy.js";
 import type { CapacitySnapshot } from "../scheduling/capacity-ledger.js";
@@ -25,21 +29,29 @@ export async function collectCompilationEvidence(
   items: readonly Pick<CompilerWorkItem, "id" | "requirements">[],
   source: CompilationEvidenceSource,
 ): Promise<DecompositionEvidence> {
-  if (items.length < 1 || items.length > 100 || new Set(items.map((item) => item.id)).size !== items.length)
+  if (
+    items.length < 1 ||
+    items.length > 100 ||
+    new Set(items.map((item) => item.id)).size !== items.length
+  )
     throw new Error("compilation evidence requires a bounded unique graph");
-  const resource = normalizeSchedulingPolicy(source.policy).capacity.mode === "adaptive-local"
-    ? await source.sampleResource(source.nowMs).catch(() => null)
-    : null;
+  const resource =
+    normalizeSchedulingPolicy(source.policy).capacity.mode === "adaptive-local"
+      ? await source.sampleResource(source.nowMs).catch(() => null)
+      : null;
   const candidates = new Map<string, readonly BackendCandidate[]>();
   // Sequential observations reuse the existing registry probe cache and do not
   // fan out a hundred capability requests at the post-compilation boundary.
   for (const item of items) {
     try {
-      candidates.set(item.id, await source.evaluate({
-        policy: source.policy,
-        requirements: economicRequirements(item, source.policy),
-        nowMs: source.nowMs,
-      }));
+      candidates.set(
+        item.id,
+        await source.evaluate({
+          policy: source.policy,
+          requirements: economicRequirements(item, source.policy),
+          nowMs: source.nowMs,
+        }),
+      );
     } catch {
       // Missing is unknown, not an empty capability set proving ineligibility.
       // Do not copy raw provider errors into the durable graph rationale.

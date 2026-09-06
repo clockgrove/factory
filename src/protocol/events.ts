@@ -341,6 +341,13 @@ const Attempt = Common.extend({
   providerResourceId: boundedText(500).optional(),
   environmentIdentity: boundedText(500).optional(),
   resourceHostIdentity: sha256Digest.optional(),
+  sourceArchiveDigest: sha256Digest.optional(),
+  sourceArchiveBytes: z
+    .number()
+    .int()
+    .nonnegative()
+    .max(256 * 1024 * 1024)
+    .optional(),
   localScopeBatch: LocalScopeBatchSchema.optional(),
   artifactDigest: sha256Digest.optional(),
   headSha: gitSha.optional(),
@@ -369,6 +376,11 @@ const Attempt = Common.extend({
   minimumCloudTimeSavedMinutes: z.number().nonnegative().finite().optional(),
   reason: boundedText(8_000).optional(),
 }).superRefine((event, context) => {
+  if ((event.sourceArchiveDigest === undefined) !== (event.sourceArchiveBytes === undefined))
+    context.addIssue({
+      code: "custom",
+      message: "source archive digest and size must be recorded together",
+    });
   const scopeBatch = event.localScopeBatch;
   if (scopeBatch) {
     const scope = scopeBatch.identity;
@@ -614,8 +626,30 @@ const Budget = Common.extend({
     "validation_milliseconds",
   ]),
   amount: z.number().nonnegative().finite(),
+  usageEvidence: z.enum(["as-recorded", "conservative-reservation"]).optional(),
+  reason: boundedText(4000).optional(),
+  directorEpoch: z.number().int().positive().optional(),
+  policyDigest: sha256Digest.optional(),
   reportedModelUsage: ReportedModelUsageSchema.optional(),
 }).superRefine((event, context) => {
+  if (
+    event.usageEvidence === "conservative-reservation" &&
+    (event.event !== "BudgetReconciled" ||
+      !["local_milliseconds", "sandbox_milliseconds"].includes(event.unit) ||
+      event.phase !== "execution" ||
+      !event.workItem ||
+      !event.attempt ||
+      !event.directorEpoch ||
+      !event.policyDigest ||
+      event.amount <= 0 ||
+      !event.reason)
+  )
+    context.addIssue({
+      code: "custom",
+      path: ["usageEvidence"],
+      message:
+        "conservative reservation charge requires exact timed execution and an explicit reason",
+    });
   const usage = event.reportedModelUsage;
   if (!usage) return;
   if (event.event !== "BudgetReconciled" || event.unit !== "model_tokens")

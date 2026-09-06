@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "scope": "Integrated implementation and clean package installation; not live provider or product-benefit qualification",
+  "source": {
+    "commit": "bbc135a6f82766f9f811b26899b97b6e5d090167",
+    "tree": "945567730e1528a22246c2b56e817b6c84cfafed"
+  },
+  "command": "npm run verify:release",
+  "result": "passed",
+  "logSha256": "34a064ea26ff7e2b07a8d237a355ac29a5f9e1563a4feccb2729313b7b974b27",
+  "checks": {
+    "typecheck": "passed",
+    "lint": "passed",
+    "format": "passed",
+    "testFilesPassed": 158,
+    "testsPassed": 3060,
+    "testsSkipped": 3,
+    "skipBoundaries": ["SDK-only assertion is inapplicable to the CLI parameterization", "Separately opted live systemd lifecycle case", "Separately opted live retirement case"],
+    "testDurationSeconds": 393.68,
+    "coveragePercent": { "lines": 81.16, "statements": 80.01, "functions": 83.68, "branches": 77.72 },
+    "coverageThresholds": "passed unchanged",
+    "schemas": "passed",
+    "reproducibleBundles": "passed",
+    "cleanPluginInstallation": "passed",
+    "installedMcpAndControllerStartup": "passed",
+    "npmPackage": "passed",
+    "dependencyVulnerabilities": 0
+  },
+  "artifact": {
+    "version": "2.0.26",
+    "files": 43,
+    "packageBytes": 2972597,
+    "packageSha256": "df2f098b57fd7166a5d8da6f32b53735bf0f3e3f462c80885ea1775f04818c31",
+    "inventorySha256": "5e0aedb503a6eb40bafa48b4b074dec64e369758cbdbe8e5b9593945e0abd6dd",
+    "cliSha256": "814f7b2fe59ad8d86ce40573bbc2f1b2f58c1c1fa55e77c12f3a33fc5f2e013a",
+    "mcpSha256": "5eb0be2c3a29a7579e00f9cad9e2ad98e35997273520d98cb006b0399e7a65af"
+  },
+  "persistentWslInstallation": {
+    "observedAt": "2026-09-06T10:02:34.613Z",
+    "canonicalFilesMatched": true,
+    "exactFileInventoryMatched": true,
+    "onlyDifference": "Codex manifest cachebuster",
+    "manifestVersion": "2.0.26+codex.20260906100209"
+  },
+  "originalResultsPreserved": [
+    { "commit": "7941ed3e8706cf5ac2fee76faacea4bf0abc22d7", "result": "failed", "boundary": "Strict contracts, formatting and behavioral failures; sandbox child-process restrictions also affected the original run." },
+    { "commit": "283814ea2ce9904b862a067d466a75978427e3ec", "result": "failed-incomplete", "boundary": "Original assertion failures retained; exact stalled successor worker was explicitly stopped, never counted as a pass." },
+    { "commit": "22ad192c9b79374404682d13b0773bfe8d395356", "result": "failed", "testFilesPassed": 156, "testsPassed": 3052, "testsFailed": 1, "testsSkipped": 3, "boundary": "Two-run Git recovery fixture exceeded its original five-second bound; successor suite finished naturally. Independent review also found the subsequently corrected mixed-trust ancestry defect." }
+  ],
+  "remaining": [
+    "Installed WSL2 runtime and fault qualification, including restored concurrency, durable sessions and large-file behavior.",
+    "Actual compiler/chat evaluation and controlled cost/throughput comparison; no savings claim follows from component tests.",
+    "Unresolved acceptance dispositions in issue 108 and separate Clockgrove activation authority.",
+    "Provider-specific qualification, distribution authority and published-byte installation.",
+    "Native Linux and macOS-hosted Linux tests remain explicitly deferred and unrun."
+  ]
+}

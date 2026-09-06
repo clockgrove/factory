@@ -6,6 +6,7 @@ export interface CheckpointAuthority {
   namespace: string;
   evidence: string;
   policy: Record<string, unknown>;
+  sessionRecovery?: true;
 }
 export function checkpointAuthority(
   env: Record<string, string | undefined>,
@@ -59,12 +60,23 @@ export interface CheckpointPort {
   controller(state: string, prior?: unknown): Promise<unknown>;
   observe(): Promise<unknown>;
   poll(phase: string, accept: (observation: unknown) => boolean): Promise<unknown>;
-  absence(observation: unknown, controllers: unknown[]): Promise<unknown>;
+  absence(observation: unknown, controllers: unknown[], executionOnly?: boolean): Promise<unknown>;
+  armSession?(original: unknown): Promise<unknown>;
+  sessionProof?(observation: unknown, witness?: unknown): Promise<unknown[]>;
   checkpoint(value: unknown): Promise<void>;
   takeover(checkpoint: unknown): Promise<void>;
   finalProof(observation: unknown, original: unknown, replacement: unknown): Promise<void>;
 }
 export function runCheckpointScenario(
+  port: CheckpointPort,
+  authority: CheckpointAuthority,
+): Promise<unknown>;
+export function appServerHoldReady(
+  observation: unknown,
+  authority: CheckpointAuthority,
+  arm: unknown,
+): boolean;
+export function runAppServerCheckpointScenario(
   port: CheckpointPort,
   authority: CheckpointAuthority,
 ): Promise<unknown>;

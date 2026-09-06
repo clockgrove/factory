@@ -1,9 +1,21 @@
 import { createHash, randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 
 import { CodexCliLocalBackend } from "./backends/codex-cli-local.js";
 import { CodexSdkLocalBackend } from "./backends/codex-sdk-local.js";
-import { CodexAppServerLocalBackend } from "./backends/codex-app-server.js";
+import {
+  CodexAppServerLocalBackend,
+  appServerHandleFromCheckpoint,
+} from "./backends/codex-app-server.js";
+import {
+  holdAppServerQualificationCheckpoint,
+  SafeArtifactCheckpointHeldError,
+} from "./runtime/qualification-checkpoint.js";
+import { AppServerSessionManager } from "./control/app-server-sessions.js";
+import {
+  completeSessionUsage,
+  type AppServerSessionJournal,
+} from "./execution/app-server-session.js";
 import {
   GITHUB_MANAGED_AGENT_PROFILES,
   GitHubManagedAgentBackend,
@@ -13,6 +25,12 @@ import { DaytonaBackend, DaytonaResourceCleanupError } from "./backends/daytona.
 import { VercelSandboxBackend } from "./backends/vercel-sandbox.js";
 import { validationInvocationOwnership } from "./backends/validation-invocation.js";
 import { AttemptManager, type AttemptReservation } from "./control/attempts.js";
+import {
+  artifactRecoveryCopyAvailable,
+  persistArtifactTransfer,
+  resumeArtifactTransfer,
+  type ArtifactTransferIdentity,
+} from "./control/artifact-transfers.js";
 import { activationCancellation, type ActivationBinding } from "./control/activations.js";
 import {
   deriveBudgetUsage,
@@ -41,6 +59,11 @@ export {
   type GraphProjectionExpectation,
 } from "./control/graph-evidence.js";
 import { GitHubControlStore } from "./control/github-store.js";
+import { materializePinnedCompilationTree } from "./execution/pinned-compilation-tree.js";
+import {
+  assertLocalLfsAvailable,
+  materializeLocalLfsAssets,
+} from "./repository-profiles/git-lfs.js";
 import {
   DEFAULT_LEASE_RENEWAL_INTERVAL_MS,
   DEFAULT_LEASE_RENEWAL_LEAD_MS,
@@ -56,6 +79,7 @@ import {
 } from "./control/receipts.js";
 import { RunManager, type RunState } from "./control/runs.js";
 import { loadRecoveryRuntime, type RecoveryRuntime } from "./recovery/runtime.js";
+import { nativeSourceRequiresIsolation } from "./execution/native-ancestry-trust.js";
 import {
   loadRecoverySourceArtifact,
   createRecoverySourcePublishedEvent,
@@ -135,9 +159,15 @@ import {
 import type { BackendHandle, ExecutionBackend, ExecutionUsage } from "./execution/backend.js";
 import {
   MAX_ARTIFACT_PATCH_BYTES,
-  normalizeArtifact,
+  assertArtifactScope,
   type NormalizedArtifact,
 } from "./execution/artifacts.js";
+import { bindArtifactManifest } from "./runtime/artifact-patch.js";
+import { retainArtifactContent } from "./execution/artifact-content.js";
+import {
+  retainScopedArtifact,
+  withArtifactContentScope,
+} from "./execution/artifact-content-scope.js";
 import { Dispatcher, GithubOctokitWriter } from "./dispatch.js";
 import {
   compiledGraphDigest,
@@ -198,6 +228,7 @@ import {
   type LocalWorktree,
 } from "./runtime/local-worktree.js";
 import { runContainedProcess } from "./runtime/process-group.js";
+import { artifactFromGitRange } from "./runtime/artifact-patch.js";
 import { allDone, derive, queuedState, ready, type DerivedWorkItem } from "./state.js";
 import { queuedReasonCode } from "./explanations/index.js";
 import { COPILOT_ASSIGNEE_LOGIN } from "./types.js";
@@ -341,10 +372,46 @@ export interface SupervisorResult {
 interface DeliveryExecutionBase {
   branch: string;
   sha: string;
+  kind?: "trunk" | "stack";
+  requiresIsolation?: boolean;
+}
+
+/** Already collected original execution, never a replacement worker or new attempt. */
+interface CollectedAttemptContinuation {
+  reservation: AttemptReservation;
+  packet: WorkerPacket;
+  artifact: NormalizedArtifact;
+  modelTokens?: number;
+  modelUsage?: ReportedModelUsage & { inputTokens: number; outputTokens: number };
+  nativeUsage: {
+    unit: "local_milliseconds" | "sandbox_milliseconds" | "managed_sessions";
+    amount: number;
+  };
+  worker?: LocalWorktree;
 }
 
 class SiblingRefreshTargetAdvancedError extends Error {}
 class SiblingRefreshObservationPendingError extends Error {}
+
+class ArtifactCollectionCheckpointError extends Error {
+  constructor(cause: unknown) {
+    super(
+      "collected output is not durably retained; automated replacement is blocked until exact artifact transfer recovery completes",
+      { cause },
+    );
+    this.name = "ArtifactCollectionCheckpointError";
+  }
+}
+
+/** Missing completion evidence must remain recoverable, not become terminal history. */
+class ArtifactCompletionUnavailableError extends Error {
+  constructor() {
+    super(
+      "execution completion is unknown after dispatch; recover the exact original output or obtain explicit recovery direction before replacement",
+    );
+    this.name = "ArtifactCompletionUnavailableError";
+  }
+}
 
 interface NativeStackMember {
   receipt: PublicationReceipt;
@@ -921,16 +988,19 @@ function inspectCompiledGraph(snapshot: Snapshot): {
 }
 
 const MAX_RETRY_CHECKPOINT_CACHE_BYTES = 32 * 1024 * 1024;
+const MAX_RETRY_PAYLOAD_CACHE_BYTES = 512 * 1024 * 1024;
 
 class RetryArtifactCache {
   readonly #entries = new Map<number, NormalizedArtifact>();
+  readonly #releases = new Map<number, () => Promise<void>>();
   #bytes = 0;
+  #payloadBytes = 0;
 
-  get(workItem: number, baseSha: string): NormalizedArtifact | undefined {
+  async get(workItem: number, baseSha: string): Promise<NormalizedArtifact | undefined> {
     const artifact = this.#entries.get(workItem);
     if (!artifact) return undefined;
     if (artifact.baseSha !== baseSha) {
-      this.delete(workItem);
+      await this.delete(workItem);
       return undefined;
     }
     this.#entries.delete(workItem);
@@ -938,24 +1008,39 @@ class RetryArtifactCache {
     return artifact;
   }
 
-  set(workItem: number, artifact: NormalizedArtifact): void {
-    this.delete(workItem);
-    const bytes = Buffer.byteLength(artifact.patch) + Buffer.byteLength(artifact.logs);
-    if (bytes > MAX_RETRY_CHECKPOINT_CACHE_BYTES) return;
-    while (this.#bytes + bytes > MAX_RETRY_CHECKPOINT_CACHE_BYTES) {
+  async set(workItem: number, artifact: NormalizedArtifact): Promise<void> {
+    await this.delete(workItem);
+    const bytes = Buffer.byteLength(JSON.stringify(artifact));
+    const payloadBytes = artifact.payload?.bytes ?? 0;
+    if (bytes > MAX_RETRY_CHECKPOINT_CACHE_BYTES || payloadBytes > MAX_RETRY_PAYLOAD_CACHE_BYTES)
+      return;
+    while (
+      this.#bytes + bytes > MAX_RETRY_CHECKPOINT_CACHE_BYTES ||
+      this.#payloadBytes + payloadBytes > MAX_RETRY_PAYLOAD_CACHE_BYTES
+    ) {
       const oldest = this.#entries.keys().next().value;
       if (oldest === undefined) break;
-      this.delete(oldest);
+      await this.delete(oldest);
     }
     this.#entries.set(workItem, artifact);
+    if (artifact.payload) this.#releases.set(workItem, retainArtifactContent(artifact.payload));
     this.#bytes += bytes;
+    this.#payloadBytes += payloadBytes;
   }
 
-  delete(workItem: number): void {
+  async delete(workItem: number): Promise<void> {
     const artifact = this.#entries.get(workItem);
     if (!artifact) return;
-    this.#bytes -= Buffer.byteLength(artifact.patch) + Buffer.byteLength(artifact.logs);
+    this.#bytes -= Buffer.byteLength(JSON.stringify(artifact));
+    this.#payloadBytes -= artifact.payload?.bytes ?? 0;
     this.#entries.delete(workItem);
+    const release = this.#releases.get(workItem);
+    this.#releases.delete(workItem);
+    await release?.();
+  }
+
+  async clear(): Promise<void> {
+    for (const workItem of [...this.#entries.keys()]) await this.delete(workItem);
   }
 }
 
@@ -970,6 +1055,7 @@ export class FactorySupervisor {
   readonly #leases: LeaseManager;
   readonly #attempts: AttemptManager;
   readonly #reviews: ReviewCheckpointManager;
+  readonly #sessions: AppServerSessionManager;
   readonly #mergeCandidates: MergeCandidateCheckpointStore;
   readonly #siblingRefreshes: SiblingRefreshStore;
   readonly #nativeRebases: NativeRebaseCheckpointStore;
@@ -1076,6 +1162,7 @@ export class FactorySupervisor {
       leases: this.#leases,
     });
     this.#reviews = new ReviewCheckpointManager(this.#store, this.#leases);
+    this.#sessions = new AppServerSessionManager(this.#store, this.#leases);
     this.#mergeCandidates = new MergeCandidateCheckpointStore(this.#store, this.#leases);
     this.#siblingRefreshes = new SiblingRefreshStore(this.#store, this.#leases);
     this.#nativeRebases = new NativeRebaseCheckpointStore(this.#store, this.#leases);
@@ -1349,6 +1436,45 @@ export class FactorySupervisor {
     throw new Error("source reconciliation exceeded the compiled work-item bound");
   }
 
+  #releaseCapacity(key: string): void {
+    this.#capacity.release(key);
+    this.#fairness.changed();
+  }
+
+  #reconcileObjectiveCapacity(objective: number, items: DerivedWorkItem[]) {
+    const scheduling = normalizeSchedulingPolicy(this.#policy);
+    const reservations = deriveCapacityReservations(
+      items.map((item) => {
+        const packet = this.#packetFor(item.number);
+        for (const event of item.factoryEvents ?? []) {
+          if (
+            event.kind === "attempt" &&
+            event.event === "AttemptReserved" &&
+            this.#registry.get(event.backend)?.capabilities.hostExecution
+          )
+            this.#fairness.noteAdmission(objective, Date.parse(event.at));
+        }
+        return {
+          objective,
+          workItem: item.number,
+          events: item.factoryEvents ?? [],
+          defaultCpu: scheduling.capacity.local.defaultCpu,
+          defaultMemoryMb: scheduling.capacity.local.defaultMemoryMb,
+          paths: packet.allowedPaths,
+          exclusiveResources: packet.changeSurface?.exclusiveResources ?? [],
+          isLocalBackend: (id: string) => {
+            const capabilities = this.#registry.get(id)?.capabilities;
+            return (
+              isLocalIntegrationValidationBackend(id) ||
+              Boolean(capabilities?.hostExecution && !capabilities.requiresPaidRuntime)
+            );
+          },
+        };
+      }),
+    );
+    return this.#capacity.reconcileObjective(objective, reservations);
+  }
+
   #deriveObjective(snapshot: Snapshot): ReturnType<typeof derive> {
     const objective = derive(snapshot);
     if (!this.#recoveryRuntime) return objective;
@@ -1564,6 +1690,8 @@ export class FactorySupervisor {
     completedSources?: ReadonlyMap<number, { mergeCommitSha: string; targetBaseSha: string }>,
     completedCandidates?: Map<string, MergeCandidateCheckpointRecord>,
     completedMergeOids?: Set<string>,
+    stopBaseSha = run.baseSha,
+    peerProof = false,
   ): Promise<boolean> {
     if (!run.baseSha || snapshot.number !== run.objective) return false;
     const observations = new Map<
@@ -1572,8 +1700,8 @@ export class FactorySupervisor {
     >();
     let cursor = targetBaseSha;
     const visited = new Set<string>();
-    while (cursor !== run.baseSha) {
-      if (visited.has(cursor) || visited.size >= snapshot.workItems.length) return false;
+    while (cursor !== stopBaseSha) {
+      if (visited.has(cursor) || visited.size >= 3200) return false;
       visited.add(cursor);
       const matches = [];
       if (completionDeadline !== undefined) {
@@ -1682,7 +1810,7 @@ export class FactorySupervisor {
             pull.headRepository?.toLowerCase() !== run.repository?.toLowerCase()
           )
             return false;
-          if (completionDeadline !== undefined) {
+          if (completionDeadline !== undefined || peerProof) {
             const review = await this.#reviews.load({
               kind: validation.baseSha === reservation.baseSha ? "artifact" : "rebase",
               runId: run.runId,
@@ -1698,7 +1826,11 @@ export class FactorySupervisor {
                 : { headSha: publication.headSha }),
             });
             if (
-              !this.#completedReviewAccounted(review, snapshotEvents(snapshot), completionDeadline)
+              !this.#completedReviewAccounted(
+                review,
+                snapshotEvents(snapshot),
+                completionDeadline ?? Infinity,
+              )
             )
               return false;
           }
@@ -1782,6 +1914,10 @@ export class FactorySupervisor {
           }
           matches.push(parent);
         }
+      }
+      if (matches.length === 0 && !peerProof) {
+        const peer = await this.#peerTrunkIntegration(cursor, snapshot, run);
+        if (peer) matches.push(peer.parent);
       }
       if (matches.length !== 1) return false;
       completedMergeOids?.add(cursor);
@@ -2181,6 +2317,14 @@ export class FactorySupervisor {
   }
 
   async run(): Promise<SupervisorResult> {
+    try {
+      return await withArtifactContentScope(() => this.#runWithArtifactContent());
+    } finally {
+      await this.#retryArtifacts.clear();
+    }
+  }
+
+  async #runWithArtifactContent(): Promise<SupervisorResult> {
     this.#recoveryRuntime = null;
     this.#compiledGraph = null;
     this.#compiledProjection = null;
@@ -2467,7 +2611,9 @@ export class FactorySupervisor {
     if (
       this.#options.activation &&
       base.oid !== this.#options.activation.baseSha &&
-      (!resumedRun || !(await this.#observedRunOwnsBaseAdvance(snapshot, resumedRun, base.oid)))
+      !(resumedRun
+        ? await this.#observedRunOwnsBaseAdvance(snapshot, resumedRun, base.oid)
+        : await this.#observedPeerBaseAdvance(snapshot, this.#options.activation.baseSha, base.oid))
     ) {
       return this.#startlessEscalation(
         `activation ${this.#options.activation.requestId} is stale: ${snapshot.defaultBranch} advanced from ${this.#options.activation.baseSha} to ${base.oid}; reactivate against the new head`,
@@ -2563,11 +2709,17 @@ export class FactorySupervisor {
       }
       // The original activation remains immutable across restarts. Recheck its
       // permitted progress under the lease before writing any resumed-run effect.
-      if (currentRun && this.#options.activation) {
+      if (this.#options.activation) {
         const currentBase = await this.#store.getBranchHead(current.defaultBranch);
         if (
           currentBase.oid !== this.#options.activation.baseSha &&
-          !(await this.#observedRunOwnsBaseAdvance(current, currentRun, currentBase.oid))
+          !(currentRun
+            ? await this.#observedRunOwnsBaseAdvance(current, currentRun, currentBase.oid)
+            : await this.#observedPeerBaseAdvance(
+                current,
+                this.#options.activation.baseSha,
+                currentBase.oid,
+              ))
         )
           throw new Error("base branch advanced outside this run during startup");
       }
@@ -2814,10 +2966,6 @@ export class FactorySupervisor {
               "compiled graph receipt exists but its durable graph record is missing",
             );
           }
-          const layout = await this.#reader.readRepositoryLayout(undefined, 5_000);
-          if (layout.truncated) {
-            throw new Error("repository layout is incomplete; compilation would be under-grounded");
-          }
           const compilationBudget = remainingBudget(
             this.#policy,
             deriveBudgetUsage(this.#budgetEvents),
@@ -2827,35 +2975,57 @@ export class FactorySupervisor {
           }
           const compilationModel = resolveModelSelection(this.#policy, "compile");
           invokeCompilation = (checkpoint) =>
-            this.#externalAdmission(() =>
-              this.#management.compile(
-                {
-                  repository: this.#options.repository,
-                  objective: {
-                    number: snapshot.number,
-                    title: snapshot.title,
-                    body: snapshot.body,
+            this.#externalAdmission(async () => {
+              await ensureLocalCommit(this.#options.repository, base.oid);
+              const repositoryLfs = await assertLocalLfsAvailable(
+                this.#options.repository,
+                base.oid,
+              );
+              const tree = await materializePinnedCompilationTree(
+                this.#options.repository,
+                base.oid,
+              );
+              try {
+                await materializeLocalLfsAssets(this.#options.repository, tree.path, base.oid);
+                return await this.#management.compile(
+                  {
+                    repository: tree.path,
+                    objective: {
+                      number: snapshot.number,
+                      title: snapshot.title,
+                      body: snapshot.body,
+                    },
+                    defaultBranch: snapshot.defaultBranch,
+                    baseSha: base.oid,
+                    repositoryFiles: tree.files,
+                    repositoryLfs,
+                    allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                    economicEvidence: (items) =>
+                      collectCompilationEvidence(items, {
+                        objective: snapshot.number,
+                        policy: this.#policy,
+                        capacity: this.#capacity.snapshot(),
+                        repositoryLimits: this.#controllerLimits,
+                        deliveryMode: this.#deliverySelection.selected,
+                        nowMs: Date.now(),
+                        cooldownUntilMs: this.#resourceSampler.cooldownUntil,
+                        sampleResource: (nowMs) => this.#resourceSampler.sample(nowMs),
+                        evaluate: (input) => this.#registry.evaluate(input),
+                      }),
+                    ...(compilationModel ? { modelSelection: compilationModel } : {}),
                   },
-                  defaultBranch: snapshot.defaultBranch,
-                  baseSha: base.oid,
-                  repositoryFiles: layout.files,
-                  allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
-                  economicEvidence: (items) => collectCompilationEvidence(items, {
-                    objective: snapshot.number,
-                    policy: this.#policy,
-                    capacity: this.#capacity.snapshot(),
-                    repositoryLimits: this.#controllerLimits,
-                    deliveryMode: this.#deliverySelection.selected,
-                    nowMs: Date.now(),
-                    cooldownUntilMs: this.#resourceSampler.cooldownUntil,
-                    sampleResource: (nowMs) => this.#resourceSampler.sample(nowMs),
-                    evaluate: (input) => this.#registry.evaluate(input),
-                  }),
-                  ...(compilationModel ? { modelSelection: compilationModel } : {}),
-                },
-                checkpoint,
-              ),
-            );
+                  checkpoint,
+                );
+              } finally {
+                // A durable successful checkpoint must not become a repeated paid call
+                // merely because this exact owned temporary directory could not be removed.
+                await tree
+                  .dispose()
+                  .catch(() =>
+                    this.#notify(`compilation tree cleanup needs attention: ${tree.path}`),
+                  );
+              }
+            });
         } else if (!durableGraph) {
           // A graph recovered from an older run or issue receipt is copied into
           // this run's immutable ref before any backend preflight can fail.
@@ -3214,6 +3384,17 @@ export class FactorySupervisor {
         });
         if (this.#recoveryRuntime) await this.#resumeObservedRun(snapshot, runManager);
         const objective = this.#deriveObjective(snapshot);
+        // All resumed peers seed their durable execution/validation liabilities
+        // before any member of the starting cohort may acquire fresh capacity.
+        this.#reconcileObjectiveCapacity(objective.number, objective.items);
+        this.#fairness.markReconciled(objective.number);
+        if (!this.#fairness.reconciled) {
+          await this.#fairness.waitForChange(
+            this.#options.pollIntervalMs ?? 60_000,
+            this.#options.signal,
+          );
+          continue;
+        }
         const adoptedPublication =
           this.#recoveryRuntime &&
           objective.items.find((item) => {
@@ -3455,28 +3636,6 @@ export class FactorySupervisor {
           continue;
         }
 
-        // A worker promise may finish while its published PR is still waiting for
-        // checks/mergeability. Regular delivery owns the whole pipeline, not just
-        // that promise or the current integration-backoff window. Reconstruct
-        // this gate on every snapshot so restart cannot admit a sibling on the
-        // retained publication's old base. Native units keep their concurrency.
-        if (
-          this.#deliverySelection.selected === "regular-prs" &&
-          objective.items.some((item) => item.state === "for_review")
-        ) {
-          this.#fairness.reportDemand(objective.number, 0);
-          if (activeExecutions.size > 0) {
-            const settled = await activeExecutions.waitForChange(
-              this.#options.pollIntervalMs ?? 2_000,
-              this.#options.signal,
-            );
-            if (settled?.error) throw settled.error;
-          } else {
-            await sleep(this.#options.pollIntervalMs ?? 60_000, this.#options.signal);
-          }
-          continue;
-        }
-
         const deliveryBases = new Map<number, DeliveryExecutionBase>();
         const stackReady =
           this.#deliverySelection.selected === "native-stacks"
@@ -3497,7 +3656,8 @@ export class FactorySupervisor {
                   (candidate) =>
                     parseGraphItemMetadata(candidate.body ?? "").id === plan.parentItemId,
                 );
-                if (!parent || parent.state !== "for_review") return false;
+                if (!parent || parent.state !== "for_review" || activeExecutions.has(parent.number))
+                  return false;
                 const waitsSatisfied = plan.waitsForMerge.every((dependencyId) =>
                   objective.items.some(
                     (candidate) =>
@@ -3550,34 +3710,7 @@ export class FactorySupervisor {
             all.findIndex((candidate) => candidate.number === item.number) === index,
         );
         const scheduling = normalizeSchedulingPolicy(this.#policy);
-        const durableCapacity = deriveCapacityReservations(
-          objective.items.map((item) => {
-            const packet = this.#packetFor(item.number);
-            return {
-              objective: objective.number,
-              workItem: item.number,
-              events: item.factoryEvents ?? [],
-              defaultCpu: scheduling.capacity.local.defaultCpu,
-              defaultMemoryMb: scheduling.capacity.local.defaultMemoryMb,
-              paths: packet.allowedPaths,
-              exclusiveResources: packet.changeSurface?.exclusiveResources ?? [],
-              isLocalBackend: (id: string) => {
-                const capabilities = this.#registry.get(id)?.capabilities;
-                return (
-                  isLocalIntegrationValidationBackend(id) ||
-                  Boolean(capabilities?.hostExecution && !capabilities.requiresPaidRuntime)
-                );
-              },
-            };
-          }),
-        );
-        const capacity = this.#capacity.reconcileObjective(objective.number, durableCapacity);
-        this.#fairness.reportDemand(objective.number, runnable.length);
-        const objectiveLocalMax = this.#fairness.localMaximum(
-          objective.number,
-          Math.min(scheduling.capacity.local.maxWorkers, this.#controllerLimits.maxLocalWorkers),
-          capacity.reservations,
-        );
+        const capacity = this.#reconcileObjectiveCapacity(objective.number, objective.items);
         this.#budgetEvents = deduplicateFactoryEvents([
           ...this.#budgetEvents,
           ...this.#accountingEvents(snapshotEvents(snapshot)),
@@ -3619,14 +3752,146 @@ export class FactorySupervisor {
             [...commandState.priorities].map(([workItem, command]) => [workItem, command.rank]),
           ),
         ).filter((rankedItem) => runnable.some((item) => item.number === rankedItem.item.number));
+        const executionBaseProofs = new Map<
+          string,
+          Promise<{ executionRequiresIsolation: boolean }>
+        >();
+        const executionHead = runnable.length
+          ? await this.#store.getBranchHead(this.#baseBranch)
+          : null;
         const admissionItems: AdmissionWorkItem[] = await Promise.all(
           ranked.map(async (priority) => {
             const original = this.#packetFor(priority.item.number);
+            const stackBase = deliveryBases.get(priority.item.number);
+            if (stackBase) {
+              const itemId = parseGraphItemMetadata(priority.item.body ?? "").id;
+              const unit = this.#deliveryPlan?.units.find((candidate) =>
+                candidate.items.includes(itemId),
+              );
+              const root = objective.items.find(
+                (candidate) => parseGraphItemMetadata(candidate.body ?? "").id === unit?.items[0],
+              );
+              if (!root) throw new Error("stack execution lacks its immutable root provenance");
+              const publication = (root.factoryEvents ?? []).find(
+                (event) =>
+                  event.kind === "publication" &&
+                  event.runId === this.#run.runId &&
+                  event.event === "PublicationRecorded",
+              );
+              const adopted = this.#recoveryRuntime?.sourcePublications.find(
+                (proof) => proof.publication.workItem === root.number,
+              );
+              const recoveryRoot = this.#recoveryRuntime?.planRecord.plan.items.find(
+                (entry) => entry.workItem === root.number,
+              );
+              const originalSource = recoveryRoot?.source?.publication;
+              const rootBase =
+                publication?.kind === "publication"
+                  ? publication.baseSha
+                  : (adopted?.publication.sourceBaseSha ?? originalSource?.baseSha);
+              if (!rootBase) throw new Error("stack execution root has no exact published base");
+              const authorityBase = this.#run.baseSha ?? this.#packetFor(root.number).baseSha;
+              const integratedRoot =
+                recoveryRoot?.action === "integrated" &&
+                this.#recoveryRuntime?.planRecord.plan.expectedBaseSha === authorityBase
+                  ? this.#recoveryRuntime?.sourceIntegrations.find(
+                      (proof) => proof.outcome.workItem === root.number,
+                    )
+                  : undefined;
+              // An authenticated pre-activation root is already contained in the
+              // recovery plan's exact base. Its older publication base is source
+              // provenance, not a forward trunk advance by the successor.
+              const comparisonBase = integratedRoot ? authorityBase : rootBase;
+              // The actual parent head contains every native ancestor, not just
+              // the root. Neither a trusted child nor successor policy may
+              // declassify an intermediate retained producer's restrictions.
+              let inheritedIsolation = false;
+              let ancestorId = this.#deliveryPlan?.items.find(
+                (candidate) => candidate.itemId === itemId,
+              )?.parentItemId;
+              const ancestors = new Set<string>();
+              while (ancestorId) {
+                if (!unit || ancestors.has(ancestorId) || !unit.items.includes(ancestorId))
+                  throw new Error("stack execution has invalid ancestor provenance");
+                ancestors.add(ancestorId);
+                const ancestor = objective.items.find(
+                  (candidate) => parseGraphItemMetadata(candidate.body ?? "").id === ancestorId,
+                );
+                if (!ancestor) throw new Error("stack execution lacks an immutable ancestor");
+                inheritedIsolation ||=
+                  this.#packetFor(ancestor.number).requirements.trust !== "trusted_local";
+                const retained = this.#recoveryRuntime?.planRecord.plan.items.find(
+                  (entry) => entry.workItem === ancestor.number,
+                );
+                if (this.#recoveryRuntime && !retained)
+                  throw new Error("stack execution ancestor is outside the recovery plan");
+                if (retained && retained.action !== "execute") {
+                  if (!retained.source)
+                    throw new Error("stack execution ancestor lacks its source run");
+                  // Always resolve provenance, even if another ancestor has
+                  // already required isolation: missing authority must refuse.
+                  const producerRunIds = new Set([
+                    retained.source.runId,
+                    ...(retained.source.priorDelivery ? [retained.source.priorDelivery.runId] : []),
+                    ...(retained.source.siblingRefresh
+                      ? [retained.source.siblingRefresh.candidateRunId]
+                      : []),
+                  ]);
+                  for (const sourceRunId of producerRunIds) {
+                    const sourceIsolation = nativeSourceRequiresIsolation(
+                      sourceRunId,
+                      this.#recoveryRuntime!.events,
+                    );
+                    inheritedIsolation ||= sourceIsolation;
+                  }
+                }
+                const ancestorPlan = this.#deliveryPlan?.items.find(
+                  (candidate) => candidate.itemId === ancestorId,
+                );
+                if (!ancestorPlan)
+                  throw new Error("stack execution ancestor lacks its delivery plan");
+                ancestorId = ancestorPlan.parentItemId;
+              }
+              if (!unit || !ancestors.has(unit.items[0]!))
+                throw new Error("stack execution ancestry does not reach its immutable root");
+              const key = `${authorityBase}:${comparisonBase}`;
+              if (!executionBaseProofs.has(key))
+                executionBaseProofs.set(
+                  key,
+                  authorityBase === comparisonBase
+                    ? Promise.resolve({ executionRequiresIsolation: false })
+                    : this.#assertOwnTrunkAdvance(authorityBase, comparisonBase, 0),
+                );
+              stackBase.requiresIsolation =
+                inheritedIsolation ||
+                this.#packetFor(root.number).requirements.trust !== "trusted_local" ||
+                (await executionBaseProofs.get(key)!).executionRequiresIsolation;
+            }
+            if (!deliveryBases.has(priority.item.number)) {
+              if (!executionHead) throw new Error("missing pinned execution head");
+              const authorityBase = this.#run.baseSha ?? original.baseSha;
+              const key = `${authorityBase}:${executionHead.oid}`;
+              if (!executionBaseProofs.has(key))
+                executionBaseProofs.set(
+                  key,
+                  executionHead.oid === authorityBase
+                    ? Promise.resolve({ executionRequiresIsolation: false })
+                    : this.#assertOwnTrunkAdvance(authorityBase, executionHead.oid, 0),
+                );
+              const proof = await executionBaseProofs.get(key)!;
+              deliveryBases.set(priority.item.number, {
+                branch: this.#baseBranch,
+                sha: executionHead.oid,
+                kind: "trunk",
+                requiresIsolation: proof.executionRequiresIsolation,
+              });
+            }
             const packet = parseWorkerPacket({
               ...original,
               requirements: {
                 ...original.requirements,
-                ...(this.#policy.trust === "sandbox_untrusted" &&
+                ...((this.#policy.trust === "sandbox_untrusted" ||
+                  deliveryBases.get(priority.item.number)?.requiresIsolation) &&
                 original.requirements.trust === "trusted_local"
                   ? { trust: "isolated" as const }
                   : {}),
@@ -3694,16 +3959,72 @@ export class FactorySupervisor {
                   }),
               paths: packet.allowedPaths,
               exclusiveResources: packet.changeSurface?.exclusiveResources ?? [],
-              ...(queued ? {
-                queuedSince: queued.since,
-                previousQueueObservation: {
-                  code: queued.latest.reasonCode ?? queuedReasonCode(queued.latest.reason) ?? null,
-                  ...(queued.latest.gate ? { gate: queued.latest.gate } : {}),
-                },
-              } : {}),
+              ...(queued
+                ? {
+                    queuedSince: queued.since,
+                    previousQueueObservation: {
+                      code:
+                        queued.latest.reasonCode ?? queuedReasonCode(queued.latest.reason) ?? null,
+                      ...(queued.latest.gate ? { gate: queued.latest.gate } : {}),
+                    },
+                  }
+                : {}),
             };
           }),
         );
+        const physicalLimits = admissionCapacityLimits(
+          this.#policy,
+          resource,
+          objective.number,
+          scheduling.capacity.local.maxWorkers,
+          this.#controllerLimits,
+        );
+        const localObservationReady =
+          scheduling.capacity.mode !== "adaptive-local" ||
+          Boolean(
+            resource &&
+              resourcePressureReasons(resource, scheduling.capacity.local).length === 0 &&
+              nowMs >= this.#resourceSampler.cooldownUntil,
+          );
+        const localDemand = !localObservationReady
+          ? []
+          : admissionItems.filter(
+              (item) =>
+                item.backends.some(
+                  (candidate) =>
+                    candidate.local &&
+                    candidate.permanentReasons.length === 0 &&
+                    candidate.transientReasons.length === 0,
+                ) &&
+                (item.requirements.cpu ?? scheduling.capacity.local.defaultCpu) <=
+                  physicalLimits.cpuCapacity &&
+                (item.requirements.memoryMb ?? scheduling.capacity.local.defaultMemoryMb) <=
+                  physicalLimits.memoryCapacityMb,
+            );
+        this.#fairness.reportDemand(
+          objective.number,
+          localDemand.length,
+          localDemand.map((item) => ({
+            cpu: item.requirements.cpu ?? scheduling.capacity.local.defaultCpu,
+            memoryMb: item.requirements.memoryMb ?? scheduling.capacity.local.defaultMemoryMb,
+            cpuCapacity: physicalLimits.cpuCapacity,
+            memoryCapacityMb: physicalLimits.memoryCapacityMb,
+            paths: item.paths,
+            exclusiveResources: item.exclusiveResources,
+          })),
+        );
+        const objectiveLocalMax = this.#fairness.mayAdmit(objective.number, capacity.reservations)
+          ? this.#fairness.localMaximum(
+              objective.number,
+              Math.min(
+                scheduling.capacity.local.maxWorkers,
+                this.#controllerLimits.maxLocalWorkers,
+              ),
+              capacity.reservations,
+            )
+          : capacity.reservations.filter(
+              (reservation) => reservation.objective === objective.number && reservation.local,
+            ).length;
         const plan = planAdmissions({
           objective: objective.number,
           policy: this.#policy,
@@ -3773,6 +4094,11 @@ export class FactorySupervisor {
         const started: number[] = [];
         let capacityChanged = false;
         for (const admission of safeAdmissions) {
+          if (
+            admission.reservation.local &&
+            !this.#fairness.mayAdmit(objective.number, this.#capacity.snapshot().reservations)
+          )
+            break;
           const item = objective.items.find(
             (candidate) => candidate.number === admission.workItem,
           )!;
@@ -3787,12 +4113,13 @@ export class FactorySupervisor {
             break;
           }
           expectedCapacityGeneration = committed.generation;
+          if (admission.reservation.local) this.#fairness.noteAdmission(objective.number);
           started.push(item.number);
           let executionCapacityReleased = false;
           const releaseExecutionCapacity = () => {
             if (executionCapacityReleased) return;
             executionCapacityReleased = true;
-            this.#capacity.release(admission.reservation.key);
+            this.#releaseCapacity(admission.reservation.key);
           };
           activeExecutions.start(
             item.number,
@@ -3813,7 +4140,10 @@ export class FactorySupervisor {
         }
         if (capacityChanged) continue;
         if (activeExecutions.size === 0) {
-          await sleep(this.#options.pollIntervalMs ?? 60_000, this.#options.signal);
+          await this.#fairness.waitForChange(
+            this.#options.pollIntervalMs ?? 60_000,
+            this.#options.signal,
+          );
           continue;
         }
         const settled = await activeExecutions.waitForChange(
@@ -3825,6 +4155,8 @@ export class FactorySupervisor {
     } catch (error) {
       if (error instanceof LeaseLostError) throw error;
       if (error instanceof PlatformUnavailableError) throw error;
+      if (error instanceof SafeArtifactCheckpointHeldError) throw error;
+      if (error instanceof ArtifactCompletionUnavailableError) throw error;
       const unsafeCleanup =
         error instanceof DaytonaResourceCleanupError ||
         (error instanceof Error &&
@@ -3861,6 +4193,29 @@ export class FactorySupervisor {
     releaseExecutionCapacity: () => void,
     deliveryBase?: DeliveryExecutionBase,
     executionSignal?: AbortSignal,
+    recovered?: CollectedAttemptContinuation,
+  ): Promise<void> {
+    return withArtifactContentScope(() =>
+      this.#executeWithArtifactContent(
+        item,
+        objectiveDeadline,
+        admission,
+        releaseExecutionCapacity,
+        deliveryBase,
+        executionSignal,
+        recovered,
+      ),
+    );
+  }
+
+  async #executeWithArtifactContent(
+    item: DerivedWorkItem,
+    objectiveDeadline: number,
+    admission: AdmissionProposal,
+    releaseExecutionCapacity: () => void,
+    deliveryBase?: DeliveryExecutionBase,
+    executionSignal?: AbortSignal,
+    recovered?: CollectedAttemptContinuation,
   ): Promise<void> {
     if (
       this.#recoveryRuntime &&
@@ -3869,8 +4224,8 @@ export class FactorySupervisor {
       )
     )
       throw new Error("successor execution is not authorized for a retained source");
-    let reservation: AttemptReservation | undefined;
-    let worker: LocalWorktree | undefined;
+    let reservation: AttemptReservation | undefined = recovered?.reservation;
+    let worker: LocalWorktree | undefined = recovered?.worker;
     let validation: CleanValidationResult | undefined;
     let handle: BackendHandle | undefined;
     let selected: ExecutionBackend | undefined;
@@ -3888,8 +4243,10 @@ export class FactorySupervisor {
     let validationCapacityRecorded = false;
     let validationCapacityReconciled = false;
     let retryableArtifact: NormalizedArtifact | undefined;
-    let executionCleanupConfirmed = false;
+    let retainCollectedSource = false;
+    let executionCleanupConfirmed = Boolean(recovered);
     let backendLaunchAttempted = false;
+    let executionTerminalObserved = Boolean(recovered);
     let terminalModelTokens: number | undefined;
     let terminalModelUsage: ReportedModelUsage | undefined;
     let terminalModelProfile: string | undefined;
@@ -3916,6 +4273,10 @@ export class FactorySupervisor {
             runId: reservation.runId,
             directorEpoch: reservation.directorEpoch,
             phase: "execution",
+            ...(reservation.localScopeBatch
+              ? { localScopeBatch: reservation.localScopeBatch }
+              : {}),
+            policyDigest: reservation.policyDigest,
             providerResourceId: handle.resourceId,
           });
           executionCleanupConfirmed = true;
@@ -3931,31 +4292,35 @@ export class FactorySupervisor {
     };
     try {
       if (this.#recoveryRuntime) await this.#externalAdmission(async () => {});
-      const originalPacket = this.#packetFor(item.number);
-      const base = deliveryBase
-        ? await this.#store.readCommit(deliveryBase.sha)
-        : await this.#store.getBranchHead(this.#baseBranch);
+      const originalPacket = recovered?.packet ?? this.#packetFor(item.number);
+      const base = recovered
+        ? await this.#store.readCommit(recovered.reservation.baseSha)
+        : deliveryBase
+          ? await this.#store.readCommit(deliveryBase.sha)
+          : await this.#store.readCommit(originalPacket.baseSha);
       const publicationBaseBranch = deliveryBase?.branch ?? this.#baseBranch;
-      if (deliveryBase) {
+      if (deliveryBase && deliveryBase.kind !== "trunk") {
         const current = await this.#store.readRef(`refs/heads/${deliveryBase.branch}`);
         if (current !== deliveryBase.sha) {
           throw new Error("stack parent branch changed before child admission");
         }
       }
-      const packet = parseWorkerPacket({
-        ...originalPacket,
-        baseSha: base.oid,
-        ...(retryContext(item, this.#run.runId)
-          ? { retryContext: retryContext(item, this.#run.runId) }
-          : {}),
-        requirements: {
-          ...originalPacket.requirements,
-          ...(this.#policy.trust === "sandbox_untrusted" &&
-          originalPacket.requirements.trust === "trusted_local"
-            ? { trust: "isolated" as const }
+      const packet =
+        recovered?.packet ??
+        parseWorkerPacket({
+          ...originalPacket,
+          baseSha: base.oid,
+          ...(retryContext(item, this.#run.runId)
+            ? { retryContext: retryContext(item, this.#run.runId) }
             : {}),
-        },
-      });
+          requirements: {
+            ...originalPacket.requirements,
+            ...((this.#policy.trust === "sandbox_untrusted" || deliveryBase?.requiresIsolation) &&
+            originalPacket.requirements.trust === "trusted_local"
+              ? { trust: "isolated" as const }
+              : {}),
+          },
+        });
       assertRequirementsWithinPolicy(
         packet.requirements,
         this.#policy,
@@ -3968,360 +4333,509 @@ export class FactorySupervisor {
       );
       const attemptDeadline = new Date(Date.now() + timeoutMs);
       noHandleReplacementNotBefore = new Date(attemptDeadline.getTime() + 60_000).toISOString();
-      await this.#lease.use(async (lease) => {
-        const prior = (await this.#attempts.list(this.#run.objective, item.number)).filter(
-          (attempt) =>
-            (this.#recoveryRuntime?.accountingRunIds ?? [this.#run.runId]).includes(attempt.runId),
-        );
-        const deferred = new Set(
-          (item.factoryEvents ?? []).flatMap((event) =>
-            event.kind === "attempt" &&
-            (this.#recoveryRuntime?.accountingRunIds ?? [this.#run.runId]).includes(event.runId) &&
-            event.event === "AttemptDeferred"
-              ? [`${event.runId}:${event.attempt}`]
-              : [],
-          ),
-        );
-        const consumed = prior.filter(
-          (attempt) => !deferred.has(`${attempt.runId}:${attempt.attempt}`),
-        ).length;
-        if (consumed >= this.#policy.maxAttemptsPerItem) {
-          throw new Error(`attempt budget exhausted (${consumed})`);
-        }
-        const budgets = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
-        selected = this.#registry.get(admission.backendId) ?? undefined;
-        if (!selected) {
-          throw new Error(`admitted backend ${admission.backendId} is no longer registered`);
-        }
-        if (
-          selected.capabilities.reportsModelUsage &&
-          budgets.modelTokens !== null &&
-          budgets.modelTokens <= 0
-        ) {
-          throw new Error("model-token budget changed after admission planning");
-        }
-        if (
-          admission.reservedBudget.unit === "sandbox_milliseconds" &&
-          budgets.sandboxMinutes * 60_000 < admission.reservedBudget.amount
-        ) {
-          throw new Error("sandbox-minute budget changed after admission planning");
-        }
-        if (
-          admission.reservedBudget.unit === "managed_sessions" &&
-          budgets.managedAgentSessions < admission.reservedBudget.amount
-        ) {
-          throw new Error("managed-session budget changed after admission planning");
-        }
-        budgetUnit = isManagedAgentBackendId(selected.capabilities.id)
-          ? "managed_sessions"
-          : isSandboxBackendId(selected.capabilities.id)
-            ? "sandbox_milliseconds"
-            : "local_milliseconds";
-        const admittedExecutionUnit =
-          budgetUnit === "sandbox_milliseconds"
-            ? "sandbox_milliseconds"
-            : budgetUnit === "managed_sessions"
-              ? "managed_sessions"
-              : "none";
-        if (admission.reservedBudget.unit !== admittedExecutionUnit) {
-          throw new Error("admitted backend native budget unit changed before commit");
-        }
-        const independentValidationRequired =
-          packet.requirements.trust !== "trusted_local" || !selected.capabilities.hostExecution;
-        if (independentValidationRequired) {
-          if (!admission.validation) {
-            throw new Error("isolated work was admitted without a pinned validator");
+      if (!recovered) {
+        await this.#lease.use(async (lease) => {
+          const prior = (await this.#attempts.list(this.#run.objective, item.number)).filter(
+            (attempt) =>
+              (this.#recoveryRuntime?.accountingRunIds ?? [this.#run.runId]).includes(
+                attempt.runId,
+              ),
+          );
+          const deferred = new Set(
+            (item.factoryEvents ?? []).flatMap((event) =>
+              event.kind === "attempt" &&
+              (this.#recoveryRuntime?.accountingRunIds ?? [this.#run.runId]).includes(
+                event.runId,
+              ) &&
+              event.event === "AttemptDeferred"
+                ? [`${event.runId}:${event.attempt}`]
+                : [],
+            ),
+          );
+          const consumed = prior.filter(
+            (attempt) => !deferred.has(`${attempt.runId}:${attempt.attempt}`),
+          ).length;
+          if (consumed >= this.#policy.maxAttemptsPerItem) {
+            throw new Error(`attempt budget exhausted (${consumed})`);
           }
-          validator = this.#registry.get(admission.validation.backendId) ?? undefined;
-          if (!validator?.validate || !validator.probeValidation) {
-            throw new Error(
-              `admitted validator ${admission.validation.backendId} is no longer registered`,
-            );
+          const budgets = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
+          selected = this.#registry.get(admission.backendId) ?? undefined;
+          if (!selected) {
+            throw new Error(`admitted backend ${admission.backendId} is no longer registered`);
           }
           if (
-            budgets.sandboxMinutes * 60_000 <
-            (admission.reservedBudget.unit === "sandbox_milliseconds"
-              ? admission.reservedBudget.amount
-              : 0) +
-              (admission.validation.reservedBudget.unit === "sandbox_milliseconds"
-                ? admission.validation.reservedBudget.amount
-                : 0)
+            selected.capabilities.reportsModelUsage &&
+            budgets.modelTokens !== null &&
+            budgets.modelTokens <= 0
           ) {
-            throw new Error("sandbox-minute budget changed after validation admission planning");
+            throw new Error("model-token budget changed after admission planning");
           }
           if (
-            budgets.managedAgentSessions <
-            (admission.reservedBudget.unit === "managed_sessions"
-              ? admission.reservedBudget.amount
-              : 0) +
-              (admission.validation.reservedBudget.unit === "managed_sessions"
-                ? admission.validation.reservedBudget.amount
-                : 0)
+            admission.reservedBudget.unit === "sandbox_milliseconds" &&
+            budgets.sandboxMinutes * 60_000 < admission.reservedBudget.amount
           ) {
-            throw new Error("managed-session budget changed after validation admission planning");
+            throw new Error("sandbox-minute budget changed after admission planning");
           }
-        }
-        // Admission is the durable attempt-ref creation, rather than the
-        // preceding local backend choice.  Fence immediately before it.
-        await this.#leases.assertGeneration(lease, "admission");
-        await this.#store.claimWorkItem({
-          objective: this.#run.objective,
-          workItem: item.number,
-          runId: this.#run.runId,
-          directorEpoch: lease.epoch,
-          treeOid: base.treeOid,
-          parentOid: base.oid,
-        });
-        reservation = await this.#attempts.reserve({
-          lease,
-          workItem: item.number,
-          workItemNodeId: item.id,
-          backend: selected.capabilities.id,
-          base,
-          sequence: this.#sequences.take(),
-          prepareLocalScope: async (attempt) => {
-            if (!selected!.capabilities.hostExecution) return null;
-            const host = await (this.#localScopeHost ??= discoverLocalScopeHost());
-            if (!host) {
-              if (this.#recoveryRuntime)
-                throw new Error("successor execution requires observable owned local scopes");
-              return null;
+          if (
+            admission.reservedBudget.unit === "managed_sessions" &&
+            budgets.managedAgentSessions < admission.reservedBudget.amount
+          ) {
+            throw new Error("managed-session budget changed after admission planning");
+          }
+          budgetUnit = isManagedAgentBackendId(selected.capabilities.id)
+            ? "managed_sessions"
+            : isSandboxBackendId(selected.capabilities.id)
+              ? "sandbox_milliseconds"
+              : "local_milliseconds";
+          const admittedExecutionUnit =
+            budgetUnit === "sandbox_milliseconds"
+              ? "sandbox_milliseconds"
+              : budgetUnit === "managed_sessions"
+                ? "managed_sessions"
+                : "none";
+          if (admission.reservedBudget.unit !== admittedExecutionUnit) {
+            throw new Error("admitted backend native budget unit changed before commit");
+          }
+          const independentValidationRequired =
+            packet.requirements.trust !== "trusted_local" || !selected.capabilities.hostExecution;
+          if (independentValidationRequired) {
+            if (!admission.validation) {
+              throw new Error("isolated work was admitted without a pinned validator");
             }
-            return LocalScopeBatchSchema.parse({
-              identity: {
-                protocol: "clockgrove.factory/local-scope-v1",
-                repository: `${this.#options.owner}/${this.#options.repo}`.toLowerCase(),
-                objective: this.#run.objective,
-                runId: this.#run.runId,
-                workItem: item.number,
-                attempt,
-                directorEpoch: lease.epoch,
-                policyDigest: this.#run.policyDigest,
-                phase: "execution",
-                commandIndex: 0,
-                invocationDigest: workerPacketDigest(packet),
-                hostIdentity: host.hostIdentity,
-                ...(host.producerUnit
-                  ? {
-                      producerUnit: host.producerUnit,
-                      producerInvocationId: host.producerInvocationId,
-                    }
-                  : {}),
-              },
-              commandCount: 1,
-              producerPid: host.producerPid,
-              producerStartTicks: host.producerStartTicks,
-              deadline: attemptDeadline.toISOString(),
-            });
-          },
-          admission: {
-            admissionClass: admission.admissionClass,
-            admissionReason: admission.admissionReason,
-            requestedCpu: admission.requirements.cpu,
-            requestedMemoryMb: admission.requirements.memoryMb,
-            priorityRank: admission.priority.rank,
-            prioritySource: admission.priority.source,
-            ...(admission.priority.fieldId ? { priorityFieldId: admission.priority.fieldId } : {}),
-            ...(admission.priority.optionId
-              ? { priorityOptionId: admission.priority.optionId }
-              : {}),
-            subIssuePosition: admission.priority.subIssuePosition,
-            criticalPathLength: admission.priority.criticalPathLength,
-            unfinishedDownstream: admission.priority.unfinishedDownstream,
-            ...(admission.capacity
-              ? {
-                  capacityMeasuredAt: admission.capacity.measuredAt,
-                  effectiveCpu: admission.capacity.effectiveCpu,
-                  availableMemoryMb: admission.capacity.availableMemoryMb,
-                  loadRatio: admission.capacity.loadRatio,
-                  memoryUsageRatio: admission.capacity.memoryUsageRatio,
-                }
-              : {}),
-            ...(admission.economics ?? {}),
-          },
-        });
-        const reservedAmount =
-          admission.reservedBudget.unit === "none" ? timeoutMs : admission.reservedBudget.amount;
-        const budgetEvent = await this.#recorder.budget({
-          lease,
-          workItemNodeId: item.id,
-          reservation,
-          sequence: this.#sequences.take(),
-          event: "BudgetReserved",
-          unit: budgetUnit,
-          amount: reservedAmount,
-        });
-        this.#budgetEvents.push(budgetEvent);
-        executionBudgetReserved = true;
-        if (
-          validator &&
-          admission.validation &&
-          admission.validation.reservedBudget.unit !== "none"
-        ) {
-          validationBudgetUnit = admission.validation.reservedBudget.unit;
-          const validationBudget = await this.#recorder.budget({
+            validator = this.#registry.get(admission.validation.backendId) ?? undefined;
+            if (!validator?.validate || !validator.probeValidation) {
+              throw new Error(
+                `admitted validator ${admission.validation.backendId} is no longer registered`,
+              );
+            }
+            if (
+              budgets.sandboxMinutes * 60_000 <
+              (admission.reservedBudget.unit === "sandbox_milliseconds"
+                ? admission.reservedBudget.amount
+                : 0) +
+                (admission.validation.reservedBudget.unit === "sandbox_milliseconds"
+                  ? admission.validation.reservedBudget.amount
+                  : 0)
+            ) {
+              throw new Error("sandbox-minute budget changed after validation admission planning");
+            }
+            if (
+              budgets.managedAgentSessions <
+              (admission.reservedBudget.unit === "managed_sessions"
+                ? admission.reservedBudget.amount
+                : 0) +
+                (admission.validation.reservedBudget.unit === "managed_sessions"
+                  ? admission.validation.reservedBudget.amount
+                  : 0)
+            ) {
+              throw new Error("managed-session budget changed after validation admission planning");
+            }
+          }
+          // Admission is the durable attempt-ref creation, rather than the
+          // preceding local backend choice.  Fence immediately before it.
+          await this.#leases.assertGeneration(lease, "admission");
+          await this.#store.claimWorkItem({
+            objective: this.#run.objective,
+            workItem: item.number,
+            runId: this.#run.runId,
+            directorEpoch: lease.epoch,
+            treeOid: base.treeOid,
+            parentOid: base.oid,
+          });
+          reservation = await this.#attempts.reserve({
+            lease,
+            workItem: item.number,
+            workItemNodeId: item.id,
+            backend: selected.capabilities.id,
+            base,
+            sequence: this.#sequences.take(),
+            prepareLocalScope: async (attempt) => {
+              if (!selected!.capabilities.hostExecution) return null;
+              const host = await (this.#localScopeHost ??= discoverLocalScopeHost());
+              if (!host) {
+                if (this.#recoveryRuntime)
+                  throw new Error("successor execution requires observable owned local scopes");
+                return null;
+              }
+              return LocalScopeBatchSchema.parse({
+                identity: {
+                  protocol: "clockgrove.factory/local-scope-v1",
+                  repository: `${this.#options.owner}/${this.#options.repo}`.toLowerCase(),
+                  objective: this.#run.objective,
+                  runId: this.#run.runId,
+                  workItem: item.number,
+                  attempt,
+                  directorEpoch: lease.epoch,
+                  policyDigest: this.#run.policyDigest,
+                  phase: "execution",
+                  commandIndex: 0,
+                  invocationDigest: workerPacketDigest(packet),
+                  hostIdentity: host.hostIdentity,
+                  ...(host.producerUnit
+                    ? {
+                        producerUnit: host.producerUnit,
+                        producerInvocationId: host.producerInvocationId,
+                      }
+                    : {}),
+                },
+                commandCount: 1,
+                producerPid: host.producerPid,
+                producerStartTicks: host.producerStartTicks,
+                deadline: attemptDeadline.toISOString(),
+              });
+            },
+            admission: {
+              admissionClass: admission.admissionClass,
+              admissionReason: admission.admissionReason,
+              requestedCpu: admission.requirements.cpu,
+              requestedMemoryMb: admission.requirements.memoryMb,
+              priorityRank: admission.priority.rank,
+              prioritySource: admission.priority.source,
+              ...(admission.priority.fieldId
+                ? { priorityFieldId: admission.priority.fieldId }
+                : {}),
+              ...(admission.priority.optionId
+                ? { priorityOptionId: admission.priority.optionId }
+                : {}),
+              subIssuePosition: admission.priority.subIssuePosition,
+              criticalPathLength: admission.priority.criticalPathLength,
+              unfinishedDownstream: admission.priority.unfinishedDownstream,
+              ...(admission.capacity
+                ? {
+                    capacityMeasuredAt: admission.capacity.measuredAt,
+                    effectiveCpu: admission.capacity.effectiveCpu,
+                    availableMemoryMb: admission.capacity.availableMemoryMb,
+                    loadRatio: admission.capacity.loadRatio,
+                    memoryUsageRatio: admission.capacity.memoryUsageRatio,
+                  }
+                : {}),
+              ...(admission.economics ?? {}),
+            },
+          });
+          const reservedAmount =
+            admission.reservedBudget.unit === "none" ? timeoutMs : admission.reservedBudget.amount;
+          const budgetEvent = await this.#recorder.budget({
             lease,
             workItemNodeId: item.id,
             reservation,
             sequence: this.#sequences.take(),
             event: "BudgetReserved",
-            unit: validationBudgetUnit,
-            phase: "validation",
-            amount: admission.validation.reservedBudget.amount,
+            unit: budgetUnit,
+            amount: reservedAmount,
           });
-          this.#budgetEvents.push(validationBudget);
-          validationBudgetReserved = true;
-        }
-      });
-      if (!selected || !reservation) throw new Error("backend reservation did not complete");
-      const retryCheckpoint = selected.capabilities.providerManagedPublication
-        ? undefined
-        : this.#retryArtifacts.get(item.number, base.oid);
-      worker = await createLocalWorktree(this.#options.repository, base.oid);
-      if (retryCheckpoint) {
-        await seedLocalWorktree(worker, retryCheckpoint);
-        this.#notify(
-          `reusing validated artifact ${retryCheckpoint.digest.slice(0, 12)} for Work Item #${item.number}`,
-        );
-      }
-      const workerModelSelection = resolveModelSelection(
-        this.#policy,
-        reservation.attempt === 1 ? "implement" : "recover",
-      );
-      terminalModelProfile = workerModelSelection?.profile ?? this.#policy.modelProfile;
-      handle = await this.#externalAdmission(() => {
-        backendLaunchAttempted = true;
-        return selected!.launch({
-          repository: `${this.#options.owner}/${this.#options.repo}`,
-          objective: this.#run.objective,
-          workItem: item.number,
-          attempt: reservation!.attempt,
-          runId: this.#run.runId,
-          directorEpoch: reservation!.directorEpoch,
-          policyDigest: reservation!.policyDigest,
-          workspace: worker!.path,
-          packet,
-          policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
-          providerBaseRef: publicationBaseBranch,
-          deadline: attemptDeadline,
-          ...(reservation!.localScopeBatch
-            ? {
-                localExecutionScope: {
-                  batch: reservation!.localScopeBatch,
-                  assertCurrent: () =>
-                    this.#externalAdmission(async () => {
-                      if (Date.now() >= attemptDeadline.getTime())
-                        throw new Error("execution scope deadline expired");
-                    }),
-                },
-              }
-            : {}),
-          ...(workerModelSelection ? { modelSelection: workerModelSelection } : {}),
-          ...(retryCheckpoint ? { seededFromArtifact: true } : {}),
-        });
-      });
-      await this.#lease.use((lease) =>
-        this.#attempts.record({
-          lease,
-          workItemNodeId: item.id,
-          reservation: reservation!,
-          event: "AttemptStarted",
-          sequence: this.#sequences.take(),
-          providerResourceId: handle!.resourceId,
-          ...(handle!.metadata?.resourceHostIdentity
-            ? { resourceHostIdentity: handle!.metadata.resourceHostIdentity }
-            : {}),
-          ...(handle!.metadata?.environmentIdentity
-            ? { environmentIdentity: handle!.metadata.environmentIdentity }
-            : {}),
-        }),
-      );
-
-      let lastCancellationCheck = 0;
-      for (;;) {
-        await this.#lease.renewIfNeeded();
-        if (Date.now() - lastCancellationCheck >= 10_000) {
-          lastCancellationCheck = Date.now();
-          const cancellation = await this.#reader.readRunCancellationRequest(
-            this.#run.objective,
-            this.#run.runId,
-            this.#run.actor,
-            this.#activationBinding(),
-          );
-          if (cancellation) {
-            this.#sequences.observe([cancellation]);
-            throw new RunCancellationRequestedError(
-              "operator requested cancellation through GitHub",
-            );
-          }
-        }
-        const observation = await selected.observe(handle);
-        if (["succeeded", "failed", "cancelled"].includes(observation.state)) {
-          terminalModelUsage = reportedModelUsage(observation.usage);
-          const observedTokens = reportedModelTokens(observation.usage);
-          if (observedTokens !== null) {
-            terminalModelTokens = observedTokens;
-            await this.#lease.use(async (lease) => {
-              const event = await this.#recorder.budget({
-                lease,
-                workItemNodeId: item.id,
-                reservation: reservation!,
-                sequence: this.#sequences.take(),
-                event: "BudgetReconciled",
-                unit: "model_tokens",
-                phase: "execution",
-                amount: observedTokens,
-                usageId: `worker-${item.number}-${reservation!.attempt}`,
-                ...(terminalModelUsage ? { reportedModelUsage: terminalModelUsage } : {}),
-              });
-              this.#budgetEvents.push(event);
+          this.#budgetEvents.push(budgetEvent);
+          executionBudgetReserved = true;
+          if (
+            validator &&
+            admission.validation &&
+            admission.validation.reservedBudget.unit !== "none"
+          ) {
+            validationBudgetUnit = admission.validation.reservedBudget.unit;
+            const validationBudget = await this.#recorder.budget({
+              lease,
+              workItemNodeId: item.id,
+              reservation,
+              sequence: this.#sequences.take(),
+              event: "BudgetReserved",
+              unit: validationBudgetUnit,
+              phase: "validation",
+              amount: admission.validation.reservedBudget.amount,
             });
-          } else if (this.#policy.economics && selected.capabilities.reportsModelUsage) {
-            throw new Error(
-              `backend ${selected.capabilities.id} omitted terminal model-token usage required by maxModelTokens`,
-            );
+            this.#budgetEvents.push(validationBudget);
+            validationBudgetReserved = true;
           }
-          if (observation.state !== "succeeded") {
-            throw new Error(observation.reason ?? `worker ${observation.state}`);
+        });
+      } else {
+        selected = this.#registry.get(recovered.reservation.backend) ?? undefined;
+        terminalModelUsage = recovered.modelUsage;
+        terminalModelTokens =
+          recovered.modelTokens ??
+          (recovered.modelUsage
+            ? recovered.modelUsage.inputTokens + recovered.modelUsage.outputTokens
+            : undefined);
+        budgetUnit = recovered.nativeUsage.unit;
+        executionBudgetReconciled = true;
+        if (admission.validation) {
+          validator = this.#registry.get(admission.validation.backendId) ?? undefined;
+          if (!validator?.validate || !validator.probeValidation)
+            throw new Error("recovered artifact validator is no longer available");
+          if (admission.validation.reservedBudget.unit !== "none") {
+            validationBudgetUnit = admission.validation.reservedBudget.unit;
+            validationBudgetReserved = true;
           }
-          break;
+          // Source preparation is not replacement implementation. The exact
+          // original artifact is validated in its required independent boundary.
+          worker ??= await createLocalWorktree(this.#options.repository, base.oid);
         }
-        await sleep(this.#options.pollIntervalMs ?? 2_000, executionSignal);
+        terminalModelProfile =
+          resolveModelSelection(this.#policy, reservation!.attempt === 1 ? "implement" : "recover")
+            ?.profile ?? this.#policy.modelProfile;
       }
-      const artifact = await selected.collect(handle);
+      if (!selected || !reservation) throw new Error("backend reservation did not complete");
+      if (!recovered) {
+        const retryCheckpoint = selected.capabilities.providerManagedPublication
+          ? undefined
+          : await this.#retryArtifacts.get(item.number, base.oid);
+        worker = await createLocalWorktree(this.#options.repository, base.oid);
+        if (retryCheckpoint) {
+          await seedLocalWorktree(worker, retryCheckpoint);
+          this.#notify(
+            `reusing validated artifact ${retryCheckpoint.digest.slice(0, 12)} for Work Item #${item.number}`,
+          );
+        }
+        const workerModelSelection = resolveModelSelection(
+          this.#policy,
+          reservation.attempt === 1 ? "implement" : "recover",
+        );
+        terminalModelProfile = workerModelSelection?.profile ?? this.#policy.modelProfile;
+        const sessionJournal =
+          selected.capabilities.id === "codex-app-server/local-worktree"
+            ? await this.#sessionJournal(reservation)
+            : undefined;
+        handle = await this.#externalAdmission(() => {
+          backendLaunchAttempted = true;
+          return selected!.launch({
+            repository: `${this.#options.owner}/${this.#options.repo}`,
+            objective: this.#run.objective,
+            workItem: item.number,
+            attempt: reservation!.attempt,
+            runId: this.#run.runId,
+            directorEpoch: reservation!.directorEpoch,
+            policyDigest: reservation!.policyDigest,
+            workspace: worker!.path,
+            packet,
+            ...(sessionJournal ? { sessionJournal } : {}),
+            policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
+            providerBaseRef: publicationBaseBranch,
+            deadline: attemptDeadline,
+            ...(reservation!.localScopeBatch
+              ? {
+                  localExecutionScope: {
+                    batch: reservation!.localScopeBatch,
+                    assertCurrent: () =>
+                      this.#externalAdmission(async () => {
+                        if (Date.now() >= attemptDeadline.getTime())
+                          throw new Error("execution scope deadline expired");
+                      }),
+                  },
+                }
+              : {}),
+            ...(workerModelSelection ? { modelSelection: workerModelSelection } : {}),
+            ...(retryCheckpoint ? { seededFromArtifact: true } : {}),
+          });
+        });
+        await this.#lease.use((lease) =>
+          this.#attempts.record({
+            ...(recovered ? { allowRecovery: true } : {}),
+            lease,
+            workItemNodeId: item.id,
+            reservation: reservation!,
+            event: "AttemptStarted",
+            sequence: this.#sequences.take(),
+            providerResourceId: handle!.resourceId,
+            ...(handle!.metadata?.sourceArchiveDigest
+              ? { sourceArchiveDigest: handle!.metadata.sourceArchiveDigest }
+              : {}),
+            ...(handle!.metadata?.sourceArchiveBytes === undefined
+              ? {}
+              : { sourceArchiveBytes: Number(handle!.metadata.sourceArchiveBytes) }),
+            ...(handle!.metadata?.resourceHostIdentity
+              ? { resourceHostIdentity: handle!.metadata.resourceHostIdentity }
+              : {}),
+            ...(handle!.metadata?.environmentIdentity
+              ? { environmentIdentity: handle!.metadata.environmentIdentity }
+              : {}),
+          }),
+        );
+
+        let lastCancellationCheck = 0;
+        for (;;) {
+          await this.#lease.renewIfNeeded();
+          if (Date.now() - lastCancellationCheck >= 10_000) {
+            lastCancellationCheck = Date.now();
+            const cancellation = await this.#reader.readRunCancellationRequest(
+              this.#run.objective,
+              this.#run.runId,
+              this.#run.actor,
+              this.#activationBinding(),
+            );
+            if (cancellation) {
+              this.#sequences.observe([cancellation]);
+              throw new RunCancellationRequestedError(
+                "operator requested cancellation through GitHub",
+              );
+            }
+          }
+          const observation = await selected.observe(handle);
+          if (
+            selected.capabilities.id === "codex-app-server/local-worktree" &&
+            observation.state === "unknown"
+          )
+            throw new Error(
+              "App Server outcome is unknown; automated replacement is blocked pending exact session recovery",
+            );
+          if (["succeeded", "failed", "cancelled"].includes(observation.state)) {
+            executionTerminalObserved = true;
+            terminalModelUsage = reportedModelUsage(observation.usage);
+            const observedTokens = reportedModelTokens(observation.usage);
+            if (observedTokens !== null) {
+              terminalModelTokens = observedTokens;
+              await this.#lease.use(async (lease) => {
+                const event = await this.#recorder.budget({
+                  lease,
+                  workItemNodeId: item.id,
+                  reservation: reservation!,
+                  sequence: this.#sequences.take(),
+                  event: "BudgetReconciled",
+                  unit: "model_tokens",
+                  phase: "execution",
+                  amount: observedTokens,
+                  usageId: `worker-${item.number}-${reservation!.attempt}`,
+                  ...(terminalModelUsage ? { reportedModelUsage: terminalModelUsage } : {}),
+                });
+                this.#budgetEvents.push(event);
+              });
+            } else if (this.#policy.economics && selected.capabilities.reportsModelUsage) {
+              if (selected.capabilities.id === "codex-app-server/local-worktree")
+                throw new Error(
+                  "App Server final model usage is unavailable; automated replacement is blocked",
+                );
+              throw new Error(
+                `backend ${selected.capabilities.id} omitted terminal model-token usage required by maxModelTokens`,
+              );
+            }
+            if (observation.state !== "succeeded") {
+              throw new Error(observation.reason ?? `worker ${observation.state}`);
+            }
+            break;
+          }
+          await sleep(this.#options.pollIntervalMs ?? 2_000, executionSignal);
+        }
+      }
+      let artifact = recovered?.artifact ?? (await selected.collect(handle!));
+      this.#retainArtifactContent(artifact);
+      assertArtifactScope(artifact, packet.allowedPaths);
+      if (!recovered && artifact.outcome === "succeeded")
+        artifact = await bindArtifactManifest(this.#options.repository, artifact);
+      this.#retainArtifactContent(artifact);
       retryableArtifact = artifact;
       if (artifact.outcome !== "succeeded") {
         throw new Error(artifact.reason ?? `worker ${artifact.outcome}`);
       }
-      await this.#lease.use((lease) =>
-        this.#attempts.record({
-          lease,
-          workItemNodeId: item.id,
-          reservation: reservation!,
-          event: "AttemptSucceeded",
-          sequence: this.#sequences.take(),
+      try {
+        await this.#persistCollectedArtifact(reservation, packet, artifact);
+      } catch (cause) {
+        // Keep the original workspace only when no complete independent copy can
+        // be verified. Complete local pending bytes or a ready ref survive cleanup.
+        retainCollectedSource = !(await artifactRecoveryCopyAvailable({
+          store: this.#store,
+          identity: this.#artifactTransferIdentity(reservation),
           artifactDigest: artifact.digest,
-          ...(terminalModelProfile ? { modelProfile: terminalModelProfile } : {}),
-          ...(terminalModelTokens === undefined
-            ? {}
-            : { reportedModelTokens: terminalModelTokens }),
-          ...(terminalModelUsage ? { reportedModelUsage: terminalModelUsage } : {}),
-        }),
-      );
+        }));
+        throw new ArtifactCollectionCheckpointError(cause);
+      }
+      if (
+        !recovered ||
+        !(item.factoryEvents ?? []).some(
+          (event) =>
+            event.kind === "attempt" &&
+            event.event === "AttemptSucceeded" &&
+            event.runId === reservation!.runId &&
+            event.attempt === reservation!.attempt &&
+            event.artifactDigest === artifact.digest,
+        )
+      )
+        await this.#lease.use((lease) =>
+          this.#attempts.record({
+            ...(recovered ? { allowRecovery: true } : {}),
+            lease,
+            workItemNodeId: item.id,
+            reservation: reservation!,
+            event: "AttemptSucceeded",
+            sequence: this.#sequences.take(),
+            artifactDigest: artifact.digest,
+            ...(terminalModelProfile ? { modelProfile: terminalModelProfile } : {}),
+            ...(terminalModelTokens === undefined
+              ? {}
+              : { reportedModelTokens: terminalModelTokens }),
+            ...(terminalModelUsage ? { reportedModelUsage: terminalModelUsage } : {}),
+          }),
+        );
       await confirmExecutionCleanup("post-collection backend cleanup");
-      await this.#lease.use(async (lease) => {
-        const event = await this.#recorder.budget({
-          lease,
-          workItemNodeId: item.id,
-          reservation: reservation!,
-          sequence: this.#sequences.take(),
-          event: "BudgetReconciled",
-          unit: budgetUnit,
-          amount: budgetUnit === "managed_sessions" ? 1 : Date.now() - started,
+      if (!recovered)
+        await this.#lease.use(async (lease) => {
+          const event = await this.#recorder.budget({
+            lease,
+            workItemNodeId: item.id,
+            reservation: reservation!,
+            sequence: this.#sequences.take(),
+            event: "BudgetReconciled",
+            unit: budgetUnit,
+            amount: budgetUnit === "managed_sessions" ? 1 : Date.now() - started,
+          });
+          this.#budgetEvents.push(event);
+          executionBudgetReconciled = true;
         });
-        this.#budgetEvents.push(event);
-        executionBudgetReconciled = true;
-      });
+      if (
+        !recovered &&
+        selected.capabilities.id === "codex-app-server/local-worktree" &&
+        reservation.localScopeBatch
+      ) {
+        const native = this.#budgetEvents
+          .filter(
+            (event) =>
+              event.kind === "budget" &&
+              event.event === "BudgetReconciled" &&
+              event.runId === reservation!.runId &&
+              event.workItem === reservation!.workItem &&
+              event.attempt === reservation!.attempt &&
+              event.phase === "execution" &&
+              event.unit === "local_milliseconds",
+          )
+          .at(-1);
+        try {
+          await holdAppServerQualificationCheckpoint({
+            repository: `${this.#options.owner}/${this.#options.repo}`,
+            objective: this.#run.objective,
+            ...(this.#run.activationRequestId
+              ? { activationRequestId: this.#run.activationRequestId }
+              : {}),
+            runId: reservation.runId,
+            workItem: reservation.workItem,
+            attempt: reservation.attempt,
+            directorEpoch: reservation.directorEpoch,
+            policyDigest: reservation.policyDigest,
+            baseSha: reservation.baseSha,
+            artifactDigest: artifact.digest,
+            threadId: handle!.resourceId,
+            turnId: handle!.metadata?.turnId ?? "",
+            modelTokens: terminalModelTokens ?? NaN,
+            nativeMilliseconds: native?.kind === "budget" ? native.amount : NaN,
+            batch: reservation.localScopeBatch,
+            ...(executionSignal ? { signal: executionSignal } : {}),
+            assertCurrent: () => this.#lease.assert(),
+            proveTerminal: async () => {
+              const terminal = await this.#sessions.load(
+                `${this.#options.owner}/${this.#options.repo}`,
+                reservation!,
+                "terminal",
+              );
+              if (
+                !terminal ||
+                terminal.state !== "succeeded" ||
+                !completeSessionUsage(terminal.usage) ||
+                terminal.turnId !== handle!.metadata?.turnId ||
+                terminal.binding.threadId !== handle!.resourceId ||
+                terminal.usage!.inputTokens! + terminal.usage!.outputTokens! !== terminalModelTokens
+              )
+                throw new Error("qualification hold lacks exact complete terminal session usage");
+            },
+          });
+        } catch (cause) {
+          if (cause instanceof SafeArtifactCheckpointHeldError) throw cause;
+          throw new SafeArtifactCheckpointHeldError(cause);
+        }
+      }
       const validationBackendId = validator?.capabilities.id ?? "factory/local-validation";
       validationCapacity = {
         key: capacityReservationKey({
@@ -4371,22 +4885,25 @@ export class FactorySupervisor {
           }
         }
         const current = this.#capacity.snapshot();
-        const transitioned = this.#capacity.transition(
-          current.generation,
-          admission.reservation.key,
-          validationCapacity,
-          admissionCapacityLimits(
-            this.#policy,
-            validationResource,
+        const limits = admissionCapacityLimits(
+          this.#policy,
+          validationResource,
+          this.#run.objective,
+          this.#fairness.localMaximum(
             this.#run.objective,
-            this.#fairness.localMaximum(
-              this.#run.objective,
-              Math.min(effective.capacity.local.maxWorkers, this.#controllerLimits.maxLocalWorkers),
-              current.reservations,
-            ),
-            this.#controllerLimits,
+            Math.min(effective.capacity.local.maxWorkers, this.#controllerLimits.maxLocalWorkers),
+            current.reservations,
           ),
+          this.#controllerLimits,
         );
+        const transitioned = recovered
+          ? this.#capacity.tryReserve(current.generation, validationCapacity, limits)
+          : this.#capacity.transition(
+              current.generation,
+              admission.reservation.key,
+              validationCapacity,
+              limits,
+            );
         if (transitioned.reserved) break;
         if (transitioned.code === "duplicate-reservation") {
           throw new Error("execution capacity disappeared before validation transition");
@@ -4404,6 +4921,7 @@ export class FactorySupervisor {
           );
       await this.#lease.use(async (lease) => {
         const capacityEvent = await this.#attempts.recordCapacity({
+          ...(recovered ? { allowRecovery: true } : {}),
           lease,
           workItemNodeId: item.id,
           reservation: reservation!,
@@ -4426,6 +4944,7 @@ export class FactorySupervisor {
       });
       await this.#lease.use((lease) =>
         this.#attempts.record({
+          ...(recovered ? { allowRecovery: true } : {}),
           lease,
           workItemNodeId: item.id,
           reservation: reservation!,
@@ -4479,6 +4998,7 @@ export class FactorySupervisor {
       );
       await this.#lease.use(async (lease) => {
         await this.#attempts.recordCapacity({
+          ...(recovered ? { allowRecovery: true } : {}),
           lease,
           workItemNodeId: item.id,
           reservation: reservation!,
@@ -4491,7 +5011,7 @@ export class FactorySupervisor {
         });
         validationCapacityReconciled = true;
       });
-      this.#capacity.release(validationCapacity.key);
+      this.#releaseCapacity(validationCapacity.key);
       await this.#lease.use(async (lease) => {
         const event = await this.#recorder.budget({
           lease,
@@ -4583,8 +5103,8 @@ export class FactorySupervisor {
       });
       await this.#lease.assertGeneration("publication");
       if (selected.capabilities.providerManagedPublication) {
-        const pullNumber = Number(handle.metadata?.pullNumber);
-        const headSha = handle.metadata?.headSha;
+        const pullNumber = Number(handle!.metadata?.pullNumber);
+        const headSha = handle!.metadata?.headSha;
         if (!Number.isInteger(pullNumber) || pullNumber <= 0 || !headSha) {
           throw new Error("managed backend did not identify its pull request");
         }
@@ -4622,6 +5142,7 @@ export class FactorySupervisor {
       const publication = published;
       await this.#lease.use((lease) =>
         this.#attempts.record({
+          ...(recovered ? { allowRecovery: true } : {}),
           lease,
           workItemNodeId: item.id,
           reservation: reservation!,
@@ -4665,11 +5186,11 @@ export class FactorySupervisor {
           event: "PublicationRecorded",
         }),
       );
-      if (this.#deliverySelection.selected !== "native-stacks") {
-        await this.#integrate(item, reservation, publication, objectiveDeadline);
-      }
-      this.#retryArtifacts.delete(item.number);
+      // Publication ends the worker pipeline. The next reconstructed snapshot
+      // integrates regular and native siblings through exact candidate recovery.
+      await this.#retryArtifacts.delete(item.number);
     } catch (error) {
+      if (error instanceof SafeArtifactCheckpointHeldError) throw error;
       if (
         retryableArtifact &&
         validation &&
@@ -4677,10 +5198,12 @@ export class FactorySupervisor {
         selected.capabilities.hostExecution &&
         !selected.capabilities.providerManagedPublication
       ) {
-        this.#retryArtifacts.set(item.number, retryableArtifact);
+        await this.#retryArtifacts.set(item.number, retryableArtifact);
       }
       const cancellation =
         error instanceof RunCancellationRequestedError || executionSignal?.aborted;
+      if (backendLaunchAttempted && !executionTerminalObserved && !cancellation)
+        retainCollectedSource = true;
       if (
         backendLaunchAttempted &&
         !handle &&
@@ -4702,6 +5225,10 @@ export class FactorySupervisor {
             runId: reservation.runId,
             directorEpoch: reservation.directorEpoch,
             phase: "execution",
+            ...(reservation.localScopeBatch
+              ? { localScopeBatch: reservation.localScopeBatch }
+              : {}),
+            policyDigest: reservation.policyDigest,
             ...(noHandleReplacementNotBefore ? { noHandleReplacementNotBefore } : {}),
           });
           executionCleanupConfirmed = true;
@@ -4802,9 +5329,27 @@ export class FactorySupervisor {
       if (
         error instanceof PlatformUnavailableError ||
         error instanceof LeaseLostError ||
-        error instanceof NoExecutionBackendError
+        error instanceof ArtifactCollectionCheckpointError ||
+        error instanceof NoExecutionBackendError ||
+        (selected?.capabilities.id === "codex-app-server/local-worktree" &&
+          error instanceof Error &&
+          /automated replacement is blocked/.test(error.message))
       ) {
         throw error;
+      }
+      if (
+        backendLaunchAttempted &&
+        !executionTerminalObserved &&
+        !cancellation &&
+        !selected?.capabilities.providerManagedPublication
+      ) {
+        retainCollectedSource = true;
+        throw new ArtifactCollectionCheckpointError(
+          new Error(
+            "execution completion is unknown after dispatch; absence alone does not authorize replacement",
+            { cause: error },
+          ),
+        );
       }
       if (cancelledUsageWriteFailure) throw cancelledUsageWriteFailure.error;
       const reason = error instanceof Error ? error.message : String(error);
@@ -4842,6 +5387,7 @@ export class FactorySupervisor {
           await this.#lease
             .use(async (lease) => {
               await this.#attempts.recordCapacity({
+                ...(recovered ? { allowRecovery: true } : {}),
                 lease,
                 workItemNodeId: item.id,
                 reservation: reservation!,
@@ -4895,6 +5441,7 @@ export class FactorySupervisor {
         }
         await this.#lease.use((lease) =>
           this.#attempts.record({
+            ...(recovered ? { allowRecovery: true } : {}),
             lease,
             workItemNodeId: item.id,
             reservation: reservation!,
@@ -4932,16 +5479,735 @@ export class FactorySupervisor {
         finalizationError = error;
       }
       try {
-        if (worker) await cleanupLocalWorktree(worker);
+        if (worker && !retainCollectedSource) await cleanupLocalWorktree(worker);
         if (validation) await discardValidationResult(validation);
       } catch (error) {
         finalizationError ??= error;
       } finally {
-        if (validationCapacity) this.#capacity.release(validationCapacity.key);
+        if (validationCapacity) this.#releaseCapacity(validationCapacity.key);
       }
       // biome-ignore lint/correctness/noUnsafeFinally: uncertain cleanup must override success so Factory cannot launch a duplicate paid or local worker
       if (finalizationError) throw finalizationError;
     }
+  }
+
+  /** Ready immutable artifacts take this entry before any provider-session fallback.
+   * Caller proves original resource absence; this entry independently requires exact
+   * reconciled execution accounting and never replays an already-started validation. */
+  async #continueCollectedArtifact(
+    item: DerivedWorkItem,
+    deadline: number,
+    recovered: CollectedAttemptContinuation,
+  ): Promise<void> {
+    const { reservation, packet, artifact, modelUsage, nativeUsage } = recovered;
+    const modelTokens =
+      recovered.modelTokens ??
+      (modelUsage ? modelUsage.inputTokens + modelUsage.outputTokens : undefined);
+    const backend = this.#registry.get(reservation.backend);
+    const original = reservation.admission;
+    if (
+      !backend ||
+      backend.capabilities.providerManagedPublication ||
+      !original ||
+      reservation.runId !== this.#run.runId ||
+      reservation.objective !== this.#run.objective ||
+      reservation.workItem !== item.number ||
+      reservation.policyDigest !== policyDigest(this.#policy) ||
+      packet.baseSha !== reservation.baseSha ||
+      artifact.baseSha !== reservation.baseSha ||
+      artifact.outcome !== "succeeded" ||
+      (backend.capabilities.hostExecution && !reservation.localScopeBatch) ||
+      (reservation.localScopeBatch &&
+        reservation.localScopeBatch.identity.invocationDigest !== workerPacketDigest(packet))
+    )
+      throw new Error("collected attempt continuation is not bound to its original execution");
+    const prior = deduplicateFactoryEvents([
+      ...(item.factoryEvents ?? []),
+      ...this.#budgetEvents,
+    ]).filter(
+      (event) =>
+        event.runId === reservation.runId &&
+        "workItem" in event &&
+        event.workItem === item.number &&
+        "attempt" in event &&
+        event.attempt === reservation.attempt,
+    );
+    if (
+      prior.some(
+        (event) =>
+          event.kind === "validation" ||
+          (event.kind === "capacity" && event.phase === "validation") ||
+          (event.kind === "attempt" &&
+            [
+              "AttemptCollected",
+              "AttemptValidated",
+              "AttemptPublished",
+              "AttemptIntegrated",
+              "AttemptFailed",
+              "AttemptTimedOut",
+              "AttemptCancelled",
+              "AttemptDeferred",
+            ].includes(event.event)),
+      )
+    )
+      throw new Error(
+        "collected continuation cannot replay terminal or previously invoked validation work",
+      );
+    if (
+      prior.some(
+        (event) =>
+          event.kind === "attempt" &&
+          event.event === "AttemptSucceeded" &&
+          event.artifactDigest !== artifact.digest,
+      )
+    )
+      throw new Error("retained artifact differs from its original terminal success receipt");
+    const model = prior.filter(
+      (event) =>
+        event.kind === "budget" &&
+        event.event === "BudgetReconciled" &&
+        event.phase === "execution" &&
+        event.unit === "model_tokens",
+    );
+    const native = prior.filter(
+      (event) =>
+        event.kind === "budget" &&
+        event.event === "BudgetReconciled" &&
+        event.phase === "execution" &&
+        event.unit === nativeUsage.unit,
+    );
+    if (
+      modelUsage &&
+      model.some(
+        (event) =>
+          event.kind === "budget" &&
+          event.reportedModelUsage &&
+          (["inputTokens", "outputTokens", "cachedInputTokens"] as const).some(
+            (key) =>
+              event.reportedModelUsage?.[key] !== undefined &&
+              modelUsage[key] !== undefined &&
+              event.reportedModelUsage[key] !== modelUsage[key],
+          ),
+      )
+    )
+      throw new Error("collected continuation has conflicting model usage breakdowns");
+    if (
+      prior.some(
+        (event) =>
+          event.kind === "attempt" &&
+          event.event === "AttemptSucceeded" &&
+          event.reportedModelTokens !== undefined &&
+          event.reportedModelTokens !== modelTokens,
+      )
+    )
+      throw new Error("collected continuation model accounting differs from terminal success");
+    const expectedUnit = isManagedAgentBackendId(reservation.backend)
+      ? "managed_sessions"
+      : isSandboxBackendId(reservation.backend)
+        ? "sandbox_milliseconds"
+        : "local_milliseconds";
+    if (
+      (this.#policy.economics &&
+        backend.capabilities.reportsModelUsage &&
+        (modelTokens === undefined || !model.length)) ||
+      (modelTokens !== undefined &&
+        (!Number.isSafeInteger(modelTokens) ||
+          modelTokens < 0 ||
+          !model.length ||
+          model.some(
+            (event) =>
+              event.kind !== "budget" ||
+              event.usageId !== `worker-${item.number}-${reservation.attempt}` ||
+              event.amount !== modelTokens,
+          ))) ||
+      (modelUsage && modelUsage.inputTokens + modelUsage.outputTokens !== modelTokens) ||
+      (modelTokens === undefined && model.length > 0) ||
+      nativeUsage.unit !== expectedUnit ||
+      !native.length ||
+      native.some((event) => event.kind !== "budget" || event.amount !== nativeUsage.amount) ||
+      !Number.isFinite(nativeUsage.amount) ||
+      nativeUsage.amount < 0
+    )
+      throw new Error("collected continuation lacks exact reconciled execution accounting");
+    let validation: AdmissionProposal["validation"];
+    if (packet.requirements.trust !== "trusted_local" || !backend.capabilities.hostExecution) {
+      const held = unreconciledBudgetReservations(prior).filter(
+        (event) => event.phase === "validation",
+      );
+      const remaining = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
+      const duration = Math.min(
+        (packet.requirements.timeoutMinutes ?? this.#policy.workItemTimeoutMinutes) * 60_000,
+        deadline - Date.now(),
+      );
+      if (duration <= 0)
+        throw new Error("Objective deadline exhausted before recovered artifact validation");
+      const selected = await this.#externalAdmission(() =>
+        this.#registry.selectIsolatedValidator({
+          policy: this.#policy,
+          requirements: packet.requirements,
+          estimatedDurationMs: duration,
+          budget: {
+            ...remaining,
+            sandboxMinutes:
+              remaining.sandboxMinutes +
+              held
+                .filter((event) => event.unit === "sandbox_milliseconds")
+                .reduce((sum, event) => sum + event.amount, 0) /
+                60_000,
+          },
+        }),
+      );
+      const unit = isSandboxBackendId(selected.backend.capabilities.id)
+        ? "sandbox_milliseconds"
+        : isManagedAgentBackendId(selected.backend.capabilities.id)
+          ? "managed_sessions"
+          : "none";
+      const reservationBudget = held.filter((event) => event.unit === unit);
+      if (
+        unit !== "none" &&
+        (reservationBudget.length !== 1 ||
+          reservationBudget[0]!.amount < (unit === "managed_sessions" ? 1 : duration))
+      )
+        throw new Error(
+          "recovered artifact requires its existing unspent independent-validation allowance",
+        );
+      validation = {
+        backendId: selected.backend.capabilities.id,
+        reservedBudget: { unit, amount: reservationBudget[0]?.amount ?? 0 },
+      };
+    }
+    const executionKey = capacityReservationKey({
+      objective: reservation.objective,
+      workItem: item.number,
+      attempt: reservation.attempt,
+      phase: "execution",
+      backendId: reservation.backend,
+    });
+    this.#capacity.release(executionKey);
+    const admission: AdmissionProposal = {
+      workItem: item.number,
+      backendId: reservation.backend,
+      admissionClass: original.admissionClass,
+      admissionReason: original.admissionReason,
+      requirements: { cpu: original.requestedCpu, memoryMb: original.requestedMemoryMb },
+      priority: {
+        rank: original.priorityRank,
+        source: original.prioritySource ?? "subissue-order",
+        subIssuePosition: original.subIssuePosition,
+        criticalPathLength: original.criticalPathLength,
+        unfinishedDownstream: original.unfinishedDownstream,
+      },
+      capacityGeneration: this.#capacity.snapshot().generation,
+      reservation: {
+        key: executionKey,
+        objective: reservation.objective,
+        workItem: item.number,
+        attempt: reservation.attempt,
+        phase: "execution",
+        backendId: reservation.backend,
+        admissionClass: original.admissionClass,
+        local: backend.capabilities.hostExecution && !backend.capabilities.requiresPaidRuntime,
+        cpu: original.requestedCpu,
+        memoryMb: original.requestedMemoryMb,
+        paidUnits: backend.capabilities.requiresPaidRuntime ? 1 : 0,
+        paths: packet.allowedPaths,
+        exclusiveResources: packet.changeSurface?.exclusiveResources ?? [],
+      },
+      reservedBudget: { unit: "none", amount: 0 },
+      ...(validation ? { validation } : {}),
+    };
+    let deliveryBase: DeliveryExecutionBase | undefined;
+    if (this.#deliverySelection.selected === "native-stacks") {
+      const metadata = parseGraphItemMetadata(item.body ?? "");
+      const planned = this.#deliveryPlan?.items.find((entry) => entry.itemId === metadata.id);
+      if (!planned) throw new Error("retained artifact lacks its immutable delivery plan");
+      if (planned.parentItemId) {
+        const snapshot = await this.#reader.readObjective(this.#run.objective);
+        this.#fenceSnapshot(snapshot);
+        const parent = this.#deriveObjective(snapshot).items.find(
+          (entry) => parseGraphItemMetadata(entry.body ?? "").id === planned.parentItemId,
+        );
+        if (!parent) throw new Error("retained artifact stack parent is missing");
+        const member = await this.#nativeStackMember(parent, true);
+        if (
+          member.pull.commitSha !== reservation.baseSha ||
+          member.observedHeadSha !== reservation.baseSha
+        )
+          throw new Error(
+            "retained artifact stack parent advanced; automated replacement is blocked pending exact parent recovery",
+          );
+        deliveryBase = { branch: member.pull.branch, sha: reservation.baseSha };
+      }
+    }
+    await this.#execute(
+      item,
+      deadline,
+      admission,
+      () => {},
+      deliveryBase,
+      this.#options.signal,
+      recovered,
+    );
+  }
+
+  #retainArtifactContent(artifact: NormalizedArtifact): NormalizedArtifact {
+    return retainScopedArtifact(artifact);
+  }
+
+  async #sessionJournal(reservation: AttemptReservation): Promise<AppServerSessionJournal> {
+    const repository = `${this.#options.owner}/${this.#options.repo}`;
+    const earlier = (await this.#attempts.list(reservation.objective, reservation.workItem))
+      .filter(
+        (candidate) =>
+          candidate.runId === reservation.runId &&
+          candidate.attempt < reservation.attempt &&
+          candidate.backend === "codex-app-server/local-worktree",
+      )
+      .sort((a, b) => b.attempt - a.attempt);
+    let previous: AppServerSessionJournal["previous"];
+    if (earlier[0]) {
+      previous = (await this.#sessions.load(repository, earlier[0], "terminal")) ?? undefined;
+      if (!previous || !completeSessionUsage(previous.usage))
+        throw new Error(
+          "prior App Server session usage is unavailable; automated replacement is blocked",
+        );
+    }
+    return {
+      load: (stage) => this.#sessions.load(repository, reservation, stage),
+      persist: (checkpoint) =>
+        this.#lease.use((lease) =>
+          this.#sessions.persist({ repository, reservation, lease, checkpoint }),
+        ),
+      assertCurrent: () => this.#externalAdmission(async () => {}),
+      ...(previous ? { previous } : {}),
+    };
+  }
+
+  /** Ready artifact recovery reads this first; it does not reload a provider or recollect. */
+  async #recoverAppServerUsage(
+    item: DerivedWorkItem,
+    reservation: AttemptReservation,
+    events: readonly FactoryEvent[],
+  ): Promise<(ReportedModelUsage & { inputTokens: number; outputTokens: number }) | null> {
+    const terminal = await this.#sessions.load(
+      `${this.#options.owner}/${this.#options.repo}`,
+      reservation,
+      "terminal",
+    );
+    if (!terminal || terminal.state !== "succeeded" || !completeSessionUsage(terminal.usage))
+      return null;
+    const usage = reportedModelUsage(terminal.usage);
+    if (!usage || usage.inputTokens === undefined || usage.outputTokens === undefined) return null;
+    const matching = events.filter(
+      (event) =>
+        event.kind === "budget" &&
+        event.event === "BudgetReconciled" &&
+        event.runId === reservation.runId &&
+        event.workItem === item.number &&
+        event.attempt === reservation.attempt &&
+        event.phase === "execution" &&
+        event.unit === "model_tokens",
+    );
+    if (
+      matching.some(
+        (event) =>
+          event.kind !== "budget" ||
+          event.usageId !== `worker-${item.number}-${reservation.attempt}` ||
+          event.amount !== usage.inputTokens! + usage.outputTokens!,
+      )
+    )
+      throw new Error("App Server terminal usage conflicts with its original budget receipt");
+    if (!matching.length)
+      await this.#lease.use(async (lease) => {
+        this.#budgetEvents.push(
+          await this.#recorder.budget({
+            lease,
+            workItemNodeId: item.id,
+            reservation,
+            sequence: this.#sequences.take(),
+            event: "BudgetReconciled",
+            phase: "execution",
+            unit: "model_tokens",
+            amount: usage.inputTokens! + usage.outputTokens!,
+            usageId: `worker-${item.number}-${reservation.attempt}`,
+            reportedModelUsage: usage,
+          }),
+        );
+      });
+    return { ...usage, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens };
+  }
+
+  async #recoverAppServerSession(
+    item: DerivedWorkItem,
+    reservation: AttemptReservation,
+    deadline: number,
+    events: readonly FactoryEvent[],
+  ): Promise<void> {
+    const repository = `${this.#options.owner}/${this.#options.repo}`;
+    const prepared = await this.#sessions.load(repository, reservation, "prepared");
+    const backend = this.#registry.get(reservation.backend);
+    if (!prepared || !backend?.resume)
+      throw new Error(
+        "App Server session identity is unavailable; automated replacement is blocked",
+      );
+    if (
+      events.some(
+        (event) =>
+          (event.kind === "capacity" && event.phase === "validation") ||
+          event.kind === "validation",
+      )
+    )
+      throw new Error(
+        "prior validation may have executed; automated replacement is blocked without its durable artifact/result checkpoint",
+      );
+    const sessionJournal = await this.#sessionJournal(reservation);
+    const modelSelection = resolveModelSelection(
+      this.#policy,
+      reservation.attempt === 1 ? "implement" : "recover",
+    );
+    let handle: BackendHandle | undefined;
+    try {
+      handle = await backend.resume(
+        {
+          repository,
+          objective: reservation.objective,
+          workItem: reservation.workItem,
+          attempt: reservation.attempt,
+          runId: reservation.runId,
+          directorEpoch: reservation.directorEpoch,
+          policyDigest: reservation.policyDigest,
+          workspace: prepared.binding.workspace,
+          packet: prepared.packet,
+          deadline: new Date(prepared.binding.deadline),
+          policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
+          ...(modelSelection ? { modelSelection } : {}),
+          sessionJournal,
+        },
+        appServerHandleFromCheckpoint(prepared),
+      );
+      const observed = await backend.observe(handle);
+      const usage = reportedModelUsage(observed.usage);
+      if (
+        observed.state !== "succeeded" ||
+        !usage ||
+        usage.inputTokens === undefined ||
+        usage.outputTokens === undefined
+      )
+        throw new Error(
+          "App Server terminal success and complete model usage are required for artifact continuation",
+        );
+      const model = events.filter(
+        (event) =>
+          event.kind === "budget" &&
+          event.event === "BudgetReconciled" &&
+          event.phase === "execution" &&
+          event.unit === "model_tokens",
+      );
+      if (
+        model.some(
+          (event) =>
+            event.kind !== "budget" ||
+            event.usageId !== `worker-${item.number}-${reservation.attempt}` ||
+            event.amount !== usage.inputTokens! + usage.outputTokens!,
+        )
+      )
+        throw new Error("App Server recovered usage conflicts with original accounting");
+      if (!model.length)
+        await this.#lease.use(async (lease) => {
+          this.#budgetEvents.push(
+            await this.#recorder.budget({
+              lease,
+              workItemNodeId: item.id,
+              reservation,
+              sequence: this.#sequences.take(),
+              event: "BudgetReconciled",
+              phase: "execution",
+              unit: "model_tokens",
+              amount: usage.inputTokens! + usage.outputTokens!,
+              usageId: `worker-${item.number}-${reservation.attempt}`,
+              reportedModelUsage: usage,
+            }),
+          );
+        });
+      const artifact = await backend.collect(handle);
+      // The same durable artifact boundary as fresh execution. Never remove the
+      // original materialization on persistence failure, and never generate again.
+      try {
+        await this.#persistCollectedArtifact(reservation, prepared.packet, artifact);
+      } catch (error) {
+        throw new ArtifactCollectionCheckpointError(error);
+      }
+      await backend.cleanup(handle);
+      handle = undefined;
+      const native = events.filter(
+        (event) =>
+          event.kind === "budget" &&
+          event.event === "BudgetReconciled" &&
+          event.phase === "execution" &&
+          event.unit === "local_milliseconds",
+      );
+      let nativeMilliseconds: number;
+      if (native.length) {
+        const amounts = new Set(
+          native.map((event) => (event.kind === "budget" ? event.amount : NaN)),
+        );
+        if (amounts.size !== 1) throw new Error("original native usage receipts conflict");
+        nativeMilliseconds = [...amounts][0]!;
+      } else {
+        const reserved = deduplicateFactoryEvents([...events]).filter(
+          (event) =>
+            event.kind === "budget" &&
+            event.event === "BudgetReserved" &&
+            event.phase === "execution" &&
+            event.unit === "local_milliseconds",
+        );
+        if (reserved.length !== 1 || reserved[0]!.kind !== "budget" || reserved[0]!.amount <= 0)
+          throw new Error("original positive local execution allowance is unavailable");
+        nativeMilliseconds = reserved[0]!.amount;
+        await this.#lease.use(async (lease) => {
+          this.#budgetEvents.push(
+            await this.#recorder.budget({
+              lease,
+              workItemNodeId: item.id,
+              reservation,
+              sequence: this.#sequences.take(),
+              event: "BudgetReconciled",
+              phase: "execution",
+              unit: "local_milliseconds",
+              amount: nativeMilliseconds,
+              usageEvidence: "conservative-reservation",
+              reason:
+                "Exact terminal session and original worker scope absence were independently verified; charging the original reserved duration, not measured elapsed execution",
+            }),
+          );
+        });
+      }
+      await this.#continueCollectedArtifact(item, deadline, {
+        reservation,
+        packet: prepared.packet,
+        artifact,
+        modelUsage: { ...usage, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens },
+        nativeUsage: { unit: "local_milliseconds", amount: nativeMilliseconds },
+        worker: {
+          root: dirname(prepared.binding.workspace),
+          path: prepared.binding.workspace,
+          repository: this.#options.repository,
+          baseSha: reservation.baseSha,
+        },
+      });
+    } catch (error) {
+      if (
+        error instanceof PlatformUnavailableError ||
+        error instanceof LeaseLostError ||
+        error instanceof ArtifactCollectionCheckpointError
+      )
+        throw error;
+      throw new Error(
+        `App Server recovery is unavailable; automated replacement is blocked: ${error instanceof Error ? error.message : "unknown protocol outcome"}`,
+        { cause: error },
+      );
+    } finally {
+      if (handle) await backend.cleanup(handle);
+    }
+  }
+
+  #artifactTransferIdentity(reservation: AttemptReservation): ArtifactTransferIdentity {
+    return {
+      repository: `${this.#options.owner}/${this.#options.repo}`,
+      objective: reservation.objective,
+      workItem: reservation.workItem,
+      attempt: reservation.attempt,
+      runId: reservation.runId,
+      directorEpoch: reservation.directorEpoch,
+      policyDigest: reservation.policyDigest,
+      baseSha: reservation.baseSha,
+    };
+  }
+
+  async #recoverRetainedArtifact(
+    item: DerivedWorkItem,
+    reservation: AttemptReservation,
+    events: FactoryEvent[],
+    backend: ExecutionBackend,
+    deadline: number,
+  ): Promise<boolean> {
+    if (backend.capabilities.providerManagedPublication) return false;
+    const original = this.#packetFor(item.number);
+    const packet = parseWorkerPacket({
+      ...original,
+      baseSha: reservation.baseSha,
+      ...(retryContext(item, this.#run.runId)
+        ? { retryContext: retryContext(item, this.#run.runId) }
+        : {}),
+      requirements: {
+        ...original.requirements,
+        ...(this.#policy.trust === "sandbox_untrusted" &&
+        original.requirements.trust === "trusted_local"
+          ? { trust: "isolated" as const }
+          : {}),
+      },
+    });
+    if (
+      reservation.localScopeBatch &&
+      reservation.localScopeBatch.identity.invocationDigest !== workerPacketDigest(packet)
+    )
+      throw new Error("retained artifact packet differs from its original scoped invocation");
+    let artifact: NormalizedArtifact | null;
+    try {
+      artifact = await resumeArtifactTransfer({
+        store: this.#store,
+        identity: this.#artifactTransferIdentity(reservation),
+        allowedPaths: packet.allowedPaths,
+        assertCurrent: () => this.#externalAdmission(async () => {}),
+      });
+    } catch (cause) {
+      throw new ArtifactCollectionCheckpointError(cause);
+    }
+    if (!artifact) return false;
+    this.#retainArtifactContent(artifact);
+    if (
+      events.some(
+        (event) =>
+          event.kind === "attempt" &&
+          event.event === "AttemptSucceeded" &&
+          event.artifactDigest !== artifact.digest,
+      )
+    )
+      throw new Error("retained artifact differs from its original terminal success receipt");
+    if (
+      events.some(
+        (event) =>
+          event.kind === "validation" ||
+          (event.kind === "capacity" && event.phase === "validation") ||
+          (event.kind === "attempt" &&
+            [
+              "AttemptCollected",
+              "AttemptValidated",
+              "AttemptPublished",
+              "AttemptIntegrated",
+              "AttemptFailed",
+              "AttemptTimedOut",
+              "AttemptCancelled",
+              "AttemptDeferred",
+            ].includes(event.event)),
+      )
+    )
+      throw new Error(
+        "retained output has later lifecycle evidence; automated replacement is blocked pending exact validation/publication recovery",
+      );
+    const started = events.find(
+      (event) => event.kind === "attempt" && event.event === "AttemptStarted",
+    );
+    if (!backend.reconcileStale)
+      throw new Error(
+        "retained output has no backend absence reconciler; automated replacement is blocked",
+      );
+    await backend.reconcileStale({
+      repository: `${this.#options.owner}/${this.#options.repo}`,
+      objective: reservation.objective,
+      workItem: reservation.workItem,
+      attempt: reservation.attempt,
+      runId: reservation.runId,
+      directorEpoch: reservation.directorEpoch,
+      policyDigest: reservation.policyDigest,
+      phase: "execution",
+      ...(reservation.localScopeBatch ? { localScopeBatch: reservation.localScopeBatch } : {}),
+      ...(started?.kind === "attempt" && started.providerResourceId
+        ? { providerResourceId: started.providerResourceId }
+        : {}),
+    });
+    let model = events.filter(
+      (event): event is Extract<FactoryEvent, { kind: "budget" }> =>
+        event.kind === "budget" &&
+        event.event === "BudgetReconciled" &&
+        event.phase === "execution" &&
+        event.unit === "model_tokens",
+    );
+    if (this.#policy.economics && backend.capabilities.reportsModelUsage && !model.length) {
+      await this.#recoverAppServerUsage(item, reservation, events);
+      model = this.#budgetEvents.filter(
+        (event): event is Extract<FactoryEvent, { kind: "budget" }> =>
+          event.kind === "budget" &&
+          event.runId === reservation.runId &&
+          event.workItem === item.number &&
+          event.attempt === reservation.attempt &&
+          event.event === "BudgetReconciled" &&
+          event.phase === "execution" &&
+          event.unit === "model_tokens",
+      );
+    }
+    const reported = model[0]?.reportedModelUsage;
+    const modelUsage =
+      reported?.inputTokens !== undefined && reported.outputTokens !== undefined
+        ? { ...reported, inputTokens: reported.inputTokens, outputTokens: reported.outputTokens }
+        : undefined;
+    // A content checkpoint does not invent accounting. The session fallback may
+    // restore an exact terminal usage receipt, but must not dispatch a new turn.
+    if (this.#policy.economics && backend.capabilities.reportsModelUsage && !model.length)
+      throw new Error(
+        "retained output lacks exact terminal model usage; automated replacement is blocked pending usage recovery",
+      );
+    const unit = isSandboxBackendId(reservation.backend)
+      ? "sandbox_milliseconds"
+      : "local_milliseconds";
+    let native = events.filter(
+      (event): event is Extract<FactoryEvent, { kind: "budget" }> =>
+        event.kind === "budget" &&
+        event.event === "BudgetReconciled" &&
+        event.phase === "execution" &&
+        event.unit === unit,
+    );
+    if (!native.length) {
+      const held = unreconciledBudgetReservations(events).filter(
+        (event) => event.phase === "execution" && event.unit === unit,
+      );
+      if (held.length !== 1)
+        throw new Error(
+          "retained output lacks its original native allowance; automated replacement is blocked",
+        );
+      const event = await this.#lease.use((lease) =>
+        this.#recorder.budget({
+          lease,
+          workItemNodeId: item.id,
+          reservation,
+          sequence: this.#sequences.take(),
+          event: "BudgetReconciled",
+          phase: "execution",
+          unit,
+          amount: held[0]!.amount,
+          usageEvidence: "conservative-reservation",
+          reason:
+            "Original resource absence is proven; charge its reserved duration because exact elapsed usage is unavailable. This is not measured consumption or invoice settlement.",
+        }),
+      );
+      this.#budgetEvents.push(event);
+      if (event.kind !== "budget")
+        throw new Error("native recovery did not record a budget receipt");
+      native = [event];
+    }
+    await this.#continueCollectedArtifact(item, deadline, {
+      reservation,
+      packet,
+      artifact,
+      ...(model.length ? { modelTokens: model[0]!.amount } : {}),
+      ...(modelUsage ? { modelUsage } : {}),
+      nativeUsage: { unit, amount: native[0]!.amount },
+    });
+    return true;
+  }
+
+  async #persistCollectedArtifact(
+    reservation: AttemptReservation,
+    packet: WorkerPacket,
+    artifact: NormalizedArtifact,
+  ): Promise<void> {
+    await persistArtifactTransfer({
+      store: this.#store,
+      identity: this.#artifactTransferIdentity(reservation),
+      artifact,
+      allowedPaths: packet.allowedPaths,
+      assertCurrent: () => this.#externalAdmission(async () => {}),
+    });
   }
 
   #reviewUsageId(record: ReviewCheckpointRecord): string {
@@ -5404,9 +6670,20 @@ export class FactorySupervisor {
     // AttemptPublished may have been written before a lost final publication response.
     // Replay the prior complete binding until that exact checkpoint transaction repairs it.
     const metadata = parseGraphItemMetadata(item.body ?? "");
-    const plan = this.#deliveryPlan?.items.find((candidate) => candidate.itemId === metadata.id);
+    const plan =
+      this.#deliveryPlan?.items.find((candidate) => candidate.itemId === metadata.id) ??
+      (this.#deliverySelection.selected === "regular-prs"
+        ? {
+            itemId: metadata.id,
+            unitId: `delivery/${metadata.id}`,
+            position: 0,
+            waitsForMerge: [] as string[],
+            parentItemId: undefined,
+          }
+        : undefined);
     if (!plan) throw new Error(`Work Item ${metadata.id} is absent from the delivery plan`);
     const sibling =
+      this.#deliverySelection.selected === "regular-prs" ||
       this.#deliveryPlan?.units.find((unit) => unit.id === plan.unitId)?.kind === "sibling";
     const recordedPublications = [...(item.factoryEvents ?? [])]
       .sort((left, right) => right.sequence - left.sequence)
@@ -5482,6 +6759,39 @@ export class FactorySupervisor {
     if (!reservation) {
       throw new Error(`stack Work Item #${item.number} has no attempt reservation`);
     }
+    if (this.#deliverySelection.selected === "regular-prs") {
+      // Regular publications now share sibling integration/recovery. Preserve
+      // the ordinary path's original acceptance proof before repairing any
+      // publication/integration receipt, even if a concurrent merge changes the
+      // mutable PR state after this observation. Never review merged work anew.
+      const accepted = (item.factoryEvents ?? []).some(
+        (event) =>
+          event.kind === "attempt" &&
+          event.event === "AttemptValidated" &&
+          event.runId === reservation.runId &&
+          event.workItem === item.number &&
+          event.attempt === reservation.attempt &&
+          event.policyDigest === reservation.policyDigest &&
+          event.artifactDigest === publishedEvent.artifactDigest &&
+          event.sequence > validation.sequence &&
+          event.sequence < publishedEvent.sequence,
+      );
+      const review = publishedEvent.artifactDigest
+        ? await this.#reviews.load({
+            kind: "artifact",
+            runId: reservation.runId,
+            objective: reservation.objective,
+            workItem: item.number,
+            attempt: reservation.attempt,
+            artifactDigest: publishedEvent.artifactDigest,
+            baseSha: validation.baseSha,
+            outputTreeSha: validation.outputTreeSha,
+            evidenceDigest: validation.evidenceDigest,
+          })
+        : null;
+      if (!accepted || !review?.review.accepted || review.review.unmetCriteria.length)
+        throw new Error("completed ordinary integration lacks its original acceptance checkpoint");
+    }
     let publicationEvent = recordedPublication ?? undefined;
     const baseBranch =
       publicationEvent?.kind === "publication" ? publicationEvent.baseBranch : this.#baseBranch;
@@ -5496,7 +6806,7 @@ export class FactorySupervisor {
       workItem: item.number,
       attempt: publishedEvent.attempt,
       revision: 1,
-      mode: "native-stacks",
+      mode: this.#deliverySelection.selected === "native-stacks" ? "native-stacks" : "regular-prs",
       position: plan.position,
       ...(plan.parentItemId ? { parentItemId: plan.parentItemId } : {}),
       branch,
@@ -5559,6 +6869,16 @@ export class FactorySupervisor {
   }
 
   async #integrateNativeStack(
+    unitId: string,
+    items: DerivedWorkItem[],
+    deadline: number,
+  ): Promise<boolean> {
+    return withArtifactContentScope(() =>
+      this.#integrateNativeStackWithArtifactContent(unitId, items, deadline),
+    );
+  }
+
+  async #integrateNativeStackWithArtifactContent(
     unitId: string,
     items: DerivedWorkItem[],
     deadline: number,
@@ -6399,7 +7719,7 @@ export class FactorySupervisor {
           if (capacityRecorded && (record || !providerStarted))
             await reconcile(capacity.cpu, capacity.memoryMb);
         } finally {
-          if (!capacityRecorded || record || !providerStarted) this.#capacity.release(capacity.key);
+          if (!capacityRecorded || record || !providerStarted) this.#releaseCapacity(capacity.key);
         }
       }
     }
@@ -6439,19 +7759,33 @@ export class FactorySupervisor {
     )
       .split("\0")
       .filter(Boolean);
-    const patch = await hostGit(
-      this.#options.repository,
-      ["diff", "--binary", "--no-ext-diff", "--no-textconv", baseSha, headSha],
-      MAX_ARTIFACT_PATCH_BYTES + 1_024,
-      true,
+    const priorNative = isolated
+      ? await this.#nativeRebases.load({
+          repository: `${this.#options.owner}/${this.#options.repo}`,
+          runId: member.reservation.runId,
+          objective: member.reservation.objective,
+          workItem: item.number,
+          attempt: member.reservation.attempt,
+          directorEpoch: member.reservation.directorEpoch,
+          policyDigest: member.reservation.policyDigest,
+          pullRequest: member.pull.number,
+          sourceHeadSha: member.pull.commitSha,
+          sourceExactHeadValidationDigest: member.pull.exactHeadValidation.digest,
+          headSha,
+          baseSha,
+        })
+      : null;
+    const artifact = this.#retainArtifactContent(
+      await artifactFromGitRange({
+        repository: this.#options.repository,
+        sourceBaseSha: baseSha,
+        headSha,
+        baseSha,
+        changedPaths,
+        emptyReason: "rebased stack layer has no diff",
+        authenticatedLegacyDigest: priorNative?.validation.artifactDigest,
+      }),
     );
-    const artifact = normalizeArtifact({
-      baseSha,
-      patch,
-      changedPaths,
-      outcome: patch.trim() ? "succeeded" : "declined",
-      ...(patch.trim() ? {} : { reason: "rebased stack layer has no diff" }),
-    });
     const packet = parseWorkerPacket({
       ...originalPacket,
       baseSha,
@@ -6578,10 +7912,10 @@ export class FactorySupervisor {
         );
       } catch (error) {
         if (pendingValidation) await discardValidationResult(pendingValidation);
-        if (!capacityRecorded) this.#capacity.release(capacity.key);
+        if (!capacityRecorded) this.#releaseCapacity(capacity.key);
         throw error;
       }
-      const releaseCapacity = () => this.#capacity.release(capacity.key);
+      const releaseCapacity = () => this.#releaseCapacity(capacity.key);
       return {
         validation,
         async finish(recorded: boolean) {
@@ -6752,8 +8086,12 @@ export class FactorySupervisor {
     targetBaseSha: string,
     run = this.#run,
   ): Promise<SiblingRefreshIdentity> {
+    const ownRecovery =
+      run.runId === this.#run?.runId && run.objective === this.#run?.objective
+        ? this.#recoveryRuntime
+        : undefined;
     const publications = deduplicateFactoryEvents([
-      ...(this.#recoveryRuntime?.events ?? item.factoryEvents ?? []),
+      ...(ownRecovery?.events ?? item.factoryEvents ?? []),
     ]).filter(
       (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
         event.kind === "publication" &&
@@ -6763,7 +8101,7 @@ export class FactorySupervisor {
         event.attempt === member.reservation.attempt,
     );
     const publication = selectEquivalentPublicationRecord(publications);
-    const restored = this.#recoveryRuntime?.sourcePublications.find(
+    const restored = ownRecovery?.sourcePublications.find(
       (proof) =>
         proof.publication.workItem === item.number &&
         proof.publication.sourceRunId === member.reservation.runId &&
@@ -6903,13 +8241,15 @@ export class FactorySupervisor {
     )
       .split("\0")
       .filter(Boolean);
-    const patch = await hostGit(
-      this.#options.repository,
-      ["diff", "--binary", "--no-ext-diff", "--no-textconv", ...source],
-      MAX_ARTIFACT_PATCH_BYTES + 1_024,
-      true,
+    return this.#retainArtifactContent(
+      await artifactFromGitRange({
+        repository: this.#options.repository,
+        sourceBaseSha: source[0]!,
+        headSha: source[1]!,
+        baseSha: targetBaseSha,
+        changedPaths,
+      }),
     );
-    return normalizeArtifact({ baseSha: targetBaseSha, changedPaths, patch, outcome: "succeeded" });
   }
 
   async #assertSiblingRefreshCurrent(
@@ -7094,12 +8434,276 @@ export class FactorySupervisor {
     return pinned;
   }
 
+  async #observedPeerBaseAdvance(
+    snapshot: Snapshot,
+    source: string,
+    target: string,
+  ): Promise<boolean> {
+    const seen = new Set<string>();
+    let cursor = target;
+    while (cursor !== source) {
+      if (seen.has(cursor) || seen.size >= 3200) return false;
+      seen.add(cursor);
+      const peer = await this.#peerTrunkIntegration(cursor, snapshot);
+      if (!peer) return false;
+      cursor = peer.parent;
+    }
+    return true;
+  }
+
+  /** Read historical peers, never resume them. A shared controller observation identifies
+   * an explicitly co-owned generation; exact-commit PR associations are discovery hints only. */
+  async #peerTrunkIntegration(
+    mergeSha: string,
+    receiver: Snapshot,
+    receiverRun?: RunState,
+  ): Promise<{
+    parent: string;
+    requiresIsolation: boolean;
+    executionRequiresIsolation: boolean;
+  } | null> {
+    const currentController = this.#options.controllerObservation?.();
+    const observations = (receiver.factoryEvents ?? []).filter(
+      (event) => event.kind === "controller" && event.runId === receiverRun?.runId,
+    );
+    const generations = new Set(
+      observations.flatMap((event) =>
+        event.kind === "controller"
+          ? [`${event.controllerId}:${event.epoch}:${event.controllerPolicyDigest}`]
+          : [],
+      ),
+    );
+    if (currentController)
+      generations.add(
+        `${currentController.controllerId}:${currentController.epoch}:${currentController.controllerPolicyDigest}`,
+      );
+    if (!generations.size) return null;
+    const objectives = (await this.#store.readCommitObjectiveCandidates(mergeSha)).filter(
+      (number) => number !== receiver.number,
+    );
+    if (objectives.length > 100)
+      throw new Error("repository integration provenance exceeds 100 Objectives");
+    let proof: {
+      parent: string;
+      requiresIsolation: boolean;
+      executionRequiresIsolation: boolean;
+    } | null = null;
+    let proofObjective: number | undefined;
+    let priorRequiresIsolation = false;
+    let priorExecutionRequiresIsolation = false;
+    for (const number of objectives) {
+      const snapshot = await this.#reader.readObjective(number);
+      if (
+        snapshot.repositoryId !== receiver.repositoryId ||
+        snapshot.defaultBranch !== receiver.defaultBranch
+      )
+        throw new Error("peer Objective repository identity changed");
+      const starts = (snapshot.factoryEvents ?? []).filter(
+        (event) => event.kind === "run" && event.event === "FactoryRunStarted",
+      );
+      for (const start of starts) {
+        if (
+          start.kind !== "run" ||
+          start.event !== "FactoryRunStarted" ||
+          !start.baseSha ||
+          (!start.activationRequestId && !start.recoveryRequestId) ||
+          start.repository.toLowerCase() !==
+            `${this.#options.owner}/${this.#options.repo}`.toLowerCase() ||
+          start.baseBranch !== receiver.defaultBranch
+        )
+          continue;
+        const events = snapshotEvents(snapshot).filter((event) => event.runId === start.runId);
+        if (
+          !events.some(
+            (event) =>
+              event.kind === "controller" &&
+              generations.has(
+                `${event.controllerId}:${event.epoch}:${event.controllerPolicyDigest}`,
+              ),
+          )
+        )
+          continue;
+        // Do not read every PR in every peer unless authenticated publication history
+        // and the observed linked merge identify a possible source for this exact commit.
+        const mergedItems = snapshot.workItems.filter(
+          (item) =>
+            item.linkedPullRequests.some((pull) => pull.state === "MERGED") &&
+            (item.factoryEvents ?? []).some(
+              (event) =>
+                event.kind === "publication" &&
+                (event.runId === start.runId || Boolean(start.recoveryRequestId)) &&
+                event.event === "PublicationRecorded",
+            ),
+        );
+        if (!mergedItems.length) continue;
+        let exactAssociation = false;
+        for (const item of mergedItems) {
+          for (const linked of item.linkedPullRequests.filter((pull) => pull.state === "MERGED")) {
+            const pull = await this.#store.readPullRequest(linked.number);
+            if (pull.merged && pull.mergeCommitSha === mergeSha) exactAssociation = true;
+          }
+        }
+        if (!exactAssociation) continue;
+        const policy = parseRunPolicy(start.policy);
+        if (policyDigest(policy) !== start.policyDigest)
+          throw new Error("peer run policy digest changed");
+        const recovery = start.recoveryRequestId
+          ? await loadRecoveryRuntime({
+              objective: number,
+              runId: start.runId,
+              store: this.#recoveryStore,
+              readSnapshot: async () => ({ snapshot, historyComplete: true }),
+            })
+          : undefined;
+        if (recovery && recovery.status !== "verified")
+          throw new Error("peer recovery integration lacks verified adoption provenance");
+        const graphManager = new CompiledGraphManager(this.#store, this.#leases);
+        const graph = recovery?.graph ?? (await graphManager.load(number, start.runId));
+        const projection =
+          recovery?.projection ??
+          (graph ? await graphManager.loadProjection(number, start.runId, graph) : null);
+        if (!graph || !projection)
+          throw new Error("peer integration lacks immutable graph/projection evidence");
+        assertGraphWithinRunPolicy(graph.objective, policy);
+        const packets = assertSnapshotMatchesCompiledGraph(
+          graph.objective,
+          snapshot,
+          projection.bindings,
+        );
+        if (!recovery)
+          assertAuthenticatedGraphProjection(
+            snapshotEvents(snapshot),
+            number,
+            start.runId,
+            projection,
+          );
+        const run: RunState = {
+          objective: number,
+          runId: start.runId,
+          actor: start.actor,
+          sequence: start.sequence,
+          policy,
+          policyDigest: start.policyDigest,
+          startedAt: new Date(start.at),
+          ...(start.activationRequestId ? { activationRequestId: start.activationRequestId } : {}),
+          baseSha: start.baseSha,
+          repository: start.repository,
+          baseBranch: start.baseBranch,
+          fork: start.fork,
+        };
+        const commit = await this.#store.readCommit(mergeSha);
+        if (commit.parentOids.length !== 1) return null;
+        const adopted =
+          recovery?.sourceIntegrations.filter(
+            (source) => source.outcome.mergeCommitSha === mergeSha,
+          ) ?? [];
+        if (adopted.length > 1) throw new Error("peer adopted integration ownership is ambiguous");
+        if (adopted.length) {
+          if (
+            adopted[0]!.targetBaseSha !== commit.parentOids[0] ||
+            adopted[0]!.outputTreeSha !== commit.treeOid
+          )
+            throw new Error("peer adopted integration squash changed");
+        } else if (
+          !(await this.#observedRunOwnsBaseAdvance(
+            snapshot,
+            run,
+            mergeSha,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            commit.parentOids[0],
+            true,
+          ))
+        )
+          continue;
+        if (proof && proofObjective !== number)
+          throw new Error("trunk commit has ambiguous cross-Objective ownership");
+        const matched = mergedItems.filter((item) =>
+          (item.factoryEvents ?? []).some(
+            (event) =>
+              event.kind === "attempt" &&
+              event.runId === start.runId &&
+              event.event === "AttemptIntegrated" &&
+              event.headSha === mergeSha,
+          ),
+        );
+        // A lost final integration receipt is allowed only because the helper above
+        // proved the real squash and pre-merge accepted checkpoints. Conservatively
+        // propagate isolation from every candidate source if its exact item is unknown.
+        const sources = matched.length ? matched : mergedItems;
+        const adoptedIsolation = adopted.some((source) => {
+          const original = recovery?.events.find(
+            (event) =>
+              event.kind === "run" &&
+              event.event === "FactoryRunStarted" &&
+              event.runId === source.outcome.sourceRunId,
+          );
+          return (
+            original?.kind !== "run" ||
+            original.event !== "FactoryRunStarted" ||
+            parseRunPolicy(original.policy).trust === "sandbox_untrusted"
+          );
+        });
+        const executionRequiresIsolation =
+          adoptedIsolation ||
+          policy.trust === "sandbox_untrusted" ||
+          sources.some((item) => {
+            const packet = packets.get(item.number);
+            return (
+              !packet ||
+              packet.requirements.trust !== "trusted_local" ||
+              (item.factoryEvents ?? []).some(
+                (event) =>
+                  event.kind === "attempt" &&
+                  (event.runId === start.runId || Boolean(adopted.length)) &&
+                  event.event === "AttemptPublished" &&
+                  isManagedAgentBackendId(event.backend),
+              )
+            );
+          });
+        const requiresIsolation =
+          adoptedIsolation ||
+          policy.trust === "sandbox_untrusted" ||
+          sources.some((item) => {
+            const packet = packets.get(item.number);
+            if (!packet || packet.requirements.trust !== "trusted_local") return true;
+            const published = (item.factoryEvents ?? []).filter(
+              (event) =>
+                event.kind === "attempt" &&
+                (event.runId === start.runId || Boolean(adopted.length)) &&
+                event.event === "AttemptPublished",
+            );
+            return published.some(
+              (event) =>
+                event.kind === "attempt" &&
+                !this.#registry.get(event.backend)?.capabilities.hostExecution,
+            );
+          });
+        priorRequiresIsolation ||= requiresIsolation;
+        priorExecutionRequiresIsolation ||= executionRequiresIsolation;
+        proof = {
+          parent: commit.parentOids[0]!,
+          requiresIsolation: priorRequiresIsolation,
+          executionRequiresIsolation: priorExecutionRequiresIsolation,
+        };
+        proofObjective = number;
+      }
+    }
+    return proof;
+  }
+
   /** External trunk changes never acquire execution authority from being cleanly applicable. */
   async #assertOwnTrunkAdvance(
     sourceBaseSha: string,
     targetBaseSha: string,
     currentWorkItem: number,
-  ): Promise<{ snapshot: Snapshot; requiresIsolation: boolean }> {
+  ): Promise<{
+    snapshot: Snapshot;
+    requiresIsolation: boolean;
+    executionRequiresIsolation: boolean;
+  }> {
     const snapshot = await this.#reader.readObjective(this.#run.objective);
     this.#fenceSnapshot(snapshot);
     this.#sequences.observe(snapshotEvents(snapshot));
@@ -7107,9 +8711,10 @@ export class FactorySupervisor {
     const items = derive(snapshot).items;
     let cursor = targetBaseSha;
     let requiresIsolation = false;
+    let executionRequiresIsolation = false;
     const visited = new Set<string>();
     while (cursor !== sourceBaseSha) {
-      if (visited.has(cursor) || visited.size >= items.length) {
+      if (visited.has(cursor) || visited.size >= 3200) {
         throw new Error("base advancement is not a bounded chain of this run's integrations");
       }
       visited.add(cursor);
@@ -7128,6 +8733,20 @@ export class FactorySupervisor {
           commit.treeOid !== adopted[0]!.outputTreeSha
         )
           throw new Error("adopted source integration ancestry changed");
+        const source = adopted[0]!.outcome;
+        const originalStart = this.#recoveryRuntime!.events.find(
+          (event) =>
+            event.kind === "run" &&
+            event.event === "FactoryRunStarted" &&
+            event.runId === source.sourceRunId,
+        );
+        const inheritedTrust =
+          originalStart?.kind !== "run" ||
+          originalStart.event !== "FactoryRunStarted" ||
+          parseRunPolicy(originalStart.policy).trust === "sandbox_untrusted" ||
+          this.#packetFor(source.workItem).requirements.trust !== "trusted_local";
+        executionRequiresIsolation ||= inheritedTrust;
+        requiresIsolation ||= inheritedTrust;
         cursor = commit.parentOids[0]!;
         continue;
       }
@@ -7144,61 +8763,92 @@ export class FactorySupervisor {
           )
           .map((event) => ({ item, event })),
       );
+      if (matches.length === 0) {
+        const commit = await this.#store.readCommit(cursor);
+        if (
+          commit.parentOids.length === 1 &&
+          (await this.#observedRunOwnsBaseAdvance(
+            snapshot,
+            this.#run,
+            cursor,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            commit.parentOids[0],
+            true,
+          ))
+        ) {
+          // Recover a peer worker's lost final receipt from its original accepted
+          // publication and observed squash, never by re-reviewing a completed merge.
+          requiresIsolation ||= items.some((item) =>
+            (item.factoryEvents ?? []).some(
+              (event) =>
+                event.kind === "attempt" &&
+                event.runId === this.#run.runId &&
+                event.event === "AttemptPublished" &&
+                (!this.#registry.get(event.backend)?.capabilities.hostExecution ||
+                  this.#packetFor(item.number).requirements.trust !== "trusted_local"),
+            ),
+          );
+          executionRequiresIsolation ||= items.some((item) =>
+            (item.factoryEvents ?? []).some(
+              (event) =>
+                event.kind === "attempt" &&
+                event.runId === this.#run.runId &&
+                event.event === "AttemptPublished" &&
+                (isManagedAgentBackendId(event.backend) ||
+                  this.#packetFor(item.number).requirements.trust !== "trusted_local"),
+            ),
+          );
+          cursor = commit.parentOids[0]!;
+          continue;
+        }
+        const peer = await this.#peerTrunkIntegration(cursor, snapshot, this.#run);
+        if (peer) {
+          requiresIsolation ||= peer.requiresIsolation;
+          executionRequiresIsolation ||= peer.executionRequiresIsolation;
+          cursor = peer.parent;
+          continue;
+        }
+      }
       if (matches.length !== 1) {
         throw new Error(
           `base branch advanced outside this run's evidenced integrations: ${cursor}`,
         );
       }
       const { item, event } = matches[0]!;
-      const member = await this.#nativeStackMember(item, true);
-      if (!this.#registry.get(member.reservation.backend)?.capabilities.hostExecution)
-        requiresIsolation = true;
-      if (event.kind !== "attempt" || event.attempt !== member.reservation.attempt) {
-        throw new Error("integrated trunk commit does not match its published attempt");
-      }
-      const pull = await this.#store.readPullRequest(member.pull.number);
-      const commit = await this.#store.readCommit(cursor);
+      if (event.kind !== "attempt") throw new Error("invalid integration receipt");
+      executionRequiresIsolation ||=
+        isManagedAgentBackendId(event.backend) ||
+        this.#packetFor(item.number).requirements.trust !== "trusted_local";
       if (
-        !pull.merged ||
-        pull.mergeCommitSha !== cursor ||
-        pull.baseRef !== this.#baseBranch ||
-        commit.oid !== cursor ||
-        commit.parentOids.length !== 1
-      ) {
+        !this.#registry.get(event.backend)?.capabilities.hostExecution ||
+        this.#packetFor(item.number).requirements.trust !== "trusted_local"
+      )
+        requiresIsolation = true;
+      const commit = await this.#store.readCommit(cursor);
+      if (commit.oid !== cursor || commit.parentOids.length !== 1) {
         throw new Error("trunk advancement lacks an exact Factory squash integration");
       }
       const parent = commit.parentOids[0]!;
-      const refresh = await this.#observedSiblingRefresh(item, member, pull.headSha);
-      if (refresh && refresh.identity.targetBaseSha !== parent)
-        throw new Error("prior sibling refresh does not bind its actual squash parent");
-      if (parent === member.pull.exactHeadValidation.baseSha) {
-        if (refresh) throw new Error("unexpected refresh on an unchanged source base");
-        await verifySquashIntegration(this.#store, member.pull, cursor, parent);
-      } else {
-        const candidate = await this.#mergeCandidates.load(
-          this.#mergeCandidateIdentity(member, parent, refresh?.plannedHeadSha),
-        );
-        const review = candidate
-          ? await this.#reviews.load(this.#mergeCandidateReviewIdentity(candidate))
-          : null;
-        if (
-          !candidate ||
-          !review?.review.accepted ||
-          review.review.unmetCriteria.length ||
-          (refresh && candidate.validation.outputTreeSha !== refresh.outputTreeSha)
-        ) {
-          throw new Error("prior sibling integration has no accepted candidate checkpoint");
-        }
-        await verifyMergeCandidateSquash(
-          this.#store,
-          member.pull.exactHeadValidation,
-          candidate.evidence,
+      if (
+        !(await this.#observedRunOwnsBaseAdvance(
+          snapshot,
+          this.#run,
           cursor,
-        );
-      }
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          parent,
+          true,
+        ))
+      )
+        throw new Error("prior integration lacks its authenticated accepted exact-head checkpoint");
       cursor = parent;
     }
-    return { snapshot, requiresIsolation };
+    return { snapshot, requiresIsolation, executionRequiresIsolation };
   }
 
   async #recordCandidateValidationUsage(
@@ -7420,18 +9070,16 @@ export class FactorySupervisor {
       )
         .split("\0")
         .filter(Boolean);
-      const patch = await hostGit(
-        this.#options.repository,
-        ["diff", "--binary", "--no-ext-diff", "--no-textconv", ...source],
-        MAX_ARTIFACT_PATCH_BYTES + 1_024,
-        true,
+      return this.#retainArtifactContent(
+        await artifactFromGitRange({
+          repository: this.#options.repository,
+          sourceBaseSha: source[0]!,
+          headSha: source[1]!,
+          baseSha: targetBaseSha,
+          changedPaths,
+          authenticatedLegacyDigest: record?.validation.artifactDigest,
+        }),
       );
-      return normalizeArtifact({
-        baseSha: targetBaseSha,
-        changedPaths,
-        patch,
-        outcome: "succeeded",
-      });
     };
     if (!record) {
       const effective = normalizeSchedulingPolicy(this.#policy);
@@ -7654,7 +9302,7 @@ export class FactorySupervisor {
             await reconcileCapacity(capacity.cpu, capacity.memoryMb);
         } finally {
           if (!capacityRecorded || record || !validationLaunched)
-            this.#capacity.release(capacity.key);
+            this.#releaseCapacity(capacity.key);
         }
       }
     }
@@ -8255,6 +9903,10 @@ export class FactorySupervisor {
   }
 
   async #resumeAdoptedSourceNow(item: DerivedWorkItem): Promise<void> {
+    return withArtifactContentScope(() => this.#resumeAdoptedSourceWithArtifactContent(item));
+  }
+
+  async #resumeAdoptedSourceWithArtifactContent(item: DerivedWorkItem): Promise<void> {
     let runtime = this.#recoveryRuntime!;
     const planItem = runtime.planRecord.plan.items.find((entry) => entry.workItem === item.number)!;
     const source = planItem.source!;
@@ -8504,13 +10156,16 @@ export class FactorySupervisor {
         )
           .split("\0")
           .filter(Boolean);
-        const patch = await hostGit(
-          this.#options.repository,
-          ["diff", "--binary", "--no-ext-diff", "--no-textconv", ...range],
-          MAX_ARTIFACT_PATCH_BYTES + 1024,
-          true,
+        return this.#retainArtifactContent(
+          await artifactFromGitRange({
+            repository: this.#options.repository,
+            sourceBaseSha: range[0]!,
+            headSha: range[1]!,
+            baseSha: target,
+            changedPaths,
+            authenticatedLegacyDigest: candidate?.validation.artifactDigest,
+          }),
         );
-        return normalizeArtifact({ baseSha: target, changedPaths, patch, outcome: "succeeded" });
       };
       const outstanding = unreconciledCapacityReservations([...runtime.events]).filter(
         (event) =>
@@ -8674,7 +10329,7 @@ export class FactorySupervisor {
             if (recorded && (candidate || !validationLaunched))
               await recordCapacity("CapacityReconciled", capacity.cpu, capacity.memoryMb);
           } finally {
-            if (!recorded || candidate || !validationLaunched) this.#capacity.release(capacity.key);
+            if (!recorded || candidate || !validationLaunched) this.#releaseCapacity(capacity.key);
           }
         }
       }
@@ -9018,8 +10673,21 @@ export class FactorySupervisor {
   }
 
   async #resumeIntegration(item: DerivedWorkItem): Promise<boolean> {
+    return withArtifactContentScope(() => this.#resumeIntegrationWithArtifactContent(item));
+  }
+
+  async #resumeIntegrationWithArtifactContent(item: DerivedWorkItem): Promise<boolean> {
     if (!this.#integrationDue(item.number)) return false;
-    if (this.#deliverySelection.selected === "native-stacks") {
+    if (
+      this.#deliverySelection.selected === "native-stacks" ||
+      (item.factoryEvents ?? []).some(
+        (event) =>
+          event.kind === "publication" &&
+          event.runId === this.#run.runId &&
+          event.event === "PublicationRecorded" &&
+          event.branch === publicationBranch(this.#run.objective, item.number, event.attempt),
+      )
+    ) {
       try {
         const member = await this.#nativeStackMember(item);
         const current = await this.#store.readPullRequest(member.pull.number);
@@ -9256,18 +10924,52 @@ export class FactorySupervisor {
         }),
       );
     }
+    const published: PublishedPullRequest = {
+      branch: receipt.branch,
+      commitSha: event.headSha,
+      number: pull.number,
+      htmlUrl: pull.htmlUrl,
+      exactHeadValidation,
+    };
+    const current = await this.#store.readPullRequest(pull.number);
+    const merge =
+      current.merged && current.mergeCommitSha
+        ? await this.#store.readCommit(current.mergeCommitSha)
+        : null;
+    if (current.merged && (!merge || merge.parentOids.length !== 1))
+      throw new Error("completed ordinary integration lacks an exact squash parent");
+    const targetBaseSha = merge
+      ? merge.parentOids[0]!
+      : (await this.#store.getBranchHead(this.#baseBranch)).oid;
+    // Provider-managed branches remain provider-owned. Validate GitHub's exact
+    // test-merge candidate under the independently authorized validator instead
+    // of rewriting their head or bypassing stale-base checks.
+    const candidate =
+      targetBaseSha === validation.baseSha
+        ? undefined
+        : await this.#prepareSiblingMergeCandidate(
+            item,
+            {
+              receipt,
+              pull: published,
+              reservation,
+              observedHeadSha: current.headSha,
+            },
+            targetBaseSha,
+            current.merged,
+          );
+    if (candidate === null)
+      return this.#deferIntegration(
+        item.number,
+        "waiting for ordinary merge-candidate validation capacity",
+      );
     return await this.#integrate(
       item,
       reservation,
-      {
-        branch: receipt.branch,
-        commitSha: event.headSha,
-        number: pull.number,
-        htmlUrl: pull.htmlUrl,
-        exactHeadValidation,
-      },
+      published,
       this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
       true,
+      candidate,
     );
   }
 
@@ -9367,6 +11069,16 @@ export class FactorySupervisor {
   }
 
   async #recoverInterrupted(
+    item: DerivedWorkItem,
+    deadline: number,
+    objectiveItems: readonly DerivedWorkItem[],
+  ): Promise<void> {
+    return withArtifactContentScope(() =>
+      this.#recoverInterruptedWithArtifactContent(item, deadline, objectiveItems),
+    );
+  }
+
+  async #recoverInterruptedWithArtifactContent(
     item: DerivedWorkItem,
     deadline: number,
     objectiveItems: readonly DerivedWorkItem[],
@@ -9755,6 +11467,8 @@ export class FactorySupervisor {
       }
     }
 
+    if (await this.#recoverRetainedArtifact(item, reservation, events, backend, deadline)) return;
+
     if (backend.capabilities.providerManagedPublication) {
       const attemptStartedAt = events.find(
         (event) => event.kind === "attempt" && event.event === "AttemptStarted",
@@ -9771,6 +11485,11 @@ export class FactorySupervisor {
           await this.#store.closePullRequest(stalePull.number);
         }
       }
+    }
+    // Ready artifact-transfer recovery is inserted before this provider fallback.
+    if (reservation.backend === "codex-app-server/local-worktree" && !validation) {
+      await this.#recoverAppServerSession(item, reservation, deadline, events);
+      return;
     }
     const providerResourceId = latest?.kind === "attempt" ? latest.providerResourceId : undefined;
     const executionBudget = unreconciledBudgetReservations(events).find(
@@ -9791,6 +11510,8 @@ export class FactorySupervisor {
         runId: reservation.runId,
         directorEpoch: reservation.directorEpoch,
         phase: "execution",
+        ...(reservation.localScopeBatch ? { localScopeBatch: reservation.localScopeBatch } : {}),
+        policyDigest: reservation.policyDigest,
         ...(providerResourceId ? { providerResourceId } : {}),
         ...(noHandleReplacementNotBefore ? { noHandleReplacementNotBefore } : {}),
       });
@@ -9799,6 +11520,30 @@ export class FactorySupervisor {
     ) {
       throw new Error(`backend ${reservation.backend} cannot prove the stale resource was stopped`);
     }
+    // Exact artifact and provider-session recovery have already had first refusal.
+    // Dispatch may have completed before the first collection-marker write, so
+    // missing local metadata is not evidence that there is no reusable output.
+    const knownTerminal = events.some(
+      (event) =>
+        event.kind === "attempt" &&
+        ["AttemptFailed", "AttemptTimedOut", "AttemptCancelled", "AttemptDeferred"].includes(
+          event.event,
+        ),
+    );
+    const dispatchPossible = events.some(
+      (event) =>
+        (event.kind === "attempt" && event.event === "AttemptStarted") ||
+        (event.kind === "budget" &&
+          event.event === "BudgetReserved" &&
+          event.phase === "execution"),
+    );
+    if (
+      !backend.capabilities.providerManagedPublication &&
+      dispatchPossible &&
+      !knownTerminal &&
+      !validation
+    )
+      throw new ArtifactCompletionUnavailableError();
     const attemptStartedAt = events.find(
       (event) => event.kind === "attempt" && event.event === "AttemptStarted",
     )?.at;

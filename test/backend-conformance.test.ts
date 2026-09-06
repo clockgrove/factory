@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
@@ -8,6 +8,14 @@ import { CodexAppServerLocalBackend } from "../src/backends/codex-app-server.js"
 import { CodexCliLocalBackend } from "../src/backends/codex-cli-local.js";
 import type { AttemptContext, BackendHandle, ExecutionBackend } from "../src/execution/backend.js";
 import { durableAttemptId, normalizeExecutionUsage } from "../src/execution/session.js";
+import {
+  parseAppServerSessionCheckpoint,
+  type AppServerSessionCheckpoint,
+  type AppServerSessionStage,
+} from "../src/execution/app-server-session.js";
+import { LocalScopeBatchSchema } from "../src/protocol/local-scope.js";
+import { workerPacketDigest } from "../src/protocol/worker-packet.js";
+import { readLocalResourceHostIdentity } from "../src/recovery/local-resources.js";
 import type {
   AppServerConnection,
   AppServerExit,
@@ -30,9 +38,23 @@ class ConformanceConnection implements AppServerConnection {
     });
   }
 
-  async request<T>(method: string): Promise<T> {
+  async request<T>(method: string, params?: unknown): Promise<T> {
+    if (method === "initialize") return { userAgent: "codex_cli_rs/0.153.0" } as T;
     if (method === "thread/start") {
-      return { thread: { id: this.threadId } } as T;
+      const input = params as { cwd: string; model?: string };
+      return {
+        model: input.model ?? "gpt-5",
+        approvalPolicy: "never",
+        thread: {
+          id: this.threadId,
+          sessionId: `session-${this.threadId}`,
+          cwd: input.cwd,
+          modelProvider: "openai",
+          model: input.model ?? "gpt-5",
+          cliVersion: "0.153.0",
+          turns: [],
+        },
+      } as T;
     }
     if (method === "turn/start") {
       return { turn: { id: `turn-${++this.#number}` } } as T;
@@ -194,6 +216,44 @@ async function appServerHarness(): Promise<BackendHarness> {
     },
   });
   const context = attemptContext(fixture, 2);
+  const checkpoints = new Map<AppServerSessionStage, AppServerSessionCheckpoint>();
+  context.sessionJournal = {
+    async assertCurrent() {},
+    async load(stage) {
+      return structuredClone(checkpoints.get(stage) ?? null);
+    },
+    async persist(value) {
+      const checkpoint = parseAppServerSessionCheckpoint(value);
+      const previous = checkpoints.get(checkpoint.stage);
+      if (previous && JSON.stringify(previous) !== JSON.stringify(checkpoint))
+        throw new Error("conformance session checkpoint changed");
+      checkpoints.set(checkpoint.stage, structuredClone(checkpoint));
+    },
+  };
+  const stat = await readFile("/proc/self/stat", "utf8");
+  context.localExecutionScope = {
+    assertCurrent: async () => {},
+    batch: LocalScopeBatchSchema.parse({
+      identity: {
+        protocol: "clockgrove.factory/local-scope-v1",
+        repository: context.repository,
+        runId: context.runId,
+        objective: context.objective,
+        workItem: context.workItem,
+        attempt: context.attempt,
+        directorEpoch: context.directorEpoch,
+        policyDigest: context.policyDigest,
+        phase: "execution",
+        commandIndex: 0,
+        invocationDigest: workerPacketDigest(context.packet),
+        hostIdentity: await readLocalResourceHostIdentity(),
+      },
+      commandCount: 1,
+      producerPid: process.pid,
+      producerStartTicks: stat.slice(stat.lastIndexOf(")") + 2).split(/\s+/)[19],
+      deadline: context.deadline.toISOString(),
+    }),
+  };
   return {
     backend,
     context,
@@ -209,12 +269,26 @@ async function appServerHarness(): Promise<BackendHarness> {
           commands: [],
         }),
       };
+      const tokens = {
+        inputTokens: 9,
+        outputTokens: 4,
+        cachedInputTokens: 2,
+        cacheWriteInputTokens: 0,
+        reasoningOutputTokens: 0,
+        totalTokens: 13,
+      };
+      connection.emit("rawResponse/completed", {
+        threadId: handle.resourceId,
+        turnId: handle.metadata!.turnId,
+        responseId: "conformance-response",
+        usage: tokens,
+      });
       connection.emit("thread/tokenUsage/updated", {
         threadId: handle.resourceId,
         turnId: handle.metadata!.turnId,
         tokenUsage: {
-          total: {},
-          last: { inputTokens: 9, outputTokens: 4, cachedInputTokens: 2 },
+          total: tokens,
+          last: tokens,
         },
       });
       connection.emit("turn/completed", {

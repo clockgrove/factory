@@ -1,4 +1,4 @@
-/** Explicit regular delivery qualification; never a substitute for native concurrency. */
+/** Explicit concurrent regular delivery qualification; not native-stack API qualification. */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
@@ -10,6 +10,10 @@ import {
   modelTokenLimit,
 } from "./verify-live-objective.mjs";
 import { deduplicateQualificationReceipts } from "./qualification-receipts.mjs";
+import {
+  assertNativeMergeProof,
+  observeNativeMergeProofs,
+} from "./qualification-sibling-refresh-proof.mjs";
 
 const scope = "installed-local-explicit-regular-objective";
 function regularPolicy(profile, ceiling) {
@@ -64,7 +68,9 @@ export function regularQualification(env) {
     privateEvidence: true,
     beforeRun: async ({ evidence }) => {
       evidence.regularBackendProfile = profile;
+      evidence.nativeDefaultBranch = evidence.preflight?.defaultBranch;
     },
+    observeMergeProofs: observeNativeMergeProofs,
     assessCompletion: assessRegularCompletion,
     afterRun: observeRegularCommits,
   };
@@ -110,7 +116,9 @@ export function assertRegularCompletion(evidence) {
 /** Reuse exact regular-pipeline proof without relabelling the original request or receipts. */
 export function assertRegularPipelineCompletion(evidence, { expected, scope, deliveryMode }) {
   assert.ok(["regular-prs", "native-fallback"].includes(deliveryMode));
-  assertQualificationCompletion(evidence, deliveryMode, expected.backendOrder);
+  assertQualificationCompletion(evidence, deliveryMode, expected.backendOrder, (proof, input) =>
+    assertNativeMergeProof(evidence, proof, input),
+  );
   assert.equal(evidence.scope, scope, "qualification scope differs");
   assert.deepEqual(evidence.policy, expected, "requested bounded regular policy differs");
   const events = eventsOf(evidence);
@@ -178,11 +186,10 @@ export function assertRegularPipelineCompletion(evidence, { expected, scope, del
     for (const sha of [base, publication.headSha, integration.headSha, validation.outputTreeSha])
       assert.match(sha, /^[a-f0-9]{40}$/, "malformed exact commit/tree identity");
     assert.equal(
+      validation.baseSha,
       publication.baseSha,
-      base,
-      "regular publication did not build on previous integration",
+      "validation base differs from original publication",
     );
-    assert.equal(validation.baseSha, base, "validation base differs from publication");
     assert.ok(
       validation.sequence < publication.sequence && publication.sequence < integration.sequence,
       "validation/publication/integration ordering differs",
@@ -191,7 +198,7 @@ export function assertRegularPipelineCompletion(evidence, { expected, scope, del
     const exact = {
       protocol: "clockgrove.factory/exact-head-validation-v1",
       validationDigest: publication.validationDigest,
-      baseSha: base,
+      baseSha: publication.baseSha,
       outputTreeSha: validation.outputTreeSha,
       publishedHeadSha: publication.headSha,
     };
@@ -203,12 +210,19 @@ export function assertRegularPipelineCompletion(evidence, { expected, scope, del
     for (const sha of [publication.headSha, integration.headSha]) {
       const commit = commits.get(sha);
       assert.ok(commit, "exact commit missing");
-      assert.deepEqual(commit.parents, [base], "commit is not the exact singleton-parent squash");
-      assert.equal(
-        commit.treeSha,
-        validation.outputTreeSha,
-        "commit tree differs from independent validation",
+      assert.deepEqual(
+        commit.parents,
+        [sha === publication.headSha ? publication.baseSha : base],
+        "commit is not bound to its exact original or integration parent",
       );
+      // Changed-base candidate/refresh trees are independently proved by the full
+      // immutable checkpoint recipe above, not relabelled as original validation.
+      if (sha === publication.headSha || publication.baseSha === base)
+        assert.equal(
+          commit.treeSha,
+          validation.outputTreeSha,
+          "commit tree differs from original validation",
+        );
     }
     base = integration.headSha;
   }

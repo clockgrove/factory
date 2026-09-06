@@ -41,7 +41,11 @@ the host's clean-tree materialization step.
 
 A successful candidate checkpoint records the controller-observed provider interval only after
 validator cleanup returns. Restart reuses that checkpoint, repairs exact native/validation/review
-accounting, and performs no second validation or completed semantic review. Without completion,
+accounting, and performs no second validation or completed semantic review. A returned failed
+validation with proven cleanup records a distinct authenticated rejected completion on its exact
+capacity reconciliation, never a successful merge checkpoint. Restart repairs its recorded
+validation/native durations and preserves rejection without a probe, validator, cleanup call,
+review, or merge. Without either successful or rejected completion,
 only the exact recorded provider identity may be reconciled; unknown cleanup or usage remains a
 liability. Even proven resource absence does not manufacture successful validation or authorize
 automatic redispatch of the same immutable invocation. Current-head, current-trunk, merge-preview,

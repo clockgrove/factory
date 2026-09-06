@@ -136,6 +136,7 @@ import {
   type ReviewIdentity,
 } from "./control/reviews.js";
 import { parseFactoryEvent, type FactoryEvent } from "./protocol/events.js";
+import { assertIsolatedCandidateFailureProof } from "./recovery/isolated-candidate.js";
 import { assertNoSecretMaterial, PROTOCOL_V2 } from "./protocol/limits.js";
 import {
   assertRequirementsWithinPolicy,
@@ -10127,6 +10128,21 @@ export class FactorySupervisor {
       (this.#packetFor(item.number).requirements.timeoutMinutes ?? this.#policy.workItemTimeoutMinutes) * 60_000,
       this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000 - Date.now(),
     );
+    const remoteAdmissionOpen = async (alreadyAdmitted = false) => {
+      const snapshot = await this.#reader.readObjective(this.#run.objective);
+      this.#fenceSnapshot(snapshot);
+      this.#sequences.observe(snapshotEvents(snapshot));
+      if (hasCancellationRequest(snapshot, this.#run.runId))
+        throw new RunCancellationRequestedError("operator cancelled before adopted isolated validation");
+      const commands = deriveDurableCommandState({ events: snapshotEvents(snapshot),
+        objective: this.#run.objective, runId: this.#run.runId, runActor: this.#run.actor,
+        runStartSequence: this.#runStartSequence });
+      this.#budgetEvents = deduplicateFactoryEvents([...this.#budgetEvents,
+        ...snapshotEvents(snapshot).filter((event) => event.runId === this.#run.runId && event.kind === "budget")]);
+      // Pause/drain stops new phases, while an already durably admitted phase may
+      // finish. Cancellation is different and is rechecked even after admission.
+      return alreadyAdmitted || (!commands.admissionsPaused && !commands.draining && !commands.cloudPaused);
+    };
     const selectAdoptedValidator = async () => {
       const amount = candidateTimeout();
       const available = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
@@ -10399,12 +10415,28 @@ export class FactorySupervisor {
         throw new Error("adopted isolated completion lacks its exact resource ownership");
       if (candidate && !isolated && candidate.isolatedResource)
         throw new Error("adopted candidate isolation classification changed");
+      const failures = runtime.events.filter((event): event is SourceCapacity =>
+        event.kind === "capacity" && event.event === "CapacityReconciled" &&
+        event.runId === this.#run.runId && event.workItem === item.number &&
+        event.backend === backendId && event.isolatedFailure !== undefined);
+      if (failures.length) {
+        if (!isolated || candidate) throw new Error("adopted isolated failure conflicts with successful completion");
+        assertIsolatedCandidateFailureProof({ repository: this.#run.repository, sourceRunId: source.runId,
+          identity, events: runtime.events, requireAccounting: false });
+        const failure = failures[0]!.isolatedFailure!;
+        await this.#sourceUsage(item, `integration-validation-${digest}`,
+          Date.parse(failure.validationCompletedAt) - Date.parse(failure.validationStartedAt), "validation_milliseconds");
+        await this.#sourceUsage(item, `integration-validation-${digest}`,
+          failure.sandboxMilliseconds, "sandbox_milliseconds");
+        throw new Error("adopted isolated candidate validation was durably rejected");
+      }
       const recordCapacity = async (
         event: "CapacityReserved" | "CapacityReconciled",
         cpu: number,
         memoryMb: number,
         batch?: LocalScopeBatch,
         remote?: SourceCapacity,
+        failure?: SourceCapacity["isolatedFailure"],
       ) =>
         this.#appendSuccessorEvent(
           item.id,
@@ -10428,6 +10460,7 @@ export class FactorySupervisor {
             requestedMemoryMb: memoryMb,
             ...(batch ? { localScopeBatch: batch } : {}),
             ...(remote?.isolatedValidation ? { isolatedValidation: remote.isolatedValidation } : {}),
+            ...(failure ? { isolatedFailure: failure } : {}),
           }),
         );
       if (!candidate && isolated && remoteReservation) {
@@ -10451,6 +10484,7 @@ export class FactorySupervisor {
           await recordCapacity("CapacityReconciled", entry.requestedCpu, entry.requestedMemoryMb, undefined,
             isolated ? entry : undefined);
       if (!candidate) {
+        if (isolated && !(await remoteAdmissionOpen())) return;
         if (isolated) adoptedValidator ??= await selectAdoptedValidator();
         const effective = normalizeSchedulingPolicy(this.#policy);
         const resource =
@@ -10503,8 +10537,10 @@ export class FactorySupervisor {
         let validation: CleanValidationResult | undefined;
         let recorded = false;
         let validationLaunched = false;
+        let failureRecorded = false;
         let providerStarted: Date | undefined;
         let providerCompleted: Date | undefined;
+        let providerResult: Awaited<ReturnType<NonNullable<ExecutionBackend["validate"]>>> | undefined;
         try {
           artifact = await reconstruct();
           const scope = isolated ? undefined : await this.#scopedValidation(
@@ -10523,6 +10559,7 @@ export class FactorySupervisor {
           let validationDeadline = deadline;
           let sandboxAmount = 0;
           if (isolated) {
+            if (!(await remoteAdmissionOpen())) return;
             const available = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
             sandboxAmount = candidateTimeout();
             if (sandboxAmount <= 0 || available.sandboxMinutes * 60_000 < sandboxAmount)
@@ -10578,6 +10615,7 @@ export class FactorySupervisor {
               packet,
               ...(scope ? { localScope: scope.hooks } : {}),
               ...(isolated ? { isolatedValidator: () => this.#externalAdmission(async () => {
+                await remoteAdmissionOpen(true);
                 if (Date.now() >= validationDeadline.getTime())
                   throw new Error("adopted isolated validation deadline exhausted before launch");
                 await this.#lease.use(async (lease) => {
@@ -10594,10 +10632,44 @@ export class FactorySupervisor {
                   deadline: validationDeadline, validationInvocation: invocation(artifact!.digest),
                 });
                 providerCompleted = new Date();
+                providerResult = result;
                 return result;
               }) } : {}),
             });
+          }).catch(async (error: unknown) => {
+            // A returned provider result already proves cleanup, even if the
+            // host rejects its command/tree binding. Record rejection, not an
+            // accepted candidate or an indefinitely unknown sandbox.
+            if (isolated && providerStarted && providerCompleted && providerResult) {
+              await recordCapacity("CapacityReconciled", capacity.cpu, capacity.memoryMb, undefined,
+                remoteReservation, {
+                  validationDigest: createHash("sha256").update(JSON.stringify({
+                    invocation: invocation(artifact!.digest), result: providerResult,
+                  })).digest("hex"),
+                  validationStartedAt: providerResult.startedAt,
+                  validationCompletedAt: providerResult.completedAt,
+                  startedAt: providerStarted.toISOString(), completedAt: providerCompleted.toISOString(),
+                  sandboxMilliseconds: providerCompleted.getTime() - providerStarted.getTime(),
+                });
+              failureRecorded = true;
+              await this.#sourceUsage(item, `integration-validation-${digest}`,
+                Date.parse(providerResult.completedAt) - Date.parse(providerResult.startedAt),
+                "validation_milliseconds");
+            }
+            throw error;
           });
+          if (isolated && (!validation.evidence.passed ||
+            (siblingRefresh && validation.evidence.outputTreeSha !== siblingRefresh.outputTreeSha))) {
+            await recordCapacity("CapacityReconciled", capacity.cpu, capacity.memoryMb, undefined,
+              remoteReservation, {
+                validationDigest: validation.evidence.digest,
+                validationStartedAt: validation.evidence.startedAt,
+                validationCompletedAt: validation.evidence.completedAt,
+                startedAt: providerStarted!.toISOString(), completedAt: providerCompleted!.toISOString(),
+                sandboxMilliseconds: providerCompleted!.getTime() - providerStarted!.getTime(),
+              });
+            failureRecorded = true;
+          }
           if (!validation.evidence.passed) {
             await this.#sourceUsage(
               item,
@@ -10643,11 +10715,11 @@ export class FactorySupervisor {
             if (providerStarted && providerCompleted)
               await this.#sourceUsage(item, `integration-validation-${digest}`,
                 providerCompleted.getTime() - providerStarted.getTime(), "sandbox_milliseconds");
-            if (recorded && (candidate || !validationLaunched))
+            if (recorded && !failureRecorded && (candidate || !validationLaunched))
               await recordCapacity("CapacityReconciled", capacity.cpu, capacity.memoryMb, undefined,
                 isolated ? remoteReservation : undefined);
           } finally {
-            if (!recorded || candidate || !validationLaunched) this.#releaseCapacity(capacity.key);
+            if (!recorded || candidate || failureRecorded || !validationLaunched) this.#releaseCapacity(capacity.key);
           }
         }
       }

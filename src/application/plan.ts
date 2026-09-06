@@ -15,6 +15,11 @@ import { DEFAULT_RUN_POLICY, parseRunPolicy, resolveModelSelection } from "../pr
 import type { ApplicationSnapshot } from "./services.js";
 import { safeDiagnosticMessage } from "./doctor.js";
 import { assertCleanPlanningFiles, inspectLocalCheckout } from "./checkout.js";
+import { materializePinnedCompilationTree } from "../execution/pinned-compilation-tree.js";
+import {
+  assertLocalLfsAvailable,
+  materializeLocalLfsAssets,
+} from "../repository-profiles/git-lfs.js";
 
 export interface PlanInput {
   objective: number;
@@ -73,7 +78,10 @@ export async function validatePlanningCheckout(
       `planning checkout HEAD ${head.slice(0, 12)} does not match selected base ${baseSha.slice(0, 12)}`,
     );
   }
-  await assertCleanPlanningFiles(root);
+  // Accept either exact raw pointers or unchanged hydrated bytes, but only after the
+  // required executable and standard local objects have been independently verified.
+  const repositoryLfs = await assertLocalLfsAvailable(root, baseSha.toLowerCase());
+  await assertCleanPlanningFiles(root, repositoryLfs);
 }
 
 export async function readPlanningRepositoryLayout(
@@ -232,15 +240,17 @@ export async function buildPlanReport(input: {
   }
 
   let observedUsage: ManagementUsage | null = null;
+  const preparationDiagnostics: PlanReport["diagnostics"] = [];
   try {
     const management = input.planning?.management;
     if (!management) throw new Error("management compiler is not configured");
     if (!input.planning?.readRepositoryLayout)
       throw new Error("repository layout reader is not configured");
-    const baseSha =
+    const requestedBaseSha =
       input.request.baseSha ?? (await input.planning.readBaseSha?.(input.snapshot.defaultBranch));
-    if (!baseSha || !/^[0-9a-f]{40}$/i.test(baseSha))
+    if (!requestedBaseSha || !/^[0-9a-f]{40}$/i.test(requestedBaseSha))
       throw new Error("plan compilation requires a valid base SHA");
+    const baseSha = requestedBaseSha.toLowerCase();
     if (!input.planning.repositoryPath || !input.planning.validateCheckout)
       throw new Error(
         "plan compilation requires a configured checkout identity and clean-base validator",
@@ -253,53 +263,66 @@ export async function buildPlanReport(input: {
       );
     const policy = parseRunPolicy(input.request.policy ?? DEFAULT_RUN_POLICY);
     const modelSelection = resolveModelSelection(policy, "compile");
-    const context: CompilationContext = {
-      repository: input.planning.repositoryPath,
-      objective: {
-        number: input.snapshot.number,
-        title: input.snapshot.title,
-        body: input.snapshot.body ?? "",
-      },
-      defaultBranch: input.snapshot.defaultBranch,
-      baseSha,
-      repositoryFiles: layout.files,
-      allowedNetworkDestinations: policy.allowedNetworkDestinations,
-      ...(modelSelection ? { modelSelection } : {}),
-    };
-    let checkpointed = false;
-    const result = await management.compile(context, async (candidate) => {
-      observedUsage = { ...candidate.usage };
-      checkpointed = true;
-    });
-    if (!checkpointed) throw new Error("management compiler returned without its result callback");
-    validateGraph(result.objective);
-    if (
-      result.objective.workItems.some(
-        (item) => item.baseSha?.toLowerCase() !== baseSha.toLowerCase(),
-      )
-    )
-      throw new Error("proposed Work Item base does not match the inspected checkout");
-    observedUsage = { ...result.usage };
-    await input.planning.validateCheckout(input.planning.repositoryPath, baseSha, input.repository);
-    return {
-      ...common,
-      mode: "compilation",
-      compilation: {
-        requested: true,
-        result: "completed",
-        backend: management.id,
-        usagePersistence: "response-only",
-      },
-      graph: summarizeGraph(result.objective),
-      proposedGraph: result.objective,
-      usage: observedUsage,
-      diagnostics: [
-        {
-          status: "pass",
-          summary: `bounded compilation completed through ${management.id}; activation remains separate`,
+    const repositoryLfs = await assertLocalLfsAvailable(input.planning.repositoryPath, baseSha);
+    const tree = await materializePinnedCompilationTree(input.planning.repositoryPath, baseSha);
+    try {
+      await materializeLocalLfsAssets(input.planning.repositoryPath, tree.path, baseSha);
+      const context: CompilationContext = {
+        repository: tree.path,
+        objective: {
+          number: input.snapshot.number,
+          title: input.snapshot.title,
+          body: input.snapshot.body ?? "",
         },
-      ],
-    };
+        defaultBranch: input.snapshot.defaultBranch,
+        baseSha,
+        // The earlier layout port proves completeness; only the actual pinned tree supplies
+        // compiler facts and cwd. A mutable caller inventory cannot replace that evidence.
+        repositoryFiles: tree.files,
+        repositoryLfs,
+        allowedNetworkDestinations: policy.allowedNetworkDestinations,
+        ...(modelSelection ? { modelSelection } : {}),
+      };
+      let checkpointed = false;
+      const result = await management.compile(context, async (candidate) => {
+        observedUsage = { ...candidate.usage };
+        checkpointed = true;
+      });
+      if (!checkpointed) throw new Error("management compiler returned without its result callback");
+      validateGraph(result.objective);
+      if (result.objective.workItems.some((item) => item.baseSha?.toLowerCase() !== baseSha))
+        throw new Error("proposed Work Item base does not match the inspected checkout");
+      observedUsage = { ...result.usage };
+      await input.planning.validateCheckout(input.planning.repositoryPath, baseSha, input.repository);
+      preparationDiagnostics.push({
+        status: "pass",
+        summary: `bounded compilation completed through ${management.id}; activation remains separate`,
+      });
+      return {
+        ...common,
+        mode: "compilation",
+        compilation: {
+          requested: true,
+          result: "completed",
+          backend: management.id,
+          usagePersistence: "response-only",
+        },
+        graph: summarizeGraph(result.objective),
+        proposedGraph: result.objective,
+        usage: observedUsage,
+        diagnostics: preparationDiagnostics,
+      };
+    } finally {
+      // The callback records paid usage before compile returns. Cleanup of this exact
+      // owned tree cannot turn its successful response into a suggested new paid call.
+      // Retain warnings in the returned array even when finally runs after return.
+      await tree.dispose().catch(() => {
+        preparationDiagnostics.push({
+          status: "warning",
+          summary: `compilation tree cleanup needs attention: ${tree.path}`,
+        });
+      });
+    }
   } catch (error) {
     if (error instanceof ManagementOutputError) observedUsage = { ...error.usage };
     return {
@@ -313,7 +336,10 @@ export async function buildPlanReport(input: {
       },
       graph: null,
       usage: observedUsage,
-      diagnostics: [{ status: "fail", summary: safeDiagnosticMessage(error) }],
+      diagnostics: [
+        { status: "fail", summary: safeDiagnosticMessage(error) },
+        ...preparationDiagnostics,
+      ],
     };
   }
 }

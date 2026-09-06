@@ -1,4 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { FactoryApplicationService, type ApplicationSnapshot } from "../src/application/index.js";
 import { decodeEventComments } from "../src/control/receipts.js";
@@ -13,6 +17,7 @@ import type {
   ReviewContext,
   ReviewResult,
 } from "../src/management/backend.js";
+import { validatePlanningCheckout, readPlanningRepositoryLayout } from "../src/application/plan.js";
 
 const snapshot = (): ApplicationSnapshot => ({
   id: "objective-node",
@@ -23,10 +28,10 @@ const snapshot = (): ApplicationSnapshot => ({
   factoryEvents: [],
 });
 
-function proposedGraph(): CompiledObjective {
+function proposedGraph(baseSha = "a".repeat(40)): CompiledObjective {
   return compileObjective({
     title: "Objective",
-    baseSha: "a".repeat(40),
+    baseSha,
     repositoryFacts: {
       files: [{ path: "package.json" }, { path: "src/feature.ts" }],
       scripts: { test: "vitest run" },
@@ -42,7 +47,7 @@ function proposedGraph(): CompiledObjective {
         outOfScope: ["Publishing"],
         conventions: ["Use TypeScript"],
         dependsOn: [],
-        baseSha: "a".repeat(40),
+        baseSha,
         validationCommands: ["npm test"],
         requirements: {
           os: ["linux"],
@@ -266,7 +271,20 @@ describe("FactoryApplicationService", () => {
   });
 
   it("compiles only on explicit request and returns observed management usage without writes", async () => {
-    const graph = proposedGraph();
+    const checkout = await mkdtemp(join(tmpdir(), "factory-application-plan-"));
+    try {
+    const git = (...args: string[]) => execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-C", checkout, ...args], { encoding: "utf8" }).trim();
+    git("init", "--quiet", "--template=");
+    git("config", "user.name", "Fixture");
+    git("config", "user.email", "fixture@example.invalid");
+    git("remote", "add", "origin", "https://github.com/o/r.git");
+    await mkdir(join(checkout, "src"));
+    await writeFile(join(checkout, "src/feature.ts"), "export const value = 1;\n");
+    await writeFile(join(checkout, "package.json"), '{"scripts":{"test":"vitest run"}}\n');
+    git("add", "package.json", "src/feature.ts");
+    git("commit", "-qm", "planning fixture");
+    const baseSha = git("rev-parse", "HEAD");
+    const graph = proposedGraph(baseSha);
     const backend = new PlanningBackend(graph);
     let writes = 0;
     const service = new FactoryApplicationService({
@@ -282,17 +300,10 @@ describe("FactoryApplicationService", () => {
       },
       planning: {
         management: backend,
-        repositoryPath: "/repo",
-        validateCheckout: async (path, baseSha) => {
-          expect(path).toBe("/repo");
-          expect(baseSha).toBe("a".repeat(40));
-        },
-        readRepositoryLayout: async () => ({
-          files: ["package.json", "src/feature.ts"],
-          totalFiles: 2,
-          truncated: false,
-        }),
-        readBaseSha: async () => "a".repeat(40),
+        repositoryPath: checkout,
+        validateCheckout: validatePlanningCheckout,
+        readRepositoryLayout: (max, base) => readPlanningRepositoryLayout(checkout, max, base),
+        readBaseSha: async () => baseSha,
       },
     });
     const report = await service.plan({ objective: 7, compile: true });
@@ -305,8 +316,13 @@ describe("FactoryApplicationService", () => {
       proposedGraph: { title: "Objective" },
     });
     expect(backend.compileCalls).toBe(1);
-    expect(backend.lastContext?.repository).toBe("/repo");
+    expect(backend.lastContext?.repository).not.toBe(checkout);
+    expect(backend.lastContext?.repositoryFiles).toEqual(["package.json", "src/feature.ts"]);
+    expect(backend.lastContext?.repositoryLfs).toMatchObject({ baseSha, assets: [], requiredTools: [] });
     expect(writes).toBe(0);
+    } finally {
+      await rm(checkout, { recursive: true, force: true });
+    }
   });
 
   it("fails plan compilation diagnostically before a model call when repository evidence is incomplete", async () => {

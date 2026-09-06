@@ -18,7 +18,11 @@ export const operatorDocumentation = Object.freeze([
 export function assertPackageDocumentation(packagePaths, documents) {
   const paths = new Set(packagePaths);
   for (const required of [
-    "README.md", "SECURITY.md", "SUPPORT.md", "CHANGELOG.md", ...operatorDocumentation,
+    "README.md",
+    "SECURITY.md",
+    "SUPPORT.md",
+    "CHANGELOG.md",
+    ...operatorDocumentation,
   ]) {
     if (!paths.has(required)) {
       throw new Error(`npm package is missing operator documentation ${required}`);
@@ -44,8 +48,11 @@ export function assertPackageDocumentation(packagePaths, documents) {
       const target = decodeURIComponent(href.split(/[?#]/)[0]);
       const resolved = posix.normalize(posix.join(posix.dirname(path), target));
       if (
-        !target || target.startsWith("/") || target.includes("\\") ||
-        resolved.startsWith("../") || !paths.has(resolved)
+        !target ||
+        target.startsWith("/") ||
+        target.includes("\\") ||
+        resolved.startsWith("../") ||
+        !paths.has(resolved)
       ) {
         throw new Error(`npm package Markdown link has no packaged target: ${path} -> ${href}`);
       }

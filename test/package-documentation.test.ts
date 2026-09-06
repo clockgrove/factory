@@ -10,7 +10,13 @@ import {
 const root = new URL("../", import.meta.url);
 
 function fixture() {
-  const paths = ["README.md", "SECURITY.md", "SUPPORT.md", "CHANGELOG.md", ...operatorDocumentation];
+  const paths = [
+    "README.md",
+    "SECURITY.md",
+    "SUPPORT.md",
+    "CHANGELOG.md",
+    ...operatorDocumentation,
+  ];
   const documents: Record<string, string> = Object.fromEntries(paths.map((path) => [path, ""]));
   return { paths, documents };
 }
@@ -32,13 +38,13 @@ describe("distributed operator documentation", () => {
         ? readdirSync(url).flatMap((entry) => expand(`${path.replace(/\/$/, "")}/${entry}`))
         : [path];
     };
-    const paths = [...new Set([
-      "README.md", "LICENSE", "package.json", ...manifest.files.flatMap(expand),
-    ])];
+    const paths = [
+      ...new Set(["README.md", "LICENSE", "package.json", ...manifest.files.flatMap(expand)]),
+    ];
     const documents = Object.fromEntries(
-      paths.filter((path) => path.endsWith(".md")).map((path) => [
-        path, readFileSync(new URL(path, root), "utf8"),
-      ]),
+      paths
+        .filter((path) => path.endsWith(".md"))
+        .map((path) => [path, readFileSync(new URL(path, root), "utf8")]),
     );
     expect(() => assertPackageDocumentation(paths, documents)).not.toThrow();
   });
@@ -59,9 +65,12 @@ describe("distributed operator documentation", () => {
 
   it("rejects missing required operator guidance", () => {
     const f = fixture();
-    expect(() => assertPackageDocumentation(
-      f.paths.filter((path) => path !== "docs/setup/unattended.md"), f.documents,
-    )).toThrow("missing operator documentation docs/setup/unattended.md");
+    expect(() =>
+      assertPackageDocumentation(
+        f.paths.filter((path) => path !== "docs/setup/unattended.md"),
+        f.documents,
+      ),
+    ).toThrow("missing operator documentation docs/setup/unattended.md");
   });
 
   it("checks actual Markdown bytes, including a document added outside docs", () => {
@@ -101,9 +110,6 @@ describe("distributed operator documentation", () => {
   ])("rejects missing or escaping local targets: %s", (markdown) => {
     const f = fixture();
     f.documents["README.md"] = markdown;
-    expect(() => assertPackageDocumentation(f.paths, f.documents)).toThrow(
-      "no packaged target",
-    );
+    expect(() => assertPackageDocumentation(f.paths, f.documents)).toThrow("no packaged target");
   });
-
 });

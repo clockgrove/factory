@@ -173,9 +173,13 @@ try {
   );
 
   const installedRoot = resolve(installDirectory, "node_modules", "@clockgrove", "factory");
-  const documents = Object.fromEntries(await Promise.all(
-    [...paths].filter((path) => path.endsWith(".md")).map(async (path) => [path, await readFile(resolve(installedRoot, path), "utf8")]),
-  ));
+  const documents = Object.fromEntries(
+    await Promise.all(
+      [...paths]
+        .filter((path) => path.endsWith(".md"))
+        .map(async (path) => [path, await readFile(resolve(installedRoot, path), "utf8")]),
+    ),
+  );
   assertPackageDocumentation(paths, documents);
   const executable = resolve(installDirectory, "node_modules", ".bin", "factory");
   await access(executable, constants.X_OK);

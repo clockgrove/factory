@@ -16,9 +16,10 @@ describe("public qualification evidence", () => {
         "terminalReceipt",
         "deliveryReceipt",
       ]) {
-        expect(record, `${name}: public evidence must use private-record digests`).not.toHaveProperty(
-          key,
-        );
+        expect(
+          record,
+          `${name}: public evidence must use private-record digests`,
+        ).not.toHaveProperty(key);
       }
       for (const match of text.matchAll(/\/(?:home|Users)\/([^/"\\\s]+)/g)) {
         expect(match[1], `${name}: home paths must be explicitly generic`).toBe("USER");

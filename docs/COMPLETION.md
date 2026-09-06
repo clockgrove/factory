@@ -1,6 +1,6 @@
 # Factory completion board
 
-Updated: 2026-09-05. The authoritative remaining-work checklist is
+Updated: 2026-09-06. The authoritative remaining-work checklist is
 [GitHub #69](https://github.com/clockgrove/factory/issues/69). These are ordinary development issues,
 not Factory Objectives. This board is a linked summary, not another backlog.
 
@@ -53,10 +53,16 @@ or registry publication was performed. All six live release gates retain their a
 ## Deferred qualification and distribution
 
 The [installed accounted-checkpoint restart component](release-evidence/accounted-checkpoint-restart-component-2026-09-06.json)
-has now passed on the exact installed candidate. It used 206,543 tokens from the newly approved
-500,000 local-only aggregate allowance; 293,457 remain. The original run completed and its controller
-is stopped. Only #75's orderly checkpoint-restart acceptance is satisfied; this is not cancellation,
-genuine fallback, the full WSL2 matrix or any other release gate. No additional scenario has started.
+passed on the exact installed candidate, using 206,543 tokens from the newly approved 500,000
+local-only aggregate allowance. A subsequent distinct
+[active-cancellation attempt](release-evidence/active-cancellation-incomplete-2026-09-06.json)
+observed same-run cancellation and exact reserved-resource absence, but is **incomplete** because
+the interrupted worker's final model-token usage is unavailable. Its known management usage is
+15,154 tokens: the aggregate known subtotal is 221,697 **plus unknown worker usage**, not an exact
+remaining allowance. Both runs are terminal and the controller is independently stopped with PID 0
+and no control group. No further model-backed scenario has started. Only #75's orderly
+checkpoint-restart acceptance is satisfied; cancellation, genuine fallback, the full WSL2 matrix
+and all other release gates remain unpassed.
 
 Every issue has acceptance criteria, dependencies and an exact next deliverable. Qualification and
 distribution remain open; the integrated local suite is completed. Their execution can now follow
@@ -64,7 +70,7 @@ the implementation phase, but only within each issue's explicit authorization bo
 
 | Capability | Ordinary issues | Dependency / next boundary |
 | --- | --- | --- |
-| WSL2 resilience and adaptive scheduling | [#75](https://github.com/clockgrove/factory/issues/75), [#76](https://github.com/clockgrove/factory/issues/76) | Checkpoint restart passed; remaining scenarios need an explicit allocation within the 293,457 remaining aggregate allowance and an exact frozen artifact. No revival or refill of the completed run. |
+| WSL2 resilience and adaptive scheduling | [#75](https://github.com/clockgrove/factory/issues/75), [#76](https://github.com/clockgrove/factory/issues/76) | Checkpoint restart passed; active cancellation is incomplete on missing worker usage. Resolve authoritative usage or obtain explicit acknowledgement and a bounded continuation allowance before further model-backed scenarios. This does not waive cancellation acceptance or revive either terminal run. |
 | Organization priority edits | [#77](https://github.com/clockgrove/factory/issues/77) | Scoped disposable organization-field permission. |
 | Other supported Linux hosts | [Native Linux #78](https://github.com/clockgrove/factory/issues/78), [macOS-hosted Linux #79](https://github.com/clockgrove/factory/issues/79) | Host access; supported architecture coverage is retained. Neither blocks independent WSL2 work. |
 | Native stacks, merge queue and recorded regular-PR fallback | [#80](https://github.com/clockgrove/factory/issues/80), [#81](https://github.com/clockgrove/factory/issues/81), [#82](https://github.com/clockgrove/factory/issues/82) | Installed candidate; queue/rule tests additionally need eligible disposable features and explicit configuration authority. |

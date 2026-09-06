@@ -26,6 +26,7 @@ import {
   installedBundleIdentity,
   installedIdentity,
   installedPluginPath,
+  modelTokenLimit,
   objectiveBodyFor,
   qualificationNamespace,
   qualificationNamespaceMarker,
@@ -81,7 +82,7 @@ export function checkpointAuthority(env) {
     phase,
     namespace: qualificationNamespace(env.FACTORY_CHECKPOINT_NAMESPACE),
     evidence: safePath(env.FACTORY_CHECKPOINT_EVIDENCE),
-    policy: boundedPolicy("regular-prs", 500000),
+    policy: boundedPolicy("regular-prs", modelTokenLimit(env.FACTORY_CHECKPOINT_MAX_MODEL_TOKENS)),
   };
 }
 
@@ -472,7 +473,7 @@ export function checkpointFacts(
     observation.status.summary.economics.modelTokenBreakdown.reconciledCalls,
     usage.length,
   );
-  assert.ok(modelTokens < 500000, "original allowance exhausted");
+  assert.ok(modelTokens < authority.policy.economics.maxModelTokens, "original allowance exhausted");
   assert.equal(
     unique(
       run.filter((event) => event.event === "GraphCompiled"),

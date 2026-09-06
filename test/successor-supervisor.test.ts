@@ -22,6 +22,7 @@ import { publicationBranch } from "../src/publication/publisher.js";
 import { bindValidationToPublishedHead } from "../src/validation/plan.js";
 import { BackendRegistry } from "../src/execution/registry.js";
 import { CodexSdkLocalBackend } from "../src/backends/codex-sdk-local.js";
+import { DaytonaResourceCleanupError } from "../src/backends/daytona.js";
 import type { ManagementBackend } from "../src/management/backend.js";
 import type { ObjectiveSnapshot, LinkedPullRequest } from "../src/types.js";
 import { PlatformUnavailableError } from "../src/platform.js";
@@ -842,16 +843,28 @@ async function fixture(
       await cleanValidation.discardValidationResult(result);
       if (options.adoptedIsolatedValidation?.fault === "cleanup") {
         // biome-ignore lint/correctness/noUnsafeFinally: models the existing provider contract's cleanup refusal overriding successful commands
-        throw new Error(
-          "simulated isolated candidate termination is unknown; automated replacement is blocked",
-        );
+        throw new DaytonaResourceCleanupError({
+          resourceId: `simulated-${ownership}`,
+          resourceName: `simulated-validation-${ownership}`,
+          operation: "validation cleanup",
+          cause: "simulated isolated candidate termination is unknown",
+        });
       }
       isolatedResources.delete(ownership);
     }
   });
-  const isolatedReconcile = vi.fn<NonNullable<ExecutionBackend["reconcileStale"]>>(async () => {
-    if (isolatedResources.size)
-      throw new Error("simulated isolated candidate termination is still unknown");
+  const isolatedReconcile = vi.fn<NonNullable<ExecutionBackend["reconcileStale"]>>(async (input) => {
+    if (isolatedResources.size) {
+      const ownership = validationInvocationOwnership(input);
+      if (!ownership || !isolatedResources.has(ownership))
+        throw new Error("fixture reconciliation does not own its simulated resource");
+      throw new DaytonaResourceCleanupError({
+        resourceId: `simulated-${ownership}`,
+        resourceName: `simulated-validation-${ownership}`,
+        operation: "stale-attempt reconciliation",
+        cause: "simulated isolated candidate termination is still unknown",
+      });
+    }
   });
   if (backendRegistry) {
     const local = new CodexSdkLocalBackend();
@@ -2174,13 +2187,13 @@ describe("Supervisor adopted isolated candidate validation", () => {
   it("retains unknown isolated termination and refuses a replacement candidate after restart", async () => {
     const f = await isolatedSuccessorFixture({ fault: "cleanup" });
     const first = await f.run().catch((error: unknown) => error);
-    expect(first).toBeInstanceOf(Error);
+    expect(first).toBeInstanceOf(DaytonaResourceCleanupError);
     expect((first as Error).message).toMatch(/termination|completion|reconciliation|replacement/);
     expect(f.isolatedValidate).toHaveBeenCalledOnce();
     expect(f.isolatedResources.size).toBe(1);
     expect([...f.refs.keys()].filter((ref) => ref.includes("/merge-candidates/"))).toEqual([]);
     const restarted = await f.run().catch((error: unknown) => error);
-    expect(restarted).toBeInstanceOf(Error);
+    expect(restarted, JSON.stringify(restarted)).toBeInstanceOf(DaytonaResourceCleanupError);
     expect(f.isolatedValidate).toHaveBeenCalledOnce();
     expect(f.isolatedReconcile).toHaveBeenCalled();
     const input = f.isolatedValidate.mock.calls[0]![0];

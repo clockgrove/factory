@@ -20,9 +20,10 @@ import {
   type LargeFilePhase,
   type LargeFileRefusalScenario,
 } from "../scripts/qualification-large-files.mjs";
-import { artifactFromPatchFile } from "../src/runtime/artifact-patch.js";
+import { artifactFromPatchFile, inspectPatchManifest } from "../src/runtime/artifact-patch.js";
 import { collectLocalArtifact } from "../src/runtime/local-worktree.js";
-import { releaseAllArtifactContent } from "../src/execution/artifact-content.js";
+import { assertFilesystemArtifactManifest, releaseAllArtifactContent } from "../src/execution/artifact-content.js";
+import { normalizeArtifact } from "../src/execution/artifacts.js";
 
 const roots: string[] = [];
 const sha256 = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
@@ -172,7 +173,7 @@ describe("installed large-file qualifier fixture and proof contracts", () => {
     expect(() => writeLargeFileOutput({ fixture: prepared, phase: "metadata" })).toThrow();
   });
 
-  it.each(["scope", "secret", "symlink"] as const)("produces local-only %s refusal bytes with no upload", async (scenario) => {
+  it.each(["scope", "secret"] as const)("produces local-only %s collection refusal bytes", async (scenario) => {
     const prepared = fixture();
     execFileSync(process.execPath, [join(prepared.repository, prepared.recipePath), scenario], { cwd: prepared.repository, timeout: 15_000, env: { PATH: "/usr/bin:/bin", HOME: prepared.root } });
     let error: unknown;
@@ -185,6 +186,32 @@ describe("installed large-file qualifier fixture and proof contracts", () => {
     expect(assertLargeFileRefusal(observation)).toMatchObject({ refused: true, uploadAbsence: "unavailable" });
     expect(() => assertLargeFileRefusal({ ...observation, contentUploads: 0 })).toThrow(/provenance/);
     expect(reason).not.toContain("Q".repeat(40));
+  }, 30_000);
+
+  it("allows exact raw symlink Git content but refuses filesystem materialization before executable validation", async () => {
+    const prepared = fixture();
+    execFileSync(process.execPath, [join(prepared.repository, prepared.recipePath), "symlink"], { cwd: prepared.repository, timeout: 15_000, env: { PATH: "/usr/bin:/bin", HOME: prepared.root } });
+    git(prepared.repository, ["add", "--intent-to-add", "--", prepared.paths.payload]);
+    const patch = git(prepared.repository, ["diff", "--binary", "--no-ext-diff", prepared.baseSha, "--", prepared.paths.payload]);
+    const patchPath = join(prepared.root, "symlink.patch");
+    writeFileSync(patchPath, patch, { flag: "wx", mode: 0o600 });
+    const manifest = await inspectPatchManifest(prepared.repository, prepared.baseSha, patchPath, [prepared.paths.payload], { allowSymlinkBlobs: true });
+    expect(manifest.files).toEqual([{
+      path: prepared.paths.payload, action: "write", mode: "120000",
+      bytes: Buffer.byteLength("../lfs/canonical.bin"), digest: sha256("../lfs/canonical.bin"),
+      mediaType: "unknown", generated: true,
+    }]);
+    const retained = normalizeArtifact({ baseSha: prepared.baseSha, changedPaths: [prepared.paths.payload], patch: patch.toString("utf8"), fileManifest: manifest, outcome: "succeeded" });
+    expect(retained.fileManifest).toEqual(manifest);
+    const reason = "symlink artifacts support Git-object-only operations, not filesystem materialization";
+    expect(() => assertFilesystemArtifactManifest(manifest)).toThrow(reason);
+    const observation = { scenario: "symlink" as const, outcome: "refused" as const, stage: "filesystem-materialization" as const, reason, artifactPublished: false };
+    expect(largeFileScenario("symlink").remoteWritesAllowed).toBe(true);
+    expect(assertLargeFileRefusal(observation)).toMatchObject({ refused: true, uploadAbsence: "unavailable" });
+    expect(assertLargeFileRefusal({ ...observation, contentUploads: 1, contentUploadEvidence: "instrumented-content-write-count" })).toMatchObject({ uploadAbsence: "not-absent" });
+    expect(() => assertLargeFileRefusal({ ...observation, stage: "collection" })).toThrow();
+    expect(() => assertLargeFileRefusal({ ...observation, artifactPublished: true })).toThrow();
+    // This offline contract does not fabricate intent/ready refs or installed run/process evidence.
   }, 30_000);
 
   it.each([

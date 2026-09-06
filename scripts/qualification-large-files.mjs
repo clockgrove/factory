@@ -291,10 +291,12 @@ export function largeFileScenario(id) {
     "lfs-object-corrupt": { stage: "source-preflight", reason: /LFS (?:cache )?object.*(?:digest|size|hash|integrity)/i },
     scope: { stage: "collection", reason: /outside scope/i },
     secret: { stage: "collection", reason: /suspected.*(?:credential|secret)|secret material/i },
-    symlink: { stage: "collection", reason: /symlink|unsupported.*(?:kind|mode)|not regular/i },
+    symlink: { stage: "filesystem-materialization", reason: /^symlink artifacts support Git-object-only operations, not filesystem materialization$/ },
   };
   assert.ok(Object.hasOwn(scenarios, id), "unknown refusal scenario");
-  return { id, ...scenarios[id], remoteWritesAllowed: false };
+  // Symlinks may retain exact raw target Git blobs in intent/ready; this is not PR or
+  // filesystem authority. The installed driver independently proves that retained identity.
+  return { id, ...scenarios[id], remoteWritesAllowed: id === "symlink" };
 }
 export function assertLargeFileRefusal(observation) {
   const scenario = largeFileScenario(observation.scenario);
@@ -305,12 +307,14 @@ export function assertLargeFileRefusal(observation) {
   assert.match(observation.reason, scenario.reason);
   if (observation.contentUploads !== undefined) {
     assert.equal(observation.contentUploadEvidence, "instrumented-content-write-count", "upload count lacks observation provenance");
-    assert.equal(observation.contentUploads, 0, "refused content reached external publication");
+    assert.ok(Number.isSafeInteger(observation.contentUploads) && observation.contentUploads >= 0);
+    if (!scenario.remoteWritesAllowed)
+      assert.equal(observation.contentUploads, 0, "refused content reached external publication");
   } else assert.equal(observation.contentUploadEvidence, undefined);
   assert.equal(observation.artifactPublished, false);
   if (scenario.stage === "source-preflight") assert.equal(observation.modelCalls, 0);
   // Counters come from the driver's actual installed observation, never inferred by this helper.
-  return { scenario: scenario.id, boundary: scenario.stage, refused: true, uploadAbsence: observation.contentUploads === 0 ? "observed-zero" : "unavailable" };
+  return { scenario: scenario.id, boundary: scenario.stage, refused: true, uploadAbsence: observation.contentUploads === undefined ? "unavailable" : observation.contentUploads === 0 ? "observed-zero" : "not-absent" };
 }
 
 export function largeFileObjectiveBody(namespace) {

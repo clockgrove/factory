@@ -51,6 +51,20 @@ const instant = (value) => {
   return result;
 };
 
+function cooldownDeadline(reason, message) {
+  // The planner emits toISOString(), optionally followed by this exact local-only
+  // policy diagnostic. Neither arbitrary suffixes nor Date.parse normalization
+  // of malformed calendar dates establish an observed cooldown boundary.
+  const match =
+    /^local-cooldown: local admission cooldown lasts until (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)(?:; paid burst is disabled)?$/.exec(
+      reason,
+    );
+  assert.ok(match && match[0] === reason, message);
+  const milliseconds = instant(match[1]);
+  assert.equal(new Date(milliseconds).toISOString(), match[1], "malformed cooldown deadline");
+  return { at: match[1], milliseconds };
+}
+
 function pressurePolicy(limit) {
   const policy = boundedPolicy("regular-prs", limit);
   policy.capacity.local.admissionCooldownSeconds = 120;
@@ -144,11 +158,11 @@ export function assertPressureReadmission(events, proof, policy) {
     (event) => event.sequence > pressure.sequence && event.workItem === pressure.workItem,
   );
   assert.ok(cooldown, "real local-cooldown transition unavailable");
-  const match = /^local-cooldown: local admission cooldown lasts until (\S+)$/.exec(
+  const deadline = cooldownDeadline(
     cooldown.reason,
+    "cooldown decision does not contain its actual deadline",
   );
-  assert.ok(match, "cooldown decision does not contain its actual deadline");
-  const cooldownUntil = instant(match[1]);
+  const cooldownUntil = deadline.milliseconds;
   assert.ok(cooldownUntil > instant(pressure.at), "cooldown does not follow pressure");
   for (const key of [
     "unit",
@@ -220,12 +234,9 @@ export function assertPressureReadmission(events, proof, policy) {
     for (const decision of queued(events, "local-cooldown").filter(
       (event) => event.sequence < admission.sequence,
     )) {
-      const boundary = /^local-cooldown: local admission cooldown lasts until (\S+)$/.exec(
-        decision.reason,
-      );
-      assert.ok(boundary, "later cooldown boundary unavailable");
+      const boundary = cooldownDeadline(decision.reason, "later cooldown boundary unavailable");
       assert.ok(
-        instant(admission.capacityMeasuredAt) >= instant(boundary[1]),
+        instant(admission.capacityMeasuredAt) >= boundary.milliseconds,
         "admission preceded a later observed cooldown deadline",
       );
     }
@@ -241,7 +252,7 @@ export function assertPressureReadmission(events, proof, policy) {
         admission.requestedMemoryMb + policy.capacity.local.reserveMemoryMb,
     );
   }
-  return { pressure, cooldown, cooldownUntil: match[1], firstAdmission: admissions[0] };
+  return { pressure, cooldown, cooldownUntil: deadline.at, firstAdmission: admissions[0] };
 }
 
 export function assertPressureCompletion(evidence) {

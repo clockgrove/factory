@@ -53,6 +53,12 @@ describe("regular delivery owns the complete Supervisor pipeline", () => {
         localOnly: true,
         localMaxParallel: 2,
       });
+      // Captured foreground contract: the start has neither activation nor base;
+      // GraphCompiled is the authenticated original base authority.
+      const start = f.snapshot.factoryEvents!.find((event) => event.event === "FactoryRunStarted")!;
+      if (start.kind !== "run" || start.event !== "FactoryRunStarted") throw new Error("start");
+      delete start.baseSha;
+      const originalStart = structuredClone(start);
       let held = true;
       let waits = 0;
       const readPull = vi.mocked(GitHubControlStore.prototype.readPullRequest);
@@ -93,10 +99,74 @@ describe("regular delivery owns the complete Supervisor pipeline", () => {
         const result = await running;
         expect(result, result.reason).toMatchObject({ status: "completed" });
         assertConcurrent(f);
+        expect(start).toEqual(originalStart);
+        expect(start.activationRequestId).toBeUndefined();
+        expect(start.baseSha).toBeUndefined();
       } finally {
         held = false;
         shutdown.abort();
         await running.catch(() => {});
+        await f.dispose();
+      }
+    },
+    30_000,
+  );
+
+  it.each([
+    "missing-graph",
+    "graph-base",
+    "graph-blob",
+    "duplicate-graph",
+    "review",
+    "review-usage",
+  ])(
+    "does not continue a foreground run after its first integration with %s evidence",
+    async (fault) => {
+      let changed = false;
+      const f = await providerSupervisorFixture("daytona-burst", {
+        localOnly: true,
+        localMaxParallel: 2,
+        afterIntegration: () => {
+          if (changed) return;
+          changed = true;
+          const events = f.snapshot.factoryEvents!;
+          const graph = events.find((event) => event.event === "GraphCompiled")!;
+          if (graph.kind !== "graph" || graph.event !== "GraphCompiled") throw new Error("graph");
+          if (fault === "missing-graph") events.splice(events.indexOf(graph), 1);
+          if (fault === "graph-base") graph.baseSha = "f".repeat(40);
+          if (fault === "graph-blob") graph.graphBlobSha = "f".repeat(40);
+          if (fault === "duplicate-graph")
+            events.push({ ...graph, sequence: graph.sequence + 10000 });
+          if (fault === "review") {
+            for (const ref of f.refs.keys()) if (ref.includes("/reviews/")) f.refs.delete(ref);
+          }
+          if (fault === "review-usage") {
+            for (const item of f.snapshot.workItems)
+              item.factoryEvents = item.factoryEvents!.filter(
+                (event) => !(event.kind === "budget" && event.phase === "management"),
+              );
+          }
+        },
+      });
+      const start = f.snapshot.factoryEvents!.find((event) => event.event === "FactoryRunStarted")!;
+      if (start.kind !== "run" || start.event !== "FactoryRunStarted") throw new Error("start");
+      delete start.baseSha;
+      try {
+        const result = await f.run();
+        expect(changed).toBe(true);
+        expect(result.status).toBe("escalated");
+        if (fault === "graph-base" || fault === "graph-blob")
+          expect(result.reason).toMatch(/^conflicting Factory events at .*:graph:GraphCompiled:/);
+        else
+          expect(result.reason).toBe(
+            "prior integration lacks its authenticated accepted exact-head checkpoint",
+          );
+        expect(f.events().filter((event) => event.event === "AttemptIntegrated")).toHaveLength(1);
+        expect(
+          f.activity.some((entry) => entry.operation === "launch" && entry.workItem === 10),
+        ).toBe(false);
+        expect(start.baseSha).toBeUndefined();
+      } finally {
         await f.dispose();
       }
     },

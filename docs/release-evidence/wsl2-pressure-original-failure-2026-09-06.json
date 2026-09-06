@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "scope": "Installed local pressure/cooldown/readmission; original run escalated before complete regular-PR delivery",
+  "result": "incomplete",
+  "environment": "Linux under WSL2",
+  "installedSourceCommit": "bbc135a6f82766f9f811b26899b97b6e5d090167",
+  "mergedSourceCommit": "9923417590950d8f95a58a834b36c449c8e58a49",
+  "installedArtifact": {
+    "packageSha256": "df2f098b57fd7166a5d8da6f32b53735bf0f3e3f462c80885ea1775f04818c31",
+    "inventorySha256": "5e0aedb503a6eb40bafa48b4b074dec64e369758cbdbe8e5b9593945e0abd6dd",
+    "files": 43
+  },
+  "originalObserverEvidenceSha256": "3b0224d20c86b80a2e3418c81f37d738d9f986bf1c333e17ec9d2dd732da3025",
+  "separateTerminalReconciliationSha256": "9701856c44a9fed74738686e85c332a1872a90f458eaac6572dec7bcb8191d04",
+  "separateCleanupEvidenceSha256": "883b0d8e3ca7a6cd7d9accfe19a98dff37b8e4c11a11c3135e85c5edf869a3cf",
+  "failures": [
+    {
+      "issue": "https://github.com/clockgrove/factory/issues/124",
+      "layer": "qualification observer",
+      "cause": "The emitted local-only cooldown diagnostic has an exact paid-burst-disabled suffix that the old parser rejected."
+    },
+    {
+      "issue": "https://github.com/clockgrove/factory/issues/125",
+      "layer": "runtime continuation",
+      "reason": "prior integration lacks its authenticated accepted exact-head checkpoint"
+    }
+  ],
+  "retainedSubset": {
+    "verifierSourceCommit": "3a775667409ea4cb38a2b5af2ff15e4a218b9b05",
+    "pressureCooldownReadmission": "passed by strict read-only reassessment of original observations",
+    "originalPublicationAndActualMergeIdentity": "passed for the one integrated root; not accepted-checkpoint authority proof",
+    "regularCommitReads": "passed",
+    "delivery": "one root integrated, another retained for review, dependent join unfinished",
+    "fullCompletion": false,
+    "artifactBehavior": "unverified",
+    "cleanup": "independently passed for the original primary, pressure helper, six receipt-derived worker scopes and exact owned slice; only the empty slice and its three temporary overrides were removed"
+  },
+  "observedUsage": {
+    "modelTokens": 221853,
+    "localMilliseconds": 175569,
+    "validationMilliseconds": 20871,
+    "remainingObservedModelTokenThreshold": 278147,
+    "unreconciledReservations": 0,
+    "notes": "Observed stop threshold is not a hard provider token cap. Accounting receipts do not prove physical resource absence."
+  },
+  "boundaries": [
+    "Original failed observer evidence was not modified, the terminal original run was not revived, and pressure was not reinjected.",
+    "The separate terminal result was derived from authenticated receipts and fresh installed status, not relabelled as a captured factory_run RPC response.",
+    "Recovery requires a separately bound successor and retains original work, usage and failure history.",
+    "No paid cloud backend, native non-WSL host, complete qualification or comparative savings claim is established."
+  ]
+}

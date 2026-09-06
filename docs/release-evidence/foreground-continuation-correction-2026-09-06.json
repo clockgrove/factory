@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "scope": "Integrated continuation corrections, complete release checks and matching local WSL2 plugin installation; successor delivery remains separate",
+  "sourceCommit": "6d22af761786526721748c374f96ce0b6654a393",
+  "sourceTree": "40e943ef5a08bd12b6c082d49fec08c6619354c7",
+  "issues": [124, 125, 126],
+  "command": "npm run verify:release",
+  "exitCode": 0,
+  "logSha256": "4cd1106dcca33e96cfafc8779551d532fe3fdd568db6324f8556b5fc788acebf",
+  "checks": {
+    "typecheck": "passed",
+    "lint": "passed",
+    "format": "passed",
+    "testFilesPassed": 158,
+    "testsPassed": 3081,
+    "testsSkipped": 3,
+    "suiteDurationSeconds": 421.90,
+    "coverage": { "statements": 80.02, "branches": 77.76, "functions": 83.71, "lines": 81.18, "unchangedThresholds": "passed" },
+    "schemas": "passed",
+    "reproducibleBundles": "passed",
+    "isolatedCliPluginInstallAndStartup": "passed",
+    "npmPackage": "passed",
+    "reportedVulnerabilities": 0
+  },
+  "installedArtifact": {
+    "packageSha256": "60e4a4ee8a2d8a7d384ab8b581017251ade43f6d558a67a69b070df15acfcb7b",
+    "packageFiles": 43,
+    "packageBytes": 2973300,
+    "inventorySha256": "cfc874a0d2291c720cc07ac572f21e63cc254e00baa80d922a6e64d4bb44cb8e",
+    "cliSha256": "36f518608b2e97a5fd43645caed5bdb84c75b6f59a8778d6337ae62725a8fc57",
+    "mcpSha256": "92e77ee3c440c6e618b65a2270cd8f2497434e6d35f3dda2c3493899a6fa205e",
+    "allCanonicalFilesMatched": true,
+    "onlyPermittedDifference": "Codex manifest cachebuster",
+    "previousSourceRetainedForRollback": true
+  },
+  "originalFailedCandidate": {
+    "sourceCommit": "3809d0be5394e6d07bcf69b8682f66e4a03f641b",
+    "qualification": "Generated inventory and notices were present but not yet committed; no source or test edits were made during that run. This is not a clean-tree claim.",
+    "generatedMetadataDiffSha256": "dd4370543bb393f50edcc429925fd550fd79e741276c75f5ba0ab5780a1715d5",
+    "logSha256": "844a817d39fa23af2eff56ef61903b0c4343a0c8060f947bc2389b6d947833f9",
+    "exitCode": 1,
+    "testsPassed": 3080,
+    "testsFailed": 1,
+    "testsSkipped": 3,
+    "cause": "One existing nested real-Git validation fixture exceeded its five-second default deadline; every unchanged assertion passed in the isolated diagnostic and focused correction checks.",
+    "correction": "Only that fixture receives a 15-second allowance. No global deadline, runtime behavior, assertion or coverage threshold changed."
+  },
+  "boundaries": [
+    "After the passing source, only completion/evidence documentation may be added; runtime, tests and packaged bytes must remain identical for this evidence to apply.",
+    "The original installed run's escalation, partial delivery and cleanup evidence remain separate. Recovery has not been proven by these source checks.",
+    "No registry publication, cloud-provider qualification, comparative savings claim or native non-WSL host pass is established."
+  ]
+}

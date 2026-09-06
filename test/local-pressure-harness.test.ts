@@ -363,6 +363,53 @@ function progression() {
 }
 
 describe("real receipt pressure/cooldown/readmission contract", () => {
+  // Only the reason text is captured from the original installed run (#124).
+  // The surrounding deterministic fixture is not a replacement runtime receipt.
+  const capturedReason =
+    "local-cooldown: local admission cooldown lasts until 2026-09-06T10:18:53.472Z; paid burst is disabled";
+  const capturedProgression = () => {
+    const input = progression();
+    input.pressure.at = "2026-09-06T10:16:53.000Z";
+    input.cooldown.at = "2026-09-06T10:18:03.000Z";
+    input.cooldown.reason = capturedReason;
+    input.proof.pressureAbsent.observedAt = "2026-09-06T10:17:01.000Z";
+    input.admission.capacityMeasuredAt = "2026-09-06T10:18:54.000Z";
+    return input;
+  };
+  it("accepts the captured local-only reason without changing its exact deadline", () => {
+    const input = capturedProgression();
+    expect(assertPressureReadmission(input.events, input.proof, input.policy)).toMatchObject({
+      cooldownUntil: "2026-09-06T10:18:53.472Z",
+      firstAdmission: input.admission,
+    });
+  });
+  it.each([
+    { capacityMeasuredAt: "2026-09-06T10:18:53.471Z" },
+    { sequence: 5 },
+    { runId: "other" },
+    { policyDigest: "f".repeat(64) },
+  ])("keeps timing, order and identity fences for the captured reason %j", (change) => {
+    const input = capturedProgression();
+    Object.assign(input.admission, change);
+    expect(() => assertPressureReadmission(input.events, input.proof, input.policy)).toThrow();
+  });
+  it.each([
+    capturedReason.replace("2026-09-06", "2026-02-30"),
+    capturedReason.replace("10:18:53.472Z", "25:18:53.472Z"),
+    capturedReason.replace(".472Z", "Z"),
+    capturedReason.replace(".472Z", ".472+00:00"),
+    capturedReason.replace("paid burst is disabled", "paid burst is enabled"),
+    `${capturedReason}; arbitrary trailing content`,
+    `${capturedReason}; paid burst is disabled`,
+    `${capturedReason}\n`,
+    capturedReason.replace("local-cooldown:", "local-pressure:"),
+  ])("rejects malformed or unrelated cooldown reason %j", (reason) => {
+    const input = capturedProgression();
+    input.cooldown.reason = reason;
+    expect(() => assertPressureReadmission(input.events, input.proof, input.policy)).toThrow(
+      /deadline|timestamp/,
+    );
+  });
   it("requires both distinct real reasons followed by first-attempt safe fresh admission", () => {
     const input = progression();
     expect(assertPressureReadmission(input.events, input.proof, input.policy)).toHaveProperty(
@@ -403,18 +450,21 @@ describe("real receipt pressure/cooldown/readmission contract", () => {
     input.proof.pressureAbsent.state = "active";
     expect(() => assertPressureReadmission(input.events, input.proof, input.policy)).toThrow();
   });
-  it("does not ignore a later observed cooldown deadline", () => {
-    const input = progression();
-    const later = {
-      ...input.cooldown,
-      sequence: 7,
-      reason: "local-cooldown: local admission cooldown lasts until 2026-09-05T00:03:00.000Z",
-    };
-    input.admission.sequence = 8;
-    expect(() =>
-      assertPressureReadmission([...input.events, later], input.proof, input.policy),
-    ).toThrow(/later observed/);
-  });
+  it.each(["", "; paid burst is disabled"])(
+    "does not ignore a later observed cooldown deadline %s",
+    (suffix) => {
+      const input = progression();
+      const later = {
+        ...input.cooldown,
+        sequence: 7,
+        reason: `local-cooldown: local admission cooldown lasts until 2026-09-05T00:03:00.000Z${suffix}`,
+      };
+      input.admission.sequence = 8;
+      expect(() =>
+        assertPressureReadmission([...input.events, later], input.proof, input.policy),
+      ).toThrow(/later observed/);
+    },
+  );
   it("never accepts a successor policy or a terminal original run as injection authority", () => {
     const { policy } = progression();
     const start = {

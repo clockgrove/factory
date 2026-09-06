@@ -45,6 +45,8 @@ import {
 import { LifecycleRecorder } from "./control/events.js";
 import {
   CompiledGraphManager,
+  loadCompiledGraph,
+  loadCompiledGraphProjection,
   type CompiledGraphProjectionRecord,
   type CompiledGraphRecord,
 } from "./control/graphs.js";
@@ -1693,7 +1695,75 @@ export class FactorySupervisor {
     stopBaseSha = run.baseSha,
     peerProof = false,
   ): Promise<boolean> {
-    if (!run.baseSha || snapshot.number !== run.objective) return false;
+    if (snapshot.number !== run.objective) return false;
+    if (!run.baseSha) {
+      // Foreground starts deliberately have no activation/base envelope. Their
+      // initial base is the authenticated immutable compilation, never today's
+      // trunk or the caller's one-commit traversal boundary. Do not modify the
+      // historical RunState to make it look like a controller activation.
+      const events = deduplicateFactoryEvents(snapshot.factoryEvents ?? []);
+      const starts = events.filter(
+        (event) =>
+          event.kind === "run" &&
+          event.event === "FactoryRunStarted" &&
+          event.runId === run.runId &&
+          event.objective === run.objective,
+      );
+      const start = starts[0];
+      const compiled = events.filter(
+        (event) =>
+          event.kind === "graph" &&
+          event.event === "GraphCompiled" &&
+          event.runId === run.runId &&
+          event.objective === run.objective,
+      );
+      const receipt = compiled[0];
+      if (
+        starts.length !== 1 ||
+        start?.kind !== "run" ||
+        start.event !== "FactoryRunStarted" ||
+        start.baseSha ||
+        start.activationRequestId ||
+        start.recoveryRequestId ||
+        start.actor !== run.actor ||
+        start.repository !== run.repository ||
+        start.baseBranch !== run.baseBranch ||
+        start.policyDigest !== run.policyDigest ||
+        policyDigest(parseRunPolicy(start.policy)) !== run.policyDigest ||
+        compiled.length !== 1 ||
+        receipt?.kind !== "graph" ||
+        receipt.event !== "GraphCompiled" ||
+        receipt.sequence <= start.sequence
+      )
+        return false;
+      const graph = await loadCompiledGraph(this.#recoveryStore, run.objective, run.runId);
+      if (
+        !graph ||
+        graph.ref !== receipt.graphRef ||
+        graph.blobOid !== receipt.graphBlobSha ||
+        graph.graphDigest !== receipt.graphDigest ||
+        graph.graphSize !== receipt.graphSize ||
+        !graph.objective.workItems.every((item) => item.baseSha === receipt.baseSha)
+      )
+        return false;
+      const commit = await this.#recoveryStore.readCommit(graph.commitOid);
+      if (
+        commit.oid !== graph.commitOid ||
+        commit.parentOids.length !== 1 ||
+        commit.parentOids[0] !== receipt.baseSha
+      )
+        return false;
+      const projection = await loadCompiledGraphProjection(
+        this.#recoveryStore,
+        run.objective,
+        run.runId,
+        graph,
+      );
+      if (!projection) return false;
+      assertAuthenticatedGraphProjection(events, run.objective, run.runId, projection);
+      assertSnapshotMatchesCompiledGraph(graph.objective, snapshot, projection.bindings);
+      stopBaseSha ??= receipt.baseSha;
+    }
     const observations = new Map<
       number,
       Awaited<ReturnType<GitHubControlStore["readPullRequest"]>>

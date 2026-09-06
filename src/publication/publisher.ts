@@ -1,14 +1,20 @@
-import { lstat, readFile, readlink } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open, readlink } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { NormalizedArtifact } from "../execution/artifacts.js";
-import { MAX_CONTENT_FILE_BYTES, verifyMaterializedFiles } from "../execution/artifact-content.js";
+import {
+  MAX_CONTENT_FILE_BYTES,
+  regularContentPath,
+  sha256,
+  verifyMaterializedFiles,
+} from "../execution/artifact-content.js";
 import type { GitCommitObject } from "../control/lease.js";
 import {
   verifyPlannedSiblingRefreshCommit,
   type SiblingRefreshRecord,
 } from "../control/sibling-refreshes.js";
-import { gitSha } from "../protocol/limits.js";
+import { assertNoSecretMaterial, gitSha } from "../protocol/limits.js";
 import type { CleanValidationResult } from "../validation/clean-run.js";
 import { verifyValidationEvidence } from "../validation/evidence.js";
 import {
@@ -163,8 +169,32 @@ async function blobContent(worktree: string, path: string, mode: string): Promis
     return Buffer.from(await readlink(absolute), "utf8");
   }
   if (!stat.isFile()) throw new Error(`${path} is not a publishable regular file`);
-  if (stat.size > MAX_CONTENT_FILE_BYTES) throw new Error(`${path} exceeds the ordinary Git blob publication ceiling`);
-  return readFile(absolute);
+  if (stat.size > MAX_CONTENT_FILE_BYTES)
+    throw new Error(`${path} exceeds the ordinary Git blob publication ceiling`);
+  await regularContentPath(worktree, path);
+  const file = await open(absolute, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const before = await file.stat();
+    if (!before.isFile() || before.size > MAX_CONTENT_FILE_BYTES)
+      throw new Error("publication file changed before bounded read");
+    const content = Buffer.alloc(before.size);
+    let offset = 0;
+    while (offset < content.length) {
+      const result = await file.read(content, offset, content.length - offset, offset);
+      if (!result.bytesRead) throw new Error("publication file was truncated");
+      offset += result.bytesRead;
+    }
+    const after = await file.stat();
+    if (
+      after.size !== before.size ||
+      after.mtimeMs !== before.mtimeMs ||
+      after.ctimeMs !== before.ctimeMs
+    )
+      throw new Error("publication file changed during bounded read");
+    return content;
+  } finally {
+    await file.close();
+  }
 }
 
 /** Host-owned publication: upload the independently validated tree, then open a PR. */
@@ -189,7 +219,10 @@ export async function publishValidated(args: {
     throw new Error("publication base does not match the artifact");
   }
   if (args.artifact.fileManifest) {
-    if (args.artifact.fileManifest.baseTreeSha !== args.base.treeOid || args.artifact.fileManifest.resultTreeSha !== args.validation.evidence.outputTreeSha)
+    if (
+      args.artifact.fileManifest.baseTreeSha !== args.base.treeOid ||
+      args.artifact.fileManifest.resultTreeSha !== args.validation.evidence.outputTreeSha
+    )
       throw new Error("publication content manifest does not match exact validated trees");
     await verifyMaterializedFiles(args.validation.worktree.path, args.artifact.fileManifest);
   }
@@ -222,6 +255,16 @@ export async function publishValidated(args: {
         continue;
       }
       const content = await blobContent(args.validation.worktree.path, path, mode);
+      const manifest = args.artifact.fileManifest?.files.find((file) => file.path === path);
+      if (
+        manifest &&
+        (manifest.action !== "write" ||
+          manifest.mode !== mode ||
+          manifest.bytes !== content.length ||
+          manifest.digest !== sha256(content))
+      )
+        throw new Error("publication bytes changed after validation");
+      assertNoSecretMaterial(content.toString("latin1"), "publication content");
       await args.assertLease();
       const sha = await args.store.createBlob(content);
       entries.push({ path, mode, type: "blob", sha });

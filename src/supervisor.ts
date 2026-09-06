@@ -203,6 +203,7 @@ import {
   type LocalWorktree,
 } from "./runtime/local-worktree.js";
 import { runContainedProcess } from "./runtime/process-group.js";
+import { artifactFromGitRange } from "./runtime/artifact-patch.js";
 import { allDone, derive, queuedState, ready, type DerivedWorkItem } from "./state.js";
 import { queuedReasonCode } from "./explanations/index.js";
 import { COPILOT_ASSIGNEE_LOGIN } from "./types.js";
@@ -6733,19 +6734,33 @@ export class FactorySupervisor {
     )
       .split("\0")
       .filter(Boolean);
-    const patch = await hostGit(
-      this.#options.repository,
-      ["diff", "--binary", "--no-ext-diff", "--no-textconv", baseSha, headSha],
-      MAX_ARTIFACT_PATCH_BYTES + 1_024,
-      true,
+    const priorNative = isolated
+      ? await this.#nativeRebases.load({
+          repository: `${this.#options.owner}/${this.#options.repo}`,
+          runId: member.reservation.runId,
+          objective: member.reservation.objective,
+          workItem: item.number,
+          attempt: member.reservation.attempt,
+          directorEpoch: member.reservation.directorEpoch,
+          policyDigest: member.reservation.policyDigest,
+          pullRequest: member.pull.number,
+          sourceHeadSha: member.pull.commitSha,
+          sourceExactHeadValidationDigest: member.pull.exactHeadValidation.digest,
+          headSha,
+          baseSha,
+        })
+      : null;
+    const artifact = this.#retainArtifactContent(
+      await artifactFromGitRange({
+        repository: this.#options.repository,
+        sourceBaseSha: baseSha,
+        headSha,
+        baseSha,
+        changedPaths,
+        emptyReason: "rebased stack layer has no diff",
+        authenticatedLegacyDigest: priorNative?.validation.artifactDigest,
+      }),
     );
-    const artifact = normalizeArtifact({
-      baseSha,
-      patch,
-      changedPaths,
-      outcome: patch.trim() ? "succeeded" : "declined",
-      ...(patch.trim() ? {} : { reason: "rebased stack layer has no diff" }),
-    });
     const packet = parseWorkerPacket({
       ...originalPacket,
       baseSha,
@@ -7197,13 +7212,15 @@ export class FactorySupervisor {
     )
       .split("\0")
       .filter(Boolean);
-    const patch = await hostGit(
-      this.#options.repository,
-      ["diff", "--binary", "--no-ext-diff", "--no-textconv", ...source],
-      MAX_ARTIFACT_PATCH_BYTES + 1_024,
-      true,
+    return this.#retainArtifactContent(
+      await artifactFromGitRange({
+        repository: this.#options.repository,
+        sourceBaseSha: source[0]!,
+        headSha: source[1]!,
+        baseSha: targetBaseSha,
+        changedPaths,
+      }),
     );
-    return normalizeArtifact({ baseSha: targetBaseSha, changedPaths, patch, outcome: "succeeded" });
   }
 
   async #assertSiblingRefreshCurrent(
@@ -7714,18 +7731,16 @@ export class FactorySupervisor {
       )
         .split("\0")
         .filter(Boolean);
-      const patch = await hostGit(
-        this.#options.repository,
-        ["diff", "--binary", "--no-ext-diff", "--no-textconv", ...source],
-        MAX_ARTIFACT_PATCH_BYTES + 1_024,
-        true,
+      return this.#retainArtifactContent(
+        await artifactFromGitRange({
+          repository: this.#options.repository,
+          sourceBaseSha: source[0]!,
+          headSha: source[1]!,
+          baseSha: targetBaseSha,
+          changedPaths,
+          authenticatedLegacyDigest: record?.validation.artifactDigest,
+        }),
       );
-      return normalizeArtifact({
-        baseSha: targetBaseSha,
-        changedPaths,
-        patch,
-        outcome: "succeeded",
-      });
     };
     if (!record) {
       const effective = normalizeSchedulingPolicy(this.#policy);
@@ -8802,13 +8817,16 @@ export class FactorySupervisor {
         )
           .split("\0")
           .filter(Boolean);
-        const patch = await hostGit(
-          this.#options.repository,
-          ["diff", "--binary", "--no-ext-diff", "--no-textconv", ...range],
-          MAX_ARTIFACT_PATCH_BYTES + 1024,
-          true,
+        return this.#retainArtifactContent(
+          await artifactFromGitRange({
+            repository: this.#options.repository,
+            sourceBaseSha: range[0]!,
+            headSha: range[1]!,
+            baseSha: target,
+            changedPaths,
+            authenticatedLegacyDigest: candidate?.validation.artifactDigest,
+          }),
         );
-        return normalizeArtifact({ baseSha: target, changedPaths, patch, outcome: "succeeded" });
       };
       const outstanding = unreconciledCapacityReservations([...runtime.events]).filter(
         (event) =>

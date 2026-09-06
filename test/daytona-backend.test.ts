@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -13,7 +13,8 @@ import {
   DaytonaBackend,
   DaytonaResourceCleanupError,
 } from "../src/backends/daytona.js";
-import { MAX_ARTIFACT_PATCH_BYTES, normalizeArtifact } from "../src/execution/artifacts.js";
+import { normalizeArtifact } from "../src/execution/artifacts.js";
+import { MAX_CONTENT_BYTES } from "../src/execution/artifact-content.js";
 import type { AttemptContext } from "../src/execution/backend.js";
 import { MAX_LOG_BYTES } from "../src/protocol/limits.js";
 
@@ -137,13 +138,19 @@ function fakeProvider() {
       labels,
       fs: {
         createFolder: async () => undefined,
-        uploadFiles: async (uploads: Array<{ source: Buffer; destination: string }>) => {
+        uploadFiles: async (uploads: Array<{ source: Buffer | string; destination: string }>) => {
           if (uploadFailure) {
             const error = uploadFailure;
             uploadFailure = undefined;
             throw error;
           }
-          for (const upload of uploads) files.set(upload.destination, Buffer.from(upload.source));
+          for (const upload of uploads)
+            files.set(
+              upload.destination,
+              typeof upload.source === "string"
+                ? await readFile(upload.source)
+                : Buffer.from(upload.source),
+            );
         },
         downloadFile: async (path: string) => {
           const value = files.get(path);
@@ -607,7 +614,7 @@ describe("Daytona supported provider contract", () => {
     await new Promise((resolve) => setTimeout(resolve, 1));
 
     const oversized = [
-      ["factory/artifact.patch", MAX_ARTIFACT_PATCH_BYTES, "Daytona artifact patch"],
+      ["factory/artifact.patch", MAX_CONTENT_BYTES, "Daytona artifact patch"],
       ["factory/changed-paths", MAX_CHANGED_PATHS_BYTES, "Daytona changed-path manifest"],
       ["factory/worker.stdout", MAX_LOG_BYTES, "Daytona worker stdout"],
       ["factory/worker.stderr", MAX_LOG_BYTES, "Daytona worker stderr"],

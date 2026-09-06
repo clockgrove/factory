@@ -12,7 +12,12 @@ import {
 } from "../execution/artifacts.js";
 import { runContainedProcess, sanitizedWorkerEnvironment } from "./process-group.js";
 import { materializePinnedCompilationTree } from "../execution/pinned-compilation-tree.js";
-import { assertLocalLfsAvailable, inspectPinnedLfs, materializeLocalLfsAssets } from "../repository-profiles/git-lfs.js";
+import {
+  assertLocalLfsAvailable,
+  inspectPinnedLfs,
+  materializeLocalLfsAssets,
+  MAX_LOCAL_LFS_FILE_BYTES,
+} from "../repository-profiles/git-lfs.js";
 import { inspectContentFile, regularContentPath } from "../execution/artifact-content.js";
 import { artifactFromPatchFile, streamGitFile } from "./artifact-patch.js";
 
@@ -55,8 +60,8 @@ export async function createLocalWorktree(
   await assertLocalLfsAvailable(repo, baseSha);
   const prepared = await materializePinnedCompilationTree(repo, baseSha, { purpose: "worktree" });
   const { root, path } = prepared;
-  await writeFile(join(root, MARKER), `${repo}\n${baseSha}\nraw-tree-v1\n`, { mode: 0o600 });
   try {
+    await writeFile(join(root, MARKER), `${repo}\n${baseSha}\nraw-tree-v1\n`, { mode: 0o600 });
     await materializeLocalLfsAssets(repo, path, baseSha);
     return { root, path, repository: repo, baseSha };
   } catch (error) {
@@ -102,20 +107,53 @@ export async function collectLocalArtifact(
   for (const asset of lfs.assets) {
     const index = changedPaths.indexOf(asset.path);
     if (index < 0) continue;
-    const actual = await inspectContentFile(await regularContentPath(worktree.path, asset.path));
-    if (actual.digest !== asset.oid || actual.bytes !== asset.size)
-      throw new Error(`changed LFS asset ${asset.path} requires unsupported authenticated LFS upload; restore the original asset or publish it explicitly outside Factory`);
+    const actual = await inspectContentFile(
+      await regularContentPath(worktree.path, asset.path),
+      MAX_LOCAL_LFS_FILE_BYTES,
+    );
+    if (actual.digest !== asset.oid || actual.bytes !== asset.size || actual.mode !== asset.mode)
+      throw new Error(
+        `changed LFS asset ${asset.path} requires unsupported authenticated LFS upload; restore the original asset or publish it explicitly outside Factory`,
+      );
     changedPaths.splice(index, 1);
   }
   if (allowedPaths) assertChangedPathScope(changedPaths, allowedPaths);
-  if (!changedPaths.length) return normalizeArtifact({ baseSha: worktree.baseSha, patch: "", changedPaths, logs,
-    outcome: "declined", reason: "worker produced no repository changes" });
+  if (!changedPaths.length)
+    return normalizeArtifact({
+      baseSha: worktree.baseSha,
+      patch: "",
+      changedPaths,
+      logs,
+      outcome: "declined",
+      reason: "worker produced no repository changes",
+    });
   const root = await mkdtemp(join(tmpdir(), "factory-collected-patch-"));
   try {
     const patchPath = join(root, "artifact.patch");
-    await streamGitFile(worktree.path, ["diff", "--binary", "--no-ext-diff", "--no-textconv", worktree.baseSha, "--", ...changedPaths], patchPath);
-    return await artifactFromPatchFile({ repository: worktree.path, baseSha: worktree.baseSha, patchPath, changedPaths, logs, outcome: "succeeded" });
-  } finally { await rm(root, { recursive: true, force: true }); }
+    await streamGitFile(
+      worktree.path,
+      [
+        "diff",
+        "--binary",
+        "--no-ext-diff",
+        "--no-textconv",
+        worktree.baseSha,
+        "--",
+        ...changedPaths,
+      ],
+      patchPath,
+    );
+    return await artifactFromPatchFile({
+      repository: worktree.path,
+      baseSha: worktree.baseSha,
+      patchPath,
+      changedPaths,
+      logs,
+      outcome: "succeeded",
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -148,7 +186,8 @@ export async function cleanupLocalWorktree(worktree: LocalWorktree): Promise<voi
     throw new Error("worktree ownership marker does not match cleanup request");
   }
   try {
-    if (kind !== "raw-tree-v1") await git(worktree.repository, ["worktree", "remove", "--force", worktree.path]);
+    if (kind !== "raw-tree-v1")
+      await git(worktree.repository, ["worktree", "remove", "--force", worktree.path]);
   } finally {
     // The exact root was created by us, is marker-verified, and has no sibling
     // content. This is deliberately narrower than deleting a supplied path.

@@ -517,7 +517,9 @@ export class DaytonaBackend implements ExecutionBackend {
     } catch (launchFailure) {
       await this.#deleteTracked(running, "launch rollback", launchFailure);
       throw safeFailure(launchFailure, "Daytona launch failure");
-    } finally { await archive.dispose(); }
+    } finally {
+      await archive.dispose();
+    }
   }
 
   async observe(handle: BackendHandle): Promise<BackendObservation> {
@@ -568,27 +570,49 @@ export class DaytonaBackend implements ExecutionBackend {
         }
         return metadata.size;
       });
-      await this.#downloadRemoteFileToPath(running.sandbox, REMOTE_ARTIFACT_FILES[0], expectedSizes[0]!, patchPath);
-      const files = await Promise.all(REMOTE_ARTIFACT_FILES.slice(1).map((file, index) => this.#downloadRemoteFile(running.sandbox, file, expectedSizes[index + 1]!)));
-    const [paths, exit, stdout, stderr] = files as [Buffer, Buffer, Buffer, Buffer];
-    const exitCode = Number(exit.toString("utf8"));
-    const changedPaths = parseSandboxPaths(paths);
-    assertChangedPathScope(changedPaths, running.context.packet.allowedPaths);
-    const outcome =
-      exitCode === 0 && expectedSizes[0]! > 0 ? "succeeded" : expectedSizes[0]! > 0 ? "failed" : "declined";
-    if (expectedSizes[0] === 0) return normalizeArtifact({ baseSha: running.context.packet.baseSha, patch: "", changedPaths,
-      logs: `${stdout.toString("utf8")}\n${stderr.toString("utf8")}`, outcome });
-    return await artifactFromPatchFile({
-      repository: this.#repository,
-      baseSha: running.context.packet.baseSha,
-      patchPath,
-      changedPaths,
-      logs: `${stdout.toString("utf8")}\n${stderr.toString("utf8")}`,
-      outcome,
-      ...(outcome === "succeeded" ? {} : { reason: `sandbox worker exited ${exitCode}` }),
-    });
-    } catch (error) { throw safeFailure(error, "Daytona artifact collection failure"); }
-    finally { await rm(root, { recursive: true, force: true }); }
+      await this.#downloadRemoteFileToPath(
+        running.sandbox,
+        REMOTE_ARTIFACT_FILES[0],
+        expectedSizes[0]!,
+        patchPath,
+      );
+      const files = await Promise.all(
+        REMOTE_ARTIFACT_FILES.slice(1).map((file, index) =>
+          this.#downloadRemoteFile(running.sandbox, file, expectedSizes[index + 1]!),
+        ),
+      );
+      const [paths, exit, stdout, stderr] = files as [Buffer, Buffer, Buffer, Buffer];
+      const exitCode = Number(exit.toString("utf8"));
+      const changedPaths = parseSandboxPaths(paths);
+      assertChangedPathScope(changedPaths, running.context.packet.allowedPaths);
+      const outcome =
+        exitCode === 0 && expectedSizes[0]! > 0
+          ? "succeeded"
+          : expectedSizes[0]! > 0
+            ? "failed"
+            : "declined";
+      if (expectedSizes[0] === 0)
+        return normalizeArtifact({
+          baseSha: running.context.packet.baseSha,
+          patch: "",
+          changedPaths,
+          logs: `${stdout.toString("utf8")}\n${stderr.toString("utf8")}`,
+          outcome,
+        });
+      return await artifactFromPatchFile({
+        repository: this.#repository,
+        baseSha: running.context.packet.baseSha,
+        patchPath,
+        changedPaths,
+        logs: `${stdout.toString("utf8")}\n${stderr.toString("utf8")}`,
+        outcome,
+        ...(outcome === "succeeded" ? {} : { reason: `sandbox worker exited ${exitCode}` }),
+      });
+    } catch (error) {
+      throw safeFailure(error, "Daytona artifact collection failure");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   }
 
   async cleanup(handle: BackendHandle): Promise<void> {
@@ -686,15 +710,19 @@ export class DaytonaBackend implements ExecutionBackend {
     let result: IsolatedValidationResult | undefined;
     let validationFailure: unknown;
     let validationFailed = false;
-    const patchRoot = await mkdtemp(join(tmpdir(), "factory-daytona-validation-content-"));
+    let patchRoot: string | undefined;
     try {
+      patchRoot = await mkdtemp(join(tmpdir(), "factory-daytona-validation-content-"));
       const patchPath = join(patchRoot, "artifact.patch");
       await materializeArtifactPatch(context.artifact, patchPath);
       await sandbox.fs.createFolder("factory", "700");
-      await sandbox.fs.uploadFiles(
-        [...sourceContentUploads(sandboxValidationFiles(context, Buffer.alloc(0)), archive).filter((file) => file.destination !== "factory/artifact.patch"),
-          { source: patchPath, destination: "factory/artifact.patch" }],
-      );
+      await sandbox.fs.uploadFiles([
+        ...sourceContentUploads(
+          sandboxValidationFiles(context, Buffer.alloc(0), { externalizedPatchUpload: true }),
+          archive,
+        ),
+        { source: patchPath, destination: "factory/artifact.patch" },
+      ]);
       const workdir = await sandbox.getWorkDir();
       const command = await sandbox.process.executeCommand(
         "node factory/validate.mjs",
@@ -723,7 +751,10 @@ export class DaytonaBackend implements ExecutionBackend {
     } catch (error) {
       validationFailed = true;
       validationFailure = error;
-    } finally { await archive.dispose(); await rm(patchRoot, { recursive: true, force: true }); }
+    } finally {
+      await archive.dispose();
+      if (patchRoot) await rm(patchRoot, { recursive: true, force: true });
+    }
 
     await this.#deleteTracked(
       tracked,
@@ -881,25 +912,44 @@ export class DaytonaBackend implements ExecutionBackend {
     return Buffer.concat(chunks, received);
   }
 
-  async #downloadRemoteFileToPath(sandbox: Sandbox, file: RemoteArtifactFile, expectedSize: number, destination: string): Promise<void> {
+  async #downloadRemoteFileToPath(
+    sandbox: Sandbox,
+    file: RemoteArtifactFile,
+    expectedSize: number,
+    destination: string,
+  ): Promise<void> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 120_000);
     const output = await open(destination, "wx", 0o600);
     let received = 0;
     try {
-      const stream = await sandbox.fs.downloadFileStream(file.path, { signal: controller.signal,
-        onProgress: ({ bytesReceived }) => { if (bytesReceived > file.maxBytes) controller.abort(); } });
+      const stream = await sandbox.fs.downloadFileStream(file.path, {
+        signal: controller.signal,
+        onProgress: ({ bytesReceived }) => {
+          if (bytesReceived > file.maxBytes) controller.abort();
+        },
+      });
       try {
         for await (const chunk of stream) {
           const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string | Uint8Array);
           received += bytes.length;
-          if (received > file.maxBytes || received > expectedSize) throw new Error("provider artifact stream exceeded declared byte ceiling");
+          if (received > file.maxBytes || received > expectedSize)
+            throw new Error("provider artifact stream exceeded declared byte ceiling");
           let offset = 0;
           while (offset < bytes.length) offset += (await output.write(bytes, offset)).bytesWritten;
         }
-      } finally { stream.destroy(); }
-      if (received !== expectedSize) throw new Error("provider artifact stream was truncated or changed after metadata inspection");
-    } finally { clearTimeout(timer); controller.abort(); await output.close(); }
+      } finally {
+        stream.destroy();
+      }
+      if (received !== expectedSize)
+        throw new Error(
+          "provider artifact stream was truncated or changed after metadata inspection",
+        );
+    } finally {
+      clearTimeout(timer);
+      controller.abort();
+      await output.close();
+    }
   }
 
   async #downloadBoundedRemoteFile(sandbox: Sandbox, file: RemoteArtifactFile): Promise<Buffer> {

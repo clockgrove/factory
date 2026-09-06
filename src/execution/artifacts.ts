@@ -2,8 +2,13 @@ import { createHash } from "node:crypto";
 
 import { z } from "zod";
 import { writeFile } from "node:fs/promises";
-import { ArtifactFileManifestSchema, ArtifactPayloadSchema, materializePayload,
-  type ArtifactFileManifest, type ArtifactPayload } from "./artifact-content.js";
+import {
+  ArtifactFileManifestSchema,
+  ArtifactPayloadSchema,
+  materializePayload,
+  type ArtifactFileManifest,
+  type ArtifactPayload,
+} from "./artifact-content.js";
 
 import {
   MAX_LOG_BYTES,
@@ -84,10 +89,15 @@ export function artifactDigest(input: {
     .update("\0")
     .update(input.patch);
   // Preserve the exact old digest for old inline artifacts.
-  if (input.payload || input.fileManifest) hash.update("\0content-v1\0").update(JSON.stringify({
-    ...(input.payload ? { payload: ArtifactPayloadSchema.parse(input.payload) } : {}),
-    ...(input.fileManifest ? { fileManifest: ArtifactFileManifestSchema.parse(input.fileManifest) } : {}),
-  }));
+  if (input.payload || input.fileManifest)
+    hash.update("\0content-v1\0").update(
+      JSON.stringify({
+        ...(input.payload ? { payload: ArtifactPayloadSchema.parse(input.payload) } : {}),
+        ...(input.fileManifest
+          ? { fileManifest: ArtifactFileManifestSchema.parse(input.fileManifest) }
+          : {}),
+      }),
+    );
   return hash.digest("hex");
 }
 
@@ -162,13 +172,23 @@ export const payloadPatchMarker = (payload: ArtifactPayload) =>
 function assertArtifactContentBinding(artifact: NormalizedArtifact): void {
   if (artifact.payload && artifact.patch !== payloadPatchMarker(artifact.payload))
     throw new Error("external payload must use its exact non-executable display marker");
-  if (artifact.fileManifest && JSON.stringify(artifact.fileManifest.files.map((file) => file.path).sort()) !== JSON.stringify([...artifact.changedPaths].sort()))
+  if (
+    artifact.fileManifest &&
+    JSON.stringify(artifact.fileManifest.files.map((file) => file.path).sort()) !==
+      JSON.stringify([...artifact.changedPaths].sort())
+  )
     throw new Error("artifact file manifest differs from changed paths");
-  assertNoSecretMaterial({ payload: artifact.payload, fileManifest: artifact.fileManifest }, "artifact content descriptor");
+  assertNoSecretMaterial(
+    { payload: artifact.payload, fileManifest: artifact.fileManifest },
+    "artifact content descriptor",
+  );
 }
 
 /** The only materialization path for inline and externalized patches. Never apply the display marker. */
-export async function materializeArtifactPatch(artifact: NormalizedArtifact, destination: string): Promise<void> {
+export async function materializeArtifactPatch(
+  artifact: NormalizedArtifact,
+  destination: string,
+): Promise<void> {
   const verified = verifyArtifact(artifact);
   if (verified.payload) await materializePayload(verified.payload, destination);
   else await writeFile(destination, verified.patch, { flag: "wx", mode: 0o600 });

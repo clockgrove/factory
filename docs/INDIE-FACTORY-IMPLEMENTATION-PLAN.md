@@ -985,16 +985,19 @@ game-development wave to the core roadmap.
 These are not game features. They solve common software-repository problems and therefore remain in
 the generic design. Factory implements repository-fact classification, `large-binary` and
 `generated` change-surface classes, exclusive-resource serialization, binary Git patches, artifact
-digests, and clean validation. Its normalized patch is capped at 5 MiB, and a Daytona source archive
-is capped at 64 MiB. Work that cannot be represented inside those bounds fails closed.
+digests, and clean validation. Restored issues #116–#118 add bounded local LFS cache preflight and
+hydration, content-bound file/media manifests, 4 MiB GitHub content chunks for patches above the
+unchanged 5 MiB inline limit, and streaming Daytona source archives above the former 64 MiB limit.
+The total patch/source ceiling is 256 MiB; regular result files are capped at 100,000,000 bytes.
+See [the concrete large-file contract](LARGE-FILES.md) for consumers, lifecycle, compatibility and
+remaining provider-specific boundaries. These are implementation claims, not completed installed,
+paid-provider, or WSL2 qualification claims. The dedicated regressions must run after integration.
 
-The current implementation does **not** include Git LFS lifecycle management, an oversized content-addressed transfer
-service, media-type inspection, or a provider object-store artifact channel. The bullets below are
-design requirements for adding those capabilities in later delivery waves; they are not current
-support claims. A future implementation must add executable conformance evidence before changing
-that boundary.
+Authenticated remote LFS fetch/upload and automatic migration remain unsupported. Existing LFS
+assets must already exist in the authorized local standard cache; changed/new LFS pointer outputs
+fail closed. No extra hosted Factory service or generalized storage framework is introduced.
 
-#### Future large and binary artifact extensions
+#### Large and binary artifact requirements
 
 - Classify a path from repository evidence as text, generated, large/binary, or otherwise
   non-mergeable.

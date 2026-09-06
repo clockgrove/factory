@@ -13,6 +13,7 @@ import {
 import { assertNoSecretMaterial, gitSha } from "../protocol/limits.js";
 import type { WorkerPacket } from "../protocol/worker-packet.js";
 import { runContainedProcess, sanitizedWorkerEnvironment } from "../runtime/process-group.js";
+import { inspectPatchManifest } from "../runtime/artifact-patch.js";
 import type { PublicationStore } from "./publisher.js";
 
 // GitHub's ordinary Git-blob read contract is bounded at 100 MB. Large assets
@@ -133,10 +134,16 @@ export async function prepareSiblingRefreshTree(input: {
       throw new Error("sibling tree remote base identity differs");
     const patchPath = join(root, "artifact.patch");
     await materializeArtifactPatch(artifact, patchPath);
+    const trustedManifest =
+      artifact.fileManifest ??
+      (await inspectPatchManifest(input.repository, baseSha, patchPath, artifact.changedPaths));
     await git(["read-tree", baseSha]);
     await git(["apply", "--cached", "--binary", "--whitespace=error-all", patchPath]);
     const outputTreeSha = gitSha.parse((await git(["write-tree"])).trim());
-    if (artifact.fileManifest && (artifact.fileManifest.baseTreeSha !== base.treeOid || artifact.fileManifest.resultTreeSha !== outputTreeSha))
+    if (
+      trustedManifest.baseTreeSha !== base.treeOid ||
+      trustedManifest.resultTreeSha !== outputTreeSha
+    )
       throw new Error("sibling preparation differs from artifact content manifest");
     const changed = (
       await git([
@@ -199,6 +206,7 @@ export async function prepareSiblingRefreshTree(input: {
           .update(content)
           .digest("hex");
         if (actual !== blobOid) throw new Error("raw blob object identity changed");
+        assertNoSecretMaterial(content.toString("latin1"), "sibling publication content");
         await input.assertCurrent();
         remaining();
         if ((await input.store.createBlob(content)) !== blobOid)

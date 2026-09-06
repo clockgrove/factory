@@ -169,7 +169,22 @@ npx --yes ${SANDBOX_CODEX_PACKAGE} --dangerously-bypass-approvals-and-sandbox -c
 worker_status=$?
 set -e
 git add --intent-to-add --all
-git diff --binary --no-ext-diff HEAD > "$factory_root/artifact.patch"
+node --input-type=module - "$factory_root/artifact.patch" <<'FACTORY_PATCH_CAPTURE'
+import { spawn } from 'node:child_process';
+import { createWriteStream } from 'node:fs';
+import { Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
+const child = spawn('git', ['diff', '--binary', '--no-ext-diff', '--no-textconv', 'HEAD'], {stdio:['ignore','pipe','inherit']});
+const outcome = new Promise(resolve => { child.once('error', resolve); child.once('close', code => resolve(code === 0 ? null : new Error('artifact diff failed'))); });
+let bytes = 0;
+try {
+  await pipeline(child.stdout, new Transform({transform(chunk, encoding, callback) {
+    bytes += chunk.length;
+    callback(bytes > 268435456 ? new Error('artifact patch exceeds 256 MiB') : null, chunk);
+  }}), createWriteStream(process.argv[2], {flags:'wx',mode:0o600}));
+  const error = await outcome; if (error) throw error;
+} catch (error) { child.kill('SIGKILL'); await outcome; throw error; }
+FACTORY_PATCH_CAPTURE
 git diff --name-only -z HEAD > "$factory_root/changed-paths"
 printf '%s' "$worker_status" > "$factory_root/exit-code"
 `;
@@ -205,7 +220,12 @@ printf '%s' "$worker_status" > "$factory_root/exit-code"
 export function sandboxValidationFiles(
   context: IsolatedValidationContext,
   archive: Buffer,
+  options: { externalizedPatchUpload?: boolean } = {},
 ): SandboxBootstrapFile[] {
+  if (context.artifact.payload && !options.externalizedPatchUpload)
+    throw new Error(
+      "externalized artifact requires a verified file upload; a payload marker is not a patch",
+    );
   const configuration = {
     expectedPaths: [...context.artifact.changedPaths].sort(),
     commands: context.packet.validationCommands,
@@ -289,7 +309,9 @@ try {
 `;
   return [
     { path: "factory/source.tar", content: archive },
-    { path: "factory/artifact.patch", content: Buffer.from(context.artifact.patch, "utf8") },
+    ...(options.externalizedPatchUpload
+      ? []
+      : [{ path: "factory/artifact.patch", content: Buffer.from(context.artifact.patch, "utf8") }]),
     {
       path: "factory/config.json",
       content: Buffer.from(JSON.stringify(configuration), "utf8"),

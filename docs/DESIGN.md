@@ -119,10 +119,10 @@ factory controller run OWNER/REPO --repo /absolute/path/to/repository
 
 An explicit chat/MCP activation writes a durable request and returns; the controller discovers it,
 acquires the repository and Objective leases, and continues without holding the chat turn open. The
-controller shares one CPU, memory, backend, and GitHub-rate-limit pool. Factory admits one
-Objective at a time in that repository. Native-stack delivery may admit dependency-ready Work Items
-concurrently; regular-PR delivery admits one complete Work Item pipeline at a time. Additional
-activations remain durable and queued. Plugin installation never starts or installs the controller;
+controller shares one CPU, memory, backend, and GitHub-rate-limit pool across active Objectives.
+The immutable controller ceiling defaults to two Objectives (configurable 1–32); fair admission
+allows dependency-ready regular or native-stack workers to run concurrently within shared limits.
+Activations beyond that ceiling remain durable and queued. Plugin installation never starts or installs the controller;
 service installation is a separate explicit user action.
 
 Each controller process acquires the repository lease under one generated controller identity and
@@ -401,11 +401,12 @@ closed. Human-approval, code-owner, last-push approval, and incompatible merge-m
 escalate rather than being bypassed. Regular sibling PRs are the default. Explicit stacked delivery
 uses GitHub's pinned REST surface only after an observed repository capability probe; an
 unavailable capability produces a durable configured fallback or escalation before publication.
-The regular-PR fallback admits one complete Work Item pipeline at a time. In native-stack mode,
-independent Work Items remain sibling PRs and may execute concurrently. When an earlier sibling
-advances trunk, Factory first proves every intervening commit is an exact, authenticated integration
-from this same run. External or unexplained base changes escalate; clean applicability alone does
-not authorize executing changed code.
+Regular and native-stack delivery both admit independent Work Items concurrently. When an earlier
+sibling advances trunk, Factory first proves every intervening commit is an exact, authenticated
+integration from this run or an authenticated peer Objective owned by the same repository controller.
+Peer proof preserves the original activation, graph, policy, reservation and review identities;
+external or unexplained base changes escalate. Clean applicability alone does not authorize
+executing changed code.
 
 For siblings, Factory applies the original published patch to a private temporary Git index on that
 proved target base and uploads raw Git blobs and the exact proposed tree. Preparation performs no

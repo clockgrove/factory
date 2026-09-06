@@ -29,6 +29,8 @@ describe("distributed operator documentation", () => {
     expect(manifest.files.filter((path) => path.startsWith("docs/"))).toEqual([
       "docs/setup/",
       "docs/CREDENTIALS.md",
+      "docs/CODEX-APP-SERVER-SESSIONS.md",
+      "docs/LARGE-FILES.md",
       "docs/HOST-SCHEDULING.md",
       "docs/THREAT-MODEL.md",
     ]);

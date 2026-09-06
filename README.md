@@ -232,7 +232,7 @@ resource ownership or cleanup still blocks unsafe replacement and further spendi
 Vercel Sandbox is an optional Labs adapter. Codex App Server is a supported explicit local route,
 not the default: its [session contract](docs/CODEX-APP-SERVER-SESSIONS.md) distinguishes durable
 terminal recovery from currently unavailable cold repair turns. Required qualification remains
-visible in [verification status](docs/CONFORMANCE.md).
+visible in [verification status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md).
 
 Use native sub-issue order as the zero-configuration priority. To configure an organization
 single-select issue field, inspect its stable field and option IDs without writing GitHub:

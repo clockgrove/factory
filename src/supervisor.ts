@@ -10121,6 +10121,19 @@ export class FactorySupervisor {
     const unit = this.#deliveryPlan?.units.find((entry) =>
       entry.items.includes(planItem.compilerId),
     );
+    if (!observed.merged && target !== exactHeadValidation.baseSha) {
+      const lineage = await this.#assertOwnTrunkAdvance(exactHeadValidation.baseSha, target, item.number);
+      const sourceStarts = runtime.events.filter((event) => event.event === "FactoryRunStarted" &&
+        event.runId === source.runId && event.policyDigest === reserved.policyDigest);
+      const sourceStart = sourceStarts[0];
+      // This adopted validation path is local-only. Authorization to buy a
+      // sandbox is not evidence that its local validator executes in one.
+      if (sourceStarts.length !== 1 || sourceStart?.event !== "FactoryRunStarted" ||
+        sourceStart.policy.trust === "sandbox_untrusted" || this.#policy.trust === "sandbox_untrusted" ||
+        this.#packetFor(item.number).requirements.trust !== "trusted_local" ||
+        !this.#registry.get(reserved.backend)?.capabilities.hostExecution || lineage.requiresIsolation)
+        throw new Error("adopted candidate requires independent isolated validation; local refresh is unavailable");
+    }
     let siblingRefresh: SiblingRefreshRecord | undefined;
     if (
       ((publication.mode === "native-stacks" && unit?.kind === "sibling") ||
@@ -10135,6 +10148,34 @@ export class FactorySupervisor {
           event.runId === this.#run.runId && event.workItem === item.number &&
           event.sourceRunId === source.runId))
         throw new Error("prior adopted validation requires exact scope reconciliation before refresh");
+      if (observed.headSha === pull.commitSha) {
+        const priorIdentity: MergeCandidateIdentity = {
+          runId: this.#run.runId, objective: this.#run.objective, workItem: item.number,
+          attempt: source.attempt, pullRequest: pull.number, sourceHeadSha: pull.commitSha,
+          sourceExactHeadValidationDigest: exactHeadValidation.digest, targetBaseSha: target,
+        };
+        const prior = await this.#mergeCandidates.load(priorIdentity);
+        if (prior) {
+          if (JSON.stringify(prior.source) !== JSON.stringify(exactHeadValidation))
+            throw new Error("prior adopted candidate source changed before refresh");
+          const reviewIdentity = this.#mergeCandidateReviewIdentity(prior);
+          const invocationId = `integration-review-${reviewIdentityDigest(reviewIdentity)}`;
+          this.#assertManagementInvocationNotFailed(invocationId);
+          const existing = await this.#reviews.load(reviewIdentity);
+          if (existing)
+            await runDurableReviewTransaction({
+              existing,
+              recover: () => this.#reviews.load(reviewIdentity),
+              persist: async () => { throw new Error("prior review cannot be recreated before refresh"); },
+              recordUsage: (review) => this.#sourceUsage(item, invocationId,
+                review.usage.inputTokens + review.usage.outputTokens, "model_tokens"),
+              recordOutcome: async (review) => {
+                if (!review.review.accepted || review.review.unmetCriteria.length)
+                  throw new Error("prior adopted candidate semantic review rejected before refresh");
+              },
+            });
+        }
+      }
       const member = await this.#nativeStackMember(item, true);
       siblingRefresh = await this.#prepareSiblingRefresh(item, member, target, observed.merged);
       if (

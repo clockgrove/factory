@@ -5,6 +5,7 @@ import {
   loadMergeCandidateCheckpoint,
   mergeCandidateIdentityDigest,
 } from "../control/merge-candidates.js";
+import { loadReviewCheckpoint } from "../control/reviews.js";
 import { bindValidationToPublishedHead } from "../validation/plan.js";
 import { observeRecoverySiblingRefresh } from "./sibling-refresh.js";
 import { deriveBudgetUsage, remainingBudget, type BudgetUsage } from "../control/budget.js";
@@ -470,6 +471,22 @@ export async function loadRecoveryRuntime(input: {
         requireRuntime(accounted.length > 0 && accounted.every((entry) => entry.kind === "budget" &&
           entry.amount === Date.parse(completed.validation.completedAt) - Date.parse(completed.validation.startedAt)),
           "source-capacity-prior-accounting-unavailable");
+        const review = await loadReviewCheckpoint(input.store, {
+          kind: "integration-candidate", runId: input.runId, objective: input.objective,
+          workItem: event.workItem, attempt: source.attempt, headSha: publication.headSha,
+          artifactDigest: completed.validation.artifactDigest, baseSha: completed.validation.baseSha,
+          outputTreeSha: completed.validation.outputTreeSha, evidenceDigest: completed.validation.digest,
+        });
+        if (review) {
+          const usage = suffix.filter((entry) => entry.kind === "budget" &&
+            entry.event === "BudgetReconciled" && entry.workItem === event.workItem &&
+            entry.attempt === undefined && entry.phase === "management" && entry.unit === "model_tokens" &&
+            entry.usageId === `integration-review-${review.identityDigest}`);
+          requireRuntime(review.review.accepted && review.review.unmetCriteria.length === 0 &&
+            usage.length > 0 && usage.every((entry) => entry.kind === "budget" &&
+              entry.amount === review.usage.inputTokens + review.usage.outputTokens),
+            "source-capacity-prior-review-unaccounted");
+        }
       }
       if (event.event === "CapacityReconciled") {
         const reserved = [...sourceCapacity].filter(

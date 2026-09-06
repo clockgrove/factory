@@ -28,7 +28,9 @@ const versions = new Set([
 const safePath = (path: string) =>
   !!path &&
   !isAbsolute(path) &&
-  !/[\\\x00-\x1f\x7f:]/.test(path) &&
+  !path.includes("\\") &&
+  !path.includes(":") &&
+  !Array.from(path).some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127) &&
   !path.split("/").some((part) => !part || part === "." || part === ".." || part.toLowerCase() === ".git");
 
 /** Recognize canonical pointer bytes, never run a clean/smudge filter. Unsupported

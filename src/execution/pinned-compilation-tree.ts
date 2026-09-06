@@ -45,7 +45,7 @@ export async function materializePinnedCompilationTree(repository: string, baseS
     const match = /^(100644|100755) blob ([a-f0-9]{40}) +([0-9]+)\t(.+)$/.exec(entry);
     if (!match) throw new Error("pinned compilation tree contains an unsupported path or Git entry mode");
     const mode = match[1]!, oid = match[2]!, rawSize = match[3]!, path = match[4]!;
-    if (path.includes("\\") || path.split("/").some((part) => !part || part === "." || part === ".." || part.toLowerCase() === ".git") || /[\u0000-\u001f\u007f]/.test(path))
+    if (path.includes("\\") || path.split("/").some((part) => !part || part === "." || part === ".." || part.toLowerCase() === ".git") || Array.from(path).some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127))
       throw new Error("pinned compilation tree path is unsafe");
     const size = Number(rawSize);
     if (!Number.isSafeInteger(size) || size < 0 || size > MAX_BLOB_BYTES || bytes + size > MAX_TREE_BYTES)

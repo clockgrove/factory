@@ -31,7 +31,7 @@ export const ArtifactPathSchema = z
     (path) =>
       !path.startsWith("/") &&
       !path.includes("\\") &&
-      !/[\u0000-\u001f\u007f]/.test(path) &&
+      !Array.from(path).some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127) &&
       path
         .split("/")
         .every(

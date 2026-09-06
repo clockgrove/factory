@@ -1517,7 +1517,7 @@ describe("Supervisor parallel independent sibling integration", () => {
       events.filter((event) => event.kind === "budget" && event.unit === "validation_milliseconds"),
     ).toHaveLength(2);
     expect(f.launch).not.toHaveBeenCalled();
-  });
+  }, 15_000); // Three real Git integrations, including nested and superseding candidate validation.
 
   it("restarts after a lost merge response without validating or paying for review again", async () => {
     const f = await fixture({ loseMergeResponse: true });

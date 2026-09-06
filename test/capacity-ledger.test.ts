@@ -115,6 +115,101 @@ describe("repository-wide capacity ledger", () => {
     expect(ledger.snapshot().reservations).toEqual([validation]);
   });
 
+  it.each([
+    [`factory/integration-sandbox-${"a".repeat(64)}`, `factory/integration-sandbox-${"b".repeat(64)}`],
+    [`factory/integration-sandbox-${"a".repeat(64)}`, "codex-cli/daytona"],
+    ["codex-cli/daytona", `factory/integration-sandbox-${"b".repeat(64)}`],
+  ])("shares provider capacity between %s and %s without changing invocation keys", (first, next) => {
+    const ledger = new CapacityLedger();
+    const held = reservation(1, {
+      backendId: first!, phase: first!.startsWith("factory/") ? "validation" : "execution",
+      local: false, admissionClass: "remote-required", paidUnits: 1,
+    });
+    const candidate = reservation(2, {
+      objective: 2, backendId: next!, phase: next!.startsWith("factory/") ? "validation" : "execution",
+      local: false, admissionClass: "remote-required", paidUnits: 1,
+    });
+    const providerLimits = { ...limits, backendMaxParallel: { "codex-cli/daytona": 1 } };
+    ledger.reconcile(1, [held]);
+    expect(ledger.snapshot().byBackend).toEqual({ "codex-cli/daytona": 1 });
+    expect(ledger.snapshot().reservations).toEqual([held]);
+    expect(ledger.tryReserve(ledger.snapshot().generation, candidate, providerLimits)).toMatchObject({
+      reserved: false, code: "backend-capacity",
+    });
+    expect(ledger.release(held.key)).toBe(true);
+    expect(ledger.release(held.key)).toBe(false);
+    expect(ledger.tryReserve(ledger.snapshot().generation, candidate, providerLimits).reserved).toBe(true);
+    expect(ledger.snapshot().reservations).toEqual([candidate]);
+  });
+
+  it("enforces the Objective provider ceiling across candidate and execution phases", () => {
+    const ledger = new CapacityLedger();
+    const backendId = `factory/integration-sandbox-${"c".repeat(64)}`;
+    const held = reservation(1, {
+      objective: 2, backendId, phase: "validation", local: false,
+      admissionClass: "remote-required", paidUnits: 1,
+    });
+    const peer = reservation(2, {
+      objective: 1, backendId: "codex-cli/daytona", local: false,
+      admissionClass: "burst", paidUnits: 1,
+    });
+    ledger.reconcile(1, [peer, held]);
+    const providerLimits: CapacityLimits = {
+      ...limits, maxCloudParallel: 4, maxPaidUnits: 4,
+      backendMaxParallel: { "codex-cli/daytona": 4 },
+      objectiveBackendMaxParallel: { objective: 2, limits: { "codex-cli/daytona": 1 } },
+    };
+    const candidate = reservation(3, {
+      objective: 2, backendId: "codex-cli/daytona", local: false,
+      admissionClass: "remote-required", paidUnits: 1,
+    });
+    expect(ledger.tryReserve(ledger.snapshot().generation, candidate, providerLimits)).toMatchObject({
+      reserved: false, code: "backend-capacity",
+    });
+    ledger.release(held.key);
+    expect(ledger.tryReserve(ledger.snapshot().generation, candidate, providerLimits).reserved).toBe(true);
+    expect(ledger.snapshot().byBackend["codex-cli/daytona"]).toBe(2);
+  });
+
+  it("reconstructs the provider ceiling from exact durable candidate reservations", () => {
+    const backendId = `factory/integration-sandbox-${"d".repeat(64)}`;
+    const event = parseFactoryEvent({
+      protocol: "clockgrove.factory/v2", kind: "capacity", event: "CapacityReserved",
+      objective: 1, runId: "run-1", workItem: 10, attempt: 1, phase: "validation",
+      backend: backendId, directorEpoch: 1, policyDigest: DIGEST, sequence: 1,
+      at: "2026-09-04T00:00:01.000Z", requestedCpu: 1, requestedMemoryMb: 2048,
+    });
+    const durable = deriveCapacityReservations([{
+      objective: 1, workItem: 10, events: [event], defaultCpu: 1, defaultMemoryMb: 2048,
+    }]);
+    const ledger = new CapacityLedger();
+    ledger.reconcileObjective(1, durable);
+    expect(durable).toHaveLength(1);
+    expect(durable[0]!.backendId).toBe(backendId);
+    expect(durable[0]!.key).toContain(backendId);
+    expect(ledger.tryReserve(ledger.snapshot().generation, reservation(11, {
+      backendId: "codex-cli/daytona", local: false, admissionClass: "burst", paidUnits: 1,
+    }), { ...limits, backendMaxParallel: { "codex-cli/daytona": 1 } })).toMatchObject({
+      reserved: false, code: "backend-capacity",
+    });
+  });
+
+  it("does not infer Daytona from local or unrecognized invocation identifiers", () => {
+    const local = reservation(1, {
+      phase: "validation", backendId: `factory/integration-validation-${"a".repeat(64)}`,
+    });
+    const unknown = reservation(2, {
+      phase: "validation", backendId: "factory/integration-sandbox-not-an-identity",
+      local: false, admissionClass: "remote-required", paidUnits: 1,
+    });
+    const ledger = new CapacityLedger();
+    ledger.reconcile(1, [local, unknown]);
+    expect(ledger.snapshot().byBackend).toEqual({ [local.backendId]: 1, [unknown.backendId]: 1 });
+    expect(ledger.tryReserve(ledger.snapshot().generation, reservation(3, {
+      backendId: "codex-cli/daytona", local: false, admissionClass: "burst", paidUnits: 1,
+    }), { ...limits, backendMaxParallel: { "codex-cli/daytona": 1 } }).reserved).toBe(true);
+  });
+
   it("enforces CPU, memory, backend, path, exclusive, and paid ceilings", () => {
     const checks: Array<[Partial<CapacityReservation>, Partial<CapacityLimits>, string]> = [
       [{ cpu: 5 }, {}, "cpu-capacity"],

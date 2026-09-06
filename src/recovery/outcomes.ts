@@ -13,6 +13,7 @@ import {
 } from "../control/reviews.js";
 import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
 import { verifyMergeCandidateSquash } from "../publication/merge-candidate.js";
+import { assertIsolatedCandidateProof } from "./isolated-candidate.js";
 import { selectEquivalentPublicationRecord } from "../publication/recorded-publication.js";
 import {
   bindValidationToPublishedHead,
@@ -466,6 +467,9 @@ async function verifySourceProof(
         requireOutcome(!args.requireCandidateDigest || args.candidateDigest === digest);
         candidate = await loadMergeCandidateCheckpoint(store, identity);
         requireOutcome(candidate);
+        assertIsolatedCandidateProof({ repository: plan.repository,
+          sourceRunId: plan.items.find((item) => item.workItem === args.workItem)?.source?.runId ?? identity.runId,
+          candidate, events, beforeSequence: args.before });
         if (args.deliveryHeadSha && !args.siblingRefresh) {
           const delivery = await store.readCommit(args.deliveryHeadSha);
           requireOutcome(

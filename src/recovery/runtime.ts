@@ -8,6 +8,7 @@ import {
 import { loadReviewCheckpoint } from "../control/reviews.js";
 import { bindValidationToPublishedHead } from "../validation/plan.js";
 import { observeRecoverySiblingRefresh } from "./sibling-refresh.js";
+import { assertIsolatedCandidateProof, assertIsolatedCandidateReservation } from "./isolated-candidate.js";
 import { deriveBudgetUsage, remainingBudget, type BudgetUsage } from "../control/budget.js";
 import {
   loadCompiledGraph,
@@ -404,10 +405,12 @@ export async function loadRecoveryRuntime(input: {
         sourceExactHeadValidationDigest: proof.digest,
         targetBaseSha: event.targetBaseSha,
       };
+      const remote = event.backend.startsWith("factory/integration-sandbox-");
+      const backendPrefix = remote ? "factory/integration-sandbox-" : "factory/integration-validation-";
       // A later CAS does not rewrite an already paid invocation's identity. Keep
       // the old immutable-head candidate distinct from new delivery-head work.
       const originalCandidate = event.backend ===
-        `factory/integration-validation-${mergeCandidateIdentityDigest(originalIdentity)}`;
+        `${backendPrefix}${mergeCandidateIdentityDigest(originalIdentity)}`;
       const refresh =
         pull.headSha !== publication.headSha && currentHead.parentOids.length === 2
           ? await observeRecoverySiblingRefresh({
@@ -421,7 +424,7 @@ export async function loadRecoveryRuntime(input: {
               deliveryHeadSha: pull.headSha,
               ...(!originalCandidate ? { targetBaseSha: event.targetBaseSha } : {}),
               candidateRunId: input.runId,
-              ...(!originalCandidate ? { candidateIdentityDigest: event.backend.replace("factory/integration-validation-", "") } : {}),
+              ...(!originalCandidate ? { candidateIdentityDigest: event.backend.slice(backendPrefix.length) } : {}),
             })
           : null;
       if (refresh)
@@ -437,13 +440,17 @@ export async function loadRecoveryRuntime(input: {
         event.targetBaseSha &&
           event.targetBaseSha !== source.validation.baseSha &&
           event.backend ===
-            `factory/integration-validation-${mergeCandidateIdentityDigest(candidateIdentity)}`,
+            `${backendPrefix}${mergeCandidateIdentityDigest(candidateIdentity)}`,
         "source-capacity-candidate-mismatch",
       );
       requireRuntime(
-        event.event !== "CapacityReserved" || event.localScopeBatch,
+        remote ? event.isolatedValidation && !event.localScopeBatch :
+          !event.isolatedValidation && (event.event !== "CapacityReserved" || event.localScopeBatch),
         "source-capacity-scope-unavailable",
       );
+      if (remote)
+        assertIsolatedCandidateReservation({ repository: plan.repository, sourceRunId: source.runId,
+          identity: candidateIdentity, reservation: event, events });
       if (event.localScopeBatch)
         requireRuntime(
           event.localScopeBatch.identity.runId === input.runId &&
@@ -455,6 +462,8 @@ export async function loadRecoveryRuntime(input: {
         const completed = await loadMergeCandidateCheckpoint(input.store, originalIdentity);
         requireRuntime(completed && JSON.stringify(completed.source) === JSON.stringify(proof),
           "source-capacity-prior-completion-unavailable");
+        assertIsolatedCandidateProof({ repository: plan.repository, sourceRunId: source.runId,
+          candidate: completed, events });
         if (event.localScopeBatch)
           requireRuntime(event.localScopeBatch.identity.invocationDigest === completed.validation.artifactDigest,
             "source-capacity-prior-artifact-mismatch");
@@ -502,13 +511,19 @@ export async function loadRecoveryRuntime(input: {
           reserved.length === 1 &&
             reserved[0]!.kind === "capacity" &&
             reserved[0]!.requestedCpu === event.requestedCpu &&
-            reserved[0]!.requestedMemoryMb === event.requestedMemoryMb,
+            reserved[0]!.requestedMemoryMb === event.requestedMemoryMb &&
+            (!remote || reserved[0]!.directorEpoch === event.directorEpoch) &&
+            reserved[0]!.policyDigest === event.policyDigest &&
+            JSON.stringify(reserved[0]!.isolatedValidation) === JSON.stringify(event.isolatedValidation),
           "source-capacity-reconciliation-mismatch",
         );
+        const completed = await loadMergeCandidateCheckpoint(input.store, candidateIdentity);
         requireRuntime(
-          await loadMergeCandidateCheckpoint(input.store, candidateIdentity),
+          completed,
           "source-capacity-completion-unavailable",
         );
+        assertIsolatedCandidateProof({ repository: plan.repository, sourceRunId: source.runId,
+          candidate: completed, events, requireAccounting: false });
       }
       sourceCapacity.add(event);
     }

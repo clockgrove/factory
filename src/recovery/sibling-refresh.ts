@@ -21,6 +21,7 @@ import { createRecoveryEventDigest } from "./identity.js";
 import { loadRecoveryPlan, type RecoveryPlanItem } from "./plan.js";
 import { recoveryAdoptionEvents } from "./transaction.js";
 import { verifyRecoverySourceIntegration } from "./outcomes.js";
+import { assertIsolatedCandidateProof } from "./isolated-candidate.js";
 
 type Source = NonNullable<RecoveryPlanItem["source"]>;
 function requireRefresh(value: unknown): asserts value {
@@ -450,6 +451,8 @@ export async function observeRecoverySiblingRefresh(
                 candidate.validation.outputTreeSha === merge.treeOid &&
                 JSON.stringify(candidate.source) === JSON.stringify(original),
             );
+            assertIsolatedCandidateProof({ repository: input.repository, sourceRunId: start.runId,
+              candidate, events, beforeSequence: integrated.sequence });
             const review = await loadReviewCheckpoint(store, {
               kind: "integration-candidate",
               runId: start.runId,
@@ -604,6 +607,10 @@ export async function observeRecoverySiblingRefresh(
       candidate.validation.outputTreeSha === record.outputTreeSha &&
         JSON.stringify(candidate.source) === JSON.stringify(exact),
     );
+  if (candidate)
+    assertIsolatedCandidateProof({ repository: input.repository, sourceRunId: source.runId,
+      candidate, events, requireAccounting: input.requireCompletion === true,
+      ...(input.beforeSequence === undefined ? {} : { beforeSequence: input.beforeSequence }) });
   const review = candidate
     ? await loadReviewCheckpoint(store, {
         kind: "integration-candidate",

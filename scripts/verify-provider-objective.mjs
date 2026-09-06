@@ -243,13 +243,14 @@ export function assessProviderCompletion(evidence, authority) {
         .reduce((sum, event) => sum + event.amount, 0) <= authority.managedSessions,
       "observed managed sessions exceeded authorized ceiling",
     );
-    if (authority.profile === "daytona-burst") {
-      assert.equal(
-        evidence.cleanupObservation?.state,
-        "absent",
-        "Daytona cleanup is not independently observed absent",
-      );
-    } else {
+    // Managed workers also use independent Daytona validators. Terminal managed
+    // tasks and reconciled capacity receipts cannot substitute for their absence.
+    assert.equal(
+      evidence.cleanupObservation?.state,
+      "absent",
+      "Daytona cleanup is not independently observed absent",
+    );
+    if (authority.profile !== "daytona-burst") {
       assert.equal(
         evidence.managedSessionObservation?.state,
         "terminated",
@@ -515,9 +516,10 @@ export async function main() {
   const policy = providerPolicy(authority);
   const namespace = qualificationNamespace(process.env.FACTORY_LIVE_OBJECTIVE_NAMESPACE);
   const observe = async ({ evidence, request }) => {
-    if (authority.profile === "daytona-burst") {
-      evidence.cleanupObservation = await observeProviderAbsence(new Daytona(), evidence);
-    } else {
+    // The exact original-run listing covers workers and validators, including
+    // validators belonging to a managed-agent Objective. This never deletes them.
+    evidence.cleanupObservation = await observeProviderAbsence(new Daytona(), evidence);
+    if (authority.profile !== "daytona-burst") {
       evidence.managedSessionObservation = await observeManagedAgentTermination(request, evidence);
       evidence.billingObservation = {
         state: "unavailable",

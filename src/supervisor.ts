@@ -151,6 +151,7 @@ import {
 } from "./graph.js";
 import { GitHubReader, type GitHubOptions } from "./github.js";
 import { CodexCliManagementBackend } from "./management/codex-cli.js";
+import { collectCompilationEvidence } from "./compiler/runtime-evidence.js";
 import { ManagementOutputError } from "./management/backend.js";
 import { reportedModelUsage, type ReportedModelUsage } from "./protocol/model-usage.js";
 import type {
@@ -2839,6 +2840,17 @@ export class FactorySupervisor {
                   baseSha: base.oid,
                   repositoryFiles: layout.files,
                   allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                  economicEvidence: (items) => collectCompilationEvidence(items, {
+                    objective: snapshot.number,
+                    policy: this.#policy,
+                    capacity: this.#capacity.snapshot(),
+                    repositoryLimits: this.#controllerLimits,
+                    deliveryMode: this.#deliverySelection.selected,
+                    nowMs: Date.now(),
+                    cooldownUntilMs: this.#resourceSampler.cooldownUntil,
+                    sampleResource: (nowMs) => this.#resourceSampler.sample(nowMs),
+                    evaluate: (input) => this.#registry.evaluate(input),
+                  }),
                   ...(compilationModel ? { modelSelection: compilationModel } : {}),
                 },
                 checkpoint,

@@ -390,7 +390,9 @@ describe("GitHub managed-agent profiles", () => {
       state: "running",
       progress: expect.stringContaining("remains in_progress"),
     });
-    await expect(backend.cleanup(handle)).rejects.toThrow(/unassignment is not cancellation/);
+    await expect(backend.cleanup(handle)).rejects.toThrow(
+      /managed Agent Task task-exact remains in_progress; unassignment is not cancellation.*Stop session.*session-exact/,
+    );
     state = "completed";
     await expect(backend.cleanup(handle)).resolves.toBeUndefined();
   });
@@ -578,7 +580,7 @@ describe("GitHub managed-agent profiles", () => {
     expect(writer.calls).toEqual([]);
   });
 
-  it("rolls back an ambiguous paid assignment and blocks replacement if rollback fails", async () => {
+  it("never describes ambiguous paid compute as rolled back after assignee removal", async () => {
     const actor = { id: "BOT_runtime", login: "copilot-swe-agent", type: "Bot" as const };
     const writer = new ManagedWriter();
     writer.assignFailures = 1;
@@ -589,7 +591,12 @@ describe("GitHub managed-agent profiles", () => {
       profile: GITHUB_COPILOT_MANAGED_PROFILE,
       actorResolution: { actor },
     });
-    await expect(backend.launch(context())).rejects.toThrow(/was rolled back/);
+    const error = await backend.launch(context()).catch((error: unknown) => error);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(
+      /assignee was removed but task identity and termination remain unknown.*Automated replacement is blocked/,
+    );
+    expect((error as Error).message).not.toMatch(/rolled back|task stopped|task cancelled/);
     expect(writer.calls).toEqual([
       "assign:I_work_item:BOT_runtime:factory/stack-parent",
       "remove:I_work_item:BOT_runtime",

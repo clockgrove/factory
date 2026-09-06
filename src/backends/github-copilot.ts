@@ -339,7 +339,8 @@ export class GitHubManagedAgentBackend implements ExecutionBackend {
     } catch (assignmentError) {
       if (assignmentError instanceof ManagedAssignmentDeadlineError) throw assignmentError;
       // A network error does not prove whether GitHub accepted the mutation.
-      // Removing this exact discovered Bot is the only safe ambiguity repair.
+      // Removing this exact discovered Bot repairs assignment only. It cannot
+      // establish whether a paid task started or whether that task has stopped.
       try {
         await dispatcher.unassign(item.id);
       } catch (cleanupError) {
@@ -351,7 +352,10 @@ export class GitHubManagedAgentBackend implements ExecutionBackend {
         );
       }
       throw new Error(
-        `${this.#options.profile.displayName} assignment was not confirmed and was rolled back: ` +
+        `${this.#options.profile.displayName} assignment was not confirmed; the assignee was ` +
+          "removed but task identity and termination remain unknown. Automated replacement is " +
+          "blocked. Inspect this Work Item in GitHub's Agents view and stop its session before " +
+          "replacement; unassignment is not cancellation. Assignment error: " +
           safeDiagnostic(assignmentError, "managed assignment failure"),
       );
     }
@@ -687,7 +691,11 @@ export class GitHubManagedAgentBackend implements ExecutionBackend {
     if (task.activeSessionIds.length > 0 || !TERMINAL_AGENT_TASK_STATES.has(task.taskState)) {
       throw new Error(
         `managed Agent Task ${task.taskId} remains ${task.taskState}; ` +
-          "unassignment is not cancellation—stop the exact session in GitHub before replacement",
+          "unassignment is not cancellation. Open this exact task in GitHub's Agents view and " +
+          "use Stop session for its active sessions " +
+          `${safeDiagnostic(JSON.stringify(task.activeSessionIds), "managed active session identifiers")}. ` +
+          "Then re-observe the task and every session as terminal before replacement; " +
+          "an empty active-session list alone does not prove a non-terminal task stopped",
       );
     }
   }

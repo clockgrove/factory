@@ -134,9 +134,18 @@ export async function prepareSiblingRefreshTree(input: {
       throw new Error("sibling tree remote base identity differs");
     const patchPath = join(root, "artifact.patch");
     await materializeArtifactPatch(artifact, patchPath);
-    const trustedManifest =
-      artifact.fileManifest ??
-      (await inspectPatchManifest(input.repository, baseSha, patchPath, artifact.changedPaths));
+    const trustedManifest = await inspectPatchManifest(
+      input.repository,
+      baseSha,
+      patchPath,
+      artifact.changedPaths,
+      { allowSymlinkBlobs: true },
+    );
+    if (
+      artifact.fileManifest &&
+      JSON.stringify(artifact.fileManifest) !== JSON.stringify(trustedManifest)
+    )
+      throw new Error("sibling artifact manifest differs from actual Git blob identities");
     await git(["read-tree", baseSha]);
     await git(["apply", "--cached", "--binary", "--whitespace=error-all", patchPath]);
     const outputTreeSha = gitSha.parse((await git(["write-tree"])).trim());

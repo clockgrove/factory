@@ -152,6 +152,7 @@ export async function inspectPatchManifest(
   baseSha: string,
   patchPath: string,
   changedPaths: string[],
+  options: { allowSymlinkBlobs?: boolean } = {},
 ): Promise<ArtifactFileManifest> {
   if (!/^[a-f0-9]{40}$/i.test(baseSha)) throw new Error("invalid artifact base SHA");
   if (changedPaths.length > MAX_CONTENT_FILES || new Set(changedPaths).size !== changedPaths.length)
@@ -184,13 +185,20 @@ export async function inspectPatchManifest(
     if (JSON.stringify(actualPaths) !== JSON.stringify([...changedPaths].sort()))
       throw new Error("artifact patch paths differ from supplied manifest");
     const listing = await indexGit(repository, index, ["ls-tree", "-r", "-l", "-z", resultTreeSha]);
-    const objects = new Map<string, { mode: "100644" | "100755"; oid: string; bytes: number }>();
+    const objects = new Map<
+      string,
+      { mode: "100644" | "100755" | "120000"; oid: string; bytes: number }
+    >();
     for (const line of listing.split("\0").filter(Boolean)) {
       const match = /^(\d{6}) blob ([a-f0-9]{40})\s+(\d+)\t([\s\S]+)$/.exec(line);
       if (!match) continue;
       if (!changedPaths.includes(match[4]!)) continue;
-      if (match[1] !== "100644" && match[1] !== "100755")
+      if (match[1] !== "100644" && match[1] !== "100755" && match[1] !== "120000")
         throw new Error("artifact contains unsupported Git mode");
+      if (match[1] === "120000" && !options.allowSymlinkBlobs)
+        throw new Error(
+          "symlink artifacts support Git-object-only operations, not filesystem materialization",
+        );
       const bytes = Number(match[3]);
       if (!Number.isSafeInteger(bytes) || bytes > MAX_CONTENT_FILE_BYTES)
         throw new Error("artifact Git blob exceeds file byte ceiling");
@@ -231,7 +239,11 @@ export async function inspectPatchManifest(
       );
       await chmod(content, object.mode === "100755" ? 0o700 : 0o600);
       const observed = await inspectContentFile(content);
-      if (observed.bytes < 1024 && parseLfsPointer(await readFile(content)))
+      if (
+        object.mode !== "120000" &&
+        observed.bytes < 1024 &&
+        parseLfsPointer(await readFile(content))
+      )
         throw new Error(
           "new LFS pointer assets require an explicitly supported authenticated LFS upload capability",
         );
@@ -241,6 +253,8 @@ export async function inspectPatchManifest(
         path,
         action: "write",
         ...observed,
+        mode: object.mode,
+        mediaType: object.mode === "120000" ? "unknown" : observed.mediaType,
         generated: /(^|\/)(generated|dist|build)\//.test(path),
       });
       await rm(content);

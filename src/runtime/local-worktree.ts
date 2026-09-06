@@ -18,8 +18,12 @@ import {
   materializeLocalLfsAssets,
   MAX_LOCAL_LFS_FILE_BYTES,
 } from "../repository-profiles/git-lfs.js";
-import { inspectContentFile, regularContentPath } from "../execution/artifact-content.js";
-import { artifactFromPatchFile, streamGitFile } from "./artifact-patch.js";
+import {
+  assertFilesystemArtifactManifest,
+  inspectContentFile,
+  regularContentPath,
+} from "../execution/artifact-content.js";
+import { artifactFromPatchFile, inspectPatchManifest, streamGitFile } from "./artifact-patch.js";
 
 const MARKER = ".factory-worktree";
 
@@ -172,6 +176,13 @@ export async function seedLocalWorktree(
   const patchPath = join(worktree.root, "retry-checkpoint.patch");
   await materializeArtifactPatch(verified, patchPath);
   try {
+    const manifest = await inspectPatchManifest(
+      worktree.repository,
+      verified.baseSha,
+      patchPath,
+      verified.changedPaths,
+    );
+    assertFilesystemArtifactManifest(manifest);
     await git(worktree.path, ["apply", "--binary", "--whitespace=error-all", patchPath]);
   } finally {
     await rm(patchPath, { force: true });

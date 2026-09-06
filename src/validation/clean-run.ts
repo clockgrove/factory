@@ -8,7 +8,10 @@ import {
   materializeArtifactPatch,
   type NormalizedArtifact,
 } from "../execution/artifacts.js";
-import { verifyMaterializedFiles } from "../execution/artifact-content.js";
+import {
+  assertFilesystemArtifactManifest,
+  verifyMaterializedFiles,
+} from "../execution/artifact-content.js";
 import { inspectPatchManifest } from "../runtime/artifact-patch.js";
 import { assertNoSecretMaterial } from "../protocol/limits.js";
 import type { WorkerPacket } from "../protocol/worker-packet.js";
@@ -202,14 +205,18 @@ export async function validateArtifactClean(
   try {
     const patchPath = join(worktree.root, "artifact.patch");
     await materializeArtifactPatch(artifact, patchPath);
-    const trustedManifest =
-      artifact.fileManifest ??
-      (await inspectPatchManifest(
-        input.repository,
-        artifact.baseSha,
-        patchPath,
-        artifact.changedPaths,
-      ));
+    const trustedManifest = await inspectPatchManifest(
+      input.repository,
+      artifact.baseSha,
+      patchPath,
+      artifact.changedPaths,
+    );
+    if (
+      artifact.fileManifest &&
+      JSON.stringify(artifact.fileManifest) !== JSON.stringify(trustedManifest)
+    )
+      throw new Error("artifact manifest differs from actual Git blob identities");
+    assertFilesystemArtifactManifest(trustedManifest);
     const apply = await runContainedProcess({
       command: "git",
       args: ["apply", "--index", "--binary", "--whitespace=error-all", patchPath],

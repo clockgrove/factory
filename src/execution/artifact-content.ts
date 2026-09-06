@@ -82,7 +82,7 @@ export const ArtifactFileSchema = z
   .object({
     path: ArtifactPathSchema,
     action: z.enum(["write", "delete"]),
-    mode: z.enum(["100644", "100755"]),
+    mode: z.enum(["100644", "100755", "120000"]),
     bytes: z.number().int().nonnegative().max(MAX_CONTENT_FILE_BYTES),
     digest: sha256Digest,
     mediaType: MediaSchema,
@@ -90,6 +90,11 @@ export const ArtifactFileSchema = z
   })
   .strict()
   .superRefine((value, context) => {
+    if (value.mode === "120000" && value.mediaType !== "unknown")
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "symlink target bytes must not claim regular-file media",
+      });
     if (
       value.action === "delete" &&
       (value.bytes !== 0 ||
@@ -521,11 +526,19 @@ export function retainArtifactContent(payload: ArtifactPayload): () => Promise<v
 }
 
 /** Revalidate full bytes after application, not only a worker/provider-supplied manifest. */
+export function assertFilesystemArtifactManifest(manifest: ArtifactFileManifest): void {
+  ArtifactFileManifestSchema.parse(manifest);
+  if (manifest.files.some((file) => file.mode === "120000"))
+    throw new Error(
+      "symlink artifacts support Git-object-only operations, not filesystem materialization",
+    );
+}
+
 export async function verifyMaterializedFiles(
   root: string,
   manifest: ArtifactFileManifest,
 ): Promise<void> {
-  ArtifactFileManifestSchema.parse(manifest);
+  assertFilesystemArtifactManifest(manifest);
   for (const file of manifest.files) {
     if (file.action === "delete") {
       try {

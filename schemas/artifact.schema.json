@@ -62,7 +62,7 @@
             "properties": {
               "path": { "type": "string", "minLength": 1, "maxLength": 500 },
               "action": { "enum": ["write", "delete"] },
-              "mode": { "enum": ["100644", "100755"] },
+              "mode": { "enum": ["100644", "100755", "120000"] },
               "bytes": { "type": "integer", "minimum": 0, "maximum": 100000000 },
               "digest": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
               "mediaType": {
@@ -80,7 +80,9 @@
                 ]
               },
               "generated": { "type": "boolean" }
-            }
+            },
+            "if": { "properties": { "mode": { "const": "120000" } } },
+            "then": { "properties": { "mediaType": { "const": "unknown" } } }
           }
         }
       }

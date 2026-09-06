@@ -11,11 +11,8 @@ import {
   prepareSiblingRefreshTree,
 } from "../src/publication/sibling-refresh-tree.js";
 import * as processGroup from "../src/runtime/process-group.js";
-import {
-  cleanupLocalWorktree,
-  collectLocalArtifact,
-  createLocalWorktree,
-} from "../src/runtime/local-worktree.js";
+import { inspectPatchManifest } from "../src/runtime/artifact-patch.js";
+import { createLocalWorktree } from "../src/runtime/local-worktree.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -222,18 +219,13 @@ async function fixture() {
 }
 
 describe("object-only sibling refresh tree preparation", () => {
-  it("reproduces real post-checkout, smudge and clean execution through the existing sanitized worktree path", async () => {
+  it("refuses symlink source materialization without executing checkout, smudge or clean hooks", async () => {
     const f = await fixture();
     f.hostile();
-    const worktree = await createLocalWorktree(f.repository, f.baseSha);
-    try {
-      await writeFile(join(worktree.path, "value.txt"), "worker result\n");
-      await collectLocalArtifact(worktree);
-      for (const name of ["post-checkout", "smudge", "clean"])
-        expect(await readFile(join(f.root, `${name}.marker`), "utf8")).toBe("invoked");
-    } finally {
-      await cleanupLocalWorktree(worktree);
-    }
+    await expect(createLocalWorktree(f.repository, f.baseSha)).rejects.toThrow(
+      /unsupported path or Git entry mode/,
+    );
+    expect(await f.present()).toEqual([]);
   });
 
   it("uploads the exact binary, mode, deletion and symlink tree without executing repository configuration or packet commands", async () => {
@@ -298,6 +290,33 @@ describe("object-only sibling refresh tree preparation", () => {
     },
   );
 
+  it("rejects forged link-target manifest bytes before uploading the object-only tree", async () => {
+    const f = await fixture();
+    const patch = join(f.root, "manifest.patch");
+    await writeFile(patch, f.artifact.patch);
+    const manifest = await inspectPatchManifest(
+      f.repository,
+      f.baseSha,
+      patch,
+      f.artifact.changedPaths,
+      { allowSymlinkBlobs: true },
+    );
+    f.artifact = normalizeArtifact({
+      baseSha: f.baseSha,
+      patch: f.artifact.patch,
+      changedPaths: f.artifact.changedPaths,
+      outcome: "succeeded",
+      fileManifest: {
+        ...manifest,
+        files: manifest.files.map((file) =>
+          file.path === "link" ? { ...file, digest: "f".repeat(64) } : file,
+        ),
+      },
+    });
+    await expect(prepareSiblingRefreshTree(f)).rejects.toThrow(/actual Git blob identities/);
+    expect(f.writes).toEqual([]);
+  });
+
   it("performs no upload when the current authority check fails", async () => {
     const f = await fixture();
     f.assertCurrent.mockRejectedValue(new Error("lease lost"));
@@ -321,10 +340,22 @@ describe("object-only sibling refresh tree preparation", () => {
     await expect(prepareSiblingRefreshTree(f)).rejects.toThrow(/blob.*bound|blob.*exceed/i);
     expect(f.writes).toEqual([]);
     // Only the size response is fault-injected; real preparation still executes.
-    // No huge test allocation or fabricated successful provider proof is needed.
-    expect(observed.mock.calls.some(([options]) => options.command === process.execPath)).toBe(
-      false,
-    );
+    // The earlier LFS metadata batch also uses Node, but must not be confused
+    // with the fixed raw-upload bridge reading this size-rejected Git blob.
+    expect(
+      observed.mock.calls.some(
+        ([options]) =>
+          options.command === process.execPath &&
+          options.args?.some((arg) => {
+            try {
+              const args: unknown = JSON.parse(arg);
+              return Array.isArray(args) && args.includes("cat-file") && args.includes("blob");
+            } catch {
+              return false;
+            }
+          }),
+      ),
+    ).toBe(false);
   });
 
   it("ignores inherited alternate-index and configuration injection without modifying that index", async () => {

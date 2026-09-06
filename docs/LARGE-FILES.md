@@ -12,7 +12,10 @@ collection binds `fileManifest` into the digest: exact base/result Git trees, ch
 write/delete action, regular/executable mode, actual bytes, SHA-256, generated-path classification
 and known media signature. PNG/JPEG/GIF/WebP/PDF/Wasm/ZIP/WAV/MP4 signatures are recognized;
 `unknown` is valid. A signature is not semantic or full-format validation. Declared criterion-bound
-validation and review remain necessary. Symlinks, gitlinks, traversal and special files fail closed.
+validation and review remain necessary. Object-only sibling refresh additionally represents Git
+symlinks as mode `120000`, media `unknown`, and the raw target blob's byte count/SHA-256; it never
+creates or follows a filesystem link. Local source materialization, retry seeding and executable
+validation still refuse symlinks. Gitlinks, traversal and special files remain unsupported.
 
 `artifactFromPatchFile` applies the real patch to a private index and hashes the resulting Git blobs;
 it does not trust producer-reported paths or media. Above 5 MiB, `payload` binds an ordered sequence

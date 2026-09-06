@@ -16,7 +16,13 @@ export interface RecoverySnapshot {
 
 export const TERMINAL_RECOVERY_REQUIRED =
   "Existing Objective execution requires explicit evidence-preserving successor-run recovery, " +
-  "which is not implemented. A new activation cannot adopt its attempts or pull requests; " +
+  "not a new activation. Use factory_recovery_plan for read-only assessment, then " +
+  "factory_recovery_propose with a stable requestId to evaluate an exact successor plan. " +
+  "After explicit authorization, submit factory_recovery_request with that planDigest, " +
+  "the same requestId, and the same allowance/acknowledgement inputs. Assessment and proposal " +
+  "do not authorize execution or additional allowance; missing source evidence, unverified " +
+  "resource absence, or unresolved accounting can still block controller adoption. " +
+  "A new activation cannot adopt existing attempts or pull requests; " +
   "do not restart with a fresh budget or delete the existing work.";
 
 function needsSuccessorInspection(snapshot: RecoverySnapshot): boolean {

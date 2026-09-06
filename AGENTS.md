@@ -63,9 +63,11 @@ These are settled. Do not relitigate them.
 - After each PR, compare delivered outcomes with the active goal, identify remaining acceptance
   gaps, and choose the next substantial authorized deliverable. Recalibrate when evidence changes;
   do not repeatedly replan settled work or expand the goal without authority.
-- Keep one concise completion board: remaining capability and acceptance criteria, code/testing/
-  external-input classification, owner, dependencies, and next concrete deliverable. Link historical
-  evidence rather than copying it. A bounded pilot does not waive the full release requirements.
+- Track all remaining product work in ordinary GitHub issues first: implementation, known bugs,
+  deferred qualification, external dependencies, and distribution. Each issue needs acceptance,
+  code/testing/external-input classification, an owner, dependencies, and a next deliverable.
+  Factory Objective compilation is not required for this contributor backlog. Keep the completion
+  board as a concise linked summary, not a second backlog. A bounded pilot waives no release gate.
 
 ## Capability-sized delivery
 
@@ -73,7 +75,8 @@ These are settled. Do not relitigate them.
   behavior. Helper modules, intermediate plumbing, and individual Work Items belong in that batch;
   do not turn each into a separate PR or stack layer merely because it can be committed independently.
 - Use parallel subagents for bounded independent work and incremental commits inside the capability's
-  integration branch. Keep file ownership explicit and integrate their work before the PR handoff.
+  integration branch. Assign dependency-ready implementation issues to isolated worktrees/sessions,
+  keep file ownership explicit, and integrate their work before the PR handoff.
 - Optimize time to the overall goal by running independent capabilities concurrently, not only
   subtasks within one capability. Give each capability an owner, isolated worktree, and end-to-end
   acceptance criteria. Keep available agents on the highest-impact unblocked work within authorized
@@ -109,14 +112,17 @@ These are settled. Do not relitigate them.
   Test counts, commits, and agent counts support that report; they are not completion measures.
   Avoid repeating plans and transcripts. Pause or redirect promptly when the user asks.
 
-## Proportional verification
+## Implementation first, then coordinated verification
 
-- During development, run typechecks and focused tests for changed behavior. Add a regression for
-  each concrete defect; retain targeted security, destructive-action, accounting, and recovery checks.
-  Use cheap contract fixtures derived from captured live behavior for external integration shapes.
-  Do not repeatedly run full coverage, release matrices, packaging, plugin reinstalls, or broad live
-  qualification between intermediate changes. Documentation-only changes need proportional checks.
-- After implementation and integration review, freeze the candidate, run the full integrated checks,
+- Write and integrate all remaining implementation code before executing verification. During this
+  phase, do not run tests, typechecks, lint/format checks, coverage, release matrices, package checks,
+  plugin reinstalls, or live qualification. Write needed regression tests with concrete fixes, but
+  execute them in the coordinated test phase. Do not create extra qualification infrastructure to
+  occupy implementation lanes. Source inspection and authoritative API documentation still inform
+  implementation; this sequence does not authorize unsafe actions or invented provider contracts.
+- After all implementation code is integrated, review and freeze the candidate, run the full suite,
+  and fix the actual failures. Keep security, destructive-action, accounting, and recovery coverage.
+  Then run the full integrated release checks,
   build and install the matching artifact, then execute the required end-to-end qualification cases.
   An external gate may remain explicitly blocked; it is not waived or passed by local checks.
 - If qualification fails, preserve the original failure and exact source/artifact identities, fix

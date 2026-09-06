@@ -647,6 +647,7 @@ export function largeFileExtension(authority) {
     harnessPaths: [
       "verify-local-large-files.mjs",
       "qualification-large-files.mjs",
+      "qualification-large-files-recipe.mjs",
       "qualification-artifact-transfer.mjs",
       "qualification-large-file-refusals.mjs",
     ].map((path) => `scripts/${path}`),

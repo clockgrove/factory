@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const LARGE_FILE_RECIPE_VERSION = "factory-large-files-fixture-v1";
 export const LARGE_FILE_AUDIO_BYTES = 6 * 1024 * 1024 + 44;
@@ -211,10 +212,31 @@ function recipeOutput(root, namespace, scenario, phase) {
   }
 }
 
+export function renderLargeFileRecipe(template, namespace) {
+  assertNamespace(namespace);
+  assert.ok(
+    typeof template === "string" && Buffer.byteLength(template) <= 32 * 1024,
+    "standalone recipe template exceeds its bound",
+  );
+  const marker = '"__FACTORY_LARGE_FILE_NAMESPACE__"';
+  const first = template.indexOf(marker);
+  assert.ok(
+    first >= 0 && first === template.lastIndexOf(marker),
+    "standalone recipe template must contain exactly one namespace marker",
+  );
+  const rendered = template.replace(marker, JSON.stringify(namespace));
+  assert.ok(Buffer.byteLength(rendered) <= 32 * 1024, "standalone recipe exceeds its bound");
+  return rendered;
+}
 function recipeSource(namespace) {
-  // This small reviewed recipe is committed into the baseline. A real installed worker invokes
-  // it; the runner must never call writeLargeFileOutput as a substitute for worker execution.
-  return `import assert from "node:assert/strict";\nimport * as fs from "node:fs";\nimport {createHash} from "node:crypto";\nimport {dirname,isAbsolute,join,resolve} from "node:path";\nimport {fileURLToPath} from "node:url";\nconst namespace=${JSON.stringify(namespace)};\nconst hash=${hash.toString()};\n${[assertNamespace, relativePath, largeFilePaths, audioBytes, outputFiles, phaseFiles, safeDirectory, exclusiveFile, regularBytes, recipeOutput].map((fn) => fn.toString()).join("\n")}\nconst root=resolve(dirname(fileURLToPath(import.meta.url)),"../..");\nexport function verify(phase="present") {\n const files=outputFiles(namespace);\n const required=phase==="payload"?["payload"]:phase==="metadata"?["payload","metadata"]:phase==="join"?["payload","metadata","join"]:[];\n for(const file of files) {\n  if(!fs.existsSync(join(root,file.path))&&!required.includes(file.phase)) continue;\n  const actual=regularBytes(root,file.path,file.bytes.length);\n  assert.ok(actual.bytes.equals(file.bytes),"fixture output bytes differ");\n  assert.equal(actual.mode,file.mode,"fixture output mode differs");\n }\n}\nif(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)) {\n const phase=process.argv[2];\n if(phase==="verify") verify("join");\n else if(["scope","secret","symlink"].includes(phase)) recipeOutput(root,namespace,phase,"payload");\n else {\n  if(phase==="metadata") verify("payload");\n  if(phase==="join") verify("metadata");\n  recipeOutput(root,namespace,"accepted",phase);\n  verify(phase);\n }\n}\n`;
+  // Copy committed raw source, never function.toString(): test/build transforms may rewrite
+  // imported bindings into names that cannot exist in a standalone worker process.
+  const directory = dirname(fileURLToPath(import.meta.url));
+  const template = regularBytes(directory, "qualification-large-files-recipe.mjs", 32 * 1024);
+  return renderLargeFileRecipe(
+    new TextDecoder("utf-8", { fatal: true }).decode(template.bytes),
+    namespace,
+  );
 }
 function baselineFiles(namespace) {
   const paths = largeFilePaths(namespace);

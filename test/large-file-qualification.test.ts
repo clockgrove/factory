@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -11,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   LARGE_FILE_AUDIO_BYTES,
@@ -22,6 +23,7 @@ import {
   largeFileObjectiveBody,
   largeFilePaths,
   largeFileScenario,
+  renderLargeFileRecipe,
   observeLargeFileTree,
   writeLargeFileOutput,
   type LargeFileFixture,
@@ -106,6 +108,28 @@ function fixture() {
 }
 
 describe("installed large-file qualifier fixture and proof contracts", () => {
+  it("copies a bounded raw standalone recipe with exactly one safe namespace substitution", () => {
+    const template = readFileSync(
+      new URL("../scripts/qualification-large-files-recipe.mjs", import.meta.url),
+      "utf8",
+    );
+    const prepared = fixture();
+    const recipe = readFileSync(join(prepared.repository, prepared.recipePath), "utf8");
+    expect(recipe).toBe(
+      template.replace('"__FACTORY_LARGE_FILE_NAMESPACE__"', JSON.stringify(prepared.namespace)),
+    );
+    expect(recipe).not.toContain("__vite_ssr_import_");
+    expect(recipe).not.toContain("__FACTORY_LARGE_FILE_NAMESPACE__");
+    expect(() => renderLargeFileRecipe(template, "../unsafe")).toThrow();
+    expect(() => renderLargeFileRecipe("no marker", prepared.namespace)).toThrow(/exactly one/);
+    expect(() =>
+      renderLargeFileRecipe(template + '\n"__FACTORY_LARGE_FILE_NAMESPACE__"', prepared.namespace),
+    ).toThrow(/exactly one/);
+    expect(() => renderLargeFileRecipe("x".repeat(32 * 1024 + 1), prepared.namespace)).toThrow(
+      /bound/,
+    );
+  });
+
   it("prepares canonical/legacy pointer Git blobs and verified local-only LFS objects", () => {
     const prepared = fixture();
     expect(prepared.lfs).toHaveLength(2);
@@ -138,6 +162,7 @@ describe("installed large-file qualifier fixture and proof contracts", () => {
     const source = fixture();
     const hook = join(source.root, "must-not-execute");
     const hookScript = join(source.repository, ".git", "hooks", "post-checkout");
+    mkdirSync(dirname(hookScript), { recursive: true, mode: 0o700 });
     writeFileSync(hookScript, `#!/bin/sh\ntouch '${hook}'\n`, { mode: 0o755 });
     git(source.repository, ["config", "filter.lfs.smudge", `touch '${hook}'`]);
     git(source.repository, ["config", "filter.lfs.required", "true"]);

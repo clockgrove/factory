@@ -64,6 +64,7 @@ export interface LargeFileTreeObservation {
   patchProof?: { bytes: number; digest: string; appliedTreeSha: string };
 }
 export function largeFilePaths(namespace: string): LargeFilePaths;
+export function renderLargeFileRecipe(template: string, namespace: string): string;
 export function largeFileObjectiveBody(namespace: string): string;
 export function createLargeFileFixture(input: {
   parent: string;

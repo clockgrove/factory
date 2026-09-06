@@ -463,6 +463,14 @@ const Scheduling = Common.extend({
 });
 
 const Capacity = Common.extend({
+  isolatedFailure: z.object({
+    validationDigest: sha256Digest,
+    validationStartedAt: z.string().datetime(),
+    validationCompletedAt: z.string().datetime(),
+    startedAt: z.string().datetime(),
+    completedAt: z.string().datetime(),
+    sandboxMilliseconds: z.number().int().nonnegative().max(604_800_000),
+  }).strict().optional(),
   isolatedValidation: z.object({
     backend: z.literal("codex-cli/daytona"),
     artifactDigest: sha256Digest,
@@ -502,6 +510,13 @@ const Capacity = Common.extend({
     });
   }
   const isolated = event.isolatedValidation;
+  const failure = event.isolatedFailure;
+  if (failure && (!isolated || event.event !== "CapacityReconciled" ||
+    Date.parse(failure.completedAt) - Date.parse(failure.startedAt) !== failure.sandboxMilliseconds ||
+    Date.parse(failure.validationCompletedAt) < Date.parse(failure.validationStartedAt) ||
+    Date.parse(failure.validationCompletedAt) - Date.parse(failure.validationStartedAt) > 604_800_000)) {
+    context.addIssue({ code: "custom", message: "isolated failure must bind a bounded completed validation and terminated resource" });
+  }
   if ((event.sourceRunId && event.backend.startsWith("factory/integration-sandbox-") && !isolated) ||
     (isolated && (!event.sourceRunId || event.phase !== "validation" ||
       !/^factory\/integration-sandbox-[a-f0-9]{64}$/.test(event.backend) || event.localScopeBatch ||

@@ -123,6 +123,7 @@ function fixture() {
       event: "FactoryRunStarted",
       sequence: 1,
       actor: "fixture-operator",
+      objectiveAuthor: "fixture-operator",
       repository: "fixture/repository",
       baseBranch: "main",
       fork: false,

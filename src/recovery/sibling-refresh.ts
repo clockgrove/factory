@@ -267,7 +267,10 @@ export async function observeRecoverySiblingRefresh(
               event.event === "DeliverySelected" &&
               event.selected === "regular-prs" &&
               event.requested === (start.policy.delivery?.mode ?? "regular-prs") &&
-              event.policyDigest === start.policyDigest,
+              // DeliverySelected has no policyDigest field. Its authenticated
+              // run and post-start position bind it to the unique accepted
+              // start whose policy digest was checked against the intent above.
+              event.sequence > start.sequence,
           ),
       );
     }

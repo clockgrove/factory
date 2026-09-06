@@ -624,7 +624,7 @@ export function createLargeFileRefusalPorts(context, fixture) {
         scenario === "scope"
           ? `artifact changes paths outside scope: ${fixture.paths.prefix}/outside-scope.txt`
           : scenario === "secret"
-            ? "artifact content contains suspected credential bytes"
+            ? "artifact content contains suspected GitHub token"
             : "symlink artifacts support Git-object-only operations, not filesystem materialization";
       assert.ok(failed.reason === expected, "worker failed at a different artifact boundary");
       assert.ok(

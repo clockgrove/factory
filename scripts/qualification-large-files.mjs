@@ -554,7 +554,10 @@ export function largeFileScenario(id) {
       reason: /LFS (?:cache )?object.*(?:digest|size|hash|integrity)/i,
     },
     scope: { stage: "collection", reason: /outside scope/i },
-    secret: { stage: "collection", reason: /suspected.*(?:credential|secret)|secret material/i },
+    secret: {
+      stage: "collection",
+      reason: /suspected.*(?:credential|secret|GitHub token)|secret material/i,
+    },
     symlink: {
       stage: "filesystem-materialization",
       reason:

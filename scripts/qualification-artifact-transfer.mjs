@@ -329,7 +329,15 @@ function descriptor(proof, ref, parents, identity, phase, externalRequired = tru
   assert.ok(Array.isArray(artifact.changedPaths) && artifact.changedPaths.length <= 5000);
   assert.equal(new Set(artifact.changedPaths).size, artifact.changedPaths.length);
   for (const path of artifact.changedPaths) {
-    assert.ok(typeof path === "string" && path.length <= 500 && !/[\\\x00-\x1f\x7f]/.test(path));
+    assert.ok(
+      typeof path === "string" &&
+        path.length <= 500 &&
+        !path.includes("\\") &&
+        Array.from(path).every((character) => {
+          const code = character.codePointAt(0);
+          return code > 31 && code !== 127;
+        }),
+    );
     assert.ok(
       path
         .split("/")
@@ -351,7 +359,11 @@ function descriptor(proof, ref, parents, identity, phase, externalRequired = tru
       assert.ok(
         typeof file.path === "string" &&
           file.path.length <= 500 &&
-          !/[\\\x00-\x1f\x7f]/.test(file.path),
+          !file.path.includes("\\") &&
+          Array.from(file.path).every((character) => {
+            const code = character.codePointAt(0);
+            return code > 31 && code !== 127;
+          }),
       );
       assert.ok(
         file.path
@@ -431,7 +443,10 @@ function tree(value, expected, maxEntries) {
   const entries = value.entries
     .map((entry) => {
       assert.ok(
-        typeof entry.path === "string" && entry.path.length <= 500 && !/[\/\x00]/.test(entry.path),
+        typeof entry.path === "string" &&
+          entry.path.length <= 500 &&
+          !entry.path.includes("/") &&
+          !entry.path.includes("\0"),
       );
       sha(entry.sha);
       assert.ok(["100644", "040000"].includes(entry.mode));

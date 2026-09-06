@@ -6,18 +6,38 @@ import {
 } from "../scripts/qualification-large-file-refusals.mjs";
 
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
-const canonical = (value: any): string =>
+const canonical = (value: unknown): string =>
   Array.isArray(value)
     ? `[${value.map(canonical).join(",")}]`
     : value && typeof value === "object"
       ? `{${Object.keys(value)
           .sort()
-          .map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`)
+          .map(
+            (key) => `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key])}`,
+          )
           .join(",")}}`
       : JSON.stringify(value);
 const oid = (kind: string, bytes: Buffer) =>
   createHash("sha1").update(`${kind} ${bytes.length}\0`).update(bytes).digest("hex");
 type Entry = { path: string; mode: string; type: string; sha: string };
+type CommitResponse = {
+  sha: string;
+  tree: { sha: string };
+  parents: Array<{ sha: string }>;
+  message: string;
+};
+type ToolResponse = { isError?: boolean; content: Array<{ type: "text"; text: string }> };
+type FixtureEvent = Record<string, unknown> & {
+  protocol: string;
+  objective: number;
+  runId: string;
+  at: string;
+  kind: string;
+  event: string;
+  sequence: number;
+  reason?: string;
+  localScopeBatch?: { identity: { invocationDigest: string } };
+};
 function fixture(scenario = "scope") {
   const authority = {
     repository: "fixture/project",
@@ -41,7 +61,7 @@ function fixture(scenario = "scope") {
     actor: { id: 41, login: "fixture" },
   };
   const refs = new Map<string, string>(),
-    commits = new Map<string, any>(),
+    commits = new Map<string, CommitResponse>(),
     trees = new Map<string, Entry[]>(),
     blobs = new Map<string, Buffer>();
   const addTree = (entries: Entry[]) => {
@@ -98,21 +118,36 @@ function fixture(scenario = "scope") {
     refs.set(ref, head);
     return { head, blob };
   };
-  const request = vi.fn(async (route: string, args: Record<string, any>) => {
+  const request = vi.fn(async (route: string, args: Record<string, unknown>) => {
+    const parameter = (name: string) => {
+      const value = args[name];
+      if (typeof value !== "string")
+        throw new Error("fixture Git route requires a string identity");
+      return value;
+    };
     expect(route.startsWith("GET ")).toBe(true); // These ports never mutate GitHub.
     if (route.endsWith("/git/ref/{ref}")) {
-      const sha = refs.get(`refs/${args.ref}`);
+      const ref = parameter("ref"),
+        sha = refs.get(`refs/${ref}`);
       if (!sha) throw Object.assign(new Error("missing"), { status: 404 });
-      return { data: { ref: `refs/${args.ref}`, object: { type: "commit", sha } } };
+      return { data: { ref: `refs/${ref}`, object: { type: "commit", sha } } };
     }
-    if (route.endsWith("/git/commits/{commit_sha}")) return { data: commits.get(args.commit_sha) };
+    if (route.endsWith("/git/commits/{commit_sha}"))
+      return { data: commits.get(parameter("commit_sha")) };
     if (route.endsWith("/git/trees/{tree_sha}"))
-      return { data: { sha: args.tree_sha, truncated: false, tree: trees.get(args.tree_sha) } };
-    if (route.endsWith("/git/blobs/{file_sha}")) {
-      const bytes = blobs.get(args.file_sha)!;
       return {
         data: {
-          sha: args.file_sha,
+          sha: parameter("tree_sha"),
+          truncated: false,
+          tree: trees.get(parameter("tree_sha")),
+        },
+      };
+    if (route.endsWith("/git/blobs/{file_sha}")) {
+      const fileSha = parameter("file_sha"),
+        bytes = blobs.get(fileSha)!;
+      return {
+        data: {
+          sha: fileSha,
           encoding: "base64",
           size: bytes.length,
           content: bytes.toString("base64"),
@@ -123,7 +158,7 @@ function fixture(scenario = "scope") {
   });
   const save = vi.fn(),
     list = vi.fn(async () => [] as unknown[]),
-    invoke = vi.fn(async () => ({ content: [] }) as any);
+    invoke = vi.fn(async (): Promise<ToolResponse> => ({ content: [] }));
   const context = {
     authority,
     evidence,
@@ -204,9 +239,9 @@ function fixture(scenario = "scope") {
     scenario === "scope"
       ? `artifact changes paths outside scope: ${prefix}/outside-scope.txt`
       : scenario === "secret"
-        ? "artifact content contains suspected credential bytes"
+        ? "artifact content contains suspected GitHub token"
         : "symlink artifacts support Git-object-only operations, not filesystem materialization";
-  const events: any[] = [
+  const events: FixtureEvent[] = [
     {
       ...common,
       kind: "run",
@@ -436,19 +471,19 @@ describe("installed large-file refusal ports (scripted Git/MCP contracts, no liv
     "unknown-read",
   ])("refuses invalid %s evidence", async (fault) => {
     const f = fixture();
-    if (fault === "duplicate") f.events.push({ ...f.events[2], attempt: 2, sequence: 10 });
+    if (fault === "duplicate") f.events.push({ ...f.events[2]!, attempt: 2, sequence: 10 });
     if (fault === "publication")
       f.events.push({
-        ...f.events[2],
+        ...f.events[2]!,
         kind: "publication",
         event: "PublicationRecorded",
         sequence: 10,
       });
-    if (fault === "reason") f.events[4].reason = "provider crashed";
+    if (fault === "reason") f.events[4]!.reason = "provider crashed";
     if (fault === "broadened-packet") {
       f.session.packet.allowedPaths = [f.source.paths.prefix + "/"];
       f.session.binding.packetDigest = hash(canonical(f.session.packet));
-      f.events[2].localScopeBatch.identity.invocationDigest = f.session.binding.packetDigest;
+      f.events[2]!.localScopeBatch!.identity.invocationDigest = f.session.binding.packetDigest;
       f.checkpoint(f.sessionRef, ".clockgrove-factory/control/app-server-session.json", f.session, [
         f.reservationOid,
       ]);
@@ -467,6 +502,14 @@ describe("installed large-file refusal ports (scripted Git/MCP contracts, no liv
     await expect(
       createLargeFileRefusalPorts(f.context, f.source).artifactRefusal(observation),
     ).rejects.toThrow();
+    expect(f.save).not.toHaveBeenCalled();
+  });
+  it("requires the captured GitHub-token guard rather than the generic credential fallback", async () => {
+    const f = fixture("secret");
+    f.events[4]!.reason = "artifact content contains suspected credential bytes";
+    await expect(
+      createLargeFileRefusalPorts(f.context, f.source).artifactRefusal(f.observe()),
+    ).rejects.toThrow("different artifact boundary");
     expect(f.save).not.toHaveBeenCalled();
   });
   it("retains and verifies raw symlink bytes without claiming filesystem materialization or zero Git writes", async () => {
@@ -497,7 +540,7 @@ describe("installed large-file refusal ports (scripted Git/MCP contracts, no liv
     const g = fixture("symlink");
     g.retainedSymlink();
     g.events.push({
-      ...g.events[2],
+      ...g.events[2]!,
       kind: "validation",
       event: "ValidationRecorded",
       sequence: 7,

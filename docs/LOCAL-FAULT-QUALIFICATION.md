@@ -56,6 +56,13 @@ Repository owner/name must be lowercase. The script refuses the Factory product
 repository, public repositories, redirected Codex homes, `/mnt` checkouts,
 different installed bytes, and an uncommitted candidate.
 
+The opt-in runner also rejects `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST`, `GH_CONFIG_DIR` and
+`XDG_CONFIG_HOME` overrides so its REST observations and installed controller use the same default
+Linux authentication. Prefix each phase command with
+`env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST -u GH_CONFIG_DIR -u XDG_CONFIG_HOME` when those variables
+are present; this changes only the child process environment, not global settings. Do not put
+credentials in arguments or evidence.
+
 1. `FACTORY_LOCAL_FAULT_PHASE=preflight node scripts/verify-local-faults.mjs`
    performs read-only prerequisites. It creates no issue and launches no worker.
 2. Set `FACTORY_LOCAL_FAULT_MUTATION_ACK` to the **exact same** owner/repo, then
@@ -76,7 +83,8 @@ required for both `prepare` and `exercise`.
 
 ## Evidence and interruption handling
 
-Polling is mechanical and bounded: normally ten-second intervals, two minutes
+REST requests have actual abortable 15-second timeouts. Polling is mechanical and bounded:
+normally ten-second intervals, two minutes
 per active-worker/takeover/absence observation, and ten minutes for the final
 terminal observation. A worker that finishes before injection is **incomplete**,
 not a simulated successful fault. Lifecycle injection is journaled locally before
@@ -110,9 +118,11 @@ queued activation also blocks even if the previous run is terminal. This is
 quiescence evidence only, not execution or retry authority.
 
 Only authenticated receipt identities can demonstrate no duplicate resource per
-attempt. Physical absence is proved for the **captured active worker scope**;
-normal terminal receipts and installed status reconcile subsequent work. This is
-not proof of an unreported provider resource. Orderly controller restart is not
+attempt. Physical absence is proved for **every reserved execution and validation slot in the
+same run**, including validation admitted during the cancellation race and reserved setup slots.
+Scope identities bind the exact producer and validation invocation; unrelated or contradictory
+receipts cannot provide absence proof. Installed status and terminal receipts must describe one
+coherent same-run outcome. This is not proof of an unreported provider resource. Orderly controller restart is not
 abrupt crash, phase-kill, network partition, or the entire adversarial fault gate.
 
 If a call times out, a resource is unknown, a terminal state differs, or the

@@ -29,6 +29,7 @@ const env = {
   FACTORY_CHECKPOINT_PHASE: "exercise",
   FACTORY_CHECKPOINT_NAMESPACE: "checkpoint-fixture",
   FACTORY_CHECKPOINT_EVIDENCE: "/tmp/private/checkpoint.json",
+  FACTORY_CHECKPOINT_MAX_MODEL_TOKENS: "500000",
   FACTORY_CHECKPOINT_ACK: `${repository}:${unit}:start,pause-drain,restart,resume,stop`,
 };
 const authority = checkpointAuthority(env)!;
@@ -296,6 +297,27 @@ describe("same-generation initial startup observation", () => {
 });
 
 describe("explicit checkpoint restart authority", () => {
+  it("requires an explicit bounded scenario allowance rather than assigning the batch ceiling", () => {
+    for (const value of [undefined, "0", "249999", "500001", "NaN"])
+      expect(() =>
+        checkpointAuthority({ ...env, FACTORY_CHECKPOINT_MAX_MODEL_TOKENS: value }),
+      ).toThrow();
+    const bounded = checkpointAuthority({ ...env, FACTORY_CHECKPOINT_MAX_MODEL_TOKENS: "250000" })!;
+    expect(bounded.policy).toEqual(boundedPolicy("regular-prs", 250000));
+    const observed = observation();
+    for (const { event } of observed.receipts)
+      if (["FactoryRunStarted", "ActivationRequested"].includes(String(event.event)))
+        event.policy = bounded.policy;
+    expect(() => checkpointFacts(observed, bounded, pause)).not.toThrow();
+    expect(() => checkpointFacts(observed, authority, pause)).toThrow(/allowance changed/);
+    const compile = observed.receipts.find(
+      ({ event }) =>
+        event.event === "BudgetReconciled" && event.phase === "management" && !event.workItem,
+    )!;
+    compile.event.amount = 249800;
+    observed.status.summary.economics.usage.model_tokens.value = 250000;
+    expect(() => checkpointFacts(observed, bounded, pause)).toThrow(/original allowance exhausted/);
+  });
   it("checks only the captured PID executable and rejects a different or deleted executable", () => {
     const read = vi.fn(() => "/usr/bin/node");
     expect(() => assertCheckpointExecutable(123, "/usr/bin/node", read)).not.toThrow();

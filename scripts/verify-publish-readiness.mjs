@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import { dirname, resolve, sep } from "node:path";
@@ -87,6 +88,87 @@ const rows = gateSection
   .filter((cells) => cells.length === 3 && cells[0] !== "Gate" && !/^---+$/.test(cells[0]));
 const openGates = [];
 const managedBackendIds = ["github-copilot/github-managed", "openai-codex/github-managed"];
+const verifyManagedObjective = async (qualification, record, backendId) => {
+  assert.equal(qualification.schema, 1, "installed qualification schema missing");
+  assert.equal(qualification.kind, "installed-provider-objective-qualification");
+  const observed = qualification.observation;
+  assert.equal(observed?.schemaVersion, 1, "structured installed observation missing");
+  assert.equal(observed.scope, "installed-managed-objective-happy-path");
+  assert.equal(observed.result, "passed", "installed Objective exercise did not pass");
+  assert.equal(
+    observed.completionAssessment?.result,
+    "passed",
+    "completion assessment is incomplete",
+  );
+  assert.equal(observed.completionAssessment.scope, observed.scope);
+  assert.equal(observed.failure, undefined, "qualification retained a failed boundary");
+  assert.ok(Number.isFinite(Date.parse(observed.startedAt)));
+  assert.ok(Date.parse(observed.finishedAt) >= Date.parse(observed.startedAt));
+  assert.equal(observed.preflight?.result, "passed");
+  assert.deepEqual(observed.preflight.blockers, []);
+  assert.equal(observed.preflight.harness?.sourceCommit, record.commit);
+  assert.equal(observed.preflight.harness.sourceTreeClean, true);
+  const inventory = record.subjects.find(
+    (subject) => subject.path === "dist/bundle-inventory.json",
+  );
+  assert.equal(observed.installedArtifact?.inventorySha256, inventory.sha256);
+  assert.equal(observed.preflight.harness.candidateInventorySha256, inventory.sha256);
+  assert.deepEqual(observed.preflight.installedArtifact, observed.installedArtifact);
+  assert.deepEqual(observed.finishedInstalledArtifact, observed.installedArtifact);
+  assert.equal(observed.installedArtifact.bundles?.length, 2);
+  for (const file of ["factory.js", "mcp-server.js"]) {
+    const bundles = observed.installedArtifact.bundles.filter((bundle) => bundle.file === file);
+    assert.equal(bundles.length, 1);
+    const subject = record.subjects.find((entry) => entry.path === `dist/${file}`);
+    assert.equal(bundles[0].sha256, subject.sha256, "observed installed bundle differs from gate");
+    assert.equal(bundles[0].bytes, (await readFile(resolve(root, subject.path))).length);
+  }
+  const packageManifest = JSON.parse(await readFile(resolve(root, "package.json"), "utf8"));
+  assert.equal(observed.installedArtifact.version, packageManifest.version);
+  const authority = observed.providerAuthority;
+  assert.equal(
+    authority?.profile,
+    backendId === managedBackendIds[0] ? "github-copilot" : "openai-codex",
+  );
+  assert.equal(authority.repository, observed.repository);
+  assert.ok(
+    Number.isSafeInteger(authority.sandboxMinutes) &&
+      authority.sandboxMinutes >= 10 &&
+      authority.sandboxMinutes <= 120,
+  );
+  assert.ok(
+    Number.isSafeInteger(authority.modelTokens) &&
+      authority.modelTokens >= 1000 &&
+      authority.modelTokens <= 500000,
+  );
+  assert.equal(authority.managedSessions, 3);
+  // Reuse the runner's pure execution proof, not its caller-supplied passed label.
+  // Importing this module does not invoke a provider, controller or live runner.
+  const { assessProviderCompletion, providerPolicy } = await import(
+    "./verify-provider-objective.mjs"
+  );
+  assert.deepEqual(observed.policy, providerPolicy(authority));
+  const starts = observed.events.filter((event) => event.event === "FactoryRunStarted");
+  assert.equal(starts.length, 1);
+  assert.deepEqual(starts[0].policy, observed.policy);
+  const assessment = assessProviderCompletion(observed, authority);
+  assert.equal(assessment.result, "passed", assessment.reason);
+  const joins = observed.dependencies.filter((item) => item.blockedBy.length === 2);
+  assert.equal(joins.length, 1);
+  const integrations = observed.events.filter(
+    (event) =>
+      event.runId === observed.runResult.runId &&
+      event.event === "AttemptIntegrated" &&
+      event.workItem === joins[0].workItem,
+  );
+  assert.equal(integrations.length, 1);
+  assert.match(observed.finalSha ?? "", /^[a-f0-9]{40}$/);
+  assert.equal(observed.finalSha, integrations[0].headSha);
+  assert.ok(typeof observed.testOutput === "string" && observed.testOutput.trim().length > 0);
+  assert.ok(
+    typeof observed.behaviorOutput === "string" && observed.behaviorOutput.trim().length > 0,
+  );
+};
 const verifyManagedProviders = async (record) => {
   if (!Array.isArray(record.managedProviders) || record.managedProviders.length !== 2) {
     throw new Error("managed-provider evidence requires both exact provider declarations");
@@ -142,10 +224,19 @@ const verifyManagedProviders = async (record) => {
         throw new Error(`${backendId} has an unsupported capability without a source`);
       }
       if (
-        typeof boundary.capability !== "string" || !boundary.capability.trim() ||
-        typeof boundary.reason !== "string" || !boundary.reason.trim() ||
-        reference.protocol !== "https:" || reference.username || reference.password ||
-        !["docs.github.com", "developers.openai.com", "learn.chatgpt.com", "platform.openai.com"].includes(reference.hostname)
+        typeof boundary.capability !== "string" ||
+        !boundary.capability.trim() ||
+        typeof boundary.reason !== "string" ||
+        !boundary.reason.trim() ||
+        reference.protocol !== "https:" ||
+        reference.username ||
+        reference.password ||
+        ![
+          "docs.github.com",
+          "developers.openai.com",
+          "learn.chatgpt.com",
+          "platform.openai.com",
+        ].includes(reference.hostname)
       ) {
         throw new Error(`${backendId} has an invalid unsupported-capability boundary`);
       }
@@ -153,7 +244,8 @@ const verifyManagedProviders = async (record) => {
     if (!available) {
       if (
         observed.reasonKind !== "provider-interface-unavailable" ||
-        typeof observed.probe.reason !== "string" || !observed.probe.reason.trim() ||
+        typeof observed.probe.reason !== "string" ||
+        !observed.probe.reason.trim() ||
         observed.unsupportedCapabilities.length === 0 ||
         observed.supportedClaims.length !== 0 ||
         observed.checks.unavailableLaunchDenied !== true ||
@@ -165,19 +257,29 @@ const verifyManagedProviders = async (record) => {
     }
     if (
       !observed.supportedClaims.some((claim) => claim?.capability === "objective-delivery") ||
-      new Set(observed.supportedClaims.map((claim) => claim?.capability)).size !== observed.supportedClaims.length
+      new Set(observed.supportedClaims.map((claim) => claim?.capability)).size !==
+        observed.supportedClaims.length
     ) {
-      throw new Error(`${backendId} requires qualified supported claims including objective-delivery`);
+      throw new Error(
+        `${backendId} requires qualified supported claims including objective-delivery`,
+      );
     }
     for (const claim of observed.supportedClaims) {
       const qualification = await boundArtifact(claim.evidence);
       if (
-        typeof claim.capability !== "string" || !claim.capability.trim() ||
-        qualification.commit !== record.commit || qualification.backendId !== backendId ||
-        qualification.capability !== claim.capability || qualification.status !== "passed"
+        typeof claim.capability !== "string" ||
+        !claim.capability.trim() ||
+        qualification.commit !== record.commit ||
+        qualification.backendId !== backendId ||
+        qualification.capability !== claim.capability ||
+        qualification.status !== "passed"
       ) {
         throw new Error(`${backendId} has an unqualified supported capability claim`);
       }
+      if (claim.capability !== "objective-delivery") {
+        throw new Error(`${backendId} has no release assessor for ${claim.capability}`);
+      }
+      await verifyManagedObjective(qualification, record, backendId);
     }
   }
 };

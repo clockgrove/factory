@@ -34,6 +34,16 @@ Notable changes to Factory. See [the delivery plan](docs/DELIVERY-PLAN.md) for u
 
 ### Changed
 
+- Provider support is capability-specific. An unsupported managed-provider interface no longer
+  blocks Factory globally, and final provider invoice settlement is not required for proven
+  execution completion. User-owned billing, unknown costs and exact active-resource safeguards
+  remain explicit; unavailable Codex managed execution is never advertised as a working adapter.
+- Recovery and Copilot diagnostics distinguish the supported successor flow from unsafe implicit
+  restart, and unassignment from actual session termination. Provider-cost summaries deduplicate
+  receipt replay and reject contradictory or non-finite totals.
+- Existing local fault qualifiers use bounded REST calls, default authentication and exact absence
+  observations for all same-run execution/validation reservations. Checkpoint restart requires an
+  explicit per-scenario model allowance. These source corrections do not imply new live evidence.
 - Recovery shares bounded exact-OID content reads without caching mutable authority or resource
   observations. Platform refusals retain their retry boundary through proof reconstruction.
 - The repository controller settles ownership before abortable in-process quota cooldown and fresh

@@ -398,7 +398,12 @@ describe("conservative economic feedback", () => {
   it.each([NaN, Infinity, -Infinity, -1])(
     "keeps invalid billing amount %s unavailable, not a partial total",
     (amount) => {
-      const receipt = { provider: "provider-a", receiptId: "receipt-1", amount: 2, currency: "USD" };
+      const receipt = {
+        provider: "provider-a",
+        receiptId: "receipt-1",
+        amount: 2,
+        currency: "USD",
+      };
       const billing = [receipt, { ...receipt, amount }];
       expect(
         summarizeEconomics({ events: [], policy: DEFAULT_RUN_POLICY, billing }).providerCost,
@@ -409,7 +414,12 @@ describe("conservative economic feedback", () => {
   it.each([{ provider: "" }, { receiptId: "" }, { currency: "usd" }])(
     "does not report partial cost when supplied billing identity is invalid: %j",
     (change) => {
-      const receipt = { provider: "provider-a", receiptId: "receipt-1", amount: 2, currency: "USD" };
+      const receipt = {
+        provider: "provider-a",
+        receiptId: "receipt-1",
+        amount: 2,
+        currency: "USD",
+      };
       const billing = [receipt, { ...receipt, ...change }];
       expect(
         summarizeEconomics({ events: [], policy: DEFAULT_RUN_POLICY, billing }).providerCost,

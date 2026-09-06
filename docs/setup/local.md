@@ -7,7 +7,8 @@
 1. Use a Linux checkout and Linux tools, including under WSL2 or a Linux guest on macOS.
 2. Install Factory through your agent client's plugin installer and restart the client. The plugin
    includes Factory's runtime; npm/npx is not required. Check
-   [verification status](../CONFORMANCE.md) for current installation limitations.
+   [verification status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md)
+   for current installation limitations.
 3. Make a compatible Codex CLI available to that Linux process and authenticate Codex there.
    Authenticate GitHub as the same Linux user with `gh auth login`, or supply a host token.
 4. Open your checkout and ask the agent: “Use Factory director to inspect OWNER/REPO#OBJECTIVE
@@ -32,7 +33,8 @@ Factory has two distribution artifacts built from the same source: the Agent Plu
 `clockgrove/factory` for chat/MCP use, and `@clockgrove/factory` on npm for the `factory` CLI and
 repository controller. Installing either artifact runs no lifecycle scripts, changes no repository,
 and starts no daemon. Until the npm artifact has passed the published-artifact gate in
-[docs/CONFORMANCE.md](../CONFORMANCE.md), use the plugin installation supported by your client or
+[verification status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md),
+use the plugin installation supported by your client or
 the source-checkout command below rather than assuming the npm package is available.
 
 Once the npm package is published, the controller installation path will be:

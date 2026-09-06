@@ -11,7 +11,8 @@
    An unattended controller also needs an explicitly nonzero paid ceiling.
 
 **Success looks like:** the adapter reports available in the intended environment. This is not proof
-of an end-to-end paid run; check [conformance status](../CONFORMANCE.md).
+of an end-to-end paid run; check
+[conformance status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md).
 
 ## Detailed configuration
 

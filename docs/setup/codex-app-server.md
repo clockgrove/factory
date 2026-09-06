@@ -24,6 +24,7 @@ not an authentication mode or a command with arguments.
 ## Verification and troubleshooting
 
 Follow [read-only checks](configuration.md#7-verify-the-same-environment-that-will-do-the-work) and
-[current conformance](../CONFORMANCE.md). A protocol/version gate is not a missing sandbox API key.
+[current conformance](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md).
+A protocol/version gate is not a missing sandbox API key.
 A local App Server probe says nothing about GitHub-managed identity readiness. Local work uses your
 model account's normal cost/quota and must remain within the approved trust and run-policy boundaries.

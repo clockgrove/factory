@@ -51,7 +51,7 @@ provisions a paid resource.
 
 The detailed assets, trust assumptions, threats, mitigations, and known limitations are in
 [docs/THREAT-MODEL.md](docs/THREAT-MODEL.md). Security controls and live-evidence status are recorded
-in [docs/CONFORMANCE.md](docs/CONFORMANCE.md).
+in [verification status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md).
 
 ## Sensitive changes
 

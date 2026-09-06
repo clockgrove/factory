@@ -15,7 +15,8 @@
 
 **Success looks like:** the probe accepts the provider credentials and exact Secret metadata.
 A separate approved live test must demonstrate execution, independent validation, and cleanup.
-Check [current conformance](../CONFORMANCE.md); this guide is not a claim that live gates passed.
+Check [current conformance](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md);
+this guide is not a claim that live gates passed.
 
 ## Detailed credential setup
 

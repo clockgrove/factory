@@ -126,4 +126,4 @@ generation. Factory uses only its already configured restart policy; it does not
 service to pass recovery. The next process still checks the old generation and its command scopes.
 Legacy resources without sufficient ownership evidence remain blocked, rather than being killed
 by a guessed PID or ignored. Current live qualification gaps remain in
-[verification status](../CONFORMANCE.md).
+[verification status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md).

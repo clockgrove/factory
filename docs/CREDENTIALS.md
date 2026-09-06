@@ -101,7 +101,8 @@ header solely for `api.openai.com`.
 Independent validation uses a fresh non-persistent microVM with no model key. Worker and validator
 resources have hard timeouts, deterministic tags/names, restricted egress, and are stopped after use.
 
-Vercel Sandbox is a Labs adapter and is not a publication gate in the [delivery plan](DELIVERY-PLAN.md).
+Vercel Sandbox is a Labs adapter and is not a publication gate in the
+[delivery plan](https://github.com/clockgrove/factory/blob/main/docs/DELIVERY-PLAN.md).
 
 ## GitHub managed agents
 

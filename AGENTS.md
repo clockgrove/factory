@@ -46,7 +46,7 @@ These are settled. Do not relitigate them.
   instructions, run them against the published artifact before claiming they work.
 - **Work on a branch and open a pull request.** Do not push directly to `main`. Single, deliberate
   pushes, never bursts, and confirm what landed with `git fetch origin main` plus a SHA comparison.
-- **Standing Factory merge authority.** The user authorizes agents to merge capability PRs in
+- **Standing Factory merge authority.** Maintainer policy permits agents to merge capability PRs in
   `clockgrove/factory` after their applicable acceptance, review, and checks are satisfied; do not
   ask for routine merge confirmation. Handle dependency-correct stack retargeting automatically
   after parent merges, preserving the intended changes and reviewing the resulting base/head.
@@ -87,6 +87,7 @@ These are settled. Do not relitigate them.
 - **Classify every development issue and subissue with one primary work-type label.** Use
   `work:code` for implementing or fixing product/tooling code (including qualification-runner bugs),
   `work:test` for executing existing tests/live qualification and collecting evidence,
+  `work:review` for evidence-backed reviews whose findings become linked implementation issues,
   `work:release` for distribution/publication execution, `work:follow-up` for deferred external
   provider follow-up, and `work:tracking` for umbrella coordination. Preserve structural and other
   existing labels; use `bug` additionally for concrete defects. Classify by the actual deliverable,
@@ -131,8 +132,8 @@ These are settled. Do not relitigate them.
   Restart a completed agent with the harness's follow-up-task mechanism before assigning more work;
   sending a message alone may not resume it. Do not leave deliverables waiting on an idle reviewer.
 - Use additional Codex sessions as needed for genuinely independent work when a session's agent
-  pool would otherwise serialize the project. The user has authorized this coordination pattern;
-  each additional session needs an isolated worktree, explicit ownership, a bounded deliverable,
+  pool would otherwise serialize the project. This maintainer-approved coordination pattern requires
+  each additional session to have an isolated worktree, explicit ownership, a bounded deliverable,
   and a handoff to the integration owner. Respect platform and account limits across sessions.
   Optimize completed capability throughput and quota use, not session count; do not duplicate
   active work, expand scope, or start deferred testing merely to occupy more workers.

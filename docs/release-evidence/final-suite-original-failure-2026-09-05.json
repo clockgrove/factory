@@ -3,7 +3,9 @@
   "kind": "development-verification-failure",
   "status": "failed",
   "candidateCommit": "7fa42f75016dcab229d901bc52962e7d96502629",
-  "command": "CODEX_HOME=/home/kirk/.codex FACTORY_LIVE_PROVIDER=0 FACTORY_LIVE_OBJECTIVE=0 FACTORY_LOCAL_FAULTS=0 FACTORY_LOCAL_CHECKPOINT_RESTART=0 FACTORY_LIVE_BUDGET_STOP=0 npm run verify:release",
+  "command": "CODEX_HOME=/home/USER/.codex FACTORY_LIVE_PROVIDER=0 FACTORY_LIVE_OBJECTIVE=0 FACTORY_LOCAL_FAULTS=0 FACTORY_LOCAL_CHECKPOINT_RESTART=0 FACTORY_LIVE_BUDGET_STOP=0 npm run verify:release",
+  "commandNormalization": "The personal home directory is parameterized as USER; this is not a byte-for-byte command transcript. The exact original record is retained privately.",
+  "originalRecordSha256": "44d14f96dc7e9f450dde0d9b40dae0d3f67678de14bd6d2c6ba9d5cee1d30068",
   "exitCode": 2,
   "stoppedAt": "typecheck",
   "output": [

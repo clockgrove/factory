@@ -1,8 +1,9 @@
 # Factory
 
 > [!IMPORTANT]
-> Factory is under development. See [what works today](docs/CONFORMANCE.md) and
-> [what's next](docs/DELIVERY-PLAN.md).
+> Factory is under development. Read the [local quick start](docs/setup/local.md) and
+> [current verification status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md)
+> before authorizing unattended work.
 
 Factory coordinates coding agents to turn a GitHub issue into tested pull requests. Describe what
 you want to build; Factory breaks it into Work Items, runs independent tasks concurrently, checks
@@ -40,7 +41,8 @@ and native dependencies               or opt-in sandbox/managed backends
 - **Recovery:** reconstructs progress from GitHub and stops for specific safety, budget, or correctness blockers.
 
 Local workers use the Codex SDK by default, with Codex CLI fallback. Cloud execution is opt-in.
-Provider availability and outstanding end-to-end checks are listed in [verification status](docs/CONFORMANCE.md).
+Provider availability and outstanding end-to-end checks are listed in
+[verification status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md).
 
 ## Scope
 
@@ -68,14 +70,9 @@ features are bundled where useful but are not part of the initial delivery scope
 multiple local machines, native Windows/macOS lifecycle support, a custom UI, and a required hosted
 Factory service are deliberately out of scope.
 
-The authoritative contract and failure model are in [docs/DESIGN.md](docs/DESIGN.md). The concrete
-priority and local-to-cloud burst implementation is specified in
-[docs/ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md](docs/ADAPTIVE-SCHEDULING-IMPLEMENTATION-PLAN.md).
-The accepted product scope, chat/MCP boundary, repository controller, cost-aware compiler, durable
-Codex sessions, native stacked-PR delivery, and implementation details are specified in
-[docs/INDIE-FACTORY-IMPLEMENTATION-PLAN.md](docs/INDIE-FACTORY-IMPLEMENTATION-PLAN.md).
-The active task waves and completion checks are in
-[docs/DELIVERY-PLAN.md](docs/DELIVERY-PLAN.md).
+For operating boundaries, see [host scheduling](docs/HOST-SCHEDULING.md) and the
+[threat model](docs/THREAT-MODEL.md). Contributors can read the
+[design contract in the source repository](https://github.com/clockgrove/factory/blob/main/docs/DESIGN.md).
 
 ## Install and activate
 
@@ -85,7 +82,8 @@ Start with **[the local runner quick start](docs/setup/local.md)**: install the 
 agent environment, authenticate GitHub and Codex there, then ask the Director to inspect your
 Objective and absolute checkout before authorizing execution. No sandbox account, npm/npx install,
 Factory GitHub workflow, or cloud spending permission is needed for the plugin's local path.
-See [verification status](docs/CONFORMANCE.md) for current installation limitations.
+See [verification status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md)
+for current installation limitations.
 
 ### Choose your setup
 
@@ -202,7 +200,8 @@ claimed. Copilot cannot automatically stop an active task through its documented
 require the operator's exact-session intervention. Codex managed execution remains unavailable until
 an authoritative identity and provider-specific lifecycle interface are implemented and qualified.
 An unavailable third-party feature limits that integration, not the whole Factory release. See
-[provider qualification](docs/PROVIDER-QUALIFICATION.md) and [credentials](docs/CREDENTIALS.md).
+[provider qualification](https://github.com/clockgrove/factory/blob/main/docs/PROVIDER-QUALIFICATION.md)
+and [credentials](docs/CREDENTIALS.md).
 
 Optional economics and model-routing policy is evidence-bound. Factory accepts only a
 `models.mode` of `single-profile`; all four `phaseProfiles` entries must name the same explicit model
@@ -269,11 +268,15 @@ npm run verify:release
 installs a staged copy through an isolated Codex home, and starts both installed executables without
 using worktree configuration. `verify:release` also runs the full test suite, typecheck, and
 production dependency audit. See
-[CONTRIBUTING.md](CONTRIBUTING.md) for contribution rules.
+[contribution rules](https://github.com/clockgrove/factory/blob/main/CONTRIBUTING.md).
 
 Current release evidence and the external gates that still require real provider credentials or a
-published installation are tracked in [docs/CONFORMANCE.md](docs/CONFORMANCE.md).
+published installation are tracked in
+[verification status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md).
 
-Factory is MIT licensed. See [CONTRIBUTING.md](CONTRIBUTING.md), [GOVERNANCE.md](GOVERNANCE.md),
+Factory is MIT licensed. See
+[contributing](https://github.com/clockgrove/factory/blob/main/CONTRIBUTING.md),
+[governance](https://github.com/clockgrove/factory/blob/main/GOVERNANCE.md),
 [SECURITY.md](SECURITY.md), [SUPPORT.md](SUPPORT.md), and
-[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) before contributing or reporting a problem.
+[code of conduct](https://github.com/clockgrove/factory/blob/main/CODE_OF_CONDUCT.md)
+before contributing or reporting a problem.

@@ -84,6 +84,17 @@ These are settled. Do not relitigate them.
   code/testing/external-input classification, an owner, dependencies, and a next deliverable.
   Factory Objective compilation is not required for this contributor backlog. Keep the completion
   board as a concise linked summary, not a second backlog. A bounded pilot waives no release gate.
+- **Classify every development issue and subissue with one primary work-type label.** Use
+  `work:code` for implementing or fixing product/tooling code (including qualification-runner bugs),
+  `work:test` for executing existing tests/live qualification and collecting evidence,
+  `work:release` for distribution/publication execution, `work:follow-up` for deferred external
+  provider follow-up, and `work:tracking` for umbrella coordination. Preserve structural and other
+  existing labels; use `bug` additionally for concrete defects. Classify by the actual deliverable,
+  not the file's location or the issue's open/closed state, and retain the classification on closure.
+  Apply the convention to subissues as well as top-level issues. Split concrete defects discovered
+  during qualification into linked `work:code` issues; keep the qualification issue open until its
+  acceptance passes. Never classify unfinished implementation as testing or follow-up to hide it.
+  These are contributor work types, not Factory runtime status, priority, or execution authority.
 
 ## Capability-sized delivery
 

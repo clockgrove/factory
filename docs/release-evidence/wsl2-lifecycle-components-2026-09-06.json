@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "scope": "Two existing opt-in no-model WSL2 systemd component cases; not installed Objective or full resilience qualification",
+  "sourceCommit": "9923417590950d8f95a58a834b36c449c8e58a49",
+  "environment": "Linux under WSL2",
+  "kernel": "6.18.33.2-microsoft-standard-WSL2",
+  "privateSummarySha256": "b0ebe0c1c5d25e49a8a87f8309bfe9f8eb7e0ed434352bc81622ac2b7925fbf9",
+  "cases": [
+    { "file": "test/systemd-service.test.ts", "name": "passes the live Linux/WSL systemd user lifecycle gate", "optIn": "FACTORY_SYSTEMD_INTEGRATION", "result": "passed", "durationMilliseconds": 787 },
+    { "file": "test/controller-retirement.test.ts", "name": "retires only the source generation across a real same-service restart", "optIn": "FACTORY_LIVE_RETIREMENT", "result": "passed", "durationMilliseconds": 655, "firstRetirement": true, "secondRetirement": false, "generationChanged": true }
+  ],
+  "independentCleanup": { "bothOwnedUnits": { "LoadState": "not-found", "ActiveState": "inactive", "SubState": "dead", "MainPID": 0, "ControlGroup": "", "Job": "", "FragmentPath": "", "UnitFileState": "" } },
+  "originalAttempts": "An initial overly specific lifecycle selector skipped every case; retained separately and excluded from passing results.",
+  "boundaries": [
+    "No model, provider or GitHub calls in these cases.",
+    "Only the exact disposable fixture services were changed; no actual Factory controller or unrelated service was stopped.",
+    "The retirement case uses its existing temporary bundled helper; this is not a package rebuild or reinstall.",
+    "Does not qualify native non-WSL Linux, macOS-hosted Linux, complete resilience, provider execution or measured product benefit."
+  ]
+}

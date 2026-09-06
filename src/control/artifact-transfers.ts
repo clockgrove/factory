@@ -159,26 +159,59 @@ async function retainLocalDescriptorLocked(descriptor: Descriptor): Promise<void
   );
   if (roots.length >= 16 && !roots.includes(root.split("/").at(-1)!))
     throw new Error("pending artifact cache count bound reached; recover retained transfers first");
-  let retainedBytes = 0;
-  for (const name of roots) {
-    const directory = join(tmpdir(), name);
-    await assertLocalDescriptorRoot(directory);
-    const children = await readdir(directory);
-    if (children.length > 66) throw new Error("pending artifact cache entry bound exceeded");
-    for (const child of children) retainedBytes += (await lstat(join(directory, child))).size;
-  }
-  const additionalBytes =
-    descriptor.chunks.reduce((sum, chunk) => sum + chunk.bytes, 0) +
-    descriptorBytes(descriptor).length;
-  if (
-    !roots.includes(root.split("/").at(-1)!) &&
-    retainedBytes + additionalBytes > 512 * 1024 * 1024
-  )
-    throw new Error("pending artifact cache byte bound reached; recover retained transfers first");
+  // Persist collection identity before bulk admission. This is an artifact-data
+  // availability marker, not authoritative runtime success or retry permission.
   await mkdir(root, { mode: 0o700 }).catch((error: NodeJS.ErrnoException) => {
     if (error.code !== "EEXIST") throw error;
   });
   await assertLocalDescriptorRoot(root);
+  const marker = Buffer.from(
+    JSON.stringify({
+      protocol: "clockgrove.factory/incomplete-artifact-v1",
+      identity: descriptor.identity,
+      artifactDigest: descriptor.artifact.digest,
+    }),
+  );
+  if (marker.length > 2048) throw new Error("collection identity marker exceeds 2 KiB");
+  assertNoSecretMaterial(marker.toString("utf8"), "collection identity marker");
+  const markerPath = join(root, "collection.json");
+  try {
+    const file = await open(markerPath, "wx", 0o600);
+    try {
+      await file.writeFile(marker);
+      await file.sync();
+    } finally {
+      await file.close();
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    if (!(await boundedPrivateRead(markerPath, 2048)).equals(marker))
+      throw new Error("collection identity already binds different content");
+  }
+  await syncDirectory(root);
+  await syncDirectory(tmpdir());
+  let retainedBytes = 0;
+  let currentRootBytes = 0;
+  for (const name of roots) {
+    const directory = join(tmpdir(), name);
+    await assertLocalDescriptorRoot(directory);
+    const children = await readdir(directory);
+    if (children.length > 67) throw new Error("pending artifact cache entry bound exceeded");
+    for (const child of children) {
+      const bytes = (await lstat(join(directory, child))).size;
+      retainedBytes += bytes;
+      if (directory === root) currentRootBytes += bytes;
+    }
+  }
+  const additionalBytes =
+    descriptor.chunks.reduce((sum, chunk) => sum + chunk.bytes, 0) +
+    descriptorBytes(descriptor).length +
+    marker.length;
+  if (
+    retainedBytes - currentRootBytes + Math.max(currentRootBytes, additionalBytes) >
+    512 * 1024 * 1024
+  )
+    throw new Error("pending artifact cache byte bound reached; recover retained transfers first");
   const bytes = descriptorBytes(descriptor);
   const destination = join(root, "descriptor.json");
   try {

@@ -28,6 +28,82 @@ afterEach(async () => {
 });
 
 describe("Supervisor collected artifact durability", () => {
+  it("does not turn an unknown post-dispatch observation into a retryable failure", async () => {
+    const f = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      configureLocalBackend: (backend) => ({
+        ...backend,
+        observe: async () => {
+          throw new Error("fixture: observation unavailable");
+        },
+      }),
+    });
+    fixtures.push(f);
+    const create = worktrees.createLocalWorktree;
+    vi.spyOn(worktrees, "createLocalWorktree").mockImplementation(async (...args) => {
+      const worker = await create(...args);
+      retained.push(worker);
+      return worker;
+    });
+    await expect(f.run()).rejects.toThrow(/artifact transfer recovery/);
+    await expect(f.run()).rejects.toThrow(/completion is unknown after dispatch/);
+    expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);
+    await expect(access(retained[0]!.path)).resolves.toBeUndefined();
+    expect(
+      f
+        .events()
+        .some(
+          (event) =>
+            event.kind === "attempt" && ["AttemptFailed", "AttemptDeferred"].includes(event.event),
+        ),
+    ).toBe(false);
+  });
+
+  it("preserves explicit observed execution failure instead of classifying it as unknown completion", async () => {
+    const f = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      configureLocalBackend: (backend) => ({
+        ...backend,
+        observe: async () => ({
+          state: "failed",
+          reason: "fixture: explicit execution failure",
+          observedAt: new Date().toISOString(),
+          usage: { inputTokens: 4, outputTokens: 2 },
+        }),
+      }),
+    });
+    fixtures.push(f);
+    await f.run();
+    expect(
+      f.events().some((event) => event.kind === "attempt" && event.event === "AttemptFailed"),
+    ).toBe(true);
+  });
+
+  it("preserves recorded no-dispatch rejection after an execution reservation", async () => {
+    const f = await providerSupervisorFixture("daytona-burst", { localOnly: true });
+    fixtures.push(f);
+    vi.spyOn(worktrees, "createLocalWorktree").mockRejectedValue(
+      new Error("fixture: prelaunch materialization refused"),
+    );
+    await f.run();
+    expect(
+      f
+        .events()
+        .some(
+          (event) =>
+            event.kind === "budget" &&
+            event.event === "BudgetReserved" &&
+            event.phase === "execution",
+        ),
+    ).toBe(true);
+    expect(
+      f.events().some((event) => event.kind === "attempt" && event.event === "AttemptFailed"),
+    ).toBe(true);
+    expect(f.activity.some((entry) => entry.operation === "launch")).toBe(false);
+    await f.run();
+    expect(f.activity.some((entry) => entry.operation === "launch")).toBe(false);
+  });
+
   it("reuses exact scalar usage without inventing a missing token breakdown", async () => {
     const f = await providerSupervisorFixture("daytona-burst", { localOnly: true });
     fixtures.push(f);
@@ -286,6 +362,9 @@ describe("Supervisor collected artifact durability", () => {
     await expect(access(retained[0]!.path)).resolves.toBeUndefined();
     expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);
     expect([...f.refs.keys()].some((ref) => ref.includes("artifact-transfers"))).toBe(false);
+    await expect(f.run()).rejects.toThrow(/completion is unknown after dispatch/);
+    expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);
+    await expect(access(retained[0]!.path)).resolves.toBeUndefined();
     expect(
       f
         .events()

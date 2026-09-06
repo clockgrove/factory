@@ -4018,6 +4018,7 @@ export class FactorySupervisor {
     let retainCollectedSource = false;
     let executionCleanupConfirmed = Boolean(recovered);
     let backendLaunchAttempted = false;
+    let executionTerminalObserved = Boolean(recovered);
     let terminalModelTokens: number | undefined;
     let terminalModelUsage: ReportedModelUsage | undefined;
     let terminalModelProfile: string | undefined;
@@ -4421,6 +4422,7 @@ export class FactorySupervisor {
         if (selected.capabilities.id === "codex-app-server/local-worktree" && observation.state === "unknown")
           throw new Error("App Server outcome is unknown; automated replacement is blocked pending exact session recovery");
         if (["succeeded", "failed", "cancelled"].includes(observation.state)) {
+          executionTerminalObserved = true;
           terminalModelUsage = reportedModelUsage(observation.usage);
           const observedTokens = reportedModelTokens(observation.usage);
           if (observedTokens !== null) {
@@ -4891,6 +4893,8 @@ export class FactorySupervisor {
       }
       const cancellation =
         error instanceof RunCancellationRequestedError || executionSignal?.aborted;
+      if (backendLaunchAttempted && !executionTerminalObserved && !cancellation)
+        retainCollectedSource = true;
       if (
         backendLaunchAttempted &&
         !handle &&
@@ -5019,6 +5023,15 @@ export class FactorySupervisor {
         (selected?.capabilities.id === "codex-app-server/local-worktree" && error instanceof Error && /automated replacement is blocked/.test(error.message))
       ) {
         throw error;
+      }
+      if (
+        backendLaunchAttempted && !executionTerminalObserved && !cancellation &&
+        !selected?.capabilities.providerManagedPublication
+      ) {
+        retainCollectedSource = true;
+        throw new ArtifactCollectionCheckpointError(
+          new Error("execution completion is unknown after dispatch; absence alone does not authorize replacement", { cause: error }),
+        );
       }
       if (cancelledUsageWriteFailure) throw cancelledUsageWriteFailure.error;
       const reason = error instanceof Error ? error.message : String(error);
@@ -10507,6 +10520,24 @@ export class FactorySupervisor {
     ) {
       throw new Error(`backend ${reservation.backend} cannot prove the stale resource was stopped`);
     }
+    // Exact artifact and provider-session recovery have already had first refusal.
+    // Dispatch may have completed before the first collection-marker write, so
+    // missing local metadata is not evidence that there is no reusable output.
+    const knownTerminal = events.some((event) =>
+      event.kind === "attempt" &&
+      ["AttemptFailed", "AttemptTimedOut", "AttemptCancelled", "AttemptDeferred"].includes(event.event),
+    );
+    const dispatchPossible = events.some((event) =>
+      (event.kind === "attempt" && event.event === "AttemptStarted") ||
+      (event.kind === "budget" && event.event === "BudgetReserved" && event.phase === "execution"),
+    );
+    if (
+      !backend.capabilities.providerManagedPublication && dispatchPossible &&
+      !knownTerminal && !validation
+    )
+      throw new Error(
+        "execution completion is unknown after dispatch; recover the exact original output or obtain explicit recovery direction before replacement",
+      );
     const attemptStartedAt = events.find(
       (event) => event.kind === "attempt" && event.event === "AttemptStarted",
     )?.at;

@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   artifactTransferRef,
   persistArtifactTransfer,
@@ -21,6 +22,7 @@ import type { GitCommitObject } from "../src/control/lease.js";
 
 const roots: string[] = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
   await releaseAllArtifactContent();
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
 });
@@ -133,6 +135,68 @@ async function artifact(baseSha: string) {
 }
 
 describe("immutable GitHub artifact transfer lifecycle", () => {
+  it("retains an exact incomplete marker before chunk admission and resumes only the original content", async () => {
+    const memory = store(),
+      id = identity(),
+      value = await artifact(id.baseSha);
+    const root = join(
+      tmpdir(),
+      `factory-collected-${process.getuid?.() ?? "unknown"}-${sha256(JSON.stringify(id))}`,
+    );
+    const originalOpen = fs.open;
+    const admission = vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+      if (String(args[0]) === join(root, value.payload!.chunks[0]!.digest))
+        throw Object.assign(new Error("fixture: chunk admission full"), { code: "ENOSPC" });
+      return originalOpen(...args);
+    });
+    const options = {
+      store: memory.api,
+      identity: id,
+      allowedPaths: ["asset.dat"],
+      assertCurrent: async () => {},
+    };
+    await expect(persistArtifactTransfer({ ...options, artifact: value })).rejects.toThrow(
+      /chunk admission full/,
+    );
+    expect(memory.writes).toEqual([]);
+    expect(JSON.parse(await fs.readFile(join(root, "collection.json"), "utf8"))).toEqual({
+      protocol: "clockgrove.factory/incomplete-artifact-v1",
+      identity: id,
+      artifactDigest: value.digest,
+    });
+    await expect(resumeArtifactTransfer(options)).rejects.toThrow(/incomplete/i);
+    admission.mockRestore();
+    await persistArtifactTransfer({ ...options, artifact: value });
+    expect((await recoverArtifactTransfer(options))?.digest).toBe(value.digest);
+  });
+
+  it("leaves first marker-write failure incomplete without any external publication", async () => {
+    const memory = store(),
+      id = identity(),
+      value = await artifact(id.baseSha);
+    const root = join(
+      tmpdir(),
+      `factory-collected-${process.getuid?.() ?? "unknown"}-${sha256(JSON.stringify(id))}`,
+    );
+    const originalOpen = fs.open;
+    vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+      if (String(args[0]) === join(root, "collection.json"))
+        throw Object.assign(new Error("fixture: first durable write full"), { code: "ENOSPC" });
+      return originalOpen(...args);
+    });
+    const options = {
+      store: memory.api,
+      identity: id,
+      allowedPaths: ["asset.dat"],
+      assertCurrent: async () => {},
+    };
+    await expect(persistArtifactTransfer({ ...options, artifact: value })).rejects.toThrow(
+      /first durable write full/,
+    );
+    expect(memory.writes).toEqual([]);
+    await expect(resumeArtifactTransfer(options)).rejects.toThrow(/incomplete/i);
+  });
+
   it("fences every mutation and recovers exact bytes only through intent-bound ready refs", async () => {
     const memory = store(),
       id = identity(),

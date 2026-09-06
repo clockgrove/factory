@@ -77,6 +77,17 @@ objects before ref publication; GitHub provides no per-blob delete, and its own 
 retention/GC is not a Factory cleanup guarantee. No source-content secrets may be uploaded to make
 cleanup easier. Operators may retire audit refs only through separately authorized repository policy.
 
+Before bulk byte admission, each pending directory receives a fsynced, secret-scanned identity and
+artifact-digest marker of at most 2 KiB (at most 16 directories; this small metadata reserve precedes
+the observed bulk-byte guard). Marker-only directories are incomplete, not absent. Even if creating
+the directory or its first durable write fails, stale recovery does not infer retry permission from
+missing content. After exact artifact/session recovery and resource reconciliation, an execution
+reservation or dispatch without explicit terminal failure/cancellation/defer or completed validation
+blocks automatic replacement. Explicit known failures, including recorded no-dispatch rejection,
+retain their existing retry rules. An unknown post-dispatch observation is not journaled as a known
+failure. If every durable copy failed, preserved source may require explicit recovery direction;
+this guard prevents duplicate execution but cannot promise recovery of bytes that were never saved.
+
 Process chunk storage is separately capped at 512 MiB observed active allocations. Acquire
 `retainArtifactContent(payload)` immediately for each owning pipeline/attempt; its idempotent async
 release runs only after that owner's consumers drain. Per-chunk references protect shared data

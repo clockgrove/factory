@@ -23,8 +23,17 @@ separate. That evidence does not qualify changed source or close the six live re
 The [sanitization and fallback qualifier implementation checks](release-evidence/sanitization-fallback-implementation-2026-09-06.json)
 passed on their separate exact candidate. New defects remain tracked implementation work.
 
+The [scope audit](https://github.com/clockgrove/factory/issues/108) found unverified reductions
+and retained implementation gaps. Earlier blanket completion and accepted-deferral claims are
+withdrawn. The comparative cost/throughput benefit is not yet demonstrated; safe execution and
+consumption counters are not substitutes. Disputed requirements remain unresolved, not waived.
+
 | Capability | Issues | Remaining acceptance |
 | --- | --- | --- |
+| Scope and acceptance reconciliation | [#108](https://github.com/clockgrove/factory/issues/108) | Coordinator has delivered the cross-domain register; maintainer disposition is needed for disputed reductions. Reconcile plans, ADRs and release/pilot acceptance before declaring completion. |
+| Compiler economics and runtime reporting | [#110](https://github.com/clockgrove/factory/issues/110) | Code / economics lane: grounded compilation tradeoffs and measurable active time, concurrency, retries/discards and interventions with explicit unknowns. Depends on durable input contracts. |
+| Representative compiler/chat evaluation | [#111](https://github.com/clockgrove/factory/issues/111), [#112](https://github.com/clockgrove/factory/issues/112) | Code / evaluation lane: implement executable fixtures and direct/indirect/negative prompts, then qualify actual compiler/agent behavior after integration. Existing profile/annotation tests are narrower. |
+| Measured product benefit | [#109](https://github.com/clockgrove/factory/issues/109) | Testing / qualification lane: compare equivalent accepted outcomes against controlled baselines after implementation. Depends on #110/#111 and scope reconciliation; coordinate with #112 without duplicating runs. |
 | WSL2 resilience | [#75](https://github.com/clockgrove/factory/issues/75) | Orderly [accounted checkpoint restart](release-evidence/accounted-checkpoint-restart-component-2026-09-06.json) and [pre-projection budget refusal](release-evidence/budget-refusal-component-2026-09-06.json) passed. Budget refusal recorded 16,437 compilation tokens, durable escalation and no implementation admission; the compiler graph was not inspected. [Active cancellation remains incomplete](release-evidence/active-cancellation-incomplete-2026-09-06.json) on unavailable worker usage. These component results do not close the full resilience matrix. |
 | Adaptive scheduling and organization priority | [#76](https://github.com/clockgrove/factory/issues/76), [#77](https://github.com/clockgrove/factory/issues/77) | Extend the [installed scheduling subset](release-evidence/local-scheduling-component-2026-09-05.json) with pressure, fairness, phase recovery, inner Director contention and organization-field edits. |
 | Genuine SDK-to-CLI fallback | [#75](https://github.com/clockgrove/factory/issues/75) | [Passed on the recorded installed candidate](release-evidence/genuine-sdk-cli-fallback-component-2026-09-06.json): authentic CLI incompatibility refused SDK admission; unchanged SDK-first policy delivered through CLI, with complete reported usage and exact resource absence. Other WSL2 fault cases remain open. |
@@ -49,9 +58,13 @@ artifact and scope boundaries; issue closure is not a substitute for acceptance 
 
 The [definition of done](DESIGN.md#definition-of-done), [delivery plan](DELIVERY-PLAN.md), and
 [conformance ledger](CONFORMANCE.md#verification-required-before-publication) retain all six
-prepublication gates and the post-publication installation gate. Vercel Sandbox, Codex App Server
-and harness-native child workers remain Labs; Git LFS lifecycle and oversized artifact transfer
-remain future extensions rather than current support claims.
+prepublication gates and the post-publication installation gate. The retained economic and
+compiler/chat acceptance is tracked explicitly above. Vercel as an optional second sandbox and
+originally conditional harness-native workers do not imply approval to defer App Server session
+acceptance, LFS detection, binary/media manifests or oversized transfer. Same-host multi-Objective
+sharing, regular-PR pipeline concurrency, the adaptive-default prerequisite, token-limit semantics
+and broader dogfood coverage also require explicit reconciliation in #108. Current limited support
+must remain honestly documented while those decisions are unresolved.
 
 Unsupported third-party interfaces narrow the affected integration, not Factory globally. Users
 own their provider relationships and billing; invoice finality is not execution qualification.

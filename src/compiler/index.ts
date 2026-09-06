@@ -321,6 +321,8 @@ export function validateCompiledObjective(
 export function compileObjective(input: CompileInput): CompilerObjective {
   if (!/^[0-9a-f]{40}$/i.test(input.baseSha)) throw new Error("invalid base SHA");
   const facts = normalizeRepositoryFacts(input.repositoryFacts);
+  if (facts.lfs !== undefined && facts.lfs.baseSha !== input.baseSha)
+    throw new Error("LFS repository facts do not match the pinned compilation base");
   const analyzed = input.workItems.map((w) => {
     const explicitResources = sorted(ExclusiveResourcesSchema.parse(w.exclusiveResources ?? []));
     const { exclusiveResources: _claims, ...source } = w;
@@ -359,6 +361,10 @@ export function compileObjective(input: CompileInput): CompilerObjective {
     return {
       ...source,
       baseSha: input.baseSha,
+      requirements: {
+        ...w.requirements,
+        tools: sorted([...w.requirements.tools, ...(facts.lfs?.requiredTools ?? [])]),
+      },
       validationCommands: w.validationCommands,
       context: { ...manifest, dependencyEvidence: [] },
       changeSurface: { mergeClass, exclusiveResources: resources },

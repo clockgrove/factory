@@ -4,6 +4,7 @@ import type { WorkerPacket } from "../protocol/worker-packet.js";
 import type { ValidationEvidence } from "../validation/evidence.js";
 import type { ModelSelection } from "../protocol/policy.js";
 import type { CompilerWorkItem, DecompositionEvidence } from "../compiler/index.js";
+import type { PinnedLfsFacts } from "../repository-profiles/git-lfs.js";
 
 export interface ManagementUsage {
   inputTokens: number;
@@ -29,6 +30,7 @@ export interface CompilationContext {
   defaultBranch: string;
   baseSha: string;
   repositoryFiles: string[];
+  repositoryLfs?: PinnedLfsFacts;
   allowedNetworkDestinations: string[];
   modelSelection?: ModelSelection;
   /** Read-only trusted observations after grounding; omitted callers retain explicit unknowns. */

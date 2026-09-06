@@ -481,7 +481,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
   ): Promise<CompilationResult> {
     assertWithinBytes(context, 512 * 1024, "compilation context");
     assertNoSecretMaterial(context, "compilation context");
-    const repositoryFacts = await readRepositoryFacts(context.repository, context.repositoryFiles);
+    const repositoryFacts = await readRepositoryFacts(context.repository, context.repositoryFiles, context.repositoryLfs);
     const validationCommands = discoverValidationCommands(repositoryFacts);
     const validationGrounding = {
       packageJson: context.repositoryFiles.includes("package.json") ? "observed" : "not observed",

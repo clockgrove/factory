@@ -3,13 +3,18 @@ import { open, realpath } from "node:fs/promises";
 import { join, sep } from "node:path";
 import { normalizeRepositoryFacts, type RepositoryFacts } from "./index.js";
 import { assertNoSecretMaterial, assertWithinBytes } from "../protocol/limits.js";
+import type { PinnedLfsFacts } from "./git-lfs.js";
 
 /** Read facts without executing a repository, installing tools, or following external symlinks. */
 export async function readRepositoryFacts(
   checkout: string,
   repositoryFiles: string[],
+  lfs?: PinnedLfsFacts,
 ): Promise<RepositoryFacts> {
-  const facts = normalizeRepositoryFacts({ files: repositoryFiles.map((path) => ({ path })) });
+  const facts = normalizeRepositoryFacts({
+    files: repositoryFiles.map((path) => ({ path })),
+    ...(lfs === undefined ? {} : { lfs }),
+  });
   const root = await realpath(checkout);
   const candidates = facts.files.filter(
     ({ path }) =>

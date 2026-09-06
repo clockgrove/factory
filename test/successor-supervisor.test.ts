@@ -753,7 +753,10 @@ async function fixture(
       repository,
       policy,
       managementBackend: management,
-      pollIntervalMs: 1,
+      // Snapshot/recovery mocks execute real synchronous Git. A 1ms polling
+      // cadence monopolizes the worker between each streamed artifact I/O step;
+      // retain the 180-read guard while yielding enough for that pipeline to run.
+      pollIntervalMs: 50,
       onStatus: (message) => messages.push(message),
       ...(recovery ? { recovery } : {}),
     }).run();

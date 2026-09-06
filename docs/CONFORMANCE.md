@@ -1,443 +1,72 @@
 # Factory verification status
 
-Date: 2026-09-05
+Updated: 2026-09-06
 
-This file distinguishes release evidence from implemented adapters. An adapter existing in the
-bundle is not, by itself, a support claim.
+This ledger distinguishes implemented behavior, scoped observations, and release qualification.
+[DESIGN.md](DESIGN.md#definition-of-done) defines the contract; the
+[completion board](COMPLETION.md) links remaining work. An adapter or passing component test does
+not establish broader support. All six prepublication gates below remain **Open**.
 
-The scope is defined in [`DESIGN.md`](DESIGN.md). This document records tested behavior and the
-checks still required before publication. Current remaining work is on the [completion board](COMPLETION.md);
-the [delivery plan](DELIVERY-PLAN.md) retains the accepted waves.
+## Recorded component results
 
-## Proven on this branch
+Each linked record retains its own date, exact source and artifact identities, outcome and
+limitations. Later source or documentation changes do not extend an observation to a new candidate.
 
-The [installed accounted-checkpoint restart](release-evidence/accounted-checkpoint-restart-component-2026-09-06.json)
-passed on exact candidate `d61c436`, delivered unchanged to `main` through #95. The original run
-paused after one fully accounted integration, restarted into a verified new controller incarnation,
-and completed all three Work Items without repeated pre-checkpoint work. All seven model calls were
-known and reconciled: 206,543 tokens of the newly approved 500,000 aggregate allowance. Exact scope
-absence, merged PR identities, fresh-clone behavior and the normally stopped controller were verified.
-This closes only the orderly checkpoint-restart component of #75; cancellation, genuine fallback,
-remaining fault cases and all other broad release gates remain open. The first read-only preflight
-failure and exact new installation identity remain separately recorded.
+| Component | Recorded result and scope |
+| --- | --- |
+| Integrated local verification, 2026-09-05 | [Passed](release-evidence/integrated-completion-suite-2026-09-05.json) at `1e605d2fba58c9134b9e90e1b516a58bedb42424`, including deterministic bundles and staged plugin/npm installation. The [original failed candidate](release-evidence/final-suite-original-failure-2026-09-05.json) remains separate. Neither is published-artifact or live-provider qualification. |
+| Accounted checkpoint restart, 2026-09-06 | [Passed](release-evidence/accounted-checkpoint-restart-component-2026-09-06.json) at `d61c43640da81ed454326ff9c34e7618b03d0583`: same-run restart after accounted integration, no repeated checkpoint work, final artifact verification and exact resource cleanup. This closes only the orderly-restart component, not abrupt interruption, fallback or the full host matrix. |
+| Active cancellation, 2026-09-06 | [Incomplete](release-evidence/active-cancellation-incomplete-2026-09-06.json): terminal cancellation and reserved-resource absence were observed, but interrupted worker usage is unavailable. Known management usage is not total usage; cleanup does not qualify complete cancellation accounting. |
+| Retained-successor completion, 2026-09-05 | [Passed at the recorded boundaries](release-evidence/quota-safe-successor-completion-component-2026-09-05.json): adoption/delivery and proof-only final closure used distinct identified artifacts. Valid work, accounting and cleanup were independently verified. This is not a clean-history run on one candidate or a broad recovery-gate pass. |
+| Direct regular delivery, 2026-09-05 | [SDK and CLI-only cases passed](release-evidence/regular-delivery-component-2026-09-05.json), including three serial pipelines, dependent join, independent validation and fresh-artifact checks. Direct CLI selection is not failure-triggered SDK fallback. |
+| Local scheduling subset, 2026-09-05 | [Passed](release-evidence/local-scheduling-component-2026-09-05.json): native subissue-order admission, constrained Director CPU admission and outer repository-lease contention. Broader pressure, fairness, inner Director races and other hosts remain unqualified. |
+| Write-free installed planning, 2026-09-05 | [Passed](release-evidence/installed-planning-component-2026-09-05.json): one explicit compilation, verified returned graph digest and no control-plane, checkout or installation mutation. This is not activation or execution. |
+| Native stack API, 2026-09-05 | [Scoped API cases passed](release-evidence/native-stack-component-2026-09-05.json), including response-loss replay, partial merge and cascading tree preservation. Direct API observations do not replace installed Supervisor validation/review, merge-queue and fallback qualification. |
 
-The [quota-safe completion candidate and retained successor](release-evidence/quota-safe-successor-completion-component-2026-09-05.json)
-passed at the explicitly recorded boundaries: `4e06b13` passed full integrated checks and matching
-89-file Linux plugin installation; the same already-delivered successor then completed through the
-new proof-only deadline path, without new model work. Independent observation verified original
-history, retained sibling refresh/validation/review, dependent integration, all three closed Work
-Items, 219,769 cumulative known tokens under the unchanged 500,000 allowance, and eleven absent
-reserved scopes. The normally stopped controller has MainPID zero and no restarts. Fresh-clone
-delivered-code tests also passed.
+## Dated evidence index
 
-Adoption and delivery used `007cd8c`; final closure used `4e06b13`. This is not a clean-history run
-performed entirely on one candidate. The original runtime failures remain failed. Two private
-observer format/optional-setup assertions also remain preserved; separately corrected read-only
-observation passed without restarting Factory. The evidence document is later than the installed
-package. This completes the bounded retained-successor case, not any broad release gate.
+These records preserve both successful observations and failures. A filename or an implementation
+correction is not a passed gate. Consult each record for its exact source, artifact digests,
+measurement scope and outcome; private raw evidence is not a public reproduction procedure.
+Public records may be normalized to remove private details. Their historical outcomes and tested
+artifact identities are preserved, while exact original records remain private. Normalization or a
+later fix does not turn an earlier failure into a pass.
 
-### Earlier candidate observations (unchanged)
-
-The [foreground-recovery candidate](release-evidence/foreground-recovery-candidate-component-2026-09-05.json)
-passed full integrated checks and exact matching Linux installation at `007cd8c`. The installed
-successor then adopted the original work, refreshed and integrated the retained publication, and
-implemented the dependent item. All three Work Items are done, with 219,769 cumulative known tokens
-under the unchanged 500,000 threshold. [Objective closure remains incomplete](release-evidence/recovery-quota-closure-component-2026-09-05.json):
-GitHub REST exhaustion exposed repeated immutable reads and a controller restart loop. The exact
-controller was stopped; quota/closure corrections and independent successor qualification remain
-required. These observed results do not erase earlier failures or close any broad release gate.
-
-The [installed foreground-resource component](release-evidence/recovery-foreground-resource-component-2026-09-05.json)
-records discovery repair at `0363c5e`: replaying the exact accepted request restored the structural
-label and the controller reached adoption. Adoption then blocked at `resource-absence-unverified`
-because the original foreground batches lack a producer service identity. No successor worker
-started or additional model usage was observed; the controller was stopped. Focused checks and
-matching installation passed, not a new full release suite. A completed-invocation proof is separately
-implemented and reviewed; installed adoption is still unqualified. PID/scope absence alone is not
-accepted and the failed observations remain intact.
-
-The [installed recovery-discovery component](release-evidence/recovery-discovery-component-2026-09-05.json)
-preserves a later failure at `f67fd05`: explicit successor authority was accepted, but a foreground-created
-Objective lacked its structural discovery label, so the healthy controller did not adopt it. No
-successor worker started; known usage stayed unchanged. The controller was normally stopped and
-independently observed inactive. Request/replay discovery repair is separately implemented and
-regression-tested; discovery is now observed on the later artifact above, but continuation is not qualified.
-
-The [corrected publication-recovery candidate](release-evidence/publication-recovery-candidate-component-2026-09-05.json)
-passed integrated release checks and matching Linux CLI installation at
-`f67fd05ac97ffd68803e1fea299c7977e5b3c73c`. The installed package matches the tarball verified by those
-checks; all 84 canonical files and exact inventory match except the permitted manifest cachebuster.
-The exact controller remained inactive. Successor execution was approved later; its subsequent
-discovery/resource outcomes are recorded above. The previous native failure remains failed and all
-broad gates remain Open. This evidence and board update are
-later documentation, not part of the identified tested or installed package.
-
-The separate [installed planning component](release-evidence/installed-planning-component-2026-09-05.json)
-passed at `894537324a1fa61cdb3c2b905e841bca8a80e9ba`: actual `factory_plan` with `compile:true`
-returned one scoped Work Item with repository-grounded validation commands. One compiler call
-reported 14,959 tokens in the response; independent returned-graph digest verification passed.
-Activation remained unauthorized, and before/after comparisons found no activation, sub-issue, PR,
-repository or installed-artifact changes. This qualifies planning, not durable graph publication or
-execution, and leaves all six broad gates Open.
-
-The [native sibling-refresh release/install component](release-evidence/native-refresh-release-component-2026-09-05.json)
-records `npm run verify:release` passing at `894537324a1fa61cdb3c2b905e841bca8a80e9ba`:
-129 files, 2,492 passing tests, three skips, all static/schema/bundle/staged-package checks and zero
-dependency vulnerabilities. The exact 81-file candidate package was installed with canonical bytes
-matching except the permitted manifest cachebuster. The record binds its package, bundle, inventory
-and retained log hashes, plus the bounded recovery digest optimization. The installed native exercise
-failed in runtime with `sibling refresh lacks one authenticated original publication`: two Work Items
-published and validated, one integrated, and the dependent join never started. Five known usage
-receipts account for 131,622 tokens. A separate read-only observation found all six actually reserved
-execution/validation units absent, unchanged installed bundles, and the exact controller inactive;
-it did not invent join scopes or satisfy the original qualifier's inapplicable requirement for an
-SDK environment identity. The original failure remains unchanged. All broad prepublication gates remain
-Open; this later documentation update is not part of that tested or installed package.
-
-The corrected implementation rereads publication history before repair and accepts only fully
-equivalent authenticated receipts while preserving exact immutable source bindings. The independent
-qualifier now checks the SDK/CLI resource, backend and host identities actually supplied by those
-adapters; an optional environment identity is validated when present. These corrections do not turn
-the failed attempt into a pass. Installed continuation remains a separate qualification step.
-
-The [final key-free component record](release-evidence/local-keyfree-finalization-component-2026-09-05.json)
-binds the earlier `npm run verify:release` at `1346107ae568099f823a72066316c86d8793b685`:
-125 files, 2,300 passing tests, three skips, all static/schema/bundle/staged-package checks and zero
-dependency vulnerabilities. Its exact 79-file package is separately identified from the earlier
-`2668f0b` full release (2,249 passing tests) and 79-file installed package. All earlier installed
-files match that installed package except the canonical personal-plugin manifest cachebuster.
-Runtime bundles remain the recorded `0c97438` subjects; no reinstall occurred during the live
-exercise. This later evidence update is not part of either tested tarball.
-
-The installed one-token negative exercise at the earlier `2668f0b` candidate remained
-**failed/incomplete**: its queue-and-cancel harness expected a later stage than Factory reached.
-Retained authenticated evidence
-instead shows one compiler call accounting for 15,919 tokens, followed by exact exhausted-budget
-backend refusal and escalation before Work Item projection. No attempts, validation, publication or
-capacity receipts exist; fresh installed status reports no active or outstanding reservations, and
-the exact captured service was independently absent. The immutable compiled graph was not inspected:
-source persists graph and usage before preflight, so absent graph-event receipts do not prove absent
-durable graph data. A separate read-only assessment at `0f3f55a` preserves the original failed record;
-it is not execution of the corrected prospective pre-projection-refusal qualifier. No cancellation,
-reinjection or allowance increase occurred.
-
-That prospective correction is integrated at `12f63736cf1d615dff3510e3988617d5bcfe9404`, where
-132 focused tests, typecheck and scoped formatting/lint passed. Its script is byte-identical to the
-recorded assessor source; integration does not mean the private assessment was reinvoked at that
-revision. The earlier full release and unchanged installed runtime retain their separate identities.
-
-A separate checkpoint qualifier at `f634bd62e14e6ade80e84a4a1c839943ca6b95db` stopped after its
-sole controller-start action and before Objective creation or any model call. Its original generic
-diagnostic did not localize the failed startup assertion. A later independent read observed that
-exact controller active; a separate normal stop was accepted and independent inspection confirmed
-inactive state with MainPID zero. No checkpoint, worker interruption or restart completion was
-exercised. A later no-model startup-only probe at `e90628a` localized its own failure to reading the
-controller executable identity (`EACCES`). It likewise created no Objective and made no model or
-restart call. A subsequent privileged read matched the original single generation with no restarts;
-normal cleanup and independent inactive/MainPID-zero observation followed. This is a local process
-observation boundary, not a provider-credential gate; it does not retrospectively localize the first
-attempt or pass full restart qualification. These narrowly observed outcomes close none of the six
-broad prepublication gates.
-
-A subsequent startup-only probe at `1346107` passed its intended component: the initial executable
-read returned `EACCES`, the second bounded read validated the exact same generation, a prior-bound
-pre-stop recheck passed, and normal stop reached independently observed inactive state. It created
-no Objective, made no model call and exercised no restart. Ninety focused tests plus static checks
-passed for that helper revision. The separate full checkpoint exercise retains its own outcome;
-this startup result does not stand in for it.
-
-The actual full exercise reached a clean intermediate checkpoint after one integration with
-73,821 known tokens across three calls, no outstanding reservations and exact resource absence.
-A new controller invocation and lease reconstructed the same paused work/accounting before resume.
-The qualifier subsequently exited 2 during final proof: its comments snapshot ended at the final
-`AttemptIntegrated` receipt while the later status read already reported completed. It accepted
-status before the terminal receipt entered the same observation, then correctly failed its final
-receipt proof. No final stop action was recorded by that exercise. This is a harness snapshot
-coherence failure, not a qualified final pass. A later retained read-only observation independently
-verified the original run completed with all three first-attempt integrations, closed Work Items
-and Objective, exact published PR heads and GraphQL merge commits. Seven known usage receipts total
-205,830 tokens; the accounted checkpoint prefix and takeover remain unchanged, no active
-reservations remain, and all nine recorded execution/validation scopes were absent. Separate fresh
-artifact verification passed 76 clone tests and independent behavior assertions at the exact default
-head, with a clean worktree before/after execution and both join dependencies verified. A separate
-cleanup component strictly rechecked the replacement generation, issued one normal installed Stop,
-and independently observed inactive state/MainPID zero. No new model calls occurred after the
-original run completed. These components establish useful retained closure/recovery evidence but
-do not rewrite the original incomplete qualifier or close the broader adversarial/host gates.
-
-Prospective harness fixes are separately checked: the coherent completion poll at `abd582c` passed
-97 focused tests, and exact GraphQL actual-merge proof at `c3b31a` passed 113 focused tests; both
-passed typecheck and scoped formatting/lint. The final proof binds REST/GraphQL PR identity, head,
-repository and merge commit to the authenticated integration receipt, without relying on the removed
-REST `merge_commit_sha` field. These later test-harness corrections do not change runtime bundles;
-they were not in the `1346107` full-release snapshot and have not been re-exercised as a complete
-prospective qualification. All six broad prepublication gates remain Open.
-
-The [installed local scheduling component](release-evidence/local-scheduling-component-2026-09-05.json)
-passed with harness `98ce207650e76b2f1aed114b89749c80b34e0e34` and the unchanged installed
-`0c97438` runtime. A 0.5-CPU Director leaf admitted no workers while both roots queued; native
-subissue reordering promoted the first eventual reservation, and a second installed runner was
-refused by the outer repository-controller lease. Releasing that same Director to 4 CPUs preceded
-every admission's fresh capacity sample. Three first-attempt SDK pipelines then integrated serially
-through the join and Objective closure; 63 fresh-clone tests and independent behavior checks passed.
-Seven calls accounted for 221,536 tokens, no active reservations remained, and all three execution
-plus six validation-command scopes and both temporary services were observed absent. This qualifies
-only the recorded admission/priority/outer-lease subset, not worker throttling, inner Director CAS,
-native concurrency, abrupt recovery, paid burst or the complete adaptive/host matrix.
-Fresh installed status and write-free replay agree with the original completed summary, including
-three publications/integrations and all seven usage calls. Replay explicitly lacks pinned admission
-snapshots and does not recompute the scheduler; the separate captured barriers prove this subset.
-
-Its record separately binds the full release at `13d4efea2b8eaf7ca8ed764492c0f8b2091ad9f8`
-(123 files, 2,140 passing tests, three skips, all static/schema/package checks and zero vulnerabilities),
-148 final affected tests with typecheck/scoped Biome at `98ce207`, and that later candidate's exact
-76-file tarball. Those are distinct source/package checkpoints; neither closes a broad live gate.
-
-The [corrected explicit regular-delivery qualification](release-evidence/regular-delivery-component-2026-09-05.json)
-passed through the installed candidate `0c97438f05d721d6cde761b79ae05f5510659199`. Its SDK-first
-policy used actual SDK workers for all three first-attempt pipelines: two independent roots and a
-dependent join. Each next reservation/start followed the preceding integration on its new base.
-All three PRs were validated, reviewed, merged and closed, the Objective closed, and the join's
-integration matched the fresh default-branch clone. Thirty clone tests and independent behavior
-assertions passed. Seven model-call receipts account for 205,570 tokens; no active reservations
-remained and all nine exact recorded scopes were independently absent. This is a passed explicit
-serialized regular happy path, not native concurrency, automatic fallback or a broad fault/host gate.
-A separate CLI-only run against the same installed subjects also passed: all three first-attempt
-workers used the requested CLI backend, with no SDK worker. Its three serialized pipelines closed
-and merged all PRs, the dependent join and Objective; 46 fresh-clone tests and independent behavior
-assertions passed. Seven model calls account for 199,368 tokens, no active reservations remained,
-and all nine exact recorded scopes were absent. Fresh installed status/replay summaries agree on
-completion and three distinct publications/integrations; replay is write-free without pinned
-scheduler recomputation. Direct CLI selection does not prove observed SDK-failure fallback.
-
-The same candidate passed `npm run verify:release`: 122 files, 2,064 tests and three skips, all
-static/schema/bundle/staged-package checks and zero dependency vulnerabilities. The record binds
-its exact 74-file local tarball and installed executable identities. Fresh installed status, explain
-and replay observations reconstruct the completed run; status/replay summaries agree on three
-distinct publications and integrations. Corrected read-only reconstruction of the earlier failed
-regular run reports two distinct publications and one integration, with unchanged receipt digest
-and 131,699 tokens across five calls. Replay remains write-free and explicitly does not recompute
-the scheduler without pinned admission snapshots. Neither correction rewrites the earlier failure.
-All six prepublication gates remain Open; subsequent historical records retain their own scopes.
-
-The earlier [explicit regular-delivery observation](release-evidence/regular-delivery-failure-2026-09-05.json)
-failed despite passing the offline release batch at `657d746bb8a2708d03f55a898ee04e3da2e0d725`
-(121 files, 2,051 tests, three skips). The installed unchanged runtime ran two SDK workers, passed
-both independent validations, recorded two review calls, and merged one PR; the other PR was closed
-unmerged and the dependent join never started. Pending regular integration failed to block the next
-Work Item's admission. A possible additional concurrent publication/recovery race remains under
-investigation, not a proved cause. The run escalated with 131,699 known model tokens across five
-calls against its initial 500,000-token admission threshold, no active reservations, and all six
-exact recorded scopes independently absent. Fresh installed status/explain/replay reads retained the
-failure honestly: status and replay summaries agreed, replay was write-free, and scheduler
-recomputation remained unavailable without pinned admission snapshots. This is failed explicit
-regular qualification and useful read-only reconstruction, not native fallback/concurrency evidence
-or a passed live gate. Earlier records and all six prepublication gates remain unchanged.
-
-The final verifier batch `35ea74c00d1f0eba9a963fde9256dba5190b5716` passed the full release
-command: 121 test files, 2,035 passing tests and three skips, all static/schema/bundle/package
-checks, and zero dependency vulnerabilities. The
-[local lifecycle component record](release-evidence/local-lifecycle-component-2026-09-05.json)
-separately binds its 72-file local tarball and the earlier installed lifecycle subject. Runtime
-bundles did not change. A corrected read-only parser confirmed the retained restart's independent
-same-sequence receipts, controller takeover and pause acknowledgement, with no retry/resume and
-unavailable worker usage. Neither that parser check nor this release batch closes a live gate.
-
-The installed lifecycle candidate `136983af385413c971bf3f5cd0f744542a56cdf2` passed
-`npm run verify:release`: 121 test files, 2,032 passing tests and three skips, typecheck,
-lint, formatting, schemas, reproducible bundles, staged clean plugin/npm installation,
-and a dependency audit with zero vulnerabilities. The
-[local lifecycle component record](release-evidence/local-lifecycle-component-2026-09-05.json)
-binds its exact 71-file staged tarball and matching executable digests. Fresh staged npm/plugin
-WSL2 no-model startup, controller installation lifecycle and disposable host-process checks also
-passed. These host probes did not start a Factory controller or qualify model-backed cancellation.
-
-The exact personal plugin installation accepted withdrawal of the previously queued activation.
-Installed status reported `activation.state: withdrawn`, matching request identities, and
-`run.state: not-started`, with no Work Items, active reservations or run summary. This is a
-never-started activation withdrawal, not cancellation of an active worker.
-
-A separate fresh installed cancellation scenario captured an active worker, recorded the operator's
-durable cancellation request, observed the exact captured scope absent, and reached a cancelled run
-with one cancelled attempt and no active reservations. It performed no validation, PR publication or
-integration. Both exercise and read-only verification remained incomplete because the interrupted
-worker's model counters were unavailable. The 14,431 recorded compiler tokens are known partial
-usage, not total consumption and not evidence that the worker used zero tokens.
-
-The separate installed restart scenario observed its captured active scope become absent and the
-controller invocation change. Installed status then showed the original run paused, one cancelled
-attempt and no active reservations. The harness stopped during takeover evidence processing; no
-retry or resume was requested and recovered completion was not demonstrated. Its 14,406 known
-compiler tokens likewise exclude unavailable interrupted-worker usage. A separate operator cleanup
-request subsequently cancelled that same run, with one cancelled attempt, no active reservations or
-pending retries, and no publication or integration. The controller was then explicitly stopped and
-reported inactive. Cleanup is not recovered completion. These mixed component results close no
-complete live gate.
-
-The retained restart diagnostic attributes the reader failure to a harness-only global sequence
-uniqueness assumption: an authenticated pause request and an independently written local-budget
-reconciliation both used sequence 12. The later authenticated controller observation and exact
-resource measurements remain useful evidence, but a verifier correction cannot retroactively turn
-the original exercise into a recovered-completion pass. Its original evidence is preserved.
-
-The earlier records below remain bound to their own revisions. In particular, their test counts,
-tarball identities and installed observations are not evidence for the latest candidate.
-
-The integrated implementation and matching bundles at `efb9578edd959a23d23e8e9ab0ae97e619b675e8`
-passed `npm run verify:release`: 118 test files, 1,996 passing tests and three skips, typecheck,
-lint, formatting, schema checks, reproducible bundles, staged clean plugin/npm installation,
-and a dependency audit with zero vulnerabilities. The
-[completion-batch component record](release-evidence/completion-batch-component-2026-09-05.json)
-binds that exact source snapshot, package digest and executable subjects. The tested local tarball
-contains 69 files; this later evidence update was not in that tarball.
-
-Fresh staged npm and plugin installations of the same executable subjects also passed no-model
-WSL2 component checks: installed startup, explicit controller install/idempotent reinstall/uninstall,
-process pressure, descendant cancellation, restart generation and cleanup. These checks did not
-start a Factory controller or execute a model-backed Objective. The complete installed happy path
-and fault matrix are not claimed passed. Native Linux, macOS-hosted Linux, paid-provider and
-published-artifact gates remain open. Earlier records below retain their own revision and scope;
-neither a passing component test nor deferred credentials closes a live gate.
-
-The same record includes installed read-only `doctor` and `plan` observations against those bundles.
-Doctor reported ready with a controller warning and no allowed paid backend. Plan inspected three
-existing Work Items with compilation disabled, no model usage and no writes; it did not verify a
-durable graph. Neither operation granted activation authority or establishes Objective completion.
-
-An [installed local Objective observation](release-evidence/installed-local-component-2026-09-05.json)
-then compiled three Work Items, ran both independent siblings successfully on their first attempts,
-validated both artifacts, and merged one PR. The second sibling remained blocked by GitHub's stale
-test-merge metadata after trunk advanced. The operator cancelled the run; the dependent join did not
-start. All eight exact recorded execution/validation scopes were subsequently absent. This is useful
-partial execution evidence, not an end-to-end pass. GitHub's
-[documented test-merge generation policy](https://github.blog/changelog/2026-02-19-changes-to-test-merge-commit-generation-for-pull-requests/)
-invalidates an assumption that polling alone will promptly refresh that preview.
-The operator has since approved non-force refresh of Factory-owned sibling branches, with separate
-full validation and semantic review of each changed head and immutable original publication history.
-The [real exact-head branch-CAS component](release-evidence/sibling-branch-cas-component-2026-09-05.json)
-passed: a planned two-parent update succeeded and a stale writer was rejected despite proposing a
-valid fast-forward descendant. This resolves the product decision and measures the update primitive,
-not the full native delivery criterion. Fresh installed qualification remains required; the cancelled
-historical Objective is unchanged and must not be revived. No API key or paid provider is needed for
-the local-first capability.
-
-The same observation records a separate pre-worker failure: durable activation of a plain human
-issue was accepted but remained undiscovered because its structural Objective label was missing.
-The fault harness injected no cancellation and the controller was stopped. Fixes require fresh
-installed qualification; neither the activation receipt nor controller startup passes the fault gate.
-
-The first installed multi-wave Objective escalated during compilation before creating Work Items.
-Its [failure record](release-evidence/local-objective-failure-2026-09-04.json) preserves the rejected
-acceptance check and unavailable historical model usage. It closes no live gate; missing token
-receipts are not evidence of zero consumption.
-
-The [same-Objective retry](release-evidence/local-objective-stream-failure-2026-09-04.json) exposed
-incorrect selection of an intermediate agent message as structured output. Failed-call accounting
-did persist 29,407 model tokens in GitHub this time. This is live evidence for that accounting path,
-not successful compilation or execution.
-
-The [next retry](release-evidence/local-objective-command-failure-2026-09-04.json) reached command
-grounding and escalated before graph projection, recording 15,125 model tokens. The fixed npm-alias
-discovery list cannot express the fixture's scoped use of its observed test runner. This remains a
-failed Objective, not a passed compilation gate.
-
-The subsequent installed WSL2 run on candidate `3e64d41` compiled three native Work Items, admitted
-two SDK workers with overlapping attempt lifecycles, independently validated both artifacts, and
-published two PRs. Integration escalated on an external automatic review check whose integration
-could not access the now-private repository. No PR was merged and the dependent join did not run.
-Observed model usage was 157,125 tokens across compilation, two workers, and two reviews; the
-150,000-token policy is a stop-before-next-call threshold, not an in-flight hard cap. Raw private
-issues, diffs, and job logs are retained outside this public repository. These partial results do not
-close the environment, scheduling, native-stack, or Objective E2E gates below.
-
-A subsequent installed local-only qualification compiled three Work Items and completed two
-independent worker/validation/review pipelines. Their recorded attempt lifecycles overlapped for
-41 seconds; that is not a measurement of physical CPU or model-session concurrency. One sibling
-merged, then integration of the other escalated because trunk no longer matched its original base.
-The dependent join did not execute. Observed usage was 196,220 model tokens against a 250,000-token
-stop threshold, so this failure was not budget exhaustion. The run remains terminal and its
-controller was stopped; no replacement run or extra allowance was created to bypass that history.
-
-`test/parallel-sibling-integration.test.ts` now exercises the real Supervisor with local Git and
-simulated GitHub/management responses: sequential integration of two independently published
-siblings, unchanged PR heads, fresh combined-tree validation, immutable candidate/review reuse
-after merge-response loss and lease takeover, repair of a missing integration receipt, stale
-test-merge metadata, wrong test-merge trees, external trunk changes, failed tests, rejected semantic
-review, and unknown validator cleanup. The candidate proof/checkpoint, publication, review, and
-capacity suites cover their lower-level binding and durability contracts. These are offline
-component results, not a completed installed Objective, live native stack, or dependent-join gate.
-The [component verification record](release-evidence/parallel-sibling-integration-component-2026-09-05.json)
-binds the source commit, full release-suite result, exact local package, and freshly reinstalled
-CLI/MCP entry points. The historical qualification remains escalated; installation did not revive it.
-
-A [live native-stack API component test](release-evidence/native-stack-component-2026-09-05.json)
-created and extended a three-layer stack, replayed deliberately lost success responses without
-duplicate writes, merged the lower layers, observed the remaining layer's cascading rebase with
-its complete tree preserved, and merged that final layer. All disposable refs were removed; an
-independent read-only check confirmed three closed/merged PRs and an unchanged default branch.
-This used direct API adapters and no models, not an installed Supervisor. Merge-queue behavior,
-fallback, and Factory's cascading independent validation/review remain live qualification work.
-
-| Surface | Evidence | Status |
-|---|---|---|
-| GitHub custom control refs | Live custom-ref, metadata-commit, workflow-side-effect, and GraphQL compare-and-swap probes against `clockgrove/factory` | Passed |
-| Codex CLI management call | Live nested ephemeral call with JSONL and strict output schema on Codex CLI 0.153.0 | Passed |
-| Codex SDK local worker contract | Official SDK client, exact-SHA worktree, isolated Codex home, sanitized environment, no-prompt sandboxing, Work-Packet-derived network rules, bounded streamed output, cancellation, usage normalization, artifact collection, and cleanup | Passed in deterministic SDK contract tests; installed live Objective is part of the environment/adversarial gates below |
-| Codex CLI local fallback | Exact-SHA worktree, sanitized environment, no-prompt sandboxing, disabled web search, Work-Packet-derived network proxy rules, bounded output, process-group cancellation, artifact collection, and independent fresh-checkout validation tests | Passed |
-| Protocol and recovery mechanics | Unit/fault fixtures for leases, reservations, partial graph writes, state derivation, budget reconciliation, stale-base integration, cancellation, and provider-neutral artifacts | Passed |
-| Adaptive scheduling mechanics | Deterministic stable-ID priority and DAG fixtures; cgroup v1/v2 and WSL-host sampling; repository/per-Objective capacity CAS; complete local-first/burst admission matrices; continuous refill, fairness, restart reconstruction, and validator native-budget tests | Passed in the full release suite |
-| Provider-neutral delivery mechanics | Deterministic sibling/linear/fork/join topology; observed capability selection; exact-head evidence; partial branch/PR/receipt recovery; descendant invalidation; asynchronous merge/queue resume; and reversible integration-lease fixtures | Passed in automated tests; live native-stack behavior remains gated below |
-| Explainability, replay, and economics | Stable explanation-code fixtures; bounded status rendering; durable receipt replay; pure credential-free admission replay; tamper detection; distinct-call model-token reconstruction; stop-before-next-call exhaustion; model-profile routing; time-saved burst gating; and observed/unavailable cost accounting | Passed in automated tests |
-| Installed plugin shape | Manifest, version, executable, skill, schema, asset, public-marketplace, no-lifecycle-script, standalone bundle, and credential-free startup checks | Passed in staged clean-home Codex installation and both official skill/plugin validators; published-artifact installation remains a separate gate |
-| npm package shape | Package allowlist, `factory` executable, exported contract, install-time behavior, and clean `npm`/`npx` startup | Passed in reproducible local packing and clean tarball installation; registry installation and publication provenance remain unverified until publication |
-| GitHub managed agents | Provider-neutral managed-session contract, exact-head collection, independent validation, and bounded session accounting | The Copilot adapter is implemented with declared automatic-stop and pre-artifact identity limitations. Codex is an unavailable profile, not a working adapter. Qualify supported claims; document unsupported interfaces without globally blocking Factory. Managed sessions may consume GitHub Actions minutes, but Factory installs no scheduler workflow. |
-| Security boundaries | Scope/base/digest checks, suspected-secret rejection, validation-command restrictions, branch-rule fail-closed behavior, repository-identity checks, Factory-controlled worker credential stripping, and exact local/Daytona approval/network argument tests | Passed; provider-controlled managed-agent credential and egress behavior remains gated below |
-
-Detailed live control-plane and CLI observations are recorded in
-[`decisions/0001-v2-control-protocol.md`](decisions/0001-v2-control-protocol.md). Exact graph recovery
-and the boundary around replanning are recorded in
-[`decisions/0002-immutable-graph-recovery.md`](decisions/0002-immutable-graph-recovery.md).
-
-A [WSL cgroup component observation](release-evidence/wsl-cgroup-component-2026-09-04.json)
-measured the real sampler inside a transient systemd service capped at one CPU and 256 MiB.
-Both ceilings were observed and the unit was automatically collected. This is partial host evidence,
-not completion of the Linux environment or live adaptive scheduling gates.
-
-A [local resource component observation](release-evidence/local-resource-observation-component-2026-09-04.json)
-detected a synthetic owned worker and observed its graceful exit. Post-exit absence remained unknown:
-three same-owner processes denied environment inspection. The observer retained that uncertainty;
-this is not a passed cleanup or successor-execution gate. It does not qualify the current
-generation-bound resource ownership and cleanup implementation.
+- [accounted checkpoint restart component 2026 09 06](release-evidence/accounted-checkpoint-restart-component-2026-09-06.json)
+- [active cancellation incomplete 2026 09 06](release-evidence/active-cancellation-incomplete-2026-09-06.json)
+- [completion batch component 2026 09 05](release-evidence/completion-batch-component-2026-09-05.json)
+- [final suite original failure 2026 09 05](release-evidence/final-suite-original-failure-2026-09-05.json)
+- [foreground recovery candidate component 2026 09 05](release-evidence/foreground-recovery-candidate-component-2026-09-05.json)
+- [installed local component 2026 09 05](release-evidence/installed-local-component-2026-09-05.json)
+- [installed planning component 2026 09 05](release-evidence/installed-planning-component-2026-09-05.json)
+- [integrated completion suite 2026 09 05](release-evidence/integrated-completion-suite-2026-09-05.json)
+- [local keyfree finalization component 2026 09 05](release-evidence/local-keyfree-finalization-component-2026-09-05.json)
+- [local lifecycle component 2026 09 05](release-evidence/local-lifecycle-component-2026-09-05.json)
+- [local objective command failure 2026 09 04](release-evidence/local-objective-command-failure-2026-09-04.json)
+- [local objective failure 2026 09 04](release-evidence/local-objective-failure-2026-09-04.json)
+- [local objective stream failure 2026 09 04](release-evidence/local-objective-stream-failure-2026-09-04.json)
+- [local resource observation component 2026 09 04](release-evidence/local-resource-observation-component-2026-09-04.json)
+- [local scheduling component 2026 09 05](release-evidence/local-scheduling-component-2026-09-05.json)
+- [native refresh release component 2026 09 05](release-evidence/native-refresh-release-component-2026-09-05.json)
+- [native stack component 2026 09 05](release-evidence/native-stack-component-2026-09-05.json)
+- [parallel sibling integration component 2026 09 05](release-evidence/parallel-sibling-integration-component-2026-09-05.json)
+- [publication recovery candidate component 2026 09 05](release-evidence/publication-recovery-candidate-component-2026-09-05.json)
+- [quota safe successor completion component 2026 09 05](release-evidence/quota-safe-successor-completion-component-2026-09-05.json)
+- [recovery discovery component 2026 09 05](release-evidence/recovery-discovery-component-2026-09-05.json)
+- [recovery foreground resource component 2026 09 05](release-evidence/recovery-foreground-resource-component-2026-09-05.json)
+- [recovery quota closure component 2026 09 05](release-evidence/recovery-quota-closure-component-2026-09-05.json)
+- [regular delivery component 2026 09 05](release-evidence/regular-delivery-component-2026-09-05.json)
+- [regular delivery failure 2026 09 05](release-evidence/regular-delivery-failure-2026-09-05.json)
+- [sibling branch cas component 2026 09 05](release-evidence/sibling-branch-cas-component-2026-09-05.json)
+- [wsl cgroup component 2026 09 04](release-evidence/wsl-cgroup-component-2026-09-04.json)
 
 ## Definition-of-done evidence map
 
-Terminal-run continuation remains an open installed qualification gate: ordinary resume/retry cannot
-revive an escalated run. Explicit successor requests, controller adoption, repeated-successor lineage
-and mixed retained/fresh native-stack restoration have deterministic coverage in the completed batch.
-Installed execution and live delivery-lineage qualification remain outstanding. The
-[successor recovery plan](TERMINAL-RECOVERY-IMPLEMENTATION-PLAN.md) covers explicit authority,
-cumulative accounting, resource reconciliation, and reuse of validated publications. A startup
-guard blocks implicit reuse of executed work; it is containment, not a passed recovery gate.
-The read-only `factory_recovery_plan` assessment inspects graph, reservation, publication, and
-accounting evidence through a read-only store capability. Historical usage is not new spending
-authority, and an observed terminal resource receipt does not prove host/provider cleanup.
-Recovery-plan persistence, source-history/allowance-chain verification, authenticated successor
-request bindings, cross-run receipt-write fences, immutable pending claims, exact adoption-receipt
-replay inspection, and read-only source-evidence resolution have deterministic fixtures.
-`factory_recovery_propose` is read-only; `factory_recovery_request` binds explicit authority to its
-exact plan without inferring extra allowance. Controller discovery and the Supervisor require that
-identity and verified adoption. Offline `test/successor-supervisor.test.ts` covers an existing
-publication, independently validated combined-tree integration, response-loss replay, and execution
-of its dependent join through Objective completion. These fixtures use real Git with simulated
-GitHub and management responses, not live installed agents.
-
-New Linux execution/validation reservations bind command scopes and their producer generation.
-`test/controller-retirement.test.ts` includes a real no-model, opt-in systemd probe for controlled
-retirement and prevention of a repeated restart. Absence is independently rechecked after restart;
-legacy unbound resources, changed hosts, and incomplete observations still block. Repeated-successor
-delivery lineage and multi-member native-stack restoration are covered by offline Supervisor fixtures;
-live provider cleanup and installed recovery qualification remain open. An observed completion receipt or a descriptive next-event candidate
-cannot authorize a worker. These component results do not pass the live recovery gate.
+Recovery requires authenticated source and successor identity, cumulative accounting and independently
+verified resource reconciliation. Ordinary retry cannot revive a terminal run. The bounded installed
+successor result above complements deterministic lineage and fault coverage; it does not qualify every
+restart, cancellation or provider-cleanup case. See the
+[recovery contract](TERMINAL-RECOVERY-IMPLEMENTATION-PLAN.md).
 
 This table maps every stable contract statement in [`DESIGN.md`](DESIGN.md#definition-of-done) to
 the executable evidence required on a release branch. “Implemented” does not promote an open live
@@ -489,8 +118,9 @@ bundle/package subjects, and evidence artifacts by SHA-256. The tested commit mu
 the final release commit, and their trees may differ only in this ledger and
 `docs/release-evidence/`. This permits committing evidence after its run without asking a record to
 contain its own commit hash. Any other source, bundle, manifest, or documentation change invalidates
-the evidence. The final clean, tagged checkout is separately packed and verified; its tarball can
-include the newly committed evidence documentation. See the concrete sequence and record format in
+the evidence. Repository evidence is retained separately from the installed package. The final
+clean, tagged checkout is separately packed, and that exact distribution tarball is verified against
+the package allowlist and provenance. See the concrete sequence and record format in
 [`DELIVERY-PLAN.md`](DELIVERY-PLAN.md#recording-evidence-and-publishing).
 
 The `Managed-provider capability boundaries` record additionally declares both known profiles in

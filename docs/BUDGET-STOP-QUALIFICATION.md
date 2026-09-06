@@ -27,16 +27,13 @@ qualify worker execution, active-worker cancellation, queued admission recovery,
 failed tests, or full Objective completion. There are no merged-artifact tests
 because no worker or implementation artifact is allowed.
 
-## Historical exercise remains incomplete
+## Recorded scope
 
-The earlier queue-and-cancel qualifier at `2668f0b` exited 2 when this earlier
-terminal appeared. Its expected repeated queue observations and cancellation were
-never exercised; the original result remains failed/incomplete. A separate read-only
-assessment may record its authenticated pre-projection budget refusal, known
-15,919 compiler tokens (14,460 input and 1,459 output), zero worker admissions and
-exact owned-service absence. It must not rewrite the original JSON/log, claim the
-corrected prospective qualifier was run, or turn that narrower observation into a
-queue/cancellation pass. No reinjection or additional allowance follows this fix.
+The [2026-09-05 component record](release-evidence/local-keyfree-finalization-component-2026-09-05.json)
+retains the original incomplete exercise at `2668f0b` and the separately assessed
+pre-projection refusal. It preserves the exact source/artifact and evidence hashes.
+That observation is not a successful execution of the corrected qualifier or a
+queue/cancellation pass. Preserve original results when a qualifier is corrected.
 
 ## Explicit prospective invocation
 
@@ -46,8 +43,8 @@ Linux filesystem. The committed harness bundle inventory must match the installe
 plugin. Existing local GitHub/Codex auth and Linux systemd user services with cgroup
 v2 are required. The exact temporary Director service has a 4-CPU quota; it does
 not start or throttle workers. One compiler call is expected; actual usage is
-required, never estimated or replaced with zero. No new live call is authorized
-by this document.
+required, never estimated or replaced with zero. Use the scenario's configured
+execution and cleanup boundaries.
 
 ```bash
 export FACTORY_LIVE_BUDGET_STOP=1
@@ -62,9 +59,9 @@ env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST -u GH_CONFIG_DIR -u XDG_CONFIG_HOME \
   FACTORY_LIVE_OBJECTIVE_PREFLIGHT=1 node scripts/verify-budget-stop.mjs
 ```
 
-Preflight does not start a service/model or mutate GitHub. For a separately
-authorized fresh execution, unset `FACTORY_LIVE_OBJECTIVE_PREFLIGHT` and use the
-**new, exact-scope ACK** (the old queue/cancel ACK is rejected):
+Preflight does not start a service/model or mutate GitHub. For an authorized fresh
+execution, unset `FACTORY_LIVE_OBJECTIVE_PREFLIGHT` and supply the exact-scope
+acknowledgement:
 
 ```bash
 export FACTORY_LIVE_OBJECTIVE=1

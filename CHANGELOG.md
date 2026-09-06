@@ -1,6 +1,6 @@
 # Changelog
 
-Notable changes to Factory. See [the delivery plan](docs/DELIVERY-PLAN.md) for upcoming work.
+Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/factory/issues) for upcoming work.
 
 ## Unreleased
 

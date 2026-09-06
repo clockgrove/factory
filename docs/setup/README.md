@@ -20,7 +20,8 @@ For work that continues after chat disconnects, add the [unattended controller](
 | Explore the local Codex protocol adapter | [Codex App Server — Labs](codex-app-server.md) |
 
 Each guide starts with a TL;DR, then configuration, verification, and troubleshooting detail.
-Factory is still under development; [conformance status](../CONFORMANCE.md) distinguishes implemented
+Factory is still under development;
+[conformance status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md) distinguishes implemented
 adapters from verified live capability. Optional provider failures do not block local-only setup.
 
 ## Understand the three choices

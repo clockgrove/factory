@@ -81,7 +81,8 @@ workflow and cannot treat an Actions allowance as launch authority or as one of 
 receipts.
 
 Vercel Sandbox and Codex App Server are Labs integrations. They inherit the same worker and artifact
-contracts but are not publication gates in the [delivery plan](DELIVERY-PLAN.md).
+contracts but are not publication gates in the
+[delivery plan](https://github.com/clockgrove/factory/blob/main/docs/DELIVERY-PLAN.md).
 
 ## Known limitations and non-goals
 

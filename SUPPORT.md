@@ -15,8 +15,9 @@ Maintainers and the community provide best-effort help with Factory. There is no
 | Labs | Vercel Sandbox, Codex App Server, and additional harness/provider adapters |
 | Out of scope | Native Win32/Darwin execution or lifecycle, multi-local-machine clusters, custom UI, required hosted service |
 
-Current proof and open release gates are listed in [docs/CONFORMANCE.md](docs/CONFORMANCE.md);
-implementation waves are tracked in [docs/DELIVERY-PLAN.md](docs/DELIVERY-PLAN.md). Until the npm
+Current proof and open release gates are listed in
+[verification status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md);
+upcoming work is tracked in [GitHub issues](https://github.com/clockgrove/factory/issues). Until the npm
 artifact is published, use the plugin or source-checkout path documented in the README.
 
 ## Ask for help

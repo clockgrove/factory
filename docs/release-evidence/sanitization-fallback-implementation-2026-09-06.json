@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "kind": "sanitization-and-fallback-qualifier-implementation",
+  "result": "passed",
+  "candidateCommit": "e33402493a2e1dfe8a9dfd8e4119ee17cd6dfbc0",
+  "issues": [99, 100],
+  "reviewIssue": 98,
+  "unchangedFromPriorMain": ["src", "dist", "schemas", "package-lock.json"],
+  "checks": {
+    "typecheck": { "exitCode": 0, "logSha256": "1a83378fac252095a66ad415603906e94282cea41c36885c4a8321c4e33ebf52" },
+    "changedFileBiome": { "exitCode": 0, "files": 9, "logSha256": "ea037128a51d1407ba68c63de541d17b685f55e71936836f0cc5c2f2ff878695" },
+    "affectedTests": { "exitCode": 0, "files": 7, "passed": 393, "logSha256": "2aaf6f06c00bae26b969517c07eec1f29cfc6dc205afa937fde1822291327187" },
+    "releaseLedgerRegression": { "exitCode": 0, "files": 1, "passed": 32, "logSha256": "497da52d59522735e6a576a8d4d7d9f5f2ff6360abf1915c59b3b82d195fbaf8" },
+    "npmPackage": {
+      "exitCode": 0,
+      "files": 40,
+      "bytes": 2835498,
+      "sha256": "48ab5e40b12dff5fb4f777059ded1547eda47141090a72a01a27c5908040ea56",
+      "logSha256": "9bdd357a954d2b9eb1ec080a52613a0a0c08cba7e1541bbc9f432512726fb9e0",
+      "operatorDocumentationFiles": 11,
+      "actualInstalledMarkdownTargetsVerified": true,
+      "developmentEvidenceAndPlanningExcluded": true
+    }
+  },
+  "preservedOriginalObservation": {
+    "result": "test-startup-environment-failure",
+    "reason": "The initial focused-test process could not write its dependency cache under filesystem sandboxing; no tests started. A separately authorized invocation passed without code changes.",
+    "logSha256": "5247f71ea3b136ae35cd36dfdd0c26431cfe89d6fbd30511f510cd2c90a59066"
+  },
+  "sanitization": {
+    "exactPreEditDocumentationArchiveSha256": "d2680b8b3122d741aba7507d07f8a063fe5f163b279305bcbf644bfb11d6822c",
+    "originalsRetainedPrivately": true,
+    "historicalOutcomeOrArtifactRelabelled": false,
+    "historicalPublicCommitsRewritten": false,
+    "previouslyCopiedArtifactsRetracted": false
+  },
+  "scope": "Affected implementation and distribution checks only. Actual native-unavailability fallback still needs installed live qualification under issue 82; fixtures do not establish platform unavailability. No new model-backed run, cloud spending, production activation or registry publication occurred. This does not close any of the six live release gates or qualify previously copied packages as sanitized.",
+  "identityBoundary": "The recorded package and checks belong to the exact candidate above. Later completion/evidence-only edits are not re-executions or extensions of that evidence to changed implementation. Prior component failures and packages remain separately identified."
+}

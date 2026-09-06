@@ -1,111 +1,58 @@
 # Factory completion board
 
-Updated: 2026-09-06. The authoritative remaining-work checklist is
-[GitHub #69](https://github.com/clockgrove/factory/issues/69). These are ordinary development issues,
-not Factory Objectives. This board is a linked summary, not another backlog.
+Updated: 2026-09-06. [GitHub #69](https://github.com/clockgrove/factory/issues/69) is the
+authoritative backlog. This page summarizes capability boundaries, not execution sessions or a
+second queue. These are ordinary development issues, not Factory Objectives.
 
-Filter open work directly in GitHub:
-[Code](https://github.com/clockgrove/factory/issues?q=is%3Aissue+is%3Aopen+label%3A%22work%3Acode%22),
-[Tests](https://github.com/clockgrove/factory/issues?q=is%3Aissue+is%3Aopen+label%3A%22work%3Atest%22),
-[Release](https://github.com/clockgrove/factory/issues?q=is%3Aissue+is%3Aopen+label%3A%22work%3Arelease%22),
-[Provider follow-up](https://github.com/clockgrove/factory/issues?q=is%3Aissue+is%3Aopen+label%3A%22work%3Afollow-up%22),
-[Tracking](https://github.com/clockgrove/factory/issues?q=is%3Aissue+is%3Aopen+label%3A%22work%3Atracking%22).
-Every issue and subissue has one primary work type, preserved on closure. Bugs in qualification
-tooling are coding work; running that tooling is testing work. Existing structural labels remain.
+Filter open work by
+[code](https://github.com/clockgrove/factory/issues?q=is%3Aissue+is%3Aopen+label%3A%22work%3Acode%22),
+[testing](https://github.com/clockgrove/factory/issues?q=is%3Aissue+is%3Aopen+label%3A%22work%3Atest%22),
+[review](https://github.com/clockgrove/factory/issues?q=is%3Aissue+is%3Aopen+label%3A%22work%3Areview%22),
+[release](https://github.com/clockgrove/factory/issues?q=is%3Aissue+is%3Aopen+label%3A%22work%3Arelease%22),
+[provider follow-up](https://github.com/clockgrove/factory/issues?q=is%3Aissue+is%3Aopen+label%3A%22work%3Afollow-up%22)
+or [tracking](https://github.com/clockgrove/factory/issues?q=is%3Aissue+is%3Aopen+label%3A%22work%3Atracking%22).
+Each issue and subissue has one primary work type, retained on closure. Qualification-tool defects
+are implementation work; exercising an existing qualifier is testing work.
 
-## Finish line and execution order
+## Capability status
 
-Finish all remaining implementation code and known-bug fixes first, in parallel isolated worktrees.
-**No test runs, typechecks, lint/format checks, release checks, plugin reinstalls, or live qualification
-during this implementation phase.** Then run the coordinated suite, fix discovered defects, and
-qualify the integrated product. Keep all six release gates and post-publication installation.
+The [recorded integrated local suite](release-evidence/integrated-completion-suite-2026-09-05.json)
+passed on its exact candidate; the
+[original failed candidate](release-evidence/final-suite-original-failure-2026-09-05.json) remains
+separate. That evidence does not qualify changed source or close the six live release gates.
+The [sanitization and fallback qualifier implementation checks](release-evidence/sanitization-fallback-implementation-2026-09-06.json)
+passed on their separate exact candidate. New defects remain tracked implementation work.
 
-Unsupported third-party features narrow the affected provider's claims, not Factory's finish line.
-Users own their paid-provider relationships; final invoice settlement is not a completion gate.
-Exact active-resource, identity, replacement and native admission safeguards remain mandatory.
-A bounded Clockgrove pilot is separate from full release qualification and grants no production or
-paid-provider authority. Missing input for one issue does not stop independent implementation.
-
-## Implementation completed; integrated local verification passed
-
-| Issue / acceptance boundary | Kind | Owner / state | Next deliverable |
-| --- | --- | --- | --- |
-| [#70 Accurate recovery guidance](https://github.com/clockgrove/factory/issues/70): supported recovery instructions without weakening restart fences | Code, known bug | Recovery lane / completed and verified | Delivered in merged #91. |
-| [#71 Codex capability boundary](https://github.com/clockgrove/factory/issues/71): no working-provider claim without its own interface | Code | Capability lane / delivered and closed | Landed through #95; actual unavailable interface remains #85 follow-up, not a global blocker. |
-| [#72 Copilot limited controls](https://github.com/clockgrove/factory/issues/72): exact task-specific human action where automatic stop is unsupported | Code | Copilot lane / completed and verified | Delivered in merged #91; supported live execution qualification is #84. |
-| [#73 User-owned provider billing](https://github.com/clockgrove/factory/issues/73): complete proven execution without invoice finality | Code | Accounting lane / delivered and closed | Landed through #95; unknown actual resources still block replacement. |
-| [#90 Provider-cost replay](https://github.com/clockgrove/factory/issues/90): unique receipts, contradictory evidence and finite totals | Code, known accounting bug | Accounting lane / completed and verified | Delivered in merged #91; unknown costs remain unavailable, not zero. |
-| [#74 Retained qualifier corrections](https://github.com/clockgrove/factory/issues/74): bounded, correctly bound cancellation/budget evidence | Code, qualification-tool bugs | Local correction lane / delivered and closed | Landed through #95; live scenarios remain separately authorized. |
-| [#92 Final-check defects](https://github.com/clockgrove/factory/issues/92): independent managed-validator absence and real installed claim proof, with typed fixtures | Code, final verification defects | Both lanes / delivered and closed | Landed through #95; original failed candidate remains preserved. |
-
-All implementation and review lanes are completed, not waiting or silently running. The coordinator
-integrated their work and finished the single coordinated local verification phase. There is no known
-unresolved implementation defect in this backlog; this is not a claim that testing proves zero bugs.
-
-[Exact final evidence](release-evidence/integrated-completion-suite-2026-09-05.json) records candidate
-`1e605d2fba58c9134b9e90e1b516a58bedb42424`: all `verify:release` checks passed, including clean temporary
-plugin/npm installation. The [original failed candidate](release-evidence/final-suite-original-failure-2026-09-05.json)
-is preserved separately. Only completion/evidence documentation follows the tested candidate; runtime
-and manifest hashes are unchanged. The recorded npm tarball is the tested candidate's package, not a
-later documentation-bearing tarball. No paid/model-backed live qualification, production activation
-or registry publication was performed. All six live release gates retain their actual open status.
-
-## Deferred qualification and distribution
-
-The [installed accounted-checkpoint restart component](release-evidence/accounted-checkpoint-restart-component-2026-09-06.json)
-passed on the exact installed candidate, using 206,543 tokens from the newly approved 500,000
-local-only aggregate allowance. A subsequent distinct
-[active-cancellation attempt](release-evidence/active-cancellation-incomplete-2026-09-06.json)
-observed same-run cancellation and exact reserved-resource absence, but is **incomplete** because
-the interrupted worker's final model-token usage is unavailable. Its known management usage is
-15,154 tokens: the aggregate known subtotal is 221,697 **plus unknown worker usage**, not an exact
-remaining allowance. Both runs are terminal and the controller is independently stopped with PID 0
-and no control group. No further model-backed scenario has started. Only #75's orderly
-checkpoint-restart acceptance is satisfied; cancellation, genuine fallback, the full WSL2 matrix
-and all other release gates remain unpassed.
-
-Every issue has acceptance criteria, dependencies and an exact next deliverable. Qualification and
-distribution remain open; the integrated local suite is completed. Their execution can now follow
-the implementation phase, but only within each issue's explicit authorization boundary.
-
-| Capability | Ordinary issues | Dependency / next boundary |
+| Capability | Issues | Remaining acceptance |
 | --- | --- | --- |
-| WSL2 resilience and adaptive scheduling | [#75](https://github.com/clockgrove/factory/issues/75), [#76](https://github.com/clockgrove/factory/issues/76) | Checkpoint restart passed; active cancellation is incomplete on missing worker usage. Resolve authoritative usage or obtain explicit acknowledgement and a bounded continuation allowance before further model-backed scenarios. This does not waive cancellation acceptance or revive either terminal run. |
-| Organization priority edits | [#77](https://github.com/clockgrove/factory/issues/77) | Scoped disposable organization-field permission. |
-| Other supported Linux hosts | [Native Linux #78](https://github.com/clockgrove/factory/issues/78), [macOS-hosted Linux #79](https://github.com/clockgrove/factory/issues/79) | Host access; supported architecture coverage is retained. Neither blocks independent WSL2 work. |
-| Native stacks, merge queue and recorded regular-PR fallback | [#80](https://github.com/clockgrove/factory/issues/80), [#81](https://github.com/clockgrove/factory/issues/81), [#82](https://github.com/clockgrove/factory/issues/82) | Installed candidate; queue/rule tests additionally need eligible disposable features and explicit configuration authority. |
-| Daytona and claimed managed capabilities | [Daytona #83](https://github.com/clockgrove/factory/issues/83), [Copilot #84](https://github.com/clockgrove/factory/issues/84) | Credentials, explicit native-unit spending and cleanup authority, then evidence for supported capabilities. Unsupported automation and unavailable costs remain explicit. |
-| Future Codex managed execution | [#85](https://github.com/clockgrove/factory/issues/85) | Provider-specific interface follow-up; currently unavailable, not a required working-provider release gate. |
-| Bounded Clockgrove pilot | [#86](https://github.com/clockgrove/factory/issues/86) | Accepted Objective, trust, delivery policy and allowance before actual-checkout activation. |
-| Integrated suite and discovered-defect fixes | [#87](https://github.com/clockgrove/factory/issues/87) | Completed on the exact integrated candidate above, delivered through #95 and closed. Not an open live gate. |
-| Release and actual published installation | [Publication #88](https://github.com/clockgrove/factory/issues/88), [post-publication #89](https://github.com/clockgrove/factory/issues/89) | All retained gates, compatible exact-candidate evidence and registry approval; clean-install the actual published bytes afterwards. |
+| WSL2 resilience | [#75](https://github.com/clockgrove/factory/issues/75) | Orderly [accounted checkpoint restart passed](release-evidence/accounted-checkpoint-restart-component-2026-09-06.json). [Active cancellation is incomplete](release-evidence/active-cancellation-incomplete-2026-09-06.json) because interrupted worker usage is unavailable; resource absence alone does not complete accounting. Remaining cases need their own bounded evidence. |
+| Adaptive scheduling and organization priority | [#76](https://github.com/clockgrove/factory/issues/76), [#77](https://github.com/clockgrove/factory/issues/77) | Extend the [installed scheduling subset](release-evidence/local-scheduling-component-2026-09-05.json) with pressure, fairness, phase recovery, inner Director contention and organization-field edits. |
+| Genuine SDK-to-CLI fallback | [#75](https://github.com/clockgrove/factory/issues/75) | Qualify unchanged-policy fallback caused by actual SDK unavailability; direct CLI selection is not equivalent. |
+| Native-unavailable regular-PR fallback qualifier | [#99](https://github.com/clockgrove/factory/issues/99), [#82](https://github.com/clockgrove/factory/issues/82) | Qualifier implemented and affected checks passed. Live #82 still requires genuinely unavailable native-stack delivery; direct regular-PR selection or synthetic errors are not equivalent. |
+| Supported Linux hosts | [#78](https://github.com/clockgrove/factory/issues/78), [#79](https://github.com/clockgrove/factory/issues/79) | Complete native Linux and macOS-hosted Linux guest coverage, independently of WSL2 results. |
+| Native delivery, merge queue and regular fallback | [#80](https://github.com/clockgrove/factory/issues/80), [#81](https://github.com/clockgrove/factory/issues/81), [#82](https://github.com/clockgrove/factory/issues/82) | Qualify the remaining installed native-stack, queue/ejection and recorded fallback cases. [Retained successor completion](release-evidence/quota-safe-successor-completion-component-2026-09-05.json) is a bounded component result. |
+| Daytona and supported managed capabilities | [#83](https://github.com/clockgrove/factory/issues/83), [#84](https://github.com/clockgrove/factory/issues/84) | Exact installed execution, independent validation, native admission and resource/session termination evidence, within provider-specific capabilities. |
+| Codex managed interface | [#85](https://github.com/clockgrove/factory/issues/85) | External interface follow-up. The profile remains unavailable and unlaunchable, not a required working-provider release gate. |
+| Bounded pilot | [#86](https://github.com/clockgrove/factory/issues/86) | Pilot-specific Objective, trust, delivery and resource boundaries; pilot acceptance is separate from release qualification. |
+| Integrated verification | [#87](https://github.com/clockgrove/factory/issues/87) | Completed for the recorded candidate. Verify subsequent implementation at the next integrated candidate boundary. |
+| Public presentation and sanitization | [#98](https://github.com/clockgrove/factory/issues/98), [#100](https://github.com/clockgrove/factory/issues/100) | Review and current-tree/package remediation completed and affected checks passed. Historical public commits and previously copied artifacts are not retracted or relabelled as sanitized. |
+| Publication and published installation | [#88](https://github.com/clockgrove/factory/issues/88), [#89](https://github.com/clockgrove/factory/issues/89) | All required gates, compatible exact-candidate evidence and distribution authority, followed by clean installation of the actual published bytes. |
 
-## Scope and retained evidence
+## Completion rules
 
-The [design definition of done](DESIGN.md#definition-of-done), [delivery plan](DELIVERY-PLAN.md), and
-[conformance gates](CONFORMANCE.md#verification-required-before-publication) retain the complete
-product contract. Vercel Sandbox, Codex App Server and harness-native child workers remain Labs.
-Git LFS lifecycle and oversized artifact transfer remain explicit future appendix extensions, not
-current support claims. The accepted provider-specific support decision supersedes the former
-two-working-managed-providers and invoice-finality requirements; the other retained gates remain.
+Follow the coordinated implementation and verification procedure in [AGENTS.md](../AGENTS.md) and
+[CONTRIBUTING.md](../CONTRIBUTING.md#validate-changes). Reuse evidence only within its exact source,
+artifact and scope boundaries; issue closure is not a substitute for acceptance evidence.
 
-## PR stack
+The [definition of done](DESIGN.md#definition-of-done), [delivery plan](DELIVERY-PLAN.md), and
+[conformance ledger](CONFORMANCE.md#verification-required-before-publication) retain all six
+prepublication gates and the post-publication installation gate. Vercel Sandbox, Codex App Server
+and harness-native child workers remain Labs; Git LFS lifecycle and oversized artifact transfer
+remain future extensions rather than current support claims.
 
-[PR #91](https://github.com/clockgrove/factory/pull/91) and
-[PR #93](https://github.com/clockgrove/factory/pull/93) delivered recovery/accounting and provider
-capabilities. #94 merged into its former parent branch, so
-[PR #95](https://github.com/clockgrove/factory/pull/95) completed the actual delivery to `main`.
-Main commit `12d45ccb8108b201b8a06870ed7764b1ea0f6235` was verified byte-for-byte identical to the
-integrated `d61c436` tree. Issues #71/#72/#73/#74/#87/#92 are closed after that verification.
-There are no known unfinished implementation issues; open issues concern qualification, release/pilot,
-the optional provider follow-up and the tracker. The coordinator now owns Factory merges, dependent
-base retargeting and verified issue closeout under the standing authority in `AGENTS.md`.
-
-[PR #68](https://github.com/clockgrove/factory/pull/68) delivered native sibling refresh and retained
-successor completion. [Exact evidence](release-evidence/quota-safe-successor-completion-component-2026-09-05.json)
-preserves the original failures, separate adoption/closure artifact identities, known accounting and
-verified cleanup. The completed successor and its stopped controller are not a new-run allowance.
-Historical implementation issues remain history, not evidence that unexecuted release gates passed.
-
-The new board and guidance are not part of those previously tested artifacts. Never attach old
-evidence to changed source bytes. [Contributor procedure](../CONTRIBUTING.md#validate-changes).
+Unsupported third-party interfaces narrow the affected integration, not Factory globally. Users
+own their provider relationships and billing; invoice finality is not execution qualification.
+Unknown usage remains unavailable, never zero, and unknown active resources still prevent unsafe
+replacement. Local qualification follows its configured scenario boundaries; completed or failed
+runs are not silently revived. Paid-provider, production and publication actions retain their
+separate authority requirements.

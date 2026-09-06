@@ -6,6 +6,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { optionalHostQualification } from "./qualify-linux-host.mjs";
+import { assertPackageDocumentation } from "./package-documentation.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const temporaryRoot = await mkdtemp(resolve(tmpdir(), "factory-npm-package-"));
@@ -172,6 +173,14 @@ try {
   );
 
   const installedRoot = resolve(installDirectory, "node_modules", "@clockgrove", "factory");
+  const documents = Object.fromEntries(
+    await Promise.all(
+      [...paths]
+        .filter((path) => path.endsWith(".md"))
+        .map(async (path) => [path, await readFile(resolve(installedRoot, path), "utf8")]),
+    ),
+  );
+  assertPackageDocumentation(paths, documents);
   const executable = resolve(installDirectory, "node_modules", ".bin", "factory");
   await access(executable, constants.X_OK);
   const installedPackage = JSON.parse(

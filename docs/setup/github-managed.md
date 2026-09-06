@@ -6,7 +6,8 @@
 
 1. Complete [local setup](local.md); local compilation/management and GitHub access are still required.
 2. Choose `github-copilot/github-managed` or `openai-codex/github-managed` and check
-   [conformance status](../CONFORMANCE.md) before treating it as usable.
+   [conformance status](https://github.com/clockgrove/factory/blob/main/docs/CONFORMANCE.md)
+   before treating it as usable.
 3. Enable the corresponding provider integration for the exact target GitHub repository and identity.
 4. Ask Factory to inspect repository/provider gates before approving sessions. A generic backend probe
    alone does not prove repository-specific availability.

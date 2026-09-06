@@ -9,7 +9,8 @@ Status: accepted
 Factory needs a supported, programmatic local worker boundary for unattended operation. The Codex
 CLI established the Linux security and execution baseline, but parsing and supervising a CLI is a
 lower-level integration than the official TypeScript SDK. Codex App Server exposes richer client
-protocols but remains a Labs integration and is not required for job automation.
+protocols for explicit durable sessions; those are a separate supported route, not a prerequisite
+for using the default SDK/CLI chain.
 
 ## Decision
 
@@ -28,9 +29,9 @@ credentials and does not make local thread state authoritative.
 - Package and backend conformance include the pinned `@openai/codex-sdk` dependency.
 - The same Linux environment matrix exercises both local routes.
 - SDK unavailability may select the CLI fallback without selecting paid compute.
-- Codex App Server remains Labs and is not part of the supported local fallback chain.
+- Codex App Server is supported explicitly, with its own session acceptance and provider limitations;
+  it is not automatically inserted into the default local fallback chain.
 
 ## Reference
 
 - [OpenAI Codex SDK](https://developers.openai.com/codex/sdk)
-

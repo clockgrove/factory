@@ -162,7 +162,13 @@ correct result is “not exercised,” not “failed” and not an inferred supp
 
 ## Labs evidence
 
-Vercel Sandbox, Codex App Server, and harness-native child workers are Labs integrations. Their
+The explicit Codex App Server route is part of supported local qualification, not Labs. Its
+[session acceptance](CODEX-APP-SERVER-SESSIONS.md#qualification-still-required) requires installed
+fresh execution and exact same-attempt terminal recovery without another model turn, with complete
+usage and independently absent resources. This evidence is pending on WSL2; component code/tests
+do not substitute for it. Unsupported cold repair turns remain a documented provider boundary.
+
+Vercel Sandbox and harness-native child workers are Labs integrations. Their
 deterministic tests should remain green, but missing credentials, host capabilities, or live-provider
 evidence do not block the initial delivery scope. If a paid Labs provider is exercised, it requires the same
 explicit authorization and cleanup boundary as a release provider.

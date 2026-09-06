@@ -72,7 +72,12 @@ reported as implemented or qualified. Missing credentials are configuration requ
 evidence that a provider interface is unsupported. Claimed execution capabilities still require
 their corresponding qualification evidence.
 
-Labs contains Vercel Sandbox, Codex App Server, and additional harness/provider experiments. Labs
+Durable App Server sessions are a supported explicit local route and retain required WSL2
+qualification. They do not replace the SDK/CLI default chain. The
+[session contract](CODEX-APP-SERVER-SESSIONS.md) specifies exact terminal recovery and the pinned
+provider's unavailable cold-repair accounting subscription.
+
+Labs contains Vercel Sandbox and additional harness/provider experiments. Labs
 adapters may reuse the production contracts and tests, but they are not release blockers and must not
 be selected implicitly. The boundary and its rationale are recorded in
 [`decisions/0007-product-scope.md`](decisions/0007-product-scope.md).
@@ -519,8 +524,10 @@ contracts. The planned bundles are:
 - `openai-codex/github-managed` — bundled unavailable profile, not a working managed adapter; a
   supported provider-specific identity/lifecycle interface is required before enabling it.
 
-`codex-cli/vercel-sandbox`, `codex-app-server/local-worktree`, and harness-native child-worker
-adapters are Labs integrations. The installed package must still start when their optional
+`codex-cli/vercel-sandbox` and harness-native child-worker adapters are Labs integrations.
+`codex-app-server/local-worktree` is an explicit supported route with durable session acceptance;
+its provider restrictions do not turn it into a nonblocking Labs exclusion.
+The installed package must still start when optional
 credentials or host capabilities are unavailable. The local default/fallback decision is recorded
 in [`decisions/0008-codex-sdk-default.md`](decisions/0008-codex-sdk-default.md).
 

@@ -20,9 +20,11 @@ The scope includes:
 - the Agent Plugin and `@clockgrove/factory` npm CLI/controller;
 - Linux execution on native Linux, Windows WSL2, or a Linux guest hosted by macOS;
 - Codex SDK local workers, Codex CLI fallback, and adaptive single-host admission;
+- fair same-host multi-Objective sharing and durable explicit Codex App Server sessions;
 - GitHub Copilot and OpenAI Codex managed agents;
 - Daytona as the supported third-party sandbox;
-- regular and native stacked GitHub pull requests; and
+- concurrent regular and native stacked GitHub pull requests;
+- local LFS detection/tooling, binary/media manifests, and bounded large-file transport; and
 - GitHub-only durable orchestration with no required workflow, UI, or hosted Factory service.
 
 Every claimed supported capability passes the applicable deterministic, security, recovery, package,
@@ -33,7 +35,7 @@ Session/resource caps are not guaranteed dollar caps, unknown costs remain unava
 billing settlement finality is not required. Exact active-compute and cleanup evidence remains required
 before releasing resource obligations or admitting unsafe replacements.
 
-Vercel Sandbox, Codex App Server, and additional provider/harness adapters are Labs. Native Win32
+Vercel Sandbox and additional provider/harness adapters are Labs. Native Win32
 and Darwin lifecycle/execution and multi-machine local clusters are out of scope.
 
 ## Consequences
@@ -41,7 +43,8 @@ and Darwin lifecycle/execution and multi-machine local clusters are out of scope
 - `CONFORMANCE.md` records verification results and remaining gaps.
 - Daytona retains its live release gate. **Managed-provider capability boundaries** requires exact
   evidence for each provider's claimed behavior and explicit limits for unavailable features; it does
-  not require every managed provider to offer the same API. Vercel and App Server remain Labs.
+  not require every managed provider to offer the same API. Vercel remains Labs; explicit App Server
+  session recovery retains its supported-route qualification and documented provider limitations.
 - Copilot has limited automation, including an operator boundary when exact-session termination cannot
   be automated. Codex managed execution remains unavailable until an authoritative identity and real
   provider-specific lifecycle interface are implemented and qualified; a display name is not identity.

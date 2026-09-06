@@ -277,19 +277,26 @@ describe("immutable recovery proposal", () => {
     item.observedPullRequest!.headSha = sha("8");
     item.observedPullRequest!.treeSha = sha("9");
     item.source!.priorDelivery = {
-      runId: "source", planDigest: digest("7"), integrationReceiptDigest: digest("8"),
-      deliveryHeadSha: sha("8"), outputTreeSha: sha("9"),
+      runId: "source",
+      planDigest: digest("7"),
+      integrationReceiptDigest: digest("8"),
+      deliveryHeadSha: sha("8"),
+      outputTreeSha: sha("9"),
     };
     const parsed = parseRecoveryPlan(plan);
     expect(parsed.items[0]!.source!.validation).toEqual(original.validation);
     expect(parsed.items[0]!.source!.publication).toEqual(original.publication);
     const acceptedDigest = recoveryPlanDigest(parsed);
     item.source!.priorDelivery.outputTreeSha = sha("a");
-    expect(() => parseRecoveryPlan(plan)).toThrow("publication reuse needs unchanged validated PR identities");
+    expect(() => parseRecoveryPlan(plan)).toThrow(
+      "publication reuse needs unchanged validated PR identities",
+    );
     item.observedPullRequest!.treeSha = sha("a");
     expect(recoveryPlanDigest(parseRecoveryPlan(plan))).not.toBe(acceptedDigest);
     delete item.source!.priorDelivery.outputTreeSha;
-    expect(() => parseRecoveryPlan(plan)).toThrow("publication reuse needs unchanged validated PR identities");
+    expect(() => parseRecoveryPlan(plan)).toThrow(
+      "publication reuse needs unchanged validated PR identities",
+    );
     // Older unchanged-head deliveries remain valid without the new descriptor.
     item.observedPullRequest!.headSha = original.publication!.headSha;
     item.source!.priorDelivery.deliveryHeadSha = original.publication!.headSha;

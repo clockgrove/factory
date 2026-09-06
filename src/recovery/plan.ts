@@ -473,7 +473,8 @@ export function parseRecoveryPlan(input: unknown): RecoveryPlan {
           observed.headRepository?.toLowerCase() === publication.headRepository.toLowerCase() &&
           observed.treeSha ===
             (source!.priorDelivery?.outputTreeSha ??
-              source!.siblingRefresh?.outputTreeSha ?? source!.validation!.outputTreeSha),
+              source!.siblingRefresh?.outputTreeSha ??
+              source!.validation!.outputTreeSha),
         "publication reuse needs unchanged validated PR identities",
       );
     }

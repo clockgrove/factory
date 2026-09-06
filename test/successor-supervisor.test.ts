@@ -853,19 +853,21 @@ async function fixture(
       isolatedResources.delete(ownership);
     }
   });
-  const isolatedReconcile = vi.fn<NonNullable<ExecutionBackend["reconcileStale"]>>(async (input) => {
-    if (isolatedResources.size) {
-      const ownership = validationInvocationOwnership(input);
-      if (!ownership || !isolatedResources.has(ownership))
-        throw new Error("fixture reconciliation does not own its simulated resource");
-      throw new DaytonaResourceCleanupError({
-        resourceId: `simulated-${ownership}`,
-        resourceName: `simulated-validation-${ownership}`,
-        operation: "stale-attempt reconciliation",
-        cause: "simulated isolated candidate termination is still unknown",
-      });
-    }
-  });
+  const isolatedReconcile = vi.fn<NonNullable<ExecutionBackend["reconcileStale"]>>(
+    async (input) => {
+      if (isolatedResources.size) {
+        const ownership = validationInvocationOwnership(input);
+        if (!ownership || !isolatedResources.has(ownership))
+          throw new Error("fixture reconciliation does not own its simulated resource");
+        throw new DaytonaResourceCleanupError({
+          resourceId: `simulated-${ownership}`,
+          resourceName: `simulated-validation-${ownership}`,
+          operation: "stale-attempt reconciliation",
+          cause: "simulated isolated candidate termination is still unknown",
+        });
+      }
+    },
+  );
   if (backendRegistry) {
     const local = new CodexSdkLocalBackend();
     backendRegistry.register(local);

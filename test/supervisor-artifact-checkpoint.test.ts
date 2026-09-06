@@ -142,6 +142,8 @@ describe("Supervisor collected artifact durability", () => {
     ).toHaveLength(1);
   }, 15_000);
 
+  // Includes native-stack setup and two complete Supervisor runs with real Git/Node
+  // subprocesses; use the same bounded allowance as the adjacent recovery cases.
   it("does not replace a sandbox artifact when its independent validation allowance is absent", async () => {
     const f = await providerSupervisorFixture("daytona-burst", { nativeStack: true });
     fixtures.push(f);
@@ -169,7 +171,7 @@ describe("Supervisor collected artifact durability", () => {
     expect(f.activity.some((entry) => entry.operation === "validate" && entry.workItem === 9)).toBe(
       false,
     );
-  });
+  }, 15_000);
 
   it("rejects conflicting terminal usage rather than relaunching or charging a new attempt", async () => {
     const f = await providerSupervisorFixture("daytona-burst", { localOnly: true });

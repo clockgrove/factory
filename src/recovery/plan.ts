@@ -109,6 +109,7 @@ const sourceSchema = z
         planDigest: digest,
         integrationReceiptDigest: digest,
         deliveryHeadSha: sha.optional(),
+        outputTreeSha: sha.optional(),
       })
       .strict()
       .optional(),
@@ -471,7 +472,8 @@ export function parseRecoveryPlan(input: unknown): RecoveryPlan {
           observed.baseRef === publication.baseBranch &&
           observed.headRepository?.toLowerCase() === publication.headRepository.toLowerCase() &&
           observed.treeSha ===
-            (source!.siblingRefresh?.outputTreeSha ?? source!.validation!.outputTreeSha),
+            (source!.priorDelivery?.outputTreeSha ??
+              source!.siblingRefresh?.outputTreeSha ?? source!.validation!.outputTreeSha),
         "publication reuse needs unchanged validated PR identities",
       );
     }

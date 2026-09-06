@@ -151,6 +151,7 @@ export async function verifyPriorRecoveryDelivery(input: {
   requireOutcome(
     proof.status === "verified" && reference.deliveryHeadSha === proof.outcome.deliveryHeadSha,
   );
+  requireOutcome(reference.outputTreeSha === undefined || reference.outputTreeSha === proof.outputTreeSha);
   const pull = await store.readPullRequest(publication.pullRequest);
   requireOutcome(
     pull.merged &&

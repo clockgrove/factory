@@ -2,11 +2,11 @@ import { execFileSync } from "node:child_process";
 import { mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { materializePinnedCompilationTree } from "../src/execution/pinned-compilation-tree.js";
 
 const cleanup: Array<() => Promise<void>> = [];
-afterEach(async () => { for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
+afterEach(async () => { vi.unstubAllEnvs(); for (const dispose of cleanup.splice(0).reverse()) await dispose(); });
 async function fixture() {
   const repository = await mkdtemp(join(tmpdir(), "factory-pinned-test-"));
   cleanup.push(() => rm(repository, { recursive: true, force: true }));
@@ -20,6 +20,23 @@ async function fixture() {
 }
 
 describe("hook/filter-free exact compilation trees", () => {
+  it("strips inherited Git configuration injection and materializes a mixed-size batch", async () => {
+    const f = await fixture();
+    await Promise.all(Array.from({ length: 64 }, (_, index) => writeFile(join(f.repository, `batch-${index}.txt`), "x".repeat(index))));
+    f.git("add", "."); f.git("commit", "-qm", "batch");
+    const base = f.git("rev-parse", "HEAD");
+    vi.stubEnv("GIT_DIR", "/does-not-exist");
+    vi.stubEnv("GIT_CONFIG_PARAMETERS", "invalid inherited configuration");
+    vi.stubEnv("GIT_CONFIG_COUNT", "1");
+    vi.stubEnv("GIT_CONFIG_KEY_0", "core.repositoryformatversion");
+    vi.stubEnv("GIT_CONFIG_VALUE_0", "9999");
+    vi.stubEnv("GIT_NO_LAZY_FETCH", "0");
+    const pinned = await materializePinnedCompilationTree(f.repository, base);
+    cleanup.push(pinned.dispose);
+    expect(pinned.files).toHaveLength(65);
+    expect(await readFile(join(pinned.path, "batch-0.txt"), "utf8")).toBe("");
+    expect(await readFile(join(pinned.path, "batch-63.txt"), "utf8")).toBe("x".repeat(63));
+  });
   it("pins files, index and HEAD independently of dirty or advancing shared trunk", async () => {
     const f = await fixture();
     await writeFile(join(f.repository, "input.txt"), "next\n");

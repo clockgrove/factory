@@ -326,7 +326,7 @@ export async function schedulingRequest(hooks, route, parameters = {}, signal, t
   return await hooks.request(route, { ...parameters, request: { signal: bounded } });
 }
 
-async function snapshot(hooks) {
+export async function schedulingSnapshot(hooks) {
   const objective = hooks.evidence.objective.number;
   const children = (
     await schedulingRequest(
@@ -368,6 +368,9 @@ async function snapshot(hooks) {
     status,
   };
 }
+
+// Shared read-only observer; the original scenario retains its existing behavior.
+const snapshot = schedulingSnapshot;
 
 async function repositoryLease(hooks) {
   const ref = (

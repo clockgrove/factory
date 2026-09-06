@@ -168,7 +168,16 @@
           "maxItems": 64,
           "items": { "type": "string", "minLength": 1, "maxLength": 200 }
         },
-        "queuedSince": { "type": "string", "format": "date-time" }
+        "queuedSince": { "type": "string", "format": "date-time" },
+        "previousQueueObservation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code"],
+          "properties": {
+            "code": { "anyOf": [{ "$ref": "#/definitions/queued/properties/code" }, { "type": "null" }] },
+            "gate": { "$ref": "#/definitions/queued/properties/gate" }
+          }
+        }
       }
     },
     "reservation": {
@@ -250,9 +259,9 @@
       "properties": {
         "measuredAt": { "type": "string", "format": "date-time" },
         "logicalCpu": { "type": "number", "minimum": 1 },
-        "effectiveCpu": { "type": "number", "minimum": 1 },
+        "effectiveCpu": { "type": "number", "exclusiveMinimum": 0 },
         "loadRatio": { "$ref": "#/definitions/nonNegativeNumber" },
-        "totalMemoryMb": { "type": "number", "minimum": 1 },
+        "totalMemoryMb": { "type": "number", "minimum": 0 },
         "availableMemoryMb": { "$ref": "#/definitions/nonNegativeNumber" },
         "memoryUsageRatio": { "type": "number", "minimum": 0, "maximum": 1 },
         "source": { "enum": ["cgroup-v2", "cgroup-v1", "host"] }
@@ -427,6 +436,7 @@
             "budget-exhausted",
             "burst-disabled",
             "burst-trigger-pending",
+            "burst-time-saved",
             "burst-priority",
             "path-conflict",
             "exclusive-resource-conflict"
@@ -450,6 +460,7 @@
         "prioritySource": { "$ref": "#/definitions/prioritySource" },
         "queuedSince": { "type": "string", "format": "date-time" },
         "recordQueueStart": { "type": "boolean" },
+        "recordQueueReasonChange": { "const": true },
         "permanent": { "type": "boolean" }
       }
     },

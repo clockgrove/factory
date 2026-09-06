@@ -11,6 +11,7 @@ import {
 } from "../control/receipts.js";
 import { buildExplanationReport } from "./explain.js";
 import { buildReplayReport } from "./replay.js";
+import { parseSuppliedReplaySnapshots } from "../replay/supplied.js";
 import { buildStatusReport, type FactoryReadSnapshot } from "./status.js";
 import type { RecoveryAssessment } from "../recovery/assessment.js";
 import type {
@@ -158,7 +159,16 @@ export class FactoryApplicationService {
     return this.context.recovery.request(input);
   }
 
-  async inspect(operation: ReadOperation, objective: number, workItem?: number): Promise<unknown> {
+  async inspect(
+    operation: ReadOperation,
+    objective: number,
+    workItem?: number,
+    suppliedSnapshots?: unknown,
+  ): Promise<unknown> {
+    if (suppliedSnapshots !== undefined && operation !== "replay") {
+      throw new Error("Supplied admission snapshots are accepted only by replay inspection.");
+    }
+    const pinnedAdmissionSnapshots = parseSuppliedReplaySnapshots(suppliedSnapshots, objective);
     if (operation === "doctor") return this.doctor(objective);
     if (operation === "plan") return this.plan({ objective });
     if (operation === "recovery-plan") {
@@ -184,7 +194,11 @@ export class FactoryApplicationService {
       return buildExplanationReport({ repository, snapshot, ...(workItem ? { workItem } : {}) });
     }
     if (operation === "replay") {
-      return buildReplayReport({ repository, snapshot });
+      return buildReplayReport({
+        repository,
+        snapshot,
+        ...(pinnedAdmissionSnapshots === undefined ? {} : { pinnedAdmissionSnapshots }),
+      });
     }
     return {
       operation,
@@ -225,8 +239,8 @@ export class FactoryApplicationService {
   explain(objective: number, workItem?: number) {
     return this.inspect("explain", objective, workItem);
   }
-  replay(objective: number) {
-    return this.inspect("replay", objective);
+  replay(objective: number, pinnedAdmissionSnapshots?: unknown) {
+    return this.inspect("replay", objective, undefined, pinnedAdmissionSnapshots);
   }
 
   async activate(input: {

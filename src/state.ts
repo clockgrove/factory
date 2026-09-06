@@ -9,6 +9,7 @@
  * it is why the state machine can be tested exhaustively without a network.
  */
 
+import type { FactoryEvent } from "./protocol/events.js";
 import {
   COPILOT_ASSIGNEE_LOGIN,
   INITIAL_PLAN_COMMIT,
@@ -499,37 +500,39 @@ export function ready(o: DerivedObjective): DerivedWorkItem[] {
   );
 }
 
-/** GitHub-server timestamp for the current durable ready-but-queued episode. */
-export function queuedSince(item: DerivedWorkItem, runId: string): string | undefined {
+/** First wait timestamp and latest observation, reconstructed from one ready episode. */
+export function queuedState(item: DerivedWorkItem, runId: string): {
+  since: string;
+  latest: Extract<FactoryEvent, { kind: "scheduling" }>;
+} | undefined {
   const events = (item.factoryEvents ?? [])
     .filter((event) => event.runId === runId && "workItem" in event)
     .sort((left, right) => left.sequence - right.sequence);
   const latestAdmission = [...events]
     .reverse()
     .find((event) => event.kind === "attempt" && event.event === "AttemptReserved");
-  const queued = [...events]
-    .reverse()
-    .find(
-      (event) =>
+  const queued = events.filter(
+      (event): event is Extract<FactoryEvent, { kind: "scheduling" }> =>
         event.kind === "scheduling" &&
         event.event === "WorkItemQueued" &&
-        (!latestAdmission || event.sequence > latestAdmission.sequence),
+        (!latestAdmission || event.sequence > latestAdmission.sequence) &&
+        !item.blockedBy.some(
+          (dependency) =>
+            dependency.closed &&
+            dependency.updatedAt !== undefined &&
+            dependency.updatedAt.getTime() > new Date(event.at).getTime(),
+        ),
     );
-  if (
-    queued &&
-    item.blockedBy.some(
-      (dependency) =>
-        dependency.closed &&
-        dependency.updatedAt !== undefined &&
-        dependency.updatedAt.getTime() > new Date(queued.at).getTime(),
-    )
-  ) {
-    // A dependency changed after the queue receipt. Conservatively treat this
-    // as a new ready episode: a reopen/reclose must never inherit an old delay
-    // and become immediately eligible for paid burst after restart.
-    return undefined;
-  }
-  return queued?.at;
+  // A dependency reopen/reclose invalidates earlier waiting age. Within the new
+  // episode, reason changes must never reset the original fairness/burst clock.
+  const first = queued[0];
+  const latest = queued.at(-1);
+  return first && latest ? { since: first.at, latest } : undefined;
+}
+
+/** GitHub-server timestamp for the current durable ready-but-queued episode. */
+export function queuedSince(item: DerivedWorkItem, runId: string): string | undefined {
+  return queuedState(item, runId)?.since;
 }
 
 /** Every Work Item is done, so the Objective itself can close (§4). */

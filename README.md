@@ -118,7 +118,15 @@ The Director skill uses bounded, read-only operations when the user is inspectin
 - `factory_explain` returns stable reason codes, policy gates, observed evidence, and the concrete
   action needed to unblock waiting or escalated work.
 - `factory_replay` reconstructs durable scheduling receipts and can replay a credential-free pinned
-  admission snapshot without writing GitHub or launching a worker.
+  admission snapshot without writing GitHub or launching a worker. Supply an optional
+  `pinnedAdmissionSnapshots` array, or use `factory replay OWNER/REPO#NUMBER --snapshots FILE`
+  with a JSON array in an explicitly named regular file (symlinks are rejected).
+  The [collection schema](schemas/replay-snapshots.schema.json) limits input to 8 snapshots,
+  1 MiB of UTF-8 JSON, depth 32 and 100,000 JSON values; every snapshot must match the requested
+  Objective and pass its policy/snapshot digest checks. Results distinguish authenticated receipt
+  reconstruction from recomputation of caller-supplied hypothetical inputs. A reproduced simulation
+  does not authenticate its inputs as historical facts or grant execution authority. Omitting the
+  array/file retains receipt-only inspection; Factory does not capture or invent missing snapshots.
 - `factory_recovery_plan` inspects historical work, graph/PR evidence, and cumulative recorded usage
   after escalation. Its CLI equivalent is `factory recovery-plan OWNER/REPO#NUMBER`. It neither
   authorizes execution nor resets budgets.

@@ -41,6 +41,7 @@ export interface ProviderFaults {
   controllerActivation?: boolean;
   afterIntegration?: () => void;
   localOnly?: boolean;
+  adaptiveLocal?: boolean;
   localMaxParallel?: 2;
   loseIntegrationReceipt?: "before" | "after";
   unavailable?: boolean;
@@ -118,7 +119,7 @@ export async function providerSupervisorFixture(
     },
     capacity: {
       ...DEFAULT_RUN_POLICY.capacity,
-      mode: "fixed",
+      mode: faults.adaptiveLocal ? "adaptive-local" : "fixed",
       local: {
         ...DEFAULT_RUN_POLICY.capacity!.local,
         maxWorkers: faults.localOnly ? (faults.localMaxParallel ?? 1) : 1,

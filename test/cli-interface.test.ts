@@ -21,6 +21,7 @@ describe("packaged CLI interface", () => {
     expect(result.stdout).toContain("factory recovery-plan OWNER/REPO#NUMBER");
     expect(result.stdout).toContain("factory recovery-propose OWNER/REPO#NUMBER");
     expect(result.stdout).toContain("factory recovery-request OWNER/REPO#NUMBER");
+    expect(result.stdout).toContain("factory replay OWNER/REPO#NUMBER [--snapshots FILE]");
   });
 
   it.each(versionArguments)("prints the package version for %j", (args: string[]) => {

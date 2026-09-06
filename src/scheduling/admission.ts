@@ -52,6 +52,12 @@ export type SchedulingGate =
   | "validation"
   | "economic";
 
+/** Last authenticated stable observation in the current waiting episode. */
+export interface PreviousQueueObservation {
+  code: QueuedReasonCode | null;
+  gate?: SchedulingGate;
+}
+
 export interface AdmissionWorkItem {
   priority: RankedWorkItem;
   requirements: ExecutionRequirements;
@@ -65,6 +71,7 @@ export interface AdmissionWorkItem {
   paths: readonly string[];
   exclusiveResources: readonly string[];
   queuedSince?: string;
+  previousQueueObservation?: PreviousQueueObservation;
 }
 
 export interface AdmissionProposal {
@@ -115,6 +122,8 @@ export interface QueuedDecision {
   prioritySource: RankedWorkItem["source"];
   queuedSince?: string;
   recordQueueStart: boolean;
+  /** A new observation, not a new waiting episode. Absent for legacy replay inputs. */
+  recordQueueReasonChange?: true;
   permanent: boolean;
 }
 
@@ -205,6 +214,13 @@ function queue(
     prioritySource: item.priority.source,
     ...(item.queuedSince ? { queuedSince: item.queuedSince } : {}),
     recordQueueStart: item.queuedSince === undefined,
+    ...(item.queuedSince !== undefined &&
+    item.previousQueueObservation !== undefined &&
+    (item.previousQueueObservation.code !== code ||
+      (item.previousQueueObservation.gate !== undefined &&
+        item.previousQueueObservation.gate !== gate))
+      ? { recordQueueReasonChange: true as const }
+      : {}),
     permanent,
   };
 }

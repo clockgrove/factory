@@ -9,6 +9,7 @@ import {
   planAdmissions,
   type AdmissionInput,
   type AdmissionPlan,
+  type PreviousQueueObservation,
 } from "../scheduling/admission.js";
 import type { CapacitySnapshot } from "../scheduling/capacity-ledger.js";
 import type { ObservedPrioritySource } from "../scheduling/priority.js";
@@ -53,6 +54,7 @@ export interface PinnedAdmissionWorkItem {
   paths: readonly string[];
   exclusiveResources: readonly string[];
   queuedSince?: string;
+  previousQueueObservation?: PreviousQueueObservation;
 }
 
 /** Every non-wall-clock input consumed by the admission planner. */
@@ -243,14 +245,23 @@ function pinnedResource(value: ResourceSnapshot | null): ResourceSnapshot | null
   if (!Number.isFinite(Date.parse(value.measuredAt))) {
     throw new Error("resource measuredAt is not an ISO timestamp");
   }
+  const effectiveCpu = finite(value.effectiveCpu, "effective CPU");
+  const totalMemoryMb = finite(value.totalMemoryMb, "total memory");
+  const availableMemoryMb = finite(value.availableMemoryMb, "available memory");
+  const memoryUsageRatio = finite(value.memoryUsageRatio, "memory usage ratio");
+  if (effectiveCpu <= 0 || availableMemoryMb > totalMemoryMb || memoryUsageRatio > 1) {
+    throw new Error("resource CPU or memory bounds are inconsistent");
+  }
+  // CPU quotas may be fractional. Memory is reported in whole MiB, so a
+  // positive sub-MiB cgroup limit can round to zero without 100% pressure.
   return {
     measuredAt: value.measuredAt,
     logicalCpu: finite(value.logicalCpu, "logical CPU", 1),
-    effectiveCpu: finite(value.effectiveCpu, "effective CPU", 1),
+    effectiveCpu,
     loadRatio: finite(value.loadRatio, "load ratio"),
-    totalMemoryMb: finite(value.totalMemoryMb, "total memory", 1),
-    availableMemoryMb: finite(value.availableMemoryMb, "available memory"),
-    memoryUsageRatio: finite(value.memoryUsageRatio, "memory usage ratio"),
+    totalMemoryMb,
+    availableMemoryMb,
+    memoryUsageRatio,
     source: value.source,
   };
 }
@@ -304,6 +315,12 @@ export function normalizePinnedAdmissionInput(value: PinnedAdmissionInput): Pinn
       paths: [...item.paths],
       exclusiveResources: [...item.exclusiveResources],
       ...(item.queuedSince ? { queuedSince: item.queuedSince } : {}),
+      ...(item.previousQueueObservation === undefined ? {} : {
+        previousQueueObservation: {
+          code: item.previousQueueObservation.code,
+          ...(item.previousQueueObservation.gate === undefined ? {} : { gate: item.previousQueueObservation.gate }),
+        },
+      }),
     };
   });
   if (new Set(workItems.map((item) => item.number)).size !== workItems.length) {
@@ -382,6 +399,9 @@ function hydrate(input: PinnedAdmissionInput): AdmissionInput {
       paths: [...item.paths],
       exclusiveResources: [...item.exclusiveResources],
       ...(item.queuedSince ? { queuedSince: item.queuedSince } : {}),
+      ...(item.previousQueueObservation === undefined ? {} : {
+        previousQueueObservation: { ...item.previousQueueObservation },
+      }),
     })),
   };
 }

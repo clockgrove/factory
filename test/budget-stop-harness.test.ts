@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { parseRunPolicy, policyDigest as digestPolicy } from "../src/protocol/policy.js";
 import {
   assertBudgetStopCompletion,
   assessBudgetStopObservation,
@@ -19,7 +20,7 @@ import {
 const repository = "example/disposable";
 const namespace = "budget-negative-fixture";
 const actor = { id: 7, login: "operator" };
-const policyDigest = "c".repeat(64);
+const policyDigest = digestPolicy(parseRunPolicy(budgetStopPolicy()));
 type Event = Record<string, unknown> & {
   event: string;
   kind: string;
@@ -75,6 +76,25 @@ function observation() {
         runId: "budget-run",
         attempts: { active: 0 },
         economics: {
+          modelTokenBreakdown: {
+            source: "model-token-reconciliations",
+            reconciledCalls: 1,
+            inputTokens: {
+              tokens: { availability: "observed", value: 14460 },
+              receiptsWithValue: 1,
+              receiptsWithoutValue: 0,
+            },
+            outputTokens: {
+              tokens: { availability: "observed", value: 1459 },
+              receiptsWithValue: 1,
+              receiptsWithoutValue: 0,
+            },
+            cachedInputTokens: {
+              tokens: { availability: "unavailable" },
+              receiptsWithValue: 0,
+              receiptsWithoutValue: 1,
+            },
+          },
           usage: { model_tokens: { availability: "observed", value: 15919 } },
           budgets: { modelTokens: { value: { configured: 1, committed: 15919 } } },
         },
@@ -221,6 +241,32 @@ describe("observed pre-projection terminal rather than queued/cancelled assumpti
     expect(() => assessBudgetStopObservation(input)).toThrow();
   });
   const changes: Array<[string, (v: ReturnType<typeof observation>) => void]> = [
+    [
+      "policy digest transplanted into both receipt and status",
+      (v) => {
+        v.receipts[0]!.event.policyDigest = "f".repeat(64);
+        v.status.run.policyDigest = "f".repeat(64);
+      },
+    ],
+    [
+      "status hiding another model call",
+      (v) => {
+        v.status.summary.economics.modelTokenBreakdown.reconciledCalls = 2;
+      },
+    ],
+    [
+      "status input counter differs from authenticated usage",
+      (v) => {
+        v.status.summary.economics.modelTokenBreakdown.inputTokens.tokens.value++;
+      },
+    ],
+    [
+      "missing cached input fabricated as observed zero",
+      (v) => {
+        v.status.summary.economics.modelTokenBreakdown.cachedInputTokens.tokens.availability =
+          "observed";
+      },
+    ],
     [
       "changed delivery",
       (v) => {
@@ -370,6 +416,18 @@ describe("observed pre-projection terminal rather than queued/cancelled assumpti
   it("deduplicates authenticated same-identity lost responses", () => {
     const input = observation();
     input.receipts.push(structuredClone(input.receipts[1]!));
+    expect(assessBudgetStopObservation(input).compilerTokens).toBe(15919);
+  });
+  it.each([0, 10000])("preserves reported cached input %i without adding it to usage", (cached) => {
+    const input = observation();
+    Object.assign(input.receipts[1]!.event.reportedModelUsage as object, {
+      cachedInputTokens: cached,
+    });
+    Object.assign(input.status.summary.economics.modelTokenBreakdown.cachedInputTokens, {
+      tokens: { availability: "observed", value: cached },
+      receiptsWithValue: 1,
+      receiptsWithoutValue: 0,
+    });
     expect(assessBudgetStopObservation(input).compilerTokens).toBe(15919);
   });
 });

@@ -1,6 +1,6 @@
 /** Prospective pre-projection refusal qualifier; never rewrites earlier exercises. */
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
@@ -21,6 +21,15 @@ import {
 } from "./verify-local-scheduling.mjs";
 
 const scope = "installed-local-pre-projection-budget-refusal";
+const canonical = (value) => {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value !== null && typeof value === "object")
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`)
+      .join(",")}}`;
+  return JSON.stringify(value);
+};
 export const budgetRefusalReason =
   "no execution backend satisfies policy and requirements: codex-sdk/local-worktree (model-token budget exhausted), codex-cli/local-worktree (model-token budget exhausted)";
 
@@ -105,6 +114,11 @@ export function assessBudgetStopObservation({ receipts, status, context }) {
   assert.equal(start.actor.toLowerCase(), context.actor.login.toLowerCase());
   assert.deepEqual(start.policy, budgetStopPolicy());
   assert.match(start.policyDigest, /^[a-f0-9]{64}$/);
+  assert.equal(
+    start.policyDigest,
+    createHash("sha256").update(canonical(start.policy)).digest("hex"),
+    "durable policy digest must bind the exact requested stop threshold",
+  );
   assert.equal(start.activationRequestId, undefined);
   assert.equal(start.recoveryRequestId, undefined);
   assert.ok(events.every((event) => event.runId === start.runId));
@@ -172,6 +186,19 @@ export function assessBudgetStopObservation({ receipts, status, context }) {
   assert.equal(economics.usage.model_tokens.value, compiler.amount);
   assert.equal(economics.budgets.modelTokens?.value?.configured, 1);
   assert.equal(economics.budgets.modelTokens.value.committed, compiler.amount);
+  // These are recorded-call subtotals, not an estimate of unreported provider use.
+  // Management receipts have no backend/epoch fields; do not invent those bindings.
+  const breakdown = economics.modelTokenBreakdown;
+  assert.equal(breakdown?.source, "model-token-reconciliations");
+  assert.equal(breakdown.reconciledCalls, 1);
+  for (const key of ["inputTokens", "outputTokens", "cachedInputTokens"]) {
+    const value = compiler.reportedModelUsage[key];
+    const subtotal = breakdown[key];
+    assert.equal(subtotal.receiptsWithValue, value === undefined ? 0 : 1);
+    assert.equal(subtotal.receiptsWithoutValue, value === undefined ? 1 : 0);
+    assert.equal(subtotal.tokens.availability, value === undefined ? "unavailable" : "observed");
+    assert.equal(subtotal.tokens.value, value);
+  }
   return {
     observationScope: "observed-pre-projection-budget-refusal",
     runId: start.runId,

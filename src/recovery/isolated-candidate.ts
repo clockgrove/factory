@@ -57,7 +57,63 @@ export function assertIsolatedCandidateProof(input: {
   requireAccounting?: boolean;
 }): void {
   const { candidate } = input;
-  const identity = candidate.identity;
+  const remote = input.events.some((event) => event.kind === "capacity" &&
+    event.runId === candidate.identity.runId && event.objective === candidate.identity.objective &&
+    event.workItem === candidate.identity.workItem && event.attempt === candidate.identity.attempt &&
+    event.backend === `factory/integration-sandbox-${mergeCandidateIdentityDigest(candidate.identity)}`);
+  if (!candidate.isolatedResource && !remote) return;
+  requireProof(candidate.isolatedResource);
+  assertResourceProof({ ...input, identity: candidate.identity,
+    artifactDigest: candidate.validation.artifactDigest, resource: candidate.isolatedResource });
+}
+
+/** A failed validation can discharge known compute, never authorize a candidate. */
+export function assertIsolatedCandidateFailureProof(input: {
+  repository: string;
+  sourceRunId: string;
+  identity: MergeCandidateIdentity;
+  events: readonly FactoryEvent[];
+  beforeSequence?: number;
+  requireAccounting?: boolean;
+}): void {
+  const { identity } = input;
+  const digest = mergeCandidateIdentityDigest(identity);
+  const events = input.events.filter((event) => event.runId === identity.runId &&
+    event.objective === identity.objective &&
+    (input.beforeSequence === undefined || event.sequence < input.beforeSequence));
+  const receipts = events.filter((event) => event.kind === "capacity" &&
+    event.event === "CapacityReconciled" && event.workItem === identity.workItem &&
+    event.attempt === identity.attempt && event.backend === `factory/integration-sandbox-${digest}`);
+  const receipt = receipts[0];
+  requireProof(receipts.length === 1 && receipt?.kind === "capacity" &&
+    receipt.isolatedValidation && receipt.isolatedFailure);
+  const failure = receipt.isolatedFailure;
+  const duration = Date.parse(failure.validationCompletedAt) - Date.parse(failure.validationStartedAt);
+  requireProof(Number.isSafeInteger(duration) && duration >= 0);
+  assertResourceProof({ ...input, artifactDigest: receipt.isolatedValidation.artifactDigest, failure,
+    resource: { backend: receipt.isolatedValidation.backend,
+      invocationOwnershipDigest: receipt.isolatedValidation.invocationOwnershipDigest,
+      startedAt: failure.startedAt, completedAt: failure.completedAt,
+      sandboxMilliseconds: failure.sandboxMilliseconds } });
+  const usage = events.filter((event) => event.kind === "budget" && event.event === "BudgetReconciled" &&
+    event.workItem === identity.workItem && event.attempt === undefined && event.phase === "validation" &&
+    event.unit === "validation_milliseconds" && event.usageId === `integration-validation-${digest}`);
+  requireProof(usage.every((event) => event.kind === "budget" && event.sequence > receipt.sequence && event.amount === duration));
+  if (input.requireAccounting !== false) requireProof(usage.length > 0);
+}
+
+function assertResourceProof(input: {
+  repository: string;
+  sourceRunId: string;
+  identity: MergeCandidateIdentity;
+  artifactDigest: string;
+  resource: NonNullable<MergeCandidateCheckpointRecord["isolatedResource"]>;
+  failure?: NonNullable<Extract<FactoryEvent, { kind: "capacity" }>["isolatedFailure"]>;
+  events: readonly FactoryEvent[];
+  beforeSequence?: number;
+  requireAccounting?: boolean;
+}): void {
+  const { identity, resource } = input;
   const digest = mergeCandidateIdentityDigest(identity);
   const events = input.events.filter((event) => event.runId === identity.runId &&
     event.objective === identity.objective &&
@@ -65,8 +121,6 @@ export function assertIsolatedCandidateProof(input: {
   const capacity = events.filter((event) => event.kind === "capacity" &&
     event.workItem === identity.workItem && event.attempt === identity.attempt &&
     event.backend === `factory/integration-sandbox-${digest}`);
-  if (!candidate.isolatedResource && !capacity.length) return;
-  const resource = candidate.isolatedResource;
   const reserves = capacity.filter((event) => event.event === "CapacityReserved");
   const reserved = reserves[0];
   requireProof(resource && reserves.length === 1 && reserved?.kind === "capacity" &&
@@ -90,7 +144,7 @@ export function assertIsolatedCandidateProof(input: {
     policyDigest: reserved.policyDigest,
     phase: "validation",
     validationInvocation: { kind: "integration-candidate", identityDigest: digest,
-      artifactDigest: candidate.validation.artifactDigest, baseSha: identity.targetBaseSha },
+      artifactDigest: input.artifactDigest, baseSha: identity.targetBaseSha },
   });
   requireProof(resource.invocationOwnershipDigest === ownership &&
     Number.isSafeInteger(resource.sandboxMilliseconds) && resource.sandboxMilliseconds >= 0 &&
@@ -99,7 +153,7 @@ export function assertIsolatedCandidateProof(input: {
     assertIsolatedCandidateReservation({ ...input, identity, reservation: reserved });
     const metadata = reserved.isolatedValidation;
     requireProof(metadata && metadata.backend === resource.backend &&
-      metadata.artifactDigest === candidate.validation.artifactDigest &&
+      metadata.artifactDigest === input.artifactDigest &&
       metadata.invocationOwnershipDigest === ownership);
   } else {
     // The original same-run protocol uses the original reservation's ownership
@@ -116,6 +170,7 @@ export function assertIsolatedCandidateProof(input: {
     event.targetBaseSha === reserved.targetBaseSha && event.policyDigest === reserved.policyDigest &&
     event.directorEpoch === reserved.directorEpoch && event.requestedCpu === reserved.requestedCpu &&
     event.requestedMemoryMb === reserved.requestedMemoryMb && !event.localScopeBatch &&
+    JSON.stringify(event.isolatedFailure) === JSON.stringify(input.failure) &&
     (!adopted || JSON.stringify(event.isolatedValidation) === JSON.stringify(reserved.isolatedValidation))));
   const budget = events.filter((event) => event.kind === "budget" &&
     event.workItem === identity.workItem && event.attempt === (adopted ? undefined : identity.attempt) &&

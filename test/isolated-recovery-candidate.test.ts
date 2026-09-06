@@ -4,7 +4,7 @@ import { mergeCandidateIdentityDigest, type MergeCandidateCheckpointRecord } fro
 import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
 import { bindMergeCandidateValidation } from "../src/publication/merge-candidate.js";
-import { assertIsolatedCandidateProof, assertIsolatedCandidateReservation } from "../src/recovery/isolated-candidate.js";
+import { assertIsolatedCandidateFailureProof, assertIsolatedCandidateProof, assertIsolatedCandidateReservation } from "../src/recovery/isolated-candidate.js";
 import { createValidationEvidence } from "../src/validation/evidence.js";
 import { bindValidationToPublishedHead } from "../src/validation/plan.js";
 
@@ -128,5 +128,46 @@ describe("isolated adopted candidate proof", () => {
     const f = fixture();
     delete f.candidate.isolatedResource;
     expect(() => assertIsolatedCandidateProof({ ...f, events: [] })).not.toThrow();
+  });
+
+  it("proves failed cleanup separately, repairs missing usage, and never calls it successful", () => {
+    const f = fixture();
+    const receipt = f.events.find((event) => event.event === "CapacityReconciled")!;
+    if (receipt.kind !== "capacity") throw new Error("fixture capacity");
+    receipt.isolatedFailure = { validationDigest: digest("b"),
+      validationStartedAt: f.candidate.validation.startedAt,
+      validationCompletedAt: f.candidate.validation.completedAt,
+      startedAt: f.candidate.isolatedResource!.startedAt,
+      completedAt: f.candidate.isolatedResource!.completedAt, sandboxMilliseconds: 1000 };
+    const proof = { ...f, identity: f.candidate.identity };
+    expect(() => assertIsolatedCandidateFailureProof({ ...proof,
+      events: f.events.filter((event) => event.event !== "BudgetReconciled"), requireAccounting: false })).not.toThrow();
+    expect(() => assertIsolatedCandidateFailureProof({ ...proof, requireAccounting: false })).not.toThrow();
+    expect(() => assertIsolatedCandidateFailureProof(proof)).toThrow(/proof unavailable/);
+    expect(() => assertIsolatedCandidateProof(f)).toThrow(/proof unavailable/);
+    f.events.push(parseFactoryEvent({ protocol: "clockgrove.factory/v2", kind: "budget",
+      event: "BudgetReconciled", objective: 7, runId: "successor", workItem: 8, sequence: 6,
+      at: "2026-09-06T00:00:04.000Z", phase: "validation", unit: "validation_milliseconds",
+      amount: 10, usageId: `integration-validation-${mergeCandidateIdentityDigest(f.candidate.identity)}` }));
+    expect(() => assertIsolatedCandidateFailureProof(proof)).not.toThrow();
+    const usage = f.events.at(-1)!;
+    if (usage.kind !== "budget") throw new Error("fixture budget");
+    usage.amount = 0;
+    expect(() => assertIsolatedCandidateFailureProof({ ...proof, requireAccounting: false })).toThrow(/proof unavailable/);
+  });
+
+  it("refuses unknown or conflicting failure completion instead of manufacturing zero usage", () => {
+    const f = fixture();
+    const proof = { ...f, identity: f.candidate.identity, requireAccounting: false };
+    expect(() => assertIsolatedCandidateFailureProof(proof)).toThrow(/proof unavailable/);
+    const receipt = f.events.find((event) => event.event === "CapacityReconciled")!;
+    if (receipt.kind !== "capacity") throw new Error("fixture capacity");
+    receipt.isolatedFailure = { validationDigest: digest("b"), validationStartedAt: "2026-09-06T00:00:03Z",
+      validationCompletedAt: "2026-09-06T00:00:02Z", startedAt: "2026-09-06T00:00:02Z",
+      completedAt: "2026-09-06T00:00:03Z", sandboxMilliseconds: 1000 };
+    expect(() => assertIsolatedCandidateFailureProof(proof)).toThrow(/proof unavailable/);
+    receipt.isolatedFailure.validationCompletedAt = "2026-09-06T00:00:04Z";
+    receipt.isolatedFailure.sandboxMilliseconds = 0;
+    expect(() => assertIsolatedCandidateFailureProof(proof)).toThrow(/proof unavailable/);
   });
 });

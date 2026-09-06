@@ -8,7 +8,7 @@ import {
 import { loadReviewCheckpoint } from "../control/reviews.js";
 import { bindValidationToPublishedHead } from "../validation/plan.js";
 import { observeRecoverySiblingRefresh } from "./sibling-refresh.js";
-import { assertIsolatedCandidateProof, assertIsolatedCandidateReservation } from "./isolated-candidate.js";
+import { assertIsolatedCandidateFailureProof, assertIsolatedCandidateProof, assertIsolatedCandidateReservation } from "./isolated-candidate.js";
 import { deriveBudgetUsage, remainingBudget, type BudgetUsage } from "../control/budget.js";
 import {
   loadCompiledGraph,
@@ -518,12 +518,15 @@ export async function loadRecoveryRuntime(input: {
           "source-capacity-reconciliation-mismatch",
         );
         const completed = await loadMergeCandidateCheckpoint(input.store, candidateIdentity);
-        requireRuntime(
-          completed,
-          "source-capacity-completion-unavailable",
-        );
-        assertIsolatedCandidateProof({ repository: plan.repository, sourceRunId: source.runId,
-          candidate: completed, events, requireAccounting: false });
+        if (event.isolatedFailure) {
+          requireRuntime(remote && !completed, "source-capacity-failure-conflicts-with-candidate");
+          assertIsolatedCandidateFailureProof({ repository: plan.repository, sourceRunId: source.runId,
+            identity: candidateIdentity, events, requireAccounting: false });
+        } else {
+          requireRuntime(completed, "source-capacity-completion-unavailable");
+          assertIsolatedCandidateProof({ repository: plan.repository, sourceRunId: source.runId,
+            candidate: completed, events, requireAccounting: false });
+        }
       }
       sourceCapacity.add(event);
     }

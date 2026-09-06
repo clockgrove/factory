@@ -20,6 +20,15 @@ async function fixture() {
 }
 
 describe("hook/filter-free exact compilation trees", () => {
+  it("accepts immediate index-bound patch application without an incidental status refresh", async () => {
+    const f = await fixture();
+    const pinned = await materializePinnedCompilationTree(f.repository, f.base);
+    cleanup.push(pinned.dispose);
+    const patch = "diff --git a/input.txt b/input.txt\n--- a/input.txt\n+++ b/input.txt\n@@ -1 +1 @@\n-original\n+changed\n";
+    execFileSync("git", ["apply", "--index", "--binary", "-"], { cwd: pinned.path, input: patch });
+    expect(await readFile(join(pinned.path, "input.txt"), "utf8")).toBe("changed\n");
+    expect(execFileSync("git", ["show", ":input.txt"], { cwd: pinned.path, encoding: "utf8" })).toBe("changed\n");
+  });
   it("strips inherited Git configuration injection and materializes a mixed-size batch", async () => {
     const f = await fixture();
     await Promise.all(Array.from({ length: 64 }, (_, index) => writeFile(join(f.repository, `batch-${index}.txt`), "x".repeat(index))));
@@ -65,6 +74,7 @@ describe("hook/filter-free exact compilation trees", () => {
     await writeFile(join(f.repository, ".gitattributes"), "*.bin filter=unsafe\n");
     f.git("add", "."); f.git("commit", "-qm", "binary");
     f.git("config", "filter.unsafe.smudge", "sh -c 'touch FILTER_RAN; exit 1'");
+    f.git("config", "filter.unsafe.clean", "sh -c 'touch CLEAN_FILTER_RAN; exit 1'");
     f.git("config", "filter.unsafe.required", "true");
     await writeFile(join(f.repository, ".git", "hooks", "post-checkout"), "#!/bin/sh\ntouch HOOK_RAN\nexit 1\n", { mode: 0o700 });
     const pinned = await materializePinnedCompilationTree(f.repository, f.git("rev-parse", "HEAD"));
@@ -72,6 +82,7 @@ describe("hook/filter-free exact compilation trees", () => {
     expect(await readFile(join(pinned.path, "asset.bin"))).toEqual(bytes);
     await expect(stat(join(f.repository, "HOOK_RAN"))).rejects.toMatchObject({ code: "ENOENT" });
     await expect(stat(join(pinned.path, "FILTER_RAN"))).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(stat(join(pinned.path, "CLEAN_FILTER_RAN"))).rejects.toMatchObject({ code: "ENOENT" });
     await expect(stat(join(pinned.path, ".git", "hooks", "post-checkout"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 

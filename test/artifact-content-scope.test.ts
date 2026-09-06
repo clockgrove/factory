@@ -13,6 +13,10 @@ import {
 } from "../src/execution/artifact-content-scope.js";
 import { normalizeArtifact, payloadPatchMarker } from "../src/execution/artifacts.js";
 
+vi.mock("node:fs/promises", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs/promises")>()),
+}));
+
 const roots: string[] = [];
 afterEach(async () => {
   vi.restoreAllMocks();

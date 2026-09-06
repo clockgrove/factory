@@ -44,7 +44,7 @@ export async function materializePinnedCompilationTree(repository: string, baseS
   const objectsToRead = entries.map((entry) => {
     const match = /^(100644|100755) blob ([a-f0-9]{40}) +([0-9]+)\t(.+)$/.exec(entry);
     if (!match) throw new Error("pinned compilation tree contains an unsupported path or Git entry mode");
-    const [, mode, oid, rawSize, path] = match as [string, string, string, string, string];
+    const mode = match[1]!, oid = match[2]!, rawSize = match[3]!, path = match[4]!;
     if (path.includes("\\") || path.split("/").some((part) => !part || part === "." || part === ".." || part.toLowerCase() === ".git") || /[\u0000-\u001f\u007f]/.test(path))
       throw new Error("pinned compilation tree path is unsafe");
     const size = Number(rawSize);
@@ -86,6 +86,10 @@ export async function materializePinnedCompilationTree(repository: string, baseS
     if (/[\r\n]/.test(objects)) throw new Error("unsafe compilation object-store path");
     await writeFile(join(checkout, ".git", "objects", "info", "alternates"), `${objects}\n`, { flag: "wx", mode: 0o600 });
     await git(checkout, ["read-tree", baseSha]);
+    // read-tree does not populate worktree stat data. Refresh in this new
+    // hook/filter-free configuration before hydration so immediate --index
+    // application recognizes the exact raw files without a prior `git status`.
+    await git(checkout, ["update-index", "--refresh"]);
     await git(checkout, ["update-ref", "--no-deref", "HEAD", baseSha]);
     return { path: checkout, root, files: files.sort(), baseSha, dispose: () => rm(root, { recursive: true, force: true }) };
   } catch (error) {

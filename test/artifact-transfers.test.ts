@@ -20,6 +20,12 @@ import {
 import { normalizeArtifact, payloadPatchMarker } from "../src/execution/artifacts.js";
 import type { GitCommitObject } from "../src/control/lease.js";
 
+// Copy the real module into a configurable test namespace: native ESM exports
+// cannot be spied on. All un-intercepted filesystem operations remain real.
+vi.mock("node:fs/promises", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("node:fs/promises")>()),
+}));
+
 const roots: string[] = [];
 afterEach(async () => {
   vi.restoreAllMocks();

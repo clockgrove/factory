@@ -72,6 +72,9 @@ export interface ArtifactTransferStore {
 }
 const gitBlobOid = (bytes: Buffer) =>
   createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+// Transfer descriptors additionally bind Git's OID. Pass only the exact content
+// contract across the strict local-CAS boundary; do not relax that schema.
+const contentChunk = ({ digest, bytes }: { digest: string; bytes: number }) => ({ digest, bytes });
 const canonicalIdentity = (input: ArtifactTransferIdentity) =>
   IdentitySchema.parse({ ...input, repository: input.repository.toLowerCase() });
 export const artifactTransferRef = (input: ArtifactTransferIdentity) =>
@@ -224,7 +227,7 @@ async function retainLocalDescriptorLocked(descriptor: Descriptor): Promise<void
   for (const chunk of [
     ...new Map(descriptor.chunks.map((chunk) => [chunk.digest, chunk])).values(),
   ]) {
-    const data = await readContentChunk(chunk);
+    const data = await readContentChunk(contentChunk(chunk));
     const path = join(root, chunk.digest);
     try {
       const file = await open(path, "wx", 0o600);
@@ -286,7 +289,7 @@ async function readLocalDescriptor(identity: ArtifactTransferIdentity): Promise<
     const info = await lstat(path);
     if (!info.isFile() || info.isSymbolicLink() || info.size !== chunk.bytes)
       throw new ArtifactTransferIncompleteError(artifactTransferRef(identity));
-    await restoreContentChunk(chunk, await boundedPrivateRead(path, chunk.bytes));
+    await restoreContentChunk(contentChunk(chunk), await boundedPrivateRead(path, chunk.bytes));
   }
   return descriptor;
 }
@@ -387,7 +390,7 @@ export async function recoverArtifactTransfer(args: {
     if (oid !== chunk.oid) throw new Error("retained chunk tree identity mismatch");
     const bytes = await args.store.readBlob(oid);
     if (gitBlobOid(bytes) !== oid) throw new Error("retained Git blob identity mismatch");
-    await restoreContentChunk(chunk, bytes);
+    await restoreContentChunk(contentChunk(chunk), bytes);
   }
   if (ready.descriptor.artifact.payload) await verifyPayload(ready.descriptor.artifact.payload);
   return ready.descriptor.artifact;
@@ -420,7 +423,7 @@ export async function resumeArtifactTransfer(args: {
     throw new Error("local retained artifact differs from durable intent");
   for (const chunk of intent.descriptor.chunks) {
     try {
-      await readContentChunk(chunk);
+      await readContentChunk(contentChunk(chunk));
       continue;
     } catch {
       /* An exact remote chunk may survive response loss. */
@@ -435,7 +438,7 @@ export async function resumeArtifactTransfer(args: {
     }
     if (gitBlobOid(bytes) !== chunk.oid)
       throw new Error("resumed artifact chunk Git identity mismatch");
-    await restoreContentChunk(chunk, bytes);
+    await restoreContentChunk(contentChunk(chunk), bytes);
   }
   await persistArtifactTransfer({ ...args, artifact: intent.descriptor.artifact });
   return recoverArtifactTransfer(args);
@@ -524,7 +527,7 @@ export async function persistArtifactTransfer(args: {
   };
   const intent = await save("intent", []);
   for (const chunk of [...new Map(chunks.map((chunk) => [chunk.digest, chunk])).values()]) {
-    const data = await readContentChunk(chunk);
+    const data = await readContentChunk(contentChunk(chunk));
     const oid = await mutation(() => args.store.createBlob(data));
     if (oid !== chunk.oid) throw new Error("uploaded content chunk OID mismatch");
   }

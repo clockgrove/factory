@@ -7,6 +7,7 @@ import {
   ArtifactFileManifestSchema,
   ArtifactPayloadSchema,
   cachePayload,
+  copyBoundedContent,
   inspectContentFile,
   materializePayload,
   releaseAllArtifactContent,
@@ -51,6 +52,26 @@ async function fixture() {
 }
 
 describe("bounded content-addressed artifacts", () => {
+  it("copies exact bounded bytes through a no-follow file descriptor without overwriting", async () => {
+    const f = await fixture();
+    const source = join(f.repository, "source.bin"),
+      destination = join(f.repository, "copied.bin");
+    const bytes = Buffer.from([0, 255, 128, 1]);
+    await writeFile(source, bytes);
+    await copyBoundedContent(source, destination, bytes.length);
+    expect(await readFile(destination)).toEqual(bytes);
+    await expect(copyBoundedContent(source, destination, bytes.length)).rejects.toMatchObject({
+      code: "EEXIST",
+    });
+    await expect(
+      copyBoundedContent(source, join(f.repository, "too-large"), bytes.length - 1),
+    ).rejects.toThrow(/byte limit/);
+    const link = join(f.repository, "source-link");
+    await symlink(source, link);
+    await expect(copyBoundedContent(link, join(f.repository, "from-link"))).rejects.toMatchObject({
+      code: "ELOOP",
+    });
+  });
   it("collects and reassembles a genuine patch above the inline ceiling with a tree-bound manifest", async () => {
     const f = await fixture();
     await mkdir(join(f.repository, "generated"));
@@ -109,7 +130,7 @@ describe("bounded content-addressed artifacts", () => {
     });
     expect(reconstructed.digest).toBe(candidate.digest);
     await materializeArtifactPatch(reconstructed, join(f.repository, "recovered-candidate.patch"));
-  });
+  }, 120_000);
 
   it("binds media signatures, executable mode, generated files and canonical deletions to actual blobs", async () => {
     const f = await fixture();

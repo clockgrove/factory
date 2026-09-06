@@ -1006,6 +1006,9 @@ describe("Supervisor parallel independent sibling integration", () => {
           .mock.calls.every(([identity]) => identity.objective === 7),
       ).toBe(true);
     },
+    // Two real Git integrations plus peer proof exceeded 5 s in the concurrent suite.
+    // Keep every acceptance assertion and a bounded per-case deadline.
+    15000,
   );
 
   it.each(["foreignPeerGeneration", "missingPeerReview"] as const)(

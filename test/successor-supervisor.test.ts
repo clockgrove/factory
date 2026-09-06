@@ -30,6 +30,7 @@ import { ReviewCheckpointManager } from "../src/control/reviews.js";
 import {
   MergeCandidateCheckpointStore,
   mergeCandidateIdentityDigest,
+  type MergeCandidateIdentity,
 } from "../src/control/merge-candidates.js";
 import { createValidationEvidence } from "../src/validation/evidence.js";
 import { buildRecoveryProposal } from "../src/recovery/proposal.js";
@@ -42,7 +43,14 @@ import { loadRecoveryRuntime } from "../src/recovery/runtime.js";
 import { recoveryReadPort } from "../src/recovery/github-read-port.js";
 import { verifyRecoveryProposalResources } from "../src/recovery/resources.js";
 import { verifyPriorRecoveryDelivery } from "../src/recovery/outcomes.js";
-import { localExecutionScopeBatch, type AttemptContext } from "../src/execution/backend.js";
+import {
+  localExecutionScopeBatch,
+  type AttemptContext,
+  type ExecutionBackend,
+} from "../src/execution/backend.js";
+import { validationInvocationOwnership } from "../src/backends/validation-invocation.js";
+
+const validateFixtureTree = cleanValidation.validateArtifactClean;
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -83,6 +91,12 @@ async function fixture(
     staleRetainedBaseUntilRefresh?: boolean;
     providerOwnedRetainedBranch?: boolean;
     refreshedPreview?: "missing" | "old-parents";
+    noJoin?: boolean;
+    adoptedIsolatedValidation?: {
+      paid?: boolean;
+      available?: boolean;
+      fault?: "cleanup";
+    };
   } = {},
 ) {
   const repository = await mkdtemp(join(tmpdir(), "factory-successor-integration-"));
@@ -143,7 +157,17 @@ async function fixture(
       ...(options.isolatedWorker ? ["fixture/isolated-worker"] : []),
       "codex-sdk/local-worktree",
       ...(options.isolatedItem ? ["fixture/isolated-validator"] : []),
+      ...(options.adoptedIsolatedValidation ? ["codex-cli/daytona"] : []),
     ],
+    ...(options.adoptedIsolatedValidation
+      ? {
+          allowedPaidBackends:
+            options.adoptedIsolatedValidation.paid === false ? [] : ["codex-cli/daytona"],
+          cloudFallback: "explicit",
+          maxSandboxMinutes: 90,
+          workItemTimeoutMinutes: 2,
+        }
+      : {}),
     capacity: { ...DEFAULT_RUN_POLICY.capacity, mode: "fixed" },
     delivery: {
       mode: options.nativeSource ? "stacked-prs" : "regular-prs",
@@ -258,42 +282,44 @@ async function fixture(
   const leases = { assertCurrent: async () => {} } as unknown as LeaseManager;
   const graph: CompiledObjective = {
     title: "Parallel siblings",
-    workItems: ["a", "b", "c", "d"].slice(0, options.stackLength ?? 3).map((name, index) => ({
-      id: name,
-      title: name,
-      goal: `Add ${name}`,
-      acceptance: ["Tests pass"],
-      scope: [`${name}.txt`],
-      preconditions: [],
-      outOfScope: [],
-      conventions: [],
-      dependsOn: options.retainedPrefix
-        ? index
-          ? [["a", "b", "c"][index - 1]!]
-          : []
-        : name === "c"
-          ? ["a", "b"]
-          : [],
-      baseSha,
-      validationCommands: ["node --test"],
-      requirements: {
-        os: ["linux"],
-        architecture: [],
-        tools: ["node"],
-        services: [],
-        networkDestinations: [],
-        permittedSecretNames: [],
-        trust: options.isolatedItem === name ? "isolated" : "trusted_local",
-      },
-      artifactContract: "clockgrove.factory/artifact-v1",
-      delivery: options.retainedPrefix
-        ? {
-            group: "a",
-            relationship: index ? "continue-stack" : "root",
-            ...(index ? { parentWorkItem: ["a", "b", "c"][index - 1]! } : {}),
-          }
-        : { group: name, relationship: name === "c" ? "join-after-merge" : "root" },
-    })),
+    workItems: ["a", "b", "c", "d"]
+      .slice(0, options.noJoin ? 2 : (options.stackLength ?? 3))
+      .map((name, index) => ({
+        id: name,
+        title: name,
+        goal: `Add ${name}`,
+        acceptance: ["Tests pass"],
+        scope: [`${name}.txt`],
+        preconditions: [],
+        outOfScope: [],
+        conventions: [],
+        dependsOn: options.retainedPrefix
+          ? index
+            ? [["a", "b", "c"][index - 1]!]
+            : []
+          : name === "c"
+            ? ["a", "b"]
+            : [],
+        baseSha,
+        validationCommands: ["node --test"],
+        requirements: {
+          os: ["linux"],
+          architecture: [],
+          tools: ["node"],
+          services: [],
+          networkDestinations: [],
+          permittedSecretNames: [],
+          trust: options.isolatedItem === name ? "isolated" : "trusted_local",
+        },
+        artifactContract: "clockgrove.factory/artifact-v1",
+        delivery: options.retainedPrefix
+          ? {
+              group: "a",
+              relationship: index ? "continue-stack" : "root",
+              ...(index ? { parentWorkItem: ["a", "b", "c"][index - 1]! } : {}),
+            }
+          : { group: name, relationship: name === "c" ? "join-after-merge" : "root" },
+      })),
   };
   const graphManager = new CompiledGraphManager(storage, leases);
   const record = await graphManager.persist({
@@ -783,7 +809,47 @@ async function fixture(
     version: "2026-03-10",
     reason: "fixture observed native API",
   });
-  const backendRegistry = options.isolatedItem ? new BackendRegistry() : undefined;
+  const backendRegistry =
+    options.isolatedItem || options.adoptedIsolatedValidation ? new BackendRegistry() : undefined;
+  const isolatedResources = new Set<string>();
+  // Same deterministic provider simulation boundary as helpers/provider-supervisor.ts:
+  // owned local fixture Git substitutes for remote compute, never live provider proof.
+  const isolatedValidate = vi.fn<NonNullable<ExecutionBackend["validate"]>>(async (input) => {
+    const ownership = validationInvocationOwnership(input);
+    if (!ownership) throw new Error("fixture requires exact candidate invocation");
+    isolatedResources.add(ownership);
+    const result = await validateFixtureTree({
+      repository,
+      artifact: input.artifact,
+      packet: {
+        ...input.packet,
+        requirements: { ...input.packet.requirements, trust: "trusted_local" },
+      },
+    });
+    try {
+      return {
+        outputTreeSha: result.evidence.outputTreeSha,
+        commands: result.evidence.commands,
+        passed: result.evidence.passed,
+        startedAt: result.evidence.startedAt,
+        completedAt: result.evidence.completedAt,
+        environmentIdentity: `docker.io/library/node@sha256:${"a".repeat(64)}`,
+      };
+    } finally {
+      await cleanValidation.discardValidationResult(result);
+      if (options.adoptedIsolatedValidation?.fault === "cleanup") {
+        // biome-ignore lint/correctness/noUnsafeFinally: models the existing provider contract's cleanup refusal overriding successful commands
+        throw new Error(
+          "simulated isolated candidate termination is unknown; automated replacement is blocked",
+        );
+      }
+      isolatedResources.delete(ownership);
+    }
+  });
+  const isolatedReconcile = vi.fn<NonNullable<ExecutionBackend["reconcileStale"]>>(async () => {
+    if (isolatedResources.size)
+      throw new Error("simulated isolated candidate termination is still unknown");
+  });
   if (backendRegistry) {
     const local = new CodexSdkLocalBackend();
     backendRegistry.register(local);
@@ -812,6 +878,36 @@ async function fixture(
       cleanup: unused,
       validate: unused,
     });
+    if (options.adoptedIsolatedValidation)
+      backendRegistry.register({
+        capabilities: {
+          ...local.capabilities,
+          id: "codex-cli/daytona",
+          runtimeKind: "simulated-provider",
+          hostExecution: false,
+          isolation: "container",
+          requiresPaidRuntime: true,
+          reportsModelUsage: false,
+          requiredCredentials: [],
+        },
+        probe: async () => ({
+          available: options.adoptedIsolatedValidation?.available !== false,
+          authenticated: true,
+          measuredAt: now.toISOString(),
+        }),
+        probeValidation: async () => ({
+          available: options.adoptedIsolatedValidation?.available !== false,
+          authenticated: true,
+          measuredAt: now.toISOString(),
+        }),
+        launch: unused,
+        observe: unused,
+        cancel: unused,
+        collect: unused,
+        cleanup: unused,
+        validate: isolatedValidate,
+        reconcileStale: isolatedReconcile,
+      });
     if (options.isolatedWorker)
       backendRegistry.register({
         capabilities: {
@@ -873,6 +969,9 @@ async function fixture(
     commits,
     management,
     refresh,
+    isolatedValidate,
+    isolatedReconcile,
+    isolatedResources,
     get sequence() {
       return sequence;
     },
@@ -1060,7 +1159,7 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
     f.commits.get(f.refs.get(attemptRef(7, item.number, 1))!)!.message =
       encodeEventTrailer(reserved);
   }
-  if (!options.retainedPrefix)
+  if (!options.retainedPrefix && !options.noJoin)
     f.snapshot.workItems.push({
       id: "I_10",
       number: 10,
@@ -1668,6 +1767,313 @@ function interruptAfterIntegrationWait(f: Awaited<ReturnType<typeof successorFix
   return unavailable;
 }
 
+async function isolatedSuccessorFixture(
+  options: {
+    nativeSource?: boolean;
+    paid?: boolean;
+    available?: boolean;
+    fault?: "cleanup";
+    loseMergeResponse?: boolean;
+  } = {},
+) {
+  return successorFixture({
+    noJoin: true,
+    foregroundPredecessor: true,
+    staleRetainedBaseUntilRefresh: true,
+    isolatedItem: "b",
+    ...(options.nativeSource === undefined ? {} : { nativeSource: options.nativeSource }),
+    ...(options.loseMergeResponse === undefined
+      ? {}
+      : { loseMergeResponse: options.loseMergeResponse }),
+    adoptedIsolatedValidation: {
+      ...(options.paid === undefined ? {} : { paid: options.paid }),
+      ...(options.available === undefined ? {} : { available: options.available }),
+      ...(options.fault === undefined ? {} : { fault: options.fault }),
+    },
+  });
+}
+
+async function isolatedCandidate(f: Awaited<ReturnType<typeof isolatedSuccessorFixture>>) {
+  const refs = [...f.refs].filter(
+    ([ref]) => ref.includes("/merge-candidates/") && ref.includes("/work-item-9/"),
+  );
+  expect(refs).toHaveLength(1);
+  const document = JSON.parse(
+    f.git("show", `${refs[0]![1]}:.clockgrove-factory/control/merge-candidate.json`),
+  ) as { identity: MergeCandidateIdentity };
+  const candidate = await new MergeCandidateCheckpointStore(f.storage, f.leases).load(
+    document.identity,
+  );
+  if (!candidate?.isolatedResource) throw new Error("fixture isolated completion missing");
+  return candidate;
+}
+
+describe("Supervisor adopted isolated candidate validation", () => {
+  it.each([false, true])(
+    "validates a retained sibling in a distinct authorized sandbox, native=%s",
+    async (nativeSource) => {
+      const f = await isolatedSuccessorFixture({ nativeSource });
+      const originalSource = structuredClone(f.planRecord.plan.items[1]!.source);
+      expect(await f.run(), JSON.stringify(f.messages)).toMatchObject({
+        status: "completed",
+        runId: "successor",
+      });
+      expect(f.isolatedValidate).toHaveBeenCalledOnce();
+      expect(f.review).toHaveBeenCalledOnce();
+      expect(f.launch).not.toHaveBeenCalled();
+      expect(f.isolatedResources.size).toBe(0);
+      expect(f.refresh).toHaveBeenCalledOnce();
+      const input = f.isolatedValidate.mock.calls[0]![0];
+      const candidate = await isolatedCandidate(f);
+      expect(input).toMatchObject({
+        repository: "o/r",
+        objective: 7,
+        workItem: 9,
+        attempt: 1,
+        runId: "successor",
+        policyDigest: f.pd,
+        packet: { baseSha: f.planRecord.plan.expectedBaseSha, requirements: { trust: "isolated" } },
+        validationInvocation: {
+          kind: "integration-candidate",
+          identityDigest: mergeCandidateIdentityDigest(candidate.identity),
+          artifactDigest: candidate.validation.artifactDigest,
+          baseSha: candidate.identity.targetBaseSha,
+        },
+      });
+      expect(input.runId).not.toBe(originalSource!.runId);
+      expect(candidate.identity).toMatchObject({
+        sourceHeadSha: originalSource!.publication!.headSha,
+        deliveryHeadSha: f.refresh.mock.calls[0]![0].afterOid,
+      });
+      expect(candidate.isolatedResource).toMatchObject({
+        backend: "codex-cli/daytona",
+        invocationOwnershipDigest: validationInvocationOwnership(input),
+      });
+      expect(candidate.validation.environmentIdentity).toBe(
+        `docker.io/library/node@sha256:${"a".repeat(64)}`,
+      );
+      expect(f.validate.mock.calls.every(([call]) => Boolean(call.isolatedValidator))).toBe(true);
+      expect(f.planRecord.plan.items[1]!.source).toEqual(originalSource);
+      expect(
+        [
+          ...f.snapshot.factoryEvents!,
+          ...f.snapshot.workItems.flatMap((item) => item.factoryEvents!),
+        ].filter((entry) => entry.runId === "parallel"),
+      ).toEqual(f.original);
+      const events = f.snapshot.workItems[1]!.factoryEvents!;
+      const capacity = events.filter(
+        (entry) => entry.kind === "capacity" && entry.runId === "successor",
+      );
+      expect(capacity.map((entry) => entry.event)).toEqual([
+        "CapacityReserved",
+        "CapacityReconciled",
+      ]);
+      expect(capacity[0]).toMatchObject({
+        sourceRunId: "parallel",
+        attempt: 1,
+        directorEpoch: input.directorEpoch,
+        backend: `factory/integration-sandbox-${mergeCandidateIdentityDigest(candidate.identity)}`,
+        isolatedValidation: {
+          backend: "codex-cli/daytona",
+          artifactDigest: input.artifact.digest,
+          invocationOwnershipDigest: validationInvocationOwnership(input),
+        },
+      });
+      expect(capacity[0]).not.toHaveProperty("localScopeBatch");
+      const sandboxUsage = events.filter(
+        (entry) =>
+          entry.kind === "budget" &&
+          entry.unit === "sandbox_milliseconds" &&
+          entry.runId === "successor",
+      );
+      expect(sandboxUsage.map((entry) => entry.event)).toEqual([
+        "BudgetReserved",
+        "BudgetReconciled",
+      ]);
+      expect(sandboxUsage[1]).toMatchObject({
+        amount: candidate.isolatedResource!.sandboxMilliseconds,
+        usageId: `integration-validation-${mergeCandidateIdentityDigest(candidate.identity)}`,
+      });
+      for (const receipt of sandboxUsage) expect(receipt).not.toHaveProperty("attempt");
+      expect(
+        events.filter((entry) => entry.kind === "attempt" && entry.runId === "successor"),
+      ).toEqual([]);
+      expect(await f.runtime()).toMatchObject({
+        status: "verified",
+        usage: {
+          modelTokens: 45,
+          sandboxMinutesReserved: candidate.isolatedResource!.sandboxMilliseconds / 60_000,
+        },
+      });
+    },
+    30000,
+  );
+
+  it.each([
+    { paid: false, available: true },
+    { paid: true, available: false },
+  ])(
+    "refuses isolated successor admission before CAS with paid=$paid available=$available",
+    async (options) => {
+      const f = await isolatedSuccessorFixture(options);
+      expect(await f.run(), JSON.stringify(f.messages)).toMatchObject({
+        status: "escalated",
+        reason: expect.stringContaining(
+          options.paid
+            ? "independent Daytona adopted-candidate validator is unavailable or unauthorized"
+            : "adopted candidate requires original and successor authorization for independent Daytona validation",
+        ),
+      });
+      expect(f.refresh).not.toHaveBeenCalled();
+      expect(f.isolatedValidate).not.toHaveBeenCalled();
+      expect(f.validate).not.toHaveBeenCalled();
+      expect(f.review).not.toHaveBeenCalled();
+      expect(f.launch).not.toHaveBeenCalled();
+      expect(f.refs.get(`refs/heads/${publicationBranch(7, 9, 1)}`)).toBe(f.heads[1]);
+      expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
+      expect(f.isolatedResources.size).toBe(0);
+    },
+    30000,
+  );
+
+  it.each(["native-usage", "review-usage", "merge-response"] as const)(
+    "restarts after isolated %s loss without another resource, paid review, or charge",
+    async (point) => {
+      const f = await isolatedSuccessorFixture({ loseMergeResponse: point === "merge-response" });
+      const write = vi
+        .mocked(GitHubControlStore.prototype.addIssueComment)
+        .getMockImplementation()!;
+      let interrupted = false;
+      vi.mocked(GitHubControlStore.prototype.addIssueComment).mockImplementation(
+        async (node, body) => {
+          if (
+            !interrupted &&
+            point !== "merge-response" &&
+            decodeEventComments(body).some(
+              (entry) =>
+                entry.kind === "budget" &&
+                entry.runId === "successor" &&
+                entry.event === "BudgetReconciled" &&
+                entry.unit ===
+                  (point === "native-usage" ? "sandbox_milliseconds" : "model_tokens") &&
+                entry.usageId?.startsWith(
+                  point === "native-usage" ? "integration-validation-" : "integration-review-",
+                ),
+            )
+          ) {
+            interrupted = true;
+            throw new PlatformUnavailableError(
+              { kind: "server_error", retryAfterMs: 1 },
+              new Error("fixture lost isolated accounting write"),
+            );
+          }
+          return write(node, body);
+        },
+      );
+      await expect(f.run()).rejects.toThrow(PlatformUnavailableError);
+      const completed = await isolatedCandidate(f);
+      expect(f.isolatedValidate).toHaveBeenCalledOnce();
+      expect(f.isolatedResources.size).toBe(0);
+      expect(f.review).toHaveBeenCalledTimes(point === "native-usage" ? 0 : 1);
+      expect(f.launch).not.toHaveBeenCalled();
+      expect(await f.run(), JSON.stringify(f.messages)).toMatchObject({ status: "completed" });
+      expect(await isolatedCandidate(f)).toEqual(completed);
+      expect(f.isolatedValidate).toHaveBeenCalledOnce();
+      expect(f.review).toHaveBeenCalledOnce();
+      expect(f.refresh).toHaveBeenCalledOnce();
+      expect(f.launch).not.toHaveBeenCalled();
+      const events = f.snapshot.workItems[1]!.factoryEvents!;
+      expect(
+        events.filter(
+          (entry) =>
+            entry.kind === "budget" &&
+            entry.runId === "successor" &&
+            entry.event === "BudgetReconciled" &&
+            entry.unit === "sandbox_milliseconds",
+        ),
+      ).toEqual([
+        expect.objectContaining({ amount: completed.isolatedResource!.sandboxMilliseconds }),
+      ]);
+      expect(
+        events.filter(
+          (entry) =>
+            entry.kind === "budget" &&
+            entry.runId === "successor" &&
+            entry.event === "BudgetReconciled" &&
+            entry.unit === "model_tokens",
+        ),
+      ).toEqual([expect.objectContaining({ amount: 15 })]);
+      expect(await f.runtime()).toMatchObject({
+        status: "verified",
+        usage: {
+          modelTokens: 45,
+          sandboxMinutesReserved: completed.isolatedResource!.sandboxMilliseconds / 60_000,
+        },
+      });
+    },
+    30000,
+  );
+
+  it("retains unknown isolated termination and refuses a replacement candidate after restart", async () => {
+    const f = await isolatedSuccessorFixture({ fault: "cleanup" });
+    const first = await f.run().catch((error: unknown) => error);
+    expect(first).toBeInstanceOf(Error);
+    expect((first as Error).message).toMatch(/termination|completion|reconciliation|replacement/);
+    expect(f.isolatedValidate).toHaveBeenCalledOnce();
+    expect(f.isolatedResources.size).toBe(1);
+    expect([...f.refs.keys()].filter((ref) => ref.includes("/merge-candidates/"))).toEqual([]);
+    const restarted = await f.run().catch((error: unknown) => error);
+    expect(restarted).toBeInstanceOf(Error);
+    expect(f.isolatedValidate).toHaveBeenCalledOnce();
+    expect(f.isolatedReconcile).toHaveBeenCalled();
+    const input = f.isolatedValidate.mock.calls[0]![0];
+    const stale = f.isolatedReconcile.mock.calls.at(-1)![0];
+    expect(stale).toMatchObject({
+      repository: input.repository,
+      objective: input.objective,
+      runId: "successor",
+      workItem: 9,
+      attempt: 1,
+      directorEpoch: input.directorEpoch,
+      policyDigest: input.policyDigest,
+      phase: "validation",
+      validationInvocation: input.validationInvocation,
+    });
+    expect(validationInvocationOwnership(stale)).toBe(validationInvocationOwnership(input));
+    expect(Date.parse(stale.noHandleReplacementNotBefore!)).toBeGreaterThanOrEqual(
+      input.deadline.getTime() + 60_000,
+    );
+    expect(f.review).not.toHaveBeenCalled();
+    expect(f.launch).not.toHaveBeenCalled();
+    expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
+    const events = f.snapshot.workItems[1]!.factoryEvents!;
+    expect(
+      events
+        .filter((entry) => entry.kind === "capacity" && entry.runId === "successor")
+        .map((entry) => entry.event),
+    ).toEqual(["CapacityReserved"]);
+    expect(
+      events
+        .filter(
+          (entry) =>
+            entry.kind === "budget" &&
+            entry.runId === "successor" &&
+            entry.unit === "sandbox_milliseconds",
+        )
+        .map((entry) => entry.event),
+    ).toEqual(["BudgetReserved"]);
+    expect(
+      f.snapshot.factoryEvents!.filter(
+        (entry) =>
+          entry.runId === "successor" &&
+          ["FactoryRunCompleted", "FactoryRunEscalated", "FactoryRunCancelled"].includes(
+            entry.event,
+          ),
+      ),
+    ).toEqual([]);
+  }, 30000);
+});
+
 describe("Supervisor authenticated successor execution", () => {
   it("refreshes a retained ordinary foreground PR without relabelling its paid old-head candidate", async () => {
     const f = await successorFixture({
@@ -1816,7 +2222,9 @@ describe("Supervisor authenticated successor execution", () => {
     const originalHead = f.snapshot.workItems[1]!.linkedPullRequests[0]!.headSha;
     expect(await f.run(), JSON.stringify(f.messages)).toMatchObject({
       status: "escalated",
-      reason: expect.stringContaining("adopted candidate requires independent isolated validation"),
+      reason: expect.stringContaining(
+        "adopted candidate requires original and successor authorization for independent Daytona validation",
+      ),
     });
     expect(f.refresh).not.toHaveBeenCalled();
     expect(f.validate).not.toHaveBeenCalled();

@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -30,6 +31,8 @@ import { CodexCliManagementBackend } from "./management/codex-cli.js";
 import { runForegroundObjective, runGitHubRepositoryController } from "./controller/index.js";
 import { SystemdControllerLifecycle, SystemdUserService } from "./service/index.js";
 import { GitHubStacks, type GitHubStackTransport } from "./publication/github-stacks.js";
+import { readSuppliedReplayFile } from "./replay/file.js";
+import { SUPPLIED_REPLAY_ERROR } from "./replay/supplied.js";
 
 const controllerLifecycle = new SystemdControllerLifecycle(
   new SystemdUserService({
@@ -46,7 +49,8 @@ const USAGE = [
   "  factory controller install|start|stop|restart|status|uninstall OWNER/REPO --repo DIR",
   "  factory doctor OWNER/REPO#NUMBER [--repo DIR]",
   "  factory plan OWNER/REPO#NUMBER [--compile] [--repo DIR] [--base-sha SHA] [--policy FILE]",
-  "  factory status|explain|replay OWNER/REPO#NUMBER [--work-item NUMBER]",
+  "  factory status|explain OWNER/REPO#NUMBER [--work-item NUMBER]",
+  "  factory replay OWNER/REPO#NUMBER [--snapshots FILE]  (caller-supplied simulations; read-only)",
   "  factory recovery-plan OWNER/REPO#NUMBER  (read-only; does not authorize execution)",
   "  factory recovery-propose OWNER/REPO#NUMBER --request-id ID [--allowance-increment FILE] [--acknowledge-unknown-usage DIGEST]",
   "  factory recovery-request OWNER/REPO#NUMBER --request-id ID --plan-digest DIGEST [--allowance-increment FILE] [--acknowledge-unknown-usage DIGEST]",
@@ -168,6 +172,20 @@ async function applicationCommand(command: string, args: string[]): Promise<void
   if (!args[0]) fail(`usage: factory ${command} OWNER/REPO#NUMBER`);
   const target = parseTarget(args[0]);
   const checkout = option(args, "--repo");
+  let pinnedAdmissionSnapshots;
+  if (args.includes("--snapshots")) {
+    if (command !== "replay") fail("--snapshots is accepted only by replay inspection.");
+    try {
+      const index = args.indexOf("--snapshots");
+      const path = args[index + 1];
+      if (!path || path.startsWith("--") || args.lastIndexOf("--snapshots") !== index) {
+        throw new Error(SUPPLIED_REPLAY_ERROR);
+      }
+      pinnedAdmissionSnapshots = await readSuppliedReplayFile(path, target.objective);
+    } catch {
+      fail(SUPPLIED_REPLAY_ERROR);
+    }
+  }
   const service = applicationFor(
     target.owner,
     target.repo,
@@ -216,6 +234,7 @@ async function applicationCommand(command: string, args: string[]): Promise<void
               command as "recovery-plan" | "status" | "explain" | "replay",
               target.objective,
               workItem ? Number(workItem) : undefined,
+              pinnedAdmissionSnapshots,
             );
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     return;
@@ -550,4 +569,9 @@ export async function main(argv: string[]): Promise<void> {
   fail(USAGE);
 }
 
-await main(process.argv.slice(2));
+if (
+  process.argv[1] &&
+  realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))
+) {
+  await main(process.argv.slice(2));
+}

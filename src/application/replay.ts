@@ -56,7 +56,14 @@ export interface FactoryReplayReport {
       };
   simulations: AdmissionReplayResult[];
   schedulerSimulation:
-    | { availability: "observed"; snapshotCount: number; allReproduced: boolean }
+    | {
+        availability: "observed";
+        source: "caller-supplied";
+        historicalInputsAuthenticated: false;
+        executionAuthority: false;
+        snapshotCount: number;
+        allReproduced: boolean;
+      }
     | {
         availability: "unavailable";
         reason: string;
@@ -108,6 +115,9 @@ export function buildReplayReport(input: {
         simulations.length > 0
           ? {
               availability: "observed",
+              source: "caller-supplied",
+              historicalInputsAuthenticated: false,
+              executionAuthority: false,
               snapshotCount: simulations.length,
               allReproduced: simulations.every((result) => result.reproduced),
             }
@@ -183,6 +193,9 @@ export function buildReplayReport(input: {
       simulations.length > 0
         ? {
             availability: "observed",
+            source: "caller-supplied",
+            historicalInputsAuthenticated: false,
+            executionAuthority: false,
             snapshotCount: simulations.length,
             allReproduced: simulations.every((result) => result.reproduced),
           }

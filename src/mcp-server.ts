@@ -61,6 +61,7 @@ import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { MAX_SUPPLIED_REPLAY_SNAPSHOTS } from "./replay/supplied.js";
 
 import { version as packageVersion } from "../package.json";
 
@@ -1414,6 +1415,7 @@ type ApplicationToolInput = {
   planDigest?: string;
   allowanceIncrement?: RecoveryProposalInput["allowanceIncrement"];
   unknownUsageAcknowledgementDigest?: string | null;
+  pinnedAdmissionSnapshots?: unknown;
 };
 
 function registerApplicationTool(
@@ -1502,6 +1504,17 @@ function registerApplicationTool(
               ...(operation === "explain"
                 ? { workItemNumber: z.number().int().positive().optional() }
                 : {}),
+              ...(operation === "replay"
+                ? {
+                    pinnedAdmissionSnapshots: z
+                      .array(z.unknown())
+                      .max(MAX_SUPPLIED_REPLAY_SNAPSHOTS)
+                      .optional()
+                      .describe(
+                        "Caller-supplied replay-v1 snapshots, at most 8 and 1 MiB total. Validated against replay-snapshot.schema.json and their digests. Simulations are not authenticated historical facts or execution authority.",
+                      ),
+                  }
+                : {}),
             }
           : {
               ...RequestToolShape,
@@ -1573,6 +1586,7 @@ function registerApplicationTool(
           operation as "doctor" | "plan" | "recovery-plan" | "status" | "explain" | "replay",
           input.objectiveNumber!,
           input.workItemNumber,
+          input.pinnedAdmissionSnapshots,
         );
       }
       if (operation === "activate") {

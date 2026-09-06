@@ -1,0 +1,9 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/clockgrove/factory/schemas/replay-snapshots.schema.json",
+  "title": "Factory supplied admission replay snapshots",
+  "description": "Explicit caller-supplied simulations for factory_replay.pinnedAdmissionSnapshots or factory replay --snapshots FILE. At most 8 snapshots and 1048576 UTF-8 JSON bytes total; depth at most 32 and at most 100000 JSON values. Each input Objective must match the requested Objective. Policy and snapshot digests are verified by the existing pure replayer. Expected decision Work Item IDs must be unique across admissions and queued decisions and belong to input.workItems. Supplied snapshots are hypothetical inputs, not authenticated historical facts or execution authority; no historical inputs are captured or synthesized.",
+  "type": "array",
+  "maxItems": 8,
+  "items": { "$ref": "replay-snapshot.schema.json" }
+}

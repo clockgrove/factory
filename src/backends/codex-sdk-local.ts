@@ -689,6 +689,8 @@ export class CodexSdkLocalBackend implements ExecutionBackend {
     return normalizeArtifact({
       baseSha: collected.baseSha,
       patch: collected.patch,
+      payload: collected.payload,
+      fileManifest: collected.fileManifest,
       changedPaths: collected.changedPaths,
       commands: (running.final?.commands ?? []).map((command) => ({
         ...command,

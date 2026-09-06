@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream, constants } from "node:fs";
-import { chmod, lstat, mkdir, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { Transform } from "node:stream";
@@ -108,11 +108,43 @@ export async function inspectContentFile(path: string, maxBytes = MAX_CONTENT_FI
 // Optimization only. Exact manifests + immutable GitHub transfer records remain authority.
 const cachedChunks = new Map<string, string>();
 const ownedRoots = new Set<string>();
+const rootBytes = new Map<string, number>();
+const MAX_CACHE_BYTES = 512 * 1024 * 1024;
+async function contentRoot(bytes: number): Promise<string> {
+  let existingBytes = 0;
+  const roots = (await readdir(tmpdir())).filter((name) => /^factory-content-[1-9][0-9]*-[A-Za-z0-9]+$/.test(name));
+  if (roots.length > 512) throw new Error("content cache directory bound exceeded; reconcile abandoned owned caches");
+  for (const name of roots) {
+    const root = join(tmpdir(), name);
+    const info = await lstat(root);
+    if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid?.()) continue;
+    const marker = join(root, ".factory-content");
+    let metadata: { pid: number; bytes: number };
+    try {
+      const markerInfo = await lstat(marker);
+      if (!markerInfo.isFile() || markerInfo.isSymbolicLink() || markerInfo.size > 1024) continue;
+      metadata = JSON.parse(await readFile(marker, "utf8"));
+      if (!Number.isSafeInteger(metadata.pid) || metadata.pid < 1 || !name.startsWith(`factory-content-${metadata.pid}-`) ||
+          !Number.isSafeInteger(metadata.bytes) || metadata.bytes < 0 || metadata.bytes > MAX_CONTENT_BYTES) continue;
+    } catch { continue; }
+    let absent = false;
+    try { process.kill(metadata.pid, 0); } catch (error) { absent = (error as NodeJS.ErrnoException).code === "ESRCH"; }
+    if (absent) {
+      // Cache is not authority. Dead-owner bytes are recoverable from the immutable ready ref.
+      await rm(root, { recursive: true, force: true });
+    } else existingBytes += metadata.bytes;
+  }
+  if (existingBytes + bytes > MAX_CACHE_BYTES) throw new Error("bounded content cache is full; retain/recover current transfers before admitting more");
+  const root = await mkdtemp(join(tmpdir(), `factory-content-${process.pid}-`));
+  await writeFile(join(root, ".factory-content"), JSON.stringify({ pid: process.pid, bytes }), { mode: 0o600, flag: "wx" });
+  ownedRoots.add(root);
+  rootBytes.set(root, bytes);
+  return root;
+}
 export async function cachePayload(path: string): Promise<ArtifactPayload> {
   const identity = await inspectContentFile(path, MAX_CONTENT_BYTES);
   if (identity.bytes === 0) throw new Error("cannot externalize an empty patch");
-  const root = await mkdtemp(join(tmpdir(), "factory-content-"));
-  ownedRoots.add(root);
+  const root = await contentRoot(identity.bytes);
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   const chunks: ArtifactPayload["chunks"] = [];
   try {
@@ -155,8 +187,11 @@ export async function readContentChunk(chunk: z.infer<typeof ContentChunkSchema>
 export async function restoreContentChunk(chunk: z.infer<typeof ContentChunkSchema>, bytes: Buffer): Promise<void> {
   ContentChunkSchema.parse(chunk);
   if (bytes.length !== chunk.bytes || sha256(bytes) !== chunk.digest) throw new Error("downloaded chunk size/digest mismatch");
-  const root = await mkdtemp(join(tmpdir(), "factory-content-"));
-  ownedRoots.add(root);
+  if (cachedChunks.has(chunk.digest)) {
+    await readContentChunk(chunk);
+    return;
+  }
+  const root = await contentRoot(chunk.bytes);
   const path = join(root, chunk.digest);
   await writeFile(path, bytes, { mode: 0o600, flag: "wx" });
   cachedChunks.set(chunk.digest, path);
@@ -202,6 +237,12 @@ export async function cleanupContentRoot(root: string): Promise<void> {
   for (const [digest, path] of cachedChunks) if (dirname(path) === root) cachedChunks.delete(digest);
   await rm(root, { recursive: true, force: true });
   ownedRoots.delete(root);
+  rootBytes.delete(root);
+}
+
+/** Call only after all active consumers are finished; immutable GitHub records remain retained. */
+export async function releaseAllArtifactContent(): Promise<void> {
+  for (const root of [...ownedRoots]) await cleanupContentRoot(root);
 }
 
 export async function releasePayload(payload: ArtifactPayload): Promise<void> {

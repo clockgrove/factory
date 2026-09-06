@@ -1,4 +1,7 @@
 import type { Readable } from "node:stream";
+import { mkdtemp, open, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { Daytona, DaytonaNotFoundError, type Sandbox, type Secret } from "@daytona/sdk";
 
@@ -14,17 +17,20 @@ import type {
   StaleAttemptIdentity,
 } from "../execution/backend.js";
 import {
-  MAX_ARTIFACT_PATCH_BYTES,
   normalizeArtifact,
+  assertChangedPathScope,
+  materializeArtifactPatch,
   type NormalizedArtifact,
 } from "../execution/artifacts.js";
+import { MAX_CONTENT_BYTES } from "../execution/artifact-content.js";
+import { artifactFromPatchFile } from "../runtime/artifact-patch.js";
+import { repositoryArchiveFile, sourceContentUploads } from "./source-content.js";
 import { assertNoSecretMaterial, MAX_LOG_BYTES } from "../protocol/limits.js";
 import { destinationAllowedByPolicy } from "../protocol/policy.js";
 import { validationInvocationOwnership } from "./validation-invocation.js";
 import {
   parseSandboxPaths,
   parseIsolatedValidationResult,
-  repositoryArchive,
   sandboxBootstrapFiles,
   sandboxResourceName,
   sandboxValidationFiles,
@@ -180,7 +186,7 @@ const REMOTE_ARTIFACT_FILES = [
   {
     path: "factory/artifact.patch",
     label: "Daytona artifact patch",
-    maxBytes: MAX_ARTIFACT_PATCH_BYTES,
+    maxBytes: MAX_CONTENT_BYTES,
   },
   {
     path: "factory/changed-paths",
@@ -410,7 +416,7 @@ export class DaytonaBackend implements ExecutionBackend {
     );
     const daytona = this.#createClient();
     await this.#resolveScopedModelSecret(daytona);
-    const archive = await repositoryArchive(this.#repository, context.packet.baseSha);
+    const archive = await repositoryArchiveFile(this.#repository, context.packet.baseSha);
     const ttlMinutes = Math.max(1, Math.ceil((context.deadline.getTime() - this.#now()) / 60_000));
     const resourceName = sandboxResourceName(context);
     let sandbox: Sandbox;
@@ -453,6 +459,7 @@ export class DaytonaBackend implements ExecutionBackend {
         { timeout: 120 },
       );
     } catch (createFailure) {
+      await archive.dispose();
       await this.#reconcileAmbiguousCreate(
         daytona,
         resourceName,
@@ -477,10 +484,7 @@ export class DaytonaBackend implements ExecutionBackend {
     try {
       await sandbox.fs.createFolder("factory", "700");
       await sandbox.fs.uploadFiles(
-        sandboxBootstrapFiles(context, archive).map((file) => ({
-          source: file.content,
-          destination: file.path,
-        })),
+        sourceContentUploads(sandboxBootstrapFiles(context, Buffer.alloc(0)), archive),
       );
       const workdir = await sandbox.getWorkDir();
       void sandbox.process
@@ -506,12 +510,14 @@ export class DaytonaBackend implements ExecutionBackend {
           sandbox: sandbox.id,
           resourceName,
           environmentIdentity: this.#image,
+          sourceArchiveDigest: archive.digest,
+          sourceArchiveBytes: String(archive.bytes),
         },
       };
     } catch (launchFailure) {
       await this.#deleteTracked(running, "launch rollback", launchFailure);
       throw safeFailure(launchFailure, "Daytona launch failure");
-    }
+    } finally { await archive.dispose(); }
   }
 
   async observe(handle: BackendHandle): Promise<BackendObservation> {
@@ -543,7 +549,8 @@ export class DaytonaBackend implements ExecutionBackend {
 
   async collect(handle: BackendHandle): Promise<NormalizedArtifact> {
     const running = this.#require(handle);
-    let files: [Buffer, Buffer, Buffer, Buffer, Buffer];
+    const root = await mkdtemp(join(tmpdir(), "factory-daytona-content-"));
+    const patchPath = join(root, "artifact.patch");
     try {
       const details = await Promise.all(
         REMOTE_ARTIFACT_FILES.map(async (file) => ({
@@ -561,27 +568,27 @@ export class DaytonaBackend implements ExecutionBackend {
         }
         return metadata.size;
       });
-      files = (await Promise.all(
-        REMOTE_ARTIFACT_FILES.map((file, index) =>
-          this.#downloadRemoteFile(running.sandbox, file, expectedSizes[index]!),
-        ),
-      )) as [Buffer, Buffer, Buffer, Buffer, Buffer];
-    } catch (error) {
-      throw safeFailure(error, "Daytona artifact collection failure");
-    }
-    const [patch, paths, exit, stdout, stderr] = files;
+      await this.#downloadRemoteFileToPath(running.sandbox, REMOTE_ARTIFACT_FILES[0], expectedSizes[0]!, patchPath);
+      const files = await Promise.all(REMOTE_ARTIFACT_FILES.slice(1).map((file, index) => this.#downloadRemoteFile(running.sandbox, file, expectedSizes[index + 1]!)));
+    const [paths, exit, stdout, stderr] = files as [Buffer, Buffer, Buffer, Buffer];
     const exitCode = Number(exit.toString("utf8"));
-    const patchText = patch.toString("utf8");
+    const changedPaths = parseSandboxPaths(paths);
+    assertChangedPathScope(changedPaths, running.context.packet.allowedPaths);
     const outcome =
-      exitCode === 0 && patchText.trim() ? "succeeded" : patchText.trim() ? "failed" : "declined";
-    return normalizeArtifact({
+      exitCode === 0 && expectedSizes[0]! > 0 ? "succeeded" : expectedSizes[0]! > 0 ? "failed" : "declined";
+    if (expectedSizes[0] === 0) return normalizeArtifact({ baseSha: running.context.packet.baseSha, patch: "", changedPaths,
+      logs: `${stdout.toString("utf8")}\n${stderr.toString("utf8")}`, outcome });
+    return await artifactFromPatchFile({
+      repository: this.#repository,
       baseSha: running.context.packet.baseSha,
-      patch: patchText,
-      changedPaths: parseSandboxPaths(paths),
+      patchPath,
+      changedPaths,
       logs: `${stdout.toString("utf8")}\n${stderr.toString("utf8")}`,
       outcome,
       ...(outcome === "succeeded" ? {} : { reason: `sandbox worker exited ${exitCode}` }),
     });
+    } catch (error) { throw safeFailure(error, "Daytona artifact collection failure"); }
+    finally { await rm(root, { recursive: true, force: true }); }
   }
 
   async cleanup(handle: BackendHandle): Promise<void> {
@@ -598,7 +605,7 @@ export class DaytonaBackend implements ExecutionBackend {
       context.policyNetworkDestinations ?? [],
       "validation",
     );
-    const archive = await repositoryArchive(this.#repository, context.packet.baseSha);
+    const archive = await repositoryArchiveFile(this.#repository, context.packet.baseSha);
     const ttlMinutes = Math.max(1, Math.ceil((context.deadline.getTime() - this.#now()) / 60_000));
     const daytona = this.#createClient();
     const resourceName = sandboxResourceName(context, "validation");
@@ -643,6 +650,7 @@ export class DaytonaBackend implements ExecutionBackend {
         { timeout: 120 },
       );
     } catch (createFailure) {
+      await archive.dispose();
       await this.#reconcileAmbiguousCreate(
         daytona,
         resourceName,
@@ -657,7 +665,8 @@ export class DaytonaBackend implements ExecutionBackend {
     if (
       invocationOwner &&
       (sandbox.name !== resourceName || sandbox.labels?.invocationOwner !== invocationOwner)
-    )
+    ) {
+      await archive.dispose();
       throw new DaytonaResourceCleanupError({
         resourceId: sandbox.id,
         resourceName,
@@ -665,6 +674,7 @@ export class DaytonaBackend implements ExecutionBackend {
         operation: "created validation ownership mismatch",
         cause: "refusing use or cleanup of unowned resource",
       });
+    }
 
     const tracked: TrackedDaytona = {
       sandbox,
@@ -676,13 +686,14 @@ export class DaytonaBackend implements ExecutionBackend {
     let result: IsolatedValidationResult | undefined;
     let validationFailure: unknown;
     let validationFailed = false;
+    const patchRoot = await mkdtemp(join(tmpdir(), "factory-daytona-validation-content-"));
     try {
+      const patchPath = join(patchRoot, "artifact.patch");
+      await materializeArtifactPatch(context.artifact, patchPath);
       await sandbox.fs.createFolder("factory", "700");
       await sandbox.fs.uploadFiles(
-        sandboxValidationFiles(context, archive).map((file) => ({
-          source: file.content,
-          destination: file.path,
-        })),
+        [...sourceContentUploads(sandboxValidationFiles(context, Buffer.alloc(0)), archive).filter((file) => file.destination !== "factory/artifact.patch"),
+          { source: patchPath, destination: "factory/artifact.patch" }],
       );
       const workdir = await sandbox.getWorkDir();
       const command = await sandbox.process.executeCommand(
@@ -712,7 +723,7 @@ export class DaytonaBackend implements ExecutionBackend {
     } catch (error) {
       validationFailed = true;
       validationFailure = error;
-    }
+    } finally { await archive.dispose(); await rm(patchRoot, { recursive: true, force: true }); }
 
     await this.#deleteTracked(
       tracked,
@@ -868,6 +879,27 @@ export class DaytonaBackend implements ExecutionBackend {
       );
     }
     return Buffer.concat(chunks, received);
+  }
+
+  async #downloadRemoteFileToPath(sandbox: Sandbox, file: RemoteArtifactFile, expectedSize: number, destination: string): Promise<void> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 120_000);
+    const output = await open(destination, "wx", 0o600);
+    let received = 0;
+    try {
+      const stream = await sandbox.fs.downloadFileStream(file.path, { signal: controller.signal,
+        onProgress: ({ bytesReceived }) => { if (bytesReceived > file.maxBytes) controller.abort(); } });
+      try {
+        for await (const chunk of stream) {
+          const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string | Uint8Array);
+          received += bytes.length;
+          if (received > file.maxBytes || received > expectedSize) throw new Error("provider artifact stream exceeded declared byte ceiling");
+          let offset = 0;
+          while (offset < bytes.length) offset += (await output.write(bytes, offset)).bytesWritten;
+        }
+      } finally { stream.destroy(); }
+      if (received !== expectedSize) throw new Error("provider artifact stream was truncated or changed after metadata inspection");
+    } finally { clearTimeout(timer); controller.abort(); await output.close(); }
   }
 
   async #downloadBoundedRemoteFile(sandbox: Sandbox, file: RemoteArtifactFile): Promise<Buffer> {

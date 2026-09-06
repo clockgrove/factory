@@ -557,7 +557,10 @@ export class CodexCliManagementBackend implements ManagementBackend {
         baseSha: context.artifact.baseSha,
         digest: context.artifact.digest,
         changedPaths: context.artifact.changedPaths,
-        patch: context.artifact.patch,
+        patch: context.artifact.fileManifest
+          ? "Content is bound by the file manifest below. Inspect relevant actual files in this independently validated checkout; the manifest alone is not semantic acceptance evidence. Binary contents and oversized patches are not embedded in this prompt."
+          : context.artifact.patch,
+        ...(context.artifact.fileManifest ? { fileManifest: context.artifact.fileManifest } : {}),
       },
       evidence: context.evidence,
     };

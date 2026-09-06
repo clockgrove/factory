@@ -2,6 +2,7 @@ import { lstat, readFile, readlink } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { NormalizedArtifact } from "../execution/artifacts.js";
+import { MAX_CONTENT_FILE_BYTES, verifyMaterializedFiles } from "../execution/artifact-content.js";
 import type { GitCommitObject } from "../control/lease.js";
 import {
   verifyPlannedSiblingRefreshCommit,
@@ -162,6 +163,7 @@ async function blobContent(worktree: string, path: string, mode: string): Promis
     return Buffer.from(await readlink(absolute), "utf8");
   }
   if (!stat.isFile()) throw new Error(`${path} is not a publishable regular file`);
+  if (stat.size > MAX_CONTENT_FILE_BYTES) throw new Error(`${path} exceeds the ordinary Git blob publication ceiling`);
   return readFile(absolute);
 }
 
@@ -185,6 +187,11 @@ export async function publishValidated(args: {
   }
   if (args.base.oid !== args.artifact.baseSha) {
     throw new Error("publication base does not match the artifact");
+  }
+  if (args.artifact.fileManifest) {
+    if (args.artifact.fileManifest.baseTreeSha !== args.base.treeOid || args.artifact.fileManifest.resultTreeSha !== args.validation.evidence.outputTreeSha)
+      throw new Error("publication content manifest does not match exact validated trees");
+    await verifyMaterializedFiles(args.validation.worktree.path, args.artifact.fileManifest);
   }
   const branch = publicationBranch(args.objective, args.workItem, args.attempt);
   const expectedMessage = `${args.title}\n\nCloses #${args.workItem}\nFactory-Artifact: ${args.artifact.digest}\nFactory-Validation: ${args.validation.evidence.digest}`;

@@ -1,12 +1,14 @@
-import { access, writeFile } from "node:fs/promises";
+import { access } from "node:fs/promises";
 import { join } from "node:path";
 
 import { executionAffectingReason } from "../approval.js";
 import {
   assertArtifactScope,
   verifyArtifact,
+  materializeArtifactPatch,
   type NormalizedArtifact,
 } from "../execution/artifacts.js";
+import { verifyMaterializedFiles } from "../execution/artifact-content.js";
 import { assertNoSecretMaterial } from "../protocol/limits.js";
 import type { WorkerPacket } from "../protocol/worker-packet.js";
 import type { IsolatedValidationResult } from "../execution/backend.js";
@@ -198,7 +200,7 @@ export async function validateArtifactClean(
   let failureReason: string | undefined;
   try {
     const patchPath = join(worktree.root, "artifact.patch");
-    await writeFile(patchPath, artifact.patch, { mode: 0o600 });
+    await materializeArtifactPatch(artifact, patchPath);
     const apply = await runContainedProcess({
       command: "git",
       args: ["apply", "--index", "--binary", "--whitespace=error-all", patchPath],
@@ -219,6 +221,11 @@ export async function validateArtifactClean(
     }
 
     const outputTreeSha = await git(worktree, ["write-tree"]);
+    if (artifact.fileManifest) {
+      if (artifact.fileManifest.resultTreeSha !== outputTreeSha || artifact.fileManifest.baseTreeSha !== await git(worktree, ["rev-parse", `${artifact.baseSha}^{tree}`]))
+        throw new Error("applied artifact tree differs from trusted collection manifest");
+      await verifyMaterializedFiles(worktree.path, artifact.fileManifest);
+    }
     let evidenceStartedAt = startedAt.toISOString();
     let evidenceCompletedAt: string;
     let environmentIdentity: string | undefined;

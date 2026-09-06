@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { NormalizedArtifactSchema, verifyArtifact, type NormalizedArtifact } from "../execution/artifacts.js";
+import { NormalizedArtifactSchema, assertArtifactScope, verifyArtifact, type NormalizedArtifact } from "../execution/artifacts.js";
 import { readContentChunk, restoreContentChunk, sha256, verifyPayload } from "../execution/artifact-content.js";
 import { assertNoSecretMaterial, gitSha, sha256Digest } from "../protocol/limits.js";
 import type { GitCommitObject } from "./lease.js";
@@ -89,8 +89,9 @@ export async function recoverArtifactTransfer(args: { store: ArtifactTransferSto
 
 /** All writes use the caller's existing paced store and fresh per-write lease/controller fence. */
 export async function persistArtifactTransfer(args: { store: ArtifactTransferStore; identity: ArtifactTransferIdentity;
-  artifact: NormalizedArtifact; assertCurrent: () => Promise<void> }): Promise<{ ref: string; commitSha: string; artifactDigest: string; lifecycle: "retained" }> {
+  artifact: NormalizedArtifact; allowedPaths: string[]; assertCurrent: () => Promise<void> }): Promise<{ ref: string; commitSha: string; artifactDigest: string; lifecycle: "retained" }> {
   const artifact = verifyArtifact(args.artifact);
+  assertArtifactScope(artifact, args.allowedPaths);
   const identity = canonicalIdentity(args.identity);
   if (artifact.baseSha !== identity.baseSha) throw new Error("artifact transfer base mismatch");
   if (artifact.payload && !artifact.fileManifest) throw new Error("externalized artifact requires trusted file manifest before upload");

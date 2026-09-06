@@ -155,7 +155,7 @@ cd "$workspace"
 git init -q
 git config user.name clockgrove-factory
 git config user.email factory@invalid.local
-git add -A
+git add --force --all
 git commit -qm factory-base
 model_args=()
 if [[ -f "$factory_root/model.txt" ]]; then
@@ -235,7 +235,7 @@ try {
   git(["init", "-q"]);
   git(["config", "user.name", "clockgrove-factory"]);
   git(["config", "user.email", "factory@invalid.local"]);
-  git(["add", "-A"]);
+  git(["add", "--force", "--all"]);
   git(["commit", "-qm", "factory-base"]);
   git(["apply", "--index", "--binary", "--whitespace=error-all", root + "artifact.patch"]);
   const changed = Buffer.from(execFileSync("git", ["diff", "--cached", "--name-only", "-z"], { cwd: workspace }))

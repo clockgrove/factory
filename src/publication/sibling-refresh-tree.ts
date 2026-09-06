@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { executionAffectingReason } from "../approval.js";
@@ -7,6 +7,7 @@ import {
   MAX_ARTIFACT_PATCH_BYTES,
   assertArtifactScope,
   verifyArtifact,
+  materializeArtifactPatch,
   type NormalizedArtifact,
 } from "../execution/artifacts.js";
 import { assertNoSecretMaterial, gitSha } from "../protocol/limits.js";
@@ -131,10 +132,12 @@ export async function prepareSiblingRefreshTree(input: {
     )
       throw new Error("sibling tree remote base identity differs");
     const patchPath = join(root, "artifact.patch");
-    await writeFile(patchPath, artifact.patch, { flag: "wx", mode: 0o600 });
+    await materializeArtifactPatch(artifact, patchPath);
     await git(["read-tree", baseSha]);
     await git(["apply", "--cached", "--binary", "--whitespace=error-all", patchPath]);
     const outputTreeSha = gitSha.parse((await git(["write-tree"])).trim());
+    if (artifact.fileManifest && (artifact.fileManifest.baseTreeSha !== base.treeOid || artifact.fileManifest.resultTreeSha !== outputTreeSha))
+      throw new Error("sibling preparation differs from artifact content manifest");
     const changed = (
       await git([
         "diff-tree",

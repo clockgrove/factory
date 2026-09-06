@@ -50,6 +50,11 @@ These are settled. Do not relitigate them.
   local worktree and not hand-copied skills. A local bundle tests something no adopter will ever run,
   and a worktree can change underneath a live run. This rule governs installed-product qualification,
   not focused source tests during development; it does not require reinstalling after every fix.
+- **Provider capability boundaries are not global blockers.** Factory reuses providers paid directly
+  by the user; it is not a reseller or billing service. Document unsupported interfaces, use supported
+  workarounds or specific human actions, and never advertise an unavailable provider as working.
+  Missing invoice finality does not block completed work. Missing execution termination still keeps
+  the affected resource obligations and replacement fences intact. Credentials alone grant no spend.
 
 ## Complete the authorized development task
 
@@ -83,10 +88,14 @@ These are settled. Do not relitigate them.
   budgets; serialize only genuine dependencies or conflicting changes. One PR per capability does
   not mean one capability at a time.
 - Finish and integrate the remaining implementation before coordinated qualification. A capability
-  PR is a delivery boundary, not automatically a release candidate. Use the development checks below
-  until the intended candidate's implementation and integration review are complete; then freeze it
+  PR is a delivery boundary, not automatically a release candidate. Write code without running checks
+  until the intended candidate's implementation is integrated; then review and freeze it
   and perform the coordinated qualification phase. Do not manufacture audits, documentation tasks,
   or testing infrastructure merely to occupy agents.
+- Deliver dependency-correct PR stacks when capabilities build on each other. Independent capabilities
+  may proceed in parallel; helper commits do not each need a PR. Validate the integrated stack at the
+  final candidate boundary, not every intermediate layer. Keep issue acceptance and unexecuted checks
+  explicit until that phase completes.
 
 ## Parallel work and responsiveness
 

@@ -25,8 +25,13 @@ The scope includes:
 - regular and native stacked GitHub pull requests; and
 - GitHub-only durable orchestration with no required workflow, UI, or hosted Factory service.
 
-Every supported capability passes the applicable deterministic, security, recovery, package, and
-live-provider conformance gates. Paid execution remains off by default and explicitly budgeted.
+Every claimed supported capability passes the applicable deterministic, security, recovery, package,
+and live-provider conformance gates. Unsupported third-party features are documented per provider;
+their absence does not block the entire product. Paid execution remains off by default and explicitly
+budgeted. Factory reuses providers under the user's direct subscription and billing relationship.
+Session/resource caps are not guaranteed dollar caps, unknown costs remain unavailable, and provider
+billing settlement finality is not required. Exact active-compute and cleanup evidence remains required
+before releasing resource obligations or admitting unsafe replacements.
 
 Vercel Sandbox, Codex App Server, and additional provider/harness adapters are Labs. Native Win32
 and Darwin lifecycle/execution and multi-machine local clusters are out of scope.
@@ -34,9 +39,12 @@ and Darwin lifecycle/execution and multi-machine local clusters are out of scope
 ## Consequences
 
 - `CONFORMANCE.md` records verification results and remaining gaps.
-- Daytona and both managed agents are release gates; Vercel and App Server live evidence is not.
-- The Codex managed profile remains unavailable until its gate records a stable,
-  provider-published actor identity; a display name is not identity evidence.
+- Daytona retains its live release gate. **Managed-provider capability boundaries** requires exact
+  evidence for each provider's claimed behavior and explicit limits for unavailable features; it does
+  not require every managed provider to offer the same API. Vercel and App Server remain Labs.
+- Copilot has limited automation, including an operator boundary when exact-session termination cannot
+  be automated. Codex managed execution remains unavailable until an authoritative identity and real
+  provider-specific lifecycle interface are implemented and qualified; a display name is not identity.
 - Native stacked pull requests are release-critical and retain a recorded regular-PR fallback.
 - The `systemd` lifecycle runs inside Linux even when Windows or macOS hosts that environment.
 - Plugin and npm artifacts are versioned and verified together; neither installation starts the

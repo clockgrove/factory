@@ -25,9 +25,14 @@ API, or change to the product boundary. Security vulnerabilities must be reporte
 
 The supported runtime is Linux: native Linux, Windows WSL2, or a Linux guest hosted by macOS. Native
 Win32/Darwin lifecycle support and multiple-local-machine scheduling are intentionally out of scope.
-Daytona and two GitHub-managed release targets belong to the product contract; their live gates block
-publication, and Codex remains fail-closed until its provider-published identity and provider-specific
-task/session lifecycle integration are established. Vercel Sandbox and Codex App Server are Labs.
+Daytona retains its live qualification gate. Managed integrations are qualified per provider under
+the **Managed-provider capability boundaries** gate: document supported behavior and unavailable
+interfaces, and obtain live evidence before claiming execution support. Copilot has limited automation;
+Codex remains unavailable until its identity and provider-specific lifecycle integration are established.
+Missing third-party APIs are provider limitations, not categorical blockers to Factory publication.
+Billing settlement finality is not required; users own their provider billing relationship. Do not
+weaken active-compute, exact-identity, replacement, cleanup or spending safeguards to claim support.
+Vercel Sandbox and Codex App Server are Labs.
 A Labs adapter must remain optional and
 cannot change default startup or release behavior.
 

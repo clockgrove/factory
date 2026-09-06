@@ -259,5 +259,11 @@ Resource reconciliation and delivery tests can then run in parallel. Installed l
 follows deterministic and fault tests.
 
 This closes only the terminal-recovery portion of the [delivery plan](DELIVERY-PLAN.md).
-Daytona burst, both managed agents, native-stack/host matrices, publication, and published
-installation remain obligations in [CONFORMANCE.md](CONFORMANCE.md).
+Daytona burst, native-stack/host and adversarial matrices, publication, and published installation
+remain obligations in [CONFORMANCE.md](CONFORMANCE.md). The **Managed-provider capability boundaries**
+row requires evidence for each provider's claimed behavior and explicit limits for unsupported
+interfaces, not successful execution by both managed agents. Copilot's limited automation and Codex's
+currently unavailable managed interface do not become global product blockers. Provider billing
+settlement finality is not required; users retain their direct billing relationship. Unknown active
+compute, resource ownership, cleanup or required usage still blocks unsafe recovery and replacement.
+Historical failed runs and qualification records are unchanged.

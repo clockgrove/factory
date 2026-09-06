@@ -30,8 +30,8 @@ The scope includes:
 - a `factory` CLI and explicitly installed repository controller;
 - native Linux, Windows WSL2, and Linux guest on macOS environments;
 - local Codex SDK workers, with Codex CLI fallback and adaptive CPU and memory admission;
-- GitHub Copilot and OpenAI Codex managed-agent release profiles, with publication blocked until
-  both live gates pass and the Codex gate records a stable provider-published identity;
+- optional GitHub-managed integrations, with qualified behavior and explicit limits per provider:
+  Copilot limited automation and Codex unavailable until its real identity/lifecycle interface exists;
 - Daytona sandbox burst with TTL, egress, secret, concurrency, budget, and cleanup controls;
 - GitHub issues, native sub-issues/dependencies, versioned refs/receipts, and no required private
   state service;
@@ -63,14 +63,15 @@ authenticate deliberately, and start the same controller behavior without a sour
   supported portable fallback. Run both through the same Work Packet, sandbox, artifact, validation,
   cancellation, and cleanup contract.
 - Qualify Daytona with one real multi-worker Objective, fresh-resource validation, forced
-  cancellation, restart reconciliation, hard TTL, restricted egress, named-secret brokerage, cost
+  cancellation, restart reconciliation, hard TTL, restricted egress, named-secret brokerage, native-usage
   reconciliation, and leak detection/cleanup.
-- Bundle GitHub Copilot and OpenAI Codex managed-agent adapters behind the same capability, lifecycle,
-  artifact, validation, cancellation, recovery, and economics contract.
-- Keep Codex discovery fail-closed until live evidence records a stable provider-published actor
-  identity; never derive authorization from its documented display name.
-- Exercise the same bounded Work Item through both managed agents and prove no implicit provider
-  substitution occurs.
+- Keep managed integrations behind exact capability, identity, artifact, independent-validation,
+  recovery and spending safeguards. Expose Copilot's operator-assisted termination boundary rather
+  than claiming an unavailable automated stop operation.
+- Keep Codex unavailable until authoritative identity and provider-specific lifecycle interfaces are
+  implemented and qualified; never infer authorization from a display name or borrow Copilot's API.
+- Qualify each provider before claiming its execution support, preserving evidence of unsupported
+  features and no implicit provider substitution. Missing provider APIs do not block all of Factory.
 
 Acceptance: local-only operation works with no cloud credential, and every paid launch is preceded by
 durable provider, budget, and concurrency authority.
@@ -128,9 +129,12 @@ decision, without manual per-Work-Item dispatch.
 1. Finish and verify the intended protocol, package, policy, and backend interfaces.
 2. Pass deterministic tests, typecheck, package/plugin verification, audit, schema validation, and
    artifact-content checks from a clean checkout.
-3. Complete the Linux, native-stack, Daytona, managed-agent, and adversarial matrices against a clean
-   tested commit, then commit only their evidence records and the [`CONFORMANCE.md`](CONFORMANCE.md)
-   ledger. All other changes require the affected candidate to be retested.
+3. Complete the Linux, native-stack, Daytona and adversarial matrices and the **Managed-provider
+   capability boundaries** review against a clean tested commit. Keep all six conformance rows,
+   including published installation: record exact evidence for claimed managed behavior and explicit
+   unavailable/limited capabilities rather than requiring both providers to execute. Then commit only
+   evidence records and the [`CONFORMANCE.md`](CONFORMANCE.md) ledger. All other changes require the
+   affected candidate to be retested.
 4. Review the security boundary and public documentation before freezing that tested commit; verify
    the final evidence-enriched package independently as described below.
 5. Create the immutable package tag on the evidence commit, then publish synchronized
@@ -142,6 +146,10 @@ decision, without manual per-Work-Item dispatch.
 
 No live paid-provider gate runs merely because credentials are present. Each requires explicit
 authorization naming the provider, disposable target, maximum billable units, and cleanup boundary.
+Native-unit session/resource limits are not guaranteed dollar caps. The user owns provider billing;
+unknown costs stay unavailable, and invoice settlement finality is not a qualification requirement.
+None of this waives exact resource identity, active-compute reconciliation, cleanup or replacement
+safety. Historical failed exercises retain their original result and source binding.
 
 ## Recording evidence and publishing
 

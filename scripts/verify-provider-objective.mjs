@@ -260,16 +260,55 @@ export function assessProviderCompletion(evidence, authority) {
         3,
         "managed Objective requires three exact task/session bindings",
       );
-      assert.equal(
-        evidence.billingObservation?.state,
-        "unavailable",
-        "managed billing boundary must remain explicit",
-      );
+      const taskIds = new Set();
+      const pullIds = new Set();
+      let sessionCount = 0;
+      assert.deepEqual(evidence.managedSessionObservation.active ?? [], [], "managed activity remains");
+      for (const binding of evidence.managedSessionObservation.bindings) {
+        assert.ok(typeof binding.taskId === "string" && binding.taskId.length > 0);
+        assert.ok(!taskIds.has(binding.taskId), "managed task binding repeated");
+        taskIds.add(binding.taskId);
+        assert.ok(Number.isSafeInteger(binding.pullDatabaseId) && binding.pullDatabaseId > 0);
+        assert.ok(!pullIds.has(binding.pullDatabaseId), "managed pull binding repeated");
+        pullIds.add(binding.pullDatabaseId);
+        assert.ok(
+          evidence.pulls.some(
+            (pull) => pull.id === binding.pullDatabaseId && pull.number === binding.pullNumber,
+          ),
+          "managed task belongs to another pull request",
+        );
+        assert.ok(
+          TERMINAL_AGENT_TASK_STATES.has(binding.taskState),
+          "managed task is not terminal",
+        );
+        assert.ok(Array.isArray(binding.sessions) && binding.sessions.length > 0);
+        const sessionIds = new Set();
+        for (const session of binding.sessions) {
+          assert.ok(typeof session.id === "string" && session.id.length > 0);
+          assert.ok(!sessionIds.has(session.id), "managed session binding repeated");
+          sessionIds.add(session.id);
+          assert.ok(
+            TERMINAL_AGENT_TASK_STATES.has(session.state),
+            "managed session is not terminal",
+          );
+          sessionCount += 1;
+        }
+      }
+      assert.ok(sessionCount <= authority.managedSessions, "observed sessions exceeded authority");
       return {
-        result: "incomplete",
+        result: "passed",
         scope,
-        reason:
-          "Objective orchestration and exact Agent Task session termination passed; GitHub exposes no documented per-task billing-settlement API, so billing cessation remains unqualified",
+        billing: {
+          availability: "unavailable",
+          reason:
+            "Provider invoice settlement and monetary cost are outside this execution qualification",
+        },
+        excludes: [
+          "provider invoice settlement and billing finality",
+          "provider billing accuracy and monetary cost",
+          "unreported provider activity",
+          "crash/cancellation/TTL/egress fault qualification",
+        ],
       };
     }
     return {

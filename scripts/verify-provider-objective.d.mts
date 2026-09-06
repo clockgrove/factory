@@ -13,7 +13,13 @@ export function providerObjective(profile: ProviderAuthority["profile"], namespa
 export function assessProviderCompletion(
   evidence: unknown,
   authority: ProviderAuthority,
-): { result: string; scope: string; reason?: string };
+): {
+  result: string;
+  scope: string;
+  reason?: string;
+  billing?: { availability: string; reason: string };
+  excludes?: string[];
+};
 export function observeProviderAbsence(
   daytona: unknown,
   evidence: unknown,

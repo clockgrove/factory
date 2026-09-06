@@ -95,6 +95,7 @@ function evidence() {
       headSha: String(number + 3).repeat(40),
     });
     pulls.push({
+      id: number + 100,
       node_id: `PR_${number + 10}`,
       base: { repo: { node_id: "R_fixture", full_name: authority.repository } },
       number: number + 10,
@@ -140,7 +141,112 @@ function evidence() {
   };
 }
 
+function managedEvidence() {
+  const managedAuthority: ProviderAuthority = {
+    ...authority,
+    profile: "github-copilot",
+    managedSessions: 3,
+  };
+  const input = evidence();
+  const events: Array<Record<string, unknown>> = input.events
+    .filter(
+      (event) =>
+        !["BudgetReserved", "BudgetReconciled", "CapacityReserved", "CapacityReconciled"].includes(
+          String(event.event),
+        ),
+    )
+    .flatMap<Record<string, unknown>>((event) => {
+      if (event.event === "FactoryRunStarted")
+        return [{ ...event, policy: providerPolicy(managedAuthority) }];
+      if (event.event !== "AttemptStarted") return [event];
+      const scope = { ...event, phase: "execution", unit: "managed_sessions", amount: 1 };
+      const validation = { ...event, phase: "validation", backend: "codex-cli/daytona" };
+      return [
+        { ...scope, event: "BudgetReserved" },
+        { ...event, backend: "github-copilot/github-managed" },
+        { ...scope, event: "BudgetReconciled" },
+        { ...validation, event: "CapacityReserved" },
+        { ...validation, event: "CapacityReconciled" },
+      ];
+    })
+    .map((event, index) => ({ ...event, sequence: index + 1 }));
+  return {
+    authority: managedAuthority,
+    input: {
+      ...input,
+      events,
+      billingObservation: { state: "unavailable" },
+      managedSessionObservation: {
+        state: "terminated",
+        bindings: input.pulls.map((pull) => ({
+          pullNumber: pull.number,
+          pullDatabaseId: pull.id,
+          taskId: `task-${pull.number}`,
+          taskState: "completed",
+          sessions: [{ id: `session-${pull.number}`, state: "completed" }],
+        })),
+      },
+    },
+  };
+}
+
 describe("installed provider Objective harness (no live calls)", () => {
+  it("qualifies exact managed execution with unavailable billing, without inventing settlement or zero cost", () => {
+    const fixture = managedEvidence();
+    const before = structuredClone(fixture.input);
+    expect(assessProviderCompletion(fixture.input, fixture.authority)).toMatchObject({
+      result: "passed",
+      scope: "installed-managed-objective-happy-path",
+      billing: { availability: "unavailable" },
+      excludes: expect.arrayContaining([
+        "provider invoice settlement and billing finality",
+        "provider billing accuracy and monetary cost",
+      ]),
+    });
+    expect(fixture.input).toEqual(before);
+    const { billingObservation: _unavailable, ...withoutBilling } = fixture.input;
+    const result = assessProviderCompletion(withoutBilling, fixture.authority);
+    expect(result.result).toBe("passed");
+    expect(result.billing).not.toHaveProperty("amount");
+    expect(result.billing).not.toHaveProperty("value");
+  });
+
+  it.each([
+    "active",
+    "unknown",
+    "unknown-task",
+    "active-session",
+    "unknown-session",
+    "duplicate-task",
+    "foreign-pull",
+    "extra-session",
+    "budget",
+    "validation",
+    "head",
+  ])(
+    "does not waive %s evidence because billing settlement is excluded",
+    (fault) => {
+      const { input, authority: managedAuthority } = managedEvidence();
+      const observation = input.managedSessionObservation;
+      if (fault === "active") observation.state = "present";
+      if (fault === "unknown") observation.state = "unknown";
+      if (fault === "unknown-task") observation.bindings[0]!.taskState = "unknown";
+      if (fault === "active-session") observation.bindings[0]!.sessions[0]!.state = "in_progress";
+      if (fault === "unknown-session") observation.bindings[0]!.sessions[0]!.state = "unknown";
+      if (fault === "duplicate-task")
+        observation.bindings[1]!.taskId = observation.bindings[0]!.taskId;
+      if (fault === "foreign-pull") observation.bindings[0]!.pullDatabaseId = 9999;
+      if (fault === "extra-session")
+        observation.bindings[0]!.sessions.push({ id: "extra", state: "completed" });
+      if (fault === "budget")
+        input.events = input.events.filter((event) => event.event !== "BudgetReserved");
+      if (fault === "validation")
+        input.events = input.events.filter((event) => event.event !== "CapacityReserved");
+      if (fault === "head") input.pulls[0]!.head.sha = "a".repeat(40);
+      expect(assessProviderCompletion(input, managedAuthority).result).toBe("incomplete");
+    },
+  );
+
   it("requires separate exact merge proofs and never recovers missing proof from legacy REST fields", () => {
     const value = evidence();
     expect(value.pulls.every((pull) => !("merge_commit_sha" in pull))).toBe(true);

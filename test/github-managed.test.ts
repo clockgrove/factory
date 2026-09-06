@@ -190,7 +190,7 @@ describe("GitHub managed-agent profiles", () => {
     );
     expect(resolveManagedAgentActor(OPENAI_CODEX_MANAGED_PROFILE, actors)).toMatchObject({
       actor: null,
-      reason: expect.stringContaining("release-blocked"),
+      reason: expect.stringContaining("managed provider is unavailable"),
     });
   });
 
@@ -283,13 +283,13 @@ describe("GitHub managed-agent profiles", () => {
     ).toThrow(/does not match its exact assignable Bot profile/);
   });
 
-  it("keeps the Codex profile unavailable until GitHub exposes a verifiable actor identity", async () => {
+  it("keeps unsupported Codex unlaunchable without describing Factory itself as release-blocked", async () => {
     const resolution = resolveManagedAgentActor(OPENAI_CODEX_MANAGED_PROFILE, [
       { id: "BOT_unverified", login: "openai-code-agent", type: "Bot" },
     ]);
     expect(resolution).toMatchObject({
       actor: null,
-      reason: expect.stringContaining("no live conformance evidence"),
+      reason: expect.stringContaining("Codex-specific task/session termination contract"),
     });
     const backend = new GitHubManagedAgentBackend({
       reader: managedReader(snapshot()),
@@ -300,8 +300,11 @@ describe("GitHub managed-agent profiles", () => {
     await expect(backend.probe()).resolves.toMatchObject({
       available: false,
       authenticated: false,
-      reason: expect.stringContaining("release-blocked"),
+      reason: expect.stringContaining("managed provider is unavailable"),
     });
+    expect(resolution.reason).toContain("does not block Factory's local backends");
+    expect(resolution.reason).not.toContain("release-blocked");
+    await expect(backend.launch(context())).rejects.toThrow("managed provider is unavailable");
   });
 
   it("uses deterministic fenced identities and the discovered Copilot actor", async () => {

@@ -6,12 +6,92 @@ This file distinguishes release evidence from implemented adapters. An adapter e
 bundle is not, by itself, a support claim.
 
 The scope is defined in [`DESIGN.md`](DESIGN.md). This document records tested behavior and the
-checks still required before publication. Tasks are organized in the [delivery plan](DELIVERY-PLAN.md).
+checks still required before publication. Current remaining work is on the [completion board](COMPLETION.md);
+the [delivery plan](DELIVERY-PLAN.md) retains the accepted waves.
 
 ## Proven on this branch
 
+The [quota-safe completion candidate and retained successor](release-evidence/quota-safe-successor-completion-component-2026-09-05.json)
+passed at the explicitly recorded boundaries: `4e06b13` passed full integrated checks and matching
+89-file Linux plugin installation; the same already-delivered successor then completed through the
+new proof-only deadline path, without new model work. Independent observation verified original
+history, retained sibling refresh/validation/review, dependent integration, all three closed Work
+Items, 219,769 cumulative known tokens under the unchanged 500,000 allowance, and eleven absent
+reserved scopes. The normally stopped controller has MainPID zero and no restarts. Fresh-clone
+delivered-code tests also passed.
+
+Adoption and delivery used `007cd8c`; final closure used `4e06b13`. This is not a clean-history run
+performed entirely on one candidate. The original runtime failures remain failed. Two private
+observer format/optional-setup assertions also remain preserved; separately corrected read-only
+observation passed without restarting Factory. The evidence document is later than the installed
+package. This completes the bounded retained-successor case, not any broad release gate.
+
+### Earlier candidate observations (unchanged)
+
+The [foreground-recovery candidate](release-evidence/foreground-recovery-candidate-component-2026-09-05.json)
+passed full integrated checks and exact matching Linux installation at `007cd8c`. The installed
+successor then adopted the original work, refreshed and integrated the retained publication, and
+implemented the dependent item. All three Work Items are done, with 219,769 cumulative known tokens
+under the unchanged 500,000 threshold. [Objective closure remains incomplete](release-evidence/recovery-quota-closure-component-2026-09-05.json):
+GitHub REST exhaustion exposed repeated immutable reads and a controller restart loop. The exact
+controller was stopped; quota/closure corrections and independent successor qualification remain
+required. These observed results do not erase earlier failures or close any broad release gate.
+
+The [installed foreground-resource component](release-evidence/recovery-foreground-resource-component-2026-09-05.json)
+records discovery repair at `0363c5e`: replaying the exact accepted request restored the structural
+label and the controller reached adoption. Adoption then blocked at `resource-absence-unverified`
+because the original foreground batches lack a producer service identity. No successor worker
+started or additional model usage was observed; the controller was stopped. Focused checks and
+matching installation passed, not a new full release suite. A completed-invocation proof is separately
+implemented and reviewed; installed adoption is still unqualified. PID/scope absence alone is not
+accepted and the failed observations remain intact.
+
+The [installed recovery-discovery component](release-evidence/recovery-discovery-component-2026-09-05.json)
+preserves a later failure at `f67fd05`: explicit successor authority was accepted, but a foreground-created
+Objective lacked its structural discovery label, so the healthy controller did not adopt it. No
+successor worker started; known usage stayed unchanged. The controller was normally stopped and
+independently observed inactive. Request/replay discovery repair is separately implemented and
+regression-tested; discovery is now observed on the later artifact above, but continuation is not qualified.
+
+The [corrected publication-recovery candidate](release-evidence/publication-recovery-candidate-component-2026-09-05.json)
+passed integrated release checks and matching Linux CLI installation at
+`f67fd05ac97ffd68803e1fea299c7977e5b3c73c`. The installed package matches the tarball verified by those
+checks; all 84 canonical files and exact inventory match except the permitted manifest cachebuster.
+The exact controller remained inactive. Successor execution was approved later; its subsequent
+discovery/resource outcomes are recorded above. The previous native failure remains failed and all
+broad gates remain Open. This evidence and board update are
+later documentation, not part of the identified tested or installed package.
+
+The separate [installed planning component](release-evidence/installed-planning-component-2026-09-05.json)
+passed at `894537324a1fa61cdb3c2b905e841bca8a80e9ba`: actual `factory_plan` with `compile:true`
+returned one scoped Work Item with repository-grounded validation commands. One compiler call
+reported 14,959 tokens in the response; independent returned-graph digest verification passed.
+Activation remained unauthorized, and before/after comparisons found no activation, sub-issue, PR,
+repository or installed-artifact changes. This qualifies planning, not durable graph publication or
+execution, and leaves all six broad gates Open.
+
+The [native sibling-refresh release/install component](release-evidence/native-refresh-release-component-2026-09-05.json)
+records `npm run verify:release` passing at `894537324a1fa61cdb3c2b905e841bca8a80e9ba`:
+129 files, 2,492 passing tests, three skips, all static/schema/bundle/staged-package checks and zero
+dependency vulnerabilities. The exact 81-file candidate package was installed with canonical bytes
+matching except the permitted manifest cachebuster. The record binds its package, bundle, inventory
+and retained log hashes, plus the bounded recovery digest optimization. The installed native exercise
+failed in runtime with `sibling refresh lacks one authenticated original publication`: two Work Items
+published and validated, one integrated, and the dependent join never started. Five known usage
+receipts account for 131,622 tokens. A separate read-only observation found all six actually reserved
+execution/validation units absent, unchanged installed bundles, and the exact controller inactive;
+it did not invent join scopes or satisfy the original qualifier's inapplicable requirement for an
+SDK environment identity. The original failure remains unchanged. All broad prepublication gates remain
+Open; this later documentation update is not part of that tested or installed package.
+
+The corrected implementation rereads publication history before repair and accepts only fully
+equivalent authenticated receipts while preserving exact immutable source bindings. The independent
+qualifier now checks the SDK/CLI resource, backend and host identities actually supplied by those
+adapters; an optional environment identity is validated when present. These corrections do not turn
+the failed attempt into a pass. Installed continuation remains a separate qualification step.
+
 The [final key-free component record](release-evidence/local-keyfree-finalization-component-2026-09-05.json)
-binds the latest `npm run verify:release` at `1346107ae568099f823a72066316c86d8793b685`:
+binds the earlier `npm run verify:release` at `1346107ae568099f823a72066316c86d8793b685`:
 125 files, 2,300 passing tests, three skips, all static/schema/bundle/staged-package checks and zero
 dependency vulnerabilities. Its exact 79-file package is separately identified from the earlier
 `2668f0b` full release (2,249 passing tests) and 79-file installed package. All earlier installed
@@ -222,9 +302,14 @@ start. All eight exact recorded execution/validation scopes were subsequently ab
 partial execution evidence, not an end-to-end pass. GitHub's
 [documented test-merge generation policy](https://github.blog/changelog/2026-02-19-changes-to-test-merge-commit-generation-for-pull-requests/)
 invalidates an assumption that polling alone will promptly refresh that preview.
-The decision whether to permit changing a sibling PR head to obtain fresh preview evidence remains
-unanswered. Current integration pacing preserves the unchanged-head and exact-merge guards; it does
-not resolve that product decision. This blocker is independent of API keys or paid-provider access.
+The operator has since approved non-force refresh of Factory-owned sibling branches, with separate
+full validation and semantic review of each changed head and immutable original publication history.
+The [real exact-head branch-CAS component](release-evidence/sibling-branch-cas-component-2026-09-05.json)
+passed: a planned two-parent update succeeded and a stale writer was rejected despite proposing a
+valid fast-forward descendant. This resolves the product decision and measures the update primitive,
+not the full native delivery criterion. Fresh installed qualification remains required; the cancelled
+historical Objective is unchanged and must not be revived. No API key or paid provider is needed for
+the local-first capability.
 
 The same observation records a separate pre-worker failure: durable activation of a plain human
 issue was accepted but remained undiscovered because its structural Objective label was missing.
@@ -354,7 +439,7 @@ gate into a platform or paid-provider support claim.
 | DOD-2 — GitHub-only durable control | `test/v2-control.test.ts`, `test/v2-protocol.test.ts`, `test/v2-state.test.ts`, `test/authenticated-events.test.ts`, `test/durable-commands.test.ts`, `test/supervisor-commands.test.ts`, `test/github-reader-history.test.ts`, `test/application-services.test.ts`, `test/repository-controller.test.ts`, `test/control-surface.test.ts`, plus the package verifier's no-workflow check | Implemented; authenticated atomic comment requests, centralized semantic request-ID deduplication, at-least-once replay tolerance, single-controller fencing, and the no-workflow boundary have deterministic coverage |
 | DOD-3 — Objective compilation and activation | `test/compiler-pipeline.test.ts`, `test/compiled-graph.test.ts`, `test/compilation-durability.test.ts`, `test/graph.test.ts`, `test/application-services.test.ts`, `test/control-surface.test.ts` | Implemented and deterministic/fault-injection fixtures pass |
 | DOD-4 — Adaptive local-first execution | `test/admission.test.ts`, `test/capacity-ledger.test.ts`, `test/resource-sampler.test.ts`, `test/scheduling-priority.test.ts`, `test/local-runtime.test.ts`, `test/codex-sdk-backend.test.ts`, `test/codex-cli-backend.test.ts` | Implemented; broad live-host matrix remains gated below |
-| DOD-5 — Explicit bounded cloud burst | `test/admission.test.ts`, `test/budget.test.ts`, `test/economics.test.ts`, `test/backend-conformance.test.ts`, `test/daytona-backend.test.ts`, `test/github-managed.test.ts`, `test/sandbox-contract.test.ts`, `test/supervisor-preflight.test.ts` | Implemented with fake/credential-free adapters; paid-provider runs remain gated below |
+| DOD-5 — Explicit bounded cloud burst | `test/admission.test.ts`, `test/budget.test.ts`, `test/economics.test.ts`, `test/backend-conformance.test.ts`, `test/daytona-backend.test.ts`, `test/github-managed.test.ts`, `test/sandbox-contract.test.ts`, `test/supervisor-preflight.test.ts` | Policy, Daytona and Copilot paths implemented with credential-free coverage; managed Codex remains blocked implementation pending authoritative actor discovery and a provider-specific task/session lifecycle binding. Paid-provider runs remain gated below |
 | DOD-6 — Durable recovery | `test/repository-controller-faults.test.ts`, `test/compilation-durability.test.ts`, `test/review-durability.test.ts`, `test/scheduling-recovery.test.ts`, `test/session-recovery.test.ts`, `test/integration-recovery.test.ts`, `test/publication.test.ts` | Implemented and injected-fault fixtures pass |
 | DOD-7 — Evidence-bound delivery | `test/validation.test.ts`, `test/exact-head-validation.test.ts`, `test/delivery-topology.test.ts`, `test/stack-publication.test.ts`, `test/integration-recovery.test.ts`, `test/checks.test.ts`, `test/merge-candidate.test.ts`, `test/merge-candidates.test.ts`, `test/parallel-sibling-integration.test.ts` | Implemented; combined-tree sibling integration has offline Supervisor coverage; installed Objective and live native-stack matrix remain gated below |
 | DOD-8 — Explainable, replayable economics | `test/status-output.test.ts`, `test/explanations.test.ts`, `test/replay.test.ts`, `test/economics.test.ts`, `test/model-economics.test.ts`, `test/budget.test.ts`, `test/admission.test.ts`, installed MCP surface verification | Implemented and read-only contract verified; model tokens are an observed stop threshold with documented one-call overshoot, not a provider hard cap |

@@ -1,0 +1,30 @@
+{
+  "protocol": "clockgrove.factory/component-evidence-v1",
+  "capability": "sibling-branch-exact-cas-primitive",
+  "status": "passed-component-only",
+  "scope": "real-github-head-branch-cas-component",
+  "sourceCommit": "e32490fe8ca3a9268a644c770b53602ee2ba7bee",
+  "sourceScriptSha256": "5182560710483bc12dd422d777619cc3a8c93230971fae7bee3e3a0a77aa9c4a",
+  "bundledProbeSha256": "fe255f9ed3d7c1efa5fe0433dbe750f14298ce4449f651f84e557acc922148d2",
+  "retainedObservationSha256": "077ba522577bb16c4fdae5b41e839aef3f9a7829d9f57a539431b2f752564792",
+  "startedAt": "2026-09-05T17:23:41.308Z",
+  "finishedAt": "2026-09-05T17:24:09.820Z",
+  "observed": {
+    "twoParentFastForwardAccepted": true,
+    "staleBeforeOidRejectedDespiteValidFastForwardTarget": true,
+    "branchUnchangedAfterRejection": true,
+    "originalTreePreserved": true,
+    "exactOwnedBranchCleanupVerified": true,
+    "defaultBranchUnchanged": true
+  },
+  "objectiveOrModelCalls": 0,
+  "existingIssuesOrPullRequestsChanged": false,
+  "privateRepositoryIdentifiersPublished": false,
+  "notEstablished": [
+    "installed native Objective completion",
+    "PR test-merge regeneration or its latency",
+    "changed-head validation and semantic review",
+    "controller restart or successor recovery",
+    "native stacked linear-descendant rebase"
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "kind": "installed-write-free-planning-component",
+  "observedAt": "2026-09-05T19:13:28.008Z",
+  "sourceCommit": "894537324a1fa61cdb3c2b905e841bca8a80e9ba",
+  "manifestVersion": "2.0.26+codex.20260905185308",
+  "result": "passed-component-only",
+  "operation": "factory_plan with compile:true",
+  "workItemCount": 1,
+  "validationPlan": "requested scoped node --test command grounded in the inspected repository",
+  "activationAuthorized": false,
+  "modelUsage": {
+    "calls": 1,
+    "inputTokens": 14371,
+    "outputTokens": 588,
+    "cachedInputTokens": 0,
+    "totalTokens": 14959,
+    "persistence": "response-only; no run accounting receipt claimed"
+  },
+  "unchanged": {
+    "activationSubIssuesAndPullRequests": true,
+    "repositoryGitAndLocalState": true,
+    "installedArtifact": true,
+    "beforeAfterComparableSha256": "5bc1758d0c398fcba0fc500e9cdc75c865de42ce8eeff67bead6966c68911b3d"
+  },
+  "evidence": {
+    "verifiedResultSha256": "46f17a6776dcc24ae9f8808a4e04ddbd306fe3514f570db746979c71db86138d",
+    "beforeSha256": "0676b1d50dcc2f46b3b607c368621708ac6bb01981c014cdf168e43f86280ef7",
+    "afterSha256": "23125ac47233e52221c9eec7fa5d08684d6fef02c5eb1f593ae75e8e82651c08",
+    "compilationSha256": "683d69c9c69ba659dcaedba6850920955aab8b317bde8e8ea92e87c25b81c5fd",
+    "returnedGraphDigest": "83fe6243c3cdc05fa5f12705bece5f1900f1d967217fa9f8464f27e8ca7d870f",
+    "independentGraphDigestObservationSha256": "23fd4ef209fdbed62222c78ed8bc99c6bcad5c5d870db4f9bfb6660009df6016",
+    "independentReturnedGraphDigestMatched": true
+  },
+  "limitations": [
+    "This is actual installed compilation of a proposed graph, not activation, durable graph publication or Work Item execution.",
+    "The separate failed native Objective remains failed and unchanged.",
+    "All six broad prepublication gates remain Open; this component does not qualify additional hosts or providers.",
+    "This later documentation update is not part of the identified installed package."
+  ]
+}

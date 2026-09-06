@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PlatformUnavailableError } from "../platform.js";
 
 import type { CompiledGraphReadStore, CompiledGraphStore } from "../control/graphs.js";
 import type { LeaseManager, LeaseState } from "../control/lease.js";
@@ -300,6 +301,7 @@ export class RecoveryClaimManager {
     try {
       await this.store.createRef(ref, oid);
     } catch (error) {
+      if (error instanceof PlatformUnavailableError) throw error;
       const observed = await this.load(plan.objective, plan.predecessor.runId);
       if (!observed) throw error;
       assertSameClaim(observed, payload);

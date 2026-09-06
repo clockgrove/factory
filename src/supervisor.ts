@@ -72,10 +72,12 @@ import {
 import { verifyRecoveryResources } from "./recovery/resources.js";
 import { recoveryReadPort } from "./recovery/github-read-port.js";
 import { observeRecoveryNativeTransition } from "./recovery/native-transition.js";
+import { observeRecoverySiblingRefresh } from "./recovery/sibling-refresh.js";
 import {
   createRecoverySourceIntegratedEvent,
   verifyRecoverySourceIntegration,
   verifyPriorRecoveryDelivery,
+  verifyRecoveryMergedSource,
 } from "./recovery/outcomes.js";
 import { inspectImplicitRestart } from "./control/recovery.js";
 import {
@@ -85,6 +87,13 @@ import {
   type MergeCandidateIdentity,
 } from "./control/merge-candidates.js";
 import { verifyMergeCandidateSquash } from "./publication/merge-candidate.js";
+import {
+  SiblingRefreshStore,
+  loadSiblingRefreshLineage,
+  verifyPlannedSiblingRefreshCommit,
+  type SiblingRefreshIdentity,
+  type SiblingRefreshRecord,
+} from "./control/sibling-refreshes.js";
 import {
   NativeRebaseCheckpointStore,
   nativeRebaseIdentityDigest,
@@ -157,6 +166,7 @@ import {
   verifySquashIntegration,
   type PublishedPullRequest,
 } from "./publication/publisher.js";
+import { prepareSiblingRefreshTree } from "./publication/sibling-refresh-tree.js";
 import {
   branchRuleBlockers,
   missingRequiredChecks,
@@ -170,6 +180,7 @@ import {
   type DeliverySelection,
 } from "./publication/delivery.js";
 import { GITHUB_STACKS_API_VERSION, GitHubStacks } from "./publication/github-stacks.js";
+import { selectEquivalentPublicationRecord } from "./publication/recorded-publication.js";
 import {
   acquireIntegrationLease,
   assertIntegrationHeads,
@@ -221,7 +232,7 @@ import {
   type CleanValidationInput,
 } from "./validation/clean-run.js";
 import { bindValidationToPublishedHead, validationPlanFromPacket } from "./validation/plan.js";
-import { discoverLocalScopeHost } from "./runtime/local-scope.js";
+import { discoverLocalScopeHost, observeLocalScope } from "./runtime/local-scope.js";
 import { LocalScopeBatchSchema, type LocalScopeBatch } from "./protocol/local-scope.js";
 import type { ValidationEvidence } from "./validation/evidence.js";
 import {
@@ -329,6 +340,9 @@ interface DeliveryExecutionBase {
   branch: string;
   sha: string;
 }
+
+class SiblingRefreshTargetAdvancedError extends Error {}
+class SiblingRefreshObservationPendingError extends Error {}
 
 interface NativeStackMember {
   receipt: PublicationReceipt;
@@ -955,6 +969,7 @@ export class FactorySupervisor {
   readonly #attempts: AttemptManager;
   readonly #reviews: ReviewCheckpointManager;
   readonly #mergeCandidates: MergeCandidateCheckpointStore;
+  readonly #siblingRefreshes: SiblingRefreshStore;
   readonly #nativeRebases: NativeRebaseCheckpointStore;
   readonly #recorder: LifecycleRecorder;
   #management: ManagementBackend;
@@ -1060,6 +1075,7 @@ export class FactorySupervisor {
     });
     this.#reviews = new ReviewCheckpointManager(this.#store, this.#leases);
     this.#mergeCandidates = new MergeCandidateCheckpointStore(this.#store, this.#leases);
+    this.#siblingRefreshes = new SiblingRefreshStore(this.#store, this.#leases);
     this.#nativeRebases = new NativeRebaseCheckpointStore(this.#store, this.#leases);
     this.#recorder = new LifecycleRecorder(this.#store, this.#leases);
     this.#management =
@@ -1251,6 +1267,7 @@ export class FactorySupervisor {
     try {
       recovered = await manager.resumeRecovery(input);
     } catch (error) {
+      if (error instanceof PlatformUnavailableError) throw error;
       // Ordinary execution/admission never uses this startup-only repair path.
       if (reconciliationMode === "none" || this.#recoveryRuntime) throw error;
       const inspection = await manager.inspectRecoveryReconciliation({
@@ -1541,6 +1558,10 @@ export class FactorySupervisor {
     snapshot: Snapshot,
     run: RunState,
     targetBaseSha: string,
+    completionDeadline?: number,
+    completedSources?: ReadonlyMap<number, { mergeCommitSha: string; targetBaseSha: string }>,
+    completedCandidates?: Map<string, MergeCandidateCheckpointRecord>,
+    completedMergeOids?: Set<string>,
   ): Promise<boolean> {
     if (!run.baseSha || snapshot.number !== run.objective) return false;
     const observations = new Map<
@@ -1553,7 +1574,18 @@ export class FactorySupervisor {
       if (visited.has(cursor) || visited.size >= snapshot.workItems.length) return false;
       visited.add(cursor);
       const matches = [];
+      if (completionDeadline !== undefined) {
+        for (const proof of completedSources?.values() ?? []) {
+          if (proof.mergeCommitSha !== cursor) continue;
+          matches.push(proof.targetBaseSha);
+        }
+      }
       for (const item of snapshot.workItems) {
+        if (
+          completionDeadline !== undefined &&
+          completedSources?.get(item.number)?.mergeCommitSha === cursor
+        )
+          continue;
         const events = deduplicateFactoryEvents(item.factoryEvents ?? []).filter(
           (event) =>
             event.runId === run.runId && "workItem" in event && event.workItem === item.number,
@@ -1567,11 +1599,41 @@ export class FactorySupervisor {
             observations.set(linked.number, pull);
           }
           if (!pull.merged || pull.mergeCommitSha !== cursor) continue;
+          if (completionDeadline !== undefined) {
+            const integrated = events.filter((event) => event.event === "AttemptIntegrated");
+            if (
+              integrated.length !== 1 ||
+              integrated[0]?.kind !== "attempt" ||
+              integrated[0].headSha !== cursor ||
+              Date.parse(integrated[0].at) > completionDeadline
+            )
+              return false;
+          }
+          const publication = [...events]
+            .reverse()
+            .find(
+              (event) =>
+                event.kind === "publication" &&
+                event.event === "PublicationRecorded" &&
+                event.pullRequest === linked.number,
+            );
+          if (publication?.kind !== "publication") return false;
+          selectEquivalentPublicationRecord(
+            events.filter(
+              (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
+                event.kind === "publication" &&
+                event.event === "PublicationRecorded" &&
+                event.attempt === publication.attempt &&
+                event.headSha === publication.headSha,
+            ),
+            publication,
+          );
           const published = events.find(
             (event) =>
               event.kind === "attempt" &&
               event.event === "AttemptPublished" &&
-              event.headSha === pull.headSha &&
+              event.headSha === publication.headSha &&
+              event.attempt === publication.attempt &&
               event.policyDigest === run.policyDigest,
           );
           if (published?.kind !== "attempt" || !published.artifactDigest) return false;
@@ -1581,6 +1643,7 @@ export class FactorySupervisor {
               (event) =>
                 event.kind === "validation" &&
                 event.attempt === published.attempt &&
+                event.evidenceDigest === publication.validationDigest &&
                 event.passed &&
                 event.sequence < published.sequence &&
                 (event.policyDigest === undefined || event.policyDigest === run.policyDigest),
@@ -1617,7 +1680,33 @@ export class FactorySupervisor {
             pull.headRepository?.toLowerCase() !== run.repository?.toLowerCase()
           )
             return false;
-          const head = await this.#store.readCommit(pull.headSha);
+          if (completionDeadline !== undefined) {
+            const review = await this.#reviews.load({
+              kind: validation.baseSha === reservation.baseSha ? "artifact" : "rebase",
+              runId: run.runId,
+              objective: run.objective,
+              workItem: item.number,
+              attempt: published.attempt,
+              artifactDigest: published.artifactDigest,
+              baseSha: validation.baseSha,
+              outputTreeSha: validation.outputTreeSha,
+              evidenceDigest: validation.evidenceDigest,
+              ...(validation.baseSha === reservation.baseSha
+                ? {}
+                : { headSha: publication.headSha }),
+            });
+            if (
+              !this.#completedReviewAccounted(review, snapshotEvents(snapshot), completionDeadline)
+            )
+              return false;
+          }
+          const head = await this.#store.readCommit(publication.headSha);
+          if (
+            head.oid !== publication.headSha ||
+            head.parentOids.length !== 1 ||
+            head.parentOids[0] !== validation.baseSha
+          )
+            return false;
           const exactHeadValidation = bindValidationToPublishedHead({
             validation: {
               passed: true,
@@ -1625,7 +1714,7 @@ export class FactorySupervisor {
               baseSha: validation.baseSha,
               outputTreeSha: validation.outputTreeSha,
             },
-            publishedHeadSha: pull.headSha,
+            publishedHeadSha: publication.headSha,
             publishedTreeSha: head.treeOid,
             publishedBaseSha: validation.baseSha,
           });
@@ -1635,11 +1724,19 @@ export class FactorySupervisor {
           const publishedPull: PublishedPullRequest = {
             number: linked.number,
             branch: pull.headRef!,
-            commitSha: pull.headSha,
+            commitSha: publication.headSha,
             htmlUrl: `https://github.com/${run.repository}/pull/${linked.number}`,
             exactHeadValidation,
           };
+          const refresh = await this.#observedSiblingRefresh(
+            item,
+            { reservation, pull: publishedPull },
+            pull.headSha,
+            run,
+          );
+          if (refresh && refresh.identity.targetBaseSha !== parent) return false;
           if (parent === validation.baseSha) {
+            if (refresh) return false;
             await verifySquashIntegration(this.#store, publishedPull, cursor, parent);
           } else {
             const candidate = await this.#mergeCandidates.load({
@@ -1648,15 +1745,32 @@ export class FactorySupervisor {
               workItem: item.number,
               attempt: published.attempt,
               pullRequest: linked.number,
-              sourceHeadSha: pull.headSha,
+              sourceHeadSha: publication.headSha,
               sourceExactHeadValidationDigest: exactHeadValidation.digest,
               targetBaseSha: parent,
+              ...(refresh ? { deliveryHeadSha: refresh.plannedHeadSha } : {}),
             });
             const review = candidate
               ? await this.#reviews.load(this.#mergeCandidateReviewIdentity(candidate))
               : null;
-            if (!candidate || !review?.review.accepted || review.review.unmetCriteria.length)
+            if (
+              !candidate ||
+              !review?.review.accepted ||
+              review.review.unmetCriteria.length ||
+              (refresh && candidate.validation.outputTreeSha !== refresh.outputTreeSha)
+            )
               return false;
+            if (
+              completionDeadline !== undefined &&
+              (!this.#completedReviewAccounted(
+                review,
+                snapshotEvents(snapshot),
+                completionDeadline,
+              ) ||
+                Date.parse(candidate.validation.completedAt) > completionDeadline)
+            )
+              return false;
+            completedCandidates?.set(mergeCandidateIdentityDigest(candidate.identity), candidate);
             await verifyMergeCandidateSquash(
               this.#store,
               exactHeadValidation,
@@ -1668,9 +1782,400 @@ export class FactorySupervisor {
         }
       }
       if (matches.length !== 1) return false;
+      completedMergeOids?.add(cursor);
       cursor = matches[0]!;
     }
     return true;
+  }
+
+  #completedReviewAccounted(
+    record: ReviewCheckpointRecord | null,
+    events: readonly FactoryEvent[],
+    deadline: number,
+    sourceOwned = false,
+  ): boolean {
+    if (!record?.review.accepted || record.review.unmetCriteria.length) return false;
+    const receipts = events.filter(
+      (event) =>
+        event.kind === "budget" &&
+        event.event === "BudgetReconciled" &&
+        event.runId === record.identity.runId &&
+        event.workItem === record.identity.workItem &&
+        event.attempt === (sourceOwned ? undefined : record.identity.attempt) &&
+        event.phase === "management" &&
+        event.unit === "model_tokens" &&
+        event.usageId === this.#reviewUsageId(record),
+    );
+    return (
+      receipts.length === 1 &&
+      receipts[0]?.kind === "budget" &&
+      receipts[0].amount === record.usage.inputTokens + record.usage.outputTokens &&
+      Date.parse(receipts[0].at) <= deadline
+    );
+  }
+
+  /** Completion-only authority after expiry: no repair or new execution may be inferred. */
+  async #recordedCompletionReady(snapshot: Snapshot, deadline: number): Promise<boolean> {
+    try {
+      const active = latestSupportedRun(snapshot.factoryEvents ?? []);
+      if (
+        active?.event !== "FactoryRunStarted" ||
+        active.runId !== this.#run.runId ||
+        active.policyDigest !== this.#run.policyDigest
+      )
+        return false;
+      if (this.#options.recovery) {
+        const runtime = await loadRecoveryRuntime({
+          objective: snapshot.number,
+          runId: this.#run.runId,
+          store: this.#recoveryStore,
+          readSnapshot: async () => ({ snapshot, historyComplete: true }),
+        });
+        if (
+          runtime.status !== "verified" ||
+          runtime.currentUnknownModelUsageCount !== 0 ||
+          runtime.planRecord.digest !== this.#options.recovery.planDigest ||
+          runtime.planRecord.plan.requestId !== this.#options.recovery.requestId
+        )
+          return false;
+        this.#recoveryRuntime = runtime;
+      }
+      const graphs = new CompiledGraphManager(this.#store, this.#leases);
+      const graph =
+        this.#recoveryRuntime?.graph ?? (await graphs.load(snapshot.number, this.#run.runId));
+      const projection =
+        this.#recoveryRuntime?.projection ??
+        (graph && (await graphs.loadProjection(snapshot.number, this.#run.runId, graph)));
+      if (!graph || !projection) return false;
+      assertGraphWithinRunPolicy(graph.objective, this.#policy);
+      this.#compiledGraph = graph.objective;
+      this.#compiledProjection = projection;
+      this.#fenceSnapshot(snapshot);
+      const completedSources = new Map<
+        number,
+        { mergeCommitSha: string; targetBaseSha: string; at: string }
+      >();
+      const runtime = this.#recoveryRuntime;
+      for (const proof of runtime?.sourceIntegrations ?? []) {
+        if (
+          proof.candidate &&
+          (Date.parse(proof.candidate.validation.completedAt) > deadline ||
+            !this.#completedReviewAccounted(
+              proof.candidateReview,
+              runtime!.events,
+              deadline,
+              proof.candidate.identity.runId !==
+                runtime!.planRecord.plan.items.find(
+                  (item) => item.workItem === proof.outcome.workItem,
+                )?.source?.runId,
+            ))
+        )
+          return false;
+        completedSources.set(proof.outcome.workItem, {
+          mergeCommitSha: proof.outcome.mergeCommitSha,
+          targetBaseSha: proof.targetBaseSha,
+          at: proof.outcome.at,
+        });
+      }
+      // An acknowledged already-integrated predecessor retains its ORIGINAL
+      // receipt. Never manufacture a successor outcome to make closure possible.
+      for (const item of runtime?.planRecord.plan.items ?? []) {
+        if (item.action !== "integrated" || !item.source || completedSources.has(item.workItem))
+          continue;
+        const source = item.source;
+        if (source.priorDelivery) {
+          const prior = await verifyPriorRecoveryDelivery({
+            plan: runtime!.planRecord.plan,
+            item,
+            events: runtime!.events,
+            store: this.#recoveryStore,
+          });
+          completedSources.set(item.workItem, {
+            mergeCommitSha: prior.outcome.mergeCommitSha,
+            targetBaseSha: prior.targetBaseSha,
+            at: prior.outcome.at,
+          });
+        } else {
+          const receipts = runtime!.events.filter(
+            (event) =>
+              event.event === "AttemptIntegrated" &&
+              event.runId === source.runId &&
+              event.workItem === item.workItem &&
+              event.attempt === source.attempt,
+          );
+          if (receipts.length !== 1 || receipts[0]?.kind !== "attempt") return false;
+          const receipt = receipts[0];
+          const proof = await verifyRecoveryMergedSource({
+            planRecord: runtime!.planRecord,
+            claim: runtime!.claim,
+            events: runtime!.events,
+            store: this.#recoveryStore,
+            workItem: item.workItem,
+          });
+          if (
+            proof.mergeCommitSha !== receipt.headSha ||
+            receipt.policyDigest !==
+              runtime!.planRecord.plan.history.find((entry) => entry.runId === source.runId)
+                ?.policyDigest
+          )
+            return false;
+          const merge = await this.#store.readCommit(proof.mergeCommitSha);
+          if (merge.oid !== proof.mergeCommitSha || merge.parentOids.length !== 1) return false;
+          completedSources.set(item.workItem, {
+            mergeCommitSha: proof.mergeCommitSha,
+            targetBaseSha: merge.parentOids[0]!,
+            at: receipt.at,
+          });
+        }
+      }
+      const derived = this.#deriveObjective(snapshot);
+      const objective = {
+        ...derived,
+        items: derived.items.map((item) =>
+          completedSources.has(item.number) && item.closed
+            ? { ...item, state: "done" as const }
+            : item,
+        ),
+      };
+      if (!allDone(objective) || objective.items.some((item) => !item.closed)) return false;
+      const events = deduplicateFactoryEvents(
+        this.#accountingEvents(snapshotEvents(snapshot), this.#run.runId),
+      );
+      if (graph.compilation) {
+        const owner = runtime?.planRecord.plan.graph.sourceRunId ?? this.#run.runId;
+        const compiler = events.filter(
+          (event) =>
+            event.kind === "budget" &&
+            event.event === "BudgetReconciled" &&
+            event.runId === owner &&
+            event.phase === "management" &&
+            event.unit === "model_tokens" &&
+            event.workItem === undefined &&
+            event.attempt === undefined &&
+            event.usageId === `compile-${graph.graphDigest}`,
+        );
+        if (
+          compiler.length !== 1 ||
+          compiler[0]?.kind !== "budget" ||
+          compiler[0].amount !== graph.compilation.inputTokens + graph.compilation.outputTokens ||
+          Date.parse(compiler[0].at) > deadline
+        )
+          return false;
+      }
+      if (
+        unreconciledBudgetReservations(events).length ||
+        unreconciledCapacityReservations(events).length
+      )
+        return false;
+      const current = events.filter((event) => event.runId === this.#run.runId);
+      if (
+        current.some(
+          (event) =>
+            ["attempt", "capacity", "budget", "validation", "publication"].includes(event.kind) &&
+            (!Number.isFinite(Date.parse(event.at)) || Date.parse(event.at) > deadline),
+        )
+      )
+        return false;
+      // Every completed Work Item needs its real, on-time integration receipt. A
+      // closed issue or an observed merge without the receipt cannot use this path.
+      for (const item of objective.items) {
+        const source = completedSources.get(item.number);
+        const own = current.filter(
+          (event) => event.event === "AttemptIntegrated" && event.workItem === item.number,
+        );
+        const outcomes = [...(source ? [source] : []), ...own];
+        if (
+          outcomes.length !== 1 ||
+          !Number.isFinite(Date.parse(outcomes[0]!.at)) ||
+          Date.parse(outcomes[0]!.at) > deadline
+        )
+          return false;
+      }
+      for (const started of current) {
+        if (started.event !== "AttemptStarted") continue;
+        const terminal = current.filter(
+          (event) =>
+            event.kind === "attempt" &&
+            event.workItem === started.workItem &&
+            event.attempt === started.attempt &&
+            ["AttemptSucceeded", "AttemptFailed", "AttemptTimedOut", "AttemptCancelled"].includes(
+              event.event,
+            ),
+        );
+        if (
+          terminal.length !== 1 ||
+          terminal[0]?.kind !== "attempt" ||
+          terminal[0].reportedModelTokens === undefined ||
+          terminal[0].sequence <= started.sequence ||
+          Date.parse(terminal[0].at) > deadline
+        )
+          return false;
+        const usage = current.filter(
+          (event) =>
+            event.kind === "budget" &&
+            event.event === "BudgetReconciled" &&
+            event.workItem === started.workItem &&
+            event.attempt === started.attempt &&
+            event.phase === "execution" &&
+            event.unit === "model_tokens",
+        );
+        if (
+          usage.length !== 1 ||
+          usage[0]?.kind !== "budget" ||
+          usage[0].amount !== terminal[0].reportedModelTokens
+        )
+          return false;
+      }
+      const target = await this.#store.getBranchHead(this.#baseBranch);
+      const candidates = new Map<string, MergeCandidateCheckpointRecord>();
+      const merged = new Set<string>();
+      if (
+        !(await this.#observedRunOwnsBaseAdvance(
+          snapshot,
+          this.#run,
+          target.oid,
+          deadline,
+          completedSources,
+          candidates,
+          merged,
+        ))
+      )
+        return false;
+      if (
+        current.some(
+          (event) =>
+            event.event === "AttemptIntegrated" && (!event.headSha || !merged.has(event.headSha)),
+        )
+      )
+        return false;
+      if (
+        runtime?.sourceIntegrations.some(
+          (proof) =>
+            runtime.planRecord.plan.items.find((item) => item.workItem === proof.outcome.workItem)
+              ?.action !== "integrated" && !merged.has(proof.outcome.mergeCommitSha),
+        )
+      )
+        return false;
+      // This shortcut is intentionally local-only. Exact settled receipts plus
+      // synchronous terminal control flow precede physical observation of every
+      // possible command slot; a live Director producer is not a worker liability.
+      for (const event of events) {
+        if (event.event !== "AttemptReserved" && event.event !== "CapacityReserved") continue;
+        if (event.event === "CapacityReserved" && event.phase !== "validation") continue;
+        if (!event.localScopeBatch) return false;
+        const batch = LocalScopeBatchSchema.parse(event.localScopeBatch);
+        const identity = batch.identity;
+        if (
+          identity.repository !== this.#run.repository ||
+          identity.objective !== snapshot.number ||
+          identity.runId !== event.runId ||
+          identity.workItem !== event.workItem ||
+          identity.attempt !== event.attempt ||
+          identity.policyDigest !== event.policyDigest ||
+          identity.directorEpoch !== (event.recoveryEpoch ?? event.directorEpoch) ||
+          identity.phase !== (event.event === "AttemptReserved" ? "execution" : "validation")
+        )
+          return false;
+        if (event.event === "AttemptReserved") {
+          const reservation = (await this.#attempts.list(snapshot.number, event.workItem)).find(
+            (entry) => entry.runId === event.runId && entry.attempt === event.attempt,
+          );
+          if (
+            !reservation?.localScopeBatch ||
+            JSON.stringify(LocalScopeBatchSchema.parse(reservation.localScopeBatch)) !==
+              JSON.stringify(batch)
+          )
+            return false;
+        } else {
+          const workItem = snapshot.workItems.find((item) => item.number === event.workItem);
+          const compilerId = workItem && parseGraphItemMetadata(workItem.body ?? "").id;
+          const packet = graph.objective.workItems.find((item) => item.id === compilerId);
+          if (
+            !packet ||
+            batch.commandCount !== workerPacketFromCompiled(packet).validationCommands.length + 1
+          )
+            return false;
+          const candidate = candidates.get(
+            event.backend.replace(/^factory\/integration-validation-/, ""),
+          );
+          const sourceCapacity = runtime?.verifiedSourceCapacity.some(
+            (entry) => recoveryEventDigest(entry) === recoveryEventDigest(event),
+          );
+          const ordinary = events.some(
+            (collected) =>
+              collected.event === "AttemptCollected" &&
+              collected.runId === event.runId &&
+              collected.workItem === event.workItem &&
+              collected.attempt === event.attempt &&
+              collected.artifactDigest === identity.invocationDigest &&
+              events.some(
+                (validated) =>
+                  validated.kind === "validation" &&
+                  validated.passed &&
+                  validated.runId === event.runId &&
+                  validated.workItem === event.workItem &&
+                  validated.attempt === event.attempt &&
+                  validated.sequence > event.sequence &&
+                  validated.sequence > collected.sequence,
+              ),
+          );
+          if (candidate) {
+            if (
+              candidate.identity.runId !== event.runId ||
+              candidate.identity.workItem !== event.workItem ||
+              candidate.identity.attempt !== event.attempt ||
+              candidate.validation.artifactDigest !== identity.invocationDigest ||
+              ![batch.commandCount, batch.commandCount - 1].includes(
+                candidate.validation.commands.length,
+              )
+            )
+              return false;
+            const usage = events.filter(
+              (entry) =>
+                entry.kind === "budget" &&
+                entry.event === "BudgetReconciled" &&
+                entry.runId === event.runId &&
+                entry.workItem === event.workItem &&
+                entry.attempt === event.attempt &&
+                entry.unit === "validation_milliseconds" &&
+                entry.phase === "validation" &&
+                entry.usageId ===
+                  `integration-validation-${mergeCandidateIdentityDigest(candidate.identity)}`,
+            );
+            if (
+              usage.length !== 1 ||
+              usage[0]?.kind !== "budget" ||
+              usage[0].amount !==
+                Date.parse(candidate.validation.completedAt) -
+                  Date.parse(candidate.validation.startedAt)
+            )
+              return false;
+          } else if (!sourceCapacity && !ordinary) return false;
+          else if (!sourceCapacity) {
+            const duration = events.filter(
+              (entry) =>
+                entry.kind === "budget" &&
+                entry.event === "BudgetReconciled" &&
+                entry.runId === event.runId &&
+                entry.workItem === event.workItem &&
+                entry.attempt === event.attempt &&
+                entry.unit === "validation_milliseconds" &&
+                entry.phase === "validation" &&
+                !entry.usageId,
+            );
+            if (duration.length !== 1 || duration[0]!.sequence <= event.sequence) return false;
+          }
+        }
+        for (let commandIndex = 0; commandIndex < batch.commandCount; commandIndex++) {
+          const observed = await observeLocalScope({ ...identity, commandIndex });
+          if (observed.status !== "absent") return false;
+        }
+      }
+      return true;
+    } catch (error) {
+      if (error instanceof PlatformUnavailableError || error instanceof LeaseLostError) throw error;
+      return false;
+    }
   }
 
   async run(): Promise<SupervisorResult> {
@@ -1779,7 +2284,13 @@ export class FactorySupervisor {
         );
       }
     }
-    if (snapshot.closed) {
+    if (
+      snapshot.closed &&
+      !(
+        resumedRun &&
+        Date.now() >= resumedRun.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000
+      )
+    ) {
       if (!resumedRun) {
         return {
           status: "completed",
@@ -1987,8 +2498,19 @@ export class FactorySupervisor {
       // Preflight is not a lock: the previous holder may have finished or spent
       // more budget before this lease was acquired. Refresh both new and resumed runs.
       let current = await this.#reader.readObjective(snapshot.number);
-      const needsReconciliation = Boolean(this.#options.recovery && !this.#recoveryRuntime);
-      let currentRun = await this.#resumeObservedRun(current, runManager, "repair");
+      const expiredResume = Boolean(
+        resumedRun &&
+          Date.now() >=
+            resumedRun.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
+      );
+      const needsReconciliation = Boolean(
+        !expiredResume && this.#options.recovery && !this.#recoveryRuntime,
+      );
+      let currentRun = await this.#resumeObservedRun(
+        current,
+        runManager,
+        expiredResume ? "inspect" : "repair",
+      );
       if (!currentRun && this.#withdrawnActivation(current, actor, facts.fullName)) {
         await this.#lease.release();
         return {
@@ -2005,7 +2527,7 @@ export class FactorySupervisor {
         currentRun = await this.#resumeObservedRun(current, runManager);
       }
       if (
-        current.closed ||
+        (current.closed && !expiredResume) ||
         current.number !== snapshot.number ||
         current.id !== snapshot.id ||
         current.repositoryId !== snapshot.repositoryId ||
@@ -2078,7 +2600,7 @@ export class FactorySupervisor {
           event.runId === this.#run.runId,
       );
       this.#runStartSequence = durableRunStart?.sequence ?? this.#run.sequence;
-      await this.#recordControllerObservation(snapshot);
+      if (!expiredResume) await this.#recordControllerObservation(snapshot);
     } catch (error) {
       await this.#lease.release().catch(() => {});
       throw error;
@@ -2125,6 +2647,39 @@ export class FactorySupervisor {
       await drainExecutions();
       return this.#releaseForShutdown(snapshot);
     };
+    const finishExpired = async (): Promise<SupervisorResult> => {
+      snapshot = await this.#reader.readObjective(snapshot.number);
+      this.#sequences.observe(snapshotEvents(snapshot));
+      if (hasCancellationRequest(snapshot, this.#run.runId) || this.#options.signal?.aborted)
+        return terminalAfterDrain("FactoryRunCancelled", "operator requested cancellation");
+      if (
+        activeExecutions.size === 0 &&
+        (await this.#recordedCompletionReady(snapshot, deadline))
+      ) {
+        const failure = (await activeExecutions.settle()).find((value) => value.error);
+        if (failure?.error) throw failure.error;
+        const finalSnapshot = await this.#reader.readObjective(snapshot.number);
+        this.#sequences.observe(snapshotEvents(finalSnapshot));
+        if (hasCancellationRequest(finalSnapshot, this.#run.runId) || this.#options.signal?.aborted)
+          return terminalAfterDrain("FactoryRunCancelled", "operator requested cancellation");
+        if (await this.#recordedCompletionReady(finalSnapshot, deadline)) {
+          const cancellation = await this.#reader.readRunCancellationRequest(
+            this.#run.objective,
+            this.#run.runId,
+            this.#run.actor,
+            this.#activationBinding(),
+          );
+          if (cancellation)
+            return terminalAfterDrain("FactoryRunCancelled", "operator requested cancellation");
+          await this.#options.repositoryFence?.();
+          await this.#lease.assert();
+          this.#options.signal?.throwIfAborted();
+          if (!finalSnapshot.closed) await this.#store.closeIssue(finalSnapshot.number);
+          return this.#terminal(runManager, finalSnapshot, "FactoryRunCompleted");
+        }
+      }
+      return terminalAfterDrain("FactoryRunEscalated", "Objective timeout exhausted");
+    };
     const escalateAfterDrain = async (
       item: DerivedWorkItem,
       reason: string,
@@ -2146,6 +2701,8 @@ export class FactorySupervisor {
     this.#fairness.register(this.#options.objective);
 
     try {
+      // A resumed expired run cannot repair graph/publication/checkpoint state.
+      if (Date.now() >= deadline) return await finishExpired();
       const deliveryPolicy = this.#policy.delivery ?? {
         mode: "regular-prs" as const,
         onUnavailable: "regular-prs" as const,
@@ -2620,9 +3177,6 @@ export class FactorySupervisor {
           }
           return await terminalAfterDrain("FactoryRunCancelled", "operator cancelled run");
         }
-        if (Date.now() >= deadline) {
-          return await terminalAfterDrain("FactoryRunEscalated", "Objective timeout exhausted");
-        }
         await this.#lease.renewIfNeeded();
         snapshot = await this.#reader.readObjective(snapshot.number);
         this.#fenceSnapshot(snapshot);
@@ -2633,6 +3187,9 @@ export class FactorySupervisor {
             "FactoryRunCancelled",
             "operator requested cancellation through GitHub",
           );
+        }
+        if (Date.now() >= deadline) {
+          return await finishExpired();
         }
         await this.#recordControllerObservation(snapshot);
         const commandState = deriveDurableCommandState({
@@ -4825,15 +5382,28 @@ export class FactorySupervisor {
     // A completed publication receipt is the commit point for a rebase. Validation and
     // AttemptPublished may have been written before a lost final publication response.
     // Replay the prior complete binding until that exact checkpoint transaction repairs it.
-    const recordedPublication = [...(item.factoryEvents ?? [])]
+    const metadata = parseGraphItemMetadata(item.body ?? "");
+    const plan = this.#deliveryPlan?.items.find((candidate) => candidate.itemId === metadata.id);
+    if (!plan) throw new Error(`Work Item ${metadata.id} is absent from the delivery plan`);
+    const sibling =
+      this.#deliveryPlan?.units.find((unit) => unit.id === plan.unitId)?.kind === "sibling";
+    const recordedPublications = [...(item.factoryEvents ?? [])]
       .sort((left, right) => right.sequence - left.sequence)
-      .find(
+      .filter(
         (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
           event.kind === "publication" &&
           event.runId === this.#run.runId &&
           event.workItem === item.number &&
           event.event === "PublicationRecorded",
       );
+    const latestPublication = recordedPublications[0];
+    const recordedPublication = selectEquivalentPublicationRecord(
+      recordedPublications.filter(
+        (event) =>
+          event.attempt === latestPublication?.attempt &&
+          (sibling || event.headSha === latestPublication.headSha),
+      ),
+    );
     const publishedEvent = [...(item.factoryEvents ?? [])]
       .sort((left, right) => right.sequence - left.sequence)
       .find(
@@ -4864,9 +5434,6 @@ export class FactorySupervisor {
     if (!validation || validation.kind !== "validation") {
       throw new Error(`stack Work Item #${item.number} has no passing validation receipt`);
     }
-    const metadata = parseGraphItemMetadata(item.body ?? "");
-    const plan = this.#deliveryPlan?.items.find((candidate) => candidate.itemId === metadata.id);
-    if (!plan) throw new Error(`Work Item ${metadata.id} is absent from the delivery plan`);
     const branch = publicationBranch(this.#run.objective, item.number, publishedEvent.attempt);
     const found = await this.#store.findPullRequestForBranch(branch);
     if (!found) throw new Error(`stack publication branch ${branch} has no pull request`);
@@ -4894,16 +5461,7 @@ export class FactorySupervisor {
     if (!reservation) {
       throw new Error(`stack Work Item #${item.number} has no attempt reservation`);
     }
-    const publicationEvent = [...(item.factoryEvents ?? [])]
-      .sort((left, right) => right.sequence - left.sequence)
-      .find(
-        (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
-          event.kind === "publication" &&
-          event.runId === this.#run.runId &&
-          event.event === "PublicationRecorded" &&
-          event.itemId === metadata.id &&
-          event.headSha === publishedEvent.headSha,
-      );
+    let publicationEvent = recordedPublication ?? undefined;
     const baseBranch =
       publicationEvent?.kind === "publication" ? publicationEvent.baseBranch : this.#baseBranch;
     if (!publicationEvent && (plan.parentItemId || requireRecordedPublication)) {
@@ -4930,17 +5488,39 @@ export class FactorySupervisor {
       state: "published",
     };
     if (!publicationEvent) {
-      await this.#lease.use((lease) =>
-        this.#recorder.publication({
-          lease,
-          workItemNodeId: item.id,
-          sequence: this.#sequences.take(),
-          receipt,
-          event: "PublicationRecorded",
-          reason: "recovered publication receipt",
-        }),
+      // The owning worker may have finished its publication while another unit
+      // awaited checks. Re-read before repairing the older loop snapshot.
+      const fresh = await this.#reader.readObjective(this.#run.objective);
+      this.#fenceSnapshot(fresh);
+      this.#sequences.observe(snapshotEvents(fresh));
+      const current = fresh.workItems.find((value) => value.number === item.number);
+      if (!current || current.id !== item.id)
+        throw new Error("publication recovery Work Item identity changed");
+      const records = (current.factoryEvents ?? []).filter(
+        (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
+          event.kind === "publication" &&
+          event.event === "PublicationRecorded" &&
+          event.runId === this.#run.runId &&
+          event.workItem === item.number &&
+          event.attempt === publishedEvent.attempt,
       );
-    } else {
+      publicationEvent = selectEquivalentPublicationRecord(records) ?? undefined;
+      item.factoryEvents = current.factoryEvents ?? [];
+      if (!publicationEvent) {
+        const recorded = await this.#lease.use((lease) =>
+          this.#recorder.publication({
+            lease,
+            workItemNodeId: item.id,
+            sequence: this.#sequences.take(),
+            receipt,
+            event: "PublicationRecorded",
+            reason: "recovered publication receipt",
+          }),
+        );
+        item.factoryEvents = [...(item.factoryEvents ?? []), recorded];
+      }
+    }
+    if (publicationEvent) {
       assertPublicationEventMatchesReceipt(publicationEvent, receipt);
     }
     return {
@@ -6115,6 +6695,7 @@ export class FactorySupervisor {
   #mergeCandidateIdentity(
     member: NativeStackMember,
     targetBaseSha: string,
+    deliveryHeadSha?: string,
   ): MergeCandidateIdentity {
     return {
       runId: this.#run.runId,
@@ -6125,6 +6706,7 @@ export class FactorySupervisor {
       sourceHeadSha: member.pull.commitSha,
       sourceExactHeadValidationDigest: member.pull.exactHeadValidation.digest,
       targetBaseSha,
+      ...(deliveryHeadSha ? { deliveryHeadSha } : {}),
     };
   }
 
@@ -6139,8 +6721,356 @@ export class FactorySupervisor {
       baseSha: record.validation.baseSha,
       outputTreeSha: record.validation.outputTreeSha,
       evidenceDigest: record.validation.digest,
-      headSha: record.identity.sourceHeadSha,
+      headSha: record.identity.deliveryHeadSha ?? record.identity.sourceHeadSha,
     };
+  }
+
+  async #siblingRefreshIdentity(
+    item: Pick<DerivedWorkItem, "number" | "factoryEvents">,
+    member: Pick<NativeStackMember, "reservation" | "pull">,
+    targetBaseSha: string,
+    run = this.#run,
+  ): Promise<SiblingRefreshIdentity> {
+    const publications = deduplicateFactoryEvents([
+      ...(this.#recoveryRuntime?.events ?? item.factoryEvents ?? []),
+    ]).filter(
+      (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
+        event.kind === "publication" &&
+        event.event === "PublicationRecorded" &&
+        event.runId === member.reservation.runId &&
+        event.workItem === item.number &&
+        event.attempt === member.reservation.attempt,
+    );
+    const publication = selectEquivalentPublicationRecord(publications);
+    const restored = this.#recoveryRuntime?.sourcePublications.find(
+      (proof) =>
+        proof.publication.workItem === item.number &&
+        proof.publication.sourceRunId === member.reservation.runId &&
+        proof.publication.sourceAttempt === member.reservation.attempt &&
+        proof.publication.sourceHeadSha === member.pull.commitSha,
+    );
+    if (!publication && !restored)
+      throw new Error("sibling refresh lacks an authenticated original publication");
+    if (
+      publication &&
+      (publication.headSha !== member.pull.commitSha ||
+        publication.pullRequest !== member.pull.number ||
+        publication.validationDigest !== member.pull.exactHeadValidation.validationDigest ||
+        publication.exactHeadValidationDigest !== member.pull.exactHeadValidation.digest ||
+        publication.branch !== member.pull.branch ||
+        publication.objective !== run.objective)
+    )
+      throw new Error("sibling refresh original publication binding changed");
+    const pull = await this.#store.readPullRequest(member.pull.number);
+    if (
+      !pull.nodeId ||
+      pull.number !== member.pull.number ||
+      pull.headRef !== member.pull.branch ||
+      pull.baseRepository?.toLowerCase() !==
+        `${this.#options.owner}/${this.#options.repo}`.toLowerCase() ||
+      pull.headRepository?.toLowerCase() !==
+        `${this.#options.owner}/${this.#options.repo}`.toLowerCase()
+    )
+      throw new Error("sibling refresh repository or PR identity changed");
+    const identity: SiblingRefreshIdentity = {
+      repository: `${this.#options.owner}/${this.#options.repo}`,
+      runId: run.runId,
+      sourceRunId: member.reservation.runId,
+      objective: run.objective,
+      workItem: item.number,
+      attempt: member.reservation.attempt,
+      pullRequest: member.pull.number,
+      pullRequestNodeId: pull.nodeId,
+      branch: member.pull.branch,
+      reservationRef: member.reservation.ref,
+      reservationOid: member.reservation.oid,
+      leaseEpoch: member.reservation.directorEpoch,
+      policyDigest: member.reservation.policyDigest,
+      controllingPolicyDigest: run.policyDigest,
+      sourcePublicationDigest: recoveryEventDigest(publication ?? restored!.publication),
+      sourceHeadSha: member.pull.commitSha,
+      sourceExactHeadValidationDigest: member.pull.exactHeadValidation.digest,
+      targetBaseSha,
+    };
+    // A late-arriving equivalent envelope cannot change an already pinned ref.
+    // Probe only this bounded equivalence class, never guess another head/target.
+    if (publications.length > 1) {
+      const existing: SiblingRefreshRecord[] = [];
+      for (const event of publications) {
+        const record = await this.#siblingRefreshes.load({
+          ...identity,
+          sourcePublicationDigest: recoveryEventDigest(event),
+        });
+        if (record && !existing.some((prior) => prior.ref === record.ref)) existing.push(record);
+      }
+      if (existing.length > 1)
+        throw new Error("equivalent publications have conflicting refresh intents");
+      if (existing[0]) return existing[0].identity;
+    }
+    return identity;
+  }
+
+  async #observedSiblingRefresh(
+    item: Pick<DerivedWorkItem, "number" | "factoryEvents">,
+    member: Pick<NativeStackMember, "reservation" | "pull">,
+    headSha: string,
+    run = this.#run,
+  ): Promise<SiblingRefreshRecord | null> {
+    if (headSha === member.pull.commitSha) return null;
+    const runtime = this.#recoveryRuntime;
+    if (runtime && member.reservation.runId !== run.runId) {
+      const source = runtime.planRecord.plan.items.find(
+        (entry) => entry.workItem === item.number,
+      )?.source;
+      const restored = runtime.sourcePublications.find(
+        (proof) => proof.publication.workItem === item.number,
+      );
+      const publication =
+        source?.publication ??
+        (restored
+          ? recoverySourcePublicationBinding(
+              restored.publication,
+              runtime.planRecord.plan.repository,
+            )
+          : null);
+      if (!source || !publication)
+        throw new Error("refreshed adopted source publication is unavailable");
+      return (
+        await observeRecoverySiblingRefresh({
+          repository: runtime.planRecord.plan.repository,
+          objective: runtime.planRecord.plan.objective,
+          workItem: item.number,
+          source: { ...source, publication },
+          events: runtime.events,
+          controllingRunIds: [
+            ...runtime.planRecord.plan.history.map((entry) => entry.runId),
+            runtime.controllingRun.runId,
+          ],
+          store: this.#recoveryStore,
+          deliveryHeadSha: headSha,
+          requireCompletion: false,
+        })
+      ).record;
+    }
+    const head = await this.#store.readCommit(headSha);
+    if (head.oid !== headSha || head.parentOids.length !== 2)
+      throw new Error("changed sibling head has no exact two-parent refresh lineage");
+    const identity = await this.#siblingRefreshIdentity(item, member, head.parentOids[1]!, run);
+    const record = await this.#siblingRefreshes.load(identity);
+    if (!record || record.plannedHeadSha !== headSha)
+      throw new Error("changed sibling head is not this run's immutable planned refresh");
+    await loadSiblingRefreshLineage(this.#store, record);
+    await verifyPlannedSiblingRefreshCommit(this.#store, record);
+    return record;
+  }
+
+  async #siblingArtifact(
+    member: NativeStackMember,
+    targetBaseSha: string,
+  ): Promise<NormalizedArtifact> {
+    await ensureLocalCommit(this.#options.repository, member.pull.exactHeadValidation.baseSha);
+    await ensureLocalCommit(this.#options.repository, member.pull.commitSha);
+    await ensureLocalCommit(this.#options.repository, targetBaseSha);
+    const source = [member.pull.exactHeadValidation.baseSha, member.pull.commitSha];
+    const changedPaths = (
+      await hostGit(
+        this.#options.repository,
+        ["diff", "--name-only", "-z", ...source],
+        MAX_ARTIFACT_PATCH_BYTES + 1_024,
+        true,
+      )
+    )
+      .split("\0")
+      .filter(Boolean);
+    const patch = await hostGit(
+      this.#options.repository,
+      ["diff", "--binary", "--no-ext-diff", "--no-textconv", ...source],
+      MAX_ARTIFACT_PATCH_BYTES + 1_024,
+      true,
+    );
+    return normalizeArtifact({ baseSha: targetBaseSha, changedPaths, patch, outcome: "succeeded" });
+  }
+
+  async #assertSiblingRefreshCurrent(
+    member: Pick<NativeStackMember, "reservation" | "pull">,
+    record: SiblingRefreshRecord,
+    merged = false,
+  ): Promise<void> {
+    const pull = await this.#store.readPullRequest(member.pull.number);
+    if (
+      pull.number !== record.identity.pullRequest ||
+      pull.nodeId !== record.identity.pullRequestNodeId ||
+      pull.headRef !== record.identity.branch ||
+      pull.baseRef !== this.#baseBranch ||
+      pull.draft ||
+      (!merged && (pull.merged || pull.state !== "open")) ||
+      pull.headRepository?.toLowerCase() !== record.identity.repository.toLowerCase() ||
+      pull.baseRepository?.toLowerCase() !== record.identity.repository.toLowerCase()
+    )
+      throw new Error("sibling refresh current PR no longer matches its immutable intent");
+    if (pull.headSha !== record.plannedHeadSha) {
+      if (
+        !pull.merged &&
+        pull.headSha === record.expectedOldHeadSha &&
+        (await this.#store.readRef(`refs/heads/${record.identity.branch}`)) ===
+          record.plannedHeadSha
+      )
+        throw new SiblingRefreshObservationPendingError(
+          "waiting for GitHub PR metadata to observe the exact refreshed head",
+        );
+      throw new Error("sibling refresh current PR head differs from its immutable intent");
+    }
+    if (!pull.merged) {
+      if (
+        (await this.#store.readRef(`refs/heads/${record.identity.branch}`)) !==
+        record.plannedHeadSha
+      )
+        throw new Error("sibling refresh branch changed before validation");
+      await this.#assertRefreshTarget(record.identity.targetBaseSha, member.reservation.workItem);
+    }
+    await verifyPlannedSiblingRefreshCommit(this.#store, record);
+  }
+
+  async #assertRefreshTarget(targetBaseSha: string, workItem: number): Promise<void> {
+    const current = (await this.#store.getBranchHead(this.#baseBranch)).oid;
+    if (current === targetBaseSha) return;
+    await this.#assertOwnTrunkAdvance(targetBaseSha, current, workItem);
+    throw new SiblingRefreshTargetAdvancedError(
+      "another evidenced sibling advanced the refresh target",
+    );
+  }
+
+  /** A write-ahead two-parent commit is a proposed head, never a validation receipt. */
+  async #prepareSiblingRefresh(
+    item: DerivedWorkItem,
+    member: NativeStackMember,
+    targetBaseSha: string,
+    merged: boolean,
+  ): Promise<SiblingRefreshRecord> {
+    const { snapshot, requiresIsolation } = await this.#assertOwnTrunkAdvance(
+      member.pull.exactHeadValidation.baseSha,
+      targetBaseSha,
+      item.number,
+    );
+    const assertAdmission = () => {
+      this.#options.signal?.throwIfAborted();
+      if (
+        Date.now() >=
+        this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000
+      )
+        throw new Error("Objective timeout exhausted before sibling refresh");
+      if (hasCancellationRequest(snapshot, this.#run.runId))
+        throw new RunCancellationRequestedError("operator cancelled before sibling refresh");
+    };
+    assertAdmission();
+    const identity = await this.#siblingRefreshIdentity(item, member, targetBaseSha);
+    let record = await this.#siblingRefreshes.load(identity);
+    const observed = await this.#store.readPullRequest(member.pull.number);
+    const previous = await this.#observedSiblingRefresh(item, member, observed.headSha);
+    if (previous?.identity.targetBaseSha === targetBaseSha) {
+      if (record && previous.commitOid !== record.commitOid)
+        throw new Error("sibling refresh intent conflicts with observed head");
+      return previous;
+    }
+    if (merged) throw new Error("merged sibling lacks its pre-merge refresh intent");
+    if (!record) {
+      if (
+        (requiresIsolation ||
+          this.#packetFor(item.number).requirements.trust !== "trusted_local" ||
+          !this.#registry.get(member.reservation.backend)?.capabilities.hostExecution) &&
+        !this.#policy.allowedPaidBackends.includes("codex-cli/daytona")
+      )
+        throw new Error(
+          "sibling refresh requires explicitly authorized independent isolated validation",
+        );
+      this.#budgetEvents = deduplicateFactoryEvents([
+        ...this.#budgetEvents,
+        ...snapshotEvents(snapshot).filter((event) => event.runId === this.#run.runId),
+      ]);
+      const budget = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
+      if (budget.modelTokens !== null && budget.modelTokens <= 0)
+        throw new Error("model-token budget exhausted before sibling refresh");
+      const artifact = await this.#siblingArtifact(member, targetBaseSha);
+      const packet = parseWorkerPacket({ ...this.#packetFor(item.number), baseSha: targetBaseSha });
+      const outputTreeSha = await prepareSiblingRefreshTree({
+        repository: this.#options.repository,
+        artifact,
+        packet,
+        store: this.#store,
+        assertCurrent: () => this.#externalAdmission(async () => {}),
+      });
+      record = await this.#lease.use((lease) =>
+        this.#siblingRefreshes.persist({
+          lease,
+          identity,
+          source: member.pull.exactHeadValidation,
+          expectedOldHeadSha: observed.headSha,
+          outputTreeSha,
+          ...(previous
+            ? {
+                previous: {
+                  ref: previous.ref,
+                  commitOid: previous.commitOid,
+                  identityDigest: previous.identityDigest,
+                },
+              }
+            : {}),
+        }),
+      );
+    }
+    const pinned = record;
+    await this.#serializeIntegration(() =>
+      this.#externalAdmission(async () => {
+        assertAdmission();
+        const { snapshot } = await this.#assertOwnTrunkAdvance(
+          member.pull.exactHeadValidation.baseSha,
+          targetBaseSha,
+          item.number,
+        );
+        if (hasCancellationRequest(snapshot, this.#run.runId))
+          throw new RunCancellationRequestedError("operator cancelled before sibling refresh");
+        const current = await this.#store.readPullRequest(member.pull.number);
+        if (
+          current.nodeId !== identity.pullRequestNodeId ||
+          current.headRef !== identity.branch ||
+          current.baseRef !== this.#baseBranch ||
+          current.draft ||
+          current.merged ||
+          current.state !== "open" ||
+          current.headRepository?.toLowerCase() !== identity.repository.toLowerCase() ||
+          current.baseRepository?.toLowerCase() !== identity.repository.toLowerCase()
+        )
+          throw new Error("sibling refresh PR or target changed before branch CAS");
+        await this.#assertRefreshTarget(targetBaseSha, item.number);
+        const branchHead = await this.#store.readRef(`refs/heads/${identity.branch}`);
+        if (branchHead === pinned.plannedHeadSha && current.headSha === pinned.expectedOldHeadSha)
+          throw new SiblingRefreshObservationPendingError(
+            "waiting for GitHub PR metadata to observe the exact refreshed head",
+          );
+        if (
+          current.headSha !== branchHead ||
+          (branchHead !== pinned.expectedOldHeadSha && branchHead !== pinned.plannedHeadSha)
+        )
+          throw new Error("sibling refresh branch contains an unauthorized third head");
+        const rules = await this.#store.readBranchRules(this.#baseBranch);
+        if (branchRuleBlockers(rules).length)
+          throw new Error("branch policy blocks sibling refresh");
+        if (branchHead === pinned.expectedOldHeadSha) {
+          await this.#lease.use(async () => {
+            if (
+              !(await this.#store.compareAndSwapRef({
+                ref: `refs/heads/${identity.branch}`,
+                beforeOid: pinned.expectedOldHeadSha,
+                afterOid: pinned.plannedHeadSha,
+              }))
+            )
+              throw new Error("sibling refresh exact branch CAS lost ownership");
+          });
+        }
+        await this.#assertSiblingRefreshCurrent(member, pinned);
+      }),
+    );
+    return pinned;
   }
 
   /** External trunk changes never acquire execution authority from being cleanly applicable. */
@@ -6209,7 +7139,6 @@ export class FactorySupervisor {
       const commit = await this.#store.readCommit(cursor);
       if (
         !pull.merged ||
-        pull.headSha !== member.pull.commitSha ||
         pull.mergeCommitSha !== cursor ||
         pull.baseRef !== this.#baseBranch ||
         commit.oid !== cursor ||
@@ -6218,16 +7147,25 @@ export class FactorySupervisor {
         throw new Error("trunk advancement lacks an exact Factory squash integration");
       }
       const parent = commit.parentOids[0]!;
+      const refresh = await this.#observedSiblingRefresh(item, member, pull.headSha);
+      if (refresh && refresh.identity.targetBaseSha !== parent)
+        throw new Error("prior sibling refresh does not bind its actual squash parent");
       if (parent === member.pull.exactHeadValidation.baseSha) {
+        if (refresh) throw new Error("unexpected refresh on an unchanged source base");
         await verifySquashIntegration(this.#store, member.pull, cursor, parent);
       } else {
         const candidate = await this.#mergeCandidates.load(
-          this.#mergeCandidateIdentity(member, parent),
+          this.#mergeCandidateIdentity(member, parent, refresh?.plannedHeadSha),
         );
         const review = candidate
           ? await this.#reviews.load(this.#mergeCandidateReviewIdentity(candidate))
           : null;
-        if (!candidate || !review?.review.accepted) {
+        if (
+          !candidate ||
+          !review?.review.accepted ||
+          review.review.unmetCriteria.length ||
+          (refresh && candidate.validation.outputTreeSha !== refresh.outputTreeSha)
+        ) {
           throw new Error("prior sibling integration has no accepted candidate checkpoint");
         }
         await verifyMergeCandidateSquash(
@@ -6302,6 +7240,7 @@ export class FactorySupervisor {
     member: NativeStackMember,
     targetBaseSha: string,
     merged: boolean,
+    refresh?: SiblingRefreshRecord,
   ): Promise<MergeCandidateCheckpointRecord | null> {
     const assertDeadline = () => {
       if (
@@ -6348,7 +7287,7 @@ export class FactorySupervisor {
       ...this.#budgetEvents,
       ...snapshotEvents(snapshot).filter((event) => event.runId === this.#run.runId),
     ]);
-    const identity = this.#mergeCandidateIdentity(member, targetBaseSha);
+    const identity = this.#mergeCandidateIdentity(member, targetBaseSha, refresh?.plannedHeadSha);
     const identityDigest = mergeCandidateIdentityDigest(identity);
     const invocationOwnership = (artifactDigest: string) =>
       validationInvocationOwnership({
@@ -6530,6 +7469,7 @@ export class FactorySupervisor {
       let providerStarted: Date | undefined;
       let providerCompleted: Date | undefined;
       let capacityRecorded = false;
+      let validationLaunched = false;
       try {
         artifact = await reconstructArtifact();
         const scopedValidation = isolated
@@ -6598,8 +7538,10 @@ export class FactorySupervisor {
             ),
           );
         }
-        validation = await this.#externalAdmission(() =>
-          validateArtifactClean({
+        validation = await this.#externalAdmission(async () => {
+          if (refresh) await this.#assertSiblingRefreshCurrent(member, refresh);
+          validationLaunched = true;
+          return validateArtifactClean({
             repository: this.#options.repository,
             artifact: artifact!,
             packet,
@@ -6634,8 +7576,8 @@ export class FactorySupervisor {
                     }),
                 }
               : {}),
-          }),
-        );
+          });
+        });
         if (!validation.evidence.passed) {
           await this.#recordCandidateValidationUsage(
             validation.evidence,
@@ -6644,6 +7586,26 @@ export class FactorySupervisor {
             member.reservation,
           );
           throw new Error(validation.evidence.failureReason ?? "merge-candidate validation failed");
+        }
+        if (refresh) {
+          if (validation.evidence.outputTreeSha !== refresh.outputTreeSha) {
+            await this.#recordCandidateValidationUsage(
+              validation.evidence,
+              identityDigest,
+              item,
+              member.reservation,
+            );
+            if (isolated)
+              await this.#recordCandidateValidationUsage(
+                validation.evidence,
+                identityDigest,
+                item,
+                member.reservation,
+                "sandbox_milliseconds",
+                providerCompleted!.getTime() - providerStarted!.getTime(),
+              );
+            throw new Error("refreshed head differs from the full newly validated tree");
+          }
         }
         record = await this.#lease.use((lease) =>
           this.#mergeCandidates.persist({
@@ -6667,11 +7629,17 @@ export class FactorySupervisor {
       } finally {
         try {
           if (validation) await discardValidationResult(validation);
-          if (capacityRecorded && record) await reconcileCapacity(capacity.cpu, capacity.memoryMb);
+          if (capacityRecorded && (record || !validationLaunched))
+            await reconcileCapacity(capacity.cpu, capacity.memoryMb);
         } finally {
-          if (!capacityRecorded || record) this.#capacity.release(capacity.key);
+          if (!capacityRecorded || record || !validationLaunched)
+            this.#capacity.release(capacity.key);
         }
       }
+    }
+    if (refresh) {
+      if (record.validation.outputTreeSha !== refresh.outputTreeSha)
+        throw new Error("refreshed head checkpoint differs from its planned tree");
     }
     await this.#recordCandidateValidationUsage(
       record.validation,
@@ -6688,6 +7656,9 @@ export class FactorySupervisor {
         "sandbox_milliseconds",
         record.isolatedResource!.sandboxMilliseconds,
       );
+    // A completed exact validation is durable/accounted before observing mutable trunk.
+    // A later same-run merge creates a new target, not lost usage or a duplicate validator.
+    if (refresh) await this.#assertSiblingRefreshCurrent(member, refresh, merged);
     const reviewIdentity = this.#mergeCandidateReviewIdentity(record);
     const existingReview = await this.#reviews.load(reviewIdentity);
     const invocationId = `integration-review-${reviewIdentityDigest(reviewIdentity)}`;
@@ -6738,7 +7709,7 @@ export class FactorySupervisor {
       recordFailureUsage: (usage) =>
         this.#recordFailedManagementUsage(invocationId, usage, item.id, member.reservation),
       recordOutcome: async (review) => {
-        if (!review.review.accepted)
+        if (!review.review.accepted || review.review.unmetCriteria.length > 0)
           throw new Error(
             `integration-candidate semantic review rejected: ${review.review.summary}; ${review.review.unmetCriteria.join("; ")}`,
           );
@@ -7248,6 +8219,21 @@ export class FactorySupervisor {
   }
 
   async #resumeAdoptedSource(item: DerivedWorkItem): Promise<void> {
+    try {
+      await this.#resumeAdoptedSourceNow(item);
+    } catch (error) {
+      if (
+        error instanceof SiblingRefreshTargetAdvancedError ||
+        error instanceof SiblingRefreshObservationPendingError
+      ) {
+        this.#deferIntegration(item.number, error.message);
+        return;
+      }
+      throw error;
+    }
+  }
+
+  async #resumeAdoptedSourceNow(item: DerivedWorkItem): Promise<void> {
     let runtime = this.#recoveryRuntime!;
     const planItem = runtime.planRecord.plan.items.find((entry) => entry.workItem === item.number)!;
     const source = planItem.source!;
@@ -7376,8 +8362,62 @@ export class FactorySupervisor {
       !(await this.#linkRecoveryNativeUnit(item))
     )
       return;
+    const target = observed.merged
+      ? (await this.#store.readCommit(observed.mergeCommitSha!)).parentOids[0]!
+      : (await this.#store.getBranchHead(this.#baseBranch)).oid;
+    const unit = this.#deliveryPlan?.units.find((entry) =>
+      entry.items.includes(planItem.compilerId),
+    );
+    let siblingRefresh: SiblingRefreshRecord | undefined;
+    if (
+      publication.mode === "native-stacks" &&
+      unit?.kind === "sibling" &&
+      target !== exactHeadValidation.baseSha &&
+      (!observed.merged || observed.headSha !== pull.commitSha)
+    ) {
+      const member = await this.#nativeStackMember(item, true);
+      siblingRefresh = await this.#prepareSiblingRefresh(item, member, target, observed.merged);
+      if (
+        source.siblingRefresh &&
+        source.siblingRefresh.targetBaseSha === target &&
+        source.siblingRefresh.deliveryHeadSha === siblingRefresh.plannedHeadSha &&
+        (planItem.action === "reuse-publication" || planItem.action === "integrated")
+      ) {
+        const prior = await observeRecoverySiblingRefresh({
+          repository: runtime.planRecord.plan.repository,
+          objective: runtime.planRecord.plan.objective,
+          workItem: item.number,
+          source: { ...source, publication },
+          events: runtime.events,
+          controllingRunIds: [
+            ...runtime.planRecord.plan.history.map((entry) => entry.runId),
+            runtime.controllingRun.runId,
+          ],
+          store: this.#recoveryStore,
+          deliveryHeadSha: siblingRefresh.plannedHeadSha,
+          candidateRunId: source.siblingRefresh.candidateRunId,
+          requireCompletion: true,
+        });
+        if (!prior.candidate) throw new Error("accepted prior sibling candidate is unavailable");
+        await this.#integrate(
+          item,
+          reserved,
+          pull,
+          this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
+          true,
+          prior.candidate,
+          true,
+          undefined,
+          siblingRefresh,
+        );
+        return;
+      }
+    }
     let deliveryHeadSha: string | undefined;
-    if (observed.headSha !== pull.commitSha || observed.baseRef !== this.#baseBranch) {
+    if (
+      !siblingRefresh &&
+      (observed.headSha !== pull.commitSha || observed.baseRef !== this.#baseBranch)
+    ) {
       if (publication.mode !== "native-stacks")
         throw new Error("adopted ordinary source head/base changed");
       const transition = await observeRecoveryNativeTransition({
@@ -7397,9 +8437,6 @@ export class FactorySupervisor {
       throw new Error(
         "adopted publication changed; original source authority cannot be relabelled",
       );
-    const target = observed.merged
-      ? (await this.#store.readCommit(observed.mergeCommitSha!)).parentOids[0]!
-      : (await this.#store.getBranchHead(this.#baseBranch)).oid;
     let candidate: MergeCandidateCheckpointRecord | undefined;
     if (target !== exactHeadValidation.baseSha) {
       const identity: MergeCandidateIdentity = {
@@ -7411,6 +8448,7 @@ export class FactorySupervisor {
         sourceHeadSha: pull.commitSha,
         sourceExactHeadValidationDigest: exactHeadValidation.digest,
         targetBaseSha: target,
+        ...(siblingRefresh ? { deliveryHeadSha: siblingRefresh.plannedHeadSha } : {}),
       };
       const digest = mergeCandidateIdentityDigest(identity);
       const backendId = `factory/integration-validation-${digest}`;
@@ -7544,6 +8582,7 @@ export class FactorySupervisor {
           return;
         let validation: CleanValidationResult | undefined;
         let recorded = false;
+        let validationLaunched = false;
         try {
           artifact = await reconstruct();
           const scope = await this.#scopedValidation(
@@ -7561,14 +8600,20 @@ export class FactorySupervisor {
           if (!scope) throw new Error("adopted validation requires observable owned local scopes");
           await recordCapacity("CapacityReserved", capacity.cpu, capacity.memoryMb, scope.batch);
           recorded = true;
-          validation = await this.#externalAdmission(() =>
-            validateArtifactClean({
+          validation = await this.#externalAdmission(async () => {
+            if (siblingRefresh)
+              await this.#assertSiblingRefreshCurrent(
+                { reservation: reserved, pull },
+                siblingRefresh,
+              );
+            validationLaunched = true;
+            return validateArtifactClean({
               repository: this.#options.repository,
               artifact: artifact!,
               packet,
               localScope: scope.hooks,
-            }),
-          );
+            });
+          });
           if (!validation.evidence.passed) {
             await this.#sourceUsage(
               item,
@@ -7581,6 +8626,19 @@ export class FactorySupervisor {
               validation.evidence.failureReason ?? "adopted candidate validation failed",
             );
           }
+          if (
+            siblingRefresh &&
+            validation.evidence.outputTreeSha !== siblingRefresh.outputTreeSha
+          ) {
+            await this.#sourceUsage(
+              item,
+              `integration-validation-${digest}`,
+              Date.parse(validation.evidence.completedAt) -
+                Date.parse(validation.evidence.startedAt),
+              "validation_milliseconds",
+            );
+            throw new Error("adopted refreshed head differs from its newly validated tree");
+          }
           candidate = await this.#lease.use((lease) =>
             this.#mergeCandidates.persist({
               lease,
@@ -7592,10 +8650,10 @@ export class FactorySupervisor {
         } finally {
           try {
             if (validation) await discardValidationResult(validation);
-            if (recorded && candidate)
+            if (recorded && (candidate || !validationLaunched))
               await recordCapacity("CapacityReconciled", capacity.cpu, capacity.memoryMb);
           } finally {
-            if (!recorded || candidate) this.#capacity.release(capacity.key);
+            if (!recorded || candidate || !validationLaunched) this.#capacity.release(capacity.key);
           }
         }
       }
@@ -7605,6 +8663,15 @@ export class FactorySupervisor {
         Date.parse(candidate.validation.completedAt) - Date.parse(candidate.validation.startedAt),
         "validation_milliseconds",
       );
+      if (siblingRefresh) {
+        if (candidate.validation.outputTreeSha !== siblingRefresh.outputTreeSha)
+          throw new Error("adopted refresh checkpoint differs from its planned tree");
+        await this.#assertSiblingRefreshCurrent(
+          { reservation: reserved, pull },
+          siblingRefresh,
+          observed.merged,
+        );
+      }
       const reviewIdentity = this.#mergeCandidateReviewIdentity(candidate);
       const existing = await this.#reviews.load(reviewIdentity);
       if (!existing && observed.merged)
@@ -7661,7 +8728,7 @@ export class FactorySupervisor {
             "model_tokens",
           ),
         recordOutcome: async (review) => {
-          if (!review.review.accepted)
+          if (!review.review.accepted || review.review.unmetCriteria.length > 0)
             throw new Error("adopted candidate semantic review rejected");
         },
       });
@@ -7681,6 +8748,7 @@ export class FactorySupervisor {
       candidate,
       true,
       deliveryHeadSha,
+      siblingRefresh,
     );
   }
 
@@ -7707,7 +8775,13 @@ export class FactorySupervisor {
     candidate?: MergeCandidateCheckpointRecord,
     adoptedSource = false,
     deliveryHeadSha?: string,
+    siblingRefresh?: SiblingRefreshRecord,
   ): Promise<boolean> {
+    if (siblingRefresh) {
+      if (deliveryHeadSha || candidate?.identity.deliveryHeadSha !== siblingRefresh.plannedHeadSha)
+        throw new Error("sibling integration lacks its distinct changed-head validation identity");
+      deliveryHeadSha = siblingRefresh.plannedHeadSha;
+    }
     for (;;) {
       await this.#lease.renewIfNeeded();
       const readiness = await this.#serializeIntegration(async () => {
@@ -7732,7 +8806,11 @@ export class FactorySupervisor {
           {
             ciExpected: this.#ciExpectedOnPullRequests,
             ...(candidate ? { mergeCandidateValidation: candidate.evidence } : {}),
-            ...(deliveryHeadSha ? { mergeCandidateDeliveryHeadSha: deliveryHeadSha } : {}),
+            ...(siblingRefresh
+              ? { siblingRefresh }
+              : deliveryHeadSha
+                ? { mergeCandidateDeliveryHeadSha: deliveryHeadSha }
+                : {}),
           },
         );
         if (current.state !== "ready") return current;
@@ -7872,15 +8950,27 @@ export class FactorySupervisor {
           if (!item.closed) await this.#store.closeIssue(item.number);
           return true;
         }
-        if (!item.closed) await this.#store.closeIssue(item.number);
-        const alreadyRecorded = (item.factoryEvents ?? []).some(
+        // Candidate validation can span another completed sibling observation.
+        // Do not project a second integration from the earlier loop snapshot.
+        const latest = await this.#reader.readObjective(this.#run.objective);
+        this.#fenceSnapshot(latest);
+        this.#sequences.observe(snapshotEvents(latest));
+        const latestItem = latest.workItems.find((entry) => entry.number === item.number);
+        if (!latestItem)
+          throw new Error("integrated Work Item disappeared before outcome projection");
+        const recorded = (latestItem.factoryEvents ?? []).filter(
           (candidate) =>
             candidate.kind === "attempt" &&
             candidate.runId === reservation.runId &&
             candidate.attempt === reservation.attempt &&
             candidate.event === "AttemptIntegrated",
         );
-        if (!alreadyRecorded) {
+        if (
+          recorded.some((event) => event.kind !== "attempt" || event.headSha !== readiness.headSha)
+        )
+          throw new Error("existing integration receipt conflicts with the exact observed squash");
+        if (!latestItem.closed) await this.#store.closeIssue(item.number);
+        if (recorded.length === 0) {
           await this.#lease.use((lease) =>
             this.#attempts.record({
               lease,
@@ -7909,42 +8999,65 @@ export class FactorySupervisor {
   async #resumeIntegration(item: DerivedWorkItem): Promise<boolean> {
     if (!this.#integrationDue(item.number)) return false;
     if (this.#deliverySelection.selected === "native-stacks") {
-      const member = await this.#nativeStackMember(item);
-      const current = await this.#store.readPullRequest(member.pull.number);
-      if (
-        current.headSha !== member.pull.commitSha ||
-        current.baseRef !== this.#baseBranch ||
-        (current.state !== "open" && !current.merged)
-      ) {
-        throw new Error("sibling pull request identity or target changed after publication");
-      }
-      let targetBaseSha: string;
-      if (current.merged) {
-        if (!current.mergeCommitSha) throw new Error("merged sibling has no merge commit identity");
-        const merge = await this.#store.readCommit(current.mergeCommitSha);
-        if (merge.parentOids.length !== 1) throw new Error("merged sibling is not a squash commit");
-        targetBaseSha = merge.parentOids[0]!;
-      } else {
-        targetBaseSha = (await this.#store.getBranchHead(this.#baseBranch)).oid;
-      }
-      const candidate =
-        targetBaseSha === member.pull.exactHeadValidation.baseSha
-          ? undefined
-          : await this.#prepareSiblingMergeCandidate(item, member, targetBaseSha, current.merged);
-      if (candidate === null) {
-        return this.#deferIntegration(
-          item.number,
-          "waiting for merge-candidate validation capacity",
+      try {
+        const member = await this.#nativeStackMember(item);
+        const current = await this.#store.readPullRequest(member.pull.number);
+        if (current.baseRef !== this.#baseBranch || (current.state !== "open" && !current.merged)) {
+          throw new Error("sibling pull request identity or target changed after publication");
+        }
+        let targetBaseSha: string;
+        if (current.merged) {
+          if (!current.mergeCommitSha)
+            throw new Error("merged sibling has no merge commit identity");
+          const merge = await this.#store.readCommit(current.mergeCommitSha);
+          if (merge.parentOids.length !== 1)
+            throw new Error("merged sibling is not a squash commit");
+          targetBaseSha = merge.parentOids[0]!;
+        } else {
+          targetBaseSha = (await this.#store.getBranchHead(this.#baseBranch)).oid;
+        }
+        const refresh =
+          targetBaseSha === member.pull.exactHeadValidation.baseSha ||
+          (current.merged && current.headSha === member.pull.commitSha)
+            ? undefined
+            : await this.#prepareSiblingRefresh(item, member, targetBaseSha, current.merged);
+        if (!refresh && current.headSha !== member.pull.commitSha)
+          throw new Error("sibling head changed without an authorized refresh");
+        const candidate =
+          targetBaseSha === member.pull.exactHeadValidation.baseSha
+            ? undefined
+            : await this.#prepareSiblingMergeCandidate(
+                item,
+                member,
+                targetBaseSha,
+                current.merged,
+                refresh,
+              );
+        if (candidate === null) {
+          return this.#deferIntegration(
+            item.number,
+            "waiting for merge-candidate validation capacity",
+          );
+        }
+        return await this.#integrate(
+          item,
+          member.reservation,
+          member.pull,
+          this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
+          true,
+          candidate,
+          false,
+          undefined,
+          refresh,
         );
+      } catch (error) {
+        if (
+          error instanceof SiblingRefreshTargetAdvancedError ||
+          error instanceof SiblingRefreshObservationPendingError
+        )
+          return this.#deferIntegration(item.number, error.message);
+        throw error;
       }
-      return await this.#integrate(
-        item,
-        member.reservation,
-        member.pull,
-        this.#run.startedAt.getTime() + this.#policy.objectiveTimeoutMinutes * 60_000,
-        true,
-        candidate,
-      );
     }
     const event = [...(item.factoryEvents ?? [])]
       .sort((left, right) => right.sequence - left.sequence)

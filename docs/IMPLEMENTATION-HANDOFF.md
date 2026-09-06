@@ -1,5 +1,9 @@
 # Implementation handoff
 
+For current remaining work, owners and blockers, use the [completion board](COMPLETION.md).
+The sections below retain historical implementation and exact-candidate evidence, not a second
+current execution queue.
+
 The completion implementation and matching bundles are integrated. Exact offline, installed and
 staged-package results are recorded in the conformance ledger below. A fresh installed regular-PR
 exercise exposed premature admission while a prior publication still awaited integration. The
@@ -24,14 +28,14 @@ recompute scheduling without pinned admission snapshots.
 [DESIGN.md](DESIGN.md) defines behavior; [CONFORMANCE.md](CONFORMANCE.md) remains the release-gate
 ledger. This document grants no execution, spending, installation, or publication authority.
 
-## Completion acceptance
+## Historical acceptance snapshot
 
 | Capability | Required outcome | Status |
 | --- | --- | --- |
 | Ordinary restart and receipt repair | Resume after authenticated same-run merges; reject external trunk changes; reconstruct reservation receipts without losing immutable resource identity. | Integrated; full offline batch passed |
 | Partial native-stack recovery | Retain validated lower work and execute unfinished upper work through exact-evidence publication and integration without duplicate work. | Integrated; mixed-artifact and historical-prefix regressions passed in the full offline batch |
 | Generic, economic compilation | Ground commands in observed repository toolchains, accept explicit exclusive-resource claims, and evaluate decomposition costs without fabricated prices or measurements. | Integrated; full offline batch passed |
-| Chat preflight and planning | Doctor performs useful mechanical diagnostics; explicit plan produces or inspects a proposed graph before activation; CLI and MCP share the same write-free inspection contract. | Integrated; offline and installed read-only doctor/existing-graph plan checks passed. Plan did not compile, verify a durable graph or authorize activation. A separate explicit regular Objective passed; broader installed qualification remains open |
+| Chat preflight and planning | Doctor performs useful mechanical diagnostics; explicit plan produces or inspects a proposed graph before activation; CLI and MCP share the same write-free inspection contract. | Integrated; offline and installed doctor/existing-graph checks passed. Actual installed `factory_plan` with `compile:true` separately passed at `8945373`: one proposed Work Item, independently matched graph digest, 14,959 response-only tokens, no activation or repository/installation changes. This is not durable graph publication or execution; see the [planning component](release-evidence/installed-planning-component-2026-09-05.json). Broader gates remain Open |
 | Managed providers | Prove assignable provider identities and owned session lifecycle observations for both managed targets; preserve explicit unsupported boundaries until evidenced. | Exact Copilot task/session reconciliation integrated and regression-tested; separate paid-run authorization, required credentials, live lifecycle/billing evidence and stable managed Codex identity remain gates |
 | Installed complete Objective | Qualify matching installed artifacts through parallel siblings, independent validation/review, integration, dependent join, final closure, and bounded recovery/cancellation cases. | Separate explicit serialized regular happy paths passed with actual SDK and CLI-only workers, each with three merged PRs, dependent join and closure. The original parallel/native and recovery/fault criterion remains open; direct CLI selection does not qualify failure-triggered fallback |
 | Installed scheduling subset | Observe constrained local admission, native priority changes and competing repository-controller refusal without changing policy or resource authority. | Passed for the exact Director leaf 0.5-to-4-CPU barrier, native subissue order and outer repository lease. Broader adaptive scheduling and all six prepublication gates remain open |
@@ -49,9 +53,12 @@ or resolve the unavailable stable managed Codex identity. No fallback, extra spe
 or reduced support contract is authorized by those prerequisites becoming available.
 
 The installed native happy path separately exposed stale sibling test-merge metadata after trunk
-advanced. Whether to permit changing a sibling PR head to obtain fresh preview evidence remains an
-unanswered product decision, not an API-key shortage. Integration pacing preserves current exact-head
-and merge-evidence guards and does not itself force GitHub to refresh that preview.
+advanced. The operator has approved refreshing Factory-owned sibling branches with full validation
+and semantic review of every changed head. The capability batch implements an immutable write-ahead
+intent and a non-force, exact-head branch update; it preserves the original publication and validation
+history. The [real branch-CAS primitive](release-evidence/sibling-branch-cas-component-2026-09-05.json)
+passed, but that component observation does not qualify the installed native Objective. Fresh
+installed parallel delivery and recovery evidence remain required, independently of API keys.
 
 Explicit regular delivery now holds each complete pipeline through integration, including pending
 checks and fresh-controller reconstruction. Its dedicated installed qualifier also supports a

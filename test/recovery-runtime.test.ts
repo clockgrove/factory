@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { PlatformUnavailableError } from "../src/platform.js";
+import { describe, expect, it, vi } from "vitest";
 import type { FactoryReadSnapshot } from "../src/application/status.js";
 import type { GitHubControlStore } from "../src/control/github-store.js";
 import { recoveryReadPort } from "../src/recovery/github-read-port.js";
@@ -130,7 +131,7 @@ class MemoryStore implements CompiledGraphStore, RecoveryReadStore {
   }
   async createBlob(content: Buffer) {
     this.before("blob");
-    const oid = this.oid(content.toString("utf8"));
+    const oid = createHash("sha1").update(`blob ${content.length}\0`).update(content).digest("hex");
     this.blobs.set(oid, Buffer.from(content));
     this.after("blob");
     return oid;
@@ -619,6 +620,97 @@ async function addAttempt(f: Awaited<ReturnType<typeof adopted>>, attempt = 1) {
 }
 
 describe("verified successor runtime loader", () => {
+  it.each(["readRef", "readCommit", "readBlob", "getRepositoryFacts", "getBranchHead"] as const)(
+    "preserves typed refusal through %s and retries only on a new full observation",
+    async (method) => {
+      const f = await adopted();
+      const refusal = new PlatformUnavailableError(
+        { kind: "rate_limit", retryAfterMs: 123456 },
+        new Error("primary exhausted"),
+      );
+      const read = vi.spyOn(f.store, method).mockRejectedValueOnce(refusal);
+      const port = recoveryReadPort(f.store as unknown as GitHubControlStore, "o", "r");
+      await expect(f.read(port)).rejects.toBe(refusal);
+      expect(refusal.retryAfterMs).toBe(123456);
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(await f.read(port)).toMatchObject({ status: "verified" });
+    },
+  );
+  it("defers adoption on observation refusal without writes or lost request identity", async () => {
+    const f = await fixture();
+    const refusal = new PlatformUnavailableError(
+      { kind: "rate_limit", retryAfterMs: 321000 },
+      new Error("primary exhausted"),
+    );
+    const writes = f.store.writes.length;
+    vi.spyOn(f.store, "readBlob").mockRejectedValueOnce(refusal);
+    await expect(f.make().adopt(f.args)).rejects.toBe(refusal);
+    expect(f.store.writes).toHaveLength(writes);
+    expect(await f.make().adopt(f.args)).toMatchObject({ status: "adopted" });
+  });
+  it("preserves a persisted claim after a typed refusal without immediate repair reads or duplicate claim writes", async () => {
+    const f = await fixture();
+    const refusal = new PlatformUnavailableError(
+      { kind: "rate_limit", retryAfterMs: 321000 },
+      new Error("primary exhausted"),
+    );
+    const original = f.store.createRef.bind(f.store);
+    const refs = vi.spyOn(f.store, "readRef");
+    let readsAtRefusal = 0;
+    const creates = vi.spyOn(f.store, "createRef").mockImplementationOnce(async (ref, oid) => {
+      const result = await original(ref, oid);
+      expect(result).toBe(true);
+      readsAtRefusal = refs.mock.calls.length;
+      throw refusal;
+    });
+    await expect(f.make().adopt(f.args)).rejects.toBe(refusal);
+    expect(refs).toHaveBeenCalledTimes(readsAtRefusal);
+    expect(creates).toHaveBeenCalledTimes(1);
+    expect(await f.make().adopt(f.args)).toMatchObject({ status: "adopted" });
+    expect(creates).toHaveBeenCalledTimes(1);
+  });
+  it("reuses immutable objects across full reconstructions without caching snapshots, authority refs or mutable base", async () => {
+    const f = await adopted();
+    const methods = ["readCommit", "readBlob", "readTreeEntry"] as const;
+    const reads = methods.map((method) => vi.spyOn(f.store, method));
+    const refs = vi.spyOn(f.store, "readRef"),
+      facts = vi.spyOn(f.store, "getRepositoryFacts"),
+      baseRead = vi.spyOn(f.store, "getBranchHead");
+    const port = recoveryReadPort(f.store as unknown as GitHubControlStore, "o", "r");
+    const readSnapshot = vi.fn(async () => ({
+      snapshot: structuredClone(f.snapshot),
+      historyComplete: f.state.historyComplete,
+    }));
+    const prove = () =>
+      loadRecoveryRuntime({ objective: 7, runId: "successor", store: port, readSnapshot });
+    expect(await prove()).toMatchObject({ status: "verified" });
+    const counts = reads.map((read) => read.mock.calls.length);
+    const presentTrees = (
+      await Promise.all(reads[2]!.mock.results.map((result) => result.value))
+    ).filter((value) => value !== null).length;
+    expect(counts.every((count) => count > 0)).toBe(true);
+    const refCount = refs.mock.calls.length,
+      factsCount = facts.mock.calls.length,
+      baseCount = baseRead.mock.calls.length;
+    for (let i = 0; i < 5; i++) expect(await prove()).toMatchObject({ status: "verified" });
+    expect(reads.slice(0, 2).map((read) => read.mock.calls.length)).toEqual(counts.slice(0, 2));
+    expect(
+      (await Promise.all(reads[2]!.mock.results.map((result) => result.value))).filter(
+        (value) => value !== null,
+      ),
+    ).toHaveLength(presentTrees);
+    expect(refs.mock.calls.length).toBe(refCount * 6);
+    expect(facts.mock.calls.length).toBe(factsCount * 6);
+    expect(baseRead.mock.calls.length).toBe(baseCount * 6);
+    expect(readSnapshot).toHaveBeenCalledTimes(6);
+    f.store.head = { ...base, oid: sha("8") };
+    expect(await prove()).toMatchObject({ sourceEvidence: { currentBase: "changed" } });
+    f.state.historyComplete = false;
+    expect(await prove()).toMatchObject({ status: "blocked", blockers: ["snapshot-incomplete"] });
+    f.state.historyComplete = true;
+    f.store.refs.delete(f.planRecord.ref);
+    expect(await prove()).toMatchObject({ status: "blocked" });
+  });
   it("loads and memoizes complete adoption through the actual frozen capability port", async () => {
     const f = await adopted();
     const port = recoveryReadPort(f.store as unknown as GitHubControlStore, "o", "r");

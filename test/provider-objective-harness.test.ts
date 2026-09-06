@@ -81,25 +81,43 @@ function evidence() {
       workItem: number,
       attempt: 1,
       artifactDigest: `artifact-${number}`,
-      headSha: `head-${number}`,
+      headSha: String(number).repeat(40),
     });
     add("PublicationRecorded", {
       workItem: number,
       attempt: 1,
       pullRequest: number + 10,
-      headSha: `head-${number}`,
+      headSha: String(number).repeat(40),
     });
-    add("AttemptIntegrated", { workItem: number, attempt: 1, headSha: `merge-${number}` });
+    add("AttemptIntegrated", {
+      workItem: number,
+      attempt: 1,
+      headSha: String(number + 3).repeat(40),
+    });
     pulls.push({
+      node_id: `PR_${number + 10}`,
+      base: { repo: { node_id: "R_fixture", full_name: authority.repository } },
       number: number + 10,
       state: "closed",
       merged: true,
-      head: { sha: `head-${number}` },
-      merge_commit_sha: `merge-${number}`,
+      head: { sha: String(number).repeat(40) },
     });
   }
   add("FactoryRunCompleted");
   return {
+    repository: authority.repository,
+    mergeProofs: [2, 3, 4].map((number) => ({
+      runId: "run",
+      objective: 1,
+      workItem: number,
+      attempt: 1,
+      pullRequest: number + 10,
+      pullRequestNodeId: `PR_${number + 10}`,
+      repository: authority.repository,
+      repositoryNodeId: "R_fixture",
+      headSha: String(number).repeat(40),
+      mergeSha: String(number + 3).repeat(40),
+    })),
     actor: { id: 123 },
     runResult: { status: "completed", runId: "run", objective: 1 },
     objective: { number: 1, state: "closed" },
@@ -123,6 +141,14 @@ function evidence() {
 }
 
 describe("installed provider Objective harness (no live calls)", () => {
+  it("requires separate exact merge proofs and never recovers missing proof from legacy REST fields", () => {
+    const value = evidence();
+    expect(value.pulls.every((pull) => !("merge_commit_sha" in pull))).toBe(true);
+    expect(assessProviderCompletion(value, authority).result).toBe("passed");
+    Object.assign(value.pulls[0]!, { merge_commit_sha: value.mergeProofs[0]!.mergeSha });
+    value.mergeProofs.pop();
+    expect(assessProviderCompletion(value, authority).result).toBe("incomplete");
+  });
   it("is inert without explicit provider opt-in", () => expect(providerAuthority({})).toBeNull());
   it("requires exact target, paid budget and cleanup authority", () => {
     expect(providerAuthority(env)).toEqual(authority);

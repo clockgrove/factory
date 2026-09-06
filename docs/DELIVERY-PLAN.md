@@ -4,6 +4,9 @@ Status: in progress
 
 Date: 2026-09-04
 
+The [completion board](COMPLETION.md) is the current remaining-work view. This document retains the
+accepted product waves and final publication protocol, not a competing execution queue.
+
 ## Goal
 
 Build an open-source Factory that an indie developer or small team can

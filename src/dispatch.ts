@@ -1100,6 +1100,7 @@ export class Dispatcher {
 
     const mutationPermit = await this.#mutations.acquire("normal");
     const release = await this.#concurrency.acquire();
+    let attempted = false;
     try {
       if (this.#breaker.isOpen()) {
         throw new PlatformUnavailableError(
@@ -1112,9 +1113,17 @@ export class Dispatcher {
       // shared mutation permit. Keep their final synchronous fence adjacent to
       // the provider call instead of checking before the queue.
       beforeCall?.();
+      if (this.#breaker.isOpen()) {
+        throw new PlatformUnavailableError(
+          { kind: "rate_limit", retryAfterMs: this.#breaker.waitMs() },
+          new Error("Factory GitHub circuit opened during the dispatch mutation fence"),
+        );
+      }
+      attempted = true;
       await fn();
       this.#breaker.recordSuccess();
     } catch (error) {
+      if (!attempted) throw error;
       const refusal = classifyRefusal(error);
       if (refusal.kind === "not_refusal") throw error;
       this.#breaker.recordRefusal(refusal);

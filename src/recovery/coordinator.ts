@@ -1,4 +1,5 @@
 import type { FactoryReadSnapshot } from "../application/status.js";
+import { PlatformUnavailableError } from "../platform.js";
 import type { CompiledGraphStore } from "../control/graphs.js";
 import type { LeaseManager, LeaseState } from "../control/lease.js";
 import { deduplicateFactoryEvents, encodeEventComment } from "../control/receipts.js";
@@ -321,7 +322,8 @@ export class RecoveryCoordinator {
               replay.nextEvent,
             ),
           );
-        } catch {
+        } catch (error) {
+          if (error instanceof PlatformUnavailableError) throw error;
           const reloaded = await this.#inspect(input);
           if (!reloaded.events.some((event) => recoveryEventDigest(event) === expectedDigest))
             return result("pending", ["comment-response-unresolved"]);
@@ -331,6 +333,7 @@ export class RecoveryCoordinator {
       }
       return result("pending", ["adoption-incomplete"]);
     } catch (error) {
+      if (error instanceof PlatformUnavailableError) throw error;
       return result(uncertainWrite ? "pending" : "blocked", [
         error instanceof RecoveryGateError ? error.code : "recovery-observation-unavailable",
       ]);

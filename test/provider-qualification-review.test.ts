@@ -59,9 +59,45 @@ it("reconstructs candidate native usage after checkpoint completion but before i
           encoding: "utf8",
         },
       ),
-    ) as { isolatedResource: { sandboxMilliseconds: number } };
+    ) as {
+      identity: { workItem: number; deliveryHeadSha: string; targetBaseSha: string };
+      validation: { outputTreeSha: string };
+      isolatedResource: { sandboxMilliseconds: number };
+    };
+    const publication = fixture
+      .events()
+      .find(
+        (event) =>
+          event.event === "PublicationRecorded" && event.workItem === durable.identity.workItem,
+      );
+    expect(publication?.event).toBe("PublicationRecorded");
+    if (publication?.event !== "PublicationRecorded")
+      throw new Error("missing original publication");
+    const originalPublication = structuredClone(publication);
+    expect(durable.identity.deliveryHeadSha).not.toBe(publication.headSha);
+    const git = (...args: string[]) =>
+      execFileSync("git", args, {
+        cwd: fixture.repository,
+        encoding: "utf8",
+      }).trim();
+    expect(git("show", "-s", "--format=%P", durable.identity.deliveryHeadSha)).toBe(
+      `${publication.headSha} ${durable.identity.targetBaseSha}`,
+    );
+    expect(git("rev-parse", `${durable.identity.deliveryHeadSha}^{tree}`)).toBe(
+      durable.validation.outputTreeSha,
+    );
+    expect(GitHubControlStore.prototype.compareAndSwapRef).toHaveBeenCalledOnce();
 
     expect(await fixture.run()).toMatchObject({ status: "completed" });
+    expect(GitHubControlStore.prototype.compareAndSwapRef).toHaveBeenCalledOnce();
+    expect(
+      fixture
+        .events()
+        .filter(
+          (event) =>
+            event.event === "PublicationRecorded" && event.workItem === durable.identity.workItem,
+        ),
+    ).toEqual([originalPublication]);
     expect(fixture.activity.filter((entry) => entry.invocation)).toHaveLength(1);
     expect(fixture.activity.filter((entry) => entry.operation === "candidate-review")).toHaveLength(
       1,

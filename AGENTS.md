@@ -9,6 +9,8 @@ Factory runs for adopters. [`docs/DESIGN.md`](docs/DESIGN.md) defines the produc
 - **`docs/DESIGN.md`** — goals, scope, non-goals, the loop, evaluation and integration rules, the
   confidence bar, packaging, and stated limitations. Read it before changing behavior.
 - **`docs/PLATFORM-BEHAVIOR.md`** — the measured platform behavior the design rests on.
+- **`docs/COMPLETION.md`** — the concise remaining-capability board, separating bounded pilot
+  readiness from full release qualification. It is a contributor planning view, not runtime state.
 - **GitHub is the source of truth for status**, not this file and not session state. Reconstruct
   where things stand from `git log`, the code, and `origin/main` rather than assuming prior-session
   memory is accurate.
@@ -25,11 +27,14 @@ These are settled. Do not relitigate them.
   structural identity, not state.
 - **Rate-limit discipline is mandatory.** Every GitHub write goes through `platform.ts`'s
   `CircuitBreaker`, `ContentCreationPacer`, and `ConcurrencyLimiter`. Never burst writes; never retry
-  through an open circuit. A `403` alongside `5000/5000` on `/rate_limit` is the documented secondary
-  limit, not a bug.
+  through an open circuit. Classify the failed request's response headers/body: primary exhaustion
+  waits for its reset, and secondary refusals honor their retry delay. A separate `/rate_limit`
+  balance neither proves a secondary refusal nor overrides the failed request's retry boundary.
 - **Verify platform claims live** against current documentation (docs.github.com, agent-plugins.org,
   modelcontextprotocol.io, npm) before writing code that depends on them. Never infer a mutation or
-  field shape from training data — schemas change.
+  field shape from training data — schemas change. Reuse applicable captured observations and cheap
+  contract fixtures; a narrow live probe is warranted when uncertainty blocks implementation, not
+  as a ritual after each change. Preserve the existing target, permission, and spending boundaries.
 - **This applies to behavioral claims most of all.** A wrong field name looks like something you
   might misremember, so it prompts a check; a belief about how GitHub or the coding agent *behaves*
   looks like background knowledge and never triggers one. If a design rests on what something *will
@@ -43,7 +48,8 @@ These are settled. Do not relitigate them.
   pushes, never bursts, and confirm what landed with `git fetch origin main` plus a SHA comparison.
 - **Exercise Factory through the installed plugin**, not a hand-written MCP config pointing at a
   local worktree and not hand-copied skills. A local bundle tests something no adopter will ever run,
-  and a worktree can change underneath a live run.
+  and a worktree can change underneath a live run. This rule governs installed-product qualification,
+  not focused source tests during development; it does not require reinstalling after every fix.
 
 ## Complete the authorized development task
 
@@ -57,6 +63,9 @@ These are settled. Do not relitigate them.
 - After each PR, compare delivered outcomes with the active goal, identify remaining acceptance
   gaps, and choose the next substantial authorized deliverable. Recalibrate when evidence changes;
   do not repeatedly replan settled work or expand the goal without authority.
+- Keep one concise completion board: remaining capability and acceptance criteria, code/testing/
+  external-input classification, owner, dependencies, and next concrete deliverable. Link historical
+  evidence rather than copying it. A bounded pilot does not waive the full release requirements.
 
 ## Capability-sized delivery
 
@@ -70,12 +79,11 @@ These are settled. Do not relitigate them.
   acceptance criteria. Keep available agents on the highest-impact unblocked work within authorized
   budgets; serialize only genuine dependencies or conflicting changes. One PR per capability does
   not mean one capability at a time.
-- Run targeted checks during development. Run the full required integration and release checks at
-  the completed batch boundary, and rebuild/reinstall the updated plugin there when the batch changes
-  it. Do not repeat full release verification or plugin reinstall after every helper change or commit.
-  Repeat affected checks earlier only when changed behavior or a concrete failure invalidates the
-  evidence, including installation-specific tests when relevant. Documentation-only batches retain
-  their proportional checks; batching never waives required release or live-conformance gates.
+- Finish and integrate the remaining implementation before coordinated qualification. A capability
+  PR is a delivery boundary, not automatically a release candidate. Use the development checks below
+  until the intended candidate's implementation and integration review are complete; then freeze it
+  and perform the coordinated qualification phase. Do not manufacture audits, documentation tasks,
+  or testing infrastructure merely to occupy agents.
 
 ## Parallel work and responsiveness
 
@@ -85,6 +93,9 @@ These are settled. Do not relitigate them.
 - Give each agent an outcome, file ownership, acceptance criteria, relevant context, and a concise
   return format. Keep shared-file edits under one owner. The coordinating agent owns integration
   and checks the returned evidence; do not duplicate an assigned investigation without a reason.
+- Track each lane as running, waiting, completed, or blocked, with its next deliverable and dependency.
+  Restart a completed agent with the harness's follow-up-task mechanism before assigning more work;
+  sending a message alone may not resume it. Do not leave deliverables waiting on an idle reviewer.
 - Use additional Codex sessions as needed for genuinely independent work when a session's agent
   pool would otherwise serialize the project. The user has authorized this coordination pattern;
   each additional session needs an isolated worktree, explicit ownership, a bounded deliverable,
@@ -94,17 +105,25 @@ These are settled. Do not relitigate them.
 - Process delivered user corrections and agent messages before further dependent work. Use the
   harness's supported steering and wait mechanisms. Verify its message-delivery behavior before
   relying on it; do not assume messages require a completed turn or end turns merely as a ritual.
-- Keep progress updates concise: completed outcomes, evidence, blockers, and the next action.
+- Report which capability finished, what remains, the critical path, and any needed decision.
+  Test counts, commits, and agent counts support that report; they are not completion measures.
   Avoid repeating plans and transcripts. Pause or redirect promptly when the user asks.
 
 ## Proportional verification
 
-- During development, run checks targeted to the changed behavior and meaningful regression risks.
-  Complete the required integration and release checks at their applicable gates; see
-  [`CONTRIBUTING.md`](CONTRIBUTING.md#validate-changes).
-- Broaden or repeat checks when relevant changes, failures, or unresolved concerns invalidate the
-  existing evidence. Record the checked revision or working-tree state and commands so results can
-  be reused only while applicable. Do not repeatedly run the full suite without a concrete reason.
+- During development, run typechecks and focused tests for changed behavior. Add a regression for
+  each concrete defect; retain targeted security, destructive-action, accounting, and recovery checks.
+  Use cheap contract fixtures derived from captured live behavior for external integration shapes.
+  Do not repeatedly run full coverage, release matrices, packaging, plugin reinstalls, or broad live
+  qualification between intermediate changes. Documentation-only changes need proportional checks.
+- After implementation and integration review, freeze the candidate, run the full integrated checks,
+  build and install the matching artifact, then execute the required end-to-end qualification cases.
+  An external gate may remain explicitly blocked; it is not waived or passed by local checks.
+- If qualification fails, preserve the original failure and exact source/artifact identities, fix
+  the defect, and run affected checks first. Repeat broader checks at the next stable candidate
+  boundary, not every unrelated test automatically. Never relabel old evidence as proof of a changed
+  candidate. Reuse completed work through authorized recovery instead of regenerating test history.
+  See [`CONTRIBUTING.md`](CONTRIBUTING.md#validate-changes) for the final gates.
 - Verify observable behavior rather than adding tests that merely mirror implementation. This does
   not waive mandatory checks, independent validation, semantic review, or live conformance evidence.
 

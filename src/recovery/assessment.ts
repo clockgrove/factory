@@ -81,7 +81,9 @@ export interface RecoveryAssessment {
   repository: string;
   objective: number;
   executionAuthorized: false;
-  successorAvailable: false;
+  /** Historical evidence is not a proposal or a determination of successor eligibility. */
+  successorEligibility: "not-assessed";
+  nextStep: string;
   availability: "observed" | "incomplete";
   blockers: RecoveryBlocker[];
   runs: RecoveryRun[];
@@ -122,15 +124,11 @@ export async function assessRecovery(input: {
     repository,
     objective: snapshot.number,
     executionAuthorized: false,
-    successorAvailable: false,
+    successorEligibility: "not-assessed",
+    nextStep:
+      "Use factory_recovery_propose to evaluate and bind an exact successor plan. Execution requires explicit authorization through factory_recovery_request and fresh controller admission checks; this assessment grants no authority or additional allowance.",
     availability: "observed",
-    blockers: [
-      {
-        code: "successor-unavailable",
-        reason:
-          "Evidence-preserving successor execution is not implemented; this assessment grants no authority or additional allowance.",
-      },
-    ],
+    blockers: [],
     runs: [],
     workItems: [],
     orphanReservations: [],

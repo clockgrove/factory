@@ -736,6 +736,7 @@ export class GraphApplier {
 
     const mutationPermit = await this.#mutations.acquire("normal");
     const release = await this.#concurrency.acquire();
+    let attempted = false;
     try {
       if (this.#breaker.isOpen()) {
         throw new PlatformUnavailableError(
@@ -744,10 +745,18 @@ export class GraphApplier {
         );
       }
       await this.#beforeMutation(mutationPermit.waitedMs);
+      if (this.#breaker.isOpen()) {
+        throw new PlatformUnavailableError(
+          { kind: "rate_limit", retryAfterMs: this.#breaker.waitMs() },
+          new Error("Factory GitHub circuit opened during the graph mutation fence"),
+        );
+      }
+      attempted = true;
       const result = await fn();
       this.#breaker.recordSuccess();
       return result;
     } catch (error) {
+      if (!attempted) throw error;
       const refusal = classifyRefusal(error);
       if (refusal.kind === "not_refusal") throw error;
       this.#breaker.recordRefusal(refusal);

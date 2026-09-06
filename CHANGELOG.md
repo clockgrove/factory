@@ -34,14 +34,30 @@ Notable changes to Factory. See [the delivery plan](docs/DELIVERY-PLAN.md) for u
 
 ### Changed
 
+- Recovery shares bounded exact-OID content reads without caching mutable authority or resource
+  observations. Platform refusals retain their retry boundary through proof reconstruction.
+- The repository controller settles ownership before abortable in-process quota cooldown and fresh
+  acquisition. Queued calls respect the same boundary; quota failures do not cause restart storms.
+- After a delayed restart, already finished local work can receive Objective completion only with
+  exact on-time delivery, review, accounting and fresh cleanup proof. The deadline is not extended;
+  new execution, validation, review, merging and missing-receipt repair remain prohibited.
+- Completed original-local foreground work can prove launcher closure from exact authenticated
+  completion chains plus fresh producer/host and reserved-scope observations. Missing, partial or
+  conflicting evidence still blocks recovery; no service identity or command output is invented.
+- Accepted successor recovery requests and exact retries repair Objective discovery without creating
+  another activation or allowance. Read-only assessment directs users to the explicit proposal path
+  instead of incorrectly reporting successor execution as unavailable.
 - Clean plugin verification requires the exact enabled Codex installation receipt and cache path;
   an available-only listing or staged source directory cannot satisfy installation evidence.
 - Native linear-stack Daytona execution uses immutable, independently sandboxed rebase validation
   and separate paid capacity/accounting before semantic review. Runtime qualification remains open.
-- Native-mode independent siblings retain parallel execution and validate the combined merge tree
-  after another Work Item in the same run advances trunk. Durable candidate/review checkpoints
-  preserve original PR heads, budget history, and response-loss recovery; external advances remain
-  an escalation boundary.
+- Native-mode independent siblings retain parallel execution after another Work Item in the same
+  run advances trunk. Factory refreshes the owned branch with an immutable two-parent commit and
+  exact non-force update, then independently validates and reviews its changed head. Original
+  publication evidence and budget history remain unchanged; external advances still escalate.
+- Sibling tree preparation uses raw Git objects and a private index without running repository
+  hooks, filters, or commands. Installed native qualification independently verifies refresh
+  lineage, changed-head evidence, integration, dependent joins, and resource accounting.
 - Recovery inspection distinguishes graph-derived native-stack units from independent sibling PRs.
 - Local Codex execution is the default; paid execution is always explicitly authorized and bounded.
 - The supported runtime is Linux on native Linux, Windows WSL2, or a Linux guest hosted by macOS.

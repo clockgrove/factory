@@ -1,6 +1,11 @@
 /** Opt-in installed-plugin Supervisor exercise; never part of offline release checks. */
 import assert from "node:assert/strict";
 import { deduplicateQualificationReceipts } from "./qualification-receipts.mjs";
+import {
+  assertQualificationMergeProof,
+  observeQualificationMergeProofs,
+  selectQualificationPublicationRecord,
+} from "./qualification-merge-proof.mjs";
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -380,7 +385,11 @@ export function boundedPolicy(delivery = "stacked-prs", maxModelTokens = maximum
   };
 }
 
-export function assertCompletion(evidence, allowedBackends = localBackends) {
+export function assertCompletion(
+  evidence,
+  allowedBackends = localBackends,
+  assertMergeProof = assertQualificationMergeProof,
+) {
   const runId = evidence.runResult?.runId;
   assert.ok(typeof runId === "string" && runId.length > 0, "explicit executed run ID required");
   assert.equal(evidence.status?.run?.runId, runId, "status belongs to another run");
@@ -404,6 +413,7 @@ export function assertCompletion(evidence, allowedBackends = localBackends) {
     ["children", 100],
     ["dependencies", 100],
     ["pulls", 1000],
+    ["mergeProofs", 100],
     ["events", 50_000],
   ]) {
     assert.ok(
@@ -414,6 +424,11 @@ export function assertCompletion(evidence, allowedBackends = localBackends) {
   assert.ok(evidence.children.length >= 3, "expected a multi-wave compiled graph");
   const childNumbers = new Set(evidence.children.map((child) => child.number));
   assert.equal(childNumbers.size, evidence.children.length, "duplicate Work Items");
+  assert.equal(
+    evidence.mergeProofs.length,
+    evidence.children.length,
+    "merge commit proof coverage differs",
+  );
   assert.ok(
     [...childNumbers].every((number) => Number.isSafeInteger(number) && number > 0),
     "invalid Work Item identity",
@@ -578,25 +593,35 @@ export function assertCompletion(evidence, allowedBackends = localBackends) {
       ),
       `Work Item #${child.number} lacks independent validation for its published artifact`,
     );
-    const publication = events.find(
-      (event) =>
-        event.workItem === child.number &&
-        event.attempt === integrated.attempt &&
-        event.event === "PublicationRecorded" &&
-        event.headSha === published.headSha,
+    const publication = selectQualificationPublicationRecord(
+      events.filter(
+        (event) =>
+          event.workItem === child.number &&
+          event.attempt === integrated.attempt &&
+          event.event === "PublicationRecorded",
+      ),
+    );
+    assert.equal(
+      publication.headSha,
+      published.headSha,
+      "published head differs from publication proof",
     );
     assert.ok(publication?.pullRequest, "missing publication PR identity");
-    assert.ok(
-      evidence.pulls.some(
-        (pull) =>
-          pull.number === publication.pullRequest &&
-          pull.state === "closed" &&
-          pull.merged === true &&
-          pull.head?.sha === published.headSha &&
-          pull.merge_commit_sha === integrated.headSha,
-      ),
-      "integration receipt differs from GitHub merge commit",
+    const pulls = evidence.pulls.filter((pull) => pull.number === publication.pullRequest);
+    const proofs = evidence.mergeProofs.filter(
+      (proof) =>
+        proof.runId === runId &&
+        proof.workItem === child.number &&
+        proof.attempt === integrated.attempt,
     );
+    assert.equal(pulls.length, 1, "exact REST PR identity missing or repeated");
+    assert.equal(proofs.length, 1, "exact GraphQL merge commit proof missing or repeated");
+    assertMergeProof(proofs[0], {
+      repository: evidence.repository,
+      pull: pulls[0],
+      publication,
+      integration: integrated,
+    });
   }
   for (const entry of evidence.dependencies) {
     const dependencies = entry.blockedBy.map((dependency) => dependency.number);
@@ -666,6 +691,7 @@ export function assertQualificationCompletion(
   evidence,
   deliveryMode = "stacked-prs",
   allowedBackends = localBackends,
+  assertMergeProof = assertQualificationMergeProof,
 ) {
   assert.ok(
     ["stacked-prs", "regular-prs"].includes(deliveryMode),
@@ -677,7 +703,7 @@ export function assertQualificationCompletion(
         JSON.stringify(allowedBackends) === JSON.stringify(["codex-cli/local-worktree"])),
     "unsupported qualification backend route",
   );
-  assertCompletion(evidence, allowedBackends);
+  assertCompletion(evidence, allowedBackends, assertMergeProof);
   assertQualificationNamespace(evidence);
   assert.equal(
     evidence.preflight?.harness?.candidateInventorySha256,
@@ -1126,6 +1152,7 @@ export async function main(qualification = {}) {
     dependencies: [],
     events: [],
     pulls: [],
+    mergeProofs: [],
   };
   const save = () =>
     writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });
@@ -1248,6 +1275,15 @@ export async function main(qualification = {}) {
           })
         ).data,
       );
+    if (evidence.runResult.status === "completed") {
+      evidence.mergeProofs = qualification.observeMergeProofs
+        ? await qualification.observeMergeProofs(hooks)
+        : await observeQualificationMergeProofs(
+            { request: (route, parameters) => octokit.request(route, parameters) },
+            evidence,
+          );
+      save();
+    }
     evidence.finishedInstalledArtifact = installedBundleIdentity(pluginRoot);
     assert.deepEqual(
       evidence.finishedInstalledArtifact,

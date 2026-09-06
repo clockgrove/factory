@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "kind": "reviewed-foreground-recovery-candidate-and-install-component",
+  "sourceCommit": "007cd8c22fcb99473637d1ded7865c6ffb6ff018",
+  "observedAt": "2026-09-05T21:41:23.802Z",
+  "result": "integrated checks and matching Linux CLI installation passed",
+  "implementation": {
+    "reviewedSourceCommit": "3f3aa5c235d19fc0fbd9cbfac0084a1a99dda198",
+    "integratedSourceCommit": "89d97df",
+    "scope": "Exact completed first-attempt trusted-local ordinary foreground invocation proof; generic and unsupported resource gates remain fail-closed.",
+    "focusedResourceTestsPassed": 62,
+    "independentSafetyReview": "clear",
+    "sourceSha256": {
+      "src/recovery/foreground-completion.ts": "65d79f34d53d0926d55b8b39f78d3da57eec75cc827e4400b6e23b2b10c045d2",
+      "src/recovery/scope-resources.ts": "3b1166afce820a4534f8303f3668113dc80ea820c4e4ddac6077f7f340411c49",
+      "src/recovery/resources.ts": "3392dd2816bbf19b74fddcec2f32db158a1664976905512b8c277a1191a09f87"
+    }
+  },
+  "integratedChecks": {
+    "command": "npm run verify:release",
+    "exitCode": 0,
+    "testFilesPassed": 132,
+    "testsPassed": 2594,
+    "testsSkipped": 3,
+    "testDurationSeconds": 338.79,
+    "coveragePercent": { "statements": 80.33, "branches": 77.55, "functions": 84.32, "lines": 81.39 },
+    "dependencyVulnerabilities": 0,
+    "logSha256": "55e906e02ed777572994f1d339a408356a65721ff1fdcdc9f3e07b2bf43064e2",
+    "candidateBookkeeping": "Checks began with already-generated matching notice bytes present. The final source commit added that notice inventory digest to Git while checks ran; no checked file bytes changed. Subsequent package checks matched the clean committed tree."
+  },
+  "installation": {
+    "packageSha256": "cad581956fe945777922a0add17b798d754758ba0521f7bdc42d4564ae3129d9",
+    "packageFiles": 87,
+    "packageBytes": 2981958,
+    "canonicalFilesMatched": true,
+    "exactFileInventoryMatched": true,
+    "onlyPermittedDifference": "Codex manifest cachebuster",
+    "manifestVersion": "2.0.26+codex.20260905214100",
+    "inventorySha256": "5430efef2933f626db8eb2b675e28b40daa1a4fe9b21bad9b677fab880879cc2",
+    "cliSha256": "569a7134d047135d69af3e2641264b99e552a1918ca53a5325e0289c99bd4e9c",
+    "mcpSha256": "83e0782e40a7535f61ec7b920ecdcbb0a35a841e7afaa8be5991357fd22f6e8c",
+    "receiptSha256": "c02420ab2f357874edb48dab64a922823bf48a20a4fc6fd88e23e4be0580ad0f",
+    "previousSourceRetained": true,
+    "controllerInactiveDuringInstall": true
+  },
+  "limitations": [
+    "This component proves integrated checks and exact installation, not Objective completion or a broad live gate.",
+    "Successor execution is separately authorized under its unchanged allowance; original failed observations remain preserved.",
+    "No provider credentials, paid launch, npm publication, marketplace settings, or Windows app cache changed.",
+    "This evidence document is later than the identified tested and installed package. All six broad prepublication gates remain Open."
+  ]
+}

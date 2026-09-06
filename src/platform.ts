@@ -91,6 +91,7 @@ function headerNumber(
  * the measured plane-3 event the quota headers reported a full budget.
  */
 export function classifyRefusal(error: unknown): Refusal {
+  if (error instanceof PlatformUnavailableError) return error.refusal;
   const e = error as HttpErrorLike;
   const status = e?.status;
   // `RequestError` keeps these under `response`; `GraphqlResponseError`
@@ -131,7 +132,7 @@ export function classifyRefusal(error: unknown): Refusal {
 
   if (graphQlRateLimited || status === 429 || (status === 403 && looksLikeRateLimit)) {
     const retryAfter = headerNumber(headers, "retry-after");
-    if (retryAfter !== null) {
+    if (retryAfter !== null && retryAfter >= 0) {
       return { kind: "rate_limit", retryAfterMs: retryAfter * 1000 };
     }
 
@@ -165,12 +166,14 @@ export function isPlatformUnavailable(error: unknown): boolean {
 }
 
 export class PlatformUnavailableError extends Error {
+  readonly refusal: Exclude<Refusal, { kind: "not_refusal" }>;
   readonly retryAfterMs: number;
   override readonly cause: unknown;
 
   constructor(refusal: Exclude<Refusal, { kind: "not_refusal" }>, cause: unknown) {
     super(`platform unavailable (${refusal.kind}); retry in ${refusal.retryAfterMs}ms`);
     this.name = "PlatformUnavailableError";
+    this.refusal = refusal;
     this.retryAfterMs = refusal.retryAfterMs;
     this.cause = cause;
   }
@@ -240,6 +243,9 @@ export class CircuitBreaker {
 
   /** Trips the circuit once enough consecutive refusals accumulate. */
   recordRefusal(refusal: Exclude<Refusal, { kind: "not_refusal" }>, now: Date = new Date()): void {
+    // A single refusal already asks us to stop sending requests. The trip
+    // threshold controls escalation, not permission to ignore Retry-After.
+    this.#openUntil = Math.max(this.#openUntil ?? 0, now.getTime() + refusal.retryAfterMs);
     this.#consecutiveRefusals += 1;
     if (this.#consecutiveRefusals < this.#opts.openAfterConsecutiveRefusals) {
       return;
@@ -250,7 +256,7 @@ export class CircuitBreaker {
     // Exponentially increasing cooldown per the same GitHub guidance, capped
     // so a stuck breaker does not stall the loop indefinitely on its own.
     const cooldown = Math.min(this.#opts.baseCooldownMs * this.#opens, this.#opts.maxCooldownMs);
-    this.#openUntil = now.getTime() + Math.max(cooldown, refusal.retryAfterMs);
+    this.#openUntil = Math.max(this.#openUntil, now.getTime() + cooldown);
   }
 }
 

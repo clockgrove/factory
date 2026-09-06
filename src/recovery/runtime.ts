@@ -1,10 +1,12 @@
 import type { FactoryReadSnapshot } from "../application/status.js";
+import { PlatformUnavailableError } from "../platform.js";
 import { attemptRef } from "../control/attempts.js";
 import {
   loadMergeCandidateCheckpoint,
   mergeCandidateIdentityDigest,
 } from "../control/merge-candidates.js";
 import { bindValidationToPublishedHead } from "../validation/plan.js";
+import { observeRecoverySiblingRefresh } from "./sibling-refresh.js";
 import { deriveBudgetUsage, remainingBudget, type BudgetUsage } from "../control/budget.js";
 import {
   loadCompiledGraph,
@@ -387,6 +389,29 @@ export async function loadRecoveryRuntime(input: {
         publishedTreeSha: head.treeOid,
         publishedBaseSha: publication.baseSha,
       });
+      const pull = await input.store.readPullRequest(publication.pullRequest);
+      const currentHead = await input.store.readCommit(pull.headSha);
+      const refresh =
+        pull.headSha !== publication.headSha && currentHead.parentOids.length === 2
+          ? await observeRecoverySiblingRefresh({
+              repository: plan.repository,
+              objective: input.objective,
+              workItem: event.workItem,
+              source: { ...source, publication },
+              events,
+              controllingRunIds: [...sourceRunIds, input.runId],
+              store: input.store,
+              deliveryHeadSha: pull.headSha,
+              ...(event.targetBaseSha ? { targetBaseSha: event.targetBaseSha } : {}),
+              candidateRunId: input.runId,
+              candidateIdentityDigest: event.backend.replace("factory/integration-validation-", ""),
+            })
+          : null;
+      if (refresh)
+        requireRuntime(
+          refresh.candidateIdentity.runId === input.runId,
+          "source-capacity-refresh-owner-mismatch",
+        );
       requireRuntime(
         event.targetBaseSha &&
           event.targetBaseSha !== source.validation.baseSha &&
@@ -400,6 +425,7 @@ export async function loadRecoveryRuntime(input: {
               sourceHeadSha: publication.headSha,
               sourceExactHeadValidationDigest: proof.digest,
               targetBaseSha: event.targetBaseSha,
+              ...(refresh ? { deliveryHeadSha: refresh.record.plannedHeadSha } : {}),
             })}`,
         "source-capacity-candidate-mismatch",
       );
@@ -441,6 +467,7 @@ export async function loadRecoveryRuntime(input: {
             sourceHeadSha: publication.headSha,
             sourceExactHeadValidationDigest: proof.digest,
             targetBaseSha: event.targetBaseSha!,
+            ...(refresh ? { deliveryHeadSha: refresh.record.plannedHeadSha } : {}),
           }),
           "source-capacity-completion-unavailable",
         );
@@ -643,6 +670,7 @@ export async function loadRecoveryRuntime(input: {
       currentUnknownModelUsageCount: unknown.length,
     };
   } catch (error) {
+    if (error instanceof PlatformUnavailableError) throw error;
     return {
       status: "blocked",
       adoptionVerified: false,

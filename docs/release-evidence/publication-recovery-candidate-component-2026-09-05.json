@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "kind": "publication-recovery-corrected-candidate-component",
+  "observedAt": "2026-09-05T19:54:21.853Z",
+  "sourceCommit": "f67fd05ac97ffd68803e1fea299c7977e5b3c73c",
+  "scope": {
+    "integratedReleaseChecks": "passed",
+    "exactCandidateInstall": "passed",
+    "correctedInstalledSuccessorQualification": "not run: explicit approval pending",
+    "broadPrepublicationGates": "Open",
+    "registryPublicationPerformed": false,
+    "newProviderOrModelExecutionStarted": false
+  },
+  "release": {
+    "command": "npm run verify:release",
+    "exitCode": 0,
+    "retainedLogSha256": "d8fd8bb64b1ad05964ab3678fcb15322ec76fb3b3ef9194730fda1590432b04c",
+    "testFilesPassed": 131,
+    "testsPassed": 2567,
+    "testsSkipped": 3,
+    "testDurationSeconds": 337.86,
+    "coveragePercent": {
+      "statements": 80.2,
+      "branches": 77.32,
+      "functions": 84.16,
+      "lines": 81.27
+    },
+    "typecheckLintFormat": "passed",
+    "schemasReproducibleBundlesStagedPluginAndNpm": "passed",
+    "dependencyAuditVulnerabilities": 0
+  },
+  "installedArtifact": {
+    "origin": "exact committed candidate package, not a registry publication",
+    "packageFiles": 84,
+    "packageBytes": 2974185,
+    "tarballSha256": "88398e4400ca52424cab563329bc55096b7a50467626f19b05974243eaffe4af",
+    "matchesTarballVerifiedByIntegratedChecks": true,
+    "inventorySha256": "fed338893823be0c5793cc7ff4f40b9ea658d8044af6a2c78e8e79b65a395ee9",
+    "retainedInstallReceiptSha256": "c483babd0c8f1cd9118713706fd291b1a6e5025317c2f59fc3a2eadea167a5ce",
+    "cliSha256": "bc289cdf56390d1a6eaa5114f50e12f9135e4ed7378138c6e7df04bbbbfb1ee0",
+    "mcpSha256": "e72814d7dcf94465fc4bc1dbdff95fb70dd16f4a6c2a2306ee6e23fe4a7afae6",
+    "canonicalFilesMatched": true,
+    "exactFileInventoryMatched": true,
+    "onlyPermittedDifference": "Codex manifest cachebuster",
+    "manifestVersion": "2.0.26+codex.20260905195334",
+    "installedCliHelp": "passed",
+    "priorSourceRetainedRecoverably": true,
+    "exactControllerAfterInstall": "inactive/dead, MainPID zero, no pending job"
+  },
+  "priorInterruptedCheck": {
+    "sourceCommit": "ba92429234713e9553a847940944cffef6517806",
+    "result": "interrupted after the operator changed execution priorities; not a pass",
+    "exitCode": 130,
+    "retainedLogSha256": "6a9bb064fa6667d24c26924990d67d3fc6761c764f8f6cb53cbfeff33d34b0b9"
+  },
+  "limitations": [
+    "The previous installed native Objective remains failed; corrected source and offline checks do not retrospectively pass it.",
+    "No successor execution, allowance increase, unknown-usage waiver, paid launch, controller start or registry publication occurred.",
+    "All six broad prepublication gates remain Open; this component does not qualify a new host, provider or live recovery scenario.",
+    "This record and the accompanying completion-board update are later documentation changes, not part of the identified tested or installed package."
+  ]
+}

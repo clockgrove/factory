@@ -485,12 +485,16 @@ describe("read-only recovery assessment", () => {
       const result = await f.assess();
       expect(result).toMatchObject({
         executionAuthorized: false,
-        successorAvailable: false,
+        successorEligibility: "not-assessed",
         workItems: [{ number: 8, classification }],
       });
-      expect(result.blockers).toContainEqual(
-        expect.objectContaining({ code: "successor-unavailable" }),
+      expect(result.blockers.some((blocker) => blocker.code === "successor-unavailable")).toBe(
+        false,
       );
+      expect(result).not.toHaveProperty("successorAvailable");
+      expect(JSON.stringify(result)).not.toContain("not implemented");
+      expect(result.nextStep).toContain("factory_recovery_propose");
+      expect(result.nextStep).toContain("factory_recovery_request");
       expect({ refs: f.refs, commits: f.commits, snapshot: f.snapshot }).toEqual(before);
       expect(JSON.stringify(result)).not.toMatch(
         /Private (Objective|feature|requirement|commit) text/,

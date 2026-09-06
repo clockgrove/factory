@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
+import { PlatformUnavailableError } from "../platform.js";
 import type { FactoryReadSnapshot } from "../application/status.js";
 import { attemptRef } from "../control/attempts.js";
+import { observeRecoverySiblingRefresh, recoverySiblingRefreshBinding } from "./sibling-refresh.js";
 import {
   assertAuthenticatedGraphProjection,
   assertSnapshotMatchesCompiledGraph,
@@ -10,6 +12,7 @@ import { decodeEventTrailer, deduplicateFactoryEvents } from "../control/receipt
 import { loadReviewCheckpoint, type ReviewIdentity } from "../control/reviews.js";
 import { type FactoryEvent, parseFactoryEvent } from "../protocol/events.js";
 import { policyDigest } from "../protocol/policy.js";
+import { selectEquivalentPublicationRecord } from "../publication/recorded-publication.js";
 import { bindValidationToPublishedHead } from "../validation/plan.js";
 import type { RecoveryReadStore } from "./assessment.js";
 import { loadRecoveryClaim, type RecoveryClaimRecord } from "./claims.js";
@@ -380,7 +383,8 @@ export async function resolveRecoveryEvidence(input: {
       ).oid;
       output.currentBase = output.currentBaseSha === plan.expectedBaseSha ? "unchanged" : "changed";
       if (output.currentBase === "changed") block("current-base-changed");
-    } catch {
+    } catch (error) {
+      if (error instanceof PlatformUnavailableError) throw error;
       block("current-base-unavailable");
     }
     if (input.claim) {
@@ -407,7 +411,8 @@ export async function resolveRecoveryEvidence(input: {
             request.planDigest === input.planRecord.digest,
         );
         output.claimBinding = "verified";
-      } catch {
+      } catch (error) {
+        if (error instanceof PlatformUnavailableError) throw error;
         output.claimBinding = "mismatch";
         block("claim-binding-unavailable");
       }
@@ -650,6 +655,16 @@ export async function resolveRecoveryEvidence(input: {
           );
           if (publication.kind !== "publication" || !source.validation)
             throw new Error("publication validation");
+          selectEquivalentPublicationRecord(
+            sourceEvents.filter(
+              (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
+                event.kind === "publication" &&
+                event.event === "PublicationRecorded" &&
+                event.sequence <= plan.sourceEventMaxSequence &&
+                event.headSha === publication.headSha,
+            ),
+            publication,
+          );
           const published = await store.readCommit(publication.headSha);
           const binding = bindValidationToPublishedHead({
             validation: {
@@ -669,6 +684,25 @@ export async function resolveRecoveryEvidence(input: {
               publication.validationDigest === source.validation.evidenceDigest &&
               publication.exactHeadValidationDigest === binding.digest,
           );
+          if (source.siblingRefresh) {
+            const refresh = await observeRecoverySiblingRefresh({
+              repository: plan.repository,
+              objective: plan.objective,
+              workItem: item.workItem,
+              source,
+              events,
+              controllingRunIds: plan.history.map((entry) => entry.runId),
+              store,
+              deliveryHeadSha: source.siblingRefresh.deliveryHeadSha,
+              candidateRunId: source.siblingRefresh.candidateRunId,
+              requireCompletion: item.action !== "revalidate",
+            });
+            requireEvidence(
+              JSON.stringify(
+                recoverySiblingRefreshBinding(refresh.record, refresh.candidateIdentity.runId),
+              ) === JSON.stringify(source.siblingRefresh),
+            );
+          }
           resolved.publication = {
             pullRequest: publication.pullRequest,
             branch: publication.branch,
@@ -721,7 +755,8 @@ export async function resolveRecoveryEvidence(input: {
                 : "changed";
             if (resolved.current.head === "changed")
               block("current-publication-changed", item.workItem);
-          } catch {
+          } catch (error) {
+            if (error instanceof PlatformUnavailableError) throw error;
             resolved.current.head = "unavailable";
             block("current-publication-unavailable", item.workItem);
           }
@@ -731,14 +766,16 @@ export async function resolveRecoveryEvidence(input: {
         }
         if (source) block("resource-cleanup-unverified", item.workItem);
         resolved.sourceBindings = "verified";
-      } catch {
+      } catch (error) {
+        if (error instanceof PlatformUnavailableError) throw error;
         block("source-item-unavailable", item.workItem);
       }
     }
     output.sourceBindings = output.items.every((item) => item.sourceBindings === "verified")
       ? "verified"
       : "incomplete";
-  } catch {
+  } catch (error) {
+    if (error instanceof PlatformUnavailableError) throw error;
     block("source-plan-or-graph-unavailable");
   }
   return output;

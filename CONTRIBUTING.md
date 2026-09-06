@@ -8,7 +8,8 @@ security boundary, and claims in the pull request.
 
 Read [`docs/DESIGN.md`](docs/DESIGN.md) first. It states the goals, the non-goals, and the rules that
 changes are judged against; [`AGENTS.md`](AGENTS.md) states the engineering conventions.
-The current implementation waves are tracked in [`docs/DELIVERY-PLAN.md`](docs/DELIVERY-PLAN.md).
+The remaining-capability board is [`docs/COMPLETION.md`](docs/COMPLETION.md); accepted implementation
+waves remain in [`docs/DELIVERY-PLAN.md`](docs/DELIVERY-PLAN.md).
 
 Keep each change focused on one complete, testable capability, not an arbitrary number of files or
 helper modules. GitHub is Factory's durable state: do not add sidecar state, status
@@ -23,26 +24,44 @@ API, or change to the product boundary. Security vulnerabilities must be reporte
 The supported runtime is Linux: native Linux, Windows WSL2, or a Linux guest hosted by macOS. Native
 Win32/Darwin lifecycle support and multiple-local-machine scheduling are intentionally out of scope.
 Daytona and two GitHub-managed release targets belong to the product contract; their live gates block
-publication, and Codex discovery remains fail-closed until its provider-published identity is
-recorded. Vercel Sandbox and Codex App Server are Labs. A Labs adapter must remain optional and
+publication, and Codex remains fail-closed until its provider-published identity and provider-specific
+task/session lifecycle integration are established. Vercel Sandbox and Codex App Server are Labs.
+A Labs adapter must remain optional and
 cannot change default startup or release behavior.
 
 ## Validate changes
 
-Use Node.js 20 or later:
+Use Node.js 20 or later. During development, install dependencies when needed, then run typecheck
+and the focused tests for the behavior being changed:
 
 ```bash
 npm ci
-npm run verify:release
+npm run typecheck
+npx vitest run test/publication.test.ts
 ```
 
-For behavior changes, add the narrowest meaningful unit or fault-injection test that would fail
-without the change. Documentation-only edits need relevant formatting, link, and consistency checks,
-not new implementation tests. Run targeted checks while iterating; retain the full required gates
-for integration and release. Repeat checks when intervening changes invalidate their evidence,
-and state which checks were not run rather than implying release qualification. Changes to a
-provider, GitHub behavior, platform lifecycle, install path, or other external contract also need
-the applicable conformance evidence; do not convert a fake-provider test into a live-support claim.
+The test path is an example; select the affected suite(s). Add a regression test for each concrete
+defect. Keep targeted checks for security, destructive actions, accounting, and recovery; use cheap
+contract fixtures derived from captured live behavior to catch external integration mismatches.
+Documentation-only edits need relevant formatting, link, and consistency checks, not new tests.
+Until implementation and integration review are complete, do not repeatedly run full coverage,
+release matrices, packaging, plugin reinstalls, or broad live qualification between fixes. A narrow
+live probe is justified when uncertain platform behavior blocks implementation, within existing
+authorization and spending boundaries. An installation defect can need a targeted install check.
+
+Then use one coordinated qualification phase:
+
+1. Freeze the source, tests, documentation, manifests, and bundles as an identified candidate.
+2. Run `npm run verify:release` for the full integrated checks.
+3. Build and install the matching artifact; record source and artifact identities.
+4. Execute the required installed end-to-end cases and applicable conformance matrices.
+
+If a check fails, preserve its original result, fix the defect, and run affected checks first.
+Repeat broader checks at the next stable candidate boundary; do not automatically restart unrelated
+tests. Keep old evidence bound to its original candidate, never relabel it as proof of changed bytes.
+Reuse completed work through authorized recovery where possible rather than regenerating a cleaner
+history. State unrun or blocked checks explicitly. Simulated-provider fixtures do not establish live
+support, and bounded pilot qualification does not satisfy or remove full release gates.
 
 `verify:package` checks the committed plugin manifests and skills, starts the bundled MCP server
 through the manifest's own command and arguments, and verifies its public tool surface. It also
@@ -126,22 +145,22 @@ decision and reproducible evidence instead.
 
 Use one integration branch and one PR per complete, testable capability. Develop with incremental
 commits and bounded parallel subagents where useful; consolidate their work in that branch rather
-than opening a separate PR or stack layer for each helper or Work Item. The batch boundary is when
-the end-to-end acceptance criteria are met and the integrated result is ready for verification and
-review.
+than opening a separate PR or stack layer for each helper or Work Item. A capability's end-to-end
+acceptance criteria define its batch; a PR boundary is not automatically a release-candidate boundary.
 
 Independent capabilities may advance concurrently in isolated worktrees, each with one owner and
 explicit acceptance criteria. Optimize delivery of the overall goal, not utilization alone: keep
 available agents on high-impact unblocked work within authorized budgets, and serialize only genuine
 dependencies or conflicting edits. One PR per capability is a delivery boundary, not a global
-one-capability-at-a-time limit.
+one-capability-at-a-time limit. Every lane needs a concrete finish-line deliverable and an explicit
+running, waiting, completed, or blocked status. Resume a completed agent explicitly before assigning
+follow-up work; do not create extra audits, docs, or test infrastructure just to occupy agents.
 
-Run targeted checks while iterating. At the batch boundary, run the full required integration and
-release checks and rebuild/reinstall the updated plugin when the batch changes it. Do not pay this
-overhead after every intermediate commit. Repeat checks when relevant changes or failures invalidate
-their evidence; installation-specific work may need earlier targeted install tests. Documentation-only
-batches use the proportional checks described above. All applicable release and live-conformance gates
-still apply.
+Finish the remaining implementation in parallel before the coordinated qualification phase above.
+Keep one concise completion board with acceptance criteria, code/testing/external-input classification,
+owner, dependencies, and next deliverable. Link detailed historical evidence. Report completed
+capabilities, remaining work, the critical path, and required decisions; counts are supporting detail.
+All applicable release and live-conformance gates still apply.
 
 Do not commit credentials, local Factory state,
 installation receipts, provider output, or private fixtures. A release candidate is published only

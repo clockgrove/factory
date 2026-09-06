@@ -26,9 +26,10 @@ import {
   parseControllerPolicy,
   parseRunPolicy,
 } from "../protocol/policy.js";
-import { PlatformUnavailableError } from "../platform.js";
+import { classifyRefusal, PlatformUnavailableError } from "../platform.js";
 import { adoptRecoveryActivation, type RecoveryRepositoryOwnership } from "./recovery.js";
 import { ControllerGenerationRetirement } from "./retirement.js";
+import { LeaseLostError } from "../control/lease.js";
 
 export interface DiscoveredObjective {
   number: number;
@@ -154,8 +155,6 @@ export interface GitHubRepositoryControllerOptions {
   signal?: AbortSignal;
   onError?: (error: unknown, objective: number) => void;
   resources?: RepositorySupervisorResources;
-  /** Deterministic clock seam for transient retry-backoff tests. */
-  nowMs?: () => number;
 }
 
 /** The production-shaped repository loop. Discovery is GitHub-backed and the
@@ -165,11 +164,12 @@ export class GitHubRepositoryController {
   readonly #options: GitHubRepositoryControllerOptions;
   readonly #resources: RepositorySupervisorResources;
   readonly #running = new Map<number, Promise<void>>();
-  readonly #retryNotBefore = new Map<number, number>();
   #cursor = 0;
   readonly #shutdown = new AbortController();
   readonly #signal: AbortSignal;
   #retirement: ControllerGenerationRetirement | undefined;
+  #platformFailure: PlatformUnavailableError | undefined;
+  #fatalFailure: unknown;
 
   constructor(options: GitHubRepositoryControllerOptions) {
     this.#options = options;
@@ -182,6 +182,7 @@ export class GitHubRepositoryController {
   }
 
   async reconcileOnce(): Promise<number> {
+    if (this.#signal.aborted) return 0;
     const discovered = [...(await this.#options.store.discoverObjectiveActivations())]
       .filter(
         (item, index, all) =>
@@ -197,31 +198,31 @@ export class GitHubRepositoryController {
     for (const activation of ordered) {
       if (this.#signal.aborted || this.#running.size >= (this.#options.capacity ?? 1)) break;
       if (this.#running.has(activation.objective)) continue;
-      if (
-        (this.#retryNotBefore.get(activation.objective) ?? 0) >
-        (this.#options.nowMs?.() ?? Date.now())
-      ) {
-        continue;
-      }
       const signal = this.#signal;
-      const task = this.#options
-        .reconcileObjective(activation, signal, this.#resources)
-        .then(() => {
-          this.#retryNotBefore.delete(activation.objective);
-        })
+      const task = Promise.resolve()
+        .then(() => this.#options.reconcileObjective(activation, signal, this.#resources))
         .catch((error) => {
-          if (error instanceof ControllerGenerationRetirement) {
-            this.#retirement = error;
+          try {
+            if (error instanceof ControllerGenerationRetirement) {
+              this.#retirement = error;
+              this.#shutdown.abort();
+            }
+            const unavailable = platformFailure(error);
+            if (unavailable) {
+              this.#platformFailure = ownershipFailure(
+                this.#platformFailure,
+                unavailable,
+              ) as PlatformUnavailableError;
+              this.#shutdown.abort();
+            } else if (!(error instanceof ControllerGenerationRetirement)) {
+              this.#fatalFailure = error;
+              this.#shutdown.abort();
+            }
+            this.#options.onError?.(error, activation.objective);
+          } catch (callbackError) {
+            this.#fatalFailure = callbackError;
             this.#shutdown.abort();
           }
-          if (error instanceof PlatformUnavailableError) {
-            const now = this.#options.nowMs?.() ?? Date.now();
-            this.#retryNotBefore.set(
-              activation.objective,
-              now + Math.max(this.#options.pollIntervalMs ?? 60_000, error.retryAfterMs),
-            );
-          }
-          (this.#options.onError ?? (() => {}))(error, activation.objective);
         })
         .finally(() => this.#running.delete(activation.objective));
       this.#running.set(activation.objective, task);
@@ -231,12 +232,22 @@ export class GitHubRepositoryController {
   }
 
   async run(): Promise<void> {
-    while (!this.#signal.aborted) {
-      await this.reconcileOnce();
-      await interruptibleDelay(this.#options.pollIntervalMs ?? 60_000, this.#signal);
+    let loopFailure: unknown;
+    try {
+      while (!this.#signal.aborted) {
+        await this.reconcileOnce();
+        await interruptibleDelay(this.#options.pollIntervalMs ?? 60_000, this.#signal);
+      }
+    } catch (error) {
+      loopFailure = error;
+    } finally {
+      this.#shutdown.abort();
+      await this.settle();
     }
-    await this.settle();
+    if (this.#fatalFailure) throw this.#fatalFailure;
     if (this.#retirement) throw this.#retirement;
+    const failure = ownershipFailure(loopFailure, this.#platformFailure);
+    if (failure !== undefined) throw failure;
   }
   async settle(): Promise<void> {
     await Promise.allSettled(this.#running.values());
@@ -305,7 +316,7 @@ export function createGitHubRepositoryController(
     ...(options.signal === undefined ? {} : { signal: options.signal }),
     onError: (error, objective) =>
       options.onStatus?.(
-        `Objective #${objective} reconciliation failed: ${error instanceof Error ? error.message : String(error)}`,
+        `Objective #${objective} reconciliation failed: ${controllerFailureDiagnostic(error)}`,
       ),
     reconcileObjective: async (activation, signal, shared) => {
       shared.fairness.register(activation.objective);
@@ -377,29 +388,59 @@ export async function runGitHubRepositoryController(
       maxLocalWorkers: policy.maxLocalWorkers,
       maxPaidWorkers: policy.maxPaidWorkers,
     });
-  await withRepositoryOwnership(
-    {
-      token: options.token,
-      owner: options.owner,
-      repo: options.repo,
-      policy,
-      resources,
-      ...(options.signal ? { signal: options.signal } : {}),
-      ...(options.onStatus ? { onStatus: options.onStatus } : {}),
-    },
-    async ({ store, signal, fence, observation, recoveryOwnership }) =>
-      createGitHubRepositoryController({
-        ...options,
-        capacity: policy.maxActiveObjectives,
-        pollIntervalMs: policy.pollIntervalSeconds * 1_000,
-        signal,
-        resources,
-        activationStore: store,
-        repositoryFence: fence,
-        controllerObservation: observation,
-        recoveryOwnership,
-      }).run(),
-  );
+  // One process identity can safely rediscover its own ambiguously acquired
+  // lease. Every retry acquires from GitHub anew after the prior loop settles.
+  const controllerId = randomUUID();
+  while (!options.signal?.aborted) {
+    try {
+      await withRepositoryOwnership(
+        {
+          token: options.token,
+          owner: options.owner,
+          repo: options.repo,
+          policy,
+          resources,
+          controllerId,
+          ...(options.signal ? { signal: options.signal } : {}),
+          ...(options.onStatus ? { onStatus: options.onStatus } : {}),
+        },
+        async ({ store, signal, fence, observation, recoveryOwnership }) =>
+          createGitHubRepositoryController({
+            ...options,
+            capacity: policy.maxActiveObjectives,
+            pollIntervalMs: policy.pollIntervalSeconds * 1_000,
+            signal,
+            resources,
+            activationStore: store,
+            repositoryFence: fence,
+            controllerObservation: observation,
+            recoveryOwnership,
+          }).run(),
+      );
+      return;
+    } catch (error) {
+      if (options.signal?.aborted && error === options.signal.reason) return;
+      const unavailable = platformFailure(error);
+      if (!unavailable) {
+        if (error instanceof ControllerGenerationRetirement) throw error;
+        // Octokit errors can embed request headers and raw response bodies.
+        // Keep fatal errors fatal without letting Node print those secrets.
+        throw new Error(
+          `Factory repository controller stopped after a non-retryable failure (${controllerFailureDiagnostic(error)})`,
+        );
+      }
+      const delayMs = Math.max(unavailable.retryAfterMs, resources.circuitBreaker.waitMs());
+      options.onStatus?.(
+        `repository controller paused for platform backoff; retry in ${delayMs}ms`,
+      );
+      // Chunk long waits: Node's timer overflow must never turn a long reset
+      // boundary into an immediate retry. Monotonic time prevents clock jumps.
+      const deadline = performance.now() + delayMs;
+      while (!options.signal?.aborted && performance.now() < deadline) {
+        await interruptibleDelay(Math.min(60_000, deadline - performance.now()), options.signal);
+      }
+    }
+  }
 }
 
 /** Foreground compatibility mode still owns the repository fence. It cannot
@@ -446,6 +487,7 @@ export async function runForegroundObjective(
 }
 
 interface RepositoryOwnershipOptions {
+  controllerId?: string;
   token: string;
   owner: string;
   repo: string;
@@ -477,12 +519,15 @@ async function withRepositoryOwnership<T>(
     mutationScheduler: options.resources.mutationScheduler,
     ...(options.onStatus ? { onThrottle: options.onStatus } : {}),
   });
+  options.signal?.throwIfAborted();
   const facts = await store.getRepositoryFacts();
+  options.signal?.throwIfAborted();
   const base = await store.getBranchHead(facts.defaultBranch);
+  options.signal?.throwIfAborted();
   const leases = new RepositoryLeaseManager({ store });
   let lease = await leases.acquire(
     {
-      controllerId: randomUUID(),
+      controllerId: options.controllerId ?? randomUUID(),
       policyDigest: controllerPolicyDigest(options.policy),
     },
     base,
@@ -515,13 +560,18 @@ async function withRepositoryOwnership<T>(
       } catch (error) {
         renewalFailure = error;
         options.onStatus?.(
-          `repository lease lost: ${error instanceof Error ? error.message : String(error)}`,
+          `repository lease renewal failed; retiring controller ownership (${controllerFailureDiagnostic(error)})`,
         );
         ownership.abort();
         return;
       }
     }
-  })();
+  })().catch((error: unknown) => {
+    // Attach immediately: a diagnostic callback must not create an unhandled
+    // background rejection while the foreground operation is still draining.
+    renewalFailure = error;
+    ownership.abort();
+  });
 
   const observation = (): ControllerObservation => ({
     controllerId: lease.controllerId,
@@ -530,23 +580,88 @@ async function withRepositoryOwnership<T>(
     controllerPolicyDigest: lease.policyDigest,
   });
 
+  let result: T | undefined;
+  let failure: unknown;
   try {
-    const result = await operation({
+    result = await operation({
       store,
       signal,
       fence,
       observation,
       recoveryOwnership: { leases, current: () => lease },
     });
-    if (renewalFailure) throw renewalFailure;
-    return result;
+  } catch (error) {
+    failure = error;
   } finally {
     ownership.abort();
     await renewal;
-    if (!renewalFailure) {
-      await leases.release(lease).catch((error) => {
-        if (!(error instanceof RepositoryLeaseLostError)) throw error;
-      });
+    failure = ownershipFailure(failure, renewalFailure);
+    if (options.resources.circuitBreaker.isOpen()) {
+      failure = ownershipFailure(
+        failure,
+        new PlatformUnavailableError(
+          { kind: "rate_limit", retryAfterMs: options.resources.circuitBreaker.waitMs() },
+          new Error("shared platform cooldown prevents lease release"),
+        ),
+      );
+    } else if (!renewalFailure) {
+      try {
+        await leases.release(lease);
+      } catch (error) {
+        if (!(error instanceof RepositoryLeaseLostError))
+          failure = ownershipFailure(failure, error);
+      }
     }
   }
+  if (failure !== undefined) throw failure;
+  return result as T;
+}
+
+function platformFailure(error: unknown): PlatformUnavailableError | undefined {
+  if (error instanceof PlatformUnavailableError) return error;
+  const refusal = classifyRefusal(error);
+  return refusal.kind === "not_refusal" ? undefined : new PlatformUnavailableError(refusal, error);
+}
+
+/** Fixed diagnostics only: never log provider request bodies, headers, or causes. */
+function controllerFailureDiagnostic(error: unknown): string {
+  const unavailable = platformFailure(error);
+  if (unavailable)
+    return `platform-${unavailable.refusal.kind}; retryAfterMs=${unavailable.retryAfterMs}`;
+  if (error instanceof ControllerGenerationRetirement) return "controller-generation-retirement";
+  if (error instanceof RepositoryLeaseLostError) return "repository-lease-lost";
+  if (error instanceof LeaseLostError) return "objective-lease-lost";
+  const status = (error as { status?: unknown } | null)?.status;
+  if (status === 401 || status === 403) return `github-permission-${status}`;
+  if (
+    error instanceof Error &&
+    error.message === "Recovery adoption blocked: resource-absence-unverified"
+  )
+    return "recovery-adoption-blocked: resource-absence-unverified";
+  if (
+    error instanceof Error &&
+    [
+      "Recovery activation identity is required",
+      "Observed successor runtime does not match controller discovery",
+      "Recovery activation changed before adoption",
+    ].includes(error.message)
+  )
+    return "recovery-activation-identity-mismatch";
+  return "controller-invariant-failure";
+}
+
+/** Cleanup must not erase the failure that selected this teardown. */
+function ownershipFailure(original: unknown, next: unknown): unknown {
+  if (original === undefined) return next;
+  if (next === undefined) return original;
+  const first = platformFailure(original);
+  const second = platformFailure(next);
+  if (first && second) {
+    return new PlatformUnavailableError(
+      first.retryAfterMs >= second.retryAfterMs ? first.refusal : second.refusal,
+      original,
+    );
+  }
+  if (first && !second) return next;
+  return original;
 }

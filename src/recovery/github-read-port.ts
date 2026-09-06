@@ -1,6 +1,7 @@
 import type { GitHubControlStore } from "../control/github-store.js";
 import { GitHubStacks } from "../publication/github-stacks.js";
 import type { RecoveryReadStore } from "./assessment.js";
+import { withImmutableRecoveryReads } from "./immutable-read-cache.js";
 
 /** Runtime capability boundary: the assessment never receives a mutation-capable store. */
 export function recoveryReadPort(
@@ -20,11 +21,12 @@ export function recoveryReadPort(
     owner,
     repo,
   );
+  const objects = withImmutableRecoveryReads(store);
   return Object.freeze({
     readRef: store.readRef.bind(store),
-    readCommit: store.readCommit.bind(store),
-    readBlob: store.readBlob.bind(store),
-    readTreeEntry: store.readTreeEntry.bind(store),
+    readCommit: objects.readCommit,
+    readBlob: objects.readBlob,
+    readTreeEntry: objects.readTreeEntry,
     listRefs: store.listRefs.bind(store),
     readPullRequest: store.readPullRequest.bind(store),
     getRepositoryFacts: store.getRepositoryFacts.bind(store),

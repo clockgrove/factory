@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "kind": "native-sibling-refresh-release-and-install-component",
+  "observedAt": "2026-09-05T18:53:54.677Z",
+  "sourceCommit": "894537324a1fa61cdb3c2b905e841bca8a80e9ba",
+  "scope": {
+    "fullReleaseVerification": "passed",
+    "exactCandidateInstall": "passed",
+    "liveNativeObjectiveQualification": "failed: runtime escalation before sibling refresh and dependent join",
+    "broadPrepublicationGates": "Open",
+    "registryPublicationPerformed": false
+  },
+  "release": {
+    "command": "npm run verify:release",
+    "exitCode": 0,
+    "retainedLogSha256": "53aa4e8f430e2d18c1f8d5c2db27d7c32a0798c3f47b893aea3949208fd64a24",
+    "testFilesPassed": 129,
+    "testsPassed": 2492,
+    "testsSkipped": 3,
+    "testDurationSeconds": 329.34,
+    "coveragePercent": {
+      "statements": 80.16,
+      "branches": 77.38,
+      "functions": 84.11,
+      "lines": 81.23
+    },
+    "typecheckLintFormat": "passed",
+    "schemasReproducibleBundlesStagedPluginAndNpm": "passed",
+    "dependencyAuditVulnerabilities": 0
+  },
+  "installedArtifact": {
+    "origin": "exact committed candidate package, not a registry publication",
+    "packageFiles": 81,
+    "packageBytes": 2966401,
+    "tarballSha256": "f34968a02687638ad04f4d3dc4d64128eca67a89c1ab13869fb119281f7e588e",
+    "inventorySha256": "ec81d40a8c95b698191bcf1abc77632293985cab621ac23fd8e3d979f7029154",
+    "retainedInstallReceiptSha256": "8036c59bcc42712aa870d88324ebcee9c7066d18ff947c927b8b70907efeff08",
+    "cliSha256": "edbba2ff19de3b991320fae0a7c5590ce68223678633f1229766a5bd11dd164c",
+    "mcpSha256": "711e896d47fd5dd66cb47cc85226ea67850955f32490bce2405904db6cfe2cde",
+    "canonicalFilesMatched": true,
+    "onlyPermittedDifference": "Codex manifest cachebuster",
+    "manifestVersion": "2.0.26+codex.20260905185308"
+  },
+  "recoveryPerformance": {
+    "implementationCommit": "9c045d50b889624c90758f0c7cc1f820e37f4b11",
+    "integratedImplementationCommit": "a461b2e91c8681f5022eec91af794a1a7a7b22f0",
+    "change": "Reuse the existing bounded, content-validated event-digest cache within each sibling-refresh observer call; compute each expected envelope digest once before its membership scan.",
+    "mutableReadsOrProofResultsCached": false,
+    "normalTestTimeoutChanged": false,
+    "singleCoveredCaseProfile": {
+      "beforeMilliseconds": 37667.576625,
+      "afterMilliseconds": 27671.213492,
+      "beforeResultSha256": "65a5a7efc690a8e6a401f873d577097e7a52577eeef046399625ef7f6f3e8982",
+      "afterResultSha256": "d72ac59ece5725dbbf1f0427eda9dbf59ef2a5f913033a39103fcfe2bc1cbea9",
+      "scope": "One artifact-only successor case with assertions passing; before used a temporary diagnostic 90-second timeout, after restored the normal 30 seconds. Subset process exits were 1 from global coverage thresholds, not a full-suite pass or general performance guarantee. Mutation assertions were added after the profiled invocation."
+    },
+    "mutationRegression": "Changed adoption identity between calls and nested successor policy mutation during an awaited read reject; restoring exact content verifies again."
+  },
+  "installedNativeExercise": {
+    "result": "failed",
+    "terminalState": "escalated",
+    "runtimeReason": "sibling refresh lacks one authenticated original publication",
+    "publishedAndValidatedWorkItems": 2,
+    "integratedWorkItems": 1,
+    "dependentJoinStarted": false,
+    "modelTokens": 131622,
+    "reconciledModelCalls": 5,
+    "statusActiveReservations": 0,
+    "retainedOriginalEvidenceSha256": "67a477029229bae679b60f409fde6127fbfc36ce1a16fbf24ef0b23f6664e457",
+    "originalEvidenceUnchanged": true,
+    "independentResourceObservation": {
+      "observedAt": "2026-09-05T19:06:41.034Z",
+      "retainedObservationSha256": "bbe61515e3a14082df1a1faa55f797b4b2d31ec210eb31d2585f5fa1c252f346",
+      "actualAttempts": 2,
+      "exactReservedUnitsObservedAbsent": 6,
+      "neverStartedJoinScopesInvented": false,
+      "installedBundleAndInventoryIdentityUnchanged": true,
+      "exactController": "loaded, inactive, MainPID zero, no pending job",
+      "scope": "Read-only absence of every actual authenticated execution/validation reserved unit on its independently matched host; no stop, cancel, retry, model call or remote write.",
+      "qualificationLimitation": "The original native scope qualifier required an environmentIdentity that the local SDK contract does not supply. This separate reserved-unit observation does not synthesize that identity or pass the original qualifier."
+    }
+  },
+  "limitations": [
+    "Release checks and installation passed, but the installed native Objective failed in runtime; neither complete native execution nor live provider qualification passed.",
+    "Previously retained failed or incomplete exercises are unchanged; later checks do not retrospectively pass them.",
+    "All existing broad prepublication gates remain Open; no new host, provider, interrupted-usage or publication claim is made.",
+    "This evidence document is a later documentation update and is not part of the identified tested or installed tarball."
+  ]
+}

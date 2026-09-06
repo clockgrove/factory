@@ -425,6 +425,24 @@ export async function providerSupervisorFixture(
     number,
     { pull: LinkedPullRequest; branch: string; base: string; baseRef: string; merged?: string }
   >();
+  vi.spyOn(GitHubControlStore.prototype, "compareAndSwapRef").mockImplementation(
+    async ({ ref, beforeOid, afterOid }) => {
+      if (refs.get(ref) !== beforeOid) return false;
+      const owned = [...pulls.values()].find((value) => `refs/heads/${value.branch}` === ref);
+      if (!owned || owned.merged || owned.pull.state !== "OPEN" || owned.pull.headSha !== beforeOid)
+        throw new Error("fixture refresh must bind an exact open Factory publication");
+      const commit = await readCommit(afterOid);
+      if (
+        commit.parentOids.length !== 2 ||
+        commit.parentOids[0] !== beforeOid ||
+        commit.parentOids[1] !== git("rev-parse", "main")
+      )
+        throw new Error("fixture refresh must be an exact two-parent fast-forward");
+      refs.set(ref, afterOid);
+      owned.pull.headSha = afterOid;
+      return true;
+    },
+  );
   const createPull = async (workItem: number, head: string, branch: string, baseRef = "main") => {
     const number = 100 + workItem;
     const item = snapshot.workItems.find((item) => item.number === workItem)!;

@@ -24,6 +24,8 @@ const IdentitySchema = z
     sourceHeadSha: gitSha,
     sourceExactHeadValidationDigest: sha256Digest,
     targetBaseSha: gitSha,
+    /** Actual separately refreshed delivery head; the source proof is never relabelled. */
+    deliveryHeadSha: gitSha.optional(),
   })
   .strict();
 const SourceSchema = z

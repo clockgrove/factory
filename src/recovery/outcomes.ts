@@ -1,4 +1,5 @@
 import { attemptRef } from "../control/attempts.js";
+import { PlatformUnavailableError } from "../platform.js";
 import {
   loadMergeCandidateCheckpoint,
   mergeCandidateIdentityDigest,
@@ -12,6 +13,7 @@ import {
 } from "../control/reviews.js";
 import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
 import { verifyMergeCandidateSquash } from "../publication/merge-candidate.js";
+import { selectEquivalentPublicationRecord } from "../publication/recorded-publication.js";
 import {
   bindValidationToPublishedHead,
   type ExactHeadValidationEvidence,
@@ -33,6 +35,7 @@ import {
 } from "./plan.js";
 import { recoveryAdoptionEvents } from "./transaction.js";
 import { observeRecoveryNativeTransition } from "./native-transition.js";
+import { observeRecoverySiblingRefresh } from "./sibling-refresh.js";
 import {
   verifyRecoverySourcePublication,
   recoverySourcePublicationBinding,
@@ -70,6 +73,7 @@ export async function verifyPriorRecoveryDelivery(input: {
   item: RecoveryPlanItem;
   events: readonly FactoryEvent[];
   store: RecoveryReadStore;
+  proofTraversal?: ReadonlySet<string>;
 }): Promise<RecoverySourceIntegrationProof> {
   const { plan, item, events, store } = input;
   const reference = item.source?.priorDelivery;
@@ -136,6 +140,7 @@ export async function verifyPriorRecoveryDelivery(input: {
   const claim = await loadRecoveryClaim(store, plan.objective, record.plan.predecessor.runId);
   requireOutcome(claim);
   const proof = await verifyRecoverySourceIntegration({
+    ...(input.proofTraversal ? { proofTraversal: input.proofTraversal } : {}),
     planRecord: record,
     claim,
     events,
@@ -245,6 +250,8 @@ interface SourceProofInput {
   claim: RecoveryClaimRecord;
   events: readonly FactoryEvent[];
   store: RecoveryReadStore;
+  /** Shared path bound across sibling, outcome, and prior-delivery proof recursion. */
+  proofTraversal?: ReadonlySet<string>;
 }
 export interface RecoveryMergedSourceProof {
   workItem: number;
@@ -278,6 +285,9 @@ async function verifySourceProof(
 ): Promise<RecoverySourceIntegrationResult | RecoveryMergedSourceProof> {
   const recoveryEventDigest = createRecoveryEventDigest();
   try {
+    const proofKey = `outcome:${input.planRecord.digest}:${"outcome" in input ? input.outcome.workItem : input.workItem}`;
+    requireOutcome(!input.proofTraversal?.has(proofKey) && (input.proofTraversal?.size ?? 0) < 100);
+    const proofTraversal = new Set(input.proofTraversal).add(proofKey);
     requireOutcome(input.events.length <= 10_000);
     const events = [
       ...new Map(
@@ -417,6 +427,7 @@ async function verifySourceProof(
       before: number;
       candidateDigest?: string;
       deliveryHeadSha?: string;
+      siblingRefresh?: Awaited<ReturnType<typeof observeRecoverySiblingRefresh>>;
       requireCandidateDigest: boolean;
     }) => {
       const merge = await store.readCommit(args.mergeCommitSha);
@@ -441,7 +452,7 @@ async function verifySourceProof(
             merge.treeOid === args.source.outputTreeSha,
         );
       } else {
-        const identity = {
+        const identity = args.siblingRefresh?.candidateIdentity ?? {
           runId: plan.successorRunId,
           objective: plan.objective,
           workItem: args.workItem,
@@ -455,7 +466,7 @@ async function verifySourceProof(
         requireOutcome(!args.requireCandidateDigest || args.candidateDigest === digest);
         candidate = await loadMergeCandidateCheckpoint(store, identity);
         requireOutcome(candidate);
-        if (args.deliveryHeadSha) {
+        if (args.deliveryHeadSha && !args.siblingRefresh) {
           const delivery = await store.readCommit(args.deliveryHeadSha);
           requireOutcome(
             delivery.oid === args.deliveryHeadSha &&
@@ -472,11 +483,11 @@ async function verifySourceProof(
         );
         candidateReview = await loadReviewCheckpoint(store, {
           kind: "integration-candidate",
-          runId: plan.successorRunId,
+          runId: identity.runId,
           objective: plan.objective,
           workItem: args.workItem,
           attempt: args.attempt,
-          headSha: args.source.publishedHeadSha,
+          headSha: args.siblingRefresh?.record.plannedHeadSha ?? args.source.publishedHeadSha,
           artifactDigest: candidate.validation.artifactDigest,
           baseSha: targetBaseSha,
           outputTreeSha: candidate.validation.outputTreeSha,
@@ -492,7 +503,7 @@ async function verifySourceProof(
           (event) =>
             event.kind === "budget" &&
             event.event === "BudgetReconciled" &&
-            event.runId === plan.successorRunId &&
+            event.runId === identity.runId &&
             event.workItem === args.workItem &&
             (event.attempt === undefined || event.attempt === args.attempt) &&
             event.phase === "validation" &&
@@ -555,6 +566,15 @@ async function verifySourceProof(
             ),
         );
         const ref = attemptRef(plan.objective, ancestor.workItem, ancestor.attempt);
+        selectEquivalentPublicationRecord(
+          group.filter(
+            (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
+              event.kind === "publication" &&
+              event.event === "PublicationRecorded" &&
+              event.headSha === publication.headSha,
+          ),
+          publication,
+        );
         const oid = await store.readRef(ref);
         requireOutcome(oid);
         requireOutcome(
@@ -583,6 +603,54 @@ async function verifySourceProof(
             publication.baseSha === validation.baseSha &&
             publication.validationDigest === validation.evidenceDigest,
         );
+        const pull = await store.readPullRequest(publication.pullRequest);
+        const refreshed =
+          pull.headSha !== publication.headSha
+            ? await observeRecoverySiblingRefresh(
+                {
+                  repository: plan.repository,
+                  objective: plan.objective,
+                  workItem: ancestor.workItem,
+                  source: {
+                    runId: ancestor.runId,
+                    attempt: ancestor.attempt,
+                    reservationRef: ref,
+                    reservationCommitOid: oid,
+                    reservationReceiptDigest: recoveryEventDigest(reserved[0]!),
+                    artifactDigest: null,
+                    review: null,
+                    validation: {
+                      receiptDigest: recoveryEventDigest(validation),
+                      evidenceDigest: validation.evidenceDigest,
+                      baseSha: validation.baseSha,
+                      outputTreeSha: validation.outputTreeSha,
+                    },
+                    publication: {
+                      receiptDigest: recoveryEventDigest(publication),
+                      mode: publication.mode,
+                      pullRequest: publication.pullRequest,
+                      pullRequestNodeId: pull.nodeId!,
+                      branch: publication.branch,
+                      baseBranch: publication.baseBranch,
+                      baseSha: publication.baseSha,
+                      headSha: publication.headSha,
+                      baseRepository: plan.repository,
+                      headRepository: plan.repository,
+                      stackNumber: publication.stackNumber ?? null,
+                    },
+                  },
+                  events,
+                  store,
+                  controllingRunIds: [
+                    ...plan.history.map((entry) => entry.runId),
+                    plan.successorRunId,
+                  ],
+                  deliveryHeadSha: pull.headSha,
+                  requireCompletion: true,
+                },
+                proofTraversal,
+              )
+            : null;
         const proof = await verifyMerge({
           workItem: ancestor.workItem,
           attempt: ancestor.attempt,
@@ -591,6 +659,9 @@ async function verifySourceProof(
           mergeCommitSha: target,
           before: ancestor.sequence,
           requireCandidateDigest: false,
+          ...(refreshed
+            ? { siblingRefresh: refreshed, deliveryHeadSha: refreshed.record.plannedHeadSha }
+            : {}),
         });
         await assertOwnAdvance(proof.targetBaseSha, ancestor.sequence);
       }
@@ -622,6 +693,7 @@ async function verifySourceProof(
               store,
               events,
               publication: sourcePublication,
+              proofTraversal,
             })
           ).status === "verified" && sourcePublication.sequence < outcome.sequence,
         );
@@ -677,7 +749,13 @@ async function verifySourceProof(
       const item = plan.items.find((value) => value.workItem === outcome.workItem)!;
       const source = item.source!;
       if (source.priorDelivery) {
-        const prior = await verifyPriorRecoveryDelivery({ plan, item, events, store });
+        const prior = await verifyPriorRecoveryDelivery({
+          plan,
+          item,
+          events,
+          store,
+          proofTraversal,
+        });
         requireOutcome(
           outcome.mergeCommitSha === prior.outcome.mergeCommitSha &&
             outcome.mergeCandidateIdentityDigest === prior.outcome.mergeCandidateIdentityDigest &&
@@ -806,18 +884,58 @@ async function verifySourceProof(
           pull.baseRepository?.toLowerCase() === plan.repository.toLowerCase() &&
           pull.headRepository?.toLowerCase() === publicationBinding.headRepository.toLowerCase(),
       );
+      let siblingRefresh: Awaited<ReturnType<typeof observeRecoverySiblingRefresh>> | undefined;
       if (outcome.deliveryHeadSha) {
         requireOutcome(publication.mode === "native-stacks");
-        const transition = await observeRecoveryNativeTransition({
-          planRecord: record,
-          events,
-          store,
-          workItem: item.workItem,
-        });
-        requireOutcome(
-          transition.deliveryHeadSha === outcome.deliveryHeadSha &&
-            transition.sourceHeadSha === publication.headSha,
-        );
+        const delivery = await store.readCommit(outcome.deliveryHeadSha);
+        if (delivery.parentOids.length === 2) {
+          const refreshInput = {
+            repository: plan.repository,
+            objective: plan.objective,
+            workItem: item.workItem,
+            source: { ...source, publication },
+            events,
+            store,
+            controllingRunIds: [...plan.history.map((entry) => entry.runId), plan.successorRunId],
+            deliveryHeadSha: outcome.deliveryHeadSha,
+          };
+          const observed = await observeRecoverySiblingRefresh(refreshInput, proofTraversal);
+          const originalDigest = mergeCandidateIdentityDigest(observed.candidateIdentity);
+          const candidateRunId = outcome.mergeCandidateIdentityDigest
+            ? outcome.mergeCandidateIdentityDigest === originalDigest
+              ? observed.candidateIdentity.runId
+              : plan.successorRunId
+            : observed.candidate
+              ? observed.candidateIdentity.runId
+              : plan.successorRunId;
+          if (candidateRunId !== plan.successorRunId)
+            requireOutcome(
+              source.siblingRefresh?.identityDigest === observed.record.identityDigest &&
+                source.siblingRefresh.candidateRunId === candidateRunId,
+            );
+          siblingRefresh = await observeRecoverySiblingRefresh(
+            {
+              ...refreshInput,
+              candidateRunId,
+              requireCompletion: true,
+              ...(outcome.mergeCandidateIdentityDigest
+                ? { candidateIdentityDigest: outcome.mergeCandidateIdentityDigest }
+                : {}),
+            },
+            proofTraversal,
+          );
+        } else {
+          const transition = await observeRecoveryNativeTransition({
+            planRecord: record,
+            events,
+            store,
+            workItem: item.workItem,
+          });
+          requireOutcome(
+            transition.deliveryHeadSha === outcome.deliveryHeadSha &&
+              transition.sourceHeadSha === publication.headSha,
+          );
+        }
       }
       const proof = await verifyMerge({
         workItem: item.workItem,
@@ -827,6 +945,7 @@ async function verifySourceProof(
         mergeCommitSha: outcome.mergeCommitSha,
         before,
         requireCandidateDigest,
+        ...(siblingRefresh ? { siblingRefresh } : {}),
         ...(outcome.deliveryHeadSha ? { deliveryHeadSha: outcome.deliveryHeadSha } : {}),
         ...(outcome.mergeCandidateIdentityDigest
           ? { candidateDigest: outcome.mergeCandidateIdentityDigest }
@@ -892,6 +1011,7 @@ async function verifySourceProof(
             store,
             events,
             publication: sourcePublication,
+            proofTraversal,
           })
         ).status === "verified",
       );
@@ -925,7 +1045,8 @@ async function verifySourceProof(
         : {}),
       ...(deliveryHeadSha ? { deliveryHeadSha } : {}),
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof PlatformUnavailableError) throw error;
     return {
       status: "blocked",
       executionAuthorized: false,

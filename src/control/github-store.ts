@@ -214,6 +214,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     }
     const mutationPermit = mutating ? await this.#mutations.acquire(mutationClass) : undefined;
     const release = await this.#concurrency.acquire();
+    let attempted = false;
     try {
       if (this.#breaker.isOpen()) {
         throw new PlatformUnavailableError(
@@ -224,11 +225,20 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       if (mutationPermit) {
         await this.#beforeMutation(mutationClass, mutationPermit.waitedMs);
       }
+      if (this.#breaker.isOpen()) {
+        throw new PlatformUnavailableError(
+          { kind: "rate_limit", retryAfterMs: this.#breaker.waitMs() },
+          new Error("Factory GitHub circuit opened during the mutation fence"),
+        );
+      }
+      attempted = true;
       const result = await operation();
       this.#breaker.recordSuccess();
       return result;
     } catch (error) {
-      const refusal = classifyRefusal(error);
+      if (!attempted) throw error;
+      const refusal =
+        error instanceof PlatformUnavailableError ? error.refusal : classifyRefusal(error);
       if (refusal.kind !== "not_refusal") {
         this.#breaker.recordRefusal(refusal);
         throw new PlatformUnavailableError(refusal, error);
@@ -412,7 +422,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
   }
 
   /** The label is a discovery index, never execution authority. Add it only
-   * after an authenticated activation receipt exists, including exact replay. */
+   * after an authenticated activation or recovery request exists, including exact replay. */
   async ensureObjectiveLabel(objective: number): Promise<void> {
     const name = "factory:objective";
     const issue = await this.#call(() =>

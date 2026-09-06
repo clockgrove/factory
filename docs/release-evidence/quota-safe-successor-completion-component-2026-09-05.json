@@ -1,0 +1,124 @@
+{
+  "schemaVersion": 1,
+  "kind": "installed-quota-safe-retained-successor-completion-component",
+  "sourceCommit": "4e06b1397c289b8e2d5e330e0f7baa56a5af7a45",
+  "observedAt": "2026-09-05T23:04:12.258Z",
+  "result": "completed retained successor independently verified; controller and all reserved scopes absent",
+  "artifactBoundary": {
+    "adoptionAndRetainedDeliverySource": "007cd8c22fcb99473637d1ded7865c6ffb6ff018",
+    "proofOnlyFinalClosureSource": "4e06b1397c289b8e2d5e330e0f7baa56a5af7a45",
+    "originalFailureChanged": false,
+    "singleArtifactFreshObjectiveClaim": false,
+    "explanation": "The authorized successor preserved original completed work. Adoption, refreshed sibling validation/review and dependent implementation occurred on the earlier identified installed artifact; the corrected candidate performed only existing-proof completion after quota-delayed restart."
+  },
+  "implementation": {
+    "immutableRecoveryCache": "42c114d",
+    "typedPlatformRefusalPropagation": "03c7a42",
+    "controllerQuotaRecovery": "cd292ce",
+    "deadlineSafeClosure": "92675ff",
+    "independentSafetyReview": "clear for all four corrections before freeze",
+    "authority": "Exact original policy and successor request retained; no new worker, validation, review, merge or missing-receipt repair after the original deadline."
+  },
+  "integratedChecks": {
+    "command": "npm run verify:release",
+    "exitCode": 0,
+    "testFilesPassed": 135,
+    "testsPassed": 2655,
+    "testsSkipped": 3,
+    "testDurationSeconds": 390.24,
+    "coveragePercent": { "statements": 80.77, "branches": 77.96, "functions": 84.77, "lines": 81.89 },
+    "dependencyVulnerabilities": 0,
+    "logSha256": "0fe5bd45cb22e0c5853d5ca61039ceec870efd585d960f644a20713ed6407aca",
+    "candidateBookkeeping": "Tracked source, generated bundles and notices were committed and unchanged throughout the integrated checks, package staging, installation and live closure."
+  },
+  "installation": {
+    "observedAt": "2026-09-05T22:54:05.220Z",
+    "packageSha256": "6b2d1890f70ead62da83ee206522abd482b0add892782aa3986c32ead2774ed2",
+    "packageFiles": 89,
+    "packageBytes": 2994248,
+    "canonicalFilesMatched": true,
+    "exactFileInventoryMatched": true,
+    "onlyPermittedDifference": "Codex manifest cachebuster",
+    "manifestVersion": "2.0.26+codex.20260905225405",
+    "inventorySha256": "634183747190fabdd02ef54e34557d4e149d407e0c0ff9659793a9a571c5ba06",
+    "cliSha256": "2bd130965ff599e77377b217658ea94e7efae147e30daf5cdb20a20efbb84c06",
+    "mcpSha256": "52e77ba1bc1117373efab279236586417f4888d462e40cbdaa2e27055b710227",
+    "receiptSha256": "0b8db14cdf6ed48a47713409953c80912faa976ed70804e29161087a9dc4d9c2",
+    "previousSourceRetained": true,
+    "controllerInactiveDuringInstall": true
+  },
+  "installedCompletion": {
+    "successorState": "completed",
+    "finishedAt": "2026-09-05T22:56:06Z",
+    "objectiveClosed": true,
+    "workItemsClosed": 3,
+    "originalIntegrationPreserved": true,
+    "retainedPublicationRefreshedValidatedReviewedIntegrated": true,
+    "newDependentImplementationAttempts": 1,
+    "newCompilationCalls": 0,
+    "newModelCallsAfterDeadline": 0,
+    "originalRunRemainsEscalated": true,
+    "cumulativeModelTokens": 219769,
+    "historicalModelTokens": 131622,
+    "successorModelTokens": 88147,
+    "approvedModelTokenThreshold": 500000,
+    "remainingModelTokens": 280231,
+    "allowanceIncrement": 0,
+    "unknownUsageWaiver": false,
+    "activeReservations": 0,
+    "outstandingRecordedNativeReservations": 0,
+    "independentlyAbsentReservedScopes": 11,
+    "controller": { "normallyStopped": true, "active": false, "mainPid": 0, "restarts": 0, "jobAbsent": true, "controlGroupAbsent": true },
+    "liveQuotaRefusalReinjected": false
+  },
+  "independentObservation": {
+    "result": "observed",
+    "independentOfflineAssessment": "clear: original history, exact artifacts, single new dependent attempt, on-time integrations, cumulative accounting and all reserved scope identities independently rechecked",
+    "readOnlyGitHubRequests": 75,
+    "evidenceSha256": "098ff518d1db435fbdb612acafe3847e3c5919345fbef045da44285091f7cc5a",
+    "observerSha256": "675d026b13939a499f76b636723ceb6d5a8047dc7f2bd9fdfa1a11c53bd70865",
+    "commandProofSha256": "f3917f863855ed649adf2fb9486416c55e326be1dc59349024361497fdee1a35",
+    "capturedCommandRegressionTests": 11,
+    "commandRegressionSourceSha256": "598b2070f8068d7b181f253a3aa49f2ac1b6a9423fea0776b3ea3a2ee53d82a4",
+    "finalStatusSha256": "423c63df329e171a750362ccd4fc7462e5099a32f378f36fa71f2b38b37a68df",
+    "matchingInstalledStartSha256": "c5930d864035e57b55bd640f06edb28bc293b0738e3590df67e7f53e198afea9",
+    "installedStopSha256": "bf15fb6ae7ae3248136782189c6e126852a4ba7b7bf01dbed2053670f7719a04",
+    "controllerAbsenceSha256": "78f0b5e0f0866ed692a59f3afb7643422edd7e6e3da4ffe74db293afe70d2d54"
+  },
+  "freshCloneBehavior": {
+    "deliveredCommit": "7c8092d13e81771e6007fc6b7fa213952d8824f6",
+    "nodeVersion": "24.20.0",
+    "scopedTestsPassed": 13,
+    "repositoryBuiltinTestsPassed": 89,
+    "independentBehaviorAssertionsPassed": 12,
+    "cleanBeforeAndAfter": true,
+    "evidenceSha256": "a8a7d72d17c1c899c8d665ad8cb6e9638288d39b2bcdbe8971a4b2bd94354044",
+    "scopedLogSha256": "2174d7bfc5bb06a334967af70265c76f13fec21de981b098ed078765d139fdaf",
+    "repositoryLogSha256": "cf896f6144a415be58e45281233e6b8e31023f73cbb20f58686b50c9054379c4",
+    "boundary": "Delivered disposable code behavior only, not a product runtime or provider gate. Earlier sandbox/report-format failures were retained separately, not treated as code failures."
+  },
+  "preservedObserverFailures": [
+    {
+      "kind": "mechanical watcher response-shape assertion",
+      "result": "failed watcher; Factory continued without changed work or usage",
+      "observerSha256": "721e34408122fd549d6b3a338574b618a3ca70bce28f366a984797e10fc1fc73",
+      "capturedStatusSha256": "df591ff2c7f589ea86500012086eb1381de6d9fc5a726c56cd428423d1477467",
+      "correction": "A separate watcher reads the observed model-token value from its structured availability record.",
+      "correctedObserverSha256": "0794cd8cac68ce8be6c499e57db34d5f4bfde869bc443758b96069dddfade42e"
+    },
+    {
+      "kind": "private successor observer optional-setup count assertion",
+      "result": "original observation remains incomplete at accounting line 654",
+      "observerSha256": "6832a9ecfd10d390f009145f9a2e41b5c3c58654ca7302b81d55cb6ded251a0c",
+      "evidenceSha256": "5ff3e0d5c8519c46e711ae149df0dee66eaa85ef4d463886c91f1ea6fea870c5",
+      "correction": "The separate reviewed checker binds reserved slots to exact declared graph commands plus one optional slot, and executed commands to the exact declared sequence with or without the single permitted npm setup. It does not relax missing, extra, reordered or failed commands."
+    }
+  ],
+  "limitations": [
+    "This qualifies the explicitly authorized retained local successor, not a fresh Objective executed entirely on the final candidate or the full restart/fault/host matrix.",
+    "Controller cooldown refusal handling is covered by focused captured-contract tests; the final live closure followed the real reset without reinjecting a quota failure.",
+    "No allowance or timeout was increased; no paid provider, production pilot or registry publication was activated.",
+    "Daytona, both managed-provider contracts, remaining Linux/adversarial cases and published distribution remain retained requirements. All six broad prepublication gates remain Open.",
+    "The private source repository, issue identities, actors, host paths and raw logs are not published here. This document is later than the identified tested and installed package."
+  ]
+}

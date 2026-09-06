@@ -155,6 +155,18 @@ Both API surfaces still share Factory's circuit breaker, concurrency limiter, co
 and secondary-rate-limit handling. Unchanged idle state is polled no more often than once per minute
 by default, while active local-worker cancellation uses the cheaper REST comments path.
 
+Recovery may retain bounded immutable Git content by exact object identity across repeated proof
+calls. It never caches mutable refs, authenticated event snapshots, PR/base state, leases, physical
+absence or an admission decision. A cache hit saves a content read, not an authority check; failures
+and misses are not retained, and cached response timestamps are not fresh server-time evidence.
+
+A classified quota refusal imposes a shared retry boundary, including during controller bootstrap,
+discovery and lease retirement. An in-flight success cannot clear a later retry deadline. After
+settling the current generation, the same process waits abortably and reconstructs ownership; it
+does not reuse a stale lease or rely on service restarts to retry. Authentication and invariant
+failures remain errors. The controller honors GitHub's [rate-limit response headers](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api#exceeding-the-rate-limit),
+not a contradictory later balance from another observation.
+
 Model quota is protected at retry boundaries as well. After an artifact has passed host scope,
 secret, clean-apply, and sensitive-path checks, the running Supervisor may retain it in a bounded
 32 MiB in-memory cache. A retry at the same base SHA is seeded with that complete patch and receives
@@ -379,17 +391,42 @@ advances trunk, Factory first proves every intervening commit is an exact, authe
 from this same run. External or unexplained base changes escalate; clean applicability alone does
 not authorize executing changed code.
 
-For trusted-local siblings, Factory applies the original published patch to a fresh checkout of that
-proved target base, reruns the full validation plan, and persists an immutable merge-candidate
-checkpoint before requesting semantic review. A distinct review identity binds the original PR head,
-new base, combined tree, artifact, and validation evidence. The PR head, original reservation, and
-original exact-head validation remain unchanged. Candidate validation has its own local capacity and
+For siblings, Factory applies the original published patch to a private temporary Git index on that
+proved target base and uploads raw Git blobs and the exact proposed tree. Preparation performs no
+checkout and executes no repository hooks, filters, setup, tests, or model work. Before changing the
+owned Factory branch, it persists an immutable refresh intent binding the original reservation/publication/validation,
+exact PR identity, prior head, target base, proposed tree, and planned two-parent commit. Its parents
+are the prior owned head followed by the proved target base. The existing non-force atomic GitHub
+ref update compares the exact prior OID and advances only to that immutable planned OID. A lost
+response is resolved by exact read-back; a third head fails closed. An unapplied update may retry
+only that same atomic old/new pair after all current fences are independently revalidated. GitHub's
+commit timestamps mean the planned OID is immutable, not assumed reproducible. Unreferenced Git
+objects before an intent is durable are neither branch changes nor validation authority.
+Preparation has a 120-second total deadline and a 100-MiB per-blob bound. It does not fetch LFS
+assets or qualify other existing worktree lifecycle paths as hook-free.
+
+After the exact changed head is observed, Factory reruns the full validation plan in the required
+trusted-local or independently isolated boundary and persists its immutable merge-candidate
+checkpoint before requesting semantic review. A distinct identity binds the actual refreshed head,
+new base, combined tree, artifact, and validation evidence. The original reservation, worker artifact,
+publication receipt, and original exact-head validation remain unchanged: they are provenance, not
+assertions that the refreshed head has already passed. Candidate validation has its own capacity and
 native-usage identity; original attempt completion cannot discharge this new resource liability.
 An interrupted validator without an exact completion checkpoint requires resource reconciliation,
 not an automatic duplicate launch. A completed checkpoint is reused after restart, including its
-original evidence timestamps, and its paid review is accounted once.
+original evidence timestamps, and its paid review is accounted once. Completed validation and usage
+are preserved before rechecking mutable trunk. Another proved sibling integration creates a new
+linked refresh/validation/review identity; neither an old review nor an unexplained external advance
+authorizes the next head. Native linear-stack rebase proofs remain separate from sibling refreshes.
 
-Before merging, GitHub's current test-merge commit must name the exact target base and original PR
+Publication repair rereads authenticated history before writing a missing receipt. Equivalent
+receipts may still exist after response loss or delayed observation; Factory preserves every audit
+envelope and requires all proof fields to agree, ignoring only sequence, timestamp and reason.
+New refresh intents select a deterministic original receipt. An existing immutable intent keeps its
+exact receipt digest, even when another equivalent envelope is later observed. Conflicting receipts
+or ambiguous intent bindings fail closed; independently proved linear-head revisions remain separate.
+
+Before merging, GitHub's current test-merge commit must name the exact target base and actual PR
 head, with the same combined tree Factory validated. Stale or absent test-merge metadata waits;
 different trees fail closed. The resulting squash commit must have exactly the target base as its
 single parent and the validated combined tree. Response-loss recovery requires the pre-merge

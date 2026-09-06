@@ -19,14 +19,17 @@ paid-provider authority. Missing input for one issue does not stop independent i
 
 | Issue / acceptance boundary | Kind | Owner / state | Next deliverable |
 | --- | --- | --- | --- |
-| [#70 Accurate recovery guidance](https://github.com/clockgrove/factory/issues/70): supported recovery instructions without weakening restart fences | Code, known bug | Recovery lane / assigned | Correct the stale runtime refusal and write its regression coverage; defer execution. |
-| [#71 Real Codex managed binding](https://github.com/clockgrove/factory/issues/71): actual actor and provider-specific lifecycle, never Copilot substitution | Code, external contract | Codex lane / assigned; provider contract unresolved | Implement against an authoritative interface if available; otherwise record the exact missing interface. |
-| [#72 Copilot identity and termination](https://github.com/clockgrove/factory/issues/72): exact task binding and supported stop/absence evidence | Code, external contract | Copilot lane / assigned; provider contract unresolved | Complete supported lifecycle handling without treating unassignment as termination. |
-| [#73 Managed billing settlement](https://github.com/clockgrove/factory/issues/73): exact attributable native units and finality | Code, external contract or explicit product decision | Coordinator / active | Implement a supported accounting contract or retain the precise external blocker; never invent settlement. |
+| [#70 Accurate recovery guidance](https://github.com/clockgrove/factory/issues/70): supported recovery instructions without weakening restart fences | Code, known bug | Recovery lane / code integrated; checks deferred | Run written regression coverage in the coordinated phase; keep the issue open until acceptance. |
+| [#71 Real Codex managed binding](https://github.com/clockgrove/factory/issues/71): actual actor and provider-specific lifecycle, never Copilot substitution | Code, external contract | Codex lane / blocked | Provider must expose supported actor identity, exact task/session-to-PR/head binding, launch/replay and termination interfaces. Enabling the current profile would wrongly enter Copilot lifecycle logic. |
+| [#72 Copilot identity and termination](https://github.com/clockgrove/factory/issues/72): exact task binding and supported stop/absence evidence | Code, external contract | Copilot lane / guidance fix integrated; feature blocked | Obtain issue-to-task identity and a supported exact stop operation. Unassignment now explicitly leaves compute unknown; bound active tasks name the operator stop action. |
+| [#73 Managed billing settlement](https://github.com/clockgrove/factory/issues/73): exact attributable native units and finality | Code, external contract or explicit product decision | Coordinator / blocked | Obtain task-scoped charge/finality evidence or an explicit contract decision. Aggregate bills and terminal sessions do not supply it. |
+| [#90 Provider-cost replay](https://github.com/clockgrove/factory/issues/90): unique receipts, contradictory evidence and finite totals | Code, known accounting bug | Accounting lane / implementation written | Integrate the fix and defer regression execution; this does not resolve provider settlement. |
 | [#74 Retained qualifier corrections](https://github.com/clockgrove/factory/issues/74): bounded, correctly bound cancellation/budget evidence | Code, qualification-tool bugs | Existing worktrees / paused | Preserve written work until the product implementation boundary; no additional harness expansion. |
 
-Issue comments carry current handoffs and blockers. Restart completed agents explicitly when assigning
-follow-up work. Do not create testing lanes or idle sessions merely to increase agent count.
+Issue comments carry exact handoffs and blockers. The recovery lane completed its first code task and
+was explicitly restarted for #90. The provider lanes are blocked, not running background tests.
+No test, typecheck, lint/format, build or live qualification has run since the implementation-only
+directive. Written regression source and old qualifier work are preserved, not claimed as passed.
 
 ## Deferred qualification and distribution
 

@@ -41,6 +41,7 @@ import { recoveryAdoptionEvents } from "../src/recovery/transaction.js";
 import { normalizeArtifact } from "../src/execution/artifacts.js";
 import { workerPacketDigest } from "../src/protocol/worker-packet.js";
 import { loadRecoveryRuntime } from "../src/recovery/runtime.js";
+import * as siblingRefreshProof from "../src/recovery/sibling-refresh.js";
 import { recoveryReadPort } from "../src/recovery/github-read-port.js";
 import { verifyRecoveryProposalResources } from "../src/recovery/resources.js";
 import { verifyPriorRecoveryDelivery } from "../src/recovery/outcomes.js";
@@ -3283,11 +3284,27 @@ describe("Supervisor authenticated successor execution", () => {
     expect(sourceCapacity?.kind).toBe("capacity");
     if (sourceCapacity?.kind !== "capacity") throw new Error("missing source capacity fixture");
     const backend = sourceCapacity.backend;
+    const refreshProof = vi.spyOn(siblingRefreshProof, "observeRecoverySiblingRefresh");
     sourceCapacity.backend = `factory/integration-validation-${"0".repeat(64)}`;
+    // B now has an authenticated refreshed head. Its observer must resolve the
+    // receipt's exact candidate digest before the later capacity tuple check;
+    // the forged digest fails that earlier proof, not the unchanged-head gate.
     expect(await f.runtime()).toMatchObject({
       status: "blocked",
-      blockers: ["source-capacity-candidate-mismatch"],
+      adoptionVerified: false,
+      executionAuthorized: false,
+      blockers: ["runtime-binding-unavailable"],
     });
+    const invalidInvocation = refreshProof.mock.calls.findIndex(
+      ([input]) => input.candidateIdentityDigest === "0".repeat(64),
+    );
+    expect(invalidInvocation).toBeGreaterThanOrEqual(0);
+    await expect(refreshProof.mock.results[invalidInvocation]!.value).rejects.toThrow(
+      "sibling refresh recovery binding unavailable",
+    );
     sourceCapacity.backend = backend;
+    expect(await f.runtime()).toMatchObject({ status: "verified", usage: { modelTokens: 80 } });
+    expect(f.launch).toHaveBeenCalledTimes(1);
+    expect(f.review).toHaveBeenCalledTimes(2);
   }, 30000);
 });

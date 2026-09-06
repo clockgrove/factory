@@ -1,11 +1,15 @@
-import { readFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open } from "node:fs/promises";
 import os from "node:os";
 
 import {
   cgroupPath,
+  cgroupAncestors,
+  MAX_CGROUP_MEMBERSHIP_BYTES,
   parseCgroupBytes,
   parseCgroupMembership,
   parseCgroupV1Cpu,
+  parseCgroupV1Hierarchy,
   parseCgroupV2CpuMax,
 } from "./cgroup.js";
 
@@ -27,6 +31,7 @@ export interface ResourceSampler {
 }
 
 export interface ResourceFileReader {
+  /** Null means absent; denied, malformed or otherwise unavailable reads reject. */
   read(path: string): Promise<string | null>;
 }
 
@@ -40,10 +45,26 @@ export interface ResourceOsReader {
 const defaultFiles: ResourceFileReader = {
   async read(path) {
     try {
-      return await readFile(path, "utf8");
+      const handle = await open(path, constants.O_RDONLY | constants.O_NONBLOCK);
+      try {
+        // procfs/cgroupfs can report size zero, so bound bytes actually read.
+        const buffer = Buffer.alloc(MAX_CGROUP_MEMBERSHIP_BYTES + 1);
+        let total = 0;
+        while (total < buffer.length) {
+          const { bytesRead } = await handle.read(buffer, total, buffer.length - total, total);
+          if (bytesRead === 0) break;
+          total += bytesRead;
+        }
+        if (total > MAX_CGROUP_MEMBERSHIP_BYTES) {
+          throw new Error("cgroup resource file exceeds observation bounds");
+        }
+        return new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, total));
+      } finally {
+        await handle.close();
+      }
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT" || code === "ENOTDIR" || code === "EACCES") return null;
+      if (code === "ENOENT" || code === "ENOTDIR") return null;
       throw error;
     }
   },
@@ -58,9 +79,28 @@ const defaultOs: ResourceOsReader = {
 
 interface CgroupObservation {
   cpu: number | null;
-  memoryLimitBytes: number | null;
-  memoryCurrentBytes: number | null;
+  memory: Array<{ limit: number; current: number }>;
   source: "cgroup-v2" | "cgroup-v1";
+}
+
+function constrainCpu(observation: CgroupObservation, cpu: number | null): void {
+  if (cpu !== null) observation.cpu = Math.min(observation.cpu ?? cpu, cpu);
+}
+
+function observeMemoryPair(
+  maxRaw: string | null,
+  currentRaw: string | null,
+  maxPath: string,
+  currentPath: string,
+  v1 = false,
+): { limit: number; current: number } | null {
+  if (maxRaw === null && currentRaw === null) return null;
+  if (maxRaw === null) throw new Error("incomplete cgroup memory limit observation");
+  const limit = parseCgroupBytes(maxRaw, maxPath, !v1, v1);
+  const current = currentRaw === null ? null : parseCgroupBytes(currentRaw, currentPath, false);
+  if (limit === null) return null;
+  if (current === null) throw new Error("incomplete constrained cgroup memory usage observation");
+  return { limit, current };
 }
 
 async function observeV2(
@@ -68,22 +108,42 @@ async function observeV2(
   membership: string | undefined,
 ): Promise<CgroupObservation | null> {
   const root = "/sys/fs/cgroup";
-  const cpuPath = cgroupPath(root, membership, "cpu.max");
-  const maxPath = cgroupPath(root, membership, "memory.max");
-  const currentPath = cgroupPath(root, membership, "memory.current");
-  const [cpuRaw, maxRaw, currentRaw] = await Promise.all([
-    files.read(cpuPath),
-    files.read(maxPath),
-    files.read(currentPath),
-  ]);
-  if (cpuRaw === null && maxRaw === null && currentRaw === null) return null;
-  return {
-    cpu: cpuRaw === null ? null : parseCgroupV2CpuMax(cpuRaw, cpuPath),
-    memoryLimitBytes: maxRaw === null ? null : parseCgroupBytes(maxRaw, maxPath),
-    memoryCurrentBytes:
-      currentRaw === null ? null : parseCgroupBytes(currentRaw, currentPath, false),
-    source: "cgroup-v2",
-  };
+  const result: CgroupObservation = { cpu: null, memory: [], source: "cgroup-v2" };
+  let cpuObserved = false;
+  let memoryObserved = false;
+  for (const ancestor of cgroupAncestors(membership)) {
+    const cpuPath = cgroupPath(root, ancestor, "cpu.max");
+    const maxPath = cgroupPath(root, ancestor, "memory.max");
+    const currentPath = cgroupPath(root, ancestor, "memory.current");
+    const [cpuRaw, maxRaw, currentRaw] = await Promise.all([
+      files.read(cpuPath),
+      files.read(maxPath),
+      files.read(currentPath),
+    ]);
+    // v2 controllers can be disabled below a constrained ancestor. Once present,
+    // however, a missing intermediate ancestor is incomplete telemetry. The real
+    // hierarchy root legitimately has no cpu.max or memory.max/current files.
+    if (ancestor && cpuObserved && cpuRaw === null) {
+      throw new Error("incomplete cgroup v2 CPU ancestry observation");
+    }
+    if (ancestor && memoryObserved && maxRaw === null && currentRaw === null) {
+      throw new Error("incomplete cgroup v2 memory ancestry observation");
+    }
+    if (cpuRaw !== null) {
+      cpuObserved = true;
+      constrainCpu(result, parseCgroupV2CpuMax(cpuRaw, cpuPath));
+    }
+    if (maxRaw !== null || currentRaw !== null) memoryObserved = true;
+    // Root-only accounting can be exposed without a limit control. It is not
+    // evidence of a finite constraint; non-root partial pairs still fail closed.
+    if (ancestor === "" && maxRaw === null) {
+      if (currentRaw !== null) parseCgroupBytes(currentRaw, currentPath, false);
+      continue;
+    }
+    const memory = observeMemoryPair(maxRaw, currentRaw, maxPath, currentPath);
+    if (memory) result.memory.push(memory);
+  }
+  return cpuObserved || memoryObserved ? result : null;
 }
 
 async function observeV1(
@@ -91,41 +151,64 @@ async function observeV1(
   cpuMembership: string | undefined,
   memoryMembership: string | undefined,
 ): Promise<CgroupObservation | null> {
+  const result: CgroupObservation = { cpu: null, memory: [], source: "cgroup-v1" };
   const memoryRoot = "/sys/fs/cgroup/memory";
-  const maxPath = cgroupPath(memoryRoot, memoryMembership, "memory.limit_in_bytes");
-  const currentPath = cgroupPath(memoryRoot, memoryMembership, "memory.usage_in_bytes");
-  const [maxRaw, currentRaw] = await Promise.all([files.read(maxPath), files.read(currentPath)]);
-  let cpu: number | null = null;
+  let memoryObserved = false;
+  let missingMemoryDescendant = false;
+  for (const [index, ancestor] of cgroupAncestors(memoryMembership).entries()) {
+    const maxPath = cgroupPath(memoryRoot, ancestor, "memory.limit_in_bytes");
+    const currentPath = cgroupPath(memoryRoot, ancestor, "memory.usage_in_bytes");
+    const hierarchyPath = cgroupPath(memoryRoot, ancestor, "memory.use_hierarchy");
+    const [maxRaw, currentRaw, hierarchyRaw] = await Promise.all([
+      files.read(maxPath),
+      files.read(currentPath),
+      files.read(hierarchyPath),
+    ]);
+    if (maxRaw === null && currentRaw === null && hierarchyRaw === null) {
+      if (ancestor && memoryObserved) throw new Error("incomplete cgroup v1 memory ancestry observation");
+      missingMemoryDescendant = true;
+      continue;
+    }
+    if (missingMemoryDescendant) throw new Error("incomplete cgroup v1 memory descendant observation");
+    memoryObserved = true;
+    const hierarchical = hierarchyRaw === null ? null : parseCgroupV1Hierarchy(hierarchyRaw, hierarchyPath);
+    // A leaf's own limit always applies. Legacy v1 ancestor charges and limits
+    // apply only with hierarchical accounting enabled; unknown is not disabled.
+    if (index > 0 && hierarchical === null) {
+      throw new Error("unavailable cgroup v1 memory hierarchy observation");
+    }
+    const memory = observeMemoryPair(maxRaw, currentRaw, maxPath, currentPath, true);
+    if (memory && (index === 0 || hierarchical)) result.memory.push(memory);
+  }
   let cpuObserved = false;
   for (const cpuRoot of [
     "/sys/fs/cgroup/cpu",
     "/sys/fs/cgroup/cpu,cpuacct",
     "/sys/fs/cgroup/cpuacct,cpu",
   ]) {
-    const quotaPath = cgroupPath(cpuRoot, cpuMembership, "cpu.cfs_quota_us");
-    const periodPath = cgroupPath(cpuRoot, cpuMembership, "cpu.cfs_period_us");
-    const [quotaRaw, periodRaw] = await Promise.all([
-      files.read(quotaPath),
-      files.read(periodPath),
-    ]);
-    if (quotaRaw === null && periodRaw === null) continue;
-    if (quotaRaw === null || periodRaw === null) {
-      throw new Error("incomplete cgroup v1 CPU quota observation");
+    let missingCpuDescendant = false;
+    for (const ancestor of cgroupAncestors(cpuMembership)) {
+      const quotaPath = cgroupPath(cpuRoot, ancestor, "cpu.cfs_quota_us");
+      const periodPath = cgroupPath(cpuRoot, ancestor, "cpu.cfs_period_us");
+      const [quotaRaw, periodRaw] = await Promise.all([
+        files.read(quotaPath),
+        files.read(periodPath),
+      ]);
+      if (quotaRaw === null && periodRaw === null) {
+        if (ancestor && cpuObserved) throw new Error("incomplete cgroup v1 CPU ancestry observation");
+        missingCpuDescendant = true;
+        continue;
+      }
+      if (missingCpuDescendant) throw new Error("incomplete cgroup v1 CPU descendant observation");
+      if (quotaRaw === null || periodRaw === null) {
+        throw new Error("incomplete cgroup v1 CPU quota observation");
+      }
+      constrainCpu(result, parseCgroupV1Cpu(quotaRaw, periodRaw, quotaPath, periodPath));
+      cpuObserved = true;
     }
-    cpu = parseCgroupV1Cpu(quotaRaw, periodRaw, quotaPath, periodPath);
-    cpuObserved = true;
-    break;
+    if (cpuObserved) break;
   }
-  if (!cpuObserved && maxRaw === null && currentRaw === null) {
-    return null;
-  }
-  return {
-    cpu,
-    memoryLimitBytes: maxRaw === null ? null : parseCgroupBytes(maxRaw, maxPath),
-    memoryCurrentBytes:
-      currentRaw === null ? null : parseCgroupBytes(currentRaw, currentPath, false),
-    source: "cgroup-v1",
-  };
+  return cpuObserved || memoryObserved ? result : null;
 }
 
 export interface LinuxResourceSamplerOptions {
@@ -134,7 +217,7 @@ export interface LinuxResourceSamplerOptions {
   now?: () => Date;
 }
 
-/** Linux and WSL sampler. Missing cgroups fall back to host observations. */
+/** Linux and WSL sampler. Observe bounded visible ancestry without changing limits. */
 export class LinuxResourceSampler implements ResourceSampler {
   readonly #files: ResourceFileReader;
   readonly #os: ResourceOsReader;
@@ -167,28 +250,35 @@ export class LinuxResourceSampler implements ResourceSampler {
 
     const membershipRaw = await this.#files.read("/proc/self/cgroup");
     const membership = membershipRaw ? parseCgroupMembership(membershipRaw) : {};
-    const cgroup =
-      (await observeV2(this.#files, membership.v2)) ??
-      (await observeV1(this.#files, membership.v1Cpu, membership.v1Memory));
-
-    const finiteCpu = cgroup?.cpu && cgroup.cpu > 0 ? cgroup.cpu : null;
-    const effectiveCpu = Math.min(logicalCpu, finiteCpu ?? logicalCpu);
-    const finiteMemoryLimit =
-      cgroup?.memoryLimitBytes && cgroup.memoryLimitBytes < hostTotal
-        ? cgroup.memoryLimitBytes
-        : null;
-    const effectiveTotal = Math.min(hostTotal, finiteMemoryLimit ?? hostTotal);
-    const cgroupCurrent = cgroup?.memoryCurrentBytes ?? null;
-    const cgroupFree =
-      finiteMemoryLimit !== null && cgroupCurrent !== null
-        ? Math.max(0, finiteMemoryLimit - cgroupCurrent)
-        : hostFree;
-    const effectiveFree = Math.min(hostFree, cgroupFree, effectiveTotal);
-    const hostUsage = (hostTotal - hostFree) / hostTotal;
-    const cgroupUsage =
-      finiteMemoryLimit !== null && cgroupCurrent !== null
-        ? Math.min(1, cgroupCurrent / finiteMemoryLimit)
-        : 0;
+    // Hybrid hosts may bind CPU and memory to different cgroup versions. Do not
+    // discard the v1 controller merely because some v2 telemetry is present.
+    const observations = (
+      await Promise.all([
+        observeV2(this.#files, membership.v2),
+        observeV1(this.#files, membership.v1Cpu, membership.v1Memory),
+      ])
+    ).filter((value): value is CgroupObservation => value !== null);
+    let effectiveCpu = logicalCpu;
+    let effectiveTotal = hostTotal;
+    let effectiveFree = hostFree;
+    let memoryUsageRatio = (hostTotal - hostFree) / hostTotal;
+    let source: ResourceSnapshot["source"] = "host";
+    for (const observation of observations) {
+      if (observation.cpu !== null) effectiveCpu = Math.min(effectiveCpu, observation.cpu);
+      for (const { limit, current } of observation.memory) {
+        effectiveTotal = Math.min(effectiveTotal, limit);
+        effectiveFree = Math.min(effectiveFree, Math.max(0, limit - current));
+        memoryUsageRatio = Math.max(
+          memoryUsageRatio,
+          // A zero-byte hard limit provides no capacity, including at zero use.
+          limit === 0 ? 1 : Math.min(1, current / limit),
+        );
+      }
+      if (source === "host" && (observation.cpu !== null || observation.memory.length > 0)) {
+        source = observation.source;
+      }
+    }
+    effectiveFree = Math.min(effectiveFree, effectiveTotal);
 
     return {
       measuredAt: this.#now().toISOString(),
@@ -197,8 +287,8 @@ export class LinuxResourceSampler implements ResourceSampler {
       loadRatio: load / effectiveCpu,
       totalMemoryMb: Math.floor(effectiveTotal / MB),
       availableMemoryMb: Math.floor(effectiveFree / MB),
-      memoryUsageRatio: Math.max(hostUsage, cgroupUsage),
-      source: cgroup && (finiteCpu !== null || finiteMemoryLimit !== null) ? cgroup.source : "host",
+      memoryUsageRatio,
+      source,
     };
   }
 }

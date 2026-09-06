@@ -26,6 +26,33 @@ user session rather than delegating lifecycle management to `launchd`.
 Native Win32 and native Darwin execution and lifecycle management are out of scope. Factory does
 not install Windows services, Task Scheduler entries, or `launchd` agents.
 
+## Resource observation boundary
+
+Local admission samples the process's visible cgroup ancestry, including its mount root, at the
+standard Linux v2 mount and supported v1 CPU/memory mounts. CPU capacity is the minimum of host
+parallelism and applicable quota/period limits. Memory capacity and free headroom are the minimum
+of host observations and each applicable ancestor's limit and remaining capacity; the usage ratio
+is the maximum observed ratio. Each limit is paired with that same ancestor's aggregate usage,
+including sibling charges. A zero usage counter or zero-byte limit is not an unlimited sentinel.
+
+This follows the kernel's [v2 hierarchy rules](https://docs.kernel.org/admin-guide/cgroup-v2.html#what-is-cgroup)
+and [CPU bandwidth hierarchy](https://docs.kernel.org/scheduler/sched-bwc.html#hierarchical-considerations).
+For [legacy v1 memory accounting](https://docs.kernel.org/5.10/admin-guide/cgroup-v1/memory.html#hierarchy-support),
+an ancestor limit applies only when its `memory.use_hierarchy` is observed as enabled; a leaf's own
+limit always applies. Unknown hierarchy settings, malformed values, permission-denied reads and
+incomplete constrained observations make the sample unavailable. Root-only v2 memory usage without
+a limit is accounting telemetry, not a finite constraint. CPU and memory controllers are inspected
+independently, including on hybrid v1/v2 hosts; the existing source field prefers v2 when both versions
+contribute finite constraints.
+
+Observation is read-only and bounded to 64 levels per hierarchy, 4 KiB membership paths and 64 KiB
+per kernel file. It never walks above the visible mount root or into sibling directories. Missing
+applicable cgroups fall back to host measurements. Nonstandard mount layouts and ancestors hidden
+by a cgroup namespace or mount are not discovered; their limits or usage cannot be inferred from
+this sample. Values are sampled across separate reads, not an atomic allocation guarantee, and v1
+usage counters can be approximate. This component behavior does not qualify the full live scheduling
+matrix or authorize changing host limits.
+
 ## Linux with systemd
 
 Factory's explicit repository-service lifecycle creates one deterministic user unit per checkout.

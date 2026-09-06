@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { constants } from "node:fs";
+
+const openResourceFile = vi.hoisted(() => vi.fn());
+vi.mock("node:fs/promises", () => ({ open: openResourceFile }));
 
 import {
   CachedResourceSampler,
@@ -12,9 +16,14 @@ import {
   parseCgroupBytes,
   parseCgroupV1Cpu,
   parseCgroupV2CpuMax,
+  parseCgroupMembership,
+  cgroupAncestors,
+  MAX_CGROUP_ANCESTORS,
+  MAX_CGROUP_MEMBERSHIP_BYTES,
 } from "../src/scheduling/cgroup.js";
 
 const GB = 1_073_741_824;
+afterEach(() => vi.resetAllMocks());
 
 function files(values: Record<string, string>): ResourceFileReader {
   return { read: async (path) => values[path] ?? null };
@@ -35,10 +44,14 @@ describe("Linux/WSL resource sampler", () => {
     expect(parseCgroupV2CpuMax("max 100000")).toBeNull();
     expect(parseCgroupV1Cpu("-1", "100000")).toBeNull();
     expect(parseCgroupBytes("max", "memory.max")).toBeNull();
-    expect(parseCgroupBytes("9223372036854771712", "memory.limit_in_bytes")).toBeNull();
+    expect(parseCgroupBytes("9223372036854771712", "memory.limit_in_bytes", false, true)).toBeNull();
     expect(() => parseCgroupBytes("9223372036854771712", "memory.usage_in_bytes", false)).toThrow(
       /malformed cgroup/,
     );
+    expect(parseCgroupBytes("0", "memory.current", false)).toBe(0);
+    expect(parseCgroupBytes("0", "memory.max")).toBe(0);
+    expect(() => parseCgroupV1Cpu("-1", "0")).toThrow(/malformed cgroup/);
+    expect(() => parseCgroupV2CpuMax("0 100000")).toThrow(/malformed cgroup/);
   });
 
   it("chooses the tightest cgroup v2 CPU and memory observations", async () => {
@@ -108,6 +121,228 @@ describe("Linux/WSL resource sampler", () => {
       memoryUsageRatio: 0.5,
       source: "host",
     });
+  });
+
+  it("uses an ancestor CPU limit and its aggregate sibling-inclusive memory usage", async () => {
+    const result = await new LinuxResourceSampler({
+      files: files({
+        "/proc/self/cgroup": "0::/parent/child\n",
+        "/sys/fs/cgroup/parent/child/cpu.max": "max 100000",
+        "/sys/fs/cgroup/parent/child/memory.max": "max",
+        "/sys/fs/cgroup/parent/child/memory.current": String(GB),
+        "/sys/fs/cgroup/parent/cpu.max": "125000 100000",
+        "/sys/fs/cgroup/parent/memory.max": String(8 * GB),
+        "/sys/fs/cgroup/parent/memory.current": String(7 * GB),
+      }),
+      os: host(),
+    }).sample();
+    expect(result).toMatchObject({
+      effectiveCpu: 1.25,
+      totalMemoryMb: 8192,
+      availableMemoryMb: 1024,
+      memoryUsageRatio: 0.875,
+      source: "cgroup-v2",
+    });
+  });
+
+  it("can take total capacity from a tighter child and headroom/pressure from its parent", async () => {
+    const result = await new LinuxResourceSampler({
+      files: files({
+        "/proc/self/cgroup": "0::/parent/child\n",
+        "/sys/fs/cgroup/parent/child/cpu.max": "150000 100000",
+        "/sys/fs/cgroup/parent/child/memory.max": String(4 * GB),
+        "/sys/fs/cgroup/parent/child/memory.current": String(GB),
+        "/sys/fs/cgroup/parent/cpu.max": "400000 100000",
+        "/sys/fs/cgroup/parent/memory.max": String(8 * GB),
+        "/sys/fs/cgroup/parent/memory.current": String(7.5 * GB),
+      }),
+      os: host(),
+    }).sample();
+    expect(result).toMatchObject({
+      effectiveCpu: 1.5,
+      totalMemoryMb: 4096,
+      availableMemoryMb: 512,
+      memoryUsageRatio: 0.9375,
+    });
+  });
+
+  it("still applies a finite cgroup's headroom when its memory limit exceeds host total", async () => {
+    const result = await new LinuxResourceSampler({
+      files: files({
+        "/proc/self/cgroup": "0::/parent/child\n",
+        // Controllers need not be enabled in the child to inherit parent limits.
+        "/sys/fs/cgroup/parent/cpu.max": "12800000 100000",
+        "/sys/fs/cgroup/parent/memory.max": String(32 * GB),
+        "/sys/fs/cgroup/parent/memory.current": String(31 * GB),
+      }),
+      os: host(),
+    }).sample();
+    expect(result).toMatchObject({
+      effectiveCpu: 8,
+      totalMemoryMb: 16384,
+      availableMemoryMb: 1024,
+      memoryUsageRatio: 31 / 32,
+    });
+  });
+
+  it.each([
+    { limit: 32 * GB, current: 0, total: 16384, free: 8192, usage: 0.5 },
+    { limit: 4 * GB, current: 0, total: 4096, free: 4096, usage: 0.5 },
+    { limit: 4 * GB, current: 5 * GB, total: 4096, free: 0, usage: 1 },
+    { limit: 0, current: 0, total: 0, free: 0, usage: 1 },
+    { limit: 512 * 1024, current: 0, total: 0, free: 0, usage: 0.5 },
+  ])("preserves host ceilings and zero capacity for limit=$limit/current=$current", async (entry) => {
+    const reads: string[] = [];
+    const source = files({
+      "/proc/self/cgroup": "0::/\n",
+      "/sys/fs/cgroup/cpu.max": "50000 100000",
+      "/sys/fs/cgroup/memory.max": String(entry.limit),
+      "/sys/fs/cgroup/memory.current": String(entry.current),
+    });
+    const result = await new LinuxResourceSampler({
+      files: { read: async (path) => { reads.push(path); return source.read(path); } },
+      os: host(),
+    }).sample();
+    expect(result).toMatchObject({
+      effectiveCpu: 0.5,
+      totalMemoryMb: entry.total,
+      availableMemoryMb: entry.free,
+      memoryUsageRatio: entry.usage,
+    });
+    expect(reads).toEqual([
+      "/proc/self/cgroup",
+      "/sys/fs/cgroup/cpu.max",
+      "/sys/fs/cgroup/memory.max",
+      "/sys/fs/cgroup/memory.current",
+    ]);
+  });
+
+  it("applies v1 ancestor CPU limits and hierarchical memory using separate membership paths", async () => {
+    const result = await new LinuxResourceSampler({
+      files: files({
+        "/proc/self/cgroup": "2:cpu,cpuacct:/cpu-parent/job\n3:memory:/mem-parent/job\n",
+        "/sys/fs/cgroup/cpu,cpuacct/cpu-parent/job/cpu.cfs_quota_us": "-1",
+        "/sys/fs/cgroup/cpu,cpuacct/cpu-parent/job/cpu.cfs_period_us": "100000",
+        "/sys/fs/cgroup/cpu,cpuacct/cpu-parent/cpu.cfs_quota_us": "75000",
+        "/sys/fs/cgroup/cpu,cpuacct/cpu-parent/cpu.cfs_period_us": "100000",
+        "/sys/fs/cgroup/memory/mem-parent/job/memory.limit_in_bytes": String(4 * GB),
+        "/sys/fs/cgroup/memory/mem-parent/job/memory.usage_in_bytes": String(GB),
+        "/sys/fs/cgroup/memory/mem-parent/job/memory.use_hierarchy": "1",
+        "/sys/fs/cgroup/memory/mem-parent/memory.limit_in_bytes": String(8 * GB),
+        "/sys/fs/cgroup/memory/mem-parent/memory.usage_in_bytes": String(7 * GB),
+        "/sys/fs/cgroup/memory/mem-parent/memory.use_hierarchy": "1",
+      }),
+      os: host(),
+    }).sample();
+    expect(result).toMatchObject({
+      effectiveCpu: 0.75,
+      totalMemoryMb: 4096,
+      availableMemoryMb: 1024,
+      memoryUsageRatio: 0.875,
+      source: "cgroup-v1",
+    });
+  });
+
+  it("does not apply a legacy v1 non-hierarchical parent's own usage to the child", async () => {
+    const result = await new LinuxResourceSampler({
+      files: files({
+        "/proc/self/cgroup": "3:memory:/parent/child\n",
+        "/sys/fs/cgroup/memory/parent/child/memory.limit_in_bytes": String(4 * GB),
+        "/sys/fs/cgroup/memory/parent/child/memory.usage_in_bytes": String(GB),
+        "/sys/fs/cgroup/memory/parent/child/memory.use_hierarchy": "0",
+        "/sys/fs/cgroup/memory/parent/memory.limit_in_bytes": String(GB),
+        "/sys/fs/cgroup/memory/parent/memory.usage_in_bytes": String(GB),
+        "/sys/fs/cgroup/memory/parent/memory.use_hierarchy": "0",
+      }),
+      os: host(),
+    }).sample();
+    expect(result).toMatchObject({ totalMemoryMb: 4096, availableMemoryMb: 3072, memoryUsageRatio: 0.5 });
+  });
+
+  it("combines v2 CPU with v1 memory on a hybrid host", async () => {
+    const result = await new LinuxResourceSampler({
+      files: files({
+        "/proc/self/cgroup": "0::/job\n3:memory:/\n",
+        "/sys/fs/cgroup/job/cpu.max": "200000 100000",
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes": String(GB),
+        "/sys/fs/cgroup/memory/memory.usage_in_bytes": "0",
+        "/sys/fs/cgroup/memory/memory.use_hierarchy": "0",
+      }),
+      os: host(),
+    }).sample();
+    expect(result).toMatchObject({ effectiveCpu: 2, totalMemoryMb: 1024, availableMemoryMb: 1024 });
+  });
+
+  it("accepts root-only v2 memory accounting without inventing a finite root limit", async () => {
+    const result = await new LinuxResourceSampler({
+      files: files({
+        "/proc/self/cgroup": "0::/job",
+        "/sys/fs/cgroup/job/memory.max": String(4 * GB),
+        "/sys/fs/cgroup/job/memory.current": String(GB),
+        "/sys/fs/cgroup/memory.current": String(15 * GB),
+      }),
+      os: host(),
+    }).sample();
+    expect(result).toMatchObject({ effectiveCpu: 8, totalMemoryMb: 4096, availableMemoryMb: 3072, memoryUsageRatio: 0.5 });
+  });
+
+  it("does not sample unrelated controller roots without process membership", async () => {
+    const result = await new LinuxResourceSampler({
+      files: files({ "/sys/fs/cgroup/cpu.max": "50000 100000" }),
+      os: host(),
+    }).sample();
+    expect(result).toMatchObject({ effectiveCpu: 8, source: "host" });
+  });
+
+  it.each([
+    { "/proc/self/cgroup": "0::/job", "/sys/fs/cgroup/job/memory.max": "0" },
+    { "/proc/self/cgroup": "0::/job", "/sys/fs/cgroup/job/memory.current": "0" },
+    { "/proc/self/cgroup": "0::/job", "/sys/fs/cgroup/job/memory.max": "9223372036854771712" },
+    { "/proc/self/cgroup": "0::/parent/child", "/sys/fs/cgroup/parent/child/cpu.max": "100000 100000" },
+    { "/proc/self/cgroup": "2:cpu:/job", "/sys/fs/cgroup/cpu/job/cpu.cfs_quota_us": "-1" },
+    { "/proc/self/cgroup": "2:cpu:/job", "/sys/fs/cgroup/cpu/job/cpu.cfs_quota_us": "-1", "/sys/fs/cgroup/cpu/job/cpu.cfs_period_us": "broken" },
+    { "/proc/self/cgroup": "3:memory:/parent/child", "/sys/fs/cgroup/memory/parent/child/memory.limit_in_bytes": "1", "/sys/fs/cgroup/memory/parent/child/memory.usage_in_bytes": "0", "/sys/fs/cgroup/memory/parent/memory.limit_in_bytes": "1", "/sys/fs/cgroup/memory/parent/memory.usage_in_bytes": "0" },
+    { "/proc/self/cgroup": "3:memory:/job", "/sys/fs/cgroup/memory/job/memory.limit_in_bytes": "1", "/sys/fs/cgroup/memory/job/memory.usage_in_bytes": "0", "/sys/fs/cgroup/memory/job/memory.use_hierarchy": "2" },
+  ])("rejects malformed or incomplete constrained ancestry", async (entry) => {
+    const sampler = new LinuxResourceSampler({ files: files(entry as Record<string, string>), os: host() });
+    await expect(sampler.sample()).rejects.toThrow();
+  });
+
+  it("bounds ancestry and rejects traversal, duplicate controllers and malformed memberships", () => {
+    expect(cgroupAncestors("")).toEqual([""]);
+    expect(cgroupAncestors(undefined)).toEqual([]);
+    expect(cgroupAncestors("a/b")).toEqual(["a/b", "a", ""]);
+    expect(cgroupAncestors(Array(63).fill("a").join("/"))).toHaveLength(MAX_CGROUP_ANCESTORS);
+    for (const value of [
+      `0::/${Array(64).fill("a").join("/")}`,
+      "0::/a/../b", "0::/a/./b", "0::relative", "0::/a\0b",
+      "0::/a\n0::/b", "2:cpu:/a\n3:cpu:/b", "0::/gone (deleted)",
+      `0::/${"a".repeat(4096)}`, "x".repeat(MAX_CGROUP_MEMBERSHIP_BYTES + 1),
+    ]) {
+      expect(() => parseCgroupMembership(value)).toThrow();
+    }
+    expect(parseCgroupMembership("0::/allowed:name").v2).toBe("allowed:name");
+  });
+
+  it("distinguishes a missing kernel file from denied observation", async () => {
+    openResourceFile.mockRejectedValueOnce(Object.assign(new Error("absent"), { code: "ENOENT" }));
+    await expect(new LinuxResourceSampler({ os: host() }).sample()).resolves.toMatchObject({ source: "host" });
+    openResourceFile.mockRejectedValueOnce(Object.assign(new Error("denied"), { code: "EACCES" }));
+    await expect(new LinuxResourceSampler({ os: host() }).sample()).rejects.toThrow("denied");
+  });
+
+  it("caps bytes actually read and closes the read-only descriptor on overflow", async () => {
+    const close = vi.fn(async () => {});
+    const read = vi.fn(async (buffer: Buffer, offset: number, length: number) => {
+      buffer.fill(97, offset, offset + length);
+      return { bytesRead: length, buffer };
+    });
+    openResourceFile.mockResolvedValueOnce({ read, close });
+    await expect(new LinuxResourceSampler({ os: host() }).sample()).rejects.toThrow("observation bounds");
+    expect(read.mock.calls[0]![0]).toHaveLength(MAX_CGROUP_MEMBERSHIP_BYTES + 1);
+    expect(close).toHaveBeenCalledOnce();
+    const flags = openResourceFile.mock.calls[0]![1] as number;
+    expect(flags & (constants.O_WRONLY | constants.O_RDWR | constants.O_CREAT | constants.O_TRUNC)).toBe(0);
   });
 
   it("fails closed on an observed malformed cgroup value", async () => {

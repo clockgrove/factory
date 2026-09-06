@@ -490,6 +490,13 @@ unaffected local startup. An unavailable provider needs an evidenced unsupported
 launch and no provider launch, with no supported execution claims; absent user credentials alone
 do not qualify. An available provider needs digest-bound qualification for `objective-delivery` and
 every other advertised capability. Unsupported capabilities carry their reason and official source.
+An `objective-delivery` qualification artifact uses schema 1, kind
+`installed-provider-objective-qualification`, and an `observation` containing the installed provider
+runner's complete structured result. The gate re-evaluates its execution proof and binds clean
+harness source, installed bundle inventory, original run/policy, exact integration/task/session
+evidence, independent validator absence and final artifact output. A `passed` label alone, an
+incomplete completion assessment or a different installed artifact cannot satisfy the claim.
+New capability names need their own concrete assessor before they can be advertised as qualified.
 All referenced artifacts remain subject to the same tracked-path, exact-commit and SHA-256 checks.
 Invoice settlement is not part of this evidence contract. No existing observation is relabelled as
 proof of the revised candidate or gate.

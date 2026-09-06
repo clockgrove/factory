@@ -323,6 +323,127 @@ export function authenticatedFaultEvents(comments, actor, objective) {
   }
   return deduplicateQualificationReceipts(receipts);
 }
+
+export function assertFaultAuthenticationEnvironment(env) {
+  for (const key of ["GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME"])
+    assert.equal(
+      env[key],
+      undefined,
+      "fault qualification requires existing default local authentication",
+    );
+}
+
+export async function faultRequest(request, route, parameters = {}, signal) {
+  const deadline = AbortSignal.timeout(15000);
+  return request(route, {
+    ...parameters,
+    request: { signal: signal ? AbortSignal.any([signal, deadline]) : deadline },
+  });
+}
+
+export function faultTerminalReady(evidence) {
+  const outcomes = (evidence.receipts ?? [])
+    .map(({ event }) => event)
+    .filter((event) => event.runId === evidence.runId && terminal.has(event.event));
+  assert.ok(outcomes.length <= 1, "conflicting terminal outcomes");
+  if (!outcomes.length) return false;
+  const state = {
+    FactoryRunCompleted: "completed",
+    FactoryRunCancelled: "cancelled",
+    FactoryRunEscalated: "escalated",
+  }[outcomes[0].event];
+  assert.equal(evidence.status?.run?.runId, evidence.runId, "terminal status changed run");
+  assert.equal(evidence.status?.summary?.runId, evidence.runId, "terminal summary changed run");
+  if (!["completed", "cancelled", "escalated"].includes(evidence.status.run.state)) return false;
+  assert.equal(evidence.status.run.state, state, "terminal status conflicts with receipt");
+  assert.equal(evidence.status.summary.outcome, state, "terminal summary conflicts with receipt");
+  return evidence.status.run.availability === "observed";
+}
+
+/** Physical absence includes every slot actually reserved, even an unused setup
+ * slot or validation admitted between the active-worker read and cancellation.
+ * This is not proof of unreported resources or missing model usage. */
+export function faultResourceUnits(evidence) {
+  const events = (evidence.receipts ?? [])
+    .map(({ event }) => event)
+    .filter((event) => event.runId === evidence.runId);
+  const starts = events.filter((event) => event.event === "FactoryRunStarted");
+  assert.equal(starts.length, 1, "resource proof requires one exact run");
+  const start = starts[0];
+  assert.equal(start.repository, evidence.repository);
+  assert.equal(start.objective, evidence.objective);
+  const producers = [evidence.before?.controller, evidence.after?.controller].filter(Boolean);
+  const births = new Map();
+  const units = new Set();
+  const reservations = events.filter(
+    (event) =>
+      event.event === "AttemptReserved" ||
+      (event.event === "CapacityReserved" && event.phase === "validation"),
+  );
+  assert.ok(reservations.length > 0 && reservations.length <= 100);
+  assert.ok(
+    events.every((event) => !event.localScopeBatch || reservations.includes(event)),
+    "unexpected scoped event",
+  );
+  for (const event of reservations) {
+    const batch = event.localScopeBatch;
+    assert.ok(batch, "resource reservation lacks exact scope batch");
+    const identity = batch.identity;
+    assert.equal(event.objective, evidence.objective);
+    assert.equal(event.policyDigest, start.policyDigest);
+    assert.equal(identity.repository, evidence.repository);
+    assert.equal(identity.hostIdentity, evidence.before.hostIdentity);
+    assert.equal(identity.objective, evidence.objective);
+    for (const key of ["runId", "workItem", "attempt", "policyDigest"])
+      assert.equal(identity[key], event[key]);
+    assert.equal(identity.directorEpoch, event.recoveryEpoch ?? event.directorEpoch);
+    assert.equal(identity.phase, event.event === "AttemptReserved" ? "execution" : "validation");
+    assert.equal(identity.commandIndex, 0);
+    assert.ok(
+      Number.isSafeInteger(batch.commandCount) &&
+        batch.commandCount > 0 &&
+        batch.commandCount <= 257,
+    );
+    assert.ok(Number.isSafeInteger(batch.producerPid) && batch.producerPid > 0);
+    assert.match(batch.producerStartTicks ?? "", /^[0-9]{1,30}$/);
+    assert.ok(
+      Number.isFinite(Date.parse(event.at)) && Date.parse(batch.deadline) > Date.parse(event.at),
+    );
+    assert.ok(
+      producers.some(
+        (producer) =>
+          producer.unit === identity.producerUnit &&
+          producer.invocationId === identity.producerInvocationId,
+      ),
+      "unobserved producer generation",
+    );
+    const birth = JSON.stringify([batch.producerPid, batch.producerStartTicks]);
+    const prior = births.get(identity.producerInvocationId);
+    assert.ok(prior === undefined || prior === birth, "producer process identity changed");
+    births.set(identity.producerInvocationId, birth);
+    if (event.event === "AttemptReserved") {
+      assert.ok(localBackends.has(event.backend));
+      assert.equal(batch.commandCount, 1);
+    } else {
+      assert.equal(
+        reservations.filter(
+          (reserved) =>
+            reserved.event === "AttemptReserved" &&
+            reserved.workItem === event.workItem &&
+            reserved.attempt === event.attempt &&
+            reserved.sequence < event.sequence,
+        ).length,
+        1,
+        "orphan validation reservation",
+      );
+    }
+    for (let commandIndex = 0; commandIndex < batch.commandCount; commandIndex++)
+      units.add(scopeUnit({ ...identity, commandIndex }));
+  }
+  assert.ok(units.size <= 100, "resource observation bound exceeded");
+  return [...units].sort();
+}
+
 export function assessLocalFault(evidence) {
   const blockers = [];
   if (!evidence.runId || !evidence.injected) blockers.push("fault-not-injected");
@@ -376,6 +497,13 @@ export function assessLocalFault(evidence) {
     evidence.status?.capacity?.activeReservations?.length !== 0
   )
     blockers.push("active-or-unavailable-reservations");
+  try {
+    const units = faultResourceUnits(evidence);
+    assert.deepEqual(evidence.finalScopes?.map((entry) => entry.unit).sort(), units);
+    assert.ok(evidence.finalScopes.every((entry) => entry.status === "absent"));
+  } catch {
+    blockers.push("all-reserved-resource-absence-unproven");
+  }
   if (
     !evidence.before?.scope ||
     evidence.before.scope.status !== "active" ||
@@ -576,7 +704,7 @@ export function assessLocalFault(evidence) {
     limitations: [
       "Orderly installed controller restart, not abrupt crash/phase kill",
       "Restart permits one explicit retry within its initial two-attempt allowance, not terminal revival or extra allowance",
-      "Physical absence applies only to the captured active worker scope",
+      "Physical absence applies to all authenticated reserved slots, not unreported resources",
       "Receipt identity checks are not a proof of unreported provider behavior",
     ],
   };
@@ -654,6 +782,7 @@ async function runQualification(progress) {
     return;
   }
   progress.stage("configuration");
+  assertFaultAuthenticationEnvironment(process.env);
   const required = (key) => {
     const value = process.env[`FACTORY_LOCAL_FAULT_${key}`]?.trim();
     assert.ok(value, `FACTORY_LOCAL_FAULT_${key} required`);
@@ -705,14 +834,18 @@ async function runQualification(progress) {
     "harness must be committed",
   );
   progress.stage("repository-preflight");
-  const token =
-    process.env.GITHUB_TOKEN || process.env.GH_TOKEN || command("gh", ["auth", "token"], checkout);
+  const token = command("gh", ["auth", "token"], checkout);
   const octokit = new Octokit({
     auth: token,
     request: { headers: { "X-GitHub-Api-Version": "2026-03-10" } },
   });
   const [owner, repo] = repository.split("/");
-  const request = (route, args = {}) => octokit.request(route, { owner, repo, ...args });
+  const request = (route, args = {}) =>
+    faultRequest((path, parameters) => octokit.request(path, parameters), route, {
+      owner,
+      repo,
+      ...args,
+    });
   const list = async (route, args = {}) => {
     const values = [];
     for (let page = 1; page <= 10; page++) {
@@ -728,7 +861,7 @@ async function runQualification(progress) {
     info.private && !info.archived && info.permissions?.push,
     "private writable disposable repository required",
   );
-  const actor = (await octokit.request("GET /user")).data;
+  const actor = (await request("GET /user")).data;
   const mcp = manifest.mcpServers?.factory;
   assert.equal(mcp?.command, "node");
   const client = new Client({ name: "factory-installed-local-faults", version: "1.0.0" });
@@ -1079,12 +1212,7 @@ async function runQualification(progress) {
     }
     progress.stage("terminal-observation");
     assert.ok(evidence.runId, "no captured run to verify");
-    await boundedPoll(
-      observe,
-      (events) =>
-        events.some((event) => event.runId === evidence.runId && terminal.has(event.event)),
-      { milliseconds: 600000 },
-    );
+    await boundedPoll(observe, () => faultTerminalReady(evidence), { milliseconds: 600000 });
     evidence.finishedInstalledArtifact = installedBundleIdentity(pluginRoot);
     if (evidence.before?.scope)
       evidence.after = {
@@ -1092,6 +1220,8 @@ async function runQualification(progress) {
         scope: observeUnit(evidence.before.scope.unit),
         controller: observeUnit(controller.unit),
       };
+    evidence.finalScopes = faultResourceUnits(evidence).map(observeUnit);
+    save();
     progress.stage("assessment");
     evidence.assessment = assessLocalFault(evidence);
     save();

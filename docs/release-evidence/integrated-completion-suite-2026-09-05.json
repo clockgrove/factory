@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "kind": "development-integrated-verification",
+  "status": "passed",
+  "candidateCommit": "1e605d2fba58c9134b9e90e1b516a58bedb42424",
+  "command": "CODEX_HOME=/home/kirk/.codex FACTORY_LIVE_PROVIDER=0 FACTORY_LIVE_OBJECTIVE=0 FACTORY_LOCAL_FAULTS=0 FACTORY_LOCAL_CHECKPOINT_RESTART=0 FACTORY_LIVE_BUDGET_STOP=0 npm run verify:release",
+  "exitCode": 0,
+  "logSha256": "0157c656ae35fc5f830387931b9e54b13f9668d9fb58b0eff7619c6c03925d43",
+  "checks": ["typecheck", "lint", "format:check", "test:coverage", "verify:schemas", "verify:dist", "verify:package", "verify:npm", "npm audit"],
+  "tests": { "filesPassed": 135, "passed": 2733, "skipped": 3, "total": 2736, "durationSeconds": 388.82 },
+  "coveragePercent": { "statements": 80.95, "branches": 78.18, "functions": 84.91, "lines": 82.06 },
+  "dependencyVulnerabilities": 0,
+  "installedPackage": { "files": 91, "bytes": 3000016, "sha256": "dfe1adfcb656061d3adf5e976d64168da24d3b50e28868bc01770ff88e2465bc" },
+  "subjects": [
+    { "path": "dist/factory.js", "sha256": "277ee16ab32e96215aa150842aea2af47cdbc425d59c2a8e1ca4608c7d97ffe2" },
+    { "path": "dist/mcp-server.js", "sha256": "9e5574711c99d70666588c6d23dd0668549522698eb34badb2c2b1b6c43e06a2" },
+    { "path": "dist/bundle-inventory.json", "sha256": "320a236c978f23008f87b994832dffab00da6d5967589105a2440b180a17fdfb" },
+    { "path": "package.json", "sha256": "2e2fb4a8e45617331c749d71b3b682ff9e35cdfade361a3bd124bfa06ed78460" },
+    { "path": "package-lock.json", "sha256": "558b88bac2c6e59ce58b070afede639b792b3846aaef86fac52e9b3bfe25b32c" },
+    { "path": ".codex-plugin/plugin.json", "sha256": "e4a11bdf07500f7b2b292575154dc1f465f13f8237c9720bf0e86ae69a611fef" },
+    { "path": "THIRD_PARTY_NOTICES.txt", "sha256": "e83fd352276a70608bdd6832db34a96ed5c9ab6c554fbacb1ca2ace41d1b8c32" }
+  ],
+  "completedImplementationIssues": [70, 71, 72, 73, 74, 90, 92],
+  "verificationIssue": 87,
+  "originalFailure": "final-suite-original-failure-2026-09-05.json",
+  "scope": "Integrated local source, deterministic bundles, clean temporary Codex plugin installation, and clean npm package installation. No live/model-backed provider qualification, production activation, personal installed-plugin replacement, registry publication, or published-artifact installation occurred. This component record does not satisfy any still-open live release gate.",
+  "identityBoundary": "The tested commit is exact. Later completion-board/evidence documentation commits do not rerun or relabel these results. Runtime and manifest subjects remain unchanged; the recorded npm tarball belongs to this tested commit, not a later documentation-bearing package."
+}

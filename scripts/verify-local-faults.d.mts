@@ -1,4 +1,13 @@
 export function faultPolicy(tokens: number, scenario?: "cancel" | "restart"): unknown;
+export function assertFaultAuthenticationEnvironment(env: Record<string, string | undefined>): void;
+export function faultRequest<T>(
+  request: (route: string, parameters: Record<string, unknown>) => Promise<T>,
+  route: string,
+  parameters?: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<T>;
+export function faultTerminalReady(evidence: unknown): boolean;
+export function faultResourceUnits(evidence: unknown): string[];
 export function createFaultProgress(options?: {
   now?: () => number;
   emit?: (event: { protocol: string; phase: string; stage: string; elapsedMs: number }) => void;

@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "kind": "development-verification-failure",
+  "status": "failed",
+  "candidateCommit": "7fa42f75016dcab229d901bc52962e7d96502629",
+  "command": "CODEX_HOME=/home/kirk/.codex FACTORY_LIVE_PROVIDER=0 FACTORY_LIVE_OBJECTIVE=0 FACTORY_LOCAL_FAULTS=0 FACTORY_LOCAL_CHECKPOINT_RESTART=0 FACTORY_LIVE_BUDGET_STOP=0 npm run verify:release",
+  "exitCode": 2,
+  "stoppedAt": "typecheck",
+  "output": [
+    "test/release-evidence.test.ts(231,7): error TS2532: Object is possibly 'undefined'.",
+    "test/release-evidence.test.ts(247,39): error TS2532: Object is possibly 'undefined'.",
+    "test/release-evidence.test.ts(259,39): error TS2532: Object is possibly 'undefined'."
+  ],
+  "notExecuted": ["lint", "format:check", "test:coverage", "verify:schemas", "verify:dist", "verify:package", "verify:npm", "npm audit"],
+  "defectIssue": "https://github.com/clockgrove/factory/issues/92",
+  "scope": "First coordinated local verification attempt after all implementation and generated artifacts were integrated. This is original failure evidence, not a passed release gate. No paid, model-backed or live qualification ran."
+}

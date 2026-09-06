@@ -191,6 +191,56 @@ function managedEvidence() {
 }
 
 describe("installed provider Objective harness (no live calls)", () => {
+  it.each(["present", "unknown", "missing"])(
+    "rejects %s Daytona cleanup even when every managed task/session is terminal",
+    (state) => {
+      const { input, authority: managedAuthority } = managedEvidence();
+      const { cleanupObservation: _cleanup, ...withoutCleanup } = input;
+      const candidate =
+        state === "missing" ? withoutCleanup : { ...input, cleanupObservation: { state } };
+      expect(assessProviderCompletion(candidate, managedAuthority)).toMatchObject({
+        result: "incomplete",
+        reason: expect.stringContaining("Daytona cleanup is not independently observed absent"),
+      });
+    },
+  );
+
+  it.each(["absent", "present", "failure", "foreign-labels"])(
+    "uses the exact original-run validator listing for managed cleanup: %s",
+    async (outcome) => {
+      const { input, authority: managedAuthority } = managedEvidence();
+      const queries: unknown[] = [];
+      const observed = await observeProviderAbsence(
+        {
+          async *list(query: { labels: Record<string, string>; limit: number }) {
+            queries.push(query);
+            if (outcome === "failure") throw new Error("provider listing unavailable");
+            if (outcome === "present" || outcome === "foreign-labels")
+              yield {
+                id: "validator-exact",
+                name: "validator-exact",
+                labels:
+                  outcome === "present" ? query.labels : { ...query.labels, run: "different-run" },
+              };
+          },
+        },
+        input,
+      );
+      expect(queries).toEqual([
+        { labels: { factory: "v2", objective: "1", run: "run" }, limit: 100 },
+      ]);
+      expect(observed.state).toBe(
+        outcome === "absent" ? "absent" : outcome === "present" ? "present" : "unknown",
+      );
+      const result = assessProviderCompletion(
+        { ...input, cleanupObservation: observed },
+        managedAuthority,
+      );
+      expect(result.result).toBe(outcome === "absent" ? "passed" : "incomplete");
+      if (outcome === "absent") expect(result.billing?.availability).toBe("unavailable");
+    },
+  );
+
   it("qualifies exact managed execution with unavailable billing, without inventing settlement or zero cost", () => {
     const fixture = managedEvidence();
     const before = structuredClone(fixture.input);
@@ -223,29 +273,26 @@ describe("installed provider Objective harness (no live calls)", () => {
     "budget",
     "validation",
     "head",
-  ])(
-    "does not waive %s evidence because billing settlement is excluded",
-    (fault) => {
-      const { input, authority: managedAuthority } = managedEvidence();
-      const observation = input.managedSessionObservation;
-      if (fault === "active") observation.state = "present";
-      if (fault === "unknown") observation.state = "unknown";
-      if (fault === "unknown-task") observation.bindings[0]!.taskState = "unknown";
-      if (fault === "active-session") observation.bindings[0]!.sessions[0]!.state = "in_progress";
-      if (fault === "unknown-session") observation.bindings[0]!.sessions[0]!.state = "unknown";
-      if (fault === "duplicate-task")
-        observation.bindings[1]!.taskId = observation.bindings[0]!.taskId;
-      if (fault === "foreign-pull") observation.bindings[0]!.pullDatabaseId = 9999;
-      if (fault === "extra-session")
-        observation.bindings[0]!.sessions.push({ id: "extra", state: "completed" });
-      if (fault === "budget")
-        input.events = input.events.filter((event) => event.event !== "BudgetReserved");
-      if (fault === "validation")
-        input.events = input.events.filter((event) => event.event !== "CapacityReserved");
-      if (fault === "head") input.pulls[0]!.head.sha = "a".repeat(40);
-      expect(assessProviderCompletion(input, managedAuthority).result).toBe("incomplete");
-    },
-  );
+  ])("does not waive %s evidence because billing settlement is excluded", (fault) => {
+    const { input, authority: managedAuthority } = managedEvidence();
+    const observation = input.managedSessionObservation;
+    if (fault === "active") observation.state = "present";
+    if (fault === "unknown") observation.state = "unknown";
+    if (fault === "unknown-task") observation.bindings[0]!.taskState = "unknown";
+    if (fault === "active-session") observation.bindings[0]!.sessions[0]!.state = "in_progress";
+    if (fault === "unknown-session") observation.bindings[0]!.sessions[0]!.state = "unknown";
+    if (fault === "duplicate-task")
+      observation.bindings[1]!.taskId = observation.bindings[0]!.taskId;
+    if (fault === "foreign-pull") observation.bindings[0]!.pullDatabaseId = 9999;
+    if (fault === "extra-session")
+      observation.bindings[0]!.sessions.push({ id: "extra", state: "completed" });
+    if (fault === "budget")
+      input.events = input.events.filter((event) => event.event !== "BudgetReserved");
+    if (fault === "validation")
+      input.events = input.events.filter((event) => event.event !== "CapacityReserved");
+    if (fault === "head") input.pulls[0]!.head.sha = "a".repeat(40);
+    expect(assessProviderCompletion(input, managedAuthority).result).toBe("incomplete");
+  });
 
   it("requires separate exact merge proofs and never recovers missing proof from legacy REST fields", () => {
     const value = evidence();

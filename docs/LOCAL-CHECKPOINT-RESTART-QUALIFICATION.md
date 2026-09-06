@@ -42,6 +42,7 @@ env -u GH_TOKEN -u GITHUB_TOKEN -u GH_HOST -u GH_CONFIG_DIR -u XDG_CONFIG_HOME \
   FACTORY_CHECKPOINT_CHECKOUT=/home/example/conformance \
   FACTORY_CHECKPOINT_CONTROLLER_UNIT=clockgrove-factory-EXACT_DERIVED_ID.service \
   FACTORY_CHECKPOINT_NAMESPACE=checkpoint-UNIQUE \
+  FACTORY_CHECKPOINT_MAX_MODEL_TOKENS=250000 \
   FACTORY_CHECKPOINT_EVIDENCE=/home/example/private-evidence/preflight.json \
   node scripts/verify-local-checkpoint-restart.mjs
 ```
@@ -105,8 +106,12 @@ The acknowledgement authorizes only this one-shot sequence:
    remove `merge_commit_sha`; the [GraphQL field](https://docs.github.com/en/graphql/reference/pulls#pullrequest)
    identifies the commit created by the actual merge.
 
-The immutable policy is regular PR delivery, local SDK with local CLI fallback, a 500,000 observed
-model-token ceiling, two attempts per item, and 45 minutes. The qualifier itself requires first
+The immutable policy is regular PR delivery, local SDK with local CLI fallback, an explicitly
+approved per-scenario observed model-token ceiling, two attempts per item, and 45 minutes.
+`FACTORY_CHECKPOINT_MAX_MODEL_TOKENS` is required in preflight and exercise, accepts 250,000–500,000,
+and has no default. The example value is not spending approval. Allocate it within the separately
+accepted aggregate qualification allowance; do not silently reuse that aggregate for each scenario
+or transfer unused allowance from a completed run. The qualifier itself requires first
 attempt success throughout; it grants no replacement attempt or additional allowance. The token
 ceiling is an observed admission ceiling, not a provider-side hard token cap. It must remain
 unexhausted at the checkpoint and terminal proof.

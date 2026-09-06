@@ -1,9 +1,13 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, statSync, symlinkSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   assessLocalFault,
+  assertFaultAuthenticationEnvironment,
+  faultRequest,
+  faultTerminalReady,
+  faultResourceUnits,
   authenticatedFaultEvents,
   boundedPoll,
   createFaultProgress,
@@ -150,16 +154,26 @@ function fixture(scenario: "cancel" | "restart" = "cancel") {
     policyDigest: identity.policyDigest,
     directorEpoch: identity.directorEpoch,
     event: "AttemptReserved",
+    backend: "codex-sdk/local-worktree",
+    at: "2026-09-05T12:00:00Z",
     sequence: 3,
     workItem: 8,
     attempt: 1,
-    localScopeBatch: { identity, commandCount: 1 },
+    localScopeBatch: {
+      identity,
+      commandCount: 1,
+      producerPid: 101,
+      producerStartTicks: "1000",
+      deadline: "2026-09-05T12:10:00Z",
+    },
   };
   const policy = parseRunPolicy(faultPolicy(250000, scenario));
   const events: Record<string, unknown>[] = [
     {
       runId: "fixture",
       event: "FactoryRunStarted",
+      repository: identity.repository,
+      objective: identity.objective,
       sequence: 1,
       policy,
       policyDigest: identity.policyDigest,
@@ -203,7 +217,17 @@ function fixture(scenario: "cancel" | "restart" = "cancel") {
         requestId: "retry",
       },
       { runId: "fixture", event: "RunResumeRequested", sequence: 9, requestId: "resume" },
-      { runId: "fixture", event: "AttemptReserved", sequence: 10, workItem: 8, attempt: 2 },
+      {
+        ...reserved,
+        sequence: 10,
+        attempt: 2,
+        localScopeBatch: {
+          ...reserved.localScopeBatch,
+          producerPid: 102,
+          producerStartTicks: "2000",
+          identity: { ...identity, attempt: 2, producerInvocationId: "e".repeat(32) },
+        },
+      },
       {
         runId: "fixture",
         event: "AttemptStarted",
@@ -241,7 +265,7 @@ function fixture(scenario: "cancel" | "restart" = "cancel") {
       attempt: 2,
       amount: 50,
     });
-  return {
+  const evidence = {
     scenario,
     repository: identity.repository,
     objective: identity.objective,
@@ -276,16 +300,193 @@ function fixture(scenario: "cancel" | "restart" = "cancel") {
       reservationDigest: digest(reserved),
       hostIdentity: identity.hostIdentity,
       scope: { unit: scopeUnit(identity), status: "active" },
-      controller: { invocationId: "old" },
+      controller: { unit: identity.producerUnit, invocationId: identity.producerInvocationId },
     },
     after: {
       hostIdentity: identity.hostIdentity,
       scope: { unit: scopeUnit(identity), status: "absent" },
-      controller: { invocationId: "new", status: "active" },
+      controller: {
+        unit: identity.producerUnit,
+        invocationId: scenario === "restart" ? "e".repeat(32) : identity.producerInvocationId,
+        status: "active",
+      },
     },
   };
+  return {
+    ...evidence,
+    finalScopes: faultResourceUnits(evidence).map((unit) => ({ unit, status: "absent" })),
+  };
 }
+
+function validationRaceFixture() {
+  const evidence = fixture();
+  const capacity = {
+    kind: "capacity",
+    event: "CapacityReserved",
+    runId: identity.runId,
+    objective: identity.objective,
+    workItem: identity.workItem,
+    attempt: identity.attempt,
+    directorEpoch: identity.directorEpoch,
+    policyDigest: identity.policyDigest,
+    phase: "validation",
+    backend: "factory/local-validation",
+    at: "2026-09-05T12:00:01Z",
+    sequence: 5,
+    localScopeBatch: {
+      identity: { ...identity, phase: "validation", invocationDigest: "f".repeat(64) },
+      commandCount: 2,
+      producerPid: 101,
+      producerStartTicks: "1000",
+      deadline: "2026-09-05T12:10:00Z",
+    },
+  };
+  evidence.receipts.push(
+    { event: capacity },
+    {
+      event: { ...capacity, event: "CapacityReconciled", localScopeBatch: undefined, sequence: 8 },
+    },
+  );
+  evidence.finalScopes = faultResourceUnits(evidence).map((unit) => ({ unit, status: "absent" }));
+  return { evidence, capacity };
+}
+
 describe("installed local fault qualification harness", () => {
+  it("requires default local authentication before opt-in work without changing no-opt-in behavior", () => {
+    expect(() => assertFaultAuthenticationEnvironment({})).not.toThrow();
+    for (const key of ["GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "GH_CONFIG_DIR", "XDG_CONFIG_HOME"])
+      for (const value of ["override", ""])
+        expect(() => assertFaultAuthenticationEnvironment({ [key]: value })).toThrow();
+    const result = spawnSync(process.execPath, ["scripts/verify-local-faults.mjs"], {
+      env: { PATH: process.env.PATH, GH_TOKEN: "unused-guard-sentinel" },
+      encoding: "utf8",
+      timeout: 15000,
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("Not exercised");
+    expect(`${result.stdout}${result.stderr}`).not.toContain("unused-guard-sentinel");
+  });
+
+  it("bounds each request with an actual abort signal and never retries uncertain mutation", async () => {
+    const deadline = new AbortController();
+    const timer = vi.spyOn(AbortSignal, "timeout").mockReturnValue(deadline.signal);
+    const request = vi.fn(async (_route: string, parameters: Record<string, unknown>) => {
+      const signal = (parameters.request as { signal: AbortSignal }).signal;
+      return new Promise<never>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    });
+    try {
+      const pending = faultRequest(request, "POST /scoped-fixture", { issue_number: 7 });
+      const rejected = expect(pending).rejects.toThrow("deadline");
+      deadline.abort(new Error("deadline"));
+      await rejected;
+      expect(timer).toHaveBeenCalledWith(15000);
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(request.mock.calls[0]![1].issue_number).toBe(7);
+    } finally {
+      timer.mockRestore();
+    }
+  });
+
+  it("combines caller abort with the request deadline without discarding either", async () => {
+    const deadline = new AbortController();
+    const caller = new AbortController();
+    const timer = vi.spyOn(AbortSignal, "timeout").mockReturnValue(deadline.signal);
+    try {
+      let observed: AbortSignal | undefined;
+      await faultRequest(
+        async (_route, parameters) => {
+          observed = (parameters.request as { signal: AbortSignal }).signal;
+        },
+        "GET /scoped-fixture",
+        {},
+        caller.signal,
+      );
+      expect(observed?.aborted).toBe(false);
+      caller.abort();
+      expect(observed?.aborted).toBe(true);
+      expect(deadline.signal.aborted).toBe(false);
+    } finally {
+      timer.mockRestore();
+    }
+  });
+
+  it("waits for coherent terminal receipts and status rather than assessing a one-sided read", () => {
+    const evidence = fixture();
+    expect(faultTerminalReady(evidence)).toBe(true);
+    const stale = structuredClone(evidence);
+    stale.status.run.state = "active";
+    stale.status.summary.outcome = "active";
+    expect(faultTerminalReady(stale)).toBe(false);
+    const missing = structuredClone(evidence);
+    missing.receipts = missing.receipts.filter(
+      ({ event }) => event.event !== "FactoryRunCancelled",
+    );
+    expect(faultTerminalReady(missing)).toBe(false);
+    for (const field of ["run", "summary"] as const) {
+      const foreign = structuredClone(evidence);
+      foreign.status[field].runId = "foreign";
+      expect(() => faultTerminalReady(foreign)).toThrow();
+    }
+    const conflict = structuredClone(evidence);
+    conflict.status.run.state = "completed";
+    expect(() => faultTerminalReady(conflict)).toThrow(/conflicts/);
+  });
+
+  it("requires every reserved validation slot even when cancellation races with validation setup", () => {
+    const { evidence, capacity } = validationRaceFixture();
+    expect(faultResourceUnits(evidence)).toEqual(
+      [
+        scopeUnit(identity),
+        scopeUnit(capacity.localScopeBatch.identity),
+        scopeUnit({ ...capacity.localScopeBatch.identity, commandIndex: 1 }),
+      ].sort(),
+    );
+    expect(assessLocalFault(evidence).result).toBe("passed");
+    evidence.finalScopes.pop();
+    expect(assessLocalFault(evidence).blockers).toContain("all-reserved-resource-absence-unproven");
+  });
+
+  it.each([
+    "missing-batch",
+    "wrong-run",
+    "wrong-work",
+    "foreign-generation",
+    "changed-birth",
+    "expired",
+    "zero-slots",
+    "unknown",
+    "active",
+  ])(
+    "rejects %s resource evidence rather than proving cleanup from the captured worker alone",
+    (fault) => {
+      const { evidence, capacity } = validationRaceFixture();
+      if (fault === "missing-batch")
+        evidence.receipts.find(({ event }) => event === capacity)!.event.localScopeBatch =
+          undefined;
+      if (fault === "wrong-run") capacity.localScopeBatch.identity.runId = "foreign";
+      if (fault === "wrong-work") capacity.localScopeBatch.identity.workItem += 1;
+      if (fault === "foreign-generation")
+        capacity.localScopeBatch.identity.producerInvocationId = "a".repeat(32);
+      if (fault === "changed-birth") capacity.localScopeBatch.producerStartTicks = "9999";
+      if (fault === "expired") capacity.localScopeBatch.deadline = capacity.at;
+      if (fault === "zero-slots") capacity.localScopeBatch.commandCount = 0;
+      if (fault === "unknown" || fault === "active") evidence.finalScopes[0]!.status = fault;
+      expect(assessLocalFault(evidence).blockers).toContain(
+        "all-reserved-resource-absence-unproven",
+      );
+    },
+  );
+
+  it("keeps interrupted worker usage unavailable even after every reserved scope is absent", () => {
+    const { evidence } = validationRaceFixture();
+    evidence.receipts = evidence.receipts.filter(({ event }) => event.unit !== "model_tokens");
+    const result = assessLocalFault(evidence);
+    expect(result.result).toBe("incomplete");
+    expect(result.blockers).toContain("worker-model-usage-unavailable");
+    expect(result.blockers).not.toContain("all-reserved-resource-absence-unproven");
+  });
   it("keeps private evidence bounded, owned, nonsymlinked, and correctly truncated", () => {
     const directory = mkdtempSync("/tmp/factory-fault-harness-test-");
     try {
@@ -546,7 +747,7 @@ describe("installed local fault qualification harness", () => {
   );
   it("does not qualify restart from unchanged controller generation or missing pause/resume", () => {
     const evidence = fixture("restart");
-    evidence.after.controller.invocationId = "old";
+    evidence.after.controller.invocationId = evidence.before.controller.invocationId;
     evidence.receipts = evidence.receipts.filter(
       ({ event }) => event.event !== "RunPauseRequested",
     );

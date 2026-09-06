@@ -46,6 +46,17 @@ These are settled. Do not relitigate them.
   instructions, run them against the published artifact before claiming they work.
 - **Work on a branch and open a pull request.** Do not push directly to `main`. Single, deliberate
   pushes, never bursts, and confirm what landed with `git fetch origin main` plus a SHA comparison.
+- **Standing Factory merge authority.** The user authorizes agents to merge capability PRs in
+  `clockgrove/factory` after their applicable acceptance, review, and checks are satisfied; do not
+  ask for routine merge confirmation. Handle dependency-correct stack retargeting automatically
+  after parent merges, preserving the intended changes and reviewing the resulting base/head.
+  Merge only the exact reviewed head, respect required checks and branch protection, and never use
+  administrator privileges or bypasses. Fetch `origin/main` afterward and verify the recorded merge
+  commit and intended tree actually arrived before reporting completion or closing issues whose
+  acceptance is satisfied. Retain proportional verification: reuse evidence for an identical
+  validated tree rather than rerunning the full suite merely because a merge changes commit IDs;
+  changed integration content still requires applicable checks. This authority covers only Factory
+  repository PR delivery, not other repositories, provider spending, or package publication.
 - **Exercise Factory through the installed plugin**, not a hand-written MCP config pointing at a
   local worktree and not hand-copied skills. A local bundle tests something no adopter will ever run,
   and a worktree can change underneath a live run. This rule governs installed-product qualification,
@@ -73,6 +84,17 @@ These are settled. Do not relitigate them.
   code/testing/external-input classification, an owner, dependencies, and a next deliverable.
   Factory Objective compilation is not required for this contributor backlog. Keep the completion
   board as a concise linked summary, not a second backlog. A bounded pilot waives no release gate.
+- **Classify every development issue and subissue with one primary work-type label.** Use
+  `work:code` for implementing or fixing product/tooling code (including qualification-runner bugs),
+  `work:test` for executing existing tests/live qualification and collecting evidence,
+  `work:release` for distribution/publication execution, `work:follow-up` for deferred external
+  provider follow-up, and `work:tracking` for umbrella coordination. Preserve structural and other
+  existing labels; use `bug` additionally for concrete defects. Classify by the actual deliverable,
+  not the file's location or the issue's open/closed state, and retain the classification on closure.
+  Apply the convention to subissues as well as top-level issues. Split concrete defects discovered
+  during qualification into linked `work:code` issues; keep the qualification issue open until its
+  acceptance passes. Never classify unfinished implementation as testing or follow-up to hide it.
+  These are contributor work types, not Factory runtime status, priority, or execution authority.
 
 ## Capability-sized delivery
 

@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "kind": "installed-accounted-checkpoint-restart-component",
+  "result": "passed",
+  "sourceCommit": "d61c43640da81ed454326ff9c34e7618b03d0583",
+  "mainDeliveryCommit": "12d45ccb8108b201b8a06870ed7764b1ea0f6235",
+  "mainDeliveryTreeEqualsSource": true,
+  "harness": { "path": "scripts/verify-local-checkpoint-restart.mjs", "sha256": "0e9312db4c0d19c141f531f6f313b7d97b43b0dc843511d3867116016f7fbca7" },
+  "installation": {
+    "packageSha256": "373521aba78725b0ec748b520af136f91dca02d5af3236da4fddae39154a9511",
+    "packageFiles": 92,
+    "packageBytes": 3001159,
+    "manifestVersion": "2.0.26+codex.20260906021442",
+    "allCanonicalFilesMatched": true,
+    "onlyPermittedDifference": "Codex manifest cachebuster",
+    "inventorySha256": "320a236c978f23008f87b994832dffab00da6d5967589105a2440b180a17fdfb",
+    "cliSha256": "277ee16ab32e96215aa150842aea2af47cdbc425d59c2a8e1ca4608c7d97ffe2",
+    "mcpSha256": "9e5574711c99d70666588c6d23dd0668549522698eb34badb2c2b1b6c43e06a2"
+  },
+  "authorization": { "aggregateModelTokens": 500000, "scenarioAdmissionThreshold": 300000, "cloudProviderSpend": false, "clockgroveActivation": false },
+  "observed": {
+    "sameOriginalRunCompleted": true,
+    "checkpointIntegratedItems": 1,
+    "checkpointKnownModelTokens": 74115,
+    "finalIntegratedItems": 3,
+    "finalKnownModelTokens": 206543,
+    "reconciledModelCalls": 7,
+    "newControllerInvocationVerified": true,
+    "noRepeatedPreCheckpointWorkOrAccounting": true,
+    "checkpointScopeAbsenceObservations": 3,
+    "finalScopeAbsenceObservations": 9,
+    "allObservedScopesAbsent": true,
+    "exactMergedPullRequestProofs": 3,
+    "controllerStopped": true,
+    "controllerMainPid": 0,
+    "deliberateControllerRestarts": 1,
+    "systemdAutomaticRestarts": 0,
+    "independentFreshCloneTests": "passed",
+    "independentBehaviorAssertions": "passed"
+  },
+  "aggregateAllowanceRemaining": 293457,
+  "privateEvidence": [
+    { "role": "exact-installation", "sha256": "2b3b373828304f559eccdd2ed0fb0bb3d128d1b84480690001cd0afe3a6c54cb" },
+    { "role": "original-read-only-preflight-failure", "sha256": "d242146ecd5b1c3c1bef21b95d305a2ff7261eb88b88c0e4ceb55edd46a63e76" },
+    { "role": "synchronized-read-only-preflight", "sha256": "daf4077f3f2ba73aa95546d8d6ebe1e438870ec1a3d97fa4647022c56d942c3f" },
+    { "role": "original-exercise", "sha256": "eb50370b30f16a67b5f844c178e79208bc3aee60d7f400306ad98e08680d1c4a" },
+    { "role": "independent-delivered-artifact", "sha256": "d1bbbde28e80e45e0a8b4faf6af46760d935e0de76dd1a2d6acd9c567a8d8d23" }
+  ],
+  "originalFailure": "The first read-only preflight rejected a clean disposable checkout behind the current default branch. No lifecycle action or model execution occurred. A verified fast-forward resolved the precondition; the original failed evidence was retained, not relabelled.",
+  "scope": "Installed Windows WSL2 orderly same-run restart at an accounted checkpoint, through the supported local SDK path, with exact fresh-artifact verification. This does not prove abrupt active cancellation, genuine SDK-to-CLI fallback, pressure/fairness/races, other hosts, native stacks, provider integrations, pilot activation, publication or complete release qualification. Private repository, actor, process and resource identities are retained privately, not published.",
+  "identityBoundary": "The live scenario used the exact recorded installed candidate throughout. Subsequent contributor-guidance and evidence documentation do not turn this record into qualification of changed runtime bytes. No unrelated full local suite was repeated."
+}

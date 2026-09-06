@@ -11,6 +11,16 @@ the [delivery plan](DELIVERY-PLAN.md) retains the accepted waves.
 
 ## Proven on this branch
 
+The [installed accounted-checkpoint restart](release-evidence/accounted-checkpoint-restart-component-2026-09-06.json)
+passed on exact candidate `d61c436`, delivered unchanged to `main` through #95. The original run
+paused after one fully accounted integration, restarted into a verified new controller incarnation,
+and completed all three Work Items without repeated pre-checkpoint work. All seven model calls were
+known and reconciled: 206,543 tokens of the newly approved 500,000 aggregate allowance. Exact scope
+absence, merged PR identities, fresh-clone behavior and the normally stopped controller were verified.
+This closes only the orderly checkpoint-restart component of #75; cancellation, genuine fallback,
+remaining fault cases and all other broad release gates remain open. The first read-only preflight
+failure and exact new installation identity remain separately recorded.
+
 The [quota-safe completion candidate and retained successor](release-evidence/quota-safe-successor-completion-component-2026-09-05.json)
 passed at the explicitly recorded boundaries: `4e06b13` passed full integrated checks and matching
 89-file Linux plugin installation; the same already-delivered successor then completed through the

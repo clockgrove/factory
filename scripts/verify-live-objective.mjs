@@ -797,40 +797,20 @@ export function assertQualificationCompletion(
   );
   const attemptStarts = events.filter((event) => event.event === "AttemptStarted");
   const attemptSuccesses = events.filter((event) => event.event === "AttemptSucceeded");
-  if (selectedMode === "regular-prs") {
-    const admissions = events.filter((event) =>
-      ["AttemptReserved", "AttemptStarted"].includes(event.event),
-    );
-    const seen = new Set();
-    for (const admission of admissions) {
-      for (const prior of seen)
-        if (prior !== admission.workItem)
-          assert.ok(
-            events.some(
-              (event) =>
-                event.event === "AttemptIntegrated" &&
-                event.workItem === prior &&
-                event.sequence < admission.sequence,
-            ),
-            "regular Work Item admitted before previous pipeline integrated",
-          );
-      seen.add(admission.workItem);
-    }
-  } else
-    for (const root of roots) {
-      const start = attemptStarts.find((event) => event.workItem === root.workItem);
-      assert.ok(start, `root Work Item #${root.workItem} did not start`);
-      assert.ok(
-        roots
-          .filter((other) => other.workItem !== root.workItem)
-          .every((other) =>
-            attemptSuccesses.some(
-              (success) => success.workItem === other.workItem && success.sequence > start.sequence,
-            ),
+  for (const root of roots) {
+    const start = attemptStarts.find((event) => event.workItem === root.workItem);
+    assert.ok(start, `root Work Item #${root.workItem} did not start`);
+    assert.ok(
+      roots
+        .filter((other) => other.workItem !== root.workItem)
+        .every((other) =>
+          attemptSuccesses.some(
+            (success) => success.workItem === other.workItem && success.sequence > start.sequence,
           ),
-        "independent sibling attempt lifecycles did not overlap",
-      );
-    }
+        ),
+      "independent sibling attempt lifecycles did not overlap",
+    );
+  }
 
   const modelReceipts = events.filter(
     (event) => event.event === "BudgetReconciled" && event.unit === "model_tokens",
@@ -1080,6 +1060,7 @@ export async function main(qualification = {}) {
     }),
     observedAt: new Date().toISOString(),
     repository,
+    defaultBranch: info.default_branch,
     qualificationNamespace: namespace,
     fixturePaths,
     base,

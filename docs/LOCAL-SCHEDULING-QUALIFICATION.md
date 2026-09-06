@@ -7,8 +7,8 @@ It does not change the CPU/priority/outer-lease scenario below or relabel its ev
 `scripts/verify-local-scheduling.mjs` is an explicitly authorized, one-shot installed
 regular-PR scheduling exercise. It has deterministic tests, **not a live pass**.
 It reuses the namespaced clamp/slugify/two-parent-join Objective, its exact installed
-artifact checks, authenticated receipts, original local-only policy, complete-pipeline
-serialization, independent validation, immutable PR/merge checks, and fresh merged tests.
+artifact checks, authenticated receipts, original local-only policy, overlapping independent
+pipelines, serialized exact-candidate integration, immutable PR/merge checks, and fresh merged tests.
 
 The additional scope is deliberately narrow:
 
@@ -30,8 +30,8 @@ The additional scope is deliberately narrow:
 - After those observations, the harness rechecks zero admissions and changes only
   the captured primary service's cap to `CPUQuota=400%` (4 CPUs). Every reservation
   must follow that barrier and record a fresh 4-CPU resource measurement. The
-  original two-worker/two-attempt policy is unchanged. Regular delivery still
-  serializes complete Work Item pipelines through integration.
+  original two-worker/two-attempt policy is unchanged. Regular delivery must demonstrate root
+  overlap while merges retain exact candidate validation and serialization.
 
 ## Explicit invocation
 

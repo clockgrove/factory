@@ -474,6 +474,8 @@ never activate a terminal run. An exact-commit PR association only discovers can
 authenticated explicit activation/recovery, a shared observed controller generation, immutable
 graph/projection, reservation, original acceptance/accounting, and actual exact squash/candidate
 proof establish permissible ancestry. Unrelated trunk changes remain a hard stop.
+Discovery uses GitHub's documented [Issue parent relationship](https://docs.github.com/en/graphql/reference/issues#issue)
+for closing-issue hints; those mutable hints never replace the immutable integration proof.
 
 Compilation reads a separate exact Git-object tree and index, not the controller's mutable checkout.
 Preparation runs no checkout hooks or filters; verified locally available LFS objects are hydrated

@@ -16,6 +16,7 @@ import {
   qualificationNamespace,
 } from "./verify-live-objective.mjs";
 import { assertRegularCompletion, observeRegularCommits } from "./verify-regular-objective.mjs";
+import { observeNativeMergeProofs } from "./qualification-sibling-refresh-proof.mjs";
 import {
   authenticatedFaultEvents,
   parseUnitObservation,
@@ -881,6 +882,8 @@ export function createSchedulingQualification(authority, env = process.env, port
       proof.released = await changeSchedulingService(primary, "release-cpu", port);
       hooks.save();
     }),
+    observeMergeProofs: (hooks) => observeNativeMergeProofs({ ...hooks,
+      request: (route, parameters) => schedulingRequest(hooks, route, parameters) }),
     afterRun: safe(async (hooks) => {
       await observeRegularCommits({
         ...hooks,

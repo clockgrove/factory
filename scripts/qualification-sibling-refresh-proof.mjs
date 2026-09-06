@@ -1,4 +1,4 @@
-/** Independent, read-only proof of a fresh native sibling's advanced delivery head. */
+/** Independent, read-only proof of a sibling's advanced delivery head in either delivery mode. */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { deduplicateQualificationReceipts } from "./qualification-receipts.mjs";
@@ -345,7 +345,11 @@ function* prove(evidence, input) {
   };
   const source = { ...sourceCore, digest: hash(JSON.stringify(sourceCore)) };
   assert.equal(publication.exactHeadValidationDigest, source.digest);
-  assert.equal(publication.mode, "native-stacks");
+  const selections = events.filter((event) => event.event === "DeliverySelected");
+  assert.ok(selections.length <= 1, "ambiguous delivery selection");
+  const selected = selections[0]?.selected ?? (start.policy.delivery.mode === "regular-prs" ? "regular-prs" : "native-stacks");
+  assert.ok(["native-stacks", "regular-prs"].includes(selected));
+  assert.equal(publication.mode, selected, "sibling proof escaped selected delivery mode");
   const branch = `factory/objective-${publication.objective}/work-item-${publication.workItem}/attempt-${publication.attempt}`;
   assert.equal(publication.branch, branch);
   assert.equal(
@@ -492,7 +496,7 @@ function* prove(evidence, input) {
   assert.equal(pull.head.ref, branch);
   assert.equal(pull.head.repo.full_name, repository);
   assert.equal(pull.base.repo.full_name, repository);
-  assert.equal(pull.base.ref, evidence.nativeDefaultBranch);
+  assert.equal(pull.base.ref, evidence.nativeDefaultBranch ?? evidence.preflight?.defaultBranch);
   assert.equal(pull.state, "closed");
   assert.equal(pull.merged, true);
   const reservationRef = prefix("attempts", publication).slice(0, -1);

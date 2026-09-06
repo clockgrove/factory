@@ -16,10 +16,10 @@ Supervisor alone compiles, schedules, validates, publishes, integrates, and clos
 The shared namespaced fixture has exactly three Work Items: independent `clamp` and
 `slugify` roots, followed by `describe`, which depends on both. The initial policy
 still permits two local workers and two attempts per item, uses the existing SDK/CLI
-backends and frontier-model defaults, and forbids all cloud spending. Regular delivery
-must nevertheless serialize each complete Work Item pipeline: integration of the
-previous item precedes every reservation/start for the next. Merely serializing worker
-execution or choosing regular delivery after requesting native does not pass.
+backends and frontier-model defaults, and forbids all cloud spending. Both independent root
+attempt lifecycles must overlap. Integration remains serialized: changed bases require immutable
+refresh/candidate validation and accepted review checkpoints tied to the exact real squash.
+The join waits for both roots to integrate. Old serial-only evidence does not pass this gate.
 
 ## Operator invocation
 

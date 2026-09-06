@@ -75,8 +75,8 @@ override. Preflight and exercise write distinct exclusive private files; existin
 overwritten. Neither opt-in grants authority on its own. No provider/paid-cloud authority is added.
 
 The original policy allows SDK-first local workers with CLI fallback, two local workers/two attempts
-per item, ten-minute items and a 45-minute Objective. Regular fallback must nevertheless serialize
-each **complete pipeline through integration**, not just worker execution. The initial token
+per item, ten-minute items and a 45-minute Objective. Regular fallback must demonstrate overlapping
+independent root attempts with serialized, exact-candidate revalidated integration. The initial token
 threshold must be 250,000–500,000; it stops later admission, not already-started provider calls.
 Unknown interrupted usage remains unknown. All sandbox/session allowances are zero and cloud
 fallback is disabled. The example threshold is not a new spending authorization or guaranteed cap.
@@ -84,7 +84,7 @@ fallback is disabled. The example threshold is not a new spending authorization 
 ## Completion boundary
 
 The assessor preserves the original native-requested policy, authenticated actor/run/graph and
-delivery selection. It reuses dependency-join completion, full-pipeline serialization, independent
+delivery selection. It reuses dependency-join completion, actual root overlap, independent
 exact-head validation/publication and merge proofs, compilation/worker/review accounting, terminal
 closure and zero reservations. It additionally observes **every reserved local execution and
 validation scope** on the exact host and checks absence after terminal completion. Missing or

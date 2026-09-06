@@ -98,10 +98,9 @@ export function parseSuppliedReplaySnapshots(
         throw new Error(SUPPLIED_REPLAY_ERROR);
       }
       const workItems = new Set(snapshot.input.workItems.map((item) => item.number));
-      const expectedItems = [
-        ...snapshot.expected.admissions,
-        ...snapshot.expected.queued,
-      ].map((item) => item.workItem);
+      const expectedItems = [...snapshot.expected.admissions, ...snapshot.expected.queued].map(
+        (item) => item.workItem,
+      );
       if (
         new Set(expectedItems).size !== expectedItems.length ||
         expectedItems.some((number) => !workItems.has(number))

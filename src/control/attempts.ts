@@ -309,7 +309,9 @@ export class AttemptManager {
       ...(args.providerResourceId ? { providerResourceId: args.providerResourceId } : {}),
       ...(args.resourceHostIdentity ? { resourceHostIdentity: args.resourceHostIdentity } : {}),
       ...(args.sourceArchiveDigest ? { sourceArchiveDigest: args.sourceArchiveDigest } : {}),
-      ...(args.sourceArchiveBytes === undefined ? {} : { sourceArchiveBytes: args.sourceArchiveBytes }),
+      ...(args.sourceArchiveBytes === undefined
+        ? {}
+        : { sourceArchiveBytes: args.sourceArchiveBytes }),
       ...(args.environmentIdentity ? { environmentIdentity: args.environmentIdentity } : {}),
       ...(args.artifactDigest ? { artifactDigest: args.artifactDigest } : {}),
       ...(args.headSha ? { headSha: args.headSha } : {}),

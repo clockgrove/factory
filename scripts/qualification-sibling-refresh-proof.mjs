@@ -73,7 +73,11 @@ function commit(value, oid) {
 export function assertQualificationCheckpoint(value, request, target) {
   assert.equal(value.ref, request.ref);
   const head = commit(value.commit, value.commit.oid);
-  assert.deepEqual(head.parentOids, Array.isArray(target) ? target : [target], "checkpoint target parent differs");
+  assert.deepEqual(
+    head.parentOids,
+    Array.isArray(target) ? target : [target],
+    "checkpoint target parent differs",
+  );
   assert.equal(value.observedRefOid, head.oid, "checkpoint ref changed during observation");
   sha(value.blobOid);
   assert.ok(
@@ -348,7 +352,9 @@ function* prove(evidence, input) {
   assert.equal(publication.exactHeadValidationDigest, source.digest);
   const selections = events.filter((event) => event.event === "DeliverySelected");
   assert.ok(selections.length <= 1, "ambiguous delivery selection");
-  const selected = selections[0]?.selected ?? (start.policy.delivery.mode === "regular-prs" ? "regular-prs" : "native-stacks");
+  const selected =
+    selections[0]?.selected ??
+    (start.policy.delivery.mode === "regular-prs" ? "regular-prs" : "native-stacks");
   assert.ok(["native-stacks", "regular-prs"].includes(selected));
   assert.equal(publication.mode, selected, "sibling proof escaped selected delivery mode");
   const branch = `factory/objective-${publication.objective}/work-item-${publication.workItem}/attempt-${publication.attempt}`;
@@ -472,32 +478,38 @@ function* prove(evidence, input) {
     originalReview.usage.inputTokens + originalReview.usage.outputTokens,
   );
   assert.ok(originalUsage.sequence < publication.sequence);
-  if (selected === "native-stacks") assert.ok(
-    events.some(
-      (event) =>
-        event.event === "StackLinked" &&
-        sameAttempt(event, publication) &&
-        [
-          "unitId",
-          "itemId",
-          "branch",
-          "baseBranch",
-          "headSha",
-          "baseSha",
-          "pullRequest",
-          "validationDigest",
-          "exactHeadValidationDigest",
-        ].every((key) => event[key] === publication[key]) &&
-        Number.isSafeInteger(event.stackNumber) &&
-        event.stackNumber > 0,
-    ),
-    "original native stack linkage is missing",
-  );
+  if (selected === "native-stacks")
+    assert.ok(
+      events.some(
+        (event) =>
+          event.event === "StackLinked" &&
+          sameAttempt(event, publication) &&
+          [
+            "unitId",
+            "itemId",
+            "branch",
+            "baseBranch",
+            "headSha",
+            "baseSha",
+            "pullRequest",
+            "validationDigest",
+            "exactHeadValidationDigest",
+          ].every((key) => event[key] === publication[key]) &&
+          Number.isSafeInteger(event.stackNumber) &&
+          event.stackNumber > 0,
+      ),
+      "original native stack linkage is missing",
+    );
   else {
-    assert.ok(!events.some((event) => event.event === "StackLinked" && sameAttempt(event, publication)),
-      "regular publication has native stack linkage");
+    assert.ok(
+      !events.some((event) => event.event === "StackLinked" && sameAttempt(event, publication)),
+      "regular publication has native stack linkage",
+    );
     assert.equal(publication.position, 0, "regular publication has native position");
-    assert.ok(!publication.stackNumber && !publication.parentItemId, "regular publication has native topology");
+    assert.ok(
+      !publication.stackNumber && !publication.parentItemId,
+      "regular publication has native topology",
+    );
   }
   assert.equal(pull.number, publication.pullRequest);
   assert.equal(pull.head.ref, branch);
@@ -876,7 +888,8 @@ export function nativeProofReader(request) {
     assert.ok(
       /^refs\/clockgrove-factory\/[a-z-]+\/objective-[1-9][0-9]*\/work-item-[1-9][0-9]*\/attempt-[1-9][0-9]*(?:\/[a-z-]+[a-f0-9]{64})?$/.test(
         ref,
-      ) || /^refs\/clockgrove-factory\/graphs\/objective-[1-9][0-9]*\/run-[a-f0-9]{32}$/.test(ref) ||
+      ) ||
+        /^refs\/clockgrove-factory\/graphs\/objective-[1-9][0-9]*\/run-[a-f0-9]{32}$/.test(ref) ||
         /^refs\/clockgrove-factory\/sessions\/[a-f0-9]{64}\/(prepared|turn|terminal)$/.test(ref) ||
         /^refs\/clockgrove-factory\/artifact-transfers\/[a-f0-9]{64}\/(intent|ready)$/.test(ref),
     );
@@ -891,9 +904,14 @@ export function nativeProofReader(request) {
     if (demand.kind === "ref") return readRef(demand.ref);
     assert.equal(demand.kind, "checkpoint");
     assert.ok(
-      demand.path === "artifact-transfer.json" || ["sibling-refresh", "merge-candidate", "semantic-review", "compiled-objective", "app-server-session"].some(
-        (name) => demand.path === `.clockgrove-factory/control/${name}.json`,
-      ),
+      demand.path === "artifact-transfer.json" ||
+        [
+          "sibling-refresh",
+          "merge-candidate",
+          "semantic-review",
+          "compiled-objective",
+          "app-server-session",
+        ].some((name) => demand.path === `.clockgrove-factory/control/${name}.json`),
     );
     const head = await readCommit(await readRef(demand.ref));
     let tree = head.treeOid;

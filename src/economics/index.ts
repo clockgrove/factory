@@ -181,7 +181,14 @@ export function nativeUnitLedgers(
       unit,
       reserved,
       reconciled,
-      ...(entries.some((entry) => entry.conservative) ? { conservativeReconciled: entries.reduce((sum, entry) => sum + (entry.conservative ? entry.reconciled ?? 0 : 0), 0) } : {}),
+      ...(entries.some((entry) => entry.conservative)
+        ? {
+            conservativeReconciled: entries.reduce(
+              (sum, entry) => sum + (entry.conservative ? (entry.reconciled ?? 0) : 0),
+              0,
+            ),
+          }
+        : {}),
       outstanding: Math.max(0, committed - reconciled),
       ...counts.get(unit)!,
     };
@@ -189,7 +196,12 @@ export function nativeUnitLedgers(
 }
 
 function observedUsage(ledger: NativeUnitLedger): EvidenceMetric<number> {
-  if (ledger.conservativeReconciled) return { availability: "unavailable", reason: "includes conservative original-reservation charges, not measured elapsed usage; see native ledger" };
+  if (ledger.conservativeReconciled)
+    return {
+      availability: "unavailable",
+      reason:
+        "includes conservative original-reservation charges, not measured elapsed usage; see native ledger",
+    };
   return ledger.reconciliations > 0
     ? {
         availability: "observed",
@@ -543,7 +555,12 @@ export function summarizeRun(
       policy: effectivePolicy,
       runId: receiptSet.runId,
     }),
-    runtime: summarizeRuntimeEconomics(runEvents, receiptSet.runId, receiptSet.start.at, terminal?.at),
+    runtime: summarizeRuntimeEconomics(
+      runEvents,
+      receiptSet.runId,
+      receiptSet.start.at,
+      terminal?.at,
+    ),
     evidence: {
       eventCount: runEvents.length,
       firstSequence: runEvents[0]?.sequence ?? receiptSet.start.sequence,

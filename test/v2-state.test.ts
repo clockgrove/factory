@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { attemptCount, deriveState, queuedSince, queuedState, type DerivedWorkItem } from "../src/state.js";
+import {
+  attemptCount,
+  deriveState,
+  queuedSince,
+  queuedState,
+  type DerivedWorkItem,
+} from "../src/state.js";
 import type { FactoryEvent } from "../src/protocol/events.js";
 import type { LinkedPullRequest, WorkItemSnapshot } from "../src/types.js";
 
@@ -76,10 +82,26 @@ function queued(sequence: number, at: string): Extract<FactoryEvent, { kind: "sc
 
 describe("provider-neutral v2 state", () => {
   it("reconstructs original waiting age and latest reason independently after restart", () => {
-    const first = { ...queued(2, "2026-09-03T00:01:00.000Z"), reasonCode: "local-capacity" as const };
-    const pressure = { ...queued(3, "2026-09-03T00:02:00.000Z"), reasonCode: "local-pressure" as const };
-    const cooldown = { ...queued(4, "2026-09-03T00:03:00.000Z"), reasonCode: "local-cooldown" as const };
-    const restarted = derivedItem({ factoryEvents: [cooldown, first, pressure, { ...queued(9, NOW.toISOString()), runId: "other-run" }] });
+    const first = {
+      ...queued(2, "2026-09-03T00:01:00.000Z"),
+      reasonCode: "local-capacity" as const,
+    };
+    const pressure = {
+      ...queued(3, "2026-09-03T00:02:00.000Z"),
+      reasonCode: "local-pressure" as const,
+    };
+    const cooldown = {
+      ...queued(4, "2026-09-03T00:03:00.000Z"),
+      reasonCode: "local-cooldown" as const,
+    };
+    const restarted = derivedItem({
+      factoryEvents: [
+        cooldown,
+        first,
+        pressure,
+        { ...queued(9, NOW.toISOString()), runId: "other-run" },
+      ],
+    });
     expect(queuedSince(restarted, "run-1")).toBe(first.at);
     expect(queuedState(restarted, "run-1")?.latest).toEqual(cooldown);
     expect(restarted.attempts).toBe(0);
@@ -92,10 +114,15 @@ describe("provider-neutral v2 state", () => {
     const latest = queued(6, "2026-09-03T00:05:00.000Z");
     const events = [original, attempt("AttemptReserved", { sequence: 3 }), next, latest];
     expect(queuedSince(derivedItem({ factoryEvents: events }), "run-1")).toBe(next.at);
-    expect(queuedSince(derivedItem({
-      factoryEvents: [original, next, latest],
-      blockedBy: [{ number: 1, closed: true, updatedAt: new Date("2026-09-03T00:03:00.000Z") }],
-    }), "run-1")).toBe(next.at);
+    expect(
+      queuedSince(
+        derivedItem({
+          factoryEvents: [original, next, latest],
+          blockedBy: [{ number: 1, closed: true, updatedAt: new Date("2026-09-03T00:03:00.000Z") }],
+        }),
+        "run-1",
+      ),
+    ).toBe(next.at);
   });
 
   it("restarts queue delay after a dependency was reopened and closed", () => {

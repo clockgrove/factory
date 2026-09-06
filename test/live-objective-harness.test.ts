@@ -320,18 +320,33 @@ async function regularEvidence(profile = "local-default", fallback = false) {
   const policy = parseRunPolicy(boundedPolicy(fallback ? "stacked-prs" : "regular-prs"));
   if (fallback) policy.delivery!.onUnavailable = "regular-prs";
   if (profile === "codex-cli") policy.backendOrder = ["codex-cli/local-worktree"];
-  const f = await completeSiblingQualificationFixture({ policy, repository: "example/factory-qualification",
-    ...(profile === "fallback-cli" ? { backend: "codex-cli/local-worktree" } : {}) });
+  const f = await completeSiblingQualificationFixture({
+    policy,
+    repository: "example/factory-qualification",
+    ...(profile === "fallback-cli" ? { backend: "codex-cli/local-worktree" } : {}),
+  });
   const generated = f.evidence as ReturnType<typeof evidence> & {
     base: string;
     nativeMergeEvidence: unknown[];
     nativeScopeObservations: unknown[];
     nativeScopeFinalHostIdentity: string;
     nativeDefaultBranch: string;
-    runRequest: { tool: string; arguments: { owner: string; repo: string; objectiveNumber: number; untilTerminal: boolean; policy: typeof policy } };
+    runRequest: {
+      tool: string;
+      arguments: {
+        owner: string;
+        repo: string;
+        objectiveNumber: number;
+        untilTerminal: boolean;
+        policy: typeof policy;
+      };
+    };
   };
-  const shas = new Set(generated.events.filter((event) =>
-    ["PublicationRecorded", "AttemptIntegrated"].includes(event.event)).map((event) => String(event.headSha)));
+  const shas = new Set(
+    generated.events
+      .filter((event) => ["PublicationRecorded", "AttemptIntegrated"].includes(event.event))
+      .map((event) => String(event.headSha)),
+  );
   return {
     ...generated,
     regularBackendProfile: profile === "fallback-cli" ? "local-default" : profile,
@@ -392,7 +407,9 @@ async function fallbackEvidence() {
   const value = await regularEvidence("local-default", true);
   value.scope = "installed-local-native-unavailable-regular-fallback";
   const capability = await observeNativeFallbackCapability({
-    repository: value.repository, actor: value.actor, request: fallbackTransport(),
+    repository: value.repository,
+    actor: value.actor,
+    request: fallbackTransport(),
   });
   Object.assign(value.preflight.harness, { sourceTreeClean: true });
   Object.assign(value.preflight, { scenario: capability });
@@ -552,7 +569,11 @@ describe("actual native-unavailability regular fallback", () => {
     if (mutation === "missing-overlap")
       value.events.find(
         (event) => event.workItem === 3 && event.event === "AttemptStarted",
-      )!.sequence = Number(value.events.find((event) => event.workItem === 2 && event.event === "AttemptSucceeded")!.sequence) + 1;
+      )!.sequence =
+        Number(
+          value.events.find((event) => event.workItem === 2 && event.event === "AttemptSucceeded")!
+            .sequence,
+        ) + 1;
     if (mutation === "merge") value.mergeProofs.pop();
     expect(() => assertNativeFallbackCompletion(value)).toThrow();
     expect(assessNativeFallbackCompletion(value).result).toBe("incomplete");
@@ -565,8 +586,15 @@ describe("shared versioned REST merge evidence", () => {
     const regular = await regularEvidence();
     for (const value of [native, regular]) {
       expect(value.pulls.every((pull) => !("merge_commit_sha" in pull))).toBe(true);
-      expect(() => assertCompletion(value, undefined, value === regular
-        ? (proof, input) => assertNativeMergeProof(regular, proof, input) : undefined)).not.toThrow();
+      expect(() =>
+        assertCompletion(
+          value,
+          undefined,
+          value === regular
+            ? (proof, input) => assertNativeMergeProof(regular, proof, input)
+            : undefined,
+        ),
+      ).not.toThrow();
       value.mergeProofs.pop();
       expect(() => assertCompletion(value)).toThrow(/merge commit proof coverage/);
     }
@@ -607,8 +635,9 @@ describe("explicit installed regular qualification", () => {
     expect(() => assertRegularCompletion(value)).not.toThrow();
     for (const start of value.events.filter((event) => event.event === "AttemptStarted")) {
       const changed = structuredClone(value);
-      changed.events.find((event) => event.sequence === start.sequence && event.workItem === start.workItem)!.backend =
-        "codex-sdk/local-worktree";
+      changed.events.find(
+        (event) => event.sequence === start.sequence && event.workItem === start.workItem,
+      )!.backend = "codex-sdk/local-worktree";
       expect(() => assertRegularCompletion(changed)).toThrow(/backend selection/);
     }
     const relabelled = await regularEvidence();
@@ -655,8 +684,11 @@ describe("explicit installed regular qualification", () => {
     const value = await regularEvidence();
     expect(() => assertRegularCompletion(value)).not.toThrow();
     expect(assessRegularCompletion(value).result).toBe("passed");
-    expect(() => assertQualificationCompletion(value, "stacked-prs", undefined,
-      (proof, input) => assertNativeMergeProof(value, proof, input))).toThrow(/native delivery/);
+    expect(() =>
+      assertQualificationCompletion(value, "stacked-prs", undefined, (proof, input) =>
+        assertNativeMergeProof(value, proof, input),
+      ),
+    ).toThrow(/native delivery/);
     expect(() => assertRegularCompletion(evidence())).toThrow();
   });
   it.each(["AttemptReserved", "AttemptStarted"])(
@@ -689,8 +721,15 @@ describe("explicit installed regular qualification", () => {
   it("rejects a native linkage receipt hidden beside an otherwise regular publication", async () => {
     const value = await regularEvidence();
     const publication = value.events.find((event) => event.event === "PublicationRecorded")!;
-    value.events.push({ ...publication, event: "StackLinked", sequence: publication.sequence + 1, stackNumber: 90 });
-    expect(() => assertRegularCompletion(value)).toThrow(/regular publication has native stack linkage/);
+    value.events.push({
+      ...publication,
+      event: "StackLinked",
+      sequence: publication.sequence + 1,
+      stackNumber: 90,
+    });
+    expect(() => assertRegularCompletion(value)).toThrow(
+      /regular publication has native stack linkage/,
+    );
   });
   it.each(["exactHeadValidationDigest", "validationDigest", "baseSha"])(
     "rejects transplanted publication %s",

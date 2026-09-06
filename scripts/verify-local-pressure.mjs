@@ -527,8 +527,11 @@ export function createPressureQualification(authority, env = process.env, port =
       }
       throw Error("same original Objective did not safely readmit within the bounded observation");
     },
-    observeMergeProofs: (hooks) => observeNativeMergeProofs({ ...hooks,
-      request: (route, parameters) => schedulingRequest(hooks, route, parameters) }),
+    observeMergeProofs: (hooks) =>
+      observeNativeMergeProofs({
+        ...hooks,
+        request: (route, parameters) => schedulingRequest(hooks, route, parameters),
+      }),
     afterRun: async (hooks) => {
       artifacts(hooks.evidence);
       await observeRegularCommits({

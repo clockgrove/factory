@@ -14,18 +14,28 @@ import { GitHubControlStore } from "../src/control/github-store.js";
 import { CodexSdkLocalBackend } from "../src/backends/codex-sdk-local.js";
 import { CodexCliManagementBackend } from "../src/management/codex-cli.js";
 import { MAX_SUPPLIED_REPLAY_BYTES, SUPPLIED_REPLAY_ERROR } from "../src/replay/supplied.js";
-import { replayObjective, suppliedReplaySnapshot, unreproducedReplaySnapshot } from "./fixtures/supplied-replay.js";
+import {
+  replayObjective,
+  suppliedReplaySnapshot,
+  unreproducedReplaySnapshot,
+} from "./fixtures/supplied-replay.js";
 
-const read = vi.spyOn(GitHubReader.prototype, "readObjective").mockImplementation(async () => replayObjective());
-const write = vi.spyOn(GitHubControlStore.prototype, "addIssueComment").mockImplementation(async () => {
-  throw new Error("replay attempted a GitHub write");
-});
+const read = vi
+  .spyOn(GitHubReader.prototype, "readObjective")
+  .mockImplementation(async () => replayObjective());
+const write = vi
+  .spyOn(GitHubControlStore.prototype, "addIssueComment")
+  .mockImplementation(async () => {
+    throw new Error("replay attempted a GitHub write");
+  });
 const launch = vi.spyOn(CodexSdkLocalBackend.prototype, "launch").mockImplementation(async () => {
   throw new Error("replay attempted a worker launch");
 });
-const compile = vi.spyOn(CodexCliManagementBackend.prototype, "compile").mockImplementation(async () => {
-  throw new Error("replay attempted a management call");
-});
+const compile = vi
+  .spyOn(CodexCliManagementBackend.prototype, "compile")
+  .mockImplementation(async () => {
+    throw new Error("replay attempted a management call");
+  });
 
 afterEach(() => {
   expect(write).not.toHaveBeenCalled();
@@ -78,7 +88,10 @@ describe("actual CLI replay dispatch", () => {
     async (kind) => {
       const file = join(directory, `${kind}.json`);
       const secret = `ghp_${"z".repeat(30)}`;
-      await writeFile(file, kind === "oversized" ? " ".repeat(MAX_SUPPLIED_REPLAY_BYTES + 1) : secret);
+      await writeFile(
+        file,
+        kind === "oversized" ? " ".repeat(MAX_SUPPLIED_REPLAY_BYTES + 1) : secret,
+      );
       const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
       const exit = vi.spyOn(process, "exit").mockImplementation(() => {
         throw new Error("test-cli-exit");
@@ -104,7 +117,9 @@ describe("actual MCP replay registration and application dispatch", () => {
   let client: Client;
   beforeAll(async () => {
     // Capture the actual server while suppressing only its process stdio attachment.
-    const connect = vi.spyOn(McpServer.prototype, "connect").mockImplementation(async function (this: McpServer) {
+    const connect = vi.spyOn(McpServer.prototype, "connect").mockImplementation(async function (
+      this: McpServer,
+    ) {
       server = this;
     });
     const stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);

@@ -47,8 +47,17 @@ describe("Supervisor collected artifact durability", () => {
     });
     await expect(f.run()).rejects.toThrow(/artifact transfer recovery/);
     await expect(f.run()).rejects.toThrow(/completion is unknown after dispatch/);
-    expect(f.events().some((event) => event.kind === "run" &&
-      ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(event.event))).toBe(false);
+    expect(
+      f
+        .events()
+        .some(
+          (event) =>
+            event.kind === "run" &&
+            ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(
+              event.event,
+            ),
+        ),
+    ).toBe(false);
     expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);
     await expect(access(retained[0]!.path)).resolves.toBeUndefined();
     expect(
@@ -147,9 +156,13 @@ describe("Supervisor collected artifact durability", () => {
           event.event === "BudgetReserved"
         ),
     );
-    await expect(f.run()).resolves.toMatchObject({ status: "escalated",
-      reason: expect.stringMatching(/existing unspent independent-validation allowance/) });
-    expect(f.events().filter((event) => event.kind === "run" && event.event === "FactoryRunEscalated")).toHaveLength(1);
+    await expect(f.run()).resolves.toMatchObject({
+      status: "escalated",
+      reason: expect.stringMatching(/existing unspent independent-validation allowance/),
+    });
+    expect(
+      f.events().filter((event) => event.kind === "run" && event.event === "FactoryRunEscalated"),
+    ).toHaveLength(1);
     expect(
       f.activity.filter((entry) => entry.operation === "launch" && entry.workItem === 9),
     ).toHaveLength(1);
@@ -174,9 +187,15 @@ describe("Supervisor collected artifact durability", () => {
       amount: 7,
       reportedModelUsage: { inputTokens: 5, outputTokens: 2 },
     });
-    await expect(f.run()).resolves.toMatchObject({ status: "escalated",
-      reason: expect.stringMatching(/conflicting model usage|exact reconciled execution accounting/) });
-    expect(f.events().filter((event) => event.kind === "run" && event.event === "FactoryRunEscalated")).toHaveLength(1);
+    await expect(f.run()).resolves.toMatchObject({
+      status: "escalated",
+      reason: expect.stringMatching(
+        /conflicting model usage|exact reconciled execution accounting/,
+      ),
+    });
+    expect(
+      f.events().filter((event) => event.kind === "run" && event.event === "FactoryRunEscalated"),
+    ).toHaveLength(1);
     expect(
       f.activity.filter((entry) => entry.operation === "launch" && entry.workItem === 8),
     ).toHaveLength(1);
@@ -245,13 +264,16 @@ describe("Supervisor collected artifact durability", () => {
         if (remote) {
           expect(
             f.activity.filter(
-              (entry) => entry.operation === "validate" && entry.workItem === target && !entry.invocation,
+              (entry) =>
+                entry.operation === "validate" && entry.workItem === target && !entry.invocation,
             ),
           ).toHaveLength(1);
           // Integrating the parent legitimately requires a new exact-head rebase
           // validation; it must not replay the original artifact invocation.
-          const candidateValidations = f.activity.filter((entry) =>
-            entry.operation === "validate" && entry.workItem === target && entry.invocation);
+          const candidateValidations = f.activity.filter(
+            (entry) =>
+              entry.operation === "validate" && entry.workItem === target && entry.invocation,
+          );
           expect(candidateValidations).toHaveLength(1);
           expect(new Set(candidateValidations.map((entry) => entry.invocation)).size).toBe(1);
           expect([...f.refs.keys()]).toContain(

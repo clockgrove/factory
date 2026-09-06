@@ -501,10 +501,15 @@ export function ready(o: DerivedObjective): DerivedWorkItem[] {
 }
 
 /** First wait timestamp and latest observation, reconstructed from one ready episode. */
-export function queuedState(item: DerivedWorkItem, runId: string): {
-  since: string;
-  latest: Extract<FactoryEvent, { kind: "scheduling" }>;
-} | undefined {
+export function queuedState(
+  item: DerivedWorkItem,
+  runId: string,
+):
+  | {
+      since: string;
+      latest: Extract<FactoryEvent, { kind: "scheduling" }>;
+    }
+  | undefined {
   const events = (item.factoryEvents ?? [])
     .filter((event) => event.runId === runId && "workItem" in event)
     .sort((left, right) => left.sequence - right.sequence);
@@ -512,17 +517,17 @@ export function queuedState(item: DerivedWorkItem, runId: string): {
     .reverse()
     .find((event) => event.kind === "attempt" && event.event === "AttemptReserved");
   const queued = events.filter(
-      (event): event is Extract<FactoryEvent, { kind: "scheduling" }> =>
-        event.kind === "scheduling" &&
-        event.event === "WorkItemQueued" &&
-        (!latestAdmission || event.sequence > latestAdmission.sequence) &&
-        !item.blockedBy.some(
-          (dependency) =>
-            dependency.closed &&
-            dependency.updatedAt !== undefined &&
-            dependency.updatedAt.getTime() > new Date(event.at).getTime(),
-        ),
-    );
+    (event): event is Extract<FactoryEvent, { kind: "scheduling" }> =>
+      event.kind === "scheduling" &&
+      event.event === "WorkItemQueued" &&
+      (!latestAdmission || event.sequence > latestAdmission.sequence) &&
+      !item.blockedBy.some(
+        (dependency) =>
+          dependency.closed &&
+          dependency.updatedAt !== undefined &&
+          dependency.updatedAt.getTime() > new Date(event.at).getTime(),
+      ),
+  );
   // A dependency reopen/reclose invalidates earlier waiting age. Within the new
   // episode, reason changes must never reset the original fairness/burst clock.
   const first = queued[0];

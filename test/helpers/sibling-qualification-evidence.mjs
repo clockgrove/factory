@@ -4,11 +4,21 @@ import { expect, vi } from "vitest";
 import { createValidationEvidence } from "../../src/validation/evidence.js";
 import { bindValidationToPublishedHead } from "../../src/validation/plan.js";
 import { bindMergeCandidateValidation } from "../../src/publication/merge-candidate.js";
-import { siblingRefreshIdentityDigest, siblingRefreshRef } from "../../src/control/sibling-refreshes.js";
-import { mergeCandidateIdentityDigest, mergeCandidateCheckpointRef } from "../../src/control/merge-candidates.js";
+import {
+  siblingRefreshIdentityDigest,
+  siblingRefreshRef,
+} from "../../src/control/sibling-refreshes.js";
+import {
+  mergeCandidateIdentityDigest,
+  mergeCandidateCheckpointRef,
+} from "../../src/control/merge-candidates.js";
 import { reviewIdentityDigest, reviewCheckpointRef } from "../../src/control/reviews.js";
 import { observeNativeMergeProofs } from "../../scripts/qualification-sibling-refresh-proof.mjs";
-import { boundedPolicy, objectiveBodyFor, qualificationPaths } from "../../scripts/verify-live-objective.mjs";
+import {
+  boundedPolicy,
+  objectiveBodyFor,
+  qualificationPaths,
+} from "../../scripts/verify-live-objective.mjs";
 import { observeNativeScopes } from "../../scripts/qualification-native-scopes.mjs";
 
 // Exact in-memory Git objects/checkpoints for a genuinely overlapping roots + join fixture.
@@ -27,11 +37,18 @@ const canonical = (value) =>
 const time = "2026-09-05T00:00:00Z";
 const hostIdentity = hash("host");
 
-function fixture({ recoveredPublication = false, pinRecovered = false, policy: configuredPolicy, repository: suppliedRepository, backend: configuredBackend } = {}) {
+function fixture({
+  recoveredPublication = false,
+  pinRecovered = false,
+  policy: configuredPolicy,
+  repository: suppliedRepository,
+  backend: configuredBackend,
+} = {}) {
   const repository = suppliedRepository ?? "example/fixture";
   const policy = configuredPolicy ?? boundedPolicy("stacked-prs");
   const localBackend = configuredBackend ?? policy.backendOrder[0];
-  const regular = policy.delivery.mode === "regular-prs" || policy.delivery.onUnavailable === "regular-prs";
+  const regular =
+    policy.delivery.mode === "regular-prs" || policy.delivery.onUnavailable === "regular-prs";
   const policyDigest = hash(canonical(policy));
   const base = sha("base");
   const commits = new Map();
@@ -223,7 +240,16 @@ function fixture({ recoveredPublication = false, pinRecovered = false, policy: c
         evidenceDigest: sourceValidation.digest,
       },
       publication,
-      ...(regular ? [] : [{ ...publication, sequence: number * 100 + 13, event: "StackLinked", stackNumber: number }]),
+      ...(regular
+        ? []
+        : [
+            {
+              ...publication,
+              sequence: number * 100 + 13,
+              event: "StackLinked",
+              stackNumber: number,
+            },
+          ]),
       integration,
     );
     events.push(
@@ -232,7 +258,8 @@ function fixture({ recoveredPublication = false, pinRecovered = false, policy: c
         event: "AttemptStarted",
         backend: localBackend,
         resourceHostIdentity: hostIdentity,
-        providerResourceId: localBackend.startsWith("codex-cli/") ? `local-${1000 + number}`
+        providerResourceId: localBackend.startsWith("codex-cli/")
+          ? `local-${1000 + number}`
           : `sdk-${hash(JSON.stringify(["clockgrove.factory/attempt-v2", repository, "run", 1, number, 1, 1])).slice(0, 24)}`,
       },
       {
@@ -529,7 +556,12 @@ export async function completeSiblingQualificationFixture(options) {
     });
   // Both roots start before either succeeds; immutable reservation proofs remain untouched.
   for (const number of [2, 3, 4]) {
-    add({ event: "AttemptSucceeded", sequence: number === 2 ? 204 : number * 100 + 3, workItem: number, attempt: 1 });
+    add({
+      event: "AttemptSucceeded",
+      sequence: number === 2 ? 204 : number * 100 + 3,
+      workItem: number,
+      attempt: 1,
+    });
     add({
       event: "BudgetReconciled",
       sequence: number * 100 + 18,
@@ -546,9 +578,17 @@ export async function completeSiblingQualificationFixture(options) {
     event: "DeliverySelected",
     sequence: 4,
     requested: start.policy.delivery.mode,
-    selected: start.policy.delivery.mode === "regular-prs" || start.policy.delivery.onUnavailable === "regular-prs" ? "regular-prs" : "native-stacks",
+    selected:
+      start.policy.delivery.mode === "regular-prs" ||
+      start.policy.delivery.onUnavailable === "regular-prs"
+        ? "regular-prs"
+        : "native-stacks",
     capabilityVersion: "2026-03-10",
-    reason: start.policy.delivery.mode === "stacked-prs" && start.policy.delivery.onUnavailable === "regular-prs" ? "repository did not expose GitHub stacks API 2026-03-10" : "explicit regular delivery",
+    reason:
+      start.policy.delivery.mode === "stacked-prs" &&
+      start.policy.delivery.onUnavailable === "regular-prs"
+        ? "repository did not expose GitHub stacks API 2026-03-10"
+        : "explicit regular delivery",
   });
   add({
     event: "BudgetReconciled",

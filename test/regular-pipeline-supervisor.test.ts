@@ -30,13 +30,18 @@ function assertConcurrent(f: Awaited<ReturnType<typeof providerSupervisorFixture
       expect(admission.sequence).toBeLessThan(integrations[0]!.sequence);
     }
   }
-  const join = events.find((event) => event.kind === "attempt" && event.event === "AttemptStarted" && event.workItem === 10)!;
+  const join = events.find(
+    (event) =>
+      event.kind === "attempt" && event.event === "AttemptStarted" && event.workItem === 10,
+  )!;
   for (const integrated of integrations.filter((event) => event.workItem !== 10))
     expect(join.sequence).toBeGreaterThan(integrated.sequence);
   expect(
     f.activity.filter((entry) => entry.operation === "launch").map((entry) => entry.workItem),
   ).toEqual([8, 9, 10]);
-  expect(f.activity.filter((entry) => entry.operation.endsWith("review")).length).toBeGreaterThanOrEqual(3);
+  expect(
+    f.activity.filter((entry) => entry.operation.endsWith("review")).length,
+  ).toBeGreaterThanOrEqual(3);
 }
 
 describe("regular delivery owns the complete Supervisor pipeline", () => {
@@ -202,7 +207,14 @@ describe("regular delivery owns the complete Supervisor pipeline", () => {
         interval: 20,
       });
       expect(publicationWrites).toBe(1);
-      expect(f.events().filter((event) => event.event === "AttemptIntegrated" && "workItem" in event && event.workItem === 8)).toHaveLength(0);
+      expect(
+        f
+          .events()
+          .filter(
+            (event) =>
+              event.event === "AttemptIntegrated" && "workItem" in event && event.workItem === 8,
+          ),
+      ).toHaveLength(0);
       expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(2);
       release.resolve();
       const result = await running;

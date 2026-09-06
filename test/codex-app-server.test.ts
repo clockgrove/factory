@@ -12,11 +12,18 @@ import {
 } from "../src/backends/codex-app-server.js";
 import type { AttemptContext, BackendHandle } from "../src/execution/backend.js";
 import { durableAttemptId } from "../src/execution/session.js";
-import { parseAppServerSessionCheckpoint, type AppServerSessionCheckpoint, type AppServerSessionStage } from "../src/execution/app-server-session.js";
+import {
+  parseAppServerSessionCheckpoint,
+  type AppServerSessionCheckpoint,
+  type AppServerSessionStage,
+} from "../src/execution/app-server-session.js";
 import { workerPacketDigest } from "../src/protocol/worker-packet.js";
 import { readLocalResourceHostIdentity } from "../src/recovery/local-resources.js";
 import { LocalScopeBatchSchema } from "../src/protocol/local-scope.js";
-import { AppServerSessionManager, appServerSessionRef } from "../src/control/app-server-sessions.js";
+import {
+  AppServerSessionManager,
+  appServerSessionRef,
+} from "../src/control/app-server-sessions.js";
 import type { CompiledGraphStore } from "../src/control/graphs.js";
 import type { AttemptReservation } from "../src/control/attempts.js";
 import type { GitCommitObject, LeaseManager, LeaseState } from "../src/control/lease.js";
@@ -65,11 +72,19 @@ class FakeConnection implements AppServerConnection {
 
   async request<T>(method: string, params?: unknown): Promise<T> {
     this.calls.push({ method, params });
-    if (method === "initialize") return { userAgent: `codex_cli_rs/${this.options.version ?? "0.153.0"}` } as T;
+    if (method === "initialize")
+      return { userAgent: `codex_cli_rs/${this.options.version ?? "0.153.0"}` } as T;
     if (method === "thread/start") {
       const input = params as { cwd: string; model?: string };
-      const thread = { id: `thread-${this.name}`, sessionId: `session-${this.name}`, cwd: input.cwd,
-        modelProvider: "openai", model: input.model ?? "gpt-5", cliVersion: "0.153.0", turns: [] };
+      const thread = {
+        id: `thread-${this.name}`,
+        sessionId: `session-${this.name}`,
+        cwd: input.cwd,
+        modelProvider: "openai",
+        model: input.model ?? "gpt-5",
+        cliVersion: "0.153.0",
+        turns: [],
+      };
       storedThreads.set(thread.id, thread);
       return { thread, model: thread.model, approvalPolicy: "never" } as T;
     }
@@ -91,7 +106,10 @@ class FakeConnection implements AppServerConnection {
     }
     if (method === "turn/interrupt" && !this.options.omitInterruptTerminal) {
       const input = params as { threadId: string; turnId: string };
-      this.emit("turn/completed", { threadId: input.threadId, turn: { id: input.turnId, status: "interrupted", items: [] } });
+      this.emit("turn/completed", {
+        threadId: input.threadId,
+        turn: { id: input.turnId, status: "interrupted", items: [] },
+      });
     }
     return {} as T;
   }
@@ -198,21 +216,42 @@ async function context(
   };
   const checkpoints = new Map<AppServerSessionStage, AppServerSessionCheckpoint>();
   value.sessionJournal = {
-    async assertCurrent() {}, async load(stage) { return structuredClone(checkpoints.get(stage) ?? null); },
+    async assertCurrent() {},
+    async load(stage) {
+      return structuredClone(checkpoints.get(stage) ?? null);
+    },
     async persist(checkpoint) {
       const parsed = parseAppServerSessionCheckpoint(checkpoint);
       const prior = checkpoints.get(parsed.stage);
-      if (prior && JSON.stringify(prior) !== JSON.stringify(parsed)) throw new Error("immutable session changed");
+      if (prior && JSON.stringify(prior) !== JSON.stringify(parsed))
+        throw new Error("immutable session changed");
       checkpoints.set(parsed.stage, structuredClone(parsed));
     },
   };
   const stat = await readFile("/proc/self/stat", "utf8");
-  value.localExecutionScope = { assertCurrent: async () => {}, batch: LocalScopeBatchSchema.parse({
-    identity: { protocol: "clockgrove.factory/local-scope-v1", repository: value.repository, runId: value.runId, objective: value.objective, workItem: value.workItem,
-      attempt: value.attempt, directorEpoch: value.directorEpoch, policyDigest: value.policyDigest, phase: "execution", commandIndex: 0,
-      invocationDigest: workerPacketDigest(value.packet), hostIdentity: await readLocalResourceHostIdentity() },
-    commandCount: 1, producerPid: process.pid, producerStartTicks: stat.slice(stat.lastIndexOf(")") + 2).split(/\s+/)[19], deadline: value.deadline.toISOString(),
-  }) };
+  value.localExecutionScope = {
+    assertCurrent: async () => {},
+    batch: LocalScopeBatchSchema.parse({
+      identity: {
+        protocol: "clockgrove.factory/local-scope-v1",
+        repository: value.repository,
+        runId: value.runId,
+        objective: value.objective,
+        workItem: value.workItem,
+        attempt: value.attempt,
+        directorEpoch: value.directorEpoch,
+        policyDigest: value.policyDigest,
+        phase: "execution",
+        commandIndex: 0,
+        invocationDigest: workerPacketDigest(value.packet),
+        hostIdentity: await readLocalResourceHostIdentity(),
+      },
+      commandCount: 1,
+      producerPid: process.pid,
+      producerStartTicks: stat.slice(stat.lastIndexOf(")") + 2).split(/\s+/)[19],
+      deadline: value.deadline.toISOString(),
+    }),
+  };
   return value;
 }
 
@@ -224,10 +263,19 @@ function factory(
   return new CodexAppServerLocalBackend({
     authFile: join(root, "missing-factory-auth"),
     cancellationWaitMs: 5,
-    scopeReadPort: { hostIdentity: readLocalResourceHostIdentity, now: () => new Date(), async read(path) {
-      if (options.liveProducer) return readFile(path, "utf8");
-      throw Object.assign(new Error("absent"), { code: "ENOENT" }); },
-      async show(unit) { return options.presentScope ? `Id=${unit}\nLoadState=loaded\nActiveState=active\nSubState=running\nControlGroup=/owned\nJob=0\n` : `Id=${unit}\nLoadState=not-found\nActiveState=inactive\nSubState=dead\nControlGroup=\nJob=0\n`; } },
+    scopeReadPort: {
+      hostIdentity: readLocalResourceHostIdentity,
+      now: () => new Date(),
+      async read(path) {
+        if (options.liveProducer) return readFile(path, "utf8");
+        throw Object.assign(new Error("absent"), { code: "ENOENT" });
+      },
+      async show(unit) {
+        return options.presentScope
+          ? `Id=${unit}\nLoadState=loaded\nActiveState=active\nSubState=running\nControlGroup=/owned\nJob=0\n`
+          : `Id=${unit}\nLoadState=not-found\nActiveState=inactive\nSubState=dead\nControlGroup=\nJob=0\n`;
+      },
+    },
     resolveCodexHome: (identity) => join(root, durableAttemptId(identity)),
     connect: (home) => {
       const found = connections.get(home);
@@ -245,9 +293,25 @@ function finish(
   final: { outcome: "succeeded" | "failed" | "declined"; summary: string },
 ): void {
   const workerFinal = { ...final, commands: [] };
-  const tokens = { inputTokens: 10, outputTokens: 2, cachedInputTokens: 3, cacheWriteInputTokens: 0, reasoningOutputTokens: 0, totalTokens: 12 };
-  connection.emit("rawResponse/completed", { threadId: handle.resourceId, turnId: handle.metadata!.turnId, responseId: "response-1", usage: tokens });
-  connection.emit("thread/tokenUsage/updated", { threadId: handle.resourceId, turnId: handle.metadata!.turnId, tokenUsage: { total: tokens, last: tokens } });
+  const tokens = {
+    inputTokens: 10,
+    outputTokens: 2,
+    cachedInputTokens: 3,
+    cacheWriteInputTokens: 0,
+    reasoningOutputTokens: 0,
+    totalTokens: 12,
+  };
+  connection.emit("rawResponse/completed", {
+    threadId: handle.resourceId,
+    turnId: handle.metadata!.turnId,
+    responseId: "response-1",
+    usage: tokens,
+  });
+  connection.emit("thread/tokenUsage/updated", {
+    threadId: handle.resourceId,
+    turnId: handle.metadata!.turnId,
+    tokenUsage: { total: tokens, last: tokens },
+  });
   const item = {
     type: "agentMessage",
     id: "message-1",
@@ -420,18 +484,29 @@ describe("Codex App Server local backend", () => {
     const turn = {
       id: handle.metadata!.turnId,
       status: "completed",
-      items: [{ type: "agentMessage", text: JSON.stringify({ outcome: "succeeded", summary: "resumed", commands: [] }) }],
+      items: [
+        {
+          type: "agentMessage",
+          text: JSON.stringify({ outcome: "succeeded", summary: "resumed", commands: [] }),
+        },
+      ],
       error: null,
     };
     await writeFile(join(ctx.workspace, "value.txt"), "resumed\n");
-    finish(firstConnections.get(handle.metadata!.codexHome!)!, handle, { outcome: "succeeded", summary: "resumed" });
+    finish(firstConnections.get(handle.metadata!.codexHome!)!, handle, {
+      outcome: "succeeded",
+      summary: "resumed",
+    });
     await first.observe(handle);
     await first.cleanup(handle);
     const resumedConnections = new Map<string, FakeConnection>();
     // The same parent controller can stay alive after this exact invocation drains.
     const second = factory(root, resumedConnections, { resumeTurns: [turn], liveProducer: true });
     const resumed = await second.resume(ctx, structuredClone(handle));
-    expect(await second.observe(resumed)).toMatchObject({ state: "succeeded", usage: { inputTokens: 10, outputTokens: 2, cachedInputTokens: 3 } });
+    expect(await second.observe(resumed)).toMatchObject({
+      state: "succeeded",
+      usage: { inputTokens: 10, outputTokens: 2, cachedInputTokens: 3 },
+    });
     const connection = resumedConnections.get(resumed.metadata!.codexHome!)!;
     expect(connection.calls.filter((call) => call.method === "thread/read")).toHaveLength(1);
     expect(connection.calls.some((call) => call.method === "thread/resume")).toBe(false);
@@ -463,43 +538,64 @@ describe("Codex App Server local backend", () => {
   });
 
   it("does not invent terminal cancellation or usage from a successful interrupt request", async () => {
-    const root = join(suiteRoot, "interrupt-unknown"), connections = new Map<string, FakeConnection>();
+    const root = join(suiteRoot, "interrupt-unknown"),
+      connections = new Map<string, FakeConnection>();
     const backend = factory(root, connections, { omitInterruptTerminal: true });
-    const ctx = await context(101), handle = await backend.launch(ctx);
+    const ctx = await context(101),
+      handle = await backend.launch(ctx);
     await backend.cancel(handle);
-    expect(await backend.observe(handle)).toMatchObject({ state: "unknown", usage: { inputTokens: null, outputTokens: null } });
+    expect(await backend.observe(handle)).toMatchObject({
+      state: "unknown",
+      usage: { inputTokens: null, outputTokens: null },
+    });
     expect(await ctx.sessionJournal!.load("terminal")).toBeNull();
-    expect(connections.get(handle.metadata!.codexHome!)!.calls.filter((call) => call.method === "turn/interrupt")).toHaveLength(1);
+    expect(
+      connections
+        .get(handle.metadata!.codexHome!)!
+        .calls.filter((call) => call.method === "turn/interrupt"),
+    ).toHaveLength(1);
     await backend.cleanup(handle);
     await expect(access(handle.metadata!.codexHome!)).resolves.toBeUndefined();
   });
 
   it("retains a lost turn-start intent and never automatically sends a second turn", async () => {
-    const root = join(suiteRoot, "lost-dispatch"), connections = new Map<string, FakeConnection>();
+    const root = join(suiteRoot, "lost-dispatch"),
+      connections = new Map<string, FakeConnection>();
     const backend = factory(root, connections, { loseTurnResponse: true });
     const ctx = await context(102);
     await expect(backend.launch(ctx)).rejects.toThrow("dispatch response");
     expect(await ctx.sessionJournal!.load("prepared")).not.toBeNull();
     expect(await ctx.sessionJournal!.load("turn")).toBeNull();
     await expect(backend.launch(ctx)).rejects.toThrow("durable intent");
-    expect([...connections.values()].flatMap((connection) => connection.calls).filter((call) => call.method === "turn/start")).toHaveLength(1);
+    expect(
+      [...connections.values()]
+        .flatMap((connection) => connection.calls)
+        .filter((call) => call.method === "turn/start"),
+    ).toHaveLength(1);
     expect([...connections.values()].every((connection) => connection.closedByClient)).toBe(true);
   });
 
   it("refuses unsupported versions and missing journals before any model turn", async () => {
-    const root = join(suiteRoot, "unsupported"), connections = new Map<string, FakeConnection>();
+    const root = join(suiteRoot, "unsupported"),
+      connections = new Map<string, FakeConnection>();
     const backend = factory(root, connections, { version: "0.152.0" });
     const ctx = await context(103);
     await expect(backend.launch(ctx)).rejects.toThrow(/0\.153\.0|protocol|version/i);
-    expect([...connections.values()].flatMap((connection) => connection.calls).some((call) => call.method === "turn/start")).toBe(false);
+    expect(
+      [...connections.values()]
+        .flatMap((connection) => connection.calls)
+        .some((call) => call.method === "turn/start"),
+    ).toBe(false);
     const { sessionJournal: _journal, ...withoutJournal } = ctx;
     await expect(backend.launch(withoutJournal)).rejects.toThrow("journal");
   });
 
   it("does not treat an absent scope as permission to recover an ambiguous live producer", async () => {
-    const root = join(suiteRoot, "ambiguous-producer"), firstConnections = new Map<string, FakeConnection>();
+    const root = join(suiteRoot, "ambiguous-producer"),
+      firstConnections = new Map<string, FakeConnection>();
     const first = factory(root, firstConnections, { omitInterruptTerminal: true });
-    const ctx = await context(104), handle = await first.launch(ctx);
+    const ctx = await context(104),
+      handle = await first.launch(ctx);
     await first.cancel(handle);
     await first.cleanup(handle);
     const connections = new Map<string, FakeConnection>();
@@ -509,70 +605,206 @@ describe("Codex App Server local backend", () => {
   });
 
   it("requires exact resource absence even when immutable terminal usage exists", async () => {
-    const root = join(suiteRoot, "terminal-live-scope"), firstConnections = new Map<string, FakeConnection>();
+    const root = join(suiteRoot, "terminal-live-scope"),
+      firstConnections = new Map<string, FakeConnection>();
     const first = factory(root, firstConnections);
-    const ctx = await context(105), handle = await first.launch(ctx);
-    finish(firstConnections.get(handle.metadata!.codexHome!)!, handle, { outcome: "succeeded", summary: "done" });
-    await first.observe(handle); await first.cleanup(handle);
+    const ctx = await context(105),
+      handle = await first.launch(ctx);
+    finish(firstConnections.get(handle.metadata!.codexHome!)!, handle, {
+      outcome: "succeeded",
+      summary: "done",
+    });
+    await first.observe(handle);
+    await first.cleanup(handle);
     const connections = new Map<string, FakeConnection>();
-    await expect(factory(root, connections, { presentScope: true }).resume(ctx, handle)).rejects.toThrow("not independently absent");
+    await expect(
+      factory(root, connections, { presentScope: true }).resume(ctx, handle),
+    ).rejects.toThrow("not independently absent");
     expect(connections.size).toBe(0);
   });
 
   it("refuses cold same-thread repair before a new model invocation instead of dropping accounting", async () => {
-    const root = join(suiteRoot, "cold-repair"), connections = new Map<string, FakeConnection>();
-    const first = factory(root, connections), ctx = await context(107), handle = await first.launch(ctx);
-    finish(connections.get(handle.metadata!.codexHome!)!, handle, { outcome: "succeeded", summary: "first" });
-    await first.observe(handle); await first.cleanup(handle);
+    const root = join(suiteRoot, "cold-repair"),
+      connections = new Map<string, FakeConnection>();
+    const first = factory(root, connections),
+      ctx = await context(107),
+      handle = await first.launch(ctx);
+    finish(connections.get(handle.metadata!.codexHome!)!, handle, {
+      outcome: "succeeded",
+      summary: "first",
+    });
+    await first.observe(handle);
+    await first.cleanup(handle);
     const terminal = (await ctx.sessionJournal!.load("terminal"))!;
-    const next: AttemptContext = { ...ctx, attempt: 2,
-      sessionJournal: { ...ctx.sessionJournal!, previous: terminal, async load() { return null; } },
-      localExecutionScope: { ...ctx.localExecutionScope!, batch: { ...ctx.localExecutionScope!.batch,
-        identity: { ...ctx.localExecutionScope!.batch.identity, attempt: 2 } } } };
+    const next: AttemptContext = {
+      ...ctx,
+      attempt: 2,
+      sessionJournal: {
+        ...ctx.sessionJournal!,
+        previous: terminal,
+        async load() {
+          return null;
+        },
+      },
+      localExecutionScope: {
+        ...ctx.localExecutionScope!,
+        batch: {
+          ...ctx.localExecutionScope!.batch,
+          identity: { ...ctx.localExecutionScope!.batch.identity, attempt: 2 },
+        },
+      },
+    };
     const nextConnections = new Map<string, FakeConnection>();
-    await expect(factory(root, nextConnections).launch(next)).rejects.toThrow("cold same-thread repair is unavailable");
+    await expect(factory(root, nextConnections).launch(next)).rejects.toThrow(
+      "cold same-thread repair is unavailable",
+    );
     expect(nextConnections.size).toBe(0);
   });
 
   it("rejects transplanted terminal turn identity without recollection or dispatch", async () => {
-    const root = join(suiteRoot, "wrong-terminal"), connections = new Map<string, FakeConnection>();
-    const first = factory(root, connections), ctx = await context(108), handle = await first.launch(ctx);
-    finish(connections.get(handle.metadata!.codexHome!)!, handle, { outcome: "succeeded", summary: "original" });
-    await first.observe(handle); await first.cleanup(handle);
+    const root = join(suiteRoot, "wrong-terminal"),
+      connections = new Map<string, FakeConnection>();
+    const first = factory(root, connections),
+      ctx = await context(108),
+      handle = await first.launch(ctx);
+    finish(connections.get(handle.metadata!.codexHome!)!, handle, {
+      outcome: "succeeded",
+      summary: "original",
+    });
+    await first.observe(handle);
+    await first.cleanup(handle);
     const nextConnections = new Map<string, FakeConnection>();
-    await expect(factory(root, nextConnections, { resumeTurns: [{ id: "wrong-turn", status: "completed", items: [] }] }).resume(ctx, handle)).rejects.toThrow("immutable dispatch");
-    expect([...nextConnections.values()].flatMap((connection) => connection.calls).map((call) => call.method)).toEqual(["initialize", "thread/read"]);
-    expect([...nextConnections.values()].every((connection) => connection.closedByClient)).toBe(true);
+    await expect(
+      factory(root, nextConnections, {
+        resumeTurns: [{ id: "wrong-turn", status: "completed", items: [] }],
+      }).resume(ctx, handle),
+    ).rejects.toThrow("immutable dispatch");
+    expect(
+      [...nextConnections.values()]
+        .flatMap((connection) => connection.calls)
+        .map((call) => call.method),
+    ).toEqual(["initialize", "thread/read"]);
+    expect([...nextConnections.values()].every((connection) => connection.closedByClient)).toBe(
+      true,
+    );
   });
 
   it("persists exact immutable session stages with fencing, response-loss repair and no rebinding", async () => {
-    const connections = new Map<string, FakeConnection>(), backend = factory(join(suiteRoot, "journal"), connections);
-    const ctx = await context(106), handle = await backend.launch(ctx);
-    finish(connections.get(handle.metadata!.codexHome!)!, handle, { outcome: "succeeded", summary: "journal" });
-    await backend.observe(handle); await backend.cleanup(handle);
-    const prepared = (await ctx.sessionJournal!.load("prepared"))!, turn = (await ctx.sessionJournal!.load("turn"))!, terminal = (await ctx.sessionJournal!.load("terminal"))!;
-    const refs = new Map<string, string>(), blobs = new Map<string, Buffer>(), trees = new Map<string, Map<string, string>>(), commits = new Map<string, GitCommitObject>();
-    let writes = 0, loseRefResponse = false, current = true, fenced = false;
-    const beforeWrite = () => { expect(fenced).toBe(true); fenced = false; writes++; };
-    const objectId = (kind: string, bytes: Buffer) => createHash("sha1").update(`${kind} ${bytes.length}\0`).update(bytes).digest("hex");
-    const store: CompiledGraphStore = {
-      async readRef(ref) { return refs.get(ref) ?? null; },
-      async readCommit(oid) { const value = commits.get(oid); if (!value) throw new Error("missing commit"); return structuredClone(value); },
-      async readBlob(oid) { const value = blobs.get(oid); if (!value) throw new Error("missing blob"); return Buffer.from(value); },
-      async readTreeEntry(tree, path) { return trees.get(tree)?.get(path) ?? null; },
-      async createBlob(bytes) { beforeWrite(); const oid = objectId("blob", bytes); blobs.set(oid, Buffer.from(bytes)); return oid; },
-      async createTree(args) { beforeWrite(); const oid = objectId("tree", Buffer.from(JSON.stringify(args))); trees.set(oid, new Map(args.entries.filter((entry) => entry.sha).map((entry) => [entry.path, entry.sha!]))); return oid; },
-      async createCommit(args) { beforeWrite(); const oid = objectId("commit", Buffer.from(JSON.stringify(args))); commits.set(oid, { ...args, oid, serverTime: new Date() }); return oid; },
-      async createRef(ref, oid) { beforeWrite(); if (refs.has(ref)) return false; refs.set(ref, oid); if (loseRefResponse) { loseRefResponse = false; throw new Error("lost ref response"); } return true; },
+    const connections = new Map<string, FakeConnection>(),
+      backend = factory(join(suiteRoot, "journal"), connections);
+    const ctx = await context(106),
+      handle = await backend.launch(ctx);
+    finish(connections.get(handle.metadata!.codexHome!)!, handle, {
+      outcome: "succeeded",
+      summary: "journal",
+    });
+    await backend.observe(handle);
+    await backend.cleanup(handle);
+    const prepared = (await ctx.sessionJournal!.load("prepared"))!,
+      turn = (await ctx.sessionJournal!.load("turn"))!,
+      terminal = (await ctx.sessionJournal!.load("terminal"))!;
+    const refs = new Map<string, string>(),
+      blobs = new Map<string, Buffer>(),
+      trees = new Map<string, Map<string, string>>(),
+      commits = new Map<string, GitCommitObject>();
+    let writes = 0,
+      loseRefResponse = false,
+      current = true,
+      fenced = false;
+    const beforeWrite = () => {
+      expect(fenced).toBe(true);
+      fenced = false;
+      writes++;
     };
-    const leases = { async assertCurrent() { if (!current) throw new Error("lease lost"); fenced = true; } } as unknown as LeaseManager;
+    const objectId = (kind: string, bytes: Buffer) =>
+      createHash("sha1").update(`${kind} ${bytes.length}\0`).update(bytes).digest("hex");
+    const store: CompiledGraphStore = {
+      async readRef(ref) {
+        return refs.get(ref) ?? null;
+      },
+      async readCommit(oid) {
+        const value = commits.get(oid);
+        if (!value) throw new Error("missing commit");
+        return structuredClone(value);
+      },
+      async readBlob(oid) {
+        const value = blobs.get(oid);
+        if (!value) throw new Error("missing blob");
+        return Buffer.from(value);
+      },
+      async readTreeEntry(tree, path) {
+        return trees.get(tree)?.get(path) ?? null;
+      },
+      async createBlob(bytes) {
+        beforeWrite();
+        const oid = objectId("blob", bytes);
+        blobs.set(oid, Buffer.from(bytes));
+        return oid;
+      },
+      async createTree(args) {
+        beforeWrite();
+        const oid = objectId("tree", Buffer.from(JSON.stringify(args)));
+        trees.set(
+          oid,
+          new Map(
+            args.entries.filter((entry) => entry.sha).map((entry) => [entry.path, entry.sha!]),
+          ),
+        );
+        return oid;
+      },
+      async createCommit(args) {
+        beforeWrite();
+        const oid = objectId("commit", Buffer.from(JSON.stringify(args)));
+        commits.set(oid, { ...args, oid, serverTime: new Date() });
+        return oid;
+      },
+      async createRef(ref, oid) {
+        beforeWrite();
+        if (refs.has(ref)) return false;
+        refs.set(ref, oid);
+        if (loseRefResponse) {
+          loseRefResponse = false;
+          throw new Error("lost ref response");
+        }
+        return true;
+      },
+    };
+    const leases = {
+      async assertCurrent() {
+        if (!current) throw new Error("lease lost");
+        fenced = true;
+      },
+    } as unknown as LeaseManager;
     const manager = new AppServerSessionManager(store, leases);
-    const reservation: AttemptReservation = { ref: "refs/attempt", oid: "a".repeat(40), objective: ctx.objective, workItem: ctx.workItem, attempt: ctx.attempt,
-      backend: handle.backendId, baseSha: ctx.packet.baseSha, runId: ctx.runId, directorEpoch: ctx.directorEpoch, policyDigest: ctx.policyDigest,
-      sequence: 2, createdAt: new Date(), localScopeBatch: ctx.localExecutionScope!.batch };
-    const lease: LeaseState = { ref: "refs/lease", oid: "b".repeat(40), treeOid: "c".repeat(40), objective: ctx.objective, runId: ctx.runId,
-      holder: "controller", policyDigest: ctx.policyDigest, epoch: ctx.directorEpoch + 1, sequence: 3, expiresAt: ctx.deadline };
-    const persist = (checkpoint: AppServerSessionCheckpoint) => manager.persist({ repository: ctx.repository, reservation, lease, checkpoint });
+    const reservation: AttemptReservation = {
+      ref: "refs/attempt",
+      oid: "a".repeat(40),
+      objective: ctx.objective,
+      workItem: ctx.workItem,
+      attempt: ctx.attempt,
+      backend: handle.backendId,
+      baseSha: ctx.packet.baseSha,
+      runId: ctx.runId,
+      directorEpoch: ctx.directorEpoch,
+      policyDigest: ctx.policyDigest,
+      sequence: 2,
+      createdAt: new Date(),
+      localScopeBatch: ctx.localExecutionScope!.batch,
+    };
+    const lease: LeaseState = {
+      ref: "refs/lease",
+      oid: "b".repeat(40),
+      treeOid: "c".repeat(40),
+      objective: ctx.objective,
+      runId: ctx.runId,
+      holder: "controller",
+      policyDigest: ctx.policyDigest,
+      epoch: ctx.directorEpoch + 1,
+      sequence: 3,
+      expiresAt: ctx.deadline,
+    };
+    const persist = (checkpoint: AppServerSessionCheckpoint) =>
+      manager.persist({ repository: ctx.repository, reservation, lease, checkpoint });
     await expect(persist(terminal)).rejects.toThrow("prepared");
     expect(writes).toBe(0);
     loseRefResponse = true;
@@ -584,8 +816,11 @@ describe("Codex App Server local backend", () => {
     await persist(terminal);
     expect(writes).toBe(beforeReplay);
     await expect(persist({ ...terminal, turnId: "other-turn" })).rejects.toThrow("conflicting");
-    await expect(manager.load(ctx.repository, { ...reservation, policyDigest: "0".repeat(64) }, "terminal")).rejects.toThrow("reservation");
-    const turnRef = appServerSessionRef(ctx.repository, reservation, "turn"), turnOid = refs.get(turnRef)!;
+    await expect(
+      manager.load(ctx.repository, { ...reservation, policyDigest: "0".repeat(64) }, "terminal"),
+    ).rejects.toThrow("reservation");
+    const turnRef = appServerSessionRef(ctx.repository, reservation, "turn"),
+      turnOid = refs.get(turnRef)!;
     refs.delete(turnRef);
     await expect(manager.load(ctx.repository, reservation, "terminal")).rejects.toThrow("dispatch");
     refs.set(turnRef, turnOid);
@@ -593,9 +828,12 @@ describe("Codex App Server local backend", () => {
     await expect(persist(terminal)).rejects.toThrow("lease lost");
     expect(writes).toBe(beforeReplay);
     const terminalOid = refs.get(appServerSessionRef(ctx.repository, reservation, "terminal"))!;
-    const terminalTree = commits.get(terminalOid)!.treeOid, blob = [...trees.get(terminalTree)!.values()][0]!;
+    const terminalTree = commits.get(terminalOid)!.treeOid,
+      blob = [...trees.get(terminalTree)!.values()][0]!;
     blobs.set(blob, Buffer.from("{}"));
-    await expect(manager.load(ctx.repository, reservation, "terminal")).rejects.toThrow("blob is invalid");
+    await expect(manager.load(ctx.repository, reservation, "terminal")).rejects.toThrow(
+      "blob is invalid",
+    );
   });
 
   it("responds to unattended approvals immediately and cannot leave the attempt hanging", async () => {

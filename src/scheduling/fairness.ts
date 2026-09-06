@@ -34,7 +34,9 @@ export class ObjectiveFairness {
     if (this.#unreconciled.delete(objective)) this.changed();
   }
 
-  get reconciled(): boolean { return this.#unreconciled.size === 0; }
+  get reconciled(): boolean {
+    return this.#unreconciled.size === 0;
+  }
 
   /** Receipt timestamps seed rotation after restart; never a persisted private cursor. */
   noteAdmission(objective: number, at = Date.now()): void {
@@ -49,19 +51,31 @@ export class ObjectiveFairness {
    * lending once all contenders have service. Impossible work reports zero demand. */
   mayAdmit(objective: number, reservations: readonly CapacityReservation[]): boolean {
     if (!this.reconciled) return false;
-    const waiting = [...this.#ready.keys()].filter((number) =>
-      this.#ready.get(number) !== 0 && this.#canPlace(number, reservations) &&
-      !reservations.some((reservation) => reservation.objective === number && reservation.local));
-    waiting.sort((a, b) => (this.#lastAdmission.get(a) ?? 0) - (this.#lastAdmission.get(b) ?? 0) || a - b);
+    const waiting = [...this.#ready.keys()].filter(
+      (number) =>
+        this.#ready.get(number) !== 0 &&
+        this.#canPlace(number, reservations) &&
+        !reservations.some((reservation) => reservation.objective === number && reservation.local),
+    );
+    waiting.sort(
+      (a, b) => (this.#lastAdmission.get(a) ?? 0) - (this.#lastAdmission.get(b) ?? 0) || a - b,
+    );
     return waiting.length === 0 || waiting[0] === objective;
   }
 
-  changed(): void { for (const notify of this.#listeners) notify(); }
+  changed(): void {
+    for (const notify of this.#listeners) notify();
+  }
 
   waitForChange(ms: number, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) return Promise.resolve();
     return new Promise((resolve) => {
-      const done = () => { clearTimeout(timer); this.#listeners.delete(done); signal?.removeEventListener("abort", done); resolve(); };
+      const done = () => {
+        clearTimeout(timer);
+        this.#listeners.delete(done);
+        signal?.removeEventListener("abort", done);
+        resolve();
+      };
       const timer = setTimeout(done, ms);
       this.#listeners.add(done);
       signal?.addEventListener("abort", done, { once: true });
@@ -77,17 +91,30 @@ export class ObjectiveFairness {
     const local = reservations.filter((reservation) => reservation.local);
     const cpu = local.reduce((sum, reservation) => sum + reservation.cpu, 0);
     const memory = local.reduce((sum, reservation) => sum + reservation.memoryMb, 0);
-    return requirements.some((request) => request.cpu <= request.cpuCapacity - cpu &&
-      request.memoryMb <= request.memoryCapacityMb - memory &&
-      !reservations.some((claim) => reservationPathsOverlap(request.paths, claim.paths) ||
-        request.exclusiveResources.some((resource) => claim.exclusiveResources.includes(resource))));
+    return requirements.some(
+      (request) =>
+        request.cpu <= request.cpuCapacity - cpu &&
+        request.memoryMb <= request.memoryCapacityMb - memory &&
+        !reservations.some(
+          (claim) =>
+            reservationPathsOverlap(request.paths, claim.paths) ||
+            request.exclusiveResources.some((resource) =>
+              claim.exclusiveResources.includes(resource),
+            ),
+        ),
+    );
   }
 
-  reportDemand(objective: number, readyCount: number, requirements?: readonly LocalDemandRequirement[]): void {
+  reportDemand(
+    objective: number,
+    readyCount: number,
+    requirements?: readonly LocalDemandRequirement[],
+  ): void {
     if (!Number.isInteger(readyCount) || readyCount < 0) {
       throw new Error("ready demand must be a non-negative integer");
     }
-    const requirementsChanged = JSON.stringify(this.#requirements.get(objective)) !== JSON.stringify(requirements);
+    const requirementsChanged =
+      JSON.stringify(this.#requirements.get(objective)) !== JSON.stringify(requirements);
     if (requirements) this.#requirements.set(objective, structuredClone(requirements));
     else this.#requirements.delete(objective);
     if (this.#ready.get(objective) !== readyCount || requirementsChanged) {
@@ -105,8 +132,9 @@ export class ObjectiveFairness {
       throw new Error("local slots must be a positive integer");
     }
     this.register(objective);
-    const objectives = [...this.#ready.keys()].sort((a, b) =>
-      (this.#lastAdmission.get(a) ?? 0) - (this.#lastAdmission.get(b) ?? 0) || a - b);
+    const objectives = [...this.#ready.keys()].sort(
+      (a, b) => (this.#lastAdmission.get(a) ?? 0) - (this.#lastAdmission.get(b) ?? 0) || a - b,
+    );
     const base = Math.floor(totalSlots / objectives.length);
     const remainder = totalSlots % objectives.length;
     const shares = new Map(

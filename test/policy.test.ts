@@ -202,9 +202,14 @@ describe("extended run policy", () => {
   it("validates repository controller safety ceilings independently", () => {
     expect(DEFAULT_CONTROLLER_POLICY.maxActiveObjectives).toBe(2);
     for (const maxActiveObjectives of [1, 2, 32])
-      expect(parseControllerPolicy({ ...DEFAULT_CONTROLLER_POLICY, maxActiveObjectives }).maxActiveObjectives).toBe(maxActiveObjectives);
+      expect(
+        parseControllerPolicy({ ...DEFAULT_CONTROLLER_POLICY, maxActiveObjectives })
+          .maxActiveObjectives,
+      ).toBe(maxActiveObjectives);
     for (const maxActiveObjectives of [0, 1.5, 33, Infinity])
-      expect(() => parseControllerPolicy({ ...DEFAULT_CONTROLLER_POLICY, maxActiveObjectives })).toThrow();
+      expect(() =>
+        parseControllerPolicy({ ...DEFAULT_CONTROLLER_POLICY, maxActiveObjectives }),
+      ).toThrow();
     expect(
       parseControllerPolicy({
         scope: "repository",

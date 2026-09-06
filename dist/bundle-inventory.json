@@ -3,13 +3,13 @@
   "bundles": [
     {
       "file": "factory.js",
-      "bytes": 3024973,
-      "sha256": "277ee16ab32e96215aa150842aea2af47cdbc425d59c2a8e1ca4608c7d97ffe2"
+      "bytes": 3303971,
+      "sha256": "a65082df4e52b3912115494c209bf28a19a2f1516dea8fd1054c2d64d441b945"
     },
     {
       "file": "mcp-server.js",
-      "bytes": 3316917,
-      "sha256": "9e5574711c99d70666588c6d23dd0668549522698eb34badb2c2b1b6c43e06a2"
+      "bytes": 3459726,
+      "sha256": "bbae37f143d78ae511d566851084846ae880190845c92dcb12e23639eb8ac31e"
     }
   ],
   "components": [
@@ -299,6 +299,7 @@
       "author": "Evgeny Poberezkin",
       "repository": "git+https://github.com/ajv-validator/ajv-formats.git",
       "bundles": [
+        "factory.js",
         "mcp-server.js"
       ],
       "licenseFiles": [
@@ -312,6 +313,7 @@
       "author": "Evgeny Poberezkin",
       "repository": "ajv-validator/ajv",
       "bundles": [
+        "factory.js",
         "mcp-server.js"
       ],
       "licenseFiles": [
@@ -605,6 +607,7 @@
       "author": "Evgeny Poberezkin",
       "repository": "git+https://github.com/epoberezkin/fast-deep-equal.git",
       "bundles": [
+        "factory.js",
         "mcp-server.js"
       ],
       "licenseFiles": [
@@ -632,6 +635,7 @@
       "author": "Vincent Le Goff <vince.legoff@gmail.com> (https://github.com/zekth)",
       "repository": "git+https://github.com/fastify/fast-uri.git",
       "bundles": [
+        "factory.js",
         "mcp-server.js"
       ],
       "licenseFiles": [
@@ -827,6 +831,7 @@
       "author": "Evgeny Poberezkin",
       "repository": "git+https://github.com/epoberezkin/json-schema-traverse.git",
       "bundles": [
+        "factory.js",
         "mcp-server.js"
       ],
       "licenseFiles": [

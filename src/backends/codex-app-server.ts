@@ -14,21 +14,32 @@ import type {
   StaleAttemptIdentity,
 } from "../execution/backend.js";
 import { localExecutionScopeBatch } from "../execution/backend.js";
-import { APP_SERVER_SESSION_PROTOCOL, appServerBoundaryDigest, assertAppServerSessionContext,
-  canonicalSessionJson, completeSessionUsage, parseAppServerSessionCheckpoint,
-  AppServerResponseUsageSchema, completedAppServerUsage, EMPTY_APP_SERVER_USAGE,
+import {
+  APP_SERVER_SESSION_PROTOCOL,
+  appServerBoundaryDigest,
+  assertAppServerSessionContext,
+  canonicalSessionJson,
+  completeSessionUsage,
+  parseAppServerSessionCheckpoint,
+  AppServerResponseUsageSchema,
+  completedAppServerUsage,
+  EMPTY_APP_SERVER_USAGE,
   type AppServerResponseUsage,
-  type AppServerSessionBinding, type AppServerSessionCheckpoint } from "../execution/app-server-session.js";
+  type AppServerSessionBinding,
+  type AppServerSessionCheckpoint,
+} from "../execution/app-server-session.js";
 import { workerPacketDigest } from "../protocol/worker-packet.js";
 import { LocalScopeBatchSchema } from "../protocol/local-scope.js";
 import { readLocalResourceHostIdentity } from "../recovery/local-resources.js";
-import { linuxLocalScopeReadPort, observeLocalScope, stopLocalScope, type LocalScopeReadPort } from "../runtime/local-scope.js";
+import {
+  linuxLocalScopeReadPort,
+  observeLocalScope,
+  stopLocalScope,
+  type LocalScopeReadPort,
+} from "../runtime/local-scope.js";
 import { resolveCodexCommand } from "../runtime/codex-command.js";
 import { normalizeArtifact, type NormalizedArtifact } from "../execution/artifacts.js";
-import {
-  durableAttemptId,
-  normalizeExecutionUsage,
-} from "../execution/session.js";
+import { durableAttemptId, normalizeExecutionUsage } from "../execution/session.js";
 import type { ExecutionRequirements } from "../protocol/worker-packet.js";
 import {
   createIsolatedCodexHome,
@@ -294,11 +305,23 @@ async function wait(ms: number): Promise<void> {
 }
 
 export function appServerHandleFromCheckpoint(input: AppServerSessionCheckpoint): BackendHandle {
-  const checkpoint = parseAppServerSessionCheckpoint(input), binding = checkpoint.binding;
-  return { backendId: "codex-app-server/local-worktree", resourceId: binding.threadId, startedAt: binding.startedAt,
-    metadata: { threadId: binding.threadId, sessionId: binding.sessionId, attemptId: binding.attemptId,
-      workspace: binding.workspace, baseSha: binding.baseSha, codexHome: binding.codexHome,
-      resourceHostIdentity: binding.hostIdentity, ...(checkpoint.turnId ? { turnId: checkpoint.turnId } : {}) } };
+  const checkpoint = parseAppServerSessionCheckpoint(input),
+    binding = checkpoint.binding;
+  return {
+    backendId: "codex-app-server/local-worktree",
+    resourceId: binding.threadId,
+    startedAt: binding.startedAt,
+    metadata: {
+      threadId: binding.threadId,
+      sessionId: binding.sessionId,
+      attemptId: binding.attemptId,
+      workspace: binding.workspace,
+      baseSha: binding.baseSha,
+      codexHome: binding.codexHome,
+      resourceHostIdentity: binding.hostIdentity,
+      ...(checkpoint.turnId ? { turnId: checkpoint.turnId } : {}),
+    },
+  };
 }
 
 export class CodexAppServerLocalBackend implements ExecutionBackend {
@@ -316,8 +339,13 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     supportsCancellation: true,
     supportsObservation: true,
     supportsResume: true,
-    durableSession: { providerStorage: "local", recovery: "exact-terminal-read-only",
-      coldRepair: "unavailable-raw-usage-subscription", supportedCodexVersion: "0.153.0", preferredRouteQualification: "required" },
+    durableSession: {
+      providerStorage: "local",
+      recovery: "exact-terminal-read-only",
+      coldRepair: "unavailable-raw-usage-subscription",
+      supportedCodexVersion: "0.153.0",
+      preferredRouteQualification: "required",
+    },
     supportsLocalInference: false,
     reportsModelUsage: true,
     supportsModelSelection: true,
@@ -329,7 +357,10 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
   readonly #options: CodexAppServerOptions;
   readonly #attempts = new Map<string, AppAttempt>();
   readonly #connections = new Map<string, AppServerConnection>();
-  readonly #ownedScopes = new Map<string, NonNullable<AttemptContext["localExecutionScope"]>["batch"]>();
+  readonly #ownedScopes = new Map<
+    string,
+    NonNullable<AttemptContext["localExecutionScope"]>["batch"]
+  >();
 
   constructor(options: CodexAppServerOptions = {}) {
     this.#options = options;
@@ -389,21 +420,40 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
       throw new Error("attempt deadline already elapsed");
     }
     const journal = context.sessionJournal;
-    if (!journal) throw new Error("durable App Server execution requires the fenced GitHub session journal");
+    if (!journal)
+      throw new Error("durable App Server execution requires the fenced GitHub session journal");
     const scope = localExecutionScopeBatch(context);
-    if (!scope) throw new Error("durable App Server execution requires independently observable local scopes");
+    if (!scope)
+      throw new Error(
+        "durable App Server execution requires independently observable local scopes",
+      );
     const host = await (this.#options.readHostIdentity ?? readLocalResourceHostIdentity)();
-    if (!host || host !== scope.identity.hostIdentity) throw new Error("App Server launch host differs from its reservation");
-    if (await journal.load("prepared")) throw new Error("App Server turn dispatch already has a durable intent; use read-only recovery");
+    if (!host || host !== scope.identity.hostIdentity)
+      throw new Error("App Server launch host differs from its reservation");
+    if (await journal.load("prepared"))
+      throw new Error(
+        "App Server turn dispatch already has a durable intent; use read-only recovery",
+      );
     const previous = journal.previous && parseAppServerSessionCheckpoint(journal.previous);
-    if (previous && (previous.stage !== "terminal" || !completeSessionUsage(previous.usage) ||
-      previous.binding.repository !== context.repository.toLowerCase() || previous.binding.runId !== context.runId ||
-      previous.binding.workItem !== context.workItem || previous.binding.attempt >= context.attempt ||
-      previous.binding.policyDigest !== context.policyDigest || previous.binding.baseSha !== context.packet.baseSha ||
-      previous.binding.hostIdentity !== host)) throw new Error("prior thread does not authorize an exact known-usage repair attempt");
+    if (
+      previous &&
+      (previous.stage !== "terminal" ||
+        !completeSessionUsage(previous.usage) ||
+        previous.binding.repository !== context.repository.toLowerCase() ||
+        previous.binding.runId !== context.runId ||
+        previous.binding.workItem !== context.workItem ||
+        previous.binding.attempt >= context.attempt ||
+        previous.binding.policyDigest !== context.policyDigest ||
+        previous.binding.baseSha !== context.packet.baseSha ||
+        previous.binding.hostIdentity !== host)
+    )
+      throw new Error("prior thread does not authorize an exact known-usage repair attempt");
     // Pinned 0.153.0 cold thread/resume cannot opt into rawResponse/completed.
     // Never dispatch a repair with a knowingly unavailable accounting stream.
-    if (previous) throw new Error("cold same-thread repair is unavailable in Codex 0.153.0: thread/resume cannot enable exact raw-response accounting");
+    if (previous)
+      throw new Error(
+        "cold same-thread repair is unavailable in Codex 0.153.0: thread/resume cannot enable exact raw-response accounting",
+      );
     const attemptId = durableAttemptId(context);
     this.#ownedScopes.set(attemptId, scope);
     const home = await this.#prepareHome(context);
@@ -422,22 +472,49 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
         experimentalRawEvents: true,
       });
       const threadId = idOf(threadResult, "thread");
-      const response = record(threadResult), thread = record(response.thread);
-      if (typeof thread.sessionId !== "string" || !thread.sessionId || thread.cwd !== context.workspace ||
-        typeof thread.modelProvider !== "string" || typeof response.model !== "string" ||
-        thread.cliVersion !== "0.153.0" || response.approvalPolicy !== "never" ||
-        ((context.modelSelection?.model ?? this.#options.model) && response.model !== (context.modelSelection?.model ?? this.#options.model)))
+      const response = record(threadResult),
+        thread = record(response.thread);
+      if (
+        typeof thread.sessionId !== "string" ||
+        !thread.sessionId ||
+        thread.cwd !== context.workspace ||
+        typeof thread.modelProvider !== "string" ||
+        typeof response.model !== "string" ||
+        thread.cliVersion !== "0.153.0" ||
+        response.approvalPolicy !== "never" ||
+        ((context.modelSelection?.model ?? this.#options.model) &&
+          response.model !== (context.modelSelection?.model ?? this.#options.model))
+      )
         throw new Error("App Server returned an incompatible thread, model, or permission binding");
       const priorTurns = Array.isArray(thread.turns) ? thread.turns.map(turnFrom) : [];
       if (!Array.isArray(thread.turns) || priorTurns.length)
         throw new Error("App Server thread contains missing, active, or unexpected prior turns");
-      const binding: AppServerSessionBinding = { attemptId, repository: context.repository.toLowerCase(), runId: context.runId,
-        objective: context.objective, workItem: context.workItem, attempt: context.attempt, directorEpoch: context.directorEpoch,
-        policyDigest: context.policyDigest, baseSha: context.packet.baseSha, packetDigest: workerPacketDigest(context.packet),
-        boundaryDigest: appServerBoundaryDigest(context), hostIdentity: host, workspace: context.workspace, codexHome: home,
-        threadId, sessionId: thread.sessionId, modelProvider: thread.modelProvider, model: response.model,
-        cliVersion: "0.153.0", usageBaseline: { ...EMPTY_APP_SERVER_USAGE }, startedAt: new Date().toISOString(), deadline: context.deadline.toISOString(),
-        priorTurnIds: priorTurns.map((turn) => turn!.id), localScopeBatch: scope };
+      const binding: AppServerSessionBinding = {
+        attemptId,
+        repository: context.repository.toLowerCase(),
+        runId: context.runId,
+        objective: context.objective,
+        workItem: context.workItem,
+        attempt: context.attempt,
+        directorEpoch: context.directorEpoch,
+        policyDigest: context.policyDigest,
+        baseSha: context.packet.baseSha,
+        packetDigest: workerPacketDigest(context.packet),
+        boundaryDigest: appServerBoundaryDigest(context),
+        hostIdentity: host,
+        workspace: context.workspace,
+        codexHome: home,
+        threadId,
+        sessionId: thread.sessionId,
+        modelProvider: thread.modelProvider,
+        model: response.model,
+        cliVersion: "0.153.0",
+        usageBaseline: { ...EMPTY_APP_SERVER_USAGE },
+        startedAt: new Date().toISOString(),
+        deadline: context.deadline.toISOString(),
+        priorTurnIds: priorTurns.map((turn) => turn!.id),
+        localScopeBatch: scope,
+      };
       resourceId = threadId;
       const handle: BackendHandle = {
         backendId: this.capabilities.id,
@@ -459,7 +536,12 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
       attempt.binding = binding;
       this.#attempts.set(threadId, attempt);
       this.#attach(attempt, connection);
-      await journal.persist({ protocol: APP_SERVER_SESSION_PROTOCOL, stage: "prepared", binding, packet: context.packet });
+      await journal.persist({
+        protocol: APP_SERVER_SESSION_PROTOCOL,
+        stage: "prepared",
+        binding,
+        packet: context.packet,
+      });
       await journal.assertCurrent();
       const turnResult = await connection.request("turn/start", {
         threadId,
@@ -477,7 +559,13 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
         throw new Error("App Server turn dispatch returned a different invocation");
       attempt.turnId = turnId;
       handle.metadata = { ...handle.metadata, turnId };
-      await journal.persist({ protocol: APP_SERVER_SESSION_PROTOCOL, stage: "turn", binding, packet: context.packet, turnId });
+      await journal.persist({
+        protocol: APP_SERVER_SESSION_PROTOCOL,
+        stage: "turn",
+        binding,
+        packet: context.packet,
+        turnId,
+      });
       const returnedTurn = turnFrom(record(turnResult).turn);
       if (returnedTurn && !attempt.providerTerminal) this.#applyTurn(attempt, returnedTurn);
       return handle;
@@ -493,18 +581,33 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
 
   async observe(handle: BackendHandle): Promise<BackendObservation> {
     const attempt = this.#require(handle);
-    if (attempt.providerTerminal && !attempt.terminalPersisted && attempt.binding && attempt.context.sessionJournal) {
-      attempt.usage = completedAppServerUsage({ completed: attempt.providerCompleted === true,
-        baseline: attempt.binding.usageBaseline, total: attempt.rawTokenUsage?.total,
-        responses: [...attempt.responseUsage.values()], streamComplete: attempt.usageStreamComplete });
-      await attempt.context.sessionJournal.persist({ protocol: APP_SERVER_SESSION_PROTOCOL, stage: "terminal",
-        binding: attempt.binding, packet: attempt.context.packet, turnId: attempt.turnId,
+    if (
+      attempt.providerTerminal &&
+      !attempt.terminalPersisted &&
+      attempt.binding &&
+      attempt.context.sessionJournal
+    ) {
+      attempt.usage = completedAppServerUsage({
+        completed: attempt.providerCompleted === true,
+        baseline: attempt.binding.usageBaseline,
+        total: attempt.rawTokenUsage?.total,
+        responses: [...attempt.responseUsage.values()],
+        streamComplete: attempt.usageStreamComplete,
+      });
+      await attempt.context.sessionJournal.persist({
+        protocol: APP_SERVER_SESSION_PROTOCOL,
+        stage: "terminal",
+        binding: attempt.binding,
+        packet: attempt.context.packet,
+        turnId: attempt.turnId,
         state: attempt.state as "succeeded" | "failed" | "cancelled",
         providerStatus: attempt.providerStatus!,
         ...(attempt.rawTokenUsage ? { rawTokenUsage: attempt.rawTokenUsage } : {}),
-        responseUsage: [...attempt.responseUsage.values()], usageStreamComplete: attempt.usageStreamComplete,
+        responseUsage: [...attempt.responseUsage.values()],
+        usageStreamComplete: attempt.usageStreamComplete,
         ...(attempt.usage ? { usage: normalizeExecutionUsage(attempt.usage) } : {}),
-        ...(attempt.final ? { final: attempt.final } : {}) });
+        ...(attempt.final ? { final: attempt.final } : {}),
+      });
       attempt.terminalPersisted = true;
     }
     return {
@@ -533,7 +636,9 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     await this.#closeConnection(attempt.home);
     if (!terminalState(attempt.state)) {
       attempt.state = "unknown";
-      attempt.reason = interruptError ? "App Server interruption outcome unavailable" : "App Server stopped without a terminal turn receipt";
+      attempt.reason = interruptError
+        ? "App Server interruption outcome unavailable"
+        : "App Server stopped without a terminal turn receipt";
     }
   }
 
@@ -585,7 +690,11 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     attempt.unsubscribeNotification?.();
     attempt.unsubscribeRequest?.();
     let checkpointError: unknown;
-    try { if (attempt.providerTerminal) await this.observe(handle); } catch (error) { checkpointError = error; }
+    try {
+      if (attempt.providerTerminal) await this.observe(handle);
+    } catch (error) {
+      checkpointError = error;
+    }
     await this.#closeConnection(attempt.home);
     this.#attempts.delete(handle.resourceId);
     // Retain provider-owned thread history. It is not a Factory scheduler DB.
@@ -600,55 +709,103 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     if (!prepared) throw new Error("App Server session preparation is unavailable");
     assertAppServerSessionContext(context, prepared.binding);
     const binding = prepared.binding;
-    if (handle.resourceId !== binding.threadId || handle.metadata?.turnId && binding.priorTurnIds.includes(handle.metadata.turnId))
+    if (
+      handle.resourceId !== binding.threadId ||
+      (handle.metadata?.turnId && binding.priorTurnIds.includes(handle.metadata.turnId))
+    )
       throw new Error("App Server handle differs from its durable thread");
     const current = this.#attempts.get(handle.resourceId);
     if (current) {
-      if (canonicalSessionJson(current.binding) !== canonicalSessionJson(binding)) throw new Error("active App Server binding changed");
+      if (canonicalSessionJson(current.binding) !== canonicalSessionJson(binding))
+        throw new Error("active App Server binding changed");
       return current.handle;
     }
     const terminalCheckpoint = await journal.load("terminal");
     await journal.assertCurrent();
     await this.#assertPriorStopped(binding, terminalCheckpoint !== null);
-    if (!(await exists(binding.codexHome))) throw new Error("durable App Server provider state is unavailable; no replacement turn authorized");
+    if (!(await exists(binding.codexHome)))
+      throw new Error(
+        "durable App Server provider state is unavailable; no replacement turn authorized",
+      );
     await journal.assertCurrent();
     // A separate read-only connection may inspect persisted history only. It
     // never reloads an agent or dispatches a model turn during reconciliation.
-    const connection = await this.#connection(binding.codexHome, context.workspace, `${binding.attemptId}-read`);
+    const connection = await this.#connection(
+      binding.codexHome,
+      context.workspace,
+      `${binding.attemptId}-read`,
+    );
     try {
-      const response = record(await connection.request("thread/read", { threadId: binding.threadId, includeTurns: true }));
+      const response = record(
+        await connection.request("thread/read", { threadId: binding.threadId, includeTurns: true }),
+      );
       const thread = record(response.thread);
-      if (thread.id !== binding.threadId || thread.sessionId !== binding.sessionId || thread.cwd !== binding.workspace ||
-        thread.modelProvider !== binding.modelProvider || thread.cliVersion !== binding.cliVersion ||
-        (thread.model !== null && thread.model !== binding.model) || !Array.isArray(thread.turns) || thread.turns.length > 101)
+      if (
+        thread.id !== binding.threadId ||
+        thread.sessionId !== binding.sessionId ||
+        thread.cwd !== binding.workspace ||
+        thread.modelProvider !== binding.modelProvider ||
+        thread.cliVersion !== binding.cliVersion ||
+        (thread.model !== null && thread.model !== binding.model) ||
+        !Array.isArray(thread.turns) ||
+        thread.turns.length > 101
+      )
         throw new Error("stored App Server thread identity or complete history changed");
       const turns = thread.turns.map(turnFrom);
-      if (turns.some((turn) => !turn) || turns.length !== binding.priorTurnIds.length + 1 ||
-        binding.priorTurnIds.some((id, index) => turns[index]!.id !== id))
-        throw new Error("App Server dispatch outcome is unavailable or ambiguous; no duplicate turn authorized");
+      if (
+        turns.some((turn) => !turn) ||
+        turns.length !== binding.priorTurnIds.length + 1 ||
+        binding.priorTurnIds.some((id, index) => turns[index]!.id !== id)
+      )
+        throw new Error(
+          "App Server dispatch outcome is unavailable or ambiguous; no duplicate turn authorized",
+        );
       const selected = turns.at(-1)!;
-      const started = await journal.load("turn"), terminal = await journal.load("terminal");
+      const started = await journal.load("turn"),
+        terminal = await journal.load("terminal");
       if (canonicalSessionJson(terminal) !== canonicalSessionJson(terminalCheckpoint))
         throw new Error("durable terminal session changed during recovery");
-      if ((started && started.turnId !== selected.id) || (terminal && terminal.turnId !== selected.id) ||
-        (handle.metadata?.turnId && handle.metadata.turnId !== selected.id))
+      if (
+        (started && started.turnId !== selected.id) ||
+        (terminal && terminal.turnId !== selected.id) ||
+        (handle.metadata?.turnId && handle.metadata.turnId !== selected.id)
+      )
         throw new Error("stored App Server turn differs from its immutable dispatch");
-      if (selected.status === "inProgress") throw new Error("App Server turn has no terminal provider outcome; stopped process is not completion");
+      if (selected.status === "inProgress")
+        throw new Error(
+          "App Server turn has no terminal provider outcome; stopped process is not completion",
+        );
       await journal.assertCurrent();
       await this.#assertPriorStopped(binding, terminal !== null);
       if (!started) await journal.persist({ ...prepared, stage: "turn", turnId: selected.id });
-      const resumed = appServerHandleFromCheckpoint({ ...prepared, stage: "turn", turnId: selected.id });
-      const attempt = this.#newAttempt(context, resumed, binding.threadId, selected.id, binding.codexHome);
+      const resumed = appServerHandleFromCheckpoint({
+        ...prepared,
+        stage: "turn",
+        turnId: selected.id,
+      });
+      const attempt = this.#newAttempt(
+        context,
+        resumed,
+        binding.threadId,
+        selected.id,
+        binding.codexHome,
+      );
       attempt.binding = binding;
       attempt.cancellationRequested = terminal?.state === "cancelled";
       attempt.usageStreamComplete = false;
       this.#applyTurn(attempt, selected);
       if (terminal) {
-        if (terminal.state !== attempt.state || terminal.providerStatus !== selected.status || canonicalSessionJson(terminal.final) !== canonicalSessionJson(attempt.final))
+        if (
+          terminal.state !== attempt.state ||
+          terminal.providerStatus !== selected.status ||
+          canonicalSessionJson(terminal.final) !== canonicalSessionJson(attempt.final)
+        )
           throw new Error("provider terminal differs from its durable completion");
         attempt.usage = terminal.usage;
         attempt.rawTokenUsage = terminal.rawTokenUsage;
-        attempt.responseUsage = new Map((terminal.responseUsage ?? []).map((entry) => [entry.responseId, entry]));
+        attempt.responseUsage = new Map(
+          (terminal.responseUsage ?? []).map((entry) => [entry.responseId, entry]),
+        );
         attempt.usageStreamComplete = terminal.usageStreamComplete === true;
         attempt.terminalPersisted = true;
       }
@@ -661,25 +818,43 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     }
   }
 
-  async #assertPriorStopped(binding: AppServerSessionBinding, terminalCheckpoint: boolean): Promise<void> {
+  async #assertPriorStopped(
+    binding: AppServerSessionBinding,
+    terminalCheckpoint: boolean,
+  ): Promise<void> {
     const port = this.#options.scopeReadPort ?? linuxLocalScopeReadPort;
-    if (await port.hostIdentity() !== binding.hostIdentity) throw new Error("durable session host is unavailable or changed");
+    if ((await port.hostIdentity()) !== binding.hostIdentity)
+      throw new Error("durable session host is unavailable or changed");
     const batch = binding.localScopeBatch;
     let producerGone = false;
     try {
       const stat = await port.read(`/proc/${batch.producerPid}/stat`);
-      const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
-      if (!stat.startsWith(`${batch.producerPid} (`) || !/^\d+$/.test(fields[19] ?? "")) throw new Error("producer identity unavailable");
-      producerGone = fields[19] !== batch.producerStartTicks || fields[0] === "Z" || fields[0] === "X";
+      const fields = stat
+        .slice(stat.lastIndexOf(")") + 2)
+        .trim()
+        .split(/\s+/);
+      if (!stat.startsWith(`${batch.producerPid} (`) || !/^\d+$/.test(fields[19] ?? ""))
+        throw new Error("producer identity unavailable");
+      producerGone =
+        fields[19] !== batch.producerStartTicks || fields[0] === "Z" || fields[0] === "X";
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT" && (error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+      if (
+        (error as NodeJS.ErrnoException).code !== "ENOENT" &&
+        (error as NodeJS.ErrnoException).code !== "ESRCH"
+      )
+        throw error;
       producerGone = true;
     }
     // An immutable provider-terminal checkpoint closes this invocation's launcher.
     // Its owning controller may remain alive. Without that checkpoint, an alive
     // producer is ambiguous even when the service is momentarily absent.
-    if ((!producerGone && !terminalCheckpoint) || (await observeLocalScope(batch.identity, port)).status !== "absent")
-      throw new Error("prior App Server producer or exact worker scope is not independently absent");
+    if (
+      (!producerGone && !terminalCheckpoint) ||
+      (await observeLocalScope(batch.identity, port)).status !== "absent"
+    )
+      throw new Error(
+        "prior App Server producer or exact worker scope is not independently absent",
+      );
   }
 
   async reconcileStale(identity: StaleAttemptIdentity): Promise<void> {
@@ -695,9 +870,15 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
 
     const value = identity.localScopeBatch ?? this.#ownedScopes.get(attemptId);
     const batch = value ? LocalScopeBatchSchema.parse(value) : undefined;
-    if (!batch || durableAttemptId(batch.identity) !== attemptId || batch.identity.phase !== "execution" ||
-      (identity.policyDigest && batch.identity.policyDigest !== identity.policyDigest))
-      throw new Error("stale App Server execution lacks its exact durable scope; automatic replacement is blocked");
+    if (
+      !batch ||
+      durableAttemptId(batch.identity) !== attemptId ||
+      batch.identity.phase !== "execution" ||
+      (identity.policyDigest && batch.identity.policyDigest !== identity.policyDigest)
+    )
+      throw new Error(
+        "stale App Server execution lacks its exact durable scope; automatic replacement is blocked",
+      );
     await stopLocalScope(batch.identity);
     // Absence settles compute only, never missing usage or provider history.
   }
@@ -738,36 +919,49 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     const connection = await (this.#options.connect?.(home) ??
       startCodexAppServer({
         command: target.command,
-        args:
-          this.#options.args ??
-          // Current Codex builds default SQLite runtime state in the user's
-          // shared ~/.codex directory even when CODEX_HOME is overridden.
-          // Pin it explicitly so each attempt's resumable state is isolated.
-          [...target.args, ...codexAppServerArgs(home, this.#options.profile)],
+        args: this.#options
+          .args ?? // Current Codex builds default SQLite runtime state in the user's
+        // shared ~/.codex directory even when CODEX_HOME is overridden.
+        // Pin it explicitly so each attempt's resumable state is isolated.
+        [...target.args, ...codexAppServerArgs(home, this.#options.profile)],
         cwd,
         env: isolateCodexEnvironment(process.env, home),
         permittedSecretNames: this.#options.permittedModelCredentials ?? [],
         attemptIdentity: attemptId,
-        ...(context?.localExecutionScope ? { localScope: { identity: context.localExecutionScope.batch.identity,
-          deadline: context.deadline, assertCurrent: context.localExecutionScope.assertCurrent } } : {}),
+        ...(context?.localExecutionScope
+          ? {
+              localScope: {
+                identity: context.localExecutionScope.batch.identity,
+                deadline: context.deadline,
+                assertCurrent: context.localExecutionScope.assertCurrent,
+              },
+            }
+          : {}),
       }));
     try {
-      const initialization = record(await connection.request("initialize", {
-        clientInfo: {
-          name: "clockgrove-factory",
-          title: "Clockgrove Factory",
-          version: "2",
-        },
-        capabilities: {
-          experimentalApi: true,
-          requestAttestation: false,
-          mcpServerOpenaiFormElicitation: false,
-          optOutNotificationMethods: null,
-          extensions: null,
-        },
-      }));
-      if (typeof initialization.userAgent !== "string" || !/(?:^|[^\d])0\.153\.0(?:[^\d]|$)/.test(initialization.userAgent))
-        throw new Error("durable App Server requires the source-pinned Codex 0.153.0 protocol before dispatch");
+      const initialization = record(
+        await connection.request("initialize", {
+          clientInfo: {
+            name: "clockgrove-factory",
+            title: "Clockgrove Factory",
+            version: "2",
+          },
+          capabilities: {
+            experimentalApi: true,
+            requestAttestation: false,
+            mcpServerOpenaiFormElicitation: false,
+            optOutNotificationMethods: null,
+            extensions: null,
+          },
+        }),
+      );
+      if (
+        typeof initialization.userAgent !== "string" ||
+        !/(?:^|[^\d])0\.153\.0(?:[^\d]|$)/.test(initialization.userAgent)
+      )
+        throw new Error(
+          "durable App Server requires the source-pinned Codex 0.153.0 protocol before dispatch",
+        );
       connection.notify("initialized");
       return connection;
     } catch (error) {
@@ -776,7 +970,12 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     }
   }
 
-  async #connection(home: string, cwd: string, attemptId: string, context?: AttemptContext): Promise<AppServerConnection> {
+  async #connection(
+    home: string,
+    cwd: string,
+    attemptId: string,
+    context?: AttemptContext,
+  ): Promise<AppServerConnection> {
     const existing = this.#connections.get(home);
     if (existing) return existing;
     const connection = await this.#openConnection(home, cwd, attemptId, context);
@@ -838,7 +1037,11 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     const params = record(event.params);
     if (event.method === "turn/started") {
       const turn = turnFrom(params.turn);
-      if (!turn || turn.status !== "inProgress" || attempt.binding?.priorTurnIds.includes(turn.id)) {
+      if (
+        !turn ||
+        turn.status !== "inProgress" ||
+        attempt.binding?.priorTurnIds.includes(turn.id)
+      ) {
         attempt.usageStreamComplete = false;
         return;
       }
@@ -850,25 +1053,44 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
         attempt.usageStreamComplete = false;
         return;
       }
-      const parsed = AppServerResponseUsageSchema.safeParse({ responseId: params.responseId, usage: params.usage });
+      const parsed = AppServerResponseUsageSchema.safeParse({
+        responseId: params.responseId,
+        usage: params.usage,
+      });
       if (!parsed.success || attempt.responseUsage.size >= 1000) {
         attempt.usageStreamComplete = false;
         return;
       }
       const previous = attempt.responseUsage.get(parsed.data.responseId);
-      if (previous && canonicalSessionJson(previous) !== canonicalSessionJson(parsed.data)) attempt.usageStreamComplete = false;
+      if (previous && canonicalSessionJson(previous) !== canonicalSessionJson(parsed.data))
+        attempt.usageStreamComplete = false;
       else attempt.responseUsage.set(parsed.data.responseId, parsed.data);
       return;
     }
     if (event.method === "thread/tokenUsage/updated") {
-      if (!ids.turn || !attempt.turnId || ids.turn !== attempt.turnId || attempt.providerTerminal) return;
+      if (!ids.turn || !attempt.turnId || ids.turn !== attempt.turnId || attempt.providerTerminal)
+        return;
       const usage = record(params.tokenUsage);
       const tokens = (value: unknown) => {
         const raw = record(value);
-        return Object.fromEntries(["totalTokens", "inputTokens", "outputTokens", "cachedInputTokens", "cacheWriteInputTokens", "reasoningOutputTokens"]
-          .map((name) => [name, Number.isSafeInteger(raw[name]) && Number(raw[name]) >= 0 ? Number(raw[name]) : null]));
+        return Object.fromEntries(
+          [
+            "totalTokens",
+            "inputTokens",
+            "outputTokens",
+            "cachedInputTokens",
+            "cacheWriteInputTokens",
+            "reasoningOutputTokens",
+          ].map((name) => [
+            name,
+            Number.isSafeInteger(raw[name]) && Number(raw[name]) >= 0 ? Number(raw[name]) : null,
+          ]),
+        );
       };
-      attempt.rawTokenUsage = { total: tokens(usage.total), last: tokens(usage.last) } as AppServerSessionCheckpoint["rawTokenUsage"];
+      attempt.rawTokenUsage = {
+        total: tokens(usage.total),
+        last: tokens(usage.last),
+      } as AppServerSessionCheckpoint["rawTokenUsage"];
       return;
     }
     if (event.method === "item/completed") {
@@ -911,7 +1133,8 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     const rejection = "Factory workers are unattended and cannot grant approvals";
     const ids = eventIds(request);
     const identityMismatch =
-      ids.thread !== attempt.threadId || !ids.turn ||
+      ids.thread !== attempt.threadId ||
+      !ids.turn ||
       (ids.turn !== undefined && attempt.turnId !== "" && ids.turn !== attempt.turnId);
     if (!identityMismatch && !attempt.turnId && ids.turn) {
       attempt.turnId = ids.turn;
@@ -959,7 +1182,10 @@ export class CodexAppServerLocalBackend implements ExecutionBackend {
     if (turn.id !== attempt.turnId && attempt.turnId) return;
     attempt.turnId = turn.id;
     const final = finalFromItems(turn.items);
-    if (Array.isArray(turn.items) && turn.items.some((item) => record(item).type === "agentMessage")) {
+    if (
+      Array.isArray(turn.items) &&
+      turn.items.some((item) => record(item).type === "agentMessage")
+    ) {
       if (final) attempt.final = final;
       else delete attempt.final;
     }

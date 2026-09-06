@@ -8,7 +8,10 @@ import {
   observeRegularCommits,
 } from "./verify-regular-objective.mjs";
 import { assertNativeScopes, observeNativeScopes } from "./qualification-native-scopes.mjs";
-import { nativeQualificationEvents, observeNativeMergeProofs } from "./qualification-sibling-refresh-proof.mjs";
+import {
+  nativeQualificationEvents,
+  observeNativeMergeProofs,
+} from "./qualification-sibling-refresh-proof.mjs";
 
 const scope = "installed-local-native-unavailable-regular-fallback";
 const protocol = "clockgrove.factory/native-fallback-capability-v1";

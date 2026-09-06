@@ -545,8 +545,13 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
         });
         if (recovery) {
           const active = latestSupportedRun(events);
-          result.push({ ...recovery, ...(active?.event === "FactoryRunStarted" &&
-            active.runId === recovery.recovery?.successorRunId ? { resuming: true } : {}) });
+          result.push({
+            ...recovery,
+            ...(active?.event === "FactoryRunStarted" &&
+            active.runId === recovery.recovery?.successorRunId
+              ? { resuming: true }
+              : {}),
+          });
           continue;
         }
         const activationsByRequest = new Map<string, string>();
@@ -951,23 +956,42 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
    * run, graph, publication and exact merge proof before trusting these hints. */
   async readCommitObjectiveCandidates(sha: string): Promise<number[]> {
     if (!/^[a-f0-9]{40}$/.test(sha)) throw new Error("invalid integration commit identity");
-    const pulls = await this.#call(() => this.#octokit.request("GET /repos/{owner}/{repo}/commits/{commit_sha}/pulls", {
-      owner: this.#owner, repo: this.#repo, commit_sha: sha, per_page: 100,
-    }));
-    if (pulls.data.length >= 100) throw new Error("commit association exceeds bounded integration discovery");
+    const pulls = await this.#call(() =>
+      this.#octokit.request("GET /repos/{owner}/{repo}/commits/{commit_sha}/pulls", {
+        owner: this.#owner,
+        repo: this.#repo,
+        commit_sha: sha,
+        per_page: 100,
+      }),
+    );
+    if (pulls.data.length >= 100)
+      throw new Error("commit association exceeds bounded integration discovery");
     const candidates = new Set<number>();
     for (const pull of pulls.data) {
-      const match = /^factory\/objective-([1-9][0-9]*)\/work-item-[1-9][0-9]*\/attempt-[1-9][0-9]*$/.exec(pull.head.ref);
+      const match =
+        /^factory\/objective-([1-9][0-9]*)\/work-item-[1-9][0-9]*\/attempt-[1-9][0-9]*$/.exec(
+          pull.head.ref,
+        );
       if (match) candidates.add(Number(match[1]));
     }
     if (pulls.data.length) {
-      const result = await this.#call(() => this.#octokit.graphql<{
-        nodes: ({ closingIssuesReferences: { nodes: { parent: { number: number } | null }[]; pageInfo: { hasNextPage: boolean } } } | null)[];
-      }>(`query IntegrationObjectiveHints($ids: [ID!]!) {
+      const result = await this.#call(() =>
+        this.#octokit.graphql<{
+          nodes: ({
+            closingIssuesReferences: {
+              nodes: { parent: { number: number } | null }[];
+              pageInfo: { hasNextPage: boolean };
+            };
+          } | null)[];
+        }>(
+          `query IntegrationObjectiveHints($ids: [ID!]!) {
         nodes(ids: $ids) { ... on PullRequest { closingIssuesReferences(first: 100) {
           nodes { parent { number } } pageInfo { hasNextPage }
         } } }
-      }`, { ids: pulls.data.map((pull) => pull.node_id) }));
+      }`,
+          { ids: pulls.data.map((pull) => pull.node_id) },
+        ),
+      );
       for (const node of result.nodes) {
         if (!node?.closingIssuesReferences) continue;
         if (node.closingIssuesReferences.pageInfo.hasNextPage)
@@ -976,7 +1000,9 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
           if (issue.parent) candidates.add(issue.parent.number);
       }
     }
-    return [...candidates].filter((number) => Number.isSafeInteger(number) && number > 0).sort((a, b) => a - b);
+    return [...candidates]
+      .filter((number) => Number.isSafeInteger(number) && number > 0)
+      .sort((a, b) => a - b);
   }
 
   async readPullRequest(number: number): Promise<{

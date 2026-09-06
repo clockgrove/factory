@@ -359,7 +359,12 @@ export class LifecycleRecorder {
       amount: args.amount,
       ...(args.usageId ? { usageId: args.usageId } : {}),
       ...(args.usageEvidence ? { usageEvidence: args.usageEvidence } : {}),
-      ...(args.usageEvidence === "conservative-reservation" ? { directorEpoch: args.reservation.directorEpoch, policyDigest: args.reservation.policyDigest } : {}),
+      ...(args.usageEvidence === "conservative-reservation"
+        ? {
+            directorEpoch: args.reservation.directorEpoch,
+            policyDigest: args.reservation.policyDigest,
+          }
+        : {}),
       ...(args.reason ? { reason: args.reason } : {}),
       ...(args.reportedModelUsage ? { reportedModelUsage: args.reportedModelUsage } : {}),
     });

@@ -71,8 +71,15 @@ export function runCheckpointScenario(
   port: CheckpointPort,
   authority: CheckpointAuthority,
 ): Promise<unknown>;
-export function appServerHoldReady(observation: unknown, authority: CheckpointAuthority, arm: unknown): boolean;
-export function runAppServerCheckpointScenario(port: CheckpointPort, authority: CheckpointAuthority): Promise<unknown>;
+export function appServerHoldReady(
+  observation: unknown,
+  authority: CheckpointAuthority,
+  arm: unknown,
+): boolean;
+export function runAppServerCheckpointScenario(
+  port: CheckpointPort,
+  authority: CheckpointAuthority,
+): Promise<unknown>;
 export function main(
   env?: Record<string, string | undefined>,
   runner?: typeof runCheckpointScenario,

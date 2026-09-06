@@ -174,22 +174,44 @@ describe("bounded status, explain, and replay output", () => {
     const first = waiting.factoryEvents![0]!;
     waiting.factoryEvents = [
       { ...first, reasonCode: "local-capacity", gate: "capacity" },
-      { ...first, sequence: 6, at: "2026-09-04T12:00:20.000Z", reasonCode: "local-pressure", gate: "capacity" },
-      { ...first, sequence: 7, at: "2026-09-04T12:00:30.000Z", reasonCode: "local-cooldown", gate: "capacity" },
+      {
+        ...first,
+        sequence: 6,
+        at: "2026-09-04T12:00:20.000Z",
+        reasonCode: "local-pressure",
+        gate: "capacity",
+      },
+      {
+        ...first,
+        sequence: 7,
+        at: "2026-09-04T12:00:30.000Z",
+        reasonCode: "local-cooldown",
+        gate: "capacity",
+      },
     ] as FactoryEvent[];
     const status = buildStatusReport({ repository: "clockgrove/factory", snapshot: current });
     expect(status.workItems.find((item) => item.number === 11)).toMatchObject({
-      queuedSince: first.at, queueReasonCode: "local-cooldown",
+      queuedSince: first.at,
+      queueReasonCode: "local-cooldown",
     });
-    const explanation = buildExplanationReport({ repository: "clockgrove/factory", snapshot: current });
-    expect(explanation.explanations.find((item) => item.workItem === 11)?.code).toBe(EXPLANATION_CODES.capacityCooldown);
+    const explanation = buildExplanationReport({
+      repository: "clockgrove/factory",
+      snapshot: current,
+    });
+    expect(explanation.explanations.find((item) => item.workItem === 11)?.code).toBe(
+      EXPLANATION_CODES.capacityCooldown,
+    );
     const replay = buildReplayReport({ repository: "clockgrove/factory", snapshot: current });
     expect(replay.run.availability).toBe("observed");
     if (replay.run.availability !== "observed") throw new Error("missing run");
-    expect(replay.run.decisions.filter((item) => item.workItem === 11).map((item) => item.reasonCode)).toEqual([
-      "local-capacity", "local-pressure", "local-cooldown",
-    ]);
-    expect(replay.run.decisions.filter((item) => item.workItem === 11).every((item) => !("capacity" in item))).toBe(true);
+    expect(
+      replay.run.decisions.filter((item) => item.workItem === 11).map((item) => item.reasonCode),
+    ).toEqual(["local-capacity", "local-pressure", "local-cooldown"]);
+    expect(
+      replay.run.decisions
+        .filter((item) => item.workItem === 11)
+        .every((item) => !("capacity" in item)),
+    ).toBe(true);
     expect(replay.run.decisions.find((item) => item.decision === "admitted")).toMatchObject({
       capacity: { measuredAt: "2026-09-04T12:00:00.000Z" },
     });

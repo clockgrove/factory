@@ -31,7 +31,11 @@ import type {
   SemanticReview,
 } from "./backend.js";
 import { restrictedCodexArgs } from "../backends/codex-cli-policy.js";
-import { compileObjective, applyEconomicReview, ExclusiveResourcesSchema } from "../compiler/index.js";
+import {
+  compileObjective,
+  applyEconomicReview,
+  ExclusiveResourcesSchema,
+} from "../compiler/index.js";
 import { ManagementOutputError } from "./backend.js";
 import { discoverValidationCommands, readRepositoryFacts } from "../repository-profiles/index.js";
 
@@ -481,7 +485,11 @@ export class CodexCliManagementBackend implements ManagementBackend {
   ): Promise<CompilationResult> {
     assertWithinBytes(context, 512 * 1024, "compilation context");
     assertNoSecretMaterial(context, "compilation context");
-    const repositoryFacts = await readRepositoryFacts(context.repository, context.repositoryFiles, context.repositoryLfs);
+    const repositoryFacts = await readRepositoryFacts(
+      context.repository,
+      context.repositoryFiles,
+      context.repositoryLfs,
+    );
     const validationCommands = discoverValidationCommands(repositoryFacts);
     const validationGrounding = {
       packageJson: context.repositoryFiles.includes("package.json") ? "observed" : "not observed",

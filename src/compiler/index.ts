@@ -6,7 +6,12 @@ import {
 import { addScopeSerializationEdges } from "../graph.js";
 import { z } from "zod";
 import { assessDecomposition, economicRationale, type DecompositionEvidence } from "./economics.js";
-export { assessDecomposition, economicRequirements, type DecompositionAssessment, type DecompositionEvidence } from "./economics.js";
+export {
+  assessDecomposition,
+  economicRequirements,
+  type DecompositionAssessment,
+  type DecompositionEvidence,
+} from "./economics.js";
 import {
   buildContextManifest,
   discoverValidationCommands,
@@ -467,7 +472,10 @@ export function compileObjective(input: CompileInput): CompilerObjective {
 }
 
 /** Applied before the immutable compilation checkpoint; never rerun on recovered graphs. */
-export function applyEconomicReview(result: CompilerObjective, evidence?: DecompositionEvidence): void {
+export function applyEconomicReview(
+  result: CompilerObjective,
+  evidence?: DecompositionEvidence,
+): void {
   const assessment = assessDecomposition(result.workItems, evidence);
   if (assessment.redundantItemPairs.length)
     throw new Error(

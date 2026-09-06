@@ -239,7 +239,10 @@ describe("pure admission replay", () => {
     { effectiveCpu: 0.5, totalMemoryMb: 0, availableMemoryMb: 0, memoryUsageRatio: 1 },
     { effectiveCpu: 0.5, totalMemoryMb: 0, availableMemoryMb: 0, memoryUsageRatio: 0.25 },
   ])("accepts actual cgroup resource domain in replay and its public schema: %j", (observed) => {
-    const snapshot = pinAdmissionSnapshot({ ...input, resource: { ...input.resource!, ...observed } });
+    const snapshot = pinAdmissionSnapshot({
+      ...input,
+      resource: { ...input.resource!, ...observed },
+    });
     expect(snapshot.input.resource).toMatchObject(observed);
     expect(replayAdmissions(snapshot).reproduced).toBe(true);
     const ajv = new Ajv({ strict: false });
@@ -262,7 +265,9 @@ describe("pure admission replay", () => {
     { memoryUsageRatio: 1.1 },
     { memoryUsageRatio: Number.NaN },
   ])("rejects non-finite or contradictory resource bounds: %j", (invalid) => {
-    expect(() => pinAdmissionSnapshot({ ...input, resource: { ...input.resource!, ...invalid } })).toThrow();
+    expect(() =>
+      pinAdmissionSnapshot({ ...input, resource: { ...input.resource!, ...invalid } }),
+    ).toThrow();
   });
 
   it("binds prior queue observations and reason transitions without changing legacy snapshots", () => {
@@ -270,20 +275,48 @@ describe("pure admission replay", () => {
     const pinnedInput: PinnedAdmissionInput = {
       ...input,
       leaseValid: false,
-      workItems: [{ ...item(101), queuedSince: waiting, previousQueueObservation: { code: "local-pressure", gate: "capacity" } }],
+      workItems: [
+        {
+          ...item(101),
+          queuedSince: waiting,
+          previousQueueObservation: { code: "local-pressure", gate: "capacity" },
+        },
+      ],
     };
     const snapshot = pinAdmissionSnapshot(pinnedInput);
-    expect(snapshot.input.workItems[0]?.previousQueueObservation).toEqual({ code: "local-pressure", gate: "capacity" });
-    expect(replayAdmissions(snapshot)).toMatchObject({ reproduced: true, decisions: { queued: [{
-      code: "lease-unavailable", recordQueueStart: false, recordQueueReasonChange: true, queuedSince: waiting,
-    }] } });
+    expect(snapshot.input.workItems[0]?.previousQueueObservation).toEqual({
+      code: "local-pressure",
+      gate: "capacity",
+    });
+    expect(replayAdmissions(snapshot)).toMatchObject({
+      reproduced: true,
+      decisions: {
+        queued: [
+          {
+            code: "lease-unavailable",
+            recordQueueStart: false,
+            recordQueueReasonChange: true,
+            queuedSince: waiting,
+          },
+        ],
+      },
+    });
     const tampered = structuredClone(snapshot);
-    tampered.input.workItems[0]!.previousQueueObservation = { code: "lease-unavailable", gate: "authority" };
+    tampered.input.workItems[0]!.previousQueueObservation = {
+      code: "lease-unavailable",
+      gate: "authority",
+    };
     expect(() => replayAdmissions(tampered)).toThrow("snapshot digest mismatch");
     const unchanged = pinAdmissionSnapshot(tampered.input);
     expect(unchanged.snapshotDigest).not.toBe(snapshot.snapshotDigest);
-    expect(replayAdmissions(unchanged).decisions.queued[0]).not.toHaveProperty("recordQueueReasonChange");
-    const legacy = pinAdmissionSnapshot({ ...input, leaseValid: false, workItems: [{ ...item(101), queuedSince: waiting }] });
+    expect(replayAdmissions(unchanged).decisions.queued[0]).not.toHaveProperty(
+      "recordQueueReasonChange",
+    );
+    const legacy = pinAdmissionSnapshot({
+      ...input,
+      leaseValid: false,
+      workItems: [{ ...item(101), queuedSince: waiting }],
+    });
     expect(legacy.input.workItems[0]).not.toHaveProperty("previousQueueObservation");
     expect(replayAdmissions(legacy)).toMatchObject({ reproduced: true });
     expect(legacy.expected.queued[0]).not.toHaveProperty("recordQueueReasonChange");

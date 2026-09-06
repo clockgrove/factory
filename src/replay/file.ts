@@ -11,7 +11,10 @@ import {
 export async function readSuppliedReplayFile(path: string, objective: number) {
   try {
     if (!path || path.length > 4096) throw new Error(SUPPLIED_REPLAY_ERROR);
-    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const handle = await open(
+      path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
     try {
       const stat = await handle.stat();
       if (!stat.isFile() || stat.size > MAX_SUPPLIED_REPLAY_BYTES) {

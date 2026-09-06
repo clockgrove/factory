@@ -73,18 +73,35 @@ const compile = (workItems: CompilerWorkItemInput[]) =>
 describe("generic repository command grounding", () => {
   it("preserves pinned LFS tooling and conservatively serializes asset scope", () => {
     const repositoryLfs = {
-      baseSha: sha, attributes: true, requiredTools: ["git-lfs"],
-      assets: [{ path: "asset.dat", oid: "b".repeat(64), size: 24, pointerBlobOid: "c".repeat(40), mode: "100644" as const }],
+      baseSha: sha,
+      attributes: true,
+      requiredTools: ["git-lfs"],
+      assets: [
+        {
+          path: "asset.dat",
+          oid: "b".repeat(64),
+          size: 24,
+          pointerBlobOid: "c".repeat(40),
+          mode: "100644" as const,
+        },
+      ],
     };
     const input = {
-      title: "LFS repository", baseSha: sha,
-      repositoryFacts: { ...facts, files: [...facts.files, { path: "asset.dat" }], lfs: repositoryLfs },
+      title: "LFS repository",
+      baseSha: sha,
+      repositoryFacts: {
+        ...facts,
+        files: [...facts.files, { path: "asset.dat" }],
+        lfs: repositoryLfs,
+      },
       workItems: [item("asset", { scope: ["asset.dat"] })],
     };
     const compiled = compileObjective(input);
     expect(compiled.workItems[0]!.requirements.tools).toContain("git-lfs");
     expect(compiled.workItems[0]!.changeSurface.mergeClass).toBe("large-binary");
-    expect(() => compileObjective({ ...input, baseSha: "d".repeat(40) })).toThrow(/pinned compilation base/);
+    expect(() => compileObjective({ ...input, baseSha: "d".repeat(40) })).toThrow(
+      /pinned compilation base/,
+    );
   });
   it.each([
     [

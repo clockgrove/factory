@@ -165,13 +165,16 @@ async function observeV1(
       files.read(hierarchyPath),
     ]);
     if (maxRaw === null && currentRaw === null && hierarchyRaw === null) {
-      if (ancestor && memoryObserved) throw new Error("incomplete cgroup v1 memory ancestry observation");
+      if (ancestor && memoryObserved)
+        throw new Error("incomplete cgroup v1 memory ancestry observation");
       missingMemoryDescendant = true;
       continue;
     }
-    if (missingMemoryDescendant) throw new Error("incomplete cgroup v1 memory descendant observation");
+    if (missingMemoryDescendant)
+      throw new Error("incomplete cgroup v1 memory descendant observation");
     memoryObserved = true;
-    const hierarchical = hierarchyRaw === null ? null : parseCgroupV1Hierarchy(hierarchyRaw, hierarchyPath);
+    const hierarchical =
+      hierarchyRaw === null ? null : parseCgroupV1Hierarchy(hierarchyRaw, hierarchyPath);
     // A leaf's own limit always applies. Legacy v1 ancestor charges and limits
     // apply only with hierarchical accounting enabled; unknown is not disabled.
     if (index > 0 && hierarchical === null) {
@@ -195,7 +198,8 @@ async function observeV1(
         files.read(periodPath),
       ]);
       if (quotaRaw === null && periodRaw === null) {
-        if (ancestor && cpuObserved) throw new Error("incomplete cgroup v1 CPU ancestry observation");
+        if (ancestor && cpuObserved)
+          throw new Error("incomplete cgroup v1 CPU ancestry observation");
         missingCpuDescendant = true;
         continue;
       }

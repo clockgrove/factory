@@ -53,14 +53,28 @@ describe("continuous refill and recovery", () => {
 
   it("scans past currently oversized/path-blocked demand without forgetting its next free-resource turn", () => {
     const fairness = new ObjectiveFairness();
-    const requirement = (cpu: number, path: string) => ({ cpu, memoryMb: 1, cpuCapacity: 8,
-      memoryCapacityMb: 100, paths: [path], exclusiveResources: [] });
+    const requirement = (cpu: number, path: string) => ({
+      cpu,
+      memoryMb: 1,
+      cpuCapacity: 8,
+      memoryCapacityMb: 100,
+      paths: [path],
+      exclusiveResources: [],
+    });
     for (const objective of [10, 20, 30]) fairness.register(objective);
     fairness.reportDemand(10, 1, [requirement(8, "large")]);
     fairness.reportDemand(20, 0, []);
     fairness.reportDemand(30, 1, [requirement(1, "small")]);
-    const occupied = [{ objective: 20, local: true, cpu: 1, memoryMb: 1,
-      paths: ["busy"], exclusiveResources: [] } as unknown as CapacityReservation];
+    const occupied = [
+      {
+        objective: 20,
+        local: true,
+        cpu: 1,
+        memoryMb: 1,
+        paths: ["busy"],
+        exclusiveResources: [],
+      } as unknown as CapacityReservation,
+    ];
     expect(fairness.mayAdmit(30, occupied)).toBe(true);
     expect(fairness.localMaximum(30, 8, occupied)).toBe(7);
     // Without another polling/report round, a fresh ledger makes the older large

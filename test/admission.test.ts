@@ -226,14 +226,19 @@ describe("pure local-first admission", () => {
     queuedItem.queuedSince = waiting;
     queuedItem.previousQueueObservation = { code: first.code, gate: first.gate };
     expect(planAdmissions(current).queued[0]).toMatchObject({
-      code: "local-capacity", recordQueueStart: false, queuedSince: waiting,
+      code: "local-capacity",
+      recordQueueStart: false,
+      queuedSince: waiting,
     });
     expect(planAdmissions(current).queued[0]).not.toHaveProperty("recordQueueReasonChange");
 
     current.resource = { ...resource, loadRatio: 0.95 };
     const pressure = planAdmissions(current).queued[0]!;
     expect(pressure).toMatchObject({
-      code: "local-pressure", recordQueueStart: false, recordQueueReasonChange: true, queuedSince: waiting,
+      code: "local-pressure",
+      recordQueueStart: false,
+      recordQueueReasonChange: true,
+      queuedSince: waiting,
     });
     queuedItem.previousQueueObservation = { code: pressure.code, gate: pressure.gate };
     current.resource = { ...resource, loadRatio: 0.99 };
@@ -243,7 +248,10 @@ describe("pure local-first admission", () => {
     current.cooldownUntilMs = current.nowMs + 10_000;
     const cooldown = planAdmissions(current).queued[0]!;
     expect(cooldown).toMatchObject({
-      code: "local-cooldown", recordQueueStart: false, recordQueueReasonChange: true, queuedSince: waiting,
+      code: "local-cooldown",
+      recordQueueStart: false,
+      recordQueueReasonChange: true,
+      queuedSince: waiting,
     });
     queuedItem.previousQueueObservation = { code: cooldown.code, gate: cooldown.gate };
     current.cooldownUntilMs += 1000;

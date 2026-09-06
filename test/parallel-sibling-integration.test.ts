@@ -109,7 +109,11 @@ async function fixture(
   const policy = parseRunPolicy({
     ...DEFAULT_RUN_POLICY,
     capacity: { ...DEFAULT_RUN_POLICY.capacity, mode: "fixed" },
-    delivery: { mode: options.regular ? "regular-prs" : "stacked-prs", onUnavailable: "escalate", merge: "bottom-up" },
+    delivery: {
+      mode: options.regular ? "regular-prs" : "stacked-prs",
+      onUnavailable: "escalate",
+      merge: "bottom-up",
+    },
   });
   const pd = policyDigest(policy);
   let sequence = 1;
@@ -322,12 +326,30 @@ async function fixture(
     refs.set(`refs/heads/${publicationBranch(7, number, 1)}`, head);
     const tree = (await readCommit(head)).treeOid;
     const validationDigest = createHash("sha256").update(item.id).digest("hex");
-    const reviewIdentity = { kind: "artifact" as const, runId: "parallel", objective: 7,
-      workItem: number, attempt: 1, artifactDigest: validationDigest, baseSha,
-      outputTreeSha: tree, evidenceDigest: validationDigest };
-    await new ReviewCheckpointManager(storage, leases).persist({ lease, identity: reviewIdentity,
-      result: { review: { accepted: true, summary: "Original artifact accepted", unmetCriteria: [], risks: [] },
-        usage: { inputTokens: 10, outputTokens: 5 } } });
+    const reviewIdentity = {
+      kind: "artifact" as const,
+      runId: "parallel",
+      objective: 7,
+      workItem: number,
+      attempt: 1,
+      artifactDigest: validationDigest,
+      baseSha,
+      outputTreeSha: tree,
+      evidenceDigest: validationDigest,
+    };
+    await new ReviewCheckpointManager(storage, leases).persist({
+      lease,
+      identity: reviewIdentity,
+      result: {
+        review: {
+          accepted: true,
+          summary: "Original artifact accepted",
+          unmetCriteria: [],
+          risks: [],
+        },
+        usage: { inputTokens: 10, outputTokens: 5 },
+      },
+    });
     const exact = bindValidationToPublishedHead({
       validation: { passed: true, digest: validationDigest, baseSha, outputTreeSha: tree },
       publishedBaseSha: baseSha,
@@ -418,9 +440,16 @@ async function fixture(
           evidenceDigest: validationDigest,
           passed: true,
         }),
-        event({ kind: "budget", event: "BudgetReconciled", workItem: number, attempt: 1,
-          phase: "management", unit: "model_tokens", amount: 15,
-          usageId: `review-${reviewIdentityDigest(reviewIdentity)}` }),
+        event({
+          kind: "budget",
+          event: "BudgetReconciled",
+          workItem: number,
+          attempt: 1,
+          phase: "management",
+          unit: "model_tokens",
+          amount: 15,
+          usageId: `review-${reviewIdentityDigest(reviewIdentity)}`,
+        }),
         attempt({ event: "AttemptValidated", artifactDigest: validationDigest }),
         attempt({ event: "AttemptPublished", headSha: head, artifactDigest: validationDigest }),
         event({
@@ -444,82 +473,221 @@ async function fixture(
       ],
     });
   }
-  const controller = { controllerId: "shared-controller", epoch: 1,
-    expiresAt: new Date(Date.now() + 600_000).toISOString(), controllerPolicyDigest: "c".repeat(64) };
+  const controller = {
+    controllerId: "shared-controller",
+    epoch: 1,
+    expiresAt: new Date(Date.now() + 600_000).toISOString(),
+    controllerPolicyDigest: "c".repeat(64),
+  };
   let peerSnapshot: ObjectiveSnapshot | undefined;
   let peerMergeSha: string | undefined;
   let peerHead: string | undefined;
   if (options.peerAdvance) {
     git("checkout", "-q", "-b", "peer-head", baseSha);
     await writeFile(join(repository, "peer.txt"), "peer\n");
-    git("add", "."); git("commit", "-qm", "peer artifact");
+    git("add", ".");
+    git("commit", "-qm", "peer artifact");
     peerHead = git("rev-parse", "HEAD");
-    git("checkout", "-q", "main"); git("merge", "--squash", peerHead); git("commit", "-qm", "peer squash");
+    git("checkout", "-q", "main");
+    git("merge", "--squash", peerHead);
+    git("commit", "-qm", "peer squash");
     peerMergeSha = git("rev-parse", "HEAD");
     const peerTree = (await readCommit(peerHead)).treeOid;
     const peerLease = { ...lease, objective: 6, runId: "peer" };
-    const peerItem = { ...graph.workItems[0]!, id: "peer", title: "peer", goal: "Add peer",
-      scope: ["peer.txt"], delivery: { group: "peer", relationship: "root" as const },
-      requirements: { ...graph.workItems[0]!.requirements!,
-        ...(options.peerIsolated ? { trust: "isolated" as const } : {}) } };
-    const peerGraph = await graphManager.persist({ lease: peerLease, base: await readCommit(baseSha),
-      objective: { title: "Peer Objective", workItems: [peerItem] } });
-    const peerProjection = await graphManager.persistProjection({ lease: peerLease, graph: peerGraph,
-      bindings: [{ compilerId: "peer", issueNodeId: "I_88", issueNumber: 88 }] });
+    const peerItem = {
+      ...graph.workItems[0]!,
+      id: "peer",
+      title: "peer",
+      goal: "Add peer",
+      scope: ["peer.txt"],
+      delivery: { group: "peer", relationship: "root" as const },
+      requirements: {
+        ...graph.workItems[0]!.requirements!,
+        ...(options.peerIsolated ? { trust: "isolated" as const } : {}),
+      },
+    };
+    const peerGraph = await graphManager.persist({
+      lease: peerLease,
+      base: await readCommit(baseSha),
+      objective: { title: "Peer Objective", workItems: [peerItem] },
+    });
+    const peerProjection = await graphManager.persistProjection({
+      lease: peerLease,
+      graph: peerGraph,
+      bindings: [{ compilerId: "peer", issueNodeId: "I_88", issueNumber: 88 }],
+    });
     const validationDigest = createHash("sha256").update("peer").digest("hex");
-    const reviewIdentity = { kind: "artifact" as const, runId: "peer", objective: 6, workItem: 88,
-      attempt: 1, artifactDigest: validationDigest, baseSha, outputTreeSha: peerTree, evidenceDigest: validationDigest };
-    if (!options.missingPeerReview) await new ReviewCheckpointManager(storage, leases).persist({
-      lease: peerLease, identity: reviewIdentity, result: { review: { accepted: true, summary: "Peer accepted",
-        unmetCriteria: [], risks: [] }, usage: { inputTokens: 10, outputTokens: 5 } } });
-    const exact = bindValidationToPublishedHead({ validation: { passed: true, digest: validationDigest,
-      baseSha, outputTreeSha: peerTree }, publishedBaseSha: baseSha, publishedTreeSha: peerTree, publishedHeadSha: peerHead });
-    const peerEvent = (fields: Record<string, unknown>) => event({ ...fields, objective: 6, runId: "peer", sequence: sequence++ });
+    const reviewIdentity = {
+      kind: "artifact" as const,
+      runId: "peer",
+      objective: 6,
+      workItem: 88,
+      attempt: 1,
+      artifactDigest: validationDigest,
+      baseSha,
+      outputTreeSha: peerTree,
+      evidenceDigest: validationDigest,
+    };
+    if (!options.missingPeerReview)
+      await new ReviewCheckpointManager(storage, leases).persist({
+        lease: peerLease,
+        identity: reviewIdentity,
+        result: {
+          review: { accepted: true, summary: "Peer accepted", unmetCriteria: [], risks: [] },
+          usage: { inputTokens: 10, outputTokens: 5 },
+        },
+      });
+    const exact = bindValidationToPublishedHead({
+      validation: { passed: true, digest: validationDigest, baseSha, outputTreeSha: peerTree },
+      publishedBaseSha: baseSha,
+      publishedTreeSha: peerTree,
+      publishedHeadSha: peerHead,
+    });
+    const peerEvent = (fields: Record<string, unknown>) =>
+      event({ ...fields, objective: 6, runId: "peer", sequence: sequence++ });
     const item = structuredClone(snapshot.workItems[0]!);
-    Object.assign(item, { id: "I_88", number: 88, title: "peer", closed: true,
-      body: renderWorkPacket(peerItem, { protocol: "clockgrove.factory/graph-v1", id: "peer",
-        graphDigest: peerGraph.graphDigest, graphSize: 1, index: 0, dependsOn: [] }) });
-    item.linkedPullRequests = [{ ...item.linkedPullRequests[0]!, id: "PR_88", number: 88,
-      state: "MERGED", headSha: peerHead, changedFilePaths: ["peer.txt"] }];
-    item.factoryEvents = item.factoryEvents!.map((original) => peerEvent({ ...original, workItem: 88,
-      ...(original.kind === "attempt" && original.artifactDigest ? { artifactDigest: validationDigest } : {}),
-      ...(original.kind === "attempt" && original.headSha ? { headSha: peerHead } : {}),
-      ...(original.kind === "validation" ? { outputTreeSha: peerTree, evidenceDigest: validationDigest } : {}),
-      ...(original.kind === "budget" && original.phase === "management" ? { usageId: `review-${reviewIdentityDigest(reviewIdentity)}` } : {}),
-      ...(original.kind === "publication" ? { unitId: "delivery/peer", itemId: "peer", headSha: peerHead,
-        branch: publicationBranch(6, 88, 1), pullRequest: 88, validationDigest,
-        exactHeadValidationDigest: exact.digest } : {}),
-    }));
+    Object.assign(item, {
+      id: "I_88",
+      number: 88,
+      title: "peer",
+      closed: true,
+      body: renderWorkPacket(peerItem, {
+        protocol: "clockgrove.factory/graph-v1",
+        id: "peer",
+        graphDigest: peerGraph.graphDigest,
+        graphSize: 1,
+        index: 0,
+        dependsOn: [],
+      }),
+    });
+    item.linkedPullRequests = [
+      {
+        ...item.linkedPullRequests[0]!,
+        id: "PR_88",
+        number: 88,
+        state: "MERGED",
+        headSha: peerHead,
+        changedFilePaths: ["peer.txt"],
+      },
+    ];
+    item.factoryEvents = item.factoryEvents!.map((original) =>
+      peerEvent({
+        ...original,
+        workItem: 88,
+        ...(original.kind === "attempt" && original.artifactDigest
+          ? { artifactDigest: validationDigest }
+          : {}),
+        ...(original.kind === "attempt" && original.headSha ? { headSha: peerHead } : {}),
+        ...(original.kind === "validation"
+          ? { outputTreeSha: peerTree, evidenceDigest: validationDigest }
+          : {}),
+        ...(original.kind === "budget" && original.phase === "management"
+          ? { usageId: `review-${reviewIdentityDigest(reviewIdentity)}` }
+          : {}),
+        ...(original.kind === "publication"
+          ? {
+              unitId: "delivery/peer",
+              itemId: "peer",
+              headSha: peerHead,
+              branch: publicationBranch(6, 88, 1),
+              pullRequest: 88,
+              validationDigest,
+              exactHeadValidationDigest: exact.digest,
+            }
+          : {}),
+      }),
+    );
     const reserved = item.factoryEvents.find((entry) => entry.event === "AttemptReserved")!;
     const reservedOid = oid();
     refs.set(attemptRef(6, 88, 1), reservedOid);
     refs.set(`refs/heads/${publicationBranch(6, 88, 1)}`, peerHead);
-    commits.set(reservedOid, { oid: reservedOid, treeOid: (await readCommit(baseSha)).treeOid,
-      parentOids: [baseSha], message: encodeEventTrailer(reserved), serverTime: now });
-    item.factoryEvents.push(peerEvent({ ...reserved, event: "AttemptIntegrated", headSha: peerMergeSha }));
-    peerSnapshot = { ...structuredClone(snapshot), number: 6, id: "I_6", title: "Peer Objective", closed: true,
-      workItems: [item], factoryEvents: [
-        peerEvent({ kind: "run", event: "ActivationRequested", requestId: "peer-activation", requestedBy: "operator",
-          repository: "o/r", baseSha, policy, policyDigest: pd, controllerProtocolMin: "clockgrove.factory/v2",
-          controllerProtocolMax: "clockgrove.factory/v2" }),
-        peerEvent({ kind: "run", event: "FactoryRunStarted", activationRequestId: "peer-activation", actor: "operator",
-          repository: "o/r", objectiveAuthor: "operator", fork: false, baseBranch: "main", baseSha, policy, policyDigest: pd }),
-        peerEvent({ kind: "controller", event: "ControllerObserved", ...controller,
+    commits.set(reservedOid, {
+      oid: reservedOid,
+      treeOid: (await readCommit(baseSha)).treeOid,
+      parentOids: [baseSha],
+      message: encodeEventTrailer(reserved),
+      serverTime: now,
+    });
+    item.factoryEvents.push(
+      peerEvent({ ...reserved, event: "AttemptIntegrated", headSha: peerMergeSha }),
+    );
+    peerSnapshot = {
+      ...structuredClone(snapshot),
+      number: 6,
+      id: "I_6",
+      title: "Peer Objective",
+      closed: true,
+      workItems: [item],
+      factoryEvents: [
+        peerEvent({
+          kind: "run",
+          event: "ActivationRequested",
+          requestId: "peer-activation",
+          requestedBy: "operator",
+          repository: "o/r",
+          baseSha,
+          policy,
+          policyDigest: pd,
+          controllerProtocolMin: "clockgrove.factory/v2",
+          controllerProtocolMax: "clockgrove.factory/v2",
+        }),
+        peerEvent({
+          kind: "run",
+          event: "FactoryRunStarted",
+          activationRequestId: "peer-activation",
+          actor: "operator",
+          repository: "o/r",
+          objectiveAuthor: "operator",
+          fork: false,
+          baseBranch: "main",
+          baseSha,
+          policy,
+          policyDigest: pd,
+        }),
+        peerEvent({
+          kind: "controller",
+          event: "ControllerObserved",
+          ...controller,
           ...(options.foreignPeerGeneration ? { controllerId: "foreign-controller" } : {}),
-          protocolMin: "clockgrove.factory/v2", protocolMax: "clockgrove.factory/v2" }),
-        peerEvent({ kind: "graph", event: "GraphCompiled", graphDigest: peerGraph.graphDigest,
-          graphSize: 1, baseSha, graphRef: peerGraph.ref, graphBlobSha: peerGraph.blobOid }),
-        peerEvent({ kind: "graph", event: "GraphProjected", graphDigest: peerGraph.graphDigest, graphSize: 1,
-          projectionRef: peerProjection.ref, projectionBlobSha: peerProjection.blobOid }),
+          protocolMin: "clockgrove.factory/v2",
+          protocolMax: "clockgrove.factory/v2",
+        }),
+        peerEvent({
+          kind: "graph",
+          event: "GraphCompiled",
+          graphDigest: peerGraph.graphDigest,
+          graphSize: 1,
+          baseSha,
+          graphRef: peerGraph.ref,
+          graphBlobSha: peerGraph.blobOid,
+        }),
+        peerEvent({
+          kind: "graph",
+          event: "GraphProjected",
+          graphDigest: peerGraph.graphDigest,
+          graphSize: 1,
+          projectionRef: peerProjection.ref,
+          projectionBlobSha: peerProjection.blobOid,
+        }),
         peerEvent({ kind: "run", event: "FactoryRunCompleted", policyDigest: pd }),
-      ] };
+      ],
+    };
     const terminal = peerSnapshot.factoryEvents!.pop()!;
     let peerSequence = 1;
-    peerSnapshot.factoryEvents = peerSnapshot.factoryEvents!.map((entry) => parseFactoryEvent({ ...entry,
-      sequence: peerSequence++, ...(entry.event === "ActivationRequested" ? { runId: "peer-activation" } : {}) }));
-    item.factoryEvents = item.factoryEvents.map((entry) => parseFactoryEvent({ ...entry, sequence: peerSequence++ }));
+    peerSnapshot.factoryEvents = peerSnapshot.factoryEvents!.map((entry) =>
+      parseFactoryEvent({
+        ...entry,
+        sequence: peerSequence++,
+        ...(entry.event === "ActivationRequested" ? { runId: "peer-activation" } : {}),
+      }),
+    );
+    item.factoryEvents = item.factoryEvents.map((entry) =>
+      parseFactoryEvent({ ...entry, sequence: peerSequence++ }),
+    );
     peerSnapshot.factoryEvents.push(parseFactoryEvent({ ...terminal, sequence: peerSequence }));
-    commits.get(reservedOid)!.message = encodeEventTrailer(item.factoryEvents.find((entry) => entry.event === "AttemptReserved")!);
+    commits.get(reservedOid)!.message = encodeEventTrailer(
+      item.factoryEvents.find((entry) => entry.event === "AttemptReserved")!,
+    );
   }
   for (const name of Object.keys(storage) as Array<keyof CompiledGraphStore>) {
     // The complete immutable-store API is the transport boundary; no protocol
@@ -529,8 +697,9 @@ async function fixture(
   vi.spyOn(GitHubControlStore.prototype, "listRefs").mockImplementation(async (prefix) =>
     [...refs].filter(([ref]) => ref.startsWith(prefix)).map(([ref, id]) => ({ ref, oid: id })),
   );
-  vi.spyOn(GitHubControlStore.prototype, "readCommitObjectiveCandidates").mockImplementation(async (sha) =>
-    sha === peerMergeSha ? [6] : []);
+  vi.spyOn(GitHubControlStore.prototype, "readCommitObjectiveCandidates").mockImplementation(
+    async (sha) => (sha === peerMergeSha ? [6] : []),
+  );
   vi.spyOn(GitHubControlStore.prototype, "serverTime").mockImplementation(async () => new Date());
   vi.spyOn(GitHubControlStore.prototype, "getRepositoryFacts").mockResolvedValue({
     fullName: "o/r",
@@ -609,8 +778,9 @@ async function fixture(
   vi.spyOn(LeaseManager.prototype, "assertGeneration").mockResolvedValue(undefined);
   vi.spyOn(LeaseManager.prototype, "release").mockImplementation(async (value) => value);
   const findPull = (number: number) =>
-    [...snapshot.workItems, ...(peerSnapshot?.workItems ?? [])].find((item) => item.linkedPullRequests[0]!.number === number)!
-      .linkedPullRequests[0]!;
+    [...snapshot.workItems, ...(peerSnapshot?.workItems ?? [])].find(
+      (item) => item.linkedPullRequests[0]!.number === number,
+    )!.linkedPullRequests[0]!;
   let refreshResponseLost = false;
   const staleRefreshHeads = new Map<number, { head: string; remaining: number }>();
   const refresh = vi
@@ -819,25 +989,35 @@ describe("Supervisor parallel independent sibling integration", () => {
     expect(f.git("show", "HEAD:b.txt")).toBe("b");
   });
 
-  it.each([false, true])("accepts an authenticated terminal co-owned Objective's exact squash (regular=%s) without resuming it", async (regular) => {
-    const f = await fixture({ regular, peerAdvance: true });
-    const originalPeer = structuredClone(f.peerSnapshot);
-    const result = await f.run();
-    expect(result, result.reason).toMatchObject({ status: "completed" });
-    expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18, 19]);
-    expect(f.peerSnapshot).toEqual(originalPeer);
-    expect(f.git("show", "HEAD:peer.txt")).toBe("peer");
-    expect(f.launch).not.toHaveBeenCalled();
-    expect(vi.mocked(LeaseManager.prototype.acquire).mock.calls.every(([identity]) => identity.objective === 7)).toBe(true);
-  });
+  it.each([false, true])(
+    "accepts an authenticated terminal co-owned Objective's exact squash (regular=%s) without resuming it",
+    async (regular) => {
+      const f = await fixture({ regular, peerAdvance: true });
+      const originalPeer = structuredClone(f.peerSnapshot);
+      const result = await f.run();
+      expect(result, result.reason).toMatchObject({ status: "completed" });
+      expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18, 19]);
+      expect(f.peerSnapshot).toEqual(originalPeer);
+      expect(f.git("show", "HEAD:peer.txt")).toBe("peer");
+      expect(f.launch).not.toHaveBeenCalled();
+      expect(
+        vi
+          .mocked(LeaseManager.prototype.acquire)
+          .mock.calls.every(([identity]) => identity.objective === 7),
+      ).toBe(true);
+    },
+  );
 
-  it.each(["foreignPeerGeneration", "missingPeerReview"] as const)("rejects peer history with %s before any merge or paid candidate review", async (fault) => {
-    const f = await fixture({ regular: true, peerAdvance: true, [fault]: true });
-    expect(await f.run()).toMatchObject({ status: "escalated" });
-    expect(f.merge).not.toHaveBeenCalled();
-    expect(f.review).not.toHaveBeenCalled();
-    expect(f.launch).not.toHaveBeenCalled();
-  });
+  it.each(["foreignPeerGeneration", "missingPeerReview"] as const)(
+    "rejects peer history with %s before any merge or paid candidate review",
+    async (fault) => {
+      const f = await fixture({ regular: true, peerAdvance: true, [fault]: true });
+      expect(await f.run()).toMatchObject({ status: "escalated" });
+      expect(f.merge).not.toHaveBeenCalled();
+      expect(f.review).not.toHaveBeenCalled();
+      expect(f.launch).not.toHaveBeenCalled();
+    },
+  );
 
   it("does not turn isolated peer code into host validation or infer paid-validator authority", async () => {
     const f = await fixture({ regular: true, peerAdvance: true, peerIsolated: true });
@@ -848,11 +1028,14 @@ describe("Supervisor parallel independent sibling integration", () => {
     expect(f.launch).not.toHaveBeenCalled();
   });
 
-  it.each(["failCombinedTests", "rejectReview", "externalAdvance"] as const)("regular concurrent integration does not waive %s", async (fault) => {
-    const f = await fixture({ regular: true, [fault]: true });
-    expect(await f.run()).toMatchObject({ status: "escalated" });
-    expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
-  });
+  it.each(["failCombinedTests", "rejectReview", "externalAdvance"] as const)(
+    "regular concurrent integration does not waive %s",
+    async (fault) => {
+      const f = await fixture({ regular: true, [fault]: true });
+      expect(await f.run()).toMatchObject({ status: "escalated" });
+      expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
+    },
+  );
 
   it("records a complete candidate scope batch before any test command without per-command writes", async () => {
     const f = await fixture();
@@ -927,8 +1110,11 @@ describe("Supervisor parallel independent sibling integration", () => {
       )?.identity.deliveryHeadSha,
     ).toBe(refreshed);
     expect(
-      documents.find((record) => record.protocol === "clockgrove.factory/review-checkpoint-v1" && record.identity.kind === "integration-candidate")
-        ?.identity.headSha,
+      documents.find(
+        (record) =>
+          record.protocol === "clockgrove.factory/review-checkpoint-v1" &&
+          record.identity.kind === "integration-candidate",
+      )?.identity.headSha,
     ).toBe(refreshed);
     expect(f.git("show", `${f.mergeShas.get(19)}:a.txt`)).toBe("a");
     expect(f.git("show", `${f.mergeShas.get(19)}:b.txt`)).toBe("b");

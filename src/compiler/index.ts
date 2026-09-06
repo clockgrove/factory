@@ -5,8 +5,8 @@ import {
 } from "../protocol/worker-packet.js";
 import { addScopeSerializationEdges } from "../graph.js";
 import { z } from "zod";
-import { assessDecomposition, economicRationale } from "./economics.js";
-export { assessDecomposition, type DecompositionAssessment } from "./economics.js";
+import { assessDecomposition, economicRationale, type DecompositionEvidence } from "./economics.js";
+export { assessDecomposition, economicRequirements, type DecompositionAssessment, type DecompositionEvidence } from "./economics.js";
 import {
   buildContextManifest,
   discoverValidationCommands,
@@ -77,6 +77,7 @@ export type CompileInput = {
   baseSha: string;
   repositoryFacts: RepositoryFacts;
   workItems: CompilerWorkItemInput[];
+  economicEvidence?: DecompositionEvidence;
 };
 
 const sorted = (xs: string[]) => [...new Set(xs)].sort();
@@ -455,14 +456,19 @@ export function compileObjective(input: CompileInput): CompilerObjective {
     workItems: items,
   });
   validateCompiledObjective(result, facts);
-  const assessment = assessDecomposition(result.workItems);
+  applyEconomicReview(result, input.economicEvidence);
+  return result;
+}
+
+/** Applied before the immutable compilation checkpoint; never rerun on recovered graphs. */
+export function applyEconomicReview(result: CompilerObjective, evidence?: DecompositionEvidence): void {
+  const assessment = assessDecomposition(result.workItems, evidence);
   if (assessment.redundantItemPairs.length)
     throw new Error(
       `uneconomic duplicate deliverables: ${assessment.redundantItemPairs.map((pair) => pair.join(" / ")).join(", ")}. ${assessment.feedback[0]}`,
     );
   for (const item of result.workItems)
-    item.economicReview.rationale = economicRationale(assessment);
-  return result;
+    item.economicReview.rationale = economicRationale(assessment, item.id);
 }
 
 export function serializeCompilerObjective(objective: CompilerObjective): string {

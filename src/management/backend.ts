@@ -3,6 +3,7 @@ import type { NormalizedArtifact } from "../execution/artifacts.js";
 import type { WorkerPacket } from "../protocol/worker-packet.js";
 import type { ValidationEvidence } from "../validation/evidence.js";
 import type { ModelSelection } from "../protocol/policy.js";
+import type { CompilerWorkItem, DecompositionEvidence } from "../compiler/index.js";
 
 export interface ManagementUsage {
   inputTokens: number;
@@ -30,6 +31,8 @@ export interface CompilationContext {
   repositoryFiles: string[];
   allowedNetworkDestinations: string[];
   modelSelection?: ModelSelection;
+  /** Read-only trusted observations after grounding; omitted callers retain explicit unknowns. */
+  economicEvidence?: (items: readonly CompilerWorkItem[]) => Promise<DecompositionEvidence>;
 }
 
 export interface CompilationResult {

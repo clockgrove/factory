@@ -31,7 +31,7 @@ import type {
   SemanticReview,
 } from "./backend.js";
 import { restrictedCodexArgs } from "../backends/codex-cli-policy.js";
-import { compileObjective, ExclusiveResourcesSchema } from "../compiler/index.js";
+import { compileObjective, applyEconomicReview, ExclusiveResourcesSchema } from "../compiler/index.js";
 import { ManagementOutputError } from "./backend.js";
 import { discoverValidationCommands, readRepositoryFacts } from "../repository-profiles/index.js";
 
@@ -528,12 +528,17 @@ export class CodexCliManagementBackend implements ManagementBackend {
         if (item.requirements)
           item.requirements = ExecutionRequirementsSchema.parse(item.requirements);
       }
-      objective = compileObjective({
+      const grounded = compileObjective({
         title: context.objective.title,
         baseSha: context.baseSha,
         repositoryFacts,
         workItems: providerObjective.workItems,
       });
+      if (context.economicEvidence) {
+        const evidence = await context.economicEvidence(grounded.workItems);
+        applyEconomicReview(grounded, evidence);
+      }
+      objective = grounded;
       validateGraph(objective);
       result = { objective, usage };
       await checkpoint(result);

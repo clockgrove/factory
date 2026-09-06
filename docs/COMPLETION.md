@@ -27,10 +27,12 @@ an older-base retained regular PR was not refreshed through the successor path. 
 the remaining installed scenarios are the current critical path. Review also confirmed required
 isolated adopted-candidate validation in [#129](https://github.com/clockgrove/factory/issues/129)
 and shared provider admission in [#130](https://github.com/clockgrove/factory/issues/130).
-Their implementation and regressions are integrated in one recovery capability batch. Initial
-coordinated checks exposed receipt/provenance and fixture defects; corrections preserve original
-failures and await final integrated acceptance. These are code requirements, not provider
-limitations or waived qualification requirements.
+Their implementation and regressions are integrated in one recovery capability batch and passed
+[final release checks and matching WSL2 installation](release-evidence/retained-recovery-correction-2026-09-06.json).
+That record preserves the initial receipt/provenance and fixture failures separately. The
+retained live continuation remains paused with an elapsed execution window; supported timeout
+reconciliation and any required new authority precede further execution. Installed qualification,
+not these corrected implementation gaps, is now the critical path.
 This does not establish live provider support, actual compiler/chat behavior or measured cost/throughput benefit.
 
 The [recorded integrated local suite](release-evidence/integrated-completion-suite-2026-09-05.json)
@@ -47,9 +49,9 @@ consumption counters are not substitutes. Disputed requirements remain unresolve
 
 | Capability | Issues | Remaining acceptance |
 | --- | --- | --- |
-| Retained regular-PR successor refresh | [#128](https://github.com/clockgrove/factory/issues/128) | Code / recovery owner: exact-owned refresh, new-head validation/review and interrupted accounting are integrated, including restored artifacts and repeated-successor tree proofs. Original artifacts and paid history remain immutable. Next: final integrated acceptance and capability PR, then matching-artifact qualification. The approved live continuation is acknowledged paused and its execution window elapsed; neither deadline nor allowance is extended. |
-| Isolated adopted merge candidates | [#129](https://github.com/clockgrove/factory/issues/129) | Code / isolated-recovery owner: required independent validation, explicit provider authorization, native budget/capacity, durable completion and crash reconciliation are integrated and independently reviewed. A failed validator is not successful work; unknown termination still prevents replacement. Next: final integrated acceptance and capability PR. Live paid qualification retains separate authority. |
-| Shared provider validation capacity | [#130](https://github.com/clockgrove/factory/issues/130) | Code / integration owner: invocation-specific Daytona candidate reservations share repository and Objective provider ceilings with workers while preserving exact receipt/release identities. Independent review and affected ledger checks passed. Next: final integrated acceptance and capability PR with #128/#129. |
+| Retained regular-PR successor refresh | [#128](https://github.com/clockgrove/factory/issues/128) | Implementation accepted / recovery owner: exact-owned refresh, new-head validation/review, interrupted accounting, restored artifacts and repeated-successor tree proofs passed integrated checks and matching installation. Original artifacts and paid history remain immutable. Next: installed retained-work qualification under supported authority; the paused live window elapsed without a deadline or allowance extension. |
+| Isolated adopted merge candidates | [#129](https://github.com/clockgrove/factory/issues/129) | Implementation accepted / isolated-recovery owner: required independent validation, explicit provider authorization, native budget/capacity, durable completion and crash reconciliation passed integrated checks. A failed validator is not successful work; unknown termination prevents replacement. Next: live provider qualification with separate spending authority. |
+| Shared provider validation capacity | [#130](https://github.com/clockgrove/factory/issues/130) | Implementation accepted / integration owner: candidate reservations and workers share repository/Objective provider ceilings without changing exact receipt/release identity. Independent review and final integrated checks passed. Next: installed provider-capacity qualification within separately authorized scenarios. |
 | Integrated candidate corrections | [#119](https://github.com/clockgrove/factory/issues/119) | Completed / integration owner: reviewed capability stack merged in #120–#122. Final integrated gates passed on the recorded candidate; original failures remain separate. |
 | Installed continuation corrections | [#124](https://github.com/clockgrove/factory/issues/124), [#125](https://github.com/clockgrove/factory/issues/125), [#126](https://github.com/clockgrove/factory/issues/126) | Completed / integration owner: strict cooldown parsing, authenticated foreground graph-base proof and one bounded real-Git fixture corrected and reviewed. Full release checks and matching WSL2 installation passed. Preserve [original failure, partial pressure proof and independent cleanup](release-evidence/wsl2-pressure-original-failure-2026-09-06.json). Next: supported recovery retaining the first merge and second root output; installed qualification remains open. |
 | Restored installed runtime | [#123](https://github.com/clockgrove/factory/issues/123) | Testing / qualification lane: remaining same-host multi-Objective and regular-PR overlap, durable terminal session recovery, LFS/tooling, manifests and oversized transfer cases. Reuse compatible #75/#76 evidence; integrated source checks are not these live passes. |

@@ -2016,123 +2016,152 @@ describe("Supervisor adopted isolated candidate validation", () => {
     30000,
   );
 
-  it("preserves a failed isolated validation's known usage without accepting or replacing its source", async () => {
-    const f = await isolatedSuccessorFixture({ fault: "validation" });
-    const write = vi.mocked(GitHubControlStore.prototype.addIssueComment).getMockImplementation()!;
-    let interrupted = false;
-    vi.mocked(GitHubControlStore.prototype.addIssueComment).mockImplementation(
-      async (node, body) => {
-        if (
-          !interrupted &&
-          decodeEventComments(body).some(
-            (entry) =>
-              entry.kind === "budget" &&
-              entry.runId === "successor" &&
-              entry.event === "BudgetReconciled" &&
-              entry.unit === "sandbox_milliseconds",
-          )
-        ) {
-          interrupted = true;
-          expect(
-            f.snapshot.workItems[1]!.factoryEvents!.some(
+  it.each([false, true])(
+    "preserves failed isolated validation usage without source replacement, unavailable mutable target=%s",
+    async (unavailableTarget) => {
+      const f = await isolatedSuccessorFixture({ fault: "validation" });
+      const write = vi
+        .mocked(GitHubControlStore.prototype.addIssueComment)
+        .getMockImplementation()!;
+      let interrupted = false;
+      vi.mocked(GitHubControlStore.prototype.addIssueComment).mockImplementation(
+        async (node, body) => {
+          if (
+            !interrupted &&
+            decodeEventComments(body).some(
               (entry) =>
-                entry.kind === "capacity" &&
+                entry.kind === "budget" &&
                 entry.runId === "successor" &&
-                entry.event === "CapacityReconciled" &&
-                entry.isolatedFailure,
-            ),
-          ).toBe(true);
-          expect(f.isolatedResources.size).toBe(0);
-          throw new PlatformUnavailableError(
-            { kind: "server_error", retryAfterMs: 1 },
-            new Error("fixture interrupted failed validation accounting"),
-          );
-        }
-        return write(node, body);
-      },
-    );
-    await expect(f.run()).rejects.toThrow(PlatformUnavailableError);
-    expect(interrupted).toBe(true);
-    expect(f.isolatedValidate).toHaveBeenCalledOnce();
-    expect(f.isolatedResources.size).toBe(0);
-    const result = await f.isolatedValidate.mock.results[0]!.value;
-    expect(result).toMatchObject({
-      passed: false,
-      failureReason: expect.stringContaining("combined regression"),
-    });
-    expect(result.commands.at(-1)!.exitCode).not.toBe(0);
-    expect([...f.refs.keys()].filter((ref) => ref.includes("/merge-candidates/"))).toEqual([]);
-    expect(f.review).not.toHaveBeenCalled();
-    expect(f.launch).not.toHaveBeenCalled();
-    expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
-    const events = f.snapshot.workItems[1]!.factoryEvents!;
-    const capacities = events.filter(
-      (entry) => entry.kind === "capacity" && entry.runId === "successor",
-    );
-    expect(capacities.map((entry) => entry.event)).toEqual([
-      "CapacityReserved",
-      "CapacityReconciled",
-    ]);
-    const completion = capacities[1];
-    if (completion?.kind !== "capacity" || !completion.isolatedFailure)
-      throw new Error("fixture exact failed completion absent");
-    const failure = completion.isolatedFailure;
-    expect(failure).toMatchObject({
-      validationDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
-      validationStartedAt: result.startedAt,
-      validationCompletedAt: result.completedAt,
-    });
-    expect(failure.sandboxMilliseconds).toBe(
-      Date.parse(failure.completedAt) - Date.parse(failure.startedAt),
-    );
-    expect(completion.isolatedValidation!.invocationOwnershipDigest).toBe(
-      validationInvocationOwnership(f.isolatedValidate.mock.calls[0]![0]),
-    );
-    const immutableCompletion = structuredClone(completion);
-    // The failed result is a separate durable rejection, never a successful
-    // merge-candidate checkpoint. A restart only repairs its exact usage.
-    expect(await f.run(), JSON.stringify(f.messages)).toMatchObject({
-      status: "escalated",
-      reason: expect.stringContaining("adopted isolated candidate validation was durably rejected"),
-    });
-    expect(f.isolatedReconcile).not.toHaveBeenCalled();
-    expect(f.isolatedValidate).toHaveBeenCalledOnce();
-    expect(f.isolatedResources.size).toBe(0);
-    expect(f.review).not.toHaveBeenCalled();
-    expect(f.launch).not.toHaveBeenCalled();
-    const current = f.snapshot.workItems[1]!.factoryEvents!;
-    expect(current).toContainEqual(immutableCompletion);
-    expect(
-      current.filter((entry) => entry.kind === "capacity" && entry.runId === "successor"),
-    ).toEqual(capacities);
-    const usage = current.filter(
-      (entry) =>
-        entry.kind === "budget" &&
-        entry.runId === "successor" &&
-        entry.event === "BudgetReconciled",
-    );
-    expect(usage).toHaveLength(2);
-    expect(usage).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          unit: "sandbox_milliseconds",
-          amount: failure.sandboxMilliseconds,
-        }),
-        expect.objectContaining({
-          unit: "validation_milliseconds",
-          amount: Date.parse(result.completedAt) - Date.parse(result.startedAt),
-        }),
-      ]),
-    );
-    expect([...f.refs.keys()].filter((ref) => ref.includes("/merge-candidates/"))).toEqual([]);
-    expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
-    expect(f.planRecord.plan.items[1]!.source!.publication!.headSha).toBe(f.heads[1]);
-    expect(f.snapshot.workItems[1]!.closed).toBe(false);
-    expect(await f.runtime()).toMatchObject({
-      status: "verified",
-      usage: { modelTokens: 30, sandboxMinutesReserved: failure.sandboxMilliseconds / 60_000 },
-    });
-  }, 30000);
+                entry.event === "BudgetReconciled" &&
+                entry.unit === "sandbox_milliseconds",
+            )
+          ) {
+            interrupted = true;
+            expect(
+              f.snapshot.workItems[1]!.factoryEvents!.some(
+                (entry) =>
+                  entry.kind === "capacity" &&
+                  entry.runId === "successor" &&
+                  entry.event === "CapacityReconciled" &&
+                  entry.isolatedFailure,
+              ),
+            ).toBe(true);
+            expect(f.isolatedResources.size).toBe(0);
+            throw new PlatformUnavailableError(
+              { kind: "server_error", retryAfterMs: 1 },
+              new Error("fixture interrupted failed validation accounting"),
+            );
+          }
+          return write(node, body);
+        },
+      );
+      await expect(f.run()).rejects.toThrow(PlatformUnavailableError);
+      expect(interrupted).toBe(true);
+      expect(f.isolatedValidate).toHaveBeenCalledOnce();
+      expect(f.isolatedResources.size).toBe(0);
+      const result = await f.isolatedValidate.mock.results[0]!.value;
+      expect(result).toMatchObject({
+        passed: false,
+        failureReason: expect.stringContaining("combined regression"),
+      });
+      expect(result.commands.at(-1)!.exitCode).not.toBe(0);
+      expect([...f.refs.keys()].filter((ref) => ref.includes("/merge-candidates/"))).toEqual([]);
+      expect(f.review).not.toHaveBeenCalled();
+      expect(f.launch).not.toHaveBeenCalled();
+      expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
+      const events = f.snapshot.workItems[1]!.factoryEvents!;
+      const capacities = events.filter(
+        (entry) => entry.kind === "capacity" && entry.runId === "successor",
+      );
+      expect(capacities.map((entry) => entry.event)).toEqual([
+        "CapacityReserved",
+        "CapacityReconciled",
+      ]);
+      const completion = capacities[1];
+      if (completion?.kind !== "capacity" || !completion.isolatedFailure)
+        throw new Error("fixture exact failed completion absent");
+      const failure = completion.isolatedFailure;
+      expect(failure).toMatchObject({
+        validationDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+        validationStartedAt: result.startedAt,
+        validationCompletedAt: result.completedAt,
+      });
+      expect(failure.sandboxMilliseconds).toBe(
+        Date.parse(failure.completedAt) - Date.parse(failure.startedAt),
+      );
+      expect(completion.isolatedValidation!.invocationOwnershipDigest).toBe(
+        validationInvocationOwnership(f.isolatedValidate.mock.calls[0]![0]),
+      );
+      const immutableCompletion = structuredClone(completion);
+      const unavailableHead = "f".repeat(40);
+      if (unavailableTarget) {
+        // This is only a changed mutable branch observation, deliberately lacking
+        // commit/provenance evidence. It does not invent an authenticated peer
+        // integration. Historical rejection and usage repair must precede any
+        // attempt to inspect or authorize this new target.
+        expect(unavailableHead).not.toBe(completion.targetBaseSha);
+        const previousHead = await f.store.getBranchHead("main");
+        vi.mocked(GitHubControlStore.prototype.getBranchHead).mockResolvedValue({
+          ...previousHead,
+          oid: unavailableHead,
+        });
+      }
+      const refreshesBeforeRestart = f.refresh.mock.calls.length;
+      // The failed result is a separate durable rejection, never a successful
+      // merge-candidate checkpoint. A restart only repairs its exact usage.
+      expect(await f.run(), JSON.stringify(f.messages)).toMatchObject({
+        status: "escalated",
+        reason: expect.stringContaining(
+          "adopted isolated candidate validation was durably rejected",
+        ),
+      });
+      expect(f.isolatedReconcile).not.toHaveBeenCalled();
+      expect(f.isolatedValidate).toHaveBeenCalledOnce();
+      expect(f.isolatedResources.size).toBe(0);
+      expect(f.review).not.toHaveBeenCalled();
+      expect(f.launch).not.toHaveBeenCalled();
+      expect(f.refresh).toHaveBeenCalledTimes(refreshesBeforeRestart);
+      if (unavailableTarget)
+        expect(
+          vi.mocked(GitHubControlStore.prototype.readCommit).mock.calls.map(([oid]) => oid),
+        ).not.toContain(unavailableHead);
+      const current = f.snapshot.workItems[1]!.factoryEvents!;
+      expect(current).toContainEqual(immutableCompletion);
+      expect(
+        current.filter((entry) => entry.kind === "capacity" && entry.runId === "successor"),
+      ).toEqual(capacities);
+      const usage = current.filter(
+        (entry) =>
+          entry.kind === "budget" &&
+          entry.runId === "successor" &&
+          entry.event === "BudgetReconciled",
+      );
+      expect(usage).toHaveLength(2);
+      expect(usage).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            unit: "sandbox_milliseconds",
+            amount: failure.sandboxMilliseconds,
+            usageId: `integration-validation-${completion.backend.slice("factory/integration-sandbox-".length)}`,
+          }),
+          expect.objectContaining({
+            unit: "validation_milliseconds",
+            amount: Date.parse(result.completedAt) - Date.parse(result.startedAt),
+            usageId: `integration-validation-${completion.backend.slice("factory/integration-sandbox-".length)}`,
+          }),
+        ]),
+      );
+      expect([...f.refs.keys()].filter((ref) => ref.includes("/merge-candidates/"))).toEqual([]);
+      expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18]);
+      expect(f.planRecord.plan.items[1]!.source!.publication!.headSha).toBe(f.heads[1]);
+      expect(f.snapshot.workItems[1]!.closed).toBe(false);
+      expect(await f.runtime()).toMatchObject({
+        status: "verified",
+        usage: { modelTokens: 30, sandboxMinutesReserved: failure.sandboxMilliseconds / 60_000 },
+      });
+    },
+    30000,
+  );
 
   it("retains unknown isolated termination and refuses a replacement candidate after restart", async () => {
     const f = await isolatedSuccessorFixture({ fault: "cleanup" });

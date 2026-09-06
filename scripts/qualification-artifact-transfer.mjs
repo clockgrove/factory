@@ -290,11 +290,13 @@ export function assertArtifactTransferProof(observation, authority, proof, optio
     assert.equal(witness.intentCommitSha, proof.intent.commit.oid);
     assert.equal(witness.descriptorDigest, hash(proof.intent.content));
     assert.deepEqual(witness.batch, reserved.localScopeBatch);
-    assert.equal(witness.reservationReceiptDigest, hash(canonical(reserved)));
-    assert.equal(witness.startedReceiptDigest, hash(canonical(started)));
-    assert.equal(witness.modelReceiptDigest, hash(canonical(worker)));
-    assert.equal(witness.modelTokens, worker.amount); assert.equal(witness.usageId, worker.usageId);
-    assert.deepEqual(witness.session, { threadId: binding.threadId, turnId: terminal.turnId, checkpointDigest: hash(JSON.stringify(terminal)) });
+    const reported = witness.terminal;
+    exact(reported, ["reservationReceiptDigest", "startedReceiptDigest", "modelReceiptDigest", "modelTokens", "usageId", "session"]);
+    assert.equal(reported.reservationReceiptDigest, hash(canonical(reserved)));
+    assert.equal(reported.startedReceiptDigest, hash(canonical(started)));
+    assert.equal(reported.modelReceiptDigest, hash(canonical(worker)));
+    assert.equal(reported.modelTokens, worker.amount); assert.equal(reported.usageId, worker.usageId);
+    assert.deepEqual(reported.session, { threadId: binding.threadId, turnId: terminal.turnId, checkpointDigest: hash(JSON.stringify(terminal)) });
     digest(witness.armDigest); assert.ok(when(witness.reachedAt) >= when(worker.at));
     assert.ok(when(witness.expiresAt) > when(witness.reachedAt));
     assert.equal(witness.executionCleanup, "not-proven-by-checkpoint");

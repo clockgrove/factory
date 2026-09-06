@@ -4228,6 +4228,12 @@ export class FactorySupervisor {
           event: "AttemptStarted",
           sequence: this.#sequences.take(),
           providerResourceId: handle!.resourceId,
+          ...(handle!.metadata?.sourceArchiveDigest
+            ? { sourceArchiveDigest: handle!.metadata.sourceArchiveDigest }
+            : {}),
+          ...(handle!.metadata?.sourceArchiveBytes === undefined
+            ? {}
+            : { sourceArchiveBytes: Number(handle!.metadata.sourceArchiveBytes) }),
           ...(handle!.metadata?.resourceHostIdentity
             ? { resourceHostIdentity: handle!.metadata.resourceHostIdentity }
             : {}),

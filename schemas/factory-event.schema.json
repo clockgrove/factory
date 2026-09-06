@@ -76,6 +76,8 @@
     "artifactDigest": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
     "environmentIdentity": { "type": "string", "minLength": 1, "maxLength": 500 },
     "resourceHostIdentity": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+    "sourceArchiveDigest": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+    "sourceArchiveBytes": { "type": "integer", "minimum": 0, "maximum": 268435456 },
     "evidenceDigest": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
     "graphDigest": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
     "graphSize": { "type": "integer", "minimum": 1, "maximum": 100 },

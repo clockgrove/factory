@@ -341,6 +341,8 @@ const Attempt = Common.extend({
   providerResourceId: boundedText(500).optional(),
   environmentIdentity: boundedText(500).optional(),
   resourceHostIdentity: sha256Digest.optional(),
+  sourceArchiveDigest: sha256Digest.optional(),
+  sourceArchiveBytes: z.number().int().nonnegative().max(256 * 1024 * 1024).optional(),
   localScopeBatch: LocalScopeBatchSchema.optional(),
   artifactDigest: sha256Digest.optional(),
   headSha: gitSha.optional(),

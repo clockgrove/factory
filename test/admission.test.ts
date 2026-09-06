@@ -213,6 +213,56 @@ function input(overrides: Partial<AdmissionInput> = {}): AdmissionInput {
 }
 
 describe("pure local-first admission", () => {
+  it("records stable capacity, pressure and cooldown transitions without resetting waiting age", () => {
+    const waiting = "2026-09-04T00:07:00.000Z";
+    const queuedItem = workItem(1, { backends: [local] });
+    const current = input({
+      policy: { ...policy, burst: { ...policy.burst!, mode: "never" } },
+      workItems: [queuedItem],
+      resource: { ...resource, effectiveCpu: 1 },
+    });
+    const first = planAdmissions(current).queued[0]!;
+    expect(first).toMatchObject({ code: "local-capacity", recordQueueStart: true });
+    queuedItem.queuedSince = waiting;
+    queuedItem.previousQueueObservation = { code: first.code, gate: first.gate };
+    expect(planAdmissions(current).queued[0]).toMatchObject({
+      code: "local-capacity", recordQueueStart: false, queuedSince: waiting,
+    });
+    expect(planAdmissions(current).queued[0]).not.toHaveProperty("recordQueueReasonChange");
+
+    current.resource = { ...resource, loadRatio: 0.95 };
+    const pressure = planAdmissions(current).queued[0]!;
+    expect(pressure).toMatchObject({
+      code: "local-pressure", recordQueueStart: false, recordQueueReasonChange: true, queuedSince: waiting,
+    });
+    queuedItem.previousQueueObservation = { code: pressure.code, gate: pressure.gate };
+    current.resource = { ...resource, loadRatio: 0.99 };
+    expect(planAdmissions(current).queued[0]).not.toHaveProperty("recordQueueReasonChange");
+
+    current.resource = resource;
+    current.cooldownUntilMs = current.nowMs + 10_000;
+    const cooldown = planAdmissions(current).queued[0]!;
+    expect(cooldown).toMatchObject({
+      code: "local-cooldown", recordQueueStart: false, recordQueueReasonChange: true, queuedSince: waiting,
+    });
+    queuedItem.previousQueueObservation = { code: cooldown.code, gate: cooldown.gate };
+    current.cooldownUntilMs += 1000;
+    expect(planAdmissions(current).queued[0]).not.toHaveProperty("recordQueueReasonChange");
+    expect(queuedItem.nextAttempt).toBe(1);
+    expect(queuedItem.queuedSince).toBe(waiting);
+  });
+
+  it("records a changed stable gate or legacy unknown reason once, not volatile reason text", () => {
+    const queuedItem = workItem(1, { queuedSince: "2026-09-04T00:07:00.000Z" });
+    const current = input({ workItems: [queuedItem], leaseValid: false });
+    queuedItem.previousQueueObservation = { code: null };
+    expect(planAdmissions(current).queued[0]?.recordQueueReasonChange).toBe(true);
+    queuedItem.previousQueueObservation = { code: "lease-unavailable", gate: "capacity" };
+    expect(planAdmissions(current).queued[0]?.recordQueueReasonChange).toBe(true);
+    queuedItem.previousQueueObservation = { code: "lease-unavailable", gate: "authority" };
+    expect(planAdmissions(current).queued[0]).not.toHaveProperty("recordQueueReasonChange");
+  });
+
   it("fills three local and two bounded burst slots from an eight-item queue", () => {
     const plan = planAdmissions(input());
     expect(plan.admissions.map((item) => [item.workItem, item.admissionClass])).toEqual([

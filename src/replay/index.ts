@@ -9,6 +9,7 @@ import {
   planAdmissions,
   type AdmissionInput,
   type AdmissionPlan,
+  type PreviousQueueObservation,
 } from "../scheduling/admission.js";
 import type { CapacitySnapshot } from "../scheduling/capacity-ledger.js";
 import type { ObservedPrioritySource } from "../scheduling/priority.js";
@@ -53,6 +54,7 @@ export interface PinnedAdmissionWorkItem {
   paths: readonly string[];
   exclusiveResources: readonly string[];
   queuedSince?: string;
+  previousQueueObservation?: PreviousQueueObservation;
 }
 
 /** Every non-wall-clock input consumed by the admission planner. */
@@ -304,6 +306,12 @@ export function normalizePinnedAdmissionInput(value: PinnedAdmissionInput): Pinn
       paths: [...item.paths],
       exclusiveResources: [...item.exclusiveResources],
       ...(item.queuedSince ? { queuedSince: item.queuedSince } : {}),
+      ...(item.previousQueueObservation === undefined ? {} : {
+        previousQueueObservation: {
+          code: item.previousQueueObservation.code,
+          ...(item.previousQueueObservation.gate === undefined ? {} : { gate: item.previousQueueObservation.gate }),
+        },
+      }),
     };
   });
   if (new Set(workItems.map((item) => item.number)).size !== workItems.length) {
@@ -382,6 +390,9 @@ function hydrate(input: PinnedAdmissionInput): AdmissionInput {
       paths: [...item.paths],
       exclusiveResources: [...item.exclusiveResources],
       ...(item.queuedSince ? { queuedSince: item.queuedSince } : {}),
+      ...(item.previousQueueObservation === undefined ? {} : {
+        previousQueueObservation: { ...item.previousQueueObservation },
+      }),
     })),
   };
 }

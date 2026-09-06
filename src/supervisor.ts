@@ -197,7 +197,8 @@ import {
   type LocalWorktree,
 } from "./runtime/local-worktree.js";
 import { runContainedProcess } from "./runtime/process-group.js";
-import { allDone, derive, queuedSince, ready, type DerivedWorkItem } from "./state.js";
+import { allDone, derive, queuedState, ready, type DerivedWorkItem } from "./state.js";
+import { queuedReasonCode } from "./explanations/index.js";
 import { COPILOT_ASSIGNEE_LOGIN } from "./types.js";
 import {
   admissionCapacityLimits,
@@ -3629,7 +3630,7 @@ export class FactorySupervisor {
                   event.kind === "attempt" ? Math.max(highest, event.attempt) : highest,
                 0,
               ) + 1;
-            const queuedAt = queuedSince(priority.item, this.#run.runId);
+            const queued = queuedState(priority.item, this.#run.runId);
             const backends = applyCloudPause(
               await this.#registry.evaluate({
                 policy: this.#policy,
@@ -3681,7 +3682,13 @@ export class FactorySupervisor {
                   }),
               paths: packet.allowedPaths,
               exclusiveResources: packet.changeSurface?.exclusiveResources ?? [],
-              ...(queuedAt ? { queuedSince: queuedAt } : {}),
+              ...(queued ? {
+                queuedSince: queued.since,
+                previousQueueObservation: {
+                  code: queued.latest.reasonCode ?? queuedReasonCode(queued.latest.reason) ?? null,
+                  ...(queued.latest.gate ? { gate: queued.latest.gate } : {}),
+                },
+              } : {}),
             };
           }),
         );
@@ -3707,7 +3714,9 @@ export class FactorySupervisor {
         if (plan.queued.some((decision) => decision.code === "local-pressure")) {
           this.#resourceSampler.notePressure(nowMs);
         }
-        const newQueueReceipts = plan.queued.filter((decision) => decision.recordQueueStart);
+        const newQueueReceipts = plan.queued.filter(
+          (decision) => decision.recordQueueStart || decision.recordQueueReasonChange,
+        );
         if (safeAdmissions.length + newQueueReceipts.length > 0) {
           assertGraphQlAdmissionHeadroom(
             snapshot.graphQlRateLimit,

@@ -54,6 +54,7 @@ export interface RuntimeEconomics {
   }>;
   consumptionByDeliveryOutcome: EvidenceMetric<Array<{
     unit: NativeBudgetUnit;
+    usageEvidence: "as-recorded" | "conservative-reservation";
     integrated: number;
     unintegratedAtTerminalRun: number;
     unresolvedDelivery: number;
@@ -176,6 +177,7 @@ export function summarizeRuntimeEconomics(
     return { start: a, end: b, location: where };
   };
   const attempts = new Map<string, Attempt[]>();
+  const conservativelySettled = new Set(events.filter((event) => event.kind === "budget" && event.usageEvidence === "conservative-reservation").map(key));
   for (const event of events) if (event.kind === "attempt") {
     const group = attempts.get(key(event)) ?? [];
     group.push(event); attempts.set(key(event), group);
@@ -188,7 +190,7 @@ export function summarizeRuntimeEconomics(
     const reserved = uniqueStart(group, "AttemptReserved");
     if (started) starts.push(started);
     const terminal = started && group.find((event) => event.sequence > started.sequence && executionTerminals.has(event.event));
-    const active = started && terminal && sameAttempt(started, terminal) &&
+    const active = started && terminal && !conservativelySettled.has(key(started)) && sameAttempt(started, terminal) &&
       !(terminal.providerResourceId && started.providerResourceId !== terminal.providerResourceId) &&
       interval(started, terminal, location(started.backend));
     if (active) executionIntervals.push(active);
@@ -199,7 +201,7 @@ export function summarizeRuntimeEconomics(
       ...group.filter((event) => capacityTerminals.has(event.event) && sameAttempt(reserved, event)),
       ...validationReservations.filter((event) => key(event) === key(reserved) && event.sourceRunId === undefined && event.directorEpoch === reserved.directorEpoch && event.policyDigest === reserved.policyDigest),
     ].filter((event) => event.sequence > reserved.sequence).sort((a, b) => a.sequence - b.sequence);
-    const occupied = releases[0] && interval(reserved, releases[0], location(reserved.backend, reserved.admissionClass));
+    const occupied = !conservativelySettled.has(key(reserved)) && releases[0] && interval(reserved, releases[0], location(reserved.backend, reserved.admissionClass));
     if (occupied) capacityIntervals.push(occupied); else unresolvedCapacity++;
   }
 
@@ -273,9 +275,11 @@ export function summarizeRuntimeEconomics(
   for (const event of events) if (event.kind === "budget" && event.event === "BudgetReserved" && event.phase !== "management") usageReservations.add(usageKey(event));
   for (const event of events) if (event.kind === "budget" && event.event === "BudgetReconciled" && event.phase !== "management")
     usage.set(usageKey(event), event);
-  const consumption = new Map<NativeBudgetUnit, { unit: NativeBudgetUnit; integrated: number; unintegratedAtTerminalRun: number; unresolvedDelivery: number; unattributed: number; usageIdentities: number }>();
+  const consumption = new Map<string, { unit: NativeBudgetUnit; usageEvidence: "as-recorded" | "conservative-reservation"; integrated: number; unintegratedAtTerminalRun: number; unresolvedDelivery: number; unattributed: number; usageIdentities: number }>();
   for (const value of usage.values()) {
-    const row = consumption.get(value.unit) ?? { unit: value.unit, integrated: 0, unintegratedAtTerminalRun: 0, unresolvedDelivery: 0, unattributed: 0, usageIdentities: 0 };
+    const usageEvidence = value.usageEvidence ?? "as-recorded";
+    const consumptionKey = `${value.unit}:${usageEvidence}`;
+    const row = consumption.get(consumptionKey) ?? { unit: value.unit, usageEvidence, integrated: 0, unintegratedAtTerminalRun: 0, unresolvedDelivery: 0, unattributed: 0, usageIdentities: 0 };
     const group = attempts.get(key(value));
     let bound = group !== undefined;
     let integrated = group?.some((event) => event.event === "AttemptIntegrated") ?? false;
@@ -296,7 +300,7 @@ export function summarizeRuntimeEconomics(
       }
     }
     const category = !bound ? "unattributed" : integrated ? "integrated" : finishedAt ? "unintegratedAtTerminalRun" : "unresolvedDelivery";
-    row[category] += value.amount; row.usageIdentities++; consumption.set(value.unit, row);
+    row[category] += value.amount; row.usageIdentities++; consumption.set(consumptionKey, row);
   }
   const withModel = starts.filter((started) => [...usage.values()].some((value) => key(value) === key(started) && value.phase === "execution" && value.unit === "model_tokens")).length;
   const attemptsWithUsage = [...attempts.keys()].filter((identity) => [...usage.values()].some((value) => key(value) === identity)).length;

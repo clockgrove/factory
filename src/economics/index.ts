@@ -116,11 +116,13 @@ export interface NativeUnitLedger {
   outstanding: number;
   reservations: number;
   reconciliations: number;
+  conservativeReconciled?: number;
 }
 
 interface LedgerEntry {
   reserved: number;
   reconciled?: number;
+  conservative?: boolean;
 }
 
 function budgetUsageKey(event: Extract<FactoryEvent, { kind: "budget" }>): string {
@@ -165,6 +167,7 @@ export function nativeUnitLedgers(
       count.reservations += 1;
     } else {
       current.reconciled = event.amount;
+      current.conservative = event.usageEvidence === "conservative-reservation";
       count.reconciliations += 1;
     }
     ledger.set(key, current);
@@ -178,6 +181,7 @@ export function nativeUnitLedgers(
       unit,
       reserved,
       reconciled,
+      ...(entries.some((entry) => entry.conservative) ? { conservativeReconciled: entries.reduce((sum, entry) => sum + (entry.conservative ? entry.reconciled ?? 0 : 0), 0) } : {}),
       outstanding: Math.max(0, committed - reconciled),
       ...counts.get(unit)!,
     };
@@ -185,6 +189,7 @@ export function nativeUnitLedgers(
 }
 
 function observedUsage(ledger: NativeUnitLedger): EvidenceMetric<number> {
+  if (ledger.conservativeReconciled) return { availability: "unavailable", reason: "includes conservative original-reservation charges, not measured elapsed usage; see native ledger" };
   return ledger.reconciliations > 0
     ? {
         availability: "observed",

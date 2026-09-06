@@ -618,8 +618,16 @@ const Budget = Common.extend({
     "validation_milliseconds",
   ]),
   amount: z.number().nonnegative().finite(),
+  usageEvidence: z.enum(["as-recorded", "conservative-reservation"]).optional(),
+  reason: boundedText(4000).optional(),
+  directorEpoch: z.number().int().positive().optional(),
+  policyDigest: sha256Digest.optional(),
   reportedModelUsage: ReportedModelUsageSchema.optional(),
 }).superRefine((event, context) => {
+  if (event.usageEvidence === "conservative-reservation" &&
+    (event.event !== "BudgetReconciled" || !["local_milliseconds", "sandbox_milliseconds"].includes(event.unit) || event.phase !== "execution" ||
+      !event.workItem || !event.attempt || !event.directorEpoch || !event.policyDigest || event.amount <= 0 || !event.reason))
+    context.addIssue({ code: "custom", path: ["usageEvidence"], message: "conservative reservation charge requires exact timed execution and an explicit reason" });
   const usage = event.reportedModelUsage;
   if (!usage) return;
   if (event.event !== "BudgetReconciled" || event.unit !== "model_tokens")

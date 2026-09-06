@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { summarizeRun, summarizeRuntimeEconomics } from "../src/economics/index.js";
+import { summarizeEconomics, summarizeRun, summarizeRuntimeEconomics } from "../src/economics/index.js";
 import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
 
@@ -53,6 +53,31 @@ function summarize(events: FactoryEvent[], finishedAt: string | undefined = at(2
 }
 
 describe("durable runtime economics", () => {
+  it("keeps conservative recovered reservation charges separate from measured time", () => {
+    const bound = budget(21, 8, 60000, { unit: "local_milliseconds", usageId: "worker-8-1", usageEvidence: "conservative-reservation",
+      directorEpoch: 1, policyDigest: policy, reason: "Original reserved charge after exact absence; elapsed usage unavailable" });
+    const recorded = budget(22, 9, 4000, { unit: "local_milliseconds", usageId: "worker-9-1" });
+    const history = [...concurrent(), bound, recorded];
+    const economics = summarizeEconomics({ events: history, policy: DEFAULT_RUN_POLICY, runId: "runtime-7" });
+    expect(economics.nativeUnits.find((value) => value.unit === "local_milliseconds")).toMatchObject({ reconciled: 64000, conservativeReconciled: 60000 });
+    expect(economics.usage.local_milliseconds.availability).toBe("unavailable");
+    expect(summarize(history).execution.completeIntervals).toBe(1);
+    expect(summarize(history).admittedLocalConcurrency.availability).toBe("unavailable");
+    expect(summarize(history).consumptionByDeliveryOutcome).toMatchObject({ value: expect.arrayContaining([
+      expect.objectContaining({ unit: "local_milliseconds", usageEvidence: "conservative-reservation", integrated: 60000 }),
+      expect.objectContaining({ unit: "local_milliseconds", usageEvidence: "as-recorded", integrated: 4000 }),
+    ]) });
+  });
+
+  it.each(["local_milliseconds", "sandbox_milliseconds"])("accepts explicit %s reservation bounds without substituting model usage", (unit) => {
+    const overrides = { unit, usageEvidence: "conservative-reservation", directorEpoch: 1, policyDigest: policy, reason: "Exact resources absent; original reserved timed budget charge" };
+    expect(budget(21, 8, 5000, overrides)).toMatchObject(overrides);
+    expect(() => budget(21, 8, 0, overrides)).toThrow();
+    expect(() => budget(21, 8, 5000, { ...overrides, unit: "model_tokens" })).toThrow();
+    expect(() => budget(21, 8, 5000, { ...overrides, unit: "managed_sessions" })).toThrow();
+    expect(() => budget(21, 8, 5000, { ...overrides, reason: undefined })).toThrow();
+    expect(() => budget(21, 8, 5000, { ...overrides, policyDigest: undefined })).toThrow();
+  });
   it("separates active worker time from all admitted execution/validation occupancy", () => {
     const result = summarize(concurrent());
     expect(result.execution.startedAttempts).toMatchObject({ availability: "observed", value: { local: 2, cloud: 0, unclassified: 0, total: 2 } });

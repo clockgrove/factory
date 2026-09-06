@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 
 import { CodexCliLocalBackend } from "./backends/codex-cli-local.js";
 import { CodexSdkLocalBackend } from "./backends/codex-sdk-local.js";
-import { CodexAppServerLocalBackend } from "./backends/codex-app-server.js";
+import { CodexAppServerLocalBackend, appServerHandleFromCheckpoint } from "./backends/codex-app-server.js";
+import { AppServerSessionManager } from "./control/app-server-sessions.js";
+import { completeSessionUsage, type AppServerSessionJournal } from "./execution/app-server-session.js";
 import {
   GITHUB_MANAGED_AGENT_PROFILES,
   GitHubManagedAgentBackend,
@@ -1011,6 +1013,7 @@ export class FactorySupervisor {
   readonly #leases: LeaseManager;
   readonly #attempts: AttemptManager;
   readonly #reviews: ReviewCheckpointManager;
+  readonly #sessions: AppServerSessionManager;
   readonly #mergeCandidates: MergeCandidateCheckpointStore;
   readonly #siblingRefreshes: SiblingRefreshStore;
   readonly #nativeRebases: NativeRebaseCheckpointStore;
@@ -1117,6 +1120,7 @@ export class FactorySupervisor {
       leases: this.#leases,
     });
     this.#reviews = new ReviewCheckpointManager(this.#store, this.#leases);
+    this.#sessions = new AppServerSessionManager(this.#store, this.#leases);
     this.#mergeCandidates = new MergeCandidateCheckpointStore(this.#store, this.#leases);
     this.#siblingRefreshes = new SiblingRefreshStore(this.#store, this.#leases);
     this.#nativeRebases = new NativeRebaseCheckpointStore(this.#store, this.#leases);
@@ -4334,6 +4338,8 @@ export class FactorySupervisor {
         reservation.attempt === 1 ? "implement" : "recover",
       );
       terminalModelProfile = workerModelSelection?.profile ?? this.#policy.modelProfile;
+      const sessionJournal = selected.capabilities.id === "codex-app-server/local-worktree"
+        ? await this.#sessionJournal(reservation) : undefined;
       handle = await this.#externalAdmission(() => {
         backendLaunchAttempted = true;
         return selected!.launch({
@@ -4346,6 +4352,7 @@ export class FactorySupervisor {
           policyDigest: reservation!.policyDigest,
           workspace: worker!.path,
           packet,
+          ...(sessionJournal ? { sessionJournal } : {}),
           policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
           providerBaseRef: publicationBaseBranch,
           deadline: attemptDeadline,
@@ -4408,6 +4415,8 @@ export class FactorySupervisor {
           }
         }
         const observation = await selected.observe(handle);
+        if (selected.capabilities.id === "codex-app-server/local-worktree" && observation.state === "unknown")
+          throw new Error("App Server outcome is unknown; automated replacement is blocked pending exact session recovery");
         if (["succeeded", "failed", "cancelled"].includes(observation.state)) {
           terminalModelUsage = reportedModelUsage(observation.usage);
           const observedTokens = reportedModelTokens(observation.usage);
@@ -4429,6 +4438,8 @@ export class FactorySupervisor {
               this.#budgetEvents.push(event);
             });
           } else if (this.#policy.economics && selected.capabilities.reportsModelUsage) {
+            if (selected.capabilities.id === "codex-app-server/local-worktree")
+              throw new Error("App Server final model usage is unavailable; automated replacement is blocked");
             throw new Error(
               `backend ${selected.capabilities.id} omitted terminal model-token usage required by maxModelTokens`,
             );
@@ -4972,7 +4983,8 @@ export class FactorySupervisor {
         error instanceof PlatformUnavailableError ||
         error instanceof LeaseLostError ||
         error instanceof ArtifactCollectionCheckpointError ||
-        error instanceof NoExecutionBackendError
+        error instanceof NoExecutionBackendError ||
+        (selected?.capabilities.id === "codex-app-server/local-worktree" && error instanceof Error && /automated replacement is blocked/.test(error.message))
       ) {
         throw error;
       }
@@ -5196,6 +5208,107 @@ export class FactorySupervisor {
 
   #retainArtifactContent(artifact: NormalizedArtifact): NormalizedArtifact {
     return retainScopedArtifact(artifact);
+  }
+
+  async #sessionJournal(reservation: AttemptReservation): Promise<AppServerSessionJournal> {
+    const repository = `${this.#options.owner}/${this.#options.repo}`;
+    const earlier = (await this.#attempts.list(reservation.objective, reservation.workItem)).filter((candidate) =>
+      candidate.runId === reservation.runId && candidate.attempt < reservation.attempt && candidate.backend === "codex-app-server/local-worktree")
+      .sort((a, b) => b.attempt - a.attempt);
+    let previous: AppServerSessionJournal["previous"];
+    if (earlier[0]) {
+      previous = await this.#sessions.load(repository, earlier[0], "terminal") ?? undefined;
+      if (!previous || !completeSessionUsage(previous.usage))
+        throw new Error("prior App Server session usage is unavailable; automated replacement is blocked");
+    }
+    return {
+      load: (stage) => this.#sessions.load(repository, reservation, stage),
+      persist: (checkpoint) => this.#lease.use((lease) => this.#sessions.persist({ repository, reservation, lease, checkpoint })),
+      assertCurrent: () => this.#externalAdmission(async () => {}),
+      ...(previous ? { previous } : {}),
+    };
+  }
+
+  /** Ready artifact recovery reads this first; it does not reload a provider or recollect. */
+  async #recoverAppServerUsage(item: DerivedWorkItem, reservation: AttemptReservation, events: readonly FactoryEvent[]): Promise<(ReportedModelUsage & { inputTokens: number; outputTokens: number }) | null> {
+    const terminal = await this.#sessions.load(`${this.#options.owner}/${this.#options.repo}`, reservation, "terminal");
+    if (!terminal || terminal.state !== "succeeded" || !completeSessionUsage(terminal.usage)) return null;
+    const usage = reportedModelUsage(terminal.usage);
+    if (!usage || usage.inputTokens === undefined || usage.outputTokens === undefined) return null;
+    const matching = events.filter((event) => event.kind === "budget" && event.event === "BudgetReconciled" && event.runId === reservation.runId &&
+      event.workItem === item.number && event.attempt === reservation.attempt && event.phase === "execution" && event.unit === "model_tokens");
+    if (matching.some((event) => event.kind !== "budget" || event.usageId !== `worker-${item.number}-${reservation.attempt}` || event.amount !== usage.inputTokens! + usage.outputTokens!))
+      throw new Error("App Server terminal usage conflicts with its original budget receipt");
+    if (!matching.length) await this.#lease.use(async (lease) => {
+      this.#budgetEvents.push(await this.#recorder.budget({ lease, workItemNodeId: item.id, reservation,
+        sequence: this.#sequences.take(), event: "BudgetReconciled", phase: "execution", unit: "model_tokens",
+        amount: usage.inputTokens! + usage.outputTokens!, usageId: `worker-${item.number}-${reservation.attempt}`, reportedModelUsage: usage }));
+    });
+    return { ...usage, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens };
+  }
+
+  async #recoverAppServerSession(item: DerivedWorkItem, reservation: AttemptReservation, deadline: number, events: readonly FactoryEvent[]): Promise<void> {
+    const repository = `${this.#options.owner}/${this.#options.repo}`;
+    const prepared = await this.#sessions.load(repository, reservation, "prepared");
+    const backend = this.#registry.get(reservation.backend);
+    if (!prepared || !backend?.resume) throw new Error("App Server session identity is unavailable; automated replacement is blocked");
+    if (events.some((event) => event.kind === "capacity" && event.phase === "validation" || event.kind === "validation"))
+      throw new Error("prior validation may have executed; automated replacement is blocked without its durable artifact/result checkpoint");
+    const sessionJournal = await this.#sessionJournal(reservation);
+    const modelSelection = resolveModelSelection(this.#policy, reservation.attempt === 1 ? "implement" : "recover");
+    let handle: BackendHandle | undefined;
+    try {
+      handle = await backend.resume({ repository, objective: reservation.objective, workItem: reservation.workItem,
+        attempt: reservation.attempt, runId: reservation.runId, directorEpoch: reservation.directorEpoch,
+        policyDigest: reservation.policyDigest, workspace: prepared.binding.workspace, packet: prepared.packet,
+        deadline: new Date(prepared.binding.deadline), policyNetworkDestinations: this.#policy.allowedNetworkDestinations,
+        ...(modelSelection ? { modelSelection } : {}), sessionJournal,
+      }, appServerHandleFromCheckpoint(prepared));
+      const observed = await backend.observe(handle);
+      const usage = reportedModelUsage(observed.usage);
+      if (observed.state !== "succeeded" || !usage || usage.inputTokens === undefined || usage.outputTokens === undefined)
+        throw new Error("App Server terminal success and complete model usage are required for artifact continuation");
+      const model = events.filter((event) => event.kind === "budget" && event.event === "BudgetReconciled" && event.phase === "execution" && event.unit === "model_tokens");
+      if (model.some((event) => event.kind !== "budget" || event.usageId !== `worker-${item.number}-${reservation.attempt}` || event.amount !== usage.inputTokens! + usage.outputTokens!))
+        throw new Error("App Server recovered usage conflicts with original accounting");
+      if (!model.length) await this.#lease.use(async (lease) => {
+        this.#budgetEvents.push(await this.#recorder.budget({ lease, workItemNodeId: item.id, reservation,
+          sequence: this.#sequences.take(), event: "BudgetReconciled", phase: "execution", unit: "model_tokens",
+          amount: usage.inputTokens! + usage.outputTokens!, usageId: `worker-${item.number}-${reservation.attempt}`, reportedModelUsage: usage }));
+      });
+      const artifact = await backend.collect(handle);
+      // The same durable artifact boundary as fresh execution. Never remove the
+      // original materialization on persistence failure, and never generate again.
+      try { await this.#persistCollectedArtifact(reservation, prepared.packet, artifact); }
+      catch (error) { throw new ArtifactCollectionCheckpointError(error); }
+      await backend.cleanup(handle);
+      handle = undefined;
+      const native = events.filter((event) => event.kind === "budget" && event.event === "BudgetReconciled" && event.phase === "execution" && event.unit === "local_milliseconds");
+      let nativeMilliseconds: number;
+      if (native.length) {
+        const amounts = new Set(native.map((event) => event.kind === "budget" ? event.amount : NaN));
+        if (amounts.size !== 1) throw new Error("original native usage receipts conflict");
+        nativeMilliseconds = [...amounts][0]!;
+      } else {
+        const reserved = deduplicateFactoryEvents([...events]).filter((event) => event.kind === "budget" && event.event === "BudgetReserved" && event.phase === "execution" && event.unit === "local_milliseconds");
+        if (reserved.length !== 1 || reserved[0]!.kind !== "budget" || reserved[0]!.amount <= 0) throw new Error("original positive local execution allowance is unavailable");
+        nativeMilliseconds = reserved[0]!.amount;
+        await this.#lease.use(async (lease) => {
+          this.#budgetEvents.push(await this.#recorder.budget({ lease, workItemNodeId: item.id, reservation,
+            sequence: this.#sequences.take(), event: "BudgetReconciled", phase: "execution", unit: "local_milliseconds",
+            amount: nativeMilliseconds, usageEvidence: "conservative-reservation",
+            reason: "Exact terminal session and original worker scope absence were independently verified; charging the original reserved duration, not measured elapsed execution" }));
+        });
+      }
+      await this.#continueCollectedArtifact(item, deadline, { reservation, packet: prepared.packet, artifact,
+        modelUsage: { ...usage, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens }, nativeUsage: { unit: "local_milliseconds", amount: nativeMilliseconds },
+        worker: { root: dirname(prepared.binding.workspace), path: prepared.binding.workspace, repository: this.#options.repository, baseSha: reservation.baseSha } });
+    } catch (error) {
+      if (error instanceof PlatformUnavailableError || error instanceof LeaseLostError || error instanceof ArtifactCollectionCheckpointError) throw error;
+      throw new Error(`App Server recovery is unavailable; automated replacement is blocked: ${error instanceof Error ? error.message : "unknown protocol outcome"}`, { cause: error });
+    } finally {
+      if (handle) await backend.cleanup(handle);
+    }
   }
 
   #artifactTransferIdentity(reservation: AttemptReservation): ArtifactTransferIdentity {
@@ -10310,6 +10423,11 @@ export class FactorySupervisor {
         }
       }
     }
+    // Ready artifact-transfer recovery is inserted before this provider fallback.
+    if (reservation.backend === "codex-app-server/local-worktree" && !validation) {
+      await this.#recoverAppServerSession(item, reservation, deadline, events);
+      return;
+    }
     const providerResourceId = latest?.kind === "attempt" ? latest.providerResourceId : undefined;
     const executionBudget = unreconciledBudgetReservations(events).find(
       (budget) => budget.phase === "execution",
@@ -10329,6 +10447,8 @@ export class FactorySupervisor {
         runId: reservation.runId,
         directorEpoch: reservation.directorEpoch,
         phase: "execution",
+        ...(reservation.localScopeBatch ? { localScopeBatch: reservation.localScopeBatch } : {}),
+        policyDigest: reservation.policyDigest,
         ...(providerResourceId ? { providerResourceId } : {}),
         ...(noHandleReplacementNotBefore ? { noHandleReplacementNotBefore } : {}),
       });

@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "kind": "installed-pre-projection-budget-refusal-component",
+  "result": "passed",
+  "sourceCommit": "62c591c15667c3102cb94c0a9a9814f54f33b546",
+  "observedAt": "2026-09-06T05:56:07.654Z",
+  "harness": {
+    "path": "scripts/verify-budget-stop.mjs",
+    "sha256": "3a49a51523847672981b15b2c041c2e46014beba8e9bd8713d3958d37ca2a531"
+  },
+  "installation": {
+    "packageSha256": "48ab5e40b12dff5fb4f777059ded1547eda47141090a72a01a27c5908040ea56",
+    "packageFiles": 40,
+    "packageBytes": 2835498,
+    "manifestVersion": "2.0.26+codex.20260906055241",
+    "allCanonicalFilesMatched": true,
+    "exactFileInventoryMatched": true,
+    "onlyPermittedDifference": "Codex manifest cachebuster",
+    "inventorySha256": "320a236c978f23008f87b994832dffab00da6d5967589105a2440b180a17fdfb",
+    "cliSha256": "277ee16ab32e96215aa150842aea2af47cdbc425d59c2a8e1ca4608c7d97ffe2",
+    "mcpSha256": "9e5574711c99d70666588c6d23dd0668549522698eb34badb2c2b1b6c43e06a2",
+    "unchangedBeforeAndAfter": true
+  },
+  "initialPolicy": {
+    "modelTokenAdmissionThreshold": 1,
+    "delivery": "regular-prs",
+    "backendOrder": ["codex-sdk/local-worktree", "codex-cli/local-worktree"],
+    "managementBackend": "codex-cli/local",
+    "maxParallel": 2,
+    "maxAttemptsPerItem": 2,
+    "workItemTimeoutMinutes": 10,
+    "objectiveTimeoutMinutes": 45,
+    "allowedPaidBackends": [],
+    "cloudFallback": "never",
+    "maxSandboxMinutes": 0,
+    "maxManagedAgentSessions": 0
+  },
+  "observed": {
+    "sameRunDurablyEscalated": true,
+    "escalationCause": "Both local execution backends refused admission because the observed model-token budget was exhausted.",
+    "reconciledModelCalls": 1,
+    "knownManagementModelTokens": 16437,
+    "reportedInputTokens": 14787,
+    "reportedOutputTokens": 1650,
+    "reportedCachedInputTokens": 0,
+    "workerAttempts": 0,
+    "activeReservations": 0,
+    "projectedWorkItems": 0,
+    "pullRequests": 0,
+    "publications": 0,
+    "integrations": 0,
+    "defaultHeadUnchanged": true,
+    "exactRunnerServiceAbsent": true,
+    "runnerCleanupUnitAndBootMatched": true,
+    "cancellationRequested": false,
+    "durableCompilerGraph": "uninspected",
+    "deliveredArtifactTests": "not applicable: no worker or implementation artifact"
+  },
+  "privateEvidence": [
+    { "role": "exact-installation", "sha256": "f34966e0b8c08c7ab58ad7a7118f46d8d20f226eb9569c9b097d07f72f1c2424" },
+    { "role": "read-only-preflight", "sha256": "6604ea448337c41f36fbdaf008474ff77dfce75b068a05cc074d0dce73ad78b7" },
+    { "role": "original-exercise", "sha256": "46ec4221692dd580243313e3a7ca116e6d22dd73fe4bb915209a4fe7c97fa366" }
+  ],
+  "scope": "Installed Windows WSL2 local pre-projection budget refusal. The first compilation call reported usage above the initial threshold; Factory then durably escalated without implementation admission or projection. This is a passing refusal scenario, not completed implementation or active-worker cancellation, genuine SDK-to-CLI fallback, native delivery, the full WSL2 resilience matrix or any complete release gate.",
+  "limitations": [
+    "The one-token value is an observed stop-before-next-call threshold, not a provider-enforced cap; the compilation call consumed 16437 tokens.",
+    "The compiler graph was not inspected. No claim is made that compilation produced a particular graph or that no immutable compiler checkpoint exists.",
+    "No worker or validator was launched; runner-service absence does not qualify cancellation or cleanup of an active implementation resource.",
+    "This component does not resolve or replace previously unavailable interrupted-worker usage. Original incomplete cancellation evidence remains unchanged.",
+    "Private repository, Objective, actor, process, service and filesystem identities remain in private evidence, not this public record."
+  ],
+  "identityBoundary": "The original pass and installation receipt bind the exact recorded source, package and installed runtime bytes. This record grants no spending, production activation, recovery, publication or other execution authority, and does not qualify a changed runtime."
+}

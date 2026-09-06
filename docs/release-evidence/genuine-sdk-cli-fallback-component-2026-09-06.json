@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "kind": "installed-genuine-sdk-to-cli-fallback-component",
+  "result": "passed",
+  "sourceCommit": "62c591c15667c3102cb94c0a9a9814f54f33b546",
+  "observedAt": "2026-09-06T06:17:31.841Z",
+  "harnesses": [
+    {
+      "path": "scripts/verify-regular-objective.mjs",
+      "sha256": "59523d0b7c027bb3e2da3e81793d985fac04fd672b51a8c61607d36167612f89"
+    },
+    {
+      "path": "scripts/verify-live-objective.mjs",
+      "sha256": "56ea6d51e2aa90b513861ff1011ca5cd4a852f4d4d0070df03653ce41aba93e8"
+    },
+    {
+      "path": "scripts/qualification-native-scopes.mjs",
+      "sha256": "e91b4de591ad3e8126bcb48414017d0e4b8a769c01c69f3e260f2f019b538c00"
+    }
+  ],
+  "installation": {
+    "packageSha256": "48ab5e40b12dff5fb4f777059ded1547eda47141090a72a01a27c5908040ea56",
+    "packageFiles": 40,
+    "packageBytes": 2835498,
+    "manifestVersion": "2.0.26+codex.20260906055241",
+    "allCanonicalFilesMatched": true,
+    "exactFileInventoryMatched": true,
+    "onlyPermittedDifference": "Codex manifest cachebuster",
+    "inventorySha256": "320a236c978f23008f87b994832dffab00da6d5967589105a2440b180a17fdfb",
+    "cliSha256": "277ee16ab32e96215aa150842aea2af47cdbc425d59c2a8e1ca4608c7d97ffe2",
+    "mcpSha256": "9e5574711c99d70666588c6d23dd0668549522698eb34badb2c2b1b6c43e06a2",
+    "unchangedAcrossProbeAndExercise": true
+  },
+  "fallbackBinding": {
+    "mechanism": "Supported FACTORY_CODEX_PATH override to an authentic installed Codex CLI 0.152.0 executable; the installed SDK adapter requires CLI 0.153.x and reported unavailable, while the CLI adapter reported available and authenticated.",
+    "backendProfile": "local-default",
+    "backendOrder": ["codex-sdk/local-worktree", "codex-cli/local-worktree"],
+    "originalRequestAndDurableStartPolicyMatched": true,
+    "sameExecutableBoundToProbeAndLaunch": true,
+    "launcherAndBinaryUnchangedAtExit": true,
+    "launcherSha256": "134063e133f0b4244fa3b251acf973d4fe4b4aeeacbdc135211bf480f59f1477",
+    "binarySha256": "f541420d35d3ad757fe71c0a34a3de0ec80fd513e10e5c52596b39d8be6e445c",
+    "packageLockSha256": "4c2a7e544be2bf3bfdc9e92fe576113ae2615269cf574634478806f2032dde47",
+    "durableSdkRejectionEvent": "not claimed; the cause is established by the bound read-only probe, unchanged executable, unchanged SDK-first policy and actual CLI execution receipts"
+  },
+  "initialPolicy": {
+    "modelTokenAdmissionThreshold": 500000,
+    "delivery": "regular-prs",
+    "deliveryOnUnavailable": "escalate",
+    "managementBackend": "codex-cli/local",
+    "maxParallel": 2,
+    "maxAttemptsPerItem": 2,
+    "workItemTimeoutMinutes": 10,
+    "objectiveTimeoutMinutes": 45,
+    "allowedPaidBackends": [],
+    "cloudFallback": "never",
+    "maxSandboxMinutes": 0,
+    "maxManagedAgentSessions": 0
+  },
+  "observed": {
+    "processExitCode": 0,
+    "sameRunDurablyCompleted": true,
+    "actualCliWorkerAttempts": 3,
+    "actualSdkWorkerAttempts": 0,
+    "attemptsPerWorkItem": 1,
+    "passedIndependentValidations": 3,
+    "publications": 3,
+    "integrations": 3,
+    "exactMergeProofs": 3,
+    "dependentJoinCompleted": true,
+    "regularPipelineCompleted": true,
+    "knownModelTokens": 233023,
+    "reconciledModelCalls": 7,
+    "reportedInputTokens": 226868,
+    "reportedOutputTokens": 6155,
+    "reportedCachedInputTokens": 115712,
+    "knownExecutionMilliseconds": 158053,
+    "knownValidationMilliseconds": 19898,
+    "activeReservations": 0,
+    "outstandingNativeReservations": 0,
+    "allNineReservedExecutionAndValidationScopesAbsentAfterTerminal": true,
+    "scopeObservationHostAndExactReservationIdentitiesMatched": true,
+    "freshCloneBuiltinTests": { "command": "node --test", "passed": 115, "failed": 0 },
+    "independentMergedArtifactBehavior": "passed",
+    "providerDollarCost": "unavailable; not inferred"
+  },
+  "privateEvidence": [
+    { "role": "exact-installation", "sha256": "f34966e0b8c08c7ab58ad7a7118f46d8d20f226eb9569c9b097d07f72f1c2424" },
+    { "role": "installed-backend-probe", "sha256": "f807e9501fb4c12efb566a9395dbe28328e214bd591804f55945da274162c4ac" },
+    { "role": "launch-receipt", "sha256": "cb5307c7c343fc3a5d060fdf29933cac7f328015f70c988c63ced7a9cdc7e1c4" },
+    { "role": "process-result", "sha256": "a4560b49512b379bb0671380f168167301e250f95cdadf07bb7e3fe2530856d2" },
+    { "role": "original-exercise", "sha256": "190ba8121e76114587d919014e3f477e8b9c72db6d8da0b05e13710a448b659c" },
+    { "role": "fallback-completion-and-exact-scope-observation", "sha256": "25830bac323097ca2d933b10ea812989dee653e7e5cdcce7cd0c3f6a3786e2c0" },
+    { "role": "bounded-local-launch-wrapper", "sha256": "2669e0aa56b118e30eda283ac8ef0ae8e70920b6cd69fdb2fc0bcec84b83ef35" }
+  ],
+  "scope": "One installed WSL2 local SDK-unavailability-to-CLI execution fallback, followed by complete regular-PR delivery, merged-artifact behavior verification, known accounting and exact terminal resource absence. This is not native-delivery capability fallback, the complete local resilience matrix or a full release gate.",
+  "limitations": [
+    "The SDK adapter was genuinely incompatible with the selected authentic CLI version before worker launch. This does not qualify fallback after an SDK worker has started or a provider stream has been interrupted.",
+    "No historical scheduler input or durable SDK-rejection receipt is fabricated. Explicit regular delivery and SDK-first execution fallback are separate facts.",
+    "The token threshold is checked between calls and is not a provider-enforced hard cap; cached input is reported separately and is not added again to total input plus output.",
+    "Previously unavailable interrupted-worker usage and original incomplete cancellation evidence remain unchanged. This record neither estimates those tokens nor claims a corrected cancellation runtime.",
+    "Private target, Objective, actor, session, process, service, host and filesystem identities and delivered code remain private; original evidence retains their exact bindings."
+  ],
+  "identityBoundary": "Only the recorded original source, installed package and unchanged executable are qualified. This record grants no new execution, spending, recovery, cloud, production activation or publication authority and makes no claim for subsequently changed runtime bytes."
+}

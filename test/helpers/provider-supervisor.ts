@@ -29,6 +29,7 @@ import { validateArtifactClean, discardValidationResult } from "../../src/valida
 import type { ObjectiveSnapshot, LinkedPullRequest } from "../../src/types.js";
 import { GitHubStacks } from "../../src/publication/github-stacks.js";
 import { PlatformUnavailableError } from "../../src/platform.js";
+import * as artifactTransfers from "../../src/control/artifact-transfers.js";
 
 export const LOCAL = "codex-sdk/local-worktree";
 export const DAYTONA = "codex-cli/daytona";
@@ -371,6 +372,7 @@ export async function providerSupervisorFixture(
     readCommit(refs.get(`refs/heads/${branch}`) ?? git("rev-parse", branch)),
   );
   let receiptTransportUnavailable = false;
+  const retainedArtifactRoots = new Set<string>();
   vi.spyOn(GitHubControlStore.prototype, "addIssueComment").mockImplementation(
     async (node, body) => {
       const receipt = decodeEventComments(body);
@@ -389,6 +391,32 @@ export async function providerSupervisorFixture(
       const target =
         node === snapshot.id ? snapshot : snapshot.workItems.find((item) => item.id === node)!;
       target.factoryEvents!.push(...receipt);
+      // Fault tests can remove receipts later; retain only the cleanup identity,
+      // derived from reservations this fixture itself successfully recorded.
+      for (const event of receipt) {
+        if (
+          event.kind !== "attempt" ||
+          event.event !== "AttemptReserved" ||
+          event.runId !== lease.runId
+        )
+          continue;
+        const digest = artifactTransfers
+          .artifactTransferRef({
+            repository: "fixture/provider-qualification",
+            objective: event.objective,
+            workItem: event.workItem,
+            attempt: event.attempt,
+            runId: event.runId,
+            directorEpoch: event.directorEpoch,
+            policyDigest: event.policyDigest,
+            baseSha: event.baseSha,
+          })
+          .split("/")
+          .at(-1)!;
+        retainedArtifactRoots.add(
+          join(tmpdir(), `factory-collected-${process.getuid?.() ?? "unknown"}-${digest}`),
+        );
+      }
       if (loss === "after") throw unavailable();
       if (integration) faults.afterIntegration?.();
     },
@@ -901,6 +929,8 @@ export async function providerSupervisorFixture(
     dispose: async () => {
       vi.restoreAllMocks();
       vi.unstubAllGlobals();
+      // Never enumerate or sweep user caches, including interrupted real runs.
+      for (const root of retainedArtifactRoots) await rm(root, { recursive: true, force: true });
       await rm(repository, { recursive: true, force: true });
     },
   };

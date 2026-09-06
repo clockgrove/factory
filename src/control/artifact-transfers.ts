@@ -197,11 +197,25 @@ async function retainLocalDescriptorLocked(descriptor: Descriptor): Promise<void
   let currentRootBytes = 0;
   for (const name of roots) {
     const directory = join(tmpdir(), name);
-    await assertLocalDescriptorRoot(directory);
-    const children = await readdir(directory);
+    let children: string[];
+    try {
+      await assertLocalDescriptorRoot(directory);
+      children = await readdir(directory);
+    } catch (error) {
+      // A different process may finish ready publication and remove its pending
+      // cache after enumeration. Its absence is not this attempt's copy failure.
+      if (directory !== root && (error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw error;
+    }
     if (children.length > 67) throw new Error("pending artifact cache entry bound exceeded");
     for (const child of children) {
-      const bytes = (await lstat(join(directory, child))).size;
+      let bytes: number;
+      try {
+        bytes = (await lstat(join(directory, child))).size;
+      } catch (error) {
+        if (directory !== root && (error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
+      }
       retainedBytes += bytes;
       if (directory === root) currentRootBytes += bytes;
     }

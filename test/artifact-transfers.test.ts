@@ -141,6 +141,78 @@ async function artifact(baseSha: string) {
 }
 
 describe("immutable GitHub artifact transfer lifecycle", () => {
+  for (const phase of ["directory", "child"] as const) {
+    it(`does not fail this transfer when a peer removes its ${phase} after cache enumeration`, async () => {
+      const memory = store(),
+        id = identity(),
+        peer = identity(),
+        value = await artifact(id.baseSha);
+      const peerRoot = join(
+        tmpdir(),
+        `factory-collected-${process.getuid?.() ?? "unknown"}-${sha256(JSON.stringify(peer))}`,
+      );
+      await fs.mkdir(peerRoot, { mode: 0o700 });
+      const peerFile = join(peerRoot, "collection.json");
+      await fs.writeFile(peerFile, "peer pending metadata", { mode: 0o600 });
+      const target = phase === "directory" ? peerRoot : peerFile;
+      const original = fs.lstat;
+      let removed = false;
+      vi.spyOn(fs, "lstat").mockImplementation(async (...args) => {
+        if (String(args[0]) === target && !removed) {
+          removed = true;
+          await fs.rm(target, { recursive: phase === "directory", force: true });
+        }
+        return original(...args);
+      });
+      await expect(
+        persistArtifactTransfer({
+          store: memory.api,
+          identity: id,
+          artifact: value,
+          allowedPaths: ["asset.dat"],
+          assertCurrent: async () => {},
+        }),
+      ).resolves.toMatchObject({ artifactDigest: value.digest });
+      expect(removed).toBe(true);
+      expect((await recoverArtifactTransfer({ store: memory.api, identity: id }))?.digest).toBe(
+        value.digest,
+      );
+    });
+  }
+
+  for (const own of [false, true]) {
+    it(`still refuses ${own ? "its own disappeared cache" : "a peer cache permission failure"}`, async () => {
+      const memory = store(),
+        id = identity(),
+        peer = identity(),
+        value = await artifact(id.baseSha);
+      const root = join(
+        tmpdir(),
+        `factory-collected-${process.getuid?.() ?? "unknown"}-${sha256(JSON.stringify(own ? id : peer))}`,
+      );
+      await fs.mkdir(root, { mode: 0o700 });
+      const original = fs.lstat;
+      let calls = 0;
+      vi.spyOn(fs, "lstat").mockImplementation(async (...args) => {
+        if (String(args[0]) === root && ++calls >= (own ? 2 : 1))
+          throw Object.assign(new Error("fixture: cache observation refused"), {
+            code: own ? "ENOENT" : "EACCES",
+          });
+        return original(...args);
+      });
+      await expect(
+        persistArtifactTransfer({
+          store: memory.api,
+          identity: id,
+          artifact: value,
+          allowedPaths: ["asset.dat"],
+          assertCurrent: async () => {},
+        }),
+      ).rejects.toThrow("cache observation refused");
+      expect(memory.writes).toEqual([]);
+    });
+  }
+
   it("retains an exact incomplete marker before chunk admission and resumes only the original content", async () => {
     const memory = store(),
       id = identity(),

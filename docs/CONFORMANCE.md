@@ -483,6 +483,17 @@ the evidence. The final clean, tagged checkout is separately packed and verified
 include the newly committed evidence documentation. See the concrete sequence and record format in
 [`DELIVERY-PLAN.md`](DELIVERY-PLAN.md#recording-evidence-and-publishing).
 
+The `Managed-provider capability boundaries` record additionally declares both known profiles in
+`managedProviders`, each with `backendId`, `availability` and a digest-bound `evidence` artifact.
+The artifact records the installed probe, exact candidate, matching support declaration and
+unaffected local startup. An unavailable provider needs an evidenced unsupported interface, denied
+launch and no provider launch, with no supported execution claims; absent user credentials alone
+do not qualify. An available provider needs digest-bound qualification for `objective-delivery` and
+every other advertised capability. Unsupported capabilities carry their reason and official source.
+All referenced artifacts remain subject to the same tracked-path, exact-commit and SHA-256 checks.
+Invoice settlement is not part of this evidence contract. No existing observation is relabelled as
+proof of the revised candidate or gate.
+
 ## Post-publication completion gate
 
 Publishing the candidate makes this final check possible; it cannot be evidence for the publication

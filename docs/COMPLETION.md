@@ -11,7 +11,9 @@ Finish all remaining implementation code and known-bug fixes first, in parallel 
 during this implementation phase.** Then run the coordinated suite, fix discovered defects, and
 qualify the integrated product. Keep all six release gates and post-publication installation.
 
-Factory is not feature-complete while its promised managed-provider implementation is blocked.
+Unsupported third-party features narrow the affected provider's claims, not Factory's finish line.
+Users own their paid-provider relationships; final invoice settlement is not a completion gate.
+Exact active-resource, identity, replacement and native admission safeguards remain mandatory.
 A bounded Clockgrove pilot is separate from full release qualification and grants no production or
 paid-provider authority. Missing input for one issue does not stop independent implementation.
 
@@ -20,14 +22,15 @@ paid-provider authority. Missing input for one issue does not stop independent i
 | Issue / acceptance boundary | Kind | Owner / state | Next deliverable |
 | --- | --- | --- | --- |
 | [#70 Accurate recovery guidance](https://github.com/clockgrove/factory/issues/70): supported recovery instructions without weakening restart fences | Code, known bug | Recovery lane / code integrated; checks deferred | Run written regression coverage in the coordinated phase; keep the issue open until acceptance. |
-| [#71 Real Codex managed binding](https://github.com/clockgrove/factory/issues/71): actual actor and provider-specific lifecycle, never Copilot substitution | Code, external contract | Codex lane / blocked | Provider must expose supported actor identity, exact task/session-to-PR/head binding, launch/replay and termination interfaces. Enabling the current profile would wrongly enter Copilot lifecycle logic. |
-| [#72 Copilot identity and termination](https://github.com/clockgrove/factory/issues/72): exact task binding and supported stop/absence evidence | Code, external contract | Copilot lane / guidance fix integrated; feature blocked | Obtain issue-to-task identity and a supported exact stop operation. Unassignment now explicitly leaves compute unknown; bound active tasks name the operator stop action. |
-| [#73 Managed billing settlement](https://github.com/clockgrove/factory/issues/73): exact attributable native units and finality | Code, external contract or explicit product decision | Coordinator / blocked | Obtain task-scoped charge/finality evidence or an explicit contract decision. Aggregate bills and terminal sessions do not supply it. |
-| [#90 Provider-cost replay](https://github.com/clockgrove/factory/issues/90): unique receipts, contradictory evidence and finite totals | Code, known accounting bug | Accounting lane / code integrated; checks deferred | Run written regressions in the coordinated phase; this does not resolve provider settlement. |
-| [#74 Retained qualifier corrections](https://github.com/clockgrove/factory/issues/74): bounded, correctly bound cancellation/budget evidence | Code, qualification-tool bugs | Existing worktrees / paused | Preserve written work until the product implementation boundary; no additional harness expansion. |
+| [#71 Codex capability boundary](https://github.com/clockgrove/factory/issues/71): no working-provider claim without its own interface | Code | Capability lane / code integrated; checks deferred | Verify truthful unavailability, denied launch and unaffected local startup; real integration remains a provider follow-up, not a global blocker. |
+| [#72 Copilot limited controls](https://github.com/clockgrove/factory/issues/72): exact task-specific human action where automatic stop is unsupported | Code | Copilot lane / code integrated; checks deferred | Verify unknown identity/termination retains resource obligations and blocks unsafe replacement. |
+| [#73 User-owned provider billing](https://github.com/clockgrove/factory/issues/73): complete proven execution without invoice finality | Code | Accounting lane / code integrated; checks deferred | Verify unavailable billing does not fail otherwise proven execution; actual session/resource/native-bound failures still do. |
+| [#90 Provider-cost replay](https://github.com/clockgrove/factory/issues/90): unique receipts, contradictory evidence and finite totals | Code, known accounting bug | Accounting lane / code integrated; checks deferred | Run written regressions in the coordinated phase; unavailable costs are not zero. |
+| [#74 Retained qualifier corrections](https://github.com/clockgrove/factory/issues/74): bounded, correctly bound cancellation/budget evidence | Code, qualification-tool bugs | Local correction lane / running | Finish existing source corrections as the next PR layer; no new runner or live scenario. |
 
 Issue comments carry exact handoffs and blockers. The recovery lane completed its first code task and
-was explicitly restarted for #90. The provider lanes are blocked, not running background tests.
+was explicitly restarted for #90 and then #73/#74. The provider-policy lanes delivered source and
+documentation and are completed, not running background tests. The local correction lane is active.
 No test, typecheck, lint/format, build or live qualification has run since the implementation-only
 directive. Written regression source and old qualifier work are preserved, not claimed as passed.
 
@@ -42,7 +45,8 @@ they do not run before implementation is complete.
 | Organization priority edits | [#77](https://github.com/clockgrove/factory/issues/77) | Scoped disposable organization-field permission. |
 | Other supported Linux hosts | [Native Linux #78](https://github.com/clockgrove/factory/issues/78), [macOS-hosted Linux #79](https://github.com/clockgrove/factory/issues/79) | Host access; supported architecture coverage is retained. Neither blocks independent WSL2 work. |
 | Native stacks, merge queue and recorded regular-PR fallback | [#80](https://github.com/clockgrove/factory/issues/80), [#81](https://github.com/clockgrove/factory/issues/81), [#82](https://github.com/clockgrove/factory/issues/82) | Installed candidate; queue/rule tests additionally need eligible disposable features and explicit configuration authority. |
-| Daytona and two real managed providers | [Daytona #83](https://github.com/clockgrove/factory/issues/83), [Copilot #84](https://github.com/clockgrove/factory/issues/84), [Codex #85](https://github.com/clockgrove/factory/issues/85) | Actual provider implementation, credentials, exact native-unit spending and cleanup authority. Credentials alone authorize no launch. |
+| Daytona and claimed managed capabilities | [Daytona #83](https://github.com/clockgrove/factory/issues/83), [Copilot #84](https://github.com/clockgrove/factory/issues/84) | Credentials, explicit native-unit spending and cleanup authority, then evidence for supported capabilities. Unsupported automation and unavailable costs remain explicit. |
+| Future Codex managed execution | [#85](https://github.com/clockgrove/factory/issues/85) | Provider-specific interface follow-up; currently unavailable, not a required working-provider release gate. |
 | Bounded Clockgrove pilot | [#86](https://github.com/clockgrove/factory/issues/86) | Accepted Objective, trust, delivery policy and allowance before actual-checkout activation. |
 | Integrated suite and discovered-defect fixes | [#87](https://github.com/clockgrove/factory/issues/87) | All implementation code integrated, then one coordinated suite and defect-fix phase. |
 | Release and actual published installation | [Publication #88](https://github.com/clockgrove/factory/issues/88), [post-publication #89](https://github.com/clockgrove/factory/issues/89) | All retained gates, compatible exact-candidate evidence and registry approval; clean-install the actual published bytes afterwards. |
@@ -53,7 +57,15 @@ The [design definition of done](DESIGN.md#definition-of-done), [delivery plan](D
 [conformance gates](CONFORMANCE.md#verification-required-before-publication) retain the complete
 product contract. Vercel Sandbox, Codex App Server and harness-native child workers remain Labs.
 Git LFS lifecycle and oversized artifact transfer remain explicit future appendix extensions, not
-current support claims. No requirement is dropped merely because its issue is externally blocked.
+current support claims. The accepted provider-specific support decision supersedes the former
+two-working-managed-providers and invoice-finality requirements; the other retained gates remain.
+
+## PR stack
+
+[PR #91](https://github.com/clockgrove/factory/pull/91) contains the initial recovery/accounting
+corrections and issue-first workflow. The provider-capability layer builds on it; the retained
+local-correction layer follows. Run coordinated checks on the integrated tip, not each intermediate
+layer. Source-only intermediate PRs are not separate qualified install candidates.
 
 [PR #68](https://github.com/clockgrove/factory/pull/68) delivered native sibling refresh and retained
 successor completion. [Exact evidence](release-evidence/quota-safe-successor-completion-component-2026-09-05.json)

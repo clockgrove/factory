@@ -26,11 +26,13 @@ paid-provider authority. Missing input for one issue does not stop independent i
 | [#72 Copilot limited controls](https://github.com/clockgrove/factory/issues/72): exact task-specific human action where automatic stop is unsupported | Code | Copilot lane / code integrated; checks deferred | Verify unknown identity/termination retains resource obligations and blocks unsafe replacement. |
 | [#73 User-owned provider billing](https://github.com/clockgrove/factory/issues/73): complete proven execution without invoice finality | Code | Accounting lane / code integrated; checks deferred | Verify unavailable billing does not fail otherwise proven execution; actual session/resource/native-bound failures still do. |
 | [#90 Provider-cost replay](https://github.com/clockgrove/factory/issues/90): unique receipts, contradictory evidence and finite totals | Code, known accounting bug | Accounting lane / code integrated; checks deferred | Run written regressions in the coordinated phase; unavailable costs are not zero. |
-| [#74 Retained qualifier corrections](https://github.com/clockgrove/factory/issues/74): bounded, correctly bound cancellation/budget evidence | Code, qualification-tool bugs | Local correction lane / running | Finish existing source corrections as the next PR layer; no new runner or live scenario. |
+| [#74 Retained qualifier corrections](https://github.com/clockgrove/factory/issues/74): bounded, correctly bound cancellation/budget evidence | Code, qualification-tool bugs | Local correction lane / code integrated; checks deferred | Run existing corrected runners' regression coverage with the full integrated suite; live scenarios remain separately authorized. |
 
 Issue comments carry exact handoffs and blockers. The recovery lane completed its first code task and
 was explicitly restarted for #90 and then #73/#74. The provider-policy lanes delivered source and
-documentation and are completed, not running background tests. The local correction lane is active.
+documentation and are completed, not running background tests. The local correction lane delivered
+its existing source fixes. All current implementation lanes are integrated; the coordinator now owns
+the single final verification phase and any concrete defect fixes it identifies.
 No test, typecheck, lint/format, build or live qualification has run since the implementation-only
 directive. Written regression source and old qualifier work are preserved, not claimed as passed.
 

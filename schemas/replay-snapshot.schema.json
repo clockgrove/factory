@@ -259,9 +259,9 @@
       "properties": {
         "measuredAt": { "type": "string", "format": "date-time" },
         "logicalCpu": { "type": "number", "minimum": 1 },
-        "effectiveCpu": { "type": "number", "minimum": 1 },
+        "effectiveCpu": { "type": "number", "exclusiveMinimum": 0 },
         "loadRatio": { "$ref": "#/definitions/nonNegativeNumber" },
-        "totalMemoryMb": { "type": "number", "minimum": 1 },
+        "totalMemoryMb": { "type": "number", "minimum": 0 },
         "availableMemoryMb": { "$ref": "#/definitions/nonNegativeNumber" },
         "memoryUsageRatio": { "type": "number", "minimum": 0, "maximum": 1 },
         "source": { "enum": ["cgroup-v2", "cgroup-v1", "host"] }

@@ -245,14 +245,23 @@ function pinnedResource(value: ResourceSnapshot | null): ResourceSnapshot | null
   if (!Number.isFinite(Date.parse(value.measuredAt))) {
     throw new Error("resource measuredAt is not an ISO timestamp");
   }
+  const effectiveCpu = finite(value.effectiveCpu, "effective CPU");
+  const totalMemoryMb = finite(value.totalMemoryMb, "total memory");
+  const availableMemoryMb = finite(value.availableMemoryMb, "available memory");
+  const memoryUsageRatio = finite(value.memoryUsageRatio, "memory usage ratio");
+  if (effectiveCpu <= 0 || availableMemoryMb > totalMemoryMb || memoryUsageRatio > 1) {
+    throw new Error("resource CPU or memory bounds are inconsistent");
+  }
+  // CPU quotas may be fractional. Memory is reported in whole MiB, so a
+  // positive sub-MiB cgroup limit can round to zero without 100% pressure.
   return {
     measuredAt: value.measuredAt,
     logicalCpu: finite(value.logicalCpu, "logical CPU", 1),
-    effectiveCpu: finite(value.effectiveCpu, "effective CPU", 1),
+    effectiveCpu,
     loadRatio: finite(value.loadRatio, "load ratio"),
-    totalMemoryMb: finite(value.totalMemoryMb, "total memory", 1),
-    availableMemoryMb: finite(value.availableMemoryMb, "available memory"),
-    memoryUsageRatio: finite(value.memoryUsageRatio, "memory usage ratio"),
+    totalMemoryMb,
+    availableMemoryMb,
+    memoryUsageRatio,
     source: value.source,
   };
 }

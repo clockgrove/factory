@@ -1,4 +1,8 @@
 import { describe, expect, it } from "vitest";
+import Ajv from "ajv";
+import addFormats from "ajv-formats";
+import replaySchema from "../schemas/replay-snapshot.schema.json";
+import policySchema from "../schemas/run-policy.schema.json";
 
 import { DEFAULT_RUN_POLICY, type RunPolicy } from "../src/protocol/policy.js";
 import {
@@ -230,6 +234,37 @@ const expected: ReplayDecisionSet = {
 };
 
 describe("pure admission replay", () => {
+  it.each([
+    { effectiveCpu: 0.5, totalMemoryMb: 1024, availableMemoryMb: 512, memoryUsageRatio: 0.5 },
+    { effectiveCpu: 0.5, totalMemoryMb: 0, availableMemoryMb: 0, memoryUsageRatio: 1 },
+    { effectiveCpu: 0.5, totalMemoryMb: 0, availableMemoryMb: 0, memoryUsageRatio: 0.25 },
+  ])("accepts actual cgroup resource domain in replay and its public schema: %j", (observed) => {
+    const snapshot = pinAdmissionSnapshot({ ...input, resource: { ...input.resource!, ...observed } });
+    expect(snapshot.input.resource).toMatchObject(observed);
+    expect(replayAdmissions(snapshot).reproduced).toBe(true);
+    const ajv = new Ajv({ strict: false });
+    addFormats(ajv);
+    ajv.addSchema(policySchema);
+    expect(ajv.compile(replaySchema)(snapshot)).toBe(true);
+  });
+
+  it.each([
+    { effectiveCpu: 0 },
+    { effectiveCpu: -0.5 },
+    { effectiveCpu: Number.POSITIVE_INFINITY },
+    { effectiveCpu: Number.NaN },
+    { totalMemoryMb: -1 },
+    { totalMemoryMb: Number.POSITIVE_INFINITY },
+    { totalMemoryMb: 0, availableMemoryMb: 1 },
+    { availableMemoryMb: -1 },
+    { availableMemoryMb: Number.NaN },
+    { memoryUsageRatio: -0.1 },
+    { memoryUsageRatio: 1.1 },
+    { memoryUsageRatio: Number.NaN },
+  ])("rejects non-finite or contradictory resource bounds: %j", (invalid) => {
+    expect(() => pinAdmissionSnapshot({ ...input, resource: { ...input.resource!, ...invalid } })).toThrow();
+  });
+
   it("binds prior queue observations and reason transitions without changing legacy snapshots", () => {
     const waiting = "2026-09-04T11:59:00.000Z";
     const pinnedInput: PinnedAdmissionInput = {

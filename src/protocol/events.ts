@@ -371,6 +371,8 @@ const Attempt = Common.extend({
   minimumCloudTimeSavedMinutes: z.number().nonnegative().finite().optional(),
   reason: boundedText(8_000).optional(),
 }).superRefine((event, context) => {
+  if ((event.sourceArchiveDigest === undefined) !== (event.sourceArchiveBytes === undefined))
+    context.addIssue({ code: "custom", message: "source archive digest and size must be recorded together" });
   const scopeBatch = event.localScopeBatch;
   if (scopeBatch) {
     const scope = scopeBatch.identity;

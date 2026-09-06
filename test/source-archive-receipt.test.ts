@@ -13,8 +13,10 @@ describe("source archive identity receipt", () => {
     expect(parseFactoryEvent({ ...receipt, sourceArchiveDigest: "c".repeat(64), sourceArchiveBytes: 17 })).toMatchObject({ sourceArchiveDigest: "c".repeat(64), sourceArchiveBytes: 17 });
   });
   it("rejects invalid digest and out-of-bound sizes", () => {
+    expect(() => parseFactoryEvent({ ...receipt, sourceArchiveDigest: "c".repeat(64) })).toThrow();
+    expect(() => parseFactoryEvent({ ...receipt, sourceArchiveBytes: 17 })).toThrow();
     expect(() => parseFactoryEvent({ ...receipt, sourceArchiveDigest: "not-a-digest" })).toThrow();
     for (const sourceArchiveBytes of [-1, NaN, 0.5, 256 * 1024 * 1024 + 1])
-      expect(() => parseFactoryEvent({ ...receipt, sourceArchiveBytes })).toThrow();
+      expect(() => parseFactoryEvent({ ...receipt, sourceArchiveDigest: "c".repeat(64), sourceArchiveBytes })).toThrow();
   });
 });

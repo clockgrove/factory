@@ -13,6 +13,7 @@ import { DaytonaBackend, DaytonaResourceCleanupError } from "./backends/daytona.
 import { VercelSandboxBackend } from "./backends/vercel-sandbox.js";
 import { validationInvocationOwnership } from "./backends/validation-invocation.js";
 import { AttemptManager, type AttemptReservation } from "./control/attempts.js";
+import { persistArtifactTransfer, type ArtifactTransferIdentity } from "./control/artifact-transfers.js";
 import { activationCancellation, type ActivationBinding } from "./control/activations.js";
 import {
   deriveBudgetUsage,
@@ -345,6 +346,13 @@ interface DeliveryExecutionBase {
 
 class SiblingRefreshTargetAdvancedError extends Error {}
 class SiblingRefreshObservationPendingError extends Error {}
+
+class ArtifactCollectionCheckpointError extends Error {
+  constructor(cause: unknown) {
+    super("collected output is not durably retained; automated replacement is blocked until exact artifact transfer recovery completes", { cause });
+    this.name = "ArtifactCollectionCheckpointError";
+  }
+}
 
 interface NativeStackMember {
   receipt: PublicationReceipt;
@@ -3888,6 +3896,7 @@ export class FactorySupervisor {
     let validationCapacityRecorded = false;
     let validationCapacityReconciled = false;
     let retryableArtifact: NormalizedArtifact | undefined;
+    let retainCollectedSource = false;
     let executionCleanupConfirmed = false;
     let backendLaunchAttempted = false;
     let terminalModelTokens: number | undefined;
@@ -4298,6 +4307,14 @@ export class FactorySupervisor {
       retryableArtifact = artifact;
       if (artifact.outcome !== "succeeded") {
         throw new Error(artifact.reason ?? `worker ${artifact.outcome}`);
+      }
+      try {
+        await this.#persistCollectedArtifact(reservation, packet, artifact);
+      } catch (cause) {
+        // Stop resources below, but retain source and leave the attempt resumable.
+        // A transport failure is not failed implementation and grants no retry.
+        retainCollectedSource = true;
+        throw new ArtifactCollectionCheckpointError(cause);
       }
       await this.#lease.use((lease) =>
         this.#attempts.record({
@@ -4808,6 +4825,7 @@ export class FactorySupervisor {
       if (
         error instanceof PlatformUnavailableError ||
         error instanceof LeaseLostError ||
+        error instanceof ArtifactCollectionCheckpointError ||
         error instanceof NoExecutionBackendError
       ) {
         throw error;
@@ -4938,7 +4956,7 @@ export class FactorySupervisor {
         finalizationError = error;
       }
       try {
-        if (worker) await cleanupLocalWorktree(worker);
+        if (worker && !retainCollectedSource) await cleanupLocalWorktree(worker);
         if (validation) await discardValidationResult(validation);
       } catch (error) {
         finalizationError ??= error;
@@ -4948,6 +4966,28 @@ export class FactorySupervisor {
       // biome-ignore lint/correctness/noUnsafeFinally: uncertain cleanup must override success so Factory cannot launch a duplicate paid or local worker
       if (finalizationError) throw finalizationError;
     }
+  }
+
+  #artifactTransferIdentity(reservation: AttemptReservation): ArtifactTransferIdentity {
+    return {
+      repository: `${this.#options.owner}/${this.#options.repo}`,
+      objective: reservation.objective, workItem: reservation.workItem,
+      attempt: reservation.attempt, runId: reservation.runId,
+      directorEpoch: reservation.directorEpoch, policyDigest: reservation.policyDigest,
+      baseSha: reservation.baseSha,
+    };
+  }
+
+  async #persistCollectedArtifact(
+    reservation: AttemptReservation,
+    packet: WorkerPacket,
+    artifact: NormalizedArtifact,
+  ): Promise<void> {
+    await persistArtifactTransfer({
+      store: this.#store, identity: this.#artifactTransferIdentity(reservation),
+      artifact, allowedPaths: packet.allowedPaths,
+      assertCurrent: () => this.#externalAdmission(async () => {}),
+    });
   }
 
   #reviewUsageId(record: ReviewCheckpointRecord): string {

@@ -42,6 +42,9 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- Successor recovery refreshes retained Factory-owned regular PRs after authenticated trunk advances,
+  preserving the original artifact and paid acceptance history while independently validating and
+  reviewing the exact changed head. Provider-owned branches remain outside this refresh authority.
 - Unknown completion after dispatch cannot authorize a replacement worker, including failure of the
   first durable artifact-copy write. Exact retained output reuses original accounting and validation
   allowances; corrupt evidence still escalates. Conservative native-duration charges remain distinct

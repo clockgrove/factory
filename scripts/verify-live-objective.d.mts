@@ -26,7 +26,7 @@ export function assertCompletion(
 export function assertQualificationNamespace(evidence: unknown): void;
 export function assertQualificationCompletion(
   evidence: unknown,
-  deliveryMode?: "stacked-prs" | "regular-prs",
+  deliveryMode?: "stacked-prs" | "regular-prs" | "native-fallback",
   allowedBackends?: string[],
   assertMergeProof?: QualificationMergeAssertion,
 ): void;

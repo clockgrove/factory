@@ -71,6 +71,9 @@ optional; when present, it must match the installed receipt exactly.
 
 `stacked-prs` is both the default and the required delivery mode for this CLI harness. If native
 delivery is unavailable, the policy escalates; it does not fall back to ordinary PRs.
+The separately opt-in [native-unavailability fallback qualifier](NATIVE-FALLBACK-QUALIFICATION.md)
+retains an original native request with explicit regular-fallback authorization and requires an
+actual unsupported-capability observation. It does not change this default native scenario.
 For a read-only GitHub preflight, replace `FACTORY_LIVE_OBJECTIVE=1` with
 `FACTORY_LIVE_OBJECTIVE_PREFLIGHT=1` and remove its `-u` entry from the example. Keep the repository,
 checkout, namespace, installed-artifact, evidence, and token-limit settings; mutation acknowledgement

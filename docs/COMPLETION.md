@@ -1,86 +1,62 @@
 # Factory completion board
 
-Updated: 2026-09-05. This is the single contributor completion board, not runtime state.
-GitHub remains authoritative. [Design](DESIGN.md#definition-of-done) defines the product;
-[conformance](CONFORMANCE.md) retains the detailed evidence and all six publication gates.
+Updated: 2026-09-05. The authoritative remaining-work checklist is
+[GitHub #69](https://github.com/clockgrove/factory/issues/69). These are ordinary development issues,
+not Factory Objectives. This board is a linked summary, not another backlog.
 
-## Outcome
+## Finish line and execution order
 
-The unblocked local implementation is complete: controller, compilation/chat, adaptive scheduling
-and priorities, cost accounting, bounded burst policy, regular/native delivery, and evidence-bound
-recovery. The concrete publication, discovery, foreground-resource, quota and deadline-closure
-corrections are integrated and independently reviewed.
+Finish all remaining implementation code and known-bug fixes first, in parallel isolated worktrees.
+**No test runs, typechecks, lint/format checks, release checks, plugin reinstalls, or live qualification
+during this implementation phase.** Then run the coordinated suite, fix discovered defects, and
+qualify the integrated product. Keep all six release gates and post-publication installation.
 
-Candidate `4e06b13` passed full integrated checks and matching Linux plugin installation. The
-authorized retained successor is **completed**, with all three Work Items closed, one new dependent
-worker, 219,769 cumulative known tokens under the unchanged 500,000 allowance, and all eleven reserved
-scopes absent. Its controller is stopped with zero restarts. Fresh-clone delivered behavior also
-passed. [Exact candidate and recovery evidence](release-evidence/quota-safe-successor-completion-component-2026-09-05.json).
+Factory is not feature-complete while its promised managed-provider implementation is blocked.
+A bounded Clockgrove pilot is separate from full release qualification and grants no production or
+paid-provider authority. Missing input for one issue does not stop independent implementation.
 
-This is a bounded local recovery result, not a new clean-history run on one artifact: adoption and
-delivery used `007cd8c`; proof-only final closure used `4e06b13`. Original failed runs and checker
-observations remain unchanged. No completed work was regenerated.
+## Current implementation ownership
 
-**Managed Codex remains blocked implementation**, not an adapter awaiting only a key. It needs an
-authoritative assignable actor and provider-specific task/session/termination contract; the existing
-Copilot Agent Tasks observer cannot safely substitute for that integration.
+| Issue / acceptance boundary | Kind | Owner / state | Next deliverable |
+| --- | --- | --- | --- |
+| [#70 Accurate recovery guidance](https://github.com/clockgrove/factory/issues/70): supported recovery instructions without weakening restart fences | Code, known bug | Recovery lane / assigned | Correct the stale runtime refusal and write its regression coverage; defer execution. |
+| [#71 Real Codex managed binding](https://github.com/clockgrove/factory/issues/71): actual actor and provider-specific lifecycle, never Copilot substitution | Code, external contract | Codex lane / assigned; provider contract unresolved | Implement against an authoritative interface if available; otherwise record the exact missing interface. |
+| [#72 Copilot identity and termination](https://github.com/clockgrove/factory/issues/72): exact task binding and supported stop/absence evidence | Code, external contract | Copilot lane / assigned; provider contract unresolved | Complete supported lifecycle handling without treating unassignment as termination. |
+| [#73 Managed billing settlement](https://github.com/clockgrove/factory/issues/73): exact attributable native units and finality | Code, external contract or explicit product decision | Coordinator / active | Implement a supported accounting contract or retain the precise external blocker; never invent settlement. |
+| [#74 Retained qualifier corrections](https://github.com/clockgrove/factory/issues/74): bounded, correctly bound cancellation/budget evidence | Code, qualification-tool bugs | Existing worktrees / paused | Preserve written work until the product implementation boundary; no additional harness expansion. |
 
-## Remaining capabilities and acceptance
+Issue comments carry current handoffs and blockers. Restart completed agents explicitly when assigning
+follow-up work. Do not create testing lanes or idle sessions merely to increase agent count.
 
-Kinds: **Code**, **Testing**, **External input**. A bounded Clockgrove pilot does not waive any
-full-release requirement. Rows close only with their stated acceptance evidence.
+## Deferred qualification and distribution
 
-| Capability | Acceptance | Kind | Owner / state | Dependency → next concrete deliverable |
-| --- | --- | --- | --- | --- |
-| Bounded Clockgrove pilot handoff | Actual checkout passes installed doctor/plan; Objective, trust, delivery policy and allowance are accepted before activation. SDK is the chosen route; direct CLI evidence does not prove fallback. | Testing, External input | Coordinator + operator / waiting | Pilot scope and authority → ready-to-start local-only handoff. No silent production activation. |
-| Remaining Linux and local fault qualification | Native Linux, WSL2 and macOS-hosted Linux lifecycle/resource behavior, SDK-failure fallback, adaptive priority/pressure/lease, native stacks/merge queue, and restart/cancel/conflict/budget cases satisfy the four local gate rows. | Testing, External input | Local qualification / waiting | Missing host access and scoped disposable fault authority → remaining [local gate scenarios](CONFORMANCE.md#verification-required-before-publication), retaining exact-candidate evidence already earned. |
-| Daytona burst | Real local/cloud overlap, fresh validation, TTL, egress, secret isolation, cancellation/restart, native accounting and exact cleanup pass. | Testing, External input | Provider qualification / blocked | Credentials plus bounded paid authority → installed multi-worker Objective and lifecycle evidence. |
-| Copilot managed execution | Exact task/session identity, independent validation, no provider fallback, cancellation/recovery and retained billing requirements pass. | Testing, External input | Provider qualification / blocked | Assignable access, agent-task read token and validation credentials → installed Objective; terminal sessions are not unavailable per-task billing settlement. |
-| Codex managed execution | Provider-specific actor/lifecycle binding is implemented and regression-tested; a distinct installed Objective satisfies the same contract without Copilot substitution. | Code, Testing, External input | Managed integration / blocked | Authoritative identity/lifecycle interfaces → implement the actual binding, then qualify it. |
-| Publication and distribution | All six prepublication gates pass; synchronized npm/plugin artifacts publish with approval; the exact published artifact passes clean-install smoke checks. | Testing, External input | Release owner / waiting | Retained release gates and registry authority → immutable release artifacts, approved publication and separate post-publication evidence. |
+Every issue has acceptance criteria, dependencies and an exact next deliverable. These remain open;
+they do not run before implementation is complete.
 
-Vercel Sandbox and Codex App Server remain Labs. Daytona, both managed providers, the Linux matrix,
-native-stack/adversarial cases and published distribution remain in the full product contract.
-
-## Completed lanes and current ownership
-
-| Lane | State | Delivered / next action |
+| Capability | Ordinary issues | Dependency / next boundary |
 | --- | --- | --- |
-| Publication/runtime, discovery and foreground resource proof | Completed | Integrated fail-closed corrections; installed authorized adoption and retained-work delivery observed. Unsupported foreground variants still block safely. |
-| Immutable recovery reads and transient errors | Completed | Bounded exact-OID cache, fresh authority/resource observations, and preserved platform retry timing; focused checks and independent review passed. |
-| Controller quota recovery | Completed | Shared cooldown and settled ownership before fresh acquisition; focused failure regressions, full checks and zero-restart installed closure. |
-| Deadline-safe closure | Completed | Exact on-time proof only, including closed-Objective/lost-terminal recovery, ancestry, accounting, cancellation and resource gates; no new execution after expiry. |
-| Fresh-clone delivered behavior | Completed | Scoped/full built-in tests and independent behavior checks passed at the exact delivered trunk with unchanged clean state. |
-| Independent successor qualification | Completed | Separate read-only observer verified retained history, refresh/review/merge/join, accounting and eleven absent scopes; original failed observer retained. |
-| Compilation/chat/economics/scheduling and provider assessment | Completed | No further concrete unblocked implementation gap identified. Externally blocked Codex implementation remains explicit above. |
-| Coordinator | Completed | Exact outcomes recorded for the single [capability PR](https://github.com/clockgrove/factory/pull/68); next execution requires the bounded pilot or release inputs below. |
+| WSL2 resilience and adaptive scheduling | [#75](https://github.com/clockgrove/factory/issues/75), [#76](https://github.com/clockgrove/factory/issues/76) | Integrated code, frozen artifact and a new scoped execution allowance; no reuse of a completed run's unused allowance. |
+| Organization priority edits | [#77](https://github.com/clockgrove/factory/issues/77) | Scoped disposable organization-field permission. |
+| Other supported Linux hosts | [Native Linux #78](https://github.com/clockgrove/factory/issues/78), [macOS-hosted Linux #79](https://github.com/clockgrove/factory/issues/79) | Host access; supported architecture coverage is retained. Neither blocks independent WSL2 work. |
+| Native stacks, merge queue and recorded regular-PR fallback | [#80](https://github.com/clockgrove/factory/issues/80), [#81](https://github.com/clockgrove/factory/issues/81), [#82](https://github.com/clockgrove/factory/issues/82) | Installed candidate; queue/rule tests additionally need eligible disposable features and explicit configuration authority. |
+| Daytona and two real managed providers | [Daytona #83](https://github.com/clockgrove/factory/issues/83), [Copilot #84](https://github.com/clockgrove/factory/issues/84), [Codex #85](https://github.com/clockgrove/factory/issues/85) | Actual provider implementation, credentials, exact native-unit spending and cleanup authority. Credentials alone authorize no launch. |
+| Bounded Clockgrove pilot | [#86](https://github.com/clockgrove/factory/issues/86) | Accepted Objective, trust, delivery policy and allowance before actual-checkout activation. |
+| Integrated suite and discovered-defect fixes | [#87](https://github.com/clockgrove/factory/issues/87) | All implementation code integrated, then one coordinated suite and defect-fix phase. |
+| Release and actual published installation | [Publication #88](https://github.com/clockgrove/factory/issues/88), [post-publication #89](https://github.com/clockgrove/factory/issues/89) | All retained gates, compatible exact-candidate evidence and registry approval; clean-install the actual published bytes afterwards. |
 
-No implementation agent is waiting on an idle reviewer. Blocked rows are dependencies, not active
-agents; no extra audit or test-infrastructure lane is being created to fill slots.
+## Scope and retained evidence
 
-## External inputs — one actionable list
+The [design definition of done](DESIGN.md#definition-of-done), [delivery plan](DELIVERY-PLAN.md), and
+[conformance gates](CONFORMANCE.md#verification-required-before-publication) retain the complete
+product contract. Vercel Sandbox, Codex App Server and harness-native child workers remain Labs.
+Git LFS lifecycle and oversized artifact transfer remain explicit future appendix extensions, not
+current support claims. No requirement is dropped merely because its issue is externally blocked.
 
-1. **Pilot:** name the Clockgrove Objective and accept its trust, delivery policy and token allowance
-   before actual-checkout activation. The completed disposable successor grants no production authority.
-2. **Daytona:** provide `DAYTONA_API_KEY`; workers also need `FACTORY_DAYTONA_MODEL_SECRET` naming an
-   organization Secret restricted to `["api.openai.com"]`. Managed validation needs Daytona access
-   but not that worker-model Secret. [Setup](setup/daytona.md).
-3. **Paid providers:** explicitly name repository/provider, native-unit ceilings, concurrency,
-   permitted egress and cleanup responsibility. Copilot also needs assignable repository access and
-   a user-to-server token with `Agent tasks: read`; its per-task billing settlement remains unavailable.
-   Codex needs real assignable-actor and task/session/termination interfaces, not a guessed alias.
-   Credentials alone grant no spending. [Provider boundaries and inputs](PROVIDER-QUALIFICATION.md#what-remains-open).
-4. **Hosts and faults:** provide native Linux/macOS-hosted Linux access and authorize only remaining
-   scoped disposable failure injections; no production failure testing.
-5. **Publication:** approve registry identity and publication only after all retained gates pass.
+[PR #68](https://github.com/clockgrove/factory/pull/68) delivered native sibling refresh and retained
+successor completion. [Exact evidence](release-evidence/quota-safe-successor-completion-component-2026-09-05.json)
+preserves the original failures, separate adoption/closure artifact identities, known accounting and
+verified cleanup. The completed successor and its stopped controller are not a new-run allowance.
+Historical implementation issues remain history, not evidence that unexecuted release gates passed.
 
-## Evidence discipline
-
-[Conformance](CONFORMANCE.md) and the [historical handoff](IMPLEMENTATION-HANDOFF.md) link exact
-source/artifact identities and original failures. Successful later observation does not relabel an
-earlier failure. This board and its new evidence record are later documentation, not part of the
-identified tested/installed package.
-
-Finish implementation with focused checks, then use one frozen-candidate qualification phase.
-After a defect, check affected behavior first and repeat broader checks at the next stable candidate.
-Keep all final release gates. [Contributor procedure](../CONTRIBUTING.md#validate-changes).
+The new board and guidance are not part of those previously tested artifacts. Never attach old
+evidence to changed source bytes. [Contributor procedure](../CONTRIBUTING.md#validate-changes).

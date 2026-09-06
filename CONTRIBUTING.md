@@ -8,8 +8,10 @@ security boundary, and claims in the pull request.
 
 Read [`docs/DESIGN.md`](docs/DESIGN.md) first. It states the goals, the non-goals, and the rules that
 changes are judged against; [`AGENTS.md`](AGENTS.md) states the engineering conventions.
-The remaining-capability board is [`docs/COMPLETION.md`](docs/COMPLETION.md); accepted implementation
-waves remain in [`docs/DELIVERY-PLAN.md`](docs/DELIVERY-PLAN.md).
+All remaining product work is tracked in ordinary GitHub issues linked from
+[`docs/COMPLETION.md`](docs/COMPLETION.md). The board is a concise summary, not a separate backlog;
+contributor tasks do not require Factory Objective compilation. Accepted implementation waves remain
+in [`docs/DELIVERY-PLAN.md`](docs/DELIVERY-PLAN.md).
 
 Keep each change focused on one complete, testable capability, not an arbitrary number of files or
 helper modules. GitHub is Factory's durable state: do not add sidecar state, status
@@ -31,30 +33,23 @@ cannot change default startup or release behavior.
 
 ## Validate changes
 
-Use Node.js 20 or later. During development, install dependencies when needed, then run typecheck
-and the focused tests for the behavior being changed:
+Use Node.js 20 or later. Finish the remaining implementation code in parallel, isolated worktrees
+and integrate it before running verification. During implementation, do not run tests, typechecks,
+lint/format checks, coverage, release matrices, package checks, plugin reinstalls or live qualification.
+Write regression tests alongside concrete defect fixes, but defer their execution. Use source
+inspection, authoritative API documentation and already captured contract fixtures to inform code;
+never invent provider interfaces or broaden spending/credential authority to finish a task.
 
-```bash
-npm ci
-npm run typecheck
-npx vitest run test/publication.test.ts
-```
+After all implementation code is integrated, use one coordinated verification phase:
 
-The test path is an example; select the affected suite(s). Add a regression test for each concrete
-defect. Keep targeted checks for security, destructive actions, accounting, and recovery; use cheap
-contract fixtures derived from captured live behavior to catch external integration mismatches.
-Documentation-only edits need relevant formatting, link, and consistency checks, not new tests.
-Until implementation and integration review are complete, do not repeatedly run full coverage,
-release matrices, packaging, plugin reinstalls, or broad live qualification between fixes. A narrow
-live probe is justified when uncertain platform behavior blocks implementation, within existing
-authorization and spending boundaries. An installation defect can need a targeted install check.
-
-Then use one coordinated qualification phase:
-
-1. Freeze the source, tests, documentation, manifests, and bundles as an identified candidate.
-2. Run `npm run verify:release` for the full integrated checks.
-3. Build and install the matching artifact; record source and artifact identities.
-4. Execute the required installed end-to-end cases and applicable conformance matrices.
+1. Review and freeze the source, tests, documentation and manifests as an identified candidate.
+2. Run the complete suite, fix actual failures, and retain security, destructive-action, accounting
+   and recovery coverage. Do not call code feature-complete while implementation blockers remain.
+3. At the stable candidate boundary, build synchronized bundles and run `npm run verify:release` for
+   the full integrated checks.
+4. Install the matching artifact and record source/artifact identities.
+5. Execute the required installed end-to-end cases and applicable conformance matrices under their
+   separately accepted authority.
 
 If a check fails, preserve its original result, fix the defect, and run affected checks first.
 Repeat broader checks at the next stable candidate boundary; do not automatically restart unrelated

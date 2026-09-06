@@ -15,6 +15,7 @@ import {
   restoreContentChunk,
   sha256,
   verifyPayload,
+  retainCurrentArtifactPayload,
 } from "../execution/artifact-content.js";
 import { assertNoSecretMaterial, gitSha, sha256Digest } from "../protocol/limits.js";
 import type { GitCommitObject } from "./lease.js";
@@ -246,6 +247,7 @@ async function readLocalDescriptor(identity: ArtifactTransferIdentity): Promise<
   verifyArtifact(descriptor.artifact);
   if (JSON.stringify(descriptor.identity) !== JSON.stringify(canonicalIdentity(identity)))
     throw new Error("collected-content cache provenance mismatch");
+  if (descriptor.artifact.payload) retainCurrentArtifactPayload(descriptor.artifact.payload);
   for (const chunk of descriptor.chunks) {
     const path = join(root, chunk.digest);
     const info = await lstat(path);
@@ -265,6 +267,27 @@ export class ArtifactTransferIncompleteError extends Error {
       { cause },
     );
     this.name = "ArtifactTransferIncompleteError";
+  }
+}
+
+/** Read-only proof used while the original owned workspace is still available.
+ * False means keep that source; a failed copy or unavailable transport never licenses deletion. */
+export async function artifactRecoveryCopyAvailable(args: {
+  store: ArtifactTransferStore;
+  identity: ArtifactTransferIdentity;
+  artifactDigest: string;
+}): Promise<boolean> {
+  try {
+    const local = await readLocalDescriptor(args.identity);
+    if (local) {
+      if (local.artifact.digest !== args.artifactDigest) return false;
+      if (local.artifact.payload) await verifyPayload(local.artifact.payload);
+      return true;
+    }
+    const recovered = await recoverArtifactTransfer(args);
+    return recovered?.digest === args.artifactDigest;
+  } catch {
+    return false;
   }
 }
 
@@ -312,6 +335,8 @@ export async function recoverArtifactTransfer(args: {
   identity: ArtifactTransferIdentity;
 }): Promise<NormalizedArtifact | null> {
   const ready = await readDescriptor(args.store, args.identity, "ready");
+  if (ready?.descriptor.artifact.payload)
+    retainCurrentArtifactPayload(ready.descriptor.artifact.payload);
   const intent = await readDescriptor(args.store, args.identity, "intent");
   if (!ready) {
     if (intent) throw new ArtifactTransferIncompleteError(intent.ref);
@@ -354,6 +379,8 @@ export async function resumeArtifactTransfer(args: {
     return recoverArtifactTransfer(args);
   }
   assertArtifactScope(intent.descriptor.artifact, args.allowedPaths);
+  if (intent.descriptor.artifact.payload)
+    retainCurrentArtifactPayload(intent.descriptor.artifact.payload);
   await args.assertCurrent();
   const retained = await readLocalDescriptor(args.identity);
   if (retained && JSON.stringify(retained) !== JSON.stringify(intent.descriptor))

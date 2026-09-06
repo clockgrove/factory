@@ -63,6 +63,9 @@ path and attempt authority, and completes only the original publication. Ready r
 commit/tree/blob/descriptor identity, every chunk and whole-patch digest. Missing partial data is a
 typed incomplete transfer, never permission to rerun a worker. Local bytes are not runtime status or
 proof of terminal token usage; authenticated attempt/host/resource evidence is still required.
+Existing exact scalar-only token receipts remain usable without inventing a breakdown. Conflicting
+success, token or native-usage evidence fails closed. Recovery does not grant a new implementation
+attempt or replace a missing independent-validation allowance.
 
 Pending local data is private, no-follow, bounded to 16 descriptors and 512 MiB observed storage,
 with fsynced files/directory, retained across restart and deleted only after ready publication.
@@ -81,6 +84,10 @@ held by another Objective. Root cleanup checks exact owned prefixes; dead proces
 caches can be removed because pending data/ready refs are separate. Global release is permitted
 only after all consumers drain, and refuses active leases. These are trusted same-user process
 boundaries, not a hostile-worker isolation or disk-quota mechanism.
+Capture and restoration join the current operation's lease before asynchronous handoff; active
+allocations are excluded from empty-root cleanup. On a transfer failure the still-owned workspace
+can be removed only after verifying a complete exact local recovery copy or ready GitHub artifact.
+If that proof is unavailable, the workspace remains intact.
 
 Candidate/rebase payloads are rebuilt from pinned source/target Git SHAs and checked against the
 authenticated existing validation digest before reuse. Their planned Git trees/commits remain

@@ -15,7 +15,7 @@ import { DaytonaBackend, DaytonaResourceCleanupError } from "./backends/daytona.
 import { VercelSandboxBackend } from "./backends/vercel-sandbox.js";
 import { validationInvocationOwnership } from "./backends/validation-invocation.js";
 import { AttemptManager, type AttemptReservation } from "./control/attempts.js";
-import { persistArtifactTransfer, resumeArtifactTransfer, type ArtifactTransferIdentity } from "./control/artifact-transfers.js";
+import { artifactRecoveryCopyAvailable, persistArtifactTransfer, resumeArtifactTransfer, type ArtifactTransferIdentity } from "./control/artifact-transfers.js";
 import { activationCancellation, type ActivationBinding } from "./control/activations.js";
 import {
   deriveBudgetUsage,
@@ -360,6 +360,7 @@ interface CollectedAttemptContinuation {
   reservation: AttemptReservation;
   packet: WorkerPacket;
   artifact: NormalizedArtifact;
+  modelTokens?: number;
   modelUsage?: ReportedModelUsage & { inputTokens: number; outputTokens: number };
   nativeUsage: { unit: "local_milliseconds" | "sandbox_milliseconds" | "managed_sessions"; amount: number };
   worker?: LocalWorktree;
@@ -4304,7 +4305,7 @@ export class FactorySupervisor {
       } else {
         selected = this.#registry.get(recovered.reservation.backend) ?? undefined;
         terminalModelUsage = recovered.modelUsage;
-        terminalModelTokens = recovered.modelUsage ? recovered.modelUsage.inputTokens + recovered.modelUsage.outputTokens : undefined;
+        terminalModelTokens = recovered.modelTokens ?? (recovered.modelUsage ? recovered.modelUsage.inputTokens + recovered.modelUsage.outputTokens : undefined);
         budgetUnit = recovered.nativeUsage.unit;
         executionBudgetReconciled = true;
         if (admission.validation) {
@@ -4457,6 +4458,7 @@ export class FactorySupervisor {
       assertArtifactScope(artifact, packet.allowedPaths);
       if (!recovered && artifact.outcome === "succeeded")
         artifact = await bindArtifactManifest(this.#options.repository, artifact);
+      this.#retainArtifactContent(artifact);
       retryableArtifact = artifact;
       if (artifact.outcome !== "succeeded") {
         throw new Error(artifact.reason ?? `worker ${artifact.outcome}`);
@@ -4464,9 +4466,11 @@ export class FactorySupervisor {
       try {
         await this.#persistCollectedArtifact(reservation, packet, artifact);
       } catch (cause) {
-        // Stop resources below, but retain source and leave the attempt resumable.
-        // A transport failure is not failed implementation and grants no retry.
-        retainCollectedSource = true;
+        // Keep the original workspace only when no complete independent copy can
+        // be verified. Complete local pending bytes or a ready ref survive cleanup.
+        retainCollectedSource = !await artifactRecoveryCopyAvailable({
+          store: this.#store, identity: this.#artifactTransferIdentity(reservation), artifactDigest: artifact.digest,
+        });
         throw new ArtifactCollectionCheckpointError(cause);
       }
       if (!recovered || !(item.factoryEvents ?? []).some((event) => event.kind === "attempt" && event.event === "AttemptSucceeded" && event.runId === reservation!.runId && event.attempt === reservation!.attempt && event.artifactDigest === artifact.digest)) await this.#lease.use((lease) =>
@@ -5133,6 +5137,7 @@ export class FactorySupervisor {
    * reconciled execution accounting and never replays an already-started validation. */
   async #continueCollectedArtifact(item: DerivedWorkItem, deadline: number, recovered: CollectedAttemptContinuation): Promise<void> {
     const { reservation, packet, artifact, modelUsage, nativeUsage } = recovered;
+    const modelTokens = recovered.modelTokens ?? (modelUsage ? modelUsage.inputTokens + modelUsage.outputTokens : undefined);
     const backend = this.#registry.get(reservation.backend);
     const original = reservation.admission;
     if (!backend || backend.capabilities.providerManagedPublication ||
@@ -5145,14 +5150,22 @@ export class FactorySupervisor {
     const prior = deduplicateFactoryEvents([...(item.factoryEvents ?? []), ...this.#budgetEvents]).filter((event) =>
       event.runId === reservation.runId && "workItem" in event && event.workItem === item.number && "attempt" in event && event.attempt === reservation.attempt);
     if (prior.some((event) => event.kind === "validation" || event.kind === "capacity" && event.phase === "validation" ||
-      event.kind === "attempt" && ["AttemptCollected", "AttemptValidated", "AttemptPublished", "AttemptIntegrated", "AttemptFailed", "AttemptCancelled", "AttemptDeferred"].includes(event.event)))
+      event.kind === "attempt" && ["AttemptCollected", "AttemptValidated", "AttemptPublished", "AttemptIntegrated", "AttemptFailed", "AttemptTimedOut", "AttemptCancelled", "AttemptDeferred"].includes(event.event)))
       throw new Error("collected continuation cannot replay terminal or previously invoked validation work");
+    if (prior.some((event) => event.kind === "attempt" && event.event === "AttemptSucceeded" && event.artifactDigest !== artifact.digest))
+      throw new Error("retained artifact differs from its original terminal success receipt");
     const model = prior.filter((event) => event.kind === "budget" && event.event === "BudgetReconciled" && event.phase === "execution" && event.unit === "model_tokens");
     const native = prior.filter((event) => event.kind === "budget" && event.event === "BudgetReconciled" && event.phase === "execution" && event.unit === nativeUsage.unit);
+    if (modelUsage && model.some((event) => event.kind === "budget" && event.reportedModelUsage &&
+      (["inputTokens", "outputTokens", "cachedInputTokens"] as const).some((key) => event.reportedModelUsage?.[key] !== undefined && modelUsage[key] !== undefined && event.reportedModelUsage[key] !== modelUsage[key])))
+      throw new Error("collected continuation has conflicting model usage breakdowns");
+    if (prior.some((event) => event.kind === "attempt" && event.event === "AttemptSucceeded" && event.reportedModelTokens !== undefined && event.reportedModelTokens !== modelTokens))
+      throw new Error("collected continuation model accounting differs from terminal success");
     const expectedUnit = isManagedAgentBackendId(reservation.backend) ? "managed_sessions" : isSandboxBackendId(reservation.backend) ? "sandbox_milliseconds" : "local_milliseconds";
-    if ((this.#policy.economics && backend.capabilities.reportsModelUsage && (!modelUsage || !model.length)) ||
-      (modelUsage && (!model.length || model.some((event) => event.kind !== "budget" || event.usageId !== `worker-${item.number}-${reservation.attempt}` || event.amount !== modelUsage.inputTokens + modelUsage.outputTokens))) ||
-      (!modelUsage && model.length > 0) || nativeUsage.unit !== expectedUnit || !native.length ||
+    if ((this.#policy.economics && backend.capabilities.reportsModelUsage && (modelTokens === undefined || !model.length)) ||
+      (modelTokens !== undefined && (!Number.isSafeInteger(modelTokens) || modelTokens < 0 || !model.length || model.some((event) => event.kind !== "budget" || event.usageId !== `worker-${item.number}-${reservation.attempt}` || event.amount !== modelTokens))) ||
+      (modelUsage && modelUsage.inputTokens + modelUsage.outputTokens !== modelTokens) ||
+      (modelTokens === undefined && model.length > 0) || nativeUsage.unit !== expectedUnit || !native.length ||
       native.some((event) => event.kind !== "budget" || event.amount !== nativeUsage.amount) ||
       !Number.isFinite(nativeUsage.amount) || nativeUsage.amount < 0)
       throw new Error("collected continuation lacks exact reconciled execution accounting");
@@ -5349,6 +5362,8 @@ export class FactorySupervisor {
     } catch (cause) { throw new ArtifactCollectionCheckpointError(cause); }
     if (!artifact) return false;
     this.#retainArtifactContent(artifact);
+    if (events.some((event) => event.kind === "attempt" && event.event === "AttemptSucceeded" && event.artifactDigest !== artifact.digest))
+      throw new Error("retained artifact differs from its original terminal success receipt");
     if (events.some((event) => event.kind === "validation" || event.kind === "capacity" && event.phase === "validation" ||
       event.kind === "attempt" && ["AttemptCollected", "AttemptValidated", "AttemptPublished", "AttemptIntegrated", "AttemptFailed", "AttemptTimedOut", "AttemptCancelled", "AttemptDeferred"].includes(event.event)))
       throw new Error("retained output has later lifecycle evidence; automated replacement is blocked pending exact validation/publication recovery");
@@ -5363,14 +5378,20 @@ export class FactorySupervisor {
       ...(reservation.localScopeBatch ? { localScopeBatch: reservation.localScopeBatch } : {}),
       ...(started?.kind === "attempt" && started.providerResourceId ? { providerResourceId: started.providerResourceId } : {}),
     });
-    const model = events.filter((event): event is Extract<FactoryEvent, { kind: "budget" }> =>
+    let model = events.filter((event): event is Extract<FactoryEvent, { kind: "budget" }> =>
       event.kind === "budget" && event.event === "BudgetReconciled" && event.phase === "execution" && event.unit === "model_tokens");
+    if (this.#policy.economics && backend.capabilities.reportsModelUsage && !model.length) {
+      await this.#recoverAppServerUsage(item, reservation, events);
+      model = this.#budgetEvents.filter((event): event is Extract<FactoryEvent, { kind: "budget" }> =>
+        event.kind === "budget" && event.runId === reservation.runId && event.workItem === item.number && event.attempt === reservation.attempt &&
+        event.event === "BudgetReconciled" && event.phase === "execution" && event.unit === "model_tokens");
+    }
     const reported = model[0]?.reportedModelUsage;
     const modelUsage = reported?.inputTokens !== undefined && reported.outputTokens !== undefined
       ? { ...reported, inputTokens: reported.inputTokens, outputTokens: reported.outputTokens } : undefined;
     // A content checkpoint does not invent accounting. The session fallback may
     // restore an exact terminal usage receipt, but must not dispatch a new turn.
-    if (this.#policy.economics && backend.capabilities.reportsModelUsage && !modelUsage)
+    if (this.#policy.economics && backend.capabilities.reportsModelUsage && !model.length)
       throw new Error("retained output lacks exact terminal model usage; automated replacement is blocked pending usage recovery");
     const unit = isSandboxBackendId(reservation.backend) ? "sandbox_milliseconds" : "local_milliseconds";
     let native = events.filter((event): event is Extract<FactoryEvent, { kind: "budget" }> =>
@@ -5390,6 +5411,7 @@ export class FactorySupervisor {
     }
     await this.#continueCollectedArtifact(item, deadline, {
       reservation, packet, artifact,
+      ...(model.length ? { modelTokens: model[0]!.amount } : {}),
       ...(modelUsage ? { modelUsage } : {}),
       nativeUsage: { unit, amount: native[0]!.amount },
     });

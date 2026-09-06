@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createReadStream, createWriteStream, constants } from "node:fs";
 import {
   chmod,
@@ -198,6 +199,14 @@ export async function inspectContentFile(path: string, maxBytes = MAX_CONTENT_FI
 // Optimization only. Exact manifests + immutable GitHub transfer records remain authority.
 const cachedChunks = new Map<string, string>();
 const ownedRoots = new Set<string>();
+const activeRoots = new Set<string>();
+export const artifactContentOwners = new AsyncLocalStorage<Map<string, () => Promise<void>>>();
+/** Producers and restorers join an existing operation before handing content across an await. */
+export function retainCurrentArtifactPayload(payload: ArtifactPayload): void {
+  const scope = artifactContentOwners.getStore();
+  if (scope && !scope.has(payload.digest))
+    scope.set(payload.digest, retainArtifactContent(payload));
+}
 const contentReferences = new Map<string, number>();
 let allocationQueue: Promise<void> = Promise.resolve();
 const MAX_CACHE_BYTES = 512 * 1024 * 1024;
@@ -264,15 +273,18 @@ async function allocateContentRoot(bytes: number): Promise<string> {
     flag: "wx",
   });
   ownedRoots.add(root);
+  activeRoots.add(root);
   return root;
 }
 export async function cachePayload(path: string): Promise<ArtifactPayload> {
   const identity = await inspectContentFile(path, MAX_CONTENT_BYTES);
   if (identity.bytes === 0) throw new Error("cannot externalize an empty patch");
   const root = await contentRoot(identity.bytes);
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  let file: Awaited<ReturnType<typeof open>> | undefined;
   const chunks: ArtifactPayload["chunks"] = [];
+  const captureReferences = new Set<string>();
   try {
+    file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     let offset = 0;
     while (offset < identity.bytes) {
       const bytes = Buffer.alloc(Math.min(CONTENT_CHUNK_BYTES, identity.bytes - offset));
@@ -283,6 +295,10 @@ export async function cachePayload(path: string): Promise<ArtifactPayload> {
         read += result.bytesRead;
       }
       const digest = sha256(bytes);
+      if (!captureReferences.has(digest)) {
+        contentReferences.set(digest, (contentReferences.get(digest) ?? 0) + 1);
+        captureReferences.add(digest);
+      }
       const destination = join(root, digest);
       if (!cachedChunks.has(digest)) {
         await writeFile(destination, bytes, { mode: 0o600 });
@@ -297,13 +313,21 @@ export async function cachePayload(path: string): Promise<ArtifactPayload> {
       bytes: identity.bytes,
       chunks,
     });
+    retainCurrentArtifactPayload(payload);
     await verifyPayload(payload);
     return payload;
   } catch (error) {
+    activeRoots.delete(root);
     await cleanupContentRoot(root);
     throw error;
   } finally {
-    await file.close();
+    activeRoots.delete(root);
+    for (const digest of captureReferences) {
+      const remaining = (contentReferences.get(digest) ?? 1) - 1;
+      if (remaining) contentReferences.set(digest, remaining);
+      else contentReferences.delete(digest);
+    }
+    await file?.close();
   }
 }
 
@@ -359,8 +383,16 @@ export async function restoreContentChunk(
   }
   const root = await contentRoot(chunk.bytes);
   const path = join(root, chunk.digest);
-  await writeFile(path, bytes, { mode: 0o600, flag: "wx" });
-  cachedChunks.set(chunk.digest, path);
+  try {
+    await writeFile(path, bytes, { mode: 0o600, flag: "wx" });
+    cachedChunks.set(chunk.digest, path);
+  } catch (error) {
+    activeRoots.delete(root);
+    await cleanupContentRoot(root);
+    throw error;
+  } finally {
+    activeRoots.delete(root);
+  }
 }
 
 export async function materializePayload(
@@ -407,6 +439,7 @@ export async function verifyPayload(payload: ArtifactPayload): Promise<void> {
 }
 
 export async function cleanupContentRoot(root: string): Promise<void> {
+  if (activeRoots.has(root)) throw new Error("refusing active content capture cleanup");
   if (
     !ownedRoots.has(root) ||
     !resolve(root).startsWith(`${resolve(tmpdir())}${sep}factory-content-`)
@@ -420,6 +453,7 @@ export async function cleanupContentRoot(root: string): Promise<void> {
 
 /** Call only after all active consumers are finished; immutable GitHub records remain retained. */
 export async function releaseAllArtifactContent(): Promise<void> {
+  if (activeRoots.size) throw new Error("active artifact captures prevent global cleanup");
   if ([...contentReferences.values()].some((count) => count > 0))
     throw new Error("active artifact content leases prevent global cleanup");
   for (const root of [...ownedRoots]) await cleanupContentRoot(root);
@@ -436,7 +470,12 @@ export async function releasePayload(payload: ArtifactPayload): Promise<void> {
     const digests = [...cachedChunks]
       .filter(([, path]) => dirname(path) === root)
       .map(([digest]) => digest);
-    if (digests.every((digest) => !contentReferences.get(digest))) await cleanupContentRoot(root);
+    if (
+      ownedRoots.has(root) &&
+      !activeRoots.has(root) &&
+      digests.every((digest) => !contentReferences.get(digest))
+    )
+      await cleanupContentRoot(root);
   }
 }
 
@@ -458,7 +497,11 @@ export function retainArtifactContent(payload: ArtifactPayload): () => Promise<v
     await releasePayload(payload);
     // Duplicate captures can leave an empty, owned allocation after chunk de-duplication.
     for (const root of [...ownedRoots])
-      if (![...cachedChunks.values()].some((path) => dirname(path) === root))
+      if (
+        ownedRoots.has(root) &&
+        !activeRoots.has(root) &&
+        ![...cachedChunks.values()].some((path) => dirname(path) === root)
+      )
         await cleanupContentRoot(root);
   };
 }

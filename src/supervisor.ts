@@ -11,6 +11,10 @@ import {
   holdAppServerQualificationCheckpoint,
   SafeArtifactCheckpointHeldError,
 } from "./runtime/qualification-checkpoint.js";
+import {
+  holdArtifactTransferQualificationCheckpoint,
+  proveArtifactTransferQualificationReceipts,
+} from "./runtime/artifact-transfer-qualification-checkpoint.js";
 import { AppServerSessionManager } from "./control/app-server-sessions.js";
 import {
   completeSessionUsage,
@@ -30,6 +34,7 @@ import {
   persistArtifactTransfer,
   resumeArtifactTransfer,
   type ArtifactTransferIdentity,
+  type ArtifactTransferIntentCheckpoint,
 } from "./control/artifact-transfers.js";
 import { activationCancellation, type ActivationBinding } from "./control/activations.js";
 import {
@@ -4794,7 +4799,12 @@ export class FactorySupervisor {
         throw new Error(artifact.reason ?? `worker ${artifact.outcome}`);
       }
       try {
-        await this.#persistCollectedArtifact(reservation, packet, artifact);
+        await this.#persistCollectedArtifact(reservation, packet, artifact, !recovered ? {
+          modelTokens: terminalModelTokens,
+          providerResourceId: handle!.resourceId,
+          turnId: handle!.metadata?.turnId,
+          signal: executionSignal,
+        } : undefined);
       } catch (cause) {
         // Keep the original workspace only when no complete independent copy can
         // be verified. Complete local pending bytes or a ready ref survive cleanup.
@@ -6271,6 +6281,12 @@ export class FactorySupervisor {
     reservation: AttemptReservation,
     packet: WorkerPacket,
     artifact: NormalizedArtifact,
+    qualification?: {
+      modelTokens: number | undefined;
+      providerResourceId: string;
+      turnId: string | undefined;
+      signal: AbortSignal | undefined;
+    },
   ): Promise<void> {
     await persistArtifactTransfer({
       store: this.#store,
@@ -6278,6 +6294,40 @@ export class FactorySupervisor {
       artifact,
       allowedPaths: packet.allowedPaths,
       assertCurrent: () => this.#externalAdmission(async () => {}),
+      ...(qualification && reservation.localScopeBatch ? {
+        afterIntent: async (checkpoint: ArtifactTransferIntentCheckpoint) => holdArtifactTransferQualificationCheckpoint({
+          checkpoint,
+          ...(this.#run.activationRequestId ? { activationRequestId: this.#run.activationRequestId } : {}),
+          batch: reservation.localScopeBatch,
+          ...(qualification.signal ? { signal: qualification.signal } : {}),
+          assertCurrent: () => this.#externalAdmission(async () => {}),
+          proveTerminal: async () => {
+            const snapshot = await this.#reader.readObjective(this.#run.objective);
+            this.#fenceSnapshot(snapshot);
+            const events = snapshotEvents(snapshot);
+            this.#sequences.observe(events);
+            const proof = proveArtifactTransferQualificationReceipts({
+              checkpoint, activationRequestId: this.#run.activationRequestId,
+              backend: reservation.backend, reservationSequence: reservation.sequence,
+              providerResourceId: qualification.providerResourceId,
+              modelTokens: qualification.modelTokens, batch: reservation.localScopeBatch, events,
+            });
+            if (reservation.backend === "codex-app-server/local-worktree") {
+              const terminal = await this.#sessions.load(
+                `${this.#options.owner}/${this.#options.repo}`, reservation, "terminal",
+              );
+              if (!terminal || terminal.state !== "succeeded" || !completeSessionUsage(terminal.usage) ||
+                !qualification.turnId || terminal.turnId !== qualification.turnId ||
+                terminal.binding.threadId !== qualification.providerResourceId ||
+                terminal.usage!.inputTokens! + terminal.usage!.outputTokens! !== qualification.modelTokens)
+                throw new Error("transfer qualification lacks exact complete terminal session usage");
+              proof.session = { threadId: qualification.providerResourceId, turnId: qualification.turnId,
+                checkpointDigest: createHash("sha256").update(JSON.stringify(terminal)).digest("hex") };
+            }
+            return proof;
+          },
+        }),
+      } : {}),
     });
   }
 

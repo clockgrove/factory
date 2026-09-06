@@ -14,6 +14,7 @@ import {
 } from "../src/control/artifact-transfers.js";
 import {
   cachePayload,
+  readContentChunk,
   releaseAllArtifactContent,
   sha256,
 } from "../src/execution/artifact-content.js";
@@ -109,11 +110,11 @@ function identity(): ArtifactTransferIdentity {
   roots.push(join(tmpdir(), `factory-collected-${process.getuid?.() ?? "unknown"}-${digest}`));
   return value;
 }
-async function artifact(baseSha: string) {
+async function artifact(baseSha: string, bytes = "safe retained transfer bytes") {
   const root = await mkdtemp(join(tmpdir(), "factory-transfer-test-"));
   roots.push(root);
   const path = join(root, "patch");
-  await writeFile(path, "safe retained transfer bytes");
+  await writeFile(path, bytes);
   const payload = await cachePayload(path);
   return normalizeArtifact({
     baseSha,
@@ -141,6 +142,51 @@ async function artifact(baseSha: string) {
 }
 
 describe("immutable GitHub artifact transfer lifecycle", () => {
+  it("interrupts above-inline bytes only after durable intent and resumes the original private copy without rearming", async () => {
+    const memory = store(), id = identity(), bytes = "x".repeat(5 * 1024 * 1024 + 1);
+    const value = await artifact(id.baseSha, bytes), prefix = artifactTransferRef(id);
+    const afterIntent = vi.fn(async (checkpoint: import("../src/control/artifact-transfers.js").ArtifactTransferIntentCheckpoint) => {
+      expect(checkpoint.identity).toEqual(id);
+      expect(checkpoint.artifactDigest).toBe(value.digest);
+      expect(checkpoint.payloadDigest).toBe(sha256(bytes));
+      expect(checkpoint.payloadBytes).toBe(Buffer.byteLength(bytes));
+      expect(checkpoint.payloadChunks).toBe(2);
+      expect(memory.refs.get(`${prefix}/intent`)).toBe(checkpoint.intentCommitSha);
+      expect(memory.refs.has(`${prefix}/ready`)).toBe(false);
+      // Only the descriptor exists remotely; all chunk bytes are still private.
+      expect(memory.blobs.size).toBe(1);
+      await checkpoint.proveRetained();
+      throw new Error("explicit one-shot transfer interruption");
+    });
+    let admissions = 0;
+    const args = { store: memory.api, identity: id, artifact: value, allowedPaths: ["asset.dat"],
+      assertCurrent: async () => { admissions++; }, afterIntent };
+    await expect(persistArtifactTransfer(args)).rejects.toThrow("one-shot transfer interruption");
+    const originalIntent = memory.refs.get(`${prefix}/intent`);
+    expect(memory.refs.has(`${prefix}/ready`)).toBe(false);
+    expect(admissions).toBeGreaterThan(4);
+    // A restart loses every process-local chunk. Only exact retained disk bytes survive.
+    await releaseAllArtifactContent();
+    const recovered = await resumeArtifactTransfer(args);
+    expect(recovered).toEqual(value);
+    expect(afterIntent).toHaveBeenCalledTimes(1); // Even an extra callback on args cannot rearm resume.
+    expect(memory.refs.get(`${prefix}/intent`)).toBe(originalIntent);
+    const ready = memory.commits.get(memory.refs.get(`${prefix}/ready`)!);
+    expect(ready!.parentOids).toEqual([originalIntent]);
+    const restored = Buffer.concat(await Promise.all(recovered!.payload!.chunks.map(readContentChunk)));
+    expect(restored.equals(Buffer.from(bytes))).toBe(true);
+    expect(sha256(restored)).toBe(value.payload!.digest);
+  });
+
+  it("never arms inline artifact publication", async () => {
+    const memory = store(), id = identity(), afterIntent = vi.fn();
+    const value = normalizeArtifact({ baseSha: id.baseSha, patch: "inline", changedPaths: ["asset.dat"], outcome: "succeeded" });
+    await persistArtifactTransfer({ store: memory.api, identity: id, artifact: value,
+      allowedPaths: ["asset.dat"], assertCurrent: async () => {}, afterIntent });
+    expect(afterIntent).not.toHaveBeenCalled();
+    expect(await recoverArtifactTransfer({ store: memory.api, identity: id })).toEqual(value);
+  });
+
   for (const phase of ["directory", "child"] as const) {
     it(`does not fail this transfer when a peer removes its ${phase} after cache enumeration`, async () => {
       const memory = store(),

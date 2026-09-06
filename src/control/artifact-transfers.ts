@@ -33,6 +33,18 @@ const IdentitySchema = z
   })
   .strict();
 export type ArtifactTransferIdentity = z.infer<typeof IdentitySchema>;
+/** Internal qualification seam. No checkpoint can authorize execution or replace bytes. */
+export interface ArtifactTransferIntentCheckpoint {
+  identity: ArtifactTransferIdentity;
+  artifactDigest: string;
+  payloadDigest: string;
+  payloadBytes: number;
+  payloadChunks: number;
+  intentRef: string;
+  intentCommitSha: string;
+  descriptorDigest: string;
+  proveRetained(): Promise<void>;
+}
 const DescriptorSchema = z
   .object({
     protocol: z.literal("clockgrove.factory/artifact-transfer-v1"),
@@ -425,7 +437,8 @@ export async function resumeArtifactTransfer(args: {
     await args.assertCurrent();
     const retained = await readLocalDescriptor(args.identity);
     if (!retained) return null;
-    await persistArtifactTransfer({ ...args, artifact: retained.artifact });
+    await persistArtifactTransfer({ store: args.store, identity: args.identity,
+      allowedPaths: args.allowedPaths, assertCurrent: args.assertCurrent, artifact: retained.artifact });
     return recoverArtifactTransfer(args);
   }
   assertArtifactScope(intent.descriptor.artifact, args.allowedPaths);
@@ -454,7 +467,8 @@ export async function resumeArtifactTransfer(args: {
       throw new Error("resumed artifact chunk Git identity mismatch");
     await restoreContentChunk(contentChunk(chunk), bytes);
   }
-  await persistArtifactTransfer({ ...args, artifact: intent.descriptor.artifact });
+  await persistArtifactTransfer({ store: args.store, identity: args.identity,
+    allowedPaths: args.allowedPaths, assertCurrent: args.assertCurrent, artifact: intent.descriptor.artifact });
   return recoverArtifactTransfer(args);
 }
 
@@ -465,6 +479,8 @@ export async function persistArtifactTransfer(args: {
   artifact: NormalizedArtifact;
   allowedPaths: string[];
   assertCurrent: () => Promise<void>;
+  /** Fresh collection only; resumeArtifactTransfer deliberately never supplies this callback. */
+  afterIntent?: (checkpoint: ArtifactTransferIntentCheckpoint) => Promise<void>;
 }): Promise<{ ref: string; commitSha: string; artifactDigest: string; lifecycle: "retained" }> {
   const artifact = verifyArtifact(args.artifact);
   assertArtifactScope(artifact, args.allowedPaths);
@@ -540,6 +556,28 @@ export async function persistArtifactTransfer(args: {
     return observed;
   };
   const intent = await save("intent", []);
+  if (artifact.payload && args.afterIntent)
+    await args.afterIntent({
+      identity,
+      artifactDigest: artifact.digest,
+      payloadDigest: artifact.payload.digest,
+      payloadBytes: artifact.payload.bytes,
+      payloadChunks: artifact.payload.chunks.length,
+      intentRef: intent.ref,
+      intentCommitSha: intent.oid,
+      descriptorDigest: sha256(bytes),
+      proveRetained: async () => {
+        await args.assertCurrent();
+        const local = await readLocalDescriptor(identity);
+        const observed = await readDescriptor(args.store, identity, "intent");
+        if (!local || JSON.stringify(local) !== JSON.stringify(descriptor) ||
+          !observed || observed.oid !== intent.oid ||
+          JSON.stringify(observed.descriptor) !== JSON.stringify(descriptor) ||
+          await args.store.readRef(`${artifactTransferRef(identity)}/ready`))
+          throw new Error("qualification requires exact pending intent and complete private content");
+        await verifyPayload(artifact.payload!);
+      },
+    });
   for (const chunk of [...new Map(chunks.map((chunk) => [chunk.digest, chunk])).values()]) {
     const data = await readContentChunk(contentChunk(chunk));
     const oid = await mutation(() => args.store.createBlob(data));

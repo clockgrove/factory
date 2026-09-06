@@ -580,9 +580,9 @@ export async function verifyRecoverySourcePublication(
       publication: event,
       artifact,
       current: changed
-        ? artifact.delivery.stack
-          ? "native-transition-observed"
-          : "sibling-refresh-observed"
+        ? event.mode === "regular-prs" || !artifact.delivery.stack
+          ? "sibling-refresh-observed"
+          : "native-transition-observed"
         : "unchanged",
       executionAuthorized: false,
     };

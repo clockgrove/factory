@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 import { CodexCliLocalBackend } from "./backends/codex-cli-local.js";
 import { CodexSdkLocalBackend } from "./backends/codex-sdk-local.js";
 import { CodexAppServerLocalBackend, appServerHandleFromCheckpoint } from "./backends/codex-app-server.js";
+import { holdAppServerQualificationCheckpoint, SafeArtifactCheckpointHeldError } from "./runtime/qualification-checkpoint.js";
 import { AppServerSessionManager } from "./control/app-server-sessions.js";
 import { completeSessionUsage, type AppServerSessionJournal } from "./execution/app-server-session.js";
 import {
@@ -3937,6 +3938,7 @@ export class FactorySupervisor {
     } catch (error) {
       if (error instanceof LeaseLostError) throw error;
       if (error instanceof PlatformUnavailableError) throw error;
+      if (error instanceof SafeArtifactCheckpointHeldError) throw error;
       const unsafeCleanup =
         error instanceof DaytonaResourceCleanupError ||
         (error instanceof Error &&
@@ -4503,6 +4505,31 @@ export class FactorySupervisor {
         this.#budgetEvents.push(event);
         executionBudgetReconciled = true;
       });
+      if (!recovered && selected.capabilities.id === "codex-app-server/local-worktree" && reservation.localScopeBatch) {
+        const native = this.#budgetEvents.filter((event) => event.kind === "budget" && event.event === "BudgetReconciled" &&
+          event.runId === reservation!.runId && event.workItem === reservation!.workItem && event.attempt === reservation!.attempt &&
+          event.phase === "execution" && event.unit === "local_milliseconds").at(-1);
+        try {
+          await holdAppServerQualificationCheckpoint({ repository: `${this.#options.owner}/${this.#options.repo}`,
+            objective: this.#run.objective, ...(this.#run.activationRequestId ? { activationRequestId: this.#run.activationRequestId } : {}),
+            runId: reservation.runId, workItem: reservation.workItem, attempt: reservation.attempt, directorEpoch: reservation.directorEpoch,
+            policyDigest: reservation.policyDigest, baseSha: reservation.baseSha, artifactDigest: artifact.digest,
+            threadId: handle!.resourceId, turnId: handle!.metadata?.turnId ?? "", modelTokens: terminalModelTokens ?? NaN,
+            nativeMilliseconds: native?.kind === "budget" ? native.amount : NaN, batch: reservation.localScopeBatch,
+            ...(executionSignal ? { signal: executionSignal } : {}), assertCurrent: () => this.#lease.assert(),
+            proveTerminal: async () => {
+              const terminal = await this.#sessions.load(`${this.#options.owner}/${this.#options.repo}`, reservation!, "terminal");
+              if (!terminal || terminal.state !== "succeeded" || !completeSessionUsage(terminal.usage) ||
+                terminal.turnId !== handle!.metadata?.turnId || terminal.binding.threadId !== handle!.resourceId ||
+                terminal.usage!.inputTokens! + terminal.usage!.outputTokens! !== terminalModelTokens)
+                throw new Error("qualification hold lacks exact complete terminal session usage");
+            },
+          });
+        } catch (cause) {
+          if (cause instanceof SafeArtifactCheckpointHeldError) throw cause;
+          throw new SafeArtifactCheckpointHeldError(cause);
+        }
+      }
       const validationBackendId = validator?.capabilities.id ?? "factory/local-validation";
       validationCapacity = {
         key: capacityReservationKey({
@@ -4852,6 +4879,7 @@ export class FactorySupervisor {
       // integrates regular and native siblings through exact candidate recovery.
       await this.#retryArtifacts.delete(item.number);
     } catch (error) {
+      if (error instanceof SafeArtifactCheckpointHeldError) throw error;
       if (
         retryableArtifact &&
         validation &&

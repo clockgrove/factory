@@ -593,7 +593,7 @@ export function ownedSchedulingScopes(evidence, primary) {
     assert.equal(batch.identity.workItem, event.workItem);
     assert.equal(batch.identity.attempt, event.attempt);
     assert.equal(batch.identity.policyDigest, event.policyDigest);
-    assert.equal(batch.identity.directorEpoch, event.directorEpoch);
+    assert.equal(batch.identity.directorEpoch, event.recoveryEpoch ?? event.directorEpoch);
     assert.equal(batch.identity.phase, event.phase ?? "execution");
     assert.equal(batch.identity.commandIndex, 0);
     assert.ok(

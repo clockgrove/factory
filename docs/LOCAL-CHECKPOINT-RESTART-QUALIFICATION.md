@@ -55,6 +55,62 @@ change. Never place tokens in arguments, unit properties or evidence.
 
 ## Explicit exercise
 
+### App Server same-attempt artifact continuation
+
+Use the same installed-artifact, private fixture, controller preflight and evidence paths above,
+adding `FACTORY_CHECKPOINT_BACKEND=app-server`. This selects only
+`codex-app-server/local-worktree` for execution, with one admitted worker; management remains
+the existing policy-selected backend. The supplied model-token threshold and all original
+local-only attempt/time/native-budget ceilings remain unchanged. It requires the supported
+source-pinned App Server executable and a matching installed bundle containing the checkpoint
+seam; it does not substitute a source-worktree MCP server.
+
+The exercise acknowledgement is deliberately different:
+
+```text
+FACTORY_CHECKPOINT_ACK=<repository>:<exact-unit>:start,arm-terminal-artifact-hold,pause,restart,resume,stop
+```
+
+Before activation, the runner exclusively writes a bounded owner-only qualification arm keyed
+to the exact observed controller unit and InvocationID. It binds the plain Objective, original
+activation request, policy, host and producer generation. It expires within ten minutes,
+including compilation, worker execution and hold time. It is private fault coordination, not
+Factory orchestration state or execution authority. No service configuration, arbitrary commands,
+GitHub control receipts, provider home or installed artifact are edited to inject the boundary.
+
+Only the matching first App Server attempt can reach it. The installed runtime first persists
+the immutable terminal session, complete model counters and ready artifact, records successful
+collection and native usage, and confirms execution cleanup. Before any validator admission it
+writes one reached witness binding the actual run, attempt, artifact, thread and turn, then holds.
+The hold has no release-to-validation operation. Timeout, stop or abort leaves the original
+attempt resumable without a fabricated cancellation/failure/deferral receipt. The already durable
+artifact permits normal exact-owned workspace cleanup; provider session history is retained.
+
+The runner independently reloads reservation ancestry, prepared/turn/terminal stage refs and
+intent/ready artifact refs, validating exact tree-path/blob identity and complete raw response
+usage. It checks the reached witness against those GitHub facts, proves the reserved worker scope
+absent, and restarts only the exact captured controller once. The earlier Pause request prevents
+new workers while the replacement consumes the original artifact and performs its first actual
+validation/review/integration. Validator scopes belong to the replacement generation; the original
+worker scope does not. All are independently checked, including unused optional setup slots.
+
+At the fully accounted pause, the same run/attempt/thread/turn/terminal usage and artifact OIDs
+must be unchanged. Resume then completes the original three-item fixture. The final proof requires
+three unique App Server executions, three publications/integrations, complete known accounting,
+unchanged installed/source identity, all exact scopes absent and the exact controller stopped.
+Written negative contracts reject changed binding, missing raw usage, early validation, repeated
+dispatch, live/unknown resources and expired arms; they are not separate live negative outcomes.
+
+This scenario proves **same-attempt terminal artifact continuation with unchanged durable session
+evidence**. Ready artifact recovery deliberately wins, so it does not claim a cold `thread/read`
+RPC occurred, a cold repair turn is supported, interrupted usage became available, externalized
+large-file transfer passed, or any wider host/provider/release gate closed. An absent/expired hold,
+unknown action or incomplete proof is an incomplete qualification, never permission to reinject.
+Retain private failed evidence and arm/reached files for inspection; their generation-bound expiry
+cannot authorize later work. No execution is authorized merely by this documented recipe.
+
+### Default SDK/CLI accounted restart
+
 After reviewing preflight and obtaining permission for the bounded live run, repeat with a new
 evidence filename, `FACTORY_CHECKPOINT_PHASE=exercise`, and this exact acknowledgement:
 

@@ -70,14 +70,14 @@ function commit(value, oid) {
   assert.ok(typeof value.message === "string" && Buffer.byteLength(value.message) <= 131072);
   return value;
 }
-function checkpoint(value, request, target) {
+export function assertQualificationCheckpoint(value, request, target) {
   assert.equal(value.ref, request.ref);
   const head = commit(value.commit, value.commit.oid);
-  assert.deepEqual(head.parentOids, [target], "checkpoint target parent differs");
+  assert.deepEqual(head.parentOids, Array.isArray(target) ? target : [target], "checkpoint target parent differs");
   assert.equal(value.observedRefOid, head.oid, "checkpoint ref changed during observation");
   sha(value.blobOid);
   assert.ok(
-    Array.isArray(value.treePaths) && value.treePaths.length === 3,
+    Array.isArray(value.treePaths) && value.treePaths.length === request.path.split("/").length,
     "checkpoint path proof missing",
   );
   let treeOid = head.treeOid;
@@ -151,6 +151,7 @@ function checkpoint(value, request, target) {
   );
   return JSON.parse(value.content);
 }
+const checkpoint = assertQualificationCheckpoint;
 function* readCommit(oid) {
   return commit(yield { kind: "commit", oid }, oid);
 }
@@ -869,7 +870,9 @@ export function nativeProofReader(request) {
     assert.ok(
       /^refs\/clockgrove-factory\/[a-z-]+\/objective-[1-9][0-9]*\/work-item-[1-9][0-9]*\/attempt-[1-9][0-9]*(?:\/[a-z-]+[a-f0-9]{64})?$/.test(
         ref,
-      ) || /^refs\/clockgrove-factory\/graphs\/objective-[1-9][0-9]*\/run-[a-f0-9]{32}$/.test(ref),
+      ) || /^refs\/clockgrove-factory\/graphs\/objective-[1-9][0-9]*\/run-[a-f0-9]{32}$/.test(ref) ||
+        /^refs\/clockgrove-factory\/sessions\/[a-f0-9]{64}\/(prepared|turn|terminal)$/.test(ref) ||
+        /^refs\/clockgrove-factory\/artifact-transfers\/[a-f0-9]{64}\/(intent|ready)$/.test(ref),
     );
     const data = await get("GET /repos/{owner}/{repo}/git/ref/{ref}", { ref: ref.slice(5) });
     assert.equal(data.ref, ref);
@@ -882,7 +885,7 @@ export function nativeProofReader(request) {
     if (demand.kind === "ref") return readRef(demand.ref);
     assert.equal(demand.kind, "checkpoint");
     assert.ok(
-      ["sibling-refresh", "merge-candidate", "semantic-review", "compiled-objective"].some(
+      demand.path === "artifact-transfer.json" || ["sibling-refresh", "merge-candidate", "semantic-review", "compiled-objective", "app-server-session"].some(
         (name) => demand.path === `.clockgrove-factory/control/${name}.json`,
       ),
     );
@@ -925,7 +928,7 @@ export function nativeProofReader(request) {
       observedRefOid: await readRef(demand.ref),
       treePaths,
     };
-    checkpoint(value, demand, head.parentOids[0]);
+    checkpoint(value, demand, head.parentOids);
     return value;
   };
 }

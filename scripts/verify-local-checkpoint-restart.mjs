@@ -10,6 +10,7 @@ import {
   openSync,
   readFileSync,
   readlinkSync,
+  mkdirSync,
   realpathSync,
   statSync,
   writeSync,
@@ -39,6 +40,7 @@ import {
 } from "./verify-local-faults.mjs";
 import { ownedSchedulingScopes, schedulingRequest } from "./verify-local-scheduling.mjs";
 import { readQualificationMergeProof as readCheckpointMergeProof } from "./qualification-merge-proof.mjs";
+import { appServerCheckpointArm, appServerCheckpointPath, assertAppServerCheckpoint, observeAppServerCheckpoints } from "./qualification-app-server-checkpoint.mjs";
 
 const hash = (value) =>
   createHash("sha256")
@@ -67,14 +69,18 @@ export function checkpointAuthority(env) {
   const unit = `clockgrove-factory-${hash(`${repository}\0${resolve(checkout)}`).slice(0, 16)}.service`;
   assert.equal(env.FACTORY_CHECKPOINT_CONTROLLER_UNIT, unit, "exact installed controller required");
   const phase = env.FACTORY_CHECKPOINT_PHASE;
+  const sessionRecovery = env.FACTORY_CHECKPOINT_BACKEND === "app-server";
+  assert.ok(env.FACTORY_CHECKPOINT_BACKEND === undefined || sessionRecovery, "unsupported checkpoint backend");
   assert.ok(["preflight", "exercise"].includes(phase));
   if (phase === "exercise")
     assert.equal(
       env.FACTORY_CHECKPOINT_ACK,
-      `${repository}:${unit}:start,pause-drain,restart,resume,stop`,
+      `${repository}:${unit}:${sessionRecovery ? "start,arm-terminal-artifact-hold,pause,restart,resume,stop" : "start,pause-drain,restart,resume,stop"}`,
       "explicit lifecycle authority required",
     );
   assert.ok(env.FACTORY_CHECKPOINT_NAMESPACE, "explicit new namespace required");
+  const policy = boundedPolicy("regular-prs", modelTokenLimit(env.FACTORY_CHECKPOINT_MAX_MODEL_TOKENS));
+  if (sessionRecovery) { policy.backendOrder = ["codex-app-server/local-worktree"]; policy.maxParallel = 1; }
   return {
     repository,
     checkout,
@@ -82,7 +88,8 @@ export function checkpointAuthority(env) {
     phase,
     namespace: qualificationNamespace(env.FACTORY_CHECKPOINT_NAMESPACE),
     evidence: safePath(env.FACTORY_CHECKPOINT_EVIDENCE),
-    policy: boundedPolicy("regular-prs", modelTokenLimit(env.FACTORY_CHECKPOINT_MAX_MODEL_TOKENS)),
+    policy,
+    ...(sessionRecovery ? { sessionRecovery: true } : {}),
   };
 }
 
@@ -368,7 +375,7 @@ export function checkpointFacts(
   assert.ok(Number.isSafeInteger(compile.amount) && compile.amount >= 0);
   for (const reserved of reservations) {
     assert.equal(reserved.attempt, 1, "qualification never spends a replacement attempt");
-    assert.ok(local.has(reserved.backend));
+    assert.ok(authority.sessionRecovery ? reserved.backend === "codex-app-server/local-worktree" : local.has(reserved.backend));
     const itemEvents = run.filter(
       (event) => event.workItem === reserved.workItem && event.attempt === reserved.attempt,
     );
@@ -516,6 +523,7 @@ export function checkpointFacts(
 }
 
 export async function runCheckpointScenario(port, authority) {
+  if (authority.sessionRecovery) return runAppServerCheckpointScenario(port, authority);
   // The adapter persists each requested side effect before invoking it. A fresh
   // evidence file is mandatory; this orchestration has no retry/re-entry path.
   const before = await port.preflight();
@@ -584,6 +592,66 @@ export async function runCheckpointScenario(port, authority) {
     finalScopes,
     stopped,
   };
+}
+
+export function appServerHoldReady(observation, authority, arm) {
+  const witness = observation.checkpointReached;
+  if (!witness) return false;
+  assert.equal(witness.armDigest, arm.digest);
+  const events = observation.receipts.map(({ event }) => event);
+  const start = unique(events.filter((event) => event.event === "FactoryRunStarted"), "one original run required");
+  assert.deepEqual(start.policy, authority.policy); assert.equal(start.repository, authority.repository);
+  assert.equal(start.activationRequestId, `${authority.namespace}-activate`);
+  assert.equal(start.runId, witness.runId); assert.equal(start.runId, observation.status.run.runId);
+  assert.equal(start.policyDigest, witness.policyDigest); assert.equal(start.objective, witness.objective);
+  const reserved = unique(events.filter((event) => event.event === "AttemptReserved"), "one held original attempt required");
+  assert.equal(reserved.workItem, witness.workItem); assert.equal(reserved.attempt, 1);
+  assert.equal(reserved.backend, "codex-app-server/local-worktree");
+  assert.ok(!events.some((event) => terminal.has(event.event) || ["AttemptFailed", "AttemptCancelled", "AttemptDeferred", "AttemptCollected", "ValidationRecorded", "PublicationRecorded"].includes(event.event) ||
+    event.event === "CapacityReserved" && event.phase === "validation"), "checkpoint already crossed validation or terminal boundary");
+  for (const eventName of ["AttemptStarted", "AttemptSucceeded"]) unique(events.filter((event) => event.event === eventName), "held worker receipt missing or repeated");
+  unique(events.filter((event) => event.event === "RunPauseRequested" && event.requestId === `${authority.namespace}-pause`), "pause request missing");
+  return true;
+}
+
+export async function runAppServerCheckpointScenario(port, authority) {
+  const before = await port.preflight();
+  if (authority.phase === "preflight") return { result: "preflight-only", before };
+  await port.action("start"); const original = await port.controller("active");
+  await port.action("create"); const arm = await port.armSession(original);
+  await port.action("activate");
+  await port.poll("worker-start", (value) => value.receipts.some(({ event }) => event.event === "AttemptStarted"));
+  await port.action("pause");
+  const held = await port.poll("terminal-artifact-hold", (value) => appServerHoldReady(value, authority, arm));
+  const sessionProofs = await port.sessionProof(held, held.checkpointReached);
+  assert.equal(sessionProofs.length, 1);
+  const scopes = await port.absence(held, [original], true);
+  const originalEvents = held.receipts.map(({ event }) => event).filter((event) => ["attempt", "budget", "graph"].includes(event.kind));
+  await port.checkpoint({ checkpoint: held, facts: { runId: held.status.run.runId, stable: originalEvents }, original, scopes, sessionProofs });
+  await port.controller("active", original); await port.action("restart");
+  const replacement = await port.controller("active");
+  assert.notEqual(replacement.invocationId, original.invocationId); assert.equal(replacement.hostIdentity, original.hostIdentity);
+  await port.takeover(held);
+  const paused = await port.poll("recovered-accounted-pause", (value) => checkpointReady(value, authority, port.pauseRequestId));
+  const facts = checkpointFacts(paused, authority, port.pauseRequestId);
+  assert.equal(facts.runId, held.status.run.runId);
+  for (const event of originalEvents) assert.ok(facts.stable.some((current) => JSON.stringify(current) === JSON.stringify(event)), "original worker receipt changed");
+  const resumedProofs = await port.sessionProof(paused, held.checkpointReached);
+  assert.deepEqual(resumedProofs, sessionProofs, "session or ready artifact changed across same-attempt continuation");
+  await port.absence(paused, [original, replacement]);
+  await port.controller("active", replacement); await port.action("resume");
+  const completed = await port.poll("completed", (value) => checkpointCompletionReady(value, authority, port.pauseRequestId));
+  const final = checkpointFacts(completed, authority, port.pauseRequestId, false);
+  assert.equal(final.runId, facts.runId);
+  const finalSessionProofs = await port.sessionProof(completed);
+  assert.equal(finalSessionProofs.length, 3);
+  assert.deepEqual(finalSessionProofs.find((proof) => proof.workItem === sessionProofs[0].workItem), sessionProofs[0]);
+  await port.finalProof(completed, original, replacement);
+  const finalScopes = await port.absence(completed, [original, replacement]);
+  await port.controller("active", replacement); await port.action("stop");
+  const stopped = await port.controller("inactive");
+  return { result: "passed", scope: "installed-app-server-terminal-artifact-recovery", checkpoint: facts, final,
+    sessionProofs, finalSessionProofs, original, replacement, scopes, finalScopes, stopped };
 }
 
 export function assertScopeCoverage(events) {
@@ -734,8 +802,13 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
   assert.equal(command("git", ["ls-files", "--error-unmatch", harnessPath], root), harnessPath);
   assert.equal(
     command("git", ["show", `HEAD:${harnessPath}`], root),
-    readBounded(fileURLToPath(import.meta.url)).trim(),
+    readBounded(fileURLToPath(import.meta.url), 262144).trim(),
   );
+  const harnessFiles = [harnessPath, ...(authority.sessionRecovery ? ["scripts/qualification-app-server-checkpoint.mjs", "scripts/qualification-sibling-refresh-proof.mjs"] : [])].map((path) => {
+    const bytes = readBounded(join(root, path), 262144);
+    assert.equal(command("git", ["show", `HEAD:${path}`], root), bytes.trim(), "qualification dependency differs from committed source");
+    return { path, sha256: hash(bytes) };
+  });
   const token = command("gh", ["auth", "token"], authority.checkout);
   const [owner, repo] = authority.repository.split("/");
   const octokit = new Octokit({
@@ -764,6 +837,7 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
     artifact,
     sourceCommit,
     harnessSha256: hash(readFileSync(fileURLToPath(import.meta.url), "utf8")),
+    harnessFiles,
     actions: [],
     startedAt: new Date().toISOString(),
   };
@@ -962,6 +1036,10 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
       status: await call("factory_status", { objectiveNumber: objective.number }),
       children: children.map(({ number, state }) => ({ number, state })),
     };
+    if (evidence.sessionArm) {
+      try { observation.checkpointReached = JSON.parse(readBounded(`${evidence.sessionArm.path}.reached`, 16384)); }
+      catch (error) { if (error.code !== "ENOENT") throw error; }
+    }
     evidence.latest = observation;
     save();
     return observation;
@@ -971,6 +1049,28 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
     pauseRequestId,
     observe,
     controller,
+    armSession: async (original) => {
+      assert.equal(authority.sessionRecovery, true);
+      assert.ok(!evidence.sessionArm, "qualification checkpoint must not be rearmed");
+      await controller("active", original);
+      const path = appServerCheckpointPath(original.unit, original.invocationId), directory = dirname(path);
+      try { mkdirSync(directory, { mode: 0o700 }); } catch (error) { if (error.code !== "EEXIST") throw error; }
+      assert.equal(realpathSync(directory), directory);
+      const meta = statSync(directory); assert.equal(meta.uid, process.getuid()); assert.equal(meta.mode & 0o777, 0o700);
+      const arm = appServerCheckpointArm(authority, original, evidence.objective.number), bytes = JSON.stringify(arm);
+      // Evidence is persisted before the one exclusive private fault-arm write.
+      evidence.sessionArm = { path, arm, digest: hash(bytes), requestedAt: new Date().toISOString() }; save();
+      const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+      try { writeSync(fd, bytes); } finally { closeSync(fd); }
+      evidence.sessionArm.writtenAt = new Date().toISOString(); save();
+      return evidence.sessionArm;
+    },
+    sessionProof: async (observation, witness) => {
+      assert.equal(authority.sessionRecovery, true);
+      const proofs = await observeAppServerCheckpoints(request, observation, authority, witness);
+      (evidence.sessionObservations ??= []).push({ at: new Date().toISOString(), runId: observation.status.run.runId, proofs }); save();
+      return proofs.map((proof) => assertAppServerCheckpoint(observation, authority, proof, witness?.workItem === proof.workItem ? witness : undefined));
+    },
     preflight: async () => {
       const repository = (await request("GET /repos/{owner}/{repo}")).data;
       assert.ok(repository.private && !repository.archived && repository.permissions?.push);
@@ -1123,7 +1223,7 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
       }
       throw Error("bounded new repository-controller lease not observed");
     },
-    absence: async (observation, controllers) => {
+    absence: async (observation, controllers, executionOnly = false) => {
       const runId = observation.status.run.runId;
       const events = observation.receipts
         .map(({ event }) => event)
@@ -1131,6 +1231,18 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
       const reservations = events.filter((event) => event.event === "AttemptReserved");
       assertScopeCoverage(events);
       const units = new Set();
+      if (authority.sessionRecovery) {
+        const scoped = events.filter((event) => event.localScopeBatch);
+        assert.ok(scoped.every((event) => controllers.filter((producer) => event.localScopeBatch.identity.producerInvocationId === producer.invocationId).length === 1), "scope producer missing or ambiguous");
+        for (const producer of controllers) {
+          const owned = scoped.filter((event) => event.localScopeBatch.identity.producerInvocationId === producer.invocationId);
+          if (!owned.length) continue;
+          const validationKeys = new Set(owned.filter((event) => event.event === "CapacityReserved" && event.phase === "validation").map((event) => `${event.workItem}:${event.attempt}`));
+          const subset = [...owned, ...events.filter((event) => !event.localScopeBatch && validationKeys.has(`${event.workItem}:${event.attempt}`) && ["AttemptCollected", "ValidationRecorded"].includes(event.event))];
+          for (const event of owned) assert.equal(event.localScopeBatch.identity.hostIdentity, hostIdentity());
+          for (const unit of ownedSchedulingScopes({ repository: authority.repository, objective: evidence.objective, runResult: { runId }, events: subset }, producer)) units.add(unit);
+        }
+      } else {
       for (const producer of controllers) {
         const owned = reservations.filter(
           (event) => event.localScopeBatch?.identity.producerInvocationId === producer.invocationId,
@@ -1150,6 +1262,7 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
           producer,
         ))
           units.add(unit);
+      }
       }
       assert.ok(
         reservations.every((event) =>
@@ -1174,7 +1287,7 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
           ),
         );
       assert.ok(
-        observations.length >= reservations.length * 2 &&
+        observations.length >= reservations.length * (executionOnly ? 1 : 2) &&
           observations.every((entry) => entry.status === "absent"),
         "exact worker/validator absence unproved",
       );
@@ -1241,6 +1354,7 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
         save();
       }
       assert.deepEqual(installedBundleIdentity(pluginRoot), artifact);
+      for (const entry of harnessFiles) assert.equal(hash(readBounded(join(root, entry.path), 262144)), entry.sha256, "qualifier source changed during run");
       evidence.finishedArtifact = artifact;
       evidence.original = original;
       evidence.replacement = replacement;

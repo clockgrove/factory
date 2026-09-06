@@ -72,7 +72,7 @@ provider or eliminate the local management requirements.
 | `codex-cli/vercel-sandbox` (Labs) | `VERCEL_OIDC_TOKEN` and `OPENAI_API_KEY` | Both must reach the executing Factory process. This adapter does not reuse the Daytona Secret name. Vercel's request transformation supplies the model Authorization header; the worker receives a placeholder. Renew expired provider authentication and restart affected Factory processes. |
 | `github-copilot/github-managed` | Factory's GitHub identity, with the coding-agent integration enabled and assignable in the target repo | Authorize managed sessions explicitly. No local Copilot model-key variable connects this integration. Provider sessions may also consume GitHub Actions minutes. |
 | `openai-codex/github-managed` | Factory's GitHub identity and the corresponding enabled GitHub integration | Bundled profile remains unavailable until its live identity gate supplies a stable provider-published identity. Setting `OPENAI_API_KEY`, renaming an actor, or having a local Codex login cannot bypass that gate. |
-| `codex-app-server/local-worktree` (Labs) | Compatible local Codex executable and the existing Linux Codex login | A local protocol adapter, not a hosted Factory service and not the GitHub-managed Codex agent. No Daytona/Vercel credential is needed. |
+| `codex-app-server/local-worktree` | Compatible local Codex executable and the existing Linux Codex login | Explicit local execution and durable terminal recovery, not a hosted Factory service or GitHub-managed Codex agent. No Daytona/Vercel credential is needed. |
 
 The Daytona adapter also recognizes its SDK JWT/organization credential pair; the API-key setup
 above is the straightforward documented path. See [credential boundaries](../CREDENTIALS.md) for

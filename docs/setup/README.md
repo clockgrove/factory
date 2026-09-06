@@ -17,7 +17,7 @@ For work that continues after chat disconnects, add the [unattended controller](
 | Use a third-party sandbox or burst local work into cloud | [Daytona](daytona.md) |
 | Use provider-managed GitHub coding sessions | [GitHub-managed agents](github-managed.md) |
 | Explore the bundled Vercel adapter | [Vercel Sandbox — Labs](vercel-sandbox.md) |
-| Explore the local Codex protocol adapter | [Codex App Server — Labs](codex-app-server.md) |
+| Select durable local Codex sessions | [Codex App Server](codex-app-server.md) |
 
 Each guide starts with a TL;DR, then configuration, verification, and troubleshooting detail.
 Factory is still under development;

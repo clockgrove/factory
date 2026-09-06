@@ -91,7 +91,8 @@ The canonical success path is:
 | Hosted boundary | A hosted MCP/coordinator may be a later paid target, but it cannot become a dependency of the open-source local product. |
 | Sandbox provider | Daytona is the supported third-party sandbox target. Vercel Sandbox is Labs. |
 | Managed agents | Opt-in, qualified per provider: Copilot has limited automation; Codex managed execution is unavailable until real identity/lifecycle interfaces are implemented and qualified. Unsupported third-party features are documented limits, not global product blockers. |
-| Labs | Vercel Sandbox, Codex App Server, and additional harness/provider adapters. |
+| Durable local sessions | Explicit Codex App Server execution and exact terminal recovery; SDK/CLI remain the default chain. |
+| Labs | Vercel Sandbox and additional harness/provider adapters. |
 | Native host lifecycle | Win32 and Darwin execution and lifecycle are out of scope; Windows and macOS host supported Linux environments. |
 
 Official OpenAI plugin guidance supports skills plus an MCP server with structured, model-readable
@@ -541,17 +542,19 @@ signal, artifact collection, and cleanup. `codex-cli/local-worktree` implements 
 the supported portable fallback. Neither local route gains GitHub publication, validation, merge,
 Director, or budget authority.
 
-## Durable Codex sessions (Labs)
+## Durable Codex sessions
 
-`codex-app-server/local-worktree` is a Labs adapter for durable local sessions.
+`codex-app-server/local-worktree` is the explicit supported adapter for durable local sessions.
 The release baseline remains `codex-sdk/local-worktree` with `codex-cli/local-worktree` fallback.
 
 The adapter owns one supervised App Server process and starts one Codex thread per attempt in its
 exact-SHA worktree. Attempt receipts record the thread ID, model/profile identity, worktree, base
-SHA, start time, and normalized usage fields. On restart, the controller starts or reconnects to App
-Server, reads the durable attempt, and resumes the same thread when safe. If the local Codex thread
-store is unavailable, GitHub evidence still determines whether to collect an artifact, retry under
-policy, or escalate; local thread state never overrides GitHub.
+SHA, start time, and normalized usage fields. On restart, immutable session and artifact evidence
+permits exact terminal continuation without another model turn. Ambiguous dispatch uses read-only
+recovery, never automatic redispatch. The pinned provider cannot prove complete cold repair-turn
+usage, so new cold repair turns are refused. If the local thread store is unavailable, GitHub evidence
+still determines whether an exact artifact can continue or recovery must escalate; local thread
+state never overrides GitHub. See [session boundaries](CODEX-APP-SERVER-SESSIONS.md).
 
 The adapter must normalize:
 

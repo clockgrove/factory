@@ -125,12 +125,13 @@ diff, validates it independently, and refuses integration unless the remote head
 validated tree. Missing agent policy, repository enablement, or assignability makes the provider
 unavailable and cannot cause Factory to select a different paid backend implicitly.
 
-## Codex App Server (Labs)
+## Codex App Server
 
 The App Server adapter uses the operator's existing local Codex authentication and speaks the local
-`codex app-server` protocol. It is a Factory Labs integration, not a managed GitHub agent and not a
+`codex app-server` protocol. It is an explicitly selected local integration, not a managed GitHub agent and not a
 Factory-hosted service. The local default is the Codex SDK, with Codex CLI as its
-portable fallback.
+portable fallback. See [durable session boundaries](CODEX-APP-SERVER-SESSIONS.md), including the
+complete-usage requirement and unsupported cold repair turns.
 
 ## Named secrets in Work Items
 

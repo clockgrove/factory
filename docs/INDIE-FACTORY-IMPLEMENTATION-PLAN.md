@@ -12,8 +12,9 @@ the detailed priority, capacity, and burst work in
 
 Remaining qualification work includes formal npm publication, the complete Linux environment
 matrix, live native-stack coverage,
-one real Daytona Objective, two real GitHub-managed agents, and the adversarial installed-product
-run. [`CONFORMANCE.md`](CONFORMANCE.md) is the authoritative evidence ledger.
+real Daytona qualification, per-provider managed capability boundaries, and the adversarial
+installed-product run. Unsupported third-party interfaces limit that integration rather than blocking
+the entire product. [`CONFORMANCE.md`](CONFORMANCE.md) is the authoritative evidence ledger.
 
 Active runs retain their recorded protocol and policy. Changes must preserve their safe recovery;
 release claims require the corresponding conformance evidence.
@@ -89,7 +90,7 @@ The canonical success path is:
 | Open-source boundary | No required hosted Factory server, database, queue, account, or telemetry service. |
 | Hosted boundary | A hosted MCP/coordinator may be a later paid target, but it cannot become a dependency of the open-source local product. |
 | Sandbox provider | Daytona is the supported third-party sandbox target. Vercel Sandbox is Labs. |
-| Managed agents | GitHub Copilot and OpenAI Codex are the two managed-agent targets. Both are opt-in, budget-bounded, and publication-gated; Codex discovery stays fail-closed until live evidence records a stable provider-published identity. |
+| Managed agents | Opt-in, qualified per provider: Copilot has limited automation; Codex managed execution is unavailable until real identity/lifecycle interfaces are implemented and qualified. Unsupported third-party features are documented limits, not global product blockers. |
 | Labs | Vercel Sandbox, Codex App Server, and additional harness/provider adapters. |
 | Native host lifecycle | Win32 and Darwin execution and lifecycle are out of scope; Windows and macOS host supported Linux environments. |
 
@@ -322,8 +323,11 @@ agents do not expose model selection, so they cannot be combined with this expli
 Budget controls use provider-native measurable units. `maxModelTokens` is deliberately a
 stop-before-next-call threshold over observed management and reporting local-worker usage, not a
 provider-enforced hard cap. Already-started concurrent calls can each overshoot it. Opaque sandbox
-and managed-agent token use remains unavailable and is bounded by sandbox minutes or managed
-sessions instead. A
+and managed-agent token use remains unavailable; sandbox-minute or managed-session admission limits
+bound authorized resource use instead, not guaranteed dollar cost. The user owns the direct provider
+subscription and billing relationship. Missing costs stay unavailable, and billing settlement finality
+is not required for completion. Active compute, identity, cleanup, required native usage and replacement
+fences remain unchanged. A
 dollar estimate may be reported only when the provider supplies adequate price and usage data; it is
 never presented as an enforcement boundary.
 
@@ -513,14 +517,17 @@ burst.
 
 ### Managed-agent targets
 
-Factory includes GitHub Copilot and OpenAI Codex as publication-gated managed-agent targets. Both
-use the same provider-neutral execution contract: capability discovery, bounded session admission,
-durable identity, observation, cancellation/reconciliation, exact-head artifact collection,
-independent validation, and publication/integration fencing. A managed agent's self-published pull
-request is an artifact source, never validation or merge authority. Codex discovery stays
-unavailable until its live gate records a stable provider-published identity.
+Factory includes optional managed integrations subject to the **Managed-provider capability boundaries**
+gate. Claimed execution support requires per-provider qualification of capability discovery, bounded
+session admission, durable identity, observation, cancellation/reconciliation, exact-head collection,
+independent validation and integration fencing. Copilot has limited automation: unavailable pre-artifact
+binding or automated session termination requires an explicit human boundary, not guessed identity or
+unassignment-as-cleanup. Codex managed execution remains unavailable until authoritative identity and
+a real provider-specific lifecycle interface are implemented and qualified. A managed agent's
+self-published pull request is an artifact source, never validation or merge authority.
 
-Managed agents remain opt-in even though they are supported. A run must name the provider, allow it
+Missing third-party features do not block the whole product, and documented limits do not claim those
+features passed. Managed agents remain opt-in. A run must name the provider, allow it
 as a paid backend, and reserve a nonzero session ceiling. Missing repository enablement, provider
 policy, assignability, or session budget leaves work queued or follows the run's recorded fallback;
 Factory never changes to another paid agent implicitly.
@@ -826,8 +833,9 @@ successful and uneconomic decompositions, then adjust compiler and scheduler rul
 tests rather than hidden heuristics.
 
 Exit gate: the synchronized Agent Plugin and `@clockgrove/factory` artifacts install cleanly; the
-Linux environment, native-stack, Daytona, GitHub Copilot, and OpenAI Codex matrices pass; and from
-chat a clean adopter can activate an Objective, end the chat turn, and later receive validated
+Linux environment, native-stack, Daytona and adversarial matrices pass, and the managed-provider
+capability boundaries are evidenced per provider without requiring unavailable APIs. From chat a
+clean adopter can activate an Objective, end the chat turn, and later receive validated
 sibling/stacked PRs or one evidenced escalation. No Factory GitHub Action, custom UI, hosted service,
 manual per-Work-Item dispatch, or unrecorded state is required.
 

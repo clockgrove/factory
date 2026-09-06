@@ -3,6 +3,22 @@
 The provider acceptance harness exercises Factory's **Supervisor**, not just backend methods. It uses
 two independent foundational Work Items and a third Work Item that joins only after both integrate.
 
+## Managed-provider capability boundaries
+
+Factory is open-source orchestration that reuses providers under the user's direct relationship.
+Support is qualified per provider and per capability, not granted by an adapter name or a simulation.
+Copilot has limited automation: an exact artifact-bound task can be observed, but unavailable
+pre-artifact identity or automated termination requires an explicit operator boundary. Codex managed
+execution is currently unavailable until a real provider-specific identity/lifecycle interface is
+implemented and qualified. An unsupported third-party feature is not a global Factory release blocker.
+
+The publication row **Managed-provider capability boundaries** requires exact evidence for claimed
+behavior and explicit unavailable/limited capabilities. It does not require both managed providers to
+complete the same scenario when their APIs do not support it. The other five rows, including real
+Daytona qualification, local/stack/adversarial behavior and published installation, remain intact.
+No provider execution support is claimed without its applicable live qualification, and no old failure
+is promoted by this policy change.
+
 ## Credential-free acceptance
 
 ```bash
@@ -50,7 +66,9 @@ fresh evidence directory. Then provide all provider-specific authority:
 Credentials remain in the installed environment; do not commit or place them in evidence. Daytona
 requires its API credential and, for workers, the configured organization model Secret described in
 [Daytona setup](setup/daytona.md). No model is changed by this runner. The paid ceiling is native units,
-not a dollar estimate. Managed-provider model billing remains unavailable rather than counted as zero.
+not a guaranteed dollar cap. Model-token counters and monetary costs are separate observations;
+unavailable provider costs remain unavailable rather than counted as zero. Users own subscriptions,
+provider invoices and provider-side spending limits. No allowance is granted by these instructions.
 Copilot qualification additionally requires a user-to-server GitHub token with the repository
 `Agent tasks: read` permission. GitHub App installation tokens are not accepted by that API. The
 runner probes this read-only permission before Objective creation; it does not broaden the token or
@@ -96,8 +114,8 @@ Daytona and GitHub; they are not live cloud or billing evidence, and do not repl
 batch or installed qualification.
 
 No live provider launch was performed to implement these tests. A passed Daytona happy-path report
-does not qualify all TTL, crash, egress, secret-brokerage, or provider-invoice cases. The overall live
-provider gates in [CONFORMANCE.md](CONFORMANCE.md) remain open until those observations are recorded.
+does not qualify all TTL, crash, egress, secret-brokerage or cleanup cases. Daytona's live gate in
+[CONFORMANCE.md](CONFORMANCE.md) remains open until its required observations are recorded.
 
 The Codex managed live runner stops before creating an Objective because the release profile lacks
 a qualified stable provider-published actor identity. Current GitHub documentation names the installed
@@ -108,12 +126,18 @@ alias or silently use Copilot's lifecycle surface. Official OpenAI documentation
 Codex cloud work from GitHub issues and pull requests, but publishes no GitHub assignable actor identity
 or provider API binding for the GitHub Copilot-powered integration.
 
-A Copilot run can now collect exact task/session terminal evidence. Its final assessment still stays
-**incomplete** at the narrower external boundary: GitHub documents that managed coding-agent sessions
-consume Actions minutes and AI credits. GitHub's billing APIs expose aggregate account, repository,
-product, model, and date-level usage, but no Agent Task or session identity and no per-task settlement
-state. Terminal task/session state is execution-lifecycle evidence, not proof that provider billing
-has settled or that no additional charge can post.
+A Copilot run can collect exact task/session terminal evidence once its artifact binding is available.
+GitHub-managed execution may consume Actions minutes and AI credits, but billing settlement finality
+is not a Factory completion or release requirement. Aggregate billing data is not an exact task cost;
+where the provider does not supply attributable cost, Factory reports it as unavailable. Terminal
+task/session state is lifecycle evidence, not a promise that no additional charge can post.
+
+This distinction does not release active compute or unknown resource obligations. An unbound task,
+non-terminal session, uncertain cleanup, conflicting identity or unaccounted required native usage
+still blocks unsafe replacement and further admission. The user may perform the documented exact
+session stop, after which Factory must freshly observe the required terminal/cleanup evidence. The
+historical incomplete billing assessments remain unchanged; prospective assessments separate actual
+execution/cleanup failures from unavailable costs instead of inventing a billing-finality gate.
 
 Primary API references: [Daytona SDK listing and deletion](https://www.daytona.io/docs/en/typescript-sdk/daytona/)
 and [GitHub third-party coding agents](https://docs.github.com/en/copilot/concepts/agents/about-third-party-coding-agents),

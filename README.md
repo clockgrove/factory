@@ -58,8 +58,8 @@ Factory's target capabilities are:
 - native stacked pull requests with concurrent execution and cascading revalidation, plus a recorded
   regular-PR fallback that conservatively runs one complete Work Item pipeline at a time so a
   sibling merge cannot invalidate another Work Item's validated base;
-- GitHub Copilot and OpenAI Codex managed-agent release targets, subject to explicit session and
-  spending limits and the live identity/provider gates in `docs/CONFORMANCE.md`;
+- optional managed-agent integrations with per-provider capability limits: Copilot has limited
+  automation; Codex managed execution remains unavailable pending a real identity/lifecycle interface;
 - local-to-cloud burst through Daytona, with hard TTL, concurrency, credential, and cost boundaries;
 - independent validation, crash recovery, cancellation, replay, explanation, and economic evidence.
 
@@ -196,11 +196,13 @@ silently changes the recorded delivery selection after publication begins.
 
 To use Daytona, put `codex-cli/daytona` in both `backendOrder` and `allowedPaidBackends`, set
 `cloudFallback` to `explicit`, and provide a nonzero sandbox-minute cap. Sandbox validation consumes
-its own reservation because it runs in a fresh resource, separate from the worker. Once their
-publication-blocking live gates pass, GitHub-managed Copilot and Codex sessions likewise require
-explicit managed-session authority. The Codex profile remains unavailable until its gate records a
-stable provider-published identity. See [docs/CREDENTIALS.md](docs/CREDENTIALS.md) for
-provider-specific credentials and boundaries.
+its own reservation because it runs in a fresh resource, separate from the worker. Managed execution
+also requires explicit session authority and qualification of the specific provider capability being
+claimed. Copilot cannot automatically stop an active task through its documented API; some outcomes
+require the operator's exact-session intervention. Codex managed execution remains unavailable until
+an authoritative identity and provider-specific lifecycle interface are implemented and qualified.
+An unavailable third-party feature limits that integration, not the whole Factory release. See
+[provider qualification](docs/PROVIDER-QUALIFICATION.md) and [credentials](docs/CREDENTIALS.md).
 
 Optional economics and model-routing policy is evidence-bound. Factory accepts only a
 `models.mode` of `single-profile`; all four `phaseProfiles` entries must name the same explicit model
@@ -209,8 +211,12 @@ rejected rather than ignored. `economics.minCloudTimeSavedMinutes` admits overfl
 Work Packet has a sufficient configured `estimatedDurationMinutes`; missing evidence fails closed.
 `economics.maxModelTokens` is a stop-before-next-call threshold over durably observed management and
 reporting local-worker tokens, not a provider hard cap. Already-started concurrent invocations can
-each overshoot it, and opaque sandbox/managed-agent token use remains unavailable and bounded by
-minutes or sessions.
+each overshoot it. Opaque sandbox/managed-agent token use remains unavailable; Factory instead limits
+authorized resource minutes or session admissions. Those limits are not guaranteed dollar caps.
+Factory is open-source orchestration for providers with which the user has a direct relationship:
+the user owns provider billing, subscriptions and provider-side spending limits. Unavailable costs
+are not zero, and billing settlement finality is not a completion requirement. Unknown active compute,
+resource ownership or cleanup still blocks unsafe replacement and further spending.
 
 Vercel Sandbox and Codex App Server are Labs adapters. They use the same execution contract but are
 not part of the initial delivery scope.

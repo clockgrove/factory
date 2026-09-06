@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "kind": "installed-active-cancellation-component",
+  "result": "incomplete",
+  "blockers": ["worker-model-usage-unavailable"],
+  "sourceCommit": "d61c43640da81ed454326ff9c34e7618b03d0583",
+  "harness": {
+    "path": "scripts/verify-local-faults.mjs",
+    "sha256": "a57a5aef223552f57728934e330dcee6ece1652f9cbcb2f8a05738417f0f0aaf"
+  },
+  "installation": {
+    "packageSha256": "373521aba78725b0ec748b520af136f91dca02d5af3236da4fddae39154a9511",
+    "inventorySha256": "320a236c978f23008f87b994832dffab00da6d5967589105a2440b180a17fdfb",
+    "cliSha256": "277ee16ab32e96215aa150842aea2af47cdbc425d59c2a8e1ca4608c7d97ffe2",
+    "mcpSha256": "9e5574711c99d70666588c6d23dd0668549522698eb34badb2c2b1b6c43e06a2",
+    "unchangedBeforeAndAfter": true,
+    "installationEvidence": "accounted-checkpoint-restart-component-2026-09-06.json"
+  },
+  "authorization": {
+    "aggregateModelTokens": 500000,
+    "scenarioAdmissionThreshold": 250000,
+    "maxLocalWorkers": 1,
+    "maxImplementationAttempts": 1,
+    "cloudProviderSpend": false,
+    "clockgroveActivation": false
+  },
+  "observed": {
+    "backend": "codex-sdk/local-worktree",
+    "activeOwnedWorkerCaptured": true,
+    "durableCancellationRequestedOnce": true,
+    "sameRunCancelled": true,
+    "activeReservations": 0,
+    "reservedScopeAbsenceObservations": 1,
+    "allReservedScopesAbsent": true,
+    "knownManagementModelTokens": 15154,
+    "workerModelTokens": { "availability": "unavailable", "reason": "No execution model-token reconciliation was reported for the interrupted worker." },
+    "reconciledLocalMilliseconds": 24415,
+    "controllerStopAccepted": true,
+    "controllerActiveState": "inactive",
+    "controllerSubState": "dead",
+    "controllerMainPid": 0,
+    "controllerControlGroup": "",
+    "systemdAutomaticRestarts": 0
+  },
+  "aggregateAccounting": {
+    "priorCheckpointKnownTokens": 206543,
+    "knownSubtotalTokens": 221697,
+    "remainingTokens": null,
+    "reason": "The subtotal excludes unknown interrupted-worker usage; 278303 is only an upper bound before that unknown amount, not a safely available allowance.",
+    "furtherModelBackedQualificationStarted": false
+  },
+  "sourceAssessment": {
+    "sdkVersion": "0.153.2",
+    "classification": "No demonstrated Factory usage-drop defect; interrupted final usage is unavailable on the inspected SDK surface.",
+    "sdkContract": "turn.completed carries usage; turn.failed and abort errors do not carry an equivalent terminal usage result.",
+    "factoryPreservation": "src/backends/codex-sdk-local.ts drains cancellation and retains a single completion event's usage; src/supervisor.ts observes and journals available counters before cleanup.",
+    "evidenceLimit": "Retained receipts do not contain a raw SDK stream demonstrating a discarded completion event. Absence of a demonstrated bug is not proof that all cancellation behavior is correct.",
+    "officialDocumentation": "https://learn.chatgpt.com/docs/non-interactive-mode#make-output-machine-readable"
+  },
+  "privateEvidence": [
+    { "role": "original-incomplete-exercise", "sha256": "c43d488bf046510e88dbb7245fcf40a7f0e5f86e6ef3244ca84cc84b3315a043" },
+    { "role": "installed-terminal-status", "sha256": "5b7a03a2b467e265ca52efff86ca0401ee209e42fb651f452af14c282e9830a2" },
+    { "role": "installed-controller-stop", "sha256": "82e639250ce436b46deb3848f176553cbf760f218790bae17bed89d01fe3f1be" }
+  ],
+  "scope": "Captured active-worker cancellation and exact reserved-resource cleanup were observed. Complete model accounting was not. This does not pass cancellation acceptance, the full WSL2 matrix, any complete release gate, or qualify a changed runtime. Private repository, actor and resource identities remain private.",
+  "preservation": "Original exercise, terminal status and stop receipts were copied byte-for-byte into private retained installation evidence. The original incomplete result was neither overwritten by verify nor relabelled as passed. No retry, terminal revival, replacement activation or additional model-backed scenario was started."
+}

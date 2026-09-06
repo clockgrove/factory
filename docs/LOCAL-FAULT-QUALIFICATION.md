@@ -36,6 +36,16 @@ remain blocked/incomplete. The harness does not override those gates.
 In particular, absence alone does not supply a killed worker's token counters:
 restart stops before retry/resume if its actual model-usage receipt is missing.
 
+The pinned TypeScript Codex SDK reports usage on `turn.completed`; its failed-turn and abort
+surfaces do not provide an equivalent final usage result. Factory drains the cancelled stream and
+observes any reported counters before cleanup. An interruption without those counters can therefore
+prove cancellation and resource absence while leaving accounting incomplete. Do not substitute a
+CLI account-wide usage percentage, guessed token count, or process absence for the missing worker
+receipt. See the retained [active-cancellation result](release-evidence/active-cancellation-incomplete-2026-09-06.json).
+The [official JSON event example](https://learn.chatgpt.com/docs/non-interactive-mode#make-output-machine-readable)
+also places usage on `turn.completed`; it does not establish a separate interrupted-usage retrieval
+contract. This limitation is not proof of a Factory implementation defect or a passed accounting gate.
+
 ## Explicit phases
 
 Run from a committed candidate whose bundle inventory matches the installed

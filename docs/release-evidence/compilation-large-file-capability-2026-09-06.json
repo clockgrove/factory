@@ -1,0 +1,38 @@
+{
+  "date": "2026-09-06",
+  "scope": "Integrated explicit compilation source preparation and installed large-file scenario implementation",
+  "issues": [133, 134],
+  "candidateCommit": "2fd06db60a3d42d40966590f79d1de4608e776c7",
+  "candidateTree": "7c0138cac263ae662be392b2b4b4e18aaf8de2e4",
+  "verification": {
+    "command": "npm run build && npm run verify:release",
+    "result": "passed",
+    "testFilesPassed": 165,
+    "testsPassed": 3228,
+    "testsSkipped": 3,
+    "coveragePercent": { "statements": 80.22, "branches": 78.21, "functions": 83.81, "lines": 81.31 },
+    "vulnerabilities": 0,
+    "packageFiles": 43,
+    "packageBytes": 2992781,
+    "packageSha256": "2744b1e1b8f4369d28556676a79d7625e004ad916002eaf153d7640ea5294b30"
+  },
+  "bundleInventorySha256": "47d6b622bb49a9a6231a823d20cc2f3b9bac908b0020f2d068e1ae67c4e26fe3",
+  "originalFailures": [
+    {
+      "candidateCommit": "d2bc0ca2e47f8fa59e6a5eb0f4daf5ea6b5b734b",
+      "result": "affected checks failed",
+      "reason": "Generated recipe captured transformed test imports; a template-free fixture also lacked the test-only hook directory."
+    },
+    {
+      "candidateCommit": "4ec2b1145124c7e05fbdd82e49d98d3d5c794b26",
+      "result": "affected checks and lint failed",
+      "reason": "Refusal expectation did not match the concrete scanner diagnostic; strict fixture types and path predicates needed correction."
+    }
+  ],
+  "correctionChecks": "Affected checks passed before the one full integrated release run. Original failure logs are retained separately; they were not relabelled as successful evidence.",
+  "limitations": [
+    "Installed model-backed large-file and session scenarios remain unexecuted on this candidate.",
+    "Source tests and packaging do not demonstrate provider execution, resource retirement, cost savings or throughput benefit.",
+    "The subsequent completion-board/evidence-only commit changes neither executable source, qualifier code nor packaged files."
+  ]
+}

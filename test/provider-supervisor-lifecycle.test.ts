@@ -154,13 +154,13 @@ it("reports an interrupted run's real failure but does not replay an already-set
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   await rm(f.fixture.repository, { recursive: true, force: true });
-  const settled = await providerSupervisorFixture("daytona-burst", {
-    localOnly: true,
-    dependencyChain: true,
-    controllerActivation: true,
-  });
-  cleanup.push(() => settled.dispose());
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const caller = new AbortController();
+  const settled = await blockedFixture(caller.signal);
+  cleanup.push(() => settled.fixture.dispose());
   vi.mocked(LeaseManager.prototype.release).mockRejectedValue(expected);
-  await expect(settled.run()).rejects.toBe(expected);
-  await expect(settled.dispose()).resolves.toBeUndefined();
+  caller.abort(new Error("caller retires before fixture disposal"));
+  settled.unblock.resolve();
+  expect(await settled.outcome).toMatchObject({ error: expected });
+  await expect(settled.fixture.dispose()).resolves.toBeUndefined();
 });

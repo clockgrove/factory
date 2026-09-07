@@ -715,8 +715,9 @@ const Budget = Common.extend({
   if (
     event.usageEvidence === "conservative-reservation" &&
     (event.event !== "BudgetReconciled" ||
-      !["local_milliseconds", "sandbox_milliseconds"].includes(event.unit) ||
-      event.phase !== "execution" ||
+      !["local_milliseconds", "sandbox_milliseconds", "validation_milliseconds"].includes(event.unit) ||
+      !["execution", "validation"].includes(event.phase) ||
+      (event.unit === "validation_milliseconds" && event.phase !== "validation") ||
       !event.workItem ||
       !event.attempt ||
       !event.directorEpoch ||
@@ -728,7 +729,7 @@ const Budget = Common.extend({
       code: "custom",
       path: ["usageEvidence"],
       message:
-        "conservative reservation charge requires exact timed execution and an explicit reason",
+        "conservative reservation charge requires an exact timed attempt phase and an explicit reason",
     });
   const usage = event.reportedModelUsage;
   if (!usage) return;

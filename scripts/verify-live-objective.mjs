@@ -302,7 +302,7 @@ Compile three Work Items: two independent foundational modules, followed by one 
 2. ${paths.sourceDirectory}/slugify.js exports slugify(text): lowercase ASCII text, replace each run of non-ASCII-alphanumeric characters with one hyphen, remove leading and trailing hyphens. Add ${paths.testDirectory}/slugify.test.js covering spaces, punctuation, repeated separators, empty input, and uppercase.
 3. ${paths.sourceDirectory}/describe.js imports those two modules and exports describe(name, value, min, max), returning slugify(name) + ':' + clamp(value, min, max). Add ${paths.testDirectory}/describe.test.js: describe(' Hello World ', 12, 0, 10) equals 'hello-world:10', and inverted bounds propagate RangeError.
 
-Use node --test ${paths.testDirectory}/<module>.test.js as each foundation's independent validation, and npm test for the final integration. No dependencies, services, credentials, cloud workers, workflows, or network access are needed by these modules. Preserve all existing modules and tests. Complete publication, independent validation, integration, and issue closure through Factory.`;
+Use node --test ${paths.testDirectory}/<module>.test.js as each foundation's independent validation, and npm test for the final integration. No dependencies, services, credentials, cloud workers, workflows, or network access are needed by these modules. Preserve all existing modules and tests.`;
 }
 
 /** Legacy fixture constant retained for pure retry-boundary tests; live runs always use a namespace. */

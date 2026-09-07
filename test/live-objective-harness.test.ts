@@ -968,6 +968,7 @@ describe("installed live Objective harness evidence boundary", () => {
     const body = objectiveBodyFor(namespace);
     expect(body).toContain(qualificationNamespaceMarker(namespace));
     expect(paths.files.every((path) => body.includes(path))).toBe(true);
+    expect(body).not.toMatch(/publication|issue closure|integration through Factory/i);
     for (const invalid of ["short", "UPPERCASE-NAMESPACE", "bad/path-name", "ends-with-"])
       expect(() => qualificationNamespace(invalid)).toThrow(/namespace/);
   });

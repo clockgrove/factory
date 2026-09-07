@@ -4844,6 +4844,7 @@ export class FactorySupervisor {
     let retryableArtifact: NormalizedArtifact | undefined;
     let retainCollectedSource = false;
     let executionCleanupConfirmed = Boolean(recovered);
+    let completedArtifactRetained = Boolean(recovered);
     let backendLaunchAttempted = false;
     let executionTerminalObserved = Boolean(recovered);
     let terminalModelTokens: number | undefined;
@@ -5423,6 +5424,13 @@ export class FactorySupervisor {
           this.#budgetEvents.push(event);
           executionBudgetReconciled = true;
         });
+      // Fresh completed siblings have the same durable continuation boundary as
+      // recovered attempts: ready artifact, terminal usage, and absent compute.
+      // A controller shutdown must not turn that paid work into a failed attempt.
+      completedArtifactRetained =
+        !selected.capabilities.providerManagedPublication &&
+        executionCleanupConfirmed &&
+        (Boolean(recovered) || executionBudgetReconciled);
       if (
         !recovered &&
         selected.capabilities.id === "codex-app-server/local-worktree" &&
@@ -5854,16 +5862,24 @@ export class FactorySupervisor {
       await this.#retryArtifacts.delete(item.number);
     } catch (error) {
       if (error instanceof SafeArtifactCheckpointHeldError) throw error;
-      // Recovery is continuing a durable successful attempt, not a new worker.
-      // Shutdown before validation admission preserves that checkpoint for the
-      // next fenced controller; it must not manufacture AttemptCancelled/Failed.
+      // Shutdown before validation admission preserves a durable successful
+      // checkpoint for the next fenced controller. Use the intentional teardown
+      // signal so a fresh worker's pool settlement also drains without failure;
+      // no durable AttemptCancelled/Failed receipt is manufactured here.
       if (
-        recovered &&
+        completedArtifactRetained &&
         !validationCapacityRecorded &&
         executionSignal?.aborted &&
         this.#options.shutdownBehavior === "release-lease"
-      )
+      ) {
+        if (error === executionSignal.reason)
+          throw new RunCancellationRequestedError(
+            "repository controller stopped after durable execution completion; validation was not admitted",
+          );
+        // Preserve unrelated fencing/receipt failures rather than disguising
+        // their uncertain outcome as an intentional pool teardown.
         throw error;
+      }
       if (
         retryableArtifact &&
         validation &&

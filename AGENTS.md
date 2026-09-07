@@ -1,195 +1,90 @@
 # Agent operating rules
 
-Contributor rules for AI agents building Factory. These are not instructions for the agents that
-Factory runs for adopters. [`docs/DESIGN.md`](docs/DESIGN.md) defines the product;
-[`CONTRIBUTING.md`](CONTRIBUTING.md) covers development procedures and workflow evaluation.
+These rules govern AI contributors building Factory, not the workers Factory runs for adopters.
 
-## Orientation
+Use [`docs/DESIGN.md`](docs/DESIGN.md) for the product contract,
+[`docs/COMPLETION.md`](docs/COMPLETION.md) for current capability status, and
+[`CONTRIBUTING.md`](CONTRIBUTING.md) for detailed procedures. GitHub and the repository are the
+source of truth; conversation history is not.
 
-- **`docs/DESIGN.md`** — goals, scope, non-goals, the loop, evaluation and integration rules, the
-  confidence bar, packaging, and stated limitations. Read it before changing behavior.
-- **`docs/PLATFORM-BEHAVIOR.md`** — the measured platform behavior the design rests on.
-- **`docs/COMPLETION.md`** — the concise remaining-capability board, separating bounded pilot
-  readiness from full release qualification. It is a contributor planning view, not runtime state.
-- **GitHub is the source of truth for status**, not this file and not session state. Reconstruct
-  where things stand from `git log`, the code, and `origin/main` rather than assuming prior-session
-  memory is accurate.
+## Mission: trunk, branches, leaves
 
-## Standing engineering discipline
+Finish Factory in this order:
 
-These are settled. Do not relitigate them.
+1. **Trunk:** the ordinary end-to-end path—Objective compilation, dependency-ready Work Items,
+   local execution, validation, PR delivery, integration, accounting, cleanup, and terminal outcome.
+2. **Branches:** promised differentiators—concurrency and scheduling, durable sessions, large files,
+   provider routes, and failure/conflict safety.
+3. **Leaves:** compounded outages, unusual multi-generation recovery, rare transport combinations,
+   extra hardening, and non-critical polish.
 
-- **TypeScript/Node**, ESM, bundled to `dist/factory.js` and `dist/mcp-server.js` via esbuild with
-  Octokit included. No install step is assumed at plugin-install time.
-- **Octokit only.** No raw `fetch`/`axios`/`gh`-CLI calls anywhere in `src/`.
-- **State is derived, never stored.** No sidecar files, counters, or status labels representing state
-  a fresh read of GitHub can reconstruct. The labels `factory:objective` and `factory:work-item` are
-  structural identity, not state.
-- **Rate-limit discipline is mandatory.** Every GitHub write goes through `platform.ts`'s
-  `CircuitBreaker`, `ContentCreationPacer`, and `ConcurrencyLimiter`. Never burst writes; never retry
-  through an open circuit. Classify the failed request's response headers/body: primary exhaustion
-  waits for its reset, and secondary refusals honor their retry delay. A separate `/rate_limit`
-  balance neither proves a secondary refusal nor overrides the failed request's retry boundary.
-- **Verify platform claims live** against current documentation (docs.github.com, agent-plugins.org,
-  modelcontextprotocol.io, npm) before writing code that depends on them. Never infer a mutation or
-  field shape from training data — schemas change. Reuse applicable captured observations and cheap
-  contract fixtures; a narrow live probe is warranted when uncertainty blocks implementation, not
-  as a ritual after each change. Preserve the existing target, permission, and spending boundaries.
-- **This applies to behavioral claims most of all.** A wrong field name looks like something you
-  might misremember, so it prompts a check; a belief about how GitHub or the coding agent *behaves*
-  looks like background knowledge and never triggers one. If a design rests on what something *will
-  do* rather than what shape it returns, go and measure it. Being fully typechecked and tested does
-  not make a wrong behavioral premise right.
-- **A documented flow nobody has executed is an untested claim.** Prose is the only part of a release
-  with no CI, and `npm run verify:package` does not cover it — it starts the committed bundle, which
-  is strictly weaker than "a real CLI can install this". If you touch install, upgrade, or uninstall
-  instructions, run them against the published artifact before claiming they work.
-- **Work on a branch and open a pull request.** Do not push directly to `main`. Single, deliberate
-  pushes, never bursts, and confirm what landed with `git fetch origin main` plus a SHA comparison.
-- **Standing Factory merge authority.** Maintainer policy permits agents to merge capability PRs in
-  `clockgrove/factory` after their applicable acceptance, review, and checks are satisfied; do not
-  ask for routine merge confirmation. Handle dependency-correct stack retargeting automatically
-  after parent merges, preserving the intended changes and reviewing the resulting base/head.
-  Merge only the exact reviewed head, respect required checks and branch protection, and never use
-  administrator privileges or bypasses. Fetch `origin/main` afterward and verify the recorded merge
-  commit and intended tree actually arrived before reporting completion or closing issues whose
-  acceptance is satisfied. Retain proportional verification: reuse evidence for an identical
-  validated tree rather than rerunning the full suite merely because a merge changes commit IDs;
-  changed integration content still requires applicable checks. This authority covers only Factory
-  repository PR delivery, not other repositories, provider spending, or package publication.
-- **Exercise Factory through the installed plugin**, not a hand-written MCP config pointing at a
-  local worktree and not hand-copied skills. A local bundle tests something no adopter will ever run,
-  and a worktree can change underneath a live run. This rule governs installed-product qualification,
-  not focused source tests during development; it does not require reinstalling after every fix.
-- **Provider capability boundaries are not global blockers.** Factory reuses providers paid directly
-  by the user; it is not a reseller or billing service. Document unsupported interfaces, use supported
-  workarounds or specific human actions, and never advertise an unavailable provider as working.
-  Missing invoice finality does not block completed work. Missing execution termination still keeps
-  the affected resource obligations and replacement fences intact. Credentials alone grant no spend.
+Do not use issue age, issue count, test count, sunk cost, or the latest failure as a proxy for
+priority. A defect blocks the current phase only when it prevents that phase's ordinary primary
+acceptance scenario. Keep lower-tier requirements visible without promoting them to the critical
+path.
 
-## Complete the authorized development task
+Pilot readiness and full release qualification are separate milestones. Never silently drop a
+release requirement, but do not make an unrelated release leaf block an earlier milestone.
 
-- Carry implementation requests through the agreed acceptance criteria, required verification, and
-  PR handoff. Resolve routine engineering choices from repository evidence and record consequential
-  assumptions. A review or status request alone does not authorize implementation.
-- Ask when a missing decision materially changes scope, architecture, authorization, spending, or
-  correctness. Complete independent authorized work first. If blocked, identify the concrete missing
-  decision or evidence; cite the instruction when a rule causes the stop. Do not bypass permissions,
-  settled product boundaries, or required checks to keep moving.
-- After each PR, compare delivered outcomes with the active goal, identify remaining acceptance
-  gaps, and choose the next substantial authorized deliverable. Recalibrate when evidence changes;
-  do not repeatedly replan settled work or expand the goal without authority.
-- Track all remaining product work in ordinary GitHub issues first: implementation, known bugs,
-  deferred qualification, external dependencies, and distribution. Each issue needs acceptance,
-  code/testing/external-input classification, an owner, dependencies, and a next deliverable.
-  Factory Objective compilation is not required for this contributor backlog. Keep the completion
-  board as a concise linked summary, not a second backlog. A bounded pilot waives no release gate.
-- **Classify every development issue and subissue with one primary work-type label.** Use
-  `work:code` for implementing or fixing product/tooling code (including qualification-runner bugs),
-  `work:test` for executing existing tests/live qualification and collecting evidence,
-  `work:review` for evidence-backed reviews whose findings become linked implementation issues,
-  `work:release` for distribution/publication execution, `work:follow-up` for deferred external
-  provider follow-up, and `work:tracking` for umbrella coordination. Preserve structural and other
-  existing labels; use `bug` additionally for concrete defects. Classify by the actual deliverable,
-  not the file's location or the issue's open/closed state, and retain the classification on closure.
-  Apply the convention to subissues as well as top-level issues. Split concrete defects discovered
-  during qualification into linked `work:code` issues; keep the qualification issue open until its
-  acceptance passes. Never classify unfinished implementation as testing or follow-up to hide it.
-  These are contributor work types, not Factory runtime status, priority, or execution authority.
+## When something fails
 
-## Capability-sized delivery
+- Preserve the original failure and exact source, artifact, run, and accounting identities.
+- Classify it immediately as a trunk blocker, branch blocker, or leaf.
+- Fix genuine blockers and add a regression for the concrete defect.
+- Attempt recovery at most once when it is the shortest path to current acceptance, unless recovery
+  itself is the capability being qualified.
+- If recovery reveals a compounded failure, track it and return to the primary path. A qualification
+  fixture must not become the roadmap.
+- Reuse completed work when it advances current acceptance. Do not rescue a damaged run indefinitely
+  to avoid sunk cost or create cleaner evidence.
+- Missing accounting remains unknown. Never infer zero usage, duplicate uncertain model work, revive
+  terminal runs, or bypass replacement/resource fences.
 
-- Use **one PR per complete, testable capability**, with acceptance criteria spanning its end-to-end
-  behavior. Helper modules, intermediate plumbing, and individual Work Items belong in that batch;
-  do not turn each into a separate PR or stack layer merely because it can be committed independently.
-- Use parallel subagents for bounded independent work and incremental commits inside the capability's
-  integration branch. Assign dependency-ready implementation issues to isolated worktrees/sessions,
-  keep file ownership explicit, and integrate their work before the PR handoff.
-- Optimize time to the overall goal by running independent capabilities concurrently, not only
-  subtasks within one capability. Give each capability an owner, isolated worktree, and end-to-end
-  acceptance criteria. Keep available agents on the highest-impact unblocked work within authorized
-  budgets; serialize only genuine dependencies or conflicting changes. One PR per capability does
-  not mean one capability at a time.
-- Finish and integrate the remaining implementation before coordinated qualification. A capability
-  PR is a delivery boundary, not automatically a release candidate. Write code without running checks
-  until the intended candidate's implementation is integrated; then review and freeze it
-  and perform the coordinated qualification phase. Do not manufacture audits, documentation tasks,
-  or testing infrastructure merely to occupy agents.
-- Deliver dependency-correct PR stacks when capabilities build on each other. Independent capabilities
-  may proceed in parallel; helper commits do not each need a PR. Validate the integrated stack at the
-  final candidate boundary, not every intermediate layer. Keep issue acceptance and unexecuted checks
-  explicit until that phase completes.
+## Deliver capabilities
 
-## Parallel work and responsiveness
+- Use one branch and PR per complete, testable capability; keep helper commits inside that batch.
+- Run independent capabilities in parallel with explicit ownership. Serialize only real dependencies
+  and overlapping edits. Do not create work merely to occupy agents.
+- Track all remaining work in ordinary GitHub issues using the repository's established labels.
+  Classification describes the work; it does not determine priority.
+- After every PR or failed live run, reassess the critical path using trunk, branch, and leaf priority.
+- Report capabilities completed, what remains, the critical path, and required decisions. Commits,
+  tests, agents, and recovered runs are evidence, not progress measures.
 
-- When the harness permits delegation, delegate bounded independent work when it improves delivery
-  time or review quality. Stay within the authorized concurrency and budget limits; trivial tasks
-  and overlapping implementation usually do not justify another agent.
-- Give each agent an outcome, file ownership, acceptance criteria, relevant context, and a concise
-  return format. Keep shared-file edits under one owner. The coordinating agent owns integration
-  and checks the returned evidence; do not duplicate an assigned investigation without a reason.
-- Track each lane as running, waiting, completed, or blocked, with its next deliverable and dependency.
-  Restart a completed agent with the harness's follow-up-task mechanism before assigning more work;
-  sending a message alone may not resume it. Do not leave deliverables waiting on an idle reviewer.
-- Use additional Codex sessions as needed for genuinely independent work when a session's agent
-  pool would otherwise serialize the project. This maintainer-approved coordination pattern requires
-  each additional session to have an isolated worktree, explicit ownership, a bounded deliverable,
-  and a handoff to the integration owner. Respect platform and account limits across sessions.
-  Optimize completed capability throughput and quota use, not session count; do not duplicate
-  active work, expand scope, or start deferred testing merely to occupy more workers.
-- Process delivered user corrections and agent messages before further dependent work. Use the
-  harness's supported steering and wait mechanisms. Verify its message-delivery behavior before
-  relying on it; do not assume messages require a completed turn or end turns merely as a ritual.
-- Report which capability finished, what remains, the critical path, and any needed decision.
-  Test counts, commits, and agent counts support that report; they are not completion measures.
-  Avoid repeating plans and transcripts. Pause or redirect promptly when the user asks.
+## Verify proportionally
 
-## Implementation first, then coordinated verification
+- During implementation, use focused checks and captured platform contracts when they reduce risk.
+  Add a regression for each concrete defect.
+- Do not repeatedly run broad suites, packaging, plugin reinstalls, or live qualification between
+  intermediate fixes.
+- At a stable candidate boundary, freeze the candidate and run the release gates in
+  [`CONTRIBUTING.md`](CONTRIBUTING.md). Fix failures and rerun affected checks first; repeat broad
+  gates only at the next stable boundary.
+- Build and install the exact passing artifact once per stable candidate. Installed qualification
+  must use that artifact, not a mutable worktree or handwritten MCP configuration.
+- Evidence proves only its exact candidate, host, and scenario. Never relabel it more broadly.
 
-- Write and integrate all remaining implementation code before executing verification. During this
-  phase, do not run tests, typechecks, lint/format checks, coverage, release matrices, package checks,
-  plugin reinstalls, or live qualification. Write needed regression tests with concrete fixes, but
-  execute them in the coordinated test phase. Do not create extra qualification infrastructure to
-  occupy implementation lanes. Source inspection and authoritative API documentation still inform
-  implementation; this sequence does not authorize unsafe actions or invented provider contracts.
-- After all implementation code is integrated, review and freeze the candidate, run the full suite,
-  and fix the actual failures. Keep security, destructive-action, accounting, and recovery coverage.
-  Then run the full integrated release checks,
-  build and install the matching artifact, then execute the required end-to-end qualification cases.
-  An external gate may remain explicitly blocked; it is not waived or passed by local checks.
-- If qualification fails, preserve the original failure and exact source/artifact identities, fix
-  the defect, and run affected checks first. Repeat broader checks at the next stable candidate
-  boundary, not every unrelated test automatically. Never relabel old evidence as proof of a changed
-  candidate. Reuse completed work through authorized recovery instead of regenerating test history.
-  See [`CONTRIBUTING.md`](CONTRIBUTING.md#validate-changes) for the final gates.
-- Verify observable behavior rather than adding tests that merely mirror implementation. This does
-  not waive mandatory checks, independent validation, semantic review, or live conformance evidence.
+## Non-negotiable boundaries
 
-## Cost discipline and context carry
+- Follow the architecture in [`docs/DESIGN.md`](docs/DESIGN.md). Ask before changing product scope,
+  architecture, authorization, spending, or correctness boundaries.
+- Production GitHub access in `src/` uses Octokit and shared rate-limit controls. Runtime state comes
+  from authenticated GitHub evidence, not reconstructable sidecar state.
+- Honor primary resets and secondary retry delays. Never retry through an open circuit.
+- Never bypass permissions, branch protection, leases, resource ownership, destructive-action
+  guards, accounting fences, provider limits, or spending authority.
+- Unsupported provider behavior is a documented boundary, not simulated success or a blocker for
+  unrelated local work.
+- Work on branches, never directly on `main`. Preserve unrelated user changes and avoid destructive
+  Git or filesystem operations.
+- Agents may merge reviewed Factory PRs after applicable acceptance and required checks pass. Merge
+  only the exact reviewed head, never bypass protection, then verify the intended tree on `main`.
+  This does not authorize package publication, provider spend, production activation, or mutations
+  in other repositories.
 
-Large tool results can be carried into later requests and increase token usage. Actual cost depends
-on the model, caching, reasoning/output usage, harness, and delegated sessions. Use observed usage
-when available; context size alone is not a billing formula. Optimize cost and elapsed time per
-accepted deliverable without weakening correctness or changing the selected model without authority.
+## Resume efficiently
 
-- Keep tool output intentionally small by default: narrow scope first (`view_range`, targeted `rg`
-  globs), cap rows/lines (`Select-Object -First`, `LIMIT`), and avoid full-file/full-log dumps
-  unless they are required for a decision.
-- Prefer precise reads over broad scans. Expand only when the prior slice is insufficient.
-- Avoid repeating the same large output in-thread; summarize once, then continue from the summary
-  or from deltas.
-- Treat sub-agents as context firebreaks for heavy exploration: pass tight prompts and require
-  concise, structured returns. Do not paste raw blobs back into the parent session unless necessary.
-- Be strict with high-AIU-per-call tools (for example, large task/read-agent outputs): use them
-  when they change a decision, not by default.
-- Front-load precision early in a session. Early oversized outputs can accumulate carrying cost
-  over many downstream requests.
-
-## When resuming after a gap
-
-1. `git log --oneline -15` and read the code to find the real current state.
-2. Do not re-decide anything `docs/DESIGN.md` already settles. If evidence suggests a settled decision
-   was wrong, say so explicitly and ask — do not silently drift back toward it while acting as though
-   you are still following the design.
-3. If injected context describes something that does not match this repository's files, trust the
-   files and the git history, and flag the mismatch rather than quietly reconciling it.
+On resume, read the active goal, `git status`, recent `git log`, and relevant completion-board entries.
+Identify the current trunk, branches, and leaves before acting. Continue the highest-impact authorized
+deliverable without replanning settled work. Keep tool output narrow and use parallel agents for
+genuinely independent outcomes—not as a measure of progress.

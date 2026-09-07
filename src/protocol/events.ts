@@ -673,6 +673,8 @@ const Budget = Common.extend({
   phase: z.enum(["management", "execution", "validation"]),
   /** Deterministic invocation identity; repeated receipts replace, distinct calls add. */
   usageId: boundedText(300).optional(),
+  /** Dispatch intent/actual usage linkage; never an estimated token allocation. */
+  modelInvocationId: safeId.optional(),
   unit: z.enum([
     "model_tokens",
     "local_milliseconds",
@@ -687,6 +689,26 @@ const Budget = Common.extend({
   policyDigest: sha256Digest.optional(),
   reportedModelUsage: ReportedModelUsageSchema.optional(),
 }).superRefine((event, context) => {
+  if (event.modelInvocationId !== undefined) {
+    const marker = event.event === "BudgetReserved";
+    if (
+      event.unit !== "model_tokens" ||
+      event.phase === "validation" ||
+      !event.usageId ||
+      (event.attempt !== undefined && event.workItem === undefined) ||
+      (marker &&
+        (event.amount !== 0 ||
+          event.usageId !== `invocation-${event.modelInvocationId}` ||
+          event.reportedModelUsage !== undefined ||
+          event.usageEvidence !== undefined)) ||
+      (!marker && event.usageId.startsWith("invocation-"))
+    )
+      context.addIssue({
+        code: "custom",
+        path: ["modelInvocationId"],
+        message: "model invocation linkage requires an exact zero-valued dispatch marker or actual token reconciliation",
+      });
+  }
   if (
     event.usageEvidence === "conservative-reservation" &&
     (event.event !== "BudgetReconciled" ||

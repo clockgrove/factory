@@ -331,6 +331,7 @@ export class LifecycleRecorder {
     amount: number;
     phase?: "management" | "execution" | "validation";
     usageId?: string;
+    modelInvocationId?: string;
     usageEvidence?: "as-recorded" | "conservative-reservation";
     reason?: string;
     reportedModelUsage?: ReportedModelUsage;
@@ -358,6 +359,7 @@ export class LifecycleRecorder {
       unit: args.unit,
       amount: args.amount,
       ...(args.usageId ? { usageId: args.usageId } : {}),
+      ...(args.modelInvocationId ? { modelInvocationId: args.modelInvocationId } : {}),
       ...(args.usageEvidence ? { usageEvidence: args.usageEvidence } : {}),
       ...(args.usageEvidence === "conservative-reservation"
         ? {
@@ -386,6 +388,7 @@ export class LifecycleRecorder {
     unit: "model_tokens" | "local_milliseconds";
     amount: number;
     usageId?: string;
+    modelInvocationId?: string;
     reportedModelUsage?: ReportedModelUsage;
   }): Promise<FactoryEvent> {
     await this.leases.assertCurrent(args.lease);
@@ -402,6 +405,7 @@ export class LifecycleRecorder {
       unit: args.unit,
       amount: args.amount,
       ...(args.usageId ? { usageId: args.usageId } : {}),
+      ...(args.modelInvocationId ? { modelInvocationId: args.modelInvocationId } : {}),
       ...(args.reportedModelUsage ? { reportedModelUsage: args.reportedModelUsage } : {}),
     });
     await this.store.addIssueComment(

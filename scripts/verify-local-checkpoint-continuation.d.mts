@@ -1,5 +1,8 @@
 export function readContinuationInput(path: string, digest: string, maximum?: number): unknown;
 export function continuationEvidencePath(original: unknown, originalPath: string, outputPath: string): string;
+export function assertContinuationRetry(previous: unknown, input: unknown, now?: number): {
+  outputPath: string; retry: {previousPath: string; previousSha256: string; depth: number};
+};
 export function continuationStage<T>(stage: string, operation: () => T | Promise<T>, record: (value: Record<string, unknown>) => void): Promise<T>;
 export function continuationPreflight(context: unknown, original: unknown, stopped: () => unknown, stage: (name: string, operation: () => unknown) => Promise<unknown>, bounded: () => void): Promise<void>;
 export function assertContinuationSeed(original: unknown, witness: unknown, pause: unknown, installed: unknown, now?: number): {

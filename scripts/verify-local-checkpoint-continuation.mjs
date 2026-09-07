@@ -118,6 +118,45 @@ export function continuationEvidencePath(original, originalPath, outputPath) {
   return outputPath;
 }
 
+/** A failed read can be retried only through its immutable, no-action evidence chain. */
+export function assertContinuationRetry(previous, input, now = Date.now()) {
+  const {original,witness,pause,originalSha256,witnessSha256,pauseSha256,previousPath,previousSha256}=input;
+  const seed=assertContinuationSeed(original,witness,pause,original.artifact,now);
+  assert.match(previousSha256 ?? "",/^[a-f0-9]{64}$/);
+  boundedPath(previousPath);
+  assert.equal(previous.protocol,"clockgrove.factory/checkpoint-restart-qualification-v1");
+  assert.equal(previous.result?.result,"incomplete","only an evidenced refusal may retry");
+  assert.deepEqual(previous.actions,[],"any attempted or uncertain lifecycle action blocks retry");
+  assert.equal(previous.authority.evidence,previousPath);
+  const {evidence:_priorPath,...priorAuthority}=previous.authority;
+  const {evidence:_originalPath,...originalAuthority}=original.authority;
+  assert.deepEqual(priorAuthority,originalAuthority);
+  assert.deepEqual(previous.artifact,original.artifact);
+  for(const key of ["actor","base","objective","objectiveBodyDigest","configDigest","runRequest","sessionArm","startedAt"])
+    assert.deepEqual(previous[key],original[key],"prior continuation seed differs");
+  assert.match(previous.sourceCommit,/^[a-f0-9]{40}$/);
+  assert.ok(Array.isArray(previous.harnessFiles) && previous.harnessFiles.length<=20);
+  one(previous.harnessFiles.filter((file)=>file.path==="scripts/verify-local-checkpoint-continuation.mjs"));
+  const prior=previous.continuation;
+  assert.equal(prior.originalSha256,originalSha256);
+  assert.equal(prior.witnessSha256,witnessSha256);
+  assert.equal(prior.pauseSha256,pauseSha256);
+  assert.equal(prior.originalSourceCommit,original.sourceCommit);
+  assert.equal(prior.runId,seed.runId);
+  assert.equal(prior.deadline,new Date(seed.deadline).toISOString());
+  const base=`${original.authority.evidence}.continuation.json`;
+  const depth=prior.retry?.depth ?? 0;
+  assert.ok(Number.isSafeInteger(depth) && depth>=0 && depth<3,"bounded read-only retry chain exhausted");
+  if(depth===0) {
+    assert.equal(prior.retry,undefined);
+    assert.equal(previousPath,base);
+  } else {
+    assert.match(prior.retry.previousSha256,/^[a-f0-9]{64}$/);
+    assert.equal(previousPath,`${base}.retry-${prior.retry.previousSha256}.json`);
+  }
+  return {outputPath:`${base}.retry-${previousSha256}.json`,retry:{previousPath,previousSha256,depth:depth+1}};
+}
+
 const diagnosticStages = new Set(["seed", "runner-seed", "original-harness", "deadline", "actor", "repository", "objective", "checkout-clean", "checkout-origin", "checkout-base", "remote-base", "open-pulls", "other-objectives", "controller-properties", "controller-fragment", "controller-config", "controller-process", "controller-stopped", "fresh-observation", "graph-proof", "session-proof", "scope-absence"]);
 export async function continuationStage(stage, operation, record) {
   assert.ok(diagnosticStages.has(stage));
@@ -291,12 +330,29 @@ export async function main(env = process.env) {
   const diagnosticsOnly = env.FACTORY_CHECKPOINT_DIAGNOSTICS_ONLY === "1";
   assert.equal(env.FACTORY_CHECKPOINT_CONTINUATION_ACK,
     `${original.authority.repository}:${witness.runId}:start-original-run,resume,stop`);
-  let output;
+  let output, retry;
+  const priorRecords=[];
   if (diagnosticsOnly) {
     assert.equal(env.FACTORY_CHECKPOINT_ORIGINAL, original.authority.evidence);
     output=boundedPath(env.FACTORY_CHECKPOINT_EVIDENCE);
     assert.ok(output.startsWith(`${original.authority.evidence}.diagnostic-`));
     assert.match(output.slice(`${original.authority.evidence}.diagnostic-`.length),/^[a-z0-9-]+\.json$/);
+  } else if(env.FACTORY_CHECKPOINT_PREVIOUS || env.FACTORY_CHECKPOINT_PREVIOUS_SHA256) {
+    assert.equal(env.FACTORY_CHECKPOINT_ORIGINAL,original.authority.evidence);
+    let previousPath=env.FACTORY_CHECKPOINT_PREVIOUS, previousSha256=env.FACTORY_CHECKPOINT_PREVIOUS_SHA256;
+    for(let depth=0;depth<3;depth++) {
+      const previous=readContinuationInput(previousPath,previousSha256);
+      const proof=assertContinuationRetry(previous,{original,witness,pause,
+        originalSha256:env.FACTORY_CHECKPOINT_ORIGINAL_SHA256,witnessSha256:env.FACTORY_CHECKPOINT_WITNESS_SHA256,
+        pauseSha256:env.FACTORY_CHECKPOINT_PAUSE_SHA256,previousPath,previousSha256});
+      priorRecords.push(previous);
+      if(depth===0) { output=proof.outputPath; retry=proof.retry; }
+      if(!previous.continuation.retry) break;
+      previousPath=previous.continuation.retry.previousPath;
+      previousSha256=previous.continuation.retry.previousSha256;
+    }
+    assert.equal(priorRecords.length,retry.depth,"complete prior no-action chain required");
+    assert.equal(boundedPath(env.FACTORY_CHECKPOINT_EVIDENCE),output);
   } else output=continuationEvidencePath(original,env.FACTORY_CHECKPOINT_ORIGINAL,env.FACTORY_CHECKPOINT_EVIDENCE);
   const authority = { ...original.authority, evidence:output };
   assert.match(authority.repository, /^[a-z0-9_.-]+\/[a-z0-9_.-]+$/);
@@ -316,12 +372,18 @@ export async function main(env = process.env) {
         assert.equal(hash(`${command("git", ["show", `${original.sourceCommit}:${file.path}`], root)}\n`), file.sha256,
           "original committed harness identity unavailable");
       } });
+      await stage("original-harness",()=>{ for(const prior of priorRecords) for(const file of prior.harnessFiles) {
+        assert.match(file.path,/^scripts\/[A-Za-z0-9_.-]+\.mjs$/);
+        assert.equal(hash(`${command("git",["show",`${prior.sourceCommit}:${file.path}`],root)}\n`),file.sha256,
+          "prior no-action collector source differs from committed identity");
+      } });
       assert.equal(original.harnessSha256, one(original.harnessFiles.filter((file) => file.path === "scripts/verify-local-checkpoint-restart.mjs")).sha256);
       for (const key of ["actor", "base", "objective", "objectiveBodyDigest", "configDigest", "runRequest", "sessionArm", "startedAt"])
         evidence[key] = structuredClone(original[key]);
       evidence.continuation = { originalSha256: env.FACTORY_CHECKPOINT_ORIGINAL_SHA256, witnessSha256: env.FACTORY_CHECKPOINT_WITNESS_SHA256,
         pauseSha256: env.FACTORY_CHECKPOINT_PAUSE_SHA256, originalSourceCommit: original.sourceCommit,
-        originalResult: original.result, runId: seed.runId, deadline: new Date(seed.deadline).toISOString(), enteredAt: new Date().toISOString() };
+        originalResult: original.result, runId: seed.runId, deadline: new Date(seed.deadline).toISOString(), enteredAt: new Date().toISOString(),
+        ...(retry ? {retry} : {}) };
       save();
       const bounded = () => assert.ok(Date.now() < seed.deadline, "original qualification deadline expired");
       const stopped = async () => {

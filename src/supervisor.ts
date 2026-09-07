@@ -2421,8 +2421,8 @@ export class FactorySupervisor {
     }
   }
 
-  /** Cancellation is resource retirement, never authority to run against a changed
-   * branch. Keep this path outside graph repair, artifact continuation and admission. */
+  /** Cancellation or elapsed immutable authority permits resource retirement,
+   * never execution. Keep this outside graph repair, continuation and admission. */
   async #cancelActivatedRun(
     snapshot: Snapshot,
     run: RunState,
@@ -2460,8 +2460,20 @@ export class FactorySupervisor {
       return request;
     };
     const requested = await readCancellation();
-    if (!requested) return null;
     const initial = snapshotEvents(snapshot);
+    const scheduling = normalizeSchedulingPolicy(run.policy);
+    const outstandingCapacity = deriveCapacityReservations(
+      snapshot.workItems.map((item) => ({
+        objective: run.objective,
+        workItem: item.number,
+        events: initial.filter((event) => event.runId === run.runId),
+        defaultCpu: scheduling.capacity.local.defaultCpu,
+        defaultMemoryMb: scheduling.capacity.local.defaultMemoryMb,
+      })),
+    );
+    const deadline = run.startedAt.getTime() + run.policy.objectiveTimeoutMinutes * 60_000;
+    if (!requested && !(Date.now() >= deadline && outstandingCapacity.length)) return null;
+    let terminalCancellation = requested;
     const assertActivation = (events: readonly FactoryEvent[]) => {
       const activations = events.filter(
         (event) => event.event === "ActivationRequested" && event.requestId === binding.requestId,
@@ -2482,17 +2494,18 @@ export class FactorySupervisor {
     };
     assertActivation(initial);
     const base = await this.#store.getBranchHead(snapshot.defaultBranch);
-    // This exception is only for an activation which normal startup must refuse.
-    // Keep supported unchanged/evidenced-base cancellation on its existing path;
-    // do not impose new local-only cleanup requirements on completed cloud history.
+    // Neither cancellation nor expiry retires retained resource liabilities.
+    // Keep the ordinary completion/cancellation path only when this snapshot has
+    // no outstanding capacity; completed cloud history is not a new obligation.
     if (
-      base.oid === run.baseSha ||
-      (await this.#observedRunOwnsBaseAdvance(snapshot, run, base.oid))
+      outstandingCapacity.length === 0 &&
+      (base.oid === run.baseSha ||
+        (await this.#observedRunOwnsBaseAdvance(snapshot, run, base.oid)))
     )
       return null;
     const priorLease = await this.#leases.read(snapshot.number);
     this.#sequences = new SequenceAllocator(
-      [...initial, requested],
+      [...initial, ...(requested ? [requested] : [])],
       run.sequence + 1,
       priorLease ?? undefined,
     );
@@ -2546,9 +2559,18 @@ export class FactorySupervisor {
       )
         throw new Error("run changed during cancellation cleanup");
       const cancellation = await readCancellation();
-      if (!cancellation || cancellation.requestId !== requested.requestId)
+      if (
+        terminalCancellation &&
+        (!cancellation || cancellation.requestId !== terminalCancellation.requestId)
+      )
         throw new Error("exact cancellation disappeared during cleanup");
-      this.#sequences.observe([...snapshotEvents(current), cancellation]);
+      if (!cancellation && Date.now() < deadline)
+        throw new Error("expired cleanup authority is no longer established");
+      if (cancellation) terminalCancellation = cancellation;
+      this.#sequences.observe([
+        ...snapshotEvents(current),
+        ...(cancellation ? [cancellation] : []),
+      ]);
       this.#fenceSnapshot(current);
       await this.#options.repositoryFence?.();
       await this.#lease.assert();
@@ -2771,7 +2793,9 @@ export class FactorySupervisor {
               await this.#store.addIssueComment(
                 item.id,
                 encodeEventComment(
-                  "Factory reconciled cancelled capacity.",
+                  terminalCancellation
+                    ? "Factory reconciled cancelled capacity."
+                    : "Factory reconciled expired capacity.",
                   parseFactoryEvent({
                     ...capacity,
                     localScopeBatch: undefined,
@@ -2779,7 +2803,9 @@ export class FactorySupervisor {
                     sequence: this.#sequences.take(),
                     at: (await this.#store.serverTime()).toISOString(),
                     recoveryEpoch: lease.epoch,
-                    reason: "operator cancellation proved exact resource absence",
+                    reason: terminalCancellation
+                      ? "operator cancellation proved exact resource absence"
+                      : "Objective timeout cleanup proved exact resource absence",
                   }),
                 ),
               );
@@ -2812,9 +2838,62 @@ export class FactorySupervisor {
                   amount: budget.amount,
                   ...(budget.usageId ? { usageId: budget.usageId } : {}),
                   usageEvidence: "conservative-reservation",
-                  reason:
-                    "exact resources absent after cancellation; reserved bound charged, elapsed usage unavailable",
+                  reason: terminalCancellation
+                    ? "exact resources absent after cancellation; reserved bound charged, elapsed usage unavailable"
+                    : "exact resources absent after Objective timeout; reserved bound charged, elapsed usage unavailable",
                 }),
+              );
+            });
+          }
+          // AttemptSucceeded intentionally does not imply resource absence. The
+          // original artifact/usage remains successful; retire only this exact
+          // execution capacity after independently proving cleanup above.
+          const scheduling = normalizeSchedulingPolicy(run.policy);
+          const executionCapacity = deriveCapacityReservations([
+            {
+              objective: run.objective,
+              workItem: item.number,
+              events,
+              defaultCpu: scheduling.capacity.local.defaultCpu,
+              defaultMemoryMb: scheduling.capacity.local.defaultMemoryMb,
+            },
+          ]).find(
+            (capacity) =>
+              capacity.phase === "execution" &&
+              capacity.attempt === reservation.attempt &&
+              capacity.backendId === reservation.backend,
+          );
+          if (executionCapacity) {
+            await assertCurrent();
+            await this.#lease.use(async (lease) => {
+              await this.#store.addIssueComment(
+                item.id,
+                encodeEventComment(
+                  terminalCancellation
+                    ? "Factory reconciled cancelled execution capacity after exact resource cleanup."
+                    : "Factory reconciled expired execution capacity after exact resource cleanup.",
+                  parseFactoryEvent({
+                    protocol: PROTOCOL_V2,
+                    kind: "capacity",
+                    event: "CapacityReconciled",
+                    objective: run.objective,
+                    runId: run.runId,
+                    workItem: item.number,
+                    attempt: reservation.attempt,
+                    phase: "execution",
+                    backend: reservation.backend,
+                    requestedCpu: executionCapacity.cpu,
+                    requestedMemoryMb: executionCapacity.memoryMb,
+                    directorEpoch: reservation.directorEpoch,
+                    recoveryEpoch: lease.epoch,
+                    policyDigest: reservation.policyDigest,
+                    sequence: this.#sequences.take(),
+                    at: (await this.#store.serverTime()).toISOString(),
+                    reason: terminalCancellation
+                      ? "operator cancellation proved exact original execution resource absence"
+                      : "Objective timeout cleanup proved exact original execution resource absence",
+                  }),
+                ),
               );
             });
           }
@@ -2841,8 +2920,9 @@ export class FactorySupervisor {
                 sequence: this.#sequences.take(),
                 event: "AttemptCancelled",
                 allowRecovery: true,
-                reason:
-                  "operator cancelled original attempt after exact resource cleanup; unknown model usage is not zero",
+                reason: terminalCancellation
+                  ? "operator cancelled original attempt after exact resource cleanup; unknown model usage is not zero"
+                  : "Objective timeout retired original attempt after exact resource cleanup; unknown model usage is not zero",
               }),
             );
           }
@@ -2851,8 +2931,18 @@ export class FactorySupervisor {
       }
       snapshot = await assertCurrent();
       const remaining = snapshotEvents(snapshot).filter((event) => event.runId === run.runId);
+      const scheduling = normalizeSchedulingPolicy(run.policy);
       if (
         unreconciledCapacityReservations(remaining).length ||
+        deriveCapacityReservations(
+          snapshot.workItems.map((item) => ({
+            objective: run.objective,
+            workItem: item.number,
+            events: remaining,
+            defaultCpu: scheduling.capacity.local.defaultCpu,
+            defaultMemoryMb: scheduling.capacity.local.defaultMemoryMb,
+          })),
+        ).length ||
         unreconciledBudgetReservations(remaining).some((event) => event.unit !== "model_tokens")
       )
         throw new Error("cancellation has unresolved resource or native accounting ownership");
@@ -2872,8 +2962,10 @@ export class FactorySupervisor {
       return await this.#terminal(
         manager,
         snapshot,
-        "FactoryRunCancelled",
-        "operator requested cleanup-only cancellation; retained work was not resumed",
+        terminalCancellation ? "FactoryRunCancelled" : "FactoryRunEscalated",
+        terminalCancellation
+          ? "operator requested cleanup-only cancellation; retained work was not resumed"
+          : "Objective timeout exhausted; exact retained resource cleanup completed without resuming work",
       );
     } catch (error) {
       await this.#lease.release().catch(() => {});

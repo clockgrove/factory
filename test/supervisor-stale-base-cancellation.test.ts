@@ -6,8 +6,12 @@ import { encodeEventComment } from "../src/control/receipts.js";
 import { isModelInvocationMarker, unresolvedModelInvocations } from "../src/control/budget.js";
 import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js";
 import { SafeArtifactCheckpointHeldError } from "../src/runtime/qualification-checkpoint.js";
+import { linuxLocalScopeProcessPort } from "../src/runtime/local-scope.js";
 import { unreconciledBudgetReservations } from "../src/control/budget.js";
-import { unreconciledCapacityReservations } from "../src/scheduling/capacity-ledger.js";
+import {
+  deriveCapacityReservations,
+  unreconciledCapacityReservations,
+} from "../src/scheduling/capacity-ledger.js";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
 
 type Fixture = Awaited<ReturnType<typeof providerSupervisorFixture>>;
@@ -186,6 +190,120 @@ function completedRemoteCapacity(f: Fixture) {
 }
 
 describe("cleanup-only cancellation of a stale activation", () => {
+  it.each([
+    { expired: true, cancel: true, unknown: false },
+    { expired: true, cancel: true, unknown: true },
+    { expired: false, cancel: true, unknown: false },
+    { expired: false, cancel: true, unknown: true },
+    { expired: true, cancel: false, unknown: false },
+    { expired: true, cancel: false, unknown: true },
+  ])(
+    "reconciles a paused ready attempt without resuming it (%j)",
+    async ({ expired, cancel, unknown }) => {
+      const h = await held(false);
+      const start = h.f.events().find((event) => event.event === "FactoryRunStarted")!;
+      if (start.event !== "FactoryRunStarted") throw new Error("fixture start absent");
+      h.f.snapshot.factoryEvents!.push(
+        parseFactoryEvent({
+          protocol: start.protocol,
+          kind: "run",
+          event: "RunPauseRequested",
+          objective: 7,
+          runId: h.f.runId,
+          sequence: Math.max(...h.f.events().map((event) => event.sequence)) + 1,
+          at: new Date().toISOString(),
+          requestedBy: "operator",
+          requestId: "pause-original-retained-run",
+        }),
+      );
+      if (cancel)
+        h.requestCancellation({
+          sequence: Math.max(...h.f.events().map((event) => event.sequence)) + 1,
+        });
+      const active = () =>
+        deriveCapacityReservations(
+          h.f.snapshot.workItems.map((item) => ({
+            objective: 7,
+            workItem: item.number,
+            events: item.factoryEvents ?? [],
+            defaultCpu: 1,
+            defaultMemoryMb: 2048,
+          })),
+        );
+      expect(active()).toMatchObject([{ workItem: 8, attempt: 1, phase: "execution" }]);
+      const probe = vi.spyOn(h.f.management, "probe");
+      if (unknown)
+        vi.spyOn(linuxLocalScopeProcessPort, "show").mockRejectedValue(
+          new Error("scope observation unavailable"),
+        );
+      if (expired) {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(
+          Date.parse(start.at) + start.policy.objectiveTimeoutMinutes * 60_000 + 60_000,
+        );
+      }
+      try {
+        if (unknown) {
+          await expect(h.f.run()).rejects.toThrow(/owned local scope cleanup unavailable/);
+          expect(active()).toHaveLength(1);
+          expect(
+            h.f
+              .events()
+              .some((event) =>
+                ["FactoryRunCancelled", "FactoryRunEscalated", "FactoryRunCompleted"].includes(
+                  event.event,
+                ),
+              ),
+          ).toBe(false);
+          expect(
+            h.f.events().some((event) => event.kind === "capacity" && event.phase === "execution"),
+          ).toBe(false);
+        } else {
+          expect(await h.f.run()).toMatchObject({
+            status: cancel ? "cancelled" : "escalated",
+            runId: h.f.runId,
+          });
+          expect(active()).toEqual([]);
+          const closure = h.f
+            .events()
+            .filter((event) => event.kind === "capacity" && event.phase === "execution");
+          expect(closure).toHaveLength(1);
+          expect(closure[0]).toMatchObject({
+            event: "CapacityReconciled",
+            runId: h.f.runId,
+            workItem: 8,
+            attempt: 1,
+            backend: "codex-sdk/local-worktree",
+            directorEpoch: 1,
+            recoveryEpoch: 2,
+            policyDigest: start.policyDigest,
+            reason: cancel
+              ? "operator cancellation proved exact original execution resource absence"
+              : "Objective timeout cleanup proved exact original execution resource absence",
+          });
+          expect(h.f.events().filter((event) => event.event === "AttemptSucceeded")).toHaveLength(
+            1,
+          );
+          expect(
+            h.f
+              .events()
+              .filter(
+                (event) => event.event === (cancel ? "FactoryRunCancelled" : "FactoryRunEscalated"),
+              ),
+          ).toHaveLength(1);
+          expect(
+            h.f.events().some((event) => event.event === "FactoryRunCancellationRequested"),
+          ).toBe(cancel);
+        }
+        expect(probe).not.toHaveBeenCalled();
+        assertNoContinuation(h.f, h.before, h.retainedRefs);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+    30_000,
+  );
+
   it("preserves unchanged-base cancellation with previously reconciled remote validation", async () => {
     const h = await held(false);
     const sequence = completedRemoteCapacity(h.f);
@@ -218,6 +336,17 @@ describe("cleanup-only cancellation of a stale activation", () => {
     );
     expect(probe).not.toHaveBeenCalled();
     assertNoContinuation(h.f, h.before, h.retainedRefs);
+    expect(
+      deriveCapacityReservations(
+        h.f.snapshot.workItems.map((item) => ({
+          objective: 7,
+          workItem: item.number,
+          events: item.factoryEvents ?? [],
+          defaultCpu: 1,
+          defaultMemoryMb: 2048,
+        })),
+      ),
+    ).toEqual([]);
     expect(h.f.events().filter((event) => event.event === "FactoryRunCancelled")).toHaveLength(1);
   }, 30_000);
 

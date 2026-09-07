@@ -25,6 +25,8 @@ limitations. Later source or documentation changes do not extend an observation 
 
 ## Dated evidence index
 
+- [Trunk contracts: integrated checks, original failures and matching WSL installation](release-evidence/trunk-contracts-2026-09-06.json). This is implementation acceptance, not a model-backed or economic qualification pass.
+
 These records preserve both successful observations and failures. A filename or an implementation
 correction is not a passed gate. Consult each record for its exact source, artifact digests,
 measurement scope and outcome; private raw evidence is not a public reproduction procedure.
@@ -81,7 +83,7 @@ gate into a platform or paid-provider support claim.
 | DOD-5 — Explicit bounded cloud burst | `test/admission.test.ts`, `test/budget.test.ts`, `test/economics.test.ts`, `test/backend-conformance.test.ts`, `test/daytona-backend.test.ts`, `test/github-managed.test.ts`, `test/sandbox-contract.test.ts`, `test/supervisor-preflight.test.ts` | Policy, Daytona and Copilot paths implemented with credential-free coverage; managed Codex remains unavailable pending its own supported actor/lifecycle binding. Provider limitations narrow support claims, not the whole product. Paid launches still require explicit authority |
 | DOD-6 — Durable recovery | `test/repository-controller-faults.test.ts`, `test/compilation-durability.test.ts`, `test/review-durability.test.ts`, `test/scheduling-recovery.test.ts`, `test/session-recovery.test.ts`, `test/integration-recovery.test.ts`, `test/publication.test.ts` | Implemented and injected-fault fixtures pass |
 | DOD-7 — Evidence-bound delivery | `test/validation.test.ts`, `test/exact-head-validation.test.ts`, `test/delivery-topology.test.ts`, `test/stack-publication.test.ts`, `test/integration-recovery.test.ts`, `test/checks.test.ts`, `test/merge-candidate.test.ts`, `test/merge-candidates.test.ts`, `test/parallel-sibling-integration.test.ts` | Implemented; combined-tree sibling integration has offline Supervisor coverage; installed Objective and live native-stack matrix remain gated below |
-| DOD-8 — Explainable, replayable economics | `test/status-output.test.ts`, `test/explanations.test.ts`, `test/replay.test.ts`, `test/economics.test.ts`, `test/model-economics.test.ts`, `test/budget.test.ts`, `test/admission.test.ts`, installed MCP surface verification | Budget-intent correction #136 requires explicit observed-stop selection for new token thresholds and refuses unsupported hard caps. Historical policy interpretation remains distinct; changed-candidate verification is required before acceptance. |
+| DOD-8 — Explainable, replayable economics | `test/status-output.test.ts`, `test/explanations.test.ts`, `test/replay.test.ts`, `test/economics.test.ts`, `test/model-economics.test.ts`, `test/budget.test.ts`, `test/admission.test.ts`, installed MCP surface verification | Budget-intent correction #136 passed integrated checks and matching installation: explicit observed-stop selection for new thresholds, unsupported hard-cap refusal, durable unknown-call fencing and distinct historical interpretation. Comparative benefit remains unproven under #109. |
 | DOD-9 — Evidenced human boundaries | `test/approval.test.ts`, `test/branch-policy.test.ts`, `test/supervisor-preflight.test.ts`, `test/budget.test.ts`, `test/explanations.test.ts`, `test/execution-contract.test.ts` | Implemented and fail-closed fixtures pass |
 
 The release command is `npm run verify:release`: typecheck, lint, formatting, coverage, schema,

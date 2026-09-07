@@ -1,0 +1,60 @@
+{
+  "date": "2026-09-06",
+  "scope": "Complete retained trunk budget, safe-admission and interrupted-publication implementation",
+  "issues": [136, 137, 138],
+  "sourceCommit": "7201491e6ff100d6d521fc840563503c2f67a624",
+  "artifactCommit": "3d2b13c4521cfa17f675eb585cc767704d5c7ea3",
+  "artifactTree": "3dd80d5566bd836cd727735d0f191c6fb1660848",
+  "identityNote": "Bundles were built before final verification and committed unchanged while checks ran. The artifact commit names the exact materialized tree verified. Subsequent evidence/board edits do not change executable source, tests, qualifiers or packaged files.",
+  "verification": {
+    "command": "npm run verify:release",
+    "result": "passed",
+    "testFilesPassed": 169,
+    "testsPassed": 3304,
+    "testsSkipped": 3,
+    "coveragePercent": { "statements": 80.54, "branches": 78.61, "functions": 84.04, "lines": 81.65 },
+    "vulnerabilities": 0,
+    "packageFiles": 43,
+    "packageBytes": 3000031,
+    "packageSha256": "fa18cbc841f16bf2765abad8e145f325ab3817a08e87515d3493e82b9705774a"
+  },
+  "bundles": {
+    "inventorySha256": "65f1e944a77921528c243ff63e84157666fe9e73c35d1f8db1a88922b184faf3",
+    "cliSha256": "ccecda93c837c876e057ff9c1674a393175d6aca2d06c710d3070baa8d06442f",
+    "mcpSha256": "e63106847e0808e2beb9f3a345709a3eee722ed71d3ee73bf3ebf0078b86de65"
+  },
+  "installedArtifact": {
+    "result": "passed",
+    "host": "WSL2",
+    "scope": "Local Codex plugin installation, all 43 packaged files, fresh CLI help and MCP startup/tool discovery",
+    "manifestVersion": "2.0.26+codex.20260907020202",
+    "onlyPackageDifference": "Prescribed local Codex manifest cachebuster",
+    "modelCalls": 0,
+    "factoryToolCalls": 0,
+    "installedExecutionQualification": false
+  },
+  "originalFailures": [
+    {
+      "sourceCommit": "dc7e37fd46f1c3af136d406d3c78d147adb4dd84",
+      "inventorySha256": "037f9b9c0ad07939c090dac8864f08cd49f1324b702b6ffeeeaf16cf9197c622",
+      "result": "failed",
+      "testFilesFailed": 6,
+      "testsFailed": 17,
+      "testsPassed": 3283,
+      "reason": "Obsolete usage/default/admission assertions and a real accepted-review interruption before publication (#138). Original logs remain separate."
+    },
+    {
+      "sourceCommit": "453a8a03e2d111ef3d6401dd01d5d3e9acf48624",
+      "result": "typecheck failed before full suite",
+      "reason": "The missing/partial usage regression did not use the provider contract's nullable counters. Corrected fixture typecheck and both affected cases passed before final verification."
+    }
+  ],
+  "review": "Independent source review accepted policy admission, runtime call/accounting fences and exact retained publication recovery. Concrete stale-snapshot, native-marker cleanup, terminal-unknown ownership and implicit-fetch findings were corrected; affected regressions passed before the final integrated run.",
+  "limitations": [
+    "This completes the known retained trunk implementation; it is not a zero-bug guarantee.",
+    "Installed model-backed runtime and provider scenarios retain their own acceptance issues and artifact identities.",
+    "Actual compiler/chat evaluation, controlled cost/throughput benefit and full application scenario coverage remain required.",
+    "Native non-WSL Linux and macOS-hosted Linux qualification remain explicitly deferred by host availability.",
+    "No provider hard token cap, new spending authority, package publication or full release qualification is claimed."
+  ]
+}

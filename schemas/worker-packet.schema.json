@@ -6,12 +6,12 @@
   "additionalProperties": true,
   "required": ["goal", "acceptanceCriteria", "allowedPaths", "preconditions", "outOfScope", "conventions", "baseSha", "validationCommands", "requirements", "artifactContract"],
   "properties": {
-    "goal": { "type": "string", "minLength": 1, "maxLength": 4000 },
-    "acceptanceCriteria": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+    "goal": { "type": "string", "description": "Repository-artifact outcome assigned to the worker; never a Factory-owned lifecycle or scheduling outcome.", "minLength": 1, "maxLength": 4000 },
+    "acceptanceCriteria": { "type": "array", "description": "Criteria provable from the candidate artifact and pre-publication validation evidence; never publication, integration, issue closure, accounting, or scheduling outcomes.", "minItems": 1, "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
     "allowedPaths": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//)(?!.*[*?\\[]).+$" } },
     "preconditions": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
     "outOfScope": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
-    "conventions": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+    "conventions": { "type": "array", "description": "Repository implementation constraints observable in the candidate artifact; never Factory lifecycle or graph-order instructions.", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
     "retryContext": {
       "type": "object",
       "additionalProperties": false,

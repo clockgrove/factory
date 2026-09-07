@@ -338,6 +338,12 @@ preconditions, exclusions, repository conventions, base SHA, validation commands
 OS/architecture and resource requirements, required tools/services/network destinations, permitted
 secret names, and the output contract.
 
+Compiled Work Item array order is semantic: it is dependency-aware, seeds native sub-issue priority
+among independent peers, and participates in the immutable graph digest. Worker goals, acceptance,
+validation criteria, and conventions stop at the pre-publication artifact boundary. Publication,
+integration, issue closure, accounting, and scheduling remain Supervisor-owned lifecycle phases and
+are never criteria that the artifact reviewer must prove.
+
 Workers receive no Director, merge, issue-mutation, escalation, or Objective tools. Local workers run
 with GitHub credentials removed and credential helpers disabled. Sandbox workers receive no GitHub
 write credential. Workers may edit only their isolated workspace and return a content-addressed

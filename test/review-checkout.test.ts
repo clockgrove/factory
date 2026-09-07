@@ -136,8 +136,14 @@ console.log(JSON.stringify({type:'turn.completed', usage:{input_tokens:4, output
     const input = await fixture();
     const original = JSON.stringify(input);
     let path = "";
-    const runStructured = vi.fn(async (cwd: string) => {
+    const runStructured = vi.fn(async (cwd: string, _schema: unknown, prompt: string) => {
       path = cwd;
+      expect(prompt).toContain("This is a pre-publication artifact review");
+      expect(prompt).toContain("Evaluate only packet.acceptanceCriteria");
+      expect(prompt).toContain("reject it as a malformed phase criterion");
+      expect(prompt).toContain(
+        "Ignore such lifecycle or graph-order prose outside acceptanceCriteria",
+      );
       expect(cwd).not.toBe(input.repository);
       expect(await readFile(join(cwd, "slugify.js"), "utf8")).toContain("export const slugify");
       expect(await readFile(join(cwd, "clamp.js"), "utf8")).toContain("original");

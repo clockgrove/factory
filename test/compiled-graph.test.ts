@@ -576,6 +576,73 @@ describe("durable semantic review", () => {
 });
 
 describe("golden compiled graph", () => {
+  it("keeps authored peer priority while placing dependencies before their join", async () => {
+    const fixture = new URL("./fixtures/compiler/golden-objective.json", import.meta.url);
+    const input = JSON.parse(await readFile(fixture, "utf8")) as CompileInput;
+    const template = input.workItems[0]!;
+    const workItems = [
+      {
+        ...template,
+        id: "clamp",
+        title: "Clamp",
+        goal: "Implement clamp.",
+        acceptance: ["Clamp behavior is tested."],
+        scope: ["src/clamp.ts"],
+        dependsOn: [],
+      },
+      {
+        ...template,
+        id: "describe",
+        title: "Describe",
+        goal: "Integrate clamp and slugify.",
+        acceptance: ["Describe integration is tested."],
+        scope: ["src/describe.ts"],
+        dependsOn: ["clamp", "slugify"],
+      },
+      {
+        ...template,
+        id: "slugify",
+        title: "Slugify",
+        goal: "Implement slugify.",
+        acceptance: ["Slugify behavior is tested."],
+        scope: ["src/slugify.ts"],
+        dependsOn: [],
+      },
+    ];
+    const compiled = compileObjective({ ...input, workItems });
+    const reversedPeers = compileObjective({
+      ...input,
+      workItems: [workItems[2]!, workItems[1]!, workItems[0]!],
+    });
+
+    expect(compiled.workItems.map((item) => item.id)).toEqual(["clamp", "slugify", "describe"]);
+    expect(reversedPeers.workItems.map((item) => item.id)).toEqual([
+      "slugify",
+      "clamp",
+      "describe",
+    ]);
+    expect(serializeCompilerObjective(reversedPeers)).not.toBe(
+      serializeCompilerObjective(compiled),
+    );
+  });
+
+  it("preserves an authored child ahead of a later independent peer", async () => {
+    const fixture = new URL("./fixtures/compiler/golden-objective.json", import.meta.url);
+    const input = JSON.parse(await readFile(fixture, "utf8")) as CompileInput;
+    const [root, child] = input.workItems;
+    const peer = {
+      ...root!,
+      id: "independent",
+      title: "Independent",
+      goal: "Implement an independent change.",
+      acceptance: ["The independent change is tested."],
+      scope: ["src/independent.ts"],
+    };
+    const compiled = compileObjective({ ...input, workItems: [root!, child!, peer] });
+
+    expect(compiled.workItems.map((item) => item.id)).toEqual([root!.id, child!.id, peer.id]);
+  });
+
   it("compiles a checked-in fixture byte-equivalently across enumeration order", async () => {
     const fixture = new URL("./fixtures/compiler/golden-objective.json", import.meta.url);
     const input = JSON.parse(await readFile(fixture, "utf8")) as CompileInput;

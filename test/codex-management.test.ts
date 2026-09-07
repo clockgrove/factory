@@ -91,13 +91,25 @@ describe("Codex management backend", () => {
       expect(prompt).toContain('"declaredScripts":{"dev":"node server.js","test":"node --test"}');
       expect(prompt).toContain('"validationCommands":["npm test","node --test"]');
       expect(prompt).toContain("created within this Work Item's declared scope");
+      expect(prompt).toContain("available before publication");
+      expect(prompt).toContain("Never copy Factory-owned publication, pull-request creation");
+      expect(prompt).toContain("the Supervisor owns those phases");
+      expect(prompt).toContain("workItems array is semantic");
+      expect(prompt).toContain("requested initial peer priority through workItems array order");
+      expect(prompt).toContain(
+        "Complete publication, independent validation, integration, and issue closure through Factory.",
+      );
       throw new Error("prompt inspected");
     });
     await expect(
       new CodexCliManagementBackend({ runStructured }).compile(
         {
           repository,
-          objective: { number: 1, title: "Test", body: "Test" },
+          objective: {
+            number: 1,
+            title: "Test",
+            body: "Complete publication, independent validation, integration, and issue closure through Factory.",
+          },
           defaultBranch: "main",
           baseSha: "a".repeat(40),
           repositoryFiles: ["package.json"],

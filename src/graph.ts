@@ -612,9 +612,9 @@ export class GraphApplier {
   /**
    * Create every Work Item as a sub-issue of `parentIssueId`, then wire up
    * every declared `dependsOn` as a native `blocked by` edge (§3.1).
-   * Creation order does not matter — every issue is created before any
-   * dependency edge is added, so a Work Item can depend on a sibling
-   * regardless of which was created first.
+   * Creation order seeds native sub-issue priority. The compiler therefore
+   * supplies dependency-aware order, and every issue is still created before
+   * any dependency edge is added so edge wiring remains replayable.
    *
    * Replaying the same digested graph is idempotent when `existingWorkItems`
    * comes from a fresh Objective snapshot: existing compiler IDs are reused,

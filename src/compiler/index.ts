@@ -86,6 +86,29 @@ export type CompileInput = {
 };
 
 const sorted = (xs: string[]) => [...new Set(xs)].sort();
+const dependencyOrder = <T extends { id: string; dependsOn: string[] }>(items: T[]): T[] => {
+  // Let the structural validator report duplicates without losing either
+  // entry through ID-keyed ordering state.
+  if (new Set(items.map((item) => item.id)).size !== items.length) return items;
+  const byId = new Map(items.map((item) => [item.id, item]));
+  const remaining = new Set(byId.keys());
+  const ordered: T[] = [];
+  while (remaining.size) {
+    const next = items.find(
+      (item) =>
+        remaining.has(item.id) && item.dependsOn.every((dependency) => !remaining.has(dependency)),
+    );
+    // Invalid cycles are rejected by validateCompiledObjective. Keep this
+    // total so validation, rather than an ordering loop, reports the defect.
+    if (!next) {
+      ordered.push(...items.filter((item) => remaining.has(item.id)));
+      break;
+    }
+    ordered.push(next);
+    remaining.delete(next.id);
+  }
+  return ordered;
+};
 const overlaps = (a: string, b: string) =>
   a === b || (a.endsWith("/") && b.startsWith(a)) || (b.endsWith("/") && a.startsWith(b));
 // This is a structural guard, not a natural-language observability classifier.
@@ -112,50 +135,48 @@ const acceptanceTextProblem = (criterion: string): string | undefined => {
 };
 
 export function canonicalizeObjective(input: CompilerObjective): CompilerObjective {
+  const workItems = input.workItems.map((w) => ({
+    ...w,
+    acceptance: sorted(w.acceptance),
+    scope: sorted(w.scope),
+    preconditions: sorted(w.preconditions),
+    outOfScope: sorted(w.outOfScope),
+    conventions: sorted(w.conventions),
+    dependsOn: sorted(w.dependsOn),
+    // Validation is an executable sequence, not a set. Preserve its
+    // authored order so setup/generation steps cannot move after checks.
+    validationCommands: [...w.validationCommands],
+    requirements: canonicalRequirements(w.requirements),
+    ...(w.context
+      ? {
+          context: {
+            mustRead: sorted(w.context.mustRead),
+            searchSeeds: sorted(w.context.searchSeeds),
+            dependencyEvidence: [...w.context.dependencyEvidence].sort(
+              (a, b) => a.workItem.localeCompare(b.workItem) || a.commit.localeCompare(b.commit),
+            ),
+          },
+        }
+      : {}),
+    ...(w.changeSurface
+      ? {
+          changeSurface: {
+            mergeClass: w.changeSurface.mergeClass,
+            exclusiveResources: sorted(w.changeSurface.exclusiveResources),
+          },
+        }
+      : {}),
+    ...(w.validation
+      ? {
+          validation: [...w.validation]
+            .map((v) => ({ ...v, criteria: sorted(v.criteria) }))
+            .sort((a, b) => a.tier.localeCompare(b.tier)),
+        }
+      : {}),
+  }));
   return {
     title: input.title,
-    workItems: input.workItems
-      .map((w) => ({
-        ...w,
-        acceptance: sorted(w.acceptance),
-        scope: sorted(w.scope),
-        preconditions: sorted(w.preconditions),
-        outOfScope: sorted(w.outOfScope),
-        conventions: sorted(w.conventions),
-        dependsOn: sorted(w.dependsOn),
-        // Validation is an executable sequence, not a set. Preserve its
-        // authored order so setup/generation steps cannot move after checks.
-        validationCommands: [...w.validationCommands],
-        requirements: canonicalRequirements(w.requirements),
-        ...(w.context
-          ? {
-              context: {
-                mustRead: sorted(w.context.mustRead),
-                searchSeeds: sorted(w.context.searchSeeds),
-                dependencyEvidence: [...w.context.dependencyEvidence].sort(
-                  (a, b) =>
-                    a.workItem.localeCompare(b.workItem) || a.commit.localeCompare(b.commit),
-                ),
-              },
-            }
-          : {}),
-        ...(w.changeSurface
-          ? {
-              changeSurface: {
-                mergeClass: w.changeSurface.mergeClass,
-                exclusiveResources: sorted(w.changeSurface.exclusiveResources),
-              },
-            }
-          : {}),
-        ...(w.validation
-          ? {
-              validation: [...w.validation]
-                .map((v) => ({ ...v, criteria: sorted(v.criteria) }))
-                .sort((a, b) => a.tier.localeCompare(b.tier)),
-            }
-          : {}),
-      }))
-      .sort((a, b) => a.id.localeCompare(b.id)),
+    workItems: dependencyOrder(workItems),
   };
 }
 function canonicalRequirements(value: unknown): ExecutionRequirements {

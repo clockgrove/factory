@@ -223,6 +223,33 @@ describe("same-run controller restart after integration", () => {
       });
       try {
         const first = await f.run(shutdown.signal);
+        const sibling = f.events().filter((event) => "workItem" in event && event.workItem === 9);
+        expect(
+          sibling.filter(
+            (event) =>
+              event.kind === "attempt" &&
+              ["AttemptCancelled", "AttemptFailed", "AttemptDeferred"].includes(event.event),
+          ),
+        ).toEqual([]);
+        expect(sibling.filter((event) => event.event === "AttemptSucceeded")).toHaveLength(1);
+        expect(sibling.some((event) => event.kind === "capacity")).toBe(false);
+        const originalWorkerUsage = sibling.filter(
+          (event) =>
+            event.kind === "budget" &&
+            event.event === "BudgetReconciled" &&
+            event.phase === "execution",
+        );
+        expect(originalWorkerUsage).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ unit: "model_tokens", amount: 6 }),
+            expect.objectContaining({ unit: "local_milliseconds", amount: expect.any(Number) }),
+          ]),
+        );
+        expect(originalWorkerUsage).toHaveLength(2);
+        const ready = [...f.refs].filter(
+          ([ref]) => ref.includes("/artifact-transfers/") && ref.endsWith("/ready"),
+        );
+        expect(ready).toHaveLength(2);
         expect(first).toMatchObject({
           status: "cancelled",
           reason: "repository controller stopped; durable run remains active",
@@ -244,6 +271,19 @@ describe("same-run controller restart after integration", () => {
           });
         const launches = f.activity.filter((entry) => entry.operation === "launch").length;
         const resumed = await f.run();
+        for (const event of sibling) expect(f.events()).toContainEqual(event);
+        for (const [ref, oid] of ready) expect(f.refs.get(ref)).toBe(oid);
+        expect(
+          f
+            .events()
+            .filter(
+              (event) =>
+                event.kind === "budget" &&
+                event.workItem === 9 &&
+                event.event === "BudgetReconciled" &&
+                event.phase === "execution",
+            ),
+        ).toEqual(originalWorkerUsage);
         if (external) {
           expect(resumed).toMatchObject({ status: "escalated", runId: "not-started" });
           expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(launches);

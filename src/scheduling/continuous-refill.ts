@@ -57,6 +57,13 @@ export class ContinuousExecutionPool<Key> {
     return [...this.#active.keys()];
   }
 
+  /** A settled key is no longer active, but its failure is not recovery authority.
+   * Keep the outcome queued for final draining as well as synchronous admission fences. */
+  throwIfFailed(): void {
+    const failure = this.#completed.find((settlement) => settlement.error !== undefined);
+    if (failure) throw failure.error;
+  }
+
   async waitForChange(
     pollMs: number,
     signal?: AbortSignal,

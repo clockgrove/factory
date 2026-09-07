@@ -3940,6 +3940,7 @@ export class FactorySupervisor {
       }
       for (;;) {
         if (heartbeatError) throw heartbeatError;
+        activeExecutions.throwIfFailed();
         if (this.#options.signal?.aborted) {
           if (this.#options.shutdownBehavior === "release-lease") {
             return await releaseAfterDrain();
@@ -3948,6 +3949,10 @@ export class FactorySupervisor {
         }
         await this.#lease.renewIfNeeded();
         snapshot = await this.#reader.readObjective(snapshot.number);
+        // A hold/cleanup failure can settle while the snapshot is in flight.
+        // An absent active key must not turn that failure into same-process recovery.
+        activeExecutions.throwIfFailed();
+        this.#options.signal?.throwIfAborted();
         this.#fenceSnapshot(snapshot);
         this.#ciExpectedOnPullRequests = snapshot.ciExpectedOnPullRequests;
         this.#sequences.observe(snapshotEvents(snapshot));
@@ -3981,6 +3986,8 @@ export class FactorySupervisor {
           );
           continue;
         }
+        activeExecutions.throwIfFailed();
+        this.#options.signal?.throwIfAborted();
         const adoptedPublication =
           this.#recoveryRuntime &&
           objective.items.find((item) => {
@@ -4142,6 +4149,8 @@ export class FactorySupervisor {
           }
         }
 
+        activeExecutions.throwIfFailed();
+        this.#options.signal?.throwIfAborted();
         const recoverable = objective.items.filter(
           (item) =>
             !activeExecutions.has(item.number) &&
@@ -4150,6 +4159,8 @@ export class FactorySupervisor {
         );
         if (recoverable.length > 0) {
           for (const item of recoverable) {
+            activeExecutions.throwIfFailed();
+            this.#options.signal?.throwIfAborted();
             await this.#recoverInterrupted(item, deadline, objective.items);
           }
           continue;
@@ -4686,6 +4697,8 @@ export class FactorySupervisor {
           const item = objective.items.find(
             (candidate) => candidate.number === admission.workItem,
           )!;
+          activeExecutions.throwIfFailed();
+          this.#options.signal?.throwIfAborted();
           const committed = this.#capacity.tryReserve(
             expectedCapacityGeneration,
             admission.reservation,
@@ -4831,6 +4844,7 @@ export class FactorySupervisor {
     let retryableArtifact: NormalizedArtifact | undefined;
     let retainCollectedSource = false;
     let executionCleanupConfirmed = Boolean(recovered);
+    let completedArtifactRetained = Boolean(recovered);
     let backendLaunchAttempted = false;
     let executionTerminalObserved = Boolean(recovered);
     let terminalModelTokens: number | undefined;
@@ -5410,6 +5424,13 @@ export class FactorySupervisor {
           this.#budgetEvents.push(event);
           executionBudgetReconciled = true;
         });
+      // Fresh completed siblings have the same durable continuation boundary as
+      // recovered attempts: ready artifact, terminal usage, and absent compute.
+      // A controller shutdown must not turn that paid work into a failed attempt.
+      completedArtifactRetained =
+        !selected.capabilities.providerManagedPublication &&
+        executionCleanupConfirmed &&
+        (Boolean(recovered) || executionBudgetReconciled);
       if (
         !recovered &&
         selected.capabilities.id === "codex-app-server/local-worktree" &&
@@ -5499,6 +5520,7 @@ export class FactorySupervisor {
         exclusiveResources: admission.reservation.exclusiveResources,
       };
       for (;;) {
+        executionSignal?.throwIfAborted();
         await this.#lease.renewIfNeeded();
         if (Date.now() >= objectiveDeadline) {
           throw new Error("Objective timeout exhausted while awaiting validation capacity");
@@ -5563,6 +5585,7 @@ export class FactorySupervisor {
             new Date(Date.now() + timeoutMs),
           );
       await this.#lease.use(async (lease) => {
+        executionSignal?.throwIfAborted();
         const capacityEvent = await this.#attempts.recordCapacity({
           ...(recovered ? { allowRecovery: true } : {}),
           lease,
@@ -5839,6 +5862,24 @@ export class FactorySupervisor {
       await this.#retryArtifacts.delete(item.number);
     } catch (error) {
       if (error instanceof SafeArtifactCheckpointHeldError) throw error;
+      // Shutdown before validation admission preserves a durable successful
+      // checkpoint for the next fenced controller. Use the intentional teardown
+      // signal so a fresh worker's pool settlement also drains without failure;
+      // no durable AttemptCancelled/Failed receipt is manufactured here.
+      if (
+        completedArtifactRetained &&
+        !validationCapacityRecorded &&
+        executionSignal?.aborted &&
+        this.#options.shutdownBehavior === "release-lease"
+      ) {
+        if (error === executionSignal.reason)
+          throw new RunCancellationRequestedError(
+            "repository controller stopped after durable execution completion; validation was not admitted",
+          );
+        // Preserve unrelated fencing/receipt failures rather than disguising
+        // their uncertain outcome as an intentional pool teardown.
+        throw error;
+      }
       if (
         retryableArtifact &&
         validation &&
@@ -6153,6 +6194,7 @@ export class FactorySupervisor {
     deadline: number,
     recovered: CollectedAttemptContinuation,
   ): Promise<void> {
+    this.#options.signal?.throwIfAborted();
     const { reservation, packet, artifact, modelUsage, nativeUsage } = recovered;
     const modelTokens =
       recovered.modelTokens ??
@@ -6393,6 +6435,7 @@ export class FactorySupervisor {
         deliveryBase = { branch: member.pull.branch, sha: reservation.baseSha };
       }
     }
+    this.#options.signal?.throwIfAborted();
     await this.#execute(
       item,
       deadline,

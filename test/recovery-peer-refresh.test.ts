@@ -300,4 +300,29 @@ describe("retained regular publication refreshed onto authenticated peer integra
     await expect(f.peerProof()).resolves.toMatchObject({ parent: f.original.validation.baseSha });
     await expect(f.observe()).rejects.toThrow();
   });
+
+  it.each([false, true])("uses the exact candidate capacity admission horizon, not a later terminal receipt (late peer: %s)", async (latePeer) => {
+    const f = await fixture();
+    const sequence = f.original.publication.sequence + 1;
+    for (const event of f.original.item.factoryEvents!) {
+      if (event.sequence >= sequence) event.sequence++;
+    }
+    f.original.item.factoryEvents!.push(parseFactoryEvent({
+      protocol: "clockgrove.factory/v2", kind: "capacity", event: "CapacityReserved",
+      objective: 7, runId: "receiver-run", sequence, at,
+      workItem: 9, attempt: 1, phase: "validation",
+      backend: `factory/integration-validation-${mergeCandidateIdentityDigest(f.candidate.identity)}`,
+      requestedCpu: 1, requestedMemoryMb: 2048, directorEpoch: 1,
+      policyDigest: f.receiver.lease.policyDigest,
+    }));
+    f.receiver.snapshot.factoryEvents!.push(parseFactoryEvent({
+      protocol: "clockgrove.factory/v2", kind: "run", event: "FactoryRunEscalated",
+      objective: 7, runId: "receiver-run", sequence: 1000,
+      at: "2026-09-07T00:00:02.000Z", reason: "retained work requires explicit recovery",
+    }));
+    if (latePeer) {
+      Object.assign(peerEvent(f, "AttemptIntegrated"), { at: "2026-09-07T00:00:01.000Z" });
+      await expect(f.observe()).rejects.toThrow();
+    } else await expect(f.observe()).resolves.toMatchObject({ record: f.record });
+  });
 });

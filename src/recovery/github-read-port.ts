@@ -35,10 +35,12 @@ export function recoveryReadPort(
     getBranchHead: store.getBranchHead.bind(store),
     readBranchRules: store.readBranchRules.bind(store),
     readChecks: store.readChecks.bind(store),
-    ...(readObjectiveSnapshot ? {
-      readObjectiveSnapshot,
-      readCommitObjectiveCandidates: store.readCommitObjectiveCandidates.bind(store),
-    } : {}),
+    ...(readObjectiveSnapshot
+      ? {
+          readObjectiveSnapshot,
+          readCommitObjectiveCandidates: store.readCommitObjectiveCandidates.bind(store),
+        }
+      : {}),
     readStack: (number: number) => stacks.get(number),
   });
 }

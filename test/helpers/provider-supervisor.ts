@@ -970,8 +970,12 @@ export async function providerSupervisorFixture(
       // Observe both outcomes immediately even when a timed-out test abandons
       // its promise. Return the original promise so callers retain its result.
       void run.then(
-        () => { activeRuns.delete(run); },
-        () => { activeRuns.delete(run); },
+        () => {
+          activeRuns.delete(run);
+        },
+        () => {
+          activeRuns.delete(run);
+        },
       );
       return run;
     },
@@ -988,11 +992,19 @@ export async function providerSupervisorFixture(
           const settled = await Promise.race([
             drain,
             new Promise<never>((_, reject) => {
-              timer = setTimeout(() => reject(new Error(
-                "provider Supervisor fixture retirement exceeded 10000ms; runs and cleanup remain unresolved",
-              )), 10_000);
+              timer = setTimeout(
+                () =>
+                  reject(
+                    new Error(
+                      "provider Supervisor fixture retirement exceeded 10000ms; runs and cleanup remain unresolved",
+                    ),
+                  ),
+                10_000,
+              );
             }),
-          ]).finally(() => { if (timer) clearTimeout(timer); });
+          ]).finally(() => {
+            if (timer) clearTimeout(timer);
+          });
           const failure = settled.find((result) => result.status === "rejected");
           // Preserve the checkout/cache when interrupted work reports unresolved
           // cleanup; fixture deletion is not evidence that execution was retired.
@@ -1001,12 +1013,15 @@ export async function providerSupervisorFixture(
           vi.restoreAllMocks();
           vi.unstubAllGlobals();
           // Never enumerate or sweep user caches, including interrupted real runs.
-          for (const root of retainedArtifactRoots) await rm(root, { recursive: true, force: true });
+          for (const root of retainedArtifactRoots)
+            await rm(root, { recursive: true, force: true });
           await rm(repository, { recursive: true, force: true });
         } finally {
           // After a timeout this callback only opens fixture admission once the
           // old run actually settles; it never restores mocks or deletes files.
-          void drain.then(() => { pendingFixtureRetirements.delete(retiring); });
+          void drain.then(() => {
+            pendingFixtureRetirements.delete(retiring);
+          });
         }
       })();
       return disposal;

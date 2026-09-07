@@ -140,10 +140,18 @@ export async function buildRecoveryProposal(input: {
     getBranchHead: (branch) => read("base", [branch], () => input.store.getBranchHead(branch)),
     readBranchRules: (branch) => read("rules", [branch], () => input.store.readBranchRules(branch)),
     readChecks: (head) => read("checks", [head], () => input.store.readChecks(head)),
-    ...(input.store.readCommitObjectiveCandidates ? { readCommitObjectiveCandidates: (sha: string) =>
-      read("peer-candidates", [sha], () => input.store.readCommitObjectiveCandidates!(sha)) } : {}),
-    ...(input.store.readObjectiveSnapshot ? { readObjectiveSnapshot: (number: number) =>
-      read("peer-snapshot", [number], () => input.store.readObjectiveSnapshot!(number)) } : {}),
+    ...(input.store.readCommitObjectiveCandidates
+      ? {
+          readCommitObjectiveCandidates: (sha: string) =>
+            read("peer-candidates", [sha], () => input.store.readCommitObjectiveCandidates!(sha)),
+        }
+      : {}),
+    ...(input.store.readObjectiveSnapshot
+      ? {
+          readObjectiveSnapshot: (number: number) =>
+            read("peer-snapshot", [number], () => input.store.readObjectiveSnapshot!(number)),
+        }
+      : {}),
     ...(input.store.readStack
       ? {
           readStack: (number: number) =>

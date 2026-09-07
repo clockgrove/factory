@@ -386,27 +386,54 @@ export async function observeRecoverySiblingRefresh(
             (event.event === "RecoverySourceIntegrated" && event.mergeCommitSha === cursor)),
       );
       if (integrations.length === 0) {
-        const candidateDigest = mergeCandidateIdentityDigest({ runId: start.runId,
-          objective: input.objective, workItem: input.workItem, attempt: source.attempt,
-          pullRequest: publication.pullRequest, sourceHeadSha: publication.headSha,
-          sourceExactHeadValidationDigest: exact.digest, targetBaseSha: identity.targetBaseSha,
-          deliveryHeadSha: refresh.plannedHeadSha });
-        const history = events.filter((event) => event.runId === start.runId &&
-          (input.beforeSequence === undefined || event.sequence < input.beforeSequence));
-        const admissions = history.filter((event) => event.event === "CapacityReserved" &&
-          event.workItem === input.workItem && event.attempt === source.attempt &&
-          (event.backend === `factory/integration-validation-${candidateDigest}` ||
-            event.backend === `factory/integration-sandbox-${candidateDigest}`));
+        const candidateDigest = mergeCandidateIdentityDigest({
+          runId: start.runId,
+          objective: input.objective,
+          workItem: input.workItem,
+          attempt: source.attempt,
+          pullRequest: publication.pullRequest,
+          sourceHeadSha: publication.headSha,
+          sourceExactHeadValidationDigest: exact.digest,
+          targetBaseSha: identity.targetBaseSha,
+          deliveryHeadSha: refresh.plannedHeadSha,
+        });
+        const history = events.filter(
+          (event) =>
+            event.runId === start.runId &&
+            (input.beforeSequence === undefined || event.sequence < input.beforeSequence),
+        );
+        const admissions = history.filter(
+          (event) =>
+            event.event === "CapacityReserved" &&
+            event.workItem === input.workItem &&
+            event.attempt === source.attempt &&
+            (event.backend === `factory/integration-validation-${candidateDigest}` ||
+              event.backend === `factory/integration-sandbox-${candidateDigest}`),
+        );
         // Native candidate admission provides the strongest receipt horizon. Old
         // local checkpoints have no capacity receipt: their authenticated accounting
         // history bounds observation without inventing an admission timestamp.
         const horizon = (admissions.length ? admissions : history).reduce<FactoryEvent | undefined>(
-          (selected, event) => !selected || (admissions.length
-            ? event.sequence < selected.sequence : event.sequence > selected.sequence) ? event : selected, undefined);
+          (selected, event) =>
+            !selected ||
+            (admissions.length
+              ? event.sequence < selected.sequence
+              : event.sequence > selected.sequence)
+              ? event
+              : selected,
+          undefined,
+        );
         requireRefresh(horizon);
-        const peer = await verifyRecoveryPeerTrunkIntegration({ repository: input.repository,
-          receiverObjective: input.objective, receiverStart: start, receiverEvents: events,
-          targetBaseSha: cursor, beforeAt: horizon.at, store, proofTraversal: visiting });
+        const peer = await verifyRecoveryPeerTrunkIntegration({
+          repository: input.repository,
+          receiverObjective: input.objective,
+          receiverStart: start,
+          receiverEvents: events,
+          targetBaseSha: cursor,
+          beforeAt: horizon.at,
+          store,
+          proofTraversal: visiting,
+        });
         requiresIsolation ||= peer.requiresIsolation;
         executionRequiresIsolation ||= peer.executionRequiresIsolation;
         cursor = peer.parent;
@@ -770,8 +797,16 @@ export async function observeRecoverySiblingRefresh(
         ),
     );
   }
-  return { record, lineage, source: exact, candidateIdentity, candidate, review,
-    requiresIsolation, executionRequiresIsolation };
+  return {
+    record,
+    lineage,
+    source: exact,
+    candidateIdentity,
+    candidate,
+    review,
+    requiresIsolation,
+    executionRequiresIsolation,
+  };
 }
 
 export function recoverySiblingRefreshBinding(

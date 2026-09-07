@@ -203,7 +203,9 @@ function applicationFor(
           recovery: new RecoveryRequestService({
             repository: `${owner}/${repo}`,
             store,
-            readStore: recoveryReadPort(store, owner, repo, (number) => reader.readObjective(number)),
+            readStore: recoveryReadPort(store, owner, repo, (number) =>
+              reader.readObjective(number),
+            ),
             readSnapshot: async (objective) => ({
               snapshot: await recoveryReader.readObjective(objective),
               historyComplete: true,

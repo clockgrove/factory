@@ -31,6 +31,8 @@ dependencies, not a reason to silently narrow those issues:
 | [#158](https://github.com/clockgrove/factory/issues/158): shared fairness pool | Scheduling runtime lane / code | Share repository capacity before independently applying each Objective's worker ceiling; retain physical, backend and path fences. |
 | [#159](https://github.com/clockgrove/factory/issues/159): pacing-aware qualification window | Qualifier lane / code | Bind explicit future 45–120-minute concurrency windows to both policies and one original-start deadline. Preserve existing defaults, original evidence and pacing limits. |
 | [#160](https://github.com/clockgrove/factory/issues/160): paced shutdown | Controller lifecycle lane / code | Retire queued normal writes on deliberate shutdown without dispatching them, bypassing pacing or misrepresenting in-flight uncertainty. Retain lease priority and recoverable cleanup obligations. |
+| [#161](https://github.com/clockgrove/factory/issues/161): peer-refresh recovery | Recovery lane / code | Authenticate retained PR refreshes backed by another Objective's exact integration, preserving generation, graph, review, accounting, chronology and isolation fences. |
+| [#162](https://github.com/clockgrove/factory/issues/162): fixture retirement | Reliability lane / code | Abort and drain fixture-owned Supervisors before restoring shared mocks or removing owned files. Unresolved retirement blocks subsequent fixture admission. |
 
 Scenario and stale-base corrections #140–#143 were merged in
 [#144](https://github.com/clockgrove/factory/pull/144), shutdown/recovery correction #145 in
@@ -44,10 +46,12 @@ qualification then demonstrated the separate fairness and paced-shutdown defects
 remain implementation work rather than being hidden behind a qualification label.
 Their implementation is not a live pass for the parent issues. Expired qualification authority
 is not extended; proven no-action refusals preserve their original evidence when explicitly retried.
-The current code batch combines #158–#160. After integration review, its next deliverable is one
-checked, matching installed candidate. Then complete supported cleanup of the expired shared-work
-attempt without discarding retained work, followed by fresh bounded concurrency, large-file and
-failure/conflict acceptance. A forced controller termination is contained cleanup evidence, not
+The current code batch combines #158–#162. The first candidate's original artifact-restart failures
+are retained separately; its source checks are not relabelled as a pass. After integration review,
+the next deliverable is one checked, matching installed candidate. Supported cancellation has
+completed for the expired shared-work attempt with paid work and its retained PR preserved.
+Next recover that work through the digest-bound successor path, then complete bounded concurrency,
+large-file and failure/conflict acceptance. A forced controller termination is contained cleanup evidence, not
 successful graceful shutdown. Known internal pacing boundaries remain in force across replacement.
 The specific active-cancellation
 accounting case remains incomplete where the provider supplies no complete interrupted-worker usage;

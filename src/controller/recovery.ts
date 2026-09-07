@@ -33,7 +33,9 @@ export async function adoptRecoveryActivation(input: {
     repo: input.repo,
     recoveryInspection: true,
   });
-  const read = recoveryReadPort(input.store, input.owner, input.repo, (number) => reader.readObjective(number));
+  const read = recoveryReadPort(input.store, input.owner, input.repo, (number) =>
+    reader.readObjective(number),
+  );
   const readSnapshot = async () => ({
     snapshot: await reader.readObjective(input.activation.objective),
     historyComplete: true,

@@ -95,10 +95,14 @@ export function withImmutableRecoveryReads(store: RecoveryReadStore): RecoveryRe
     getBranchHead: (branch) => store.getBranchHead(branch),
     readBranchRules: (branch) => store.readBranchRules(branch),
     readChecks: (oid) => store.readChecks(oid),
-    ...(store.readCommitObjectiveCandidates ? {
-      readCommitObjectiveCandidates: store.readCommitObjectiveCandidates.bind(store),
-    } : {}),
-    ...(store.readObjectiveSnapshot ? { readObjectiveSnapshot: store.readObjectiveSnapshot.bind(store) } : {}),
+    ...(store.readCommitObjectiveCandidates
+      ? {
+          readCommitObjectiveCandidates: store.readCommitObjectiveCandidates.bind(store),
+        }
+      : {}),
+    ...(store.readObjectiveSnapshot
+      ? { readObjectiveSnapshot: store.readObjectiveSnapshot.bind(store) }
+      : {}),
     ...(store.readStack ? { readStack: store.readStack.bind(store) } : {}),
     readCommit: (oid) => {
       if (!sha.test(oid)) return store.readCommit(oid);

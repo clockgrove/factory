@@ -169,10 +169,18 @@ export async function assessRecovery(input: {
     getBranchHead: (branch) => read(`branch:${branch}`, () => store.getBranchHead(branch)),
     readBranchRules: (branch) => read(`rules:${branch}`, () => store.readBranchRules(branch)),
     readChecks: (sha) => read(`checks:${sha}`, () => store.readChecks(sha)),
-    ...(store.readCommitObjectiveCandidates ? { readCommitObjectiveCandidates: (sha: string) =>
-      read(`peer-candidates:${sha}`, () => store.readCommitObjectiveCandidates!(sha)) } : {}),
-    ...(store.readObjectiveSnapshot ? { readObjectiveSnapshot: (number: number) =>
-      read(`peer-snapshot:${number}`, () => store.readObjectiveSnapshot!(number)) } : {}),
+    ...(store.readCommitObjectiveCandidates
+      ? {
+          readCommitObjectiveCandidates: (sha: string) =>
+            read(`peer-candidates:${sha}`, () => store.readCommitObjectiveCandidates!(sha)),
+        }
+      : {}),
+    ...(store.readObjectiveSnapshot
+      ? {
+          readObjectiveSnapshot: (number: number) =>
+            read(`peer-snapshot:${number}`, () => store.readObjectiveSnapshot!(number)),
+        }
+      : {}),
     ...(store.readStack
       ? { readStack: (number: number) => read(`stack:${number}`, () => store.readStack!(number)) }
       : {}),

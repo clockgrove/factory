@@ -11,14 +11,19 @@ afterEach(async () => {
 });
 function deferred() {
   let resolve!: () => void;
-  const promise = new Promise<void>((done) => { resolve = done; });
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
   return { promise, resolve };
 }
 async function blockedFixture(signal?: AbortSignal) {
   const fixture = await providerSupervisorFixture("daytona-burst", {
-    localOnly: true, dependencyChain: true, controllerActivation: true,
+    localOnly: true,
+    dependencyChain: true,
+    controllerActivation: true,
   });
-  const entered = deferred(), unblock = deferred();
+  const entered = deferred(),
+    unblock = deferred();
   const sample = fixture.repositoryResources.resourceSampler.sample;
   const observedRuns: string[] = [];
   fixture.repositoryResources.resourceSampler = {
@@ -27,17 +32,28 @@ async function blockedFixture(signal?: AbortSignal) {
       await unblock.promise;
       // This deliberately consults the current prototype after the blocked
       // await, exactly where a detached old run could reach a new fixture.
-      const snapshot = await new GitHubReader({ token: "fixture-only", owner: "fixture",
-        repo: "provider-qualification" }).readObjective(7);
-      observedRuns.push(snapshot.factoryEvents!.find((event) => event.event === "FactoryRunStarted")!.runId);
+      const snapshot = await new GitHubReader({
+        token: "fixture-only",
+        owner: "fixture",
+        repo: "provider-qualification",
+      }).readObjective(7);
+      observedRuns.push(
+        snapshot.factoryEvents!.find((event) => event.event === "FactoryRunStarted")!.runId,
+      );
       return sample(now);
     },
   };
   const run = fixture.run(signal);
-  const outcome = run.then((result) => ({ result }), (error: unknown) => ({ error }));
-  await Promise.race([entered.promise, outcome.then(() => {
-    throw new Error("fixture run settled before the blocked admission observation");
-  })]);
+  const outcome = run.then(
+    (result) => ({ result }),
+    (error: unknown) => ({ error }),
+  );
+  await Promise.race([
+    entered.promise,
+    outcome.then(() => {
+      throw new Error("fixture run settled before the blocked admission observation");
+    }),
+  ]);
   return { fixture, run, outcome, unblock, observedRuns };
 }
 
@@ -47,9 +63,13 @@ it("drains an abandoned real Supervisor before restoring mocks or admitting the 
   const release = vi.mocked(LeaseManager.prototype.release);
   let disposed = false;
   const retiring = f.fixture.dispose();
-  const disposal = retiring.then(() => { disposed = true; });
+  const disposal = retiring.then(() => {
+    disposed = true;
+  });
   expect(f.fixture.dispose()).toBe(retiring);
-  await expect(providerSupervisorFixture("daytona-burst")).rejects.toThrow("retirement is still pending");
+  await expect(providerSupervisorFixture("daytona-burst")).rejects.toThrow(
+    "retirement is still pending",
+  );
   await expect(access(f.fixture.repository)).resolves.toBeUndefined();
   expect(vi.isMockFunction(GitHubReader.prototype.readObjective)).toBe(true);
   expect(disposed).toBe(false);
@@ -63,9 +83,14 @@ it("drains an abandoned real Supervisor before restoring mocks or admitting the 
   await expect(f.fixture.run()).rejects.toThrow("already retiring");
   const next = await providerSupervisorFixture("daytona-burst", { localOnly: true });
   cleanup.push(() => next.dispose());
-  const snapshot = await new GitHubReader({ token: "fixture-only", owner: "fixture",
-    repo: "provider-qualification" }).readObjective(7);
-  expect(snapshot.factoryEvents!.find((event) => event.event === "FactoryRunStarted")!.runId).toBe(next.runId);
+  const snapshot = await new GitHubReader({
+    token: "fixture-only",
+    owner: "fixture",
+    repo: "provider-qualification",
+  }).readObjective(7);
+  expect(snapshot.factoryEvents!.find((event) => event.event === "FactoryRunStarted")!.runId).toBe(
+    next.runId,
+  );
   expect(f.observedRuns).toEqual([f.fixture.runId]);
   expect(next.activity).toEqual([]);
   expect(f.fixture.activity.some((event) => event.operation === "launch")).toBe(false);
@@ -89,8 +114,12 @@ it("retains unresolved teardown evidence and the next-fixture guard after its bo
   const disposal = f.fixture.dispose();
   const failure = disposal.catch((error: unknown) => error);
   await vi.advanceTimersByTimeAsync(10_001);
-  expect(await failure).toMatchObject({ message: expect.stringContaining("runs and cleanup remain unresolved") });
-  await expect(providerSupervisorFixture("daytona-burst")).rejects.toThrow("retirement is still pending");
+  expect(await failure).toMatchObject({
+    message: expect.stringContaining("runs and cleanup remain unresolved"),
+  });
+  await expect(providerSupervisorFixture("daytona-burst")).rejects.toThrow(
+    "retirement is still pending",
+  );
   await expect(access(f.fixture.repository)).resolves.toBeUndefined();
   expect(vi.isMockFunction(GitHubReader.prototype.readObjective)).toBe(true);
   vi.useRealTimers();
@@ -111,11 +140,17 @@ it("retains unresolved teardown evidence and the next-fixture guard after its bo
 });
 
 it("reports an interrupted run's real failure but does not replay an already-settled expected rejection at disposal", async () => {
-  const entered = deferred(), unblock = deferred();
+  const entered = deferred(),
+    unblock = deferred();
   const expected = new Error("fixture cleanup proof unavailable");
   const f = await providerSupervisorFixture("daytona-burst", {
-    localOnly: true, controllerActivation: true,
-    repositoryFence: async () => { entered.resolve(); await unblock.promise; throw expected; },
+    localOnly: true,
+    controllerActivation: true,
+    repositoryFence: async () => {
+      entered.resolve();
+      await unblock.promise;
+      throw expected;
+    },
   });
   const run = f.run();
   const outcome = run.catch((error: unknown) => error);
@@ -132,7 +167,11 @@ it("reports an interrupted run's real failure but does not replay an already-set
   vi.unstubAllGlobals();
   await rm(f.repository, { recursive: true, force: true });
   const settled = await providerSupervisorFixture("daytona-burst", {
-    localOnly: true, controllerActivation: true, repositoryFence: async () => { throw expected; },
+    localOnly: true,
+    controllerActivation: true,
+    repositoryFence: async () => {
+      throw expected;
+    },
   });
   cleanup.push(() => settled.dispose());
   await expect(settled.run()).rejects.toBe(expected);

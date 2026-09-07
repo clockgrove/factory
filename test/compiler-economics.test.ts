@@ -74,18 +74,30 @@ const policy: RunPolicy = {
   },
 };
 function item(id: string, overrides: Partial<CompilerWorkItemInput> = {}): CompilerWorkItemInput {
+  const acceptance = overrides.acceptance ?? [`${id} returns the expected result`];
+  const validationCommands = overrides.validationCommands ?? ["npm test"];
   return {
     id,
     title: id,
     goal: `Implement ${id}`,
-    acceptance: [`${id} returns the expected result`],
+    acceptance,
     scope: [`src/${id}.ts`],
     dependsOn: [],
     preconditions: [],
     outOfScope: [],
     conventions: [],
     baseSha: "a".repeat(40),
-    validationCommands: ["npm test"],
+    validationCommands,
+    validation: overrides.validation ?? [
+      {
+        tier: "mechanical",
+        criteria: acceptance,
+        rationale: "The selected repository command is bound to these fixture outcomes.",
+        evidenceCommands: [validationCommands[0]!],
+      },
+    ],
+    criterionRisks:
+      overrides.criterionRisks ?? acceptance.map((criterion) => ({ criterion, risk: "ordinary" })),
     requirements: {
       os: ["linux"],
       architecture: ["x64"],

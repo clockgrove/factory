@@ -142,6 +142,39 @@ export const DeliveryHintSchema = z
     }
   });
 
+export const ValidationDesignSchema = z
+  .array(
+    z
+      .object({
+        tier: z.enum(["mechanical", "semantic", "visual", "deterministic-simulation"]),
+        criteria: shortList(boundedText(2_000)).min(1),
+        rationale: boundedText(2_000).optional(),
+        evidenceCommands: shortList(boundedText(1_000), 32).optional(),
+      })
+      .strict(),
+  )
+  .min(1)
+  .max(4);
+
+export const CriterionRiskAssessmentSchema = z
+  .array(
+    z
+      .object({
+        criterion: boundedText(2_000),
+        risk: z.enum([
+          "ordinary",
+          "safety",
+          "security",
+          "destructive-action",
+          "accounting",
+          "recovery",
+        ]),
+      })
+      .strict(),
+  )
+  .min(1)
+  .max(64);
+
 export const WorkerPacketSchema = z
   .object({
     goal: boundedText(4_000),
@@ -154,6 +187,8 @@ export const WorkerPacketSchema = z
     context: ContextManifestSchema.optional(),
     changeSurface: ChangeSurfaceSchema.optional(),
     delivery: DeliveryHintSchema.optional(),
+    criterionRisks: CriterionRiskAssessmentSchema.optional(),
+    validation: ValidationDesignSchema.optional(),
     baseSha: gitSha,
     validationCommands: shortList(boundedText(1_000), 32).min(1),
     requirements: ExecutionRequirementsSchema,
@@ -163,6 +198,39 @@ export const WorkerPacketSchema = z
 
 export type ExecutionRequirements = z.infer<typeof ExecutionRequirementsSchema>;
 export type WorkerPacket = z.infer<typeof WorkerPacketSchema>;
+
+/** Legacy packets conservatively retain semantic review of every criterion. */
+export function semanticReviewCriteria(packet: WorkerPacket): string[] {
+  if (!packet.validation) return [...packet.acceptanceCriteria];
+  const accepted = new Set(packet.acceptanceCriteria);
+  const seenTiers = new Set<string>();
+  const mapped = new Map<string, typeof packet.validation>();
+  for (const entry of packet.validation) {
+    if (
+      seenTiers.has(entry.tier) ||
+      entry.criteria.some((criterion) => !accepted.has(criterion)) ||
+      new Set(entry.criteria).size !== entry.criteria.length ||
+      !entry.rationale ||
+      !entry.evidenceCommands ||
+      new Set(entry.evidenceCommands).size !== entry.evidenceCommands.length
+    )
+      return [...packet.acceptanceCriteria];
+    seenTiers.add(entry.tier);
+    for (const criterion of entry.criteria)
+      mapped.set(criterion, [...(mapped.get(criterion) ?? []), entry]);
+  }
+  return packet.acceptanceCriteria.filter((criterion) => {
+    const routes = mapped.get(criterion);
+    if (!routes?.length) return true;
+    if (routes.some((entry) => entry.tier === "semantic" || entry.tier === "visual")) return true;
+    return !routes.some(
+      (entry) =>
+        (entry.tier === "mechanical" || entry.tier === "deterministic-simulation") &&
+        entry.evidenceCommands!.length > 0 &&
+        entry.evidenceCommands!.every((command) => packet.validationCommands.includes(command)),
+    );
+  });
+}
 
 export function parseWorkerPacket(input: unknown): WorkerPacket {
   const packet = WorkerPacketSchema.parse(input);

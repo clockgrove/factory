@@ -57,6 +57,14 @@ function item(
     conventions: [],
     baseSha: sha,
     validationCommands: value.commands,
+    validation: [
+      {
+        tier: "mechanical",
+        criteria: value.entry.criteria.map((criterion) => criterion.text),
+        rationale: "The prepared corpus case binds its authoritative commands to these criteria.",
+        evidenceCommands: value.commands,
+      },
+    ],
     requirements: {
       os: ["linux"],
       architecture: ["x64"],

@@ -22,6 +22,14 @@
       "dependsOn": [],
       "baseSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "validationCommands": ["npm test", "npm run typecheck"],
+      "validation": [
+        {
+          "tier": "mechanical",
+          "criteria": ["Tests pass", "Build output exists"],
+          "rationale": "The repository test and typecheck commands establish these exact outcomes.",
+          "evidenceCommands": ["npm test", "npm run typecheck"]
+        }
+      ],
       "requirements": {
         "os": ["linux"],
         "architecture": ["x64"],
@@ -45,6 +53,14 @@
       "dependsOn": ["implementation"],
       "baseSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "validationCommands": ["npm test"],
+      "validation": [
+        {
+          "tier": "mechanical",
+          "criteria": ["Tests pass"],
+          "rationale": "The repository test command establishes this exact outcome.",
+          "evidenceCommands": ["npm test"]
+        }
+      ],
       "requirements": {
         "os": ["linux"],
         "architecture": ["x64"],

@@ -134,12 +134,33 @@ console.log(JSON.stringify({type:'turn.completed', usage:{input_tokens:4, output
 
   it("gives the real management adapter candidate files rather than the dirty controller checkout", async () => {
     const input = await fixture();
+    const deterministicCriterion = "slugify returns the exact normalized output";
+    const semanticCriterion = "slugify errors are clear to first-time users";
+    input.packet.acceptanceCriteria = [deterministicCriterion, semanticCriterion];
+    input.packet.validation = [
+      {
+        tier: "mechanical",
+        criteria: [deterministicCriterion],
+        rationale: "Exact output is machine-verifiable.",
+        evidenceCommands: ["node --test"],
+      },
+      {
+        tier: "semantic",
+        criteria: [semanticCriterion],
+        rationale: "Clarity requires judgment.",
+        evidenceCommands: [],
+      },
+    ];
     const original = JSON.stringify(input);
     let path = "";
     const runStructured = vi.fn(async (cwd: string, _schema: unknown, prompt: string) => {
       path = cwd;
       expect(prompt).toContain("This is a pre-publication artifact review");
       expect(prompt).toContain("Evaluate only packet.acceptanceCriteria");
+      expect(prompt).toContain("criterion-specific semantic/visual subset");
+      expect(prompt).toContain("must not be reviewed again");
+      expect(prompt).toContain(semanticCriterion);
+      expect(prompt).not.toContain(deterministicCriterion);
       expect(prompt).toContain("reject it as a malformed phase criterion");
       expect(prompt).toContain(
         "Ignore such lifecycle or graph-order prose outside acceptanceCriteria",

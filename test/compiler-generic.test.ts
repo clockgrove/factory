@@ -33,18 +33,30 @@ async function repository(documents: Record<string, string>) {
 }
 const sha = "a".repeat(40);
 function item(id: string, options: Partial<CompilerWorkItemInput> = {}): CompilerWorkItemInput {
+  const acceptance = options.acceptance ?? [`${id} returns the expected value`];
+  const validationCommands = options.validationCommands ?? ["npm test"];
   return {
     id,
     title: id,
     goal: `Implement ${id}`,
-    acceptance: [`${id} returns the expected value`],
+    acceptance,
     scope: [`src/${id}.ts`],
     dependsOn: [],
     preconditions: [],
     outOfScope: [],
     conventions: [],
     baseSha: sha,
-    validationCommands: ["npm test"],
+    validationCommands,
+    validation: options.validation ?? [
+      {
+        tier: "mechanical",
+        criteria: acceptance,
+        rationale: "The selected repository command is bound to these fixture outcomes.",
+        evidenceCommands: [validationCommands[0]!],
+      },
+    ],
+    criterionRisks:
+      options.criterionRisks ?? acceptance.map((criterion) => ({ criterion, risk: "ordinary" })),
     requirements: {
       os: ["linux"],
       architecture: ["x64"],

@@ -53,6 +53,11 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
   transports and 403/429 feedback. This removes the fixed 226-normal-write hourly cliff, preserves
   lease priority and circuit breaking, coalesces adjacent validation budget reconciliations, and
   reports mutation/pacing overhead with runtime economics.
+- Objective compilation now explicitly classifies each criterion's risk and assigns it to an evidence-grounded mechanical,
+  semantic, visual, or deterministic-simulation tier. Exact and protected-risk gates are no longer
+  mechanically duplicated into semantic acceptance, while genuinely dual-tier criteria retain both
+  checks and compiled Work Items explain the selection. Partial, legacy, or ungrounded routing fails
+  closed by retaining semantic review for every criterion without a valid deterministic binding.
 - An authenticated cancellation of an already-started activation can retire exactly owned resources
   after an external branch advance, without granting execution on the changed base. Known work and
   usage are retained; unknown resource termination still refuses terminal cleanup. Unavailable native

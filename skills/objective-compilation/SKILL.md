@@ -34,7 +34,8 @@ Every Work Item must contain:
 - complete `requirements`: OS, architecture, tools, services, operator-allowed network destinations,
   an empty permitted-secret list, optional resource/time bounds, and `trust`;
 - a bounded repository-derived `context` manifest, mechanically classified `changeSurface`,
-  criterion-linked validation tiers, and a topology-consistent `delivery` hint;
+  criterion-linked validation tiers with an evidence-grounded rationale, and a topology-consistent
+  `delivery` hint;
 - a conservative `economicReview` based only on known validation/runtime needs (never invent live
   paid measurements);
 - `artifactContract: "clockgrove.factory/artifact-v1"`.
@@ -62,6 +63,18 @@ architecture, CPU, memory, disk and timeout values as proposals: the trusted com
 with pinned `.factory/execution-requirements.json` evidence, the active run policy, or named defaults.
 Do not infer sizing from apparent task complexity. Absent architecture evidence stays portable,
 ordinary artifact storage remains backend-managed, and Work Item timeout cannot exceed policy.
+
+Classify each acceptance criterion explicitly and exactly once as ordinary, safety, security,
+destructive-action, accounting, or recovery, then assign it to the least expensive sufficient validation tier. Use mechanical
+validation alone for exact output, file-mode, lifecycle, and other machine-verifiable outcomes;
+semantic review for behavior or qualitative judgment that commands cannot establish; and both only
+when the criterion combines protected risk or exact evidence with genuine judgment. Safety,
+security, destructive-action, accounting, and recovery requirements always retain a deterministic
+gate. Never label protected behavior ordinary merely because the criterion uses a synonym such as
+overwrite, purge, API key, expose, charge, ledger, backup, or failover. Every non-semantic tier cites exact entries from `validationCommands`; never claim a generic
+command proves a criterion unless observed repository tests or scoped test changes bind that command
+to it. Reuse one authoritative artifact or command result across criteria instead of requesting the
+same evidence twice.
 
 ## Mechanical self-check
 

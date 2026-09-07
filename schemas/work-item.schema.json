@@ -5,7 +5,7 @@
   "description": "One compiled Work Item: an Objective's sub-issue (§3.1), described fully enough to become both a GitHub issue and an Agent Tasks prompt (§8's Work Packet -> prompt) with no further judgment required at dispatch time.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["id", "title", "goal", "acceptance", "scope", "baseSha", "validationCommands", "requirements", "artifactContract"],
+  "required": ["id", "title", "goal", "acceptance", "criterionRisks", "scope", "baseSha", "validationCommands", "requirements", "artifactContract"],
   "properties": {
     "id": {
       "type": "string",
@@ -30,6 +30,21 @@
       "type": "array",
       "description": "Explicit, checkable repository-artifact criteria (§8). Each entry must be verifiable from the candidate artifact and pre-publication validation evidence: the semantic check (§5.2) never relies on the agent's self-report (§11.7) and never requires a later Factory lifecycle outcome.",
       "items": { "type": "string", "minLength": 1, "maxLength": 2000 },
+      "minItems": 1,
+      "maxItems": 64
+    },
+    "criterionRisks": {
+      "type": "array",
+      "description": "Exactly one explicit risk classification for each acceptance criterion. Non-ordinary risks require a deterministic validation tier.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["criterion", "risk"],
+        "properties": {
+          "criterion": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "risk": { "enum": ["ordinary", "safety", "security", "destructive-action", "accounting", "recovery"] }
+        }
+      },
       "minItems": 1,
       "maxItems": 64
     },
@@ -111,7 +126,9 @@
         "type": "object", "additionalProperties": false, "required": ["tier", "criteria"],
         "properties": {
           "tier": { "enum": ["mechanical", "semantic", "visual", "deterministic-simulation"] },
-          "criteria": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } }
+          "criteria": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+          "rationale": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "evidenceCommands": { "type": "array", "maxItems": 32, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } }
         }
       }
     },

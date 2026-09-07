@@ -170,6 +170,7 @@ describe("Codex management backend", () => {
                 title: "Implement code",
                 goal: "Implement code",
                 acceptance: ["Tests pass"],
+                criterionRisks: [{ criterion: "Tests pass", risk: "ordinary" }],
                 scope: ["src/code.ts"],
                 preconditions: [],
                 outOfScope: [],
@@ -177,6 +178,14 @@ describe("Codex management backend", () => {
                 dependsOn: [],
                 baseSha: "a".repeat(40),
                 validationCommands: ["npm test"],
+                validation: [
+                  {
+                    tier: "mechanical",
+                    criteria: ["Tests pass"],
+                    rationale: "The repository test command establishes the criterion.",
+                    evidenceCommands: ["npm test"],
+                  },
+                ],
                 requirements: {
                   os: ["linux"],
                   architecture: ["x64"],

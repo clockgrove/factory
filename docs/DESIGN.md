@@ -403,8 +403,17 @@ produced without repository configuration, Factory escalates before launch.
 
 ### Optional external code review
 
-Factory's independent semantic acceptance review is mandatory: it evaluates the Work Item's
-criteria against the exact artifact and independent validation evidence before publication. An
+Factory's independent semantic acceptance review phase is mandatory before publication, but its
+acceptance work is criterion-specific: it evaluates only behavior, visual results, or qualitative
+judgment that deterministic evidence cannot establish. Exact outputs, file modes, lifecycle facts,
+and other machine-verifiable criteria remain bound to repository-grounded deterministic validation
+without being duplicated into semantic acceptance. Safety, security, destructive-action,
+accounting, and recovery criteria are classified explicitly per criterion, always retain deterministic
+gates, and also receive semantic review
+when their behavioral or judgment component genuinely requires both tiers. The compiled Work Item
+records the risk classification, selected tiers, rationale, and exact command bindings; one evidence
+artifact may cover multiple criteria. Malformed, partial, legacy, or ungrounded routing fails closed by
+retaining semantic review for any criterion without a valid deterministic binding. An
 automatic GitHub Copilot PR review is a separate, optional second opinion, not that acceptance
 review and not a requirement for using Factory. Factory does not request Copilot PR reviews by
 default or enable automatic-review settings. Repository, organization, or personal GitHub settings
@@ -741,7 +750,14 @@ part of the protocol; it is not accepted as an inert field.
 ## Management backends
 
 Mechanical scheduling never calls a model. A Management Backend receives narrow evidence and a
-strict output schema for initial compilation and independent semantic review. Bounded retries carry
+strict output schema for initial compilation and criterion-specific independent semantic review.
+The management compiler explicitly classifies each criterion's risk, routes it to the least expensive
+sufficient tier, and binds deterministic claims to repository-observed commands. Deterministic
+post-validation rejects
+unknown commands, unsupported specialized tiers, incomplete criterion coverage, and protected-risk
+criteria without a deterministic gate or understated protected risk; absent, incomplete, or
+ungrounded routing conservatively retains semantic review.
+Bounded retries carry
 the previous attempt's sanitized failure evidence as untrusted diagnostic data; the Supervisor never
 widens scope, trust, backend permissions, or budget during retry. Structurally invalid compiled graphs
 fail before their first GitHub issue write, while exhausted or unsafe work escalates with durable

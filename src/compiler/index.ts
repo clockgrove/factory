@@ -26,9 +26,16 @@ import {
   type RepositoryFacts,
 } from "../repository-profiles/index.js";
 import { groundExecutionRequirements } from "./requirements.js";
+import {
+  type CriterionValidationDesign,
+  type CriterionRiskAssessment,
+  type CriterionValidationTier,
+  inferCriterionRisk,
+  validateCriterionValidationDesign,
+} from "./validation-design.js";
 
 export type ConflictClass = "parallel-safe" | "exclusive" | "generated" | "large-binary";
-export type ValidationTier = "mechanical" | "semantic" | "visual" | "deterministic-simulation";
+export type ValidationTier = CriterionValidationTier;
 export type DeliveryRelationship = "root" | "continue-stack" | "sibling" | "join-after-merge";
 export type CompilerWorkItem = {
   id: string;
@@ -50,7 +57,8 @@ export type CompilerWorkItem = {
     dependencyEvidence: Array<{ workItem: string; commit: string }>;
   };
   changeSurface: { mergeClass: ConflictClass; exclusiveResources: string[] };
-  validation: { tier: ValidationTier; criteria: string[] }[];
+  validation: CriterionValidationDesign[];
+  criterionRisks: CriterionRiskAssessment[];
   delivery: {
     group: string;
     relationship: DeliveryRelationship;
@@ -81,8 +89,12 @@ export const ExclusiveResourcesSchema = z
   .max(64);
 export type CompilerWorkItemInput = Omit<
   CompilerWorkItem,
-  "context" | "changeSurface" | "validation" | "delivery" | "economicReview"
-> & { exclusiveResources?: string[] | undefined };
+  "context" | "changeSurface" | "validation" | "criterionRisks" | "delivery" | "economicReview"
+> & {
+  exclusiveResources?: string[] | undefined;
+  validation?: CriterionValidationDesign[] | undefined;
+  criterionRisks?: CriterionRiskAssessment[] | undefined;
+};
 export type CompileInput = {
   title: string;
   baseSha: string;
@@ -177,8 +189,19 @@ export function canonicalizeObjective(input: CompilerObjective): CompilerObjecti
     ...(w.validation
       ? {
           validation: [...w.validation]
-            .map((v) => ({ ...v, criteria: sorted(v.criteria) }))
+            .map((v) => ({
+              ...v,
+              criteria: sorted(v.criteria),
+              evidenceCommands: sorted(v.evidenceCommands),
+            }))
             .sort((a, b) => a.tier.localeCompare(b.tier)),
+        }
+      : {}),
+    ...(w.criterionRisks
+      ? {
+          criterionRisks: [...w.criterionRisks].sort((a, b) =>
+            a.criterion.localeCompare(b.criterion),
+          ),
         }
       : {}),
   }));
@@ -245,7 +268,14 @@ export function validateCompiledObjective(
           `invented validation command in ${w.id}: ${JSON.stringify(invalid.slice(0, 200))}; repository-observed commands: ${JSON.stringify(observed).slice(0, 600)}. Use an observed command or specialize an observed bare node --test with concrete existing or Work Item-scoped JavaScript test files; flags, shell syntax, and unplanned targets are not allowed.`,
         );
     }
-    if (!w.context || !w.changeSurface || !w.validation || !w.delivery || !w.economicReview)
+    if (
+      !w.context ||
+      !w.changeSurface ||
+      !w.validation ||
+      !w.criterionRisks ||
+      !w.delivery ||
+      !w.economicReview
+    )
       throw new Error(`missing compiler analysis record in ${w.id}`);
     if (
       w.context.mustRead.length > 64 ||
@@ -253,12 +283,26 @@ export function validateCompiledObjective(
       w.context.dependencyEvidence.length > 64
     )
       throw new Error(`unbounded context manifest in ${w.id}`);
-    if (
-      w.validation.length < 1 ||
-      w.validation.length > 4 ||
-      w.validation.some((v) => v.criteria.length < 1 || v.criteria.length > 64)
-    )
-      throw new Error(`invalid validation design in ${w.id}`);
+    const validationProfile =
+      commandEvidence && !Array.isArray(commandEvidence)
+        ? profileRepository({
+            files: commandEvidence.files.filter((file) =>
+              w.scope.some((path) =>
+                path.endsWith("/") ? file.path.startsWith(path) : file.path === path,
+              ),
+            ),
+            ...(commandEvidence.scripts === undefined ? {} : { scripts: commandEvidence.scripts }),
+          })
+        : undefined;
+    validateCriterionValidationDesign({
+      itemId: w.id,
+      acceptance: w.acceptance,
+      validationCommands: w.validationCommands,
+      validation: w.validation,
+      criterionRisks: w.criterionRisks,
+      deterministicSimulation: validationProfile?.deterministicSimulation ?? true,
+      visualValidation: validationProfile?.visualValidation ?? true,
+    });
     if (w.changeSurface.exclusiveResources.length > 64)
       throw new Error(`unbounded exclusive resources in ${w.id}`);
     if (w.changeSurface.mergeClass === "parallel-safe" && w.changeSurface.exclusiveResources.length)
@@ -268,9 +312,6 @@ export function validateCompiledObjective(
       !w.changeSurface.exclusiveResources.length
     )
       throw new Error(`missing exclusive resource in ${w.id}`);
-    const associated = new Set(w.validation.flatMap((v) => v.criteria));
-    if (w.acceptance.some((c) => !associated.has(c)))
-      throw new Error(`unvalidated acceptance criterion in ${w.id}`);
     if (!w.economicReview.conservative || w.economicReview.paidMeasurementRequired)
       throw new Error(`non-conservative economic review in ${w.id}`);
   }
@@ -370,7 +411,12 @@ export function compileObjective(input: CompileInput): CompilerObjective {
     throw new Error("LFS repository facts do not match the pinned compilation base");
   const analyzed = input.workItems.map((w) => {
     const explicitResources = sorted(ExclusiveResourcesSchema.parse(w.exclusiveResources ?? []));
-    const { exclusiveResources: _claims, ...source } = w;
+    const {
+      exclusiveResources: _claims,
+      validation: authoredValidation,
+      criterionRisks: authoredCriterionRisks,
+      ...source
+    } = w;
     const scope = w.scope.map((p) => RepositoryScopePathSchema.parse(p));
     const manifest = buildContextManifest(facts, scope);
     const scopedFacts = facts.files.filter((f) =>
@@ -389,16 +435,18 @@ export function compileObjective(input: CompileInput): CompilerObjective {
         : explicitResources.length
           ? "exclusive"
           : "parallel-safe";
-    const scopedProfile = profileRepository({
-      files: scopedFacts,
-      ...(facts.scripts === undefined ? {} : { scripts: facts.scripts }),
-    });
-    const tiers: ValidationTier[] = [
-      "mechanical",
-      "semantic",
-      ...(scopedProfile.deterministicSimulation ? ["deterministic-simulation" as const] : []),
-      ...(scopedProfile.visualValidation ? ["visual" as const] : []),
+    const validation = authoredValidation ?? [
+      {
+        tier: "semantic" as const,
+        criteria: w.acceptance,
+        rationale:
+          "No criterion-specific deterministic binding was supplied; conservative semantic review is retained.",
+        evidenceCommands: [],
+      },
     ];
+    const criterionRisks =
+      authoredCriterionRisks ??
+      w.acceptance.map((criterion) => ({ criterion, risk: inferCriterionRisk(criterion) }));
     const resources = sorted([
       ...explicitResources,
       ...(generated || binary ? (scopedFacts.length ? scopedFacts.map((f) => f.path) : scope) : []),
@@ -418,7 +466,8 @@ export function compileObjective(input: CompileInput): CompilerObjective {
       validationCommands: w.validationCommands,
       context: { ...manifest, dependencyEvidence: [] },
       changeSurface: { mergeClass, exclusiveResources: resources },
-      validation: tiers.map((tier) => ({ tier, criteria: w.acceptance })),
+      validation,
+      criterionRisks,
       economicReview: {
         conservative: true,
         rationale: "Assessment pending graph validation",

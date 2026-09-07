@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { parseFactoryEvent } from "../src/protocol/events.js";
 import {
   failureFixture, failureHash, failureObjectiveBody, rawFailureGit, proveFailureContent,
   assertFailedValidation, assertConflictPreserved, assertFailureAccounting,
@@ -38,11 +39,11 @@ function observation(failed = true) {
     { kind: "run", event: "FactoryRunStarted", repository, activationRequestId: `${namespace}-activate`, policy: authority.policy, policyDigest: digest },
     { kind: "graph", event: "GraphCompiled", graphSize: 1, graphDigest: digest, baseSha: base },
     { kind: "graph", event: "GraphProjected", graphSize: 1, graphDigest: digest },
-    { kind: "budget", event: "BudgetReserved", phase: "management", unit: "model_tokens", modelInvocationId: "compile-base", policyDigest: digest, directorEpoch: 1, amount: 0 },
+    { kind: "budget", event: "BudgetReserved", phase: "management", unit: "model_tokens", modelInvocationId: "compile-base", usageId: "invocation-compile-base", policyDigest: digest, directorEpoch: 1, amount: 0 },
     { kind: "budget", event: "BudgetReconciled", phase: "management", unit: "model_tokens", modelInvocationId: "compile-base", policyDigest: digest, directorEpoch: 1, usageId: "compile", amount: 10 },
     { ...item, kind: "attempt", event: "AttemptReserved" },
     { ...item, kind: "budget", event: "BudgetReserved", phase: "execution", unit: "local_milliseconds", amount: 600000 },
-    { ...item, kind: "budget", event: "BudgetReserved", phase: "execution", unit: "model_tokens", modelInvocationId: "worker-7-1", amount: 0 },
+    { ...item, kind: "budget", event: "BudgetReserved", phase: "execution", unit: "model_tokens", modelInvocationId: "worker-7-1", usageId: "invocation-worker-7-1", amount: 0 },
     { ...item, kind: "attempt", event: "AttemptStarted" },
     { ...item, kind: "budget", event: "BudgetReconciled", phase: "execution", unit: "model_tokens", modelInvocationId: "worker-7-1", usageId: "worker-7-1", amount: 20 },
     { ...item, kind: "attempt", event: "AttemptSucceeded", artifactDigest: digest, reportedModelTokens: 20 },
@@ -58,8 +59,10 @@ function observation(failed = true) {
     { kind: "run", event: "FactoryRunEscalated" },
   );
   else events.push({ kind: "command", event: "RunPauseRequested", requestId: `${namespace}-pause` });
-  const receipts = events.map((event, index) => ({ commentId: index + 100, actorId: 2,
-    event: { ...event, objective: 3, runId: "original", sequence: index + 1, at: "2026-09-06T10:00:00.000Z" } as Event }));
+  const receipts = events.map((event, index) => {
+    const receipt: Event = { ...event, protocol: "clockgrove.factory/v2", objective: 3, runId: "original", sequence: index + 1, at: "2026-09-06T10:00:00.000Z" };
+    return { commentId: index + 100, actorId: 2, event: event.kind === "budget" && event.unit === "model_tokens" ? parseFactoryEvent(receipt) : receipt };
+  });
   return { authority, value: { receipts, status: { run: { runId: "original" } }, children: [{ number: 7, state: "open" }] } };
 }
 
@@ -101,6 +104,8 @@ describe("installed failed-validation/conflict authority and evidence", () => {
     expect(() => assertFailureAccounting(events.filter((event) => event !== actual))).toThrow(/unknown model/);
     expect(() => assertFailureAccounting(events.map((event) => event === actual ? { ...event, sequence: 1 } : event))).toThrow();
     expect(() => assertFailureAccounting(events.map((event) => event === actual ? { ...event, directorEpoch: 2 } : event))).toThrow();
+    expect(() => assertFailureAccounting(events.map((event) => event.event === "BudgetReserved" && event.modelInvocationId ? { ...event, amount: 1 } : event))).toThrow();
+    expect(() => assertFailureAccounting(events.map((event) => event === actual ? { ...event, modelInvocationId: undefined } : event))).toThrow(/linkage/);
   });
 
   it("refuses repeated work after conflict and requires explicit same-run cancellation closeout", () => {

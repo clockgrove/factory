@@ -40,4 +40,21 @@ describe("installed qualifier model accounting", () => {
     expect(qualificationModelAccounting([legacy]).total).toBe(37);
     expect(() => qualificationModelAccounting([legacy], {requireMarkers: true})).toThrow(/linkage/);
   });
+  it("refuses fabricated actual-shaped markers and counters that production would reject", () => {
+    const rows = fixture();
+    for (const patch of [
+      { usageId: "invocation-worker-8-1", amount: 0 },
+      { usageEvidence: "conservative-reservation" },
+      { reportedModelUsage: { inputTokens: 30, outputTokens: 8 } },
+      { reportedModelUsage: { inputTokens: 30, outputTokens: 7, cachedInputTokens: 31 } },
+      { reportedModelUsage: {} },
+      { reportedModelUsage: { inputTokens: -1 } },
+    ]) expect(() => qualificationModelAccounting([rows[0]!, { ...rows[1], ...patch }], { requireMarkers: true })).toThrow();
+    const unbound = rows.map((row) => ({ ...row, policyDigest: undefined, directorEpoch: undefined }));
+    expect(() => qualificationModelAccounting(unbound, { requireMarkers: true })).toThrow(/binding/);
+    // Absence of optional breakdown is not absence of a supplied scalar actual.
+    expect(qualificationModelAccounting(rows, { requireMarkers: true }).total).toBe(37);
+    const zero = rows.map((row) => row.event === "BudgetReconciled" ? { ...row, amount: 0, reportedModelUsage: { inputTokens: 0, outputTokens: 0 } } : row);
+    expect(qualificationModelAccounting(zero, { requireMarkers: true })).toMatchObject({ total: 0, unresolved: [] });
+  });
 });

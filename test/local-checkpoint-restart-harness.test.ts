@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
+import { parseFactoryEvent } from "../src/protocol/events.js";
 import { boundedPolicy } from "../scripts/verify-live-objective.mjs";
 import {
   assertControllerUnit,
@@ -138,9 +139,10 @@ function observation(count = 1, completed = false) {
     const actual = { ...event, modelInvocationId: event.usageId, policyDigest: digest, directorEpoch: 1 };
     return [{ ...actual, event: "BudgetReserved", amount: 0, usageId: `invocation-${String(event.usageId)}` }, actual];
   });
-  const receipts: Array<{ event: Record<string, unknown> }> = journal.map((event, i) => ({
-    event: { objective: 1, runId: "original", sequence: i + 1, ...event },
-  }));
+  const receipts: Array<{ event: Record<string, unknown> }> = journal.map((event, i) => {
+    const receipt = { protocol: "clockgrove.factory/v2", at: "2026-09-06T10:00:00.000Z", objective: 1, runId: "original", sequence: i + 1, ...event };
+    return { event: event.kind === "budget" && event.unit === "model_tokens" ? parseFactoryEvent(receipt) : receipt };
+  });
   return {
     receipts,
     status: {
@@ -181,14 +183,22 @@ describe("same-generation initial startup observation", () => {
   it("allows a distinct accounted changed-head review without authorizing a repeat worker", () => {
     const ready = observation();
     const review = ready.receipts.find(({event}) => event.event === "BudgetReconciled" && event.workItem && event.phase === "management")!.event;
-    const invocation = `review-${"c".repeat(64)}`;
+    const invocation = `integration-review-${"c".repeat(64)}`;
+    const validation = ready.receipts.find(({event}) => event.event === "BudgetReconciled" && event.unit === "validation_milliseconds")!.event;
     ready.receipts.push(
       {event: {...review, event: "BudgetReserved", usageId: `invocation-${invocation}`, modelInvocationId: invocation, amount: 0, sequence: 1000}},
       {event: {...review, usageId: invocation, modelInvocationId: invocation, sequence: 1001}},
+      {event: {...validation, usageId: `integration-validation-${"d".repeat(64)}`, sequence: 1002}},
     );
     ready.status.summary.economics.usage.model_tokens.value += 100;
     ready.status.summary.economics.modelTokenBreakdown.reconciledCalls++;
     expect(checkpointReady(ready, authority, pause)).toBe(true);
+    const changed = structuredClone(ready);
+    changed.receipts.find(({event}) => event.usageId === invocation)!.event.usageId = `review-${"c".repeat(64)}`;
+    expect(() => checkpointReady(changed, authority, pause)).toThrow(/original artifact review/);
+    const duplicate = structuredClone(ready);
+    duplicate.receipts.push({event: {...duplicate.receipts.at(-1)!.event, sequence: 1003}});
+    expect(() => checkpointReady(duplicate, authority, pause)).toThrow(/candidate validation accounting repeated/);
   });
   const identity = {
     unit: "exact.service",

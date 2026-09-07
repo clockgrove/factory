@@ -37,6 +37,8 @@ const prefix = (kind, event) =>
 export function nativeQualificationEvents(evidence) {
   assert.ok(Array.isArray(evidence.events) && evidence.events.length <= 50000);
   const runId = evidence.runResult.runId;
+  const activationRequestId = evidence.runRequest?.tool === "factory_activate"
+    ? evidence.runRequest.arguments?.requestId : undefined;
   assert.ok(Number.isSafeInteger(evidence.actor.id) && evidence.actor.id > 0);
   const locations = new Set([
     evidence.objective.number,
@@ -44,7 +46,10 @@ export function nativeQualificationEvents(evidence) {
   ]);
   return deduplicateQualificationReceipts(
     evidence.events
-      .filter((event) => event.runId === runId)
+      .filter((event) => event.runId === runId || (activationRequestId !== undefined && (
+        (event.event === "ActivationRequested" && event.requestId === activationRequestId) ||
+        (["ActivationRejected", "ActivationCancellationRequested"].includes(event.event) && event.activationRequestId === activationRequestId)
+      )))
       .map((raw) => {
         assert.equal(raw.authorId, evidence.actor.id, "foreign receipt actor");
         assert.equal(raw.author.toLowerCase(), evidence.actor.login.toLowerCase());
@@ -247,6 +252,7 @@ function controllerAuthority(evidence, events, start, context) {
   const activation = one(events.filter((event) => event.event === "ActivationRequested"),
     "controller qualification activation missing or repeated");
   assert.equal(activation.requestId, args.requestId);
+  assert.equal(activation.runId, activation.requestId, "activation journal has a different request identity");
   assert.equal(activation.objective, start.objective);
   assert.equal(activation.repository, start.repository);
   assert.equal(activation.baseSha, start.baseSha);
@@ -266,15 +272,15 @@ function controllerAuthority(evidence, events, start, context) {
 function controllerContext(evidence) {
   if (evidence.controllerQualification === undefined) return undefined;
   const { peers, generation } = evidence.controllerQualification;
-  assert.ok(Array.isArray(peers) && peers.length === 1, "qualification requires one exact peer");
+  assert.ok(Array.isArray(peers) && peers.length <= 1, "qualification supports only an explicit singleton or one exact peer");
   exactKeys(generation, ["controllerId", "epoch", "controllerPolicyDigest"]);
   assert.ok(typeof generation.controllerId === "string" && generation.controllerId.length > 0 && generation.controllerId.length <= 200);
   assert.ok(Number.isSafeInteger(generation.epoch) && generation.epoch > 0);
   digest(generation.controllerPolicyDigest);
   const group = [evidence, ...peers];
-  assert.equal(new Set(group.map((entry) => entry.objective.number)).size, 2);
-  assert.equal(new Set(group.map((entry) => entry.runResult.runId)).size, 2);
-  assert.equal(new Set(group.flatMap((entry) => entry.children.map((child) => child.number))).size, 6);
+  assert.equal(new Set(group.map((entry) => entry.objective.number)).size, group.length);
+  assert.equal(new Set(group.map((entry) => entry.runResult.runId)).size, group.length);
+  assert.equal(new Set(group.flatMap((entry) => entry.children.map((child) => child.number))).size, group.length * 3);
   for (const entry of group) {
     assert.equal(entry.repository, evidence.repository);
     assert.deepEqual(entry.actor, evidence.actor);

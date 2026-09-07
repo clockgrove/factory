@@ -40,7 +40,8 @@ import {
 } from "./verify-local-faults.mjs";
 import { ownedSchedulingScopes, schedulingRequest } from "./verify-local-scheduling.mjs";
 import { isQualificationModelMarker, qualificationModelAccounting } from "./qualification-model-accounting.mjs";
-import { readQualificationMergeProof as readCheckpointMergeProof } from "./qualification-merge-proof.mjs";
+import { selectQualificationPublicationRecord } from "./qualification-merge-proof.mjs";
+import { observeNativeMergeProofs, assertNativeMergeProof } from "./qualification-sibling-refresh-proof.mjs";
 import {
   appServerCheckpointArm,
   appServerCheckpointPath,
@@ -431,11 +432,22 @@ export function checkpointFacts(
       const native = completedReceipt(
         itemEvents.filter(
           (event) =>
-            event.event === "BudgetReconciled" && event.phase === phase && event.unit === unit,
+            event.event === "BudgetReconciled" && event.phase === phase && event.unit === unit &&
+            event.usageId === undefined,
         ),
         "native execution/validation usage missing or repeated",
       );
       assert.ok(Number.isSafeInteger(native.amount) && native.amount >= 0);
+      if (unit === "validation_milliseconds") {
+        const candidates = itemEvents.filter((event) => event.event === "BudgetReconciled" && event.phase === phase && event.unit === unit && event.usageId !== undefined);
+        const identities = new Set();
+        for (const candidate of candidates) {
+          assert.match(candidate.usageId, /^integration-validation-[a-f0-9]{64}$/);
+          assert.ok(!identities.has(candidate.usageId), "candidate validation accounting repeated");
+          identities.add(candidate.usageId);
+          assert.ok(Number.isSafeInteger(candidate.amount) && candidate.amount >= 0);
+        }
+      }
     }
     const succeeded = completedReceipt(
       itemEvents.filter((event) => event.event === "AttemptSucceeded"),
@@ -470,9 +482,10 @@ export function checkpointFacts(
           event.phase === "management" &&
           /^review-[a-f0-9]{64}$/.test(event.usageId),
       );
-    settled(reviews.length >= 1, "review usage missing");
+    completedReceipt(reviews, "original artifact review missing or repeated");
+    const candidateReviews = usage.filter((event) => event.workItem === reserved.workItem && event.attempt === 1 && event.phase === "management" && /^integration-review-[a-f0-9]{64}$/.test(event.usageId));
     assert.ok(Number.isSafeInteger(worker.amount) && worker.amount >= 0);
-    for (const review of reviews)
+    for (const review of [...reviews, ...candidateReviews])
       assert.ok(Number.isSafeInteger(review.amount) && review.amount >= 0);
     settled(succeeded.reportedModelTokens !== undefined, "terminal worker counter unavailable");
     assert.equal(
@@ -484,7 +497,7 @@ export function checkpointFacts(
   assert.ok(usage.every((event) => event === compile || reservations.some((reserved) =>
     event.workItem === reserved.workItem && event.attempt === reserved.attempt &&
     (event.phase === "execution" ||
-      (event.phase === "management" && /^review-[a-f0-9]{64}$/.test(event.usageId)))
+      (event.phase === "management" && /^(?:integration-)?review-[a-f0-9]{64}$/.test(event.usageId)))
   )), "model usage outside compiled work");
   for (const reserved of run.filter((event) =>
     ["BudgetReserved", "CapacityReserved"].includes(event.event),
@@ -930,10 +943,11 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     harnessPath,
     "scripts/qualification-model-accounting.mjs",
     "scripts/qualification-receipts.mjs",
+    "scripts/qualification-sibling-refresh-proof.mjs",
+    "scripts/qualification-merge-proof.mjs",
     ...(authority.sessionRecovery
       ? [
           "scripts/qualification-app-server-checkpoint.mjs",
-          "scripts/qualification-sibling-refresh-proof.mjs",
         ]
       : []),
     ...(extension.harnessPaths ?? []),
@@ -1339,14 +1353,17 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
           namespace: authority.namespace,
           createdIssue: result,
         });
-      } else if (action === "activate")
-        result = await call("factory_activate", {
+      } else if (action === "activate") {
+        const args = {
           objectiveNumber: evidence.objective.number,
           requestId: `${authority.namespace}-activate`,
           baseSha: evidence.base,
           policy: authority.policy,
-        });
-      else
+        };
+        evidence.runRequest = { tool: "factory_activate", arguments: { owner, repo, ...args } };
+        save();
+        result = await call("factory_activate", args);
+      } else
         result = await call(`factory_${action}`, {
           objectiveNumber: evidence.objective.number,
           requestId: `${authority.namespace}-${action}`,
@@ -1554,30 +1571,51 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
       );
       assert.equal(observation.children.length, 3);
       assert.ok(observation.children.every((item) => item.state === "closed"));
-      const publications = events.filter((event) => event.event === "PublicationRecorded");
-      assert.equal(publications.length, 3);
-      for (const publication of publications) {
-        const pull = (
-          await request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
-            pull_number: publication.pullRequest,
-          })
-        ).data;
-        const integration = unique(
-          events.filter(
-            (event) =>
-              event.event === "AttemptIntegrated" &&
-              event.workItem === publication.workItem &&
-              event.attempt === publication.attempt,
-          ),
-          "integration identity missing",
-        );
-        const proof = await readCheckpointMergeProof(
-          { request: (route, parameters) => octokit.request(route, parameters) },
-          { repository: authority.repository, pull, publication, integration },
-        );
-        (evidence.mergeProofs ??= []).push(proof);
-        save();
+      // Re-read actor/location and immutable graph identities for the same existing
+      // proof consumer used by sibling qualification. Never relabel PublicationRecorded
+      // with a refreshed head just to satisfy the old one-parent proof.
+      const objective = (await request("GET /repos/{owner}/{repo}/issues/{issue_number}", { issue_number: evidence.objective.number })).data;
+      assert.equal(objective.id, evidence.objective.id);
+      assert.equal(objective.user.id, evidence.actor.id);
+      assert.equal(hash(objective.body), evidence.objectiveBodyDigest);
+      const children = await list("GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues", { issue_number: objective.number });
+      assert.equal(children.length, 3);
+      assert.ok(children.every((child) => child.state === "closed"));
+      const comments = [], dependencies = [];
+      for (const issue of [objective, ...children]) {
+        const rows = await list("GET /repos/{owner}/{repo}/issues/{issue_number}/comments", { issue_number: issue.number });
+        for (const row of rows) {
+          assert.equal(row.html_url, `https://github.com/${authority.repository}/issues/${issue.number}#issuecomment-${row.id}`);
+          comments.push(row);
+        }
+        if (issue !== objective) dependencies.push({ workItem: issue.number, blockedBy: await list("GET /repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by", { issue_number: issue.number }) });
       }
+      const receipts = authenticatedFaultEvents(comments, evidence.actor, objective.number);
+      for (const receipt of observation.receipts)
+        assert.ok(receipts.some((fresh) => hash(fresh.event) === hash(receipt.event)), "original completion receipt disappeared");
+      const proofEvents = receipts.map((receipt) => {
+        const comment = unique(comments.filter((row) => row.id === receipt.commentId), "receipt location ambiguous");
+        return { ...receipt.event, author: comment.user.login, authorId: comment.user.id, receiptUrl: comment.html_url };
+      });
+      const publications = proofEvents.filter((event) => event.event === "PublicationRecorded");
+      const pulls = [];
+      for (const pullNumber of new Set(publications.map((event) => event.pullRequest)))
+        pulls.push((await request("GET /repos/{owner}/{repo}/pulls/{pull_number}", { pull_number: pullNumber })).data);
+      const start = unique(proofEvents.filter((event) => event.event === "FactoryRunStarted"), "one original start required");
+      const delivery = { repository: authority.repository, namespace: authority.namespace, actor: evidence.actor,
+        objective, children, dependencies, pulls, events: proofEvents, policy: authority.policy, base: evidence.base,
+        nativeDefaultBranch: start.baseBranch, runRequest: evidence.runRequest,
+        runResult: { runId: observation.status.run.runId },
+        controllerQualification: { peers: [], generation: Object.fromEntries(["controllerId", "epoch", "controllerPolicyDigest"].map((key) => [key, before[key]])) } };
+      evidence.checkpointDelivery = delivery;
+      delivery.mergeProofs = await observeNativeMergeProofs({ evidence: delivery, request });
+      for (const proof of delivery.mergeProofs) {
+        const integration = unique(proofEvents.filter((event) => event.event === "AttemptIntegrated" && event.workItem === proof.workItem), "integration identity missing");
+        const publication = selectQualificationPublicationRecord(publications.filter((event) => event.workItem === integration.workItem && event.attempt === integration.attempt));
+        assertNativeMergeProof(delivery, proof, { repository: authority.repository, pull: unique(pulls.filter((pull) => pull.number === proof.pullRequest), "PR identity missing"), publication, integration });
+      }
+      evidence.mergeProofs = delivery.mergeProofs;
+      save();
       assert.deepEqual(installedBundleIdentity(pluginRoot), artifact);
       for (const entry of harnessFiles)
         assert.equal(

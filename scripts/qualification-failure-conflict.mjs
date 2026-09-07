@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { qualificationNamespace, qualificationNamespaceMarker } from "./verify-live-objective.mjs";
 import { deduplicateQualificationReceipts } from "./qualification-receipts.mjs";
+import { qualificationModelAccounting } from "./qualification-model-accounting.mjs";
 
 export const failureHash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 export const failureBlob = (bytes) => createHash("sha1").update(`blob ${Buffer.byteLength(bytes)}\0`).update(bytes).digest("hex");
@@ -136,6 +137,8 @@ export function failureEvents(observation, authority) {
 }
 
 export function assertFailureAccounting(run) {
+  const model = qualificationModelAccounting(run, { requireMarkers: true });
+  assert.equal(model.unresolved.length, 0, "unknown model invocation cannot be qualified");
   const actual = run.filter((event) => event.event === "BudgetReconciled");
   const identity = (event) => JSON.stringify([event.runId, event.objective, event.workItem, event.attempt, event.phase, event.unit, event.usageId]);
   const keys = new Set();
@@ -145,17 +148,11 @@ export function assertFailureAccounting(run) {
     assert.ok(!keys.has(identity(event)), "duplicate actual accounting identity");
     keys.add(identity(event));
   }
-  for (const marker of run.filter((event) => event.event === "BudgetReserved" && event.modelInvocationId)) {
-    const closed = one(actual.filter((event) => event.modelInvocationId === marker.modelInvocationId), "unknown model invocation cannot be qualified");
-    for (const key of ["runId", "objective", "workItem", "attempt", "phase", "unit", "policyDigest", "directorEpoch"]) assert.equal(closed[key], marker[key]);
-    assert.ok(closed.sequence > marker.sequence);
-  }
   for (const reserved of run.filter((event) => event.event === "BudgetReserved" && !event.modelInvocationId))
     one(actual.filter((event) => identity(event) === identity(reserved)), "unreconciled native budget");
-  const model = actual.filter((event) => event.unit === "model_tokens");
-  assert.ok(model.some((event) => event.phase === "management") && model.some((event) => event.phase === "execution"));
+  assert.ok(model.usage.some((event) => event.phase === "management") && model.usage.some((event) => event.phase === "execution"));
   assert.ok(actual.some((event) => event.unit === "local_milliseconds" && event.phase === "execution"));
-  return { modelTokens: model.reduce((sum, event) => sum + event.amount, 0), actual };
+  return { modelTokens: model.total, actual };
 }
 
 export function assertFailedValidation(observation, authority, fixture) {

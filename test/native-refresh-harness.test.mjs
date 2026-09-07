@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
+import { parseFactoryEvent } from "../src/protocol/events.js";
 import { createValidationEvidence } from "../src/validation/evidence.js";
 import { bindValidationToPublishedHead } from "../src/validation/plan.js";
 import { bindMergeCandidateValidation } from "../src/publication/merge-candidate.js";
@@ -519,7 +520,7 @@ function fixture({ recoveredPublication = false, pinRecovered = false, controlle
       bindings: graph.workItems.map((item, index) => ({ compilerId: item.id, issueNodeId: `I_${2 + offset + index}`, issueNumber: 2 + offset + index })),
     }, graphRead.commit.oid);
     evidence.events.push(...[
-      { ...fields, sequence: 1, event: "ActivationRequested", requestId: `${runId}-activate`, requestedBy: "operator", repository, baseSha: base, policy, policyDigest },
+      parseFactoryEvent({ ...fields, protocol: "clockgrove.factory/v2", kind: "run", runId: `${runId}-activate`, sequence: 1, event: "ActivationRequested", requestId: `${runId}-activate`, requestedBy: "operator", repository, baseSha: base, policy, policyDigest, controllerProtocolMin: "clockgrove.factory/v2", controllerProtocolMax: "clockgrove.factory/v2" }),
       { ...fields, sequence: 3, event: "ControllerObserved", ...generation },
       { ...fields, sequence: 5, event: "GraphProjected", graphDigest: hash(canonical(graph)), graphSize: 3, projectionRef, projectionBlobSha: projection.blobOid },
     ].map(metadata));
@@ -582,6 +583,50 @@ function controllerPair() {
 }
 
 describe("installed controller peer merge proof", () => {
+  it("proves singleton controller refresh without inventing a peer or relabelling publication", async () => {
+    const f = fixture({ controller: true });
+    f.evidence.controllerQualification = {
+      peers: [], generation: { controllerId: "controller-original", epoch: 1, controllerPolicyDigest: hash("controller-policy") },
+    };
+    const originals = structuredClone(f.inputs.map((input) => input.publication));
+    const proofs = await observeNativeMergeProofs(f, f.read);
+    expect(proofs).toHaveLength(3);
+    expect(f.evidence.nativeMergeEvidence.some((entry) => entry.refreshed > 0)).toBe(true);
+    for (const [index, proof] of proofs.entries()) assertNativeMergeProof(f.evidence, proof, f.inputs[index]);
+    expect(f.inputs.map((input) => input.publication)).toEqual(originals);
+    const changed = structuredClone(f.inputs[1]);
+    changed.publication.headSha = changed.pull.head.sha;
+    expect(() => assertNativeMergeProof(f.evidence, proofs[1], changed)).toThrow();
+    const candidateReview = f.evidence.nativeMergeEvidence[1].reads.find((entry) => entry.request.ref?.includes("integration-candidate-"));
+    expect(candidateReview).toBeDefined();
+    candidateReview.value.content = candidateReview.value.content.replace('"accepted":true', '"accepted":false');
+    expect(() => assertNativeMergeProof(f.evidence, proofs[1], f.inputs[1])).toThrow();
+  });
+  it("does not let singleton controller mode import an unevidenced external/peer target", async () => {
+    const f = controllerPair();
+    f.receiver.evidence.controllerQualification.peers = [];
+    await expect(observeNativeMergeProofs({ evidence: f.receiver.evidence, request: f.request }, f.read)).rejects.toThrow();
+  });
+  it.each(["run-id", "withdrawal", "rejection"])("retains exact activation journal identity and rejects %s", async (kind) => {
+    const f = fixture({ controller: true });
+    f.evidence.controllerQualification = { peers: [], generation: { controllerId: "controller-original", epoch: 1, controllerPolicyDigest: hash("controller-policy") } };
+    const activation = f.evidence.events.find((event) => event.event === "ActivationRequested");
+    expect(activation.runId).toBe(activation.requestId);
+    if (kind === "run-id") activation.runId = f.evidence.runResult.runId;
+    else f.evidence.events.push(parseFactoryEvent({ ...activation, event: kind === "withdrawal" ? "ActivationCancellationRequested" : "ActivationRejected", activationRequestId: activation.requestId, requestId: `${kind}-request`, sequence: 1000, reason: "qualification operator refused this activation" }));
+    await expect(observeNativeMergeProofs(f, f.read)).rejects.toThrow();
+  });
+  it("excludes unrelated request journals without accepting a matching ID under another Objective", async () => {
+    const f = fixture({ controller: true });
+    const activation = f.evidence.events.find((event) => event.event === "ActivationRequested");
+    const unrelated = parseFactoryEvent({ ...activation, runId: "unrelated-request", requestId: "unrelated-request", sequence: 1001 });
+    f.evidence.events.push(unrelated);
+    expect(nativeQualificationEvents(f.evidence).filter((event) => event.event === "ActivationRequested")).toHaveLength(1);
+    const wrongObjective = parseFactoryEvent({ ...activation, objective: activation.objective + 1, sequence: 1002 });
+    f.evidence.events.push(wrongObjective);
+    f.evidence.controllerQualification = { peers: [], generation: { controllerId: "controller-original", epoch: 1, controllerPolicyDigest: hash("controller-policy") } };
+    await expect(observeNativeMergeProofs(f, f.read)).rejects.toThrow(/another Objective/);
+  });
   it("proves exact peer ancestry and later same-run starting bases with the original shared generation", async () => {
     const f = controllerPair();
     // A takeover does not erase the original common generation that admitted the pair.

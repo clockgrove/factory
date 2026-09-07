@@ -38,6 +38,45 @@ export function checkpointFailure(
   error: unknown,
   boundary?: string,
 ): { boundary: string; code: string };
+export interface CheckpointObservationDiagnostic {
+  boundary: "observation";
+  phase: string;
+  stage: string;
+  failedAt: string;
+  category:
+    | "http-refusal"
+    | "http"
+    | "timeout"
+    | "aborted"
+    | "transport"
+    | "mcp"
+    | "parse"
+    | "assertion"
+    | "deadline"
+    | "filesystem"
+    | "unavailable";
+  code: string;
+  httpStatus?: number;
+  mcpCode?: number;
+}
+export function checkpointObservationFailure(
+  error: unknown,
+  context?: { phase?: string; stage?: string; now?: number },
+): CheckpointObservationDiagnostic;
+export function checkpointObservationRead<T>(
+  operation: (remainingMs: number) => T | Promise<T>,
+  context: {
+    phase: string;
+    stage: string;
+    deadline: number;
+    record(
+      diagnostic: CheckpointObservationDiagnostic & { attempt: number; retry: boolean },
+      error: unknown,
+    ): unknown;
+    now?(): number;
+    wait?(milliseconds: number): Promise<unknown>;
+  },
+): Promise<T>;
 export function checkpointOperatorFailure(
   tool: string,
   args: Record<string, unknown>,
@@ -87,10 +126,23 @@ export function appServerHoldReady(
   observation: unknown,
   authority: CheckpointAuthority,
   arm: unknown,
+  pauseRequestId?: string,
 ): boolean;
 export function runAppServerCheckpointScenario(
   port: CheckpointPort,
   authority: CheckpointAuthority,
+): Promise<unknown>;
+export function continueAppServerCheckpointScenario(
+  port: CheckpointPort,
+  authority: CheckpointAuthority,
+  context: {
+    held: unknown;
+    original: unknown;
+    sessionProofs: unknown[];
+    scopes: unknown;
+    originalEvents: unknown[];
+    restartAction?: "restart" | "start";
+  },
 ): Promise<unknown>;
 /** Internal committed adapters only; no operator-supplied module is loaded. */
 export interface CheckpointExtension {

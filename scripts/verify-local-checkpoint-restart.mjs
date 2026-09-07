@@ -141,6 +141,17 @@ export function checkpointOperatorFailure(tool, args, response) {
   };
 }
 
+export function checkpointStatusSnapshotRetry(tool, args, failure) {
+  return (
+    tool === "factory_status" &&
+    Number.isSafeInteger(args.objectiveNumber) &&
+    failure.isError === true &&
+    failure.truncated === false &&
+    failure.text ===
+      `Objective #${args.objectiveNumber} sub-issues changed during snapshot; retry the read`
+  );
+}
+
 export function checkpointFailure(error, boundary) {
   const boundaries = new Set([
     "controller-config",
@@ -1390,10 +1401,25 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
       maxTotalTimeout: boundedTimeout,
     });
   };
-  const call = async (name, args = {}, timeoutMs = 120000) => {
+  const call = async (name, args = {}, timeoutMs = 120000, retrySnapshot = false) => {
     const response = await invoke(name, args, timeoutMs);
     if (response.isError) {
-      evidence.operatorFailure = checkpointOperatorFailure(name, args, response);
+      const failure = checkpointOperatorFailure(name, args, response);
+      if (
+        retrySnapshot &&
+        observationDeadline !== undefined &&
+        checkpointStatusSnapshotRetry(name, args, failure)
+      ) {
+        const retries = (evidence.observationRetries ??= []);
+        if (retries.length >= 128) {
+          retries.splice(1, 1);
+          evidence.omittedObservationRetries = (evidence.omittedObservationRetries ?? 0) + 1;
+        }
+        retries.push({ ...failure, phase: observationPhase });
+        save();
+        throw new CheckpointPending("Objective snapshot changed coherently");
+      }
+      evidence.operatorFailure = failure;
       save();
     }
     assert.ok(!response.isError, "installed operator call unavailable");
@@ -1478,6 +1504,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
           "factory_status",
           { objectiveNumber: objective.number },
           Math.min(120000, remainingMs),
+          true,
         ),
       ),
       children: children.map(({ number, state }) => ({ number, state })),
@@ -1681,7 +1708,14 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
           ? 270
           : Math.ceil((observationWindowMinutes * 60000) / 5000);
       for (let count = 0; count < maximumPolls; count++) {
-        const observation = await observe();
+        let observation;
+        try {
+          observation = await observe();
+        } catch (error) {
+          if (!(error instanceof CheckpointPending)) throw error;
+          await sleep(Math.min(5000, Math.max(0, deadline - Date.now())));
+          continue;
+        }
         if (await observationRead("accept", () => accept(observation))) {
           if (extension.observationWindowMinutes !== undefined) checkpointTimeout(deadline, 1);
           observationDeadline = undefined;

@@ -104,6 +104,11 @@ export function checkpointOperatorFailure(
   truncated: boolean;
   observedAt: string;
 };
+export function checkpointStatusSnapshotRetry(
+  tool: string,
+  args: Record<string, unknown>,
+  failure: ReturnType<typeof checkpointOperatorFailure>,
+): boolean;
 export function checkpointReady(
   observation: unknown,
   authority: CheckpointAuthority,

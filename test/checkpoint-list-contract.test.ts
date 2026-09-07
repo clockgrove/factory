@@ -26,7 +26,8 @@ describe("checkpoint namespace list adapter", () => {
   });
 
   it("retries only successful absent namespace observations through the real list adapter", async () => {
-    const request = vi.fn()
+    const request = vi
+      .fn()
       .mockResolvedValueOnce({ data: [] })
       .mockResolvedValueOnce({ data: [createdIssue] });
     const wait = vi.fn(async () => {});
@@ -45,15 +46,21 @@ describe("checkpoint namespace list adapter", () => {
     const failure = Object.assign(Error("read refused"), { status: 403 });
     const request = vi.fn().mockRejectedValue(failure);
     const wait = vi.fn(async () => {});
-    await expect(waitForCreatedObjectiveNamespace({
-      list: createCheckpointList(request), namespace, createdIssue, wait,
-    })).rejects.toBe(failure);
+    await expect(
+      waitForCreatedObjectiveNamespace({
+        list: createCheckpointList(request),
+        namespace,
+        createdIssue,
+        wait,
+      }),
+    ).rejects.toBe(failure);
     expect(request).toHaveBeenCalledTimes(1);
     expect(wait).not.toHaveBeenCalled();
   });
 
   it("enforces the caller's entry limit across pages without returning a partial list", async () => {
-    const request = vi.fn()
+    const request = vi
+      .fn()
       .mockResolvedValueOnce({ data: Array.from({ length: 100 }, () => createdIssue) })
       .mockResolvedValueOnce({ data: Array.from({ length: 51 }, () => createdIssue) });
     const list = createCheckpointList(request);
@@ -70,20 +77,26 @@ describe("checkpoint namespace list adapter", () => {
       return { data: Array.from({ length: 100 }, () => createdIssue) };
     });
     const list = createCheckpointList(request, { now: () => now });
-    await expect(list("GET /repos/{owner}/{repo}/issues", {}, 1000, {
-      deadline: instant + 2000,
-    })).rejects.toMatchObject({ code: "CHECKPOINT_DEADLINE" });
+    await expect(
+      list("GET /repos/{owner}/{repo}/issues", {}, 1000, {
+        deadline: instant + 2000,
+      }),
+    ).rejects.toMatchObject({ code: "CHECKPOINT_DEADLINE" });
     expect(request).toHaveBeenCalledExactlyOnceWith(
-      "GET /repos/{owner}/{repo}/issues", { page: 1, per_page: 100 }, 2000,
+      "GET /repos/{owner}/{repo}/issues",
+      { page: 1, per_page: 100 },
+      2000,
     );
   });
 
   it("rejects an already expired explicit deadline before any read", async () => {
     const request = vi.fn(async () => ({ data: [] }));
     const list = createCheckpointList(request, { now: () => instant });
-    await expect(list("GET /repos/{owner}/{repo}/issues", {}, 1000, {
-      deadline: instant,
-    })).rejects.toMatchObject({ code: "CHECKPOINT_DEADLINE" });
+    await expect(
+      list("GET /repos/{owner}/{repo}/issues", {}, 1000, {
+        deadline: instant,
+      }),
+    ).rejects.toMatchObject({ code: "CHECKPOINT_DEADLINE" });
     expect(request).not.toHaveBeenCalled();
   });
 

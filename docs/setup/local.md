@@ -91,8 +91,9 @@ the controller reconstructs work from GitHub. The authenticated Objective commen
 MCP queue—is the cross-process journal; centralized request-ID semantics make exact duplicate writes
 safe after a lost response. For one-shot interactive work, the skill can instead make one long-lived
 `factory_run` call. Both modes default to
-`codex-sdk/local-worktree`, fall back to `codex-cli/local-worktree`, adapt admission to CPU and memory
-headroom up to eight workers, and never use paid compute. The equivalent foreground source-checkout
+`codex-sdk/local-worktree`, fall back to `codex-cli/local-worktree`, limit fixed admission to at most
+two workers within CPU and memory headroom, and never use paid compute. Adaptive concurrency is an
+explicit run-policy choice. The equivalent foreground source-checkout
 command is:
 
 ```bash

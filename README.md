@@ -230,8 +230,8 @@ For new requests, `economics.maxModelTokens` requires an explicit
 durably observed management and reporting local-worker tokens, not a provider hard cap.
 Already-started concurrent invocations can each overshoot it. If you require `"hard"` enforcement,
 Factory rejects the request before model work because its current model integrations cannot
-enforce that ceiling. It never silently substitutes the observed mode. Recorded older runs retain
-their original policy and are reported as `legacy-observed-stop`. Opaque sandbox/managed-agent token use remains unavailable; Factory instead limits
+enforce that ceiling. It never silently substitutes the observed mode. Resuming a run preserves its
+recorded policy and usage. Opaque sandbox/managed-agent token use remains unavailable; Factory instead limits
 authorized resource minutes or session admissions. Those limits are not guaranteed dollar caps.
 Factory is open-source orchestration for providers with which the user has a direct relationship:
 the user owns provider billing, subscriptions and provider-side spending limits. Unavailable costs

@@ -1477,7 +1477,7 @@ function registerApplicationTool(
               .record(z.unknown())
               .optional()
               .describe(
-                "Complete immutable run policy. Omit for adaptive local-only execution; paid backends are never inferred.",
+                "Complete immutable run policy. Omit for fixed local-only execution up to two workers with physical resource safeguards. Adaptive concurrency is explicit; paid backends are never inferred.",
               ),
           }
         : ["doctor", "plan", "recovery-plan", "status", "explain", "replay"].includes(operation)

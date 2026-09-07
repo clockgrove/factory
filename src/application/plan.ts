@@ -12,6 +12,7 @@ import {
   type ManagementUsage,
 } from "../management/backend.js";
 import { DEFAULT_RUN_POLICY, parseRunPolicy, resolveModelSelection } from "../protocol/policy.js";
+import { assertNewRunBudgetIntent } from "../protocol/budget-intent.js";
 import type { ApplicationSnapshot } from "./services.js";
 import { safeDiagnosticMessage } from "./doctor.js";
 import { assertCleanPlanningFiles, inspectLocalCheckout } from "./checkout.js";
@@ -242,6 +243,18 @@ export async function buildPlanReport(input: {
   let observedUsage: ManagementUsage | null = null;
   const preparationDiagnostics: PlanReport["diagnostics"] = [];
   try {
+    // Explicit planning starts a fresh model call; historical policy readability
+    // must not silently authorize an ambiguous threshold here.
+    const policy = parseRunPolicy(input.request.policy ?? DEFAULT_RUN_POLICY);
+    assertNewRunBudgetIntent(policy);
+    if (policy.economics?.maxModelTokens === 0)
+      throw new Error("model-token observed threshold exhausted before compilation");
+    if (policy.economics)
+      preparationDiagnostics.push({
+        status: "warning",
+        summary:
+          "explicit observed-stop model-token threshold is not a provider hard cap; this compilation may overshoot it, and returned usage is response-only, not an activated run budget",
+      });
     const management = input.planning?.management;
     if (!management) throw new Error("management compiler is not configured");
     if (!input.planning?.readRepositoryLayout)
@@ -261,7 +274,6 @@ export async function buildPlanReport(input: {
       throw new Error(
         `repository layout is incomplete${layout.totalFiles ? ` (${layout.totalFiles} files)` : ""}; refusing under-grounded compilation`,
       );
-    const policy = parseRunPolicy(input.request.policy ?? DEFAULT_RUN_POLICY);
     const modelSelection = resolveModelSelection(policy, "compile");
     const repositoryLfs = await assertLocalLfsAvailable(input.planning.repositoryPath, baseSha);
     const tree = await materializePinnedCompilationTree(input.planning.repositoryPath, baseSha);

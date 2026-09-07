@@ -3,6 +3,7 @@ import { PROTOCOL_V2 } from "../protocol/limits.js";
 import { implicitRestartBlocker } from "../control/recovery.js";
 import { latestActivation } from "../control/activations.js";
 import { DEFAULT_RUN_POLICY, parseRunPolicy, policyDigest } from "../protocol/policy.js";
+import { assertNewRunBudgetIntent } from "../protocol/budget-intent.js";
 import {
   deduplicateFactoryEvents,
   encodeEventComment,
@@ -264,6 +265,10 @@ export class FactoryApplicationService {
       // Omitted fields on exact replay mean the accepted immutable binding,
       // not today's branch head or defaults. Resolve under the request gate.
       const policy = parseRunPolicy(input.policy ?? activation?.policy ?? DEFAULT_RUN_POLICY);
+      // An exact old request may return its original receipt; it cannot grant a
+      // different activation today's implicit legacy budget interpretation.
+      if (!activation || policyDigest(policy) !== activation.policyDigest)
+        assertNewRunBudgetIntent(policy);
       const baseSha =
         input.baseSha ?? activation?.baseSha ?? (await this.requireBaseSha(current.defaultBranch));
       return {

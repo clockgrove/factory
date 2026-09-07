@@ -112,6 +112,20 @@ unknown resources still block replacement. These are deterministic regressions, 
 Publication requires the checks above to pass. Implemented adapters alone do not establish
 end-to-end readiness.
 
+### Prospective two-Objective concurrency allowance
+
+The installed `scripts/verify-local-concurrency.mjs` scenario accepts
+`FACTORY_CONCURRENCY_PER_OBJECTIVE_MAX_MODEL_TOKENS` from 250000 through 500000. Omission
+retains 250000 per Objective. `FACTORY_CONCURRENCY_MAX_MODEL_TOKENS` remains an explicit
+aggregate acknowledgement and must equal exactly twice that selection: the existing 500000
+invocation is unchanged; an explicit 400000 per Objective requires 800000 aggregate.
+Select both values before preflight and activation, only under the corresponding local spending
+authority. These are observed-stop thresholds, not provider-enforced token caps or promises of
+completion. Actual usage is never clamped. One attempt per Work Item, the original 45-minute
+deadline, two one-worker Objectives and the unchanged installed controller ceiling still apply.
+This prospective option does not top up or rewrite any recorded run, policy, digest or failed
+qualification evidence; historical continuation retains its original authority.
+
 `scripts/verify-publish-readiness.mjs` treats this table as release state, not prose. Each required
 gate must occur exactly once and say `Passed`. A passed row must link a checked-in
 `docs/release-evidence/*.json` schema-2 record using a relative link such as

@@ -19,6 +19,7 @@ import { authenticatedFaultEvents, isQuiescentFaultObjective } from "./verify-lo
 import { qualificationModelAccounting } from "./qualification-model-accounting.mjs";
 import {
   installedBundleIdentity,
+  modelTokenLimit,
   objectiveBodyFor,
   qualificationNamespace,
   qualificationNamespaceMarker,
@@ -92,10 +93,14 @@ const policyFor = (authority, index) => ({ ...authority, namespace: authority.na
 
 export function concurrencyAuthority(env) {
   if (env.FACTORY_LOCAL_CONCURRENCY !== "1") return null;
+  const perObjectiveThreshold = modelTokenLimit(
+    env.FACTORY_CONCURRENCY_PER_OBJECTIVE_MAX_MODEL_TOKENS ?? "250000",
+  );
+  const aggregateObservedThreshold = 2 * perObjectiveThreshold;
   assert.equal(
     env.FACTORY_CONCURRENCY_MAX_MODEL_TOKENS,
-    "500000",
-    "aggregate observed threshold must be explicitly 500000",
+    String(aggregateObservedThreshold),
+    "aggregate observed threshold must explicitly equal twice the per-Objective threshold",
   );
   assert.equal(
     env.FACTORY_CHECKPOINT_BACKEND,
@@ -125,7 +130,7 @@ export function concurrencyAuthority(env) {
     FACTORY_CHECKPOINT_PHASE: phase,
     FACTORY_CHECKPOINT_NAMESPACE: namespace,
     FACTORY_CHECKPOINT_EVIDENCE: env.FACTORY_CONCURRENCY_EVIDENCE,
-    FACTORY_CHECKPOINT_MAX_MODEL_TOKENS: "250000",
+    FACTORY_CHECKPOINT_MAX_MODEL_TOKENS: String(perObjectiveThreshold),
     FACTORY_CHECKPOINT_ACK: `${repository}:${unit}:start,pause-drain,restart,resume,stop`,
   });
   authority.policy.maxParallel = 1;
@@ -133,7 +138,7 @@ export function concurrencyAuthority(env) {
   return {
     ...authority,
     namespaces,
-    aggregateObservedThreshold: 500000,
+    aggregateObservedThreshold,
     controllerLocalCeiling: 8,
     authorizedScenarioWorkerMaximum: 2,
   };
@@ -429,7 +434,7 @@ export async function runConcurrencyScenario(port, authority) {
     scope: "installed-two-objective-refill-scoped-pause-inner-contention",
     controllerLocalCeiling: 8,
     authorizedScenarioWorkerMaximum: 2,
-    aggregateObservedThreshold: 500000,
+    aggregateObservedThreshold: authority.aggregateObservedThreshold,
     innerLeaseHeldContention: "observed",
     simultaneousInnerCasCollision: "not-exercised",
     pressure: "not-repeated",

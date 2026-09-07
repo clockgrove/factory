@@ -13,6 +13,7 @@ import {
 import { createValidationEvidence } from "../src/validation/evidence.js";
 import type { WorkerPacket } from "../src/protocol/worker-packet.js";
 import type { ReviewResult } from "../src/management/backend.js";
+import { validateArtifactClean, discardValidationResult } from "../src/validation/clean-run.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -88,6 +89,45 @@ async function fixture() {
 }
 
 describe("exact semantic review materialization", () => {
+  it("binds the actual review command cwd and -C to a real independently validated tree", async () => {
+    const input = await fixture();
+    const validation = await validateArtifactClean(input);
+    input.evidence = validation.evidence;
+    await discardValidationResult(validation);
+    const command = join(input.repository, "fixture-review-command.cjs");
+    // Disposable protocol stand-in, not a model or semantic qualification. This
+    // exercises the real argv/environment/process path after actual validation.
+    await writeFile(command, `#!${process.execPath}
+const assert = require('node:assert/strict');
+const {readFileSync, existsSync} = require('node:fs');
+const {execFileSync} = require('node:child_process');
+const args = process.argv.slice(2);
+const context = JSON.parse(args.at(-1).split('\\n\\n').at(-1));
+assert.equal(args[args.indexOf('-C') + 1], process.cwd());
+assert.equal(process.env.GIT_WORK_TREE, undefined);
+assert.equal(process.env.GIT_INDEX_FILE, undefined);
+assert.match(readFileSync('slugify.js', 'utf8'), /export const slugify/);
+assert.match(readFileSync('clamp.js', 'utf8'), /original/);
+assert.equal(existsSync('untracked-controller.txt'), false);
+assert.equal(execFileSync('git', ['write-tree'], {encoding:'utf8'}).trim(), context.evidence.outputTreeSha);
+console.log(JSON.stringify({type:'item.completed', item:{type:'agent_message', text:JSON.stringify({accepted:true, summary:process.cwd(), unmetCriteria:[], risks:[]})}}));
+console.log(JSON.stringify({type:'turn.completed', usage:{input_tokens:4, output_tokens:2}}));
+`, { mode: 0o700 });
+    vi.stubEnv("GIT_WORK_TREE", input.repository);
+    vi.stubEnv("GIT_INDEX_FILE", join(input.repository, ".git", "index"));
+    const backend = new CodexCliManagementBackend({
+      command,
+      authFile: join(input.repository, "no-fixture-auth.json"),
+      createCodexHome: () => mkdtemp(join(input.repository, "fixture-management-home-")),
+    });
+    const checkpoint = vi.fn(async () => {});
+    const result = await backend.review(input, checkpoint);
+    expect(result.usage).toEqual({ inputTokens: 4, outputTokens: 2 });
+    expect(checkpoint).toHaveBeenCalledExactlyOnceWith(result);
+    expect(result.review.summary).not.toBe(input.repository);
+    await expect(stat(result.review.summary)).rejects.toMatchObject({ code: "ENOENT" });
+  }, 30_000);
+
   it("gives the real management adapter candidate files rather than the dirty controller checkout", async () => {
     const input = await fixture();
     const original = JSON.stringify(input);

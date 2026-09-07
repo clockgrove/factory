@@ -32,26 +32,44 @@ const authority = concurrencyAuthority(env)!;
 describe("prospective concurrency observation window", () => {
   it("keeps omitted and explicit 45-minute authority byte-equivalent", () => {
     const original = JSON.stringify(authority);
-    expect(JSON.stringify(concurrencyAuthority({ ...env, FACTORY_CONCURRENCY_DURATION_MINUTES: "45" })))
-      .toBe(original);
+    expect(
+      JSON.stringify(concurrencyAuthority({ ...env, FACTORY_CONCURRENCY_DURATION_MINUTES: "45" })),
+    ).toBe(original);
     concurrencyAuthority({ ...env, FACTORY_CONCURRENCY_DURATION_MINUTES: "120" });
     expect(JSON.stringify(concurrencyAuthority(env))).toBe(original);
   });
-  it.each(["", "44", "121", "0", "-45", "45.5", "60.0", "1e2", " 60", "60 ", "060", "Infinity", "9007199254740992"])(
-    "refuses invalid duration %s before entering the installed runner", async (duration) => {
-      const run = vi.fn(async () => {});
-      await expect(main({ ...env, FACTORY_CONCURRENCY_DURATION_MINUTES: duration }, run)).rejects.toThrow();
-      expect(run).not.toHaveBeenCalled();
-    },
-  );
+  it.each([
+    "",
+    "44",
+    "121",
+    "0",
+    "-45",
+    "45.5",
+    "60.0",
+    "1e2",
+    " 60",
+    "60 ",
+    "060",
+    "Infinity",
+    "9007199254740992",
+  ])("refuses invalid duration %s before entering the installed runner", async (duration) => {
+    const run = vi.fn(async () => {});
+    await expect(
+      main({ ...env, FACTORY_CONCURRENCY_DURATION_MINUTES: duration }, run),
+    ).rejects.toThrow();
+    expect(run).not.toHaveBeenCalled();
+  });
   it("observes beyond 45 minutes but refuses acceptance or a new action at the original 120-minute boundary", async () => {
     const start = Date.parse("2026-01-01T00:00:00.000Z");
     const now = vi.spyOn(Date, "now").mockReturnValue(start + 80 * 60000);
     const selectedEnv = { ...env, FACTORY_CONCURRENCY_DURATION_MINUTES: "120" };
     const selected = concurrencyAuthority(selectedEnv)!;
     const evidence = {
-      startedAt: new Date(start).toISOString(), actions: [], base: "a".repeat(40),
-      objectives: selected.namespaces.map((namespace, index) => ({ namespace,
+      startedAt: new Date(start).toISOString(),
+      actions: [],
+      base: "a".repeat(40),
+      objectives: selected.namespaces.map((namespace, index) => ({
+        namespace,
         objective: { number: 10 + index },
         // Previously captured terminal progress is deliberately not mutable authority.
         terminalObservation: { status: { run: { state: "completed" } } },
@@ -61,35 +79,57 @@ describe("prospective concurrency observation window", () => {
     try {
       await main(selectedEnv, async (_env, _runner, extension) => {
         if (!extension.extendPort) throw Error("missing production extension");
-        const port = await extension.extendPort({ port: {}, evidence, save: vi.fn(), call,
+        const port = (await extension.extendPort({
+          port: {},
+          evidence,
+          save: vi.fn(),
+          call,
           request: vi.fn(async () => ({ data: { sha: evidence.base } })),
-          list: vi.fn(async () => []), retireClient: vi.fn(),
-        }) as Pick<ConcurrencyPort, "pollPair" | "prepare">;
+          list: vi.fn(async () => []),
+          retireClient: vi.fn(),
+        })) as Pick<ConcurrencyPort, "pollPair" | "prepare">;
         await expect(port.pollPair("completed", () => true)).resolves.toHaveLength(2);
         now.mockReturnValue(start + 120 * 60000 - 1);
-        await expect(port.pollPair("completed", () => {
-          now.mockReturnValue(start + 120 * 60000);
-          return true;
-        })).rejects.toMatchObject({ code: "CHECKPOINT_DEADLINE" });
-        await expect(port.prepare("activate")).rejects.toMatchObject({ code: "CHECKPOINT_DEADLINE" });
+        await expect(
+          port.pollPair("completed", () => {
+            now.mockReturnValue(start + 120 * 60000);
+            return true;
+          }),
+        ).rejects.toMatchObject({ code: "CHECKPOINT_DEADLINE" });
+        await expect(port.prepare("activate")).rejects.toMatchObject({
+          code: "CHECKPOINT_DEADLINE",
+        });
         expect(call).not.toHaveBeenCalled();
         expect(evidence.actions).toEqual([]);
         expect(evidence.startedAt).toBe(new Date(start).toISOString());
       });
-    } finally { now.mockRestore(); }
+    } finally {
+      now.mockRestore();
+    }
   });
   it("bounds independent final artifact reads by the same original remaining time", async () => {
     const now = vi.spyOn(Date, "now").mockReturnValue(10000);
     const failure = Error("bounded read unavailable");
-    const request = vi.fn(async () => { throw failure; });
+    const request = vi.fn(async () => {
+      throw failure;
+    });
     try {
-      await expect(verifyConcurrencyArtifacts(request, authority, "main", [], 11000)).rejects.toBe(failure);
-      expect(request).toHaveBeenCalledWith("GET /repos/{owner}/{repo}/commits/{ref}", { ref: "main" }, 1000);
+      await expect(verifyConcurrencyArtifacts(request, authority, "main", [], 11000)).rejects.toBe(
+        failure,
+      );
+      expect(request).toHaveBeenCalledWith(
+        "GET /repos/{owner}/{repo}/commits/{ref}",
+        { ref: "main" },
+        1000,
+      );
       now.mockReturnValue(11000);
-      await expect(verifyConcurrencyArtifacts(request, authority, "main", [], 11000))
-        .rejects.toMatchObject({ code: "CHECKPOINT_DEADLINE" });
+      await expect(
+        verifyConcurrencyArtifacts(request, authority, "main", [], 11000),
+      ).rejects.toMatchObject({ code: "CHECKPOINT_DEADLINE" });
       expect(request).toHaveBeenCalledTimes(1);
-    } finally { now.mockRestore(); }
+    } finally {
+      now.mockRestore();
+    }
   });
 });
 describe("prospective concurrent qualification attempts", () => {
@@ -115,7 +155,11 @@ describe("prospective concurrent qualification attempts", () => {
     expect(authority).toEqual(original);
     expect(concurrencyAuthority(env)).toEqual(original);
   });
-  it.each([[250000, 45], [400000, 60], [500000, 120]])(
+  it.each([
+    [250000, 45],
+    [400000, 60],
+    [500000, 120],
+  ])(
     "binds both prospective activations to the explicit %i threshold and %i minute window",
     async (limit, minutes) => {
       const selectedEnv = {

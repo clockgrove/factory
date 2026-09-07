@@ -96,8 +96,11 @@ const policyFor = (authority, index) => ({ ...authority, namespace: authority.na
 export function concurrencyAuthority(env) {
   if (env.FACTORY_LOCAL_CONCURRENCY !== "1") return null;
   const duration = env.FACTORY_CONCURRENCY_DURATION_MINUTES ?? "45";
-  assert.match(duration, /^(?:4[5-9]|[5-9][0-9]|1[01][0-9]|120)$/,
-    "concurrency duration must be an integer from 45 through 120 minutes");
+  assert.match(
+    duration,
+    /^(?:4[5-9]|[5-9][0-9]|1[01][0-9]|120)$/,
+    "concurrency duration must be an integer from 45 through 120 minutes",
+  );
   const durationMinutes = Number(duration);
   checkpointDeadline(new Date(0).toISOString(), durationMinutes);
   const perObjectiveThreshold = modelTokenLimit(
@@ -505,7 +508,8 @@ export async function main(env = process.env, run = checkpointMain) {
       }) => {
         assert.equal(typeof retireClient, "function", "owned MCP retirement boundary unavailable");
         const [owner, repo] = authority.repository.split("/");
-        const deadline = () => checkpointDeadline(evidence.startedAt, authority.policy.objectiveTimeoutMinutes);
+        const deadline = () =>
+          checkpointDeadline(evidence.startedAt, authority.policy.objectiveTimeoutMinutes);
         const once = async (action, invoke) => {
           abort.signal.throwIfAborted();
           checkpointTimeout(deadline(), 1);
@@ -842,7 +846,9 @@ export async function main(env = process.env, run = checkpointMain) {
               }),
             ),
           pollPair: async (phase, accept) => {
-            const maximumPolls = Math.ceil(authority.policy.objectiveTimeoutMinutes * 60000 / 15000);
+            const maximumPolls = Math.ceil(
+              (authority.policy.objectiveTimeoutMinutes * 60000) / 15000,
+            );
             for (let count = 0; count < maximumPolls; count++) {
               abort.signal.throwIfAborted();
               checkpointTimeout(deadline(), 1);
@@ -1187,10 +1193,7 @@ export async function main(env = process.env, run = checkpointMain) {
               abort.signal.throwIfAborted();
               const observed = await readOuter();
               if (Date.parse(observed.serverTime) > window.innerExpiry) return;
-              assert.ok(
-                deadline() - Date.now() > 300000,
-                "original completion deadline exhausted",
-              );
+              assert.ok(deadline() - Date.now() > 300000, "original completion deadline exhausted");
               await wait(checkpointTimeout(deadline(), 15000));
             }
             throw Error("original inner lease expiry not observed within bound");
@@ -1364,7 +1367,8 @@ export async function main(env = process.env, run = checkpointMain) {
 
 /** Independent bounded retained-artifact behavior. No checkout hooks, package install or inherited credentials. */
 export async function verifyConcurrencyArtifacts(request, authority, branch, evidence, deadline) {
-  const remaining = (maximumMs) => deadline === undefined ? maximumMs : checkpointTimeout(deadline, maximumMs);
+  const remaining = (maximumMs) =>
+    deadline === undefined ? maximumMs : checkpointTimeout(deadline, maximumMs);
   const originalRequest = request;
   request = (route, args) => originalRequest(route, args, remaining(15000));
   const final = (await request("GET /repos/{owner}/{repo}/commits/{ref}", { ref: branch })).data;

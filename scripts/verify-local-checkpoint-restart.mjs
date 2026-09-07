@@ -1098,8 +1098,10 @@ export function assertControllerUnit(body, expected) {
 
 // The supplied original start is immutable authority, not a fresh phase start.
 export function checkpointDeadline(startedAt, minutes = 45) {
-  assert.ok(Number.isInteger(minutes) && minutes >= 45 && minutes <= 120,
-    "checkpoint observation window must be an integer from 45 through 120 minutes");
+  assert.ok(
+    Number.isInteger(minutes) && minutes >= 45 && minutes <= 120,
+    "checkpoint observation window must be an integer from 45 through 120 minutes",
+  );
   const start = Date.parse(startedAt);
   assert.ok(Number.isFinite(start), "original checkpoint start unavailable");
   return start + minutes * 60000;
@@ -1127,8 +1129,11 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
   const observationWindowMinutes = extension.observationWindowMinutes ?? 45;
   checkpointDeadline(new Date(0).toISOString(), observationWindowMinutes);
   if (extension.observationWindowMinutes !== undefined)
-    assert.equal(observationWindowMinutes, authority.policy.objectiveTimeoutMinutes,
-      "observation window must match prospective Objective policy");
+    assert.equal(
+      observationWindowMinutes,
+      authority.policy.objectiveTimeoutMinutes,
+      "observation window must match prospective Objective policy",
+    );
   assert.equal(process.platform, "linux");
   const home = realpathSync(homedir());
   assert.ok(!home.startsWith("/mnt/"));
@@ -1197,8 +1202,12 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
       route,
       args,
       undefined,
-      extension.observationWindowMinutes === undefined ? timeoutMs
-        : checkpointTimeout(checkpointDeadline(evidence.startedAt, observationWindowMinutes), timeoutMs),
+      extension.observationWindowMinutes === undefined
+        ? timeoutMs
+        : checkpointTimeout(
+            checkpointDeadline(evidence.startedAt, observationWindowMinutes),
+            timeoutMs,
+          ),
     );
   const list = createCheckpointList(request);
   const evidence = {
@@ -1369,8 +1378,13 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     );
   };
   const invoke = async (name, args = {}, timeoutMs = 120000) => {
-    const boundedTimeout = extension.observationWindowMinutes === undefined ? timeoutMs
-      : checkpointTimeout(checkpointDeadline(evidence.startedAt, observationWindowMinutes), timeoutMs);
+    const boundedTimeout =
+      extension.observationWindowMinutes === undefined
+        ? timeoutMs
+        : checkpointTimeout(
+            checkpointDeadline(evidence.startedAt, observationWindowMinutes),
+            timeoutMs,
+          );
     return client.callTool({ name, arguments: { owner, repo, ...args } }, undefined, {
       timeout: boundedTimeout,
       maxTotalTimeout: boundedTimeout,
@@ -1662,8 +1676,10 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
       );
       observationPhase = phase;
       observationDeadline = deadline;
-      const maximumPolls = extension.observationWindowMinutes === undefined ? 270
-        : Math.ceil(observationWindowMinutes * 60000 / 5000);
+      const maximumPolls =
+        extension.observationWindowMinutes === undefined
+          ? 270
+          : Math.ceil((observationWindowMinutes * 60000) / 5000);
       for (let count = 0; count < maximumPolls; count++) {
         const observation = await observe();
         if (await observationRead("accept", () => accept(observation))) {

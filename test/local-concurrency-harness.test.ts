@@ -33,13 +33,14 @@ describe("stale controller stop identity fence", () => {
   const configPath = `/home/example/.config/systemd/user/${unit}`;
   const fields = { Id: unit, LoadState: "loaded", FragmentPath: configPath, DropInPaths: "", NeedDaemonReload: "no", Job: "",
     ActiveState: "failed", SubState: "failed", MainPID: "0", InvocationID: original.invocationId,
-    ExecMainPID: "1234", ExecMainCode: "1", ExecMainStatus: "2", Result: "exit-code" };
-  it("accepts only the exact original non-restarting fatal exit", () => {
+    ExecMainPID: "1234", ExecMainCode: "1", ExecMainStatus: "1", Result: "exit-code" };
+  it("accepts the actual original exit1 failure and still-pending auto-restart, never an assumed exit2", () => {
     expect(() => assertRetiredController(fields, original, configPath)).not.toThrow();
+    expect(() => assertRetiredController({ ...fields, ActiveState: "activating", SubState: "auto-restart" }, original, configPath)).not.toThrow();
   });
   it("refuses active, pending or already replaced controller generations", () => {
     for (const changed of [{ MainPID: "1235" }, { Job: "123 /job/123" }, { InvocationID: "b".repeat(32) },
-      { ActiveState: "activating", SubState: "auto-restart" }, { ExecMainStatus: "1" }, { DropInPaths: "/unexpected.conf" }]) {
+      { ActiveState: "activating", SubState: "start" }, { ExecMainStatus: "2" }, { DropInPaths: "/unexpected.conf" }]) {
       expect(() => assertRetiredController({ ...fields, ...changed }, original, configPath)).toThrow();
     }
   });

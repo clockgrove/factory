@@ -23,17 +23,21 @@ const time = (event) => { const at = Date.parse(event.at); assert.ok(Number.isFi
 const sameAttempt = (a, b) => ["objective", "runId", "workItem", "attempt"].every((key) => a[key] === b[key]);
 const endNames = new Set(["AttemptSucceeded", "AttemptFailed", "AttemptTimedOut", "AttemptCancelled", "AttemptDeferred"]);
 
-/** Only the original fatal-exit unit may be normalized to inactive; never stop a replacement. */
+/** Require an observed original failed incarnation, including its pending auto-restart.
+ * The CLI propagates exit 1, so Restart=on-failure remains in force. This predicate is
+ * not an atomic generation-conditional stop operation.
+ */
 export function assertRetiredController(fields, original, configPath) {
   assert.equal(fields.Id, original.unit); assert.equal(fields.LoadState, "loaded");
   assert.equal(fields.FragmentPath, configPath); assert.equal(fields.DropInPaths, "");
   assert.equal(fields.NeedDaemonReload, "no");
   assert.ok(["", "0", "0 /"].includes(fields.Job), "controller replacement job appeared");
-  assert.equal(fields.ActiveState, "failed"); assert.equal(fields.SubState, "failed");
+  assert.ok((fields.ActiveState === "failed" && fields.SubState === "failed") ||
+    (fields.ActiveState === "activating" && fields.SubState === "auto-restart"), "original controller is not in its failed/pending-restart boundary");
   assert.equal(fields.MainPID, "0", "controller replacement is active");
   assert.equal(fields.InvocationID, original.invocationId, "controller invocation changed before stop");
   assert.equal(fields.ExecMainPID, String(original.pid));
-  assert.equal(fields.ExecMainCode, "1"); assert.equal(fields.ExecMainStatus, "2");
+  assert.equal(fields.ExecMainCode, "1"); assert.equal(fields.ExecMainStatus, "1");
   assert.equal(fields.Result, "exit-code");
 }
 const policyFor = (authority, index) => ({ ...authority, namespace: authority.namespaces[index] });
@@ -450,7 +454,8 @@ export async function main(env = process.env, run = checkpointMain) {
             const rows = raw.split("\n").map((line) => { const index = line.indexOf("="); assert.ok(index > 0); return [line.slice(0, index), line.slice(index + 1)]; });
             const fields = Object.fromEntries(rows); assert.equal(Object.keys(fields).length, rows.length);
             assertRetiredController(fields, original, spec.configPath);
-            evidence.innerContention.staleActor.unitBeforeStop = fields; save();
+            evidence.innerContention.staleActor.unitBeforeStop = fields;
+            evidence.innerContention.staleActor.stopBoundary = "exact-pre-call-observation; public-stop-is-not-generation-conditional"; save();
             return call("factory_controller_stop", { repository: authority.checkout, requestId: `${authority.namespace}-stop-stale` });
           });
           await port.controller("inactive");

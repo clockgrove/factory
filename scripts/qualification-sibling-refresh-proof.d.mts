@@ -8,6 +8,12 @@ export function assertQualificationCheckpoint(
 export function nativeProofReader(
   request: (route: string, parameters: Record<string, unknown>) => Promise<unknown>,
 ): (demand: unknown) => Promise<unknown>;
+/** Foreground evidence remains same-run-only. Controller exercises may supply
+ * controllerQualification: { peers: [one full, noncyclic evidence object],
+ * generation: { controllerId, epoch, controllerPolicyDigest } }.
+ * Both peers require exact factory_activate runRequest, authenticated start and
+ * controller receipts, and child.node_id for the immutable graph projection.
+ * Additional peer GraphQL reads are retained in nativeMergeEvidence for replay. */
 export function observeNativeMergeProofs(
   hooks: {
     evidence: unknown;

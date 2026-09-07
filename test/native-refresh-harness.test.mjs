@@ -53,7 +53,10 @@ const canonical = (value) =>
 const time = "2026-09-05T00:00:00Z";
 const hostIdentity = hash("host");
 
-function fixture({ recoveredPublication = false, pinRecovered = false } = {}) {
+function fixture({ recoveredPublication = false, pinRecovered = false, controller = false,
+  objective = 1, runId = "run", offset = 0, peerTarget } = {}) {
+  const localSha = sha;
+  const objectSha = (value) => localSha(offset ? `${runId}:${value}` : value);
   const repository = "example/fixture";
   const policy = boundedPolicy("stacked-prs");
   const policyDigest = hash(canonical(policy));
@@ -69,13 +72,14 @@ function fixture({ recoveredPublication = false, pinRecovered = false } = {}) {
   const events = [
     {
       event: "FactoryRunStarted",
-      runId: "run",
-      objective: 1,
-      sequence: 1,
+      runId,
+      objective,
+      sequence: controller ? 2 : 1,
       policy,
       policyDigest,
       actor: "operator",
       repository,
+      ...(controller ? { activationRequestId: `${runId}-activate`, baseSha: base, baseBranch: "main" } : {}),
     },
   ];
   const inputs = [];
@@ -84,11 +88,11 @@ function fixture({ recoveredPublication = false, pinRecovered = false } = {}) {
     ...event,
     author: "operator",
     authorId: 7,
-    receiptUrl: `https://github.com/${repository}/issues/1#issuecomment-${event.sequence}`,
+    receiptUrl: `https://github.com/${repository}/issues/${objective}#issuecomment-${event.sequence}`,
   });
   const common = (number, sequence) => ({
-    runId: "run",
-    objective: 1,
+    runId,
+    objective,
     workItem: number,
     attempt: 1,
     directorEpoch: 1,
@@ -105,6 +109,8 @@ function fixture({ recoveredPublication = false, pinRecovered = false } = {}) {
       .digest("hex");
     const path = ref.includes("/graphs/")
       ? "compiled-objective.json"
+      : ref.includes("/graph-projections/")
+        ? "graph-projection.json"
       : ref.includes("/reviews/")
         ? "semantic-review.json"
         : ref.includes("/merge-candidates/")
@@ -142,19 +148,20 @@ function fixture({ recoveredPublication = false, pinRecovered = false } = {}) {
     refs.set(ref, oid);
     return read;
   };
-  for (const number of [2, 3, 4]) {
-    const rootBase = number === 4 ? sha("merged-3") : base;
-    const tree = sha(`tree-${number}`);
-    const head = sha(`head-${number}`);
+  for (const n of [2, 3, 4]) {
+    const number = n + offset;
+    const rootBase = n === 4 ? objectSha(`merged-${3 + offset}`) : base;
+    const tree = objectSha(`tree-${number}`);
+    const head = objectSha(`head-${number}`);
     addCommit(head, tree, [rootBase]);
     const batch = (phase) => ({
       identity: {
         protocol: "clockgrove.factory/local-scope-v1",
         repository,
-        objective: 1,
+        objective,
         workItem: number,
         attempt: 1,
-        runId: "run",
+        runId,
         directorEpoch: 1,
         policyDigest,
         phase,
@@ -169,7 +176,7 @@ function fixture({ recoveredPublication = false, pinRecovered = false } = {}) {
       deadline: "2026-09-05T00:10:00Z",
     });
     const reservation = {
-      ...common(number, number === 3 ? 201 : number * 100),
+      ...common(number, n === 3 ? 201 + offset * 100 : number * 100),
       event: "AttemptReserved",
       kind: "attempt",
       backend: "codex-sdk/local-worktree",
@@ -200,7 +207,7 @@ function fixture({ recoveredPublication = false, pinRecovered = false } = {}) {
       itemId: `item-${number}`,
       mode: "native-stacks",
       position: 0,
-      branch: `factory/objective-1/work-item-${number}/attempt-1`,
+      branch: `factory/objective-${objective}/work-item-${number}/attempt-1`,
       baseBranch: "main",
       baseSha: rootBase,
       headSha: head,
@@ -219,9 +226,9 @@ function fixture({ recoveredPublication = false, pinRecovered = false } = {}) {
     const integration = {
       ...common(number, number * 100 + 20),
       event: "AttemptIntegrated",
-      headSha: sha(`merged-${number}`),
+      headSha: objectSha(`merged-${number}`),
     };
-    const reserveRef = `refs/clockgrove-factory/attempts/objective-1/work-item-${number}/attempt-1`;
+    const reserveRef = `refs/clockgrove-factory/attempts/objective-${objective}/work-item-${number}/attempt-1`;
     const reserveOid = addCommit(
       sha(reserveRef),
       commits.get(rootBase).treeOid,
@@ -252,11 +259,11 @@ function fixture({ recoveredPublication = false, pinRecovered = false } = {}) {
     );
     events.push(
       {
-        ...common(number, number === 4 ? 402 : 202),
+        ...common(number, (n === 4 ? 402 : 202) + offset * 100),
         event: "AttemptStarted",
         backend: "codex-sdk/local-worktree",
         resourceHostIdentity: hostIdentity,
-        providerResourceId: `sdk-${hash(JSON.stringify(["clockgrove.factory/attempt-v2", repository, "run", 1, number, 1, 1])).slice(0, 24)}`,
+        providerResourceId: `sdk-${hash(JSON.stringify(["clockgrove.factory/attempt-v2", repository, runId, objective, number, 1, 1])).slice(0, 24)}`,
       },
       {
         ...common(number, number * 100 + 6),
@@ -283,8 +290,8 @@ function fixture({ recoveredPublication = false, pinRecovered = false } = {}) {
     );
     const originalReviewIdentity = {
       kind: "artifact",
-      runId: "run",
-      objective: 1,
+      runId,
+      objective,
       workItem: number,
       attempt: 1,
       artifactDigest: sourceValidation.artifactDigest,
@@ -319,18 +326,18 @@ function fixture({ recoveredPublication = false, pinRecovered = false } = {}) {
       head: { sha: head, ref: publication.branch, repo: { full_name: repository } },
       base: { ref: "main", repo: { full_name: repository, node_id: "R_fixture" } },
     };
-    if (number === 3) {
-      const target = sha("merged-2");
-      const refreshedTree = sha("refreshed-tree");
-      const plannedHead = sha("refreshed-head");
+    if (n === 3) {
+      const target = peerTarget ?? objectSha(`merged-${2 + offset}`);
+      const refreshedTree = objectSha("refreshed-tree");
+      const plannedHead = objectSha("refreshed-head");
       addCommit(plannedHead, refreshedTree, [head, target]);
       pull.head.sha = plannedHead;
       const identity = {
         repository,
-        runId: "run",
-        sourceRunId: "run",
+        runId,
+        sourceRunId: runId,
         controllingPolicyDigest: policyDigest,
-        objective: 1,
+        objective,
         workItem: number,
         attempt: 1,
         pullRequest: pull.number,
@@ -361,8 +368,8 @@ function fixture({ recoveredPublication = false, pinRecovered = false } = {}) {
         target,
       );
       const candidateIdentity = {
-        runId: "run",
-        objective: 1,
+        runId,
+        objective,
         workItem: number,
         attempt: 1,
         pullRequest: pull.number,
@@ -395,8 +402,8 @@ function fixture({ recoveredPublication = false, pinRecovered = false } = {}) {
       );
       const reviewIdentity = {
         kind: "integration-candidate",
-        runId: "run",
-        objective: 1,
+        runId,
+        objective,
         workItem: number,
         attempt: 1,
         artifactDigest: candidateValidation.artifactDigest,
@@ -418,7 +425,7 @@ function fixture({ recoveredPublication = false, pinRecovered = false } = {}) {
       );
       events.push(
         {
-          ...common(number, 316),
+          ...common(number, 316 + offset * 100),
           event: "CapacityReserved",
           phase: "validation",
           backend: `factory/integration-validation-${mergeCandidateIdentityDigest(candidateIdentity)}`,
@@ -431,13 +438,13 @@ function fixture({ recoveredPublication = false, pinRecovered = false } = {}) {
           },
         },
         {
-          ...common(number, 318),
+          ...common(number, 318 + offset * 100),
           event: "CapacityReconciled",
           phase: "validation",
           backend: `factory/integration-validation-${mergeCandidateIdentityDigest(candidateIdentity)}`,
         },
         {
-          ...common(number, 318),
+          ...common(number, 318 + offset * 100),
           event: "BudgetReconciled",
           phase: "validation",
           unit: "validation_milliseconds",
@@ -445,7 +452,7 @@ function fixture({ recoveredPublication = false, pinRecovered = false } = {}) {
           usageId: `integration-validation-${mergeCandidateIdentityDigest(candidateIdentity)}`,
         },
         {
-          ...common(number, 319),
+          ...common(number, 319 + offset * 100),
           event: "BudgetReconciled",
           phase: "management",
           unit: "model_tokens",
@@ -459,19 +466,20 @@ function fixture({ recoveredPublication = false, pinRecovered = false } = {}) {
   }
   const graph = {
     title: "fixture",
-    workItems: [2, 3, 4].map((number) => ({
-      id: `item-${number}`,
-      dependsOn: number === 4 ? ["item-2", "item-3"] : [],
+    workItems: [2, 3, 4].map((n) => ({
+      id: `item-${n + offset}`,
+      dependsOn: n === 4 ? [`item-${2 + offset}`, `item-${3 + offset}`] : [],
       validationCommands: ["npm test"],
     })),
   };
-  const graphRef = `refs/clockgrove-factory/graphs/objective-1/run-${hash("run").slice(0, 32)}`;
+  const graphRef = `refs/clockgrove-factory/graphs/objective-${objective}/run-${hash(runId).slice(0, 32)}`;
   const graphRead = addCheckpoint(graphRef, graph, base);
   events.push({
     event: "GraphCompiled",
-    runId: "run",
-    objective: 1,
-    sequence: 2,
+    runId,
+    objective,
+    sequence: controller ? 4 : 2,
+    ...(controller ? { graphSize: 3 } : {}),
     baseSha: base,
     graphDigest: hash(canonical(graph)),
     graphRef,
@@ -479,28 +487,45 @@ function fixture({ recoveredPublication = false, pinRecovered = false } = {}) {
   });
   events.push({
     event: "FactoryRunCompleted",
-    runId: "run",
-    objective: 1,
+    runId,
+    objective,
     sequence: 999,
     at: time,
   });
   const evidence = {
-    runResult: { runId: "run" },
+    runResult: { runId },
     repository,
     actor: { id: 7, login: "operator" },
-    objective: { number: 1 },
-    children: [2, 3, 4].map((number) => ({ number })),
+    objective: { number: objective },
+    children: [2, 3, 4].map((n) => ({ number: n + offset, ...(controller ? { node_id: `I_${n + offset}` } : {}) })),
     pulls: inputs.map((input) => input.pull),
     events: events.map(metadata),
     nativeDefaultBranch: "main",
     base,
     dependencies: [
-      { workItem: 2, blockedBy: [] },
-      { workItem: 3, blockedBy: [] },
-      { workItem: 4, blockedBy: [{ number: 2 }, { number: 3 }] },
+      { workItem: 2 + offset, blockedBy: [] },
+      { workItem: 3 + offset, blockedBy: [] },
+      { workItem: 4 + offset, blockedBy: [{ number: 2 + offset }, { number: 3 + offset }] },
     ],
     status: { run: {} },
   };
+  if (controller) {
+    const fields = { runId, objective, at: time };
+    const generation = { controllerId: "controller-original", epoch: 1, controllerPolicyDigest: hash("controller-policy") };
+    const projectionRef = `refs/clockgrove-factory/graph-projections/objective-${objective}/run-${hash(runId).slice(0, 32)}`;
+    const projection = addCheckpoint(projectionRef, {
+      protocol: "clockgrove.factory/graph-projection-v1",
+      graphDigest: hash(canonical(graph)),
+      bindings: graph.workItems.map((item, index) => ({ compilerId: item.id, issueNodeId: `I_${2 + offset + index}`, issueNumber: 2 + offset + index })),
+    }, graphRead.commit.oid);
+    evidence.events.push(...[
+      { ...fields, sequence: 1, event: "ActivationRequested", requestId: `${runId}-activate`, requestedBy: "operator", repository, baseSha: base, policy, policyDigest },
+      { ...fields, sequence: 3, event: "ControllerObserved", ...generation },
+      { ...fields, sequence: 5, event: "GraphProjected", graphDigest: hash(canonical(graph)), graphSize: 3, projectionRef, projectionBlobSha: projection.blobOid },
+    ].map(metadata));
+    evidence.policy = policy;
+    evidence.runRequest = { tool: "factory_activate", arguments: { owner: "example", repo: "fixture", objectiveNumber: objective, requestId: `${runId}-activate`, baseSha: base, policy } };
+  }
   const read = vi.fn(async (demand) => {
     const value =
       demand.kind === "commit"
@@ -533,6 +558,92 @@ function fixture({ recoveredPublication = false, pinRecovered = false } = {}) {
   });
   return { evidence, inputs, read, request, commits, refs, documents, addCheckpoint };
 }
+
+function controllerPair() {
+  const peer = fixture({ controller: true, objective: 10, runId: "peer", offset: 10 });
+  const receiver = fixture({ controller: true, peerTarget: peer.inputs[0].integration.headSha });
+  receiver.evidence.controllerQualification = {
+    peers: [peer.evidence],
+    generation: { controllerId: "controller-original", epoch: 1, controllerPolicyDigest: hash("controller-policy") },
+  };
+  const read = vi.fn(async (demand) => {
+    for (const f of [receiver, peer]) {
+      const value = demand.kind === "commit" ? f.commits.get(demand.oid)
+        : demand.kind === "ref" ? f.refs.get(demand.ref) : f.documents.get(demand.ref);
+      if (value !== undefined) return structuredClone(value);
+    }
+    throw new Error("immutable controller proof missing");
+  });
+  const request = vi.fn(async (route, parameters) => {
+    const f = [receiver, peer].find((f) => f.inputs.some((input) => input.pull.node_id === parameters.variables.id));
+    return f.request(route, parameters);
+  });
+  return { receiver, peer, read, request };
+}
+
+describe("installed controller peer merge proof", () => {
+  it("proves exact peer ancestry and later same-run starting bases with the original shared generation", async () => {
+    const f = controllerPair();
+    // A takeover does not erase the original common generation that admitted the pair.
+    f.receiver.evidence.events.push({
+      ...f.receiver.evidence.events.find((event) => event.event === "ControllerObserved"),
+      sequence: 350, controllerId: "controller-restarted", epoch: 2,
+      receiptUrl: "https://github.com/example/fixture/issues/1#issuecomment-9990",
+    });
+    const proofs = await observeNativeMergeProofs({ evidence: f.receiver.evidence, request: f.request }, f.read);
+    expect(proofs).toHaveLength(3);
+    for (const [index, proof] of proofs.entries())
+      assertNativeMergeProof(f.receiver.evidence, proof, f.receiver.inputs[index]);
+    const peerReads = f.receiver.evidence.nativeMergeEvidence.flatMap((record) => record.reads)
+      .filter((read) => read.request.kind === "merge-proof" && read.request.expected.runId === "peer");
+    expect(peerReads.length).toBeGreaterThan(0);
+    expect(peerReads.every((read) => read.value.objective === 10 && read.value.workItem === 12)).toBe(true);
+    expect(f.peer.request).toHaveBeenCalled();
+  });
+
+  it.each([
+    ["actor", (f) => { f.peer.evidence.events[0].authorId = 99; }],
+    ["request", (f) => { f.peer.evidence.runRequest.arguments.requestId = "another-activation"; }],
+    ["policy", (f) => { f.peer.evidence.events[0].policyDigest = hash("different-policy"); }],
+    ["generation", (f) => { f.peer.evidence.events.find((event) => event.event === "ControllerObserved").epoch = 9; }],
+    ["projection", (f) => { f.peer.evidence.children[0].node_id = "I_swapped"; }],
+    ["projection parent", (f) => {
+      const read = [...f.peer.documents.values()].find((entry) => entry.ref.includes("/graph-projections/"));
+      read.commit.parentOids = [sha("unrelated-graph")];
+    }],
+    ["accepted review", (f) => {
+      const read = [...f.peer.documents.values()].find((entry) => entry.ref.includes("/work-item-12/") && entry.ref.includes("/reviews/"));
+      const record = JSON.parse(read.content);
+      record.review.accepted = false;
+      f.peer.addCheckpoint(read.ref, record, read.commit.parentOids[0]);
+    }],
+    ["review accounting", (f) => {
+      f.peer.evidence.events.find((event) => event.workItem === 12 && event.event === "BudgetReconciled" && event.usageId.startsWith("review-")).amount = 0;
+    }],
+    ["peer chronology", (f) => {
+      f.peer.evidence.events.find((event) => event.workItem === 12 && event.event === "AttemptIntegrated").at = "2026-09-06T00:00:00Z";
+    }],
+    ["squash parent", (f) => { f.peer.commits.get(f.peer.inputs[0].integration.headSha).parentOids = [sha("outside-trunk")]; }],
+  ])("rejects changed peer %s before accepting its head", async (_name, mutate) => {
+    const f = controllerPair();
+    mutate(f);
+    await expect(observeNativeMergeProofs({ evidence: f.receiver.evidence, request: f.request }, f.read)).rejects.toThrow();
+  });
+
+  it("retains the foreground activation refusal without the explicit controller discriminator", async () => {
+    const f = controllerPair();
+    delete f.receiver.evidence.controllerQualification;
+    await expect(observeNativeMergeProofs({ evidence: f.receiver.evidence, request: f.request }, f.read)).rejects.toThrow();
+  });
+
+  it("rejects changed recorded peer GraphQL evidence during offline replay", async () => {
+    const f = controllerPair();
+    const proofs = await observeNativeMergeProofs({ evidence: f.receiver.evidence, request: f.request }, f.read);
+    const record = f.receiver.evidence.nativeMergeEvidence[1].reads.find((entry) => entry.request.kind === "merge-proof");
+    record.value.mergeSha = sha("different-merge");
+    expect(() => assertNativeMergeProof(f.receiver.evidence, proofs[1], f.receiver.inputs[1])).toThrow(/peer GraphQL/);
+  });
+});
 
 async function completeFixture(options) {
   const f = fixture(options);

@@ -286,6 +286,14 @@
         },
         "allOf": [
           {
+            "if": { "properties": { "phase": { "const": "execution" } } },
+            "then": { "required": ["workItem", "attempt"] }
+          },
+          {
+            "if": { "anyOf": [{ "required": ["directorEpoch"] }, { "required": ["policyDigest"] }] },
+            "then": { "required": ["directorEpoch", "policyDigest"] }
+          },
+          {
             "if": { "required": ["attempt"] },
             "then": { "required": ["workItem"] }
           },

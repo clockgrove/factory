@@ -148,6 +148,9 @@ describe("continuous refill and recovery", () => {
     await didSettle;
 
     expect(pool.size).toBe(0);
+    expect(() => pool.throwIfFailed()).toThrow("unsafe paid cleanup remains unconfirmed");
+    // Inspection cannot consume the failure needed by the final ownership drain.
+    expect(() => pool.throwIfFailed()).toThrow("unsafe paid cleanup remains unconfirmed");
     await expect(pool.settle()).resolves.toEqual([
       {
         key: 1,
@@ -155,6 +158,7 @@ describe("continuous refill and recovery", () => {
       },
     ]);
     await expect(pool.settle()).resolves.toEqual([]);
+    expect(() => pool.throwIfFailed()).not.toThrow();
   });
 
   it("preserves other Objectives while reconciling one durable generation", () => {

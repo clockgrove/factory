@@ -38,6 +38,11 @@ export function checkpointFailure(
   error: unknown,
   boundary?: string,
 ): { boundary: string; code: string };
+export function checkpointOperatorFailure(
+  tool: string,
+  args: Record<string, unknown>,
+  response: { isError?: boolean; content?: { type: string; text?: string }[] },
+): { tool: string; requestId: unknown; isError: boolean; text: string; truncated: boolean; observedAt: string };
 export function checkpointReady(
   observation: unknown,
   authority: CheckpointAuthority,

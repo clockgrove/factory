@@ -39,6 +39,7 @@ import {
   parseUnitObservation,
 } from "./verify-local-faults.mjs";
 import { ownedSchedulingScopes, schedulingRequest } from "./verify-local-scheduling.mjs";
+import { isQualificationModelMarker, qualificationModelAccounting } from "./qualification-model-accounting.mjs";
 import { readQualificationMergeProof as readCheckpointMergeProof } from "./qualification-merge-proof.mjs";
 import {
   appServerCheckpointArm,
@@ -94,7 +95,9 @@ export function checkpointAuthority(env) {
   if (sessionRecovery) {
     policy.backendOrder = ["codex-app-server/local-worktree"];
     policy.maxParallel = 1;
+    policy.capacity.local.maxWorkers = 1;
   }
+  assert.ok(policy.capacity.local.maxWorkers <= policy.maxParallel, "invalid qualification worker ceiling");
   return {
     repository,
     checkout,
@@ -108,6 +111,20 @@ export function checkpointAuthority(env) {
 }
 
 class CheckpointPending extends Error {}
+
+export function checkpointOperatorFailure(tool, args, response) {
+  assert.equal(response.isError, true);
+  const text = (response.content ?? []).filter((part) => part.type === "text")
+    .map((part) => part.text).join("\n");
+  return {
+    tool,
+    requestId: args.requestId ?? null,
+    isError: true,
+    text: text.slice(0, 8192),
+    truncated: text.length > 8192,
+    observedAt: new Date().toISOString(),
+  };
+}
 
 export function checkpointFailure(error, boundary) {
   const boundaries = new Set([
@@ -374,9 +391,11 @@ export function checkpointFacts(
     integrated.length >= 1 && reservations.length === integrated.length,
     "admitted work remains unsettled",
   );
-  const usage = run.filter(
-    (event) => event.event === "BudgetReconciled" && event.unit === "model_tokens",
-  );
+  const accounting = qualificationModelAccounting(run, {
+    requireMarkers: authority.policy.economics?.modelTokenBudgetMode === "observed-stop",
+  });
+  settled(accounting.unresolved.length === 0, "model dispatch consumption remains unknown");
+  const usage = accounting.usage;
   const compile = completedReceipt(
     usage.filter(
       (event) =>
@@ -444,18 +463,17 @@ export function checkpointFacts(
       ),
       "worker usage missing or repeated",
     );
-    const review = completedReceipt(
-      usage.filter(
+    const reviews = usage.filter(
         (event) =>
           event.workItem === reserved.workItem &&
           event.attempt === 1 &&
           event.phase === "management" &&
           /^review-[a-f0-9]{64}$/.test(event.usageId),
-      ),
-      "review usage missing or repeated",
-    );
+      );
+    settled(reviews.length >= 1, "review usage missing");
     assert.ok(Number.isSafeInteger(worker.amount) && worker.amount >= 0);
-    assert.ok(Number.isSafeInteger(review.amount) && review.amount >= 0);
+    for (const review of reviews)
+      assert.ok(Number.isSafeInteger(review.amount) && review.amount >= 0);
     settled(succeeded.reportedModelTokens !== undefined, "terminal worker counter unavailable");
     assert.equal(
       succeeded.reportedModelTokens,
@@ -463,10 +481,15 @@ export function checkpointFacts(
       "terminal worker counter unavailable or different",
     );
   }
-  assert.equal(usage.length, 1 + 2 * reservations.length, "unaccounted or repeated model call");
+  assert.ok(usage.every((event) => event === compile || reservations.some((reserved) =>
+    event.workItem === reserved.workItem && event.attempt === reserved.attempt &&
+    (event.phase === "execution" ||
+      (event.phase === "management" && /^review-[a-f0-9]{64}$/.test(event.usageId)))
+  )), "model usage outside compiled work");
   for (const reserved of run.filter((event) =>
     ["BudgetReserved", "CapacityReserved"].includes(event.event),
   )) {
+    if (isQualificationModelMarker(reserved)) continue;
     const expected =
       reserved.event === "BudgetReserved" ? "BudgetReconciled" : "CapacityReconciled";
     settled(
@@ -905,6 +928,8 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
   );
   const harnessFiles = [
     harnessPath,
+    "scripts/qualification-model-accounting.mjs",
+    "scripts/qualification-receipts.mjs",
     ...(authority.sessionRecovery
       ? [
           "scripts/qualification-app-server-checkpoint.mjs",
@@ -1118,6 +1143,10 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     });
   const call = async (name, args = {}) => {
     const response = await invoke(name, args);
+    if (response.isError) {
+      evidence.operatorFailure = checkpointOperatorFailure(name, args, response);
+      save();
+    }
     assert.ok(!response.isError, "installed operator call unavailable");
     return JSON.parse(
       response.content

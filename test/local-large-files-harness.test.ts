@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { parseRunPolicy } from "../src/protocol/policy.js";
 import {
   largeFileAuthority,
   largeFileTransferArm,
@@ -240,6 +241,7 @@ describe("installed large-file lifecycle authority", () => {
       backendOrder: ["codex-app-server/local-worktree"],
       maxParallel: 1,
     });
+    expect(parseRunPolicy(authority.policy).capacity?.local?.maxWorkers).toBe(1);
   });
   it("never mutates during preflight", async () => {
     const f = scenario();

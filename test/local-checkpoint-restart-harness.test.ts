@@ -6,6 +6,7 @@ import {
   checkpointAuthority,
   checkpointFacts,
   checkpointFailure,
+  checkpointOperatorFailure,
   assertCheckpointExecutable,
   checkpointStartupObservation,
   checkpointReady,
@@ -132,8 +133,13 @@ function observation(count = 1, completed = false) {
       );
   }
   if (completed) events.push({ kind: "run", event: "FactoryRunCompleted" });
-  const receipts: Array<{ event: Record<string, unknown> }> = events.map((event, i) => ({
-    event: { runId: "original", sequence: i + 1, ...event },
+  const journal = events.flatMap((event): Record<string, unknown>[] => {
+    if (event.event !== "BudgetReconciled" || event.unit !== "model_tokens") return [event];
+    const actual = { ...event, modelInvocationId: event.usageId, policyDigest: digest, directorEpoch: 1 };
+    return [{ ...actual, event: "BudgetReserved", amount: 0, usageId: `invocation-${String(event.usageId)}` }, actual];
+  });
+  const receipts: Array<{ event: Record<string, unknown> }> = journal.map((event, i) => ({
+    event: { objective: 1, runId: "original", sequence: i + 1, ...event },
   }));
   return {
     receipts,
@@ -154,6 +160,36 @@ function observation(count = 1, completed = false) {
 }
 
 describe("same-generation initial startup observation", () => {
+  it("retains the bounded original operator refusal and exact request instead of only an assertion", () => {
+    const response = { isError: true, content: [{ type: "text", text: "capacity.local.maxWorkers cannot exceed maxParallel" }] };
+    expect(checkpointOperatorFailure("factory_activate", { requestId: "original-activate" }, response)).toMatchObject({
+      tool: "factory_activate", requestId: "original-activate", text: response.content[0]!.text,
+      isError: true, truncated: false,
+    });
+    const large = checkpointOperatorFailure("factory_status", {}, { isError: true, content: [{type: "text", text: "x".repeat(10000)}] });
+    expect(large.text).toHaveLength(8192);
+    expect(large.truncated).toBe(true);
+    expect(() => checkpointOperatorFailure("factory_activate", {}, {isError: false})).toThrow();
+  });
+  it("settles dispatch markers through exact actual linkage and refuses an unknown marker", () => {
+    const ready = observation();
+    expect(checkpointReady(ready, authority, pause)).toBe(true);
+    const worker = ready.receipts.find(({event}) => event.event === "BudgetReconciled" && event.phase === "execution" && event.unit === "model_tokens")!;
+    ready.receipts.splice(ready.receipts.indexOf(worker), 1);
+    expect(checkpointReady(ready, authority, pause)).toBe(false);
+  });
+  it("allows a distinct accounted changed-head review without authorizing a repeat worker", () => {
+    const ready = observation();
+    const review = ready.receipts.find(({event}) => event.event === "BudgetReconciled" && event.workItem && event.phase === "management")!.event;
+    const invocation = `review-${"c".repeat(64)}`;
+    ready.receipts.push(
+      {event: {...review, event: "BudgetReserved", usageId: `invocation-${invocation}`, modelInvocationId: invocation, amount: 0, sequence: 1000}},
+      {event: {...review, usageId: invocation, modelInvocationId: invocation, sequence: 1001}},
+    );
+    ready.status.summary.economics.usage.model_tokens.value += 100;
+    ready.status.summary.economics.modelTokenBreakdown.reconciledCalls++;
+    expect(checkpointReady(ready, authority, pause)).toBe(true);
+  });
   const identity = {
     unit: "exact.service",
     pid: 123,

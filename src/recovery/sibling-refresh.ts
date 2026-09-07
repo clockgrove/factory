@@ -22,6 +22,7 @@ import { loadRecoveryPlan, type RecoveryPlanItem } from "./plan.js";
 import { recoveryAdoptionEvents } from "./transaction.js";
 import { verifyRecoverySourceIntegration } from "./outcomes.js";
 import { assertIsolatedCandidateProof } from "./isolated-candidate.js";
+import { verifyRecoveryPeerTrunkIntegration } from "./peer-trunk.js";
 
 type Source = NonNullable<RecoveryPlanItem["source"]>;
 function requireRefresh(value: unknown): asserts value {
@@ -240,6 +241,8 @@ export async function observeRecoverySiblingRefresh(
   requireRefresh(matches.length === 1);
   let record = matches[0]!;
   const lineage = await loadSiblingRefreshLineage(store, record);
+  let requiresIsolation = false;
+  let executionRequiresIsolation = false;
   const authenticateController = async (runId: string, controllingPolicyDigest: string) => {
     const start = starts.find((event) => event.runId === runId);
     requireRefresh(
@@ -331,7 +334,8 @@ export async function observeRecoverySiblingRefresh(
         identity.reservationOid === source.reservationCommitOid &&
         identity.sourceExactHeadValidationDigest === exact.digest,
     );
-    // Every target advance must already be this controller's authenticated integration.
+    // Every target advance must be an authenticated own-run integration or an
+    // explicitly owned peer integration under the same observed controller generation.
     // An intent, clean applicability, or an arbitrary parent commit cannot authorize trunk.
     let cursor = identity.targetBaseSha;
     let controllerBase = start.baseSha;
@@ -381,6 +385,60 @@ export async function observeRecoverySiblingRefresh(
           ((event.event === "AttemptIntegrated" && event.headSha === cursor) ||
             (event.event === "RecoverySourceIntegrated" && event.mergeCommitSha === cursor)),
       );
+      if (integrations.length === 0) {
+        const candidateDigest = mergeCandidateIdentityDigest({
+          runId: start.runId,
+          objective: input.objective,
+          workItem: input.workItem,
+          attempt: source.attempt,
+          pullRequest: publication.pullRequest,
+          sourceHeadSha: publication.headSha,
+          sourceExactHeadValidationDigest: exact.digest,
+          targetBaseSha: identity.targetBaseSha,
+          deliveryHeadSha: refresh.plannedHeadSha,
+        });
+        const history = events.filter(
+          (event) =>
+            event.runId === start.runId &&
+            (input.beforeSequence === undefined || event.sequence < input.beforeSequence),
+        );
+        const admissions = history.filter(
+          (event) =>
+            event.event === "CapacityReserved" &&
+            event.workItem === input.workItem &&
+            event.attempt === source.attempt &&
+            (event.backend === `factory/integration-validation-${candidateDigest}` ||
+              event.backend === `factory/integration-sandbox-${candidateDigest}`),
+        );
+        // Native candidate admission provides the strongest receipt horizon. Old
+        // local checkpoints have no capacity receipt: their authenticated accounting
+        // history bounds observation without inventing an admission timestamp.
+        const horizon = (admissions.length ? admissions : history).reduce<FactoryEvent | undefined>(
+          (selected, event) =>
+            !selected ||
+            (admissions.length
+              ? event.sequence < selected.sequence
+              : event.sequence > selected.sequence)
+              ? event
+              : selected,
+          undefined,
+        );
+        requireRefresh(horizon);
+        const peer = await verifyRecoveryPeerTrunkIntegration({
+          repository: input.repository,
+          receiverObjective: input.objective,
+          receiverStart: start,
+          receiverEvents: events,
+          targetBaseSha: cursor,
+          beforeAt: horizon.at,
+          store,
+          proofTraversal: visiting,
+        });
+        requiresIsolation ||= peer.requiresIsolation;
+        executionRequiresIsolation ||= peer.executionRequiresIsolation;
+        cursor = peer.parent;
+        continue;
+      }
       requireRefresh(integrations.length === 1);
       const integrated = integrations[0]!;
       const terminal = events.find(
@@ -602,6 +660,8 @@ export async function observeRecoverySiblingRefresh(
             prior.record.outputTreeSha === merge.treeOid &&
               prior.record.identity.targetBaseSha === merge.parentOids[0],
           );
+          requiresIsolation ||= prior.requiresIsolation;
+          executionRequiresIsolation ||= prior.executionRequiresIsolation;
         }
       }
       cursor = merge.parentOids[0]!;
@@ -656,7 +716,8 @@ export async function observeRecoverySiblingRefresh(
   if (candidate)
     requireRefresh(
       candidate.validation.outputTreeSha === record.outputTreeSha &&
-        JSON.stringify(candidate.source) === JSON.stringify(exact),
+        JSON.stringify(candidate.source) === JSON.stringify(exact) &&
+        (!requiresIsolation || candidate.isolatedResource),
     );
   if (candidate)
     assertIsolatedCandidateProof({
@@ -736,7 +797,16 @@ export async function observeRecoverySiblingRefresh(
         ),
     );
   }
-  return { record, lineage, source: exact, candidateIdentity, candidate, review };
+  return {
+    record,
+    lineage,
+    source: exact,
+    candidateIdentity,
+    candidate,
+    review,
+    requiresIsolation,
+    executionRequiresIsolation,
+  };
 }
 
 export function recoverySiblingRefreshBinding(

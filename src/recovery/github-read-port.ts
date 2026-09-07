@@ -2,12 +2,14 @@ import type { GitHubControlStore } from "../control/github-store.js";
 import { GitHubStacks } from "../publication/github-stacks.js";
 import type { RecoveryReadStore } from "./assessment.js";
 import { withImmutableRecoveryReads } from "./immutable-read-cache.js";
+import type { FactoryReadSnapshot } from "../application/status.js";
 
 /** Runtime capability boundary: the assessment never receives a mutation-capable store. */
 export function recoveryReadPort(
   store: GitHubControlStore,
   owner: string,
   repo: string,
+  readObjectiveSnapshot?: (objective: number) => Promise<FactoryReadSnapshot>,
 ): RecoveryReadStore {
   const stacks = new GitHubStacks(
     {
@@ -33,6 +35,12 @@ export function recoveryReadPort(
     getBranchHead: store.getBranchHead.bind(store),
     readBranchRules: store.readBranchRules.bind(store),
     readChecks: store.readChecks.bind(store),
+    ...(readObjectiveSnapshot
+      ? {
+          readObjectiveSnapshot,
+          readCommitObjectiveCandidates: store.readCommitObjectiveCandidates.bind(store),
+        }
+      : {}),
     readStack: (number: number) => stacks.get(number),
   });
 }

@@ -751,6 +751,7 @@ export class GraphApplier {
           new Error("Factory GitHub circuit opened during the graph mutation fence"),
         );
       }
+      mutationPermit.assertDispatchAllowed?.();
       attempted = true;
       const result = await fn();
       this.#breaker.recordSuccess();

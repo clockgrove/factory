@@ -1119,6 +1119,7 @@ export class Dispatcher {
           new Error("Factory GitHub circuit opened during the dispatch mutation fence"),
         );
       }
+      mutationPermit.assertDispatchAllowed?.();
       attempted = true;
       await fn();
       this.#breaker.recordSuccess();

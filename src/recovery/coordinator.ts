@@ -165,7 +165,7 @@ export class RecoveryCoordinator {
         events,
         historyComplete,
       });
-      requireGate(replay.state !== "blocked", "adoption-replay-conflict");
+      requireGate(replay.state !== "blocked", replay.blockers[0] ?? "adoption-replay-conflict");
     } else {
       requireGate(
         !events.some((event) => event.runId === plan.successorRunId),
@@ -309,7 +309,9 @@ export class RecoveryCoordinator {
         if (replay.state === "complete") return result("adopted");
         requireGate(
           replay.state !== "blocked" && replay.nextEvent && step < 3,
-          "adoption-replay-conflict",
+          replay.state === "blocked"
+            ? (replay.blockers[0] ?? "adoption-replay-conflict")
+            : "adoption-replay-conflict",
         );
         const expectedDigest = recoveryEventDigest(replay.nextEvent);
         await this.#fence(input);

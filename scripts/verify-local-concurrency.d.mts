@@ -49,10 +49,15 @@ export function runConcurrencyScenario(
   authority: ConcurrencyAuthority,
 ): Promise<Record<string, unknown>>;
 export function verifyConcurrencyArtifacts(
-  request: (route: string, parameters: Record<string, unknown>) => Promise<unknown>,
+  request: (
+    route: string,
+    parameters: Record<string, unknown>,
+    timeoutMs?: number,
+  ) => Promise<unknown>,
   authority: ConcurrencyAuthority,
   branch: string,
   evidence: unknown[],
+  deadline?: number,
 ): Promise<unknown>;
 export function main(
   env?: Record<string, string | undefined>,

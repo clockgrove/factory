@@ -8,6 +8,8 @@ export interface CheckpointAuthority {
   policy: Record<string, unknown>;
   sessionRecovery?: true;
 }
+export function checkpointDeadline(startedAt: string, minutes?: number): number;
+export function checkpointTimeout(deadline: number, maximumMs: number, now?: number): number;
 export function checkpointAuthority(
   env: Record<string, string | undefined>,
 ): CheckpointAuthority | null;
@@ -160,6 +162,7 @@ export function continueAppServerCheckpointScenario(
 /** Internal committed adapters only; no operator-supplied module is loaded. */
 export interface CheckpointExtension {
   authority?: CheckpointAuthority;
+  observationWindowMinutes?: number;
   scope?: string;
   harnessPaths?: string[];
   objectiveBody?(authority: CheckpointAuthority): string;

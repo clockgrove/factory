@@ -121,10 +121,20 @@ aggregate acknowledgement and must equal exactly twice that selection: the exist
 invocation is unchanged; an explicit 400000 per Objective requires 800000 aggregate.
 Select both values before preflight and activation, only under the corresponding local spending
 authority. These are observed-stop thresholds, not provider-enforced token caps or promises of
-completion. Actual usage is never clamped. One attempt per Work Item, the original 45-minute
-deadline, two one-worker Objectives and the unchanged installed controller ceiling still apply.
+completion. Actual usage is never clamped. One attempt per Work Item, two one-worker Objectives
+and the unchanged installed controller ceiling still apply.
 This prospective option does not top up or rewrite any recorded run, policy, digest or failed
 qualification evidence; historical continuation retains its original authority.
+
+`FACTORY_CONCURRENCY_DURATION_MINUTES` prospectively selects an integer from 45 through 120;
+omission retains 45. Select it before preflight and exercise under the corresponding local
+authority. Both Objective policies bind that duration. All scenario observation, inner-lease
+eligibility and final verification share one finite deadline anchored to the original scenario
+start, including time spent preparing and waiting; later phases never reset it. This can accommodate
+legitimate Factory pacing waits without changing pacing, token thresholds or provider authority.
+A local pacer wait is not evidence of GitHub refusing writes. No new duration may extend an
+already-started run or rewrite its policy, continuation or failed evidence. Other checkpoint
+callers retain their original 45-minute observation window.
 
 `scripts/verify-publish-readiness.mjs` treats this table as release state, not prose. Each required
 gate must occur exactly once and say `Passed`. A passed row must link a checked-in

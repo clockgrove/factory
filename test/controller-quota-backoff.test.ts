@@ -369,18 +369,40 @@ describe("controller quota boundary", () => {
     ).rejects.toBe(retirement);
   });
 
-  it("retains the known recovery resource gate diagnostic without raw provider details", async () => {
+  it.each([
+    ["blocked", "resource-absence-unverified"],
+    ["blocked", "source-evidence-blocked, accounting-or-chain-blocked"],
+    ["pending", "comment-response-unresolved"],
+  ])(
+    "retains bounded recovery %s diagnostics without raw provider details",
+    async (status, blockers) => {
+      ownershipMocks();
+      await expect(
+        runGitHubRepositoryController({
+          ...options(new AbortController().signal),
+          supervisorFactory: () => ({
+            run: async () => {
+              throw new Error(`Recovery adoption ${status}: ${blockers}`);
+            },
+          }),
+        }),
+      ).rejects.toThrow(`recovery-adoption-${status}: ${blockers}`);
+    },
+  );
+
+  it("does not expose arbitrary recovery-shaped error details", async () => {
     ownershipMocks();
+    const secret = "Bearer private-token";
     await expect(
       runGitHubRepositoryController({
         ...options(new AbortController().signal),
         supervisorFactory: () => ({
           run: async () => {
-            throw new Error("Recovery adoption blocked: resource-absence-unverified");
+            throw new Error(`Recovery adoption blocked: ${secret}`);
           },
         }),
       }),
-    ).rejects.toThrow("recovery-adoption-blocked: resource-absence-unverified");
+    ).rejects.toThrow("controller-invariant-failure");
   });
 
   it("handles a failing asynchronous diagnostic without an unhandled task rejection", async () => {

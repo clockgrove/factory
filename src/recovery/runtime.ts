@@ -30,6 +30,7 @@ import { resolveRecoveryEvidence, type RecoveryEvidenceResolution } from "./evid
 import { recoveryClaimRef, createRecoveryEventDigest } from "./identity.js";
 import { loadRecoveryPlan, type RecoveryPlanRecord } from "./plan.js";
 import { recoveryAdoptionEvents } from "./transaction.js";
+import { recoveryRunHistoryActivations } from "./activation-history.js";
 import {
   verifyRecoverySourcePublication,
   recoverySourcePublicationBinding,
@@ -65,6 +66,9 @@ export interface RecoveryRuntime {
   projection: CompiledGraphProjectionRecord;
   sourceRunIds: readonly string[];
   accountingRunIds: readonly string[];
+  /** Controller generations from exact source receipt fences, exposed only after
+   * every historical source digest and the complete recovery chain verify. */
+  verifiedSourceControllerObservations: readonly Extract<FactoryEvent, { kind: "controller" }>[];
   /** Original envelopes: no synthetic starts, terminal records, or re-labelled attempts. */
   events: readonly FactoryEvent[];
   currentEvents: readonly FactoryEvent[];
@@ -155,7 +159,6 @@ export async function loadRecoveryRuntime(input: {
     requireRuntime(raw.length <= 10_000, "history-bound");
     // Exact lost-response duplicates are harmless; different envelopes at one sequence are not.
     const unique = new Map<string, FactoryEvent>();
-    const sequences = new Map<number, string>();
     for (const value of raw) {
       const event = parseFactoryEvent(value);
       requireRuntime(
@@ -163,11 +166,6 @@ export async function loadRecoveryRuntime(input: {
         "event-scope-mismatch",
       );
       const digest = recoveryEventDigest(event);
-      requireRuntime(
-        !sequences.has(event.sequence) || sequences.get(event.sequence) === digest,
-        "event-sequence-conflict",
-      );
-      sequences.set(event.sequence, digest);
       unique.set(digest, event);
     }
     const events = [...unique.values()].sort((a, b) => a.sequence - b.sequence);
@@ -196,10 +194,18 @@ export async function loadRecoveryRuntime(input: {
     );
     const sourceRunIds = plan.history.map((entry) => entry.runId);
     const sourceIds = new Set(sourceRunIds);
-    requireRuntime(
-      events.every((event) => sourceIds.has(event.runId) || event.runId === input.runId),
-      "unplanned-run-history",
-    );
+    const activations = recoveryRunHistoryActivations(plan, events);
+    requireRuntime(activations, "unplanned-run-history");
+    const sequences = new Map<number, string>();
+    for (const event of events) {
+      if (activations.has(event)) continue;
+      const digest = recoveryEventDigest(event);
+      requireRuntime(
+        !sequences.has(event.sequence) || sequences.get(event.sequence) === digest,
+        "event-sequence-conflict",
+      );
+      sequences.set(event.sequence, digest);
+    }
     const requests = events.filter(
       (event): event is Request =>
         event.event === "RecoveryRequested" && event.predecessorRunId === plan.predecessor.runId,
@@ -646,6 +652,10 @@ export async function loadRecoveryRuntime(input: {
       chain.status === "verified" && chain.accounting?.usage,
       "historical-chain-or-accounting-invalid",
     );
+    const verifiedSourceControllerObservations = sourceEvents.filter(
+      (event): event is Extract<FactoryEvent, { kind: "controller" }> =>
+        event.kind === "controller" && sourceIds.has(event.runId),
+    );
     const sourceEvidence = await resolveRecoveryEvidence({
       planRecord: record,
       claim,
@@ -786,6 +796,7 @@ export async function loadRecoveryRuntime(input: {
       projection,
       sourceRunIds,
       accountingRunIds: [...sourceRunIds, input.runId],
+      verifiedSourceControllerObservations,
       events,
       currentEvents,
       sourceEvidence,

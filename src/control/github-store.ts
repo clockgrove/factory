@@ -233,6 +233,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
           new Error("Factory GitHub circuit opened during the mutation fence"),
         );
       }
+      mutationPermit?.assertDispatchAllowed?.();
       attempted = true;
       const result = await operation();
       this.#breaker.recordSuccess();

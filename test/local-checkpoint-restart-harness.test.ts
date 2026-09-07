@@ -6,6 +6,9 @@ import { boundedPolicy } from "../scripts/verify-live-objective.mjs";
 import {
   assertControllerUnit,
   checkpointAuthority,
+  checkpointDeadline,
+  checkpointTimeout,
+  createCheckpointList,
   checkpointFacts,
   checkpointFailure,
   checkpointOperatorFailure,
@@ -22,6 +25,52 @@ import {
 } from "../scripts/verify-local-checkpoint-restart.mjs";
 
 const repository = "example/disposable";
+describe("opt-in original-start observation window", () => {
+  const startedAt = "2026-01-01T00:00:00.000Z";
+  const start = Date.parse(startedAt);
+  it("retains 45 minutes by default and never rolls a selected deadline forward", () => {
+    expect(checkpointDeadline(startedAt)).toBe(start + 45 * 60000);
+    const deadline = checkpointDeadline(startedAt, 120);
+    expect(checkpointTimeout(deadline, 120000, start + 80 * 60000)).toBe(120000);
+    expect(checkpointTimeout(deadline, 120000, deadline - 7)).toBe(7);
+    expect(() => checkpointTimeout(deadline, 120000, deadline)).toThrow("deadline exhausted");
+    expect(checkpointDeadline(startedAt, 120)).toBe(deadline);
+    expect(() => checkpointTimeout(checkpointDeadline(startedAt), 1, start + 45 * 60000)).toThrow(
+      "deadline exhausted",
+    );
+  });
+  it.each([44, 121, 45.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    "rejects invalid internal observation window %s before host or lifecycle work",
+    async (minutes) => {
+      await expect(main(env, undefined, { observationWindowMinutes: minutes })).rejects.toThrow(
+        "observation window",
+      );
+    },
+  );
+  it("rejects an opt-in window inconsistent with the prospective policy", async () => {
+    await expect(main(env, undefined, { observationWindowMinutes: 120 })).rejects.toThrow(
+      "must match prospective Objective policy",
+    );
+  });
+  it("uses the same selected deadline across paginated reads after the old 45-minute limit", async () => {
+    const deadline = checkpointDeadline(startedAt, 120);
+    let now = deadline - 1000;
+    const request = vi.fn(async () => {
+      now = deadline;
+      return { data: Array.from({ length: 100 }, (_, id) => ({ id })) };
+    });
+    const list = createCheckpointList(request, { now: () => now });
+    await expect(
+      list("GET /repos/{owner}/{repo}/issues", {}, 1000, { deadline }),
+    ).rejects.toMatchObject({ code: "CHECKPOINT_DEADLINE" });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledWith(
+      "GET /repos/{owner}/{repo}/issues",
+      { per_page: 100, page: 1 },
+      1000,
+    );
+  });
+});
 const checkout = "/home/example/disposable";
 const unit = `clockgrove-factory-${createHash("sha256").update(`${repository}\0${checkout}`).digest("hex").slice(0, 16)}.service`;
 const env = {

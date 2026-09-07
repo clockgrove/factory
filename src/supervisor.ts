@@ -1176,7 +1176,9 @@ export class FactorySupervisor {
       ...(options.recovery ? { recoveryInspection: true } : {}),
     });
     this.#store = new GitHubControlStore(controls);
-    this.#recoveryStore = recoveryReadPort(this.#store, options.owner, options.repo);
+    this.#recoveryStore = recoveryReadPort(this.#store, options.owner, options.repo, (number) =>
+      this.#reader.readObjective(number),
+    );
     this.#stacks = new GitHubStacks(
       {
         request: (route, parameters, mutating) =>
@@ -4707,10 +4709,10 @@ export class FactorySupervisor {
         const objectiveLocalMax = this.#fairness.mayAdmit(objective.number, capacity.reservations)
           ? this.#fairness.localMaximum(
               objective.number,
-              Math.min(
-                scheduling.capacity.local.maxWorkers,
-                this.#controllerLimits.maxLocalWorkers,
-              ),
+              // Fairness shares the repository pool, not this Objective's
+              // immutable ceiling. admissionCapacityLimits applies that separate
+              // ceiling after subtracting other Objectives' occupied slots.
+              this.#controllerLimits.maxLocalWorkers,
               capacity.reservations,
             )
           : capacity.reservations.filter(
@@ -9543,6 +9545,14 @@ export class FactorySupervisor {
     const observations = (receiver.factoryEvents ?? []).filter(
       (event) => event.kind === "controller" && event.runId === receiverRun?.runId,
     );
+    const recovery = this.#recoveryRuntime;
+    if (
+      recovery &&
+      receiver.number === recovery.controllingRun.objective &&
+      this.#run.runId === recovery.controllingRun.runId &&
+      (!receiverRun || receiverRun.runId === recovery.controllingRun.runId)
+    )
+      observations.push(...recovery.verifiedSourceControllerObservations);
     const generations = new Set(
       observations.flatMap((event) =>
         event.kind === "controller"

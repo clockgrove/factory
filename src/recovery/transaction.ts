@@ -7,6 +7,7 @@ import {
 } from "./claims.js";
 import { recoveryEventDigest, recoverySourceEventsDigest } from "./identity.js";
 import { parseRecoveryPlan, type RecoveryPlanRecord } from "./plan.js";
+import { recoveryRunHistoryActivations } from "./activation-history.js";
 
 type Start = Extract<FactoryEvent, { event: "FactoryRunStarted" }>;
 type Consumed = Extract<FactoryEvent, { event: "RecoveryConsumed" }>;
@@ -146,8 +147,8 @@ export function inspectRecoveryAdoption(
     }
     const events = [...unique.values()];
     const sourceRuns = new Set(plan.history.map((entry) => entry.runId));
-    if (events.some((event) => !sourceRuns.has(event.runId) && event.runId !== plan.successorRunId))
-      return blocked("unplanned-run-history");
+    const activations = recoveryRunHistoryActivations(plan, events);
+    if (!activations) return blocked("unplanned-run-history");
     const requests = events.filter(
       (event) =>
         event.event === "RecoveryRequested" && event.predecessorRunId === plan.predecessor.runId,
@@ -179,6 +180,7 @@ export function inspectRecoveryAdoption(
     for (const event of events) {
       if (
         event.runId !== plan.successorRunId &&
+        !activations.has(event) &&
         event.sequence >= expected[0].sequence &&
         event.sequence <= expected[2].sequence
       )

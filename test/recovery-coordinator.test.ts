@@ -686,7 +686,10 @@ describe("fenced recovery adoption coordinator", () => {
       event({ kind: "run", event: "FactoryRunCancelled", runId: "successor", sequence: 20 }),
     );
     const count = f.store.writes.length;
-    expect((await f.make().adopt(f.args)).status).toBe("blocked");
+    expect(await f.make().adopt(f.args)).toMatchObject({
+      status: "blocked",
+      blockers: ["unexpected-successor-event"],
+    });
     expect(f.store.writes).toHaveLength(count);
   });
 

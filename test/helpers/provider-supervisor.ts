@@ -36,6 +36,7 @@ export const DAYTONA = "codex-cli/daytona";
 export const COPILOT = "github-copilot/github-managed";
 export const CODEX = "openai-codex/github-managed";
 export type ProviderScenario = "daytona-burst" | "copilot-objective" | "codex-objective";
+const pendingFixtureRetirements = new Set<object>();
 export interface ProviderFaults {
   repositoryFence?: () => Promise<void>;
   configureLocalBackend?: (backend: ExecutionBackend) => ExecutionBackend;
@@ -71,6 +72,8 @@ export async function providerSupervisorFixture(
   scenario: ProviderScenario,
   faults: ProviderFaults = {},
 ) {
+  if (pendingFixtureRetirements.size > 0)
+    throw new Error("previous provider Supervisor fixture retirement is still pending");
   vi.stubGlobal("fetch", async (input: unknown) => {
     return new Response(
       JSON.stringify({ message: `fixture forbids live transport: ${String(input)}` }),
@@ -916,21 +919,27 @@ export async function providerSupervisorFixture(
     }),
   };
   let controllerGeneration = 0;
+  const retirement = new AbortController();
+  const activeRuns = new Set<ReturnType<FactorySupervisor["run"]>>();
+  let disposal: Promise<void> | undefined;
   return {
     repository,
     runId: lease.runId,
     policy,
     snapshot,
     management,
+    repositoryResources: shared,
     activity,
     resources,
     events,
     refs,
     run: (signal?: AbortSignal) => {
+      if (retirement.signal.aborted)
+        return Promise.reject(new Error("provider Supervisor fixture is already retiring"));
       receiptTransportUnavailable = false;
       const generation = ++controllerGeneration;
       const controllerExpiresAt = new Date(Date.now() + 600_000).toISOString();
-      return new FactorySupervisor({
+      const run = new FactorySupervisor({
         token: "fixture-only",
         owner: "fixture",
         repo: "provider-qualification",
@@ -954,16 +963,68 @@ export async function providerSupervisorFixture(
               }),
             }
           : {}),
-        ...(signal ? { signal } : {}),
+        signal: signal ? AbortSignal.any([signal, retirement.signal]) : retirement.signal,
         onStatus: (message) => notifications.push(message),
       }).run();
+      activeRuns.add(run);
+      // Observe both outcomes immediately even when a timed-out test abandons
+      // its promise. Return the original promise so callers retain its result.
+      void run.then(
+        () => {
+          activeRuns.delete(run);
+        },
+        () => {
+          activeRuns.delete(run);
+        },
+      );
+      return run;
     },
-    dispose: async () => {
-      vi.restoreAllMocks();
-      vi.unstubAllGlobals();
-      // Never enumerate or sweep user caches, including interrupted real runs.
-      for (const root of retainedArtifactRoots) await rm(root, { recursive: true, force: true });
-      await rm(repository, { recursive: true, force: true });
+    dispose: () => {
+      if (disposal) return disposal;
+      disposal = (async () => {
+        const pending = [...activeRuns];
+        const drain = Promise.allSettled(pending);
+        const retiring = {};
+        pendingFixtureRetirements.add(retiring);
+        try {
+          retirement.abort(new Error("provider Supervisor fixture is retiring"));
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          const settled = await Promise.race([
+            drain,
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(
+                () =>
+                  reject(
+                    new Error(
+                      "provider Supervisor fixture retirement exceeded 10000ms; runs and cleanup remain unresolved",
+                    ),
+                  ),
+                10_000,
+              );
+            }),
+          ]).finally(() => {
+            if (timer) clearTimeout(timer);
+          });
+          const failure = settled.find((result) => result.status === "rejected");
+          // Preserve the checkout/cache when interrupted work reports unresolved
+          // cleanup; fixture deletion is not evidence that execution was retired.
+          if (failure?.status === "rejected") throw failure.reason;
+          // No old reader/store can reach a subsequent fixture's prototype spies.
+          vi.restoreAllMocks();
+          vi.unstubAllGlobals();
+          // Never enumerate or sweep user caches, including interrupted real runs.
+          for (const root of retainedArtifactRoots)
+            await rm(root, { recursive: true, force: true });
+          await rm(repository, { recursive: true, force: true });
+        } finally {
+          // After a timeout this callback only opens fixture admission once the
+          // old run actually settles; it never restores mocks or deletes files.
+          void drain.then(() => {
+            pendingFixtureRetirements.delete(retiring);
+          });
+        }
+      })();
+      return disposal;
     },
   };
 }

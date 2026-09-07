@@ -13,6 +13,7 @@ import {
   type GraphWriter,
 } from "../src/graph.js";
 import { CircuitBreaker, PlatformUnavailableError } from "../src/platform.js";
+import { advancingMutationScheduler } from "./helpers/mutation-scheduler.js";
 
 const NOW = new Date("2026-01-01T00:00:00Z");
 
@@ -238,7 +239,7 @@ describe("GraphApplier.apply", () => {
 
   it("creates every Work Item as a sub-issue of the Objective", async () => {
     const writer = new FakeGraphWriter();
-    const applier = new GraphApplier({ writer });
+    const applier = new GraphApplier({ writer, mutationScheduler: advancingMutationScheduler() });
 
     const created = await applier.apply(
       objective([
@@ -258,7 +259,7 @@ describe("GraphApplier.apply", () => {
 
   it("wires dependsOn edges via addBlockedBy after every issue exists", async () => {
     const writer = new FakeGraphWriter();
-    const applier = new GraphApplier({ writer });
+    const applier = new GraphApplier({ writer, mutationScheduler: advancingMutationScheduler() });
 
     const created = await applier.apply(
       objective([workItem({ id: "a" }), workItem({ id: "b", dependsOn: ["a"] })]),
@@ -276,7 +277,7 @@ describe("GraphApplier.apply", () => {
 
   it("repairs a partial graph without duplicating issues or dependency edges", async () => {
     const writer = new FakeGraphWriter();
-    const applier = new GraphApplier({ writer });
+    const applier = new GraphApplier({ writer, mutationScheduler: advancingMutationScheduler() });
     const graph = objective([workItem({ id: "a" }), workItem({ id: "b", dependsOn: ["a"] })]);
     const digest = compiledGraphDigest(graph);
     const created = await applier.apply(graph, {
@@ -291,7 +292,10 @@ describe("GraphApplier.apply", () => {
     expect(metadata).toMatchObject({ id: "b", graphDigest: digest, graphSize: 2, index: 1 });
 
     const noWrites = new FakeGraphWriter();
-    await new GraphApplier({ writer: noWrites }).apply(graph, {
+    await new GraphApplier({
+      writer: noWrites,
+      mutationScheduler: advancingMutationScheduler(),
+    }).apply(graph, {
       ...ctx,
       existingWorkItems: [existingItem(graph, 0, 90), existingItem(graph, 1, 91, [90])],
     });
@@ -306,7 +310,7 @@ describe("GraphApplier.apply", () => {
     const changed = { ...existingItem(graph, 0, 90), title: "Edited by hand" };
     const writer = new FakeGraphWriter();
     await expect(
-      new GraphApplier({ writer }).apply(graph, {
+      new GraphApplier({ writer, mutationScheduler: advancingMutationScheduler() }).apply(graph, {
         ...ctx,
         existingWorkItems: [changed],
       }),
@@ -316,7 +320,7 @@ describe("GraphApplier.apply", () => {
 
   it("applies the optional Work Item label to every created issue", async () => {
     const writer = new FakeGraphWriter();
-    const applier = new GraphApplier({ writer });
+    const applier = new GraphApplier({ writer, mutationScheduler: advancingMutationScheduler() });
     let seenLabelIds: string[] | undefined;
     const originalCreate = writer.createWorkItemIssue.bind(writer);
     writer.createWorkItemIssue = async (args) => {
@@ -334,7 +338,7 @@ describe("GraphApplier.apply", () => {
 
   it("rejects an invalid graph before making any write", async () => {
     const writer = new FakeGraphWriter();
-    const applier = new GraphApplier({ writer });
+    const applier = new GraphApplier({ writer, mutationScheduler: advancingMutationScheduler() });
 
     await expect(
       applier.apply(objective([workItem({ id: "a", dependsOn: ["ghost"] })]), ctx),
@@ -344,7 +348,7 @@ describe("GraphApplier.apply", () => {
 
   it("wraps a secondary-rate-limit refusal in PlatformUnavailableError", async () => {
     const writer = new FakeGraphWriter({ createWorkItemIssue: rateLimitError() });
-    const applier = new GraphApplier({ writer });
+    const applier = new GraphApplier({ writer, mutationScheduler: advancingMutationScheduler() });
 
     await expect(applier.apply(objective([workItem({ id: "a" })]), ctx)).rejects.toBeInstanceOf(
       PlatformUnavailableError,
@@ -362,7 +366,11 @@ describe("GraphApplier.apply", () => {
       maxCooldownMs: 1_000,
       maxOpens: 1,
     });
-    const applier = new GraphApplier({ writer, circuitBreaker: breaker });
+    const applier = new GraphApplier({
+      writer,
+      circuitBreaker: breaker,
+      mutationScheduler: advancingMutationScheduler(),
+    });
 
     await expect(applier.apply(objective([workItem({ id: "a" })]), ctx)).rejects.toBeInstanceOf(
       PlatformUnavailableError,

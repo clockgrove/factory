@@ -14,7 +14,8 @@ import {
   type DispatcherOptions,
   type GitHubWriter,
 } from "../src/dispatch.js";
-import { CircuitBreaker, ContentCreationPacer, PlatformUnavailableError } from "../src/platform.js";
+import { CircuitBreaker, PlatformUnavailableError } from "../src/platform.js";
+import { advancingMutationScheduler } from "./helpers/mutation-scheduler.js";
 import { attemptCount, deriveState, DISPATCH_CONFIRM_WINDOW_MS } from "../src/state.js";
 import type { DerivedWorkItem } from "../src/state.js";
 import {
@@ -166,8 +167,7 @@ function makeDispatcher(
     copilotBotId: "BOT_1",
     defaultBranch: "main",
     escalateToId: "U_human",
-    // No gap between calls, so tests run fast rather than pacing for real.
-    pacer: new ContentCreationPacer(10_000, 100_000, 0),
+    mutationScheduler: advancingMutationScheduler(),
     ...overrides,
   });
 }

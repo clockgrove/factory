@@ -9545,6 +9545,14 @@ export class FactorySupervisor {
     const observations = (receiver.factoryEvents ?? []).filter(
       (event) => event.kind === "controller" && event.runId === receiverRun?.runId,
     );
+    const recovery = this.#recoveryRuntime;
+    if (
+      recovery &&
+      receiver.number === recovery.controllingRun.objective &&
+      this.#run.runId === recovery.controllingRun.runId &&
+      (!receiverRun || receiverRun.runId === recovery.controllingRun.runId)
+    )
+      observations.push(...recovery.verifiedSourceControllerObservations);
     const generations = new Set(
       observations.flatMap((event) =>
         event.kind === "controller"

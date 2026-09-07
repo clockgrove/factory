@@ -66,6 +66,9 @@ export interface RecoveryRuntime {
   projection: CompiledGraphProjectionRecord;
   sourceRunIds: readonly string[];
   accountingRunIds: readonly string[];
+  /** Controller generations from exact source receipt fences, exposed only after
+   * every historical source digest and the complete recovery chain verify. */
+  verifiedSourceControllerObservations: readonly Extract<FactoryEvent, { kind: "controller" }>[];
   /** Original envelopes: no synthetic starts, terminal records, or re-labelled attempts. */
   events: readonly FactoryEvent[];
   currentEvents: readonly FactoryEvent[];
@@ -649,6 +652,10 @@ export async function loadRecoveryRuntime(input: {
       chain.status === "verified" && chain.accounting?.usage,
       "historical-chain-or-accounting-invalid",
     );
+    const verifiedSourceControllerObservations = sourceEvents.filter(
+      (event): event is Extract<FactoryEvent, { kind: "controller" }> =>
+        event.kind === "controller" && sourceIds.has(event.runId),
+    );
     const sourceEvidence = await resolveRecoveryEvidence({
       planRecord: record,
       claim,
@@ -789,6 +796,7 @@ export async function loadRecoveryRuntime(input: {
       projection,
       sourceRunIds,
       accountingRunIds: [...sourceRunIds, input.runId],
+      verifiedSourceControllerObservations,
       events,
       currentEvents,
       sourceEvidence,

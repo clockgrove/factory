@@ -199,6 +199,7 @@ async function fixture(
     resource?: "legacy" | "local" | "managed";
     stacked?: boolean;
     activated?: boolean;
+    controllerObservation?: boolean;
   } = {},
 ) {
   const store = new MemoryStore();
@@ -347,6 +348,20 @@ async function fixture(
     terminal,
   ];
   if (options.missingCompileUsage) events.splice(3, 1);
+  if (options.controllerObservation)
+    events.push(
+      event({
+        kind: "controller",
+        event: "ControllerObserved",
+        sequence: 9,
+        controllerId: "predecessor-controller",
+        epoch: 3,
+        expiresAt: "2026-09-07T00:10:00.000Z",
+        controllerPolicyDigest: "d".repeat(64),
+        protocolMin: "clockgrove.factory/v2",
+        protocolMax: "clockgrove.factory/v2",
+      }),
+    );
   if (options.activated)
     events.push(
       event({
@@ -639,6 +654,38 @@ async function addAttempt(f: Awaited<ReturnType<typeof adopted>>, attempt = 1) {
 }
 
 describe("verified successor runtime loader", () => {
+  it("exposes only digest-verified predecessor controller generations to successor consumers", async () => {
+    const f = await adopted({ controllerObservation: true });
+    const result = await f.read();
+    expect(result).toMatchObject({ status: "verified" });
+    if (result.status !== "verified") throw new Error("expected verified recovery runtime");
+    expect(result.verifiedSourceControllerObservations).toMatchObject([
+      {
+        event: "ControllerObserved",
+        runId: "source",
+        controllerId: "predecessor-controller",
+        epoch: 3,
+      },
+    ]);
+
+    const controller = f.snapshot.factoryEvents!.find(
+      (event) => event.event === "ControllerObserved",
+    )!;
+    Object.assign(controller, { controllerId: "unverified-controller" });
+    expect(await f.read()).toMatchObject({
+      status: "blocked",
+      blockers: ["historical-chain-or-accounting-invalid"],
+    });
+  });
+
+  it("does not synthesize predecessor controller authority when none was observed", async () => {
+    const f = await adopted();
+    const result = await f.read();
+    expect(result).toMatchObject({ status: "verified" });
+    if (result.status !== "verified") throw new Error("expected verified recovery runtime");
+    expect(result.verifiedSourceControllerObservations).toEqual([]);
+  });
+
   it("loads completed adoption with its exact original activation in a separate sequence namespace", async () => {
     const f = await adopted({ activated: true });
     const writes = [...f.store.writes];
@@ -836,7 +883,7 @@ describe("verified successor runtime loader", () => {
   });
 
   it("preserves exact historical claim filtering across two adoptions from a frozen port", async () => {
-    const f = await adopted();
+    const f = await adopted({ controllerObservation: true });
     const events = f.snapshot.factoryEvents!;
     const start = events.find(
       (value) => value.event === "FactoryRunStarted" && value.runId === "successor",
@@ -914,6 +961,14 @@ describe("verified successor runtime loader", () => {
     expect([...result.keys()]).toEqual(["third", "successor"]);
     expect(result.get("successor")!.controllingRun.runId).toBe("successor");
     expect(result.get("third")!.accountingRunIds).toEqual(["source", "successor", "third"]);
+    expect(result.get("third")!.verifiedSourceControllerObservations).toMatchObject([
+      {
+        event: "ControllerObserved",
+        runId: "source",
+        controllerId: "predecessor-controller",
+        epoch: 3,
+      },
+    ]);
     expect(
       await port.listRefs("refs/clockgrove-factory/recovery-claims/objective-7/"),
     ).toHaveLength(2);

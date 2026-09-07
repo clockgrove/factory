@@ -4836,13 +4836,21 @@ export class FactorySupervisor {
                 });
                 this.#budgetEvents.push(event);
               });
-            } else if (this.#policy.economics && selected.capabilities.reportsModelUsage) {
+            } else if (selected.capabilities.reportsModelUsage) {
+              this.#modelInvocations.retire(modelInvocationKey({
+                objective: reservation!.objective,
+                runId: reservation!.runId,
+                workItem: item.number,
+                attempt: reservation!.attempt,
+                phase: "execution",
+                modelInvocationId: `worker-${item.number}-${reservation!.attempt}`,
+              }));
               if (selected.capabilities.id === "codex-app-server/local-worktree")
                 throw new Error(
                   "App Server final model usage is unavailable; automated replacement is blocked",
                 );
               throw new Error(
-                `backend ${selected.capabilities.id} omitted terminal model-token usage required by maxModelTokens`,
+                `backend ${selected.capabilities.id} omitted terminal model-token usage; consumption remains unknown`,
               );
             }
             if (observation.state !== "succeeded") {
@@ -12417,7 +12425,8 @@ export class FactorySupervisor {
           artifact.baseSha !== validation.baseSha || artifact.outcome !== "succeeded")
           throw new Error("validated publication recovery differs from the original retained artifact");
         this.#retainArtifactContent(artifact);
-        await ensureLocalCommit(this.#options.repository, artifact.baseSha);
+        // The raw-object helper refuses an unavailable base; recovery must not
+        // run checkout-configured fetch, credential helpers, hooks, or filters.
         const treeOid = await prepareSiblingRefreshTree({
           repository: this.#options.repository,
           store: this.#store,

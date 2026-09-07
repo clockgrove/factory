@@ -51,6 +51,29 @@ function budget(
 }
 
 describe("durable model dispatch intent", () => {
+  it("retires only the terminal unknown invocation while another owned invocation remains active", async () => {
+    const scopes = new ModelInvocationScopes();
+    const first = budget("BudgetReserved");
+    const second = budget("BudgetReserved", {
+      sequence: 3, modelInvocationId: "second", usageId: "invocation-second",
+    });
+    const firstKey = modelInvocationKey({ ...first, modelInvocationId: first.modelInvocationId! });
+    const secondKey = modelInvocationKey({ ...second, modelInvocationId: second.modelInvocationId! });
+    await scopes.run(async () => {
+      scopes.claim(firstKey);
+      await scopes.run(async () => {
+        scopes.claim(secondKey);
+        scopes.retire(secondKey);
+        expect(scopes.active).toEqual(new Set([firstKey]));
+        expect(() => assertModelInvocationAdmission([first], DEFAULT_RUN_POLICY, scopes.active)).not.toThrow();
+        expect(() => assertModelInvocationAdmission([first, second], DEFAULT_RUN_POLICY, scopes.active)).toThrow(/consumption is unknown/);
+        expect(() => scopes.retire(firstKey)).toThrow(/not owned/);
+      });
+      expect(scopes.active).toEqual(new Set([firstKey]));
+    });
+    expect(scopes.active.size).toBe(0);
+  });
+
   it("keeps a zero-valued marker unknown, not known-zero observed usage", () => {
     const marker = budget("BudgetReserved");
     expect(isModelInvocationMarker(marker)).toBe(true);

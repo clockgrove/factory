@@ -28,6 +28,35 @@ const modelBudgets = (f: Fixture): BudgetEvent[] =>
     );
 
 describe("Supervisor model dispatch journal", () => {
+  it.each(["missing", "partial"] as const)("fences terminal %s counters without economics before any review", async (kind) => {
+    const f = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      dependencyChain: true,
+      noModelTokenBudget: true,
+      configureLocalBackend: (backend) => ({
+        ...backend,
+        observe: async (handle) => ({
+          ...await backend.observe(handle),
+          usage: kind === "missing" ? {} : { inputTokens: 4 },
+        }),
+      }),
+    });
+    try {
+      expect(f.policy.economics).toBeUndefined();
+      expect(await f.run()).toMatchObject({ status: "escalated" });
+      expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);
+      expect(f.activity.filter((entry) => entry.operation === "review")).toEqual([]);
+      expect(f.events().filter((event) => event.event === "ValidationRecorded" || event.event === "PublicationRecorded")).toEqual([]);
+      const markers = modelBudgets(f).filter(isModelInvocationMarker);
+      expect(markers).toHaveLength(1);
+      expect(markers[0]).toMatchObject({ modelInvocationId: "worker-8-1", phase: "execution" });
+      expect(modelBudgets(f)).toEqual(markers);
+      expect(unresolvedModelInvocations(f.events())).toEqual(markers);
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
+
   it("persists exact worker and semantic-review intent before each model call and links actual counters", async () => {
     let fixture: Fixture | undefined;
     const workerCalls: string[] = [];

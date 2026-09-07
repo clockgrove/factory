@@ -39,4 +39,11 @@ export class ModelInvocationScopes {
     owned.add(key);
     this.active.add(key);
   }
+
+  /** Terminal unknown consumption is no longer an in-flight dispatch exemption. */
+  retire(key: string): void {
+    const owned = this.#scope.getStore();
+    if (!owned?.delete(key)) throw new Error("model invocation is not owned by this operation");
+    this.active.delete(key);
+  }
 }

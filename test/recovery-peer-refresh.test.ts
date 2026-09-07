@@ -18,6 +18,10 @@ import { publicationBranch } from "../src/publication/publisher.js";
 import type { RecoveryReadStore } from "../src/recovery/assessment.js";
 import { recoveryEventDigest } from "../src/recovery/identity.js";
 import { verifyRecoveryPeerTrunkIntegration } from "../src/recovery/peer-trunk.js";
+import { buildRecoveryProposal } from "../src/recovery/proposal.js";
+import { RecoveryPlanManager } from "../src/recovery/plan.js";
+import { resolveRecoveryEvidence } from "../src/recovery/evidence.js";
+import * as siblingRefreshProof from "../src/recovery/sibling-refresh.js";
 import { observeRecoverySiblingRefresh } from "../src/recovery/sibling-refresh.js";
 import { createValidationEvidence } from "../src/validation/evidence.js";
 import { bindValidationToPublishedHead } from "../src/validation/plan.js";
@@ -684,6 +688,8 @@ async function fixture(sameObjective = false, peerNonhost = false) {
     });
   };
   return {
+    storage,
+    leases,
     refs,
     commits,
     blobs,
@@ -701,6 +707,119 @@ async function fixture(sameObjective = false, peerNonhost = false) {
     peerProof,
   };
 }
+
+async function adoptionFixture() {
+  const f = await fixture();
+  // The retained refresh targets the first peer merge, while the prospective
+  // successor must independently revalidate against the newer current base.
+  const currentBase: GitCommitObject = {
+    oid: sha("later-current-base"),
+    treeOid: sha("later-current-tree"),
+    parentOids: [f.peerPublication.merge],
+    message: "later base observation",
+    serverTime: new Date(at),
+  };
+  f.commits.set(currentBase.oid, currentBase);
+  f.store.getBranchHead = async () => currentBase;
+  f.receiver.snapshot.factoryEvents!.push(
+    parseFactoryEvent({
+      protocol: "clockgrove.factory/v2",
+      kind: "run",
+      event: "FactoryRunCancelled",
+      objective: 7,
+      runId: f.receiver.lease.runId,
+      sequence: 1000,
+      at,
+      reason: "Original bounded run retired with its publication retained",
+    }),
+  );
+  const proposal = await buildRecoveryProposal({
+    repository: "o/r",
+    snapshot: f.receiver.snapshot,
+    historyComplete: true,
+    store: f.store,
+    requestId: "peer-retained-request",
+    successorRunId: "peer-successor",
+  });
+  expect(proposal.blockers).toEqual([]);
+  expect(proposal.plan?.items[0]?.action).toBe("revalidate");
+  expect(proposal.plan?.items[0]?.source?.siblingRefresh?.deliveryHeadSha).toBe(
+    f.record.plannedHeadSha,
+  );
+  expect(proposal.plan?.expectedBaseSha).toBe(currentBase.oid);
+  const planRecord = await new RecoveryPlanManager(f.storage, f.leases).persist({
+    lease: { ...f.receiver.lease, runId: "peer-successor" },
+    plan: proposal.plan!,
+  });
+  vi.mocked(f.store.readCommitObjectiveCandidates!).mockClear();
+  vi.mocked(f.store.readObjectiveSnapshot!).mockClear();
+  return {
+    ...f,
+    planRecord,
+    currentBase,
+    resolve: () =>
+      resolveRecoveryEvidence({
+        planRecord,
+        claim: null,
+        events: [
+          ...f.receiver.snapshot.factoryEvents!,
+          ...f.receiver.snapshot.workItems.flatMap((item) => item.factoryEvents!),
+        ],
+        snapshot: f.receiver.snapshot,
+        store: f.store,
+      }),
+  };
+}
+
+describe("peer refresh proposal/adoption parity", () => {
+  it("forwards and caches both peer ports during persisted-plan source re-verification", async () => {
+    const f = await adoptionFixture();
+    const verify = siblingRefreshProof.observeRecoverySiblingRefresh;
+    // Repeat the real proof demand within one evidence resolution, exercising the
+    // resolver's cache rather than replacing peer verification with a mock result.
+    const repeated = vi
+      .spyOn(siblingRefreshProof, "observeRecoverySiblingRefresh")
+      .mockImplementation(async (...args) => {
+        await verify(...args);
+        return verify(...args);
+      });
+    try {
+      const evidence = await f.resolve();
+      expect(evidence.sourceBindings).toBe("verified");
+      expect(evidence.currentBase).toBe("unchanged");
+      expect(evidence.currentBaseSha).toBe(f.currentBase.oid);
+      expect(evidence.items[0]?.current.head).toBe("unchanged");
+      expect(evidence.blockers).toEqual([{ code: "resource-cleanup-unverified", workItem: 9 }]);
+      expect(repeated).toHaveBeenCalledTimes(1);
+      expect(f.store.readCommitObjectiveCandidates).toHaveBeenCalledExactlyOnceWith(
+        f.peerPublication.merge,
+      );
+      expect(vi.mocked(f.store.readObjectiveSnapshot!).mock.calls).toEqual([[7], [17]]);
+      expect(f.planRecord.plan.items[0]?.source?.publication?.headSha).toBe(f.original.head);
+      expect(f.planRecord.plan.items[0]?.source?.siblingRefresh?.deliveryHeadSha).toBe(
+        f.record.plannedHeadSha,
+      );
+    } finally {
+      repeated.mockRestore();
+    }
+  });
+
+  it.each(["missing-candidates", "missing-snapshot", "tampered-peer"] as const)(
+    "fails closed at adoption after a valid proposal when %s evidence is unavailable",
+    async (fault) => {
+      const f = await adoptionFixture();
+      if (fault === "missing-candidates") delete f.store.readCommitObjectiveCandidates;
+      else if (fault === "missing-snapshot") delete f.store.readObjectiveSnapshot;
+      else Object.assign(f.peer.controller, { epoch: 99 });
+      const evidence = await f.resolve();
+      expect(evidence.currentBase).toBe("unchanged");
+      expect(evidence.sourceBindings).toBe("incomplete");
+      expect(evidence.blockers).toContainEqual({ code: "source-item-unavailable", workItem: 9 });
+      expect(f.planRecord.plan.items[0]?.action).toBe("revalidate");
+      expect(f.planRecord.plan.items[0]?.source?.publication?.headSha).toBe(f.original.head);
+    },
+  );
+});
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
 function peerEvent(f: Fixture, name: FactoryEvent["event"]) {

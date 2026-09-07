@@ -108,6 +108,7 @@ function setup(input: { paced?: boolean; fetch?: typeof globalThis.fetch } = {})
         parentOids: [lease.oid],
         message: "Factory repository-controller lease release",
       });
+      return lease;
     });
   const run = (operation: () => Promise<void>) =>
     runGitHubRepositoryController({

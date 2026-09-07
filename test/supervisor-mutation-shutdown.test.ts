@@ -105,6 +105,7 @@ it("the actual Supervisor drains and releases its owned lease after a queued rec
       permit.assertDispatchAllowed?.();
       permit.release();
       retired.push("repository");
+      return lease;
     });
   const supervised = vi.fn(async () => {
     await f.run(shutdown.signal);

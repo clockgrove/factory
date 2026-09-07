@@ -184,12 +184,10 @@ describe("Supervisor activation withdrawal races", () => {
       else delete f.policy.economics.modelTokenBudgetMode;
       const compile = vi.spyOn(f.management, "compile");
       const review = vi.spyOn(f.management, "review");
-      expect(await f.run()).toMatchObject({
-        status: "escalated",
-        reason: expect.stringMatching(
-          mode === "hard" ? /hard is unsupported/ : /requires explicit/,
-        ),
-      });
+      // Refusal precedes run creation, so there is no run to escalate.
+      await expect(f.run()).rejects.toThrow(
+        mode === "hard" ? /hard is unsupported/ : /requires explicit/,
+      );
       expect(compile).not.toHaveBeenCalled();
       expect(review).not.toHaveBeenCalled();
       expect(f.activity).toEqual([]);

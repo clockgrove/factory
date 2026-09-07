@@ -115,8 +115,16 @@ describe("durable model dispatch intent", () => {
     expect(unresolvedModelInvocations([marker, marker])).toEqual([marker]);
     expect(unresolvedModelInvocations([marker, repeated])).toHaveLength(1);
     expect(deriveBudgetUsage([marker, marker, repeated]).modelTokens).toBe(0);
-    expect(() =>
+    // Phase belongs to the receipt identity, so another phase is not a payload
+    // conflict at this sequence. A different binding in the SAME scope is.
+    expect(
       unresolvedModelInvocations([marker, budget("BudgetReserved", { phase: "execution" })]),
+    ).toHaveLength(2);
+    expect(() =>
+      unresolvedModelInvocations([
+        marker,
+        budget("BudgetReserved", { policyDigest: "a".repeat(64), directorEpoch: 1 }),
+      ]),
     ).toThrow(/conflicting Factory events/i);
   });
 

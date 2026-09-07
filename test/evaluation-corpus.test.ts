@@ -8,7 +8,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { compileObjective, type CompilerWorkItemInput } from "../src/compiler/index.js";
 import { CodexCliManagementBackend } from "../src/management/codex-cli.js";
-import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
+import { DEFAULT_RUN_POLICY, type RunPolicy } from "../src/protocol/policy.js";
 import {
   assessCompilerCorpusResult,
   compilePreparedCorpusCase,
@@ -24,6 +24,18 @@ import {
 
 const corpusRoot = fileURLToPath(new URL("./fixtures/evaluation", import.meta.url));
 const sha = "a".repeat(40);
+const corpusRunPolicy: RunPolicy = {
+  ...DEFAULT_RUN_POLICY,
+  workItemTimeoutMinutes: 5,
+  capacity: {
+    ...DEFAULT_RUN_POLICY.capacity!,
+    local: {
+      ...DEFAULT_RUN_POLICY.capacity!.local!,
+      defaultCpu: 1,
+      defaultMemoryMb: 1_024,
+    },
+  },
+};
 const prepared: PreparedCompilerCase[] = [];
 const execute = promisify(execFile);
 const require = createRequire(import.meta.url);
@@ -45,11 +57,13 @@ function item(
   scope: string[],
   dependsOn: string[] = [],
 ): CompilerWorkItemInput {
+  const criteria = value.entry.criteria;
+  const tiers = ["mechanical", "semantic", "visual", "deterministic-simulation"] as const;
   return {
     id,
     title: `Implement ${id}`,
     goal: value.entry.objective,
-    acceptance: value.entry.criteria.map((criterion) => criterion.text),
+    acceptance: criteria.map((criterion) => criterion.text),
     scope,
     dependsOn,
     preconditions: [],
@@ -57,14 +71,22 @@ function item(
     conventions: [],
     baseSha: sha,
     validationCommands: value.commands,
-    validation: [
-      {
-        tier: "mechanical",
-        criteria: value.entry.criteria.map((criterion) => criterion.text),
-        rationale: "The prepared corpus case binds its authoritative commands to these criteria.",
-        evidenceCommands: value.commands,
-      },
-    ],
+    criterionRisks: criteria.map((criterion) => ({ criterion: criterion.text, risk: "ordinary" })),
+    validation: tiers.flatMap((tier) => {
+      const routed = criteria.filter((criterion) => criterion.tiers.includes(tier));
+      if (!routed.length) return [];
+      return [
+        {
+          tier,
+          criteria: routed.map((criterion) => criterion.text),
+          rationale: `The corpus manifest explicitly assigns these criteria to ${tier} validation.`,
+          evidenceCommands:
+            tier === "semantic"
+              ? []
+              : [...new Set(routed.flatMap((criterion) => criterion.commands))],
+        },
+      ];
+    }),
     requirements: {
       os: ["linux"],
       architecture: ["x64"],
@@ -86,6 +108,7 @@ function combined(value: PreparedCompilerCase) {
     title: value.entry.title,
     baseSha: sha,
     repositoryFacts: value.facts,
+    runPolicy: corpusRunPolicy,
     workItems: [
       item(
         value,
@@ -119,7 +142,7 @@ describe("representative executable corpus integrity, not compiler/model quality
       expect(value.fixtureDigest).toMatch(/^[a-f0-9]{64}$/);
       expect(value.commands).toContain(value.entry.baseline.command);
       // Offline fixture execution only, after integration. Tooling comes from this repository's install.
-      const { stdout } = await execute("npm", ["test", "--silent"], {
+      const { stdout } = await execute("npm", ["--silent", "test"], {
         cwd: value.repository,
         env: {
           ...process.env,
@@ -159,6 +182,7 @@ describe("representative executable corpus integrity, not compiler/model quality
       title: value.entry.title,
       baseSha: sha,
       repositoryFacts: value.facts,
+      runPolicy: corpusRunPolicy,
       workItems: [
         item(value, "discount", ["src/cart.ts"]),
         item(value, "regression", ["check.mjs", "tsconfig.json"], ["discount"]),
@@ -219,7 +243,7 @@ describe("representative executable corpus integrity, not compiler/model quality
         baseSha: sha,
         defaultBranch: "main",
         allowedNetworkDestinations: [],
-        runPolicy: DEFAULT_RUN_POLICY,
+        runPolicy: corpusRunPolicy,
       },
       backend,
       async () => {
@@ -243,7 +267,7 @@ describe("representative executable corpus integrity, not compiler/model quality
           baseSha: sha,
           defaultBranch: "main",
           allowedNetworkDestinations: [],
-          runPolicy: DEFAULT_RUN_POLICY,
+          runPolicy: corpusRunPolicy,
         },
         backend,
         async () => {},

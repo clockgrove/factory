@@ -7,6 +7,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   assertQualificationCompletion,
+  assertRecordedQualificationPolicy,
   boundedPolicy,
   main as installedMain,
   modelTokenLimit,
@@ -115,7 +116,7 @@ export function assertNativeRefreshCompletion(evidence) {
     files,
   );
   for (const entry of evidence.nativeHarness) assert.match(entry.sha256, /^[a-f0-9]{64}$/);
-  assert.deepEqual(
+  assertRecordedQualificationPolicy(
     evidence.policy,
     boundedPolicy("stacked-prs", modelTokenLimit(String(evidence.policy.economics.maxModelTokens))),
   );

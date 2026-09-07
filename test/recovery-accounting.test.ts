@@ -85,6 +85,81 @@ const assess = (events = history("one"), runIds = ["one"]) =>
 const codes = (result: ReturnType<typeof assess>) => result.blockers.map((blocker) => blocker.code);
 
 describe("historical successor accounting assessment", () => {
+  it("discloses an orphan management dispatch even when prior phase usage is known", () => {
+    const marker: FactoryEvent = {
+      ...common("one", 5),
+      kind: "budget",
+      event: "BudgetReserved",
+      phase: "management",
+      unit: "model_tokens",
+      amount: 0,
+      workItem: 2,
+      usageId: "invocation-integration-review-pending",
+      modelInvocationId: "integration-review-pending",
+      directorEpoch: 3,
+      policyDigest: digest,
+    };
+    const prior: FactoryEvent = {
+      ...common("one", 4),
+      kind: "budget",
+      event: "BudgetReconciled",
+      phase: "management",
+      unit: "model_tokens",
+      amount: 7,
+      workItem: 2,
+      usageId: "integration-review-earlier",
+    };
+    const events = [...history("one"), prior, marker];
+    const original = structuredClone(events);
+    const result = assess([...events, marker]);
+    expect(result.usage?.modelTokens).toBe(17);
+    expect(result.unknownModelUsageCount).toBe(1);
+    expect(result.unknownModelUsage).toEqual([
+      expect.objectContaining({
+        runId: "one",
+        workItem: 2,
+        phase: "management",
+        reason: expect.stringContaining("not observed zero"),
+      }),
+    ]);
+    expect(result.unreconciledReservationCount).toBe(1);
+    expect(result.unreconciledReservations).toEqual([marker]);
+    expect(codes(result)).toEqual(
+      expect.arrayContaining(["unknown-model-usage", "unreconciled-budget-reservations"]),
+    );
+    expect(events).toEqual(original);
+
+    const completion: FactoryEvent = {
+      ...marker,
+      sequence: 6,
+      event: "BudgetReconciled",
+      usageId: "integration-review-pending",
+      amount: 11,
+    };
+    const repaired = assess([...events, completion, completion]);
+    expect(repaired.usage?.modelTokens).toBe(28);
+    expect(repaired.unknownModelUsageCount).toBe(0);
+    expect(repaired.unreconciledReservations).toEqual([]);
+    expect(repaired.blockers).toEqual([]);
+  });
+
+  it("retains the historical outstanding-reservation shape when no invocation metadata exists", () => {
+    const reserved: FactoryEvent = {
+      ...common("one", 5),
+      kind: "budget",
+      event: "BudgetReserved",
+      phase: "execution",
+      unit: "local_milliseconds",
+      amount: 100,
+      workItem: 2,
+      attempt: 1,
+    };
+    const result = assess([...history("one"), reserved]);
+    expect(result.unreconciledReservations).toEqual([reserved]);
+    expect(result.unreconciledReservations[0]).not.toHaveProperty("modelInvocationId");
+    expect(result.unknownModelUsageCount).toBe(0);
+  });
+
   it("adds distinct run/usage identities without mutating source receipts or granting authority", () => {
     const events = [
       ...history("one"),

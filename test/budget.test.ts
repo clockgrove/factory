@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   deriveBudgetUsage,
+  mergeAccountingSnapshot,
   remainingBudget,
+  unresolvedModelInvocations,
   unreconciledBudgetReservations,
 } from "../src/control/budget.js";
 import type { FactoryEvent } from "../src/protocol/events.js";
@@ -36,6 +38,48 @@ function budget(
 }
 
 describe("budget ledger", () => {
+  it("retains concurrent dispatch and actual usage when an older accounting read completes", async () => {
+    const prior = budget("BudgetReconciled", 1, 11, {
+      unit: "model_tokens",
+      usageId: "worker-prior",
+    });
+    let release!: (events: FactoryEvent[]) => void;
+    const delayedRead = new Promise<FactoryEvent[]>((resolve) => {
+      release = resolve;
+    });
+    let known: FactoryEvent[] = [prior];
+    const refresh = (async () => {
+      const observed = await delayedRead;
+      known = mergeAccountingSnapshot(known, observed, new Set(["run-1", "ancestor"]));
+    })();
+    const marker = {
+      ...budget("BudgetReserved", 2, 0, {
+        unit: "model_tokens",
+        usageId: "invocation-worker-next",
+      }),
+      modelInvocationId: "worker-next",
+    };
+    const actual = {
+      ...budget("BudgetReconciled", 3, 23, { unit: "model_tokens", usageId: "worker-next" }),
+      modelInvocationId: "worker-next",
+    };
+    const ancestor = {
+      ...budget("BudgetReconciled", 1, 7, { unit: "model_tokens", usageId: "worker-ancestor" }),
+      runId: "ancestor",
+    };
+    known.push(marker, actual, ancestor);
+    release([prior, { ...prior, runId: "foreign", amount: 999 }]);
+    await refresh;
+    expect(known).toContainEqual(marker);
+    expect(known).toContainEqual(actual);
+    expect(known.some((event) => event.runId === "foreign")).toBe(false);
+    expect(deriveBudgetUsage(known).modelTokens).toBe(41);
+    expect(unresolvedModelInvocations(known)).toEqual([]);
+    expect(() =>
+      mergeAccountingSnapshot(known, [{ ...actual, amount: 24 }], new Set(["run-1", "ancestor"])),
+    ).toThrow(/conflicting Factory events/i);
+  });
+
   it("charges the reservation until terminal usage is reconciled", () => {
     const reserved = budget("BudgetReserved", 1, 600_000);
     expect(deriveBudgetUsage([reserved]).sandboxMinutesReserved).toBe(10);

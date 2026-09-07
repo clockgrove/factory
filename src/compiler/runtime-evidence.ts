@@ -4,7 +4,7 @@ import {
   type DecompositionEvidence,
 } from "./index.js";
 import type { BackendCandidate, BackendRegistry } from "../execution/registry.js";
-import { normalizeSchedulingPolicy, type RunPolicy } from "../protocol/policy.js";
+import type { RunPolicy } from "../protocol/policy.js";
 import type { CapacitySnapshot } from "../scheduling/capacity-ledger.js";
 import type { ResourceSnapshot } from "../scheduling/resource-sampler.js";
 
@@ -35,10 +35,9 @@ export async function collectCompilationEvidence(
     new Set(items.map((item) => item.id)).size !== items.length
   )
     throw new Error("compilation evidence requires a bounded unique graph");
-  const resource =
-    normalizeSchedulingPolicy(source.policy).capacity.mode === "adaptive-local"
-      ? await source.sampleResource(source.nowMs).catch(() => null)
-      : null;
+  // Fixed worker ceilings still require physical headroom; neither scheduling
+  // mode turns its configured worker count into an observed capacity estimate.
+  const resource = await source.sampleResource(source.nowMs).catch(() => null);
   const candidates = new Map<string, readonly BackendCandidate[]>();
   // Sequential observations reuse the existing registry probe cache and do not
   // fan out a hundred capability requests at the post-compilation boundary.

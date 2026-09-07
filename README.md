@@ -149,7 +149,7 @@ The default policy is exported as `DEFAULT_RUN_POLICY`. A complete JSON override
 ```json
 {
   "backendOrder": ["codex-sdk/local-worktree", "codex-cli/local-worktree"],
-  "maxParallel": 8,
+  "maxParallel": 2,
   "workItemTimeoutMinutes": 30,
   "objectiveTimeoutMinutes": 720,
   "maxAttemptsPerItem": 3,
@@ -170,9 +170,9 @@ The default policy is exported as `DEFAULT_RUN_POLICY`. A complete JSON override
     "onUnavailable": "fallback-to-subissue-order"
   },
   "capacity": {
-    "mode": "adaptive-local",
+    "mode": "fixed",
     "local": {
-      "maxWorkers": 8,
+      "maxWorkers": 2,
       "defaultCpu": 1,
       "defaultMemoryMb": 2048,
       "reserveCpu": 0.5,
@@ -200,6 +200,11 @@ The default policy is exported as `DEFAULT_RUN_POLICY`. A complete JSON override
 }
 ```
 
+The default keeps a fixed two-worker ceiling and still applies CPU, memory and shared-resource
+safety checks. Explicitly set `capacity.mode` to `adaptive-local` and your desired worker ceilings
+to enable adaptive concurrency. Making adaptive scheduling the default retains its live
+qualification prerequisite; existing runs always keep their recorded policy.
+
 Set `delivery.mode` to `stacked-prs` to request native stacks. Factory pins the GitHub stack adapter
 to API version `2026-03-10`, probes repository capability before compilation spend, and never
 silently changes the recorded delivery selection after publication begins.
@@ -220,9 +225,13 @@ Optional economics and model-routing policy is evidence-bound. Factory accepts o
 and supported reasoning effort. `task-class` and explicit model routing to GitHub-managed agents are
 rejected rather than ignored. `economics.minCloudTimeSavedMinutes` admits overflow burst only when a
 Work Packet has a sufficient configured `estimatedDurationMinutes`; missing evidence fails closed.
-`economics.maxModelTokens` is a stop-before-next-call threshold over durably observed management and
-reporting local-worker tokens, not a provider hard cap. Already-started concurrent invocations can
-each overshoot it. Opaque sandbox/managed-agent token use remains unavailable; Factory instead limits
+For new requests, `economics.maxModelTokens` requires an explicit
+`economics.modelTokenBudgetMode: "observed-stop"`. This is a stop-before-next-call threshold over
+durably observed management and reporting local-worker tokens, not a provider hard cap.
+Already-started concurrent invocations can each overshoot it. If you require `"hard"` enforcement,
+Factory rejects the request before model work because its current model integrations cannot
+enforce that ceiling. It never silently substitutes the observed mode. Resuming a run preserves its
+recorded policy and usage. Opaque sandbox/managed-agent token use remains unavailable; Factory instead limits
 authorized resource minutes or session admissions. Those limits are not guaranteed dollar caps.
 Factory is open-source orchestration for providers with which the user has a direct relationship:
 the user owns provider billing, subscriptions and provider-side spending limits. Unavailable costs

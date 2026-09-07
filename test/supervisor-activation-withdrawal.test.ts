@@ -5,6 +5,7 @@ import { LeaseManager } from "../src/control/lease.js";
 import { decodeEventComments, encodeEventComment } from "../src/control/receipts.js";
 import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js";
 import { policyDigest } from "../src/protocol/policy.js";
+import { isModelInvocationMarker, unresolvedModelInvocations } from "../src/control/budget.js";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
 
 const fixtures: Awaited<ReturnType<typeof providerSupervisorFixture>>[] = [];
@@ -121,6 +122,88 @@ function afterReceipt(eventName: FactoryEvent["event"], action: () => void) {
 }
 
 describe("Supervisor activation withdrawal races", () => {
+  it("persists compilation intent before the real invocation and leaves missing counters unknown", async () => {
+    const f = await fixture(true);
+    f.compile.mockImplementation(async (context) => {
+      const markers = f.events().filter(isModelInvocationMarker);
+      expect(markers).toHaveLength(1);
+      const start = f
+        .events()
+        .find((event) => event.kind === "run" && event.event === "FactoryRunStarted");
+      expect(start).toBeDefined();
+      expect(markers[0]).toMatchObject({
+        objective: 7,
+        runId: start!.runId,
+        phase: "management",
+        modelInvocationId: `compile-${context.baseSha}`,
+        usageId: `invocation-compile-${context.baseSha}`,
+        amount: 0,
+        policyDigest: policyDigest(f.policy),
+      });
+      expect(markers[0]!.workItem).toBeUndefined();
+      expect(markers[0]!.attempt).toBeUndefined();
+      expect(markers[0]!.sequence).toBeGreaterThan(start!.sequence);
+      expect(unresolvedModelInvocations(f.events())).toEqual(markers);
+      throw new Error("fixture: compilation result and token counters unavailable");
+    });
+    expect(await f.run()).toMatchObject({
+      status: "escalated",
+      reason: "fixture: compilation result and token counters unavailable",
+    });
+    expect(f.compile).toHaveBeenCalledOnce();
+    const markers = f.events().filter(isModelInvocationMarker);
+    expect(markers).toHaveLength(1);
+    expect(unresolvedModelInvocations(f.events())).toEqual(markers);
+    expect(
+      f
+        .events()
+        .filter(
+          (event) =>
+            event.kind === "budget" &&
+            event.event === "BudgetReconciled" &&
+            event.unit === "model_tokens",
+        ),
+    ).toEqual([]);
+    expect(f.review).not.toHaveBeenCalled();
+    expect(f.activity).toEqual([]);
+    expect(f.events().some((event) => event.event === "GraphCompiled")).toBe(false);
+  });
+
+  it.each(["hard", "missing"] as const)(
+    "rejects fresh foreground %s token intent before any compilation or dispatch",
+    async (mode) => {
+      const f = await providerSupervisorFixture("daytona-burst", { localOnly: true });
+      fixtures.push(f);
+      // Same pristine human-Objective boundary as fixture(true), but with no
+      // recorded activation: a genuinely new foreground policy is being requested.
+      f.refs.clear();
+      f.snapshot.workItems = [];
+      f.snapshot.factoryEvents = [];
+      if (!f.policy.economics) throw new Error("fixture needs a token threshold");
+      if (mode === "hard") f.policy.economics.modelTokenBudgetMode = "hard";
+      else delete f.policy.economics.modelTokenBudgetMode;
+      const compile = vi.spyOn(f.management, "compile");
+      const review = vi.spyOn(f.management, "review");
+      // Refusal precedes run creation, so there is no run to escalate.
+      await expect(f.run()).rejects.toThrow(
+        mode === "hard" ? /hard is unsupported/ : /requires explicit/,
+      );
+      expect(compile).not.toHaveBeenCalled();
+      expect(review).not.toHaveBeenCalled();
+      expect(f.activity).toEqual([]);
+      expect(
+        f
+          .events()
+          .filter(
+            (event) =>
+              event.event === "FactoryRunStarted" ||
+              event.kind === "budget" ||
+              event.kind === "attempt",
+          ),
+      ).toEqual([]);
+    },
+  );
+
   it("rechecks repository authority after the cancellation read before compilation", async () => {
     let changed = false;
     const f = await fixture(true, async () => {

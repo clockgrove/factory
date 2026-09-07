@@ -1,6 +1,8 @@
 import type { FactoryEvent } from "../protocol/events.js";
 import type { RunPolicy } from "../protocol/policy.js";
+import { modelTokenBudgetIntent, type ModelTokenBudgetIntent } from "../protocol/budget-intent.js";
 import { deduplicateFactoryEvents, latestRunReceipts } from "../control/receipts.js";
+import { isModelInvocationMarker, unresolvedModelInvocations } from "../control/budget.js";
 import { summarizeRuntimeEconomics, type RuntimeEconomics } from "./runtime.js";
 export { summarizeRuntimeEconomics, type RuntimeEconomics } from "./runtime.js";
 
@@ -157,7 +159,12 @@ export function nativeUnitLedgers(
   for (const event of deduplicateFactoryEvents([...events]).sort(
     (left, right) => left.sequence - right.sequence,
   )) {
-    if (event.kind !== "budget" || (runId && event.runId !== runId)) continue;
+    if (
+      event.kind !== "budget" ||
+      isModelInvocationMarker(event) ||
+      (runId && event.runId !== runId)
+    )
+      continue;
     const key = budgetUsageKey(event);
     const ledger = ledgers.get(event.unit)!;
     const current = ledger.get(key) ?? { reserved: 0 };
@@ -301,6 +308,9 @@ export interface EconomicSummary {
   nativeUnits: NativeUnitLedger[];
   usage: Record<NativeBudgetUnit, EvidenceMetric<number>>;
   modelTokenBreakdown: ModelTokenBreakdown;
+  modelTokenBudgetIntent: ModelTokenBudgetIntent;
+  /** Dispatch receipts without exact actual-usage closure; not a token estimate. */
+  unresolvedModelInvocations: number;
   budgets: {
     sandboxMilliseconds: { configured: number; committed: number; remaining: number };
     managedSessions: { configured: number; committed: number; remaining: number };
@@ -386,11 +396,24 @@ export function summarizeEconomics(input: {
   const managedCommitted = managed.reconciled + managed.outstanding;
   const tokenCommitted = tokens.reconciled + tokens.outstanding;
   const configuredTokens = input.policy.economics?.maxModelTokens;
+  const unresolvedInvocations = unresolvedModelInvocations([...input.events], input.runId).length;
+  const unknownInvocationUsage = {
+    availability: "unavailable" as const,
+    reason:
+      "model dispatch has no exact actual-usage receipt; known subtotals remain in the native ledger",
+  };
   return {
     nativeUnits,
     modelTokenBreakdown: modelTokenBreakdown(input.events, input.runId),
+    modelTokenBudgetIntent: modelTokenBudgetIntent(input.policy),
+    unresolvedModelInvocations: unresolvedInvocations,
     usage: Object.fromEntries(
-      nativeUnits.map((ledger) => [ledger.unit, observedUsage(ledger)]),
+      nativeUnits.map((ledger) => [
+        ledger.unit,
+        ledger.unit === "model_tokens" && unresolvedInvocations > 0
+          ? unknownInvocationUsage
+          : observedUsage(ledger),
+      ]),
     ) as Record<NativeBudgetUnit, EvidenceMetric<number>>,
     budgets: {
       sandboxMilliseconds: {
@@ -407,18 +430,20 @@ export function summarizeEconomics(input: {
         configuredTokens === undefined
           ? {
               availability: "unavailable",
-              reason: "the run policy has no enforceable model-token ceiling",
+              reason: "the run policy has no configured model-token threshold",
             }
-          : {
-              availability: "observed",
-              value: {
-                configured: configuredTokens,
-                committed: tokenCommitted,
-                remaining: Math.max(0, configuredTokens - tokenCommitted),
+          : unresolvedInvocations > 0
+            ? unknownInvocationUsage
+            : {
+                availability: "observed",
+                value: {
+                  configured: configuredTokens,
+                  committed: tokenCommitted,
+                  remaining: Math.max(0, configuredTokens - tokenCommitted),
+                },
+                source: "github-receipts",
+                evidenceCount: tokens.reservations + tokens.reconciliations,
               },
-              source: "github-receipts",
-              evidenceCount: tokens.reservations + tokens.reconciliations,
-            },
     },
     providerCost: summarizeProviderCost(input.billing ?? []),
   };

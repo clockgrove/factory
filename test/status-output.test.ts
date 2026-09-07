@@ -235,8 +235,8 @@ describe("bounded status, explain, and replay output", () => {
     ]);
     expect(report.capacity.configured).toMatchObject({
       availability: "observed",
-      maxParallel: 8,
-      localMaxWorkers: 8,
+      maxParallel: 2,
+      localMaxWorkers: 2,
       cloudMaxWorkers: 2,
     });
     expect(report.capacity.observed).toMatchObject({

@@ -56,6 +56,9 @@ The deterministic admission controller evaluates four questions:
 Add three optional blocks to `RunPolicySchema`. Lower priority ranks mean higher priority. Backend
 IDs and GitHub IDs are pinned values, not names discovered during a run.
 
+The following is an explicit adaptive policy with paid-backend authority, not the new-run default.
+Omitting policy selects fixed local-only concurrency capped at two instead.
+
 ```json
 {
   "backendOrder": [
@@ -132,10 +135,12 @@ output. They never drive ordering.
 
 `capacity.mode` is `fixed` or `adaptive-local`:
 
-- `fixed` preserves the present worker-count behavior, bounded by `maxParallel` and
-  `backendMaxParallel`.
-- `adaptive-local` requires both a free worker slot and CPU/memory headroom before admitting a local
-  attempt.
+- `fixed` uses a conservative configured worker-count ceiling, bounded by `maxParallel`,
+  `local.maxWorkers`, and `backendMaxParallel`. It still requires observed CPU/memory headroom,
+  minimum free memory, and clear pressure/cooldown gates before any new local admission.
+- `adaptive-local` explicitly permits a larger configured local ceiling with the same physical
+  safety gates; actual admissions vary with observed headroom. Selecting either mode does not
+  promise that the configured number of workers will fit.
 
 `maxParallel` remains the per-Objective hard ceiling across execution attempts. The repository
 controller adds separate `maxLocalWorkers` and `maxPaidWorkers` ceilings across all active
@@ -178,12 +183,17 @@ paid-backend and budget authority. All paid execution and validation sessions co
 - Parsing keeps the external optional shape for digest verification. A separate
   `normalizeSchedulingPolicy()` creates the internal effective defaults after the stored digest has
   been verified; it must not make an existing run's policy hash change.
-- New-run defaults are adaptive local-only. Release qualification still requires the conformance
-  matrix in this plan to pass. Paid burst remains `never` by default.
-- The implemented local default is `maxWorkers: 8`, one CPU and 2 GiB per unannotated Work Item,
+- New-run defaults are fixed local-only, with `maxParallel: 2` and `local.maxWorkers: 2`.
+  Adaptive scheduling remains available by explicit policy selection; its promotion to the default
+  remains gated on the live conformance matrix below. Paid burst remains `never` by default.
+- The implemented local default reserves one CPU and 2 GiB per unannotated Work Item,
   0.5 CPU and 1 GiB reserved for the host, 1 GiB minimum observed free memory, 90% load ceiling, and
   85% memory-use ceiling. The effective worker count can be lower, including zero while the host is
   under pressure.
+- Missing local observations admit no new local work in either mode. This safety gate also applies
+  to stored fixed policies without changing their serialized policy or digest. Compiler local-fit
+  estimates use actual supplied physical observations in both modes; absent observations remain
+  unknown, never a measured benefit inferred from the configured worker ceiling.
 - Policy parsing rejects a burst backend that is absent from `backendOrder`, absent from
   `allowedPaidBackends`, not a paid backend, or missing a nonzero compatible budget.
 
@@ -667,9 +677,12 @@ Run these gates in disposable repositories and paid provider accounts with expli
 7. Run two Directors against the same Objective. Verify the lease and attempt refs admit each Work
    Item once.
 
-`DEFAULT_RUN_POLICY` now uses `adaptive-local` with conservative headroom. It still contains no paid
-backend and keeps `burst.mode: "never"`. The live matrix qualifies that implemented default for the
-release; it never changes the default into paid execution.
+`DEFAULT_RUN_POLICY` uses fixed local-only concurrency capped at two, with physical headroom guards.
+The seven-case live matrix is not complete, so adaptive scheduling has not earned default promotion.
+Existing unit tests and individual component observations do not substitute for that prerequisite;
+their original results remain unchanged. Explicit adaptive policies remain supported and stored runs
+retain their original policy and digest. Completing the prerequisite would not authorize paid
+execution: the default contains no paid backend and keeps `burst.mode: "never"`.
 
 ## Implementation dependency graph
 

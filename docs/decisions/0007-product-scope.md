@@ -49,6 +49,9 @@ and Darwin lifecycle/execution and multi-machine local clusters are out of scope
   be automated. Codex managed execution remains unavailable until an authoritative identity and real
   provider-specific lifecycle interface are implemented and qualified; a display name is not identity.
 - Native stacked pull requests are release-critical and retain a recorded regular-PR fallback.
+- Application dogfood retains the complete scenario coverage in implementation-plan Wave 8.
+  The rich-media appendix supplies generic acceptance inputs, not an exclusion from that gate;
+  a bounded first pilot cannot discharge the remaining application scenarios.
 - The `systemd` lifecycle runs inside Linux even when Windows or macOS hosts that environment.
 - Plugin and npm artifacts are versioned and verified together; neither installation starts the
   controller or mutates a repository.

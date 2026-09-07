@@ -335,6 +335,15 @@ export function assertRetryableObjective({ issue, actorId, status, children, eve
   );
 }
 
+/** Read-only comparison; legacy evidence retains its original bytes and source identity. */
+export function assertRecordedQualificationPolicy(recorded, expected) {
+  const comparison = structuredClone(expected);
+  if (recorded?.economics && recorded.economics.modelTokenBudgetMode === undefined) {
+    delete comparison.economics.modelTokenBudgetMode;
+  }
+  assert.deepEqual(recorded, comparison, "requested bounded policy differs");
+}
+
 export function boundedPolicy(delivery = "stacked-prs", maxModelTokens = maximumModelTokens) {
   assert.ok(["regular-prs", "stacked-prs"].includes(delivery), "unsupported delivery mode");
   assert.ok(
@@ -358,6 +367,7 @@ export function boundedPolicy(delivery = "stacked-prs", maxModelTokens = maximum
     allowedNetworkDestinations: ["api.openai.com"],
     economics: {
       maxModelTokens,
+      modelTokenBudgetMode: "observed-stop",
       maxSandboxMinutes: 0,
       maxManagedSessions: 0,
       minCloudTimeSavedMinutes: 0,

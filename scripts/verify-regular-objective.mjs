@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   assertQualificationCompletion,
+  assertRecordedQualificationPolicy,
   boundedPolicy,
   main as installedMain,
   modelTokenLimit,
@@ -120,10 +121,10 @@ export function assertRegularPipelineCompletion(evidence, { expected, scope, del
     assertNativeMergeProof(evidence, proof, input),
   );
   assert.equal(evidence.scope, scope, "qualification scope differs");
-  assert.deepEqual(evidence.policy, expected, "requested bounded regular policy differs");
+  assertRecordedQualificationPolicy(evidence.policy, expected);
   const events = eventsOf(evidence);
   const start = events.find((event) => event.event === "FactoryRunStarted");
-  assert.deepEqual(start.policy, expected, "durable policy changed from exact request");
+  assert.deepEqual(start.policy, evidence.policy, "durable policy changed from exact request");
   assert.equal(start.policyDigest, hash(canonical(start.policy)), "durable policy digest changed");
   // Foreground runs do not carry an ActivationRequested/baseSha envelope.
   // The authenticated compilation receipt independently pins their initial base.
@@ -138,7 +139,7 @@ export function assertRegularPipelineCompletion(evidence, { expected, scope, del
   assert.equal(`${args.owner}/${args.repo}`, evidence.repository, "request repository differs");
   assert.equal(args.objectiveNumber, evidence.objective.number, "request Objective differs");
   assert.equal(args.untilTerminal, true, "request terminal boundary differs");
-  assert.deepEqual(args.policy, expected, "captured request policy differs");
+  assert.deepEqual(args.policy, evidence.policy, "captured request policy differs");
   assert.ok(
     events.every(
       (event) =>

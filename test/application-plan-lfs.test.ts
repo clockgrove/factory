@@ -13,6 +13,7 @@ import { assertCleanPlanningFiles } from "../src/application/checkout.js";
 import * as pinned from "../src/execution/pinned-compilation-tree.js";
 import * as lfs from "../src/repository-profiles/git-lfs.js";
 import { readRepositoryFacts } from "../src/repository-profiles/read.js";
+import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 import { compileObjective } from "../src/compiler/index.js";
 import {
   ManagementOutputError,
@@ -162,6 +163,49 @@ function plan(f: Awaited<ReturnType<typeof fixture>>, compile: ManagementBackend
 }
 
 describe("explicit plan pinned LFS preflight", () => {
+  it("preserves actual compilation usage above an explicitly observed threshold without pretending to cap it", async () => {
+    const f = await fixture();
+    const compile = vi.fn(
+      async (context: CompilationContext, checkpoint: CompilationCheckpoint) => {
+        const result = await resultFor(context);
+        await checkpoint(result);
+        return result;
+      },
+    );
+    const report = await buildPlanReport({
+      repository: "o/r",
+      request: {
+        objective: 7,
+        compile: true,
+        baseSha: f.baseSha,
+        policy: {
+          ...DEFAULT_RUN_POLICY,
+          economics: {
+            maxModelTokens: 1,
+            modelTokenBudgetMode: "observed-stop",
+            maxSandboxMinutes: 0,
+            maxManagedSessions: 0,
+            minCloudTimeSavedMinutes: 0,
+          },
+        },
+      },
+      snapshot,
+      planning: { ...f.planning, management: backend(compile) },
+    });
+    expect(compile).toHaveBeenCalledTimes(1);
+    expect(report.compilation).toMatchObject({
+      result: "completed",
+      usagePersistence: "response-only",
+    });
+    expect(report.usage).toEqual(usage);
+    expect(report.diagnostics).toContainEqual(
+      expect.objectContaining({
+        status: "warning",
+        summary: expect.stringMatching(/not a provider hard cap.*may overshoot/),
+      }),
+    );
+  });
+
   it.each([false, true])(
     "hydrates verified assets only in an exact isolated tree (original hydrated: %s)",
     async (hydrated) => {

@@ -2,6 +2,7 @@ import { access } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GitHubControlStore } from "../src/control/github-store.js";
 import { decodeEventComments } from "../src/control/receipts.js";
+import { isModelInvocationMarker, unresolvedModelInvocations } from "../src/control/budget.js";
 import * as worktrees from "../src/runtime/local-worktree.js";
 import * as transfers from "../src/control/artifact-transfers.js";
 import { publicationBranch } from "../src/publication/publisher.js";
@@ -120,8 +121,23 @@ describe("Supervisor collected artifact durability", () => {
     fixtures.push(f);
     interruptReady(8);
     await expect(f.run()).rejects.toThrow(/artifact transfer recovery/);
+    const markers = f.events().filter(isModelInvocationMarker);
+    expect(markers).toHaveLength(1);
+    expect(markers[0]).toMatchObject({
+      workItem: 8,
+      attempt: 1,
+      phase: "execution",
+      amount: 0,
+      modelInvocationId: "worker-8-1",
+      usageId: "invocation-worker-8-1",
+    });
     for (const event of f.snapshot.workItems[0]!.factoryEvents ?? []) {
-      if (event.kind === "budget" && event.phase === "execution" && event.unit === "model_tokens")
+      if (
+        event.kind === "budget" &&
+        event.event === "BudgetReconciled" &&
+        event.phase === "execution" &&
+        event.unit === "model_tokens"
+      )
         delete event.reportedModelUsage;
     }
     await expect(f.run()).resolves.toMatchObject({ status: "completed" });
@@ -130,12 +146,27 @@ describe("Supervisor collected artifact durability", () => {
       .filter(
         (event) =>
           event.kind === "budget" &&
+          event.event === "BudgetReconciled" &&
           event.workItem === 8 &&
           event.phase === "execution" &&
           event.unit === "model_tokens",
       );
     expect(model).toHaveLength(1);
-    expect(model[0]).toMatchObject({ amount: 6 });
+    expect(model[0]).toMatchObject({
+      amount: 6,
+      modelInvocationId: markers[0]!.modelInvocationId,
+      runId: markers[0]!.runId,
+      directorEpoch: markers[0]!.directorEpoch,
+      policyDigest: markers[0]!.policyDigest,
+    });
+    expect(model[0]!.sequence).toBeGreaterThan(markers[0]!.sequence);
+    expect(
+      f
+        .events()
+        .filter(isModelInvocationMarker)
+        .filter((event) => event.workItem === 8 && event.phase === "execution"),
+    ).toEqual(markers);
+    expect(unresolvedModelInvocations(f.events())).toEqual([]);
     expect(model[0]).not.toHaveProperty("reportedModelUsage");
     expect(
       f.activity.filter((entry) => entry.operation === "launch" && entry.workItem === 8),
@@ -179,10 +210,17 @@ describe("Supervisor collected artifact durability", () => {
     interruptReady(8);
     await expect(f.run()).rejects.toThrow(/artifact transfer recovery/);
     const item = f.snapshot.workItems[0]!;
+    const markers = f.events().filter(isModelInvocationMarker);
+    expect(markers).toHaveLength(1);
     const model = item.factoryEvents!.find(
-      (event) => event.kind === "budget" && event.unit === "model_tokens",
+      (event) =>
+        event.kind === "budget" &&
+        event.event === "BudgetReconciled" &&
+        event.phase === "execution" &&
+        event.unit === "model_tokens",
     )!;
     if (model.kind !== "budget") throw new Error("fixture model receipt missing");
+    expect(model).toMatchObject({ amount: 6, modelInvocationId: markers[0]!.modelInvocationId });
     item.factoryEvents!.push({
       ...model,
       sequence: Math.max(...f.events().map((event) => event.sequence)) + 1,
@@ -191,9 +229,7 @@ describe("Supervisor collected artifact durability", () => {
     });
     await expect(f.run()).resolves.toMatchObject({
       status: "escalated",
-      reason: expect.stringMatching(
-        /conflicting model usage|exact reconciled execution accounting/,
-      ),
+      reason: "model invocation has conflicting actual usage receipts",
     });
     expect(
       f.events().filter((event) => event.kind === "run" && event.event === "FactoryRunEscalated"),
@@ -201,6 +237,7 @@ describe("Supervisor collected artifact durability", () => {
     expect(
       f.activity.filter((entry) => entry.operation === "launch" && entry.workItem === 8),
     ).toHaveLength(1);
+    expect(f.events().filter(isModelInvocationMarker)).toEqual(markers);
   });
   for (const remote of [false, true]) {
     for (const phase of ["ready", "before-first-write"] as const) {
@@ -233,6 +270,18 @@ describe("Supervisor collected artifact durability", () => {
           return persist({ ...args, store: intercepted });
         });
         await expect(f.run()).rejects.toThrow(/artifact transfer recovery/);
+        const markers = f
+          .events()
+          .filter(isModelInvocationMarker)
+          .filter((event) => event.workItem === target && event.phase === "execution");
+        expect(markers).toHaveLength(remote ? 0 : 1);
+        if (!remote)
+          expect(markers[0]).toMatchObject({
+            amount: 0,
+            modelInvocationId: `worker-${target}-1`,
+            usageId: `invocation-worker-${target}-1`,
+            attempt: 1,
+          });
         expect(
           f.activity.filter((entry) => entry.operation === "launch" && entry.workItem === target),
         ).toHaveLength(1);
@@ -259,10 +308,18 @@ describe("Supervisor collected artifact durability", () => {
               (event) =>
                 event.kind === "budget" &&
                 event.event === "BudgetReserved" &&
+                event.unit === (remote ? "sandbox_milliseconds" : "local_milliseconds") &&
                 event.workItem === target &&
                 event.phase === "execution",
             ),
         ).toHaveLength(1);
+        expect(
+          f
+            .events()
+            .filter(isModelInvocationMarker)
+            .filter((event) => event.workItem === target && event.phase === "execution"),
+        ).toEqual(markers);
+        expect(unresolvedModelInvocations(f.events())).toEqual([]);
         if (remote) {
           expect(
             f.activity.filter(

@@ -1,6 +1,6 @@
 # Factory for indie developers — implementation plan
 
-Status: core delivery waves implemented; release finalization and live qualification in progress
+Status: trunk contract corrections in progress; installed qualification and release gates remain open
 
 Date: 2026-09-03
 
@@ -299,6 +299,7 @@ Extend `RunPolicySchema` with strict per-Objective blocks conceptually shaped as
   },
   "economics": {
     "maxModelTokens": 1000000,
+    "modelTokenBudgetMode": "observed-stop",
     "maxSandboxMinutes": 480,
     "maxManagedSessions": 0,
     "minCloudTimeSavedMinutes": 20
@@ -322,9 +323,14 @@ name the same profile; that choice is routed into compile, implement, review, an
 invocations. `task-class` is rejected until a durable classifier and mapping exist. GitHub managed
 agents do not expose model selection, so they cannot be combined with this explicit block.
 
-Budget controls use provider-native measurable units. `maxModelTokens` is deliberately a
-stop-before-next-call threshold over observed management and reporting local-worker usage, not a
-provider-enforced hard cap. Already-started concurrent calls can each overshoot it. Opaque sandbox
+Budget controls use provider-native measurable units. A requested hard ceiling must be enforceable;
+if the selected model interfaces cannot enforce it, Factory rejects that mode before model work.
+It must not silently substitute an observed threshold. For new requests, `maxModelTokens` requires
+explicit `modelTokenBudgetMode: "observed-stop"` to choose a stop-before-next-call threshold over
+observed management and reporting local-worker usage. `"hard"` is explicitly unsupported by the
+current model adapters. Already-started concurrent calls in observed mode can each overshoot the
+threshold. Authenticated historical policies recover unchanged and disclose their legacy intent.
+Opaque sandbox
 and managed-agent token use remains unavailable; sandbox-minute or managed-session admission limits
 bound authorized resource use instead, not guaranteed dollar cost. The user owns the direct provider
 subscription and billing relationship. Missing costs stay unavailable, and billing settlement finality
@@ -761,7 +767,10 @@ parallel scope overlap, invented command, unnecessary context dump, or impossibl
 ### Wave 4 — adaptive local scheduling and bounded cloud burst
 
 Implement the subordinate adaptive-scheduling plan, but make the capacity ledger repository-wide
-and add path and exclusive-resource claims. Default remains adaptive local with paid burst disabled.
+and add path and exclusive-resource claims. Until its default-enablement prerequisites pass, new
+runs use conservative fixed local concurrency with physical resource safeguards. Adaptive local
+concurrency remains explicitly selectable; paid burst remains disabled by default. Existing runs
+retain their immutable policies. A default change is not a substitute for the qualification gate.
 
 Primary additions:
 
@@ -775,7 +784,7 @@ Exit gate: native Linux, Windows WSL2, and a Linux guest on macOS pass pressure,
 dependency, path collision, crash recovery, provider ambiguity, and budget fault matrices. A real
 Daytona run proves TTL, egress, cancellation, cost reconciliation, and cleanup.
 
-### Wave 5 — Labs durable Codex execution adapter
+### Wave 5 — durable Codex execution adapter
 
 Add the App Server-backed local adapter, durable thread identity, usage normalization, progress
 events, cancellation, and resume. Keep the CLI adapter and run the same backend conformance suite
@@ -788,9 +797,10 @@ Primary additions:
 - `src/execution/session.ts`
 - session protocol and recovery tests
 
-Labs gate: concurrent local threads stay isolated; process restart resumes or safely reconciles each
+Exit gate: concurrent local threads stay isolated; process restart resumes or safely reconciles each
 attempt; approval requests cannot hang unattended work; the artifact and validation contracts remain
-identical across adapters. This Labs gate does not block release.
+identical across adapters. Explicit App Server support retains this required qualification; it is
+not a Labs exclusion and does not replace the SDK/CLI default chain.
 
 ### Wave 6 — native stacked pull requests
 
@@ -1064,8 +1074,11 @@ exercise portable Factory behavior, not to define Factory implementation details
 adopter's architecture. Project-specific implementation facts, paths, and source documents remain
 in the adopter repository and enter Factory only through ordinary repository grounding.
 
-The public qualification scenarios below are design inputs for future qualification; they are not
-part of the current release matrix:
+The portable behaviors below inform the retained Wave 8 application qualification. A bounded pilot
+is its first slice, not a substitute for the full scenario coverage. Record which actual application
+Objective and accepted result exercises each applicable behavior; if the repository cannot yet
+supply a scenario, keep that gap explicit rather than marking it passed. No engine-specific Factory
+code or new application feature is implied solely to manufacture evidence:
 
 - a repository may expose deterministic behavior whose Work Packets must pin seeds, fixtures,
   versions, scenarios, and expected hashes;

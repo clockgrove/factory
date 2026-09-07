@@ -1,6 +1,7 @@
 import {
   type BudgetUsage,
   deriveBudgetUsage,
+  isModelInvocationMarker,
   remainingBudget,
   unreconciledBudgetReservations,
 } from "../control/budget.js";
@@ -16,6 +17,7 @@ export interface RecoveryAccountingAssessment {
   runIds: string[];
   /** Recorded subtotal only; consult unknownModelUsage before interpreting coverage. */
   usage: BudgetUsage | null;
+  /** Recorded-subtotal balance only; unresolved invocations are not zero-cost calls. */
   remaining: ReturnType<typeof remainingBudget> | null;
   unreconciledReservations: BudgetEvent[];
   unreconciledReservationCount: number;
@@ -112,6 +114,13 @@ const reservationSource = (event: BudgetEvent): BudgetEvent => ({
   ...(event.workItem === undefined ? {} : { workItem: event.workItem }),
   ...(event.attempt === undefined ? {} : { attempt: event.attempt }),
   ...(event.usageId === undefined ? {} : { usageId: event.usageId }),
+  ...(event.modelInvocationId === undefined
+    ? {}
+    : {
+        modelInvocationId: event.modelInvocationId,
+        ...(event.directorEpoch === undefined ? {} : { directorEpoch: event.directorEpoch }),
+        ...(event.policyDigest === undefined ? {} : { policyDigest: event.policyDigest }),
+      }),
 });
 
 /** Read-only caller-selected, reader-authenticated history; neither predecessor authority nor resource cleanup proof. */
@@ -295,6 +304,19 @@ export function assessRecoveryAccounting(input: {
   result.unreconciledReservationCount = outstanding.length;
   result.unreconciledReservationsTruncated = outstanding.length > 100;
   result.unreconciledReservations = outstanding.slice(0, 100).map(reservationSource);
+  // An interrupted later review/compile can have an earlier completed usage
+  // receipt in the same phase. That receipt cannot close this exact dispatch.
+  // Keep the existing diagnostic shape for historical acknowledgement digests;
+  // full invocation/epoch/policy identity remains in outstanding reservations.
+  for (const marker of outstanding.filter(isModelInvocationMarker))
+    unknown({
+      runId: marker.runId,
+      ...(marker.workItem === undefined ? {} : { workItem: marker.workItem }),
+      ...(marker.attempt === undefined ? {} : { attempt: marker.attempt }),
+      phase: marker.phase,
+      reason:
+        "An exact model dispatch has no linked actual-usage reconciliation; its zero-valued intent marker is not observed zero consumption.",
+    });
   if (outstanding.length)
     block(
       "unreconciled-budget-reservations",

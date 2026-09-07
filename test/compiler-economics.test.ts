@@ -230,16 +230,35 @@ describe("grounded advisory compiler economics", () => {
     expect(forward.localFit.likelySlots).toBe(2);
     expect(reversed).toEqual(forward);
   });
-  it("keeps absent inputs unknown and does not pretend fixed slots are resource observations", () => {
+  it("keeps absent physical and capability inputs unknown", () => {
     const compiled = graph().workItems;
     expect(assessDecomposition(compiled).localFit.likelySlots).toBeNull();
     expect(assessDecomposition(compiled).cloudEligibility[0]!.status).toBe("unknown");
-    for (const inputs of [
-      evidence({ resource: null }),
-      evidence({ candidates: new Map() }),
-      evidence({ policy: { ...policy, capacity: { ...policy.capacity!, mode: "fixed" } } }),
-    ])
+    for (const inputs of [evidence({ resource: null }), evidence({ candidates: new Map() })])
       expect(assessDecomposition(compiled, inputs).localFit.likelySlots).toBeNull();
+  });
+  it("bounds fixed-policy advisory fit by both observed headroom and the configured ceiling", () => {
+    const fixed = {
+      ...policy,
+      maxParallel: 2,
+      capacity: {
+        ...policy.capacity!,
+        mode: "fixed" as const,
+        local: { ...policy.capacity!.local!, maxWorkers: 2 },
+      },
+    };
+    const inputs = evidence({ policy: fixed });
+    inputs.resource = { ...inputs.resource!, effectiveCpu: 8 };
+    expect(assessDecomposition(graph().workItems, inputs).localFit.likelySlots).toBe(2);
+    expect(
+      assessDecomposition(graph().workItems, {
+        ...inputs,
+        resource: { ...inputs.resource!, effectiveCpu: 1.5 },
+      }).localFit.likelySlots,
+    ).toBe(1);
+    expect(
+      assessDecomposition(graph().workItems, { ...inputs, resource: null }).localFit.likelySlots,
+    ).toBeNull();
   });
   it("does not interpret zero memory capacity as unknown or usable capacity", () => {
     const inputs = evidence();

@@ -267,9 +267,47 @@
       ]
     },
     "usageId": { "type": "string", "minLength": 1, "maxLength": 300 },
+    "modelInvocationId": {
+      "$ref": "#/definitions/safeId",
+      "description": "Dispatch/actual-usage linkage. Exact marker usageId equality and authenticated closure identity are additionally checked by the runtime."
+    },
     "amount": { "type": "number", "minimum": 0 }
   },
   "allOf": [
+    {
+      "if": { "required": ["modelInvocationId"] },
+      "then": {
+        "required": ["usageId", "phase", "unit", "amount"],
+        "properties": {
+          "kind": { "const": "budget" },
+          "event": { "enum": ["BudgetReserved", "BudgetReconciled"] },
+          "unit": { "const": "model_tokens" },
+          "phase": { "enum": ["management", "execution"] }
+        },
+        "allOf": [
+          {
+            "if": { "properties": { "phase": { "const": "execution" } } },
+            "then": { "required": ["workItem", "attempt"] }
+          },
+          {
+            "if": { "anyOf": [{ "required": ["directorEpoch"] }, { "required": ["policyDigest"] }] },
+            "then": { "required": ["directorEpoch", "policyDigest"] }
+          },
+          {
+            "if": { "required": ["attempt"] },
+            "then": { "required": ["workItem"] }
+          },
+          {
+            "if": { "properties": { "event": { "const": "BudgetReserved" } } },
+            "then": {
+              "properties": { "amount": { "const": 0 }, "usageId": { "pattern": "^invocation-" } },
+              "not": { "anyOf": [{ "required": ["reportedModelUsage"] }, { "required": ["usageEvidence"] }] }
+            },
+            "else": { "properties": { "usageId": { "not": { "pattern": "^invocation-" } } } }
+          }
+        ]
+      }
+    },
     {
       "if": { "properties": { "kind": { "const": "attempt" } }, "anyOf": [{ "required": ["sourceArchiveDigest"] }, { "required": ["sourceArchiveBytes"] }] },
       "then": { "required": ["sourceArchiveDigest", "sourceArchiveBytes"] }

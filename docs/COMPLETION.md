@@ -16,6 +16,23 @@ are implementation work; exercising an existing qualifier is testing work.
 
 ## Capability status
 
+The current trunk batch integrates
+[#136](https://github.com/clockgrove/factory/issues/136) (explicit budget intent and durable model-call
+admission), [#137](https://github.com/clockgrove/factory/issues/137) (safe conservative defaults),
+and [#138](https://github.com/clockgrove/factory/issues/138) (accepted-work recovery before publication).
+The corrected candidate passed [coordinated verification and matching WSL artifact installation](release-evidence/trunk-contracts-2026-09-06.json).
+The known retained trunk implementation is complete; earlier failures remain separate evidence,
+not a zero-bug guarantee or a full live-qualification pass. Full application scenario coverage remains required
+in [#86](https://github.com/clockgrove/factory/issues/86), not replaced by the first bounded pilot.
+
+These settle the original contract rather than create new approval gates: unsupported hard token
+ceilings are rejected before model work; new observed thresholds require explicit `observed-stop`
+intent and allow in-flight overshoot. Authenticated historical policies retain their original
+digests and semantics. Dispatch intent is not observed usage or a zero-token allocation, and
+missing actual counters continue to fence replacement. New policies default to fixed two-worker
+admission with physical CPU/memory safety; adaptive mode remains explicit, with its live default-change
+prerequisites retained. None of these choices waives application, provider or comparative-benefit acceptance.
+
 The restored implementation is complete, reviewed and passed the
 [integrated release checks and exact-artifact installation](release-evidence/restored-capabilities-integrated-2026-09-06.json).
 The capability stack is merged. Installed WSL2 qualification exposed two concrete defects:
@@ -47,8 +64,10 @@ passed on their separate exact candidate. New defects remain tracked implementat
 
 The [scope audit](https://github.com/clockgrove/factory/issues/108) found unverified reductions
 and retained implementation gaps. Earlier blanket completion and accepted-deferral claims are
-withdrawn. The comparative cost/throughput benefit is not yet demonstrated; safe execution and
-consumption counters are not substitutes. Disputed requirements remain unresolved, not waived.
+withdrawn. The six restorations and the remaining budget/default/application scope decisions are
+now reconciled through #136/#137 and retained #86 acceptance. Implementation verification and
+unexecuted qualification are still required. Comparative cost/throughput benefit is not yet
+demonstrated; safe execution and consumption counters are not substitutes.
 
 | Capability | Issues | Remaining acceptance |
 | --- | --- | --- |
@@ -63,7 +82,10 @@ consumption counters are not substitutes. Disputed requirements remain unresolve
 | Same-host multi-Objective and regular-PR concurrency | [#113](https://github.com/clockgrove/factory/issues/113), [#114](https://github.com/clockgrove/factory/issues/114) | Completed / concurrency lane: fair shared capacity, concurrent regular work, pinned compilation and exact peer/sibling integration implemented and covered by passing integrated checks. Next: installed overlap, fairness and recovery qualification. |
 | Durable App Server sessions | [#115](https://github.com/clockgrove/factory/issues/115) | Completed / session lane: exact session identity, terminal recovery without another model turn, complete-usage accounting and deterministic recovery qualifier implemented; integrated checks passed. Next: installed WSL2 recovery scenario. [Unsupported cold repair turns](CODEX-APP-SERVER-SESSIONS.md) remain an explicit provider boundary. |
 | Generic large-file handling | [#116](https://github.com/clockgrove/factory/issues/116), [#117](https://github.com/clockgrove/factory/issues/117), [#118](https://github.com/clockgrove/factory/issues/118) | Completed / artifact lane: LFS/tooling, manifests, streamed content, durable transfer recovery, cache ownership and exact continuation implemented; integrated checks passed. Unknown replacement remains refused. Next: installed local large-file cases and separately authorized provider transfer qualification. |
-| Scope and acceptance reconciliation | [#108](https://github.com/clockgrove/factory/issues/108) | All six restored commitments implemented. Maintainer decisions remain on the adaptive-default prerequisite, token-threshold semantics and broader dogfood acceptance; these are not waived by implementation completion. |
+| Trunk budget contract | [#136](https://github.com/clockgrove/factory/issues/136) | Implementation accepted / budget-policy and runtime owners: explicit intent, unsupported hard-cap refusal, durable unknown-call fencing, authenticated historical authority and honest usage disclosure passed review, integrated checks and matching installation. Next: installed scenario acceptance; no provider hard-cap or live savings claim. |
+| Safe scheduling defaults | [#137](https://github.com/clockgrove/factory/issues/137) | Implementation accepted / scheduling owner: fixed two-worker default with physical/resource safety passed integrated checks; explicit adaptive policies and recorded identities remain intact. Next: retained adaptive live prerequisites. |
+| Accepted work before publication | [#138](https://github.com/clockgrove/factory/issues/138) | Implementation accepted / recovery owner: exact retained artifact, validation and review reconstruct only missing publication, without repeating those calls or invoking repository fetch/hooks. Interruption regression, independent review and integrated checks passed. Next: remaining installed recovery acceptance. |
+| Scope and acceptance reconciliation | [#108](https://github.com/clockgrove/factory/issues/108) | All six restored commitments implemented. Original budget/default contracts are explicit in #136/#137; full Wave 8 application coverage remains #86. Scope reconciliation is not an installed qualification pass or permission to close incomplete acceptance. |
 | Compiler economics and runtime reporting | [#110](https://github.com/clockgrove/factory/issues/110) | Completed / economics lane: grounded compilation tradeoffs, runtime intervals/concurrency, attributed consumption and explicit evidence gaps implemented, reviewed and covered by passing integrated checks. Next: measured comparison under #109, not a savings claim. |
 | Representative compiler/chat evaluation | [#111](https://github.com/clockgrove/factory/issues/111), [#112](https://github.com/clockgrove/factory/issues/112) | Corpus implementation completed / evaluation lane: five executable projects, twelve selection cases and production-contract consumers; integrated checks passed. Next: actual compiler/agent behavior under #112. |
 | Measured product benefit | [#109](https://github.com/clockgrove/factory/issues/109) | Testing / qualification lane: compare equivalent accepted outcomes against controlled baselines after implementation. Depends on #110/#111 and scope reconciliation; coordinate with #112 without duplicating runs. |
@@ -79,7 +101,7 @@ consumption counters are not substitutes. Disputed requirements remain unresolve
 | Native delivery, merge queue and regular fallback | [#80](https://github.com/clockgrove/factory/issues/80), [#81](https://github.com/clockgrove/factory/issues/81), [#82](https://github.com/clockgrove/factory/issues/82) | Qualify the remaining installed native-stack, queue/ejection and recorded fallback cases. [Retained successor completion](release-evidence/quota-safe-successor-completion-component-2026-09-05.json) is a bounded component result. |
 | Daytona and supported managed capabilities | [#83](https://github.com/clockgrove/factory/issues/83), [#84](https://github.com/clockgrove/factory/issues/84) | Exact installed execution, independent validation, native admission and resource/session termination evidence, within provider-specific capabilities. |
 | Codex managed interface | [#85](https://github.com/clockgrove/factory/issues/85) | External interface follow-up. The profile remains unavailable and unlaunchable, not a required working-provider release gate. |
-| Bounded pilot | [#86](https://github.com/clockgrove/factory/issues/86) | Pilot-specific Objective, trust, delivery and resource boundaries; pilot acceptance is separate from release qualification. |
+| Application dogfood and bounded pilot | [#86](https://github.com/clockgrove/factory/issues/86) | Full Wave 8 scenario coverage remains required as the application makes it available. The bounded first pilot has its own Objective/trust/delivery/resource boundaries and cannot substitute for the rest. |
 | Integrated verification | [#87](https://github.com/clockgrove/factory/issues/87) | Completed for the recorded candidate. Verify subsequent implementation at the next integrated candidate boundary. |
 | Public presentation and sanitization | [#98](https://github.com/clockgrove/factory/issues/98), [#100](https://github.com/clockgrove/factory/issues/100) | Review and current-tree/package remediation completed and affected checks passed. Historical public commits and previously copied artifacts are not retracted or relabelled as sanitized. |
 | Publication and published installation | [#88](https://github.com/clockgrove/factory/issues/88), [#89](https://github.com/clockgrove/factory/issues/89) | All required gates, compatible exact-candidate evidence and distribution authority, followed by clean installation of the actual published bytes. |
@@ -97,8 +119,9 @@ compiler/chat acceptance is tracked explicitly above. Vercel as an optional seco
 originally conditional harness-native workers do not imply approval to defer App Server session
 acceptance, LFS detection, binary/media manifests or oversized transfer. The maintainer explicitly
 restored those four commitments and same-host multi-Objective sharing/regular-PR concurrency;
-#113–#118 own their implementation. The adaptive-default prerequisite, token-limit semantics and
-broader dogfood coverage still require explicit reconciliation in #108. Current limited support
+#113–#118 own their implementation. #136/#137 restore explicit budget intent and the adaptive-default
+prerequisite, while #86 retains full application coverage; #108 reconciles those original contracts
+without treating a smaller pilot or observed token threshold as an implicit substitute. Current limited support
 must remain honestly documented until the restored implementation and qualification are complete.
 
 Unsupported third-party interfaces narrow the affected integration, not Factory globally. Users

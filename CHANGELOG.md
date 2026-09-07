@@ -42,6 +42,15 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- New token-budget policies must explicitly choose observed stopping; unsupported hard token caps
+  are rejected before model work, and historical recorded policies keep their original digest and
+  recovery semantics. Status distinguishes budget intent from observed usage and enforceable caps.
+- Model dispatch intent is durably recorded before supervised calls. Unresolved consumption blocks
+  unsafe repeated calls after restart without turning an intent marker into zero usage; exact
+  retained checkpoints repair actual accounting. Use matching controller/plugin artifacts, not an
+  older controller that ignores these fences.
+- New default runs use a fixed two-worker ceiling with physical resource safety checks. Adaptive
+  concurrency remains explicitly selectable until its default-enablement qualification passes.
 - Successor recovery refreshes retained Factory-owned regular PRs after authenticated trunk advances,
   preserving the original artifact and paid acceptance history while independently validating and
   reviewing the exact changed head. Provider-owned branches remain outside this refresh authority.

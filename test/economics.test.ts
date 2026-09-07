@@ -326,6 +326,77 @@ describe("conservative economic feedback", () => {
     });
   });
 
+  it("discloses token-budget intent separately from observed balances without rewriting policy", () => {
+    const economics = {
+      maxModelTokens: 100,
+      maxSandboxMinutes: 0,
+      maxManagedSessions: 0,
+      minCloudTimeSavedMinutes: 0,
+    };
+    for (const mode of [undefined, "observed-stop", "hard"] as const) {
+      const policy = {
+        ...DEFAULT_RUN_POLICY,
+        economics: { ...economics, ...(mode ? { modelTokenBudgetMode: mode } : {}) },
+      };
+      const original = JSON.stringify(policy);
+      const summary = summarizeEconomics({ events: [], policy });
+      expect(summary.modelTokenBudgetIntent).toEqual({
+        mode: mode ?? "legacy-observed-stop",
+        limit: 100,
+        hardCapEnforced: false,
+      });
+      expect(summary.usage.model_tokens.availability).toBe("unavailable");
+      expect(JSON.stringify(policy)).toBe(original);
+    }
+    expect(
+      summarizeEconomics({ events: [], policy: DEFAULT_RUN_POLICY }).modelTokenBudgetIntent,
+    ).toEqual({ mode: "none", limit: null, hardCapEnforced: false });
+  });
+
+  it("does not turn dispatch intent into zero usage or an available remaining token allowance", () => {
+    const policy = {
+      ...DEFAULT_RUN_POLICY,
+      economics: {
+        maxModelTokens: 100,
+        modelTokenBudgetMode: "observed-stop" as const,
+        maxSandboxMinutes: 0,
+        maxManagedSessions: 0,
+        minCloudTimeSavedMinutes: 0,
+      },
+    };
+    const marker = event({
+      kind: "budget",
+      event: "BudgetReserved",
+      sequence: 2,
+      phase: "management",
+      unit: "model_tokens",
+      amount: 0,
+      modelInvocationId: "next-call",
+      usageId: "invocation-next-call",
+    });
+    const known = modelReceipt(1, { amount: 40 });
+    const pending = summarizeEconomics({ events: [known, marker], policy });
+    expect(pending.unresolvedModelInvocations).toBe(1);
+    expect(pending.usage.model_tokens.availability).toBe("unavailable");
+    expect(pending.budgets.modelTokens.availability).toBe("unavailable");
+    expect(pending.nativeUnits.find((ledger) => ledger.unit === "model_tokens")).toMatchObject({
+      reserved: 0,
+      reservations: 0,
+      reconciled: 40,
+      reconciliations: 1,
+    });
+    const completed = summarizeEconomics({
+      events: [known, marker, modelReceipt(3, { amount: 90, modelInvocationId: "next-call" })],
+      policy,
+    });
+    expect(completed.unresolvedModelInvocations).toBe(0);
+    expect(completed.usage.model_tokens).toMatchObject({ availability: "observed", value: 130 });
+    expect(completed.budgets.modelTokens).toMatchObject({
+      availability: "observed",
+      value: { configured: 100, committed: 130, remaining: 0 },
+    });
+  });
+
   it("counts exact provider billing receipt replays once without changing native or model ledgers", () => {
     const receipt = {
       provider: "provider-a",

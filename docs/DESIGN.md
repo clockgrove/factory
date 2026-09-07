@@ -577,7 +577,7 @@ The default policy is local-only:
 ```json
 {
   "backendOrder": ["codex-sdk/local-worktree", "codex-cli/local-worktree"],
-  "maxParallel": 8,
+  "maxParallel": 2,
   "workItemTimeoutMinutes": 30,
   "objectiveTimeoutMinutes": 720,
   "maxAttemptsPerItem": 3,
@@ -600,6 +600,12 @@ single-select issue field, then scans the complete queue for safe resource fits.
 bounded by per-Objective policy, repository-controller ceilings, backend limits, cgroup/host CPU and
 memory headroom, and global path/exclusive-resource reservations. Slots refill when any worker
 settles; one straggler does not hold a fixed wave open.
+
+New policies default to fixed local concurrency of at most two workers, retaining measured CPU,
+memory and shared-resource safety clamps. Explicit adaptive-local policies retain configurable
+concurrency. Adaptive default enablement requires the original live prerequisites, not merely
+passing source tests or conservative headroom. Existing immutable policies are never rewritten by
+a default change.
 
 Paid execution remains explicit immutable authority. Local-compatible work uses a paid burst backend
 only after local saturation and the configured burst trigger, priority threshold, provider probe,
@@ -627,13 +633,33 @@ and resources, managed sessions, retries, and validation. Native execution and v
 reserved before launch and reconciled on terminal status. Their separate phase and usage identities
 prevent one call from overwriting another.
 
-`economics.maxModelTokens` is an observed-usage stop threshold, not a provider-enforced hard cap.
+New requests containing `economics.maxModelTokens` must state their budget intent with
+`economics.modelTokenBudgetMode`. `hard` is rejected before model work because no currently supported
+model integration provides enforceable aggregate token caps; terminal counters are not enforcement.
+An omitted mode on a new request is also rejected rather than silently weakening the contract.
+Explicit `observed-stop` selects an observed-usage stop threshold, not a provider-enforced hard cap.
+Authenticated historical policies without this field recover with their original semantics and
+digests, reported as `legacy-observed-stop`; that compatibility is not permission for a new
+mode-less request. Status reports both the intent and `hardCapEnforced: false` separately from balances.
 Management and SDK/CLI/App Server workers must return real terminal counters; Factory persists their
 input-plus-output total in both the model-token ledger and terminal Attempt receipt. On restart those
 receipts reconstruct remaining observed budget. Once the threshold is exhausted, Factory refuses the
 next reporting worker, compilation, or semantic review. Already-started concurrent invocations are
 not given a provider token limit and can each overshoot the threshold by their terminal usage.
 Cached-input tokens are not added again when the provider already includes them in input tokens.
+
+Before a supervised model dispatch, Factory persists an invocation-bound intent. Its zero-valued
+budget marker records that dispatch may occur; it is neither a token allocation nor evidence of
+zero consumption. Only exact linked actual usage closes it. Live process-owned calls can coexist
+under observed-mode admission, but a restarted or ended operation cannot use that ephemeral
+ownership to repeat an uncertain call. A retained checkpoint repairs its actual usage receipt;
+missing outcomes stay unknown and prevent new model admission. Reports preserve known subtotals
+while marking total model usage and remaining threshold unavailable when invocation receipts are
+unresolved.
+
+Use matching controller and plugin artifacts for this event extension. Older controllers do not
+understand invocation-intent fences; downgrading an active run to them is unsupported. Preserve
+original receipts and qualify recovery with the build that implements this contract.
 
 Where supplied by a provider, the existing terminal Attempt and model-token reconciliation receipts
 also retain `reportedModelUsage`: input, output, and cached-input counters. Compilation and review

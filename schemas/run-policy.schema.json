@@ -183,6 +183,10 @@
       ],
       "properties": {
         "maxModelTokens": { "type": "integer", "minimum": 0 },
+        "modelTokenBudgetMode": {
+          "enum": ["hard", "observed-stop"],
+          "description": "New token-threshold requests require explicit intent. Hard enforcement is currently unavailable and rejected before model work. Observed-stop permits in-flight overshoot. Absence is readable only as historical legacy intent, without rewriting recorded policy."
+        },
         "maxSandboxMinutes": { "type": "integer", "minimum": 0, "maximum": 100000 },
         "maxManagedSessions": { "type": "integer", "minimum": 0, "maximum": 10000 },
         "minCloudTimeSavedMinutes": { "type": "integer", "minimum": 0, "maximum": 43200 }

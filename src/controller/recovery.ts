@@ -27,13 +27,13 @@ export async function adoptRecoveryActivation(input: {
 }): Promise<void> {
   const recovery = input.activation.recovery;
   if (!recovery) throw new Error("Recovery activation identity is required");
-  const read = recoveryReadPort(input.store, input.owner, input.repo);
   const reader = new GitHubReader({
     token: input.token,
     owner: input.owner,
     repo: input.repo,
     recoveryInspection: true,
   });
+  const read = recoveryReadPort(input.store, input.owner, input.repo, (number) => reader.readObjective(number));
   const readSnapshot = async () => ({
     snapshot: await reader.readObjective(input.activation.objective),
     historyComplete: true,

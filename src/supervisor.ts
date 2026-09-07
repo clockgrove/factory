@@ -1176,7 +1176,8 @@ export class FactorySupervisor {
       ...(options.recovery ? { recoveryInspection: true } : {}),
     });
     this.#store = new GitHubControlStore(controls);
-    this.#recoveryStore = recoveryReadPort(this.#store, options.owner, options.repo);
+    this.#recoveryStore = recoveryReadPort(this.#store, options.owner, options.repo,
+      (number) => this.#reader.readObjective(number));
     this.#stacks = new GitHubStacks(
       {
         request: (route, parameters, mutating) =>

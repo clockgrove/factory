@@ -35,7 +35,13 @@ export type RecoveryReadStore = Pick<
   | "getBranchHead"
   | "readBranchRules"
   | "readChecks"
-> & { readStack?: (number: number) => Promise<GitHubStack> };
+> & {
+  readStack?: (number: number) => Promise<GitHubStack>;
+  /** Exact-commit association hints only; never activation or integration authority. */
+  readCommitObjectiveCandidates?: (sha: string) => Promise<number[]>;
+  /** Complete GitHubReader-authenticated snapshot, not caller-supplied envelopes. */
+  readObjectiveSnapshot?: (objective: number) => Promise<FactoryReadSnapshot>;
+};
 
 export interface RecoveryBlocker {
   code: string;
@@ -163,6 +169,10 @@ export async function assessRecovery(input: {
     getBranchHead: (branch) => read(`branch:${branch}`, () => store.getBranchHead(branch)),
     readBranchRules: (branch) => read(`rules:${branch}`, () => store.readBranchRules(branch)),
     readChecks: (sha) => read(`checks:${sha}`, () => store.readChecks(sha)),
+    ...(store.readCommitObjectiveCandidates ? { readCommitObjectiveCandidates: (sha: string) =>
+      read(`peer-candidates:${sha}`, () => store.readCommitObjectiveCandidates!(sha)) } : {}),
+    ...(store.readObjectiveSnapshot ? { readObjectiveSnapshot: (number: number) =>
+      read(`peer-snapshot:${number}`, () => store.readObjectiveSnapshot!(number)) } : {}),
     ...(store.readStack
       ? { readStack: (number: number) => read(`stack:${number}`, () => store.readStack!(number)) }
       : {}),

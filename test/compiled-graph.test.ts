@@ -587,6 +587,7 @@ describe("golden compiled graph", () => {
         title: "Clamp",
         goal: "Implement clamp.",
         acceptance: ["Clamp behavior is tested."],
+        validation: undefined,
         scope: ["src/clamp.ts"],
         dependsOn: [],
       },
@@ -596,6 +597,7 @@ describe("golden compiled graph", () => {
         title: "Describe",
         goal: "Integrate clamp and slugify.",
         acceptance: ["Describe integration is tested."],
+        validation: undefined,
         scope: ["src/describe.ts"],
         dependsOn: ["clamp", "slugify"],
       },
@@ -605,6 +607,7 @@ describe("golden compiled graph", () => {
         title: "Slugify",
         goal: "Implement slugify.",
         acceptance: ["Slugify behavior is tested."],
+        validation: undefined,
         scope: ["src/slugify.ts"],
         dependsOn: [],
       },
@@ -636,6 +639,7 @@ describe("golden compiled graph", () => {
       title: "Independent",
       goal: "Implement an independent change.",
       acceptance: ["The independent change is tested."],
+      validation: undefined,
       scope: ["src/independent.ts"],
     };
     const compiled = compileObjective({ ...input, workItems: [root!, child!, peer] });

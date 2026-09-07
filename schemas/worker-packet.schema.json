@@ -96,6 +96,37 @@
         "parentWorkItem": { "type": "string" }
       }
     },
+    "validation": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tier", "criteria"],
+        "properties": {
+          "tier": { "enum": ["mechanical", "semantic", "visual", "deterministic-simulation"] },
+          "criteria": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 2000 } },
+          "rationale": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "evidenceCommands": { "type": "array", "maxItems": 32, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } }
+        }
+      }
+    },
+    "criterionRisks": {
+      "type": "array",
+      "description": "Explicit criterion risk classifications emitted by the compiler. Legacy packets may omit this field.",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["criterion", "risk"],
+        "properties": {
+          "criterion": { "type": "string", "minLength": 1, "maxLength": 2000 },
+          "risk": { "enum": ["ordinary", "safety", "security", "destructive-action", "accounting", "recovery"] }
+        }
+      }
+    },
     "artifactContract": { "const": "clockgrove.factory/artifact-v1" }
   }
 }

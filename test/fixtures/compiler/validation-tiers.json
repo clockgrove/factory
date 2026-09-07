@@ -1,0 +1,97 @@
+[
+  {
+    "name": "deterministic-only",
+    "scope": ["bin/factory", "test/validation-routing.test.ts"],
+    "acceptance": [
+      "bin/factory has file mode 100755",
+      "factory --version stdout is exactly 2.0.26",
+      "The attempt lifecycle records an AttemptValidated event"
+    ],
+    "expected": {
+      "criterionRisks": [
+        { "criterion": "bin/factory has file mode 100755", "risk": "ordinary" },
+        { "criterion": "factory --version stdout is exactly 2.0.26", "risk": "ordinary" },
+        {
+          "criterion": "The attempt lifecycle records an AttemptValidated event",
+          "risk": "ordinary"
+        }
+      ],
+      "validation": [
+        {
+          "tier": "mechanical",
+          "criteria": [
+            "bin/factory has file mode 100755",
+            "factory --version stdout is exactly 2.0.26",
+            "The attempt lifecycle records an AttemptValidated event"
+          ],
+          "rationale": "The scoped regression tests assert the executable mode, exact stdout, and lifecycle receipt.",
+          "evidenceCommands": ["npm test"]
+        }
+      ]
+    }
+  },
+  {
+    "name": "semantic-only",
+    "scope": ["docs/migration.md", "src/errors.ts"],
+    "acceptance": [
+      "The migration guide clearly explains tradeoffs to maintainers",
+      "The error experience is intuitive for first-time users"
+    ],
+    "expected": {
+      "criterionRisks": [
+        {
+          "criterion": "The migration guide clearly explains tradeoffs to maintainers",
+          "risk": "ordinary"
+        },
+        {
+          "criterion": "The error experience is intuitive for first-time users",
+          "risk": "ordinary"
+        }
+      ],
+      "validation": [
+        {
+          "tier": "semantic",
+          "criteria": [
+            "The migration guide clearly explains tradeoffs to maintainers",
+            "The error experience is intuitive for first-time users"
+          ],
+          "rationale": "Clarity and intuitiveness require judgment against the candidate artifact.",
+          "evidenceCommands": []
+        }
+      ]
+    }
+  },
+  {
+    "name": "genuinely-dual-tier",
+    "scope": ["src/recovery.ts", "test/recovery.test.ts"],
+    "acceptance": [
+      "Credential recovery refuses destructive overwrite and explains the next action clearly"
+    ],
+    "expected": {
+      "criterionRisks": [
+        {
+          "criterion": "Credential recovery refuses destructive overwrite and explains the next action clearly",
+          "risk": "security"
+        }
+      ],
+      "validation": [
+        {
+          "tier": "mechanical",
+          "criteria": [
+            "Credential recovery refuses destructive overwrite and explains the next action clearly"
+          ],
+          "rationale": "The scoped regression test proves the destructive overwrite is refused.",
+          "evidenceCommands": ["npm test"]
+        },
+        {
+          "tier": "semantic",
+          "criteria": [
+            "Credential recovery refuses destructive overwrite and explains the next action clearly"
+          ],
+          "rationale": "Whether the recovery guidance is clear remains a judgment over the exact artifact.",
+          "evidenceCommands": []
+        }
+      ]
+    }
+  }
+]

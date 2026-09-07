@@ -37,9 +37,11 @@ import { createOctokit, type GitHubOptions } from "./github.js";
 import {
   ChangeSurfaceSchema,
   ContextManifestSchema,
+  CriterionRiskAssessmentSchema,
   DeliveryHintSchema,
   ExecutionRequirementsSchema,
   RepositoryScopePathSchema,
+  ValidationDesignSchema,
   parseWorkerPacket,
   type ExecutionRequirements,
   type WorkerPacket,
@@ -80,10 +82,18 @@ export interface CompiledWorkItem {
   /** Compiler analysis fields are optional only for persisted pre-vNext graphs. */
   context?: z.infer<typeof ContextManifestSchema> | undefined;
   changeSurface?: z.infer<typeof ChangeSurfaceSchema> | undefined;
+  criterionRisks?:
+    | Array<{
+        criterion: string;
+        risk: "ordinary" | "safety" | "security" | "destructive-action" | "accounting" | "recovery";
+      }>
+    | undefined;
   validation?:
     | Array<{
         tier: "mechanical" | "semantic" | "visual" | "deterministic-simulation";
         criteria: string[];
+        rationale?: string | undefined;
+        evidenceCommands?: string[] | undefined;
       }>
     | undefined;
   delivery?: z.infer<typeof DeliveryHintSchema> | undefined;
@@ -194,18 +204,8 @@ const PersistedCompiledWorkItemSchema = z
     artifactContract: z.literal("clockgrove.factory/artifact-v1"),
     context: ContextManifestSchema.optional(),
     changeSurface: ChangeSurfaceSchema.optional(),
-    validation: z
-      .array(
-        z
-          .object({
-            tier: z.enum(["mechanical", "semantic", "visual", "deterministic-simulation"]),
-            criteria: z.array(z.string().min(1).max(2_000)).min(1).max(64),
-          })
-          .strict(),
-      )
-      .min(1)
-      .max(4)
-      .optional(),
+    criterionRisks: CriterionRiskAssessmentSchema.optional(),
+    validation: ValidationDesignSchema.optional(),
     delivery: DeliveryHintSchema.optional(),
     economicReview: z
       .object({
@@ -407,7 +407,9 @@ export function workerPacketFromCompiled(wi: CompiledWorkItem): WorkerPacket {
     artifactContract: wi.artifactContract,
     ...(wi.context ? { context: wi.context } : {}),
     ...(wi.changeSurface ? { changeSurface: wi.changeSurface } : {}),
+    ...(wi.criterionRisks ? { criterionRisks: wi.criterionRisks } : {}),
     ...(wi.delivery ? { delivery: wi.delivery } : {}),
+    ...(wi.validation ? { validation: wi.validation } : {}),
   });
 }
 
@@ -439,6 +441,18 @@ export function renderWorkPacket(wi: CompiledWorkItem, graphMetadata?: GraphItem
   const section = (heading: string, items: string[]): string =>
     items.length > 0 ? `## ${heading}\n\n${items.map((i) => `- ${i}`).join("\n")}\n` : "";
 
+  const validation = wi.validation?.length
+    ? `## Validation design\n\n${wi.validation
+        .map(
+          (entry) =>
+            `- **${entry.tier}** — ${entry.rationale ?? "Selected for the listed acceptance criteria."}${entry.evidenceCommands?.length ? ` Evidence: ${entry.evidenceCommands.map((command) => `\`${command}\``).join(", ")}.` : ""}\n${entry.criteria.map((criterion) => `  - ${criterion}`).join("\n")}`,
+        )
+        .join("\n")}\n`
+    : "";
+  const criterionRisks = wi.criterionRisks?.length
+    ? `## Criterion risks\n\n${wi.criterionRisks.map((entry) => `- **${entry.risk}** — ${entry.criterion}`).join("\n")}\n`
+    : "";
+
   const rendered = [
     `## Goal\n\n${wi.goal}\n`,
     section("Acceptance", wi.acceptance),
@@ -452,6 +466,8 @@ export function renderWorkPacket(wi: CompiledWorkItem, graphMetadata?: GraphItem
         (evidence) => `${evidence.field}: ${evidence.kind} — ${evidence.source}`,
       ) ?? [],
     ),
+    criterionRisks,
+    validation,
   ]
     .filter((s) => s.length > 0)
     .join("\n");

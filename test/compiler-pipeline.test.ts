@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   compileObjective,
@@ -9,13 +10,16 @@ import {
   CodexCliManagementBackend,
   parseManagementCompilerOutput,
 } from "../src/management/codex-cli.js";
-import { workerPacketFromCompiled } from "../src/graph.js";
+import { renderWorkPacket, workerPacketFromCompiled } from "../src/graph.js";
+import { semanticReviewCriteria } from "../src/protocol/worker-packet.js";
 import { validationPlanFromPacket } from "../src/validation/plan.js";
 import { workerPacketPrompt } from "../src/backends/codex-cli-local.js";
 import type { AttemptContext } from "../src/execution/backend.js";
 import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 
 const sha = "a".repeat(40);
+const ordinaryRisks = (criteria: string[]) =>
+  criteria.map((criterion) => ({ criterion, risk: "ordinary" as const }));
 const base: CompilerWorkItem = {
   id: "code",
   title: "Code",
@@ -44,7 +48,18 @@ const base: CompilerWorkItem = {
     dependencyEvidence: [],
   },
   changeSurface: { mergeClass: "parallel-safe", exclusiveResources: [] },
-  validation: [{ tier: "mechanical", criteria: ["Tests pass", "Build output exists"] }],
+  validation: [
+    {
+      tier: "mechanical",
+      criteria: ["Tests pass", "Build output exists"],
+      rationale: "Repository-grounded commands establish these exact outcomes.",
+      evidenceCommands: ["npm test", "npm run typecheck"],
+    },
+  ],
+  criterionRisks: [
+    { criterion: "Tests pass", risk: "ordinary" },
+    { criterion: "Build output exists", risk: "ordinary" },
+  ],
   delivery: { group: "code", relationship: "root" },
   economicReview: {
     conservative: true,
@@ -137,6 +152,15 @@ function providerWorkItem(id: string, dependsOn: string[], scope: string[]) {
     dependsOn,
     baseSha: sha,
     validationCommands: ["npm test"],
+    validation: [
+      {
+        tier: "mechanical" as const,
+        criteria: ["Tests pass"],
+        rationale: "The repository test command directly reports test success.",
+        evidenceCommands: ["npm test"],
+      },
+    ],
+    criterionRisks: [{ criterion: "Tests pass", risk: "ordinary" as const }],
     requirements: {
       os: ["linux"],
       architecture: ["x64"],
@@ -187,6 +211,213 @@ async function compileProviderOutput(
 }
 
 describe("bounded objective compiler", () => {
+  const validationFixtures = JSON.parse(
+    readFileSync(new URL("./fixtures/compiler/validation-tiers.json", import.meta.url), "utf8"),
+  ) as Array<{
+    name: string;
+    scope: string[];
+    acceptance: string[];
+    expected: {
+      criterionRisks: Array<{
+        criterion: string;
+        risk: "ordinary" | "safety" | "security" | "destructive-action" | "accounting" | "recovery";
+      }>;
+      validation: Array<{
+        tier: "mechanical" | "semantic" | "visual" | "deterministic-simulation";
+        criteria: string[];
+        rationale: string;
+        evidenceCommands: string[];
+      }>;
+    };
+  }>;
+
+  it.each(validationFixtures)(
+    "selects the least sufficient validation tier for $name criteria",
+    ({ acceptance, scope, expected }) => {
+      const compiled = compileObjective({
+        title: "Validation routing",
+        baseSha: sha,
+        repositoryFacts: facts,
+        workItems: [
+          {
+            ...base,
+            acceptance,
+            criterionRisks: expected.criterionRisks,
+            scope,
+            validation: expected.validation,
+          },
+        ],
+      }).workItems[0]!;
+      expect(compiled.validation).toEqual(
+        expected.validation.map((entry) => ({
+          ...entry,
+          criteria: [...entry.criteria].sort(),
+          evidenceCommands: [...entry.evidenceCommands].sort(),
+        })),
+      );
+      expect(compiled.validation.every((entry) => entry.rationale.length > 0)).toBe(true);
+      const packet = workerPacketFromCompiled(compiled);
+      expect(packet.validation).toEqual(compiled.validation);
+      expect(semanticReviewCriteria(packet)).toEqual(
+        expected.validation
+          .filter((entry) => entry.tier === "semantic" || entry.tier === "visual")
+          .flatMap((entry) => entry.criteria)
+          .sort(),
+      );
+      const issue = renderWorkPacket(compiled);
+      expect(issue).toContain("## Criterion risks");
+      expect(issue).toContain("## Validation design");
+      for (const entry of expected.criterionRisks) {
+        expect(issue).toContain(`**${entry.risk}**`);
+        expect(issue).toContain(entry.criterion);
+      }
+      for (const entry of expected.validation) {
+        expect(issue).toContain(`**${entry.tier}**`);
+        for (const command of entry.evidenceCommands) expect(issue).toContain(`\`${command}\``);
+      }
+    },
+  );
+
+  it("keeps legacy packets conservative when no criterion routing was persisted", () => {
+    const packet = workerPacketFromCompiled(
+      compileObjective({
+        title: "Legacy routing",
+        baseSha: sha,
+        repositoryFacts: facts,
+        workItems: [base],
+      }).workItems[0]!,
+    );
+    delete packet.validation;
+    expect(semanticReviewCriteria(packet)).toEqual(packet.acceptanceCriteria);
+  });
+
+  it("keeps unmapped and ungrounded packet criteria in semantic review", () => {
+    const packet = workerPacketFromCompiled(
+      compileObjective({
+        title: "Fail-closed routing",
+        baseSha: sha,
+        repositoryFacts: facts,
+        workItems: [base],
+      }).workItems[0]!,
+    );
+    packet.validation = [
+      {
+        tier: "mechanical",
+        criteria: ["Tests pass"],
+        rationale: "A valid binding for only one criterion.",
+        evidenceCommands: ["npm test"],
+      },
+    ];
+    expect(semanticReviewCriteria(packet)).toEqual(["Build output exists"]);
+    packet.validation[0]!.evidenceCommands = ["npm run unknown"];
+    expect(semanticReviewCriteria(packet)).toEqual(packet.acceptanceCriteria);
+    packet.validation[0]!.criteria = ["Unknown criterion"];
+    expect(semanticReviewCriteria(packet)).toEqual(packet.acceptanceCriteria);
+  });
+
+  it("rejects ungrounded deterministic evidence and protected-risk semantic-only routing", () => {
+    expect(() =>
+      compileObjective({
+        title: "Invalid evidence",
+        baseSha: sha,
+        repositoryFacts: facts,
+        workItems: [
+          {
+            ...base,
+            validation: [
+              {
+                tier: "mechanical",
+                criteria: base.acceptance,
+                rationale: "Claims an unrelated command.",
+                evidenceCommands: ["npm run missing"],
+              },
+            ],
+          },
+        ],
+      }),
+    ).toThrow(/ungrounded command/);
+    const protectedCriterion = "Credential recovery refuses destructive overwrite";
+    expect(() =>
+      compileObjective({
+        title: "Missing protected gate",
+        baseSha: sha,
+        repositoryFacts: facts,
+        workItems: [
+          {
+            ...base,
+            acceptance: [protectedCriterion],
+            criterionRisks: [{ criterion: protectedCriterion, risk: "recovery" }],
+            validation: [
+              {
+                tier: "semantic",
+                criteria: [protectedCriterion],
+                rationale: "Incorrectly relies only on judgment.",
+                evidenceCommands: [],
+              },
+            ],
+          },
+        ],
+      }),
+    ).toThrow(/protected-risk criterion lacks deterministic validation/);
+    const overwriteCriterion =
+      "The command overwrites the user's configuration only after confirmation";
+    expect(() =>
+      compileObjective({
+        title: "Understated destructive risk",
+        baseSha: sha,
+        repositoryFacts: facts,
+        workItems: [
+          {
+            ...base,
+            acceptance: [overwriteCriterion],
+            criterionRisks: [{ criterion: overwriteCriterion, risk: "ordinary" }],
+            validation: [
+              {
+                tier: "semantic",
+                criteria: [overwriteCriterion],
+                rationale: "Incorrectly classifies destructive behavior as ordinary.",
+                evidenceCommands: [],
+              },
+            ],
+          },
+        ],
+      }),
+    ).toThrow(/criterion risk is understated/);
+  });
+
+  it("does not treat overloaded nouns as protected actions without risk context", () => {
+    const acceptance = [
+      "The usage guide clearly explains the CLI",
+      "Tokenizer error labels are understandable",
+      "The code-ownership section is readable",
+      "The audit documentation is easy to navigate",
+    ];
+    const compiled = compileObjective({
+      title: "Qualitative documentation",
+      baseSha: sha,
+      repositoryFacts: facts,
+      workItems: [
+        {
+          ...base,
+          acceptance,
+          criterionRisks: ordinaryRisks(acceptance),
+          validation: [
+            {
+              tier: "semantic",
+              criteria: acceptance,
+              rationale: "These qualitative documentation outcomes require independent judgment.",
+              evidenceCommands: [],
+            },
+          ],
+        },
+      ],
+    }).workItems[0]!;
+    expect(compiled.validation).toHaveLength(1);
+    expect(semanticReviewCriteria(workerPacketFromCompiled(compiled))).toEqual(
+      [...acceptance].sort(),
+    );
+  });
+
   it("compiles the complete local conformance graph with planned tests grounded in the observed runner", () => {
     const workItems = [
       {
@@ -200,6 +431,21 @@ describe("bounded objective compiler", () => {
           "RangeError is thrown when min exceeds max",
         ],
         validationCommands: ["node --test test/clamp.test.js"],
+        criterionRisks: ordinaryRisks([
+          "clamp(-1, 0, 10) returns 0; clamp(11, 0, 10) returns 10",
+          "RangeError is thrown when min exceeds max",
+        ]),
+        validation: [
+          {
+            tier: "mechanical" as const,
+            criteria: [
+              "clamp(-1, 0, 10) returns 0; clamp(11, 0, 10) returns 10",
+              "RangeError is thrown when min exceeds max",
+            ],
+            rationale: "The scoped clamp test directly asserts both outcomes.",
+            evidenceCommands: ["node --test test/clamp.test.js"],
+          },
+        ],
       },
       {
         ...base,
@@ -209,6 +455,21 @@ describe("bounded objective compiler", () => {
         scope: ["src/slugify.js", "test/slugify.test.js"],
         acceptance: ["slugify(' Hello, WORLD!! ') returns 'hello-world'", "slugify('') returns ''"],
         validationCommands: ["node --test test/slugify.test.js"],
+        criterionRisks: ordinaryRisks([
+          "slugify(' Hello, WORLD!! ') returns 'hello-world'",
+          "slugify('') returns ''",
+        ]),
+        validation: [
+          {
+            tier: "mechanical" as const,
+            criteria: [
+              "slugify(' Hello, WORLD!! ') returns 'hello-world'",
+              "slugify('') returns ''",
+            ],
+            rationale: "The scoped slugify test directly asserts both exact outputs.",
+            evidenceCommands: ["node --test test/slugify.test.js"],
+          },
+        ],
       },
       {
         ...base,
@@ -222,6 +483,21 @@ describe("bounded objective compiler", () => {
           "RangeError propagates for inverted bounds",
         ],
         validationCommands: ["npm test"],
+        criterionRisks: ordinaryRisks([
+          "describe(' Hello World ', 12, 0, 10) returns 'hello-world:10'",
+          "RangeError propagates for inverted bounds",
+        ]),
+        validation: [
+          {
+            tier: "mechanical" as const,
+            criteria: [
+              "describe(' Hello World ', 12, 0, 10) returns 'hello-world:10'",
+              "RangeError propagates for inverted bounds",
+            ],
+            rationale: "The repository test suite directly asserts integration behavior.",
+            evidenceCommands: ["npm test"],
+          },
+        ],
       },
     ];
     const repositoryFacts = {
@@ -330,12 +606,35 @@ describe("bounded objective compiler", () => {
       title: "Implement boundary behavior",
       baseSha: sha,
       repositoryFacts: facts,
-      workItems: [{ ...base, acceptance }],
+      workItems: [
+        {
+          ...base,
+          acceptance,
+          criterionRisks: ordinaryRisks(acceptance),
+          validation: [
+            {
+              tier: "mechanical",
+              criteria: acceptance.slice(0, 4),
+              rationale: "Scoped tests directly assert functions, exceptions, and invariants.",
+              evidenceCommands: ["npm test"],
+            },
+            {
+              tier: "semantic",
+              criteria: acceptance.slice(4),
+              rationale: "Unmapped natural-language outcomes retain independent review.",
+              evidenceCommands: [],
+            },
+          ],
+        },
+      ],
     });
     const compiled = objective.workItems[0]!;
     expect(compiled.acceptance).toEqual([...acceptance].sort());
+    expect(compiled.validation.find((v) => v.tier === "mechanical")?.criteria).toEqual(
+      acceptance.slice(0, 4).sort(),
+    );
     expect(compiled.validation.find((v) => v.tier === "semantic")?.criteria).toEqual(
-      compiled.acceptance,
+      acceptance.slice(4).sort(),
     );
     expect(workerPacketFromCompiled(compiled).acceptanceCriteria).toEqual(compiled.acceptance);
     expect(validationPlanFromPacket(workerPacketFromCompiled(compiled)).commands).toEqual(
@@ -347,10 +646,39 @@ describe("bounded objective compiler", () => {
       validateCompiledObjective({
         ...objective,
         workItems: [
-          { ...compiled, validation: [{ tier: "semantic", criteria: [acceptance[0]!] }] },
+          {
+            ...compiled,
+            validation: [
+              {
+                tier: "semantic",
+                criteria: [acceptance[0]!],
+                rationale: "Independent judgment required.",
+                evidenceCommands: [],
+              },
+            ],
+          },
         ],
       }),
     ).toThrow(/unvalidated acceptance criterion/);
+    expect(() =>
+      validateCompiledObjective({
+        ...objective,
+        workItems: [
+          {
+            ...compiled,
+            validation: [
+              ...compiled.validation,
+              {
+                tier: compiled.validation[0]!.tier,
+                criteria: ["Criterion not in acceptance"],
+                rationale: "Invalid duplicate tier.",
+                evidenceCommands: [],
+              },
+            ],
+          },
+        ],
+      }),
+    ).toThrow(/invalid validation design/);
   });
 
   it.each([

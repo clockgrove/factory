@@ -12,6 +12,7 @@ import {
   checkpointFacts,
   checkpointFailure,
   checkpointOperatorFailure,
+  checkpointStatusSnapshotRetry,
   assertCheckpointExecutable,
   checkpointStartupObservation,
   checkpointReady,
@@ -259,6 +260,40 @@ describe("same-generation initial startup observation", () => {
     expect(large.text).toHaveLength(8192);
     expect(large.truncated).toBe(true);
     expect(() => checkpointOperatorFailure("factory_activate", {}, { isError: false })).toThrow();
+  });
+  it("retries only the exact coherent status snapshot race", () => {
+    const failure = checkpointOperatorFailure(
+      "factory_status",
+      { objectiveNumber: 17 },
+      {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: "Objective #17 sub-issues changed during snapshot; retry the read",
+          },
+        ],
+      },
+    );
+    expect(checkpointStatusSnapshotRetry("factory_status", { objectiveNumber: 17 }, failure)).toBe(
+      true,
+    );
+    expect(checkpointStatusSnapshotRetry("factory_status", { objectiveNumber: 18 }, failure)).toBe(
+      false,
+    );
+    expect(
+      checkpointStatusSnapshotRetry("factory_activate", { objectiveNumber: 17 }, failure),
+    ).toBe(false);
+    expect(
+      checkpointStatusSnapshotRetry(
+        "factory_status",
+        { objectiveNumber: 17 },
+        {
+          ...failure,
+          text: "authentication failed",
+        },
+      ),
+    ).toBe(false);
   });
   it("settles dispatch markers through exact actual linkage and refuses an unknown marker", () => {
     const ready = observation();

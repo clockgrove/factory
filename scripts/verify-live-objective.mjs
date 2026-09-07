@@ -1,5 +1,9 @@
 /** Opt-in installed-plugin Supervisor exercise; never part of offline release checks. */
 import assert from "node:assert/strict";
+import {
+  isQualificationModelMarker,
+  qualificationModelAccounting,
+} from "./qualification-model-accounting.mjs";
 import { deduplicateQualificationReceipts } from "./qualification-receipts.mjs";
 import {
   assertQualificationMergeProof,
@@ -554,9 +558,25 @@ export function assertCompletion(
       "attempt lacks terminal reconciliation",
     );
   }
+  const modelInvocationEvents = events.filter(
+    (event) =>
+      event.kind === "budget" &&
+      event.unit === "model_tokens" &&
+      event.modelInvocationId !== undefined,
+  );
+  if (modelInvocationEvents.length > 0)
+    assert.equal(
+      qualificationModelAccounting(modelInvocationEvents, { requireMarkers: true }).unresolved
+        .length,
+      0,
+      "unreconciled BudgetReserved",
+    );
   for (const reserved of events.filter((event) =>
     ["BudgetReserved", "CapacityReserved"].includes(event.event),
   )) {
+    // Model dispatch intent and actual usage deliberately have different usage IDs.
+    // Their complete invocation tuple and policy/epoch binding are checked above.
+    if (isQualificationModelMarker(reserved)) continue;
     assert.ok(
       reconciledSequences.get(
         reservationKey(reserved, reserved.event === "CapacityReserved" ? "capacity" : "budget"),

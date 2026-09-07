@@ -26,7 +26,7 @@ import {
   parseControllerPolicy,
   parseRunPolicy,
 } from "../protocol/policy.js";
-import { classifyRefusal, PlatformUnavailableError } from "../platform.js";
+import { classifyRefusal, PlatformUnavailableError, MutationAdmissionStoppedError } from "../platform.js";
 import { adoptRecoveryActivation, type RecoveryRepositoryOwnership } from "./recovery.js";
 import { ControllerGenerationRetirement } from "./retirement.js";
 import { LeaseAcquisitionContendedError, LeaseLostError } from "../control/lease.js";
@@ -422,67 +422,84 @@ export async function runGitHubRepositoryController(
   // One process identity can safely rediscover its own ambiguously acquired
   // lease. Every retry acquires from GitHub anew after the prior loop settles.
   const controllerId = randomUUID();
-  while (!options.signal?.aborted) {
-    try {
-      await withRepositoryOwnership(
-        {
-          token: options.token,
-          owner: options.owner,
-          repo: options.repo,
-          policy,
-          resources,
-          controllerId,
-          ...(options.signal ? { signal: options.signal } : {}),
-          ...(options.onStatus ? { onStatus: options.onStatus } : {}),
-        },
-        async ({ store, signal, fence, observation, recoveryOwnership }) =>
-          createGitHubRepositoryController({
-            ...options,
-            capacity: policy.maxActiveObjectives,
-            pollIntervalMs: policy.pollIntervalSeconds * 1_000,
-            signal,
+  // Only the deliberate outer stop retires normal writes. A quota or lost
+  // ownership signal must retain its own failure and recovery semantics.
+  const stopNormalAdmission = () => resources.mutationScheduler.stopNormalAdmission();
+  options.signal?.addEventListener("abort", stopNormalAdmission, { once: true });
+  if (options.signal?.aborted) stopNormalAdmission();
+  try {
+    while (!options.signal?.aborted) {
+      try {
+        await withRepositoryOwnership(
+          {
+            token: options.token,
+            owner: options.owner,
+            repo: options.repo,
+            policy,
             resources,
-            activationStore: store,
-            repositoryFence: fence,
-            controllerObservation: observation,
-            recoveryOwnership,
-          }).run(),
-      );
-      return;
-    } catch (error) {
-      if (options.signal?.aborted && error === options.signal.reason) return;
-      if (error instanceof LeaseAcquisitionContendedError) {
-        // The complete cohort and repository generation have settled before
-        // reaching here. Do not redispatch while another Objective holder may
-        // still own resources, or churn the service/repository lease on a timer.
+            controllerId,
+            ...(options.signal ? { signal: options.signal } : {}),
+            ...(options.onStatus ? { onStatus: options.onStatus } : {}),
+          },
+          async ({ store, signal, fence, observation, recoveryOwnership }) =>
+            createGitHubRepositoryController({
+              ...options,
+              capacity: policy.maxActiveObjectives,
+              pollIntervalMs: policy.pollIntervalSeconds * 1_000,
+              signal,
+              resources,
+              activationStore: store,
+              repositoryFence: fence,
+              controllerObservation: observation,
+              recoveryOwnership,
+            }).run(),
+        );
+        return;
+      } catch (error) {
+        if (options.signal?.aborted && error === options.signal.reason) return;
+        if (error instanceof LeaseAcquisitionContendedError) {
+          // The complete cohort and repository generation have settled before
+          // reaching here. Do not redispatch while another Objective holder may
+          // still own resources, or churn the service/repository lease on a timer.
+          options.onStatus?.(
+            `Objective #${error.objective} acquisition contended; waiting ${error.retryAfterMs}ms before fresh discovery`,
+          );
+          const retryAt = performance.now() + error.retryAfterMs;
+          while (!options.signal?.aborted && performance.now() < retryAt)
+            await interruptibleDelay(Math.min(60_000, retryAt - performance.now()), options.signal);
+          continue;
+        }
+        const unavailable = platformFailure(error);
+        if (unavailable && options.signal?.aborted) {
+          // This refusal reached us only after the admitted cohort and ownership
+          // retirement settled. Unlike interrupting an already-established
+          // backoff below, it may represent an in-flight write or failed cleanup.
+          throw new Error(
+            `Factory repository controller stopped with unresolved platform failure (${controllerFailureDiagnostic(unavailable)})`,
+          );
+        }
+        if (!unavailable) {
+          if (error instanceof ControllerGenerationRetirement) throw error;
+          // Octokit errors can embed request headers and raw response bodies.
+          // Keep fatal errors fatal without letting Node print those secrets.
+          throw new Error(
+            `Factory repository controller stopped after a non-retryable failure (${controllerFailureDiagnostic(error)})`,
+          );
+        }
+        const delayMs = Math.max(unavailable.retryAfterMs, resources.circuitBreaker.waitMs());
         options.onStatus?.(
-          `Objective #${error.objective} acquisition contended; waiting ${error.retryAfterMs}ms before fresh discovery`,
+          `repository controller paused for platform backoff; retry in ${delayMs}ms`,
         );
-        const retryAt = performance.now() + error.retryAfterMs;
-        while (!options.signal?.aborted && performance.now() < retryAt)
-          await interruptibleDelay(Math.min(60_000, retryAt - performance.now()), options.signal);
-        continue;
-      }
-      const unavailable = platformFailure(error);
-      if (!unavailable) {
-        if (error instanceof ControllerGenerationRetirement) throw error;
-        // Octokit errors can embed request headers and raw response bodies.
-        // Keep fatal errors fatal without letting Node print those secrets.
-        throw new Error(
-          `Factory repository controller stopped after a non-retryable failure (${controllerFailureDiagnostic(error)})`,
-        );
-      }
-      const delayMs = Math.max(unavailable.retryAfterMs, resources.circuitBreaker.waitMs());
-      options.onStatus?.(
-        `repository controller paused for platform backoff; retry in ${delayMs}ms`,
-      );
-      // Chunk long waits: Node's timer overflow must never turn a long reset
-      // boundary into an immediate retry. Monotonic time prevents clock jumps.
-      const deadline = performance.now() + delayMs;
-      while (!options.signal?.aborted && performance.now() < deadline) {
-        await interruptibleDelay(Math.min(60_000, deadline - performance.now()), options.signal);
+        // Chunk long waits: Node's timer overflow must never turn a long reset
+        // boundary into an immediate retry. Monotonic time prevents clock jumps.
+        const deadline = performance.now() + delayMs;
+        while (!options.signal?.aborted && performance.now() < deadline) {
+          await interruptibleDelay(Math.min(60_000, deadline - performance.now()), options.signal);
+        }
       }
     }
+  } finally {
+    options.signal?.removeEventListener("abort", stopNormalAdmission);
   }
 }
 
@@ -671,6 +688,8 @@ function platformFailure(error: unknown): PlatformUnavailableError | undefined {
 
 /** Fixed diagnostics only: never log provider request bodies, headers, or causes. */
 function controllerFailureDiagnostic(error: unknown): string {
+  if (error instanceof MutationAdmissionStoppedError)
+    return "normal-mutation-admission-stopped; durable cleanup may remain unresolved";
   if (error instanceof LeaseAcquisitionContendedError)
     return "objective-lease-acquisition-contended";
   const unavailable = platformFailure(error);

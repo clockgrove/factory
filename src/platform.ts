@@ -323,9 +323,20 @@ export class ContentCreationPacer {
 
 export type MutationClass = "normal" | "lease";
 
+/** No transport was invoked for this mutation. Never used to classify a
+ * transport that was already in flight or a GitHub refusal. */
+export class MutationAdmissionStoppedError extends Error {
+  constructor() {
+    super("normal mutation admission stopped before dispatch for controller shutdown");
+    this.name = "MutationAdmissionStoppedError";
+  }
+}
+
 export interface MutationPermit {
   waitedMs: number;
   release(): void;
+  /** Last synchronous check immediately before invoking transport. */
+  assertDispatchAllowed?(): void;
 }
 
 export interface MutationAdmission {
@@ -337,7 +348,7 @@ export interface MutationSchedulerOptions {
   reservedLeaseMutationsPerHour?: number;
   onThrottle?: (message: string) => void;
   now?: () => Date;
-  sleep?: (ms: number) => Promise<void>;
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
 
 /**
@@ -350,7 +361,8 @@ export class MutationScheduler implements MutationAdmission {
   readonly #reservedLeaseMutationsPerHour: number;
   readonly #notify: (message: string) => void;
   readonly #now: () => Date;
-  readonly #sleep: (ms: number) => Promise<void>;
+  readonly #sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
+  readonly #normalShutdown = new AbortController();
   #active = false;
   #leaseQueue: Array<() => void> = [];
   #normalQueue: Array<() => void> = [];
@@ -362,7 +374,18 @@ export class MutationScheduler implements MutationAdmission {
       options.reservedLeaseMutationsPerHour ?? FACTORY_PACING.reservedLeaseMutationsPerHour;
     this.#notify = options.onThrottle ?? (() => {});
     this.#now = options.now ?? (() => new Date());
-    this.#sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.#sleep = options.sleep ?? mutationDelay;
+  }
+
+  /** Deliberate process retirement only. Pending normal work is never resumed
+   * in this scheduler; lease traffic and in-flight transport remain untouched. */
+  stopNormalAdmission(): void {
+    if (!this.#normalShutdown.signal.aborted)
+      this.#normalShutdown.abort(new MutationAdmissionStoppedError());
+  }
+
+  #assertAdmissionOpen(kind: MutationClass): void {
+    if (kind === "normal") this.#normalShutdown.signal.throwIfAborted();
   }
 
   async acquire(kind: MutationClass = "normal"): Promise<MutationPermit> {
@@ -373,6 +396,7 @@ export class MutationScheduler implements MutationAdmission {
       const now = this.#now();
       let wait: number;
       try {
+        this.#assertAdmissionOpen(kind);
         wait = this.#pacer.waitMs(now, {
           hourlyReserve: kind === "lease" ? 0 : this.#reservedLeaseMutationsPerHour,
         });
@@ -385,6 +409,7 @@ export class MutationScheduler implements MutationAdmission {
         return {
           waitedMs: Math.max(pacedWaitMs, now.getTime() - startedAt),
           release,
+          assertDispatchAllowed: () => this.#assertAdmissionOpen(kind),
         };
       }
       release();
@@ -396,18 +421,34 @@ export class MutationScheduler implements MutationAdmission {
             : `pacing a GitHub mutation for ${wait}ms; lease capacity remains reserved`,
         );
       }
-      await this.#sleep(wait);
+      await this.#sleep(wait, kind === "normal" ? this.#normalShutdown.signal : undefined);
       pacedWaitMs += wait;
     }
   }
 
   async #acquireGate(kind: MutationClass): Promise<() => void> {
+    this.#assertAdmissionOpen(kind);
     if (!this.#active) {
       this.#active = true;
       return this.#releaseGate();
     }
-    await new Promise<void>((resolve) => {
-      (kind === "lease" ? this.#leaseQueue : this.#normalQueue).push(resolve);
+    await new Promise<void>((resolve, reject) => {
+      const queue = kind === "lease" ? this.#leaseQueue : this.#normalQueue;
+      const signal = kind === "normal" ? this.#normalShutdown.signal : undefined;
+      const grant = () => {
+        signal?.removeEventListener("abort", stop);
+        resolve();
+      };
+      const stop = () => {
+        const index = queue.indexOf(grant);
+        if (index < 0) return;
+        queue.splice(index, 1);
+        signal?.removeEventListener("abort", stop);
+        reject(signal!.reason);
+      };
+      queue.push(grant);
+      signal?.addEventListener("abort", stop, { once: true });
+      if (signal?.aborted) stop();
     });
     return this.#releaseGate();
   }
@@ -422,6 +463,17 @@ export class MutationScheduler implements MutationAdmission {
       else this.#active = false;
     };
   }
+}
+
+function mutationDelay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(signal.reason);
+  return new Promise((resolve, reject) => {
+    const finish = () => { signal?.removeEventListener("abort", abort); resolve(); };
+    const timer = setTimeout(finish, ms);
+    const abort = () => { clearTimeout(timer); signal?.removeEventListener("abort", abort); reject(signal!.reason); };
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+  });
 }
 
 /**

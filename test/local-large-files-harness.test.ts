@@ -56,6 +56,16 @@ function scenario() {
   const events: Record<string, unknown>[] = [];
   const add = (event: string, kind: string, values: Record<string, unknown> = {}) =>
     events.push({ ...common, sequence: events.length + 1, event, kind, ...values });
+  const modelIntent = (phase: string, modelInvocationId: string, item = {}) => {
+    add("BudgetReserved", "budget", {
+      ...item,
+      phase,
+      unit: "model_tokens",
+      modelInvocationId,
+      usageId: `invocation-${modelInvocationId}`,
+      amount: 0,
+    });
+  };
   add("ActivationRequested", "run", {
     runId: "activation",
     requestId: `${authority.namespace}-activate`,
@@ -67,11 +77,13 @@ function scenario() {
     actor: "operator",
     policy: authority.policy,
   });
+  modelIntent("management", `compile-${policyDigest}`);
   add("GraphCompiled", "graph");
   add("GraphProjected", "graph", { graphSize: 3 });
   add("BudgetReconciled", "budget", {
     phase: "management",
     unit: "model_tokens",
+    modelInvocationId: `compile-${policyDigest}`,
     usageId: `compile-${policyDigest}`,
     amount: 100,
   });
@@ -81,12 +93,14 @@ function scenario() {
       attempt: 1,
       backend: "codex-app-server/local-worktree",
     });
+    modelIntent("execution", `worker-${workItem}-1`, { workItem, attempt: 1 });
     add("AttemptStarted", "attempt", { workItem, attempt: 1 });
     add("BudgetReconciled", "budget", {
       workItem,
       attempt: 1,
       phase: "execution",
       unit: "model_tokens",
+      modelInvocationId: `worker-${workItem}-1`,
       usageId: `worker-${workItem}-1`,
       amount: 100,
     });
@@ -108,11 +122,14 @@ function scenario() {
     add("AttemptSucceeded", "attempt", { ...item, reportedModelTokens: 100 });
     add("AttemptValidated", "attempt", item);
     add("ValidationRecorded", "validation", { ...item, passed: true });
+    const reviewId = `review-${hash(`artifact-${workItem}`)}`;
+    modelIntent("management", reviewId, item);
     add("BudgetReconciled", "budget", {
       ...item,
       phase: "management",
       unit: "model_tokens",
-      usageId: `review-${policyDigest}`,
+      usageId: reviewId,
+      modelInvocationId: reviewId,
       amount: 100,
     });
     add("PublicationRecorded", "publication", item);

@@ -30,13 +30,27 @@ function deferred() {
   return { promise, resolve };
 }
 
+async function advanceUntil(observed: () => boolean) {
+  // Octokit's real throttling wrapper schedules several successive timers.
+  // Advance them only until the named boundary, never to the 42-minute reset.
+  for (let tick = 0; tick < 100 && !observed(); tick++) await vi.advanceTimersByTimeAsync(100);
+  expect(observed()).toBe(true);
+}
+
 function setup(input: { paced?: boolean; fetch?: typeof globalThis.fetch } = {}) {
   const abort = new AbortController();
   const resources = createRepositorySupervisorResources();
   const pacer = new ContentCreationPacer(40, 6, 0);
   if (input.paced) for (let n = 0; n < 3; n++) pacer.recordCall(new Date(Date.now() - 18 * 60_000));
   const recordCall = vi.spyOn(pacer, "recordCall");
-  resources.mutationScheduler = new MutationScheduler({ pacer, reservedLeaseMutationsPerHour: 3 });
+  let pacingObserved = false;
+  resources.mutationScheduler = new MutationScheduler({
+    pacer,
+    reservedLeaseMutationsPerHour: 3,
+    onThrottle: () => {
+      pacingObserved = true;
+    },
+  });
   const request = vi.fn(
     input.fetch ??
       (async () =>
@@ -116,7 +130,19 @@ function setup(input: { paced?: boolean; fetch?: typeof globalThis.fetch } = {})
       },
       true,
     );
-  return { abort, resources, pacer, recordCall, request, store, acquire, release, run, normal };
+  return {
+    abort,
+    resources,
+    pacer,
+    recordCall,
+    request,
+    store,
+    acquire,
+    release,
+    run,
+    normal,
+    pacingObserved: () => pacingObserved,
+  };
 }
 
 it("stops a real 42-minute normal pacing wait, settles cleanup and reserved lease traffic, and never dispatches it later", async () => {
@@ -134,13 +160,18 @@ it("stops a real 42-minute normal pacing wait, settles cleanup and reserved leas
       cleanupProved = true;
     }
   });
-  await vi.advanceTimersByTimeAsync(1);
+  await advanceUntil(f.pacingObserved);
   expect(f.request).not.toHaveBeenCalled();
   expect(f.pacer.waitMs(new Date(), { hourlyReserve: 3 })).toBeGreaterThan(41 * 60_000);
   const pendingLease = await f.resources.mutationScheduler.acquire("lease");
   pendingLease.release();
+  let settled = false;
+  const outcome = task.finally(() => {
+    settled = true;
+  });
   f.abort.abort();
-  await task;
+  await advanceUntil(() => settled);
+  await outcome;
   expect(cleanupProved).toBe(true);
   expect(f.acquire).toHaveBeenCalledTimes(1);
   expect(f.release).toHaveBeenCalledTimes(1);
@@ -191,13 +222,13 @@ it.each([false, true])(
         return error;
       },
     );
-    await vi.advanceTimersByTimeAsync(1);
-    expect(entered).toBe(true);
+    await advanceUntil(() => entered);
     f.abort.abort();
     await vi.advanceTimersByTimeAsync(1_000);
     expect(settled).toBe(false);
     expect(f.release).not.toHaveBeenCalled();
     response.resolve();
+    await advanceUntil(() => settled);
     const failure = await outcome;
     if (refused)
       expect(failure).toMatchObject({
@@ -224,9 +255,15 @@ it("does not hide unresolved cleanup behind a pre-dispatch cancellation", async 
       throw error;
     }
   });
-  const outcome = task.catch((error: unknown) => error);
-  await vi.advanceTimersByTimeAsync(1);
+  let settled = false;
+  const outcome = task
+    .catch((error: unknown) => error)
+    .finally(() => {
+      settled = true;
+    });
+  await advanceUntil(f.pacingObserved);
   f.abort.abort();
+  await advanceUntil(() => settled);
   expect(await outcome).toMatchObject({
     message: expect.stringContaining("non-retryable failure"),
   });

@@ -45,6 +45,7 @@ export async function withVerifiedReviewCheckout<T>(
     if (result.exitCode !== 0) throw new Error("semantic review artifact Git materialization failed");
     return result.stdout.trim();
   };
+  let reviewFailure: unknown;
   try {
     await materializeLocalLfsAssets(input.repository, worktree.path, artifact.baseSha);
     const patchPath = join(worktree.root, "semantic-review.patch");
@@ -63,8 +64,11 @@ export async function withVerifiedReviewCheckout<T>(
       throw new Error("semantic review materialized tree differs from validated output tree");
     await verifyMaterializedFiles(worktree.path, manifest);
     return await review(worktree.path);
+  } catch (error) {
+    reviewFailure = error;
+    throw error;
   } finally {
     try { await worktree.dispose(); }
-    catch (cause) { throw new ReviewCheckoutCleanupError(cause); }
+    catch (cause) { throw new ReviewCheckoutCleanupError(cause, reviewFailure); }
   }
 }

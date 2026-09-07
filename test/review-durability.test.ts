@@ -42,6 +42,28 @@ function checkpoint(kind: "artifact" | "rebase" = "artifact"): ReviewCheckpointR
 }
 
 describe("durable semantic review transaction", () => {
+  it("retains exact malformed-response usage when private cleanup also fails before a checkpoint", async () => {
+    const failure = new ReviewCheckoutCleanupError(
+      Error("owned checkout removal failed"),
+      new ManagementOutputError(Error("malformed paid review"), result.usage),
+    );
+    const recordFailureUsage = vi.fn();
+    const recordOutcome = vi.fn();
+    const recordUsage = vi.fn();
+    await expect(runDurableReviewTransaction({
+      existing: null,
+      invoke: async () => { throw failure; },
+      persist: async () => checkpoint(),
+      recover: async () => null,
+      recordUsage,
+      recordFailureUsage,
+      recordOutcome,
+    })).rejects.toBe(failure);
+    expect(recordFailureUsage).toHaveBeenCalledExactlyOnceWith(result.usage);
+    expect(recordUsage).not.toHaveBeenCalled();
+    expect(recordOutcome).not.toHaveBeenCalled();
+  });
+
   it("preserves known paid usage but does not hide private checkout cleanup failure behind its checkpoint", async () => {
     const record = checkpoint();
     const failure = new ReviewCheckoutCleanupError(Error("owned checkout removal failed"));

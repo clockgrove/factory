@@ -117,6 +117,8 @@ export async function runDurableReviewTransaction(args: {
       record = await args.recover();
       if (!record) {
         if (error instanceof ManagementOutputError) await args.recordFailureUsage?.(error.usage);
+        if (error instanceof ReviewCheckoutCleanupError && error.usage)
+          await args.recordFailureUsage?.(error.usage);
         throw error;
       }
       if (error instanceof ReviewCheckoutCleanupError) {

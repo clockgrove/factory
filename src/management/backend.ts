@@ -85,8 +85,11 @@ export interface ManagementBackend {
 }
 /** A durable model result does not prove its private review checkout was removed. */
 export class ReviewCheckoutCleanupError extends Error {
-  constructor(cause: unknown) {
+  readonly usage: ManagementUsage | undefined;
+
+  constructor(cause: unknown, reviewFailure?: unknown) {
     super("semantic review private checkout cleanup is unresolved", { cause });
     this.name = "ReviewCheckoutCleanupError";
+    this.usage = reviewFailure instanceof ManagementOutputError ? { ...reviewFailure.usage } : undefined;
   }
 }

@@ -711,6 +711,53 @@ describe("explicit installed regular qualification", () => {
     ).toThrow(/native delivery/);
     expect(() => assertRegularCompletion(evidence())).toThrow();
   });
+  it("settles production model dispatch markers by invocation identity, not equal usage IDs", async () => {
+    const value = await regularEvidence();
+    const actual = value.events.find(
+      (event) =>
+        event.event === "BudgetReconciled" &&
+        event.unit === "model_tokens" &&
+        event.workItem === 2 &&
+        event.phase === "management",
+    )!;
+    const modelInvocationId = "review-linked-invocation";
+    actual.kind = "budget";
+    actual.modelInvocationId = modelInvocationId;
+    const marker: HarnessEvent = {
+      ...actual,
+      event: "BudgetReserved",
+      amount: 0,
+      usageId: `invocation-${modelInvocationId}`,
+      sequence: actual.sequence - 1,
+    };
+    value.events.push(marker);
+    expect(() => assertRegularCompletion(value)).not.toThrow();
+
+    marker.sequence = actual.sequence + 1;
+    expect(() => assertRegularCompletion(value)).toThrow(/model usage precedes dispatch intent/);
+    marker.sequence = actual.sequence - 1;
+    marker.policyDigest = "f".repeat(64);
+    expect(() => assertRegularCompletion(value)).toThrow(/dispatch binding/);
+  });
+  it("does not let a non-model reservation evade settlement by carrying an invocation ID", async () => {
+    const value = await regularEvidence();
+    const attempt = value.events.find(
+      (event) => event.event === "AttemptStarted" && event.workItem === 2,
+    )!;
+    const reservation: HarnessEvent = {
+      ...attempt,
+      kind: "budget",
+      event: "BudgetReserved",
+      sequence: attempt.sequence - 1,
+      phase: "execution",
+      unit: "local_milliseconds",
+      amount: 1_000,
+      modelInvocationId: "invalid-native-unit-marker",
+      usageId: "unsettled-native-unit",
+    };
+    value.events.push(reservation);
+    expect(() => assertRegularCompletion(value)).toThrow(/unreconciled BudgetReserved/);
+  });
   it.each(["AttemptReserved", "AttemptStarted"])(
     "rejects delayed %s that contradicts its immutable reservation or loses root overlap",
     async (kind) => {

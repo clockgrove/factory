@@ -267,8 +267,9 @@ describe("exclusive compiler resource claims", () => {
       item("a", { dependsOn: ["b"], exclusiveResources: ["cache:build"] }),
       item("b", { exclusiveResources: ["cache:build"] }),
     ]);
-    expect(graph.workItems[0]!.dependsOn).toEqual(["b"]);
-    expect(graph.workItems[1]!.dependsOn).toEqual([]);
+    expect(graph.workItems.map((item) => item.id)).toEqual(["b", "a"]);
+    expect(graph.workItems[0]!.dependsOn).toEqual([]);
+    expect(graph.workItems[1]!.dependsOn).toEqual(["b"]);
   });
   it.each(["GPU:0", "../gpu", "gpu/../0", "gpu//0", "gpu\nignore", "gpu;run", "", "a".repeat(161)])(
     "rejects malformed resource %j",

@@ -128,8 +128,8 @@ export function assertContinuationRetry(previous, input, now = Date.now()) {
   assert.equal(previous.result?.result,"incomplete","only an evidenced refusal may retry");
   assert.deepEqual(previous.actions,[],"any attempted or uncertain lifecycle action blocks retry");
   assert.equal(previous.authority.evidence,previousPath);
-  const {evidence:_priorPath,...priorAuthority}=previous.authority;
-  const {evidence:_originalPath,...originalAuthority}=original.authority;
+  const priorAuthority={...previous.authority},originalAuthority={...original.authority};
+  delete priorAuthority.evidence; delete originalAuthority.evidence;
   assert.deepEqual(priorAuthority,originalAuthority);
   assert.deepEqual(previous.artifact,original.artifact);
   for(const key of ["actor","base","objective","objectiveBodyDigest","configDigest","runRequest","sessionArm","startedAt"])
@@ -361,7 +361,7 @@ export async function main(env = process.env) {
     authority, scope: "installed-app-server-observation-continuation",
     harnessPaths: ["scripts/verify-local-checkpoint-continuation.mjs"],
     extendPort: async (context) => {
-      const { port, evidence, artifact, command, request, list, call, save } = context;
+      const { port, evidence, artifact, command, call, save } = context;
       const stage=(name,operation)=>continuationStage(name,operation,(entry)=>{
         (evidence.continuationDiagnostics ??= []).push(entry); save();
       });

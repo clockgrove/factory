@@ -2811,7 +2811,17 @@ export class FactorySupervisor {
       this.#sequences.observe(snapshotEvents(snapshot));
       this.#budgetEvents = this.#accountingEvents(snapshotEvents(snapshot), runId);
       if (!currentRun) {
-        if (this.#options.activation) assertSupportedModelTokenBudgetIntent(this.#policy);
+        const activation = this.#options.activation;
+        const recordedActivation = activation && (snapshot.factoryEvents ?? []).some((event) =>
+          event.event === "ActivationRequested" &&
+          event.objective === snapshot.number && event.requestId === activation.requestId &&
+          event.runId === activation.requestId && event.baseSha === activation.baseSha &&
+          event.repository.toLowerCase() === facts.fullName.toLowerCase() &&
+          event.requestedBy.toLowerCase() === actor.toLowerCase() &&
+          event.policyDigest === policyDigest(this.#policy) &&
+          policyDigest(event.policy) === event.policyDigest,
+        );
+        if (recordedActivation) assertSupportedModelTokenBudgetIntent(this.#policy);
         else assertNewRunBudgetIntent(this.#policy);
       }
       this.#run =

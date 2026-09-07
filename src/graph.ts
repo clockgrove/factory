@@ -52,6 +52,7 @@ import {
   MutationScheduler,
   PlatformUnavailableError,
   classifyRefusal,
+  isSecondaryRateLimitRefusal,
   type MutationAdmission,
 } from "./platform.js";
 
@@ -758,14 +759,17 @@ export class GraphApplier {
         );
       }
       mutationPermit.assertDispatchAllowed?.();
+      mutationPermit.recordTransported?.();
       attempted = true;
       const result = await fn();
+      mutationPermit.recordSuccess?.();
       this.#breaker.recordSuccess();
       return result;
     } catch (error) {
       if (!attempted) throw error;
       const refusal = classifyRefusal(error);
       if (refusal.kind === "not_refusal") throw error;
+      mutationPermit.recordRefusal?.(isSecondaryRateLimitRefusal(error));
       this.#breaker.recordRefusal(refusal);
       throw new PlatformUnavailableError(refusal, error);
     } finally {

@@ -33,6 +33,7 @@ import { SystemdControllerLifecycle, SystemdUserService } from "./service/index.
 import { GitHubStacks, type GitHubStackTransport } from "./publication/github-stacks.js";
 import { readSuppliedReplayFile } from "./replay/file.js";
 import { SUPPLIED_REPLAY_ERROR } from "./replay/supplied.js";
+import { ContentCreationPacer, MutationScheduler, primaryQuotaForCredential } from "./platform.js";
 
 const controllerLifecycle = new SystemdControllerLifecycle(
   new SystemdUserService({
@@ -90,8 +91,18 @@ function applicationFor(
   checkout = process.cwd(),
 ): FactoryApplicationService {
   const token = resolveGitHubToken();
-  const store = new GitHubControlStore({ token, owner, repo });
-  const reader = new GitHubReader({ token, owner, repo, recoveryInspection });
+  const primaryQuota = primaryQuotaForCredential(token);
+  const pacer = new ContentCreationPacer();
+  const mutations = new MutationScheduler({ pacer, primaryQuota });
+  const store = new GitHubControlStore({
+    token,
+    owner,
+    repo,
+    primaryQuota,
+    pacer,
+    mutationScheduler: mutations,
+  });
+  const reader = new GitHubReader({ token, owner, repo, recoveryInspection, primaryQuota });
   const registry = executionRegistry(checkout);
   const management = new CodexCliManagementBackend();
   const stacks = new GitHubStacks(
@@ -103,6 +114,7 @@ function applicationFor(
     owner,
     repo,
     reader,
+    platformTelemetry: () => mutations.telemetry(),
     ...(recoveryInspection
       ? {
           recovery: new RecoveryRequestService({

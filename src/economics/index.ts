@@ -4,6 +4,7 @@ import { modelTokenBudgetIntent, type ModelTokenBudgetIntent } from "../protocol
 import { deduplicateFactoryEvents, latestRunReceipts } from "../control/receipts.js";
 import { isModelInvocationMarker, unresolvedModelInvocations } from "../control/budget.js";
 import { summarizeRuntimeEconomics, type RuntimeEconomics } from "./runtime.js";
+import type { GitHubMutationTelemetry } from "../platform.js";
 export { summarizeRuntimeEconomics, type RuntimeEconomics } from "./runtime.js";
 
 export type EvidenceMetric<T> =
@@ -321,6 +322,8 @@ export interface EconomicSummary {
     }>;
   };
   providerCost: EvidenceMetric<Array<{ provider: string; amount: number; currency: string }>>;
+  /** Live, non-durable orchestration overhead when a controller process supplies it. */
+  githubMutations?: GitHubMutationTelemetry;
 }
 
 function summarizeProviderCost(

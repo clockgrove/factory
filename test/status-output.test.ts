@@ -277,6 +277,40 @@ describe("bounded status, explain, and replay output", () => {
     });
   });
 
+  it("reports server quota separately from the local secondary estimate and model economics", () => {
+    const platformTelemetry = {
+      admitted: 8,
+      transported: 7,
+      successful: 6,
+      serverPrimaryQuota: [
+        {
+          resource: "core",
+          limit: 5000,
+          remaining: 4993,
+          used: 7,
+          resetAt: "2026-09-04T13:00:00.000Z",
+          observedAt: "2026-09-04T12:05:00.000Z",
+        },
+      ],
+      localSecondaryEstimate: {
+        transportedLastMinute: 2,
+        transportedLastHour: 7,
+        estimatedHourlyCapacity: 499,
+        confidence: "low" as const,
+        secondaryRefusals: 0,
+        limitingReason: "local-secondary-estimate" as const,
+        nextAdmissionAt: "2026-09-04T12:05:07.215Z",
+      },
+    };
+    const report = buildStatusReport({
+      repository: "clockgrove/factory",
+      snapshot: snapshot(),
+      platformTelemetry,
+    });
+    expect(report.github).toEqual(platformTelemetry);
+    expect(report.summary?.economics.githubMutations).toEqual(platformTelemetry);
+  });
+
   it("returns stable explanations without provider responses", () => {
     const report = buildExplanationReport({
       repository: "clockgrove/factory",

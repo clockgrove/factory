@@ -5779,31 +5779,34 @@ export class FactorySupervisor {
       });
       this.#releaseCapacity(validationCapacity.key);
       await this.#lease.use(async (lease) => {
-        const event = await this.#recorder.budget({
-          lease,
-          workItemNodeId: item.id,
-          reservation: reservation!,
-          sequence: this.#sequences.take(),
-          event: "BudgetReconciled",
-          unit: "validation_milliseconds",
-          amount: Date.now() - validationStarted,
-        });
-        this.#budgetEvents.push(event);
-        if (validator && validationBudgetUnit) {
-          const sandboxEvent = await this.#recorder.budget({
+        const validationDuration = Date.now() - validationStarted;
+        const events = await this.#recorder.budgetBatch([
+          {
             lease,
             workItemNodeId: item.id,
             reservation: reservation!,
             sequence: this.#sequences.take(),
             event: "BudgetReconciled",
-            unit: validationBudgetUnit,
-            phase: "validation",
-            amount:
-              validationBudgetUnit === "managed_sessions" ? 1 : Date.now() - validationStarted,
-          });
-          this.#budgetEvents.push(sandboxEvent);
-          validationBudgetReconciled = true;
-        }
+            unit: "validation_milliseconds",
+            amount: validationDuration,
+          },
+          ...(validator && validationBudgetUnit
+            ? [
+                {
+                  lease,
+                  workItemNodeId: item.id,
+                  reservation: reservation!,
+                  sequence: this.#sequences.take(),
+                  event: "BudgetReconciled" as const,
+                  unit: validationBudgetUnit,
+                  phase: "validation" as const,
+                  amount: validationBudgetUnit === "managed_sessions" ? 1 : validationDuration,
+                },
+              ]
+            : []),
+        ]);
+        this.#budgetEvents.push(...events);
+        if (validator && validationBudgetUnit) validationBudgetReconciled = true;
       });
       if (!validation.evidence.passed) {
         throw new Error(validation.evidence.failureReason ?? "validation failed");

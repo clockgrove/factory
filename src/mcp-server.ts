@@ -88,6 +88,7 @@ import {
   ConcurrencyLimiter,
   ContentCreationPacer,
   MutationScheduler,
+  primaryQuotaForCredential,
 } from "./platform.js";
 import {
   currentOpenPullRequest,
@@ -173,6 +174,7 @@ function applicationFor(
   checkout = process.cwd(),
 ): FactoryApplicationService {
   const token = getToken();
+  mutations.attachPrimaryQuota(primaryQuotaForCredential(token));
   const store = new GitHubControlStore({
     token,
     owner,
@@ -198,6 +200,7 @@ function applicationFor(
     owner,
     repo,
     reader,
+    platformTelemetry: () => mutations.telemetry(),
     ...(recoveryReader
       ? {
           recovery: new RecoveryRequestService({

@@ -42,12 +42,11 @@ function setup(input: { paced?: boolean; fetch?: typeof globalThis.fetch } = {})
   const abort = new AbortController();
   const resources = createRepositorySupervisorResources();
   const pacer = new ContentCreationPacer(40, 6, 0);
-  if (input.paced) for (let n = 0; n < 3; n++) pacer.recordCall(new Date(Date.now() - 18 * 60_000));
-  const recordCall = vi.spyOn(pacer, "recordCall");
+  if (input.paced) pacer.recordCall(new Date());
+  const recordCall = vi.spyOn(pacer, "recordTransported");
   let pacingObserved = false;
   resources.mutationScheduler = new MutationScheduler({
     pacer,
-    reservedLeaseMutationsPerHour: 3,
     onThrottle: () => {
       pacingObserved = true;
     },
@@ -147,7 +146,7 @@ function setup(input: { paced?: boolean; fetch?: typeof globalThis.fetch } = {})
   };
 }
 
-it("stops a real 42-minute normal pacing wait, settles cleanup and reserved lease traffic, and never dispatches it later", async () => {
+it("stops a smoothed normal pacing wait, settles priority cleanup, and never dispatches it later", async () => {
   const f = setup({ paced: true });
   let cleanupProved = false;
   const task = f.run(async () => {
@@ -164,7 +163,7 @@ it("stops a real 42-minute normal pacing wait, settles cleanup and reserved leas
   });
   await advanceUntil(f.pacingObserved);
   expect(f.request).not.toHaveBeenCalled();
-  expect(f.pacer.waitMs(new Date(), { hourlyReserve: 3 })).toBeGreaterThan(41 * 60_000);
+  expect(f.pacer.waitMs(new Date())).toBeGreaterThan(11 * 60_000);
   const pendingLease = await f.resources.mutationScheduler.acquire("lease");
   pendingLease.release();
   let settled = false;
@@ -178,12 +177,12 @@ it("stops a real 42-minute normal pacing wait, settles cleanup and reserved leas
   expect(f.acquire).toHaveBeenCalledTimes(1);
   expect(f.release).toHaveBeenCalledTimes(1);
   expect(f.request).toHaveBeenCalledTimes(2); // Only Objective/repository lease writes.
-  expect(f.recordCall).toHaveBeenCalledTimes(3); // Pending lease plus both retirements.
+  expect(f.resources.mutationScheduler.telemetry().transported).toBe(2);
   expect(vi.getTimerCount()).toBe(0);
   await vi.advanceTimersByTimeAsync(3_600_001);
   await expect(f.normal()).rejects.toBeInstanceOf(MutationAdmissionStoppedError);
   expect(f.request).toHaveBeenCalledTimes(2);
-  expect(f.recordCall).toHaveBeenCalledTimes(3);
+  expect(f.recordCall).toHaveBeenCalledTimes(2);
 });
 
 it.each([false, true])(
@@ -243,7 +242,7 @@ it.each([false, true])(
     // A real refusal retains the shared cooldown and prevents even lease writes;
     // deliberate stop does not claim that this ownership was durably retired.
     expect(f.release).toHaveBeenCalledTimes(refused ? 0 : 1);
-    expect(f.request).toHaveBeenCalledTimes(refused ? 4 : 2);
+    expect(f.request).toHaveBeenCalledTimes(refused ? 1 : 2);
     expect(f.recordCall).toHaveBeenCalledTimes(refused ? 1 : 2);
     expect(f.resources.circuitBreaker.isOpen()).toBe(refused);
     expect(f.acquire).toHaveBeenCalledTimes(1);
@@ -300,7 +299,7 @@ it("rechecks the permit after an awaited mutation fence and releases it for leas
   const lease = await f.resources.mutationScheduler.acquire("lease");
   lease.assertDispatchAllowed?.();
   lease.release();
-  expect(f.recordCall).toHaveBeenCalledTimes(2); // Existing admission is not refunded; lease remains admitted.
+  expect(f.recordCall).toHaveBeenCalledTimes(0); // Neither permit reached transport.
 });
 
 it("removes only queued normal admissions while an in-flight holder still serializes pending lease traffic", async () => {
@@ -316,10 +315,10 @@ it("removes only queued normal admissions while an in-flight holder still serial
   f.resources.mutationScheduler.stopNormalAdmission();
   expect(await refusal).toBeInstanceOf(MutationAdmissionStoppedError);
   expect(leaseAdmitted).toBe(false);
-  expect(f.recordCall).toHaveBeenCalledTimes(1);
+  expect(f.recordCall).toHaveBeenCalledTimes(0);
   active.release();
   (await lease).release();
   expect(leaseAdmitted).toBe(true);
-  expect(f.recordCall).toHaveBeenCalledTimes(2);
+  expect(f.recordCall).toHaveBeenCalledTimes(0);
   expect(vi.getTimerCount()).toBe(0);
 });

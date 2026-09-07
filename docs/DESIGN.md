@@ -164,9 +164,19 @@ new work is admitted; it never consumes an implementation attempt.
 High-volume lifecycle and budget receipts are written through the GitHub issue-comments REST API,
 whose destination issue number is derived from the validated Factory event envelope. Exact custom-ref
 fencing remains on GraphQL `updateRefs` because the REST ref API does not provide equivalent CAS.
+Already-adjacent budget reconciliations for one lease, attempt, and destination may share one comment;
+each retained envelope keeps its exact sequence and idempotency identity.
 Both API surfaces still share Factory's circuit breaker, concurrency limiter, content-creation pacer,
 and secondary-rate-limit handling. Unchanged idle state is polled no more often than once per minute
 by default, while active local-worker cancellation uses the cheaper REST comments path.
+
+Primary quota observations come from GitHub's response headers and are cached per credential and
+resource; Factory does not poll `/rate_limit` to reconstruct a fresher-looking answer. GitHub does
+not expose remaining secondary content-generation quota, so that plane is reported separately as a
+local estimate with explicit confidence. The estimate counts only actual transport attempts,
+smooths admission below GitHub's documented outer ceiling, reduces throughput after real 403/429
+secondary feedback, and recovers gradually after successful transports. Octokit's internal retries
+are disabled so every retry returns through Factory's shared pacing and circuit controls.
 
 Recovery may retain bounded immutable Git content by exact object identity across repeated proof
 calls. It never caches mutable refs, authenticated event snapshots, PR/base state, leases, physical
@@ -764,10 +774,11 @@ authors, install-script changes, unrestricted network, secret-requiring tasks, a
 supplied untrusted code route to an explicitly permitted sandbox or escalation.
 
 All GitHub writes continue through the shared circuit breaker, mutation scheduler, content-creation
-pacer, and concurrency limiter. Mutations are issued serially and are priced at admission, including
-failed requests. Normal writes leave 24 hourly mutation slots reserved for lease acquisition and
-renewal. A paced normal write sleeps outside the priority gate and outside lease-renewal
-serialization, so a busy audit stream cannot starve the heartbeat. A platform refusal stops mutation
+pacer, and concurrency limiter. Mutations are issued serially; actual transport attempts, including
+failed HTTP requests, are priced, while a lease or shutdown fence that stops before transport is not.
+Normal traffic is spread predictably across the documented content-generation window instead of
+bursting into a fixed local hourly cliff. Lease traffic retains queue priority and can use safe
+headroom up to the documented outer windows. A platform refusal stops mutation
 under the current lease. On recovery the interrupted
 reservation is reconciled and marked `AttemptDeferred`; it remains in the audit and cost ledgers but
 does not consume a Work Item implementation attempt. A durable failed validation remains a real

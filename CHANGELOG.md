@@ -48,6 +48,11 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 - Objective compilation now replaces model-invented platform, CPU, memory, artifact-storage and
   timeout sizing with pinned repository evidence, active run-policy values or named portable
   defaults, and records that provenance in each compiled Work Item.
+- GitHub primary quota is cached from authoritative response headers per credential/resource, while
+  the unobservable secondary content limit uses separately reported adaptive pacing based on actual
+  transports and 403/429 feedback. This removes the fixed 226-normal-write hourly cliff, preserves
+  lease priority and circuit breaking, coalesces adjacent validation budget reconciliations, and
+  reports mutation/pacing overhead with runtime economics.
 - An authenticated cancellation of an already-started activation can retire exactly owned resources
   after an external branch advance, without granting execution on the changed base. Known work and
   usage are retained; unknown resource termination still refuses terminal cleanup. Unavailable native

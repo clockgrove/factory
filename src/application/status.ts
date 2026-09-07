@@ -18,6 +18,7 @@ import {
 } from "../scheduling/capacity-ledger.js";
 import { rankReadyWorkItems, type ObservedPrioritySource } from "../scheduling/priority.js";
 import { queuedReasonCode } from "../explanations/index.js";
+import type { GitHubMutationTelemetry } from "../platform.js";
 
 export interface ReadWorkItemSnapshot {
   id?: string;
@@ -197,6 +198,8 @@ export interface FactoryStatusReport {
   };
   workItems: StatusWorkItem[];
   summary: RunSummary | null;
+  /** Current process telemetry; separate from durable/replayed economics. */
+  github?: GitHubMutationTelemetry;
 }
 
 export function snapshotEvents(snapshot: FactoryReadSnapshot): FactoryEvent[] {
@@ -326,6 +329,7 @@ function activeReservations(
 export function buildStatusReport(input: {
   repository: string;
   snapshot: FactoryReadSnapshot;
+  platformTelemetry?: GitHubMutationTelemetry;
 }): FactoryStatusReport {
   const events = snapshotEvents(input.snapshot);
   const observedAt = evidenceTime(input.snapshot, events);
@@ -422,6 +426,17 @@ export function buildStatusReport(input: {
   const controller = [...runEvents]
     .filter((event) => event.kind === "controller")
     .sort((left, right) => right.sequence - left.sequence)[0];
+  const durableSummary = summarizeRun(events, policy ?? undefined);
+  const summary =
+    durableSummary && input.platformTelemetry
+      ? {
+          ...durableSummary,
+          economics: {
+            ...durableSummary.economics,
+            githubMutations: input.platformTelemetry,
+          },
+        }
+      : durableSummary;
   const statusItems = items.map((item): StatusWorkItem => {
     const itemEvents = (item.factoryEvents ?? [])
       .filter((event) => !run || event.runId === run.runId)
@@ -665,6 +680,7 @@ export function buildStatusReport(input: {
             },
     },
     workItems: statusItems,
-    summary: summarizeRun(events, policy ?? undefined),
+    summary,
+    ...(input.platformTelemetry ? { github: input.platformTelemetry } : {}),
   };
 }

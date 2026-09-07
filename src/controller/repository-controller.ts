@@ -30,6 +30,7 @@ import {
   classifyRefusal,
   PlatformUnavailableError,
   MutationAdmissionStoppedError,
+  primaryQuotaForCredential,
 } from "../platform.js";
 import { adoptRecoveryActivation, type RecoveryRepositoryOwnership } from "./recovery.js";
 import { ControllerGenerationRetirement } from "./retirement.js";
@@ -573,6 +574,8 @@ async function withRepositoryOwnership<T>(
   options: RepositoryOwnershipOptions,
   operation: (ownership: RepositoryOwnership) => Promise<T>,
 ): Promise<T> {
+  const primaryQuota = primaryQuotaForCredential(options.token);
+  options.resources.mutationScheduler.attachPrimaryQuota(primaryQuota);
   const store = new GitHubControlStore({
     token: options.token,
     owner: options.owner,
@@ -581,6 +584,7 @@ async function withRepositoryOwnership<T>(
     circuitBreaker: options.resources.circuitBreaker,
     concurrency: options.resources.concurrency,
     mutationScheduler: options.resources.mutationScheduler,
+    primaryQuota,
     ...(options.onStatus ? { onThrottle: options.onStatus } : {}),
   });
   options.signal?.throwIfAborted();

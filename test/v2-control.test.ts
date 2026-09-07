@@ -15,6 +15,7 @@ import { LifecycleRecorder } from "../src/control/events.js";
 import {
   decodeEventComments,
   decodeEventTrailer,
+  encodeEventBatchComment,
   encodeEventComment,
 } from "../src/control/receipts.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
@@ -341,21 +342,33 @@ describe("attempt reservation", () => {
 
     const recorder = new LifecycleRecorder(store, leases);
     const writesBefore = store.comments.length;
-    const budgetEvent = await recorder.budget({
-      lease,
-      workItemNodeId: "I_43",
-      reservation: first,
-      sequence: 21,
-      event: "BudgetReconciled",
-      unit: "model_tokens",
-      phase: "execution",
-      amount: 321,
-      reportedModelUsage: { inputTokens: 300, outputTokens: 21, cachedInputTokens: 200 },
-    });
+    const [budgetEvent, validationEvent] = await recorder.budgetBatch([
+      {
+        lease,
+        workItemNodeId: "I_43",
+        reservation: first,
+        sequence: 21,
+        event: "BudgetReconciled",
+        unit: "model_tokens",
+        phase: "execution",
+        amount: 321,
+        reportedModelUsage: { inputTokens: 300, outputTokens: 21, cachedInputTokens: 200 },
+      },
+      {
+        lease,
+        workItemNodeId: "I_43",
+        reservation: first,
+        sequence: 22,
+        event: "BudgetReconciled",
+        unit: "validation_milliseconds",
+        phase: "validation",
+        amount: 100,
+      },
+    ]);
     const failedManagement = await recorder.objectiveBudget({
       lease,
       objectiveNodeId: "I_42",
-      sequence: 22,
+      sequence: 23,
       event: "BudgetReconciled",
       unit: "model_tokens",
       amount: 150,
@@ -363,7 +376,10 @@ describe("attempt reservation", () => {
       reportedModelUsage: { inputTokens: 120, outputTokens: 30, cachedInputTokens: 0 },
     });
     expect(store.comments.length - writesBefore).toBe(2);
-    expect(decodeEventComments(store.comments.at(-2)!.body)).toEqual([budgetEvent]);
+    expect(decodeEventComments(store.comments.at(-2)!.body)).toEqual([
+      budgetEvent,
+      validationEvent,
+    ]);
     expect(decodeEventComments(store.comments.at(-1)!.body)).toEqual([failedManagement]);
     expect(failedManagement.reportedModelUsage).toEqual({
       inputTokens: 120,
@@ -691,10 +707,19 @@ describe("Factory event comment routing", () => {
     expect(factoryCommentIssueNumber(encodeEventComment("started", attempt))).toBe(22);
   });
 
-  it("rejects comments without exactly one Factory event", () => {
-    const body = encodeEventComment("terminal", terminal);
-    expect(() => factoryCommentIssueNumber("ordinary comment")).toThrow(/exactly one/);
-    expect(() => factoryCommentIssueNumber(`${body}\n${body}`)).toThrow(/exactly one/);
+  it("accepts same-destination batches and rejects missing or mixed destinations", () => {
+    expect(
+      factoryCommentIssueNumber(
+        encodeEventBatchComment("attempt progress", [
+          attempt,
+          parseFactoryEvent({ ...attempt, sequence: 3 }),
+        ]),
+      ),
+    ).toBe(22);
+    expect(() => factoryCommentIssueNumber("ordinary comment")).toThrow(/an event envelope/);
+    expect(() =>
+      factoryCommentIssueNumber(encodeEventBatchComment("mixed", [terminal, attempt])),
+    ).toThrow(/one destination/);
   });
 
   it("writes durable events through the issue comments REST endpoint", async () => {

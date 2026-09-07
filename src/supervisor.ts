@@ -12453,7 +12453,8 @@ export class FactorySupervisor {
     }
     const providerResourceId = latest?.kind === "attempt" ? latest.providerResourceId : undefined;
     const executionBudget = unreconciledBudgetReservations(events).find(
-      (budget) => budget.phase === "execution",
+      (budget) => budget.phase === "execution" &&
+        ["local_milliseconds", "sandbox_milliseconds", "managed_sessions"].includes(budget.unit),
     );
     const noHandleReplacementNotBefore =
       !providerResourceId && executionBudget?.unit === "sandbox_milliseconds"
@@ -12511,6 +12512,9 @@ export class FactorySupervisor {
       (event) => event.kind === "attempt" && event.event === "AttemptCollected",
     )?.at;
     for (const budget of unreconciledBudgetReservations(events)) {
+      // Elapsed time and resource absence cannot measure token consumption.
+      // Dispatch markers remain pending until an exact model receipt is recovered.
+      if (budget.unit === "model_tokens") continue;
       const phaseStart =
         budget.phase === "validation" ? validationCouldHaveStartedAt : attemptStartedAt;
       const elapsed = phaseStart ? Math.max(0, Date.now() - new Date(phaseStart).getTime()) : 0;

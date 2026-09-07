@@ -176,11 +176,12 @@ describe("durable runtime economics", () => {
     });
   });
 
-  it.each(["local_milliseconds", "sandbox_milliseconds"])(
+  it.each(["local_milliseconds", "sandbox_milliseconds", "validation_milliseconds"])(
     "accepts explicit %s reservation bounds without substituting model usage",
     (unit) => {
       const overrides = {
         unit,
+        phase: unit === "validation_milliseconds" ? "validation" : "execution",
         usageEvidence: "conservative-reservation",
         directorEpoch: 1,
         policyDigest: policy,

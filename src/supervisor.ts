@@ -41,6 +41,7 @@ import {
   deriveBudgetUsage,
   remainingBudget,
   unreconciledBudgetReservations,
+  unresolvedModelInvocations,
   assertModelInvocationAdmission,
   isModelInvocationMarker,
   mergeAccountingSnapshot,
@@ -284,7 +285,11 @@ import {
   type CleanValidationInput,
 } from "./validation/clean-run.js";
 import { bindValidationToPublishedHead, validationPlanFromPacket } from "./validation/plan.js";
-import { discoverLocalScopeHost, observeLocalScope } from "./runtime/local-scope.js";
+import {
+  discoverLocalScopeHost,
+  observeLocalScope,
+  stopLocalScope,
+} from "./runtime/local-scope.js";
 import { LocalScopeBatchSchema, type LocalScopeBatch } from "./protocol/local-scope.js";
 import type { ValidationEvidence } from "./validation/evidence.js";
 import {
@@ -2416,6 +2421,468 @@ export class FactorySupervisor {
     }
   }
 
+  /** Cancellation is resource retirement, never authority to run against a changed
+   * branch. Keep this path outside graph repair, artifact continuation and admission. */
+  async #cancelActivatedRun(
+    snapshot: Snapshot,
+    run: RunState,
+    manager: RunManager,
+    actor: string,
+  ): Promise<SupervisorResult | null> {
+    if (!run.activationRequestId || !run.baseSha || !run.repository || this.#options.recovery)
+      return null;
+    if (run.actor.toLowerCase() !== actor.toLowerCase())
+      throw new Error("only the original run actor may reconcile cancellation");
+    const binding: ActivationBinding = {
+      objective: run.objective,
+      requestId: run.activationRequestId,
+      requestedBy: run.actor,
+      repository: run.repository,
+      baseSha: run.baseSha,
+      policyDigest: run.policyDigest,
+    };
+    const readCancellation = async () => {
+      const request = await this.#reader.readRunCancellationRequest(
+        run.objective,
+        run.runId,
+        run.actor,
+        binding,
+      );
+      if (!request) return null;
+      if (
+        request.objective !== run.objective ||
+        request.requestedBy.toLowerCase() !== run.actor.toLowerCase() ||
+        (request.event === "FactoryRunCancellationRequested" && request.runId !== run.runId) ||
+        (request.event === "ActivationCancellationRequested" &&
+          !activationCancellation([request], binding))
+      )
+        throw new Error("cancellation does not bind the original run authority");
+      return request;
+    };
+    const requested = await readCancellation();
+    if (!requested) return null;
+    const initial = snapshotEvents(snapshot);
+    const assertActivation = (events: readonly FactoryEvent[]) => {
+      const activations = events.filter(
+        (event) => event.event === "ActivationRequested" && event.requestId === binding.requestId,
+      );
+      const activation = activations[0];
+      if (
+        activations.length !== 1 ||
+        activation?.event !== "ActivationRequested" ||
+        activation.objective !== run.objective ||
+        activation.runId !== binding.requestId ||
+        activation.repository.toLowerCase() !== binding.repository.toLowerCase() ||
+        activation.requestedBy.toLowerCase() !== binding.requestedBy.toLowerCase() ||
+        activation.baseSha !== binding.baseSha ||
+        activation.policyDigest !== binding.policyDigest ||
+        policyDigest(activation.policy) !== binding.policyDigest
+      )
+        throw new Error("cancellation lacks its exact authenticated activation");
+    };
+    assertActivation(initial);
+    const base = await this.#store.getBranchHead(snapshot.defaultBranch);
+    // This exception is only for an activation which normal startup must refuse.
+    // Keep supported unchanged/evidenced-base cancellation on its existing path;
+    // do not impose new local-only cleanup requirements on completed cloud history.
+    if (
+      base.oid === run.baseSha ||
+      (await this.#observedRunOwnsBaseAdvance(snapshot, run, base.oid))
+    )
+      return null;
+    const priorLease = await this.#leases.read(snapshot.number);
+    this.#sequences = new SequenceAllocator(
+      [...initial, requested],
+      run.sequence + 1,
+      priorLease ?? undefined,
+    );
+    // Current Git tree is only the lease's storage parent, not an execution base.
+    await this.#options.repositoryFence?.();
+    const acquired = await this.#leases.acquire(
+      {
+        objective: run.objective,
+        runId: run.runId,
+        holder: `${actor}-${randomUUID()}`,
+        policyDigest: run.policyDigest,
+      },
+      base,
+      this.#sequences.take(),
+    );
+    this.#lease = new LeaseController(this.#leases, acquired, this.#sequences);
+    this.#run = run;
+    let heartbeatError: unknown;
+    const heartbeat = setInterval(() => {
+      void this.#lease.renewIfNeeded().catch((error) => {
+        heartbeatError = error;
+        this.#lease.fail(error);
+      });
+    }, 30_000);
+    heartbeat.unref();
+    const assertCurrent = async () => {
+      if (heartbeatError) throw heartbeatError;
+      await this.#options.repositoryFence?.();
+      await this.#lease.assert();
+      const current = await this.#reader.readObjective(run.objective);
+      assertActivation(snapshotEvents(current));
+      const observed = manager.resume(current.factoryEvents ?? []);
+      if (
+        !observed ||
+        current.number !== run.objective ||
+        current.id !== snapshot.id ||
+        current.repositoryId !== snapshot.repositoryId ||
+        current.authorLogin !== snapshot.authorLogin ||
+        current.defaultBranch !== snapshot.defaultBranch ||
+        [
+          "runId",
+          "actor",
+          "policyDigest",
+          "activationRequestId",
+          "baseSha",
+          "repository",
+          "baseBranch",
+          "fork",
+        ].some((key) => observed[key as keyof RunState] !== run[key as keyof RunState]) ||
+        observed.startedAt.getTime() !== run.startedAt.getTime()
+      )
+        throw new Error("run changed during cancellation cleanup");
+      const cancellation = await readCancellation();
+      if (!cancellation || cancellation.requestId !== requested.requestId)
+        throw new Error("exact cancellation disappeared during cleanup");
+      this.#sequences.observe([...snapshotEvents(current), cancellation]);
+      this.#fenceSnapshot(current);
+      await this.#options.repositoryFence?.();
+      await this.#lease.assert();
+      return current;
+    };
+    try {
+      snapshot = await assertCurrent();
+      const graphs = new CompiledGraphManager(this.#store, this.#leases);
+      const graph = await graphs.load(run.objective, run.runId);
+      if (graph) {
+        const projection = await graphs.loadProjection(run.objective, run.runId, graph);
+        if (!projection) throw new Error("cancellation graph projection is unavailable");
+        this.#compiledGraph = graph.objective;
+        this.#compiledProjection = projection;
+        this.#fenceSnapshot(snapshot);
+      } else if (snapshot.workItems.length)
+        throw new Error("cancellation graph ownership is unavailable");
+      this.#budgetEvents = this.#accountingEvents(snapshotEvents(snapshot), run.runId);
+      const items = this.#deriveObjective(snapshot).items;
+      const retired = new Map<string, AttemptReservation>();
+      for (const item of items) {
+        const reservations = (await this.#attempts.list(run.objective, item.number)).filter(
+          (reservation) => reservation.runId === run.runId,
+        );
+        if (
+          (item.factoryEvents ?? []).some(
+            (event) =>
+              event.kind === "attempt" &&
+              event.runId === run.runId &&
+              !reservations.some((reservation) => reservation.attempt === event.attempt),
+          )
+        )
+          throw new Error("cancellation attempt receipt lacks its exact reservation ref");
+        for (const reservation of reservations) {
+          if (
+            reservation.objective !== run.objective ||
+            reservation.workItem !== item.number ||
+            reservation.policyDigest !== run.policyDigest ||
+            reservation.directorEpoch > acquired.epoch
+          )
+            throw new Error("cancellation reservation differs from original ownership");
+          snapshot = await assertCurrent();
+          const events = snapshotEvents(snapshot).filter(
+            (event) =>
+              event.runId === run.runId &&
+              "workItem" in event &&
+              event.workItem === item.number &&
+              "attempt" in event &&
+              event.attempt === reservation.attempt,
+          );
+          const backend = this.#registry.get(reservation.backend);
+          if (!backend?.reconcileStale)
+            throw new Error(`cancellation cleanup unavailable for ${reservation.backend}`);
+          if (backend.capabilities.hostExecution && !reservation.localScopeBatch)
+            throw new Error("cancellation lacks exact local execution scope");
+          const resourceIds = new Set(
+            events.flatMap((event) =>
+              event.kind === "attempt" && event.providerResourceId
+                ? [event.providerResourceId]
+                : [],
+            ),
+          );
+          if (resourceIds.size > 1) throw new Error("cancellation resource identity conflicts");
+          const executionBudget = unreconciledBudgetReservations(events).find(
+            (event) => event.phase === "execution" && event.unit === "sandbox_milliseconds",
+          );
+          await backend.reconcileStale({
+            repository: run.repository,
+            objective: run.objective,
+            workItem: item.number,
+            attempt: reservation.attempt,
+            runId: run.runId,
+            directorEpoch: reservation.directorEpoch,
+            policyDigest: reservation.policyDigest,
+            phase: "execution",
+            ...(reservation.localScopeBatch
+              ? { localScopeBatch: reservation.localScopeBatch }
+              : {}),
+            ...(resourceIds.size ? { providerResourceId: [...resourceIds][0]! } : {}),
+            ...(!resourceIds.size && executionBudget
+              ? {
+                  noHandleReplacementNotBefore: new Date(
+                    Date.parse(executionBudget.at) + executionBudget.amount + 60_000,
+                  ).toISOString(),
+                }
+              : {}),
+          });
+          await assertCurrent();
+          if (reservation.localScopeBatch) {
+            await stopLocalScope(reservation.localScopeBatch.identity);
+            await assertCurrent();
+          }
+          // Every recorded validation scope is independently retired, even when a
+          // prior completion receipt exists. Missing ownership cannot mean absence.
+          const capacities = events.filter(
+            (event) => event.kind === "capacity" && event.event === "CapacityReserved",
+          );
+          for (const capacity of capacities) {
+            if (capacity.kind !== "capacity") continue;
+            if (!capacity.localScopeBatch)
+              throw new Error(
+                "cancellation validation resource lacks supported exact local scope ownership",
+              );
+            const batch = LocalScopeBatchSchema.parse(capacity.localScopeBatch);
+            if (
+              batch.identity.repository !== run.repository ||
+              batch.identity.runId !== run.runId ||
+              batch.identity.objective !== run.objective ||
+              batch.identity.workItem !== item.number ||
+              batch.identity.attempt !== reservation.attempt ||
+              batch.identity.policyDigest !== run.policyDigest ||
+              batch.identity.phase !== capacity.phase ||
+              batch.identity.directorEpoch !== (capacity.recoveryEpoch ?? capacity.directorEpoch)
+            )
+              throw new Error("cancellation validation scope identity conflicts");
+            for (let commandIndex = 0; commandIndex < batch.commandCount; commandIndex++) {
+              await assertCurrent();
+              await stopLocalScope({ ...batch.identity, commandIndex });
+            }
+          }
+          if (reservation.backend === "codex-app-server/local-worktree")
+            await this.#recoverAppServerUsage(item, reservation, events);
+          else {
+            const terminal = events.filter(
+              (event) =>
+                event.kind === "attempt" &&
+                event.reportedModelTokens !== undefined &&
+                [
+                  "AttemptSucceeded",
+                  "AttemptFailed",
+                  "AttemptTimedOut",
+                  "AttemptCancelled",
+                ].includes(event.event),
+            );
+            const known = terminal[0];
+            if (known?.kind === "attempt") {
+              if (
+                terminal.some(
+                  (event) =>
+                    event.kind !== "attempt" ||
+                    event.reportedModelTokens !== known.reportedModelTokens,
+                )
+              )
+                throw new Error("cancellation terminal model usage conflicts");
+              const actual = events.filter(
+                (event) =>
+                  event.kind === "budget" &&
+                  event.event === "BudgetReconciled" &&
+                  event.phase === "execution" &&
+                  event.unit === "model_tokens",
+              );
+              const usageId = `worker-${item.number}-${reservation.attempt}`;
+              if (
+                actual.some(
+                  (event) =>
+                    event.kind !== "budget" ||
+                    event.amount !== known.reportedModelTokens ||
+                    event.usageId !== usageId,
+                )
+              )
+                throw new Error("cancellation model accounting differs from terminal usage");
+              const link = this.#modelInvocationLink(usageId, reservation, undefined, "execution");
+              if (!this.#hasModelUsageLink(actual, link)) {
+                await assertCurrent();
+                await this.#lease.use(async (lease) => {
+                  this.#budgetEvents.push(
+                    await this.#recorder.budget({
+                      lease,
+                      workItemNodeId: item.id,
+                      reservation,
+                      sequence: this.#sequences.take(),
+                      event: "BudgetReconciled",
+                      phase: "execution",
+                      unit: "model_tokens",
+                      amount: known.reportedModelTokens!,
+                      usageId,
+                      ...link,
+                      ...(known.reportedModelUsage
+                        ? { reportedModelUsage: known.reportedModelUsage }
+                        : {}),
+                    }),
+                  );
+                });
+              }
+            }
+          }
+          const validation = events.find((event) => event.kind === "validation" && event.passed);
+          const collected = events.find(
+            (event) => event.kind === "attempt" && event.event === "AttemptCollected",
+          );
+          if (
+            validation?.kind === "validation" &&
+            collected?.kind === "attempt" &&
+            collected.artifactDigest
+          ) {
+            const review = await this.#reviews.load({
+              kind: "artifact",
+              runId: run.runId,
+              objective: run.objective,
+              workItem: item.number,
+              attempt: reservation.attempt,
+              artifactDigest: collected.artifactDigest,
+              baseSha: validation.baseSha,
+              outputTreeSha: validation.outputTreeSha,
+              evidenceDigest: validation.evidenceDigest,
+            });
+            if (review) await this.#recordReviewUsage(review, item, reservation);
+          }
+          for (const capacity of unreconciledCapacityReservations(events)) {
+            await assertCurrent();
+            // Validation may have been admitted under a later controller than
+            // execution. Preserve the original capacity identity, not the older
+            // execution reservation's epoch, while fencing this new writer.
+            await this.#lease.use(async (lease) => {
+              if (
+                capacity.directorEpoch > lease.epoch ||
+                capacity.policyDigest !== lease.policyDigest
+              )
+                throw new Error("cancellation capacity is fenced from the current lease");
+              await this.#store.addIssueComment(
+                item.id,
+                encodeEventComment(
+                  "Factory reconciled cancelled capacity.",
+                  parseFactoryEvent({
+                    ...capacity,
+                    localScopeBatch: undefined,
+                    event: "CapacityReconciled",
+                    sequence: this.#sequences.take(),
+                    at: (await this.#store.serverTime()).toISOString(),
+                    recoveryEpoch: lease.epoch,
+                    reason: "operator cancellation proved exact resource absence",
+                  }),
+                ),
+              );
+            });
+          }
+          for (const budget of unreconciledBudgetReservations(events)) {
+            if (budget.unit === "model_tokens") continue; // Unknown consumption stays unknown.
+            if (
+              budget.phase === "management" ||
+              (budget.phase === "validation" && !capacities.length)
+            )
+              throw new Error("cancellation budget lacks exact resource retirement evidence");
+            if (
+              !["local_milliseconds", "sandbox_milliseconds", "validation_milliseconds"].includes(
+                budget.unit,
+              )
+            )
+              throw new Error("cancellation native accounting cannot infer this reserved unit");
+            await assertCurrent();
+            await this.#lease.use(async (lease) => {
+              this.#budgetEvents.push(
+                await this.#recorder.budget({
+                  lease,
+                  workItemNodeId: item.id,
+                  reservation,
+                  sequence: this.#sequences.take(),
+                  event: "BudgetReconciled",
+                  phase: budget.phase,
+                  unit: budget.unit,
+                  amount: budget.amount,
+                  ...(budget.usageId ? { usageId: budget.usageId } : {}),
+                  usageEvidence: "conservative-reservation",
+                  reason:
+                    "exact resources absent after cancellation; reserved bound charged, elapsed usage unavailable",
+                }),
+              );
+            });
+          }
+          if (
+            !events.some(
+              (event) =>
+                event.kind === "attempt" &&
+                [
+                  "AttemptSucceeded",
+                  "AttemptFailed",
+                  "AttemptTimedOut",
+                  "AttemptCancelled",
+                  "AttemptDeferred",
+                  "AttemptIntegrated",
+                ].includes(event.event),
+            )
+          ) {
+            await assertCurrent();
+            await this.#lease.use((lease) =>
+              this.#attempts.record({
+                lease,
+                workItemNodeId: item.id,
+                reservation,
+                sequence: this.#sequences.take(),
+                event: "AttemptCancelled",
+                allowRecovery: true,
+                reason:
+                  "operator cancelled original attempt after exact resource cleanup; unknown model usage is not zero",
+              }),
+            );
+          }
+          retired.set(`${item.number}:${reservation.attempt}`, reservation);
+        }
+      }
+      snapshot = await assertCurrent();
+      const remaining = snapshotEvents(snapshot).filter((event) => event.runId === run.runId);
+      if (
+        unreconciledCapacityReservations(remaining).length ||
+        unreconciledBudgetReservations(remaining).some((event) => event.unit !== "model_tokens")
+      )
+        throw new Error("cancellation has unresolved resource or native accounting ownership");
+      for (const marker of unresolvedModelInvocations(remaining)) {
+        const reservation = retired.get(`${marker.workItem}:${marker.attempt}`);
+        if (marker.phase === "management")
+          throw new Error("cancellation management invocation cleanup is not independently known");
+        if (
+          !reservation ||
+          marker.policyDigest !== reservation.policyDigest ||
+          marker.directorEpoch !== reservation.directorEpoch
+        )
+          throw new Error(
+            "cancellation unknown execution invocation lacks exact resource retirement",
+          );
+      }
+      return await this.#terminal(
+        manager,
+        snapshot,
+        "FactoryRunCancelled",
+        "operator requested cleanup-only cancellation; retained work was not resumed",
+      );
+    } catch (error) {
+      await this.#lease.release().catch(() => {});
+      throw error;
+    } finally {
+      clearInterval(heartbeat);
+    }
+  }
+
   async #runWithArtifactContent(): Promise<SupervisorResult> {
     this.#recoveryRuntime = null;
     this.#compiledGraph = null;
@@ -2521,6 +2988,10 @@ export class FactorySupervisor {
           actor,
         );
       }
+    }
+    if (resumedRun?.activationRequestId && !this.#options.recovery) {
+      const cancelled = await this.#cancelActivatedRun(snapshot, resumedRun, runManager, actor);
+      if (cancelled) return cancelled;
     }
     if (
       snapshot.closed &&

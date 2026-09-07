@@ -318,11 +318,12 @@
         "required": ["phase", "workItem", "attempt", "directorEpoch", "policyDigest", "reason"],
         "properties": {
           "event": { "const": "BudgetReconciled" },
-          "phase": { "const": "execution" },
-          "unit": { "enum": ["local_milliseconds", "sandbox_milliseconds"] },
+          "phase": { "enum": ["execution", "validation"] },
+          "unit": { "enum": ["local_milliseconds", "sandbox_milliseconds", "validation_milliseconds"] },
           "amount": { "type": "number", "exclusiveMinimum": 0 },
           "reason": { "type": "string", "minLength": 1 }
-        }
+        },
+        "allOf": [{ "if": { "properties": { "unit": { "const": "validation_milliseconds" } } }, "then": { "properties": { "phase": { "const": "validation" } } } }]
       }
     },
     {

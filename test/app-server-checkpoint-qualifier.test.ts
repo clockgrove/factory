@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { parseRunPolicy } from "../src/protocol/policy.js";
 import {
   appServerCheckpointArm,
   assertAppServerCheckpoint,
@@ -282,6 +283,7 @@ describe("installed App Server checkpoint qualification", () => {
   it("requires separate explicit backend/hold authority and leaves the old default unchanged", () => {
     expect(authority.policy.backendOrder).toEqual(["codex-app-server/local-worktree"]);
     expect(authority.policy.maxParallel).toBe(1);
+    expect(parseRunPolicy(authority.policy).capacity?.local?.maxWorkers).toBe(1);
     expect(() =>
       checkpointAuthority({
         ...env,

@@ -70,7 +70,7 @@ describe("source archive identity receipt", () => {
     for (const patch of [
       { unit: "model_tokens" },
       { event: "BudgetReserved" },
-      { phase: "validation" },
+      { phase: "management" },
       { amount: 0 },
       { reason: "" },
       { usageEvidence: "invented" },
@@ -82,5 +82,12 @@ describe("source archive identity receipt", () => {
     Reflect.deleteProperty(incomplete, "directorEpoch");
     expect(validate(incomplete)).toBe(false);
     expect(() => parseFactoryEvent(incomplete)).toThrow();
+    for (const unit of ["local_milliseconds", "sandbox_milliseconds", "validation_milliseconds"]) {
+      const validation = { ...charge, phase: "validation", unit };
+      expect(validate(validation)).toBe(true);
+      expect(() => parseFactoryEvent(validation)).not.toThrow();
+    }
+    expect(validate({ ...charge, unit: "validation_milliseconds" })).toBe(false);
+    expect(() => parseFactoryEvent({ ...charge, unit: "validation_milliseconds" })).toThrow();
   });
 });

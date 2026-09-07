@@ -39,7 +39,15 @@ import {
   parseUnitObservation,
 } from "./verify-local-faults.mjs";
 import { ownedSchedulingScopes, schedulingRequest } from "./verify-local-scheduling.mjs";
-import { readQualificationMergeProof as readCheckpointMergeProof } from "./qualification-merge-proof.mjs";
+import {
+  isQualificationModelMarker,
+  qualificationModelAccounting,
+} from "./qualification-model-accounting.mjs";
+import { selectQualificationPublicationRecord } from "./qualification-merge-proof.mjs";
+import {
+  observeNativeMergeProofs,
+  assertNativeMergeProof,
+} from "./qualification-sibling-refresh-proof.mjs";
 import {
   appServerCheckpointArm,
   appServerCheckpointPath,
@@ -94,7 +102,12 @@ export function checkpointAuthority(env) {
   if (sessionRecovery) {
     policy.backendOrder = ["codex-app-server/local-worktree"];
     policy.maxParallel = 1;
+    policy.capacity.local.maxWorkers = 1;
   }
+  assert.ok(
+    policy.capacity.local.maxWorkers <= policy.maxParallel,
+    "invalid qualification worker ceiling",
+  );
   return {
     repository,
     checkout,
@@ -108,6 +121,22 @@ export function checkpointAuthority(env) {
 }
 
 class CheckpointPending extends Error {}
+
+export function checkpointOperatorFailure(tool, args, response) {
+  assert.equal(response.isError, true);
+  const text = (response.content ?? [])
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join("\n");
+  return {
+    tool,
+    requestId: args.requestId ?? null,
+    isError: true,
+    text: text.slice(0, 8192),
+    truncated: text.length > 8192,
+    observedAt: new Date().toISOString(),
+  };
+}
 
 export function checkpointFailure(error, boundary) {
   const boundaries = new Set([
@@ -374,9 +403,11 @@ export function checkpointFacts(
     integrated.length >= 1 && reservations.length === integrated.length,
     "admitted work remains unsettled",
   );
-  const usage = run.filter(
-    (event) => event.event === "BudgetReconciled" && event.unit === "model_tokens",
-  );
+  const accounting = qualificationModelAccounting(run, {
+    requireMarkers: authority.policy.economics?.modelTokenBudgetMode === "observed-stop",
+  });
+  settled(accounting.unresolved.length === 0, "model dispatch consumption remains unknown");
+  const usage = accounting.usage;
   const compile = completedReceipt(
     usage.filter(
       (event) =>
@@ -412,11 +443,30 @@ export function checkpointFacts(
       const native = completedReceipt(
         itemEvents.filter(
           (event) =>
-            event.event === "BudgetReconciled" && event.phase === phase && event.unit === unit,
+            event.event === "BudgetReconciled" &&
+            event.phase === phase &&
+            event.unit === unit &&
+            event.usageId === undefined,
         ),
         "native execution/validation usage missing or repeated",
       );
       assert.ok(Number.isSafeInteger(native.amount) && native.amount >= 0);
+      if (unit === "validation_milliseconds") {
+        const candidates = itemEvents.filter(
+          (event) =>
+            event.event === "BudgetReconciled" &&
+            event.phase === phase &&
+            event.unit === unit &&
+            event.usageId !== undefined,
+        );
+        const identities = new Set();
+        for (const candidate of candidates) {
+          assert.match(candidate.usageId, /^integration-validation-[a-f0-9]{64}$/);
+          assert.ok(!identities.has(candidate.usageId), "candidate validation accounting repeated");
+          identities.add(candidate.usageId);
+          assert.ok(Number.isSafeInteger(candidate.amount) && candidate.amount >= 0);
+        }
+      }
     }
     const succeeded = completedReceipt(
       itemEvents.filter((event) => event.event === "AttemptSucceeded"),
@@ -444,18 +494,24 @@ export function checkpointFacts(
       ),
       "worker usage missing or repeated",
     );
-    const review = completedReceipt(
-      usage.filter(
-        (event) =>
-          event.workItem === reserved.workItem &&
-          event.attempt === 1 &&
-          event.phase === "management" &&
-          /^review-[a-f0-9]{64}$/.test(event.usageId),
-      ),
-      "review usage missing or repeated",
+    const reviews = usage.filter(
+      (event) =>
+        event.workItem === reserved.workItem &&
+        event.attempt === 1 &&
+        event.phase === "management" &&
+        /^review-[a-f0-9]{64}$/.test(event.usageId),
+    );
+    completedReceipt(reviews, "original artifact review missing or repeated");
+    const candidateReviews = usage.filter(
+      (event) =>
+        event.workItem === reserved.workItem &&
+        event.attempt === 1 &&
+        event.phase === "management" &&
+        /^integration-review-[a-f0-9]{64}$/.test(event.usageId),
     );
     assert.ok(Number.isSafeInteger(worker.amount) && worker.amount >= 0);
-    assert.ok(Number.isSafeInteger(review.amount) && review.amount >= 0);
+    for (const review of [...reviews, ...candidateReviews])
+      assert.ok(Number.isSafeInteger(review.amount) && review.amount >= 0);
     settled(succeeded.reportedModelTokens !== undefined, "terminal worker counter unavailable");
     assert.equal(
       succeeded.reportedModelTokens,
@@ -463,10 +519,25 @@ export function checkpointFacts(
       "terminal worker counter unavailable or different",
     );
   }
-  assert.equal(usage.length, 1 + 2 * reservations.length, "unaccounted or repeated model call");
+  assert.ok(
+    usage.every(
+      (event) =>
+        event === compile ||
+        reservations.some(
+          (reserved) =>
+            event.workItem === reserved.workItem &&
+            event.attempt === reserved.attempt &&
+            (event.phase === "execution" ||
+              (event.phase === "management" &&
+                /^(?:integration-)?review-[a-f0-9]{64}$/.test(event.usageId))),
+        ),
+    ),
+    "model usage outside compiled work",
+  );
   for (const reserved of run.filter((event) =>
     ["BudgetReserved", "CapacityReserved"].includes(event.event),
   )) {
+    if (isQualificationModelMarker(reserved)) continue;
     const expected =
       reserved.event === "BudgetReserved" ? "BudgetReconciled" : "CapacityReconciled";
     settled(
@@ -905,12 +976,11 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
   );
   const harnessFiles = [
     harnessPath,
-    ...(authority.sessionRecovery
-      ? [
-          "scripts/qualification-app-server-checkpoint.mjs",
-          "scripts/qualification-sibling-refresh-proof.mjs",
-        ]
-      : []),
+    "scripts/qualification-model-accounting.mjs",
+    "scripts/qualification-receipts.mjs",
+    "scripts/qualification-sibling-refresh-proof.mjs",
+    "scripts/qualification-merge-proof.mjs",
+    ...(authority.sessionRecovery ? ["scripts/qualification-app-server-checkpoint.mjs"] : []),
     ...(extension.harnessPaths ?? []),
   ].map((path) => {
     assert.match(path, /^scripts\/[A-Za-z0-9_.-]+\.mjs$/);
@@ -1118,6 +1188,10 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     });
   const call = async (name, args = {}) => {
     const response = await invoke(name, args);
+    if (response.isError) {
+      evidence.operatorFailure = checkpointOperatorFailure(name, args, response);
+      save();
+    }
     assert.ok(!response.isError, "installed operator call unavailable");
     return JSON.parse(
       response.content
@@ -1310,14 +1384,17 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
           namespace: authority.namespace,
           createdIssue: result,
         });
-      } else if (action === "activate")
-        result = await call("factory_activate", {
+      } else if (action === "activate") {
+        const args = {
           objectiveNumber: evidence.objective.number,
           requestId: `${authority.namespace}-activate`,
           baseSha: evidence.base,
           policy: authority.policy,
-        });
-      else
+        };
+        evidence.runRequest = { tool: "factory_activate", arguments: { owner, repo, ...args } };
+        save();
+        result = await call("factory_activate", args);
+      } else
         result = await call(`factory_${action}`, {
           objectiveNumber: evidence.objective.number,
           requestId: `${authority.namespace}-${action}`,
@@ -1525,30 +1602,124 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
       );
       assert.equal(observation.children.length, 3);
       assert.ok(observation.children.every((item) => item.state === "closed"));
-      const publications = events.filter((event) => event.event === "PublicationRecorded");
-      assert.equal(publications.length, 3);
-      for (const publication of publications) {
-        const pull = (
-          await request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
-            pull_number: publication.pullRequest,
-          })
-        ).data;
+      // Re-read actor/location and immutable graph identities for the same existing
+      // proof consumer used by sibling qualification. Never relabel PublicationRecorded
+      // with a refreshed head just to satisfy the old one-parent proof.
+      const objective = (
+        await request("GET /repos/{owner}/{repo}/issues/{issue_number}", {
+          issue_number: evidence.objective.number,
+        })
+      ).data;
+      assert.equal(objective.id, evidence.objective.id);
+      assert.equal(objective.user.id, evidence.actor.id);
+      assert.equal(hash(objective.body), evidence.objectiveBodyDigest);
+      const children = await list("GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues", {
+        issue_number: objective.number,
+      });
+      assert.equal(children.length, 3);
+      assert.ok(children.every((child) => child.state === "closed"));
+      const comments = [],
+        dependencies = [];
+      for (const issue of [objective, ...children]) {
+        const rows = await list("GET /repos/{owner}/{repo}/issues/{issue_number}/comments", {
+          issue_number: issue.number,
+        });
+        for (const row of rows) {
+          assert.equal(
+            row.html_url,
+            `https://github.com/${authority.repository}/issues/${issue.number}#issuecomment-${row.id}`,
+          );
+          comments.push(row);
+        }
+        if (issue !== objective)
+          dependencies.push({
+            workItem: issue.number,
+            blockedBy: await list(
+              "GET /repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by",
+              { issue_number: issue.number },
+            ),
+          });
+      }
+      const receipts = authenticatedFaultEvents(comments, evidence.actor, objective.number);
+      for (const receipt of observation.receipts)
+        assert.ok(
+          receipts.some((fresh) => hash(fresh.event) === hash(receipt.event)),
+          "original completion receipt disappeared",
+        );
+      const proofEvents = receipts.map((receipt) => {
+        const comment = unique(
+          comments.filter((row) => row.id === receipt.commentId),
+          "receipt location ambiguous",
+        );
+        return {
+          ...receipt.event,
+          author: comment.user.login,
+          authorId: comment.user.id,
+          receiptUrl: comment.html_url,
+        };
+      });
+      const publications = proofEvents.filter((event) => event.event === "PublicationRecorded");
+      const pulls = [];
+      for (const pullNumber of new Set(publications.map((event) => event.pullRequest)))
+        pulls.push(
+          (
+            await request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
+              pull_number: pullNumber,
+            })
+          ).data,
+        );
+      const start = unique(
+        proofEvents.filter((event) => event.event === "FactoryRunStarted"),
+        "one original start required",
+      );
+      const delivery = {
+        repository: authority.repository,
+        namespace: authority.namespace,
+        actor: evidence.actor,
+        objective,
+        children,
+        dependencies,
+        pulls,
+        events: proofEvents,
+        policy: authority.policy,
+        base: evidence.base,
+        nativeDefaultBranch: start.baseBranch,
+        runRequest: evidence.runRequest,
+        runResult: { runId: observation.status.run.runId },
+        controllerQualification: {
+          peers: [],
+          generation: Object.fromEntries(
+            ["controllerId", "epoch", "controllerPolicyDigest"].map((key) => [key, before[key]]),
+          ),
+        },
+      };
+      evidence.checkpointDelivery = delivery;
+      delivery.mergeProofs = await observeNativeMergeProofs({ evidence: delivery, request });
+      for (const proof of delivery.mergeProofs) {
         const integration = unique(
-          events.filter(
-            (event) =>
-              event.event === "AttemptIntegrated" &&
-              event.workItem === publication.workItem &&
-              event.attempt === publication.attempt,
+          proofEvents.filter(
+            (event) => event.event === "AttemptIntegrated" && event.workItem === proof.workItem,
           ),
           "integration identity missing",
         );
-        const proof = await readCheckpointMergeProof(
-          { request: (route, parameters) => octokit.request(route, parameters) },
-          { repository: authority.repository, pull, publication, integration },
+        const publication = selectQualificationPublicationRecord(
+          publications.filter(
+            (event) =>
+              event.workItem === integration.workItem && event.attempt === integration.attempt,
+          ),
         );
-        (evidence.mergeProofs ??= []).push(proof);
-        save();
+        assertNativeMergeProof(delivery, proof, {
+          repository: authority.repository,
+          pull: unique(
+            pulls.filter((pull) => pull.number === proof.pullRequest),
+            "PR identity missing",
+          ),
+          publication,
+          integration,
+        });
       }
+      evidence.mergeProofs = delivery.mergeProofs;
+      save();
       assert.deepEqual(installedBundleIdentity(pluginRoot), artifact);
       for (const entry of harnessFiles)
         assert.equal(
@@ -1566,6 +1737,53 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     await client.connect(transport);
     transport.stderr?.on("data", () => {});
     assert.equal(client.getServerVersion()?.version, artifact.version);
+    // The committed extension may retire this one owned MCP transport after an ambiguous
+    // foreground request. Timeout/cancellation alone is not process or remote-request absence.
+    const observerPid = transport.pid;
+    assert.ok(Number.isSafeInteger(observerPid) && observerPid > 1);
+    const observerStat = readBounded(`/proc/${observerPid}/stat`, 16384);
+    const observerStartTicks = observerStat
+      .slice(observerStat.lastIndexOf(")") + 2)
+      .split(/\s+/)[19];
+    assert.match(observerStartTicks, /^[0-9]+$/);
+    const retireClient = async () => {
+      let timer,
+        transportClose = "observed";
+      try {
+        // Pinned SDK stdio.close ends stdin, waits 2s, sends SIGTERM, waits 2s,
+        // then SIGKILLs only its owned child. Independently observe that incarnation below.
+        await Promise.race([
+          client.close(),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(Error("owned MCP retirement deadline exceeded")), 6000);
+          }),
+        ]);
+      } catch {
+        transportClose = "unverified";
+      } finally {
+        clearTimeout(timer);
+      }
+      for (let index = 0; index < 20; index++) {
+        let present;
+        try {
+          const stat = readBounded(`/proc/${observerPid}/stat`, 16384);
+          present = stat.slice(stat.lastIndexOf(")") + 2).split(/\s+/)[19] === observerStartTicks;
+        } catch (error) {
+          if (error.code !== "ENOENT") throw error;
+          present = false;
+        }
+        if (!present)
+          return {
+            pid: observerPid,
+            startTicks: observerStartTicks,
+            absent: true,
+            transportClose,
+            remoteRequestSettlement: "not-implied",
+          };
+        await sleep(100);
+      }
+      throw Error("owned MCP process absence unverified");
+    };
     const scenarioPort = extension.extendPort
       ? await extension.extendPort({
           port,
@@ -1580,6 +1798,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
           readBounded,
           pluginRoot,
           artifact,
+          retireClient,
         })
       : port;
     evidence.result = await runner(scenarioPort, authority);

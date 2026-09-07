@@ -345,6 +345,30 @@ describe("cumulative recovery accounting admission", () => {
     expect(verifyRecoveryAdmission(input.refresh()).status).toBe("blocked");
   });
 
+  it("an exact unknown-usage acknowledgement cannot discharge an orphan zero-valued dispatch", () => {
+    const input = fixture([
+      ...history(),
+      budget({
+        event: "BudgetReserved",
+        phase: "management",
+        usageId: "invocation-later-compilation",
+        modelInvocationId: "later-compilation",
+        policyDigest: policyDigest(policy),
+        directorEpoch: 1,
+      }),
+    ]);
+    expect(input.chain.accounting!.usage!.modelTokens).toBe(10);
+    expect(input.chain.accounting!.unknownModelUsageCount).toBe(1);
+    input.plan.unknownUsageAcknowledgementDigest = recoveryUnknownUsageDigest(
+      input.plan.sourceEventsDigest,
+      input.chain.accounting!,
+    );
+    const result = verifyRecoveryAdmission(input.refresh());
+    expect(result.status).toBe("blocked");
+    expect(codes(result)).toContain("unreconciled-budget-reservations");
+    expect(codes(result)).not.toContain("unknown-acknowledgement-mismatch");
+  });
+
   it("an unknown acknowledgement never clears independent liabilities or blockers", () => {
     const input = fixture([
       ...history().filter((entry) => entry.kind !== "budget"),

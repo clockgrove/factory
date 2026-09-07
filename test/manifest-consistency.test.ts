@@ -76,9 +76,8 @@ describe("plugin manifest consistency", () => {
     );
     expect(codexEntry).toMatchObject({
       source: {
-        source: "url",
-        url: "https://github.com/clockgrove/factory.git",
-        ref: `v${pkg.version}`,
+        source: "local",
+        path: ".",
       },
       policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
       category: "Productivity",

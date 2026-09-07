@@ -47,10 +47,11 @@ describe("v2 run policy", () => {
       "codex-sdk/local-worktree",
       "codex-cli/local-worktree",
     ]);
-    expect(DEFAULT_RUN_POLICY.maxParallel).toBe(8);
+    expect(DEFAULT_RUN_POLICY.maxParallel).toBe(2);
     expect(DEFAULT_RUN_POLICY.allowedPaidBackends).toEqual([]);
     expect(DEFAULT_RUN_POLICY.cloudFallback).toBe("never");
-    expect(DEFAULT_RUN_POLICY.capacity?.mode).toBe("adaptive-local");
+    expect(DEFAULT_RUN_POLICY.capacity?.mode).toBe("fixed");
+    expect(DEFAULT_RUN_POLICY.capacity?.local?.maxWorkers).toBe(2);
     expect(DEFAULT_RUN_POLICY.burst?.mode).toBe("never");
   });
 

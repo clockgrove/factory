@@ -67,9 +67,12 @@ under that identity. Every Objective Supervisor shares it. A restarted service c
 identity and must acquire a new fenced lease epoch; the unit name, PID, or an in-memory queue is never
 used as durable ownership evidence.
 
-It defaults to eight adaptive local workers and zero paid workers. Explicit controller ceilings are
-available through `--max-local-workers N` and `--max-paid-workers N`; the latter only permits capacity
-and never supplies the separate immutable run-policy provider or budget authority.
+Its repository-wide ceiling defaults to eight local workers and zero paid workers, shared across
+Objectives. This is not a per-Objective adaptive default: a new run defaults to fixed concurrency
+capped at two local workers, and physical headroom can narrow that further, including to zero.
+Explicit adaptive policies retain their selected ceilings. Controller ceilings are configurable
+through `--max-local-workers N` and `--max-paid-workers N`; the latter only permits capacity and never
+supplies the separate immutable run-policy provider or budget authority.
 
 Lifecycle operations are deliberately idempotent: `install` atomically writes the unit, reloads
 systemd and enables it; `start`, `stop`, `restart`, and `status` operate on that same deterministic

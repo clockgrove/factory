@@ -147,6 +147,19 @@ export interface AdmissionInput {
   repositoryLimits?: { maxLocalWorkers: number; maxPaidWorkers: number };
 }
 
+/** Observed free memory already includes running work, but not provisional additions. */
+export function localMemoryFits(
+  resource: ResourceSnapshot,
+  requestedMemoryMb: number,
+  minimumFreeMemoryMb: number,
+  additionalReservedMemoryMb = 0,
+): boolean {
+  return (
+    resource.availableMemoryMb - Math.max(0, additionalReservedMemoryMb) >=
+    requestedMemoryMb + minimumFreeMemoryMb
+  );
+}
+
 export function admissionCapacityLimits(
   policy: RunPolicy,
   resource: ResourceSnapshot | null,
@@ -165,14 +178,14 @@ export function admissionCapacityLimits(
     backendMaxParallel: Object.fromEntries(
       policy.backendOrder.map((id) => [id, repositoryParallel]),
     ),
-    cpuCapacity:
-      effective.capacity.mode === "adaptive-local" && resource
-        ? Math.max(0, resource.effectiveCpu - effective.capacity.local.reserveCpu)
-        : Number.MAX_SAFE_INTEGER,
-    memoryCapacityMb:
-      effective.capacity.mode === "adaptive-local" && resource
-        ? Math.max(0, resource.totalMemoryMb - effective.capacity.local.reserveMemoryMb)
-        : Number.MAX_SAFE_INTEGER,
+    // Fixed is a configured worker-count ceiling, never permission to ignore
+    // physical headroom. Missing observations admit no new local reservation.
+    cpuCapacity: resource
+      ? Math.max(0, resource.effectiveCpu - effective.capacity.local.reserveCpu)
+      : 0,
+    memoryCapacityMb: resource
+      ? Math.max(0, resource.totalMemoryMb - effective.capacity.local.reserveMemoryMb)
+      : 0,
     maxPaidUnits: Number.MAX_SAFE_INTEGER,
     ...(objective === undefined
       ? {}
@@ -486,7 +499,7 @@ export function planAdmissions(input: AdmissionInput): AdmissionPlan {
                   .flatMap((candidate) => candidate.transientReasons)
                   .join("; "),
               };
-      } else if (effective.capacity.mode === "adaptive-local" && !input.resource) {
+      } else if (!input.resource) {
         localBlock = {
           code: "resource-sample-unavailable",
           reason: "no valid local resource sample is available",
@@ -496,7 +509,7 @@ export function planAdmissions(input: AdmissionInput): AdmissionPlan {
           code: "local-cooldown",
           reason: `local admission cooldown lasts until ${new Date(input.cooldownUntilMs!).toISOString()}`,
         };
-      } else if (effective.capacity.mode === "adaptive-local" && input.resource) {
+      } else if (input.resource) {
         const pressure = resourcePressureReasons(input.resource, effective.capacity.local);
         if (pressure.length > 0) {
           localBlock = { code: "local-pressure", reason: pressure.join("; ") };
@@ -508,11 +521,13 @@ export function planAdmissions(input: AdmissionInput): AdmissionPlan {
     if (!localBlock && availableLocal.length > 0) {
       for (const candidate of availableLocal) {
         if (
-          effective.capacity.mode === "adaptive-local" &&
           input.resource &&
-          input.resource.availableMemoryMb -
-            Math.max(0, provisional.snapshot().memoryMb - observedReservationMemoryMb) <
-            requested.memoryMb + effective.capacity.local.minimumFreeMemoryMb
+          !localMemoryFits(
+            input.resource,
+            requested.memoryMb,
+            effective.capacity.local.minimumFreeMemoryMb,
+            provisional.snapshot().memoryMb - observedReservationMemoryMb,
+          )
         ) {
           localCapacityCode = "memory-capacity";
           continue;

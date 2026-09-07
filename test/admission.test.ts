@@ -4,6 +4,8 @@ import type { BackendCandidate } from "../src/execution/registry.js";
 import { DEFAULT_RUN_POLICY, type RunPolicy } from "../src/protocol/policy.js";
 import type { ExecutionRequirements } from "../src/protocol/worker-packet.js";
 import {
+  admissionCapacityLimits,
+  localMemoryFits,
   planAdmissions,
   type AdmissionInput,
   type AdmissionWorkItem,
@@ -213,6 +215,119 @@ function input(overrides: Partial<AdmissionInput> = {}): AdmissionInput {
 }
 
 describe("pure local-first admission", () => {
+  it("defaults new policies to two physically bounded local workers without paid overflow", () => {
+    const fixed = { ...DEFAULT_RUN_POLICY, backendOrder: [local.id] };
+    const plan = planAdmissions(input({ policy: fixed }));
+    expect(fixed.maxParallel).toBe(2);
+    expect(fixed.capacity?.mode).toBe("fixed");
+    expect(plan.admissions).toMatchObject([
+      { workItem: 1, admissionClass: "local" },
+      { workItem: 2, admissionClass: "local" },
+    ]);
+    expect(plan.queued).toHaveLength(6);
+    expect(plan.admissions.every((entry) => entry.backendId === local.id)).toBe(true);
+    expect(fixed.burst?.mode).toBe("never");
+  });
+
+  it.each(["fixed", "adaptive-local"] as const)(
+    "preserves physical headroom, observation and cooldown gates in %s mode",
+    (mode) => {
+      const selected: RunPolicy = {
+        ...policy,
+        backendOrder: [local.id],
+        capacity: { ...policy.capacity!, mode },
+        burst: { ...policy.burst!, mode: "never", backendOrder: [] },
+      };
+      const current = input({ policy: selected, workItems: [workItem(1)] });
+      for (const constrained of [
+        { ...resource, effectiveCpu: 1 },
+        { ...resource, totalMemoryMb: 2048 },
+        { ...resource, availableMemoryMb: 2048 },
+        { ...resource, loadRatio: 0.95 },
+        { ...resource, memoryUsageRatio: 0.95 },
+        null,
+      ]) {
+        const plan = planAdmissions({ ...current, resource: constrained });
+        expect(plan.admissions).toEqual([]);
+        expect(plan.queued).toHaveLength(1);
+      }
+      expect(planAdmissions({ ...current, resource: null }).queued[0]?.code).toBe(
+        "resource-sample-unavailable",
+      );
+      expect(
+        planAdmissions({ ...current, cooldownUntilMs: current.nowMs + 1 }).queued[0]?.code,
+      ).toBe("local-cooldown");
+      expect(admissionCapacityLimits(selected, null)).toMatchObject({
+        cpuCapacity: 0,
+        memoryCapacityMb: 0,
+      });
+      expect(planAdmissions(current).admissions).toHaveLength(1);
+    },
+  );
+
+  it("keeps explicit adaptive counts and stored policy bytes unchanged", () => {
+    const selected: RunPolicy = {
+      ...policy,
+      backendOrder: [local.id],
+      capacity: {
+        ...policy.capacity!,
+        local: { ...policy.capacity!.local!, maxWorkers: 8 },
+        backendMaxParallel: { [local.id]: 8 },
+      },
+      burst: { ...policy.burst!, mode: "never", backendOrder: [] },
+    };
+    const before = JSON.stringify(selected);
+    expect(planAdmissions(input({ policy: selected })).admissions).toHaveLength(8);
+    expect(JSON.stringify(selected)).toBe(before);
+  });
+
+  it("accounts provisional memory without subtracting already observed work twice", () => {
+    const observed = { ...resource, availableMemoryMb: 4096 };
+    expect(localMemoryFits(observed, 2048, 1024)).toBe(true);
+    expect(localMemoryFits(observed, 2048, 1024, 2048)).toBe(false);
+    expect(localMemoryFits(observed, 2048, 1024, -2048)).toBe(true);
+    expect(localMemoryFits({ ...observed, availableMemoryMb: 3072 }, 2048, 1024)).toBe(true);
+    expect(localMemoryFits({ ...observed, availableMemoryMb: 3071 }, 2048, 1024)).toBe(false);
+  });
+
+  it("retains fixed-policy controller, backend, path and exclusive-resource ceilings", () => {
+    const fixed: RunPolicy = {
+      ...policy,
+      backendOrder: [local.id],
+      capacity: { ...policy.capacity!, mode: "fixed" },
+      burst: { ...policy.burst!, mode: "never", backendOrder: [] },
+    };
+    const current = input({ policy: fixed, workItems: [workItem(1)] });
+    expect(
+      planAdmissions({
+        ...current,
+        capacity: occupiedCapacity({ objective: 99 }),
+        repositoryLimits: { maxLocalWorkers: 1, maxPaidWorkers: 0 },
+      }).queued[0]?.code,
+    ).toBe("global-capacity");
+    expect(
+      planAdmissions({
+        ...current,
+        capacity: occupiedCapacity(),
+        policy: {
+          ...fixed,
+          capacity: { ...fixed.capacity!, backendMaxParallel: { [local.id]: 1 } },
+        },
+      }).queued[0]?.code,
+    ).toBe("backend-at-capacity");
+    expect(
+      planAdmissions({ ...current, capacity: occupiedCapacity({ paths: ["src/item-1/"] }) })
+        .queued[0]?.code,
+    ).toBe("path-conflict");
+    expect(
+      planAdmissions({
+        ...current,
+        workItems: [{ ...workItem(1), exclusiveResources: ["asset-pipeline"] }],
+        capacity: occupiedCapacity({ exclusiveResources: ["asset-pipeline"] }),
+      }).queued[0]?.code,
+    ).toBe("exclusive-resource-conflict");
+  });
+
   it("records stable capacity, pressure and cooldown transitions without resetting waiting age", () => {
     const waiting = "2026-09-04T00:07:00.000Z";
     const queuedItem = workItem(1, { backends: [local] });

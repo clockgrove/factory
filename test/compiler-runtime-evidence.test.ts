@@ -84,15 +84,16 @@ describe("new-graph runtime economic observations", () => {
     expect(requirements.trust).toBe("trusted_local");
   });
 
-  it("does not invent resource observations for fixed policy", async () => {
+  it("samples actual physical headroom for fixed policy instead of inferring configured slots", async () => {
     const input = source();
     input.policy = parseRunPolicy({
       ...input.policy,
       capacity: { ...input.policy.capacity, mode: "fixed" },
     });
     const result = await collectCompilationEvidence(items, input);
-    expect(input.sampleResource).not.toHaveBeenCalled();
-    expect(result.resource).toBeNull();
+    expect(input.sampleResource).toHaveBeenCalledExactlyOnceWith(input.nowMs);
+    expect(result.resource).toMatchObject({ effectiveCpu: 4, availableMemoryMb: 4096 });
+    expect(result.policy).toBe(input.policy);
   });
 
   it("bounds observations before I/O and rejects duplicate graph identities", async () => {

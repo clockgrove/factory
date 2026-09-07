@@ -6,7 +6,7 @@ import {
   requirementsPolicyRejections,
   type RunPolicy,
 } from "../protocol/policy.js";
-import { admissionCapacityLimits } from "../scheduling/admission.js";
+import { admissionCapacityLimits, localMemoryFits } from "../scheduling/admission.js";
 import {
   CapacityLedger,
   capacityReservationKey,
@@ -181,8 +181,6 @@ function localFit(
     );
   const { policy, resource, capacity, repositoryLimits } = evidence;
   const effective = normalizeSchedulingPolicy(policy);
-  if (effective.capacity.mode !== "adaptive-local")
-    return unavailable("Fixed-worker policy does not establish resource-constrained slots.");
   if (
     !Number.isSafeInteger(evidence.objective) ||
     evidence.objective <= 0 ||
@@ -253,9 +251,12 @@ function localFit(
         return null;
       for (const candidate of candidates) {
         if (
-          resource.availableMemoryMb -
-            Math.max(0, provisional.snapshot().memoryMb - observedMemory) <
-          memoryMb + effective.capacity.local.minimumFreeMemoryMb
+          !localMemoryFits(
+            resource,
+            memoryMb,
+            effective.capacity.local.minimumFreeMemoryMb,
+            provisional.snapshot().memoryMb - observedMemory,
+          )
         )
           break;
         // Private simulation identity, never persisted or sent to a backend.

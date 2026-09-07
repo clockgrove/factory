@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { parseFactoryEvent } from "../src/protocol/events.js";
+import { DEFAULT_RUN_POLICY, parseRunPolicy } from "../src/protocol/policy.js";
 import { boundedPolicy } from "../scripts/verify-live-objective.mjs";
 import {
   assertControllerUnit,
@@ -414,7 +415,10 @@ describe("explicit checkpoint restart authority", () => {
         checkpointAuthority({ ...env, FACTORY_CHECKPOINT_MAX_MODEL_TOKENS: value }),
       ).toThrow();
     const bounded = checkpointAuthority({ ...env, FACTORY_CHECKPOINT_MAX_MODEL_TOKENS: "250000" })!;
-    expect(bounded.policy).toEqual(boundedPolicy("regular-prs", 250000));
+    expect(bounded.policy).toEqual({
+      ...boundedPolicy("regular-prs", 250000),
+      maxAttemptsPerItem: 1,
+    });
     const observed = observation();
     for (const { event } of observed.receipts)
       if (["FactoryRunStarted", "ActivationRequested"].includes(String(event.event)))
@@ -489,7 +493,13 @@ describe("explicit checkpoint restart authority", () => {
     expect(checkpointAuthority({ GH_TOKEN: "untouched" })).toBeNull();
   });
   it("pins existing lifecycle identity and the original local allowance", () => {
-    expect(authority.policy).toEqual(boundedPolicy("regular-prs", 500000));
+    expect(authority.policy).toEqual({
+      ...boundedPolicy("regular-prs", 500000),
+      maxAttemptsPerItem: 1,
+    });
+    expect(parseRunPolicy(authority.policy).maxAttemptsPerItem).toBe(1);
+    expect(boundedPolicy("regular-prs", 500000).maxAttemptsPerItem).toBe(2);
+    expect(DEFAULT_RUN_POLICY.maxAttemptsPerItem).toBe(3);
     expect(
       checkpointAuthority({
         ...env,

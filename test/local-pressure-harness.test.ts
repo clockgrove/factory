@@ -158,12 +158,13 @@ describe("pressure authority and bounds", () => {
     ).toThrow();
     expect(() => pressureAuthority({ ...env, FACTORY_LIVE_LOCAL_SCHEDULING: "1" })).toThrow();
   });
-  it("selects a measurable initial cooldown and preserves every other original bound", () => {
+  it("selects a measurable cooldown and one original attempt while preserving other bounds", () => {
     const policy = boundedPolicy("regular-prs", 500000) as {
       capacity: { local: { admissionCooldownSeconds: number } };
     };
     const expected = {
       ...policy,
+      maxAttemptsPerItem: 1,
       capacity: {
         ...policy.capacity,
         local: { ...policy.capacity.local, admissionCooldownSeconds: 120 },
@@ -292,6 +293,7 @@ describe("independent physical pressure observations", () => {
 
 function progression() {
   const policy = boundedPolicy("regular-prs", 500000);
+  policy.maxAttemptsPerItem = 1;
   const common = { runId: "run", policyDigest: "e".repeat(64), workItem: 2, kind: "scheduling" };
   const pressure = {
     ...common,

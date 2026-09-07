@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
+import { parseRunPolicy } from "../src/protocol/policy.js";
 import {
   concurrencyAuthority,
   concurrencyObjectiveBody,
@@ -28,6 +29,14 @@ const env = {
   FACTORY_CONCURRENCY_ACK: `${repository}:${unit}:start,activate-two,contend,pause-b,freeze-inner-contend-unfreeze,stop-stale,restart,resume-b,stop`,
 };
 const authority = concurrencyAuthority(env)!;
+describe("prospective concurrent qualification attempts", () => {
+  it("bounds both Objectives to their original attempt without changing shared controller ceilings", () => {
+    expect(parseRunPolicy(authority.policy).maxAttemptsPerItem).toBe(1);
+    expect(authority.namespaces).toHaveLength(2);
+    expect(authority.controllerLocalCeiling).toBe(8);
+    expect(authority.aggregateObservedThreshold).toBe(500000);
+  });
+});
 describe("stale controller stop identity fence", () => {
   const original = { unit, pid: 1234, invocationId: "a".repeat(32) };
   const configPath = `/home/example/.config/systemd/user/${unit}`;

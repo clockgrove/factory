@@ -283,6 +283,7 @@ describe("installed App Server checkpoint qualification", () => {
   it("requires separate explicit backend/hold authority and leaves the old default unchanged", () => {
     expect(authority.policy.backendOrder).toEqual(["codex-app-server/local-worktree"]);
     expect(authority.policy.maxParallel).toBe(1);
+    expect(parseRunPolicy(authority.policy).maxAttemptsPerItem).toBe(1);
     expect(parseRunPolicy(authority.policy).capacity?.local?.maxWorkers).toBe(1);
     expect(() =>
       checkpointAuthority({

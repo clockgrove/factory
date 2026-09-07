@@ -67,6 +67,8 @@ function cooldownDeadline(reason, message) {
 
 function pressurePolicy(limit) {
   const policy = boundedPolicy("regular-prs", limit);
+  // Queue/readmission proves original attempts only; failure must not race the observer into retry.
+  policy.maxAttemptsPerItem = 1;
   policy.capacity.local.admissionCooldownSeconds = 120;
   return policy;
 }

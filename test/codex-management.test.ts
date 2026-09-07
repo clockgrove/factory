@@ -3,6 +3,7 @@ import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ManagementOutputError } from "../src/management/backend.js";
+import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 
 import {
   CODEX_COMPILED_OBJECTIVE_SCHEMA,
@@ -114,6 +115,7 @@ describe("Codex management backend", () => {
           baseSha: "a".repeat(40),
           repositoryFiles: ["package.json"],
           allowedNetworkDestinations: [],
+          runPolicy: DEFAULT_RUN_POLICY,
         },
         async () => {},
       ),
@@ -139,6 +141,7 @@ describe("Codex management backend", () => {
             baseSha: "a".repeat(40),
             repositoryFiles: ["package.json"],
             allowedNetworkDestinations: [],
+            runPolicy: DEFAULT_RUN_POLICY,
           },
           async () => {},
         ),
@@ -207,6 +210,7 @@ describe("Codex management backend", () => {
           baseSha: "a".repeat(40),
           repositoryFiles: ["src/code.ts", "package.json"],
           allowedNetworkDestinations: [],
+          runPolicy: DEFAULT_RUN_POLICY,
         },
         checkpoint,
       ),
@@ -233,6 +237,7 @@ describe("Codex management backend", () => {
           baseSha: "a".repeat(40),
           repositoryFiles: [],
           allowedNetworkDestinations: [],
+          runPolicy: DEFAULT_RUN_POLICY,
         },
         checkpoint,
       ),

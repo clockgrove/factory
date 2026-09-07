@@ -18,7 +18,7 @@ export async function readRepositoryFacts(
   const root = await realpath(checkout);
   const candidates = facts.files.filter(
     ({ path }) =>
-      /^(?:package\.json|Cargo\.toml|go\.mod|pyproject\.toml|pytest\.ini|setup\.cfg|GNUmakefile|makefile|Makefile)$/.test(
+      /^(?:package\.json|Cargo\.toml|go\.mod|pyproject\.toml|pytest\.ini|setup\.cfg|GNUmakefile|makefile|Makefile|\.factory\/execution-requirements\.json)$/.test(
         path,
       ) || /^(?:README|CONTRIBUTING|AGENTS)(?:\.md)?$/i.test(path),
   );

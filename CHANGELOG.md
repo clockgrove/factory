@@ -45,6 +45,9 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- Objective compilation now replaces model-invented platform, CPU, memory, artifact-storage and
+  timeout sizing with pinned repository evidence, active run-policy values or named portable
+  defaults, and records that provenance in each compiled Work Item.
 - An authenticated cancellation of an already-started activation can retire exactly owned resources
   after an external branch advance, without granting execution on the changed base. Known work and
   usage are retained; unknown resource termination still refuses terminal cleanup. Unavailable native

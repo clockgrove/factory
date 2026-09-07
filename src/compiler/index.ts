@@ -4,6 +4,11 @@ import {
   type ExecutionRequirements,
 } from "../protocol/worker-packet.js";
 import { addScopeSerializationEdges } from "../graph.js";
+import {
+  assertRequirementsWithinPolicy,
+  DEFAULT_RUN_POLICY,
+  type RunPolicy,
+} from "../protocol/policy.js";
 import { z } from "zod";
 import { assessDecomposition, economicRationale, type DecompositionEvidence } from "./economics.js";
 export {
@@ -20,6 +25,7 @@ import {
   profileRepository,
   type RepositoryFacts,
 } from "../repository-profiles/index.js";
+import { groundExecutionRequirements } from "./requirements.js";
 
 export type ConflictClass = "parallel-safe" | "exclusive" | "generated" | "large-binary";
 export type ValidationTier = "mechanical" | "semantic" | "visual" | "deterministic-simulation";
@@ -82,6 +88,8 @@ export type CompileInput = {
   baseSha: string;
   repositoryFacts: RepositoryFacts;
   workItems: CompilerWorkItemInput[];
+  /** Immutable active policy. Omitted only by legacy direct callers, which receive product defaults. */
+  runPolicy?: RunPolicy;
   economicEvidence?: DecompositionEvidence;
 };
 
@@ -189,6 +197,16 @@ function canonicalRequirements(value: unknown): ExecutionRequirements {
     services: sorted(r.services),
     networkDestinations: sorted(r.networkDestinations),
     permittedSecretNames: sorted(r.permittedSecretNames),
+    ...(r.evidence
+      ? {
+          evidence: [...r.evidence].sort(
+            (a, b) =>
+              a.field.localeCompare(b.field) ||
+              a.kind.localeCompare(b.kind) ||
+              a.source.localeCompare(b.source),
+          ),
+        }
+      : {}),
   };
 }
 
@@ -347,6 +365,7 @@ export function validateCompiledObjective(
 export function compileObjective(input: CompileInput): CompilerObjective {
   if (!/^[0-9a-f]{40}$/i.test(input.baseSha)) throw new Error("invalid base SHA");
   const facts = normalizeRepositoryFacts(input.repositoryFacts);
+  const runPolicy = input.runPolicy ?? DEFAULT_RUN_POLICY;
   if (facts.lfs !== undefined && facts.lfs.baseSha !== input.baseSha)
     throw new Error("LFS repository facts do not match the pinned compilation base");
   const analyzed = input.workItems.map((w) => {
@@ -387,10 +406,15 @@ export function compileObjective(input: CompileInput): CompilerObjective {
     return {
       ...source,
       baseSha: input.baseSha,
-      requirements: {
-        ...w.requirements,
-        tools: sorted([...w.requirements.tools, ...(facts.lfs?.requiredTools ?? [])]),
-      },
+      requirements: groundExecutionRequirements(
+        {
+          ...w.requirements,
+          tools: sorted([...w.requirements.tools, ...(facts.lfs?.requiredTools ?? [])]),
+        },
+        facts,
+        scope,
+        runPolicy,
+      ),
       validationCommands: w.validationCommands,
       context: { ...manifest, dependencyEvidence: [] },
       changeSurface: { mergeClass, exclusiveResources: resources },
@@ -487,6 +511,8 @@ export function compileObjective(input: CompileInput): CompilerObjective {
     title: input.title,
     workItems: items,
   });
+  for (const item of result.workItems)
+    assertRequirementsWithinPolicy(item.requirements, runPolicy, `Work Item ${item.id}`);
   validateCompiledObjective(result, facts);
   applyEconomicReview(result, input.economicEvidence);
   return result;

@@ -445,6 +445,12 @@ export function renderWorkPacket(wi: CompiledWorkItem, graphMetadata?: GraphItem
     section("Preconditions", wi.preconditions),
     section("Out of scope", wi.outOfScope),
     section("Conventions", wi.conventions),
+    section(
+      "Execution requirement evidence",
+      wi.requirements?.evidence?.map(
+        (evidence) => `${evidence.field}: ${evidence.kind} — ${evidence.source}`,
+      ) ?? [],
+    ),
   ]
     .filter((s) => s.length > 0)
     .join("\n");

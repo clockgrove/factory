@@ -57,8 +57,11 @@ Default `trust` to `trusted_local` only for an explicitly activated trusted repo
 Objective provenance. Use `isolated` for untrusted code/tests or requested isolation, and `managed`
 only when the task truly requires a GitHub-managed backend. A requested network
 destination must already be in the immutable run policy; never expand that policy. Arbitrary task
-secrets are not supported, so `permittedSecretNames` must be empty. Do not request services, CPU,
-memory, or disk without an evidenced need.
+secrets are not supported, so `permittedSecretNames` must be empty. Treat model-authored OS,
+architecture, CPU, memory, disk and timeout values as proposals: the trusted compiler replaces them
+with pinned `.factory/execution-requirements.json` evidence, the active run policy, or named defaults.
+Do not infer sizing from apparent task complexity. Absent architecture evidence stays portable,
+ordinary artifact storage remains backend-managed, and Work Item timeout cannot exceed policy.
 
 ## Mechanical self-check
 

@@ -293,6 +293,7 @@ export async function buildPlanReport(input: {
         repositoryFiles: tree.files,
         repositoryLfs,
         allowedNetworkDestinations: policy.allowedNetworkDestinations,
+        runPolicy: policy,
         ...(modelSelection ? { modelSelection } : {}),
       };
       let checkpointed = false;

@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { compileObjective, type CompilerWorkItemInput } from "../src/compiler/index.js";
 import { CodexCliManagementBackend } from "../src/management/codex-cli.js";
+import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 import {
   assessCompilerCorpusResult,
   compilePreparedCorpusCase,
@@ -205,7 +206,13 @@ describe("representative executable corpus integrity, not compiler/model quality
     });
     const result = await compilePreparedCorpusCase(
       value,
-      { objectiveNumber: 17, baseSha: sha, defaultBranch: "main", allowedNetworkDestinations: [] },
+      {
+        objectiveNumber: 17,
+        baseSha: sha,
+        defaultBranch: "main",
+        allowedNetworkDestinations: [],
+        runPolicy: DEFAULT_RUN_POLICY,
+      },
       backend,
       async () => {
         checkpoints++;
@@ -228,6 +235,7 @@ describe("representative executable corpus integrity, not compiler/model quality
           baseSha: sha,
           defaultBranch: "main",
           allowedNetworkDestinations: [],
+          runPolicy: DEFAULT_RUN_POLICY,
         },
         backend,
         async () => {},

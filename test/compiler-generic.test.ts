@@ -17,6 +17,7 @@ import {
 import { CodexCliManagementBackend } from "../src/management/codex-cli.js";
 import { validateGraph, workerPacketFromCompiled } from "../src/graph.js";
 import { validationPlanFromPacket } from "../src/validation/plan.js";
+import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 
 const paths: string[] = [];
 afterEach(async () => {
@@ -157,6 +158,7 @@ describe("generic repository command grounding", () => {
           defaultBranch: "main",
           baseSha: sha,
           allowedNetworkDestinations: [],
+          runPolicy: DEFAULT_RUN_POLICY,
         },
         async () => {},
       );

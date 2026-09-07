@@ -199,6 +199,9 @@ function pinnedRequirements(value: ExecutionRequirements): ExecutionRequirements
     networkDestinations: [...requirements.networkDestinations],
     permittedSecretNames: [...requirements.permittedSecretNames],
     trust: requirements.trust,
+    ...(requirements.evidence
+      ? { evidence: requirements.evidence.map((item) => ({ ...item })) }
+      : {}),
   };
 }
 

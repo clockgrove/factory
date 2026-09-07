@@ -338,6 +338,19 @@ preconditions, exclusions, repository conventions, base SHA, validation commands
 OS/architecture and resource requirements, required tools/services/network destinations, permitted
 secret names, and the output contract.
 
+Platform, CPU, memory, artifact-storage and timeout requirements are trusted-host outputs, not model
+facts. The compiler replaces model proposals with matching rules from the pinned repository's
+`.factory/execution-requirements.json`, then immutable run-policy values, then named conservative
+defaults. A scope-specific rule is the only way equivalent work receives different sizing. Missing
+architecture evidence stays portable, ordinary artifact storage remains backend-managed, and the
+default platform remains the supported Linux runtime. Repository timeouts above the activated
+Work Item limit are capped and record both sources; persisted requirements above that hard limit are
+rejected. The Work Packet and rendered issue retain provenance for each of these decisions.
+The evidence file is versioned JSON with optional `defaults` and ordered `scopes`; each scope rule
+contains concrete repository `paths` plus any evidenced `os`, `architecture`, `cpu`, `memoryMb`,
+`diskMb`, or `timeoutMinutes` values. It validates against
+[`schemas/execution-requirements.schema.json`](../schemas/execution-requirements.schema.json).
+
 Compiled Work Item array order is semantic: it is dependency-aware, seeds native sub-issue priority
 among independent peers, and participates in the immutable graph digest. Worker goals, acceptance,
 validation criteria, and conventions stop at the pre-publication artifact boundary. Publication,

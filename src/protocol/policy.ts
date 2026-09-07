@@ -486,6 +486,14 @@ export function requirementsPolicyRejections(
   policy: RunPolicy,
 ): string[] {
   const reasons: string[] = [];
+  if (
+    requirements.timeoutMinutes !== undefined &&
+    requirements.timeoutMinutes > policy.workItemTimeoutMinutes
+  ) {
+    reasons.push(
+      `timeout ${requirements.timeoutMinutes} minutes exceeds run-policy Work Item limit ${policy.workItemTimeoutMinutes} minutes`,
+    );
+  }
   const forbiddenDestinations = requirements.networkDestinations.filter(
     (destination) => !destinationAllowedByPolicy(destination, policy.allowedNetworkDestinations),
   );

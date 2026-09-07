@@ -12,6 +12,7 @@ import {
 } from "../src/runtime/local-worktree.js";
 import { createValidationEvidence } from "../src/validation/evidence.js";
 import type { WorkerPacket } from "../src/protocol/worker-packet.js";
+import type { ReviewResult } from "../src/management/backend.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -114,9 +115,7 @@ describe("exact semantic review materialization", () => {
     });
     const backend = new CodexCliManagementBackend({ runStructured });
     const checkpoint = vi.fn(async () => {});
-    await withVerifiedReviewCheckout(input, (repository) =>
-      backend.review({ ...input, repository }, checkpoint),
-    );
+    await backend.review(input, checkpoint);
     expect(runStructured).toHaveBeenCalledTimes(1);
     expect(checkpoint).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(input)).toBe(original);
@@ -129,24 +128,37 @@ describe("exact semantic review materialization", () => {
     });
   });
 
-  it.each(["tree", "artifact", "base", "failed", "isolation", "packet-isolation"])(
-    "refuses %s mismatch before review dispatch",
-    async (kind) => {
-      const input = await fixture();
+  it.each(["isolation", "tree"])("the real Codex adapter refuses %s before the supplied dispatch admission", async (kind) => {
+    const input = await fixture();
+    if (kind === "isolation") input.requiresIsolation = true;
+    else {
       const { digest: _digest, ...evidence } = input.evidence;
       void _digest;
-      if (kind === "tree") evidence.outputTreeSha = "a".repeat(40);
-      if (kind === "artifact") evidence.artifactDigest = "b".repeat(64);
-      if (kind === "base") evidence.baseSha = "c".repeat(40);
-      if (kind === "failed") evidence.passed = false;
-      if (kind === "isolation") input.requiresIsolation = true;
-      if (kind === "packet-isolation") input.packet.requirements.trust = "isolated";
-      input.evidence = createValidationEvidence(evidence);
-      const review = vi.fn(async () => {});
-      await expect(withVerifiedReviewCheckout(input, review)).rejects.toThrow();
-      expect(review).not.toHaveBeenCalled();
-    },
-  );
+      input.evidence = createValidationEvidence({ ...evidence, outputTreeSha: "a".repeat(40) });
+    }
+    const runStructured = vi.fn();
+    const dispatch = vi.fn(async (invoke: () => Promise<ReviewResult>) => invoke());
+    const backend = new CodexCliManagementBackend({ runStructured });
+    await expect(backend.reviewWithAdmission(input, vi.fn(), dispatch)).rejects.toThrow();
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(runStructured).not.toHaveBeenCalled();
+  });
+
+  it.each(["tree", "artifact", "base", "failed", "isolation", "packet-isolation"])("refuses %s mismatch before review dispatch", async (kind) => {
+    const input = await fixture();
+    const { digest: _digest, ...evidence } = input.evidence;
+    void _digest;
+    if (kind === "tree") evidence.outputTreeSha = "a".repeat(40);
+    if (kind === "artifact") evidence.artifactDigest = "b".repeat(64);
+    if (kind === "base") evidence.baseSha = "c".repeat(40);
+    if (kind === "failed") evidence.passed = false;
+    if (kind === "isolation") input.requiresIsolation = true;
+    if (kind === "packet-isolation") input.packet.requirements.trust = "isolated";
+    input.evidence = createValidationEvidence(evidence);
+    const review = vi.fn(async () => {});
+    await expect(withVerifiedReviewCheckout(input, review)).rejects.toThrow();
+    expect(review).not.toHaveBeenCalled();
+  });
 
   it("does not let inherited Git redirection touch an outside index or checkout", async () => {
     const input = await fixture();

@@ -56,7 +56,8 @@ export interface SemanticReview {
 }
 
 export interface ReviewContext {
-  /** Exact private artifact-applied checkout matching evidence.outputTreeSha. */
+  /** Source object repository. Filesystem-consuming backends must prepare the
+   * exact artifact/evidence tree; this mutable checkout is not review evidence. */
   repository: string;
   objectiveNumber: number;
   workItemNumber: number;
@@ -64,6 +65,9 @@ export interface ReviewContext {
   artifact: NormalizedArtifact;
   evidence: ValidationEvidence;
   modelSelection?: ModelSelection;
+  /** Includes current/source policy and inherited execution isolation. Packet
+   * trust remains independently authoritative, including for legacy callers. */
+  requiresIsolation?: boolean;
 }
 
 export interface ReviewResult {
@@ -82,6 +86,13 @@ export interface ManagementBackend {
     checkpoint: CompilationCheckpoint,
   ): Promise<CompilationResult>;
   review(context: ReviewContext, checkpoint: ReviewCheckpoint): Promise<ReviewResult>;
+  /** Optional local preparation boundary. The backend must call dispatch exactly
+   * once immediately around the paid invocation, after non-model preparation. */
+  reviewWithAdmission?(
+    context: ReviewContext,
+    checkpoint: ReviewCheckpoint,
+    dispatch: (invoke: () => Promise<ReviewResult>) => Promise<ReviewResult>,
+  ): Promise<ReviewResult>;
 }
 /** A durable model result does not prove its private review checkout was removed. */
 export class ReviewCheckoutCleanupError extends Error {

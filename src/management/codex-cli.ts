@@ -13,6 +13,7 @@ import {
 } from "../protocol/worker-packet.js";
 import { runContainedProcess, sanitizedWorkerEnvironment } from "../runtime/process-group.js";
 import { pinnedGitEnvironment } from "../runtime/pinned-git-environment.js";
+import { withVerifiedReviewCheckout } from "./review-checkout.js";
 import {
   createIsolatedCodexHome,
   isolateCodexEnvironment,
@@ -558,6 +559,21 @@ export class CodexCliManagementBackend implements ManagementBackend {
   }
 
   async review(context: ReviewContext, checkpoint: ReviewCheckpoint): Promise<ReviewResult> {
+    return this.reviewWithAdmission(context, checkpoint, (invoke) => invoke());
+  }
+
+  async reviewWithAdmission(
+    context: ReviewContext,
+    checkpoint: ReviewCheckpoint,
+    dispatch: (invoke: () => Promise<ReviewResult>) => Promise<ReviewResult>,
+  ): Promise<ReviewResult> {
+    return withVerifiedReviewCheckout(
+      { ...context, requiresIsolation: context.requiresIsolation ?? false },
+      (repository) => dispatch(() => this.#reviewMaterialized({ ...context, repository }, checkpoint)),
+    );
+  }
+
+  async #reviewMaterialized(context: ReviewContext, checkpoint: ReviewCheckpoint): Promise<ReviewResult> {
     const reviewInput = {
       objective: context.objectiveNumber,
       workItem: context.workItemNumber,

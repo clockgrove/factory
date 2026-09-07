@@ -9,6 +9,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   checkpointAuthority,
+  checkpointDeadline,
+  checkpointTimeout,
   checkpointLease,
   main as checkpointMain,
   assertScopeCoverage,
@@ -93,6 +95,11 @@ const policyFor = (authority, index) => ({ ...authority, namespace: authority.na
 
 export function concurrencyAuthority(env) {
   if (env.FACTORY_LOCAL_CONCURRENCY !== "1") return null;
+  const duration = env.FACTORY_CONCURRENCY_DURATION_MINUTES ?? "45";
+  assert.match(duration, /^(?:4[5-9]|[5-9][0-9]|1[01][0-9]|120)$/,
+    "concurrency duration must be an integer from 45 through 120 minutes");
+  const durationMinutes = Number(duration);
+  checkpointDeadline(new Date(0).toISOString(), durationMinutes);
   const perObjectiveThreshold = modelTokenLimit(
     env.FACTORY_CONCURRENCY_PER_OBJECTIVE_MAX_MODEL_TOKENS ?? "250000",
   );
@@ -134,6 +141,7 @@ export function concurrencyAuthority(env) {
     FACTORY_CHECKPOINT_ACK: `${repository}:${unit}:start,pause-drain,restart,resume,stop`,
   });
   authority.policy.maxParallel = 1;
+  authority.policy.objectiveTimeoutMinutes = durationMinutes;
   authority.policy.capacity.local.maxWorkers = 1;
   return {
     ...authority,
@@ -457,6 +465,7 @@ export async function main(env = process.env, run = checkpointMain) {
   try {
     return await run(env, runConcurrencyScenario, {
       authority,
+      observationWindowMinutes: authority.policy.objectiveTimeoutMinutes,
       scope: "installed-two-objective-concurrency",
       harnessPaths: [
         "scripts/verify-local-concurrency.mjs",
@@ -496,8 +505,10 @@ export async function main(env = process.env, run = checkpointMain) {
       }) => {
         assert.equal(typeof retireClient, "function", "owned MCP retirement boundary unavailable");
         const [owner, repo] = authority.repository.split("/");
+        const deadline = () => checkpointDeadline(evidence.startedAt, authority.policy.objectiveTimeoutMinutes);
         const once = async (action, invoke) => {
           abort.signal.throwIfAborted();
+          checkpointTimeout(deadline(), 1);
           assert.ok(
             !evidence.actions.some((entry) => entry.action === action),
             "uncertain action must not be retried",
@@ -795,7 +806,7 @@ export async function main(env = process.env, run = checkpointMain) {
                 requestedDelayMs: 180000,
               };
               save();
-              await wait(15000);
+              await wait(checkpointTimeout(deadline(), 15000));
             }
             evidence.stagger.elapsedMs = Math.floor(performance.now() - began);
             save();
@@ -831,8 +842,10 @@ export async function main(env = process.env, run = checkpointMain) {
               }),
             ),
           pollPair: async (phase, accept) => {
-            for (let count = 0; count < 270; count++) {
+            const maximumPolls = Math.ceil(authority.policy.objectiveTimeoutMinutes * 60000 / 15000);
+            for (let count = 0; count < maximumPolls; count++) {
               abort.signal.throwIfAborted();
+              checkpointTimeout(deadline(), 1);
               const pair = [];
               for (const [index, record] of evidence.objectives.entries()) {
                 // Cached terminal evidence is progress only, never a mutation/resource authorization.
@@ -851,11 +864,10 @@ export async function main(env = process.env, run = checkpointMain) {
                 ),
                 "owned run ended before scenario completion",
               );
-              if (accept(pair)) return pair;
-              assert.ok(
-                Date.now() < Date.parse(evidence.startedAt) + 2700000,
-                "bounded scenario observation expired",
-              );
+              checkpointTimeout(deadline(), 1);
+              const accepted = accept(pair);
+              checkpointTimeout(deadline(), 1);
+              if (accepted) return pair;
               assert.ok(
                 !(
                   phase === "refill" &&
@@ -863,7 +875,7 @@ export async function main(env = process.env, run = checkpointMain) {
                 ),
                 "actual refill timing not observed",
               );
-              await wait(15000);
+              await wait(checkpointTimeout(deadline(), 15000));
             }
             throw Error("bounded scenario observation exhausted");
           },
@@ -918,7 +930,7 @@ export async function main(env = process.env, run = checkpointMain) {
               outer: outer.record,
               inner: inner.event,
               serverTime: outer.serverTime,
-              remainingMs: Date.parse(evidence.startedAt) + 2700000 - Date.now(),
+              remainingMs: deadline() - Date.now(),
             });
             const cgroup = command("systemctl", [
               "--user",
@@ -979,7 +991,7 @@ export async function main(env = process.env, run = checkpointMain) {
                   };
                   save();
                   if (Date.parse(fresh.serverTime) > window.outerExpiry) break;
-                  await wait(15000);
+                  await wait(checkpointTimeout(deadline(), 15000));
                 }
                 assert.ok(Date.parse(fresh.serverTime) > window.outerExpiry);
                 assert.ok(
@@ -1099,7 +1111,7 @@ export async function main(env = process.env, run = checkpointMain) {
                 gone = true;
               }
               if (gone) break;
-              await wait(15000);
+              await wait(checkpointTimeout(deadline(), 15000));
             }
             assert.ok(gone, "stale controller did not retire within the observed bound");
             const journal = command("journalctl", [
@@ -1176,14 +1188,15 @@ export async function main(env = process.env, run = checkpointMain) {
               const observed = await readOuter();
               if (Date.parse(observed.serverTime) > window.innerExpiry) return;
               assert.ok(
-                Date.parse(evidence.startedAt) + 2700000 - Date.now() > 300000,
+                deadline() - Date.now() > 300000,
                 "original completion deadline exhausted",
               );
-              await wait(15000);
+              await wait(checkpointTimeout(deadline(), 15000));
             }
             throw Error("original inner lease expiry not observed within bound");
           },
           finish: async (_pair, original, replacement, refill) => {
+            checkpointTimeout(deadline(), 1);
             const final = [];
             for (const record of evidence.objectives) final.push(await observeOne(record, true));
             const starts = final.map((entry) =>
@@ -1319,7 +1332,9 @@ export async function main(env = process.env, run = checkpointMain) {
               authority,
               evidence.defaultBranch,
               final,
+              deadline(),
             );
+            checkpointTimeout(deadline(), 1);
             evidence.concurrencyProof = {
               refill: concurrencyRefill(final),
               inner,
@@ -1348,7 +1363,10 @@ export async function main(env = process.env, run = checkpointMain) {
 }
 
 /** Independent bounded retained-artifact behavior. No checkout hooks, package install or inherited credentials. */
-export async function verifyConcurrencyArtifacts(request, authority, branch, evidence) {
+export async function verifyConcurrencyArtifacts(request, authority, branch, evidence, deadline) {
+  const remaining = (maximumMs) => deadline === undefined ? maximumMs : checkpointTimeout(deadline, maximumMs);
+  const originalRequest = request;
+  request = (route, args) => originalRequest(route, args, remaining(15000));
   const final = (await request("GET /repos/{owner}/{repo}/commits/{ref}", { ref: branch })).data;
   assert.ok(
     evidence.some((entry) =>
@@ -1408,11 +1426,12 @@ export async function verifyConcurrencyArtifacts(request, authority, branch, evi
       cwd: root,
       env: { PATH: dirname(process.execPath), HOME: root, LANG: "C.UTF-8" },
       encoding: "utf8",
-      timeout: 60000,
+      timeout: remaining(60000),
       maxBuffer: 262144,
       stdio: ["ignore", "pipe", "pipe"],
     };
     execFileSync(process.execPath, [...args, "--input-type=module", "-e", command], options);
+    remaining(1);
     return { finalSha: final.sha, files, independentBehavior: "passed", workerReexecution: false };
   } finally {
     rmSync(root, { recursive: true, force: true });

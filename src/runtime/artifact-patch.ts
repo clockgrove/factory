@@ -27,6 +27,7 @@ import {
 } from "../execution/artifact-content.js";
 import { runContainedProcess, sanitizedWorkerEnvironment } from "./process-group.js";
 import { inspectPinnedLfs, parseLfsPointer } from "../repository-profiles/git-lfs.js";
+import { pinnedGitEnvironment } from "./pinned-git-environment.js";
 
 const safeGit = [
   "-c",
@@ -52,13 +53,7 @@ const safeGit = [
   "-c",
   "diff.mnemonicPrefix=false",
 ];
-const gitEnvironment = () => ({
-  ...sanitizedWorkerEnvironment(process.env),
-  GIT_NO_REPLACE_OBJECTS: "1",
-  GIT_CONFIG_NOSYSTEM: "1",
-  GIT_CONFIG_GLOBAL: "/dev/null",
-  GIT_LITERAL_PATHSPECS: "1",
-});
+const gitEnvironment = () => pinnedGitEnvironment(sanitizedWorkerEnvironment(process.env));
 
 /** Child stdout is backpressured to an owned file and hard byte ceiling, never a giant string. */
 export async function streamGitFile(

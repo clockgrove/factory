@@ -56,6 +56,7 @@ export interface SemanticReview {
 }
 
 export interface ReviewContext {
+  /** Exact private artifact-applied checkout matching evidence.outputTreeSha. */
   repository: string;
   objectiveNumber: number;
   workItemNumber: number;
@@ -81,4 +82,11 @@ export interface ManagementBackend {
     checkpoint: CompilationCheckpoint,
   ): Promise<CompilationResult>;
   review(context: ReviewContext, checkpoint: ReviewCheckpoint): Promise<ReviewResult>;
+}
+/** A durable model result does not prove its private review checkout was removed. */
+export class ReviewCheckoutCleanupError extends Error {
+  constructor(cause: unknown) {
+    super("semantic review private checkout cleanup is unresolved", { cause });
+    this.name = "ReviewCheckoutCleanupError";
+  }
 }

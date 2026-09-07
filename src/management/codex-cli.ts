@@ -12,6 +12,7 @@ import {
   RepositoryScopePathSchema,
 } from "../protocol/worker-packet.js";
 import { runContainedProcess, sanitizedWorkerEnvironment } from "../runtime/process-group.js";
+import { pinnedGitEnvironment } from "../runtime/pinned-git-environment.js";
 import {
   createIsolatedCodexHome,
   isolateCodexEnvironment,
@@ -585,6 +586,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
       REVIEW_SCHEMA,
       prompt,
       context.modelSelection,
+      true,
     );
     let result: ReviewResult;
     try {
@@ -601,6 +603,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
     schema: unknown,
     prompt: string,
     modelSelection?: CompilationContext["modelSelection"],
+    pinnedCheckout = false,
   ): Promise<{ value: T; usage: ManagementUsage }> {
     if (this.#options.runStructured) {
       const result = await this.#options.runStructured(cwd, schema, prompt, modelSelection);
@@ -644,15 +647,16 @@ export class CodexCliManagementBackend implements ManagementBackend {
       }
       args.push(prompt);
       const target = await resolveCodexCommand(this.#options.command);
+      const environment = sanitizedWorkerEnvironment(
+        { ...process.env, FACTORY_SUPERVISED: "1" },
+        this.#options.permittedModelCredentials ?? [],
+      );
       const result = await runContainedProcess({
         command: target.command,
         args: [...target.args, ...args],
         cwd,
         env: isolateCodexEnvironment(
-          sanitizedWorkerEnvironment(
-            { ...process.env, FACTORY_SUPERVISED: "1" },
-            this.#options.permittedModelCredentials ?? [],
-          ),
+          pinnedCheckout ? pinnedGitEnvironment(environment) : environment,
           codexHome,
         ),
         timeoutMs: 30 * 60_000,

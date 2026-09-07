@@ -203,6 +203,7 @@ import { GitHubReader, type GitHubOptions } from "./github.js";
 import { CodexCliManagementBackend } from "./management/codex-cli.js";
 import { collectCompilationEvidence } from "./compiler/runtime-evidence.js";
 import { ManagementOutputError } from "./management/backend.js";
+import { withVerifiedReviewCheckout } from "./management/review-checkout.js";
 import { reportedModelUsage, type ReportedModelUsage } from "./protocol/model-usage.js";
 import type {
   CompilationCheckpoint,
@@ -5828,7 +5829,15 @@ export class FactorySupervisor {
         }
         const reviewModel = resolveModelSelection(this.#policy, "review");
         invokeReview = (checkpoint) =>
-          this.#externalAdmission(async () => {
+          withVerifiedReviewCheckout({
+            repository: this.#options.repository,
+            objectiveNumber: this.#run.objective,
+            workItemNumber: item.number,
+            packet,
+            artifact,
+            evidence: validation!.evidence,
+            requiresIsolation: this.#policy.trust === "sandbox_untrusted" || Boolean(deliveryBase?.requiresIsolation),
+          }, (reviewRepository) => this.#externalAdmission(async () => {
             await this.#admitModelInvocation(
               `review-${reviewIdentityDigest(reviewIdentity)}`,
               item.id,
@@ -5836,7 +5845,7 @@ export class FactorySupervisor {
             );
             return this.#management.review(
               {
-                repository: this.#options.repository,
+                repository: reviewRepository,
                 objectiveNumber: this.#run.objective,
                 workItemNumber: item.number,
                 packet,
@@ -5846,7 +5855,7 @@ export class FactorySupervisor {
               },
               checkpoint,
             );
-          });
+          }));
       }
       await this.#reviewTransaction({
         existing: existingReview,
@@ -9012,7 +9021,15 @@ export class FactorySupervisor {
         );
         const reviewModel = resolveModelSelection(this.#policy, "review");
         invokeReview = (checkpoint) =>
-          this.#externalAdmission(async () => {
+          withVerifiedReviewCheckout({
+            repository: this.#options.repository,
+            objectiveNumber: this.#run.objective,
+            workItemNumber: item.number,
+            packet,
+            artifact,
+            evidence: validation.evidence,
+            requiresIsolation: isolated || this.#policy.trust === "sandbox_untrusted",
+          }, (reviewRepository) => this.#externalAdmission(async () => {
             await this.#admitModelInvocation(
               `rebase-review-${reviewIdentityDigest(reviewIdentity)}`,
               item.id,
@@ -9020,7 +9037,7 @@ export class FactorySupervisor {
             );
             return this.#management.review(
               {
-                repository: this.#options.repository,
+                repository: reviewRepository,
                 objectiveNumber: this.#run.objective,
                 workItemNumber: item.number,
                 packet,
@@ -9030,7 +9047,7 @@ export class FactorySupervisor {
               },
               checkpoint,
             );
-          });
+          }));
       }
       const commit = await this.#store.readCommit(headSha);
       if (commit.parentOids.length !== 1 || commit.parentOids[0] !== baseSha) {
@@ -10406,11 +10423,19 @@ export class FactorySupervisor {
         throw new Error("merge candidate no longer matches the original published patch");
       const reviewModel = resolveModelSelection(this.#policy, "review");
       invokeReview = (checkpoint) =>
-        this.#externalAdmission(async () => {
+        withVerifiedReviewCheckout({
+          repository: this.#options.repository,
+          objectiveNumber: this.#run.objective,
+          workItemNumber: item.number,
+          packet,
+          artifact: artifact!,
+          evidence: record.validation,
+          requiresIsolation: isolated || this.#policy.trust === "sandbox_untrusted",
+        }, (reviewRepository) => this.#externalAdmission(async () => {
           await this.#admitModelInvocation(invocationId, item.id, member.reservation);
           return this.#management.review(
             {
-              repository: this.#options.repository,
+              repository: reviewRepository,
               objectiveNumber: this.#run.objective,
               workItemNumber: item.number,
               packet,
@@ -10420,7 +10445,7 @@ export class FactorySupervisor {
             },
             checkpoint,
           );
-        });
+        }));
     }
     await this.#reviewTransaction({
       existing: existingReview,
@@ -12099,11 +12124,19 @@ export class FactorySupervisor {
           throw new Error("adopted candidate artifact changed");
         const model = resolveModelSelection(this.#policy, "review");
         invoke = (checkpoint) =>
-          this.#externalAdmission(async () => {
+          withVerifiedReviewCheckout({
+            repository: this.#options.repository,
+            objectiveNumber: this.#run.objective,
+            workItemNumber: item.number,
+            packet,
+            artifact: artifact!,
+            evidence: candidate!.validation,
+            requiresIsolation: requiresIsolatedCandidate || this.#policy.trust === "sandbox_untrusted",
+          }, (reviewRepository) => this.#externalAdmission(async () => {
             await this.#admitModelInvocation(invocationId, item.id, undefined, item.number);
             return this.#management.review(
               {
-                repository: this.#options.repository,
+                repository: reviewRepository,
                 objectiveNumber: this.#run.objective,
                 workItemNumber: item.number,
                 packet,
@@ -12113,7 +12146,7 @@ export class FactorySupervisor {
               },
               checkpoint,
             );
-          });
+          }));
       }
       await this.#reviewTransaction({
         existing,

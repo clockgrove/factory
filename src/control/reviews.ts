@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { ManagementOutputError } from "../management/backend.js";
+import { ManagementOutputError, ReviewCheckoutCleanupError } from "../management/backend.js";
 
 import { z } from "zod";
 
@@ -117,6 +117,10 @@ export async function runDurableReviewTransaction(args: {
       record = await args.recover();
       if (!record) {
         if (error instanceof ManagementOutputError) await args.recordFailureUsage?.(error.usage);
+        throw error;
+      }
+      if (error instanceof ReviewCheckoutCleanupError) {
+        await args.recordUsage(record);
         throw error;
       }
     }

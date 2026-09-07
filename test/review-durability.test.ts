@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { ManagementOutputError } from "../src/management/backend.js";
+import { ManagementOutputError, ReviewCheckoutCleanupError } from "../src/management/backend.js";
 
 import {
   runDurableReviewTransaction,
@@ -42,6 +42,23 @@ function checkpoint(kind: "artifact" | "rebase" = "artifact"): ReviewCheckpointR
 }
 
 describe("durable semantic review transaction", () => {
+  it("preserves known paid usage but does not hide private checkout cleanup failure behind its checkpoint", async () => {
+    const record = checkpoint();
+    const failure = new ReviewCheckoutCleanupError(Error("owned checkout removal failed"));
+    const recordUsage = vi.fn();
+    const recordOutcome = vi.fn();
+    await expect(runDurableReviewTransaction({
+      existing: null,
+      invoke: async (save) => { await save(result); throw failure; },
+      persist: async () => record,
+      recover: async () => record,
+      recordUsage,
+      recordOutcome,
+    })).rejects.toBe(failure);
+    expect(recordUsage).toHaveBeenCalledExactlyOnceWith(record);
+    expect(recordOutcome).not.toHaveBeenCalled();
+  });
+
   it("accounts malformed paid review output without publishing an outcome", async () => {
     const recordFailureUsage = vi.fn();
     const recordOutcome = vi.fn();

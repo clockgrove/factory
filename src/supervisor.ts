@@ -4707,10 +4707,10 @@ export class FactorySupervisor {
         const objectiveLocalMax = this.#fairness.mayAdmit(objective.number, capacity.reservations)
           ? this.#fairness.localMaximum(
               objective.number,
-              Math.min(
-                scheduling.capacity.local.maxWorkers,
-                this.#controllerLimits.maxLocalWorkers,
-              ),
+              // Fairness shares the repository pool, not this Objective's
+              // immutable ceiling. admissionCapacityLimits applies that separate
+              // ceiling after subtracting other Objectives' occupied slots.
+              this.#controllerLimits.maxLocalWorkers,
               capacity.reservations,
             )
           : capacity.reservations.filter(

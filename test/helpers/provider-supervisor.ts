@@ -922,6 +922,7 @@ export async function providerSupervisorFixture(
     policy,
     snapshot,
     management,
+    repositoryResources: shared,
     activity,
     resources,
     events,

@@ -28,9 +28,9 @@ dependencies, not a reason to silently narrow those issues:
 | [#123](https://github.com/clockgrove/factory/issues/123): restored capabilities | Local qualification / test | Complete installed shared-work, durable-session restart, LFS/media and oversized-transfer recovery acceptance. |
 | [#76](https://github.com/clockgrove/factory/issues/76): scheduling | Local qualification / test | Combine retained pressure evidence with continuous refill, shared ceilings, real inner/outer contention and explain/replay. Serial takeover is not simultaneous contention. |
 | [#75](https://github.com/clockgrove/factory/issues/75): resilience | Local qualification / test | Complete safe failed-validation/conflict and lifecycle outcomes. Retain the specific interrupted-usage limitation rather than treating unavailable accounting as complete. |
-| [#153](https://github.com/clockgrove/factory/issues/153): checkpoint shutdown and lease contention | Runtime lane / code | Preserve successful retained work while completing exact orderly lease cleanup; distinguish pre-acquisition contention from lost ownership without service restart churn. |
-| [#154](https://github.com/clockgrove/factory/issues/154): no-replacement qualification authority | Qualifier lane / code | Generate single-attempt policies where replacement is forbidden. Preserve old run policies and scenarios that intentionally test retries. |
-| [#155](https://github.com/clockgrove/factory/issues/155): review candidate binding | Runtime review lane / code | Every applicable semantic review inspects the independently validated candidate, never an unrelated controller checkout. Preserve isolation, identity and cleanup fences. |
+| [#158](https://github.com/clockgrove/factory/issues/158): shared fairness pool | Scheduling runtime lane / code | Share repository capacity before independently applying each Objective's worker ceiling; retain physical, backend and path fences. |
+| [#159](https://github.com/clockgrove/factory/issues/159): pacing-aware qualification window | Qualifier lane / code | Bind explicit future 45–120-minute concurrency windows to both policies and one original-start deadline. Preserve existing defaults, original evidence and pacing limits. |
+| [#160](https://github.com/clockgrove/factory/issues/160): paced shutdown | Controller lifecycle lane / code | Retire queued normal writes on deliberate shutdown without dispatching them, bypassing pacing or misrepresenting in-flight uncertainty. Retain lease priority and recoverable cleanup obligations. |
 
 Scenario and stale-base corrections #140–#143 were merged in
 [#144](https://github.com/clockgrove/factory/pull/144), shutdown/recovery correction #145 in
@@ -38,8 +38,17 @@ Scenario and stale-base corrections #140–#143 were merged in
 continuation #147 in [#148](https://github.com/clockgrove/factory/pull/148), retained-resource
 cancellation/timeout cleanup #149 in [#150](https://github.com/clockgrove/factory/pull/150), and
 namespace-listing contract #151 in [#152](https://github.com/clockgrove/factory/pull/152).
+Retained-checkpoint, review-checkout and qualification-authority corrections #153–#155/#157
+were merged in [#156](https://github.com/clockgrove/factory/pull/156). Installed shared-work
+qualification then demonstrated the separate fairness and paced-shutdown defects above; they
+remain implementation work rather than being hidden behind a qualification label.
 Their implementation is not a live pass for the parent issues. Expired qualification authority
 is not extended; proven no-action refusals preserve their original evidence when explicitly retried.
+The current code batch combines #158–#160. After integration review, its next deliverable is one
+checked, matching installed candidate. Then complete supported cleanup of the expired shared-work
+attempt without discarding retained work, followed by fresh bounded concurrency, large-file and
+failure/conflict acceptance. A forced controller termination is contained cleanup evidence, not
+successful graceful shutdown. Known internal pacing boundaries remain in force across replacement.
 The specific active-cancellation
 accounting case remains incomplete where the provider supplies no complete interrupted-worker usage;
 resource cleanup and unknown counters must be reported separately. Other authorized WSL2 work can

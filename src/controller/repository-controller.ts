@@ -26,7 +26,11 @@ import {
   parseControllerPolicy,
   parseRunPolicy,
 } from "../protocol/policy.js";
-import { classifyRefusal, PlatformUnavailableError, MutationAdmissionStoppedError } from "../platform.js";
+import {
+  classifyRefusal,
+  PlatformUnavailableError,
+  MutationAdmissionStoppedError,
+} from "../platform.js";
 import { adoptRecoveryActivation, type RecoveryRepositoryOwnership } from "./recovery.js";
 import { ControllerGenerationRetirement } from "./retirement.js";
 import { LeaseAcquisitionContendedError, LeaseLostError } from "../control/lease.js";

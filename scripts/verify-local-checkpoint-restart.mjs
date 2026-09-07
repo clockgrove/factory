@@ -1633,6 +1633,35 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     await client.connect(transport);
     transport.stderr?.on("data", () => {});
     assert.equal(client.getServerVersion()?.version, artifact.version);
+    // The committed extension may retire this one owned MCP transport after an ambiguous
+    // foreground request. Timeout/cancellation alone is not process or remote-request absence.
+    const observerPid = transport.pid;
+    assert.ok(Number.isSafeInteger(observerPid) && observerPid > 1);
+    const observerStat = readBounded(`/proc/${observerPid}/stat`, 16384);
+    const observerStartTicks = observerStat.slice(observerStat.lastIndexOf(")") + 2).split(/\s+/)[19];
+    assert.match(observerStartTicks, /^[0-9]+$/);
+    const retireClient = async () => {
+      let timer, transportClose = "observed";
+      try {
+        // Pinned SDK stdio.close ends stdin, waits 2s, sends SIGTERM, waits 2s,
+        // then SIGKILLs only its owned child. Independently observe that incarnation below.
+        await Promise.race([client.close(), new Promise((_, reject) => {
+          timer = setTimeout(() => reject(Error("owned MCP retirement deadline exceeded")), 6000);
+        })]);
+      } catch { transportClose = "unverified"; }
+      finally { clearTimeout(timer); }
+      for (let index = 0; index < 20; index++) {
+        let present;
+        try {
+          const stat = readBounded(`/proc/${observerPid}/stat`, 16384);
+          present = stat.slice(stat.lastIndexOf(")") + 2).split(/\s+/)[19] === observerStartTicks;
+        } catch (error) { if (error.code !== "ENOENT") throw error; present = false; }
+        if (!present) return { pid: observerPid, startTicks: observerStartTicks, absent: true,
+          transportClose, remoteRequestSettlement: "not-implied" };
+        await sleep(100);
+      }
+      throw Error("owned MCP process absence unverified");
+    };
     const scenarioPort = extension.extendPort
       ? await extension.extendPort({
           port,
@@ -1647,6 +1676,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
           readBounded,
           pluginRoot,
           artifact,
+          retireClient,
         })
       : port;
     evidence.result = await runner(scenarioPort, authority);

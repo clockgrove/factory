@@ -5,6 +5,7 @@ import {
   concurrencyObjectiveBody,
   concurrencyRefill,
   assertInnerTakeover,
+  assertRetiredController,
   main,
   runConcurrencyScenario,
   verifyConcurrencyArtifacts,
@@ -24,9 +25,25 @@ const env = {
   FACTORY_CONCURRENCY_NAMESPACE: "concurrency-fixture",
   FACTORY_CONCURRENCY_EVIDENCE: "/tmp/private/concurrency.json",
   FACTORY_CONCURRENCY_MAX_MODEL_TOKENS: "500000",
-  FACTORY_CONCURRENCY_ACK: `${repository}:${unit}:activate-two,start,contend,pause-b,restart,resume-b,stop`,
+  FACTORY_CONCURRENCY_ACK: `${repository}:${unit}:start,activate-two,contend,pause-b,freeze-inner-contend-unfreeze,stop-stale,restart,resume-b,stop`,
 };
 const authority = concurrencyAuthority(env)!;
+describe("stale controller stop identity fence", () => {
+  const original = { unit, pid: 1234, invocationId: "a".repeat(32) };
+  const configPath = `/home/example/.config/systemd/user/${unit}`;
+  const fields = { Id: unit, LoadState: "loaded", FragmentPath: configPath, DropInPaths: "", NeedDaemonReload: "no", Job: "",
+    ActiveState: "failed", SubState: "failed", MainPID: "0", InvocationID: original.invocationId,
+    ExecMainPID: "1234", ExecMainCode: "1", ExecMainStatus: "2", Result: "exit-code" };
+  it("accepts only the exact original non-restarting fatal exit", () => {
+    expect(() => assertRetiredController(fields, original, configPath)).not.toThrow();
+  });
+  it("refuses active, pending or already replaced controller generations", () => {
+    for (const changed of [{ MainPID: "1235" }, { Job: "123 /job/123" }, { InvocationID: "b".repeat(32) },
+      { ActiveState: "activating", SubState: "auto-restart" }, { ExecMainStatus: "1" }, { DropInPaths: "/unexpected.conf" }]) {
+      expect(() => assertRetiredController({ ...fields, ...changed }, original, configPath)).toThrow();
+    }
+  });
+});
 const at = (seconds: number) => new Date(Date.UTC(2026, 8, 6, 0, 0, seconds)).toISOString();
 const event = (objective: number, sequence: number, name: string, seconds: number, workItem = objective * 10) => ({
   objective, runId: `run-${objective}`, sequence, event: name, at: at(seconds), workItem, attempt: 1,
@@ -111,14 +128,16 @@ function scenarioPort() {
   const actions: string[] = [];
   const port: ConcurrencyPort = {
     preflight: async () => { actions.push("preflight"); return {}; },
-    prepare: async () => { actions.push("prepare"); },
+    prepare: async (stage) => { actions.push(`prepare:${stage}`); },
+    stagger: async () => { actions.push("model-free-offset"); },
     action: async (action) => { actions.push(action); },
-    controller: async (state) => { actions.push(`controller:${state}`); return {}; },
+    controller: async (state) => { actions.push(`controller:${state}`); return { invocationId: String(actions.length), hostIdentity: "same-host" }; },
     contend: async () => { actions.push("outer-contend"); },
     pollPair: async (phase, accept) => { actions.push(phase); const value = pair(); expect(accept(value)).toBe(true); return value; },
     scoped: async (action) => { actions.push(`${action}-b`); },
     settled: () => true,
     captureCheckpoint: async () => { actions.push("accounted-absence-inner-capture"); },
+    innerContend: async () => { actions.push("frozen-inner-held-contention-exact-thaw"); },
     takeover: async () => { actions.push("outer-takeover"); },
     finish: async () => { actions.push("exact-final-proofs"); return {}; },
   };
@@ -133,13 +152,20 @@ describe("bounded existing installed-controller composition", () => {
   });
   it("orders scoped pause, peer progress, accounted absence, restart and exact final proof", async () => {
     const f = scenarioPort(); const result = await runConcurrencyScenario(f.port, authority);
-    expect(result).toMatchObject({ result: "passed", simultaneousInnerDirectorRace: "not-exercised", comparativeSavings: "not-measured" });
-    expect(f.actions).toEqual(["preflight", "prepare", "start", "controller:active", "both-started", "outer-contend", "refill", "pause-b", "scoped-pause", "peer-completed", "accounted-absence-inner-capture", "restart", "controller:active", "outer-takeover", "resume-b", "completed", "stop", "controller:inactive", "exact-final-proofs"]);
+    expect(result).toMatchObject({ result: "passed", innerLeaseHeldContention: "observed", simultaneousInnerCasCollision: "not-exercised", comparativeSavings: "not-measured" });
+    expect(f.actions).toEqual(["preflight", "prepare:create", "start", "controller:active", "model-free-offset", "prepare:activate", "both-started", "outer-contend", "refill", "pause-b", "scoped-pause", "peer-completed", "accounted-absence-inner-capture", "frozen-inner-held-contention-exact-thaw", "restart", "controller:active", "outer-takeover", "resume-b", "completed", "stop", "controller:inactive", "exact-final-proofs"]);
   });
   it("does not retry or automatically restart/stop after an ambiguous exercise failure", async () => {
     const f = scenarioPort(); f.port.scoped = async () => { throw Error("response unavailable"); };
     await expect(runConcurrencyScenario(f.port, authority)).rejects.toThrow("response unavailable");
     expect(f.actions).not.toContain("restart"); expect(f.actions).not.toContain("stop"); expect(f.actions).not.toContain("exact-final-proofs");
+  });
+  it("leaves the settled peer paused and forbids continuation after an uncertain inner contender", async () => {
+    const f = scenarioPort();
+    f.port.innerContend = async () => { throw Error("inner contender outcome is unknown; no automatic continuation"); };
+    await expect(runConcurrencyScenario(f.port, authority)).rejects.toThrow(/outcome is unknown/);
+    expect(f.actions).toContain("accounted-absence-inner-capture");
+    for (const action of ["restart", "resume-b", "stop", "exact-final-proofs"]) expect(f.actions).not.toContain(action);
   });
   it("uses committed checkpoint main extension and inventories all new evidence dependencies", async () => {
     const run = vi.fn(async () => {});

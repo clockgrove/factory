@@ -12,7 +12,8 @@ export function assertConcurrencySettlement(observation: unknown, authority: Che
 export function assertInnerTakeover(before: unknown, after: unknown, chain: unknown[], start: unknown): Record<string, unknown>;
 export interface ConcurrencyPort {
   preflight(): Promise<unknown>;
-  prepare(): Promise<unknown>;
+  prepare(stage: string): Promise<unknown>;
+  stagger(original: unknown): Promise<unknown>;
   action(action: string): Promise<unknown>;
   controller(state: string, prior?: unknown): Promise<unknown>;
   contend(pair: unknown[]): Promise<unknown>;
@@ -20,9 +21,11 @@ export interface ConcurrencyPort {
   scoped(action: string): Promise<unknown>;
   settled(observation: unknown, paused: boolean, index?: number): boolean;
   captureCheckpoint(pair: unknown[], original: unknown): Promise<unknown>;
+  innerContend(original: unknown): Promise<unknown>;
   takeover(checkpoint: unknown): Promise<unknown>;
   finish(pair: unknown[], original: unknown, replacement: unknown, refill: unknown): Promise<unknown>;
 }
 export function runConcurrencyScenario(port: ConcurrencyPort, authority: ConcurrencyAuthority): Promise<Record<string, unknown>>;
 export function verifyConcurrencyArtifacts(request: (route: string, parameters: Record<string, unknown>) => Promise<unknown>, authority: ConcurrencyAuthority, branch: string, evidence: unknown[]): Promise<unknown>;
 export function main(env?: Record<string, string | undefined>, run?: (env: Record<string, string | undefined>, runner: typeof runConcurrencyScenario, extension: CheckpointExtension) => Promise<void>): Promise<void>;
+export function assertRetiredController(fields: Record<string, string>, original: { unit: string; invocationId: string; pid: number }, configPath: string): void;

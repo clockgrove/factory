@@ -2,18 +2,19 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as sleep } from "node:timers/promises";
-import { checkpointAuthority, checkpointLease, main as checkpointMain, assertScopeCoverage } from "./verify-local-checkpoint-restart.mjs";
+import { checkpointAuthority, checkpointLease, main as checkpointMain, assertScopeCoverage, assertControllerUnit } from "./verify-local-checkpoint-restart.mjs";
 import { assertRepositoryContention } from "./verify-local-scheduling.mjs";
 import { authenticatedFaultEvents, isQuiescentFaultObjective } from "./verify-local-faults.mjs";
 import { qualificationModelAccounting } from "./qualification-model-accounting.mjs";
 import { installedBundleIdentity, objectiveBodyFor, qualificationNamespace, qualificationNamespaceMarker, qualificationPaths, waitForCreatedObjectiveNamespace } from "./verify-live-objective.mjs";
 import { observeNativeMergeProofs, assertNativeMergeProof } from "./qualification-sibling-refresh-proof.mjs";
 import { selectQualificationPublicationRecord } from "./qualification-merge-proof.mjs";
+import { inspectFreezeCapability, assertInnerContentionWindow, assertHeldInnerRefusal, withFrozenController } from "./qualification-controller-freeze.mjs";
 
 const hash = (value) => createHash("sha256").update(typeof value === "string" || Buffer.isBuffer(value) ? value : JSON.stringify(value)).digest("hex");
 const one = (values, reason) => { assert.equal(values.length, 1, reason); return values[0]; };
@@ -21,6 +22,20 @@ const eventsOf = (observation) => observation.receipts.map(({ event }) => event)
 const time = (event) => { const at = Date.parse(event.at); assert.ok(Number.isFinite(at), "receipt time unavailable"); return at; };
 const sameAttempt = (a, b) => ["objective", "runId", "workItem", "attempt"].every((key) => a[key] === b[key]);
 const endNames = new Set(["AttemptSucceeded", "AttemptFailed", "AttemptTimedOut", "AttemptCancelled", "AttemptDeferred"]);
+
+/** Only the original fatal-exit unit may be normalized to inactive; never stop a replacement. */
+export function assertRetiredController(fields, original, configPath) {
+  assert.equal(fields.Id, original.unit); assert.equal(fields.LoadState, "loaded");
+  assert.equal(fields.FragmentPath, configPath); assert.equal(fields.DropInPaths, "");
+  assert.equal(fields.NeedDaemonReload, "no");
+  assert.ok(["", "0", "0 /"].includes(fields.Job), "controller replacement job appeared");
+  assert.equal(fields.ActiveState, "failed"); assert.equal(fields.SubState, "failed");
+  assert.equal(fields.MainPID, "0", "controller replacement is active");
+  assert.equal(fields.InvocationID, original.invocationId, "controller invocation changed before stop");
+  assert.equal(fields.ExecMainPID, String(original.pid));
+  assert.equal(fields.ExecMainCode, "1"); assert.equal(fields.ExecMainStatus, "2");
+  assert.equal(fields.Result, "exit-code");
+}
 const policyFor = (authority, index) => ({ ...authority, namespace: authority.namespaces[index] });
 
 export function concurrencyAuthority(env) {
@@ -33,7 +48,7 @@ export function concurrencyAuthority(env) {
   const repository = env.FACTORY_CONCURRENCY_REPOSITORY;
   const unit = env.FACTORY_CONCURRENCY_CONTROLLER_UNIT;
   if (phase === "exercise") assert.equal(env.FACTORY_CONCURRENCY_ACK,
-    `${repository}:${unit}:activate-two,start,contend,pause-b,restart,resume-b,stop`, "explicit two-Objective lifecycle authority required");
+    `${repository}:${unit}:start,activate-two,contend,pause-b,freeze-inner-contend-unfreeze,stop-stale,restart,resume-b,stop`, "explicit two-Objective lifecycle authority required");
   const authority = checkpointAuthority({ ...env,
     FACTORY_LOCAL_CHECKPOINT_RESTART: "1", FACTORY_CHECKPOINT_REPOSITORY: repository,
     FACTORY_CHECKPOINT_CHECKOUT: env.FACTORY_CONCURRENCY_CHECKOUT, FACTORY_CHECKPOINT_CONTROLLER_UNIT: unit,
@@ -160,8 +175,9 @@ export function assertInnerTakeover(before, after, chain, start) {
 export async function runConcurrencyScenario(port, authority) {
   const preflight = await port.preflight();
   if (authority.phase === "preflight") return { result: "preflight-only", preflight };
-  await port.prepare(); await port.action("start");
+  await port.prepare("create"); await port.action("start");
   const original = await port.controller("active");
+  await port.stagger(original); await port.prepare("activate");
   const started = await port.pollPair("both-started", (pair) => pair.every((observation) => eventsOf(observation).some((event) => event.event === "ControllerObserved")));
   await port.contend(started);
   const overlap = await port.pollPair("refill", (pair) => concurrencyRefill(pair) !== null);
@@ -174,34 +190,54 @@ export async function runConcurrencyScenario(port, authority) {
   assert.ok(!eventsOf(finishedA[0]).some((event) => ["RunPauseRequested", "RunCancelRequested"].includes(event.event)), "scoped command leaked to peer");
   assert.ok(port.settled(finishedA[1], true, 1), "paused peer checkpoint is not settled");
   await port.captureCheckpoint(finishedA, original);
-  await port.action("restart"); const replacement = await port.controller("active", original);
+  await port.innerContend(original);
+  await port.action("restart"); const replacement = await port.controller("active");
+  assert.notEqual(replacement.invocationId, original.invocationId, "controller did not change generation");
+  assert.equal(replacement.hostIdentity, original.hostIdentity, "host changed across restart");
   await port.takeover(finishedA[1]); await port.scoped("resume");
   const final = await port.pollPair("completed", (pair) => pair.every((observation, index) => port.settled(observation, false, index)));
   await port.action("stop"); await port.controller("inactive");
   const proofs = await port.finish(final, original, replacement, refill);
-  return { result: "passed", scope: "installed-two-objective-refill-scoped-pause-serial-takeover",
+  return { result: "passed", scope: "installed-two-objective-refill-scoped-pause-inner-contention",
     controllerLocalCeiling: 8, authorizedScenarioWorkerMaximum: 2, aggregateObservedThreshold: 500000,
-    simultaneousInnerDirectorRace: "not-exercised", pressure: "not-repeated", comparativeSavings: "not-measured", proofs };
+    innerLeaseHeldContention: "observed", simultaneousInnerCasCollision: "not-exercised", pressure: "not-repeated", comparativeSavings: "not-measured", proofs };
 }
 
 export async function main(env = process.env, run = checkpointMain) {
   const authority = concurrencyAuthority(env);
   if (!authority) { console.log("Skipped: explicit local concurrency qualification is not enabled."); return; }
-  return run(env, runConcurrencyScenario, {
+  const abort = new AbortController(), stop = () => abort.abort();
+  process.once("SIGINT", stop); process.once("SIGTERM", stop);
+  const wait = (milliseconds) => sleep(milliseconds, undefined, { signal: abort.signal });
+  try { return await run(env, runConcurrencyScenario, {
     authority, scope: "installed-two-objective-concurrency",
-    harnessPaths: ["scripts/verify-local-concurrency.mjs", "scripts/qualification-model-accounting.mjs", "scripts/qualification-sibling-refresh-proof.mjs", "scripts/qualification-merge-proof.mjs", "scripts/qualification-receipts.mjs", "scripts/verify-live-objective.mjs", "scripts/verify-local-faults.mjs", "scripts/verify-local-scheduling.mjs"],
+    harnessPaths: ["scripts/verify-local-concurrency.mjs", "scripts/qualification-controller-freeze.mjs", "scripts/qualification-model-accounting.mjs", "scripts/qualification-sibling-refresh-proof.mjs", "scripts/qualification-merge-proof.mjs", "scripts/qualification-receipts.mjs", "scripts/verify-live-objective.mjs", "scripts/verify-local-faults.mjs", "scripts/verify-local-scheduling.mjs"],
     preflight: async ({ evidence, request, list }) => {
       const repository = (await request("GET /repos/{owner}/{repo}")).data;
       evidence.defaultBranch = repository.default_branch;
+      evidence.freezeCapability = inspectFreezeCapability();
       const issues = await list("GET /repos/{owner}/{repo}/issues", { state: "all" });
       for (const namespace of authority.namespaces) assert.ok(!issues.some((issue) => issue.body?.includes(qualificationNamespaceMarker(namespace))), "namespace already exists");
     },
-    extendPort: async ({ port, evidence, save, request, list, call, invoke, readBounded, pluginRoot, artifact }) => {
+    extendPort: async ({ port, evidence, save, request, list, call, invoke, command, readBounded, pluginRoot, artifact, retireClient }) => {
+      assert.equal(typeof retireClient, "function", "owned MCP retirement boundary unavailable");
       const [owner, repo] = authority.repository.split("/");
       const once = async (action, invoke) => {
+        abort.signal.throwIfAborted();
         assert.ok(!evidence.actions.some((entry) => entry.action === action), "uncertain action must not be retried");
         const entry = { action, requestedAt: new Date().toISOString() }; evidence.actions.push(entry); save();
         const result = await invoke(); entry.response = result; entry.returnedAt = new Date().toISOString(); save(); return result;
+      };
+      const exclusiveAuthority = async () => {
+        const issues = await list("GET /repos/{owner}/{repo}/issues", { state: "open" });
+        const owned = new Map((evidence.objectives ?? []).map((record) => [record.objective.number, record]));
+        const numbers = new Set([...owned.keys(), ...issues.filter((issue) => issue.labels?.some((label) => label.name === "factory:objective")).map((issue) => issue.number)]);
+        for (const number of numbers) {
+          const status = await call("factory_status", { objectiveNumber: number }), record = owned.get(number);
+          if (record?.activation) assert.equal(status.activation?.requestId, record.activation.arguments.requestId, "owned Objective authority changed");
+          else assert.ok(isQuiescentFaultObjective(status, authority.repository, number) ||
+            (record && status.run.state === "not-started" && !status.activation), "unrelated runnable authority appeared");
+        }
       };
       const observeOne = async (record, full = false) => {
         const objective = (await request("GET /repos/{owner}/{repo}/issues/{issue_number}", { issue_number: record.objective.number })).data;
@@ -227,6 +263,12 @@ export async function main(env = process.env, run = checkpointMain) {
           runRequest: record.activation, runResult: { runId: observation.status.run.runId, objective: objective.number, status: observation.status.run.state },
           runResultProvenance: "derived-authenticated-terminal-status-not-captured-RPC" };
       };
+      const readOuter = async () => {
+        const response = await request("GET /repos/{owner}/{repo}/git/ref/{ref}", { ref: "clockgrove-factory/leases/repository-controller" });
+        assert.ok(Number.isFinite(Date.parse(response.headers.date)), "fresh GitHub server time unavailable");
+        const commit = (await request("GET /repos/{owner}/{repo}/git/commits/{commit_sha}", { commit_sha: response.data.object.sha })).data;
+        return { oid: response.data.object.sha, record: checkpointLease(commit, response.data.object.sha), parents: commit.parents.map((parent) => parent.sha), serverTime: response.headers.date };
+      };
       const readLease = async (objective, oid) => {
         if (!oid) oid = (await request("GET /repos/{owner}/{repo}/git/ref/{ref}", { ref: `clockgrove-factory/leases/objective-${objective}` })).data.object.sha;
         const commit = (await request("GET /repos/{owner}/{repo}/git/commits/{commit_sha}", { commit_sha: oid })).data;
@@ -245,13 +287,18 @@ export async function main(env = process.env, run = checkpointMain) {
         assertConcurrencySettlement(observation, policyFor(authority, index), { paused }); return true;
       };
       return { ...port, settled,
-        prepare: async () => {
+        action: async (action) => { await exclusiveAuthority(); return port.action(action); },
+        prepare: async (stage) => {
+          assert.ok(["create", "activate"].includes(stage));
+          if (stage === "create") {
           evidence.objectives = [];
           for (const [index, namespace] of authority.namespaces.entries()) {
             const body = concurrencyObjectiveBody(namespace, index);
             const objective = await once(`create-${index}`, async () => (await request("POST /repos/{owner}/{repo}/issues", { title: `Factory local concurrency [${namespace}]`, body })).data);
             const record = { namespace, objective, bodyDigest: hash(body) }; evidence.objectives.push(record); save();
             await waitForCreatedObjectiveNamespace({ list, namespace, createdIssue: objective });
+          }
+          return;
           }
           for (const [index, record] of evidence.objectives.entries()) {
             const args = { owner, repo, objectiveNumber: record.objective.number, requestId: `${record.namespace}-activate`, baseSha: evidence.base, policy: authority.policy };
@@ -266,18 +313,22 @@ export async function main(env = process.env, run = checkpointMain) {
             assert.ok(isQuiescentFaultObjective(await call("factory_status", { objectiveNumber: issue.number }), authority.repository, issue.number), "unrelated runnable authority appeared before controller start");
           }
           assert.equal((await request("GET /repos/{owner}/{repo}/commits/{ref}", { ref: evidence.defaultBranch })).data.sha, evidence.base, "base advanced before owned activations started");
-          await port.controller("inactive");
+        },
+        stagger: async (original) => {
+          const began = performance.now();
+          for (let index = 0; index < 12; index++) {
+            assert.ok(performance.now() - began < 240000, "bounded initial offset observation expired");
+            abort.signal.throwIfAborted(); await port.controller("active", original);
+            evidence.stagger = { purpose: "model-free-expiry-offset-opportunity-not-expiry-proof", elapsedMs: Math.floor(performance.now() - began), requestedDelayMs: 180000 }; save();
+            await wait(15000);
+          }
+          evidence.stagger.elapsedMs = Math.floor(performance.now() - began); save();
         },
         contend: async (pair) => {
           await once("outer-contention", async () => {
-            const read = async () => {
-              const ref = (await request("GET /repos/{owner}/{repo}/git/ref/{ref}", { ref: "clockgrove-factory/leases/repository-controller" })).data;
-              const commit = (await request("GET /repos/{owner}/{repo}/git/commits/{commit_sha}", { commit_sha: ref.object.sha })).data;
-              return { oid: ref.object.sha, record: checkpointLease(commit, ref.object.sha) };
-            };
-            const before = await read();
+            const before = await readOuter();
             const response = await invoke("factory_run", { objectiveNumber: evidence.objectives[0].objective.number, repository: authority.checkout, untilTerminal: true, policy: authority.policy });
-            const after = await read(), controller = eventsOf(pair[0]).find((event) => event.event === "ControllerObserved");
+            const after = await readOuter(), controller = eventsOf(pair[0]).find((event) => event.event === "ControllerObserved");
             assertRepositoryContention({ response, before, after, controller });
             return { boundary: "repository-controller-outer-lease", response, before, after, innerDirector: "not-reached" };
           });
@@ -285,20 +336,133 @@ export async function main(env = process.env, run = checkpointMain) {
         scoped: async (action) => once(`${action}-b`, () => call(`factory_${action}`, { objectiveNumber: evidence.objectives[1].objective.number, requestId: `${authority.namespaces[1]}-${action}` })),
         pollPair: async (phase, accept) => {
           for (let count = 0; count < 270; count++) {
-            const pair = []; for (const record of evidence.objectives) pair.push(await observeOne(record));
+            abort.signal.throwIfAborted();
+            const pair = []; for (const [index, record] of evidence.objectives.entries()) {
+              // Cached terminal evidence is progress only, never a mutation/resource authorization.
+              const observed = record.terminalObservation ?? await observeOne(record);
+              if (!record.terminalObservation && settled(observed, false, index)) record.terminalObservation = observed;
+              pair.push(observed);
+            }
             evidence.latestPair = pair; evidence.observationPhase = phase; save();
             assert.ok(pair.every((observation) => !["cancelled", "escalated"].includes(observation.status.run.state)), "owned run ended before scenario completion");
             if (accept(pair)) return pair;
             assert.ok(Date.now() < Date.parse(evidence.startedAt) + 2700000, "bounded scenario observation expired");
             assert.ok(!(phase === "refill" && pair.every((observation) => observation.status.run.state === "completed")), "actual refill timing not observed");
-            await sleep(5000);
+            await wait(15000);
           }
           throw Error("bounded scenario observation exhausted");
         },
         captureCheckpoint: async (pair, original) => {
+          pair = []; for (const record of evidence.objectives) pair.push(await observeOne(record));
+          assertConcurrencySettlement(pair[0], policyFor(authority, 0));
+          assertConcurrencySettlement(pair[1], policyFor(authority, 1), { paused: true });
           const absence = [];
           for (const [index, observation] of pair.entries()) { evidence.objective = evidence.objectives[index].objective; absence.push(await port.absence(observation, [original])); }
           evidence.concurrencyCheckpoint = { pair, original, absence, inner: await readLease(evidence.objectives[1].objective.number) }; save();
+        },
+        innerContend: async (original) => {
+          await exclusiveAuthority();
+          await port.controller("active", original);
+          const checkpoint = evidence.concurrencyCheckpoint;
+          const b = evidence.objectives[1], initial = await observeOne(b);
+          assertConcurrencySettlement(initial, policyFor(authority, 1), { paused: true });
+          const inner = await readLease(b.objective.number), outer = await readOuter();
+          for (const key of ["holder", "epoch", "objective", "runId", "policyDigest"]) assert.equal(inner.event[key], checkpoint.inner.event[key], "inner generation changed after accounted checkpoint");
+          assert.equal(inner.event.protocol, "clockgrove.factory/v2"); assert.equal(inner.event.kind, "lease");
+          assert.match(inner.event.holder, /^[A-Za-z0-9_.-]{1,160}$/);
+          const start = one(eventsOf(initial).filter((event) => event.event === "FactoryRunStarted"), "original run missing");
+          for (const key of ["objective", "runId", "policyDigest"]) assert.equal(inner.event[key], start[key]);
+          const oldController = eventsOf(initial).filter((event) => event.event === "ControllerObserved").at(-1);
+          assert.equal(outer.record.controllerId, oldController.controllerId); assert.equal(outer.record.epoch, oldController.epoch);
+          const window = assertInnerContentionWindow({ outer: outer.record, inner: inner.event, serverTime: outer.serverTime, remainingMs: Date.parse(evidence.startedAt) + 2700000 - Date.now() });
+          const cgroup = command("systemctl", ["--user", "show", authority.unit, "--property=ControlGroup", "--value"]);
+          assert.ok(cgroup.endsWith(`/${authority.unit}`));
+          const node = realpathSync(process.execPath), bundle = realpathSync(join(pluginRoot, "dist/factory.js"));
+          const spec = { ...original, uid: process.getuid(), cgroup, node, checkout: authority.checkout,
+            configPath: join(homedir(), ".config/systemd/user", authority.unit),
+            argv: [node, bundle, "controller", "run", authority.repository, "--repo", authority.checkout], maximumMs: window.maximumMs };
+          evidence.innerContention = { window, outer, inner, freeze: [], result: "pending" }; save();
+          await withFrozenController(spec, async (assertFrozen) => {
+            assert.equal((await readOuter()).oid, outer.oid, "outer lease advanced before freeze");
+            assert.equal((await readLease(b.objective.number)).oid, inner.oid, "inner lease advanced before freeze");
+            let fresh;
+            for (let count = 0; count < 42; count++) {
+              abort.signal.throwIfAborted(); assertFrozen(); fresh = await readOuter();
+              assert.equal(fresh.oid, outer.oid, "another controller replaced the frozen holder");
+              evidence.innerContention.wait = { serverTime: fresh.serverTime, polls: count + 1 }; save();
+              if (Date.parse(fresh.serverTime) > window.outerExpiry) break;
+              await wait(15000);
+            }
+            assert.ok(Date.parse(fresh.serverTime) > window.outerExpiry);
+            assert.ok(window.innerExpiry - Date.parse(fresh.serverTime) >= 135000, "live inner refusal window exhausted before contender");
+            assert.equal((await readLease(b.objective.number)).oid, inner.oid); assertFrozen(); abort.signal.throwIfAborted();
+            await once("inner-lease-held-contender", async () => {
+              let response;
+              try {
+                response = await invoke("factory_run", { objectiveNumber: b.objective.number, repository: authority.checkout, untilTerminal: true, policy: authority.policy });
+              } catch {
+                // A client deadline is not evidence that its handler or remote request stopped.
+                // Retire the exact owned client before thaw and keep the durable pause intact;
+                // no resume/restart path is reachable from this uncertain outcome.
+                const uncertain = { outcome: "unknown", continuation: "forbidden", process: { absence: "unknown" }, remoteObservation: "unavailable" };
+                evidence.innerContention.uncertainContender = uncertain; save();
+                try { uncertain.process = await retireClient(); } catch { /* retain explicit unknown */ }
+                save();
+                try {
+                  const comments = [];
+                  for (const issue of [b.objective, ...initial.children]) comments.push(...await list("GET /repos/{owner}/{repo}/issues/{issue_number}/comments", { issue_number: issue.number }));
+                  const receipts = authenticatedFaultEvents(comments, evidence.actor, b.objective.number);
+                  uncertain.remoteObservation = { outer: await readOuter(), inner: await readLease(b.objective.number), receipts,
+                    runHistoryUnchanged: hash(receipts) === hash(initial.receipts), settlementClaim: "none; fresh observation only" };
+                } catch { /* a missing read never proves remote-request settlement */ }
+                save();
+                throw Error("inner contender outcome is unknown; no automatic continuation");
+              }
+              const released = await readOuter();
+              assert.equal(released.record.event, "RepositoryLeaseReleased");
+              const commit = (await request("GET /repos/{owner}/{repo}/git/commits/{commit_sha}", { commit_sha: released.record.previousOid })).data;
+              const acquired = { oid: commit.sha, record: checkpointLease(commit, commit.sha), parents: commit.parents.map((parent) => parent.sha) };
+              assertHeldInnerRefusal({ response, objective: b.objective.number, inner, afterInner: await readLease(b.objective.number), outer, acquired, released });
+              const after = await observeOne(b);
+              assert.deepEqual(after.receipts, initial.receipts, "losing inner contender changed run/admission/accounting history");
+              evidence.innerContention.result = "inner-lease-held-refusal"; save();
+              return { response, acquired, released, innerOidUnchanged: inner.oid, admissionsAdded: 0 };
+            });
+          }, (observation) => { evidence.innerContention.freeze.push(observation); save(); });
+          // Give the original actor a bounded chance to hit its stale outer fence. No task is resumed.
+          let gone = false;
+          for (let count = 0; count < 7; count++) {
+            abort.signal.throwIfAborted();
+            try { const stat = readBounded(`/proc/${original.pid}/stat`, 16384); gone = stat.slice(stat.lastIndexOf(")") + 2).split(/\s+/)[19] !== original.startTicks; }
+            catch (error) { if (error.code !== "ENOENT") throw error; gone = true; }
+            if (gone) break; await wait(15000);
+          }
+          assert.ok(gone, "stale controller did not retire within the observed bound");
+          const journal = command("journalctl", ["--user", "--no-pager", "-n", "100", "-o", "cat", `_SYSTEMD_INVOCATION_ID=${original.invocationId}`]);
+          assert.ok(journal.includes("repository-lease-lost"), "stale outer-actor fencing diagnostic not observed");
+          const after = await observeOne(b); assert.deepEqual(after.receipts, initial.receipts, "stale actor changed paused run history");
+          assert.equal((await readLease(b.objective.number)).oid, inner.oid, "stale actor changed original inner ownership");
+          evidence.innerContention.staleActor = { original, absent: true, diagnostic: "repository-lease-lost", runHistoryUnchanged: true }; save();
+          await once("stop-stale", async () => {
+            assert.equal(assertControllerUnit(readBounded(spec.configPath, 16384), { repository: authority.repository, checkout: authority.checkout, node, bundle }), original.configDigest);
+            const raw = command("systemctl", ["--user", "show", authority.unit,
+              "--property=Id,LoadState,ActiveState,SubState,Job,InvocationID,MainPID,ExecMainPID,ExecMainCode,ExecMainStatus,Result,FragmentPath,DropInPaths,NeedDaemonReload"]);
+            const rows = raw.split("\n").map((line) => { const index = line.indexOf("="); assert.ok(index > 0); return [line.slice(0, index), line.slice(index + 1)]; });
+            const fields = Object.fromEntries(rows); assert.equal(Object.keys(fields).length, rows.length);
+            assertRetiredController(fields, original, spec.configPath);
+            evidence.innerContention.staleActor.unitBeforeStop = fields; save();
+            return call("factory_controller_stop", { repository: authority.checkout, requestId: `${authority.namespace}-stop-stale` });
+          });
+          await port.controller("inactive");
+          // A stale actor cannot release its old inner lease through a lost outer fence. Wait for
+          // that actual server-relative expiry before the normal public restart/resume path.
+          for (let count = 0; count < 24; count++) {
+            abort.signal.throwIfAborted(); const observed = await readOuter();
+            if (Date.parse(observed.serverTime) > window.innerExpiry) return;
+            assert.ok(Date.parse(evidence.startedAt) + 2700000 - Date.now() > 300000, "original completion deadline exhausted");
+            await wait(15000);
+          }
+          throw Error("original inner lease expiry not observed within bound");
         },
         finish: async (pair, original, replacement, refill) => {
           const final = []; for (const record of evidence.objectives) final.push(await observeOne(record, true));
@@ -344,7 +508,7 @@ export async function main(env = process.env, run = checkpointMain) {
         },
       };
     },
-  });
+  }); } finally { process.removeListener("SIGINT", stop); process.removeListener("SIGTERM", stop); }
 }
 
 /** Independent bounded retained-artifact behavior. No checkout hooks, package install or inherited credentials. */

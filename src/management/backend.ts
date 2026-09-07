@@ -90,6 +90,7 @@ export class ReviewCheckoutCleanupError extends Error {
   constructor(cause: unknown, reviewFailure?: unknown) {
     super("semantic review private checkout cleanup is unresolved", { cause });
     this.name = "ReviewCheckoutCleanupError";
-    this.usage = reviewFailure instanceof ManagementOutputError ? { ...reviewFailure.usage } : undefined;
+    this.usage =
+      reviewFailure instanceof ManagementOutputError ? { ...reviewFailure.usage } : undefined;
   }
 }

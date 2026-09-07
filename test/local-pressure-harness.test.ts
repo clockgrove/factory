@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { boundedPolicy } from "../scripts/verify-live-objective.mjs";
+import { parseRunPolicy } from "../src/protocol/policy.js";
 import {
   pressureAuthority,
   assertPressureRun,
@@ -292,7 +293,7 @@ describe("independent physical pressure observations", () => {
 });
 
 function progression() {
-  const policy = boundedPolicy("regular-prs", 500000);
+  const policy = parseRunPolicy(boundedPolicy("regular-prs", 500000));
   policy.maxAttemptsPerItem = 1;
   const common = { runId: "run", policyDigest: "e".repeat(64), workItem: 2, kind: "scheduling" };
   const pressure = {

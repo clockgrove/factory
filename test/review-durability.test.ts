@@ -50,15 +50,19 @@ describe("durable semantic review transaction", () => {
     const recordFailureUsage = vi.fn();
     const recordOutcome = vi.fn();
     const recordUsage = vi.fn();
-    await expect(runDurableReviewTransaction({
-      existing: null,
-      invoke: async () => { throw failure; },
-      persist: async () => checkpoint(),
-      recover: async () => null,
-      recordUsage,
-      recordFailureUsage,
-      recordOutcome,
-    })).rejects.toBe(failure);
+    await expect(
+      runDurableReviewTransaction({
+        existing: null,
+        invoke: async () => {
+          throw failure;
+        },
+        persist: async () => checkpoint(),
+        recover: async () => null,
+        recordUsage,
+        recordFailureUsage,
+        recordOutcome,
+      }),
+    ).rejects.toBe(failure);
     expect(recordFailureUsage).toHaveBeenCalledExactlyOnceWith(result.usage);
     expect(recordUsage).not.toHaveBeenCalled();
     expect(recordOutcome).not.toHaveBeenCalled();
@@ -69,14 +73,19 @@ describe("durable semantic review transaction", () => {
     const failure = new ReviewCheckoutCleanupError(Error("owned checkout removal failed"));
     const recordUsage = vi.fn();
     const recordOutcome = vi.fn();
-    await expect(runDurableReviewTransaction({
-      existing: null,
-      invoke: async (save) => { await save(result); throw failure; },
-      persist: async () => record,
-      recover: async () => record,
-      recordUsage,
-      recordOutcome,
-    })).rejects.toBe(failure);
+    await expect(
+      runDurableReviewTransaction({
+        existing: null,
+        invoke: async (save) => {
+          await save(result);
+          throw failure;
+        },
+        persist: async () => record,
+        recover: async () => record,
+        recordUsage,
+        recordOutcome,
+      }),
+    ).rejects.toBe(failure);
     expect(recordUsage).toHaveBeenCalledExactlyOnceWith(record);
     expect(recordOutcome).not.toHaveBeenCalled();
   });

@@ -416,7 +416,7 @@ describe("explicit checkpoint restart authority", () => {
       ).toThrow();
     const bounded = checkpointAuthority({ ...env, FACTORY_CHECKPOINT_MAX_MODEL_TOKENS: "250000" })!;
     expect(bounded.policy).toEqual({
-      ...boundedPolicy("regular-prs", 250000),
+      ...parseRunPolicy(boundedPolicy("regular-prs", 250000)),
       maxAttemptsPerItem: 1,
     });
     const observed = observation();
@@ -494,11 +494,11 @@ describe("explicit checkpoint restart authority", () => {
   });
   it("pins existing lifecycle identity and the original local allowance", () => {
     expect(authority.policy).toEqual({
-      ...boundedPolicy("regular-prs", 500000),
+      ...parseRunPolicy(boundedPolicy("regular-prs", 500000)),
       maxAttemptsPerItem: 1,
     });
     expect(parseRunPolicy(authority.policy).maxAttemptsPerItem).toBe(1);
-    expect(boundedPolicy("regular-prs", 500000).maxAttemptsPerItem).toBe(2);
+    expect(parseRunPolicy(boundedPolicy("regular-prs", 500000)).maxAttemptsPerItem).toBe(2);
     expect(DEFAULT_RUN_POLICY.maxAttemptsPerItem).toBe(3);
     expect(
       checkpointAuthority({

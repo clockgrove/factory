@@ -2,8 +2,7 @@
  * index, object, config, filter or network redirection for a pinned checkout. */
 export function pinnedGitEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const environment = { ...source };
-  for (const key of Object.keys(environment))
-    if (key.startsWith("GIT_")) delete environment[key];
+  for (const key of Object.keys(environment)) if (key.startsWith("GIT_")) delete environment[key];
   return Object.assign(environment, {
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_SYSTEM: "/dev/null",

@@ -261,7 +261,14 @@ describe("installed large-file lifecycle authority", () => {
     expect(parseRunPolicy(authority.policy).capacity?.local?.maxWorkers).toBe(1);
     expect(parseRunPolicy(authority.policy).maxAttemptsPerItem).toBe(1);
   });
-  it.each(["transfer-restart", "lfs-missing-tool", "lfs-missing-object", "scope", "secret", "symlink"])(
+  it.each([
+    "transfer-restart",
+    "lfs-missing-tool",
+    "lfs-missing-object",
+    "scope",
+    "secret",
+    "symlink",
+  ])(
     "prospectively forbids replacement execution for %s without waiting for the observer",
     (scenario) => {
       const accepted = largeFileAuthority({

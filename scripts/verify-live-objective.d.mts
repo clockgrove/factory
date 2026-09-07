@@ -14,6 +14,7 @@ export function waitForCreatedObjectiveNamespace(input: {
   wait?: (milliseconds: number) => Promise<void>;
 }): Promise<void>;
 export function boundedPolicy(delivery?: string, maxModelTokens?: number): unknown;
+export function assertRecordedQualificationPolicy(recorded: unknown, expected: unknown): void;
 export type QualificationMergeAssertion = (
   proof: unknown,
   input: import("./qualification-merge-proof.mjs").MergeProofInput,

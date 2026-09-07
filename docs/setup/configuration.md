@@ -133,8 +133,11 @@ launch a paid worker. For sandbox burst, check all of the following:
 - GitHub-managed execution needs a nonzero `maxManagedAgentSessions` and its own explicit backend
   authorization. Independent validation must also fit an available, authorized backend and budget.
 - When `economics` is present, its sandbox/session limits must agree with the corresponding
-  top-level limits. Model-token accounting is a separate observed-usage threshold, not a cloud
-  spending authorization or hard provider cap.
+  top-level limits. A new token threshold requires explicit
+  `economics.modelTokenBudgetMode: "observed-stop"`; in-flight calls may exceed it. Requesting
+  `"hard"` refuses before model work because the current integrations cannot enforce that token
+  cap. Neither mode grants cloud spending authority. Recorded historical runs recover without
+  silently changing their policy or usage.
 - The **repository controller** must have paid capacity. Its default is `--max-paid-workers 0`.
   The generated service command uses that default; environment variables do not raise it. To permit
   a chosen ceiling, explicitly configure the controller's `controller run` command with

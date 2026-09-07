@@ -9,6 +9,7 @@ import {
   assessQualificationPreflight,
   assertRetryableObjective,
   assertQualificationCompletion,
+  assertRecordedQualificationPolicy,
   boundedPolicy,
   installedBundleIdentity,
   installedIdentity,
@@ -46,6 +47,25 @@ type HarnessEvent = {
   sequence: number;
   [key: string]: unknown;
 };
+
+describe("qualification token intent compatibility", () => {
+  it("opts new scenarios into observed stopping without rewriting historical evidence", () => {
+    const current = parseRunPolicy(boundedPolicy());
+    expect(current.economics?.modelTokenBudgetMode).toBe("observed-stop");
+    const legacy = structuredClone(current);
+    delete legacy.economics!.modelTokenBudgetMode;
+    const before = JSON.stringify(legacy);
+    expect(() => assertRecordedQualificationPolicy(current, current)).not.toThrow();
+    expect(() => assertRecordedQualificationPolicy(legacy, current)).not.toThrow();
+    expect(JSON.stringify(legacy)).toBe(before);
+    expect(current.economics?.modelTokenBudgetMode).toBe("observed-stop");
+    const hard = structuredClone(current);
+    hard.economics!.modelTokenBudgetMode = "hard";
+    expect(() => assertRecordedQualificationPolicy(hard, current)).toThrow();
+    legacy.maxParallel += 1;
+    expect(() => assertRecordedQualificationPolicy(legacy, current)).toThrow();
+  });
+});
 
 describe("created Objective namespace visibility", () => {
   const namespace = "visibility-qualification";

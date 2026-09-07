@@ -326,6 +326,32 @@ describe("conservative economic feedback", () => {
     });
   });
 
+  it("discloses token-budget intent separately from observed balances without rewriting policy", () => {
+    const economics = {
+      maxModelTokens: 100,
+      maxSandboxMinutes: 0,
+      maxManagedSessions: 0,
+      minCloudTimeSavedMinutes: 0,
+    };
+    for (const mode of [undefined, "observed-stop", "hard"] as const) {
+      const policy = {
+        ...DEFAULT_RUN_POLICY,
+        economics: { ...economics, ...(mode ? { modelTokenBudgetMode: mode } : {}) },
+      };
+      const original = JSON.stringify(policy);
+      const summary = summarizeEconomics({ events: [], policy });
+      expect(summary.modelTokenBudgetIntent).toEqual({
+        mode: mode ?? "legacy-observed-stop",
+        limit: 100,
+        hardCapEnforced: false,
+      });
+      expect(summary.usage.model_tokens.availability).toBe("unavailable");
+      expect(JSON.stringify(policy)).toBe(original);
+    }
+    expect(summarizeEconomics({ events: [], policy: DEFAULT_RUN_POLICY }).modelTokenBudgetIntent)
+      .toEqual({ mode: "none", limit: null, hardCapEnforced: false });
+  });
+
   it("counts exact provider billing receipt replays once without changing native or model ledgers", () => {
     const receipt = {
       provider: "provider-a",

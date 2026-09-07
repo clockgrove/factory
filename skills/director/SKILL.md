@@ -20,8 +20,18 @@ Collect:
 - an absolute local checkout of that exact repository;
 - an optional complete run policy.
 
-If no policy was supplied, use Factory's adaptive local-only default (up to eight workers subject to
-measured CPU and memory headroom). Never opt into paid backends or broaden trust on the user's behalf.
+If no policy was supplied, use Factory's fixed local-only default (up to two workers, further
+constrained by measured CPU and memory headroom). Adaptive local concurrency is an explicit policy
+choice until its default-enablement qualification passes. Never opt into paid backends or broaden
+trust on the user's behalf.
+
+A new policy containing `economics.maxModelTokens` must explicitly select
+`economics.modelTokenBudgetMode: "observed-stop"` to permit in-flight overshoot. Do not make that
+choice for a user who requested a hard cap: current model providers cannot enforce one, and Factory
+rejects `"hard"` before model work. Report the limitation and available provider-native controls.
+Status exposes the recorded budget intent; old run recovery preserves its original policy rather
+than inserting a new mode or resetting usage. A zero-valued dispatch-intent marker is not proof of
+zero consumption.
 
 Prefer **durable unattended mode** when the user asks Factory to run autonomously, survive chat
 disconnects, resume after login/boot, or process work in the background:

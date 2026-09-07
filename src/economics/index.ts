@@ -1,5 +1,9 @@
 import type { FactoryEvent } from "../protocol/events.js";
 import type { RunPolicy } from "../protocol/policy.js";
+import {
+  modelTokenBudgetIntent,
+  type ModelTokenBudgetIntent,
+} from "../protocol/budget-intent.js";
 import { deduplicateFactoryEvents, latestRunReceipts } from "../control/receipts.js";
 import { summarizeRuntimeEconomics, type RuntimeEconomics } from "./runtime.js";
 export { summarizeRuntimeEconomics, type RuntimeEconomics } from "./runtime.js";
@@ -301,6 +305,7 @@ export interface EconomicSummary {
   nativeUnits: NativeUnitLedger[];
   usage: Record<NativeBudgetUnit, EvidenceMetric<number>>;
   modelTokenBreakdown: ModelTokenBreakdown;
+  modelTokenBudgetIntent: ModelTokenBudgetIntent;
   budgets: {
     sandboxMilliseconds: { configured: number; committed: number; remaining: number };
     managedSessions: { configured: number; committed: number; remaining: number };
@@ -389,6 +394,7 @@ export function summarizeEconomics(input: {
   return {
     nativeUnits,
     modelTokenBreakdown: modelTokenBreakdown(input.events, input.runId),
+    modelTokenBudgetIntent: modelTokenBudgetIntent(input.policy),
     usage: Object.fromEntries(
       nativeUnits.map((ledger) => [ledger.unit, observedUsage(ledger)]),
     ) as Record<NativeBudgetUnit, EvidenceMetric<number>>,
@@ -407,7 +413,7 @@ export function summarizeEconomics(input: {
         configuredTokens === undefined
           ? {
               availability: "unavailable",
-              reason: "the run policy has no enforceable model-token ceiling",
+              reason: "the run policy has no configured model-token threshold",
             }
           : {
               availability: "observed",

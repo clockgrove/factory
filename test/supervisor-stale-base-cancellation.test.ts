@@ -345,7 +345,7 @@ describe("cleanup-only cancellation of a stale activation", () => {
   it("does not equate an unreported execution marker with zero usage on cancellation", async () => {
     const h = await held();
     for (const item of h.f.snapshot.workItems)
-      item.factoryEvents = item.factoryEvents?.filter(
+      item.factoryEvents = (item.factoryEvents ?? []).filter(
         (event) =>
           !(
             event.kind === "budget" &&

@@ -1178,7 +1178,7 @@ export async function main(env = process.env, run = checkpointMain) {
             }
             throw Error("original inner lease expiry not observed within bound");
           },
-          finish: async (pair, original, replacement, refill) => {
+          finish: async (_pair, original, replacement, refill) => {
             const final = [];
             for (const record of evidence.objectives) final.push(await observeOne(record, true));
             const starts = final.map((entry) =>

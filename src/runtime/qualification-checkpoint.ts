@@ -210,8 +210,12 @@ export async function holdAppServerQualificationCheckpoint(args: {
           args.signal ? { signal: args.signal } : {},
         );
       } catch (error) {
-        if (args.signal?.aborted && error instanceof Error &&
-          error.name === "AbortError" && error.cause === args.signal.reason)
+        if (
+          args.signal?.aborted &&
+          error instanceof Error &&
+          error.name === "AbortError" &&
+          error.cause === args.signal.reason
+        )
           throw new SafeArtifactCheckpointShutdownError(error);
         throw error;
       }

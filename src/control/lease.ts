@@ -45,7 +45,11 @@ export class LeaseLostError extends Error {
 
 /** Observed before acquiring any Objective authority, not loss of an owned lease. */
 export class LeaseAcquisitionContendedError extends LeaseLostError {
-  constructor(readonly objective: number, readonly retryAfterMs: number, holder = "another Director") {
+  constructor(
+    readonly objective: number,
+    readonly retryAfterMs: number,
+    holder = "another Director",
+  ) {
     super(`Objective #${objective} is leased by ${holder}`);
     this.name = "LeaseAcquisitionContendedError";
   }

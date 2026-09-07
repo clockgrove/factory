@@ -122,7 +122,9 @@ describe("one-shot installed App Server checkpoint hold", () => {
       expect(result).toBeInstanceOf(SafeArtifactCheckpointHeldError);
       expect(result).not.toBeInstanceOf(SafeArtifactCheckpointShutdownError);
       expect(f.controller.signal.aborted).toBe(false);
-    } finally { now.mockRestore(); }
+    } finally {
+      now.mockRestore();
+    }
   });
   it("is a default no-op without private opt-in and does not even read provider proof", async () => {
     const f = await fixture();
@@ -148,7 +150,9 @@ describe("one-shot installed App Server checkpoint hold", () => {
       turnId: "turn-1",
     });
     expect(f.counts()).toEqual({ fenced: 2, proved: 1 });
-    const repeated = await holdAppServerQualificationCheckpoint(f.args).catch((error: unknown) => error);
+    const repeated = await holdAppServerQualificationCheckpoint(f.args).catch(
+      (error: unknown) => error,
+    );
     expect(repeated).toBeInstanceOf(SafeArtifactCheckpointHeldError);
     expect(repeated).not.toBeInstanceOf(SafeArtifactCheckpointShutdownError);
     expect(JSON.parse(await readFile(`${f.path}.reached`, "utf8"))).toEqual(witness);

@@ -6289,12 +6289,13 @@ export class FactorySupervisor {
       } finally {
         if (validationCapacity) this.#releaseCapacity(validationCapacity.key);
       }
-      // biome-ignore lint/correctness/noUnsafeFinally: uncertain cleanup must override success so Factory cannot launch a duplicate paid or local worker
       if (finalizationError) {
         // An orderly hold is not permission to suppress a later cleanup failure
         // through the outer signal-aborted shutdown branch.
-        if (safeHoldShutdown) throw new SafeArtifactCheckpointHeldError(finalizationError);
-        throw finalizationError;
+        // biome-ignore lint/correctness/noUnsafeFinally: uncertain cleanup must override success so Factory cannot launch a duplicate paid or local worker
+        throw safeHoldShutdown
+          ? new SafeArtifactCheckpointHeldError(finalizationError)
+          : finalizationError;
       }
     }
   }

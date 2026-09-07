@@ -117,8 +117,12 @@ describe("Director lease", () => {
     const acquired = await manager.acquire(identity, base);
     store.now = new Date(store.now.getTime() + 5000);
     const commits = store.commits.size;
-    await expect(manager.acquire({ ...identity, holder: "replacement" }, base)).rejects.toMatchObject({
-      name: "LeaseAcquisitionContendedError", objective: 42, retryAfterMs: 55000,
+    await expect(
+      manager.acquire({ ...identity, holder: "replacement" }, base),
+    ).rejects.toMatchObject({
+      name: "LeaseAcquisitionContendedError",
+      objective: 42,
+      retryAfterMs: 55000,
     });
     expect(store.refs.get(acquired.ref)).toBe(acquired.oid);
     expect(store.commits.size).toBe(commits);

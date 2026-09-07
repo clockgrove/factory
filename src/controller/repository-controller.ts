@@ -651,7 +651,10 @@ async function withRepositoryOwnership<T>(
       try {
         await leases.release(lease);
       } catch (error) {
-        if (!(error instanceof RepositoryLeaseLostError) || failure instanceof LeaseAcquisitionContendedError)
+        if (
+          !(error instanceof RepositoryLeaseLostError) ||
+          failure instanceof LeaseAcquisitionContendedError
+        )
           failure = ownershipFailure(failure, error);
       }
     }
@@ -668,7 +671,8 @@ function platformFailure(error: unknown): PlatformUnavailableError | undefined {
 
 /** Fixed diagnostics only: never log provider request bodies, headers, or causes. */
 function controllerFailureDiagnostic(error: unknown): string {
-  if (error instanceof LeaseAcquisitionContendedError) return "objective-lease-acquisition-contended";
+  if (error instanceof LeaseAcquisitionContendedError)
+    return "objective-lease-acquisition-contended";
   const unavailable = platformFailure(error);
   if (unavailable)
     return `platform-${unavailable.refusal.kind}; retryAfterMs=${unavailable.retryAfterMs}`;

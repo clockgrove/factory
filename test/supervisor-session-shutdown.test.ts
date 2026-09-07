@@ -65,7 +65,11 @@ describe("completed artifact shutdown before validation admission", () => {
       let interrupted = false;
       const transition = CapacityLedger.prototype.transition;
       vi.spyOn(CapacityLedger.prototype, "transition").mockImplementation(function (
-        this: CapacityLedger, generation, from, reservation, limits,
+        this: CapacityLedger,
+        generation,
+        from,
+        reservation,
+        limits,
       ) {
         if (!interrupted && reservation.workItem === 8 && reservation.phase === "validation") {
           // Inject the runtime hold's proved-shutdown outcome at the first
@@ -74,7 +78,9 @@ describe("completed artifact shutdown before validation admission", () => {
           interrupted = true;
           expect(f.resources.size).toBe(0);
           assertHeld(f);
-          original.push(...f.events().filter((event) => event.kind === "attempt" || event.kind === "budget"));
+          original.push(
+            ...f.events().filter((event) => event.kind === "attempt" || event.kind === "budget"),
+          );
           shutdown.abort();
           throw new SafeArtifactCheckpointShutdownError(shutdown.signal.reason);
         }
@@ -101,18 +107,33 @@ describe("completed artifact shutdown before validation admission", () => {
         });
       expect(interrupted).toBe(true);
       assertHeld(f);
-      expect(f.events().filter((event) => event.kind === "attempt" || event.kind === "budget")).toEqual(original);
-      expect(f.events().some((event) => ["FactoryRunCancelled", "FactoryRunCompleted", "FactoryRunEscalated"].includes(event.event))).toBe(false);
+      expect(
+        f.events().filter((event) => event.kind === "attempt" || event.kind === "budget"),
+      ).toEqual(original);
+      expect(
+        f
+          .events()
+          .some((event) =>
+            ["FactoryRunCancelled", "FactoryRunCompleted", "FactoryRunEscalated"].includes(
+              event.event,
+            ),
+          ),
+      ).toBe(false);
       expect(release).toHaveBeenCalledTimes(failure === "cleanup" ? 0 : 1);
-      const ready = [...f.refs].filter(([ref]) => ref.includes("/artifact-transfers/") && ref.endsWith("/ready"));
+      const ready = [...f.refs].filter(
+        ([ref]) => ref.includes("/artifact-transfers/") && ref.endsWith("/ready"),
+      );
       expect(ready).toHaveLength(1);
       if (failure === "none") {
         expect(release.mock.calls[0]![0]).toMatchObject({ runId: f.runId, epoch: 1 });
         await expect(f.run()).resolves.toMatchObject({ status: "completed" });
-        expect(f.events().filter((event) => event.event === "AttemptReserved" && event.workItem === 8)).toHaveLength(1);
+        expect(
+          f.events().filter((event) => event.event === "AttemptReserved" && event.workItem === 8),
+        ).toHaveLength(1);
         for (const [ref, oid] of ready) expect(f.refs.get(ref)).toBe(oid);
       }
-    }, 30_000,
+    },
+    30_000,
   );
   it("consumes a held-worker failure settled during an in-flight snapshot before same-process recovery", async () => {
     const f = await fixture();

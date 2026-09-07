@@ -39,7 +39,11 @@ describe("Supervisor model dispatch journal", () => {
           ...backend,
           observe: async (handle) => ({
             ...(await backend.observe(handle)),
-            usage: kind === "missing" ? {} : { inputTokens: 4 },
+            usage: {
+              inputTokens: kind === "missing" ? null : 4,
+              outputTokens: null,
+              cachedInputTokens: null,
+            },
           }),
         }),
       });

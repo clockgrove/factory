@@ -694,6 +694,8 @@ const Budget = Common.extend({
     if (
       event.unit !== "model_tokens" ||
       event.phase === "validation" ||
+      (event.phase === "execution" && (!event.workItem || !event.attempt)) ||
+      ((event.directorEpoch === undefined) !== (event.policyDigest === undefined)) ||
       !event.usageId ||
       (event.attempt !== undefined && event.workItem === undefined) ||
       (marker &&

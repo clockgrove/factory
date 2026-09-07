@@ -4,6 +4,17 @@ import { AsyncLocalStorage } from "node:async_hooks";
 export class ModelInvocationScopes {
   readonly active = new Set<string>();
   readonly #scope = new AsyncLocalStorage<Set<string>>();
+  #admissionTail: Promise<void> = Promise.resolve();
+
+  /** Serialize the short durable admission decision, never the model's lifetime. */
+  async admit<T>(operation: () => Promise<T>): Promise<T> {
+    const prior = this.#admissionTail;
+    let release!: () => void;
+    this.#admissionTail = new Promise<void>((resolve) => { release = resolve; });
+    await prior;
+    try { return await operation(); }
+    finally { release(); }
+  }
 
   async run<T>(operation: () => Promise<T>): Promise<T> {
     const owned = new Set<string>();

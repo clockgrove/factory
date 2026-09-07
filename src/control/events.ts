@@ -332,12 +332,18 @@ export class LifecycleRecorder {
     phase?: "management" | "execution" | "validation";
     usageId?: string;
     modelInvocationId?: string;
+    directorEpoch?: number;
+    policyDigest?: string;
     usageEvidence?: "as-recorded" | "conservative-reservation";
     reason?: string;
     reportedModelUsage?: ReportedModelUsage;
   }): Promise<FactoryEvent> {
     await this.leases.assertCurrent(args.lease);
     assertReservationLease(args.reservation, args.lease);
+    if (args.modelInvocationId && (
+      (args.policyDigest !== undefined && args.policyDigest !== args.reservation.policyDigest) ||
+      (args.directorEpoch !== undefined && args.directorEpoch !== args.reservation.directorEpoch)
+    )) throw new Error("model invocation receipt must retain its original attempt binding");
     const now = await this.store.serverTime();
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
@@ -360,6 +366,10 @@ export class LifecycleRecorder {
       amount: args.amount,
       ...(args.usageId ? { usageId: args.usageId } : {}),
       ...(args.modelInvocationId ? { modelInvocationId: args.modelInvocationId } : {}),
+      ...(args.modelInvocationId ? {
+        directorEpoch: args.directorEpoch ?? args.reservation.directorEpoch,
+        policyDigest: args.policyDigest ?? args.reservation.policyDigest,
+      } : {}),
       ...(args.usageEvidence ? { usageEvidence: args.usageEvidence } : {}),
       ...(args.usageEvidence === "conservative-reservation"
         ? {
@@ -373,7 +383,9 @@ export class LifecycleRecorder {
     await this.store.addIssueComment(
       args.workItemNodeId,
       encodeEventComment(
-        `Factory ${args.event === "BudgetReserved" ? "reserved" : "reconciled"} ${args.amount} ${args.unit}.`,
+        args.event === "BudgetReserved" && args.modelInvocationId
+          ? "Factory recorded model dispatch intent; token consumption is not yet known."
+          : `Factory ${args.event === "BudgetReserved" ? "reserved" : "reconciled"} ${args.amount} ${args.unit}.`,
         event,
       ),
     );
@@ -383,15 +395,23 @@ export class LifecycleRecorder {
   async objectiveBudget(args: {
     lease: LeaseState;
     objectiveNodeId: string;
+    workItem?: number;
     sequence: number;
     event: "BudgetReserved" | "BudgetReconciled";
     unit: "model_tokens" | "local_milliseconds";
     amount: number;
     usageId?: string;
     modelInvocationId?: string;
+    directorEpoch?: number;
+    policyDigest?: string;
     reportedModelUsage?: ReportedModelUsage;
   }): Promise<FactoryEvent> {
     await this.leases.assertCurrent(args.lease);
+    if (args.modelInvocationId && (
+      args.policyDigest !== args.lease.policyDigest ||
+      args.directorEpoch === undefined || args.directorEpoch > args.lease.epoch ||
+      (args.event === "BudgetReserved" && args.directorEpoch !== args.lease.epoch)
+    )) throw new Error("model invocation receipt is fenced from its original run policy or epoch");
     const now = await this.store.serverTime();
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
@@ -402,15 +422,19 @@ export class LifecycleRecorder {
       sequence: args.sequence,
       at: now.toISOString(),
       phase: "management",
+      ...(args.workItem !== undefined ? { workItem: args.workItem } : {}),
       unit: args.unit,
       amount: args.amount,
       ...(args.usageId ? { usageId: args.usageId } : {}),
       ...(args.modelInvocationId ? { modelInvocationId: args.modelInvocationId } : {}),
+      ...(args.modelInvocationId ? { directorEpoch: args.directorEpoch, policyDigest: args.policyDigest } : {}),
       ...(args.reportedModelUsage ? { reportedModelUsage: args.reportedModelUsage } : {}),
     });
     await this.store.addIssueComment(
       args.objectiveNodeId,
-      encodeEventComment(`Factory recorded ${args.amount} ${args.unit} for management.`, event),
+      encodeEventComment(args.event === "BudgetReserved" && args.modelInvocationId
+        ? "Factory recorded model dispatch intent; token consumption is not yet known."
+        : `Factory recorded ${args.amount} ${args.unit} for management.`, event),
     );
     return event;
   }

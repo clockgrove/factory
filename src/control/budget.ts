@@ -27,16 +27,18 @@ export function unresolvedModelInvocations(events: FactoryEvent[], runId?: strin
       const prior = markers.get(key);
       if (prior && (prior.policyDigest !== event.policyDigest || prior.directorEpoch !== event.directorEpoch))
         throw new Error("model invocation has conflicting dispatch bindings");
-      markers.set(key, event);
+      if (!prior || event.sequence < prior.sequence) markers.set(key, event);
     } else if (event.event === "BudgetReconciled" && event.unit === "model_tokens") {
       const prior = closures.get(key);
-      if (prior && (prior.amount !== event.amount || prior.usageId !== event.usageId))
+      if (prior && (prior.amount !== event.amount || prior.usageId !== event.usageId || prior.policyDigest !== event.policyDigest || prior.directorEpoch !== event.directorEpoch))
         throw new Error("model invocation has conflicting actual usage receipts");
       closures.set(key, event);
     }
   }
   return [...markers.entries()].filter(([key, marker]) => {
     const closure = closures.get(key);
+    if (closure && (closure.policyDigest !== marker.policyDigest || closure.directorEpoch !== marker.directorEpoch))
+      throw new Error("model invocation usage conflicts with its dispatch binding");
     return !closure || closure.sequence <= marker.sequence;
   }).map(([, event]) => event);
 }

@@ -41,7 +41,13 @@ import {
   deriveBudgetUsage,
   remainingBudget,
   unreconciledBudgetReservations,
+  assertModelInvocationAdmission,
+  isModelInvocationMarker,
+  modelInvocationKey,
+  type ModelInvocationIdentity,
 } from "./control/budget.js";
+import { ModelInvocationScopes } from "./control/model-invocations.js";
+import { assertNewRunBudgetIntent, assertSupportedModelTokenBudgetIntent } from "./protocol/budget-intent.js";
 import {
   type AdmissionGateCommand,
   deriveDurableCommandState,
@@ -242,6 +248,7 @@ import { queuedReasonCode } from "./explanations/index.js";
 import { COPILOT_ASSIGNEE_LOGIN } from "./types.js";
 import {
   admissionCapacityLimits,
+  localMemoryFits,
   planAdmissions,
   type AdmissionProposal,
   type AdmissionWorkItem,
@@ -1093,6 +1100,7 @@ export class FactorySupervisor {
   #deliverySelection!: DeliverySelection;
   #deliveryPlan?: Extract<DeliveryPlan, { result: "supported" }>;
   #budgetEvents: FactoryEvent[] = [];
+  readonly #modelInvocations = new ModelInvocationScopes();
   #integrationTail: Promise<void> = Promise.resolve();
   // Scheduling hints only: never reuse authority or mutable GitHub evidence.
   // Lost on restart; every due observation repeats the normal integration fences.
@@ -2802,6 +2810,10 @@ export class FactorySupervisor {
       snapshot = current;
       this.#sequences.observe(snapshotEvents(snapshot));
       this.#budgetEvents = this.#accountingEvents(snapshotEvents(snapshot), runId);
+      if (!currentRun) {
+        if (this.#options.activation) assertSupportedModelTokenBudgetIntent(this.#policy);
+        else assertNewRunBudgetIntent(this.#policy);
+      }
       this.#run =
         currentRun ??
         (await runManager.start({
@@ -3063,6 +3075,7 @@ export class FactorySupervisor {
               );
               try {
                 await materializeLocalLfsAssets(this.#options.repository, tree.path, base.oid);
+                await this.#admitModelInvocation(compilationInvocationId, snapshot.id);
                 return await this.#management.compile(
                   {
                     repository: tree.path,
@@ -3113,7 +3126,7 @@ export class FactorySupervisor {
             }),
           );
         }
-        durableGraph = await runDurableCompilationTransaction({
+        durableGraph = await this.#compilationTransaction({
           existing: durableGraph,
           ...(invokeCompilation ? { invoke: invokeCompilation } : {}),
           persist: (result) =>
@@ -3139,6 +3152,7 @@ export class FactorySupervisor {
             if (!record.compilation) return;
             const amount = record.compilation.inputTokens + record.compilation.outputTokens;
             const usageId = `compile-${record.graphDigest}`;
+            const link = this.#modelInvocationLink(record.compilation.invocationId);
             const matching = this.#budgetEvents.filter(
               (event) =>
                 event.kind === "budget" &&
@@ -3151,7 +3165,7 @@ export class FactorySupervisor {
             if (matching.some((event) => event.amount !== amount)) {
               throw new Error("durable compilation usage conflicts with its budget receipt");
             }
-            if (matching.length > 0) return;
+            if (this.#hasModelUsageLink(matching, link)) return;
             try {
               const event = await this.#lease.use((lease) =>
                 this.#recorder.objectiveBudget({
@@ -3162,6 +3176,7 @@ export class FactorySupervisor {
                   unit: "model_tokens",
                   amount,
                   usageId,
+                  ...link,
                   reportedModelUsage: reportedModelUsage(record.compilation)!,
                 }),
               );
@@ -3176,7 +3191,8 @@ export class FactorySupervisor {
                   event.phase === "management" &&
                   event.unit === "model_tokens" &&
                   event.usageId === usageId &&
-                  event.amount === amount,
+                  event.amount === amount &&
+                  this.#hasModelUsageLink([event], link),
               );
               if (!recoveredEvent) throw error;
               snapshot = recoveredSnapshot;
@@ -3808,7 +3824,7 @@ export class FactorySupervisor {
           );
         const nowMs = snapshot.readAt.getTime();
         let resource: ResourceSnapshot | null = null;
-        if (scheduling.capacity.mode === "adaptive-local") {
+        {
           resource = await this.#resourceSampler.sample(nowMs).catch((error) => {
             this.#notify(
               `local resource sampling failed closed: ${error instanceof Error ? error.message : String(error)}`,
@@ -4056,7 +4072,6 @@ export class FactorySupervisor {
           this.#controllerLimits,
         );
         const localObservationReady =
-          scheduling.capacity.mode !== "adaptive-local" ||
           Boolean(
             resource &&
               resourcePressureReasons(resource, scheduling.capacity.local).length === 0 &&
@@ -4271,7 +4286,7 @@ export class FactorySupervisor {
     executionSignal?: AbortSignal,
     recovered?: CollectedAttemptContinuation,
   ): Promise<void> {
-    return withArtifactContentScope(() =>
+    return this.#modelInvocations.run(() => withArtifactContentScope(() =>
       this.#executeWithArtifactContent(
         item,
         objectiveDeadline,
@@ -4281,7 +4296,7 @@ export class FactorySupervisor {
         executionSignal,
         recovered,
       ),
-    );
+    ));
   }
 
   async #executeWithArtifactContent(
@@ -4435,6 +4450,7 @@ export class FactorySupervisor {
             throw new Error(`attempt budget exhausted (${consumed})`);
           }
           const budgets = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
+          assertModelInvocationAdmission(this.#budgetEvents, this.#policy, this.#modelInvocations.active);
           selected = this.#registry.get(admission.backendId) ?? undefined;
           if (!selected) {
             throw new Error(`admitted backend ${admission.backendId} is no longer registered`);
@@ -4668,7 +4684,11 @@ export class FactorySupervisor {
           selected.capabilities.id === "codex-app-server/local-worktree"
             ? await this.#sessionJournal(reservation)
             : undefined;
-        handle = await this.#externalAdmission(() => {
+        handle = await this.#externalAdmission(async () => {
+          assertSupportedModelTokenBudgetIntent(this.#policy);
+          if (selected!.capabilities.reportsModelUsage)
+            await this.#admitModelInvocation(`worker-${item.number}-${reservation!.attempt}`, item.id, reservation!, undefined, "execution");
+          else assertModelInvocationAdmission(this.#budgetEvents, this.#policy, this.#modelInvocations.active);
           backendLaunchAttempted = true;
           return selected!.launch({
             repository: `${this.#options.owner}/${this.#options.repo}`,
@@ -4767,6 +4787,7 @@ export class FactorySupervisor {
                   phase: "execution",
                   amount: observedTokens,
                   usageId: `worker-${item.number}-${reservation!.attempt}`,
+                  ...this.#modelInvocationLink(`worker-${item.number}-${reservation!.attempt}`, reservation!, undefined, "execution"),
                   ...(terminalModelUsage ? { reportedModelUsage: terminalModelUsage } : {}),
                 });
                 this.#budgetEvents.push(event);
@@ -4959,12 +4980,13 @@ export class FactorySupervisor {
         }
         let validationResource: ResourceSnapshot | null = null;
         const effective = normalizeSchedulingPolicy(this.#policy);
-        if (validationCapacity.local && effective.capacity.mode === "adaptive-local") {
+        if (validationCapacity.local) {
           validationResource = await this.#resourceSampler.sample(Date.now()).catch(() => null);
           const pressure = validationResource
             ? resourcePressureReasons(validationResource, effective.capacity.local)
             : ["resource sample unavailable"];
-          if (pressure.length > 0 || this.#resourceSampler.coolingDown(Date.now())) {
+          if (pressure.length > 0 || this.#resourceSampler.coolingDown(Date.now()) ||
+            !validationResource || !localMemoryFits(validationResource, validationCapacity.memoryMb, effective.capacity.local.minimumFreeMemoryMb)) {
             if (pressure.length > 0) {
               this.#resourceSampler.notePressure(Date.now());
             }
@@ -5156,8 +5178,9 @@ export class FactorySupervisor {
         }
         const reviewModel = resolveModelSelection(this.#policy, "review");
         invokeReview = (checkpoint) =>
-          this.#externalAdmission(() =>
-            this.#management.review(
+          this.#externalAdmission(async () => {
+            await this.#admitModelInvocation(`review-${reviewIdentityDigest(reviewIdentity)}`, item.id, reservation!);
+            return this.#management.review(
               {
                 repository: this.#options.repository,
                 objectiveNumber: this.#run.objective,
@@ -5168,10 +5191,10 @@ export class FactorySupervisor {
                 ...(reviewModel ? { modelSelection: reviewModel } : {}),
               },
               checkpoint,
-            ),
-          );
+            );
+          });
       }
-      await runDurableReviewTransaction({
+      await this.#reviewTransaction({
         existing: existingReview,
         ...(invokeReview ? { invoke: invokeReview } : {}),
         persist: (result) =>
@@ -5375,6 +5398,7 @@ export class FactorySupervisor {
               phase: "execution",
               amount: terminalModelTokens!,
               usageId: `worker-${item.number}-${reservation!.attempt}`,
+              ...this.#modelInvocationLink(`worker-${item.number}-${reservation!.attempt}`, reservation!, undefined, "execution"),
               ...(terminalModelUsage ? { reportedModelUsage: terminalModelUsage } : {}),
             });
             this.#budgetEvents.push(event);
@@ -5905,7 +5929,8 @@ export class FactorySupervisor {
       )
     )
       throw new Error("App Server terminal usage conflicts with its original budget receipt");
-    if (!matching.length)
+    const link = this.#modelInvocationLink(`worker-${item.number}-${reservation.attempt}`, reservation, undefined, "execution");
+    if (!this.#hasModelUsageLink(matching, link))
       await this.#lease.use(async (lease) => {
         this.#budgetEvents.push(
           await this.#recorder.budget({
@@ -5918,6 +5943,7 @@ export class FactorySupervisor {
             unit: "model_tokens",
             amount: usage.inputTokens! + usage.outputTokens!,
             usageId: `worker-${item.number}-${reservation.attempt}`,
+            ...link,
             reportedModelUsage: usage,
           }),
         );
@@ -6000,7 +6026,8 @@ export class FactorySupervisor {
         )
       )
         throw new Error("App Server recovered usage conflicts with original accounting");
-      if (!model.length)
+      const link = this.#modelInvocationLink(`worker-${item.number}-${reservation.attempt}`, reservation, undefined, "execution");
+      if (!this.#hasModelUsageLink(model, link))
         await this.#lease.use(async (lease) => {
           this.#budgetEvents.push(
             await this.#recorder.budget({
@@ -6013,6 +6040,7 @@ export class FactorySupervisor {
               unit: "model_tokens",
               amount: usage.inputTokens! + usage.outputTokens!,
               usageId: `worker-${item.number}-${reservation.attempt}`,
+              ...link,
               reportedModelUsage: usage,
             }),
           );
@@ -6376,6 +6404,81 @@ export class FactorySupervisor {
     assertManagementInvocationNotFailed(this.#budgetEvents, this.#run.runId, invocationId);
   }
 
+  #reviewTransaction(args: Parameters<typeof runDurableReviewTransaction>[0]) {
+    return this.#modelInvocations.run(() => runDurableReviewTransaction(args));
+  }
+
+  #compilationTransaction(args: Parameters<typeof runDurableCompilationTransaction>[0]) {
+    return this.#modelInvocations.run(() => runDurableCompilationTransaction(args));
+  }
+
+  #hasModelUsageLink(events: readonly FactoryEvent[], link: { modelInvocationId?: string; directorEpoch?: number; policyDigest?: string }): boolean {
+    for (const event of events) {
+      if (event.kind !== "budget" || !event.modelInvocationId) continue;
+      if (event.modelInvocationId !== link.modelInvocationId || event.directorEpoch !== link.directorEpoch || event.policyDigest !== link.policyDigest)
+        throw new Error("actual model usage conflicts with its original dispatch binding");
+    }
+    return events.some((event) => event.kind === "budget" && (!link.modelInvocationId || event.modelInvocationId === link.modelInvocationId));
+  }
+
+  #modelInvocationLink(invocationId: string, reservation?: AttemptReservation, workItem?: number, phase: "management" | "execution" = "management"): { modelInvocationId?: string; directorEpoch?: number; policyDigest?: string } {
+    const identity: ModelInvocationIdentity = {
+      objective: this.#run.objective, runId: this.#run.runId,
+      workItem: reservation?.workItem ?? workItem, attempt: reservation?.attempt,
+      phase, modelInvocationId: invocationId,
+    };
+    const marker = this.#budgetEvents.find((event) => isModelInvocationMarker(event) && modelInvocationKey(event) === modelInvocationKey(identity));
+    return marker?.kind === "budget"
+      ? { modelInvocationId: invocationId, ...(marker.directorEpoch !== undefined ? { directorEpoch: marker.directorEpoch } : {}), ...(marker.policyDigest ? { policyDigest: marker.policyDigest } : {}) } : {};
+  }
+
+  /** Persist before dispatch. The marker is unknown consumption, not a zero-token estimate. */
+  async #admitModelInvocation(invocationId: string, nodeId: string, reservation?: AttemptReservation, workItem?: number, phase: "management" | "execution" = "management"): Promise<void> {
+    await this.#modelInvocations.admit(() => this.#lease.use(async (lease) => {
+      const snapshot = await this.#reader.readObjective(this.#run.objective);
+      this.#fenceSnapshot(snapshot);
+      this.#sequences.observe(snapshotEvents(snapshot));
+      this.#budgetEvents = deduplicateFactoryEvents([
+        ...this.#budgetEvents, ...this.#accountingEvents(snapshotEvents(snapshot)),
+      ]);
+      assertModelInvocationAdmission(this.#budgetEvents, this.#policy, this.#modelInvocations.active);
+      const identity: ModelInvocationIdentity = {
+        objective: this.#run.objective, runId: this.#run.runId,
+        workItem: reservation?.workItem ?? workItem, attempt: reservation?.attempt,
+        phase, modelInvocationId: invocationId,
+      };
+      const key = modelInvocationKey(identity);
+      const matches = (event: FactoryEvent) => isModelInvocationMarker(event) && modelInvocationKey(event) === key;
+      if (this.#budgetEvents.some(matches))
+        throw new Error("model invocation was already dispatched; refusing replay without exact completion");
+      const args = {
+        lease, sequence: this.#sequences.take(), event: "BudgetReserved" as const,
+        unit: "model_tokens" as const, amount: 0,
+        usageId: `invocation-${invocationId}`, modelInvocationId: invocationId,
+        directorEpoch: reservation?.directorEpoch ?? lease.epoch,
+        policyDigest: reservation?.policyDigest ?? policyDigest(this.#policy),
+      };
+      try {
+        const marker = reservation
+          ? await this.#recorder.budget({ ...args, reservation, workItemNodeId: nodeId, phase })
+          : await this.#recorder.objectiveBudget({ ...args, objectiveNodeId: nodeId, ...(workItem !== undefined ? { workItem } : {}) });
+        this.#budgetEvents.push(marker);
+      } catch (error) {
+        // Only this still-live dispatch may recover its exact lost write response.
+        const fresh = await this.#reader.readObjective(this.#run.objective);
+        this.#fenceSnapshot(fresh);
+        const recovered = snapshotEvents(fresh).filter(matches);
+        const marker = recovered[0];
+        if (recovered.length !== 1 || marker?.kind !== "budget" || marker.sequence !== args.sequence || marker.policyDigest !== args.policyDigest || marker.directorEpoch !== args.directorEpoch) throw error;
+        this.#sequences.observe(snapshotEvents(fresh));
+        this.#budgetEvents.push(...recovered);
+      }
+      this.#modelInvocations.claim(key);
+      await this.#options.repositoryFence?.();
+      await this.#lease.assertGeneration("admission");
+    }));
+  }
+
   async #recordFailedManagementUsage(
     invocationId: string,
     usage: ManagementUsage,
@@ -6383,6 +6486,7 @@ export class FactorySupervisor {
     reservation?: AttemptReservation,
   ): Promise<void> {
     const usageId = `failed-${invocationId}`;
+    const link = this.#modelInvocationLink(invocationId, reservation);
     const amount = usage.inputTokens + usage.outputTokens;
     const matches = (events: readonly FactoryEvent[]) =>
       events.filter(
@@ -6400,7 +6504,7 @@ export class FactorySupervisor {
     if (existing.some((event) => event.amount !== amount)) {
       throw new Error("failed management usage conflicts with its budget receipt");
     }
-    if (existing.length > 0) return;
+    if (this.#hasModelUsageLink(existing, link)) return;
     try {
       const event = await this.#lease.use((lease) => {
         const common = {
@@ -6410,6 +6514,7 @@ export class FactorySupervisor {
           unit: "model_tokens" as const,
           amount,
           usageId,
+          ...link,
           reportedModelUsage: reportedModelUsage(usage)!,
         };
         return reservation
@@ -6424,7 +6529,7 @@ export class FactorySupervisor {
       if (recovered.some((event) => event.amount !== amount)) {
         throw new Error("failed management usage conflicts with its recovered receipt");
       }
-      if (recovered.length === 0) throw error;
+      if (!this.#hasModelUsageLink(recovered, link)) throw error;
       this.#sequences.observe(snapshotEvents(snapshot));
       this.#budgetEvents.push(...recovered);
     }
@@ -6436,6 +6541,7 @@ export class FactorySupervisor {
     reservation: AttemptReservation,
   ): Promise<void> {
     const usageId = this.#reviewUsageId(record);
+    const link = this.#modelInvocationLink(usageId, reservation);
     const amount = record.usage.inputTokens + record.usage.outputTokens;
     const matches = (events: readonly FactoryEvent[]) =>
       events.filter(
@@ -6453,7 +6559,7 @@ export class FactorySupervisor {
     if (existing.some((event) => event.amount !== amount)) {
       throw new Error("semantic review usage conflicts with its durable checkpoint");
     }
-    if (existing.length > 0) return;
+    if (this.#hasModelUsageLink(existing, link)) return;
     try {
       const event = await this.#lease.use((lease) =>
         this.#recorder.budget({
@@ -6465,6 +6571,7 @@ export class FactorySupervisor {
           unit: "model_tokens",
           amount,
           usageId,
+          ...link,
           reportedModelUsage: reportedModelUsage(record.usage)!,
         }),
       );
@@ -6476,7 +6583,7 @@ export class FactorySupervisor {
       if (recovered.some((event) => event.amount !== amount)) {
         throw new Error("semantic review usage conflicts with its recovered receipt");
       }
-      if (recovered.length === 0) throw error;
+      if (!this.#hasModelUsageLink(recovered, link)) throw error;
       this.#sequences.observe(snapshotEvents(snapshot));
       for (const event of recovered) {
         if (
@@ -8005,14 +8112,12 @@ export class FactorySupervisor {
         paths: packet.allowedPaths,
         exclusiveResources: packet.changeSurface?.exclusiveResources ?? [],
       };
-      const resource =
-        scheduling.capacity.mode === "adaptive-local"
-          ? await this.#resourceSampler.sample(Date.now())
-          : null;
+      const resource = await this.#resourceSampler.sample(Date.now()).catch(() => null);
       if (
-        resource &&
-        (resourcePressureReasons(resource, scheduling.capacity.local).length ||
-          this.#resourceSampler.coolingDown(Date.now()))
+        !resource ||
+        resourcePressureReasons(resource, scheduling.capacity.local).length ||
+        this.#resourceSampler.coolingDown(Date.now()) ||
+        !localMemoryFits(resource, capacity.memoryMb, scheduling.capacity.local.minimumFreeMemoryMb)
       )
         throw new Error("local capacity pressure blocks native-rebase validation");
       if (
@@ -8136,8 +8241,9 @@ export class FactorySupervisor {
         );
         const reviewModel = resolveModelSelection(this.#policy, "review");
         invokeReview = (checkpoint) =>
-          this.#externalAdmission(() =>
-            this.#management.review(
+          this.#externalAdmission(async () => {
+            await this.#admitModelInvocation(`rebase-review-${reviewIdentityDigest(reviewIdentity)}`, item.id, member.reservation);
+            return this.#management.review(
               {
                 repository: this.#options.repository,
                 objectiveNumber: this.#run.objective,
@@ -8148,8 +8254,8 @@ export class FactorySupervisor {
                 ...(reviewModel ? { modelSelection: reviewModel } : {}),
               },
               checkpoint,
-            ),
-          );
+            );
+          });
       }
       const commit = await this.#store.readCommit(headSha);
       if (commit.parentOids.length !== 1 || commit.parentOids[0] !== baseSha) {
@@ -8172,7 +8278,7 @@ export class FactorySupervisor {
         exactHeadValidation,
         state: "published",
       };
-      await runDurableReviewTransaction({
+      await this.#reviewTransaction({
         existing: existingReview,
         ...(invokeReview ? { invoke: invokeReview } : {}),
         persist: (result) =>
@@ -9250,14 +9356,15 @@ export class FactorySupervisor {
     if (!record) {
       const effective = normalizeSchedulingPolicy(this.#policy);
       const resource =
-        !isolated && effective.capacity.mode === "adaptive-local"
+        !isolated
           ? await this.#resourceSampler.sample(Date.now()).catch(() => null)
           : null;
-      if (!isolated && effective.capacity.mode === "adaptive-local") {
+      if (!isolated) {
         const pressure = resource
           ? resourcePressureReasons(resource, effective.capacity.local)
           : ["resource sample unavailable"];
-        if (pressure.length > 0 || this.#resourceSampler.coolingDown(Date.now())) {
+        if (pressure.length > 0 || this.#resourceSampler.coolingDown(Date.now()) ||
+          !resource || !localMemoryFits(resource, packet.requirements.memoryMb ?? effective.capacity.local.defaultMemoryMb, effective.capacity.local.minimumFreeMemoryMb)) {
           if (pressure.length > 0) this.#resourceSampler.notePressure(Date.now());
           return null;
         }
@@ -9517,8 +9624,9 @@ export class FactorySupervisor {
         throw new Error("merge candidate no longer matches the original published patch");
       const reviewModel = resolveModelSelection(this.#policy, "review");
       invokeReview = (checkpoint) =>
-        this.#externalAdmission(() =>
-          this.#management.review(
+        this.#externalAdmission(async () => {
+          await this.#admitModelInvocation(invocationId, item.id, member.reservation);
+          return this.#management.review(
             {
               repository: this.#options.repository,
               objectiveNumber: this.#run.objective,
@@ -9529,10 +9637,10 @@ export class FactorySupervisor {
               ...(reviewModel ? { modelSelection: reviewModel } : {}),
             },
             checkpoint,
-          ),
-        );
+          );
+        });
     }
-    await runDurableReviewTransaction({
+    await this.#reviewTransaction({
       existing: existingReview,
       ...(invokeReview ? { invoke: invokeReview } : {}),
       persist: (result) =>
@@ -9583,6 +9691,9 @@ export class FactorySupervisor {
     amount: number,
     unit: "model_tokens" | "validation_milliseconds" | "sandbox_milliseconds",
   ): Promise<void> {
+    const link = unit === "model_tokens"
+      ? this.#modelInvocationLink(usageId.startsWith("failed-") ? usageId.slice(7) : usageId, undefined, item.number)
+      : {};
     const existing = this.#budgetEvents.filter(
       (event) =>
         event.kind === "budget" &&
@@ -9595,7 +9706,7 @@ export class FactorySupervisor {
     );
     if (existing.some((event) => event.amount !== amount))
       throw new Error("successor usage conflicts with immutable evidence");
-    if (existing.length) return;
+    if (unit === "model_tokens" ? this.#hasModelUsageLink(existing, link) : existing.length > 0) return;
     await this.#appendSuccessorEvent(
       item.id,
       parseFactoryEvent({
@@ -9611,6 +9722,7 @@ export class FactorySupervisor {
         unit,
         amount,
         usageId,
+        ...link,
       }),
     );
   }
@@ -10493,7 +10605,7 @@ export class FactorySupervisor {
           this.#assertManagementInvocationNotFailed(invocationId);
           const existing = await this.#reviews.load(reviewIdentity);
           if (existing)
-            await runDurableReviewTransaction({
+            await this.#reviewTransaction({
               existing,
               recover: () => this.#reviews.load(reviewIdentity),
               persist: async () => {
@@ -10814,15 +10926,15 @@ export class FactorySupervisor {
         if (isolated) adoptedValidator ??= await selectAdoptedValidator();
         const effective = normalizeSchedulingPolicy(this.#policy);
         const resource =
-          !isolated && effective.capacity.mode === "adaptive-local"
+          !isolated
             ? await this.#resourceSampler.sample(Date.now()).catch(() => null)
             : null;
         if (
           !isolated &&
-          effective.capacity.mode === "adaptive-local" &&
           (!resource ||
             resourcePressureReasons(resource, effective.capacity.local).length ||
-            this.#resourceSampler.coolingDown(Date.now()))
+            this.#resourceSampler.coolingDown(Date.now()) ||
+            !localMemoryFits(resource, packet.requirements.memoryMb ?? effective.capacity.local.defaultMemoryMb, effective.capacity.local.minimumFreeMemoryMb))
         )
           return;
         const capacity: CapacityReservation = {
@@ -11196,8 +11308,9 @@ export class FactorySupervisor {
           throw new Error("adopted candidate artifact changed");
         const model = resolveModelSelection(this.#policy, "review");
         invoke = (checkpoint) =>
-          this.#externalAdmission(() =>
-            this.#management.review(
+          this.#externalAdmission(async () => {
+            await this.#admitModelInvocation(invocationId, item.id, undefined, item.number);
+            return this.#management.review(
               {
                 repository: this.#options.repository,
                 objectiveNumber: this.#run.objective,
@@ -11208,10 +11321,10 @@ export class FactorySupervisor {
                 ...(model ? { modelSelection: model } : {}),
               },
               checkpoint,
-            ),
-          );
+            );
+          });
       }
-      await runDurableReviewTransaction({
+      await this.#reviewTransaction({
         existing,
         ...(invoke ? { invoke } : {}),
         persist: (result) =>
@@ -11970,7 +12083,7 @@ export class FactorySupervisor {
         };
         const checkpoint = await this.#reviews.load(identity);
         if (checkpoint) {
-          await runDurableReviewTransaction({
+          await this.#reviewTransaction({
             existing: checkpoint,
             persist: async () => checkpoint,
             recover: () => this.#reviews.load(identity),

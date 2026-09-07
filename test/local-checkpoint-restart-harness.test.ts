@@ -136,12 +136,37 @@ function observation(count = 1, completed = false) {
   if (completed) events.push({ kind: "run", event: "FactoryRunCompleted" });
   const journal = events.flatMap((event): Record<string, unknown>[] => {
     if (event.event !== "BudgetReconciled" || event.unit !== "model_tokens") return [event];
-    const actual = { ...event, modelInvocationId: event.usageId, policyDigest: digest, directorEpoch: 1 };
-    return [{ ...actual, event: "BudgetReserved", amount: 0, usageId: `invocation-${String(event.usageId)}` }, actual];
+    const actual = {
+      ...event,
+      modelInvocationId: event.usageId,
+      policyDigest: digest,
+      directorEpoch: 1,
+    };
+    return [
+      {
+        ...actual,
+        event: "BudgetReserved",
+        amount: 0,
+        usageId: `invocation-${String(event.usageId)}`,
+      },
+      actual,
+    ];
   });
   const receipts: Array<{ event: Record<string, unknown> }> = journal.map((event, i) => {
-    const receipt = { protocol: "clockgrove.factory/v2", at: "2026-09-06T10:00:00.000Z", objective: 1, runId: "original", sequence: i + 1, ...event };
-    return { event: event.kind === "budget" && event.unit === "model_tokens" ? parseFactoryEvent(receipt) : receipt };
+    const receipt = {
+      protocol: "clockgrove.factory/v2",
+      at: "2026-09-06T10:00:00.000Z",
+      objective: 1,
+      runId: "original",
+      sequence: i + 1,
+      ...event,
+    };
+    return {
+      event:
+        event.kind === "budget" && event.unit === "model_tokens"
+          ? parseFactoryEvent(receipt)
+          : receipt,
+    };
   });
   return {
     receipts,
@@ -163,42 +188,82 @@ function observation(count = 1, completed = false) {
 
 describe("same-generation initial startup observation", () => {
   it("retains the bounded original operator refusal and exact request instead of only an assertion", () => {
-    const response = { isError: true, content: [{ type: "text", text: "capacity.local.maxWorkers cannot exceed maxParallel" }] };
-    expect(checkpointOperatorFailure("factory_activate", { requestId: "original-activate" }, response)).toMatchObject({
-      tool: "factory_activate", requestId: "original-activate", text: response.content[0]!.text,
-      isError: true, truncated: false,
+    const response = {
+      isError: true,
+      content: [{ type: "text", text: "capacity.local.maxWorkers cannot exceed maxParallel" }],
+    };
+    expect(
+      checkpointOperatorFailure("factory_activate", { requestId: "original-activate" }, response),
+    ).toMatchObject({
+      tool: "factory_activate",
+      requestId: "original-activate",
+      text: response.content[0]!.text,
+      isError: true,
+      truncated: false,
     });
-    const large = checkpointOperatorFailure("factory_status", {}, { isError: true, content: [{type: "text", text: "x".repeat(10000)}] });
+    const large = checkpointOperatorFailure(
+      "factory_status",
+      {},
+      { isError: true, content: [{ type: "text", text: "x".repeat(10000) }] },
+    );
     expect(large.text).toHaveLength(8192);
     expect(large.truncated).toBe(true);
-    expect(() => checkpointOperatorFailure("factory_activate", {}, {isError: false})).toThrow();
+    expect(() => checkpointOperatorFailure("factory_activate", {}, { isError: false })).toThrow();
   });
   it("settles dispatch markers through exact actual linkage and refuses an unknown marker", () => {
     const ready = observation();
     expect(checkpointReady(ready, authority, pause)).toBe(true);
-    const worker = ready.receipts.find(({event}) => event.event === "BudgetReconciled" && event.phase === "execution" && event.unit === "model_tokens")!;
+    const worker = ready.receipts.find(
+      ({ event }) =>
+        event.event === "BudgetReconciled" &&
+        event.phase === "execution" &&
+        event.unit === "model_tokens",
+    )!;
     ready.receipts.splice(ready.receipts.indexOf(worker), 1);
     expect(checkpointReady(ready, authority, pause)).toBe(false);
   });
   it("allows a distinct accounted changed-head review without authorizing a repeat worker", () => {
     const ready = observation();
-    const review = ready.receipts.find(({event}) => event.event === "BudgetReconciled" && event.workItem && event.phase === "management")!.event;
+    const review = ready.receipts.find(
+      ({ event }) =>
+        event.event === "BudgetReconciled" && event.workItem && event.phase === "management",
+    )!.event;
     const invocation = `integration-review-${"c".repeat(64)}`;
-    const validation = ready.receipts.find(({event}) => event.event === "BudgetReconciled" && event.unit === "validation_milliseconds")!.event;
+    const validation = ready.receipts.find(
+      ({ event }) => event.event === "BudgetReconciled" && event.unit === "validation_milliseconds",
+    )!.event;
     ready.receipts.push(
-      {event: {...review, event: "BudgetReserved", usageId: `invocation-${invocation}`, modelInvocationId: invocation, amount: 0, sequence: 1000}},
-      {event: {...review, usageId: invocation, modelInvocationId: invocation, sequence: 1001}},
-      {event: {...validation, usageId: `integration-validation-${"d".repeat(64)}`, sequence: 1002}},
+      {
+        event: {
+          ...review,
+          event: "BudgetReserved",
+          usageId: `invocation-${invocation}`,
+          modelInvocationId: invocation,
+          amount: 0,
+          sequence: 1000,
+        },
+      },
+      { event: { ...review, usageId: invocation, modelInvocationId: invocation, sequence: 1001 } },
+      {
+        event: {
+          ...validation,
+          usageId: `integration-validation-${"d".repeat(64)}`,
+          sequence: 1002,
+        },
+      },
     );
     ready.status.summary.economics.usage.model_tokens.value += 100;
     ready.status.summary.economics.modelTokenBreakdown.reconciledCalls++;
     expect(checkpointReady(ready, authority, pause)).toBe(true);
     const changed = structuredClone(ready);
-    changed.receipts.find(({event}) => event.usageId === invocation)!.event.usageId = `review-${"c".repeat(64)}`;
+    changed.receipts.find(({ event }) => event.usageId === invocation)!.event.usageId =
+      `review-${"c".repeat(64)}`;
     expect(() => checkpointReady(changed, authority, pause)).toThrow(/original artifact review/);
     const duplicate = structuredClone(ready);
-    duplicate.receipts.push({event: {...duplicate.receipts.at(-1)!.event, sequence: 1003}});
-    expect(() => checkpointReady(duplicate, authority, pause)).toThrow(/candidate validation accounting repeated/);
+    duplicate.receipts.push({ event: { ...duplicate.receipts.at(-1)!.event, sequence: 1003 } });
+    expect(() => checkpointReady(duplicate, authority, pause)).toThrow(
+      /candidate validation accounting repeated/,
+    );
   });
   const identity = {
     unit: "exact.service",

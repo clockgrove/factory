@@ -715,7 +715,9 @@ const Budget = Common.extend({
   if (
     event.usageEvidence === "conservative-reservation" &&
     (event.event !== "BudgetReconciled" ||
-      !["local_milliseconds", "sandbox_milliseconds", "validation_milliseconds"].includes(event.unit) ||
+      !["local_milliseconds", "sandbox_milliseconds", "validation_milliseconds"].includes(
+        event.unit,
+      ) ||
       !["execution", "validation"].includes(event.phase) ||
       (event.unit === "validation_milliseconds" && event.phase !== "validation") ||
       !event.workItem ||

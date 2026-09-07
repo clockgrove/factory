@@ -39,9 +39,15 @@ import {
   parseUnitObservation,
 } from "./verify-local-faults.mjs";
 import { ownedSchedulingScopes, schedulingRequest } from "./verify-local-scheduling.mjs";
-import { isQualificationModelMarker, qualificationModelAccounting } from "./qualification-model-accounting.mjs";
+import {
+  isQualificationModelMarker,
+  qualificationModelAccounting,
+} from "./qualification-model-accounting.mjs";
 import { selectQualificationPublicationRecord } from "./qualification-merge-proof.mjs";
-import { observeNativeMergeProofs, assertNativeMergeProof } from "./qualification-sibling-refresh-proof.mjs";
+import {
+  observeNativeMergeProofs,
+  assertNativeMergeProof,
+} from "./qualification-sibling-refresh-proof.mjs";
 import {
   appServerCheckpointArm,
   appServerCheckpointPath,
@@ -98,7 +104,10 @@ export function checkpointAuthority(env) {
     policy.maxParallel = 1;
     policy.capacity.local.maxWorkers = 1;
   }
-  assert.ok(policy.capacity.local.maxWorkers <= policy.maxParallel, "invalid qualification worker ceiling");
+  assert.ok(
+    policy.capacity.local.maxWorkers <= policy.maxParallel,
+    "invalid qualification worker ceiling",
+  );
   return {
     repository,
     checkout,
@@ -115,8 +124,10 @@ class CheckpointPending extends Error {}
 
 export function checkpointOperatorFailure(tool, args, response) {
   assert.equal(response.isError, true);
-  const text = (response.content ?? []).filter((part) => part.type === "text")
-    .map((part) => part.text).join("\n");
+  const text = (response.content ?? [])
+    .filter((part) => part.type === "text")
+    .map((part) => part.text)
+    .join("\n");
   return {
     tool,
     requestId: args.requestId ?? null,
@@ -432,14 +443,22 @@ export function checkpointFacts(
       const native = completedReceipt(
         itemEvents.filter(
           (event) =>
-            event.event === "BudgetReconciled" && event.phase === phase && event.unit === unit &&
+            event.event === "BudgetReconciled" &&
+            event.phase === phase &&
+            event.unit === unit &&
             event.usageId === undefined,
         ),
         "native execution/validation usage missing or repeated",
       );
       assert.ok(Number.isSafeInteger(native.amount) && native.amount >= 0);
       if (unit === "validation_milliseconds") {
-        const candidates = itemEvents.filter((event) => event.event === "BudgetReconciled" && event.phase === phase && event.unit === unit && event.usageId !== undefined);
+        const candidates = itemEvents.filter(
+          (event) =>
+            event.event === "BudgetReconciled" &&
+            event.phase === phase &&
+            event.unit === unit &&
+            event.usageId !== undefined,
+        );
         const identities = new Set();
         for (const candidate of candidates) {
           assert.match(candidate.usageId, /^integration-validation-[a-f0-9]{64}$/);
@@ -476,14 +495,20 @@ export function checkpointFacts(
       "worker usage missing or repeated",
     );
     const reviews = usage.filter(
-        (event) =>
-          event.workItem === reserved.workItem &&
-          event.attempt === 1 &&
-          event.phase === "management" &&
-          /^review-[a-f0-9]{64}$/.test(event.usageId),
-      );
+      (event) =>
+        event.workItem === reserved.workItem &&
+        event.attempt === 1 &&
+        event.phase === "management" &&
+        /^review-[a-f0-9]{64}$/.test(event.usageId),
+    );
     completedReceipt(reviews, "original artifact review missing or repeated");
-    const candidateReviews = usage.filter((event) => event.workItem === reserved.workItem && event.attempt === 1 && event.phase === "management" && /^integration-review-[a-f0-9]{64}$/.test(event.usageId));
+    const candidateReviews = usage.filter(
+      (event) =>
+        event.workItem === reserved.workItem &&
+        event.attempt === 1 &&
+        event.phase === "management" &&
+        /^integration-review-[a-f0-9]{64}$/.test(event.usageId),
+    );
     assert.ok(Number.isSafeInteger(worker.amount) && worker.amount >= 0);
     for (const review of [...reviews, ...candidateReviews])
       assert.ok(Number.isSafeInteger(review.amount) && review.amount >= 0);
@@ -494,11 +519,21 @@ export function checkpointFacts(
       "terminal worker counter unavailable or different",
     );
   }
-  assert.ok(usage.every((event) => event === compile || reservations.some((reserved) =>
-    event.workItem === reserved.workItem && event.attempt === reserved.attempt &&
-    (event.phase === "execution" ||
-      (event.phase === "management" && /^(?:integration-)?review-[a-f0-9]{64}$/.test(event.usageId)))
-  )), "model usage outside compiled work");
+  assert.ok(
+    usage.every(
+      (event) =>
+        event === compile ||
+        reservations.some(
+          (reserved) =>
+            event.workItem === reserved.workItem &&
+            event.attempt === reserved.attempt &&
+            (event.phase === "execution" ||
+              (event.phase === "management" &&
+                /^(?:integration-)?review-[a-f0-9]{64}$/.test(event.usageId))),
+        ),
+    ),
+    "model usage outside compiled work",
+  );
   for (const reserved of run.filter((event) =>
     ["BudgetReserved", "CapacityReserved"].includes(event.event),
   )) {
@@ -945,11 +980,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     "scripts/qualification-receipts.mjs",
     "scripts/qualification-sibling-refresh-proof.mjs",
     "scripts/qualification-merge-proof.mjs",
-    ...(authority.sessionRecovery
-      ? [
-          "scripts/qualification-app-server-checkpoint.mjs",
-        ]
-      : []),
+    ...(authority.sessionRecovery ? ["scripts/qualification-app-server-checkpoint.mjs"] : []),
     ...(extension.harnessPaths ?? []),
   ].map((path) => {
     assert.match(path, /^scripts\/[A-Za-z0-9_.-]+\.mjs$/);
@@ -1574,45 +1605,118 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
       // Re-read actor/location and immutable graph identities for the same existing
       // proof consumer used by sibling qualification. Never relabel PublicationRecorded
       // with a refreshed head just to satisfy the old one-parent proof.
-      const objective = (await request("GET /repos/{owner}/{repo}/issues/{issue_number}", { issue_number: evidence.objective.number })).data;
+      const objective = (
+        await request("GET /repos/{owner}/{repo}/issues/{issue_number}", {
+          issue_number: evidence.objective.number,
+        })
+      ).data;
       assert.equal(objective.id, evidence.objective.id);
       assert.equal(objective.user.id, evidence.actor.id);
       assert.equal(hash(objective.body), evidence.objectiveBodyDigest);
-      const children = await list("GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues", { issue_number: objective.number });
+      const children = await list("GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues", {
+        issue_number: objective.number,
+      });
       assert.equal(children.length, 3);
       assert.ok(children.every((child) => child.state === "closed"));
-      const comments = [], dependencies = [];
+      const comments = [],
+        dependencies = [];
       for (const issue of [objective, ...children]) {
-        const rows = await list("GET /repos/{owner}/{repo}/issues/{issue_number}/comments", { issue_number: issue.number });
+        const rows = await list("GET /repos/{owner}/{repo}/issues/{issue_number}/comments", {
+          issue_number: issue.number,
+        });
         for (const row of rows) {
-          assert.equal(row.html_url, `https://github.com/${authority.repository}/issues/${issue.number}#issuecomment-${row.id}`);
+          assert.equal(
+            row.html_url,
+            `https://github.com/${authority.repository}/issues/${issue.number}#issuecomment-${row.id}`,
+          );
           comments.push(row);
         }
-        if (issue !== objective) dependencies.push({ workItem: issue.number, blockedBy: await list("GET /repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by", { issue_number: issue.number }) });
+        if (issue !== objective)
+          dependencies.push({
+            workItem: issue.number,
+            blockedBy: await list(
+              "GET /repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by",
+              { issue_number: issue.number },
+            ),
+          });
       }
       const receipts = authenticatedFaultEvents(comments, evidence.actor, objective.number);
       for (const receipt of observation.receipts)
-        assert.ok(receipts.some((fresh) => hash(fresh.event) === hash(receipt.event)), "original completion receipt disappeared");
+        assert.ok(
+          receipts.some((fresh) => hash(fresh.event) === hash(receipt.event)),
+          "original completion receipt disappeared",
+        );
       const proofEvents = receipts.map((receipt) => {
-        const comment = unique(comments.filter((row) => row.id === receipt.commentId), "receipt location ambiguous");
-        return { ...receipt.event, author: comment.user.login, authorId: comment.user.id, receiptUrl: comment.html_url };
+        const comment = unique(
+          comments.filter((row) => row.id === receipt.commentId),
+          "receipt location ambiguous",
+        );
+        return {
+          ...receipt.event,
+          author: comment.user.login,
+          authorId: comment.user.id,
+          receiptUrl: comment.html_url,
+        };
       });
       const publications = proofEvents.filter((event) => event.event === "PublicationRecorded");
       const pulls = [];
       for (const pullNumber of new Set(publications.map((event) => event.pullRequest)))
-        pulls.push((await request("GET /repos/{owner}/{repo}/pulls/{pull_number}", { pull_number: pullNumber })).data);
-      const start = unique(proofEvents.filter((event) => event.event === "FactoryRunStarted"), "one original start required");
-      const delivery = { repository: authority.repository, namespace: authority.namespace, actor: evidence.actor,
-        objective, children, dependencies, pulls, events: proofEvents, policy: authority.policy, base: evidence.base,
-        nativeDefaultBranch: start.baseBranch, runRequest: evidence.runRequest,
+        pulls.push(
+          (
+            await request("GET /repos/{owner}/{repo}/pulls/{pull_number}", {
+              pull_number: pullNumber,
+            })
+          ).data,
+        );
+      const start = unique(
+        proofEvents.filter((event) => event.event === "FactoryRunStarted"),
+        "one original start required",
+      );
+      const delivery = {
+        repository: authority.repository,
+        namespace: authority.namespace,
+        actor: evidence.actor,
+        objective,
+        children,
+        dependencies,
+        pulls,
+        events: proofEvents,
+        policy: authority.policy,
+        base: evidence.base,
+        nativeDefaultBranch: start.baseBranch,
+        runRequest: evidence.runRequest,
         runResult: { runId: observation.status.run.runId },
-        controllerQualification: { peers: [], generation: Object.fromEntries(["controllerId", "epoch", "controllerPolicyDigest"].map((key) => [key, before[key]])) } };
+        controllerQualification: {
+          peers: [],
+          generation: Object.fromEntries(
+            ["controllerId", "epoch", "controllerPolicyDigest"].map((key) => [key, before[key]]),
+          ),
+        },
+      };
       evidence.checkpointDelivery = delivery;
       delivery.mergeProofs = await observeNativeMergeProofs({ evidence: delivery, request });
       for (const proof of delivery.mergeProofs) {
-        const integration = unique(proofEvents.filter((event) => event.event === "AttemptIntegrated" && event.workItem === proof.workItem), "integration identity missing");
-        const publication = selectQualificationPublicationRecord(publications.filter((event) => event.workItem === integration.workItem && event.attempt === integration.attempt));
-        assertNativeMergeProof(delivery, proof, { repository: authority.repository, pull: unique(pulls.filter((pull) => pull.number === proof.pullRequest), "PR identity missing"), publication, integration });
+        const integration = unique(
+          proofEvents.filter(
+            (event) => event.event === "AttemptIntegrated" && event.workItem === proof.workItem,
+          ),
+          "integration identity missing",
+        );
+        const publication = selectQualificationPublicationRecord(
+          publications.filter(
+            (event) =>
+              event.workItem === integration.workItem && event.attempt === integration.attempt,
+          ),
+        );
+        assertNativeMergeProof(delivery, proof, {
+          repository: authority.repository,
+          pull: unique(
+            pulls.filter((pull) => pull.number === proof.pullRequest),
+            "PR identity missing",
+          ),
+          publication,
+          integration,
+        });
       }
       evidence.mergeProofs = delivery.mergeProofs;
       save();
@@ -1638,26 +1742,44 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     const observerPid = transport.pid;
     assert.ok(Number.isSafeInteger(observerPid) && observerPid > 1);
     const observerStat = readBounded(`/proc/${observerPid}/stat`, 16384);
-    const observerStartTicks = observerStat.slice(observerStat.lastIndexOf(")") + 2).split(/\s+/)[19];
+    const observerStartTicks = observerStat
+      .slice(observerStat.lastIndexOf(")") + 2)
+      .split(/\s+/)[19];
     assert.match(observerStartTicks, /^[0-9]+$/);
     const retireClient = async () => {
-      let timer, transportClose = "observed";
+      let timer,
+        transportClose = "observed";
       try {
         // Pinned SDK stdio.close ends stdin, waits 2s, sends SIGTERM, waits 2s,
         // then SIGKILLs only its owned child. Independently observe that incarnation below.
-        await Promise.race([client.close(), new Promise((_, reject) => {
-          timer = setTimeout(() => reject(Error("owned MCP retirement deadline exceeded")), 6000);
-        })]);
-      } catch { transportClose = "unverified"; }
-      finally { clearTimeout(timer); }
+        await Promise.race([
+          client.close(),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(Error("owned MCP retirement deadline exceeded")), 6000);
+          }),
+        ]);
+      } catch {
+        transportClose = "unverified";
+      } finally {
+        clearTimeout(timer);
+      }
       for (let index = 0; index < 20; index++) {
         let present;
         try {
           const stat = readBounded(`/proc/${observerPid}/stat`, 16384);
           present = stat.slice(stat.lastIndexOf(")") + 2).split(/\s+/)[19] === observerStartTicks;
-        } catch (error) { if (error.code !== "ENOENT") throw error; present = false; }
-        if (!present) return { pid: observerPid, startTicks: observerStartTicks, absent: true,
-          transportClose, remoteRequestSettlement: "not-implied" };
+        } catch (error) {
+          if (error.code !== "ENOENT") throw error;
+          present = false;
+        }
+        if (!present)
+          return {
+            pid: observerPid,
+            startTicks: observerStartTicks,
+            absent: true,
+            transportClose,
+            remoteRequestSettlement: "not-implied",
+          };
         await sleep(100);
       }
       throw Error("owned MCP process absence unverified");

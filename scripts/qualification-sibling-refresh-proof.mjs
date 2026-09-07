@@ -37,8 +37,10 @@ const prefix = (kind, event) =>
 export function nativeQualificationEvents(evidence) {
   assert.ok(Array.isArray(evidence.events) && evidence.events.length <= 50000);
   const runId = evidence.runResult.runId;
-  const activationRequestId = evidence.runRequest?.tool === "factory_activate"
-    ? evidence.runRequest.arguments?.requestId : undefined;
+  const activationRequestId =
+    evidence.runRequest?.tool === "factory_activate"
+      ? evidence.runRequest.arguments?.requestId
+      : undefined;
   assert.ok(Number.isSafeInteger(evidence.actor.id) && evidence.actor.id > 0);
   const locations = new Set([
     evidence.objective.number,
@@ -46,10 +48,14 @@ export function nativeQualificationEvents(evidence) {
   ]);
   return deduplicateQualificationReceipts(
     evidence.events
-      .filter((event) => event.runId === runId || (activationRequestId !== undefined && (
-        (event.event === "ActivationRequested" && event.requestId === activationRequestId) ||
-        (["ActivationRejected", "ActivationCancellationRequested"].includes(event.event) && event.activationRequestId === activationRequestId)
-      )))
+      .filter(
+        (event) =>
+          event.runId === runId ||
+          (activationRequestId !== undefined &&
+            ((event.event === "ActivationRequested" && event.requestId === activationRequestId) ||
+              (["ActivationRejected", "ActivationCancellationRequested"].includes(event.event) &&
+                event.activationRequestId === activationRequestId))),
+      )
       .map((raw) => {
         assert.equal(raw.authorId, evidence.actor.id, "foreign receipt actor");
         assert.equal(raw.author.toLowerCase(), evidence.actor.login.toLowerCase());
@@ -233,8 +239,10 @@ function validationProof(value) {
 /** An explicit installed controller exercise is a separate authority path, not a
  * relaxation of the historical foreground recipe. Peers are evidence, never run requests. */
 function controllerAuthority(evidence, events, start, context) {
-  assert.ok(events.every((event) => event.objective === evidence.objective.number),
-    "controller receipt names another Objective");
+  assert.ok(
+    events.every((event) => event.objective === evidence.objective.number),
+    "controller receipt names another Objective",
+  );
   const request = evidence.runRequest;
   assert.equal(request?.tool, "factory_activate");
   const args = request.arguments;
@@ -249,10 +257,16 @@ function controllerAuthority(evidence, events, start, context) {
   assert.equal(start.baseSha, evidence.base);
   assert.equal(start.baseBranch, evidence.nativeDefaultBranch ?? evidence.preflight?.defaultBranch);
   assert.equal(start.actor.toLowerCase(), evidence.actor.login.toLowerCase());
-  const activation = one(events.filter((event) => event.event === "ActivationRequested"),
-    "controller qualification activation missing or repeated");
+  const activation = one(
+    events.filter((event) => event.event === "ActivationRequested"),
+    "controller qualification activation missing or repeated",
+  );
   assert.equal(activation.requestId, args.requestId);
-  assert.equal(activation.runId, activation.requestId, "activation journal has a different request identity");
+  assert.equal(
+    activation.runId,
+    activation.requestId,
+    "activation journal has a different request identity",
+  );
   assert.equal(activation.objective, start.objective);
   assert.equal(activation.repository, start.repository);
   assert.equal(activation.baseSha, start.baseSha);
@@ -261,10 +275,19 @@ function controllerAuthority(evidence, events, start, context) {
   assert.equal(activation.requestedBy.toLowerCase(), start.actor.toLowerCase());
   assert.ok(activation.sequence < start.sequence);
   assert.ok(instant(activation.at) <= instant(start.at));
-  assert.ok(!events.some((event) => ["ActivationRejected", "ActivationCancellationRequested"].includes(event.event)),
-    "controller activation was rejected or withdrawn");
-  const observations = events.filter((event) => event.event === "ControllerObserved" &&
-    ["controllerId", "epoch", "controllerPolicyDigest"].every((key) => event[key] === context.generation[key]));
+  assert.ok(
+    !events.some((event) =>
+      ["ActivationRejected", "ActivationCancellationRequested"].includes(event.event),
+    ),
+    "controller activation was rejected or withdrawn",
+  );
+  const observations = events.filter(
+    (event) =>
+      event.event === "ControllerObserved" &&
+      ["controllerId", "epoch", "controllerPolicyDigest"].every(
+        (key) => event[key] === context.generation[key],
+      ),
+  );
   assert.ok(observations.length > 0, "shared authenticated controller generation unavailable");
   return observations;
 }
@@ -272,20 +295,32 @@ function controllerAuthority(evidence, events, start, context) {
 function controllerContext(evidence) {
   if (evidence.controllerQualification === undefined) return undefined;
   const { peers, generation } = evidence.controllerQualification;
-  assert.ok(Array.isArray(peers) && peers.length <= 1, "qualification supports only an explicit singleton or one exact peer");
+  assert.ok(
+    Array.isArray(peers) && peers.length <= 1,
+    "qualification supports only an explicit singleton or one exact peer",
+  );
   exactKeys(generation, ["controllerId", "epoch", "controllerPolicyDigest"]);
-  assert.ok(typeof generation.controllerId === "string" && generation.controllerId.length > 0 && generation.controllerId.length <= 200);
+  assert.ok(
+    typeof generation.controllerId === "string" &&
+      generation.controllerId.length > 0 &&
+      generation.controllerId.length <= 200,
+  );
   assert.ok(Number.isSafeInteger(generation.epoch) && generation.epoch > 0);
   digest(generation.controllerPolicyDigest);
   const group = [evidence, ...peers];
   assert.equal(new Set(group.map((entry) => entry.objective.number)).size, group.length);
   assert.equal(new Set(group.map((entry) => entry.runResult.runId)).size, group.length);
-  assert.equal(new Set(group.flatMap((entry) => entry.children.map((child) => child.number))).size, group.length * 3);
+  assert.equal(
+    new Set(group.flatMap((entry) => entry.children.map((child) => child.number))).size,
+    group.length * 3,
+  );
   for (const entry of group) {
     assert.equal(entry.repository, evidence.repository);
     assert.deepEqual(entry.actor, evidence.actor);
-    assert.equal(entry.nativeDefaultBranch ?? entry.preflight?.defaultBranch,
-      evidence.nativeDefaultBranch ?? evidence.preflight?.defaultBranch);
+    assert.equal(
+      entry.nativeDefaultBranch ?? entry.preflight?.defaultBranch,
+      evidence.nativeDefaultBranch ?? evidence.preflight?.defaultBranch,
+    );
     assert.ok(Array.isArray(entry.children) && entry.children.length === 3);
   }
   return { group, generation, visiting: new Set() };
@@ -297,16 +332,27 @@ function* proveControllerReservationBase(evidence, reservation, context) {
   while (ancestor !== evidence.base) {
     assert.ok(seen.size < 6 && !seen.has(ancestor), "unexplained controller execution base");
     seen.add(ancestor);
-    const matches = context.group.flatMap((peer) => nativeQualificationEvents(peer)
-      .filter((event) => event.event === "AttemptIntegrated" && event.headSha === ancestor)
-      .map((event) => ({ peer, event })));
+    const matches = context.group.flatMap((peer) =>
+      nativeQualificationEvents(peer)
+        .filter((event) => event.event === "AttemptIntegrated" && event.headSha === ancestor)
+        .map((event) => ({ peer, event })),
+    );
     const { peer, event } = one(matches, "execution base lacks exact controller integration");
-    assert.ok(instant(event.at) <= instant(reservation.at), "execution predates target integration");
+    assert.ok(
+      instant(event.at) <= instant(reservation.at),
+      "execution predates target integration",
+    );
     if (event.runId === reservation.runId) assert.ok(event.sequence < reservation.sequence);
     const key = `${event.runId}:${event.workItem}:${event.attempt}`;
-    assert.ok(context.visiting.size < 6 && !context.visiting.has(key), "cyclic execution base proof");
+    assert.ok(
+      context.visiting.size < 6 && !context.visiting.has(key),
+      "cyclic execution base proof",
+    );
     context.visiting.add(key);
-    const child = one(peer.children.filter((child) => child.number === event.workItem), "target child missing");
+    const child = one(
+      peer.children.filter((child) => child.number === event.workItem),
+      "target child missing",
+    );
     const proof = yield* prove(peer, proofInput(peer, child), context);
     const observed = yield { kind: "merge-proof", expected: proof.expected };
     assert.deepEqual(observed, proof.expected, "execution base GraphQL binding differs");
@@ -337,35 +383,53 @@ function* readPinnedPacket(evidence, events, publication, start, context) {
   assert.equal(graphRead.content, canonical(graph), "compiled graph bytes are not canonical");
   assert.ok(Array.isArray(graph.workItems) && graph.workItems.length === 3);
   if (context) {
-    const projected = one(events.filter((event) => event.event === "GraphProjected"),
-      "controller graph projection receipt missing or repeated");
+    const projected = one(
+      events.filter((event) => event.event === "GraphProjected"),
+      "controller graph projection receipt missing or repeated",
+    );
     const ref = `refs/clockgrove-factory/graph-projections/objective-${publication.objective}/run-${hash(start.runId).slice(0, 32)}`;
     assert.equal(projected.projectionRef, ref);
     assert.equal(projected.graphDigest, graphEvent.graphDigest);
     assert.equal(projected.graphSize, graph.workItems.length);
     assert.equal(graphEvent.graphSize, graph.workItems.length);
     assert.ok(start.sequence < graphEvent.sequence && graphEvent.sequence < projected.sequence);
-    const { document: projection, read } = yield* readCheckpoint(ref, "graph-projection", graphRead.commit.oid);
+    const { document: projection, read } = yield* readCheckpoint(
+      ref,
+      "graph-projection",
+      graphRead.commit.oid,
+    );
     assert.equal(read.blobOid, projected.projectionBlobSha);
     exactKeys(projection, ["protocol", "graphDigest", "bindings"]);
     assert.equal(projection.protocol, "clockgrove.factory/graph-projection-v1");
     assert.equal(projection.graphDigest, graphEvent.graphDigest);
-    assert.equal(read.content, JSON.stringify({ protocol: projection.protocol,
-      graphDigest: projection.graphDigest, bindings: projection.bindings }));
+    assert.equal(
+      read.content,
+      JSON.stringify({
+        protocol: projection.protocol,
+        graphDigest: projection.graphDigest,
+        bindings: projection.bindings,
+      }),
+    );
     assert.equal(projection.bindings.length, graph.workItems.length);
     const numbers = new Set();
     const nodes = new Set();
     for (const [index, binding] of projection.bindings.entries()) {
       exactKeys(binding, ["compilerId", "issueNodeId", "issueNumber"]);
       assert.equal(binding.compilerId, graph.workItems[index].id);
-      const child = one(evidence.children.filter((child) => child.number === binding.issueNumber),
-        "projected child unavailable or repeated");
+      const child = one(
+        evidence.children.filter((child) => child.number === binding.issueNumber),
+        "projected child unavailable or repeated",
+      );
       assert.equal(child.node_id, binding.issueNodeId);
       assert.ok(typeof binding.issueNodeId === "string" && binding.issueNodeId.length > 0);
       numbers.add(binding.issueNumber);
       nodes.add(binding.issueNodeId);
-      const reservation = one(events.filter((event) => event.event === "AttemptReserved" && event.workItem === binding.issueNumber),
-        "projected qualification attempt missing or repeated");
+      const reservation = one(
+        events.filter(
+          (event) => event.event === "AttemptReserved" && event.workItem === binding.issueNumber,
+        ),
+        "projected qualification attempt missing or repeated",
+      );
       assert.ok(projected.sequence < reservation.sequence);
     }
     assert.equal(numbers.size, 3);
@@ -431,7 +495,9 @@ function* prove(evidence, input, context = controllerContext(evidence)) {
     "fresh run start missing or repeated",
   );
   assert.equal(start.runId, publication.runId);
-  const controllerObservations = context ? controllerAuthority(evidence, events, start, context) : undefined;
+  const controllerObservations = context
+    ? controllerAuthority(evidence, events, start, context)
+    : undefined;
   if (!context) assert.equal(start.activationRequestId, undefined);
   assert.equal(start.recoveryRequestId, undefined);
   assert.equal(start.policyDigest, hash(canonical(start.policy)));
@@ -456,9 +522,14 @@ function* prove(evidence, input, context = controllerContext(evidence)) {
     events.filter((event) => event.event === "AttemptReserved" && sameAttempt(event, publication)),
     "source reservation missing or repeated",
   );
-  if (controllerObservations) assert.ok(controllerObservations.some((event) =>
-    event.sequence < reservation.sequence && instant(event.at) <= instant(reservation.at)),
-  "source reservation precedes shared controller ownership");
+  if (controllerObservations)
+    assert.ok(
+      controllerObservations.some(
+        (event) =>
+          event.sequence < reservation.sequence && instant(event.at) <= instant(reservation.at),
+      ),
+      "source reservation precedes shared controller ownership",
+    );
   if (context) yield* proveControllerReservationBase(evidence, reservation, context);
   const validation = one(
     events.filter(
@@ -776,28 +847,40 @@ function* prove(evidence, input, context = controllerContext(evidence)) {
       );
       visited.add(ancestor);
       const local = events.filter(
-          (event) =>
-            event.event === "AttemptIntegrated" &&
-            event.headSha === ancestor &&
-            event.workItem !== publication.workItem &&
-            event.sequence < integration.sequence,
-        );
+        (event) =>
+          event.event === "AttemptIntegrated" &&
+          event.headSha === ancestor &&
+          event.workItem !== publication.workItem &&
+          event.sequence < integration.sequence,
+      );
       if (local.length) {
         const own = one(local, "target has repeated same-run integrations");
         assert.ok(evidence.children.some((child) => child.number === own.workItem));
         if (refreshed === 1) targetIntegrationSequences.push(own.sequence);
       } else {
         assert.ok(context, "target lacks exact prior same-run integration");
-        const matches = context.group.filter((entry) => entry.runResult.runId !== start.runId)
-          .flatMap((peer) => nativeQualificationEvents(peer)
-            .filter((event) => event.event === "AttemptIntegrated" && event.headSha === ancestor)
-            .map((event) => ({ peer, event })));
+        const matches = context.group
+          .filter((entry) => entry.runResult.runId !== start.runId)
+          .flatMap((peer) =>
+            nativeQualificationEvents(peer)
+              .filter((event) => event.event === "AttemptIntegrated" && event.headSha === ancestor)
+              .map((event) => ({ peer, event })),
+          );
         const { peer, event } = one(matches, "target lacks exact authenticated peer integration");
-        assert.ok(instant(event.at) <= instant(integration.at), "peer integration postdates receiver integration");
+        assert.ok(
+          instant(event.at) <= instant(integration.at),
+          "peer integration postdates receiver integration",
+        );
         const key = `${event.runId}:${event.workItem}:${event.attempt}`;
-        assert.ok(context.visiting.size < 6 && !context.visiting.has(key), "cyclic peer integration proof");
+        assert.ok(
+          context.visiting.size < 6 && !context.visiting.has(key),
+          "cyclic peer integration proof",
+        );
         context.visiting.add(key);
-        const child = one(peer.children.filter((child) => child.number === event.workItem), "peer child missing");
+        const child = one(
+          peer.children.filter((child) => child.number === event.workItem),
+          "peer child missing",
+        );
         const peerProof = yield* prove(peer, proofInput(peer, child), context);
         const observed = yield { kind: "merge-proof", expected: peerProof.expected };
         assert.deepEqual(observed, peerProof.expected, "peer GraphQL merge binding differs");
@@ -892,8 +975,10 @@ function* prove(evidence, input, context = controllerContext(evidence)) {
       targetIntegrationSequences.every((sequence) => sequence < capacity.sequence),
       "candidate was admitted before its target integration authority",
     );
-    assert.ok(peerIntegrationTimes.every((time) => time <= instant(capacity.at)),
-      "candidate predates its authenticated peer integration");
+    assert.ok(
+      peerIntegrationTimes.every((time) => time <= instant(capacity.at)),
+      "candidate predates its authenticated peer integration",
+    );
     assert.equal(
       capacity.localScopeBatch.identity.invocationDigest,
       candidate.validation.artifactDigest,
@@ -1047,7 +1132,9 @@ export function nativeProofReader(request) {
       /^refs\/clockgrove-factory\/[a-z-]+\/objective-[1-9][0-9]*\/work-item-[1-9][0-9]*\/attempt-[1-9][0-9]*(?:\/[a-z-]+[a-f0-9]{64})?$/.test(
         ref,
       ) ||
-        /^refs\/clockgrove-factory\/(?:graphs|graph-projections)\/objective-[1-9][0-9]*\/run-[a-f0-9]{32}$/.test(ref) ||
+        /^refs\/clockgrove-factory\/(?:graphs|graph-projections)\/objective-[1-9][0-9]*\/run-[a-f0-9]{32}$/.test(
+          ref,
+        ) ||
         /^refs\/clockgrove-factory\/sessions\/[a-f0-9]{64}\/(prepared|turn|terminal)$/.test(ref) ||
         /^refs\/clockgrove-factory\/artifact-transfers\/[a-f0-9]{64}\/(intent|ready)$/.test(ref),
     );
@@ -1130,9 +1217,10 @@ export async function observeNativeMergeProofs(
     let step = recipe.next();
     while (!step.done) {
       assert.ok(reads.length < 2000, "native evidence read bound exceeded");
-      const value = step.value.kind === "merge-proof"
-        ? await readQualificationMergeProofForIdentity({ request }, step.value.expected)
-        : await read(step.value);
+      const value =
+        step.value.kind === "merge-proof"
+          ? await readQualificationMergeProofForIdentity({ request }, step.value.expected)
+          : await read(step.value);
       reads.push({ request: step.value, value });
       step = recipe.next(value);
     }

@@ -83,76 +83,188 @@ finally:
     if fd is not None: os.close(fd)
 `;
 
-const helperEnvironment = () => ({ PATH: "/usr/bin:/bin", HOME: homedir(), LANG: "C.UTF-8",
-  XDG_RUNTIME_DIR: `/run/user/${process.getuid()}`, DBUS_SESSION_BUS_ADDRESS: `unix:path=/run/user/${process.getuid()}/bus` });
+const helperEnvironment = () => ({
+  PATH: "/usr/bin:/bin",
+  HOME: homedir(),
+  LANG: "C.UTF-8",
+  XDG_RUNTIME_DIR: `/run/user/${process.getuid()}`,
+  DBUS_SESSION_BUS_ADDRESS: `unix:path=/run/user/${process.getuid()}/bus`,
+});
 
 /** Read-only capability inspection: opens/closes a self pidfd, never delivers any signal. */
 export function inspectFreezeCapability() {
-  const source = "import os,signal,sys,json; fd=os.pidfd_open(os.getpid(),0); assert callable(signal.pidfd_send_signal); os.close(fd); print(json.dumps({'python':list(sys.version_info[:3]),'pidfdOpen':True,'pidfdSendSignalPresent':True,'signalsDelivered':False}))";
-  return JSON.parse(execFileSync("/usr/bin/python3", ["-I", "-c", source], { env: helperEnvironment(), encoding: "utf8", timeout: 10000, maxBuffer: 4096, stdio: ["ignore", "pipe", "ignore"] }));
+  const source =
+    "import os,signal,sys,json; fd=os.pidfd_open(os.getpid(),0); assert callable(signal.pidfd_send_signal); os.close(fd); print(json.dumps({'python':list(sys.version_info[:3]),'pidfdOpen':True,'pidfdSendSignalPresent':True,'signalsDelivered':False}))";
+  return JSON.parse(
+    execFileSync("/usr/bin/python3", ["-I", "-c", source], {
+      env: helperEnvironment(),
+      encoding: "utf8",
+      timeout: 10000,
+      maxBuffer: 4096,
+      stdio: ["ignore", "pipe", "ignore"],
+    }),
+  );
 }
 
 /** Refuse before freeze unless actual server observations leave time for the bounded public call. */
 export function assertInnerContentionWindow({ outer, inner, serverTime, remainingMs }) {
-  const now = Date.parse(serverTime), outerExpiry = Date.parse(outer.expiresAt), innerExpiry = Date.parse(inner.expiresAt);
+  const now = Date.parse(serverTime),
+    outerExpiry = Date.parse(outer.expiresAt),
+    innerExpiry = Date.parse(inner.expiresAt);
   assert.ok([now, outerExpiry, innerExpiry].every(Number.isFinite));
   assert.ok(["RepositoryLeaseAcquired", "RepositoryLeaseRenewed"].includes(outer.event));
   assert.ok(["LeaseAcquired", "LeaseRenewed"].includes(inner.event));
   const untilOuter = outerExpiry - now;
-  assert.ok(untilOuter >= 30000 && untilOuter <= 600000, "outer lease lacks bounded preparation time");
-  assert.ok(innerExpiry - outerExpiry >= 180000, "observed expiry separation cannot safely reach inner lock");
+  assert.ok(
+    untilOuter >= 30000 && untilOuter <= 600000,
+    "outer lease lacks bounded preparation time",
+  );
+  assert.ok(
+    innerExpiry - outerExpiry >= 180000,
+    "observed expiry separation cannot safely reach inner lock",
+  );
   assert.ok(innerExpiry - outerExpiry <= 300000, "inner expiry exceeds bounded follow-up wait");
   const maximumMs = untilOuter + 150000;
-  assert.ok(maximumMs <= 750000 && remainingMs > innerExpiry - now + 300000, "unchanged scenario deadline cannot cover lease fault and completion");
-  return { outerExpiry, innerExpiry, maximumMs, serverTime, separationMs: innerExpiry - outerExpiry };
+  assert.ok(
+    maximumMs <= 750000 && remainingMs > innerExpiry - now + 300000,
+    "unchanged scenario deadline cannot cover lease fault and completion",
+  );
+  return {
+    outerExpiry,
+    innerExpiry,
+    maximumMs,
+    serverTime,
+    separationMs: innerExpiry - outerExpiry,
+  };
 }
 
-export function assertHeldInnerRefusal({ response, objective, inner, afterInner, outer, acquired, released }) {
-  assert.deepEqual(response, { isError: true, content: [{ type: "text", text: `Objective #${objective} is leased by ${inner.event.holder}` }] }, "public contender did not reach the still-held inner Director lease");
-  assert.equal(inner.event.kind, "lease"); assert.equal(inner.event.objective, objective);
+export function assertHeldInnerRefusal({
+  response,
+  objective,
+  inner,
+  afterInner,
+  outer,
+  acquired,
+  released,
+}) {
+  assert.deepEqual(
+    response,
+    {
+      isError: true,
+      content: [
+        { type: "text", text: `Objective #${objective} is leased by ${inner.event.holder}` },
+      ],
+    },
+    "public contender did not reach the still-held inner Director lease",
+  );
+  assert.equal(inner.event.kind, "lease");
+  assert.equal(inner.event.objective, objective);
   assert.equal(afterInner.oid, inner.oid, "losing contender changed the inner lease");
   assert.deepEqual(afterInner.event, inner.event);
   assert.equal(released.record.event, "RepositoryLeaseReleased");
   assert.equal(acquired.record.event, "RepositoryLeaseAcquired");
   assert.equal(acquired.record.epoch, outer.record.epoch + 1);
   assert.notEqual(acquired.record.controllerId, outer.record.controllerId);
-  assert.equal(acquired.record.previousOid, outer.oid); assert.deepEqual(acquired.parents, [outer.oid]);
-  assert.equal(released.record.previousOid, acquired.oid); assert.deepEqual(released.parents, [acquired.oid]);
-  for (const key of ["controllerId", "epoch", "policyDigest"]) assert.equal(acquired.record[key], released.record[key]);
+  assert.equal(acquired.record.previousOid, outer.oid);
+  assert.deepEqual(acquired.parents, [outer.oid]);
+  assert.equal(released.record.previousOid, acquired.oid);
+  assert.deepEqual(released.parents, [acquired.oid]);
+  for (const key of ["controllerId", "epoch", "policyDigest"])
+    assert.equal(acquired.record[key], released.record[key]);
 }
 
 function startHelper(spec, role) {
-  const child = spawn("/usr/bin/python3", ["-I", "-u", "-c", program, JSON.stringify(spec), role],
-    { env: helperEnvironment(), stdio: ["pipe", "pipe", "ignore"], detached: true });
+  const child = spawn("/usr/bin/python3", ["-I", "-u", "-c", program, JSON.stringify(spec), role], {
+    env: helperEnvironment(),
+    stdio: ["pipe", "pipe", "ignore"],
+    detached: true,
+  });
   child.stdin.on("error", () => {}); // EPIPE is reconciled by the bounded close/receipt proof below.
-  const records = []; let output = ""; let acknowledge, rejectReady;
-  const ready = new Promise((resolve, reject) => { acknowledge = resolve; rejectReady = reject; });
-  const timeout = setTimeout(() => { child.stdin.end(); rejectReady(Error("freeze helper readiness unavailable; exact thaw must be observed")); }, 15000);
+  const records = [];
+  let output = "";
+  let acknowledge, rejectReady;
+  const ready = new Promise((resolve, reject) => {
+    acknowledge = resolve;
+    rejectReady = reject;
+  });
+  const timeout = setTimeout(() => {
+    child.stdin.end();
+    rejectReady(Error("freeze helper readiness unavailable; exact thaw must be observed"));
+  }, 15000);
   child.stdout.on("data", (data) => {
     output += data.toString();
-    if (output.length > 8192) { child.stdin.end(); rejectReady(Error("freeze helper output exceeds bound")); return; }
+    if (output.length > 8192) {
+      child.stdin.end();
+      rejectReady(Error("freeze helper output exceeds bound"));
+      return;
+    }
     while (output.includes("\n")) {
-      const end = output.indexOf("\n"), line = output.slice(0, end); output = output.slice(end + 1);
+      const end = output.indexOf("\n"),
+        line = output.slice(0, end);
+      output = output.slice(end + 1);
       try {
-        const record = JSON.parse(line); assert.equal(record.role, role); assert.equal(record.helperPid, child.pid);
-        assert.ok(["frozen", "armed", "disarmed", "continued-exact-incarnation", "original-process-absent", "thaw-unverified"].includes(record.state));
+        const record = JSON.parse(line);
+        assert.equal(record.role, role);
+        assert.equal(record.helperPid, child.pid);
+        assert.ok(
+          [
+            "frozen",
+            "armed",
+            "disarmed",
+            "continued-exact-incarnation",
+            "original-process-absent",
+            "thaw-unverified",
+          ].includes(record.state),
+        );
         records.push(record);
-        if (record.state === (role === "primary" ? "frozen" : "armed")) { clearTimeout(timeout); acknowledge(record); }
-      } catch { child.stdin.end(); rejectReady(Error("freeze helper response invalid")); }
+        if (record.state === (role === "primary" ? "frozen" : "armed")) {
+          clearTimeout(timeout);
+          acknowledge(record);
+        }
+      } catch {
+        child.stdin.end();
+        rejectReady(Error("freeze helper response invalid"));
+      }
     }
   });
-  child.on("error", () => { clearTimeout(timeout); rejectReady(Error("freeze helper unavailable")); });
+  child.on("error", () => {
+    clearTimeout(timeout);
+    rejectReady(Error("freeze helper unavailable"));
+  });
   let closed = false;
-  const ended = new Promise((resolve) => child.once("close", (code, signal) => {
-    closed = true; clearTimeout(timeout); rejectReady(Error("freeze helper ended before readiness")); resolve({ code, signal, records, closed: true });
-  }));
-  return { ready, ended, records, get closed() { return closed; }, release: (command = "continue\n") => { if (!child.stdin.destroyed) child.stdin.end(command); } };
+  const ended = new Promise((resolve) =>
+    child.once("close", (code, signal) => {
+      closed = true;
+      clearTimeout(timeout);
+      rejectReady(Error("freeze helper ended before readiness"));
+      resolve({ code, signal, records, closed: true });
+    }),
+  );
+  return {
+    ready,
+    ended,
+    records,
+    get closed() {
+      return closed;
+    },
+    release: (command = "continue\n") => {
+      if (!child.stdin.destroyed) child.stdin.end(command);
+    },
+  };
 }
 
 async function boundedEnd(helper) {
   let timer;
-  try { return await Promise.race([helper.ended, new Promise((resolve) => { timer = setTimeout(() => resolve({ closed: false, records: helper.records }), 20000); })]); }
-  finally { clearTimeout(timer); }
+  try {
+    return await Promise.race([
+      helper.ended,
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve({ closed: false, records: helper.records }), 20000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Two independent pidfd holders: ordinary parent/one-helper loss still permits bounded exact thaw.
@@ -161,30 +273,65 @@ async function boundedEnd(helper) {
  */
 export async function withFrozenController(spec, operation, record, start = startHelper) {
   assert.ok(spec.pid > 1 && spec.uid > 0 && spec.pid !== process.pid);
-  assert.match(spec.startTicks, /^[0-9]+$/); assert.match(spec.invocationId, /^[a-f0-9]{32}$/);
+  assert.match(spec.startTicks, /^[0-9]+$/);
+  assert.match(spec.invocationId, /^[a-f0-9]{32}$/);
   assert.equal(spec.configPath, join(homedir(), ".config/systemd/user", spec.unit));
-  record({ state: "requested", spec, cleanupGuarantee: "two-independent-pidfds; both-helper-SIGKILL-not-covered" });
-  const watchdog = start(spec, "watchdog"); let primary;
+  record({
+    state: "requested",
+    spec,
+    cleanupGuarantee: "two-independent-pidfds; both-helper-SIGKILL-not-covered",
+  });
+  const watchdog = start(spec, "watchdog");
+  let primary;
   try {
     await watchdog.ready;
     primary = start(spec, "primary");
     await primary.ready;
     record({ state: "frozen", helpers: [...watchdog.records, ...primary.records] });
     return await operation(() => {
-      assert.ok(!primary.closed && !watchdog.closed &&
-        ![...primary.records, ...watchdog.records].some((entry) => ["continued-exact-incarnation", "original-process-absent", "thaw-unverified"].includes(entry.state)), "freeze ownership ended before the intended boundary");
+      assert.ok(
+        !primary.closed &&
+          !watchdog.closed &&
+          ![...primary.records, ...watchdog.records].some((entry) =>
+            ["continued-exact-incarnation", "original-process-absent", "thaw-unverified"].includes(
+              entry.state,
+            ),
+          ),
+        "freeze ownership ended before the intended boundary",
+      );
     });
   } finally {
     primary?.release();
     // EOF also triggers cleanup on observer failure. The watchdog is disarmed only after
     // explicit successful primary thaw; its own timeout/EOF otherwise retains that duty.
     const result = primary ? await boundedEnd(primary) : null;
-    const thawed = result?.records.some((entry) => ["continued-exact-incarnation", "original-process-absent"].includes(entry.state));
+    const thawed = result?.records.some((entry) =>
+      ["continued-exact-incarnation", "original-process-absent"].includes(entry.state),
+    );
     watchdog.release(thawed ? "disarm\n" : "continue\n");
     const backup = await boundedEnd(watchdog);
-    const verified = thawed || backup.records.some((entry) => ["continued-exact-incarnation", "original-process-absent"].includes(entry.state));
-    record({ state: !primary ? "freeze-not-started" : verified ? "thaw-observed" : "potentially-frozen-manual-reconciliation-required", primary: result, watchdog: backup, spec });
-    assert.ok(!primary || verified, "exact controller thaw unverified; do not retry, inspect retained incarnation evidence");
-    assert.ok((!primary || result.closed) && backup.closed, "observer helper termination unverified; retain exact helper incarnation for cleanup");
+    const verified =
+      thawed ||
+      backup.records.some((entry) =>
+        ["continued-exact-incarnation", "original-process-absent"].includes(entry.state),
+      );
+    record({
+      state: !primary
+        ? "freeze-not-started"
+        : verified
+          ? "thaw-observed"
+          : "potentially-frozen-manual-reconciliation-required",
+      primary: result,
+      watchdog: backup,
+      spec,
+    });
+    assert.ok(
+      !primary || verified,
+      "exact controller thaw unverified; do not retry, inspect retained incarnation evidence",
+    );
+    assert.ok(
+      (!primary || result.closed) && backup.closed,
+      "observer helper termination unverified; retain exact helper incarnation for cleanup",
+    );
   }
 }

@@ -10,6 +10,7 @@ import {
 import {
   holdAppServerQualificationCheckpoint,
   SafeArtifactCheckpointHeldError,
+  SafeArtifactCheckpointShutdownError,
 } from "./runtime/qualification-checkpoint.js";
 import {
   holdArtifactTransferQualificationCheckpoint,
@@ -4937,6 +4938,7 @@ export class FactorySupervisor {
     let retainCollectedSource = false;
     let executionCleanupConfirmed = Boolean(recovered);
     let completedArtifactRetained = Boolean(recovered);
+    let safeHoldShutdown = false;
     let backendLaunchAttempted = false;
     let executionTerminalObserved = Boolean(recovered);
     let terminalModelTokens: number | undefined;
@@ -5953,6 +5955,20 @@ export class FactorySupervisor {
       // integrates regular and native siblings through exact candidate recovery.
       await this.#retryArtifacts.delete(item.number);
     } catch (error) {
+      if (
+        error instanceof SafeArtifactCheckpointShutdownError &&
+        completedArtifactRetained &&
+        executionCleanupConfirmed &&
+        !validationCapacityRecorded &&
+        executionSignal?.aborted &&
+        this.#options.signal?.aborted &&
+        this.#options.shutdownBehavior === "release-lease"
+      ) {
+        safeHoldShutdown = true;
+        throw new RunCancellationRequestedError(
+          "repository controller stopped at proved terminal artifact hold; validation was not admitted",
+        );
+      }
       if (error instanceof SafeArtifactCheckpointHeldError) throw error;
       // Shutdown before validation admission preserves a durable successful
       // checkpoint for the next fenced controller. Use the intentional teardown
@@ -6274,7 +6290,12 @@ export class FactorySupervisor {
         if (validationCapacity) this.#releaseCapacity(validationCapacity.key);
       }
       // biome-ignore lint/correctness/noUnsafeFinally: uncertain cleanup must override success so Factory cannot launch a duplicate paid or local worker
-      if (finalizationError) throw finalizationError;
+      if (finalizationError) {
+        // An orderly hold is not permission to suppress a later cleanup failure
+        // through the outer signal-aborted shutdown branch.
+        if (safeHoldShutdown) throw new SafeArtifactCheckpointHeldError(finalizationError);
+        throw finalizationError;
+      }
     }
   }
 

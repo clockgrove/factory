@@ -32,6 +32,13 @@ export class SafeArtifactCheckpointHeldError extends Error {
     this.name = "SafeArtifactCheckpointHeldError";
   }
 }
+/** Only a reached, immutable terminal hold interrupted by its supplied signal. */
+export class SafeArtifactCheckpointShutdownError extends SafeArtifactCheckpointHeldError {
+  constructor(cause?: unknown) {
+    super(cause);
+    this.name = "SafeArtifactCheckpointShutdownError";
+  }
+}
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 export function qualificationCheckpointPath(unit: string, invocationId: string): string {
   return join(
@@ -196,14 +203,23 @@ export async function holdAppServerQualificationCheckpoint(args: {
     while (!args.signal?.aborted && Date.now() < Date.parse(arm.expiresAt)) {
       if (!(await privateBytes(path)).equals(bytes))
         throw new Error("qualification arm changed while held");
-      await sleep(
-        Math.min(500, Date.parse(arm.expiresAt) - Date.now()),
-        undefined,
-        args.signal ? { signal: args.signal } : {},
-      );
+      try {
+        await sleep(
+          Math.min(500, Date.parse(arm.expiresAt) - Date.now()),
+          undefined,
+          args.signal ? { signal: args.signal } : {},
+        );
+      } catch (error) {
+        if (args.signal?.aborted && error instanceof Error &&
+          error.name === "AbortError" && error.cause === args.signal.reason)
+          throw new SafeArtifactCheckpointShutdownError(error);
+        throw error;
+      }
     }
   } catch (error) {
+    if (error instanceof SafeArtifactCheckpointShutdownError) throw error;
     throw new SafeArtifactCheckpointHeldError(error);
   }
+  if (args.signal?.aborted) throw new SafeArtifactCheckpointShutdownError(args.signal.reason);
   throw new SafeArtifactCheckpointHeldError();
 }

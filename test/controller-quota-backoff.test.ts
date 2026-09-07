@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GitHubControlStore } from "../src/control/github-store.js";
 import { RepositoryLeaseManager } from "../src/controller/repository-lease.js";
 import { ControllerGenerationRetirement } from "../src/controller/retirement.js";
+import { LeaseAcquisitionContendedError, LeaseLostError } from "../src/control/lease.js";
 import {
   GitHubRepositoryController,
   runGitHubRepositoryController,
@@ -78,6 +79,77 @@ afterEach(() => {
 });
 
 describe("controller quota boundary", () => {
+  it("preserves a contended peer's independent sibling cleanup failure instead of retrying", async () => {
+    const failure = Error("second Objective cleanup remains unknown");
+    const seen: number[] = [];
+    const controller = new GitHubRepositoryController({
+      store: { discoverObjectiveActivations: async () => [activation, { ...activation, objective: 2 }] },
+      reconcileObjective: async (candidate, signal) => {
+        seen.push(candidate.objective);
+        if (candidate.objective === 1) throw new LeaseAcquisitionContendedError(1, 120_000);
+        if (!signal.aborted)
+          await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+        throw failure;
+      },
+    });
+    await expect(controller.run()).rejects.toBe(failure);
+    expect(seen).toEqual([1, 2]);
+    expect(await controller.reconcileOnce()).toBe(0);
+  });
+  it.each([false, true])("does not let a contended peer hide cohort quota failure (quota first: %s)", async (quotaFirst) => {
+    const failure = quota(120_000);
+    const controller = new GitHubRepositoryController({
+      store: { discoverObjectiveActivations: async () => [activation, { ...activation, objective: 2 }] },
+      reconcileObjective: async (candidate) => {
+        if ((candidate.objective === 1) === quotaFirst) throw failure;
+        throw new LeaseAcquisitionContendedError(candidate.objective, 600_000);
+      },
+    });
+    await expect(controller.run()).rejects.toBe(failure);
+    expect(await controller.reconcileOnce()).toBe(0);
+  });
+  it("waits in the same process after contended acquisition, then reconstructs a fresh cohort", async () => {
+    const mock = ownershipMocks();
+    const abort = new AbortController();
+    const run = vi.fn()
+      .mockRejectedValueOnce(new LeaseAcquisitionContendedError(1, 120_000))
+      .mockImplementationOnce(async () => abort.abort());
+    const task = runGitHubRepositoryController({ ...options(abort.signal), supervisorFactory: () => ({ run }) });
+    await vi.advanceTimersByTimeAsync(119_999);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(mock.acquire).toHaveBeenCalledTimes(1);
+    expect(mock.release).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await task;
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(mock.acquire).toHaveBeenCalledTimes(2);
+    expect(mock.acquire.mock.calls[0]![0].controllerId).toBe(mock.acquire.mock.calls[1]![0].controllerId);
+  });
+
+  it("can stop during expected contention without another acquisition", async () => {
+    const mock = ownershipMocks();
+    const abort = new AbortController();
+    const run = vi.fn().mockRejectedValue(new LeaseAcquisitionContendedError(1, 120_000));
+    const task = runGitHubRepositoryController({ ...options(abort.signal), supervisorFactory: () => ({ run }) });
+    await vi.advanceTimersByTimeAsync(30_000);
+    abort.abort();
+    await task;
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(mock.acquire).toHaveBeenCalledTimes(1);
+    expect(mock.release).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["active-lease", "release"] as const)("keeps %s failure fatal instead of treating it as acquisition contention", async (boundary) => {
+    const mock = ownershipMocks();
+    const failure = new LeaseLostError("lost owned generation");
+    const run = vi.fn().mockRejectedValue(boundary === "active-lease" ? failure : new LeaseAcquisitionContendedError(1, 120_000));
+    if (boundary === "release") mock.release.mockRejectedValueOnce(failure);
+    await expect(runGitHubRepositoryController({
+      ...options(new AbortController().signal), supervisorFactory: () => ({ run }),
+    })).rejects.toThrow("non-retryable failure (objective-lease-lost)");
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(mock.acquire).toHaveBeenCalledTimes(1);
+  });
   it.each(["facts", "acquire", "discovery", "release"] as const)(
     "waits through a %s refusal without service restart or model retry",
     async (phase) => {

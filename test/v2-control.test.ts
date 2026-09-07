@@ -6,6 +6,7 @@ import { AttemptManager, type AttemptStore } from "../src/control/attempts.js";
 import { factoryCommentIssueNumber, GitHubControlStore } from "../src/control/github-store.js";
 import {
   LeaseLostError,
+  LeaseAcquisitionContendedError,
   LeaseManager,
   type GitCommitObject,
   type LeaseStore,
@@ -109,6 +110,24 @@ const identity = {
 };
 
 describe("Director lease", () => {
+  it("distinguishes authenticated pre-acquisition contention without mutating the owned lease", async () => {
+    const store = new MemoryStore();
+    const manager = new LeaseManager({ store, durationMs: 60_000 });
+    const base = await store.readCommit(BASE_SHA);
+    const acquired = await manager.acquire(identity, base);
+    store.now = new Date(store.now.getTime() + 5000);
+    const commits = store.commits.size;
+    await expect(manager.acquire({ ...identity, holder: "replacement" }, base)).rejects.toMatchObject({
+      name: "LeaseAcquisitionContendedError", objective: 42, retryAfterMs: 55000,
+    });
+    expect(store.refs.get(acquired.ref)).toBe(acquired.oid);
+    expect(store.commits.size).toBe(commits);
+    store.now = new Date(store.now.getTime() + 55000);
+    await manager.acquire({ ...identity, holder: "replacement" }, base);
+    const loss = await manager.assertCurrent(acquired).catch((error: unknown) => error);
+    expect(loss).toBeInstanceOf(LeaseLostError);
+    expect(loss).not.toBeInstanceOf(LeaseAcquisitionContendedError);
+  });
   it("emits a fenced durable controller observation", async () => {
     const store = new MemoryStore();
     const manager = new LeaseManager({ store, durationMs: 60_000 });

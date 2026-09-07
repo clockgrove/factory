@@ -29,7 +29,7 @@ import {
 import { classifyRefusal, PlatformUnavailableError } from "../platform.js";
 import { adoptRecoveryActivation, type RecoveryRepositoryOwnership } from "./recovery.js";
 import { ControllerGenerationRetirement } from "./retirement.js";
-import { LeaseLostError } from "../control/lease.js";
+import { LeaseAcquisitionContendedError, LeaseLostError } from "../control/lease.js";
 
 export interface DiscoveredObjective {
   number: number;
@@ -239,7 +239,7 @@ export class GitHubRepositoryController {
               ) as PlatformUnavailableError;
               this.#shutdown.abort();
             } else if (!(error instanceof ControllerGenerationRetirement)) {
-              this.#fatalFailure = error;
+              this.#fatalFailure = ownershipFailure(this.#fatalFailure, error);
               this.#shutdown.abort();
             }
             this.#options.onError?.(error, activation.objective);
@@ -271,9 +271,13 @@ export class GitHubRepositoryController {
       this.#shutdown.abort();
       await this.settle();
     }
-    if (this.#fatalFailure) throw this.#fatalFailure;
+    if (this.#fatalFailure && !(this.#fatalFailure instanceof LeaseAcquisitionContendedError))
+      throw this.#fatalFailure;
     if (this.#retirement) throw this.#retirement;
-    const failure = ownershipFailure(loopFailure, this.#platformFailure);
+    const failure = ownershipFailure(
+      this.#fatalFailure,
+      ownershipFailure(loopFailure, this.#platformFailure),
+    );
     if (failure !== undefined) throw failure;
   }
   async settle(): Promise<void> {
@@ -447,6 +451,18 @@ export async function runGitHubRepositoryController(
       return;
     } catch (error) {
       if (options.signal?.aborted && error === options.signal.reason) return;
+      if (error instanceof LeaseAcquisitionContendedError) {
+        // The complete cohort and repository generation have settled before
+        // reaching here. Do not redispatch while another Objective holder may
+        // still own resources, or churn the service/repository lease on a timer.
+        options.onStatus?.(
+          `Objective #${error.objective} acquisition contended; waiting ${error.retryAfterMs}ms before fresh discovery`,
+        );
+        const retryAt = performance.now() + error.retryAfterMs;
+        while (!options.signal?.aborted && performance.now() < retryAt)
+          await interruptibleDelay(Math.min(60_000, retryAt - performance.now()), options.signal);
+        continue;
+      }
       const unavailable = platformFailure(error);
       if (!unavailable) {
         if (error instanceof ControllerGenerationRetirement) throw error;
@@ -635,7 +651,7 @@ async function withRepositoryOwnership<T>(
       try {
         await leases.release(lease);
       } catch (error) {
-        if (!(error instanceof RepositoryLeaseLostError))
+        if (!(error instanceof RepositoryLeaseLostError) || failure instanceof LeaseAcquisitionContendedError)
           failure = ownershipFailure(failure, error);
       }
     }
@@ -652,6 +668,7 @@ function platformFailure(error: unknown): PlatformUnavailableError | undefined {
 
 /** Fixed diagnostics only: never log provider request bodies, headers, or causes. */
 function controllerFailureDiagnostic(error: unknown): string {
+  if (error instanceof LeaseAcquisitionContendedError) return "objective-lease-acquisition-contended";
   const unavailable = platformFailure(error);
   if (unavailable)
     return `platform-${unavailable.refusal.kind}; retryAfterMs=${unavailable.retryAfterMs}`;
@@ -681,6 +698,14 @@ function controllerFailureDiagnostic(error: unknown): string {
 function ownershipFailure(original: unknown, next: unknown): unknown {
   if (original === undefined) return next;
   if (next === undefined) return original;
+  // Expected pre-acquisition contention cannot hide uncertain cleanup, quota,
+  // or actual ownership loss encountered while retiring the cohort.
+  if (original instanceof LeaseAcquisitionContendedError) {
+    if (next instanceof LeaseAcquisitionContendedError)
+      return original.retryAfterMs >= next.retryAfterMs ? original : next;
+    return next;
+  }
+  if (next instanceof LeaseAcquisitionContendedError) return original;
   const first = platformFailure(original);
   const second = platformFailure(next);
   if (first && second) {

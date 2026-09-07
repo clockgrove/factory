@@ -27,7 +27,7 @@ async function blockedFixture(signal?: AbortSignal) {
   const sample = fixture.repositoryResources.resourceSampler.sample;
   const observedRuns: string[] = [];
   fixture.repositoryResources.resourceSampler = {
-    sample: async (now) => {
+    sample: async () => {
       entered.resolve();
       await unblock.promise;
       // This deliberately consults the current prototype after the blocked
@@ -40,7 +40,7 @@ async function blockedFixture(signal?: AbortSignal) {
       observedRuns.push(
         snapshot.factoryEvents!.find((event) => event.event === "FactoryRunStarted")!.runId,
       );
-      return sample(now);
+      return sample();
     },
   };
   const run = fixture.run(signal);
@@ -140,32 +140,20 @@ it("retains unresolved teardown evidence and the next-fixture guard after its bo
 });
 
 it("reports an interrupted run's real failure but does not replay an already-settled expected rejection at disposal", async () => {
-  const entered = deferred(),
-    unblock = deferred();
   const expected = new Error("fixture cleanup proof unavailable");
-  const f = await providerSupervisorFixture("daytona-burst", {
-    localOnly: true,
-    controllerActivation: true,
-    repositoryFence: async () => {
-      entered.resolve();
-      await unblock.promise;
-      throw expected;
-    },
-  });
-  const run = f.run();
-  const outcome = run.catch((error: unknown) => error);
-  await entered.promise;
-  const disposal = f.dispose();
+  const f = await blockedFixture();
+  vi.mocked(LeaseManager.prototype.release).mockRejectedValue(expected);
+  const disposal = f.fixture.dispose();
   const failure = disposal.catch((error: unknown) => error);
-  unblock.resolve();
-  expect(await outcome).toBe(expected);
+  f.unblock.resolve();
+  expect(await f.outcome).toMatchObject({ error: expected });
   expect(await failure).toBe(expected);
-  await expect(access(f.repository)).resolves.toBeUndefined();
+  await expect(access(f.fixture.repository)).resolves.toBeUndefined();
   expect(vi.isMockFunction(GitHubReader.prototype.readObjective)).toBe(true);
-  expect(f.resources.size).toBe(0);
+  expect(f.fixture.resources.size).toBe(0);
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
-  await rm(f.repository, { recursive: true, force: true });
+  await rm(f.fixture.repository, { recursive: true, force: true });
   const settled = await providerSupervisorFixture("daytona-burst", {
     localOnly: true,
     controllerActivation: true,

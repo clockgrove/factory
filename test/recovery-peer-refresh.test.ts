@@ -621,7 +621,7 @@ async function fixture(sameObjective = false, peerNonhost = false) {
   );
   original.pull.headSha = record.plannedHeadSha;
   original.pull.baseSha = peerPublication.merge;
-  original.item.linkedPullRequests[0]!.headSha = record.plannedHeadSha;
+  original.item.linkedPullRequests![0]!.headSha = record.plannedHeadSha;
   refs.set(`refs/heads/${original.branch}`, record.plannedHeadSha);
   const events = () => [
     ...receiver.snapshot.factoryEvents!,

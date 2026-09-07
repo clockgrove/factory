@@ -302,6 +302,9 @@ export async function verifyRecoveryPeerTrunkIntegration(input: {
     );
     if (!integrations.length) continue;
     const integrated = one(integrations);
+    requirePeer(
+      integrated.event === "AttemptIntegrated" || integrated.event === "RecoverySourceIntegrated",
+    );
     const start = one(
       events.filter(
         (event) => event.event === "FactoryRunStarted" && event.runId === integrated.runId,
@@ -486,7 +489,10 @@ export async function verifyRecoveryPeerTrunkIntegration(input: {
           (await store.readCommit(reserved.baseSha)).treeOid === reservation.treeOid,
       );
       const publication = selectEquivalentPublicationRecord(
-        group.filter((event) => event.event === "PublicationRecorded"),
+        group.filter(
+          (event): event is Extract<FactoryEvent, { event: "PublicationRecorded" }> =>
+            event.kind === "publication" && event.event === "PublicationRecorded",
+        ),
       );
       requirePeer(publication);
       if (publication.mode === "regular-prs")

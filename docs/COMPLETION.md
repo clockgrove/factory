@@ -16,13 +16,22 @@ are implementation work; exercising an existing qualifier is testing work.
 
 ## Capability status
 
-The remaining trunk implementation boundary is
+The current trunk batch integrates
 [#136](https://github.com/clockgrove/factory/issues/136) (explicit budget intent and durable model-call
-admission) plus [#137](https://github.com/clockgrove/factory/issues/137) (safe conservative defaults).
-These are coding work, not deferred qualifications. Complete and integrate them before the
-coordinated checks. Budget policy, runtime enforcement and scheduling have independent owners;
-the coordinator owns integration. The full application scenario coverage is retained in
-[#86](https://github.com/clockgrove/factory/issues/86), not replaced by the first bounded pilot.
+admission), [#137](https://github.com/clockgrove/factory/issues/137) (safe conservative defaults),
+and [#138](https://github.com/clockgrove/factory/issues/138) (accepted-work recovery before publication).
+The final corrected candidate's coordinated verification and matching-artifact acceptance remain
+pending; earlier failed checks remain separate evidence, not a pass or a new scope deferral.
+The coordinator owns that integration boundary. Full application scenario coverage remains required
+in [#86](https://github.com/clockgrove/factory/issues/86), not replaced by the first bounded pilot.
+
+These settle the original contract rather than create new approval gates: unsupported hard token
+ceilings are rejected before model work; new observed thresholds require explicit `observed-stop`
+intent and allow in-flight overshoot. Authenticated historical policies retain their original
+digests and semantics. Dispatch intent is not observed usage or a zero-token allocation, and
+missing actual counters continue to fence replacement. New policies default to fixed two-worker
+admission with physical CPU/memory safety; adaptive mode remains explicit, with its live default-change
+prerequisites retained. None of these choices waives application, provider or comparative-benefit acceptance.
 
 The restored implementation is complete, reviewed and passed the
 [integrated release checks and exact-artifact installation](release-evidence/restored-capabilities-integrated-2026-09-06.json).
@@ -55,8 +64,10 @@ passed on their separate exact candidate. New defects remain tracked implementat
 
 The [scope audit](https://github.com/clockgrove/factory/issues/108) found unverified reductions
 and retained implementation gaps. Earlier blanket completion and accepted-deferral claims are
-withdrawn. The comparative cost/throughput benefit is not yet demonstrated; safe execution and
-consumption counters are not substitutes. Disputed requirements remain unresolved, not waived.
+withdrawn. The six restorations and the remaining budget/default/application scope decisions are
+now reconciled through #136/#137 and retained #86 acceptance. Implementation verification and
+unexecuted qualification are still required. Comparative cost/throughput benefit is not yet
+demonstrated; safe execution and consumption counters are not substitutes.
 
 | Capability | Issues | Remaining acceptance |
 | --- | --- | --- |
@@ -71,9 +82,10 @@ consumption counters are not substitutes. Disputed requirements remain unresolve
 | Same-host multi-Objective and regular-PR concurrency | [#113](https://github.com/clockgrove/factory/issues/113), [#114](https://github.com/clockgrove/factory/issues/114) | Completed / concurrency lane: fair shared capacity, concurrent regular work, pinned compilation and exact peer/sibling integration implemented and covered by passing integrated checks. Next: installed overlap, fairness and recovery qualification. |
 | Durable App Server sessions | [#115](https://github.com/clockgrove/factory/issues/115) | Completed / session lane: exact session identity, terminal recovery without another model turn, complete-usage accounting and deterministic recovery qualifier implemented; integrated checks passed. Next: installed WSL2 recovery scenario. [Unsupported cold repair turns](CODEX-APP-SERVER-SESSIONS.md) remain an explicit provider boundary. |
 | Generic large-file handling | [#116](https://github.com/clockgrove/factory/issues/116), [#117](https://github.com/clockgrove/factory/issues/117), [#118](https://github.com/clockgrove/factory/issues/118) | Completed / artifact lane: LFS/tooling, manifests, streamed content, durable transfer recovery, cache ownership and exact continuation implemented; integrated checks passed. Unknown replacement remains refused. Next: installed local large-file cases and separately authorized provider transfer qualification. |
-| Trunk budget contract | [#136](https://github.com/clockgrove/factory/issues/136) | Code / budget-policy and runtime owners: explicit intent, unsupported hard-cap refusal before model work, durable unknown-call fencing, unchanged authenticated historical recovery and honest usage disclosure. Next: integrated implementation and regression acceptance. |
-| Safe scheduling defaults | [#137](https://github.com/clockgrove/factory/issues/137) | Code / scheduling owner: fixed two-worker default with physical/resource safety; explicit adaptive policies remain available. Next: integrated implementation and regression acceptance, with adaptive live prerequisites retained. |
-| Scope and acceptance reconciliation | [#108](https://github.com/clockgrove/factory/issues/108) | All six restored commitments implemented. Preserve the original contracts through #136/#137 and full Wave 8 application coverage in #86; do not invent a new maintainer approval gate or waive remaining acceptance. |
+| Trunk budget contract | [#136](https://github.com/clockgrove/factory/issues/136) | Implementation integrated / budget-policy and runtime owners: explicit intent, unsupported hard-cap refusal before model work, durable unknown-call fencing, unchanged authenticated historical authority and honest usage disclosure. Next: resolve observed verification defects and pass the final integrated candidate; no provider hard-cap or live savings claim. |
+| Safe scheduling defaults | [#137](https://github.com/clockgrove/factory/issues/137) | Implementation integrated / scheduling owner: new fixed two-worker default with physical/resource safety; explicit adaptive policies and recorded policy identities remain intact. Next: final integrated regression acceptance, with adaptive live prerequisites retained. |
+| Accepted work before publication | [#138](https://github.com/clockgrove/factory/issues/138) | Implementation integrated / recovery owner: repair linked review accounting and the missing owned publication from the exact retained artifact/validation/accepted review, without repeating those calls. Current head, policy, scope and lease fences remain required. Next: affected interruption/restart regression, then final integrated checks. |
+| Scope and acceptance reconciliation | [#108](https://github.com/clockgrove/factory/issues/108) | All six restored commitments implemented. Original budget/default contracts are explicit in #136/#137; full Wave 8 application coverage remains #86. Scope reconciliation is not an installed qualification pass or permission to close incomplete acceptance. |
 | Compiler economics and runtime reporting | [#110](https://github.com/clockgrove/factory/issues/110) | Completed / economics lane: grounded compilation tradeoffs, runtime intervals/concurrency, attributed consumption and explicit evidence gaps implemented, reviewed and covered by passing integrated checks. Next: measured comparison under #109, not a savings claim. |
 | Representative compiler/chat evaluation | [#111](https://github.com/clockgrove/factory/issues/111), [#112](https://github.com/clockgrove/factory/issues/112) | Corpus implementation completed / evaluation lane: five executable projects, twelve selection cases and production-contract consumers; integrated checks passed. Next: actual compiler/agent behavior under #112. |
 | Measured product benefit | [#109](https://github.com/clockgrove/factory/issues/109) | Testing / qualification lane: compare equivalent accepted outcomes against controlled baselines after implementation. Depends on #110/#111 and scope reconciliation; coordinate with #112 without duplicating runs. |

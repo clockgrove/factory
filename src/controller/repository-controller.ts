@@ -704,11 +704,12 @@ function controllerFailureDiagnostic(error: unknown): string {
   if (error instanceof LeaseLostError) return "objective-lease-lost";
   const status = (error as { status?: unknown } | null)?.status;
   if (status === 401 || status === 403) return `github-permission-${status}`;
-  if (
-    error instanceof Error &&
-    error.message === "Recovery adoption blocked: resource-absence-unverified"
-  )
-    return "recovery-adoption-blocked: resource-absence-unverified";
+  if (error instanceof Error) {
+    const recovery = /^Recovery adoption (blocked|pending): ([a-z0-9,-]+(?:, [a-z0-9,-]+)*)$/.exec(
+      error.message,
+    );
+    if (recovery) return `recovery-adoption-${recovery[1]}: ${recovery[2]}`;
+  }
   if (
     error instanceof Error &&
     [

@@ -274,6 +274,7 @@ describe("release evidence and publication boundary", () => {
       "verify-live-objective.mjs",
       "qualification-receipts.mjs",
       "qualification-merge-proof.mjs",
+      "qualification-model-accounting.mjs",
     ]) {
       copyFileSync(new URL(`../scripts/${name}`, import.meta.url), join(root, "scripts", name));
     }

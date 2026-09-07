@@ -198,6 +198,7 @@ async function fixture(
     tokenLimit?: number;
     resource?: "legacy" | "local" | "managed";
     stacked?: boolean;
+    activated?: boolean;
   } = {},
 ) {
   const store = new MemoryStore();
@@ -305,6 +306,7 @@ async function fixture(
     baseSha: base.oid,
     policy,
     policyDigest: policyDigest(policy),
+    ...(options.activated ? { activationRequestId: "original-activation" } : {}),
   });
   const terminal = event({
     kind: "run",
@@ -345,6 +347,23 @@ async function fixture(
     terminal,
   ];
   if (options.missingCompileUsage) events.splice(3, 1);
+  if (options.activated)
+    events.push(
+      event({
+        kind: "run",
+        event: "ActivationRequested",
+        runId: "original-activation",
+        requestId: "original-activation",
+        sequence: 1,
+        requestedBy: "operator",
+        repository: "o/r",
+        baseSha: base.oid,
+        policy,
+        policyDigest: policyDigest(policy),
+        controllerProtocolMin: "clockgrove.factory/v2",
+        controllerProtocolMax: "clockgrove.factory/v2",
+      }),
+    );
   let source: RecoveryPlan["items"][number]["source"] = null;
   if (options.resource) {
     const reservation = event({
@@ -620,6 +639,79 @@ async function addAttempt(f: Awaited<ReturnType<typeof adopted>>, attempt = 1) {
 }
 
 describe("verified successor runtime loader", () => {
+  it("loads completed adoption with its exact original activation in a separate sequence namespace", async () => {
+    const f = await adopted({ activated: true });
+    const writes = [...f.store.writes];
+    const result = await f.read();
+    expect(result).toMatchObject({ status: "verified", adoptionVerified: true });
+    if (result.status !== "verified") throw new Error("expected verified activation runtime");
+    expect(result.events.filter((event) => event.event === "ActivationRequested")).toHaveLength(1);
+    expect(result.currentEvents.some((event) => event.event === "ActivationRequested")).toBe(false);
+    expect(result.accountingRunIds).not.toContain("original-activation");
+    expect(f.store.writes).toEqual(writes);
+  });
+
+  it.each([
+    "missing",
+    "duplicate-envelope",
+    "actor",
+    "repository",
+    "base",
+    "policy",
+    "request-id",
+    "request-run",
+    "protocol",
+    "unrelated",
+  ] as const)(
+    "refuses %s original activation evidence after otherwise completed adoption",
+    async (fault) => {
+      const f = await adopted({ activated: true });
+      const events = f.snapshot.factoryEvents!;
+      const activation = events.find((event) => event.event === "ActivationRequested")!;
+      const index = events.indexOf(activation);
+      if (fault === "missing") events.splice(index, 1);
+      else if (fault === "duplicate-envelope")
+        events.push(parseFactoryEvent({ ...activation, sequence: 0 }));
+      else if (fault === "unrelated")
+        events.push(
+          event({
+            kind: "run",
+            event: "FactoryRunEscalated",
+            runId: "unrelated-run",
+            sequence: 200,
+          }),
+        );
+      else {
+        const change = {
+          actor: { requestedBy: "other-operator" },
+          repository: { repository: "other/repo" },
+          base: { baseSha: sha("f") },
+          policy: { policyDigest: "f".repeat(64) },
+          "request-id": { requestId: "other-activation" },
+          "request-run": { runId: "source" },
+          protocol: { controllerProtocolMax: "clockgrove.factory/v3" },
+        }[fault];
+        events[index] = { ...activation, ...change } as FactoryEvent;
+      }
+      const writes = [...f.store.writes];
+      expect(await f.read()).toMatchObject({
+        status: "blocked",
+        adoptionVerified: false,
+        executionAuthorized: false,
+      });
+      expect(f.store.writes).toEqual(writes);
+    },
+  );
+
+  it("retains exact lost-response activation duplicates without treating them as new authority", async () => {
+    const f = await adopted({ activated: true });
+    const activation = f.snapshot.factoryEvents!.find(
+      (event) => event.event === "ActivationRequested",
+    )!;
+    f.snapshot.factoryEvents!.push(structuredClone(activation));
+    expect(await f.read()).toMatchObject({ status: "verified" });
+  });
+
   it.each(["readRef", "readCommit", "readBlob", "getRepositoryFacts", "getBranchHead"] as const)(
     "preserves typed refusal through %s and retries only on a new full observation",
     async (method) => {

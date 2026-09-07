@@ -7,6 +7,7 @@ import {
 } from "./claims.js";
 import { recoveryEventDigest, recoverySourceEventsDigest } from "./identity.js";
 import { parseRecoveryPlan, type RecoveryPlanRecord } from "./plan.js";
+import { recoveryRunHistoryActivations } from "./activation-history.js";
 
 type Start = Extract<FactoryEvent, { event: "FactoryRunStarted" }>;
 type Consumed = Extract<FactoryEvent, { event: "RecoveryConsumed" }>;
@@ -134,7 +135,6 @@ export function inspectRecoveryAdoption(
       return blocked("history-incomplete");
     const expected = recoveryAdoptionEvents(input);
     const plan = input.planRecord.plan;
-    const predecessor = input.predecessorStart;
     // Deduplicate only byte-equivalent parsed envelopes. Semantic deduplication
     // intentionally ignores timestamps and sequences elsewhere; using it here
     // would conceal conflicting transaction retries after a lost response.
@@ -147,31 +147,8 @@ export function inspectRecoveryAdoption(
     }
     const events = [...unique.values()];
     const sourceRuns = new Set(plan.history.map((entry) => entry.runId));
-    const activations = predecessor.activationRequestId
-      ? events.filter(
-          (event) =>
-            event.event === "ActivationRequested" &&
-            event.runId === predecessor.activationRequestId &&
-            event.requestId === predecessor.activationRequestId &&
-            event.requestedBy.toLowerCase() === predecessor.actor.toLowerCase() &&
-            event.repository.toLowerCase() === plan.repository.toLowerCase() &&
-            event.baseSha === predecessor.baseSha &&
-            event.policyDigest === predecessor.policyDigest &&
-            policyDigest(event.policy) === event.policyDigest &&
-            event.controllerProtocolMin === predecessor.protocol &&
-            event.controllerProtocolMax === predecessor.protocol,
-        )
-      : [];
-    if (
-      (predecessor.activationRequestId && activations.length !== 1) ||
-      events.some(
-        (event) =>
-          !sourceRuns.has(event.runId) &&
-          event.runId !== plan.successorRunId &&
-          event !== activations[0],
-      )
-    )
-      return blocked("unplanned-run-history");
+    const activations = recoveryRunHistoryActivations(plan, events);
+    if (!activations) return blocked("unplanned-run-history");
     const requests = events.filter(
       (event) =>
         event.event === "RecoveryRequested" && event.predecessorRunId === plan.predecessor.runId,
@@ -203,6 +180,7 @@ export function inspectRecoveryAdoption(
     for (const event of events) {
       if (
         event.runId !== plan.successorRunId &&
+        !activations.has(event) &&
         event.sequence >= expected[0].sequence &&
         event.sequence <= expected[2].sequence
       )

@@ -165,10 +165,7 @@ export class RecoveryCoordinator {
         events,
         historyComplete,
       });
-      requireGate(
-        replay.state !== "blocked",
-        replay.blockers[0] ?? "adoption-replay-conflict",
-      );
+      requireGate(replay.state !== "blocked", replay.blockers[0] ?? "adoption-replay-conflict");
     } else {
       requireGate(
         !events.some((event) => event.runId === plan.successorRunId),

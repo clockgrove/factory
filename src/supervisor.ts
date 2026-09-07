@@ -2482,12 +2482,14 @@ export class FactorySupervisor {
     };
     assertActivation(initial);
     const base = await this.#store.getBranchHead(snapshot.defaultBranch);
-    // This exception is only for an activation which normal startup must refuse.
-    // Keep supported unchanged/evidenced-base cancellation on its existing path;
-    // do not impose new local-only cleanup requirements on completed cloud history.
+    // Expiry does not retire an old process or a retained successful attempt's
+    // capacity. An explicit cancellation must reconcile those obligations before
+    // terminalization, even when normal startup would accept the unchanged base.
+    // Nonexpired unchanged/evidenced-base cancellation keeps its existing route.
     if (
-      base.oid === run.baseSha ||
-      (await this.#observedRunOwnsBaseAdvance(snapshot, run, base.oid))
+      Date.now() < run.startedAt.getTime() + run.policy.objectiveTimeoutMinutes * 60_000 &&
+      (base.oid === run.baseSha ||
+        (await this.#observedRunOwnsBaseAdvance(snapshot, run, base.oid)))
     )
       return null;
     const priorLease = await this.#leases.read(snapshot.number);
@@ -2818,6 +2820,45 @@ export class FactorySupervisor {
               );
             });
           }
+          // AttemptSucceeded intentionally does not imply resource absence. The
+          // original artifact/usage remains successful; retire only this exact
+          // execution capacity after independently proving cleanup above.
+          const scheduling = normalizeSchedulingPolicy(run.policy);
+          const executionCapacity = deriveCapacityReservations([{
+            objective: run.objective,
+            workItem: item.number,
+            events,
+            defaultCpu: scheduling.capacity.local.defaultCpu,
+            defaultMemoryMb: scheduling.capacity.local.defaultMemoryMb,
+          }]).find((capacity) => capacity.phase === "execution" &&
+            capacity.attempt === reservation.attempt && capacity.backendId === reservation.backend);
+          if (executionCapacity) {
+            await assertCurrent();
+            await this.#lease.use(async (lease) => {
+              await this.#store.addIssueComment(item.id, encodeEventComment(
+                "Factory reconciled cancelled execution capacity after exact resource cleanup.",
+                parseFactoryEvent({
+                  protocol: PROTOCOL_V2,
+                  kind: "capacity",
+                  event: "CapacityReconciled",
+                  objective: run.objective,
+                  runId: run.runId,
+                  workItem: item.number,
+                  attempt: reservation.attempt,
+                  phase: "execution",
+                  backend: reservation.backend,
+                  requestedCpu: executionCapacity.cpu,
+                  requestedMemoryMb: executionCapacity.memoryMb,
+                  directorEpoch: reservation.directorEpoch,
+                  recoveryEpoch: lease.epoch,
+                  policyDigest: reservation.policyDigest,
+                  sequence: this.#sequences.take(),
+                  at: (await this.#store.serverTime()).toISOString(),
+                  reason: "operator cancellation proved exact original execution resource absence",
+                }),
+              ));
+            });
+          }
           if (
             !events.some(
               (event) =>
@@ -2851,8 +2892,16 @@ export class FactorySupervisor {
       }
       snapshot = await assertCurrent();
       const remaining = snapshotEvents(snapshot).filter((event) => event.runId === run.runId);
+      const scheduling = normalizeSchedulingPolicy(run.policy);
       if (
         unreconciledCapacityReservations(remaining).length ||
+        deriveCapacityReservations(snapshot.workItems.map((item) => ({
+          objective: run.objective,
+          workItem: item.number,
+          events: remaining,
+          defaultCpu: scheduling.capacity.local.defaultCpu,
+          defaultMemoryMb: scheduling.capacity.local.defaultMemoryMb,
+        }))).length ||
         unreconciledBudgetReservations(remaining).some((event) => event.unit !== "model_tokens")
       )
         throw new Error("cancellation has unresolved resource or native accounting ownership");

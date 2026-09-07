@@ -455,6 +455,21 @@ export function deriveCapacityReservations(
     for (const [attempt, values] of attempts) {
       const reserved = values.find((event) => event.event === "AttemptReserved");
       if (!reserved || values.some((event) => executionTerminal.has(event.event))) continue;
+      // A retained successful artifact may be cancelled without changing its
+      // AttemptSucceeded receipt. Only the cleanup writer's exact later resource
+      // reconciliation discharges that original execution reservation.
+      const executionReconciled = events.some((event) =>
+        event.kind === "capacity" && event.event === "CapacityReconciled" &&
+        event.phase === "execution" && event.objective === reserved.objective &&
+        event.runId === reserved.runId && event.workItem === reserved.workItem &&
+        event.attempt === reserved.attempt && event.backend === reserved.backend &&
+        event.directorEpoch === reserved.directorEpoch &&
+        event.policyDigest === reserved.policyDigest &&
+        (event.recoveryEpoch ?? event.directorEpoch) >= reserved.directorEpoch &&
+        event.sequence > reserved.sequence &&
+        event.requestedCpu === (reserved.requestedCpu ?? input.defaultCpu) &&
+        event.requestedMemoryMb === (reserved.requestedMemoryMb ?? input.defaultMemoryMb));
+      if (executionReconciled) continue;
       // The validation reservation is written only after worker cleanup and
       // the atomic in-memory phase transition. It therefore proves execution
       // capacity ended even if the Director crashed before AttemptCollected.

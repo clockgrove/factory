@@ -5857,8 +5857,13 @@ export class FactorySupervisor {
       // Recovery is continuing a durable successful attempt, not a new worker.
       // Shutdown before validation admission preserves that checkpoint for the
       // next fenced controller; it must not manufacture AttemptCancelled/Failed.
-      if (recovered && !validationCapacityRecorded && executionSignal?.aborted &&
-        this.#options.shutdownBehavior === "release-lease") throw error;
+      if (
+        recovered &&
+        !validationCapacityRecorded &&
+        executionSignal?.aborted &&
+        this.#options.shutdownBehavior === "release-lease"
+      )
+        throw error;
       if (
         retryableArtifact &&
         validation &&

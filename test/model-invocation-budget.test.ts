@@ -151,6 +151,30 @@ describe("durable model dispatch intent", () => {
     expect(() => assertModelInvocationAdmission(events, policy)).toThrow(/consumption is unknown/);
   });
 
+  it.each([false, true])("keeps the earliest equivalent marker binding across receipt replay (reversed input: %s)", (reversed) => {
+    const marker = budget("BudgetReserved");
+    const actual = budget("BudgetReconciled");
+    const duplicate = budget("BudgetReserved", { sequence: 3 });
+    const events = reversed ? [duplicate, actual, marker] : [marker, actual, duplicate];
+    expect(unresolvedModelInvocations(events)).toEqual([]);
+    expect(unreconciledBudgetReservations(events)).toEqual([]);
+    expect(deriveBudgetUsage(events).modelTokens).toBe(30);
+    expect(() => assertModelInvocationAdmission(events, policy)).not.toThrow();
+  });
+
+  it.each([
+    { directorEpoch: 2, policyDigest: "a".repeat(64) },
+    { directorEpoch: 1, policyDigest: "b".repeat(64) },
+    { directorEpoch: undefined, policyDigest: undefined },
+  ])("cannot discharge the invocation using a changed or missing source binding: %j", (binding) => {
+    const original = { directorEpoch: 1, policyDigest: "a".repeat(64) };
+    const marker = budget("BudgetReserved", original);
+    const actual = budget("BudgetReconciled", binding);
+    expect(() => unresolvedModelInvocations([marker, actual])).toThrow(/usage conflicts with its dispatch binding/);
+    expect(() => assertModelInvocationAdmission([marker, actual], policy)).toThrow(/usage conflicts with its dispatch binding/);
+    expect(unresolvedModelInvocations([marker, budget("BudgetReconciled", original)])).toEqual([]);
+  });
+
   it("distinguishes active process ownership from restart and missing accounting", () => {
     const marker = budget("BudgetReserved");
     const identity = { ...marker, modelInvocationId: invocation };

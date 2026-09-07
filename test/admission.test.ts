@@ -470,6 +470,7 @@ describe("pure local-first admission", () => {
       ...policy,
       economics: {
         maxModelTokens: 10_000,
+        modelTokenBudgetMode: "observed-stop",
         maxSandboxMinutes: 60,
         maxManagedSessions: 0,
         minCloudTimeSavedMinutes: 10,
@@ -503,6 +504,7 @@ describe("pure local-first admission", () => {
       ...policy,
       economics: {
         maxModelTokens: 10_000,
+        modelTokenBudgetMode: "observed-stop",
         maxSandboxMinutes: 60,
         maxManagedSessions: 0,
         minCloudTimeSavedMinutes: 10,

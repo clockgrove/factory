@@ -115,6 +115,7 @@ export async function providerSupervisorFixture(
     maxManagedAgentSessions: managed ? 3 : 0,
     economics: {
       maxModelTokens: 10_000,
+      modelTokenBudgetMode: "observed-stop",
       maxSandboxMinutes: 30,
       maxManagedSessions: managed ? 3 : 0,
       minCloudTimeSavedMinutes: 0,

@@ -168,11 +168,26 @@ export function checkpointFailure(error, boundary) {
 }
 
 const observationPhases = new Set([
-  "worker-start", "terminal-artifact-hold", "recovered-accounted-pause", "completed",
-  "checkpoint", "paused", "accounted-pause", "observation", "continuation",
+  "worker-start",
+  "terminal-artifact-hold",
+  "recovered-accounted-pause",
+  "completed",
+  "checkpoint",
+  "paused",
+  "accounted-pause",
+  "observation",
+  "continuation",
 ]);
 const observationStages = new Set([
-  "objective", "children", "comments", "receipts", "status", "witness", "extension", "accept", "poll",
+  "objective",
+  "children",
+  "comments",
+  "receipts",
+  "status",
+  "witness",
+  "extension",
+  "accept",
+  "poll",
 ]);
 const retryableReadStages = new Set(["objective", "children", "comments", "status"]);
 
@@ -180,23 +195,52 @@ const retryableReadStages = new Set(["objective", "children", "comments", "statu
  * its message/cause, request parameters, headers or response body. */
 export function checkpointObservationFailure(error, { phase, stage, now = Date.now() } = {}) {
   const knownCode = checkpointFailure(error).code;
-  const status = Number.isSafeInteger(error?.status) && error.status >= 400 && error.status <= 599
-    ? error.status : undefined;
-  const transportCodes = new Set(["ECONNRESET", "ECONNREFUSED", "EAI_AGAIN", "ENOTFOUND", "EPIPE", "ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_SOCKET"]);
-  const transportCode = transportCodes.has(error?.code) ? error.code
-    : transportCodes.has(error?.cause?.code) ? error.cause.code : undefined;
-  const mcpCode = error?.name === "McpError" && [-32700, -32600, -32601, -32602, -32603, -32000, -32001].includes(error.code)
-    ? error.code : undefined;
-  const category = status === 403 || status === 429 ? "http-refusal"
-    : status !== undefined ? "http"
-    : error?.name === "TimeoutError" || knownCode === "ETIMEDOUT" ? "timeout"
-    : error?.name === "AbortError" || knownCode === "ABORT_ERR" ? "aborted"
-    : transportCode ? "transport"
-    : mcpCode !== undefined ? "mcp"
-    : error instanceof SyntaxError ? "parse"
-    : knownCode === "ERR_ASSERTION" ? "assertion"
-    : error?.code === "CHECKPOINT_DEADLINE" ? "deadline"
-    : knownCode !== "UNAVAILABLE" ? "filesystem" : "unavailable";
+  const status =
+    Number.isSafeInteger(error?.status) && error.status >= 400 && error.status <= 599
+      ? error.status
+      : undefined;
+  const transportCodes = new Set([
+    "ECONNRESET",
+    "ECONNREFUSED",
+    "EAI_AGAIN",
+    "ENOTFOUND",
+    "EPIPE",
+    "ETIMEDOUT",
+    "UND_ERR_CONNECT_TIMEOUT",
+    "UND_ERR_SOCKET",
+  ]);
+  const transportCode = transportCodes.has(error?.code)
+    ? error.code
+    : transportCodes.has(error?.cause?.code)
+      ? error.cause.code
+      : undefined;
+  const mcpCode =
+    error?.name === "McpError" &&
+    [-32700, -32600, -32601, -32602, -32603, -32000, -32001].includes(error.code)
+      ? error.code
+      : undefined;
+  const category =
+    status === 403 || status === 429
+      ? "http-refusal"
+      : status !== undefined
+        ? "http"
+        : error?.name === "TimeoutError" || knownCode === "ETIMEDOUT"
+          ? "timeout"
+          : error?.name === "AbortError" || knownCode === "ABORT_ERR"
+            ? "aborted"
+            : transportCode
+              ? "transport"
+              : mcpCode !== undefined
+                ? "mcp"
+                : error instanceof SyntaxError
+                  ? "parse"
+                  : knownCode === "ERR_ASSERTION"
+                    ? "assertion"
+                    : error?.code === "CHECKPOINT_DEADLINE"
+                      ? "deadline"
+                      : knownCode !== "UNAVAILABLE"
+                        ? "filesystem"
+                        : "unavailable";
   assert.ok(Number.isSafeInteger(now) && now >= 0 && now <= 8640000000000000);
   return {
     boundary: "observation",
@@ -212,23 +256,33 @@ export function checkpointObservationFailure(error, { phase, stage, now = Date.n
 
 /** One committed read port, not an arbitrary action retry. Explicit quota/refusal
  * and retry-after responses stop here; their boundary is never overridden. */
-export async function checkpointObservationRead(operation, {
-  phase, stage, deadline, record, now = Date.now, wait = sleep,
-}) {
+export async function checkpointObservationRead(
+  operation,
+  { phase, stage, deadline, record, now = Date.now, wait = sleep },
+) {
   assert.ok(observationStages.has(stage), "unsupported observation read stage");
   assert.ok(Number.isSafeInteger(deadline));
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       const remainingMs = deadline - now();
-      if (remainingMs <= 0) throw Object.assign(Error("observation deadline"), { code: "CHECKPOINT_DEADLINE" });
+      if (remainingMs <= 0)
+        throw Object.assign(Error("observation deadline"), { code: "CHECKPOINT_DEADLINE" });
       return await operation(remainingMs);
     } catch (error) {
       const diagnostic = checkpointObservationFailure(error, { phase, stage, now: now() });
       const headers = error?.response?.headers ?? {};
-      const quotaBoundary = headers["retry-after"] !== undefined || headers["x-ratelimit-reset"] !== undefined || headers["x-ratelimit-remaining"] === "0";
-      const retry = retryableReadStages.has(stage) && !quotaBoundary && attempt < 3 && now() + 1000 < deadline &&
+      const quotaBoundary =
+        headers["retry-after"] !== undefined ||
+        headers["x-ratelimit-reset"] !== undefined ||
+        headers["x-ratelimit-remaining"] === "0";
+      const retry =
+        retryableReadStages.has(stage) &&
+        !quotaBoundary &&
+        attempt < 3 &&
+        now() + 1000 < deadline &&
         ((diagnostic.category === "http" && [502, 503, 504].includes(diagnostic.httpStatus)) ||
-          (diagnostic.httpStatus === undefined && ["transport", "timeout"].includes(diagnostic.category)));
+          (diagnostic.httpStatus === undefined &&
+            ["transport", "timeout"].includes(diagnostic.category)));
       await record({ ...diagnostic, attempt, retry }, error);
       if (!retry) throw error;
       await wait(1000);
@@ -753,7 +807,12 @@ export async function runCheckpointScenario(port, authority) {
   };
 }
 
-export function appServerHoldReady(observation, authority, arm, pauseRequestId = `${authority.namespace}-pause`) {
+export function appServerHoldReady(
+  observation,
+  authority,
+  arm,
+  pauseRequestId = `${authority.namespace}-pause`,
+) {
   const witness = observation.checkpointReached;
   if (!witness) return false;
   assert.equal(witness.armDigest, arm.digest);
@@ -799,8 +858,7 @@ export function appServerHoldReady(observation, authority, arm, pauseRequestId =
     );
   unique(
     events.filter(
-      (event) =>
-        event.event === "RunPauseRequested" && event.requestId === pauseRequestId,
+      (event) => event.event === "RunPauseRequested" && event.requestId === pauseRequestId,
     ),
     "pause request missing",
   );
@@ -835,14 +893,22 @@ export async function runAppServerCheckpointScenario(port, authority) {
     scopes,
     sessionProofs,
   });
-  return continueAppServerCheckpointScenario(port, authority, { held, original, sessionProofs, scopes, originalEvents });
+  return continueAppServerCheckpointScenario(port, authority, {
+    held,
+    original,
+    sessionProofs,
+    scopes,
+    originalEvents,
+  });
 }
 
 /** The caller separately authenticates any stopped-run continuation. This tail
  * cannot create an Objective, activate it, rearm the hold or replace a worker. */
-export async function continueAppServerCheckpointScenario(port, authority, {
-  held, original, sessionProofs, scopes, originalEvents, restartAction = "restart",
-}) {
+export async function continueAppServerCheckpointScenario(
+  port,
+  authority,
+  { held, original, sessionProofs, scopes, originalEvents, restartAction = "restart" },
+) {
   assert.ok(restartAction === "restart" || restartAction === "start");
   if (restartAction === "restart") await port.controller("active", original);
   await port.action(restartAction);
@@ -1089,7 +1155,8 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
     const rows = [];
     for (let page = 1; page <= 10; page++) {
       const timeoutMs = deadline === undefined ? 15000 : Math.min(15000, deadline - Date.now());
-      if (timeoutMs <= 0) throw Object.assign(Error("observation deadline"), { code: "CHECKPOINT_DEADLINE" });
+      if (timeoutMs <= 0)
+        throw Object.assign(Error("observation deadline"), { code: "CHECKPOINT_DEADLINE" });
       const { data } = await request(route, { ...args, page, per_page: 100 }, timeoutMs);
       assert.ok(Array.isArray(data));
       rows.push(...data);
@@ -1283,59 +1350,99 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
         .join("\n"),
     );
   };
-  let observationPhase = "observation", observationDeadline, lastObservationError;
-  const observationRead = (stage, operation) => checkpointObservationRead(operation, {
-    phase: observationPhase,
-    stage,
-    deadline: Math.min(observationDeadline ?? Number.MAX_SAFE_INTEGER, Date.parse(evidence.startedAt) + 2700000),
-    record: (diagnostic, error) => {
-      lastObservationError = error;
-      const failures = evidence.observationFailures ??= [];
-      if (failures.length >= 128) {
-        failures.splice(1, 1); // Preserve the first failure and the bounded recent tail.
-        evidence.omittedObservationFailures = (evidence.omittedObservationFailures ?? 0) + 1;
-      }
-      failures.push(diagnostic);
-      save();
-    },
-  });
+  let observationPhase = "observation",
+    observationDeadline,
+    lastObservationError;
+  const observationRead = (stage, operation) =>
+    checkpointObservationRead(operation, {
+      phase: observationPhase,
+      stage,
+      deadline: Math.min(
+        observationDeadline ?? Number.MAX_SAFE_INTEGER,
+        Date.parse(evidence.startedAt) + 2700000,
+      ),
+      record: (diagnostic, error) => {
+        lastObservationError = error;
+        const failures = (evidence.observationFailures ??= []);
+        if (failures.length >= 128) {
+          failures.splice(1, 1); // Preserve the first failure and the bounded recent tail.
+          evidence.omittedObservationFailures = (evidence.omittedObservationFailures ?? 0) + 1;
+        }
+        failures.push(diagnostic);
+        save();
+      },
+    });
   const observe = async () => {
     const objective = (
-      await observationRead("objective", (remainingMs) => request("GET /repos/{owner}/{repo}/issues/{issue_number}", {
-        issue_number: evidence.objective.number,
-      }, Math.min(15000, remainingMs)))
+      await observationRead("objective", (remainingMs) =>
+        request(
+          "GET /repos/{owner}/{repo}/issues/{issue_number}",
+          {
+            issue_number: evidence.objective.number,
+          },
+          Math.min(15000, remainingMs),
+        ),
+      )
     ).data;
     await observationRead("objective", () => {
       assert.equal(objective.user.id, evidence.actor.id);
       assert.equal(hash(objective.body), evidence.objectiveBodyDigest);
     });
-    const children = await observationRead("children", (remainingMs) => list("GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues", {
-      issue_number: objective.number,
-    }, Date.now() + remainingMs));
-    await observationRead("children", () => { assert.ok(children.length <= 3); });
+    const children = await observationRead("children", (remainingMs) =>
+      list(
+        "GET /repos/{owner}/{repo}/issues/{issue_number}/sub_issues",
+        {
+          issue_number: objective.number,
+        },
+        Date.now() + remainingMs,
+      ),
+    );
+    await observationRead("children", () => {
+      assert.ok(children.length <= 3);
+    });
     const comments = [];
     for (const issue of [objective, ...children])
       comments.push(
-        ...(await observationRead("comments", (remainingMs) => list("GET /repos/{owner}/{repo}/issues/{issue_number}/comments", {
-          issue_number: issue.number,
-        }, Date.now() + remainingMs))),
+        ...(await observationRead("comments", (remainingMs) =>
+          list(
+            "GET /repos/{owner}/{repo}/issues/{issue_number}/comments",
+            {
+              issue_number: issue.number,
+            },
+            Date.now() + remainingMs,
+          ),
+        )),
       );
     const observation = {
-      receipts: await observationRead("receipts", () => authenticatedFaultEvents(comments, evidence.actor, objective.number)),
-      status: await observationRead("status", (remainingMs) => call("factory_status", { objectiveNumber: objective.number }, Math.min(120000, remainingMs))),
+      receipts: await observationRead("receipts", () =>
+        authenticatedFaultEvents(comments, evidence.actor, objective.number),
+      ),
+      status: await observationRead("status", (remainingMs) =>
+        call(
+          "factory_status",
+          { objectiveNumber: objective.number },
+          Math.min(120000, remainingMs),
+        ),
+      ),
       children: children.map(({ number, state }) => ({ number, state })),
     };
     if (evidence.sessionArm) {
       try {
         observation.checkpointReached = await observationRead("witness", () => {
-          try { return JSON.parse(readBounded(`${evidence.sessionArm.path}.reached`, 16384)); }
-          catch (error) { if (error.code !== "ENOENT") throw error; return undefined; }
+          try {
+            return JSON.parse(readBounded(`${evidence.sessionArm.path}.reached`, 16384));
+          } catch (error) {
+            if (error.code !== "ENOENT") throw error;
+            return undefined;
+          }
         });
       } catch (error) {
         if (error.code !== "ENOENT") throw error;
       }
     }
-    await observationRead("extension", () => extension.observe?.({ observation, evidence, authority }));
+    await observationRead("extension", () =>
+      extension.observe?.({ observation, evidence, authority }),
+    );
     evidence.latest = observation;
     evidence.latestObservedAt = new Date().toISOString();
     save();
@@ -1520,19 +1627,24 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
           observationPhase = "observation";
           return observation;
         }
-        await observationRead("poll", () => { assert.ok(
-          !observation.receipts.some(
-            ({ event }) =>
-              terminal.has(event.event) &&
-              !(phase === "completed" && event.event === "FactoryRunCompleted"),
-          ),
-          "run ended before checkpoint qualification",
-        );
-        assert.ok(Date.now() < deadline, "bounded checkpoint observation incomplete");
+        await observationRead("poll", () => {
+          assert.ok(
+            !observation.receipts.some(
+              ({ event }) =>
+                terminal.has(event.event) &&
+                !(phase === "completed" && event.event === "FactoryRunCompleted"),
+            ),
+            "run ended before checkpoint qualification",
+          );
+          assert.ok(Date.now() < deadline, "bounded checkpoint observation incomplete");
         });
         await sleep(Math.min(5000, Math.max(0, deadline - Date.now())));
       }
-      await observationRead("poll", () => { throw Object.assign(Error("bounded checkpoint polling exhausted"), { code: "CHECKPOINT_DEADLINE" }); });
+      await observationRead("poll", () => {
+        throw Object.assign(Error("bounded checkpoint polling exhausted"), {
+          code: "CHECKPOINT_DEADLINE",
+        });
+      });
     },
     checkpoint: async (value) => {
       evidence.checkpoint = value;
@@ -1925,8 +2037,10 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
       result: "incomplete",
       reason:
         "checkpoint boundary unavailable; inspect exact retained authority before any further action",
-      diagnostic: lastObservationError === error && evidence.observationFailures?.length
-        ? evidence.observationFailures.at(-1) : checkpointFailure(error, controllerBoundary),
+      diagnostic:
+        lastObservationError === error && evidence.observationFailures?.length
+          ? evidence.observationFailures.at(-1)
+          : checkpointFailure(error, controllerBoundary),
       automaticRetry: false,
       automaticRestart: false,
     };

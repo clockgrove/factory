@@ -43,7 +43,18 @@ export interface CheckpointObservationDiagnostic {
   phase: string;
   stage: string;
   failedAt: string;
-  category: "http-refusal" | "http" | "timeout" | "aborted" | "transport" | "mcp" | "parse" | "assertion" | "deadline" | "filesystem" | "unavailable";
+  category:
+    | "http-refusal"
+    | "http"
+    | "timeout"
+    | "aborted"
+    | "transport"
+    | "mcp"
+    | "parse"
+    | "assertion"
+    | "deadline"
+    | "filesystem"
+    | "unavailable";
   code: string;
   httpStatus?: number;
   mcpCode?: number;
@@ -58,7 +69,10 @@ export function checkpointObservationRead<T>(
     phase: string;
     stage: string;
     deadline: number;
-    record(diagnostic: CheckpointObservationDiagnostic & { attempt: number; retry: boolean }, error: unknown): unknown;
+    record(
+      diagnostic: CheckpointObservationDiagnostic & { attempt: number; retry: boolean },
+      error: unknown,
+    ): unknown;
     now?(): number;
     wait?(milliseconds: number): Promise<unknown>;
   },

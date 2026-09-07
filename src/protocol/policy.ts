@@ -195,6 +195,8 @@ export function resolveModelSelection(
 export const EconomicsPolicySchema = z
   .object({
     maxModelTokens: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+    // No default: absent intent is readable historical policy, not fresh admission authority.
+    modelTokenBudgetMode: z.enum(["hard", "observed-stop"]).optional(),
     maxSandboxMinutes: z.number().int().min(0).max(100_000),
     maxManagedSessions: z.number().int().min(0).max(10_000),
     minCloudTimeSavedMinutes: z
@@ -261,7 +263,7 @@ export type RunPolicy = z.infer<typeof RunPolicySchema>;
 
 export const DEFAULT_RUN_POLICY: RunPolicy = Object.freeze({
   backendOrder: ["codex-sdk/local-worktree", "codex-cli/local-worktree"],
-  maxParallel: 8,
+  maxParallel: 2,
   workItemTimeoutMinutes: 30,
   objectiveTimeoutMinutes: 720,
   maxAttemptsPerItem: 3,
@@ -278,9 +280,9 @@ export const DEFAULT_RUN_POLICY: RunPolicy = Object.freeze({
     onUnavailable: "fallback-to-subissue-order" as const,
   },
   capacity: {
-    mode: "adaptive-local" as const,
+    mode: "fixed" as const,
     local: {
-      maxWorkers: 8,
+      maxWorkers: 2,
       defaultCpu: 1,
       defaultMemoryMb: 2_048,
       reserveCpu: 0.5,

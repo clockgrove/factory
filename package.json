@@ -62,7 +62,7 @@
     "format:check": "biome format src test scripts package.json biome.json vitest.config.ts vitest.live.config.ts",
     "lint": "biome lint --error-on-warnings src test scripts",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage",
+    "test:coverage": "vitest run --coverage --maxWorkers=50%",
     "typecheck": "tsc --noEmit",
     "verify:dist": "node scripts/verify-dist.mjs",
     "verify:live:daytona": "vitest run --config vitest.live.config.ts test/daytona-live.test.ts",

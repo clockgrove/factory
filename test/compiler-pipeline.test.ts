@@ -13,6 +13,7 @@ import { workerPacketFromCompiled } from "../src/graph.js";
 import { validationPlanFromPacket } from "../src/validation/plan.js";
 import { workerPacketPrompt } from "../src/backends/codex-cli-local.js";
 import type { AttemptContext } from "../src/execution/backend.js";
+import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 
 const sha = "a".repeat(40);
 const base: CompilerWorkItem = {
@@ -179,6 +180,7 @@ async function compileProviderOutput(
         "src/d.ts",
       ],
       allowedNetworkDestinations: [],
+      runPolicy: DEFAULT_RUN_POLICY,
     },
     async () => {},
   );
@@ -467,6 +469,7 @@ describe("bounded objective compiler", () => {
           baseSha: sha,
           repositoryFiles: ["package.json", "src/a.ts"],
           allowedNetworkDestinations: [],
+          runPolicy: DEFAULT_RUN_POLICY,
           modelSelection: {
             profile: "frontier",
             model: "gpt-5",

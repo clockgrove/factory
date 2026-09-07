@@ -1,0 +1,46 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/clockgrove/factory/schemas/execution-requirements.schema.json",
+  "title": "Repository execution requirement evidence",
+  "description": "Optional committed evidence used to ground compiled platform, resource, artifact-storage, and timeout requirements.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version"],
+  "properties": {
+    "version": { "const": 1 },
+    "defaults": { "$ref": "#/definitions/requirements" },
+    "scopes": {
+      "type": "array",
+      "maxItems": 64,
+      "default": [],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["paths", "requirements"],
+        "properties": {
+          "paths": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 64,
+            "items": { "type": "string", "minLength": 1, "maxLength": 500, "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*//)(?!.*[*?\\[]).+$" }
+          },
+          "requirements": { "$ref": "#/definitions/requirements" }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "requirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "os": { "type": "array", "maxItems": 12, "items": { "enum": ["linux", "darwin", "win32"] } },
+        "architecture": { "type": "array", "maxItems": 8, "items": { "type": "string", "minLength": 1, "maxLength": 40 } },
+        "cpu": { "type": "number", "exclusiveMinimum": 0, "maximum": 256 },
+        "memoryMb": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+        "diskMb": { "type": "integer", "minimum": 1, "maximum": 10485760 },
+        "timeoutMinutes": { "type": "integer", "minimum": 1, "maximum": 1440 }
+      }
+    }
+  }
+}

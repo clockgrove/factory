@@ -3681,6 +3681,7 @@ export class FactorySupervisor {
                     repositoryFiles: tree.files,
                     repositoryLfs,
                     allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                    runPolicy: this.#policy,
                     economicEvidence: (items) =>
                       collectCompilationEvidence(items, {
                         objective: snapshot.number,

@@ -33,6 +33,7 @@ import type {
   SemanticReview,
 } from "./backend.js";
 import { restrictedCodexArgs } from "../backends/codex-cli-policy.js";
+import { normalizeSchedulingPolicy } from "../protocol/policy.js";
 import {
   compileObjective,
   applyEconomicReview,
@@ -504,6 +505,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
       context.repositoryLfs,
     );
     const validationCommands = discoverValidationCommands(repositoryFacts);
+    const scheduling = normalizeSchedulingPolicy(context.runPolicy);
     const validationGrounding = {
       packageJson: context.repositoryFiles.includes("package.json") ? "observed" : "not observed",
       declaredScripts: repositoryFacts.scripts,
@@ -523,6 +525,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
       `Observed validation recipe facts:\n${JSON.stringify(validationGrounding)}`,
       "Set estimatedDurationMinutes to a conservative lower-bound estimate of how long the Work Item will occupy one local worker; it is an overflow-burst admission proxy, not the timeout.",
       "Use Node.js canonical platform identifiers in requirements: linux/darwin/win32 for OS and x64/arm64/etc. for architecture.",
+      `CPU, memory, disk/artifact storage, platform, and timeout values are proposals only. The trusted host replaces them with committed repository evidence or named policy/default values; do not infer them from task size or prose. Where the output schema requires a value but repository evidence is absent, emit the neutral placeholders os=["linux"], architecture=[], cpu=${scheduling.capacity.local.defaultCpu}, memoryMb=${scheduling.capacity.local.defaultMemoryMb}, diskMb=1, and timeoutMinutes=${context.runPolicy.workItemTimeoutMinutes}; the host does not treat placeholders as facts.`,
       "Tool and service requirements are machine identifiers, never prose. Use executable names such as node, npm, git, or systemctl and service IDs such as systemd-user.",
       "Emit each validation step as one simple runner command. Do not use shell chaining, pipes, redirection, command substitution, shell wrappers, interpreter eval flags, Git commands, or on-demand package executors.",
       `networkDestinations may contain only operator-approved entries from this list: ${JSON.stringify(context.allowedNetworkDestinations)}. permittedSecretNames must be empty; arbitrary task-secret injection is not supported by this release.`,
@@ -555,6 +558,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
         baseSha: context.baseSha,
         repositoryFacts,
         workItems: providerObjective.workItems,
+        runPolicy: context.runPolicy,
       });
       if (context.economicEvidence) {
         const evidence = await context.economicEvidence(grounded.workItems);

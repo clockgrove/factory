@@ -60,6 +60,24 @@ export const ExecutionRequirementsSchema = z
     networkDestinations: shortList(NetworkDestinationSchema, 64).default([]),
     permittedSecretNames: shortList(z.string().regex(/^[A-Z][A-Z0-9_]{1,127}$/), 32).default([]),
     trust: z.enum(["trusted_local", "isolated", "managed"]),
+    evidence: shortList(
+      z
+        .object({
+          field: z.enum([
+            "os",
+            "architecture",
+            "cpu",
+            "memoryMb",
+            "diskMb",
+            "timeoutMinutes",
+            "artifactContract",
+          ]),
+          kind: z.enum(["repository", "run-policy", "factory-default"]),
+          source: boundedText(500),
+        })
+        .strict(),
+      16,
+    ).optional(),
   })
   .passthrough();
 

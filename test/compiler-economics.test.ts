@@ -114,6 +114,7 @@ function graph(
       files: [{ path: "package.json" }, ...items.map((value) => ({ path: value.scope[0]! }))],
       scripts: { test: "node --test" },
     },
+    runPolicy: policy,
     ...(economicEvidence ? { economicEvidence } : {}),
   });
 }
@@ -300,7 +301,7 @@ describe("grounded advisory compiler economics", () => {
     const second = {
       ...first,
       id: "b",
-      requirements: { ...first.requirements, architecture: ["arm64"] },
+      requirements: { ...first.requirements, trust: "isolated" as const },
     };
     expect(assessDecomposition(graph([first, second]).workItems).redundantItemPairs).toEqual([]);
     expect(() => graph([first, { ...first, id: "b" }])).toThrow(/uneconomic duplicate/);
@@ -341,6 +342,7 @@ describe("grounded advisory compiler economics", () => {
           defaultBranch: "main",
           baseSha: "a".repeat(40),
           allowedNetworkDestinations: [],
+          runPolicy: DEFAULT_RUN_POLICY,
           economicEvidence: async (items) => {
             calls.push("evidence");
             expect(items[0]!.context.mustRead).toContain("package.json");

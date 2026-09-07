@@ -93,7 +93,18 @@
           "maxItems": 32,
           "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,127}$" }
         },
-        "trust": { "enum": ["trusted_local", "isolated", "managed"] }
+        "trust": { "enum": ["trusted_local", "isolated", "managed"] },
+        "evidence": {
+          "type": "array", "maxItems": 16,
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["field", "kind", "source"],
+            "properties": {
+              "field": { "enum": ["os", "architecture", "cpu", "memoryMb", "diskMb", "timeoutMinutes", "artifactContract"] },
+              "kind": { "enum": ["repository", "run-policy", "factory-default"] },
+              "source": { "type": "string", "minLength": 1, "maxLength": 500 }
+            }
+          }
+        }
       }
     },
     "backendCandidate": {

@@ -40,7 +40,19 @@
         "services": { "type": "array", "maxItems": 64, "items": { "type": "string", "pattern": "^[A-Za-z0-9._+-]+(?:/[A-Za-z0-9._+-]+)?$" } },
         "networkDestinations": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 253 } },
         "permittedSecretNames": { "type": "array", "maxItems": 32, "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{1,127}$" } },
-        "trust": { "enum": ["trusted_local", "isolated", "managed"] }
+        "trust": { "enum": ["trusted_local", "isolated", "managed"] },
+        "evidence": {
+          "type": "array", "maxItems": 16,
+          "description": "Trusted provenance for compiler-grounded platform, resource, artifact, and timeout requirements.",
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["field", "kind", "source"],
+            "properties": {
+              "field": { "enum": ["os", "architecture", "cpu", "memoryMb", "diskMb", "timeoutMinutes", "artifactContract"] },
+              "kind": { "enum": ["repository", "run-policy", "factory-default"] },
+              "source": { "type": "string", "minLength": 1, "maxLength": 500 }
+            }
+          }
+        }
       }
     },
     "context": {

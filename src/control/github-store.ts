@@ -72,6 +72,23 @@ function responseDate(response: { headers: Record<string, string | number | unde
   return parsed;
 }
 
+const PRIVATE_REPOSITORY_RULES_UNAVAILABLE_MESSAGE =
+  "Upgrade to GitHub Pro or make this repository public to enable this feature.";
+
+function isUnavailablePrivateRepositoryRuleFeature(error: unknown, documentationUrl: string) {
+  const response = (
+    error as {
+      status?: number;
+      response?: { data?: { message?: unknown; documentation_url?: unknown } };
+    }
+  )?.response?.data;
+  return (
+    (error as { status?: number })?.status === 403 &&
+    response?.message === PRIVATE_REPOSITORY_RULES_UNAVAILABLE_MESSAGE &&
+    response.documentation_url === documentationUrl
+  );
+}
+
 export interface RepositoryWorkItemClaim {
   objective: number;
   workItem: number;
@@ -803,7 +820,14 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
         }
       }
     } catch (error) {
-      if ((error as { status?: number }).status !== 404) throw error;
+      if (
+        (error as { status?: number }).status !== 404 &&
+        !isUnavailablePrivateRepositoryRuleFeature(
+          error,
+          "https://docs.github.com/rest/repos/rules#get-rules-for-a-branch",
+        )
+      )
+        throw error;
     }
 
     // GitHub rulesets and classic branch protection are separate APIs. A
@@ -819,7 +843,14 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       );
       rules.push(...classicBranchProtectionRules(response.data));
     } catch (error) {
-      if ((error as { status?: number }).status !== 404) throw error;
+      if (
+        (error as { status?: number }).status !== 404 &&
+        !isUnavailablePrivateRepositoryRuleFeature(
+          error,
+          "https://docs.github.com/rest/branches/branch-protection#get-branch-protection",
+        )
+      )
+        throw error;
     }
     return rules;
   }

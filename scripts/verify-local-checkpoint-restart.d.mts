@@ -19,6 +19,19 @@ export function checkpointFacts(
 ): { runId: string; modelTokens: number; integrated: number; stable: unknown[] };
 export function assertScopeCoverage(events: Record<string, unknown>[]): void;
 export { readQualificationMergeProof as readCheckpointMergeProof } from "./qualification-merge-proof.mjs";
+export function createCheckpointList(
+  request: (
+    route: string,
+    parameters: Record<string, unknown>,
+    timeoutMs: number,
+  ) => Promise<{ data: unknown }>,
+  options?: { now?: () => number },
+): (
+  route: string,
+  parameters?: Record<string, unknown>,
+  maximumEntries?: number,
+  options?: { deadline?: number },
+) => Promise<unknown[]>;
 export function assertCheckpointExecutable(
   pid: number,
   expectedNode: string,

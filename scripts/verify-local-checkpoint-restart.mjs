@@ -291,6 +291,27 @@ export async function checkpointObservationRead(
   throw Error("unreachable bounded observation retry");
 }
 
+/** Preserve the shared namespace list port's third-argument entry limit.
+ * Observation deadlines are separate options, never overloaded numeric limits. */
+export function createCheckpointList(request, { now = Date.now } = {}) {
+  return async (route, args = {}, maximumEntries = 1000, { deadline } = {}) => {
+    assert.ok(Number.isSafeInteger(maximumEntries) && maximumEntries > 0);
+    assert.ok(deadline === undefined || Number.isSafeInteger(deadline));
+    const rows = [];
+    for (let page = 1; page <= 10; page++) {
+      const timeoutMs = deadline === undefined ? 15000 : Math.min(15000, deadline - now());
+      if (timeoutMs <= 0)
+        throw Object.assign(Error("observation deadline"), { code: "CHECKPOINT_DEADLINE" });
+      const { data } = await request(route, { ...args, page, per_page: 100 }, timeoutMs);
+      assert.ok(Array.isArray(data));
+      rows.push(...data);
+      assert.ok(rows.length <= maximumEntries, "paginated GitHub observation bound exceeded");
+      if (data.length < 100) return rows;
+    }
+    throw Error("complete bounded GitHub listing unavailable");
+  };
+}
+
 export function assertCheckpointExecutable(pid, expectedNode, readLink = readlinkSync) {
   assert.ok(Number.isSafeInteger(pid) && pid > 1);
   assert.equal(readLink(`/proc/${pid}/exe`), expectedNode);
@@ -1151,19 +1172,7 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
       undefined,
       timeoutMs,
     );
-  const list = async (route, args = {}, deadline) => {
-    const rows = [];
-    for (let page = 1; page <= 10; page++) {
-      const timeoutMs = deadline === undefined ? 15000 : Math.min(15000, deadline - Date.now());
-      if (timeoutMs <= 0)
-        throw Object.assign(Error("observation deadline"), { code: "CHECKPOINT_DEADLINE" });
-      const { data } = await request(route, { ...args, page, per_page: 100 }, timeoutMs);
-      assert.ok(Array.isArray(data));
-      rows.push(...data);
-      if (data.length < 100) return rows;
-    }
-    throw Error("complete bounded GitHub listing unavailable");
-  };
+  const list = createCheckpointList(request);
   const evidence = {
     protocol: "clockgrove.factory/checkpoint-restart-qualification-v1",
     authority,
@@ -1394,7 +1403,8 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
         {
           issue_number: objective.number,
         },
-        Date.now() + remainingMs,
+        1000,
+        { deadline: Date.now() + remainingMs },
       ),
     );
     await observationRead("children", () => {
@@ -1409,7 +1419,8 @@ export async function main(env = process.env, runner = runCheckpointScenario, ex
             {
               issue_number: issue.number,
             },
-            Date.now() + remainingMs,
+            1000,
+            { deadline: Date.now() + remainingMs },
           ),
         )),
       );

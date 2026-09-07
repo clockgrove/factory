@@ -648,6 +648,19 @@ next reporting worker, compilation, or semantic review. Already-started concurre
 not given a provider token limit and can each overshoot the threshold by their terminal usage.
 Cached-input tokens are not added again when the provider already includes them in input tokens.
 
+Before a supervised model dispatch, Factory persists an invocation-bound intent. Its zero-valued
+budget marker records that dispatch may occur; it is neither a token allocation nor evidence of
+zero consumption. Only exact linked actual usage closes it. Live process-owned calls can coexist
+under observed-mode admission, but a restarted or ended operation cannot use that ephemeral
+ownership to repeat an uncertain call. A retained checkpoint repairs its actual usage receipt;
+missing outcomes stay unknown and prevent new model admission. Reports preserve known subtotals
+while marking total model usage and remaining threshold unavailable when invocation receipts are
+unresolved.
+
+Use matching controller and plugin artifacts for this event extension. Older controllers do not
+understand invocation-intent fences; downgrading an active run to them is unsupported. Preserve
+original receipts and qualify recovery with the build that implements this contract.
+
 Where supplied by a provider, the existing terminal Attempt and model-token reconciliation receipts
 also retain `reportedModelUsage`: input, output, and cached-input counters. Compilation and review
 checkpoints preserve the same available breakdown. Cached input is a subset of input, not an

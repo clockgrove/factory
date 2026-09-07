@@ -2421,8 +2421,8 @@ export class FactorySupervisor {
     }
   }
 
-  /** Cancellation is resource retirement, never authority to run against a changed
-   * branch. Keep this path outside graph repair, artifact continuation and admission. */
+  /** Cancellation or elapsed immutable authority permits resource retirement,
+   * never execution. Keep this outside graph repair, continuation and admission. */
   async #cancelActivatedRun(
     snapshot: Snapshot,
     run: RunState,
@@ -2460,8 +2460,18 @@ export class FactorySupervisor {
       return request;
     };
     const requested = await readCancellation();
-    if (!requested) return null;
     const initial = snapshotEvents(snapshot);
+    const scheduling = normalizeSchedulingPolicy(run.policy);
+    const outstandingCapacity = deriveCapacityReservations(snapshot.workItems.map((item) => ({
+      objective: run.objective,
+      workItem: item.number,
+      events: initial.filter((event) => event.runId === run.runId),
+      defaultCpu: scheduling.capacity.local.defaultCpu,
+      defaultMemoryMb: scheduling.capacity.local.defaultMemoryMb,
+    })));
+    const deadline = run.startedAt.getTime() + run.policy.objectiveTimeoutMinutes * 60_000;
+    if (!requested && !(Date.now() >= deadline && outstandingCapacity.length)) return null;
+    let terminalCancellation = requested;
     const assertActivation = (events: readonly FactoryEvent[]) => {
       const activations = events.filter(
         (event) => event.event === "ActivationRequested" && event.requestId === binding.requestId,
@@ -2482,19 +2492,18 @@ export class FactorySupervisor {
     };
     assertActivation(initial);
     const base = await this.#store.getBranchHead(snapshot.defaultBranch);
-    // Expiry does not retire an old process or a retained successful attempt's
-    // capacity. An explicit cancellation must reconcile those obligations before
-    // terminalization, even when normal startup would accept the unchanged base.
-    // Nonexpired unchanged/evidenced-base cancellation keeps its existing route.
+    // Neither cancellation nor expiry retires retained resource liabilities.
+    // Keep the ordinary completion/cancellation path only when this snapshot has
+    // no outstanding capacity; completed cloud history is not a new obligation.
     if (
-      Date.now() < run.startedAt.getTime() + run.policy.objectiveTimeoutMinutes * 60_000 &&
+      outstandingCapacity.length === 0 &&
       (base.oid === run.baseSha ||
         (await this.#observedRunOwnsBaseAdvance(snapshot, run, base.oid)))
     )
       return null;
     const priorLease = await this.#leases.read(snapshot.number);
     this.#sequences = new SequenceAllocator(
-      [...initial, requested],
+      [...initial, ...(requested ? [requested] : [])],
       run.sequence + 1,
       priorLease ?? undefined,
     );
@@ -2548,9 +2557,12 @@ export class FactorySupervisor {
       )
         throw new Error("run changed during cancellation cleanup");
       const cancellation = await readCancellation();
-      if (!cancellation || cancellation.requestId !== requested.requestId)
+      if (terminalCancellation && (!cancellation || cancellation.requestId !== terminalCancellation.requestId))
         throw new Error("exact cancellation disappeared during cleanup");
-      this.#sequences.observe([...snapshotEvents(current), cancellation]);
+      if (!cancellation && Date.now() < deadline)
+        throw new Error("expired cleanup authority is no longer established");
+      if (cancellation) terminalCancellation = cancellation;
+      this.#sequences.observe([...snapshotEvents(current), ...(cancellation ? [cancellation] : [])]);
       this.#fenceSnapshot(current);
       await this.#options.repositoryFence?.();
       await this.#lease.assert();
@@ -2921,8 +2933,10 @@ export class FactorySupervisor {
       return await this.#terminal(
         manager,
         snapshot,
-        "FactoryRunCancelled",
-        "operator requested cleanup-only cancellation; retained work was not resumed",
+        terminalCancellation ? "FactoryRunCancelled" : "FactoryRunEscalated",
+        terminalCancellation
+          ? "operator requested cleanup-only cancellation; retained work was not resumed"
+          : "Objective timeout exhausted; exact retained resource cleanup completed without resuming work",
       );
     } catch (error) {
       await this.#lease.release().catch(() => {});

@@ -48,61 +48,81 @@ function fixture(legacy = false) {
     at: "2026-09-07T01:00:00.000Z",
     reason: "operator requested cleanup-only cancellation",
   });
-  const closure = (overrides: Record<string, unknown> = {}) => parseFactoryEvent({
-    ...identity,
-    kind: "capacity",
-    event: "CapacityReconciled",
-    sequence: 4,
-    at: "2026-09-07T00:59:00.000Z",
-    phase: "execution",
-    recoveryEpoch: 4,
-    requestedCpu: legacy ? 2 : 1,
-    requestedMemoryMb: legacy ? 2048 : 256,
-    reason: "operator cancellation proved exact resource absence",
-    ...overrides,
-  });
-  const derive = (events: FactoryEvent[]) => deriveCapacityReservations([{
-    objective: identity.objective,
-    workItem: identity.workItem,
-    events,
-    defaultCpu: 2,
-    defaultMemoryMb: 2048,
-    paths: ["src/result.ts"],
-    isLocalBackend: (backend) => backend === identity.backend,
-  }]);
+  const closure = (overrides: Record<string, unknown> = {}) =>
+    parseFactoryEvent({
+      ...identity,
+      kind: "capacity",
+      event: "CapacityReconciled",
+      sequence: 4,
+      at: "2026-09-07T00:59:00.000Z",
+      phase: "execution",
+      recoveryEpoch: 4,
+      requestedCpu: legacy ? 2 : 1,
+      requestedMemoryMb: legacy ? 2048 : 256,
+      reason: "operator cancellation proved exact resource absence",
+      ...overrides,
+    });
+  const derive = (events: FactoryEvent[]) =>
+    deriveCapacityReservations([
+      {
+        objective: identity.objective,
+        workItem: identity.workItem,
+        events,
+        defaultCpu: 2,
+        defaultMemoryMb: 2048,
+        paths: ["src/result.ts"],
+        isLocalBackend: (backend) => backend === identity.backend,
+      },
+    ]);
   return { reserved, succeeded, terminal, closure, derive };
 }
 
 describe("expired cancellation execution-capacity proof", () => {
   it("does not confuse successful retained output or terminal run state with resource closure", () => {
     const f = fixture();
-    for (const events of [[f.reserved], [f.reserved, f.succeeded], [f.reserved, f.succeeded, f.terminal]]) {
-      expect(f.derive(events)).toMatchObject([{
-        objective: 105, workItem: 106, attempt: 1, phase: "execution",
-        backendId: identity.backend, cpu: 1, memoryMb: 256,
-      }]);
+    for (const events of [
+      [f.reserved],
+      [f.reserved, f.succeeded],
+      [f.reserved, f.succeeded, f.terminal],
+    ]) {
+      expect(f.derive(events)).toMatchObject([
+        {
+          objective: 105,
+          workItem: 106,
+          attempt: 1,
+          phase: "execution",
+          backendId: identity.backend,
+          cpu: 1,
+          memoryMb: 256,
+        },
+      ]);
     }
   });
 
-  it.each([3, 4])("releases the exact original obligation at recovery epoch %i without rewriting success", (recoveryEpoch) => {
-    const f = fixture();
-    const closure = f.closure({ recoveryEpoch });
-    const events = [f.reserved, f.succeeded, closure, f.terminal];
-    const original = structuredClone(events);
-    expect(f.derive(events)).toEqual([]);
-    expect(f.derive([...events, structuredClone(closure)])).toEqual([]);
-    expect(f.derive([...events].reverse())).toEqual([]);
-    expect(events).toEqual(original);
-    expect(events.filter((event) => event.event === "AttemptSucceeded")).toEqual([f.succeeded]);
-    expect(f.succeeded).toMatchObject({ artifactDigest, reportedModelTokens: 44906 });
-    expect(events.some((event) => event.event === "AttemptCancelled")).toBe(false);
-  });
+  it.each([3, 4])(
+    "releases the exact original obligation at recovery epoch %i without rewriting success",
+    (recoveryEpoch) => {
+      const f = fixture();
+      const closure = f.closure({ recoveryEpoch });
+      const events = [f.reserved, f.succeeded, closure, f.terminal];
+      const original = structuredClone(events);
+      expect(f.derive(events)).toEqual([]);
+      expect(f.derive([...events, structuredClone(closure)])).toEqual([]);
+      expect(f.derive([...events].reverse())).toEqual([]);
+      expect(events).toEqual(original);
+      expect(events.filter((event) => event.event === "AttemptSucceeded")).toEqual([f.succeeded]);
+      expect(f.succeeded).toMatchObject({ artifactDigest, reportedModelTokens: 44906 });
+      expect(events.some((event) => event.event === "AttemptCancelled")).toBe(false);
+    },
+  );
 
   it("accepts exact legacy default resources, not new inferred resource values", () => {
     const f = fixture(true);
     expect(f.derive([f.reserved, f.succeeded, f.closure()])).toEqual([]);
     expect(f.derive([f.reserved, f.succeeded, f.closure({ requestedCpu: 1 })])).toHaveLength(1);
-    expect(f.derive([f.reserved, f.succeeded, f.closure({ requestedMemoryMb: 256 })])).toHaveLength(1);
+    expect(f.derive([f.reserved, f.succeeded, f.closure({ requestedMemoryMb: 256 })])).toHaveLength(
+      1,
+    );
   });
 
   it.each([
@@ -120,15 +140,22 @@ describe("expired cancellation execution-capacity proof", () => {
     ["earlier sequence", { sequence: 1 }],
     ["same sequence", { sequence: 2 }],
     ["reservation instead of closure", { event: "CapacityReserved" }],
-  ] satisfies [string, Record<string, unknown>][]) ("retains liability for mismatched %s proof", (_label, overrides) => {
-    const f = fixture();
-    const original = [f.reserved, f.succeeded, f.terminal];
-    expect(f.derive([...original, f.closure(overrides)])).toEqual(f.derive(original));
-  });
+  ] satisfies [string, Record<string, unknown>][])(
+    "retains liability for mismatched %s proof",
+    (_label, overrides) => {
+      const f = fixture();
+      const original = [f.reserved, f.succeeded, f.terminal];
+      expect(f.derive([...original, f.closure(overrides)])).toEqual(f.derive(original));
+    },
+  );
 
   it.each([
-    { requestedCpu: undefined }, { requestedMemoryMb: undefined }, { policyDigest: undefined },
-    { directorEpoch: undefined }, { recoveryEpoch: 0 }, { requestedCpu: 0 },
+    { requestedCpu: undefined },
+    { requestedMemoryMb: undefined },
+    { policyDigest: undefined },
+    { directorEpoch: undefined },
+    { recoveryEpoch: 0 },
+    { requestedCpu: 0 },
     { event: "UnknownResourceClosure" },
     { sourceRunId: "other-source-run", targetBaseSha: baseSha },
   ])("does not supply invalid or unknown closure records to derivation (%j)", (overrides) => {

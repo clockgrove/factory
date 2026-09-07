@@ -28,7 +28,7 @@ dependencies, not a reason to silently narrow those issues:
 | [#123](https://github.com/clockgrove/factory/issues/123): restored capabilities | Local qualification / test | Complete installed shared-work, durable-session restart, LFS/media and oversized-transfer recovery acceptance. |
 | [#76](https://github.com/clockgrove/factory/issues/76): scheduling | Local qualification / test | Combine retained pressure evidence with continuous refill, shared ceilings, real inner/outer contention and explain/replay. Serial takeover is not simultaneous contention. |
 | [#75](https://github.com/clockgrove/factory/issues/75): resilience | Local qualification / test | Complete safe failed-validation/conflict and lifecycle outcomes. Retain the specific interrupted-usage limitation rather than treating unavailable accounting as complete. |
-| [#149](https://github.com/clockgrove/factory/issues/149): expired cancellation | Runtime lane / code | Reconcile retained successful-attempt execution obligations before terminal cancellation, using exact cleanup evidence without dispatching validation or replacement work. |
+| [#149](https://github.com/clockgrove/factory/issues/149): cancellation and timeout cleanup | Runtime lane / code | Reconcile retained successful-attempt execution obligations before terminal cancellation or timeout escalation, using exact cleanup evidence without dispatching validation or replacement work. |
 
 Scenario and stale-base corrections #140–#143 were merged in
 [#144](https://github.com/clockgrove/factory/pull/144), shutdown/recovery correction #145 in

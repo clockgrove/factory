@@ -154,9 +154,12 @@ describe("classifyRefusal", () => {
 describe("GitHub client throttling", () => {
   it("disables hidden Octokit retries so one admitted mutation has one transport", async () => {
     let attempts = 0;
+    let now = Date.parse("2026-01-01T00:00:00Z");
     const scheduler = new MutationScheduler({
-      pacer: new ContentCreationPacer(80, 100_000, 0),
-      sleep: async () => {},
+      now: () => new Date(now),
+      sleep: async (milliseconds) => {
+        now += milliseconds;
+      },
     });
     const store = new GitHubControlStore({
       token: "mutation-retry-test",

@@ -21,6 +21,7 @@ import type { CopilotAgentTaskObservation, GitHubReader } from "../src/github.js
 import { DEFAULT_RUN_POLICY, parseRunPolicy } from "../src/protocol/policy.js";
 import type { ObjectiveSnapshot } from "../src/types.js";
 import { selectManagedRecoveryPull } from "../src/supervisor.js";
+import { advancingMutationScheduler } from "./helpers/mutation-scheduler.js";
 
 const SHA = "a".repeat(40);
 
@@ -172,6 +173,7 @@ class ManagedWriter implements GitHubWriter {
 function dispatcher(writer: GitHubWriter, actorId: string): Dispatcher {
   return new Dispatcher({
     writer,
+    mutationScheduler: advancingMutationScheduler(),
     repositoryId: "R_repo",
     managedAgentActorId: actorId,
     defaultBranch: "main",
@@ -566,6 +568,7 @@ describe("GitHub managed-agent profiles", () => {
       reader: managedReader(snapshot()),
       dispatcher: new Dispatcher({
         writer,
+        mutationScheduler: advancingMutationScheduler(),
         repositoryId: "R_repo",
         managedAgentActorId: actor.id,
         defaultBranch: "main",

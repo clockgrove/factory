@@ -284,10 +284,12 @@ describe("object-only sibling refresh tree preparation", () => {
           serverTime: new Date(),
         });
       f.hostile();
-      await expect(prepareSiblingRefreshTree({
-        ...f,
-        ...(kind === "validated-tree" ? { expectedOutputTreeSha: "f".repeat(40) } : {}),
-      })).rejects.toThrow();
+      await expect(
+        prepareSiblingRefreshTree({
+          ...f,
+          ...(kind === "validated-tree" ? { expectedOutputTreeSha: "f".repeat(40) } : {}),
+        }),
+      ).rejects.toThrow();
       expect(f.writes).toEqual([]);
       expect(await f.present()).toEqual([]);
     },

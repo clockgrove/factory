@@ -4837,14 +4837,16 @@ export class FactorySupervisor {
                 this.#budgetEvents.push(event);
               });
             } else if (selected.capabilities.reportsModelUsage) {
-              this.#modelInvocations.retire(modelInvocationKey({
-                objective: reservation!.objective,
-                runId: reservation!.runId,
-                workItem: item.number,
-                attempt: reservation!.attempt,
-                phase: "execution",
-                modelInvocationId: `worker-${item.number}-${reservation!.attempt}`,
-              }));
+              this.#modelInvocations.retire(
+                modelInvocationKey({
+                  objective: reservation!.objective,
+                  runId: reservation!.runId,
+                  workItem: item.number,
+                  attempt: reservation!.attempt,
+                  phase: "execution",
+                  modelInvocationId: `worker-${item.number}-${reservation!.attempt}`,
+                }),
+              );
               if (selected.capabilities.id === "codex-app-server/local-worktree")
                 throw new Error(
                   "App Server final model usage is unavailable; automated replacement is blocked",
@@ -12393,9 +12395,9 @@ export class FactorySupervisor {
       const branch = publicationBranch(this.#run.objective, item.number, reservation.attempt);
       let headSha = await this.#store.readRef(`refs/heads/${branch}`);
       if (!headSha && !backend.capabilities.providerManagedPublication) {
-        const collected = [...events].reverse().find(
-          (event) => event.kind === "attempt" && event.event === "AttemptCollected",
-        );
+        const collected = [...events]
+          .reverse()
+          .find((event) => event.kind === "attempt" && event.event === "AttemptCollected");
         if (collected?.kind !== "attempt" || !collected.artifactDigest)
           throw new Error("validated publication recovery has no exact collected artifact");
         const reviewIdentity: ReviewIdentity = {
@@ -12411,19 +12413,30 @@ export class FactorySupervisor {
         };
         const review = await this.#reviews.load(reviewIdentity);
         if (!review || !review.review.accepted || review.review.unmetCriteria.length > 0)
-          throw new Error("validated publication recovery requires its exact accepted review checkpoint");
+          throw new Error(
+            "validated publication recovery requires its exact accepted review checkpoint",
+          );
         // Repair only the checkpoint's actual counters; this never invokes management.
         await this.#recordReviewUsage(review, item, reservation);
-        const packet = parseWorkerPacket({ ...this.#packetFor(item.number), baseSha: reservation.baseSha });
+        const packet = parseWorkerPacket({
+          ...this.#packetFor(item.number),
+          baseSha: reservation.baseSha,
+        });
         const artifact = await resumeArtifactTransfer({
           store: this.#store,
           identity: this.#artifactTransferIdentity(reservation),
           allowedPaths: packet.allowedPaths,
           assertCurrent: () => this.#externalAdmission(async () => {}),
         });
-        if (!artifact || artifact.digest !== collected.artifactDigest ||
-          artifact.baseSha !== validation.baseSha || artifact.outcome !== "succeeded")
-          throw new Error("validated publication recovery differs from the original retained artifact");
+        if (
+          !artifact ||
+          artifact.digest !== collected.artifactDigest ||
+          artifact.baseSha !== validation.baseSha ||
+          artifact.outcome !== "succeeded"
+        )
+          throw new Error(
+            "validated publication recovery differs from the original retained artifact",
+          );
         this.#retainArtifactContent(artifact);
         // The raw-object helper refuses an unavailable base; recovery must not
         // run checkout-configured fetch, credential helpers, hooks, or filters.
@@ -12437,7 +12450,11 @@ export class FactorySupervisor {
         });
         const message = `${item.title}\n\nCloses #${item.number}\nFactory-Artifact: ${artifact.digest}\nFactory-Validation: ${validation.evidenceDigest}`;
         await this.#lease.assertGeneration("publication");
-        const plannedHead = await this.#store.createCommit({ treeOid, parentOids: [artifact.baseSha], message });
+        const plannedHead = await this.#store.createCommit({
+          treeOid,
+          parentOids: [artifact.baseSha],
+          message,
+        });
         await this.#lease.assertGeneration("publication");
         try {
           await this.#store.createRef(`refs/heads/${branch}`, plannedHead);
@@ -12447,8 +12464,12 @@ export class FactorySupervisor {
         headSha = await this.#store.readRef(`refs/heads/${branch}`);
         if (!headSha) throw new Error("validated publication recovery branch is unavailable");
         const restored = await this.#store.readCommit(headSha);
-        if (restored.treeOid !== treeOid || restored.parentOids.length !== 1 ||
-          restored.parentOids[0] !== artifact.baseSha || restored.message.trim() !== message)
+        if (
+          restored.treeOid !== treeOid ||
+          restored.parentOids.length !== 1 ||
+          restored.parentOids[0] !== artifact.baseSha ||
+          restored.message.trim() !== message
+        )
           throw new Error("validated publication recovery branch has incompatible content");
       }
       if (headSha) {

@@ -124,12 +124,20 @@ describe("Supervisor collected artifact durability", () => {
     const markers = f.events().filter(isModelInvocationMarker);
     expect(markers).toHaveLength(1);
     expect(markers[0]).toMatchObject({
-      workItem: 8, attempt: 1, phase: "execution", amount: 0,
-      modelInvocationId: "worker-8-1", usageId: "invocation-worker-8-1",
+      workItem: 8,
+      attempt: 1,
+      phase: "execution",
+      amount: 0,
+      modelInvocationId: "worker-8-1",
+      usageId: "invocation-worker-8-1",
     });
     for (const event of f.snapshot.workItems[0]!.factoryEvents ?? []) {
-      if (event.kind === "budget" && event.event === "BudgetReconciled" &&
-        event.phase === "execution" && event.unit === "model_tokens")
+      if (
+        event.kind === "budget" &&
+        event.event === "BudgetReconciled" &&
+        event.phase === "execution" &&
+        event.unit === "model_tokens"
+      )
         delete event.reportedModelUsage;
     }
     await expect(f.run()).resolves.toMatchObject({ status: "completed" });
@@ -145,14 +153,19 @@ describe("Supervisor collected artifact durability", () => {
       );
     expect(model).toHaveLength(1);
     expect(model[0]).toMatchObject({
-      amount: 6, modelInvocationId: markers[0]!.modelInvocationId,
-      runId: markers[0]!.runId, directorEpoch: markers[0]!.directorEpoch,
+      amount: 6,
+      modelInvocationId: markers[0]!.modelInvocationId,
+      runId: markers[0]!.runId,
+      directorEpoch: markers[0]!.directorEpoch,
       policyDigest: markers[0]!.policyDigest,
     });
     expect(model[0]!.sequence).toBeGreaterThan(markers[0]!.sequence);
-    expect(f.events().filter(isModelInvocationMarker).filter((event) =>
-      event.workItem === 8 && event.phase === "execution",
-    )).toEqual(markers);
+    expect(
+      f
+        .events()
+        .filter(isModelInvocationMarker)
+        .filter((event) => event.workItem === 8 && event.phase === "execution"),
+    ).toEqual(markers);
     expect(unresolvedModelInvocations(f.events())).toEqual([]);
     expect(model[0]).not.toHaveProperty("reportedModelUsage");
     expect(
@@ -200,8 +213,11 @@ describe("Supervisor collected artifact durability", () => {
     const markers = f.events().filter(isModelInvocationMarker);
     expect(markers).toHaveLength(1);
     const model = item.factoryEvents!.find(
-      (event) => event.kind === "budget" && event.event === "BudgetReconciled" &&
-        event.phase === "execution" && event.unit === "model_tokens",
+      (event) =>
+        event.kind === "budget" &&
+        event.event === "BudgetReconciled" &&
+        event.phase === "execution" &&
+        event.unit === "model_tokens",
     )!;
     if (model.kind !== "budget") throw new Error("fixture model receipt missing");
     expect(model).toMatchObject({ amount: 6, modelInvocationId: markers[0]!.modelInvocationId });
@@ -254,14 +270,18 @@ describe("Supervisor collected artifact durability", () => {
           return persist({ ...args, store: intercepted });
         });
         await expect(f.run()).rejects.toThrow(/artifact transfer recovery/);
-        const markers = f.events().filter(isModelInvocationMarker).filter((event) =>
-          event.workItem === target && event.phase === "execution",
-        );
+        const markers = f
+          .events()
+          .filter(isModelInvocationMarker)
+          .filter((event) => event.workItem === target && event.phase === "execution");
         expect(markers).toHaveLength(remote ? 0 : 1);
-        if (!remote) expect(markers[0]).toMatchObject({
-          amount: 0, modelInvocationId: `worker-${target}-1`,
-          usageId: `invocation-worker-${target}-1`, attempt: 1,
-        });
+        if (!remote)
+          expect(markers[0]).toMatchObject({
+            amount: 0,
+            modelInvocationId: `worker-${target}-1`,
+            usageId: `invocation-worker-${target}-1`,
+            attempt: 1,
+          });
         expect(
           f.activity.filter((entry) => entry.operation === "launch" && entry.workItem === target),
         ).toHaveLength(1);
@@ -293,9 +313,12 @@ describe("Supervisor collected artifact durability", () => {
                 event.phase === "execution",
             ),
         ).toHaveLength(1);
-        expect(f.events().filter(isModelInvocationMarker).filter((event) =>
-          event.workItem === target && event.phase === "execution",
-        )).toEqual(markers);
+        expect(
+          f
+            .events()
+            .filter(isModelInvocationMarker)
+            .filter((event) => event.workItem === target && event.phase === "execution"),
+        ).toEqual(markers);
         expect(unresolvedModelInvocations(f.events())).toEqual([]);
         if (remote) {
           expect(

@@ -114,13 +114,17 @@ export async function providerSupervisorFixture(
     cloudFallback: faults.localOnly ? "never" : "explicit",
     maxSandboxMinutes: 30,
     maxManagedAgentSessions: managed ? 3 : 0,
-    ...(faults.noModelTokenBudget ? {} : { economics: {
-      maxModelTokens: 10_000,
-      modelTokenBudgetMode: "observed-stop",
-      maxSandboxMinutes: 30,
-      maxManagedSessions: managed ? 3 : 0,
-      minCloudTimeSavedMinutes: 0,
-    } }),
+    ...(faults.noModelTokenBudget
+      ? {}
+      : {
+          economics: {
+            maxModelTokens: 10_000,
+            modelTokenBudgetMode: "observed-stop",
+            maxSandboxMinutes: 30,
+            maxManagedSessions: managed ? 3 : 0,
+            minCloudTimeSavedMinutes: 0,
+          },
+        }),
     capacity: {
       ...DEFAULT_RUN_POLICY.capacity,
       mode: faults.adaptiveLocal ? "adaptive-local" : "fixed",

@@ -156,12 +156,11 @@ it("reports an interrupted run's real failure but does not replay an already-set
   await rm(f.fixture.repository, { recursive: true, force: true });
   const settled = await providerSupervisorFixture("daytona-burst", {
     localOnly: true,
+    dependencyChain: true,
     controllerActivation: true,
-    repositoryFence: async () => {
-      throw expected;
-    },
   });
   cleanup.push(() => settled.dispose());
+  vi.mocked(LeaseManager.prototype.release).mockRejectedValue(expected);
   await expect(settled.run()).rejects.toBe(expected);
   await expect(settled.dispose()).resolves.toBeUndefined();
 });

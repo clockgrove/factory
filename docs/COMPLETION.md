@@ -1,6 +1,6 @@
 # Factory completion board
 
-Updated: 2026-09-06. [GitHub #69](https://github.com/clockgrove/factory/issues/69) is the
+Updated: 2026-09-07. [GitHub #69](https://github.com/clockgrove/factory/issues/69) is the
 authoritative backlog. This page summarizes capability boundaries, not execution sessions or a
 second queue. These are ordinary development issues, not Factory Objectives.
 
@@ -28,12 +28,16 @@ dependencies, not a reason to silently narrow those issues:
 | [#123](https://github.com/clockgrove/factory/issues/123): restored capabilities | Local qualification / test | Complete installed shared-work, durable-session restart, LFS/media and oversized-transfer recovery acceptance. |
 | [#76](https://github.com/clockgrove/factory/issues/76): scheduling | Local qualification / test | Combine retained pressure evidence with continuous refill, shared ceilings, real inner/outer contention and explain/replay. Serial takeover is not simultaneous contention. |
 | [#75](https://github.com/clockgrove/factory/issues/75): resilience | Local qualification / test | Complete safe failed-validation/conflict and lifecycle outcomes. Retain the specific interrupted-usage limitation rather than treating unavailable accounting as complete. |
-| [#149](https://github.com/clockgrove/factory/issues/149): cancellation and timeout cleanup | Runtime lane / code | Reconcile retained successful-attempt execution obligations before terminal cancellation or timeout escalation, using exact cleanup evidence without dispatching validation or replacement work. |
+| [#153](https://github.com/clockgrove/factory/issues/153): checkpoint shutdown and lease contention | Runtime lane / code | Preserve successful retained work while completing exact orderly lease cleanup; distinguish pre-acquisition contention from lost ownership without service restart churn. |
+| [#154](https://github.com/clockgrove/factory/issues/154): no-replacement qualification authority | Qualifier lane / code | Generate single-attempt policies where replacement is forbidden. Preserve old run policies and scenarios that intentionally test retries. |
+| [#155](https://github.com/clockgrove/factory/issues/155): review candidate binding | Runtime review lane / code | Every applicable semantic review inspects the independently validated candidate, never an unrelated controller checkout. Preserve isolation, identity and cleanup fences. |
 
 Scenario and stale-base corrections #140–#143 were merged in
 [#144](https://github.com/clockgrove/factory/pull/144), shutdown/recovery correction #145 in
 [#146](https://github.com/clockgrove/factory/pull/146), and sanitized observation/guarded
-continuation #147 in [#148](https://github.com/clockgrove/factory/pull/148).
+continuation #147 in [#148](https://github.com/clockgrove/factory/pull/148), retained-resource
+cancellation/timeout cleanup #149 in [#150](https://github.com/clockgrove/factory/pull/150), and
+namespace-listing contract #151 in [#152](https://github.com/clockgrove/factory/pull/152).
 Their implementation is not a live pass for the parent issues. Expired qualification authority
 is not extended; proven no-action refusals preserve their original evidence when explicitly retried.
 The specific active-cancellation

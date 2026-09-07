@@ -43,6 +43,18 @@ export class LeaseLostError extends Error {
   }
 }
 
+/** Observed before acquiring any Objective authority, not loss of an owned lease. */
+export class LeaseAcquisitionContendedError extends LeaseLostError {
+  constructor(
+    readonly objective: number,
+    readonly retryAfterMs: number,
+    holder = "another Director",
+  ) {
+    super(`Objective #${objective} is leased by ${holder}`);
+    this.name = "LeaseAcquisitionContendedError";
+  }
+}
+
 export type LeaseMutationBoundary = "admission" | "publication" | "integration";
 
 export function leaseRef(objective: number): string {
@@ -121,7 +133,11 @@ export class LeaseManager {
       if (current.runId === identity.runId && current.holder === identity.holder) {
         return this.renew(current);
       }
-      throw new LeaseLostError(`Objective #${identity.objective} is leased by ${current.holder}`);
+      throw new LeaseAcquisitionContendedError(
+        identity.objective,
+        current.expiresAt.getTime() - now.getTime(),
+        current.holder,
+      );
     }
 
     const epoch = (current?.epoch ?? 0) + 1;

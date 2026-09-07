@@ -14,6 +14,7 @@ const hash = (value: string) => createHash("sha256").update(value).digest("hex")
 function fixture() {
   const at = "2026-09-07T04:58:07.000Z";
   const policy = {
+    maxAttemptsPerItem: 2,
     objectiveTimeoutMinutes: 45,
     allowedPaidBackends: [],
     economics: { maxModelTokens: 250000, modelTokenBudgetMode: "observed-stop" },
@@ -192,6 +193,13 @@ function fixture() {
 }
 
 describe("bounded original checkpoint observation continuation", () => {
+  it("preserves a recorded two-attempt policy rather than applying prospective qualifier defaults", () => {
+    const f = fixture();
+    const original = structuredClone(f.original);
+    assertContinuationSeed(f.original, f.witness, f.pause, f.original.artifact, f.now);
+    expect(f.original.authority.policy.maxAttemptsPerItem).toBe(2);
+    expect(f.original).toEqual(original);
+  });
   it("keeps fixed-stage diagnostics bounded and never echoes assertion/provider text", async () => {
     const rows: Record<string, unknown>[] = [];
     const error = Object.assign(new Error("secret-body-token"), {

@@ -101,7 +101,8 @@ export function largeFileAuthority(env) {
   };
   const authority = checkpointAuthority(mapped);
   assert.ok(authority);
-  if (scenario !== "transfer-restart") authority.policy.maxAttemptsPerItem = 1;
+  // The shared checkpoint policy also fences replacement during transfer restart.
+  assert.equal(authority.policy.maxAttemptsPerItem, 1);
   return {
     ...authority,
     largeFile: {

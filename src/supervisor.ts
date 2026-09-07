@@ -10,6 +10,7 @@ import {
 import {
   holdAppServerQualificationCheckpoint,
   SafeArtifactCheckpointHeldError,
+  SafeArtifactCheckpointShutdownError,
 } from "./runtime/qualification-checkpoint.js";
 import {
   holdArtifactTransferQualificationCheckpoint,
@@ -208,6 +209,9 @@ import type {
   CompilationResult,
   ManagementBackend,
   ManagementUsage,
+  ReviewContext,
+  ReviewCheckpoint,
+  ReviewResult,
 } from "./management/backend.js";
 import {
   integrationReadiness,
@@ -4937,6 +4941,7 @@ export class FactorySupervisor {
     let retainCollectedSource = false;
     let executionCleanupConfirmed = Boolean(recovered);
     let completedArtifactRetained = Boolean(recovered);
+    let safeHoldShutdown = false;
     let backendLaunchAttempted = false;
     let executionTerminalObserved = Boolean(recovered);
     let terminalModelTokens: number | undefined;
@@ -5826,25 +5831,28 @@ export class FactorySupervisor {
         }
         const reviewModel = resolveModelSelection(this.#policy, "review");
         invokeReview = (checkpoint) =>
-          this.#externalAdmission(async () => {
-            await this.#admitModelInvocation(
-              `review-${reviewIdentityDigest(reviewIdentity)}`,
-              item.id,
-              reservation!,
-            );
-            return this.#management.review(
-              {
-                repository: this.#options.repository,
-                objectiveNumber: this.#run.objective,
-                workItemNumber: item.number,
-                packet,
-                artifact,
-                evidence: validation!.evidence,
-                ...(reviewModel ? { modelSelection: reviewModel } : {}),
-              },
-              checkpoint,
-            );
-          });
+          this.#invokeSemanticReview(
+            {
+              repository: this.#options.repository,
+              objectiveNumber: this.#run.objective,
+              workItemNumber: item.number,
+              packet,
+              artifact,
+              evidence: validation!.evidence,
+              requiresIsolation:
+                this.#policy.trust === "sandbox_untrusted" ||
+                packet.requirements.trust !== "trusted_local" ||
+                Boolean(deliveryBase?.requiresIsolation),
+              ...(reviewModel ? { modelSelection: reviewModel } : {}),
+            },
+            checkpoint,
+            () =>
+              this.#admitModelInvocation(
+                `review-${reviewIdentityDigest(reviewIdentity)}`,
+                item.id,
+                reservation!,
+              ),
+          );
       }
       await this.#reviewTransaction({
         existing: existingReview,
@@ -5953,6 +5961,20 @@ export class FactorySupervisor {
       // integrates regular and native siblings through exact candidate recovery.
       await this.#retryArtifacts.delete(item.number);
     } catch (error) {
+      if (
+        error instanceof SafeArtifactCheckpointShutdownError &&
+        completedArtifactRetained &&
+        executionCleanupConfirmed &&
+        !validationCapacityRecorded &&
+        executionSignal?.aborted &&
+        this.#options.signal?.aborted &&
+        this.#options.shutdownBehavior === "release-lease"
+      ) {
+        safeHoldShutdown = true;
+        throw new RunCancellationRequestedError(
+          "repository controller stopped at proved terminal artifact hold; validation was not admitted",
+        );
+      }
       if (error instanceof SafeArtifactCheckpointHeldError) throw error;
       // Shutdown before validation admission preserves a durable successful
       // checkpoint for the next fenced controller. Use the intentional teardown
@@ -6273,8 +6295,14 @@ export class FactorySupervisor {
       } finally {
         if (validationCapacity) this.#releaseCapacity(validationCapacity.key);
       }
-      // biome-ignore lint/correctness/noUnsafeFinally: uncertain cleanup must override success so Factory cannot launch a duplicate paid or local worker
-      if (finalizationError) throw finalizationError;
+      if (finalizationError) {
+        // An orderly hold is not permission to suppress a later cleanup failure
+        // through the outer signal-aborted shutdown branch.
+        // biome-ignore lint/correctness/noUnsafeFinally: uncertain cleanup must override success so Factory cannot launch a duplicate paid or local worker
+        throw safeHoldShutdown
+          ? new SafeArtifactCheckpointHeldError(finalizationError)
+          : finalizationError;
+      }
     }
   }
 
@@ -7093,6 +7121,30 @@ export class FactorySupervisor {
 
   #reviewTransaction(args: Parameters<typeof runDurableReviewTransaction>[0]) {
     return this.#modelInvocations.run(() => runDurableReviewTransaction(args));
+  }
+
+  #invokeSemanticReview(
+    context: ReviewContext,
+    checkpoint: ReviewCheckpoint,
+    admit: () => Promise<void>,
+  ): Promise<ReviewResult> {
+    let dispatched = false;
+    let admitted = false;
+    const dispatch = (invoke: () => Promise<ReviewResult>) =>
+      this.#externalAdmission(async () => {
+        if (dispatched) throw new Error("semantic review attempted duplicate dispatch");
+        dispatched = true;
+        await admit();
+        admitted = true;
+        return invoke();
+      });
+    const admittedCheckpoint: ReviewCheckpoint = (result) => {
+      if (!admitted) throw new Error("semantic review checkpoint precedes dispatch admission");
+      return checkpoint(result);
+    };
+    return this.#management.reviewWithAdmission
+      ? this.#management.reviewWithAdmission(context, admittedCheckpoint, dispatch)
+      : dispatch(() => this.#management.review(context, admittedCheckpoint));
   }
 
   #compilationTransaction(args: Parameters<typeof runDurableCompilationTransaction>[0]) {
@@ -8990,25 +9042,25 @@ export class FactorySupervisor {
         );
         const reviewModel = resolveModelSelection(this.#policy, "review");
         invokeReview = (checkpoint) =>
-          this.#externalAdmission(async () => {
-            await this.#admitModelInvocation(
-              `rebase-review-${reviewIdentityDigest(reviewIdentity)}`,
-              item.id,
-              member.reservation,
-            );
-            return this.#management.review(
-              {
-                repository: this.#options.repository,
-                objectiveNumber: this.#run.objective,
-                workItemNumber: item.number,
-                packet,
-                artifact,
-                evidence: validation.evidence,
-                ...(reviewModel ? { modelSelection: reviewModel } : {}),
-              },
-              checkpoint,
-            );
-          });
+          this.#invokeSemanticReview(
+            {
+              repository: this.#options.repository,
+              objectiveNumber: this.#run.objective,
+              workItemNumber: item.number,
+              packet,
+              artifact,
+              evidence: validation.evidence,
+              requiresIsolation: isolated || this.#policy.trust === "sandbox_untrusted",
+              ...(reviewModel ? { modelSelection: reviewModel } : {}),
+            },
+            checkpoint,
+            () =>
+              this.#admitModelInvocation(
+                `rebase-review-${reviewIdentityDigest(reviewIdentity)}`,
+                item.id,
+                member.reservation,
+              ),
+          );
       }
       const commit = await this.#store.readCommit(headSha);
       if (commit.parentOids.length !== 1 || commit.parentOids[0] !== baseSha) {
@@ -10384,21 +10436,20 @@ export class FactorySupervisor {
         throw new Error("merge candidate no longer matches the original published patch");
       const reviewModel = resolveModelSelection(this.#policy, "review");
       invokeReview = (checkpoint) =>
-        this.#externalAdmission(async () => {
-          await this.#admitModelInvocation(invocationId, item.id, member.reservation);
-          return this.#management.review(
-            {
-              repository: this.#options.repository,
-              objectiveNumber: this.#run.objective,
-              workItemNumber: item.number,
-              packet,
-              artifact: artifact!,
-              evidence: record.validation,
-              ...(reviewModel ? { modelSelection: reviewModel } : {}),
-            },
-            checkpoint,
-          );
-        });
+        this.#invokeSemanticReview(
+          {
+            repository: this.#options.repository,
+            objectiveNumber: this.#run.objective,
+            workItemNumber: item.number,
+            packet,
+            artifact: artifact!,
+            evidence: record.validation,
+            requiresIsolation: isolated || this.#policy.trust === "sandbox_untrusted",
+            ...(reviewModel ? { modelSelection: reviewModel } : {}),
+          },
+          checkpoint,
+          () => this.#admitModelInvocation(invocationId, item.id, member.reservation),
+        );
     }
     await this.#reviewTransaction({
       existing: existingReview,
@@ -12077,21 +12128,21 @@ export class FactorySupervisor {
           throw new Error("adopted candidate artifact changed");
         const model = resolveModelSelection(this.#policy, "review");
         invoke = (checkpoint) =>
-          this.#externalAdmission(async () => {
-            await this.#admitModelInvocation(invocationId, item.id, undefined, item.number);
-            return this.#management.review(
-              {
-                repository: this.#options.repository,
-                objectiveNumber: this.#run.objective,
-                workItemNumber: item.number,
-                packet,
-                artifact: artifact!,
-                evidence: candidate!.validation,
-                ...(model ? { modelSelection: model } : {}),
-              },
-              checkpoint,
-            );
-          });
+          this.#invokeSemanticReview(
+            {
+              repository: this.#options.repository,
+              objectiveNumber: this.#run.objective,
+              workItemNumber: item.number,
+              packet,
+              artifact: artifact!,
+              evidence: candidate!.validation,
+              requiresIsolation:
+                requiresIsolatedCandidate || this.#policy.trust === "sandbox_untrusted",
+              ...(model ? { modelSelection: model } : {}),
+            },
+            checkpoint,
+            () => this.#admitModelInvocation(invocationId, item.id, undefined, item.number),
+          );
       }
       await this.#reviewTransaction({
         existing,

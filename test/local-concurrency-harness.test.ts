@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
+import { parseRunPolicy } from "../src/protocol/policy.js";
 import {
   concurrencyAuthority,
   concurrencyObjectiveBody,
@@ -28,6 +29,123 @@ const env = {
   FACTORY_CONCURRENCY_ACK: `${repository}:${unit}:start,activate-two,contend,pause-b,freeze-inner-contend-unfreeze,stop-stale,restart,resume-b,stop`,
 };
 const authority = concurrencyAuthority(env)!;
+describe("prospective concurrent qualification attempts", () => {
+  it("bounds both Objectives to their original attempt without changing shared controller ceilings", () => {
+    expect(parseRunPolicy(authority.policy).maxAttemptsPerItem).toBe(1);
+    expect(authority.namespaces).toHaveLength(2);
+    expect(authority.controllerLocalCeiling).toBe(8);
+    expect(authority.aggregateObservedThreshold).toBe(500000);
+  });
+  it("preserves the original authority when the per-Objective option is omitted or explicitly 250000", () => {
+    const original = structuredClone(authority);
+    expect(
+      concurrencyAuthority({
+        ...env,
+        FACTORY_CONCURRENCY_PER_OBJECTIVE_MAX_MODEL_TOKENS: "250000",
+      }),
+    ).toEqual(original);
+    concurrencyAuthority({
+      ...env,
+      FACTORY_CONCURRENCY_PER_OBJECTIVE_MAX_MODEL_TOKENS: "500000",
+      FACTORY_CONCURRENCY_MAX_MODEL_TOKENS: "1000000",
+    });
+    expect(authority).toEqual(original);
+    expect(concurrencyAuthority(env)).toEqual(original);
+  });
+  it.each([250000, 400000, 500000])(
+    "binds both prospective activations to the explicit %i threshold",
+    async (limit) => {
+      const selectedEnv = {
+        ...env,
+        FACTORY_CONCURRENCY_PER_OBJECTIVE_MAX_MODEL_TOKENS: String(limit),
+        FACTORY_CONCURRENCY_MAX_MODEL_TOKENS: String(2 * limit),
+      };
+      const selected = concurrencyAuthority(selectedEnv)!;
+      expect(selected).toEqual({
+        ...authority,
+        aggregateObservedThreshold: 2 * limit,
+        policy: {
+          ...authority.policy,
+          economics: { ...parseRunPolicy(authority.policy).economics, maxModelTokens: limit },
+        },
+      });
+      expect(parseRunPolicy(selected.policy).maxAttemptsPerItem).toBe(1);
+      const evidence = {
+        actions: [],
+        base: "a".repeat(40),
+        defaultBranch: "main",
+        objectives: selected.namespaces.map((namespace, index) => ({
+          namespace,
+          objective: { number: 10 + index },
+        })),
+      };
+      const call = vi.fn(async (_tool: string, _args: Record<string, unknown>) => ({}));
+      await main(selectedEnv, async (_env, _runner, extension) => {
+        if (!extension.extendPort) throw Error("missing production extension");
+        const port = (await extension.extendPort({
+          port: {},
+          evidence,
+          save: vi.fn(),
+          call,
+          request: vi.fn(async () => ({ data: { sha: evidence.base } })),
+          list: vi.fn(async () => []),
+          retireClient: vi.fn(),
+        })) as Pick<ConcurrencyPort, "prepare">;
+        await port.prepare("activate");
+      });
+      expect(call).toHaveBeenCalledTimes(2);
+      for (const [index, namespace] of selected.namespaces.entries())
+        expect(call).toHaveBeenNthCalledWith(index + 1, "factory_activate", {
+          owner: "example",
+          repo: "disposable",
+          objectiveNumber: 10 + index,
+          requestId: `${namespace}-activate`,
+          baseSha: evidence.base,
+          policy: selected.policy,
+        });
+      const f = scenarioPort();
+      expect(await runConcurrencyScenario(f.port, selected)).toMatchObject({
+        aggregateObservedThreshold: 2 * limit,
+        controllerLocalCeiling: 8,
+        authorizedScenarioWorkerMaximum: 2,
+      });
+    },
+  );
+  it.each([
+    [undefined, undefined],
+    [undefined, "1000000"],
+    ["400000", undefined],
+    ["400000", "500000"],
+    ["400000", "800001"],
+    ["400000", "0800000"],
+    ["249999", "499998"],
+    ["500001", "1000002"],
+    ["0", "0"],
+    ["250000.5", "500001"],
+    ["2.5e5", "500000"],
+    [" 250000", "500000"],
+    ["0250000", "500000"],
+    ["NaN", "NaN"],
+    ["", "500000"],
+    ["9007199254740992", "18014398509481984"],
+  ])(
+    "refuses invalid per-Objective %s / aggregate %s before any runner action",
+    async (perObjective, aggregate) => {
+      const run = vi.fn(async () => {});
+      await expect(
+        main(
+          {
+            ...env,
+            FACTORY_CONCURRENCY_PER_OBJECTIVE_MAX_MODEL_TOKENS: perObjective,
+            FACTORY_CONCURRENCY_MAX_MODEL_TOKENS: aggregate,
+          },
+          run,
+        ),
+      ).rejects.toThrow();
+      expect(run).not.toHaveBeenCalled();
+    },
+  );
+});
 describe("stale controller stop identity fence", () => {
   const original = { unit, pid: 1234, invocationId: "a".repeat(32) };
   const configPath = `/home/example/.config/systemd/user/${unit}`;

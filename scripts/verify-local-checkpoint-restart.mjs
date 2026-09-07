@@ -99,6 +99,9 @@ export function checkpointAuthority(env) {
     "regular-prs",
     modelTokenLimit(env.FACTORY_CHECKPOINT_MAX_MODEL_TOKENS),
   );
+  // These scenarios prove same-attempt continuation, not implementation retry.
+  // Fence replacement at admission; an observer pause can arrive too late.
+  policy.maxAttemptsPerItem = 1;
   if (sessionRecovery) {
     policy.backendOrder = ["codex-app-server/local-worktree"];
     policy.maxParallel = 1;

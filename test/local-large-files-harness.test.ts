@@ -259,7 +259,27 @@ describe("installed large-file lifecycle authority", () => {
       maxParallel: 1,
     });
     expect(parseRunPolicy(authority.policy).capacity?.local?.maxWorkers).toBe(1);
+    expect(parseRunPolicy(authority.policy).maxAttemptsPerItem).toBe(1);
   });
+  it.each([
+    "transfer-restart",
+    "lfs-missing-tool",
+    "lfs-missing-object",
+    "scope",
+    "secret",
+    "symlink",
+  ])(
+    "prospectively forbids replacement execution for %s without waiting for the observer",
+    (scenario) => {
+      const accepted = largeFileAuthority({
+        ...env,
+        FACTORY_LARGE_FILE_CASE: scenario,
+        FACTORY_LARGE_FILE_PHASE: "preflight",
+      })!;
+      expect(parseRunPolicy(accepted.policy).maxAttemptsPerItem).toBe(1);
+      expect(accepted.policy.economics).toEqual(authority.policy.economics);
+    },
+  );
   it("never mutates during preflight", async () => {
     const f = scenario();
     expect(

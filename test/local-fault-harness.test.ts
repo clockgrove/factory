@@ -504,6 +504,8 @@ describe("installed local fault qualification harness", () => {
   });
   it("uses bounded local-only authority and namespaced single-item paths", () => {
     const policy = parseRunPolicy(faultPolicy(250000));
+    expect(policy.maxAttemptsPerItem).toBe(1);
+    expect(parseRunPolicy(faultPolicy(250000, "restart")).maxAttemptsPerItem).toBe(2);
     expect(policy.maxParallel).toBe(1);
     expect(policy.allowedPaidBackends).toEqual([]);
     expect(policy.economics?.maxModelTokens).toBe(250000);

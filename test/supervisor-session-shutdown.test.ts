@@ -4,6 +4,10 @@ import { LifecycleRecorder } from "../src/control/events.js";
 import * as transfers from "../src/control/artifact-transfers.js";
 import { ContinuousExecutionPool } from "../src/scheduling/continuous-refill.js";
 import { SafeArtifactCheckpointHeldError } from "../src/runtime/qualification-checkpoint.js";
+import { SafeArtifactCheckpointShutdownError } from "../src/runtime/qualification-checkpoint.js";
+import { CapacityLedger } from "../src/scheduling/capacity-ledger.js";
+import { LeaseLostError, LeaseManager } from "../src/control/lease.js";
+import * as worktrees from "../src/runtime/local-worktree.js";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
 
 type Fixture = Awaited<ReturnType<typeof providerSupervisorFixture>>;
@@ -52,6 +56,85 @@ function assertHeld(f: Fixture) {
 }
 
 describe("completed artifact shutdown before validation admission", () => {
+  it.each(["none", "cleanup", "lease"] as const)(
+    "retires an exact safe hold on shutdown without hiding %s failure",
+    async (failure) => {
+      const f = await fixture();
+      const shutdown = new AbortController();
+      const original: ReturnType<Fixture["events"]> = [];
+      let interrupted = false;
+      const transition = CapacityLedger.prototype.transition;
+      vi.spyOn(CapacityLedger.prototype, "transition").mockImplementation(function (
+        this: CapacityLedger,
+        generation,
+        from,
+        reservation,
+        limits,
+      ) {
+        if (!interrupted && reservation.workItem === 8 && reservation.phase === "validation") {
+          // Inject the runtime hold's proved-shutdown outcome at the first
+          // downstream boundary, before capacity admission. The real hold's
+          // witness/abort classification is covered in its direct module tests.
+          interrupted = true;
+          expect(f.resources.size).toBe(0);
+          assertHeld(f);
+          original.push(
+            ...f.events().filter((event) => event.kind === "attempt" || event.kind === "budget"),
+          );
+          shutdown.abort();
+          throw new SafeArtifactCheckpointShutdownError(shutdown.signal.reason);
+        }
+        return transition.call(this, generation, from, reservation, limits);
+      });
+      const release = vi.mocked(LeaseManager.prototype.release);
+      const releaseFailure = new LeaseLostError("exact original lease was replaced");
+      if (failure === "lease") release.mockRejectedValueOnce(releaseFailure);
+      if (failure === "cleanup") {
+        const cleanup = worktrees.cleanupLocalWorktree;
+        vi.spyOn(worktrees, "cleanupLocalWorktree").mockImplementationOnce(async (...args) => {
+          await cleanup(...args);
+          throw new Error("owned workspace cleanup unavailable");
+        });
+      }
+      if (failure === "none")
+        await expect(f.run(shutdown.signal)).resolves.toMatchObject({ status: "cancelled" });
+      else if (failure === "lease")
+        await expect(f.run(shutdown.signal)).rejects.toBe(releaseFailure);
+      else
+        await expect(f.run(shutdown.signal)).rejects.toMatchObject({
+          name: "SafeArtifactCheckpointHeldError",
+          cause: { message: "owned workspace cleanup unavailable" },
+        });
+      expect(interrupted).toBe(true);
+      assertHeld(f);
+      expect(
+        f.events().filter((event) => event.kind === "attempt" || event.kind === "budget"),
+      ).toEqual(original);
+      expect(
+        f
+          .events()
+          .some((event) =>
+            ["FactoryRunCancelled", "FactoryRunCompleted", "FactoryRunEscalated"].includes(
+              event.event,
+            ),
+          ),
+      ).toBe(false);
+      expect(release).toHaveBeenCalledTimes(failure === "cleanup" ? 0 : 1);
+      const ready = [...f.refs].filter(
+        ([ref]) => ref.includes("/artifact-transfers/") && ref.endsWith("/ready"),
+      );
+      expect(ready).toHaveLength(1);
+      if (failure === "none") {
+        expect(release.mock.calls[0]![0]).toMatchObject({ runId: f.runId, epoch: 1 });
+        await expect(f.run()).resolves.toMatchObject({ status: "completed" });
+        expect(
+          f.events().filter((event) => event.event === "AttemptReserved" && event.workItem === 8),
+        ).toHaveLength(1);
+        for (const [ref, oid] of ready) expect(f.refs.get(ref)).toBe(oid);
+      }
+    },
+    30_000,
+  );
   it("consumes a held-worker failure settled during an in-flight snapshot before same-process recovery", async () => {
     const f = await fixture();
     const shutdown = new AbortController();

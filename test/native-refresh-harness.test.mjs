@@ -878,13 +878,16 @@ describe("installed controller peer merge proof", () => {
       { evidence: f.receiver.evidence, request: f.request },
       f.read,
     );
-    const record = f.receiver.evidence.nativeMergeEvidence[1].reads.find(
+    // Replay the persisted JSON form: a read's observed value must be distinct
+    // from its requested identity, even if the online helper returned that object.
+    const replay = JSON.parse(JSON.stringify(f.receiver.evidence));
+    const record = replay.nativeMergeEvidence[1].reads.find(
       (entry) => entry.request.kind === "merge-proof",
     );
     record.value.mergeSha = sha("different-merge");
-    expect(() =>
-      assertNativeMergeProof(f.receiver.evidence, proofs[1], f.receiver.inputs[1]),
-    ).toThrow(/peer GraphQL/);
+    expect(() => assertNativeMergeProof(replay, proofs[1], f.receiver.inputs[1])).toThrow(
+      /peer GraphQL/,
+    );
   });
 });
 

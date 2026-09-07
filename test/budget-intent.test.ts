@@ -22,7 +22,10 @@ describe("explicit model-token budget intent", () => {
       if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
       if (value !== null && typeof value === "object") {
         const record = value as Record<string, unknown>;
-        return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonical(record[key])}`).join(",")}}`;
+        return `{${Object.keys(record)
+          .sort()
+          .map((key) => `${JSON.stringify(key)}:${canonical(record[key])}`)
+          .join(",")}}`;
       }
       return JSON.stringify(value);
     };
@@ -32,22 +35,31 @@ describe("explicit model-token budget intent", () => {
     expect(policy.economics).not.toHaveProperty("modelTokenBudgetMode");
     expect(policyDigest(policy)).toBe(digest);
     expect(modelTokenBudgetIntent(policy)).toEqual({
-      mode: "legacy-observed-stop", limit: 100, hardCapEnforced: false,
+      mode: "legacy-observed-stop",
+      limit: 100,
+      hardCapEnforced: false,
     });
     expect(() => assertSupportedModelTokenBudgetIntent(policy)).not.toThrow();
     expect(() => assertNewRunBudgetIntent(policy)).toThrow(/requires explicit/);
     expect(policyDigest(policy)).toBe(digest);
   });
 
-  it.each([0, 100])("rejects unsupported hard intent at limit %i even on recorded replay", (limit) => {
-    const policy = parseRunPolicy({
-      ...DEFAULT_RUN_POLICY,
-      economics: { ...economics, maxModelTokens: limit, modelTokenBudgetMode: "hard" },
-    });
-    expect(modelTokenBudgetIntent(policy)).toEqual({ mode: "hard", limit, hardCapEnforced: false });
-    expect(() => assertNewRunBudgetIntent(policy)).toThrow(/hard is unsupported/);
-    expect(() => assertSupportedModelTokenBudgetIntent(policy)).toThrow(/hard is unsupported/);
-  });
+  it.each([0, 100])(
+    "rejects unsupported hard intent at limit %i even on recorded replay",
+    (limit) => {
+      const policy = parseRunPolicy({
+        ...DEFAULT_RUN_POLICY,
+        economics: { ...economics, maxModelTokens: limit, modelTokenBudgetMode: "hard" },
+      });
+      expect(modelTokenBudgetIntent(policy)).toEqual({
+        mode: "hard",
+        limit,
+        hardCapEnforced: false,
+      });
+      expect(() => assertNewRunBudgetIntent(policy)).toThrow(/hard is unsupported/);
+      expect(() => assertSupportedModelTokenBudgetIntent(policy)).toThrow(/hard is unsupported/);
+    },
+  );
 
   it("accepts explicit observed intent without inventing a provider cap", () => {
     const policy = parseRunPolicy({
@@ -56,17 +68,27 @@ describe("explicit model-token budget intent", () => {
     });
     expect(() => assertNewRunBudgetIntent(policy)).not.toThrow();
     expect(modelTokenBudgetIntent(policy)).toEqual({
-      mode: "observed-stop", limit: 100, hardCapEnforced: false,
+      mode: "observed-stop",
+      limit: 100,
+      hardCapEnforced: false,
     });
-    expect(policyDigest(policy)).not.toBe(policyDigest(parseRunPolicy({ ...DEFAULT_RUN_POLICY, economics })));
+    expect(policyDigest(policy)).not.toBe(
+      policyDigest(parseRunPolicy({ ...DEFAULT_RUN_POLICY, economics })),
+    );
   });
 
   it("preserves policies without a token threshold and rejects misspelled intent", () => {
     expect(() => assertNewRunBudgetIntent(DEFAULT_RUN_POLICY)).not.toThrow();
-    expect(modelTokenBudgetIntent(DEFAULT_RUN_POLICY)).toEqual({ mode: "none", limit: null, hardCapEnforced: false });
-    expect(() => parseRunPolicy({
-      ...DEFAULT_RUN_POLICY,
-      economics: { ...economics, modelTokenBudgetMode: "observed" },
-    })).toThrow();
+    expect(modelTokenBudgetIntent(DEFAULT_RUN_POLICY)).toEqual({
+      mode: "none",
+      limit: null,
+      hardCapEnforced: false,
+    });
+    expect(() =>
+      parseRunPolicy({
+        ...DEFAULT_RUN_POLICY,
+        economics: { ...economics, modelTokenBudgetMode: "observed" },
+      }),
+    ).toThrow();
   });
 });

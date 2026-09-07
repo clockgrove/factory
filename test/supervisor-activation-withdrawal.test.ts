@@ -127,12 +127,17 @@ describe("Supervisor activation withdrawal races", () => {
     f.compile.mockImplementation(async (context) => {
       const markers = f.events().filter(isModelInvocationMarker);
       expect(markers).toHaveLength(1);
-      const start = f.events().find((event) => event.kind === "run" && event.event === "FactoryRunStarted");
+      const start = f
+        .events()
+        .find((event) => event.kind === "run" && event.event === "FactoryRunStarted");
       expect(start).toBeDefined();
       expect(markers[0]).toMatchObject({
-        objective: 7, runId: start!.runId, phase: "management",
+        objective: 7,
+        runId: start!.runId,
+        phase: "management",
         modelInvocationId: `compile-${context.baseSha}`,
-        usageId: `invocation-compile-${context.baseSha}`, amount: 0,
+        usageId: `invocation-compile-${context.baseSha}`,
+        amount: 0,
         policyDigest: policyDigest(f.policy),
       });
       expect(markers[0]!.workItem).toBeUndefined();
@@ -142,15 +147,23 @@ describe("Supervisor activation withdrawal races", () => {
       throw new Error("fixture: compilation result and token counters unavailable");
     });
     expect(await f.run()).toMatchObject({
-      status: "escalated", reason: "fixture: compilation result and token counters unavailable",
+      status: "escalated",
+      reason: "fixture: compilation result and token counters unavailable",
     });
     expect(f.compile).toHaveBeenCalledOnce();
     const markers = f.events().filter(isModelInvocationMarker);
     expect(markers).toHaveLength(1);
     expect(unresolvedModelInvocations(f.events())).toEqual(markers);
-    expect(f.events().filter((event) => event.kind === "budget" &&
-      event.event === "BudgetReconciled" && event.unit === "model_tokens",
-    )).toEqual([]);
+    expect(
+      f
+        .events()
+        .filter(
+          (event) =>
+            event.kind === "budget" &&
+            event.event === "BudgetReconciled" &&
+            event.unit === "model_tokens",
+        ),
+    ).toEqual([]);
     expect(f.review).not.toHaveBeenCalled();
     expect(f.activity).toEqual([]);
     expect(f.events().some((event) => event.event === "GraphCompiled")).toBe(false);
@@ -173,14 +186,23 @@ describe("Supervisor activation withdrawal races", () => {
       const review = vi.spyOn(f.management, "review");
       expect(await f.run()).toMatchObject({
         status: "escalated",
-        reason: expect.stringMatching(mode === "hard" ? /hard is unsupported/ : /requires explicit/),
+        reason: expect.stringMatching(
+          mode === "hard" ? /hard is unsupported/ : /requires explicit/,
+        ),
       });
       expect(compile).not.toHaveBeenCalled();
       expect(review).not.toHaveBeenCalled();
       expect(f.activity).toEqual([]);
-      expect(f.events().filter((event) => event.event === "FactoryRunStarted" ||
-        event.kind === "budget" || event.kind === "attempt",
-      )).toEqual([]);
+      expect(
+        f
+          .events()
+          .filter(
+            (event) =>
+              event.event === "FactoryRunStarted" ||
+              event.kind === "budget" ||
+              event.kind === "attempt",
+          ),
+      ).toEqual([]);
     },
   );
 

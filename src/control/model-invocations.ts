@@ -10,10 +10,15 @@ export class ModelInvocationScopes {
   async admit<T>(operation: () => Promise<T>): Promise<T> {
     const prior = this.#admissionTail;
     let release!: () => void;
-    this.#admissionTail = new Promise<void>((resolve) => { release = resolve; });
+    this.#admissionTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     await prior;
-    try { return await operation(); }
-    finally { release(); }
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
   }
 
   async run<T>(operation: () => Promise<T>): Promise<T> {

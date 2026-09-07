@@ -115,13 +115,18 @@ describe("historical successor accounting assessment", () => {
     expect(result.usage?.modelTokens).toBe(17);
     expect(result.unknownModelUsageCount).toBe(1);
     expect(result.unknownModelUsage).toEqual([
-      expect.objectContaining({ runId: "one", workItem: 2, phase: "management", reason: expect.stringContaining("not observed zero") }),
+      expect.objectContaining({
+        runId: "one",
+        workItem: 2,
+        phase: "management",
+        reason: expect.stringContaining("not observed zero"),
+      }),
     ]);
     expect(result.unreconciledReservationCount).toBe(1);
     expect(result.unreconciledReservations).toEqual([marker]);
-    expect(codes(result)).toEqual(expect.arrayContaining([
-      "unknown-model-usage", "unreconciled-budget-reservations",
-    ]));
+    expect(codes(result)).toEqual(
+      expect.arrayContaining(["unknown-model-usage", "unreconciled-budget-reservations"]),
+    );
     expect(events).toEqual(original);
 
     const completion: FactoryEvent = {
@@ -140,9 +145,14 @@ describe("historical successor accounting assessment", () => {
 
   it("retains the historical outstanding-reservation shape when no invocation metadata exists", () => {
     const reserved: FactoryEvent = {
-      ...common("one", 5), kind: "budget", event: "BudgetReserved",
-      phase: "execution", unit: "local_milliseconds", amount: 100,
-      workItem: 2, attempt: 1,
+      ...common("one", 5),
+      kind: "budget",
+      event: "BudgetReserved",
+      phase: "execution",
+      unit: "local_milliseconds",
+      amount: 100,
+      workItem: 2,
+      attempt: 1,
     };
     const result = assess([...history("one"), reserved]);
     expect(result.unreconciledReservations).toEqual([reserved]);

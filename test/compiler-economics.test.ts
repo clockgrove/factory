@@ -234,10 +234,7 @@ describe("grounded advisory compiler economics", () => {
     const compiled = graph().workItems;
     expect(assessDecomposition(compiled).localFit.likelySlots).toBeNull();
     expect(assessDecomposition(compiled).cloudEligibility[0]!.status).toBe("unknown");
-    for (const inputs of [
-      evidence({ resource: null }),
-      evidence({ candidates: new Map() }),
-    ])
+    for (const inputs of [evidence({ resource: null }), evidence({ candidates: new Map() })])
       expect(assessDecomposition(compiled, inputs).localFit.likelySlots).toBeNull();
   });
   it("bounds fixed-policy advisory fit by both observed headroom and the configured ceiling", () => {

@@ -695,7 +695,7 @@ const Budget = Common.extend({
       event.unit !== "model_tokens" ||
       event.phase === "validation" ||
       (event.phase === "execution" && (!event.workItem || !event.attempt)) ||
-      ((event.directorEpoch === undefined) !== (event.policyDigest === undefined)) ||
+      (event.directorEpoch === undefined) !== (event.policyDigest === undefined) ||
       !event.usageId ||
       (event.attempt !== undefined && event.workItem === undefined) ||
       (marker &&
@@ -708,7 +708,8 @@ const Budget = Common.extend({
       context.addIssue({
         code: "custom",
         path: ["modelInvocationId"],
-        message: "model invocation linkage requires an exact zero-valued dispatch marker or actual token reconciliation",
+        message:
+          "model invocation linkage requires an exact zero-valued dispatch marker or actual token reconciliation",
       });
   }
   if (

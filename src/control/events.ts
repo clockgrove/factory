@@ -340,10 +340,12 @@ export class LifecycleRecorder {
   }): Promise<FactoryEvent> {
     await this.leases.assertCurrent(args.lease);
     assertReservationLease(args.reservation, args.lease);
-    if (args.modelInvocationId && (
-      (args.policyDigest !== undefined && args.policyDigest !== args.reservation.policyDigest) ||
-      (args.directorEpoch !== undefined && args.directorEpoch !== args.reservation.directorEpoch)
-    )) throw new Error("model invocation receipt must retain its original attempt binding");
+    if (
+      args.modelInvocationId &&
+      ((args.policyDigest !== undefined && args.policyDigest !== args.reservation.policyDigest) ||
+        (args.directorEpoch !== undefined && args.directorEpoch !== args.reservation.directorEpoch))
+    )
+      throw new Error("model invocation receipt must retain its original attempt binding");
     const now = await this.store.serverTime();
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
@@ -366,10 +368,12 @@ export class LifecycleRecorder {
       amount: args.amount,
       ...(args.usageId ? { usageId: args.usageId } : {}),
       ...(args.modelInvocationId ? { modelInvocationId: args.modelInvocationId } : {}),
-      ...(args.modelInvocationId ? {
-        directorEpoch: args.directorEpoch ?? args.reservation.directorEpoch,
-        policyDigest: args.policyDigest ?? args.reservation.policyDigest,
-      } : {}),
+      ...(args.modelInvocationId
+        ? {
+            directorEpoch: args.directorEpoch ?? args.reservation.directorEpoch,
+            policyDigest: args.policyDigest ?? args.reservation.policyDigest,
+          }
+        : {}),
       ...(args.usageEvidence ? { usageEvidence: args.usageEvidence } : {}),
       ...(args.usageEvidence === "conservative-reservation"
         ? {
@@ -407,11 +411,14 @@ export class LifecycleRecorder {
     reportedModelUsage?: ReportedModelUsage;
   }): Promise<FactoryEvent> {
     await this.leases.assertCurrent(args.lease);
-    if (args.modelInvocationId && (
-      args.policyDigest !== args.lease.policyDigest ||
-      args.directorEpoch === undefined || args.directorEpoch > args.lease.epoch ||
-      (args.event === "BudgetReserved" && args.directorEpoch !== args.lease.epoch)
-    )) throw new Error("model invocation receipt is fenced from its original run policy or epoch");
+    if (
+      args.modelInvocationId &&
+      (args.policyDigest !== args.lease.policyDigest ||
+        args.directorEpoch === undefined ||
+        args.directorEpoch > args.lease.epoch ||
+        (args.event === "BudgetReserved" && args.directorEpoch !== args.lease.epoch))
+    )
+      throw new Error("model invocation receipt is fenced from its original run policy or epoch");
     const now = await this.store.serverTime();
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
@@ -427,14 +434,19 @@ export class LifecycleRecorder {
       amount: args.amount,
       ...(args.usageId ? { usageId: args.usageId } : {}),
       ...(args.modelInvocationId ? { modelInvocationId: args.modelInvocationId } : {}),
-      ...(args.modelInvocationId ? { directorEpoch: args.directorEpoch, policyDigest: args.policyDigest } : {}),
+      ...(args.modelInvocationId
+        ? { directorEpoch: args.directorEpoch, policyDigest: args.policyDigest }
+        : {}),
       ...(args.reportedModelUsage ? { reportedModelUsage: args.reportedModelUsage } : {}),
     });
     await this.store.addIssueComment(
       args.objectiveNodeId,
-      encodeEventComment(args.event === "BudgetReserved" && args.modelInvocationId
-        ? "Factory recorded model dispatch intent; token consumption is not yet known."
-        : `Factory recorded ${args.amount} ${args.unit} for management.`, event),
+      encodeEventComment(
+        args.event === "BudgetReserved" && args.modelInvocationId
+          ? "Factory recorded model dispatch intent; token consumption is not yet known."
+          : `Factory recorded ${args.amount} ${args.unit} for management.`,
+        event,
+      ),
     );
     return event;
   }

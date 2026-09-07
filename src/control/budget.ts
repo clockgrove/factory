@@ -14,53 +14,98 @@ export function mergeAccountingSnapshot(
   return deduplicateFactoryEvents(
     [...known, ...observed].filter((event) => accountingRunIds.has(event.runId)),
   );
-
-export type ModelInvocationIdentity = Pick<BudgetEvent, "objective" | "runId" | "workItem" | "attempt" | "phase"> & { modelInvocationId: string };
-
-export function modelInvocationKey(identity: ModelInvocationIdentity): string {
-  return JSON.stringify([identity.objective, identity.runId, identity.workItem ?? null,
-    identity.attempt ?? null, identity.phase, identity.modelInvocationId]);
 }
 
-export function isModelInvocationMarker(event: FactoryEvent): event is BudgetEvent & { modelInvocationId: string } {
-  return event.kind === "budget" && event.event === "BudgetReserved" &&
-    event.unit === "model_tokens" && event.modelInvocationId !== undefined;
+export type ModelInvocationIdentity = Pick<
+  BudgetEvent,
+  "objective" | "runId" | "workItem" | "attempt" | "phase"
+> & { modelInvocationId: string };
+
+export function modelInvocationKey(identity: ModelInvocationIdentity): string {
+  return JSON.stringify([
+    identity.objective,
+    identity.runId,
+    identity.workItem ?? null,
+    identity.attempt ?? null,
+    identity.phase,
+    identity.modelInvocationId,
+  ]);
+}
+
+export function isModelInvocationMarker(
+  event: FactoryEvent,
+): event is BudgetEvent & { modelInvocationId: string } {
+  return (
+    event.kind === "budget" &&
+    event.event === "BudgetReserved" &&
+    event.unit === "model_tokens" &&
+    event.modelInvocationId !== undefined
+  );
 }
 
 /** Unknown consumption is not zero. Only the exact actual-usage link closes intent. */
-export function unresolvedModelInvocations(events: FactoryEvent[], runId?: string): Array<BudgetEvent & { modelInvocationId: string }> {
+export function unresolvedModelInvocations(
+  events: FactoryEvent[],
+  runId?: string,
+): Array<BudgetEvent & { modelInvocationId: string }> {
   const markers = new Map<string, BudgetEvent & { modelInvocationId: string }>();
   const closures = new Map<string, BudgetEvent>();
   for (const event of deduplicateFactoryEvents(events)) {
-    if (event.kind !== "budget" || !event.modelInvocationId || (runId && event.runId !== runId)) continue;
+    if (event.kind !== "budget" || !event.modelInvocationId || (runId && event.runId !== runId))
+      continue;
     const key = modelInvocationKey({ ...event, modelInvocationId: event.modelInvocationId });
     if (isModelInvocationMarker(event)) {
       const prior = markers.get(key);
-      if (prior && (prior.policyDigest !== event.policyDigest || prior.directorEpoch !== event.directorEpoch))
+      if (
+        prior &&
+        (prior.policyDigest !== event.policyDigest || prior.directorEpoch !== event.directorEpoch)
+      )
         throw new Error("model invocation has conflicting dispatch bindings");
       if (!prior || event.sequence < prior.sequence) markers.set(key, event);
     } else if (event.event === "BudgetReconciled" && event.unit === "model_tokens") {
       const prior = closures.get(key);
-      if (prior && (prior.amount !== event.amount || prior.usageId !== event.usageId || prior.policyDigest !== event.policyDigest || prior.directorEpoch !== event.directorEpoch))
+      if (
+        prior &&
+        (prior.amount !== event.amount ||
+          prior.usageId !== event.usageId ||
+          prior.policyDigest !== event.policyDigest ||
+          prior.directorEpoch !== event.directorEpoch)
+      )
         throw new Error("model invocation has conflicting actual usage receipts");
       closures.set(key, event);
     }
   }
-  return [...markers.entries()].filter(([key, marker]) => {
-    const closure = closures.get(key);
-    if (closure && (closure.policyDigest !== marker.policyDigest || closure.directorEpoch !== marker.directorEpoch))
-      throw new Error("model invocation usage conflicts with its dispatch binding");
-    return !closure || closure.sequence <= marker.sequence;
-  }).map(([, event]) => event);
+  return [...markers.entries()]
+    .filter(([key, marker]) => {
+      const closure = closures.get(key);
+      if (
+        closure &&
+        (closure.policyDigest !== marker.policyDigest ||
+          closure.directorEpoch !== marker.directorEpoch)
+      )
+        throw new Error("model invocation usage conflicts with its dispatch binding");
+      return !closure || closure.sequence <= marker.sequence;
+    })
+    .map(([, event]) => event);
 }
 
-export function assertModelInvocationAdmission(events: FactoryEvent[], policy: RunPolicy, activeInvocationKeys: ReadonlySet<string> = new Set()): void {
+export function assertModelInvocationAdmission(
+  events: FactoryEvent[],
+  policy: RunPolicy,
+  activeInvocationKeys: ReadonlySet<string> = new Set(),
+): void {
   assertSupportedModelTokenBudgetIntent(policy);
-  if (unresolvedModelInvocations(events).some((event) => !activeInvocationKeys.has(modelInvocationKey(event))))
+  if (
+    unresolvedModelInvocations(events).some(
+      (event) => !activeInvocationKeys.has(modelInvocationKey(event)),
+    )
+  )
     throw new Error("model invocation consumption is unknown; refusing another model invocation");
   const remaining = remainingBudget(policy, deriveBudgetUsage(events));
   if (remaining.modelTokens !== null && remaining.modelTokens <= 0)
-    throw new Error("observed model-token threshold is exhausted; refusing another model invocation");
+    throw new Error(
+      "observed model-token threshold is exhausted; refusing another model invocation",
+    );
 }
 
 export interface BudgetUsage {

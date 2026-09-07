@@ -165,20 +165,27 @@ function plan(f: Awaited<ReturnType<typeof fixture>>, compile: ManagementBackend
 describe("explicit plan pinned LFS preflight", () => {
   it("preserves actual compilation usage above an explicitly observed threshold without pretending to cap it", async () => {
     const f = await fixture();
-    const compile = vi.fn(async (context: CompilationContext, checkpoint: CompilationCheckpoint) => {
-      const result = await resultFor(context);
-      await checkpoint(result);
-      return result;
-    });
+    const compile = vi.fn(
+      async (context: CompilationContext, checkpoint: CompilationCheckpoint) => {
+        const result = await resultFor(context);
+        await checkpoint(result);
+        return result;
+      },
+    );
     const report = await buildPlanReport({
       repository: "o/r",
       request: {
-        objective: 7, compile: true, baseSha: f.baseSha,
+        objective: 7,
+        compile: true,
+        baseSha: f.baseSha,
         policy: {
           ...DEFAULT_RUN_POLICY,
           economics: {
-            maxModelTokens: 1, modelTokenBudgetMode: "observed-stop",
-            maxSandboxMinutes: 0, maxManagedSessions: 0, minCloudTimeSavedMinutes: 0,
+            maxModelTokens: 1,
+            modelTokenBudgetMode: "observed-stop",
+            maxSandboxMinutes: 0,
+            maxManagedSessions: 0,
+            minCloudTimeSavedMinutes: 0,
           },
         },
       },
@@ -186,11 +193,17 @@ describe("explicit plan pinned LFS preflight", () => {
       planning: { ...f.planning, management: backend(compile) },
     });
     expect(compile).toHaveBeenCalledTimes(1);
-    expect(report.compilation).toMatchObject({ result: "completed", usagePersistence: "response-only" });
+    expect(report.compilation).toMatchObject({
+      result: "completed",
+      usagePersistence: "response-only",
+    });
     expect(report.usage).toEqual(usage);
-    expect(report.diagnostics).toContainEqual(expect.objectContaining({
-      status: "warning", summary: expect.stringMatching(/not a provider hard cap.*may overshoot/),
-    }));
+    expect(report.diagnostics).toContainEqual(
+      expect.objectContaining({
+        status: "warning",
+        summary: expect.stringMatching(/not a provider hard cap.*may overshoot/),
+      }),
+    );
   });
 
   it.each([false, true])(

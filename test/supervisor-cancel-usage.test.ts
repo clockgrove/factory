@@ -1,7 +1,59 @@
 import { describe, expect, it, vi } from "vitest";
 import { LeaseLostError, LeaseManager } from "../src/control/lease.js";
 import { LifecycleRecorder } from "../src/control/events.js";
+import { isModelInvocationMarker, unresolvedModelInvocations } from "../src/control/budget.js";
+import type { FactoryEvent } from "../src/protocol/events.js";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
+
+function assertExecutionDispatch(events: FactoryEvent[], usageKnown: boolean): void {
+  const reservations = events.filter((event) => event.event === "AttemptReserved");
+  expect(reservations).toHaveLength(1);
+  const reservation = reservations[0]!;
+  const markers = events
+    .filter(isModelInvocationMarker)
+    .filter((event) => event.phase === "execution");
+  expect(markers).toHaveLength(1);
+  const marker = markers[0]!;
+  expect(marker).toMatchObject({
+    objective: reservation.objective,
+    runId: reservation.runId,
+    workItem: 8,
+    attempt: 1,
+    directorEpoch: reservation.directorEpoch,
+    policyDigest: reservation.policyDigest,
+    usageId: "invocation-worker-8-1",
+    modelInvocationId: "worker-8-1",
+    amount: 0,
+  });
+  expect(marker.sequence).toBeGreaterThan(reservation.sequence);
+  expect(marker).not.toHaveProperty("reportedModelUsage");
+  const actual = events.filter(
+    (event) =>
+      event.kind === "budget" &&
+      event.event === "BudgetReconciled" &&
+      event.unit === "model_tokens" &&
+      event.phase === "execution",
+  );
+  const pending = unresolvedModelInvocations(events).filter((event) => event.phase === "execution");
+  if (usageKnown) {
+    expect(actual).toHaveLength(1);
+    expect(actual[0]).toMatchObject({
+      objective: marker.objective,
+      runId: marker.runId,
+      workItem: marker.workItem,
+      attempt: marker.attempt,
+      directorEpoch: marker.directorEpoch,
+      policyDigest: marker.policyDigest,
+      usageId: "worker-8-1",
+      modelInvocationId: marker.modelInvocationId,
+    });
+    expect(actual[0]!.sequence).toBeGreaterThan(marker.sequence);
+    expect(pending).toEqual([]);
+  } else {
+    expect(actual).toEqual([]);
+    expect(pending).toEqual([marker]);
+  }
+}
 
 describe("Supervisor cancellation model usage", () => {
   it("persists known usage while unknown cleanup still blocks release and replacement", async () => {
@@ -38,7 +90,10 @@ describe("Supervisor cancellation model usage", () => {
         .events()
         .filter(
           (event) =>
-            event.kind === "budget" && event.unit === "model_tokens" && event.phase === "execution",
+            event.kind === "budget" &&
+            event.event === "BudgetReconciled" &&
+            event.unit === "model_tokens" &&
+            event.phase === "execution",
         );
       expect(usage).toHaveLength(1);
       expect(usage[0]).toMatchObject({
@@ -46,6 +101,7 @@ describe("Supervisor cancellation model usage", () => {
         usageId: "worker-8-1",
         reportedModelUsage: { inputTokens: 9, outputTokens: 4, cachedInputTokens: 2 },
       });
+      assertExecutionDispatch(f.events(), true);
       expect(cleanupAttempts).toBeGreaterThan(0);
       expect(
         f
@@ -90,10 +146,14 @@ describe("Supervisor cancellation model usage", () => {
         .events()
         .filter(
           (event) =>
-            event.kind === "budget" && event.unit === "model_tokens" && event.phase === "execution",
+            event.kind === "budget" &&
+            event.event === "BudgetReconciled" &&
+            event.unit === "model_tokens" &&
+            event.phase === "execution",
         );
       expect(usage).toHaveLength(1);
       expect(usage[0]).toMatchObject({ amount: 6, usageId: "worker-8-1" });
+      assertExecutionDispatch(f.events(), true);
       expect(observations).toBe(1);
       expect(f.resources.size).toBe(0);
     } finally {
@@ -140,10 +200,12 @@ describe("Supervisor cancellation model usage", () => {
             .filter(
               (event) =>
                 event.kind === "budget" &&
+                event.event === "BudgetReconciled" &&
                 event.unit === "model_tokens" &&
                 event.phase === "execution",
             ),
         ).toEqual([]);
+        assertExecutionDispatch(f.events(), false);
         expect(
           f
             .events()
@@ -207,6 +269,7 @@ describe("Supervisor cancellation model usage", () => {
           .filter(
             (event) =>
               event.kind === "budget" &&
+              event.event === "BudgetReconciled" &&
               event.unit === "model_tokens" &&
               event.phase === "execution",
           );
@@ -216,10 +279,12 @@ describe("Supervisor cancellation model usage", () => {
         expect(order).toEqual(["cancel", "terminal-observe", "cleanup"]);
         expect(terminal).toHaveLength(1);
         if (tokens === null || tokens === "unavailable") {
+          assertExecutionDispatch(f.events(), false);
           expect(usage).toEqual([]);
           expect(terminal[0]).not.toHaveProperty("reportedModelTokens");
           expect(terminal[0]).not.toHaveProperty("reportedModelUsage");
         } else {
+          assertExecutionDispatch(f.events(), true);
           expect(usage).toHaveLength(1);
           expect(usage[0]).toMatchObject({
             amount: tokens,

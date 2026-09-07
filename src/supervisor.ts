@@ -43,6 +43,7 @@ import {
   unreconciledBudgetReservations,
   assertModelInvocationAdmission,
   isModelInvocationMarker,
+  mergeAccountingSnapshot,
   modelInvocationKey,
   type ModelInvocationIdentity,
 } from "./control/budget.js";
@@ -1235,7 +1236,11 @@ export class FactorySupervisor {
         throw new Error(`successor resources unavailable: ${resources.blockers.join(", ")}`);
       if (this.#recoveryRuntime.currentUnknownModelUsageCount > 0)
         throw new Error("successor model usage is unknown; refusing another invocation");
-      this.#budgetEvents = this.#accountingEvents([...this.#recoveryRuntime.events]);
+      this.#budgetEvents = mergeAccountingSnapshot(
+        this.#budgetEvents,
+        [...this.#recoveryRuntime.events],
+        new Set(this.#recoveryRuntime.accountingRunIds),
+      );
     }
     return runWithExternalAdmissionBoundary(
       this.#options.repositoryFence ?? (async () => {}),

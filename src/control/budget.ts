@@ -4,6 +4,17 @@ import { deduplicateFactoryEvents } from "./receipts.js";
 import { assertSupportedModelTokenBudgetIntent } from "../protocol/budget-intent.js";
 
 type BudgetEvent = Extract<FactoryEvent, { kind: "budget" }>;
+
+/** A completed read may predate another in-process write; it cannot revoke known receipts. */
+export function mergeAccountingSnapshot(
+  known: FactoryEvent[],
+  observed: FactoryEvent[],
+  accountingRunIds: ReadonlySet<string>,
+): FactoryEvent[] {
+  return deduplicateFactoryEvents(
+    [...known, ...observed].filter((event) => accountingRunIds.has(event.runId)),
+  );
+
 export type ModelInvocationIdentity = Pick<BudgetEvent, "objective" | "runId" | "workItem" | "attempt" | "phase"> & { modelInvocationId: string };
 
 export function modelInvocationKey(identity: ModelInvocationIdentity): string {

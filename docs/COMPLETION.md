@@ -16,6 +16,29 @@ are implementation work; exercising an existing qualifier is testing work.
 
 ## Capability status
 
+### Current WSL2 completion batch
+
+The remaining installed acceptance is [#123](https://github.com/clockgrove/factory/issues/123),
+[#76](https://github.com/clockgrove/factory/issues/76) and
+[#75](https://github.com/clockgrove/factory/issues/75). Qualification has exposed concrete code
+dependencies, not a reason to silently narrow those issues:
+
+| Deliverable | Owner / kind | Acceptance and next boundary |
+| --- | --- | --- |
+| [#140](https://github.com/clockgrove/factory/issues/140): shared-work scenario | Concurrency lane / code | Actual asymmetric refill, scoped pause, shared ceilings, exact peer advancement and independent validation. Serial lease takeover does not satisfy simultaneous inner-Director contention. |
+| [#141](https://github.com/clockgrove/factory/issues/141): failure/conflict scenario | Failure lane / code | Failed validation and a genuine post-execution conflict must refuse unsafe integration and reach exact safe closeout; depends on #143. |
+| [#142](https://github.com/clockgrove/factory/issues/142): session qualifier correction | Integration lane / code | Production-valid generated policy, original operator refusal evidence, exact dispatch-to-actual usage linkage. Preserve the original pre-activation failure. |
+| [#143](https://github.com/clockgrove/factory/issues/143): stale-base cancellation | Runtime lane / code | Existing-run cancellation reaches fenced cleanup before recovery, model work, validation or publication; preserve ownership and unknown-usage fences. |
+
+Integrate these changes before coordinated verification and matching changed-artifact installation.
+Their implementation is not a live pass for the parent issues. The specific active-cancellation
+accounting case remains incomplete where the provider supplies no complete interrupted-worker usage;
+resource cleanup and unknown counters must be reported separately. Other authorized WSL2 work can
+continue without that provider capability. The live lane states and next deliverables are maintained
+in [#69](https://github.com/clockgrove/factory/issues/69).
+
+### Prior implementation and evidence
+
 The current trunk batch integrates
 [#136](https://github.com/clockgrove/factory/issues/136) (explicit budget intent and durable model-call
 admission), [#137](https://github.com/clockgrove/factory/issues/137) (safe conservative defaults),

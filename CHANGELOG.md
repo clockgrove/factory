@@ -6,6 +6,9 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Added
 
+- Opt-in installed two-Objective refill and failure/conflict qualification scenarios, with
+  exact peer provenance, original-work accounting and safe closeout requirements. Their presence
+  does not imply a live qualification pass or measured throughput savings.
 - Fair same-machine multi-Objective sharing and concurrent regular-PR execution, with immutable
   peer provenance and serialized, independently revalidated integration.
 - Durable explicit App Server preparation, dispatch, terminal usage and same-attempt artifact
@@ -42,6 +45,9 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- Installed session qualification generates a self-consistent single-worker policy, preserves
+  bounded operator refusal details, and settles model dispatch markers only through their exact
+  actual-usage receipts; additional head-specific reviews remain measured work, not duplicate calls.
 - New token-budget policies must explicitly choose observed stopping; unsupported hard token caps
   are rejected before model work, and historical recorded policies keep their original digest and
   recovery semantics. Status distinguishes budget intent from observed usage and enforceable caps.

@@ -2456,11 +2456,16 @@ export class FactorySupervisor {
         throw new Error("cancellation lacks its exact authenticated activation");
     };
     assertActivation(initial);
+    const base = await this.#store.getBranchHead(snapshot.defaultBranch);
+    // This exception is only for an activation which normal startup must refuse.
+    // Keep supported unchanged/evidenced-base cancellation on its existing path;
+    // do not impose new local-only cleanup requirements on completed cloud history.
+    if (base.oid === run.baseSha || await this.#observedRunOwnsBaseAdvance(snapshot, run, base.oid))
+      return null;
     const priorLease = await this.#leases.read(snapshot.number);
     this.#sequences = new SequenceAllocator([...initial, requested], run.sequence + 1, priorLease ?? undefined);
     // Current Git tree is only the lease's storage parent, not an execution base.
     await this.#options.repositoryFence?.();
-    const base = await this.#store.getBranchHead(snapshot.defaultBranch);
     const acquired = await this.#leases.acquire({ objective: run.objective, runId: run.runId,
       holder: `${actor}-${randomUUID()}`, policyDigest: run.policyDigest }, base, this.#sequences.take());
     this.#lease = new LeaseController(this.#leases, acquired, this.#sequences);

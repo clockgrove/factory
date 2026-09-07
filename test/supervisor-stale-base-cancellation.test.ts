@@ -14,7 +14,7 @@ type Fixture = Awaited<ReturnType<typeof providerSupervisorFixture>>;
 const fixtures: Fixture[] = [];
 afterEach(async () => { for (const f of fixtures.splice(0)) await f.dispose(); });
 
-async function held() {
+async function held(advanceBase = true) {
   let cleanupUnknown = false;
   const reconcile = vi.fn(async () => {
     if (cleanupUnknown) throw new Error("original resource absence is unknown");
@@ -53,7 +53,7 @@ async function held() {
   const before = structuredClone(f.events());
   const runGit = (...args: string[]) => execFileSync("git", args, { cwd: f.repository, encoding: "utf8" }).trim();
   const competing = runGit("-c", "core.hooksPath=/dev/null", "commit-tree", `${start.baseSha}^{tree}`, "-p", start.baseSha!, "-m", "unrelated externally committed branch advance");
-  f.refs.set("refs/heads/main", competing);
+  if (advanceBase) f.refs.set("refs/heads/main", competing);
   const request = parseFactoryEvent({
     protocol: start.protocol, kind: "run", event: "FactoryRunCancellationRequested", objective: 7,
     runId: f.runId, sequence: Math.max(...f.events().map((event) => event.sequence)) + 1,
@@ -80,7 +80,42 @@ function assertNoContinuation(f: Fixture, before: FactoryEvent[], retainedRefs: 
   expect(f.activity.filter((entry) => entry.operation === "review" || entry.operation === "validate")).toEqual([]);
 }
 
+function completedRemoteCapacity(f: Fixture) {
+  const reserved = f.events().find((event) => event.event === "AttemptReserved" && event.workItem === 8);
+  if (reserved?.kind !== "attempt") throw new Error("fixture reservation missing");
+  let sequence = Math.max(...f.events().map((event) => event.sequence));
+  const identity = { protocol: reserved.protocol, kind: "capacity", objective: 7, runId: f.runId,
+    workItem: 8, attempt: 1, phase: "validation", backend: "codex-cli/daytona", requestedCpu: 1,
+    requestedMemoryMb: 1024, directorEpoch: reserved.directorEpoch, policyDigest: reserved.policyDigest,
+    at: new Date().toISOString() };
+  f.snapshot.workItems[0]!.factoryEvents!.push(
+    parseFactoryEvent({ ...identity, event: "CapacityReserved", sequence: ++sequence }),
+    parseFactoryEvent({ ...identity, event: "CapacityReconciled", sequence: ++sequence }),
+  );
+  return sequence;
+}
+
 describe("cleanup-only cancellation of a stale activation", () => {
+  it("preserves unchanged-base cancellation with previously reconciled remote validation", async () => {
+    const h = await held(false);
+    const sequence = completedRemoteCapacity(h.f);
+    const calls = h.reconcile.mock.calls.length;
+    h.requestCancellation({ sequence: sequence + 1 });
+    expect(await h.f.run()).toMatchObject({ status: "cancelled", runId: h.f.runId });
+    expect(h.reconcile).toHaveBeenCalledTimes(calls);
+    assertNoContinuation(h.f, h.before, h.retainedRefs);
+    expect(h.f.events().filter((event) => event.event === "FactoryRunCancelled")).toHaveLength(1);
+  }, 30_000);
+
+  it("does not waive unsupported remote cleanup merely because its capacity was reconciled", async () => {
+    const h = await held();
+    const sequence = completedRemoteCapacity(h.f);
+    h.requestCancellation({ sequence: sequence + 1 });
+    await expect(h.f.run()).rejects.toThrow(/validation resource lacks supported exact local scope ownership/);
+    assertNoContinuation(h.f, h.before, h.retainedRefs);
+    expect(h.f.events().some((event) => event.event === "FactoryRunCancelled")).toBe(false);
+  }, 30_000);
+
   it("retires exact existing resources before recovery and preserves paid work on external trunk", async () => {
     const h = await held();
     h.requestCancellation();

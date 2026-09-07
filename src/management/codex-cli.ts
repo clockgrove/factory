@@ -569,11 +569,15 @@ export class CodexCliManagementBackend implements ManagementBackend {
   ): Promise<ReviewResult> {
     return withVerifiedReviewCheckout(
       { ...context, requiresIsolation: context.requiresIsolation ?? false },
-      (repository) => dispatch(() => this.#reviewMaterialized({ ...context, repository }, checkpoint)),
+      (repository) =>
+        dispatch(() => this.#reviewMaterialized({ ...context, repository }, checkpoint)),
     );
   }
 
-  async #reviewMaterialized(context: ReviewContext, checkpoint: ReviewCheckpoint): Promise<ReviewResult> {
+  async #reviewMaterialized(
+    context: ReviewContext,
+    checkpoint: ReviewCheckpoint,
+  ): Promise<ReviewResult> {
     const reviewInput = {
       objective: context.objectiveNumber,
       workItem: context.workItemNumber,

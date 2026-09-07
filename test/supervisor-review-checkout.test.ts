@@ -9,7 +9,10 @@ import * as reviewCheckout from "../src/management/review-checkout.js";
 
 type Fixture = Awaited<ReturnType<typeof providerSupervisorFixture>>;
 const fixtures: Fixture[] = [];
-afterEach(async () => { for (const fixture of fixtures.splice(0)) await fixture.dispose(); vi.restoreAllMocks(); });
+afterEach(async () => {
+  for (const fixture of fixtures.splice(0)) await fixture.dispose();
+  vi.restoreAllMocks();
+});
 
 it("every fresh ordinary Supervisor review inspects the exact candidate rather than the controller", async () => {
   const f = await providerSupervisorFixture("daytona-burst", {
@@ -18,15 +21,27 @@ it("every fresh ordinary Supervisor review inspects the exact candidate rather t
   });
   fixtures.push(f);
   const paths: string[] = [];
-  const backend = new CodexCliManagementBackend({ runStructured: async (cwd, _schema, prompt) => {
-    const context = JSON.parse(prompt.split("\n\n").at(-1)!) as ReviewContext;
-    expect(cwd).not.toBe(f.repository);
-    paths.push(cwd);
-    for (const path of context.artifact.changedPaths)
-      expect((await readFile(join(cwd, path))).length).toBeGreaterThan(0);
-    expect(execFileSync("git", ["write-tree"], { cwd, encoding: "utf8" }).trim()).toBe(context.evidence.outputTreeSha);
-    return { value: { accepted: true, summary: "Fixture observed exact review files", unmetCriteria: [], risks: [] }, usage: { inputTokens: 4, outputTokens: 2 } };
-  }});
+  const backend = new CodexCliManagementBackend({
+    runStructured: async (cwd, _schema, prompt) => {
+      const context = JSON.parse(prompt.split("\n\n").at(-1)!) as ReviewContext;
+      expect(cwd).not.toBe(f.repository);
+      paths.push(cwd);
+      for (const path of context.artifact.changedPaths)
+        expect((await readFile(join(cwd, path))).length).toBeGreaterThan(0);
+      expect(execFileSync("git", ["write-tree"], { cwd, encoding: "utf8" }).trim()).toBe(
+        context.evidence.outputTreeSha,
+      );
+      return {
+        value: {
+          accepted: true,
+          summary: "Fixture observed exact review files",
+          unmetCriteria: [],
+          risks: [],
+        },
+        usage: { inputTokens: 4, outputTokens: 2 },
+      };
+    },
+  });
   f.management.review = backend.review.bind(backend);
   f.management.reviewWithAdmission = backend.reviewWithAdmission.bind(backend);
   await expect(f.run()).resolves.toMatchObject({ status: "completed" });

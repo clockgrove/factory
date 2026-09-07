@@ -15,6 +15,7 @@ import {
 import { PlatformUnavailableError } from "../src/platform.js";
 import type { FactoryEvent } from "../src/protocol/events.js";
 import * as worktrees from "../src/runtime/local-worktree.js";
+import * as cleanValidation from "../src/validation/clean-run.js";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
 
 type Fixture = Awaited<ReturnType<typeof providerSupervisorFixture>>;
@@ -197,6 +198,7 @@ describe("Supervisor model dispatch journal", () => {
       localOnly: true,
       dependencyChain: true,
     });
+    const validate = vi.spyOn(cleanValidation, "validateArtifactClean");
     let held = true;
     let checkpointRef: string | undefined;
     let checkpointOid: string | undefined;
@@ -261,7 +263,15 @@ describe("Supervisor model dispatch journal", () => {
         ),
       ).toEqual([]);
       held = false;
-      expect(await f.run()).toMatchObject({ status: "completed" });
+      const validationBeforeRestart = f.events().filter((event) => event.event === "ValidationRecorded" && event.workItem === 8);
+      expect(validationBeforeRestart).toHaveLength(1);
+      const artifactDigest = validate.mock.calls[0]![0].artifact.digest;
+      expect(f.refs.has("refs/heads/factory/objective-7/work-item-8/attempt-1")).toBe(false);
+      const result = await f.run();
+      expect(result, JSON.stringify(result)).toMatchObject({ status: "completed" });
+      expect(f.events().filter((event) => event.event === "ValidationRecorded" && event.workItem === 8)).toEqual(validationBeforeRestart);
+      expect(validate.mock.calls.filter(([input]) => input.artifact.digest === artifactDigest)).toHaveLength(1);
+      expect(f.events().filter((event) => event.event === "PublicationRecorded" && event.workItem === 8)).toHaveLength(1);
       expect(f.refs.get(checkpointRef!)).toBe(checkpointOid);
       expect(
         f.activity.filter((entry) => entry.operation === "review" && entry.workItem === 8),

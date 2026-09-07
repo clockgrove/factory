@@ -12383,7 +12383,65 @@ export class FactorySupervisor {
         }
       }
       const branch = publicationBranch(this.#run.objective, item.number, reservation.attempt);
-      const headSha = await this.#store.readRef(`refs/heads/${branch}`);
+      let headSha = await this.#store.readRef(`refs/heads/${branch}`);
+      if (!headSha && !backend.capabilities.providerManagedPublication) {
+        const collected = [...events].reverse().find(
+          (event) => event.kind === "attempt" && event.event === "AttemptCollected",
+        );
+        if (collected?.kind !== "attempt" || !collected.artifactDigest)
+          throw new Error("validated publication recovery has no exact collected artifact");
+        const reviewIdentity: ReviewIdentity = {
+          kind: "artifact",
+          runId: this.#run.runId,
+          objective: this.#run.objective,
+          workItem: item.number,
+          attempt: reservation.attempt,
+          artifactDigest: collected.artifactDigest,
+          baseSha: validation.baseSha,
+          outputTreeSha: validation.outputTreeSha,
+          evidenceDigest: validation.evidenceDigest,
+        };
+        const review = await this.#reviews.load(reviewIdentity);
+        if (!review || !review.review.accepted || review.review.unmetCriteria.length > 0)
+          throw new Error("validated publication recovery requires its exact accepted review checkpoint");
+        // Repair only the checkpoint's actual counters; this never invokes management.
+        await this.#recordReviewUsage(review, item, reservation);
+        const packet = parseWorkerPacket({ ...this.#packetFor(item.number), baseSha: reservation.baseSha });
+        const artifact = await resumeArtifactTransfer({
+          store: this.#store,
+          identity: this.#artifactTransferIdentity(reservation),
+          allowedPaths: packet.allowedPaths,
+          assertCurrent: () => this.#externalAdmission(async () => {}),
+        });
+        if (!artifact || artifact.digest !== collected.artifactDigest ||
+          artifact.baseSha !== validation.baseSha || artifact.outcome !== "succeeded")
+          throw new Error("validated publication recovery differs from the original retained artifact");
+        this.#retainArtifactContent(artifact);
+        await ensureLocalCommit(this.#options.repository, artifact.baseSha);
+        const treeOid = await prepareSiblingRefreshTree({
+          repository: this.#options.repository,
+          store: this.#store,
+          packet,
+          artifact,
+          expectedOutputTreeSha: validation.outputTreeSha,
+          assertCurrent: () => this.#lease.assertGeneration("publication"),
+        });
+        const message = `${item.title}\n\nCloses #${item.number}\nFactory-Artifact: ${artifact.digest}\nFactory-Validation: ${validation.evidenceDigest}`;
+        await this.#lease.assertGeneration("publication");
+        const plannedHead = await this.#store.createCommit({ treeOid, parentOids: [artifact.baseSha], message });
+        await this.#lease.assertGeneration("publication");
+        try {
+          await this.#store.createRef(`refs/heads/${branch}`, plannedHead);
+        } catch (error) {
+          if (!(await this.#store.readRef(`refs/heads/${branch}`))) throw error;
+        }
+        headSha = await this.#store.readRef(`refs/heads/${branch}`);
+        if (!headSha) throw new Error("validated publication recovery branch is unavailable");
+        const restored = await this.#store.readCommit(headSha);
+        if (restored.treeOid !== treeOid || restored.parentOids.length !== 1 ||
+          restored.parentOids[0] !== artifact.baseSha || restored.message.trim() !== message)
+          throw new Error("validated publication recovery branch has incompatible content");
+      }
       if (headSha) {
         const commit = await this.#store.readCommit(headSha);
         if (commit.treeOid !== validation.outputTreeSha) {
@@ -12498,9 +12556,10 @@ export class FactorySupervisor {
             allowRecovery: true,
           }),
         );
-        if (this.#deliverySelection.selected === "native-stacks") {
-          const metadata = stackMetadata!;
-          const itemPlan = stackPlan!;
+        {
+          const native = this.#deliverySelection.selected === "native-stacks";
+          const metadata = stackMetadata ?? parseGraphItemMetadata(item.body ?? "");
+          const itemPlan = stackPlan;
           const exactHeadValidation = bindValidationToPublishedHead({
             validation: {
               passed: validation.passed,
@@ -12520,14 +12579,14 @@ export class FactorySupervisor {
               receipt: {
                 protocol: PUBLICATION_RECEIPT_PROTOCOL,
                 runId: this.#run.runId,
-                unitId: itemPlan.unitId,
+                unitId: itemPlan?.unitId ?? `delivery/${metadata.id}`,
                 itemId: metadata.id,
                 workItem: item.number,
                 attempt: reservation.attempt,
                 revision: 1,
-                mode: "native-stacks",
-                position: itemPlan.position,
-                ...(itemPlan.parentItemId ? { parentItemId: itemPlan.parentItemId } : {}),
+                mode: native ? "native-stacks" : "regular-prs",
+                position: itemPlan?.position ?? 0,
+                ...(itemPlan?.parentItemId ? { parentItemId: itemPlan.parentItemId } : {}),
                 branch,
                 baseBranch: currentPull.baseRef,
                 baseSha: validation.baseSha,
@@ -12538,10 +12597,10 @@ export class FactorySupervisor {
                 state: "published",
               },
               event: "PublicationRecorded",
-              reason: "recovered interrupted stack publication",
+              reason: "recovered interrupted validated publication",
             }),
           );
-          return;
+          if (native) return;
         }
         await this.#integrate(
           item,

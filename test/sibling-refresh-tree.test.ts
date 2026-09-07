@@ -260,7 +260,7 @@ describe("object-only sibling refresh tree preparation", () => {
     expect(f.writes.at(-1)).toBe("tree");
   });
 
-  it.each(["packet-base", "scope", "manifest", "digest", "remote-base"] as const)(
+  it.each(["packet-base", "scope", "manifest", "digest", "remote-base", "validated-tree"] as const)(
     "rejects %s mismatch before any upload",
     async (kind) => {
       const f = await fixture();
@@ -284,7 +284,10 @@ describe("object-only sibling refresh tree preparation", () => {
           serverTime: new Date(),
         });
       f.hostile();
-      await expect(prepareSiblingRefreshTree(f)).rejects.toThrow();
+      await expect(prepareSiblingRefreshTree({
+        ...f,
+        ...(kind === "validated-tree" ? { expectedOutputTreeSha: "f".repeat(40) } : {}),
+      })).rejects.toThrow();
       expect(f.writes).toEqual([]);
       expect(await f.present()).toEqual([]);
     },

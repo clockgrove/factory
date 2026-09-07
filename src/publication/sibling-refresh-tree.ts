@@ -68,6 +68,8 @@ export async function prepareSiblingRefreshTree(input: {
   packet: WorkerPacket;
   store: Pick<PublicationStore, "readCommit" | "createBlob" | "createTree">;
   assertCurrent: () => Promise<void>;
+  /** Recovery can bind an already validated tree before any immutable upload. */
+  expectedOutputTreeSha?: string;
 }): Promise<string> {
   const artifact = verifyArtifact(input.artifact);
   if (
@@ -149,6 +151,8 @@ export async function prepareSiblingRefreshTree(input: {
     await git(["read-tree", baseSha]);
     await git(["apply", "--cached", "--binary", "--whitespace=error-all", patchPath]);
     const outputTreeSha = gitSha.parse((await git(["write-tree"])).trim());
+    if (input.expectedOutputTreeSha !== undefined && outputTreeSha !== input.expectedOutputTreeSha)
+      throw new Error("reconstructed artifact differs from its previously validated output tree");
     if (
       trustedManifest.baseTreeSha !== base.treeOid ||
       trustedManifest.resultTreeSha !== outputTreeSha

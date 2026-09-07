@@ -483,6 +483,12 @@ export interface MutationSchedulerOptions {
 }
 
 export interface GitHubMutationTelemetry {
+  /** Counters belong to this scheduler instance, not to any durable Factory run. */
+  measurementScope: "process-local";
+  measurementWindow: {
+    startedAt: string;
+    observedAt: string;
+  };
   admitted: number;
   transported: number;
   successful: number;
@@ -506,6 +512,7 @@ export class MutationScheduler implements MutationAdmission {
   #normalQueue: Array<() => void> = [];
   #lastNoticeAt = 0;
   #primaryQuota: GitHubPrimaryQuotaCache | undefined;
+  readonly #startedAt: string;
   #admitted = 0;
   #transported = 0;
   #successful = 0;
@@ -516,6 +523,7 @@ export class MutationScheduler implements MutationAdmission {
     this.#now = options.now ?? (() => new Date());
     this.#sleep = options.sleep ?? mutationDelay;
     this.#primaryQuota = options.primaryQuota;
+    this.#startedAt = this.#now().toISOString();
   }
 
   attachPrimaryQuota(cache: GitHubPrimaryQuotaCache): void {
@@ -523,12 +531,18 @@ export class MutationScheduler implements MutationAdmission {
   }
 
   telemetry(): GitHubMutationTelemetry {
+    const observedAt = this.#now();
     return {
+      measurementScope: "process-local",
+      measurementWindow: {
+        startedAt: this.#startedAt,
+        observedAt: observedAt.toISOString(),
+      },
       admitted: this.#admitted,
       transported: this.#transported,
       successful: this.#successful,
       serverPrimaryQuota: this.#primaryQuota?.snapshot() ?? [],
-      localSecondaryEstimate: this.#pacer.snapshot(this.#now()),
+      localSecondaryEstimate: this.#pacer.snapshot(observedAt),
     };
   }
 

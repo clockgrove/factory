@@ -118,7 +118,9 @@ The Director skill uses bounded, read-only operations when the user is inspectin
   compiles a proposed graph against a clean selected checkout without creating issues or starting
   workers. Compilation consumes model quota; its usage is returned, not persisted as run authority.
 - `factory_status` returns the current Objective/run state, active and queued Work Items, resource
-  pressure, burst activity, and aggregate execution economics.
+  pressure, burst activity, and aggregate execution economics. Current GitHub response-header quota
+  observations and process-local mutation counters are reported separately with their measurement
+  scope/window; absent durable run-attributed mutation measurements remain unavailable.
 - `factory_explain` returns stable reason codes, policy gates, observed evidence, and the concrete
   action needed to unblock waiting or escalated work.
 - `factory_replay` reconstructs durable scheduling receipts and can replay a credential-free pinned

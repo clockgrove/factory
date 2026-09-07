@@ -4,6 +4,7 @@ import { buildExplanationReport } from "../src/application/explain.js";
 import { buildReplayReport } from "../src/application/replay.js";
 import { buildStatusReport, type FactoryReadSnapshot } from "../src/application/status.js";
 import { EXPLANATION_CODES } from "../src/explanations/index.js";
+import type { GitHubMutationTelemetry } from "../src/platform.js";
 import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js";
 import { DEFAULT_RUN_POLICY, policyDigest, type RunPolicy } from "../src/protocol/policy.js";
 
@@ -167,6 +168,42 @@ function snapshot(): FactoryReadSnapshot {
   };
 }
 
+function processTelemetry(
+  counts: Pick<GitHubMutationTelemetry, "admitted" | "transported" | "successful"> = {
+    admitted: 8,
+    transported: 7,
+    successful: 6,
+  },
+): GitHubMutationTelemetry {
+  return {
+    measurementScope: "process-local",
+    measurementWindow: {
+      startedAt: "2026-09-04T12:00:00.000Z",
+      observedAt: "2026-09-04T12:05:00.000Z",
+    },
+    ...counts,
+    serverPrimaryQuota: [
+      {
+        resource: "core",
+        limit: 5000,
+        remaining: 4993,
+        used: 7,
+        resetAt: "2026-09-04T13:00:00.000Z",
+        observedAt: "2026-09-04T12:05:00.000Z",
+      },
+    ],
+    localSecondaryEstimate: {
+      transportedLastMinute: counts.transported === 0 ? 0 : 2,
+      transportedLastHour: counts.transported,
+      estimatedHourlyCapacity: 499,
+      confidence: "low",
+      secondaryRefusals: 0,
+      limitingReason: "local-secondary-estimate",
+      nextAdmissionAt: "2026-09-04T12:05:07.215Z",
+    },
+  };
+}
+
 describe("bounded status, explain, and replay output", () => {
   it("reports latest observed queue transitions while preserving original age and old sample timestamps", () => {
     const current = snapshot();
@@ -277,38 +314,53 @@ describe("bounded status, explain, and replay output", () => {
     });
   });
 
-  it("reports server quota separately from the local secondary estimate and model economics", () => {
-    const platformTelemetry = {
-      admitted: 8,
-      transported: 7,
-      successful: 6,
-      serverPrimaryQuota: [
-        {
-          resource: "core",
-          limit: 5000,
-          remaining: 4993,
-          used: 7,
-          resetAt: "2026-09-04T13:00:00.000Z",
-          observedAt: "2026-09-04T12:05:00.000Z",
-        },
-      ],
-      localSecondaryEstimate: {
-        transportedLastMinute: 2,
-        transportedLastHour: 7,
-        estimatedHourlyCapacity: 499,
-        confidence: "low" as const,
-        secondaryRefusals: 0,
-        limitingReason: "local-secondary-estimate" as const,
-        nextAdmissionAt: "2026-09-04T12:05:07.215Z",
-      },
-    };
+  it("reports active-process telemetry with its scope and window outside run economics", () => {
+    const platformTelemetry = processTelemetry();
     const report = buildStatusReport({
       repository: "clockgrove/factory",
       snapshot: snapshot(),
       platformTelemetry,
     });
     expect(report.github).toEqual(platformTelemetry);
-    expect(report.summary?.economics.githubMutations).toEqual(platformTelemetry);
+    expect(report.summary?.economics.githubMutations).toEqual({
+      availability: "unavailable",
+      reason: "no durable run-attributed GitHub mutation measurement is present",
+    });
+  });
+
+  it("does not attribute a new reader process's zero counters to a completed run", () => {
+    const terminal = snapshot();
+    terminal.factoryEvents!.push(
+      event({
+        kind: "run",
+        event: "FactoryRunCompleted",
+        sequence: 6,
+        at: "2026-09-04T12:02:00.000Z",
+      }),
+    );
+    const readerTelemetry = processTelemetry({ admitted: 0, transported: 0, successful: 0 });
+    const report = buildStatusReport({
+      repository: "clockgrove/factory",
+      snapshot: terminal,
+      platformTelemetry: readerTelemetry,
+    });
+    expect(report.run).toMatchObject({ state: "completed" });
+    expect(report.github).toEqual(readerTelemetry);
+    expect(report.summary?.economics.githubMutations).toMatchObject({
+      availability: "unavailable",
+    });
+  });
+
+  it("marks historical run mutation measurements unavailable without process telemetry", () => {
+    const report = buildStatusReport({
+      repository: "clockgrove/factory",
+      snapshot: snapshot(),
+    });
+    expect(report.github).toBeUndefined();
+    expect(report.summary?.economics.githubMutations).toEqual({
+      availability: "unavailable",
+      reason: "no durable run-attributed GitHub mutation measurement is present",
+    });
   });
 
   it("returns stable explanations without provider responses", () => {

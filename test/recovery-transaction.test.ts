@@ -28,8 +28,9 @@ const digest = (value: string) => value.repeat(64);
 const at = "2026-09-04T00:00:00.000Z";
 const common = { protocol: "clockgrove.factory/v2", objective: 7, runId: "source", at };
 
-function fixture() {
+function fixture(activated = false) {
   const policy = structuredClone(DEFAULT_RUN_POLICY);
+  const activationRequestId = "activation-one";
   const predecessorStart = parseFactoryEvent({
     ...common,
     kind: "run",
@@ -43,6 +44,7 @@ function fixture() {
     baseSha: sha("a"),
     policy,
     policyDigest: policyDigest(policy),
+    ...(activated ? { activationRequestId } : {}),
   });
   if (predecessorStart.event !== "FactoryRunStarted") throw new Error("fixture start");
   const terminal = parseFactoryEvent({
@@ -180,17 +182,43 @@ function fixture() {
     oid: sha("7"),
     blobOid: sha("8"),
   };
+  const activation = activated
+    ? parseFactoryEvent({
+        ...common,
+        runId: activationRequestId,
+        kind: "run",
+        event: "ActivationRequested",
+        sequence: 0,
+        requestedBy: "operator",
+        requestId: activationRequestId,
+        repository: "fixture/project",
+        baseSha: sha("a"),
+        policy,
+        policyDigest: policyDigest(policy),
+        controllerProtocolMin: "clockgrove.factory/v2",
+        controllerProtocolMax: "clockgrove.factory/v2",
+      })
+    : null;
   return {
     planRecord,
     claim,
     authenticatedRequest,
     predecessorStart,
-    events: [...sourceEvents, authenticatedRequest] as FactoryEvent[],
+    events: [activation, ...sourceEvents, authenticatedRequest].filter(Boolean) as FactoryEvent[],
     historyComplete: true,
   };
 }
 
 describe("deterministic pending recovery transaction inspection", () => {
+  it("accepts the exact authenticated activation envelope bound by the predecessor start", () => {
+    const f = fixture(true);
+    expect(recoveryAdoptionEvents(f)).toHaveLength(3);
+    expect(inspectRecoveryAdoption(f)).toMatchObject({ state: "pending", blockers: [] });
+    const activation = f.events[0]!;
+    f.events.push(parseFactoryEvent({ ...activation, requestId: "other" }));
+    expect(inspectRecoveryAdoption(f).blockers).toEqual(["unplanned-run-history"]);
+  });
+
   it.each([0, 1, 2, 3])("reconstructs prefix %i without granting execution authority", (length) => {
     const f = fixture();
     const expected = recoveryAdoptionEvents(f);

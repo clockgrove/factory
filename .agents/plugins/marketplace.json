@@ -14,9 +14,8 @@
       "displayName": "Factory",
       "description": "Local-first unattended engineering orchestration using GitHub, AI agents, and MCP",
       "source": {
-        "source": "url",
-        "url": "https://github.com/clockgrove/factory.git",
-        "ref": "v2.0.26"
+        "source": "local",
+        "path": "."
       },
       "policy": {
         "installation": "AVAILABLE",

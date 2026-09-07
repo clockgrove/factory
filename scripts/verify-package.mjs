@@ -223,10 +223,9 @@ const agentMarketplacePlugin = agentMarketplace.plugins?.find(
 );
 check(agentMarketplace.name === "clockgrove-factory", "the Agent marketplace has a stable name");
 check(
-  agentMarketplacePlugin?.source?.source === "url" &&
-    agentMarketplacePlugin?.source?.url === "https://github.com/clockgrove/factory.git" &&
-    agentMarketplacePlugin?.source?.ref === `v${plugin.version}`,
-  "the Agent marketplace points at its immutable public Factory version tag",
+  agentMarketplacePlugin?.source?.source === "local" &&
+    agentMarketplacePlugin?.source?.path === ".",
+  "the Agent marketplace resolves Factory from its pinned repository snapshot",
 );
 check(
   agentMarketplacePlugin?.policy?.installation === "AVAILABLE" &&

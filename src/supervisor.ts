@@ -2785,7 +2785,9 @@ export class FactorySupervisor {
               await this.#store.addIssueComment(
                 item.id,
                 encodeEventComment(
-                  "Factory reconciled cancelled capacity.",
+                  terminalCancellation
+                    ? "Factory reconciled cancelled capacity."
+                    : "Factory reconciled expired capacity.",
                   parseFactoryEvent({
                     ...capacity,
                     localScopeBatch: undefined,
@@ -2793,7 +2795,9 @@ export class FactorySupervisor {
                     sequence: this.#sequences.take(),
                     at: (await this.#store.serverTime()).toISOString(),
                     recoveryEpoch: lease.epoch,
-                    reason: "operator cancellation proved exact resource absence",
+                    reason: terminalCancellation
+                      ? "operator cancellation proved exact resource absence"
+                      : "Objective timeout cleanup proved exact resource absence",
                   }),
                 ),
               );
@@ -2826,8 +2830,9 @@ export class FactorySupervisor {
                   amount: budget.amount,
                   ...(budget.usageId ? { usageId: budget.usageId } : {}),
                   usageEvidence: "conservative-reservation",
-                  reason:
-                    "exact resources absent after cancellation; reserved bound charged, elapsed usage unavailable",
+                  reason: terminalCancellation
+                    ? "exact resources absent after cancellation; reserved bound charged, elapsed usage unavailable"
+                    : "exact resources absent after Objective timeout; reserved bound charged, elapsed usage unavailable",
                 }),
               );
             });
@@ -2848,7 +2853,9 @@ export class FactorySupervisor {
             await assertCurrent();
             await this.#lease.use(async (lease) => {
               await this.#store.addIssueComment(item.id, encodeEventComment(
-                "Factory reconciled cancelled execution capacity after exact resource cleanup.",
+                terminalCancellation
+                  ? "Factory reconciled cancelled execution capacity after exact resource cleanup."
+                  : "Factory reconciled expired execution capacity after exact resource cleanup.",
                 parseFactoryEvent({
                   protocol: PROTOCOL_V2,
                   kind: "capacity",
@@ -2866,7 +2873,9 @@ export class FactorySupervisor {
                   policyDigest: reservation.policyDigest,
                   sequence: this.#sequences.take(),
                   at: (await this.#store.serverTime()).toISOString(),
-                  reason: "operator cancellation proved exact original execution resource absence",
+                  reason: terminalCancellation
+                    ? "operator cancellation proved exact original execution resource absence"
+                    : "Objective timeout cleanup proved exact original execution resource absence",
                 }),
               ));
             });
@@ -2894,8 +2903,9 @@ export class FactorySupervisor {
                 sequence: this.#sequences.take(),
                 event: "AttemptCancelled",
                 allowRecovery: true,
-                reason:
-                  "operator cancelled original attempt after exact resource cleanup; unknown model usage is not zero",
+                reason: terminalCancellation
+                  ? "operator cancelled original attempt after exact resource cleanup; unknown model usage is not zero"
+                  : "Objective timeout retired original attempt after exact resource cleanup; unknown model usage is not zero",
               }),
             );
           }

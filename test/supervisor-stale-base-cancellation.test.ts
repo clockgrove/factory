@@ -226,7 +226,10 @@ describe("cleanup-only cancellation of a stale activation", () => {
         const closure=h.f.events().filter((event)=>event.kind==="capacity" && event.phase==="execution");
         expect(closure).toHaveLength(1);
         expect(closure[0]).toMatchObject({event:"CapacityReconciled",runId:h.f.runId,workItem:8,attempt:1,
-          backend:"codex-sdk/local-worktree",directorEpoch:1,recoveryEpoch:2,policyDigest:start.policyDigest});
+          backend:"codex-sdk/local-worktree",directorEpoch:1,recoveryEpoch:2,policyDigest:start.policyDigest,
+          reason:cancel
+            ? "operator cancellation proved exact original execution resource absence"
+            : "Objective timeout cleanup proved exact original execution resource absence"});
         expect(h.f.events().filter((event)=>event.event==="AttemptSucceeded")).toHaveLength(1);
         expect(h.f.events().filter((event)=>event.event===(cancel?"FactoryRunCancelled":"FactoryRunEscalated"))).toHaveLength(1);
         expect(h.f.events().some((event)=>event.event==="FactoryRunCancellationRequested")).toBe(cancel);

@@ -22,13 +22,13 @@
     },
     "goal": {
       "type": "string",
-      "description": "One sentence: what this Work Item accomplishes (§8).",
+      "description": "One sentence describing the repository-artifact outcome this Work Item accomplishes (§8). Factory-owned publication, integration, closure, accounting, and scheduling outcomes are not worker goals.",
       "minLength": 1,
       "maxLength": 4000
     },
     "acceptance": {
       "type": "array",
-      "description": "Explicit, checkable criteria (§8). Each entry must be verifiable from the diff alone: the semantic check (§5.2) tests these against the pull request, never against the agent's self-report (§11.7).",
+      "description": "Explicit, checkable repository-artifact criteria (§8). Each entry must be verifiable from the candidate artifact and pre-publication validation evidence: the semantic check (§5.2) never relies on the agent's self-report (§11.7) and never requires a later Factory lifecycle outcome.",
       "items": { "type": "string", "minLength": 1, "maxLength": 2000 },
       "minItems": 1,
       "maxItems": 64
@@ -56,7 +56,7 @@
     },
     "conventions": {
       "type": "array",
-      "description": "Repo-specific constraints the agent must follow (§8) -- test/build commands, commit style, file layout conventions.",
+      "description": "Repo-specific implementation constraints observable in the candidate artifact (§8) -- test/build commands and file layout conventions. Factory lifecycle, publication policy, and graph-order instructions do not belong here.",
       "items": { "type": "string", "minLength": 1, "maxLength": 2000 },
       "default": [],
       "maxItems": 64

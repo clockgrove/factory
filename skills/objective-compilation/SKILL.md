@@ -39,6 +39,20 @@ Every Work Item must contain:
   paid measurements);
 - `artifactContract: "clockgrove.factory/artifact-v1"`.
 
+The `workItems` array is semantic. Order independent peers by the Objective's requested initial
+priority and put every dependency before its dependent. Factory preserves that dependency-aware
+order when it creates native sub-issues; the order therefore participates in the durable graph
+digest rather than being cosmetic.
+
+Keep the phase boundary exact. A Work Item goal, acceptance criterion, or validation criterion may
+describe only a repository-artifact outcome observable from the candidate artifact and evidence
+available before publication; conventions are likewise observable implementation constraints. Do
+not copy Factory-owned pull-request publication,
+merge/integration, issue closure, accounting, later monitoring, scheduler priority, or native
+sub-issue placement into the Worker Packet. The Supervisor enforces those lifecycle outcomes;
+express code dependencies in `dependsOn`, topology in `delivery`, and initial peer priority through
+array order.
+
 Default `trust` to `trusted_local` only for an explicitly activated trusted repository and trusted
 Objective provenance. Use `isolated` for untrusted code/tests or requested isolation, and `managed`
 only when the task truly requires a GitHub-managed backend. A requested network
@@ -51,6 +65,7 @@ memory, or disk without an evidenced need.
 Before returning the object:
 
 - every ID is unique and every dependency resolves;
+- every dependency precedes its dependent, while independent peers retain requested priority order;
 - the graph is acyclic;
 - parallel scopes do not overlap;
 - every overlapping scope pair has a dependency path, and stack parents exactly match dependencies;

@@ -14,7 +14,7 @@
     },
     "workItems": {
       "type": "array",
-      "description": "Every Work Item this Objective decomposes into. Readiness is derived from each item's `dependsOn`; Factory also receipts the original order solely to reconstruct an identical graph digest after interruption.",
+      "description": "Every Work Item this Objective decomposes into, in dependency-aware native creation order. Readiness is derived from each item's `dependsOn`; array order seeds native sub-issue priority among independent peers and is included in the durable graph digest.",
       "items": { "$ref": "work-item.schema.json" },
       "minItems": 1,
       "maxItems": 100

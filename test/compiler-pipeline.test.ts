@@ -267,7 +267,6 @@ describe("bounded objective compiler", () => {
         scripts: { typecheck: "x", test: "x" },
       },
       workItems: [
-        { ...base, id: "docs", scope: ["docs/a.md"], dependsOn: [] },
         {
           ...base,
           acceptance: [...base.acceptance].reverse(),
@@ -282,9 +281,24 @@ describe("bounded objective compiler", () => {
             tools: ["npm", "node"],
           },
         },
+        { ...base, id: "docs", scope: ["docs/a.md"], dependsOn: [] },
       ],
     });
     expect(serializeCompilerObjective(a)).toBe(serializeCompilerObjective(b));
+  });
+
+  it("preserves duplicate IDs for structural validation instead of dropping an item", () => {
+    expect(() =>
+      compileObjective({
+        title: "Ship",
+        baseSha: sha,
+        repositoryFacts: facts,
+        workItems: [
+          base,
+          { ...base, title: "Duplicate", goal: "Implement docs.", scope: ["docs/duplicate.md"] },
+        ],
+      }),
+    ).toThrow(/duplicate Work Item id/);
   });
 
   it("preserves validation command order through compilation and execution planning", () => {
@@ -492,8 +506,8 @@ describe("bounded objective compiler", () => {
     ]);
   });
   it("turns provider diamond fan-out children into distinct delivery groups", async () => {
-    // Deliberately not topologically ordered: provider array order must not
-    // control child counting or delivery grouping.
+    // Deliberately not topologically ordered: dependencies move ahead of
+    // dependents while the provider's peer order remains native priority.
     const { objective } = await compileProviderOutput("Diamond", [
       providerWorkItem("d", ["b", "c"], ["src/d.ts"]),
       providerWorkItem("c", ["a"], ["src/c.ts"]),
@@ -508,8 +522,8 @@ describe("bounded objective compiler", () => {
       })),
     ).toEqual([
       { id: "a", delivery: { group: "a", relationship: "root" } },
-      { id: "b", delivery: { group: "b", relationship: "sibling" } },
       { id: "c", delivery: { group: "c", relationship: "sibling" } },
+      { id: "b", delivery: { group: "b", relationship: "sibling" } },
       { id: "d", delivery: { group: "d", relationship: "join-after-merge" } },
     ]);
   });

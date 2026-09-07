@@ -4,13 +4,30 @@ import { constants } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
+import {
+  normalizePinnedLfsFacts,
+  parseLfsPointer,
+  type PinnedLfsFacts,
+} from "../repository-profiles/git-lfs.js";
 
 const execFileAsync = promisify(execFile);
 
 export async function readCheckoutGit(checkout: string, args: string[]): Promise<string> {
   const result = await execFileAsync(
     "git",
-    ["--no-optional-locks", "-c", "core.fsmonitor=false", "-C", checkout, ...args],
+    [
+      "--no-optional-locks",
+      "--no-replace-objects",
+      "-c",
+      "core.fsmonitor=false",
+      "-c",
+      "core.hooksPath=/dev/null",
+      "-c",
+      "credential.helper=",
+      "-C",
+      checkout,
+      ...args,
+    ],
     {
       encoding: "utf8",
       timeout: 5_000,
@@ -21,6 +38,11 @@ export async function readCheckoutGit(checkout: string, args: string[]): Promise
         ),
         GIT_OPTIONAL_LOCKS: "0",
         GIT_TERMINAL_PROMPT: "0",
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_SYSTEM: "/dev/null",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_ATTR_NOSYSTEM: "1",
+        GIT_NO_LAZY_FETCH: "1",
       },
     },
   );
@@ -70,8 +92,15 @@ export async function inspectLocalCheckout(checkout: string, expectedRepository?
 }
 
 /** Compare raw Git blobs; git status can execute a repository's clean filters. */
-export async function assertCleanPlanningFiles(checkout: string): Promise<void> {
-  const tree = (await readCheckoutGit(checkout, ["ls-tree", "-r", "-z", "HEAD"]))
+export async function assertCleanPlanningFiles(
+  checkout: string,
+  repositoryLfs?: PinnedLfsFacts,
+): Promise<void> {
+  const head = (await readCheckoutGit(checkout, ["rev-parse", "HEAD"])).trim();
+  const lfs = repositoryLfs ? normalizePinnedLfsFacts(repositoryLfs) : undefined;
+  if (lfs && lfs.baseSha !== head)
+    throw new Error("planning LFS facts differ from the selected checkout base");
+  const tree = (await readCheckoutGit(checkout, ["ls-tree", "-r", "-z", head]))
     .split("\0")
     .filter(Boolean);
   const index = (await readCheckoutGit(checkout, ["ls-files", "--stage", "-z"]))
@@ -93,6 +122,16 @@ export async function assertCleanPlanningFiles(checkout: string): Promise<void> 
     const match = /^(100644|100755|120000) blob ([0-9a-f]{40})\t([\s\S]+)$/.exec(entry);
     if (!match) throw new Error("planning checkout contains an unsupported Git object");
     const [, mode, oid, path] = match;
+    const asset = lfs?.assets.find((candidate) => candidate.path === path);
+    if (asset) {
+      if (asset.pointerBlobOid !== oid || asset.mode !== mode)
+        throw new Error("planning LFS pointer/index identity differs from verified source");
+      const pointer = parseLfsPointer(
+        Buffer.from(await readCheckoutGit(checkout, ["cat-file", "blob", oid!])),
+      );
+      if (!pointer || pointer.oid !== asset.oid || pointer.size !== asset.size)
+        throw new Error("planning LFS content identity differs from its actual Git pointer");
+    }
     const target = join(checkout, path!);
     if ((await realpath(dirname(target))) !== dirname(target))
       throw new Error("planning checkout contains a replaced parent directory");
@@ -110,18 +149,44 @@ export async function assertCleanPlanningFiles(checkout: string): Promise<void> 
     if (totalBytes > 256 * 1024 * 1024)
       throw new Error("planning checkout content exceeds the 256 MiB read-only verification bound");
     const hash = createHash("sha1").update(`blob ${size}\0`);
+    const contentHash = asset ? createHash("sha256") : undefined;
     if (bytes) hash.update(bytes);
     else {
       const file = await open(target, constants.O_RDONLY | constants.O_NOFOLLOW);
       try {
-        for await (const chunk of file.createReadStream({ autoClose: false })) hash.update(chunk);
+        const before = await file.stat();
+        if (
+          !before.isFile() ||
+          before.size !== size ||
+          ((before.mode & 0o111) !== 0) !== (mode === "100755")
+        )
+          throw new Error("planning checkout file changed during observation");
+        let observedBytes = 0;
+        for await (const chunk of file.createReadStream({ autoClose: false })) {
+          observedBytes += chunk.length;
+          if (observedBytes > size)
+            throw new Error("planning checkout file grew during observation");
+          hash.update(chunk);
+          contentHash?.update(chunk);
+        }
+        const after = await file.stat();
+        if (
+          observedBytes !== size ||
+          after.size !== before.size ||
+          after.mtimeMs !== before.mtimeMs ||
+          after.ctimeMs !== before.ctimeMs
+        )
+          throw new Error("planning checkout file changed during observation");
       } finally {
         await file.close();
       }
     }
-    if (hash.digest("hex") !== oid)
+    const hydrated = asset && size === asset.size && contentHash?.digest("hex") === asset.oid;
+    if (hash.digest("hex") !== oid && !hydrated)
       throw new Error(
         "planning checkout has tracked changes or requires content filters; refusing mixed-revision compilation",
       );
   }
+  if ((await readCheckoutGit(checkout, ["rev-parse", "HEAD"])).trim() !== head)
+    throw new Error("planning checkout base changed during observation");
 }

@@ -856,8 +856,11 @@ export function assertControllerUnit(body, expected) {
   return hash(body);
 }
 
-export async function main(env = process.env, runner = runCheckpointScenario) {
-  const authority = checkpointAuthority(env);
+// Extensions are committed qualification adapters, never a plugin/runtime API or
+// input loaded from an operator-supplied module. They reuse this installed-client,
+// controller-identity, evidence and lifecycle boundary for additional fixtures.
+export async function main(env = process.env, runner = runCheckpointScenario, extension = {}) {
+  const authority = extension.authority ?? checkpointAuthority(env);
   if (!authority) {
     console.log("Not exercised: explicit checkpoint-restart opt-in required.");
     return;
@@ -908,7 +911,9 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
           "scripts/qualification-sibling-refresh-proof.mjs",
         ]
       : []),
+    ...(extension.harnessPaths ?? []),
   ].map((path) => {
+    assert.match(path, /^scripts\/[A-Za-z0-9_.-]+\.mjs$/);
     const bytes = readBounded(join(root, path), 262144);
     assert.equal(
       command("git", ["show", `HEAD:${path}`], root),
@@ -1106,12 +1111,13 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
       },
     );
   };
+  const invoke = async (name, args = {}) =>
+    client.callTool({ name, arguments: { owner, repo, ...args } }, undefined, {
+      timeout: 120000,
+      maxTotalTimeout: 120000,
+    });
   const call = async (name, args = {}) => {
-    const response = await client.callTool(
-      { name, arguments: { owner, repo, ...args } },
-      undefined,
-      { timeout: 120000, maxTotalTimeout: 120000 },
-    );
+    const response = await invoke(name, args);
     assert.ok(!response.isError, "installed operator call unavailable");
     return JSON.parse(
       response.content
@@ -1153,6 +1159,7 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
         if (error.code !== "ENOENT") throw error;
       }
     }
+    await extension.observe?.({ observation, evidence, authority });
     evidence.latest = observation;
     save();
     return observation;
@@ -1265,6 +1272,7 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
       assert.ok(lifecycle.installed && !lifecycle.active);
       const state = await controller("inactive");
       evidence.configDigest = state.configDigest;
+      await extension.preflight?.({ authority, evidence, request, list, command, save });
       save();
       return state;
     },
@@ -1282,7 +1290,12 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
           requestId: `${authority.namespace}-${action}`,
         });
       else if (action === "create") {
-        const body = objectiveBodyFor(authority.namespace);
+        const body = extension.objectiveBody
+          ? extension.objectiveBody(authority)
+          : objectiveBodyFor(authority.namespace);
+        assert.equal(typeof body, "string");
+        assert.ok(body.includes(qualificationNamespaceMarker(authority.namespace)));
+        assert.ok(Buffer.byteLength(body) <= 65536);
         result = (
           await request("POST /repos/{owner}/{repo}/issues", {
             title: `Factory checkpoint restart [${authority.namespace}]`,
@@ -1553,12 +1566,28 @@ export async function main(env = process.env, runner = runCheckpointScenario) {
     await client.connect(transport);
     transport.stderr?.on("data", () => {});
     assert.equal(client.getServerVersion()?.version, artifact.version);
-    evidence.result = await runner(port, authority);
+    const scenarioPort = extension.extendPort
+      ? await extension.extendPort({
+          port,
+          authority,
+          evidence,
+          save,
+          request,
+          list,
+          call,
+          invoke,
+          command,
+          readBounded,
+          pluginRoot,
+          artifact,
+        })
+      : port;
+    evidence.result = await runner(scenarioPort, authority);
     save();
     console.log(
       JSON.stringify({
         result: evidence.result.result,
-        scope: "installed-accounted-checkpoint-restart",
+        scope: extension.scope ?? "installed-accounted-checkpoint-restart",
         evidence: authority.evidence,
       }),
     );

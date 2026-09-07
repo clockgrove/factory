@@ -137,3 +137,85 @@ mode identity, LFS refusal, corrupt metadata and shared-cache leases. `test/arti
 exercises immutable refs, per-write fencing, pre-intent/post-intent interruption and exact resume,
 remote corruption and scope rejection with an in-memory Git-object contract. Those tests establish
 local contracts only; they do not substitute for installed/provider execution evidence.
+
+## Installed local qualification
+
+`scripts/verify-local-large-files.mjs` reuses the installed-client and exact-controller boundaries
+of the local checkpoint qualifier. No opt-in means no actions. This is contributor qualification,
+not a user-facing runtime API or a claim that these scenarios have passed.
+
+Prepare each case in a fresh disposable private repository/namespace. The offline
+`createLargeFileFixture` export in `scripts/qualification-large-files.mjs` accepts an owned `parent`
+directory and `namespace`. To extend an existing disposable repository, also supply its local
+`sourceRepository` and exact current default-branch `baseSha` together. It creates a private
+`root/fixture.json`, a fresh `repository`, an exact child baseline commit, and two verified synthetic
+objects in that repository's standard LFS cache. It does not fetch, publish, install LFS or invoke a
+model. For example, from the committed Factory source:
+
+```bash
+node --input-type=module -e '
+  import { createLargeFileFixture } from "./scripts/qualification-large-files.mjs";
+  const [parent, namespace, sourceRepository, baseSha] = process.argv.slice(1);
+  const fixture = createLargeFileFixture({ parent, namespace, sourceRepository, baseSha });
+  console.log(JSON.stringify({ descriptor: `${fixture.root}/fixture.json`,
+    checkout: fixture.repository, baseSha: fixture.baseSha }, null, 2));
+' /absolute/private/preparation large-file-example /absolute/disposable/source EXACT_BASE_SHA
+```
+
+Review and separately authorize publishing that exact baseline to the disposable target. Use the
+prepared repository as the execution checkout, with its matching GitHub origin and installed
+controller; this keeps the synthetic cache local without an implicit copy/fetch. The baseline must
+contain only the two qualified LFS pointers, no symlinks/gitlinks, and no existing generated outputs.
+The runner verifies raw baseline bytes/tree, exact default-branch identity and the cache preconditions
+before any scenario action. It requires an inactive matching controller, no other runnable Objective
+and no open PR. Never repurpose an active development checkout or delete another run's evidence.
+
+Set these explicit variables, then run `node scripts/verify-local-large-files.mjs`:
+
+| Variable | Required value |
+| --- | --- |
+| `FACTORY_LOCAL_LARGE_FILES` | `1` |
+| `FACTORY_LARGE_FILE_CASE` | `transfer-restart`, `lfs-missing-tool`, `lfs-missing-object`, `scope`, `secret` or `symlink` |
+| `FACTORY_LARGE_FILE_PHASE` | `preflight` first; `exercise` only with accepted scenario authority |
+| `FACTORY_LARGE_FILE_REPOSITORY` / `FACTORY_LARGE_FILE_CHECKOUT` | Exact private `owner/repo` and canonical Linux-home checkout |
+| `FACTORY_LARGE_FILE_CONTROLLER_UNIT` | Exact installed controller for that repository/checkout |
+| `FACTORY_LARGE_FILE_NAMESPACE` | Fresh fixture namespace, unchanged from preparation |
+| `FACTORY_LARGE_FILE_FIXTURE` / `FACTORY_LARGE_FILE_FIXTURE_SHA256` | Absolute private descriptor path and SHA-256 of its exact bytes |
+| `FACTORY_LARGE_FILE_EVIDENCE` | New, nonexistent evidence file in an owned mode-0700 directory |
+| `FACTORY_LARGE_FILE_MAX_MODEL_TOKENS` | Separately accepted bounded scenario allowance; no implicit default |
+| `FACTORY_LARGE_FILE_ACK` | Exact exercise acknowledgement below; unnecessary for preflight |
+
+Acknowledgements are `owner/repo:controller-unit:case:actions`, with these exact action suffixes:
+
+- `transfer-restart`: `start,create,arm-transfer-intent,activate,pause,restart,resume,stop`
+- Either `lfs-` case: `create,compile-refusal`
+- `scope`, `secret`, `symlink`: `start,create,activate,stop`
+
+Use the normal Linux-home plugin/authentication, with `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST`,
+`GH_CONFIG_DIR` and `XDG_CONFIG_HOME` unset. Source and installed bundle identities must match;
+build/install only at the coordinated candidate boundary. Preflight and exercise need different
+evidence files. A successful preflight proves prerequisites, not model execution or recovery.
+
+The positive case runs three real serial App Server workers: a deterministic 6 MiB PCM WAV,
+metadata plus executable, then a verification join. Only the first oversized result is held, after
+durable transfer intent and retained bytes but before chunk/ready upload. The private one-shot arm
+binds activation, policy, base and exact controller incarnation, expires within ten minutes, and
+latches the original attempt/session/usage and artifact. Absent an arm, runtime behavior is unchanged.
+Resume does not rearm or grant a replacement worker. An expired/uncertain hold is incomplete—not
+permission to upload or rerun. The runner independently verifies intent→ready continuation, actual
+reachable chunk bytes, original session/accounting, exact owned resource absence, all merged patch
+trees, binary manifests, unchanged Git LFS pointers and final behavior in a credential-free,
+network-isolated read-only fixture. Conservative native accounting remains labelled as such.
+
+Negative cases use independent fresh fixtures. Missing-tool preparation uses a controlled process
+PATH without `git-lfs`; missing-object preparation leaves a named synthetic cache object absent in
+that new fixture only. Do not uninstall host tools or remove production content. These cases invoke
+explicit compilation without starting the controller and require the pre-model LFS correction.
+Other cases use a real worker to produce the committed scope, synthetic-secret or symlink output.
+Scope/secret cases require collection refusal; symlink handling may retain raw Git objects but must
+refuse filesystem materialization before validation commands or publication. Ref absence does not
+prove zero unreferenced uploads, and a refusal alone does not prove zero model usage.
+
+Failure preserves private evidence and stops automatic progression. There is no automatic retry,
+new allowance, fixture publication, controller cleanup or retirement of audit refs. Inspect exact
+retained ownership and use the authorized recovery path before deciding the next action.

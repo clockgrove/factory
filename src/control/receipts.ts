@@ -8,6 +8,12 @@ const COMMENT_CLOSE = "\n-->";
 const TRAILER = "Factory-Event:";
 
 export function encodeEventComment(summary: string, event: FactoryEvent): string {
+  return encodeEventBatchComment(summary, [event]);
+}
+
+/** One authenticated GitHub comment may retain several already-adjacent
+ * events. Their individual envelopes preserve sequence identity and replay. */
+export function encodeEventBatchComment(summary: string, events: readonly FactoryEvent[]): string {
   const cleanSummary = summary.trim();
   if (!cleanSummary || Buffer.byteLength(cleanSummary, "utf8") > 8_000) {
     throw new Error("event summary must be between 1 and 8000 bytes");
@@ -15,8 +21,11 @@ export function encodeEventComment(summary: string, event: FactoryEvent): string
   if (cleanSummary.includes("<!-- clockgrove-factory:event")) {
     throw new Error("event summary contains the reserved Factory envelope marker");
   }
-  const parsed = parseFactoryEvent(event);
-  const body = `${cleanSummary}\n\n${COMMENT_OPEN}${JSON.stringify(parsed)}${COMMENT_CLOSE}`;
+  if (events.length === 0) throw new Error("event batch must not be empty");
+  const envelopes = events.map(
+    (event) => `${COMMENT_OPEN}${JSON.stringify(parseFactoryEvent(event))}${COMMENT_CLOSE}`,
+  );
+  const body = `${cleanSummary}\n\n${envelopes.join("\n")}`;
   validatePersistable(body, MAX_PERSISTED_EVENT_BYTES + 8_192, "Factory comment");
   return body;
 }

@@ -6,6 +6,7 @@ import {
   MutationScheduler,
   PlatformUnavailableError,
   classifyRefusal,
+  isSecondaryRateLimitRefusal,
   type MutationAdmission,
   type MutationClass,
 } from "../platform.js";
@@ -50,13 +51,16 @@ type FactoryOctokit = ReturnType<typeof createOctokit>;
  */
 export function factoryCommentIssueNumber(body: string): number {
   const events = decodeEventComments(body);
-  if (events.length !== 1) {
-    throw new Error("Factory comment must contain exactly one event envelope");
+  if (events.length === 0) throw new Error("Factory comment must contain an event envelope");
+  const destinations = new Set(
+    events.map((event) =>
+      "workItem" in event && typeof event.workItem === "number" ? event.workItem : event.objective,
+    ),
+  );
+  if (destinations.size !== 1) {
+    throw new Error("Factory comment event batch must have one destination issue");
   }
-  const event = events[0]!;
-  return "workItem" in event && typeof event.workItem === "number"
-    ? event.workItem
-    : event.objective;
+  return destinations.values().next().value!;
 }
 
 function stripRefs(ref: string): string {
@@ -251,8 +255,10 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
         );
       }
       mutationPermit?.assertDispatchAllowed?.();
+      mutationPermit?.recordTransported?.();
       attempted = true;
       const result = await operation();
+      mutationPermit?.recordSuccess?.();
       this.#breaker.recordSuccess();
       return result;
     } catch (error) {
@@ -260,6 +266,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       const refusal =
         error instanceof PlatformUnavailableError ? error.refusal : classifyRefusal(error);
       if (refusal.kind !== "not_refusal") {
+        mutationPermit?.recordRefusal?.(isSecondaryRateLimitRefusal(error));
         this.#breaker.recordRefusal(refusal);
         throw new PlatformUnavailableError(refusal, error);
       }

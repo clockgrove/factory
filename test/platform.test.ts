@@ -4,12 +4,14 @@ import {
   CircuitBreaker,
   ConcurrencyLimiter,
   ContentCreationPacer,
+  GitHubPrimaryQuotaCache,
   MutationScheduler,
   PlatformUnavailableError,
   classifyRefusal,
   isPlatformUnavailable,
 } from "../src/platform.js";
 import { createOctokit } from "../src/github.js";
+import { GitHubControlStore } from "../src/control/github-store.js";
 
 function err(
   status: number,
@@ -150,6 +152,70 @@ describe("classifyRefusal", () => {
 });
 
 describe("GitHub client throttling", () => {
+  it("disables hidden Octokit retries so one admitted mutation has one transport", async () => {
+    let attempts = 0;
+    const scheduler = new MutationScheduler({
+      pacer: new ContentCreationPacer(80, 100_000, 0),
+      sleep: async () => {},
+    });
+    const store = new GitHubControlStore({
+      token: "mutation-retry-test",
+      owner: "clockgrove",
+      repo: "factory",
+      mutationScheduler: scheduler,
+      requestFetch: async () => {
+        attempts += 1;
+        return new Response(JSON.stringify(attempts === 1 ? { message: "temporary" } : {}), {
+          status: attempts === 1 ? 500 : 201,
+          headers: { "content-type": "application/json", "retry-after": "0" },
+        });
+      },
+    });
+    await expect(
+      store.stackRequest(
+        "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
+        { owner: "clockgrove", repo: "factory", issue_number: 188, body: "fixture" },
+        true,
+      ),
+    ).rejects.toBeInstanceOf(PlatformUnavailableError);
+    expect(attempts).toBe(1);
+    expect(scheduler.telemetry()).toMatchObject({ admitted: 1, transported: 1, successful: 0 });
+  });
+
+  it("caches authoritative primary headers independently by resource", async () => {
+    const quota = new GitHubPrimaryQuotaCache();
+    const requestFetch: typeof globalThis.fetch = async () =>
+      new Response(JSON.stringify({ login: "fixture" }), {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          "x-ratelimit-resource": "core",
+          "x-ratelimit-limit": "5000",
+          "x-ratelimit-remaining": "4998",
+          "x-ratelimit-used": "2",
+          "x-ratelimit-reset": "1788647538",
+        },
+      });
+    const octokit = createOctokit({
+      token: "quota-cache-test",
+      owner: "clockgrove",
+      repo: "factory",
+      requestFetch,
+      primaryQuota: quota,
+    });
+    await octokit.request("GET /user");
+    quota.observe({
+      "x-ratelimit-resource": "graphql",
+      "x-ratelimit-limit": "5000",
+      "x-ratelimit-remaining": "4900",
+      "x-ratelimit-reset": "1788647540",
+    });
+    expect(quota.snapshot()).toMatchObject([
+      { resource: "core", limit: 5000, remaining: 4998, used: 2 },
+      { resource: "graphql", limit: 5000, remaining: 4900 },
+    ]);
+  });
+
   it("surfaces quota refusal immediately instead of sleeping inside Octokit", async () => {
     const notices: string[] = [];
     const reset = Math.floor(Date.now() / 1000) + 3_600;
@@ -306,7 +372,7 @@ describe("ContentCreationPacer", () => {
   });
 
   it("enforces the minimum gap between mutative calls", () => {
-    const p = new ContentCreationPacer(40, 250, 1_000);
+    const p = new ContentCreationPacer(40, 100_000, 1_000);
     const t0 = new Date("2026-01-01T00:00:00.000Z");
     p.recordCall(t0);
     expect(p.waitMs(new Date(t0.getTime() + 200))).toBe(800);
@@ -327,57 +393,72 @@ describe("ContentCreationPacer", () => {
     expect(p.waitMs(new Date(t0.getTime() + 60_001))).toBe(0);
   });
 
-  it("reserves hourly capacity for lease mutations", () => {
-    const p = new ContentCreationPacer(40, 5, 0);
+  it("smooths normal traffic across the documented hourly window", () => {
+    const p = new ContentCreationPacer(80, 500, 0);
     const t0 = new Date("2026-01-01T00:00:00.000Z");
     p.recordCall(t0);
-    p.recordCall(t0);
-    p.recordCall(t0);
-    expect(p.waitMs(t0, { hourlyReserve: 2 })).toBe(3_600_000);
-    expect(p.waitMs(t0)).toBe(0);
+    expect(p.waitMs(new Date(t0.getTime() + 1_000))).toBeGreaterThan(6_000);
   });
 
-  it("waits for enough samples to expire when lease traffic exceeds the normal cap", () => {
+  it("keeps lease priority while retaining the hard documented windows", () => {
     const p = new ContentCreationPacer(40, 5, 0);
     const t0 = new Date("2026-01-01T00:00:00.000Z");
-    for (let offset = 0; offset < 5; offset += 1) {
-      p.recordCall(new Date(t0.getTime() + offset * 1_000));
+    p.recordCall(t0);
+    expect(p.waitMs(t0)).toBeGreaterThan(0);
+    expect(p.waitMs(t0, { priority: true })).toBe(0);
+  });
+
+  it("adapts downward only after observed secondary feedback", () => {
+    const p = new ContentCreationPacer(80, 500, 0);
+    expect(p.snapshot(new Date("2026-01-01T00:00:00Z"))).toMatchObject({
+      estimatedHourlyCapacity: 499,
+      confidence: "low",
+    });
+    p.recordSecondaryRefusal();
+    expect(p.snapshot(new Date("2026-01-01T00:00:00Z"))).toMatchObject({
+      estimatedHourlyCapacity: 249,
+      confidence: "high",
+      secondaryRefusals: 1,
+    });
+  });
+
+  it("paces two small Objectives without an hourly-cliff stall", () => {
+    const p = new ContentCreationPacer();
+    let now = new Date("2026-01-01T00:00:00Z");
+    const start = now.getTime();
+    // The retained two-Objective trace contained 58 transported mutations.
+    for (let mutation = 0; mutation < 58; mutation += 1) {
+      now = new Date(now.getTime() + p.waitMs(now));
+      p.recordTransported(now);
+      p.recordSuccess();
     }
-    expect(p.waitMs(new Date(t0.getTime() + 5_000), { hourlyReserve: 2 })).toBe(3_597_000);
+    expect(now.getTime() - start).toBeLessThan(10 * 60_000);
   });
 });
 
 describe("MutationScheduler", () => {
-  it("admits reserved lease traffic while a normal write waits", async () => {
+  it("charges only transported writes and reports separate primary and secondary state", async () => {
     const t0 = new Date("2026-01-01T00:00:00.000Z");
-    let now = t0;
-    let resumeSleep: (() => void) | undefined;
-    const pacer = new ContentCreationPacer(40, 3, 0);
-    pacer.recordCall(t0);
-    pacer.recordCall(t0);
+    const now = t0;
+    const pacer = new ContentCreationPacer(40, 100_000, 0);
     const scheduler = new MutationScheduler({
       pacer,
-      reservedLeaseMutationsPerHour: 1,
       now: () => now,
-      sleep: (ms) =>
-        new Promise<void>((resolve) => {
-          resumeSleep = () => {
-            now = new Date(now.getTime() + ms + 1);
-            resolve();
-          };
-        }),
     });
-
-    const normal = scheduler.acquire("normal");
-    await Promise.resolve();
-    expect(resumeSleep).toBeTypeOf("function");
-
-    const leasePermit = await scheduler.acquire("lease");
-    leasePermit.release();
-    resumeSleep!();
-    const normalPermit = await normal;
-    normalPermit.release();
-    expect(normalPermit.waitedMs).toBeGreaterThan(0);
+    const fenced = await scheduler.acquire("normal");
+    fenced.release();
+    expect(scheduler.telemetry()).toMatchObject({ admitted: 1, transported: 0, successful: 0 });
+    const sent = await scheduler.acquire("normal");
+    sent.recordTransported?.();
+    sent.recordSuccess?.();
+    sent.release();
+    expect(scheduler.telemetry()).toMatchObject({
+      admitted: 2,
+      transported: 1,
+      successful: 1,
+      serverPrimaryQuota: [],
+      localSecondaryEstimate: { transportedLastHour: 1, confidence: "low" },
+    });
   });
 });
 

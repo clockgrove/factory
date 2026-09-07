@@ -26,10 +26,9 @@ it("the actual Supervisor drains and releases its owned lease after a queued rec
     reached = resolve;
   });
   const pacer = new ContentCreationPacer(40, 6, 0);
-  for (let n = 0; n < 3; n++) pacer.recordCall(new Date(Date.now() - 18 * 60_000));
+  pacer.recordCall(new Date());
   const scheduler = new MutationScheduler({
     pacer,
-    reservedLeaseMutationsPerHour: 3,
     onThrottle: () => reached(),
   });
   f.repositoryResources.mutationScheduler = scheduler;
@@ -130,7 +129,7 @@ it("the actual Supervisor drains and releases its owned lease after a queued rec
       throw error ?? new Error("controller returned before the queued receipt boundary");
     }),
   ]);
-  expect(pacer.waitMs(new Date(), { hourlyReserve: 3 })).toBeGreaterThan(41 * 60_000);
+  expect(pacer.waitMs(new Date())).toBeGreaterThan(11 * 60_000);
   shutdown.abort();
   expect(await outcome).toBeUndefined();
   expect(retired).toEqual(["objective", "repository"]);

@@ -22,6 +22,7 @@ import type {
 } from "../recovery/requests.js";
 import { buildDoctorReport, type DoctorChecks } from "./doctor.js";
 import { buildPlanReport, type PlanInput, type PlanningContext } from "./plan.js";
+import type { GitHubMutationTelemetry } from "../platform.js";
 
 export const APPLICATION_OPERATIONS = [
   "doctor",
@@ -134,6 +135,7 @@ export interface ServiceContext {
   recovery?: RecoveryRequestService;
   diagnostics?: DoctorChecks;
   planning?: PlanningContext;
+  platformTelemetry?: () => GitHubMutationTelemetry;
 }
 
 export type ReadOperation = "doctor" | "plan" | "recovery-plan" | "status" | "explain" | "replay";
@@ -189,7 +191,13 @@ export class FactoryApplicationService {
     const snapshot = await this.context.reader.readObjective(objective);
     const repository = `${this.context.owner}/${this.context.repo}`;
     if (operation === "status") {
-      return buildStatusReport({ repository, snapshot });
+      return buildStatusReport({
+        repository,
+        snapshot,
+        ...(this.context.platformTelemetry
+          ? { platformTelemetry: this.context.platformTelemetry() }
+          : {}),
+      });
     }
     if (operation === "explain") {
       return buildExplanationReport({ repository, snapshot, ...(workItem ? { workItem } : {}) });

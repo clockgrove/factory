@@ -35,7 +35,12 @@ import { referencedSecretNames, triggersOnPullRequest, usesSelfHostedRunner } fr
 import { bindAuthenticatedRunActors } from "./control/authenticated-events.js";
 import { activationCancellation, type ActivationBinding } from "./control/activations.js";
 import { decodeEventComments, deduplicateFactoryEvents } from "./control/receipts.js";
-import { PlatformUnavailableError, classifyRefusal } from "./platform.js";
+import {
+  PlatformUnavailableError,
+  classifyRefusal,
+  primaryQuotaForCredential,
+  type GitHubPrimaryQuotaCache,
+} from "./platform.js";
 import type { FactoryEvent } from "./protocol/events.js";
 import { normalizeIssueFieldValues } from "./scheduling/github-priority.js";
 
@@ -122,6 +127,8 @@ export interface GitHubOptions {
   onThrottle?: (message: string) => void;
   /** Injectable transport for deterministic client-contract tests. */
   requestFetch?: typeof globalThis.fetch;
+  /** Shared response-header cache for this credential. */
+  primaryQuota?: GitHubPrimaryQuotaCache;
   /** Fail closed on incomplete/beyond-bound history during read-only recovery assessment. */
   recoveryInspection?: boolean;
 }
@@ -785,7 +792,14 @@ function factoryEvents(
  */
 export function createOctokit(opts: GitHubOptions): Octokit {
   const notify = opts.onThrottle ?? (() => {});
+  const primaryQuota = opts.primaryQuota ?? primaryQuotaForCredential(opts.token);
   const surfacePlatformFailure = (error: unknown): never => {
+    const observed = error as {
+      headers?: Record<string, string | number | undefined>;
+      response?: { headers?: Record<string, string | number | undefined> };
+    };
+    const headers = observed.response?.headers ?? observed.headers;
+    primaryQuota.observe(headers);
     if (error instanceof PlatformUnavailableError) throw error;
     const refusal = classifyRefusal(error);
     if (refusal.kind !== "not_refusal") {
@@ -796,6 +810,9 @@ export function createOctokit(opts: GitHubOptions): Octokit {
   const octokit = new FactoryOctokit({
     auth: opts.token,
     ...(opts.requestFetch ? { request: { fetch: opts.requestFetch } } : {}),
+    // A mutation permit prices one transport. Hidden library retries would
+    // bypass pacing and first-failure evidence, so Factory owns retry timing.
+    retry: { enabled: false },
     throttle: {
       onRateLimit: (after: number, o: { method: string; url: string }) => {
         notify(`rate limit on ${o.method} ${o.url}; yielding to Factory for retry in ${after}s`);
@@ -808,6 +825,9 @@ export function createOctokit(opts: GitHubOptions): Octokit {
         return false;
       },
     },
+  });
+  octokit.hook.after("request", (response) => {
+    primaryQuota.observe(response.headers);
   });
   // The throttling plugin's wrapper is outside Octokit's public hook chain, so
   // wrap the public callables themselves. Proxying retains `.defaults` and

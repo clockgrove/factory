@@ -4,7 +4,7 @@ import {
   type ReportedModelUsage,
 } from "../protocol/events.js";
 import { PROTOCOL_V2 } from "../protocol/limits.js";
-import { encodeEventComment } from "./receipts.js";
+import { encodeEventBatchComment, encodeEventComment } from "./receipts.js";
 import type { AttemptReservation } from "./attempts.js";
 import type { LeaseManager, LeaseState } from "./lease.js";
 import type { ValidationEvidence } from "../validation/evidence.js";
@@ -14,6 +14,29 @@ import type { PublicationReceipt } from "../publication/stack-manager.js";
 export interface LifecycleEventStore {
   addIssueComment(issueNodeId: string, body: string): Promise<void>;
   serverTime(): Promise<Date>;
+}
+
+export interface BudgetEventArgs {
+  lease: LeaseState;
+  workItemNodeId: string;
+  reservation: AttemptReservation;
+  sequence: number;
+  event: "BudgetReserved" | "BudgetReconciled";
+  unit:
+    | "model_tokens"
+    | "local_milliseconds"
+    | "sandbox_milliseconds"
+    | "managed_sessions"
+    | "validation_milliseconds";
+  amount: number;
+  phase?: "management" | "execution" | "validation";
+  usageId?: string;
+  modelInvocationId?: string;
+  directorEpoch?: number;
+  policyDigest?: string;
+  usageEvidence?: "as-recorded" | "conservative-reservation";
+  reason?: string;
+  reportedModelUsage?: ReportedModelUsage;
 }
 
 function assertReservationLease(reservation: AttemptReservation, lease: LeaseState): void {
@@ -316,84 +339,86 @@ export class LifecycleRecorder {
     return event;
   }
 
-  async budget(args: {
-    lease: LeaseState;
-    workItemNodeId: string;
-    reservation: AttemptReservation;
-    sequence: number;
-    event: "BudgetReserved" | "BudgetReconciled";
-    unit:
-      | "model_tokens"
-      | "local_milliseconds"
-      | "sandbox_milliseconds"
-      | "managed_sessions"
-      | "validation_milliseconds";
-    amount: number;
-    phase?: "management" | "execution" | "validation";
-    usageId?: string;
-    modelInvocationId?: string;
-    directorEpoch?: number;
-    policyDigest?: string;
-    usageEvidence?: "as-recorded" | "conservative-reservation";
-    reason?: string;
-    reportedModelUsage?: ReportedModelUsage;
-  }): Promise<FactoryEvent> {
-    await this.leases.assertCurrent(args.lease);
-    assertReservationLease(args.reservation, args.lease);
+  async budget(args: BudgetEventArgs): Promise<FactoryEvent> {
+    return (await this.budgetBatch([args]))[0]!;
+  }
+
+  async budgetBatch(args: readonly BudgetEventArgs[]): Promise<FactoryEvent[]> {
+    if (args.length === 0) throw new Error("budget event batch must not be empty");
+    const first = args[0]!;
     if (
-      args.modelInvocationId &&
-      ((args.policyDigest !== undefined && args.policyDigest !== args.reservation.policyDigest) ||
-        (args.directorEpoch !== undefined && args.directorEpoch !== args.reservation.directorEpoch))
-    )
-      throw new Error("model invocation receipt must retain its original attempt binding");
+      args.some(
+        (value) =>
+          value.lease !== first.lease ||
+          value.workItemNodeId !== first.workItemNodeId ||
+          value.reservation !== first.reservation,
+      )
+    ) {
+      throw new Error("budget event batch must share one lease, reservation, and destination");
+    }
+    await this.leases.assertCurrent(first.lease);
+    assertReservationLease(first.reservation, first.lease);
     const now = await this.store.serverTime();
-    const event = parseFactoryEvent({
-      protocol: PROTOCOL_V2,
-      kind: "budget",
-      event: args.event,
-      objective: args.reservation.objective,
-      runId: args.reservation.runId,
-      sequence: args.sequence,
-      at: now.toISOString(),
-      workItem: args.reservation.workItem,
-      attempt: args.reservation.attempt,
-      phase:
-        args.phase ??
-        (args.unit === "validation_milliseconds"
-          ? "validation"
-          : args.unit === "model_tokens"
-            ? "management"
-            : "execution"),
-      unit: args.unit,
-      amount: args.amount,
-      ...(args.usageId ? { usageId: args.usageId } : {}),
-      ...(args.modelInvocationId ? { modelInvocationId: args.modelInvocationId } : {}),
-      ...(args.modelInvocationId
-        ? {
-            directorEpoch: args.directorEpoch ?? args.reservation.directorEpoch,
-            policyDigest: args.policyDigest ?? args.reservation.policyDigest,
-          }
-        : {}),
-      ...(args.usageEvidence ? { usageEvidence: args.usageEvidence } : {}),
-      ...(args.usageEvidence === "conservative-reservation"
-        ? {
-            directorEpoch: args.reservation.directorEpoch,
-            policyDigest: args.reservation.policyDigest,
-          }
-        : {}),
-      ...(args.reason ? { reason: args.reason } : {}),
-      ...(args.reportedModelUsage ? { reportedModelUsage: args.reportedModelUsage } : {}),
+    const events = args.map((value) => {
+      if (
+        value.modelInvocationId &&
+        ((value.policyDigest !== undefined &&
+          value.policyDigest !== value.reservation.policyDigest) ||
+          (value.directorEpoch !== undefined &&
+            value.directorEpoch !== value.reservation.directorEpoch))
+      ) {
+        throw new Error("model invocation receipt must retain its original attempt binding");
+      }
+      return parseFactoryEvent({
+        protocol: PROTOCOL_V2,
+        kind: "budget",
+        event: value.event,
+        objective: value.reservation.objective,
+        runId: value.reservation.runId,
+        sequence: value.sequence,
+        at: now.toISOString(),
+        workItem: value.reservation.workItem,
+        attempt: value.reservation.attempt,
+        phase:
+          value.phase ??
+          (value.unit === "validation_milliseconds"
+            ? "validation"
+            : value.unit === "model_tokens"
+              ? "management"
+              : "execution"),
+        unit: value.unit,
+        amount: value.amount,
+        ...(value.usageId ? { usageId: value.usageId } : {}),
+        ...(value.modelInvocationId ? { modelInvocationId: value.modelInvocationId } : {}),
+        ...(value.modelInvocationId
+          ? {
+              directorEpoch: value.directorEpoch ?? value.reservation.directorEpoch,
+              policyDigest: value.policyDigest ?? value.reservation.policyDigest,
+            }
+          : {}),
+        ...(value.usageEvidence ? { usageEvidence: value.usageEvidence } : {}),
+        ...(value.usageEvidence === "conservative-reservation"
+          ? {
+              directorEpoch: value.reservation.directorEpoch,
+              policyDigest: value.reservation.policyDigest,
+            }
+          : {}),
+        ...(value.reason ? { reason: value.reason } : {}),
+        ...(value.reportedModelUsage ? { reportedModelUsage: value.reportedModelUsage } : {}),
+      });
     });
     await this.store.addIssueComment(
-      args.workItemNodeId,
-      encodeEventComment(
-        args.event === "BudgetReserved" && args.modelInvocationId
-          ? "Factory recorded model dispatch intent; token consumption is not yet known."
-          : `Factory ${args.event === "BudgetReserved" ? "reserved" : "reconciled"} ${args.amount} ${args.unit}.`,
-        event,
+      first.workItemNodeId,
+      encodeEventBatchComment(
+        events.length === 1
+          ? first.event === "BudgetReserved" && first.modelInvocationId
+            ? "Factory recorded model dispatch intent; token consumption is not yet known."
+            : `Factory ${first.event === "BudgetReserved" ? "reserved" : "reconciled"} ${first.amount} ${first.unit}.`
+          : `Factory recorded ${events.length} adjacent budget reconciliations.`,
+        events,
       ),
     );
-    return event;
+    return events;
   }
 
   async objectiveBudget(args: {

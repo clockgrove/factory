@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 /**
  * Platform refusal vs. work failure.
  *
@@ -18,8 +20,8 @@
  * (docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api).
  * "There is not a way to check the status of your secondary rate limit" (same
  * page): the only signal a limit is close is a refusal, by which point the
- * request has already counted against it. Factory paces itself well under these
- * (`FACTORY_PACING`), not up to them.
+ * request has already counted against it. Factory uses these published ceilings
+ * as the outer boundary of a locally observed, adaptive guardrail.
  */
 export const GITHUB_SECONDARY_LIMITS = {
   /** Shared across REST + GraphQL. */
@@ -32,20 +34,86 @@ export const GITHUB_SECONDARY_LIMITS = {
 } as const;
 
 /**
- * Factory's own budget. Deliberately well inside `GITHUB_SECONDARY_LIMITS`,
- * because GitHub's own guidance is stronger than "stay under the ceiling":
+ * Factory's local pacing policy. The content limits are GitHub's documented
+ * outer bounds rather than a second, arbitrary hourly quota. Admission is
+ * smoothed and adapts downward after an observed secondary refusal.
  * "Avoid concurrent requests... make requests serially" and "wait at least
  * one second between" mutative requests (docs.github.com/en/rest/using-the-
  * rest-api/best-practices-for-using-the-rest-api).
  */
 export const FACTORY_PACING = {
   maxConcurrentRequests: 5,
-  maxContentCreatingPerMinute: 40,
-  maxContentCreatingPerHour: 250,
-  /** Capacity kept available for lease acquisition and renewal. */
-  reservedLeaseMutationsPerHour: 24,
+  maxContentCreatingPerMinute: GITHUB_SECONDARY_LIMITS.maxContentCreatingPerMinute,
+  maxContentCreatingPerHour: GITHUB_SECONDARY_LIMITS.maxContentCreatingPerHour,
   minMsBetweenMutations: 1_000,
 } as const;
+
+export interface PrimaryRateLimitObservation {
+  resource: string;
+  limit: number;
+  remaining: number;
+  used: number | null;
+  resetAt: string;
+  observedAt: string;
+}
+
+/** Header cache for GitHub's observable primary quota. */
+export class GitHubPrimaryQuotaCache {
+  readonly #resources = new Map<string, PrimaryRateLimitObservation>();
+
+  observe(
+    headers: Record<string, string | number | undefined> | undefined,
+    now: Date = new Date(),
+  ): void {
+    if (!headers) return;
+    const normalized = new Map(
+      Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value]),
+    );
+    const number = (name: string): number | null => {
+      const value = normalized.get(name);
+      if (value === undefined) return null;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    };
+    const resource = String(normalized.get("x-ratelimit-resource") ?? "core").toLowerCase();
+    const limit = number("x-ratelimit-limit");
+    const remaining = number("x-ratelimit-remaining");
+    const reset = number("x-ratelimit-reset");
+    if (limit === null || remaining === null || reset === null) return;
+    const resetAt = new Date(reset * 1_000);
+    if (Number.isNaN(resetAt.getTime())) return;
+    this.#resources.set(resource, {
+      resource,
+      limit,
+      remaining,
+      used: number("x-ratelimit-used"),
+      resetAt: resetAt.toISOString(),
+      observedAt: now.toISOString(),
+    });
+  }
+
+  snapshot(): PrimaryRateLimitObservation[] {
+    return [...this.#resources.values()]
+      .map((value) => ({ ...value }))
+      .sort((left, right) => left.resource.localeCompare(right.resource));
+  }
+}
+
+const primaryQuotaByCredential = new Map<string, GitHubPrimaryQuotaCache>();
+
+/** Process-local credential sharing; the token never appears in telemetry. */
+export function primaryQuotaForCredential(token: string): GitHubPrimaryQuotaCache {
+  const credential = createHash("sha256").update(token).digest("hex");
+  let cache = primaryQuotaByCredential.get(credential);
+  if (!cache) {
+    cache = new GitHubPrimaryQuotaCache();
+    if (primaryQuotaByCredential.size >= 16) {
+      primaryQuotaByCredential.delete(primaryQuotaByCredential.keys().next().value!);
+    }
+    primaryQuotaByCredential.set(credential, cache);
+  }
+  return cache;
+}
 
 export type Refusal =
   | { kind: "rate_limit"; retryAfterMs: number }
@@ -55,10 +123,10 @@ export type Refusal =
 interface HttpErrorLike {
   status?: number;
   message?: string;
-  headers?: Record<string, string | undefined>;
+  headers?: Record<string, string | number | undefined>;
   errors?: Array<GraphQlErrorLike>;
   response?: {
-    headers?: Record<string, string | undefined>;
+    headers?: Record<string, string | number | undefined>;
     data?: { errors?: Array<GraphQlErrorLike> };
     errors?: Array<GraphQlErrorLike>;
   };
@@ -73,13 +141,29 @@ interface GraphQlErrorLike {
 const DEFAULT_BACKOFF_MS = 60_000;
 
 function headerNumber(
-  headers: Record<string, string | undefined> | undefined,
+  headers: Record<string, string | number | undefined> | undefined,
   name: string,
 ): number | null {
   const raw = headers?.[name];
   if (raw === undefined) return null;
   const n = Number(raw);
   return Number.isFinite(n) ? n : null;
+}
+
+function refusalHeaders(error: unknown): Record<string, string | number | undefined> | undefined {
+  const value =
+    error instanceof PlatformUnavailableError
+      ? (error.cause as HttpErrorLike)
+      : (error as HttpErrorLike);
+  return value?.response?.headers ?? value?.headers;
+}
+
+/** Primary exhaustion reports zero remaining; other 403/429 rate refusals are
+ * the only feedback GitHub provides for the invisible secondary plane. */
+export function isSecondaryRateLimitRefusal(error: unknown): boolean {
+  const refusal = classifyRefusal(error);
+  if (refusal.kind !== "rate_limit") return false;
+  return headerNumber(refusalHeaders(error), "x-ratelimit-remaining") !== 0;
 }
 
 /**
@@ -269,6 +353,9 @@ export class ContentCreationPacer {
   #minute: number[] = [];
   #hour: number[] = [];
   #lastCallAt: number | null = null;
+  #adaptiveFactor = 1;
+  #successfulSinceRefusal = 0;
+  #secondaryRefusals = 0;
 
   constructor(
     private readonly perMinute: number = FACTORY_PACING.maxContentCreatingPerMinute,
@@ -277,38 +364,68 @@ export class ContentCreationPacer {
   ) {}
 
   /**
-   * Ms to wait before the next content-creating call is safe to make.
-   * Normal writes can reserve part of the hourly budget for lease traffic;
-   * lease writes use the full configured limit.
+   * Ms to wait before the next content-creating call is safe to make. Calls
+   * are distributed across the hour so a burst cannot create an hourly cliff.
    */
-  waitMs(now: Date = new Date(), options: { hourlyReserve?: number } = {}): number {
+  waitMs(now: Date = new Date(), options: { priority?: boolean } = {}): number {
     const t = now.getTime();
     this.#prune(t);
-    const hourlyReserve = options.hourlyReserve ?? 0;
-    if (!Number.isInteger(hourlyReserve) || hourlyReserve < 0 || hourlyReserve >= this.perHour) {
-      throw new Error("hourly mutation reserve must leave at least one usable slot");
-    }
-    const hourlyLimit = this.perHour - hourlyReserve;
-    const gapWait =
-      this.#lastCallAt === null ? 0 : Math.max(0, this.#lastCallAt + this.minGapMs - t);
+    const effectiveHourly = Math.max(1, Math.floor((this.perHour - 1) / this.#adaptiveFactor));
+    const gap = options.priority
+      ? this.minGapMs
+      : Math.max(this.minGapMs, Math.ceil(3_600_000 / effectiveHourly));
+    const gapWait = this.#lastCallAt === null ? 0 : Math.max(0, this.#lastCallAt + gap - t);
     const minuteWait =
       this.#minute.length < this.perMinute
         ? 0
         : this.#minute[this.#minute.length - this.perMinute]! + 60_000 - t;
     const hourWait =
-      this.#hour.length < hourlyLimit
+      this.#hour.length < effectiveHourly
         ? 0
-        : this.#hour[this.#hour.length - hourlyLimit]! + 3_600_000 - t;
+        : this.#hour[this.#hour.length - effectiveHourly]! + 3_600_000 - t;
     return Math.max(gapWait, minuteWait, hourWait, 0);
   }
 
-  /** Record that a content-creating call was just made. */
-  recordCall(now: Date = new Date()): void {
+  /** Record an actual transport attempt, immediately before invoking HTTP. */
+  recordTransported(now: Date = new Date()): void {
     const t = now.getTime();
     this.#prune(t);
     this.#minute.push(t);
     this.#hour.push(t);
     this.#lastCallAt = t;
+  }
+
+  recordCall(now: Date = new Date()): void {
+    this.recordTransported(now);
+  }
+
+  recordSuccess(): void {
+    this.#successfulSinceRefusal += 1;
+    if (this.#adaptiveFactor > 1 && this.#successfulSinceRefusal >= 20) {
+      this.#adaptiveFactor = Math.max(1, this.#adaptiveFactor - 0.1);
+      this.#successfulSinceRefusal = 0;
+    }
+  }
+
+  recordSecondaryRefusal(): void {
+    this.#secondaryRefusals += 1;
+    this.#successfulSinceRefusal = 0;
+    this.#adaptiveFactor = Math.min(8, this.#adaptiveFactor * 2);
+  }
+
+  snapshot(now: Date = new Date()): LocalSecondaryQuotaEstimate {
+    const t = now.getTime();
+    this.#prune(t);
+    const wait = this.waitMs(now);
+    return {
+      transportedLastMinute: this.#minute.length,
+      transportedLastHour: this.#hour.length,
+      estimatedHourlyCapacity: Math.max(1, Math.floor((this.perHour - 1) / this.#adaptiveFactor)),
+      confidence: this.#secondaryRefusals > 0 ? "high" : this.#hour.length >= 20 ? "medium" : "low",
+      secondaryRefusals: this.#secondaryRefusals,
+      limitingReason: wait > 0 ? "local-secondary-estimate" : null,
+      nextAdmissionAt: new Date(t + wait).toISOString(),
+    };
   }
 
   #prune(now: number): void {
@@ -319,6 +436,16 @@ export class ContentCreationPacer {
       this.#hour.shift();
     }
   }
+}
+
+export interface LocalSecondaryQuotaEstimate {
+  transportedLastMinute: number;
+  transportedLastHour: number;
+  estimatedHourlyCapacity: number;
+  confidence: "low" | "medium" | "high";
+  secondaryRefusals: number;
+  limitingReason: "local-secondary-estimate" | null;
+  nextAdmissionAt: string;
 }
 
 export type MutationClass = "normal" | "lease";
@@ -337,6 +464,10 @@ export interface MutationPermit {
   release(): void;
   /** Last synchronous check immediately before invoking transport. */
   assertDispatchAllowed?(): void;
+  /** Called adjacent to the sole HTTP attempt; internal retries are disabled. */
+  recordTransported?(): void;
+  recordSuccess?(): void;
+  recordRefusal?(secondary: boolean): void;
 }
 
 export interface MutationAdmission {
@@ -345,10 +476,18 @@ export interface MutationAdmission {
 
 export interface MutationSchedulerOptions {
   pacer?: ContentCreationPacer;
-  reservedLeaseMutationsPerHour?: number;
   onThrottle?: (message: string) => void;
   now?: () => Date;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
+  primaryQuota?: GitHubPrimaryQuotaCache;
+}
+
+export interface GitHubMutationTelemetry {
+  admitted: number;
+  transported: number;
+  successful: number;
+  serverPrimaryQuota: PrimaryRateLimitObservation[];
+  localSecondaryEstimate: LocalSecondaryQuotaEstimate;
 }
 
 /**
@@ -358,7 +497,6 @@ export interface MutationSchedulerOptions {
  */
 export class MutationScheduler implements MutationAdmission {
   readonly #pacer: ContentCreationPacer;
-  readonly #reservedLeaseMutationsPerHour: number;
   readonly #notify: (message: string) => void;
   readonly #now: () => Date;
   readonly #sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
@@ -367,14 +505,31 @@ export class MutationScheduler implements MutationAdmission {
   #leaseQueue: Array<() => void> = [];
   #normalQueue: Array<() => void> = [];
   #lastNoticeAt = 0;
+  #primaryQuota: GitHubPrimaryQuotaCache | undefined;
+  #admitted = 0;
+  #transported = 0;
+  #successful = 0;
 
   constructor(options: MutationSchedulerOptions = {}) {
     this.#pacer = options.pacer ?? new ContentCreationPacer();
-    this.#reservedLeaseMutationsPerHour =
-      options.reservedLeaseMutationsPerHour ?? FACTORY_PACING.reservedLeaseMutationsPerHour;
     this.#notify = options.onThrottle ?? (() => {});
     this.#now = options.now ?? (() => new Date());
     this.#sleep = options.sleep ?? mutationDelay;
+    this.#primaryQuota = options.primaryQuota;
+  }
+
+  attachPrimaryQuota(cache: GitHubPrimaryQuotaCache): void {
+    this.#primaryQuota = cache;
+  }
+
+  telemetry(): GitHubMutationTelemetry {
+    return {
+      admitted: this.#admitted,
+      transported: this.#transported,
+      successful: this.#successful,
+      serverPrimaryQuota: this.#primaryQuota?.snapshot() ?? [],
+      localSecondaryEstimate: this.#pacer.snapshot(this.#now()),
+    };
   }
 
   /** Deliberate process retirement only. Pending normal work is never resumed
@@ -397,19 +552,32 @@ export class MutationScheduler implements MutationAdmission {
       let wait: number;
       try {
         this.#assertAdmissionOpen(kind);
-        wait = this.#pacer.waitMs(now, {
-          hourlyReserve: kind === "lease" ? 0 : this.#reservedLeaseMutationsPerHour,
-        });
+        wait = this.#pacer.waitMs(now, { priority: kind === "lease" });
       } catch (error) {
         release();
         throw error;
       }
       if (wait === 0) {
-        this.#pacer.recordCall(now);
+        this.#admitted += 1;
+        let transported = false;
         return {
           waitedMs: Math.max(pacedWaitMs, now.getTime() - startedAt),
           release,
           assertDispatchAllowed: () => this.#assertAdmissionOpen(kind),
+          recordTransported: () => {
+            if (transported) return;
+            transported = true;
+            this.#transported += 1;
+            this.#pacer.recordTransported(this.#now());
+          },
+          recordSuccess: () => {
+            if (!transported) return;
+            this.#successful += 1;
+            this.#pacer.recordSuccess();
+          },
+          recordRefusal: (secondary) => {
+            if (transported && secondary) this.#pacer.recordSecondaryRefusal();
+          },
         };
       }
       release();
@@ -418,7 +586,7 @@ export class MutationScheduler implements MutationAdmission {
         this.#notify(
           kind === "lease"
             ? `pacing a lease mutation for ${wait}ms`
-            : `pacing a GitHub mutation for ${wait}ms; lease capacity remains reserved`,
+            : `pacing a GitHub mutation for ${wait}ms; lease traffic retains priority`,
         );
       }
       await this.#sleep(wait, kind === "normal" ? this.#normalShutdown.signal : undefined);

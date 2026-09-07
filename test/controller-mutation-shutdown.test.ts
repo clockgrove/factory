@@ -30,10 +30,11 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function advanceUntil(observed: () => boolean) {
+async function advanceUntil(observed: () => boolean, maximumMs = 10_000) {
   // Octokit's real throttling wrapper schedules several successive timers.
   // Advance them only until the named boundary, never to the 42-minute reset.
-  for (let tick = 0; tick < 100 && !observed(); tick++) await vi.advanceTimersByTimeAsync(100);
+  for (let elapsed = 0; elapsed < maximumMs && !observed(); elapsed += 100)
+    await vi.advanceTimersByTimeAsync(100);
   expect(observed()).toBe(true);
 }
 
@@ -228,7 +229,10 @@ it.each([false, true])(
     expect(settled).toBe(false);
     expect(f.release).not.toHaveBeenCalled();
     response.resolve();
-    await advanceUntil(() => settled);
+    // The production Octokit retry plugin retains an already-dispatched 503
+    // operation for three retries: 1 + 4 + 9 seconds, plus throttling timers.
+    // This is one unresolved admission, not four new scheduler admissions.
+    await advanceUntil(() => settled, refused ? 30_000 : 10_000);
     const failure = await outcome;
     if (refused)
       expect(failure).toMatchObject({
@@ -238,9 +242,10 @@ it.each([false, true])(
     // A real refusal retains the shared cooldown and prevents even lease writes;
     // deliberate stop does not claim that this ownership was durably retired.
     expect(f.release).toHaveBeenCalledTimes(refused ? 0 : 1);
-    expect(f.request).toHaveBeenCalledTimes(refused ? 1 : 2);
+    expect(f.request).toHaveBeenCalledTimes(refused ? 4 : 2);
     expect(f.recordCall).toHaveBeenCalledTimes(refused ? 1 : 2);
     expect(f.resources.circuitBreaker.isOpen()).toBe(refused);
+    expect(f.acquire).toHaveBeenCalledTimes(1);
   },
 );
 

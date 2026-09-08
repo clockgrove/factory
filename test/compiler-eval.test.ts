@@ -95,6 +95,35 @@ describe("obligation-first compiler evidence", () => {
     partial.coverage.pop();
     expect(() => validateCompilerJudgeVerdict(partial, expected)).toThrow("incomplete Objective");
   });
+  it("refuses preference-only repair and requires a material finding or non-waived coverage gap", () => {
+    const review = verdict();
+    review.decision = "repair";
+    expect(() => validateCompilerJudgeVerdict(review, expected)).toThrow(
+      "no unresolved coverage or material finding",
+    );
+    review.findings = [
+      {
+        id: "style",
+        severity: "advisory",
+        dimension: "granularity",
+        obligationIds: [],
+        itemIds: ["api"],
+        evidenceIds: ["objective"],
+        rootCause: "Prefer shorter prose",
+        correction: "Shorten prose",
+        confidence: 0.8,
+        uncertainty: "Style only",
+      },
+    ];
+    expect(() => validateCompilerJudgeVerdict(review, expected)).toThrow(
+      "no unresolved coverage or material finding",
+    );
+    review.findings[0]!.severity = "material-efficiency";
+    expect(validateCompilerJudgeVerdict(review, expected).decision).toBe("repair");
+    review.findings = [];
+    review.coverage[0]!.status = "partial";
+    expect(validateCompilerJudgeVerdict(review, expected).decision).toBe("repair");
+  });
   it("requires every item, dimension and dependency and binds the exact draft", () => {
     expect(validateCompilerJudgeVerdict(verdict(), expected).decision).toBe("accept");
     const changed = verdict();
@@ -407,6 +436,11 @@ it("independently corrects cited hallucinated prerequisites without waiving expl
   review.inferenceCorrections = [{ ...challenge, disposition: "unsupported-inference" }];
   const context = { ...expected, inventory: inferred, challenges: [challenge] };
   expect(validateCompilerJudgeVerdict(review, context).decision).toBe("accept");
+  review.decision = "repair";
+  expect(() => validateCompilerJudgeVerdict(review, context)).toThrow(
+    "no unresolved coverage or material finding",
+  );
+  review.decision = "accept";
   expect(inferred.obligations).toHaveLength(2);
   expect(review.coverage[1]!.status).toBe("missing");
   expect(() => validateCompilerJudgeVerdict(review, { ...context, challenges: [] })).toThrow(

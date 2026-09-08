@@ -186,6 +186,7 @@ async function setup(
     missingAccounting?: boolean;
     reportOnly?: boolean;
     abstain?: boolean;
+    advisoryOnlyRepair?: boolean;
   } = {},
 ) {
   const repository = await mkdtemp(join(tmpdir(), "factory-draft-integration-"));
@@ -292,6 +293,13 @@ async function setup(
         uncertainty: [],
         decision: options.abstain ? "abstain" : accept ? "accept" : "repair",
       };
+      if (options.advisoryOnlyRepair) {
+        verdict.coverage[0]!.status = "covered";
+        verdict.findings[0]!.severity = "advisory";
+        verdict.findings[0]!.rootCause = "Prefer a shorter item title";
+        verdict.findings[0]!.correction = "Shorten the title";
+        verdict.decision = "repair";
+      }
       return { value: verdict, usage };
     }
     if (prompt.includes("Repair the draft")) {
@@ -427,6 +435,49 @@ describe("production compiler draft adapter", () => {
       reason: "judge cannot resolve material ambiguity",
     });
     expect(f.stages).toEqual(["inventory", "compile", "judge"]);
+  });
+  it("stops advisory-only repair from the production judge before another provider call, including restart", async () => {
+    const f = await setup({ advisoryOnlyRepair: true });
+    const result = await compileEvaluatedDraft(f.args);
+    expect(result).toMatchObject({
+      status: "stopped",
+      reason: "judge repair has no unresolved coverage or material finding",
+    });
+    expect(f.stages).toEqual(["inventory", "compile", "judge"]);
+    expect(f.args.admit).toHaveBeenCalledTimes(3);
+    expect(f.accounting.size).toBe(3);
+    expect(result.records.some((r) => r.kind === "selection")).toBe(false);
+    expect(
+      await new CompiledGraphManager(f.store, f.leases).load(42, f.args.lease.runId),
+    ).toBeNull();
+    expect(await compileEvaluatedDraft(f.args)).toMatchObject({
+      status: "stopped",
+      reason: "judge repair has no unresolved coverage or material finding",
+    });
+    expect(f.runStructured).toHaveBeenCalledTimes(3);
+  });
+  it("replays the durable no-material-repair stop after a crash before the stopped record", async () => {
+    const f = await setup({ advisoryOnlyRepair: true });
+    const append = f.args.manager.append.bind(f.args.manager);
+    const fault = vi.spyOn(f.args.manager, "append").mockImplementation(async (...args) => {
+      if (args[3] === "stopped") throw new Error("process unavailable before stopped record");
+      const saved = await append(...args);
+      if (args[3] === "result" && args[4].stage === "judge")
+        throw new Error("crash after durable judge result");
+      return saved;
+    });
+    await expect(compileEvaluatedDraft(f.args)).rejects.toThrow();
+    fault.mockRestore();
+    expect((await f.args.manager.load(f.args.binding)).some((r) => r.kind === "stopped")).toBe(
+      false,
+    );
+    expect(await compileEvaluatedDraft(f.args)).toMatchObject({
+      status: "stopped",
+      reason: "judge repair has no unresolved coverage or material finding",
+    });
+    expect(f.stages).toEqual(["inventory", "compile", "judge"]);
+    expect(f.accounting.size).toBe(3);
+    expect(f.args.admit).toHaveBeenCalledTimes(3);
   });
   it("does not replay provider work with unknown terminal accounting", async () => {
     const f = await setup({ missingAccounting: true });

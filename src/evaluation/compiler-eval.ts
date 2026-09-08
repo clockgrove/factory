@@ -1,7 +1,15 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { CompilerDraftStopError } from "./compiler-draft-loop.js";
 import type { CompilerObjective } from "../compiler/index.js";
 import { assessDecomposition, type DecompositionEvidence } from "../compiler/economics.js";
+
+/** A preference-only repair request cannot authorize another paid compiler call. */
+export class CompilerJudgeNoMaterialRepairError extends CompilerDraftStopError {
+  constructor() {
+    super("judge repair has no unresolved coverage or material finding");
+  }
+}
 
 const Id = z.string().min(1).max(160);
 const Text = z.string().min(1).max(4000);
@@ -348,6 +356,14 @@ export function validateCompilerJudgeVerdict(
       verdict.dimensions.some((entry) => entry.status === "unknown"))
   )
     throw new Error("acceptance has unresolved coverage or blockers");
+  if (
+    verdict.decision === "repair" &&
+    !verdict.coverage.some(
+      (entry) => entry.status !== "covered" && !unsupported.has(entry.obligationId),
+    ) &&
+    !verdict.findings.some((entry) => entry.severity !== "advisory")
+  )
+    throw new CompilerJudgeNoMaterialRepairError();
   return verdict;
 }
 

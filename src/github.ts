@@ -34,7 +34,11 @@ import type { WorkflowSafetyProfile } from "./approval.js";
 import { referencedSecretNames, triggersOnPullRequest, usesSelfHostedRunner } from "./approval.js";
 import { bindAuthenticatedRunActors } from "./control/authenticated-events.js";
 import { activationCancellation, type ActivationBinding } from "./control/activations.js";
-import { decodeEventComments, deduplicateFactoryEvents } from "./control/receipts.js";
+import {
+  decodeEventComments,
+  deduplicateFactoryEvents,
+  latestRunReceipts,
+} from "./control/receipts.js";
 import {
   PlatformUnavailableError,
   classifyRefusal,
@@ -42,6 +46,7 @@ import {
   type GitHubPrimaryQuotaCache,
 } from "./platform.js";
 import type { FactoryEvent } from "./protocol/events.js";
+import { isManagedAgentBackendId } from "./protocol/policy.js";
 import { normalizeIssueFieldValues } from "./scheduling/github-priority.js";
 
 /** A workflow run parked in `action_required`, awaiting a maintainer's approval. */
@@ -687,6 +692,7 @@ function toWorkItem(
   v2: boolean,
   actorsByRun: ReadonlyMap<string, string> = new Map(),
   subIssuePosition?: number,
+  authenticatedEvents?: FactoryEvent[],
 ): WorkItemSnapshot {
   if (wi.blockedBy.totalCount > wi.blockedBy.nodes.length) {
     throw new Error(`Work Item #${wi.number} has too many dependencies for a complete snapshot`);
@@ -718,14 +724,60 @@ function toWorkItem(
     // runs. Keep every authenticated receipt so a later run can reconstruct a
     // completed item instead of mistaking its closed issue and merged PR for
     // receipt-free mixed state.
-    result.factoryEvents = factoryEvents(
-      wi.comments,
-      `Work Item #${wi.number}`,
-      { objective: objectiveNumber, workItem: wi.number },
-      actorsByRun,
-    );
+    result.factoryEvents =
+      authenticatedEvents ??
+      factoryEvents(
+        wi.comments,
+        `Work Item #${wi.number}`,
+        { objective: objectiveNumber, workItem: wi.number },
+        actorsByRun,
+      );
   }
   return result;
+}
+
+function pullHeadSha(pullRequest: GqlPr): string {
+  return pullRequest.statusCheckRollup.nodes[0]?.commit?.oid ?? "";
+}
+
+/**
+ * A GitHub Agent Work timeline is useful only when an open pull request may
+ * belong to a managed coding-agent attempt. V2 publication and attempt
+ * receipts can prove the opposite for an exact current attempt; legacy or
+ * incomplete identity remains fail-closed and keeps the companion REST read.
+ */
+function requiresAgentWorkTimeline(
+  pullRequest: GqlPr,
+  events: readonly FactoryEvent[] | undefined,
+  currentRunId: string | undefined,
+): boolean {
+  if (!events || !currentRunId) return true;
+  const reservations = events
+    .filter(
+      (event): event is Extract<FactoryEvent, { kind: "attempt" }> =>
+        event.kind === "attempt" &&
+        event.event === "AttemptReserved" &&
+        event.runId === currentRunId,
+    )
+    .sort((left, right) => left.sequence - right.sequence);
+  const current = reservations.at(-1);
+  if (!current || isManagedAgentBackendId(current.backend)) return true;
+
+  const publications = events.filter(
+    (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
+      event.kind === "publication" &&
+      event.event === "PublicationRecorded" &&
+      event.pullRequest === pullRequest.number,
+  );
+  if (publications.length !== 1) return true;
+  const publication = publications[0]!;
+  return !(
+    publication.runId === current.runId &&
+    publication.workItem === current.workItem &&
+    publication.attempt === current.attempt &&
+    publication.baseSha === current.baseSha &&
+    publication.headSha === pullHeadSha(pullRequest)
+  );
 }
 
 const TRUSTED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
@@ -1580,7 +1632,27 @@ export class GitHubReader {
           : [],
       ),
     );
-    const agentWorkEvents = await this.#readAgentWorkEvents(issue.subIssues.nodes, historyBudget);
+    const workItemEvents = new Map<number, FactoryEvent[]>();
+    if (v2) {
+      for (const workItem of issue.subIssues.nodes) {
+        workItemEvents.set(
+          workItem.number,
+          factoryEvents(
+            workItem.comments,
+            `Work Item #${workItem.number}`,
+            { objective: issue.number, workItem: workItem.number },
+            actorsByRun,
+          ),
+        );
+      }
+    }
+    const currentRunId = latestRunReceipts(objectiveEvents)?.runId;
+    const agentWorkEvents = await this.#readAgentWorkEvents(
+      issue.subIssues.nodes,
+      workItemEvents,
+      currentRunId,
+      historyBudget,
+    );
 
     return {
       id: issue.id,
@@ -1591,7 +1663,15 @@ export class GitHubReader {
       body: issue.body,
       closed: issue.state === "CLOSED",
       workItems: issue.subIssues.nodes.map((wi, index) =>
-        toWorkItem(wi, issue.number, agentWorkEvents, v2, actorsByRun, index),
+        toWorkItem(
+          wi,
+          issue.number,
+          agentWorkEvents,
+          v2,
+          actorsByRun,
+          index,
+          workItemEvents.get(wi.number),
+        ),
       ),
       readAt: new Date(),
       graphQlRateLimit: {
@@ -1681,12 +1761,23 @@ export class GitHubReader {
    */
   async #readAgentWorkEvents(
     workItems: GqlWorkItem[],
+    authenticatedEvents: ReadonlyMap<number, FactoryEvent[]>,
+    currentRunId: string | undefined,
     budget?: RecoveryHydrationBudget,
   ): Promise<Map<number, AgentWorkEvent[]>> {
     const openPullRequests = new Set<number>();
     for (const workItem of workItems) {
       for (const pullRequest of workItem.closedByPullRequestsReferences.nodes) {
-        if (pullRequest.state === "OPEN") openPullRequests.add(pullRequest.number);
+        if (
+          pullRequest.state === "OPEN" &&
+          requiresAgentWorkTimeline(
+            pullRequest,
+            authenticatedEvents.get(workItem.number),
+            currentRunId,
+          )
+        ) {
+          openPullRequests.add(pullRequest.number);
+        }
       }
     }
 

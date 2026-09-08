@@ -304,14 +304,21 @@ export class SharedCapacityCoordinator {
   async configureLimits(
     limits: CapacityLimits,
     assertAuthority: () => Promise<void>,
+    selected?: readonly ("maxLocalParallel" | "maxCloudParallel")[],
   ): Promise<void> {
-    const requested = globalLimits(limits);
+    const complete = globalLimits(limits);
+    const fields = selected ? [...selected] : undefined;
     const configure = async () => {
       await this.initialize();
       for (let attempt = 0; attempt < 16; attempt++) {
         const current = await this.#read();
         if (!current) throw new Error("shared capacity ref disappeared");
         await assertAuthority();
+        const requested = fields ? { ...current.state.limits } : complete;
+        if (fields) {
+          for (const field of fields) requested[field] = complete[field];
+          requested.maxParallel = requested.maxLocalParallel + requested.maxCloudParallel;
+        }
         if (canonical(current.state.limits) === canonical(requested)) return;
         const next = {
           ...current.state,

@@ -201,6 +201,46 @@ describe("independent-session durable capacity", () => {
     expect(fenced).toBeGreaterThan(0);
   });
 
+  it.each([
+    { selected: "maxLocalParallel" as const, local: 4, cloud: 0 },
+    { selected: "maxCloudParallel" as const, local: 0, cloud: 4 },
+  ])(
+    "partial $selected updates preserve unmentioned resource policy",
+    async ({ selected, local, cloud }) => {
+      const store = new Store();
+      const a = coordinator(store, {
+        ...limits,
+        maxParallel: 0,
+        maxLocalParallel: 0,
+        maxCloudParallel: 0,
+        backendMaxParallel: { "limited/backend": 1 },
+        cpuCapacity: 3,
+        memoryCapacityMb: 512,
+        maxPaidUnits: 2,
+      });
+      await a.initialize();
+      await a.configureLimits({
+        ...limits,
+        maxLocalParallel: 4,
+        maxCloudParallel: 4,
+      }, async () => {}, [selected]);
+      const oid = await store.readRef(SHARED_CAPACITY_REF);
+      const message = (await store.readCommit(oid!)).message;
+      const state = JSON.parse(
+        Buffer.from(message.split("Factory-Shared-Capacity: ")[1]!, "base64url").toString(),
+      );
+      expect(state.limits).toEqual({
+        maxParallel: 4,
+        maxLocalParallel: local,
+        maxCloudParallel: cloud,
+        backendMaxParallel: { "limited/backend": 1 },
+        cpuCapacity: 3,
+        memoryCapacityMb: 512,
+        maxPaidUnits: 2,
+      });
+    },
+  );
+
   it("races separate instances for the last slot without over-admission", async () => {
     const store = new Store(),
       ceiling = { ...limits, maxParallel: 1 };

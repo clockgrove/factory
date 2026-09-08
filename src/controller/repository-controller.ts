@@ -456,8 +456,10 @@ export async function runGitHubRepositoryController(
             resources,
             controllerId,
             sharedPaidCeiling: options.maxPaidWorkers ?? DEFAULT_CONTROLLER_POLICY.maxLocalWorkers,
-            configureCapacity:
-              options.maxPaidWorkers !== undefined || options.maxLocalWorkers !== undefined,
+            configureCapacity: [
+              ...(options.maxLocalWorkers !== undefined ? ["maxLocalParallel" as const] : []),
+              ...(options.maxPaidWorkers !== undefined ? ["maxCloudParallel" as const] : []),
+            ],
             ...(options.signal ? { signal: options.signal } : {}),
             ...(options.onStatus ? { onStatus: options.onStatus } : {}),
           },
@@ -560,7 +562,7 @@ async function attachSharedCapacity(
     leases: RepositoryLeaseManager;
     base: import("../control/lease.js").GitCommitObject;
     sharedPaidCeiling: number;
-    configureCapacity: boolean;
+    configureCapacity: readonly ("maxLocalParallel" | "maxCloudParallel")[];
   },
 ): Promise<void> {
   const store = new GitHubControlStore({
@@ -635,9 +637,11 @@ async function attachSharedCapacity(
         () => coordinator.initialize(),
       );
     } else await coordinator.initialize();
-    if (existing?.configureCapacity)
-      await coordinator.configureLimits(sharedLimits, () =>
-        existing.leases.assertCurrent(existing.lease),
+    if (existing?.configureCapacity.length)
+      await coordinator.configureLimits(
+        sharedLimits,
+        () => existing.leases.assertCurrent(existing.lease),
+        existing.configureCapacity,
       );
   } finally {
     if (releaseMigration && migrationLease) await leases.release(migrationLease);
@@ -653,7 +657,7 @@ interface RepositoryOwnershipOptions {
   policy: ControllerPolicy;
   resources: RepositorySupervisorResources;
   sharedPaidCeiling: number;
-  configureCapacity: boolean;
+  configureCapacity: readonly ("maxLocalParallel" | "maxCloudParallel")[];
   signal?: AbortSignal;
   onStatus?: (message: string) => void;
 }

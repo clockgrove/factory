@@ -868,11 +868,19 @@ export function measureCompilerRepairComparison(pairs: readonly CompilerComparis
 export const CompilerInferenceChallengeSchema = z
   .object({
     findingId: Id,
-    obligationId: Id,
+    obligationId: Id.optional(),
+    originalFinding: z
+      .object({ dimension: Dimension, rootCause: Text, correction: Text, itemIds: Refs.min(1) })
+      .strict()
+      .optional(),
     reason: Text,
     evidenceIds: Refs.min(1),
   })
-  .strict();
+  .strict()
+  .refine(
+    (entry) => entry.obligationId !== undefined || entry.originalFinding !== undefined,
+    "challenge requires an original obligation or item finding",
+  );
 export type CompilerInferenceChallenge = z.infer<typeof CompilerInferenceChallengeSchema>;
 export function validateCompilerInferenceChallenges(
   value: unknown,
@@ -880,13 +888,15 @@ export function validateCompilerInferenceChallenges(
 ): CompilerInferenceChallenge[] {
   const challenges = z.array(CompilerInferenceChallengeSchema).max(64).parse(value);
   unique(
-    challenges.map((entry) => `${entry.findingId}\0${entry.obligationId}`),
+    challenges.map((entry) => `${entry.findingId}\0${entry.obligationId ?? ""}`),
     "inference challenge",
   );
   const evidence = new Set(inventory.evidence.map((entry) => entry.id));
   const obligations = new Set(inventory.obligations.map((entry) => entry.id));
   for (const challenge of challenges) {
-    references([challenge.obligationId], obligations, "challenged obligation");
+    if (challenge.obligationId !== undefined)
+      references([challenge.obligationId], obligations, "challenged obligation");
+    if (challenge.originalFinding) unique(challenge.originalFinding.itemIds, "challenged item");
     references(challenge.evidenceIds, evidence, "challenge citation");
   }
   return challenges;
@@ -912,6 +922,18 @@ export function buildCompilerInferenceChallenges(
   for (const disposition of dispositions.filter((entry) => entry.disposition === "challenged")) {
     const finding = prior.findings.find((entry) => entry.id === disposition.findingId);
     if (!finding) throw new Error("challenge refers to unknown prior finding");
+    if (finding.obligationIds.length === 0)
+      challenges.push({
+        findingId: finding.id,
+        originalFinding: {
+          dimension: finding.dimension,
+          rootCause: finding.rootCause,
+          correction: finding.correction,
+          itemIds: finding.itemIds,
+        },
+        reason: disposition.reason,
+        evidenceIds: disposition.evidenceIds,
+      });
     for (const obligationId of finding.obligationIds)
       challenges.push({
         findingId: finding.id,

@@ -216,10 +216,10 @@ export async function compileEvaluatedDraft(args: {
           summary.findingDispositions,
         );
         const merged = new Map(
-          carried.map((entry) => [`${entry.findingId}\0${entry.obligationId}`, entry]),
+          carried.map((entry) => [`${entry.findingId}\0${entry.obligationId ?? ""}`, entry]),
         );
         for (const challenge of fresh)
-          merged.set(`${challenge.findingId}\0${challenge.obligationId}`, challenge);
+          merged.set(`${challenge.findingId}\0${challenge.obligationId ?? ""}`, challenge);
         const challenges = validateCompilerInferenceChallenges([...merged.values()], original);
         return challenges.length ? challenges : null;
       },

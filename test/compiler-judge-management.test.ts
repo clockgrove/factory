@@ -490,3 +490,62 @@ it("permits 129 dependency reviews in both provider and runtime judge schemas", 
   expect(new Ajv({ strict: false }).compile(CODEX_PLAN_JUDGE_SCHEMA)(output)).toBe(true);
   expect(CompilerJudgeVerdictSchema.safeParse(output).success).toBe(true);
 });
+
+it("supplies carried challenges and prior independent corrections to the production repair prompt", async () => {
+  const { context, inventory, proposal } = await fixture();
+  const compiled = await new CodexCliManagementBackend({
+    runStructured: async () => ({ value: proposal, usage }),
+  }).compile(context, async () => {});
+  inventory.obligations.push({
+    id: "inferred-deploy",
+    text: "Deploy infrastructure",
+    kind: "prerequisite",
+    evidenceIds: ["objective"],
+    acceptanceEvidence: "Deployment exists",
+  });
+  const reviewed = verdict(inventory, compiled.objective);
+  reviewed.decision = "repair";
+  reviewed.coverage.push({
+    obligationId: "inferred-deploy",
+    status: "missing",
+    itemIds: [],
+    acceptanceBindings: [],
+    evidenceIds: ["objective"],
+    reason: "Not requested",
+  });
+  const challenge = {
+    findingId: "false-deploy",
+    obligationId: "inferred-deploy",
+    reason: "Source does not require deployment",
+    evidenceIds: ["objective"],
+  };
+  reviewed.inferenceCorrections = [{ ...challenge, disposition: "unsupported-inference" }];
+  const summary = {
+    changeSummary: "Preserve cited correction",
+    lineage: [{ itemId: "code", previousItemIds: ["code"] }],
+    findingDispositions: [],
+  };
+  const backend = new CodexCliManagementBackend({
+    runStructured: async (_cwd, _schema, prompt) => {
+      const source = JSON.parse(prompt.split("\n\n").at(-1)!);
+      expect(source.challenges).toEqual([challenge]);
+      expect(source.inferenceCorrections).toEqual(reviewed.inferenceCorrections);
+      expect(prompt).toContain("not permission to waive explicit requirements");
+      expect(prompt).toContain("next judge must reassess every original obligation");
+      return { value: { objective: proposal, summary }, usage };
+    },
+  });
+  await expect(
+    backend.repairPlan(
+      {
+        compilation: context,
+        inventory,
+        objective: compiled.objective,
+        verdict: reviewed,
+        challenges: [challenge],
+        revision: 2,
+      },
+      async () => {},
+    ),
+  ).resolves.toMatchObject({ repair: summary });
+});

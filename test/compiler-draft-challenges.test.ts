@@ -191,10 +191,15 @@ function judged(context: PlanJudgeContext, accepted: boolean): CompilerJudgeVerd
             uncertainty: "",
           },
         ],
-    inferenceCorrections: (context.challenges ?? []).map((challenge) => ({
-      ...challenge,
-      disposition: "unsupported-inference",
-    })),
+    inferenceCorrections: (context.challenges ?? [])
+      .filter((challenge) => challenge.obligationId !== undefined)
+      .map((challenge) => ({
+        findingId: challenge.findingId,
+        obligationId: challenge.obligationId!,
+        reason: challenge.reason,
+        evidenceIds: challenge.evidenceIds,
+        disposition: "unsupported-inference",
+      })),
     uncertainty: [],
     decision: accepted ? "accept" : "repair",
   };
@@ -341,4 +346,93 @@ describe("bounded independent challenge integration", () => {
     ).rejects.toBe(cause);
     expect(other.records.some((record) => record.kind === "result")).toBe(false);
   });
+});
+
+it("reconsiders a cited item-only granularity false positive on the unchanged graph", async () => {
+  const f = await fixture();
+  f.inventory.obligations = f.inventory.obligations.filter((entry) => entry.kind === "explicit");
+  let judges = 0;
+  let repairs = 0;
+  const usage = { inputTokens: 2, outputTokens: 1 };
+  const backend = {
+    extractObligations: async () => ({ inventory: f.inventory, usage }),
+    compile: async () => ({ objective: f.graph, usage }),
+    repairPlan: async () => {
+      repairs++;
+      return {
+        objective: f.graph,
+        usage,
+        repair: {
+          changeSummary: "Challenge unsupported split",
+          lineage: f.graph.workItems.map((item) => ({
+            itemId: item.id,
+            previousItemIds: [item.id],
+          })),
+          findingDispositions: [
+            {
+              findingId: "oversized-false-positive",
+              disposition: "challenged",
+              reason:
+                "The cited source defines one cohesive bounded deliverable; splitting would duplicate validation",
+              evidenceIds: ["objective"],
+            },
+          ],
+        },
+      };
+    },
+    judgePlan: async (context: PlanJudgeContext) => {
+      judges++;
+      const review = judged(context, judges === 2);
+      if (judges === 1)
+        review.findings = [
+          {
+            id: "oversized-false-positive",
+            dimension: "granularity",
+            severity: "material-efficiency",
+            confidence: 0.8,
+            obligationIds: [],
+            itemIds: [f.graph.workItems[0]!.id],
+            evidenceIds: ["objective"],
+            rootCause: "Item appears oversized",
+            correction: "Split the item",
+            uncertainty: "",
+          },
+        ];
+      else
+        expect(context.challenges).toEqual([
+          {
+            findingId: "oversized-false-positive",
+            originalFinding: {
+              dimension: "granularity",
+              rootCause: "Item appears oversized",
+              correction: "Split the item",
+              itemIds: [f.graph.workItems[0]!.id],
+            },
+            reason:
+              "The cited source defines one cohesive bounded deliverable; splitting would duplicate validation",
+            evidenceIds: ["objective"],
+          },
+        ]);
+      return { verdict: review, usage };
+    },
+  } as unknown as ManagementBackend;
+  const args = {
+    ...f,
+    backend,
+    lease: {} as LeaseState,
+    deadlineAt: Date.now() + 60_000,
+    admit: vi.fn(async () => {}),
+    assertInputs: async () => {},
+    recordUsage: async () => {},
+    validate: async () => {},
+  };
+  const outcome = await compileEvaluatedDraft(args);
+  expect(outcome.status).toBe("accepted");
+  expect(judges).toBe(2);
+  expect(repairs).toBe(1);
+  if (outcome.status !== "accepted") throw new Error("expected acceptance");
+  expect(outcome.graphDigest).toBe(compiledGraphDigest(f.graph));
+  assertCompilerDraftSelection(f.records, outcome.graph, f.binding.inputDigest);
+  await expect(compileEvaluatedDraft(args)).resolves.toMatchObject({ status: "accepted" });
+  expect(judges).toBe(2);
 });

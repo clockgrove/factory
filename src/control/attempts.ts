@@ -421,6 +421,38 @@ export class AttemptManager {
     return admission;
   }
 
+  /** Restart can close an original intent without inventing producer/process absence:
+   * winning the issue CAS prevents every old callback from ever gaining dispatch permission. */
+  async recoverUndispatched(args: {
+    lease: LeaseState;
+    reservation: AttemptReservation;
+    workItemNodeId: string;
+    sequence: number;
+  }): Promise<boolean> {
+    await this.#leases.assertCurrent(args.lease);
+    await this.assertReservation(args.lease, args.reservation, args.workItemNodeId);
+    const closed = await this.ledger.closeUndispatched({
+      workItem: args.reservation.workItem,
+      reservationOid: args.reservation.oid,
+      objective: args.lease.objective,
+      runId: args.lease.runId,
+      directorEpoch: args.lease.epoch,
+      writerHolder: args.lease.holder,
+      policyDigest: args.lease.policyDigest,
+      assertCurrent: () => this.#leases.assertCurrent(args.lease).then(() => {}),
+    });
+    if (!closed) return false;
+    await this.repairReservationComment(args);
+    await this.record({
+      ...args,
+      event: "AttemptDeferred",
+      allowRecovery: true,
+      reason:
+        "issue admission CAS permanently closed the original intent before any backend dispatch",
+    });
+    return true;
+  }
+
   /** A winning transition is pre-dispatch intent, never a license to replay launch. */
   async markDispatching(lease: LeaseState, reservation: AttemptReservation): Promise<void> {
     if (

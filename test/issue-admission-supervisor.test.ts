@@ -1,3 +1,5 @@
+import { PlatformUnavailableError } from "../src/platform.js";
+import * as localScope from "../src/runtime/local-scope.js";
 import { describe, expect, it, vi } from "vitest";
 import { GitHubControlStore } from "../src/control/github-store.js";
 import { issueAdmissionRef, parseIssueAdmissionCommit } from "../src/control/issue-admission.js";
@@ -46,6 +48,71 @@ async function assertOriginalMetadata(f: Fixture) {
 }
 
 describe("Supervisor issue admission with synthetic local execution", () => {
+  it("restarts a never-dispatched no-scope intent after both write response and readback were lost", async () => {
+    const shutdown = new AbortController();
+    const f = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      controllerActivation: true,
+    });
+    vi.spyOn(localScope, "discoverLocalScopeHost").mockResolvedValue(null);
+    const create = vi.mocked(GitHubControlStore.prototype.createRef).getMockImplementation()!;
+    const read = vi.mocked(GitHubControlStore.prototype.readRef).getMockImplementation()!;
+    let lost = false,
+      unavailable = false;
+    vi.mocked(GitHubControlStore.prototype.createRef).mockImplementation(async (ref, oid) => {
+      const accepted = await create(ref, oid);
+      if (!lost && ref === issueAdmissionRef(8) && accepted) {
+        lost = unavailable = true;
+        shutdown.abort();
+        throw new PlatformUnavailableError(
+          { kind: "server_error", retryAfterMs: 1 },
+          new Error("accepted reservation response lost"),
+        );
+      }
+      return accepted;
+    });
+    vi.mocked(GitHubControlStore.prototype.readRef).mockImplementation(async (ref) => {
+      if (unavailable && ref === issueAdmissionRef(8))
+        throw new Error("reservation readback unavailable");
+      return read(ref);
+    });
+    try {
+      await f.run(shutdown.signal).catch(() => undefined);
+      expect(lost).toBe(true);
+      expect(f.activity.filter((event) => event.operation === "launch")).toHaveLength(0);
+      const original = (await ledger(f, 8)).history[0]!;
+      expect(original).toMatchObject({ disposition: "prepared", dispatchPossible: false });
+      expect(
+        f.events().filter((event) => event.event === "AttemptReserved" && event.workItem === 8),
+      ).toHaveLength(0);
+      unavailable = false;
+      const result = await f.run();
+      expect(result, result.reason).toMatchObject({ status: "completed" });
+      const history = (await ledger(f, 8)).history;
+      expect(history.map((entry) => entry.reservation.attempt)).toEqual([1, 2]);
+      expect(history[0]).toMatchObject({
+        reservation: original.reservation,
+        directorEpoch: original.directorEpoch,
+        disposition: "released",
+        dispatchPossible: false,
+      });
+      expect(history[1]!.dispatchPossible).toBe(true);
+      expect(
+        f.events().filter((event) => event.event === "AttemptStarted" && event.workItem === 8),
+      ).toMatchObject([{ attempt: 2 }]);
+      expect(
+        f
+          .events()
+          .filter(
+            (event) => event.kind === "budget" && event.workItem === 8 && event.attempt === 1,
+          ),
+      ).toEqual([]);
+      expect(f.resources.size).toBe(0);
+    } finally {
+      unavailable = false;
+      await f.dispose();
+    }
+  }, 30_000);
   it("finishes the real pipeline with issue ledgers and immutable metadata pointers", async () => {
     const f = await providerSupervisorFixture("daytona-burst", { localOnly: true });
     try {

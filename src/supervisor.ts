@@ -7853,6 +7853,116 @@ export class FactorySupervisor {
     }
   }
 
+  async #recoverUndispatchedAdmission(
+    item: DerivedWorkItem,
+    reservation: AttemptReservation,
+  ): Promise<boolean> {
+    const entry = (await this.#attempts.ledger.read(item.number))?.history.find(
+      (candidate) => candidate.reservation.oid === reservation.oid,
+    );
+    if (
+      !entry ||
+      entry.imported ||
+      entry.dispatchPossible ||
+      ["released", "reconciled"].includes(entry.disposition)
+    )
+      return false;
+    const closed = await this.#lease.use((lease) =>
+      this.#attempts.recoverUndispatched({
+        lease,
+        reservation,
+        workItemNodeId: item.id,
+        sequence: this.#sequences.take(),
+      }),
+    );
+    if (!closed) return false;
+    // The winning issue CAS excludes every delayed original dispatch. No provider
+    // or local-scope absence observation is needed, and no model work is replayed.
+    const snapshot = await this.#reader.readObjective(reservation.objective);
+    const events = snapshotEvents(snapshot).filter(
+      (event) =>
+        event.runId === reservation.runId &&
+        "workItem" in event &&
+        event.workItem === reservation.workItem &&
+        "attempt" in event &&
+        event.attempt === reservation.attempt,
+    );
+    if (
+      events.some(
+        (event) =>
+          event.kind === "attempt" &&
+          ![
+            "AttemptReserved",
+            "AttemptDeferred",
+            "AttemptFailed",
+            "AttemptCancelled",
+            "AttemptTimedOut",
+          ].includes(event.event),
+      )
+    )
+      throw new Error("undispatched admission contradicts authenticated dispatch evidence");
+    await this.#lease.use(async (lease) => {
+      for (const budget of unreconciledBudgetReservations(events)) {
+        if (budget.phase === "management")
+          throw new Error("undispatched worker cannot settle unknown management work");
+        const reconciled = await this.#recorder.budget({
+          lease,
+          reservation,
+          workItemNodeId: item.id,
+          sequence: this.#sequences.take(),
+          event: "BudgetReconciled",
+          unit: budget.unit,
+          phase: budget.phase,
+          amount: 0,
+          ...(budget.usageId ? { usageId: budget.usageId } : {}),
+          ...(budget.modelInvocationId
+            ? {
+                modelInvocationId: budget.modelInvocationId,
+                directorEpoch: reservation.directorEpoch,
+                policyDigest: reservation.policyDigest,
+              }
+            : {}),
+          reason: "issue CAS permanently excluded dispatch of this original worker intent",
+        });
+        this.#budgetEvents.push(reconciled);
+      }
+      for (const capacity of unreconciledCapacityReservations(events)) {
+        await this.#attempts.recordCapacity({
+          lease,
+          reservation,
+          workItemNodeId: item.id,
+          sequence: this.#sequences.take(),
+          event: "CapacityReconciled",
+          phase: capacity.phase,
+          backend: capacity.backend,
+          requestedCpu: capacity.requestedCpu,
+          requestedMemoryMb: capacity.requestedMemoryMb,
+          allowRecovery: true,
+          reason: "issue CAS closed the original intent before dispatch",
+        });
+      }
+    });
+    const capacity = await this.#capacitySnapshot();
+    for (const held of capacity.reservations.filter(
+      (held) =>
+        held.objective === reservation.objective &&
+        held.workItem === reservation.workItem &&
+        held.attempt === reservation.attempt,
+    ))
+      await this.#releaseCapacity(held.key);
+    await this.#settleIssueAdmission(item, reservation, {
+      cleanupConfirmed: true,
+      definitiveNonExecution: true,
+      modelUsageExpected: false,
+    });
+    const settled = (await this.#attempts.ledger.read(item.number))?.history.find(
+      (candidate) => candidate.reservation.oid === reservation.oid,
+    );
+    if (settled?.disposition !== "released")
+      throw new Error("undispatched admission still has unresolved accounting or capacity");
+    return true;
+  }
+
   async #reconcileIssueAdmissionHistory(
     item: DerivedWorkItem,
     lease: LeaseState,
@@ -7874,6 +7984,7 @@ export class FactorySupervisor {
         (candidate) => candidate.oid === entry.reservation.oid,
       );
       if (!reservation) throw new Error("issue admission original reservation unavailable");
+      if (await this.#recoverUndispatchedAdmission(item, reservation)) continue;
       let producerClosed = hasOriginalAdmissionProducerCompletion(entry, events);
       if (!producerClosed && reservation.localScopeBatch) {
         producerClosed =
@@ -13454,6 +13565,7 @@ export class FactorySupervisor {
     if (!reservation) {
       throw new Error(`Work Item #${item.number} has recoverable state but no attempt ref`);
     }
+    if (await this.#recoverUndispatchedAdmission(item, reservation)) return;
     const backend = this.#registry.get(reservation.backend);
     if (!backend) {
       throw new Error(`cannot reconcile unavailable backend ${reservation.backend}`);

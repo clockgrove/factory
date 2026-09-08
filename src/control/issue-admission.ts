@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { gitSha } from "../protocol/limits.js";
 import type { GitCommitObject, LeaseStore } from "./lease.js";
@@ -71,6 +72,7 @@ const recordSchema = z
     workItem: positive,
     workItemNodeId: text,
     revision: positive,
+    operationId: z.string().uuid().optional(),
     priorRevisionOid: gitSha.nullable(),
     history: z.array(entrySchema).min(1).max(4096),
   })
@@ -186,6 +188,60 @@ export class IssueAdmissionLedger {
         ...(reassignmentReceiptOid ? { reassignmentReceiptOid } : {}),
       };
       return this.#write(prior, [...(prior?.history ?? []), entry], assertCurrent);
+    });
+  }
+
+  /** Atomically withdraw launch permission, including a delayed original writer's CAS.
+   * A prepared record is positive non-dispatch evidence only after this CAS wins.
+   * Imported records and any possible dispatch require ordinary resource reconciliation. */
+  async closeUndispatched(
+    args: Fence & {
+      workItem: number;
+      reservationOid: string;
+      objective: number;
+      runId: string;
+      directorEpoch: number;
+      writerHolder: string;
+      policyDigest: string;
+    },
+  ): Promise<IssueAdmissionRecord | null> {
+    return this.#fenced(args.assertCurrent, async () => {
+      await args.assertCurrent();
+      const prior = await this.read(args.workItem);
+      const entry = prior?.history.find((item) => item.reservation.oid === args.reservationOid);
+      if (!prior || !entry) throw Error("issue admission identity not found");
+      const owner = prior.history.at(-1)!;
+      if (
+        entry.objective !== args.objective ||
+        entry.runId !== args.runId ||
+        owner.runId !== args.runId ||
+        owner.objective !== args.objective ||
+        entry.policyDigest !== args.policyDigest ||
+        args.directorEpoch < entry.writerEpoch ||
+        (args.directorEpoch === entry.writerEpoch &&
+          args.writerHolder !== entry.currentWriterHolder)
+      )
+        throw Error("issue admission authority changed");
+      if (
+        entry.imported ||
+        entry.dispatchPossible ||
+        entry.disposition === "released" ||
+        entry.disposition === "reconciled"
+      )
+        return null;
+      if (entry.disposition === "terminal" && entry.writerEpoch === args.directorEpoch)
+        return prior;
+      const closed: IssueAdmissionEntry = {
+        ...entry,
+        disposition: "terminal",
+        writerEpoch: args.directorEpoch,
+        currentWriterHolder: args.writerHolder,
+      };
+      return this.#write(
+        prior,
+        prior.history.map((item) => (item === entry ? closed : item)),
+        args.assertCurrent,
+      );
     });
   }
 
@@ -372,6 +428,9 @@ export class IssueAdmissionLedger {
       workItem: first.workItem,
       workItemNodeId: first.workItemNodeId,
       revision: (prior?.revision ?? 0) + 1,
+      // Distinguish concurrent identical transitions even with content-addressed
+      // commits created in the same second: readback authorizes only this call.
+      operationId: randomUUID(),
       priorRevisionOid: prior?.oid ?? null,
       history,
     });
@@ -420,10 +479,30 @@ export class IssueAdmissionLedger {
     });
     const ref = issueAdmissionRef(first.workItem);
     await fence();
-    const changed = prior
-      ? await this.store.compareAndSwapRef({ ref, beforeOid: prior.oid, afterOid: oid })
-      : await this.store.createRef(ref, oid);
-    if (!changed) throw Error("issue admission contention; reread required");
+    let changed: boolean;
+    try {
+      changed = prior
+        ? await this.store.compareAndSwapRef({ ref, beforeOid: prior.oid, afterOid: oid })
+        : await this.store.createRef(ref, oid);
+    } catch (error) {
+      // An accepted GitHub write can lose its response. Recover only this exact
+      // immutable commit while it is still current, never a matching-looking owner.
+      let observed: IssueAdmissionRecord | null;
+      try {
+        observed = await this.read(first.workItem);
+      } catch {
+        throw error;
+      }
+      if (observed?.oid !== oid) throw error;
+      await fence();
+      return observed;
+    }
+    if (!changed) {
+      const observed = await this.read(first.workItem);
+      if (observed?.oid !== oid) throw Error("issue admission contention; reread required");
+      await fence();
+      return observed;
+    }
     return { ...record, oid, ref };
   }
 }

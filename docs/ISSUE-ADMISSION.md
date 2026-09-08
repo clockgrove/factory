@@ -29,7 +29,10 @@ accounting and command journals.
 response is not proof that a provider request was sent or was not sent. The
 Supervisor does not replay a dispatch transition. Provider-supported idempotency,
 deterministic original resource identities, exact session recovery, and unknown
-accounting gates remain necessary.
+accounting gates remain necessary. An accepted write with a lost response succeeds
+only when fenced readback finds that call’s exact immutable commit. Each write
+includes a unique operation ID so concurrent identical transitions cannot share
+dispatch authorization. If readback is unavailable or different, the caller stops.
 
 ## Permanent compatibility bridge
 
@@ -77,6 +80,14 @@ cleanup succeeded, applicable capacity was released, and authenticated accountin
 is complete. A retained artifact awaiting continuation is not a released attempt.
 Definitive non-execution requires a never-dispatched original identity and positive
 closure evidence; missing native or model usage is never inferred to be zero.
+On restart, a current writer can CAS-close a non-imported intent whose durable
+`dispatchPossible` flag is still false. That CAS permanently defeats delayed
+dispatch transitions for the original reservation. Recovery repairs its receipt,
+settles exact pending budget and capacity reservations using this positive
+non-execution proof, and releases it before admitting another attempt. This works
+without a local process scope, including remote backends. Imported or possibly
+dispatched entries cannot take this path; elapsed time or missing processes do not
+make them safe to replace.
 
 A different run/graph cannot use ordinary admission. Transfer requires explicit
 accepted new-run authority, settled prior work/accounting, no original producer or

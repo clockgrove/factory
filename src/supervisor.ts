@@ -14070,7 +14070,7 @@ export class FactorySupervisor {
           this.#validationIdentity(reservation, [...digests][0]!),
         );
         if (checkpoint) {
-          validation = await this.#lease.use((lease) =>
+          const recoveredValidation = await this.#lease.use((lease) =>
             this.#recorder.validation({
               lease,
               workItemNodeId: item.id,
@@ -14079,7 +14079,11 @@ export class FactorySupervisor {
               sequence: this.#sequences.take(),
             }),
           );
-          events.push(validation);
+          if (recoveredValidation.kind !== "validation") {
+            throw new Error("validation recovery emitted an unexpected lifecycle receipt");
+          }
+          validation = recoveredValidation;
+          events.push(recoveredValidation);
         }
       }
     }

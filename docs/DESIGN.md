@@ -131,6 +131,15 @@ their own Objective leases and share atomic capacity reservations with the servi
 does not prevent those sessions from starting unrelated Objectives. Process-local queues and cursors
 never survive as authority.
 
+Losing that election retires discovery, new activation and recovery dispatch, election-scoped
+observations, and explicit shared-capacity configuration. It does not abort an already-dispatched
+Objective whose own current writer epoch still authorizes execution. The retired controller awaits
+every such Supervisor through completion, failure and cleanup; a successor may immediately discover
+other eligible Objectives, while Objective lease CAS and the shared-capacity ledger prevent duplicate
+ownership or capacity release by inference. Explicit service shutdown and user cancellation still
+propagate to their scoped execution. Credential, account, quota, circuit and other platform-safety
+failures retain their stop or backoff behavior rather than being treated as election handoff.
+
 The foreground compatibility entry point remains:
 
 ```text

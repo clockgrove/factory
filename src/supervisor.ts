@@ -338,6 +338,13 @@ class RunCancellationRequestedError extends Error {
   }
 }
 
+class ControllerObservationRetiredError extends Error {
+  constructor() {
+    super("repository-controller observation retired before dispatch");
+    this.name = "ControllerObservationRetiredError";
+  }
+}
+
 export interface SupervisorOptions {
   token: string;
   owner: string;
@@ -360,8 +367,10 @@ export interface SupervisorOptions {
   activation?: { requestId: string; baseSha: string };
   /** Exact acknowledged successor; selects complete authenticated recovery history reads. */
   recovery?: { requestId: string; planDigest: string; successorRunId: string };
-  /** Current fenced repository-controller identity, sampled for durable status. */
-  controllerObservation?: () => ControllerObservation;
+  /** Current fenced repository-controller identity, sampled for durable status.
+   * A retired discovery generation returns undefined; Objective authority then
+   * remains observable solely through the current Objective writer. */
+  controllerObservation?: () => ControllerObservation | undefined;
 }
 
 export interface ControllerObservation {
@@ -1811,10 +1820,14 @@ export class FactorySupervisor {
     };
   }
 
-  async #recordControllerObservation(snapshot: Snapshot): Promise<void> {
+  async #recordControllerObservation(
+    snapshot: Snapshot,
+    objectiveWriterOnly = false,
+  ): Promise<void> {
     const observe = this.#options.controllerObservation;
     const owner = await this.#lease.use(async (lease) => lease);
-    const observation = observe?.() ?? {
+    const observedController = objectiveWriterOnly ? undefined : observe?.();
+    const observation = observedController ?? {
       controllerId: owner.holder,
       epoch: owner.epoch,
       expiresAt: owner.expiresAt.toISOString(),
@@ -1824,7 +1837,7 @@ export class FactorySupervisor {
     // for each lease renewal. Service observations retain their own lifecycle.
     const observationKey = JSON.stringify([
       owner.epoch,
-      observe ? observation : "objective-writer",
+      observedController ? observation : "objective-writer",
     ]);
     if (this.#lastControllerObservationKey === observationKey) return;
     const latest = (snapshot.factoryEvents ?? [])
@@ -1844,17 +1857,37 @@ export class FactorySupervisor {
       this.#lastControllerObservationKey = observationKey;
       return;
     }
-    await this.#lease.use((lease) =>
-      this.#recorder.controller({
-        lease,
-        objectiveNodeId: snapshot.id,
-        sequence: this.#sequences.take(),
-        ...observation,
-        observationScope: observe ? "repository-controller" : "objective-writer",
-        protocolMin: PROTOCOL_V2,
-        protocolMax: PROTOCOL_V2,
-      }),
-    );
+    const record = () =>
+      this.#lease.use((lease) =>
+        this.#recorder.controller({
+          lease,
+          objectiveNodeId: snapshot.id,
+          sequence: this.#sequences.take(),
+          ...observation,
+          observationScope: observedController ? "repository-controller" : "objective-writer",
+          protocolMin: PROTOCOL_V2,
+          protocolMax: PROTOCOL_V2,
+        }),
+      );
+    try {
+      if (observedController) {
+        // A scoped fence replaces the store's configured Objective fence, so
+        // compose both checks. The local callback is sampled after any queue
+        // wait and adjacent to transport; retirement suppresses stale leader
+        // metadata without polling the repository lease or aborting execution.
+        const objectiveFence = this.#captureMutationFence();
+        await this.#store.withMutationFence(async (waitedMs) => {
+          await objectiveFence(waitedMs);
+          if (!observe?.()) throw new ControllerObservationRetiredError();
+        }, record);
+      } else await record();
+    } catch (error) {
+      if (error instanceof ControllerObservationRetiredError && !objectiveWriterOnly) {
+        await this.#recordControllerObservation(snapshot, true);
+        return;
+      }
+      throw error;
+    }
     this.#lastControllerObservationKey = observationKey;
   }
 

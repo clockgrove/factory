@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   GitHubRepositoryController,
@@ -10,7 +10,11 @@ import {
   pathsOverlap,
   type RepositoryAdmission,
 } from "../src/controller/repository-controls.js";
-import type { LeaseManager, LeaseState } from "../src/control/lease.js";
+import {
+  LeaseAcquisitionContendedError,
+  type LeaseManager,
+  type LeaseState,
+} from "../src/control/lease.js";
 import { PlatformUnavailableError } from "../src/platform.js";
 import { ControllerGenerationRetirement } from "../src/controller/retirement.js";
 
@@ -141,6 +145,143 @@ describe("repository controller", () => {
     expect(await controller.reconcileOnce()).toBe(0);
     finishPeer();
     await controller.settle();
+  });
+
+  it("retires discovery without aborting or orphaning an active Objective", async () => {
+    const retirement = new AbortController();
+    let executionSignal: AbortSignal | undefined;
+    let finish!: () => void;
+    let completed = false;
+    const discover = vi.fn(async () => [
+      {
+        objective: 1,
+        activatedAt: "2026-01-01T00:00:00Z",
+        requestId: "one",
+        policy: {},
+        policyDigest: "c".repeat(64),
+        baseSha: "a".repeat(40),
+        requestedBy: "operator",
+      },
+    ]);
+    const controller = new GitHubRepositoryController({
+      discoverySignal: retirement.signal,
+      pollIntervalMs: 60_000,
+      store: { discoverObjectiveActivations: discover },
+      reconcileObjective: async (_activation, signal) => {
+        executionSignal = signal;
+        await new Promise<void>((resolve) => {
+          finish = resolve;
+        });
+        completed = true;
+      },
+    });
+
+    const task = controller.run();
+    await vi.waitFor(() => expect(executionSignal).toBeDefined());
+    retirement.abort(new Error("successor won discovery election"));
+    await Promise.resolve();
+    expect(executionSignal!.aborted).toBe(false);
+    expect(completed).toBe(false);
+    expect(await controller.reconcileOnce()).toBe(0);
+    finish();
+    await task;
+    expect(completed).toBe(true);
+    expect(discover).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets a successor start a different eligible Objective while the retired cohort settles", async () => {
+    const retirement = new AbortController();
+    let finishFirst!: () => void;
+    let firstSignal: AbortSignal | undefined;
+    const firstActivation = {
+      objective: 1,
+      activatedAt: "2026-01-01T00:00:00Z",
+      requestId: "one",
+      policy: {},
+      policyDigest: "c".repeat(64),
+      baseSha: "a".repeat(40),
+      requestedBy: "operator",
+      resuming: true,
+    };
+    const first = new GitHubRepositoryController({
+      capacity: 2,
+      discoverySignal: retirement.signal,
+      store: { discoverObjectiveActivations: async () => [firstActivation] },
+      reconcileObjective: async (_activation, signal) => {
+        firstSignal = signal;
+        await new Promise<void>((resolve) => {
+          finishFirst = resolve;
+        });
+      },
+    });
+    expect(await first.reconcileOnce()).toBe(1);
+    await vi.waitFor(() => expect(firstSignal).toBeDefined());
+    retirement.abort(new Error("successor won discovery election"));
+
+    const successorStarted: number[] = [];
+    const successor = new GitHubRepositoryController({
+      capacity: 2,
+      store: {
+        discoverObjectiveActivations: async () => [
+          firstActivation,
+          { ...firstActivation, objective: 2, requestId: "two", resuming: false },
+        ],
+      },
+      reconcileObjective: async (activation) => {
+        if (activation.objective === 1) throw new LeaseAcquisitionContendedError(1, 120_000);
+        successorStarted.push(activation.objective);
+      },
+    });
+    expect(await successor.reconcileOnce()).toBe(2);
+    await successor.settle();
+    expect(successorStarted).toEqual([2]);
+    expect(firstSignal!.aborted).toBe(false);
+    finishFirst();
+    await first.settle();
+  });
+
+  it("propagates explicit shutdown to active Objective execution", async () => {
+    const shutdown = new AbortController();
+    let stopped = false;
+    let started!: () => void;
+    const running = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const controller = new GitHubRepositoryController({
+      signal: shutdown.signal,
+      store: {
+        discoverObjectiveActivations: async () => [
+          {
+            objective: 1,
+            activatedAt: "2026-01-01T00:00:00Z",
+            requestId: "one",
+            policy: {},
+            policyDigest: "c".repeat(64),
+            baseSha: "a".repeat(40),
+            requestedBy: "operator",
+          },
+        ],
+      },
+      reconcileObjective: async (_activation, signal) => {
+        started();
+        await new Promise<void>((resolve) =>
+          signal.addEventListener(
+            "abort",
+            () => {
+              stopped = true;
+              resolve();
+            },
+            { once: true },
+          ),
+        );
+      },
+    });
+
+    const task = controller.run();
+    await running;
+    shutdown.abort(new Error("operator shutdown"));
+    await task;
+    expect(stopped).toBe(true);
   });
 
   it("connects durable discovery to fair per-Objective supervisors with shared resources", async () => {

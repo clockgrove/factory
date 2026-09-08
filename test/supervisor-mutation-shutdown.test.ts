@@ -5,6 +5,7 @@ import { decodeEventComments } from "../src/control/receipts.js";
 import { RepositoryLeaseManager } from "../src/controller/repository-lease.js";
 import { runGitHubRepositoryController } from "../src/controller/repository-controller.js";
 import { ContentCreationPacer, MutationScheduler } from "../src/platform.js";
+import { policyDigest } from "../src/protocol/policy.js";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
 
 type Fixture = Awaited<ReturnType<typeof providerSupervisorFixture>>;
@@ -20,6 +21,24 @@ it("the actual Supervisor drains and releases its owned lease after a queued rec
     controllerActivation: true,
   });
   fixtures.push(f);
+  const baseSha = f.snapshot.factoryEvents!.find((event) => event.event === "FactoryRunStarted")!
+    .baseSha!;
+  vi.mocked(LeaseManager.prototype.read).mockImplementation(async (objective) =>
+    objective === 7
+      ? {
+          objective,
+          runId: f.runId,
+          holder: "operator",
+          policyDigest: policyDigest(f.policy),
+          ref: "refs/clockgrove-factory/leases/objective-7",
+          oid: baseSha,
+          treeOid: baseSha,
+          epoch: 1,
+          sequence: 100,
+          expiresAt: new Date(Date.now() + 600_000),
+        }
+      : null,
+  );
   const shutdown = new AbortController();
   let reached!: () => void;
   const queued = new Promise<void>((resolve) => {
@@ -68,8 +87,7 @@ it("the actual Supervisor drains and releases its owned lease after a queued rec
       requestId: "fixture-activation",
       policy: f.policy,
       policyDigest: "c".repeat(64),
-      baseSha: f.snapshot.factoryEvents!.find((event) => event.event === "FactoryRunStarted")!
-        .baseSha!,
+      baseSha,
       requestedBy: "operator",
     },
   ]);
@@ -84,6 +102,7 @@ it("the actual Supervisor drains and releases its owned lease after a queued rec
       sequence: 1,
       expiresAt: new Date(Date.now() + 600_000),
     }));
+  vi.spyOn(RepositoryLeaseManager.prototype, "assertCurrent").mockResolvedValue();
   const retired: string[] = [];
   const objectiveRelease = vi.mocked(LeaseManager.prototype.release);
   objectiveRelease.mockImplementation(async (lease) => {

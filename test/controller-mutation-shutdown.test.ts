@@ -325,3 +325,40 @@ it("removes only queued normal admissions while an in-flight holder still serial
   expect(f.recordCall).toHaveBeenCalledTimes(0);
   expect(vi.getTimerCount()).toBe(0);
 });
+
+it("rechecks local discovery retirement beside the Objective fence after a queue wait", async () => {
+  const f = setup();
+  const active = await f.resources.mutationScheduler.acquire("normal");
+  let current = true;
+  let objectiveChecks = 0;
+  const stale = f.store.withMutationFence(
+    async () => {
+      objectiveChecks++;
+      if (!current) throw new Error("repository-controller observation retired before dispatch");
+    },
+    () =>
+      f.store.stackRequest(
+        "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
+        { owner: "fixture", repo: "fixture", issue_number: 1, body: "stale observation" },
+        true,
+      ),
+  );
+  const outcome = stale.catch((error: unknown) => error);
+  await vi.advanceTimersByTimeAsync(1);
+  current = false;
+  active.release();
+  await expect(outcome).resolves.toMatchObject({
+    message: "repository-controller observation retired before dispatch",
+  });
+  expect(objectiveChecks).toBe(1);
+  expect(f.request).not.toHaveBeenCalled();
+
+  const fallback = f.store.stackRequest(
+    "POST /repos/{owner}/{repo}/issues/{issue_number}/comments",
+    { owner: "fixture", repo: "fixture", issue_number: 1, body: "Objective writer fallback" },
+    true,
+  );
+  await advanceUntil(() => f.request.mock.calls.length === 1);
+  await fallback;
+  expect(f.request).toHaveBeenCalledTimes(1);
+});

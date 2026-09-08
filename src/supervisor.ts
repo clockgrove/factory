@@ -289,6 +289,7 @@ import { rankReadyWorkItems } from "./scheduling/priority.js";
 import { validatePriorityFieldDefinition } from "./scheduling/github-priority.js";
 import { ContinuousExecutionPool } from "./scheduling/continuous-refill.js";
 import { ObjectiveFairness } from "./scheduling/fairness.js";
+import { waitForProgress } from "./scheduling/progress-wake.js";
 import {
   CachedResourceSampler,
   LinuxResourceSampler,
@@ -4196,6 +4197,10 @@ export class FactorySupervisor {
         this.#compiledProjection = durableProjection;
       }
       for (;;) {
+        // Capture before any snapshot or admission work so a peer-capacity change during this
+        // iteration cannot happen between our decision and listener registration unnoticed.
+        const fairnessRevision = this.#fairness.revision;
+        const executionRevision = activeExecutions.revision;
         if (heartbeatError) throw heartbeatError;
         activeExecutions.throwIfFailed();
         if (this.#options.signal?.aborted) {
@@ -4285,6 +4290,7 @@ export class FactorySupervisor {
           continue;
         }
         if (await this.#repairReservationReceipts(objective.items)) continue;
+        let deferredIntegration = false;
         if (this.#deliverySelection.selected === "regular-prs") {
           const unrecorded = objective.items.find((item) => {
             if (item.state !== "done" || activeExecutions.has(item.number)) return false;
@@ -4308,9 +4314,8 @@ export class FactorySupervisor {
             );
           });
           if (unrecorded) {
-            if (!(await this.#resumeIntegration(unrecorded)))
-              await sleep(this.#options.pollIntervalMs ?? 60_000, this.#options.signal);
-            continue;
+            if (await this.#resumeIntegration(unrecorded)) continue;
+            deferredIntegration = true;
           }
         }
         // GitHub can report MERGED before the response or our closure receipt arrives.
@@ -4361,11 +4366,10 @@ export class FactorySupervisor {
               deadline,
             );
           }
-          if (!progressed)
-            await sleep(this.#options.pollIntervalMs ?? 60_000, this.#options.signal);
-          continue;
+          if (progressed) continue;
+          deferredIntegration = true;
         }
-        if (allDone(objective)) {
+        if (!deferredIntegration && allDone(objective)) {
           const settlements = await activeExecutions.settle();
           const failure = settlements.find((settlement) => settlement.error);
           if (failure?.error) throw failure.error;
@@ -4999,18 +5003,12 @@ export class FactorySupervisor {
           this.#notify(`admitted: ${started.map((number) => `#${number}`).join(", ")}`);
         }
         if (capacityChanged) continue;
-        if (activeExecutions.size === 0) {
-          await this.#fairness.waitForChange(
-            this.#options.pollIntervalMs ?? 60_000,
-            this.#options.signal,
-          );
-          continue;
-        }
-        const settled = await activeExecutions.waitForChange(
-          this.#options.pollIntervalMs ?? 2_000,
-          this.#options.signal,
+        await this.#waitForProgress(
+          activeExecutions,
+          executionRevision,
+          fairnessRevision,
+          deadline,
         );
-        if (settled?.error) throw settled.error;
       }
     } catch (error) {
       if (error instanceof LeaseLostError) throw error;
@@ -12415,6 +12413,29 @@ export class FactorySupervisor {
 
   #integrationDue(workItem: number): boolean {
     return (this.#integrationWaits.get(workItem)?.until ?? 0) <= Date.now();
+  }
+
+  async #waitForProgress(
+    activeExecutions: ContinuousExecutionPool<number>,
+    executionRevision: number,
+    fairnessRevision: number,
+    objectiveDeadline: number,
+  ): Promise<void> {
+    const normalMaximum =
+      activeExecutions.size === 0
+        ? (this.#options.pollIntervalMs ?? 60_000)
+        : (this.#options.pollIntervalMs ?? 2_000);
+    const maximumMs = Math.max(1, Math.min(normalMaximum, objectiveDeadline - Date.now()));
+    const settled = await waitForProgress({
+      executions: activeExecutions,
+      executionRevision,
+      fairness: this.#fairness,
+      fairnessRevision,
+      maximumMs,
+      retryDeadlines: [...this.#integrationWaits.values()].map((wait) => wait.until),
+      signal: this.#options.signal,
+    });
+    if (settled?.error) throw settled.error;
   }
 
   #deferIntegration(workItem: number, reason: string): false {

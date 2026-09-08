@@ -1052,6 +1052,43 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     return entry.sha;
   }
 
+  /** Read one Git tree directory without recursively materializing an ever-growing tree. */
+  async readTreeDirectory(
+    treeOid: string,
+    path: string,
+  ): Promise<Array<{ name: string; type: "blob" | "tree"; sha: string }> | null> {
+    const segments = path.split("/").filter(Boolean);
+    let current = treeOid;
+    for (const segment of segments) {
+      const response = await this.#call(() =>
+        this.#octokit.request("GET /repos/{owner}/{repo}/git/trees/{tree_sha}", {
+          owner: this.#owner,
+          repo: this.#repo,
+          tree_sha: current,
+        }),
+      );
+      if (response.data.truncated) throw new Error(`Git tree directory ${path} was truncated`);
+      const entry = response.data.tree.find((candidate) => candidate.path === segment);
+      if (!entry) return null;
+      if (entry.type !== "tree" || !entry.sha)
+        throw new Error(`Git tree path ${path} crosses non-directory entry ${segment}`);
+      current = entry.sha;
+    }
+    const response = await this.#call(() =>
+      this.#octokit.request("GET /repos/{owner}/{repo}/git/trees/{tree_sha}", {
+        owner: this.#owner,
+        repo: this.#repo,
+        tree_sha: current,
+      }),
+    );
+    if (response.data.truncated) throw new Error(`Git tree directory ${path} was truncated`);
+    return response.data.tree.map((entry) => {
+      if ((entry.type !== "blob" && entry.type !== "tree") || !entry.path || !entry.sha)
+        throw new Error(`Git tree directory ${path} contains an unsupported entry`);
+      return { name: entry.path, type: entry.type, sha: entry.sha };
+    });
+  }
+
   async findPullRequestForBranch(branch: string): Promise<{
     number: number;
     htmlUrl: string;

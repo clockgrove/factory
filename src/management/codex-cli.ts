@@ -583,13 +583,19 @@ const RepairSummarySchema = z
 
 /** Frozen sources supplied before any draft exists. No compiler reasoning is a source. */
 export function compilerObligationEvidence(context: CompilationContext): CompilerEvidence[] {
+  const original = `${context.objective.title}\n${context.objective.body}`;
+  const objectiveChunks = original.match(/[\s\S]{1,4000}/g) ?? [];
+  if (objectiveChunks.length > 94)
+    throw new Error("original Objective exceeds bounded citation inventory");
   return [
-    {
-      id: "objective",
-      kind: "objective",
-      identity: compilerEvalDigest(context.objective),
-      excerpt: `${context.objective.title}\n${context.objective.body}`.slice(0, 4000),
-    },
+    ...objectiveChunks.map(
+      (excerpt, index): CompilerEvidence => ({
+        id: index === 0 ? "objective" : `objective-${index + 1}`,
+        kind: "objective",
+        identity: compilerEvalDigest(context.objective),
+        excerpt,
+      }),
+    ),
     {
       id: "repository",
       kind: "repository",
@@ -626,7 +632,8 @@ export async function readCompilerObligationEvidence(
     (a, b) => priority(a) - priority(b) || a.localeCompare(b),
   );
   const missing: string[] = [];
-  for (const path of paths.slice(0, 32)) {
+  const maximumSources = Math.min(32, 127 - evidence.length);
+  for (const path of paths.slice(0, maximumSources)) {
     RepositoryScopePathSchema.parse(path);
     const result = await runContainedProcess({
       command: "git",
@@ -654,7 +661,7 @@ export async function readCompilerObligationEvidence(
       missing.push(path);
     }
   }
-  missing.push(...paths.slice(32));
+  missing.push(...paths.slice(maximumSources));
   if (missing.length)
     evidence.push({
       id: "unavailable-sources",

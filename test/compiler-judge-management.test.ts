@@ -142,6 +142,21 @@ function verdict(
 }
 
 describe("independent compiler management boundaries", () => {
+  it("retains cited Objective text beyond the first excerpt without silently dropping scope", async () => {
+    const { context } = await fixture();
+    context.objective.body = `${"a".repeat(4200)} Final mandatory compatibility requirement`;
+    const evidence = compilerObligationEvidence(context);
+    expect(
+      evidence
+        .filter((entry) => entry.kind === "objective")
+        .map((entry) => entry.excerpt)
+        .join(""),
+    ).toBe(`${context.objective.title}\n${context.objective.body}`);
+    expect(evidence.find((entry) => entry.id === "objective-2")?.excerpt).toContain(
+      "Final mandatory compatibility requirement",
+    );
+  });
+
   it("extracts obligations without a graph and durably checkpoints before returning", async () => {
     const { context, inventory } = await fixture();
     const calls: string[] = [];

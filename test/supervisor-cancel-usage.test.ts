@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { LeaseLostError, LeaseManager } from "../src/control/lease.js";
-import { LifecycleRecorder } from "../src/control/events.js";
+import { GitHubControlStore } from "../src/control/github-store.js";
+import { decodeEventComments } from "../src/control/receipts.js";
 import { isModelInvocationMarker, unresolvedModelInvocations } from "../src/control/budget.js";
 import type { FactoryEvent } from "../src/protocol/events.js";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
@@ -185,15 +186,38 @@ describe("Supervisor cancellation model usage", () => {
               vi.mocked(LeaseManager.prototype.assertCurrent).mockRejectedValue(
                 new LeaseLostError("cancellation fixture lease lost"),
               );
-            else
-              vi.spyOn(LifecycleRecorder.prototype, "budget").mockRejectedValue(
-                new Error("cancellation fixture receipt unavailable"),
-              );
           },
         }),
       });
+      if (failure === "receipt") {
+        const writer = vi.mocked(GitHubControlStore.prototype.addIssueComment);
+        const original = writer.getMockImplementation()!;
+        writer.mockImplementation(async (nodeId, body) => {
+          if (
+            decodeEventComments(body).some(
+              (event) =>
+                event.kind === "budget" &&
+                event.event === "BudgetReconciled" &&
+                event.unit === "model_tokens" &&
+                event.phase === "execution",
+            )
+          ) {
+            throw new Error("cancellation fixture receipt unavailable");
+          }
+          return original(nodeId, body);
+        });
+      }
       try {
-        await expect(f.run(shutdown.signal)).rejects.toThrow(/lease lost|receipt unavailable/);
+        const run = f.run(shutdown.signal);
+        await expect(run).rejects.toThrow(/lease lost|receipt unavailable/);
+        if (failure === "receipt") {
+          const error = await run.catch((observed: unknown) => observed);
+          expect(error).toBeInstanceOf(Error);
+          expect((error as Error).name).toBe("CancellationAccountingPublicationError");
+          expect((error as Error).cause).toMatchObject({
+            message: "cancellation fixture receipt unavailable",
+          });
+        }
         expect(
           f
             .events()

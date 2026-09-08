@@ -12,6 +12,7 @@ import {
 } from "../src/control/receipts.js";
 import { LifecycleRecorder } from "../src/control/events.js";
 import type { LeaseManager, LeaseState } from "../src/control/lease.js";
+import { objectiveAuthorityObservation, writerAuthority } from "../src/control/authority.js";
 
 const common = {
   protocol: "clockgrove.factory/v2",
@@ -65,12 +66,23 @@ describe("Objective receipt writer generation", () => {
       ),
     );
     expect(validate(boundary)).toBe(true);
+    expect(
+      validate({
+        ...boundary,
+        writerOperationId: "a".repeat(64),
+        writerHolder: "owner-b",
+        writerPolicyDigest: policyDigest(DEFAULT_RUN_POLICY),
+      }),
+    ).toBe(true);
     for (const patch of [
       { writerEpoch: 0 },
       { writerEpoch: -1 },
       { writerEpoch: 1.5 },
       { writerEpoch: "2" },
       { observationScope: "unknown" },
+      { writerOperationId: "contains spaces" },
+      { writerHolder: "" },
+      { writerPolicyDigest: "not-a-digest" },
     ]) {
       expect(validate({ ...boundary, ...patch })).toBe(false);
       expect(() => parseFactoryEvent({ ...boundary, ...patch })).toThrow();
@@ -116,11 +128,70 @@ describe("Objective receipt writer generation", () => {
       "conflicting Factory events",
     );
   });
+  it("matches complete writer identity to the authoritative lease and fails closed when absent", () => {
+    const lease = {
+      ref: "refs/clockgrove-factory/leases/objective-42",
+      oid: "a".repeat(40),
+      treeOid: "b".repeat(40),
+      objective: 42,
+      runId: "run-a",
+      holder: "owner-b",
+      policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+      epoch: 2,
+      sequence: 6,
+      expiresAt: new Date("2026-09-07T00:10:00.000Z"),
+    } satisfies LeaseState;
+    const authority = objectiveAuthorityObservation(lease, new Date("2026-09-07T00:05:00.000Z"));
+    const fresh = parseFactoryEvent({ ...terminal(2), ...writerAuthority(lease, 9) });
+    expect(hasCurrentWriterAuthority(fresh, [fresh], authority)).toBe(true);
+    expect(
+      hasCurrentWriterAuthority(fresh, [fresh], {
+        ...authority,
+        observedAt: new Date("2026-09-07T00:11:00.000Z"),
+      }),
+    ).toBe(true);
+    expect(hasCurrentWriterAuthority(terminal(2), [terminal(2)], authority)).toBe(true);
+    expect(hasCurrentWriterAuthority(terminal(), [terminal()], authority)).toBe(false);
+    expect(
+      hasCurrentWriterAuthority(
+        parseFactoryEvent({ ...terminal(2), writerHolder: "partial-writer" }),
+        [terminal(2)],
+        authority,
+      ),
+    ).toBe(false);
+    expect(hasCurrentWriterAuthority(fresh, [fresh], null)).toBe(false);
+    expect(
+      hasCurrentWriterAuthority(fresh, [fresh], { ...authority, holder: "successor", epoch: 3 }),
+    ).toBe(false);
+  });
+  it("deduplicates exact writer-operation replay and rejects changed payloads", () => {
+    const lease = {
+      objective: 42,
+      runId: "run-a",
+      holder: "owner-b",
+      epoch: 2,
+      policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+    } as LeaseState;
+    const original = parseFactoryEvent({ ...terminal(2), ...writerAuthority(lease, 9) });
+    const replay = parseFactoryEvent({
+      ...original,
+      sequence: 10,
+      at: "2026-09-07T00:00:01.000Z",
+    });
+    expect(deduplicateFactoryEvents([replay, original])).toEqual([original]);
+    expect(() =>
+      deduplicateFactoryEvents([
+        original,
+        parseFactoryEvent({ ...replay, event: "FactoryRunCancelled" }),
+      ]),
+    ).toThrow("conflicting Factory writer operations");
+  });
   it("stamps the reconciling writer while retaining original producer accounting", async () => {
     const events: FactoryEvent[] = [];
     const lease = {
       objective: 42,
       runId: "run-a",
+      holder: "owner-b",
       epoch: 2,
       policyDigest: policyDigest(DEFAULT_RUN_POLICY),
     } as LeaseState;

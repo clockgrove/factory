@@ -7,7 +7,9 @@ import { GitHubControlStore } from "../src/control/github-store.js";
 import { decodeEventComments, encodeEventComment } from "../src/control/receipts.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
 import { cancellationRequestFromComments } from "../src/github.js";
-import { DEFAULT_RUN_POLICY, parseRunPolicy } from "../src/protocol/policy.js";
+import { DEFAULT_RUN_POLICY, parseRunPolicy, policyDigest } from "../src/protocol/policy.js";
+import { writerAuthority } from "../src/control/authority.js";
+import type { LeaseState } from "../src/control/lease.js";
 
 function fixture(fault?: "comment-response" | "label-before" | "label-response") {
   const labels = new Set<string>();
@@ -18,6 +20,7 @@ function fixture(fault?: "comment-response" | "label-before" | "label-response")
   let defaultBase = "a".repeat(40);
   let actor = "operator";
   let loseNextComment = false;
+  let authorityLease: LeaseState | undefined;
   const store = new GitHubControlStore({
     token: "fixture-only",
     owner: "fixture",
@@ -54,6 +57,35 @@ function fixture(fault?: "comment-response" | "label-before" | "label-response")
             author_association: "OWNER",
           })),
         );
+      if (route.startsWith("GET /repos/fixture/activation/git/ref/")) {
+        if (!authorityLease) return response({ message: "Not Found" }, 404);
+        return response({ object: { sha: authorityLease.oid } });
+      }
+      if (
+        authorityLease &&
+        route === `GET /repos/fixture/activation/git/commits/${authorityLease.oid}`
+      ) {
+        const event = {
+          protocol: "clockgrove.factory/v2",
+          kind: "lease",
+          event: "LeaseAcquired",
+          objective: authorityLease.objective,
+          runId: authorityLease.runId,
+          sequence: authorityLease.sequence,
+          at: "2026-09-05T09:59:00.000Z",
+          holder: authorityLease.holder,
+          epoch: authorityLease.epoch,
+          expiresAt: authorityLease.expiresAt.toISOString(),
+          policyDigest: authorityLease.policyDigest,
+        };
+        const trailer = Buffer.from(JSON.stringify(event), "utf8").toString("base64url");
+        return response({
+          sha: authorityLease.oid,
+          tree: { sha: authorityLease.treeOid },
+          parents: [{ sha: "a".repeat(40) }],
+          message: `Factory lease LeaseAcquired for Objective #7\n\nFactory-Event: ${trailer}`,
+        });
+      }
       if (route === "POST /repos/fixture/activation/issues/7/comments") {
         comments.push(data.body);
         if (loseNextComment) {
@@ -130,6 +162,9 @@ function fixture(fault?: "comment-response" | "label-before" | "label-response")
     },
     advanceBase: () => {
       defaultBase = "b".repeat(40);
+    },
+    setAuthorityLease: (lease: LeaseState) => {
+      authorityLease = lease;
     },
   };
 }
@@ -223,7 +258,7 @@ describe("plain issue activation discovery", { timeout: 15_000 }, () => {
       requestedBy: "operator",
       baseSha: "a".repeat(40),
       repository: "fixture/activation",
-      policyDigest: activation.policyDigest,
+      policyDigest: policyDigest(DEFAULT_RUN_POLICY),
     });
     expect(await f.store.discoverObjectiveActivations()).toEqual([]);
     expect(await f.service().status(7)).toMatchObject({
@@ -288,6 +323,52 @@ describe("plain issue activation discovery", { timeout: 15_000 }, () => {
     }
     // Withdrawal remains actionable even when a pause was acknowledged while
     // the queued cancellation/start race was being resolved.
+    expect(await f.store.discoverObjectiveActivations()).toHaveLength(1);
+  });
+
+  it("does not let stale terminal or pause acknowledgement comments suppress takeover discovery", async () => {
+    const f = fixture();
+    await f.service().activate(f.activation);
+    start(f);
+    const commonLease = {
+      ref: "refs/clockgrove-factory/leases/objective-7",
+      treeOid: "b".repeat(40),
+      objective: 7,
+      runId: "actual-started-run",
+      policyDigest: policyDigest(DEFAULT_RUN_POLICY),
+      sequence: 8,
+      expiresAt: new Date("2026-09-05T10:10:00.000Z"),
+    };
+    const oldLease = {
+      ...commonLease,
+      oid: "c".repeat(40),
+      holder: "old-writer",
+      epoch: 1,
+    } satisfies LeaseState;
+    f.setAuthorityLease({
+      ...commonLease,
+      oid: "d".repeat(40),
+      holder: "new-writer",
+      epoch: 2,
+    });
+    for (const [sequence, fields] of [
+      [4, { event: "RunPauseRequested", requestId: "stale-pause", requestedBy: "operator" }],
+      [5, { event: "RunPauseAcknowledged", commandRequestId: "stale-pause" }],
+      [6, { event: "FactoryRunCompleted" }],
+    ] as const) {
+      const event = parseFactoryEvent({
+        protocol: "clockgrove.factory/v2",
+        kind: "run",
+        objective: 7,
+        runId: "actual-started-run",
+        sequence,
+        at: "2026-09-05T10:00:00.000Z",
+        ...fields,
+        ...(fields.event === "RunPauseRequested" ? {} : writerAuthority(oldLease, sequence)),
+      });
+      f.comments.push(encodeEventComment(event.event, event));
+    }
+
     expect(await f.store.discoverObjectiveActivations()).toHaveLength(1);
   });
 

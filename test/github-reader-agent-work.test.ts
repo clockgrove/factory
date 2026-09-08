@@ -4,6 +4,9 @@ import { encodeEventComment } from "../src/control/receipts.js";
 import { GitHubReader } from "../src/github.js";
 import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
+import { writerAuthority } from "../src/control/authority.js";
+import { hasCurrentWriterAuthority, latestRunReceipts } from "../src/control/receipts.js";
+import type { LeaseState } from "../src/control/lease.js";
 
 const OBJECTIVE = 7;
 const RUN = "runtime-read-count";
@@ -139,7 +142,12 @@ function item(number: number, pullRequest: number, events: FactoryEvent[]) {
   };
 }
 
-function fixture(workItems: ReturnType<typeof item>[], v2 = true) {
+function fixture(
+  workItems: ReturnType<typeof item>[],
+  v2 = true,
+  objectiveReceipts: FactoryEvent[] = v2 ? [runStarted()] : [],
+  authorityLease?: LeaseState | null,
+) {
   const timelinePulls: number[] = [];
   const detail = {
     rateLimit: {
@@ -162,8 +170,8 @@ function fixture(workItems: ReturnType<typeof item>[], v2 = true) {
         author: { login: ACTOR },
         authorAssociation: "OWNER",
         comments: {
-          totalCount: v2 ? 1 : 0,
-          nodes: v2 ? [trusted(runStarted())] : [],
+          totalCount: objectiveReceipts.length,
+          nodes: objectiveReceipts.map(trusted),
         },
         subIssues: { totalCount: workItems.length, nodes: workItems },
       },
@@ -197,6 +205,41 @@ function fixture(workItems: ReturnType<typeof item>[], v2 = true) {
       }
       if (url.pathname.endsWith("/actions/runs")) {
         return Response.json({ total_count: 0, workflow_runs: [] });
+      }
+      if (
+        authorityLease !== undefined &&
+        url.pathname.includes("/git/ref/") &&
+        url.pathname.endsWith(`objective-${OBJECTIVE}`)
+      ) {
+        if (authorityLease === null) {
+          return Response.json({ message: "Not Found" }, { status: 404 });
+        }
+        return Response.json(
+          { object: { sha: authorityLease.oid } },
+          { headers: { date: "Tue, 08 Sep 2026 00:05:00 GMT" } },
+        );
+      }
+      if (authorityLease && url.pathname.endsWith(`/git/commits/${authorityLease.oid}`)) {
+        const event = {
+          protocol: "clockgrove.factory/v2",
+          kind: "lease",
+          event: "LeaseAcquired",
+          objective: authorityLease.objective,
+          runId: authorityLease.runId,
+          sequence: authorityLease.sequence,
+          at: "2026-09-08T00:04:00.000Z",
+          holder: authorityLease.holder,
+          epoch: authorityLease.epoch,
+          expiresAt: authorityLease.expiresAt.toISOString(),
+          policyDigest: authorityLease.policyDigest,
+        };
+        const trailer = Buffer.from(JSON.stringify(event), "utf8").toString("base64url");
+        return Response.json({
+          sha: authorityLease.oid,
+          tree: { sha: authorityLease.treeOid },
+          parents: [{ sha: BASE_SHA }],
+          message: `Factory lease LeaseAcquired for Objective #${OBJECTIVE}\n\nFactory-Event: ${trailer}`,
+        });
       }
       throw new Error(`Unexpected request: ${request.method} ${request.url}`);
     },
@@ -263,6 +306,94 @@ describe("GitHubReader Agent Work timeline reads", () => {
     await f.reader.readObjective(OBJECTIVE);
 
     expect(f.timelinePulls).toEqual([23]);
+  });
+
+  it("binds fresh receipt authority to the custom lease ref observed after comments", async () => {
+    const oldLease = {
+      objective: OBJECTIVE,
+      runId: RUN,
+      holder: "old-writer",
+      epoch: 1,
+      policyDigest: POLICY_DIGEST,
+    } as LeaseState;
+    const currentLease = {
+      ref: `refs/clockgrove-factory/leases/objective-${OBJECTIVE}`,
+      oid: "e".repeat(40),
+      treeOid: "f".repeat(40),
+      objective: OBJECTIVE,
+      runId: RUN,
+      holder: "current-writer",
+      epoch: 2,
+      sequence: 8,
+      expiresAt: new Date("2026-09-08T00:10:00.000Z"),
+      policyDigest: POLICY_DIGEST,
+    } satisfies LeaseState;
+    const delayed = parseFactoryEvent({
+      ...publication(8, 23, 1, 3),
+      ...writerAuthority(oldLease, 3),
+    });
+    const f = fixture([item(8, 23, [delayed])], true, [runStarted()], currentLease);
+
+    const snapshot = await f.reader.readObjective(OBJECTIVE);
+
+    expect(snapshot.objectiveAuthority).toMatchObject({
+      holder: "current-writer",
+      epoch: 2,
+      oid: currentLease.oid,
+    });
+    const events = snapshot.workItems[0]!.factoryEvents!;
+    expect(events.some((event) => event.kind === "lease")).toBe(true);
+    expect(hasCurrentWriterAuthority(delayed, events)).toBe(false);
+    expect(events).toContainEqual(delayed);
+  });
+
+  it("fails closed when a writer-bound receipt has no authoritative Objective ref", async () => {
+    const writer = {
+      objective: OBJECTIVE,
+      runId: RUN,
+      holder: "missing-writer",
+      epoch: 1,
+      policyDigest: POLICY_DIGEST,
+    } as LeaseState;
+    const started = parseFactoryEvent({ ...runStarted(), ...writerAuthority(writer, 1) });
+    const f = fixture([], true, [started], null);
+
+    await expect(f.reader.readObjective(OBJECTIVE)).rejects.toThrow(
+      "writer-bound receipts but no authoritative lease ref",
+    );
+  });
+
+  it("retains a matching epoch-only terminal after the last canonical lease expires", async () => {
+    const terminal = parseFactoryEvent({
+      protocol: "clockgrove.factory/v2",
+      kind: "run",
+      event: "FactoryRunCompleted",
+      objective: OBJECTIVE,
+      runId: RUN,
+      sequence: 7,
+      at: "2026-09-08T00:03:00.000Z",
+      writerEpoch: 2,
+    });
+    const released = {
+      ref: `refs/clockgrove-factory/leases/objective-${OBJECTIVE}`,
+      oid: "9".repeat(40),
+      treeOid: "8".repeat(40),
+      objective: OBJECTIVE,
+      runId: RUN,
+      holder: "legacy-writer",
+      epoch: 2,
+      sequence: 8,
+      expiresAt: new Date("2026-09-08T00:04:00.000Z"),
+      policyDigest: POLICY_DIGEST,
+    } satisfies LeaseState;
+    const f = fixture([], true, [runStarted(), terminal], released);
+
+    const snapshot = await f.reader.readObjective(OBJECTIVE);
+
+    expect(latestRunReceipts(snapshot.factoryEvents!)?.terminal).toEqual(terminal);
+    expect(snapshot.objectiveAuthority?.observedAt.toISOString()).toBe(
+      "2026-09-08T00:05:00.000Z",
+    );
   });
 
   it.each([

@@ -1111,6 +1111,7 @@ export class Dispatcher {
     const fence = this.#captureMutationFence?.();
     return observeMutationOperation(
       "dispatch-write",
+      "objective-publication",
       this.#mutationScope,
       this.#onMutationOperation,
       () => this.#dispatchMutation(fn, fence, beforeCall),

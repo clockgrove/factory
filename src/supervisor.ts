@@ -3573,6 +3573,7 @@ export class FactorySupervisor {
           existingEvents: snapshot.factoryEvents ?? [],
           runId,
           sequence: this.#sequences.take(),
+          writer: acquired,
           ...(this.#options.activation
             ? {
                 activationRequestId: this.#options.activation.requestId,
@@ -13796,7 +13797,7 @@ export class FactorySupervisor {
     await this.#recordControllerObservation(snapshot);
     await this.#lease.use((lease) =>
       runManager.terminal({
-        writerEpoch: lease.epoch,
+        writer: lease,
         run: this.#run,
         objectiveNodeId: snapshot.id,
         event,

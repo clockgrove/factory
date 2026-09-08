@@ -314,7 +314,8 @@ export interface WorkItemSnapshot {
    * function of GitHub's own event log, needing no separate storage.
    */
   copilotAssignments: Date[];
-  /** Versioned v2 events decoded from trusted Factory comment envelopes. */
+  /** Versioned v2 events decoded from trusted Factory comments, plus the
+   * current Objective lease record when fresh writer-bound receipts exist. */
   factoryEvents?: import("./protocol/events.js").FactoryEvent[];
 }
 
@@ -401,4 +402,7 @@ export interface ObjectiveSnapshot {
   ciExpectedOnPullRequests: boolean | "unknown";
   /** Objective-level run/lease/budget events decoded from Factory comments. */
   factoryEvents?: import("./protocol/events.js").FactoryEvent[];
+  /** Current custom-ref authority observed after the bounded comment snapshot.
+   * Null means the ref was authoritatively absent; undefined is legacy input. */
+  objectiveAuthority?: import("./control/authority.js").ObjectiveAuthorityObservation | null;
 }

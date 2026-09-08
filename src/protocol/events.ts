@@ -20,6 +20,9 @@ const Common = z
     protocol: z.literal(PROTOCOL_V2),
     // Current comment writer; not the original producer/reservation epoch.
     writerEpoch: z.number().int().positive().optional(),
+    writerOperationId: safeId.optional(),
+    writerHolder: safeId.optional(),
+    writerPolicyDigest: sha256Digest.optional(),
     objective: z.number().int().positive(),
     runId: safeId,
     sequence: z.number().int().nonnegative(),

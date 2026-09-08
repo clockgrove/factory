@@ -48,6 +48,9 @@
   "properties": {
     "protocol": { "const": "clockgrove.factory/v2" },
     "writerEpoch": { "type": "integer", "minimum": 1 },
+    "writerOperationId": { "$ref": "#/definitions/safeId" },
+    "writerHolder": { "$ref": "#/definitions/safeId" },
+    "writerPolicyDigest": { "$ref": "#/definitions/digest" },
     "kind": {
       "enum": [
         "run",

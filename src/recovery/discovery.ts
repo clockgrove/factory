@@ -5,6 +5,7 @@ import { deduplicateFactoryEvents, hasCurrentWriterAuthority } from "../control/
 import type { FactoryEvent } from "../protocol/events.js";
 import { recoveryEventDigest } from "./identity.js";
 import { loadRecoveryPlan } from "./plan.js";
+import type { ObjectiveAuthorityObservation } from "../control/authority.js";
 
 /** Discovery locates acknowledged work; it does not authorize adoption or execution. */
 export async function discoverRecoveryActivation(input: {
@@ -13,6 +14,7 @@ export async function discoverRecoveryActivation(input: {
   actor: string;
   closed?: boolean;
   events: FactoryEvent[];
+  authority?: ObjectiveAuthorityObservation | null;
   store: CompiledGraphReadStore;
 }): Promise<DurableObjectiveActivation | null> {
   const events = deduplicateFactoryEvents(input.events);
@@ -73,7 +75,7 @@ export async function discoverRecoveryActivation(input: {
         (event) =>
           event.runId === start.runId &&
           event.sequence > start.sequence &&
-          hasCurrentWriterAuthority(event, events) &&
+          hasCurrentWriterAuthority(event, events, input.authority) &&
           ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(
             event.event,
           ),
@@ -94,7 +96,7 @@ export async function discoverRecoveryActivation(input: {
         (event) =>
           event.kind === "run" &&
           event.runId === start.runId &&
-          hasCurrentWriterAuthority(event, events) &&
+          hasCurrentWriterAuthority(event, events, input.authority) &&
           event.event ===
             (commands.admissionGate!.kind === "drain"
               ? "RunDrainCompleted"

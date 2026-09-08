@@ -32,10 +32,10 @@ import {
 export interface PublicationStore {
   /**
    * The concrete transport rechecks Objective authority immediately before
-   * dispatching every mutation. Standalone stores omit this marker and retain
-   * the helper's explicit preflight assertion.
+   * authoritative publication. Immutable object preparation remains guarded
+   * by transport safety controls without spending a lease read per object.
    */
-  readonly objectiveMutationFenceAtDispatch?: boolean;
+  readonly objectivePublicationFenceAtDispatch?: boolean;
   readRef(ref: string): Promise<string | null>;
   readCommit(oid: string): Promise<GitCommitObject>;
   /** Required only for independent immutable sibling-refresh verification. */
@@ -91,10 +91,10 @@ export interface PublicationStore {
 /** Avoid a duplicate remote preflight only when the mutation transport itself
  * guarantees a fresh Objective fence at dispatch. */
 export async function assertPublicationMutationAuthorized(
-  store: Pick<PublicationStore, "objectiveMutationFenceAtDispatch">,
+  store: Pick<PublicationStore, "objectivePublicationFenceAtDispatch">,
   assertCurrent: () => Promise<void>,
 ): Promise<void> {
-  if (!store.objectiveMutationFenceAtDispatch) await assertCurrent();
+  if (!store.objectivePublicationFenceAtDispatch) await assertCurrent();
 }
 
 export interface PublishedPullRequest {

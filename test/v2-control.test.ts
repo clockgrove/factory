@@ -124,7 +124,7 @@ describe("Director lease", () => {
 
   it("uses the bound identity instead of duplicating a guaranteed dispatch-time fence", async () => {
     const store = Object.assign(new MemoryStore(), {
-      objectiveMutationFenceAtDispatch: true as const,
+      objectivePublicationFenceAtDispatch: true as const,
       assertMutationIdentity: vi.fn(),
     });
     const manager = new LeaseManager({ store, durationMs: 60_000 });
@@ -580,7 +580,22 @@ describe("attempt reservation", () => {
       workItemNodeId: "I_43",
       reservation: reservation!,
     });
-    expect(decodeEventComments(store.comments.at(-1)!.body)).toEqual([original]);
+    const [repaired] = decodeEventComments(store.comments.at(-1)!.body);
+    expect(repaired).toMatchObject({
+      writerHolder: "host-2",
+      writerEpoch: takeover.epoch,
+      directorEpoch: lease.epoch,
+      policyDigest: identity.policyDigest,
+    });
+    const withoutWriter = (event: Record<string, unknown>) => {
+      const value = { ...event };
+      delete value.writerOperationId;
+      delete value.writerHolder;
+      delete value.writerEpoch;
+      delete value.writerPolicyDigest;
+      return value;
+    };
+    expect(withoutWriter(repaired!)).toEqual(withoutWriter(original!));
     expect(await restarted.list(identity.objective, 43)).toEqual([reservation]);
   });
 

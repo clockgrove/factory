@@ -91,6 +91,23 @@ describe("Codex management backend", () => {
     const runStructured = vi.fn(async (_cwd: string, _schema: unknown, prompt: string) => {
       expect(prompt).toContain('"declaredScripts":{"dev":"node server.js","test":"node --test"}');
       expect(prompt).toContain('"validationCommands":["npm test","node --test"]');
+      const validationDescription = (_schema as typeof CODEX_COMPILED_OBJECTIVE_SCHEMA).properties
+        .workItems.items.properties.validation.description;
+      for (const instruction of [
+        "Emit at most one validation entry per distinct tier.",
+        "Group all applicable exact acceptance criteria and command evidence within that tier's single entry.",
+        "A criterion may appear across distinct tiers only when each kind of evidence is necessary.",
+      ]) {
+        expect(prompt).toContain(instruction);
+        expect(validationDescription).toContain(instruction);
+      }
+      expect(validationDescription).toContain("must cite exact entries from validationCommands");
+      expect(validationDescription).toContain(
+        "Protected-risk criteria require mechanical or deterministic-simulation evidence even when another tier also applies",
+      );
+      expect(prompt).toContain(
+        "Every non-ordinary criterionRisks entry must appear in a mechanical or deterministic-simulation entry even when it also requires semantic review",
+      );
       expect(prompt).toContain("created within this Work Item's declared scope");
       expect(prompt).toContain("available before publication");
       expect(prompt).toContain("Never copy Factory-owned publication, pull-request creation");

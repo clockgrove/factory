@@ -21,15 +21,16 @@ a full-release or comparative-performance claim.
 The [current implementation batch](https://github.com/clockgrove/factory/issues/69#issuecomment-5580200886)
 tracks the remaining control-plane changes and exact reviewed merge identities. Efficiency (#218),
 capacity retention (#220), integration-claim recovery (#222), discovery isolation (#225), and
-issue-scoped admission (#226) are merged. The final authority-consumer integration (#224) and the
-reviewed typing correction (#232) must be integrated before #215 freezes a candidate. No new
-installed or live result is implied by those code completions.
+issue-scoped admission (#226), and authority-consumer integration (#224) are merged. The coordinated
+candidate [#235](https://github.com/clockgrove/factory/pull/235) gathers those capabilities, the reviewed
+typing correction (#232), and ledger-grounded restart regressions before #215's gate and exact
+installation. No new installed or live result is implied by those code completions.
 
 ## Remaining acceptance
 
 | Capability | Kind / owner | Acceptance, dependency and next deliverable | State |
 | --- | --- | --- | --- |
-| Objective-scoped authority — [#219](https://github.com/clockgrove/factory/issues/219), [#224](https://github.com/clockgrove/factory/issues/224) | Code / controller, runtime and integration owners | Captured Objective epochs, atomic shared capacity and destination-branch claims replace repository-wide mutation fencing. Finish canonical authority at actual control decisions without mixing mutable observations into immutable receipt history. Integrate the new issue ledger and discovery-retirement boundaries, then #215 owns the coordinated gate/install. [Locking audit and targeted evidence](OBJECTIVE-AUTHORITY.md). | Final consumer integration; live qualification pending |
+| Objective-scoped authority — [#219](https://github.com/clockgrove/factory/issues/219), [#224](https://github.com/clockgrove/factory/issues/224) | Testing / integration owner | [#234](https://github.com/clockgrove/factory/pull/234) completed canonical authority at publication, control, status and recovery boundaries without mixing mutable observations into immutable receipt history. Original producer identity remains separate from the current writer. Repository-wide election is not a mutation lock; atomic shared capacity and destination-branch claims retain their own conflict boundaries. #215 owns the coordinated gate/install. [Locking audit and targeted evidence](OBJECTIVE-AUTHORITY.md). | Code merged; live qualification pending |
 | Mutation telemetry attribution — [#199](https://github.com/clockgrove/factory/issues/199) | Code / reporting | [#200](https://github.com/clockgrove/factory/pull/200) merged and was installed in candidate `93cebcc`: process-local counters are scoped separately, current header quota is retained, and absent run measurements are unavailable. It does not attribute account-wide consumption to a run. | Complete |
 | Candidate gate and installation — [#215](https://github.com/clockgrove/factory/issues/215) | Code then testing / integration owner | [#217](https://github.com/clockgrove/factory/issues/217) isolates offline test caches without changing production limits or deleting retained evidence. Next: finish and integrate the current code batch, freeze one candidate, then gate and install matching artifacts. Installed `93cebcc` remains unchanged. | Running |
 | Large files — [#123](https://github.com/clockgrove/factory/issues/123) | Testing / large-file qualification | [#214](https://github.com/clockgrove/factory/pull/214) merged the user-owned repository query correction exposed by [#213](https://github.com/clockgrove/factory/issues/213). Next: exact candidate installation under #215 and safe recovery assessment, then remaining LFS/manifests/transfer cases. Preserve the original evidence and accounting; a code correction alone is not qualification. | Waiting on candidate |

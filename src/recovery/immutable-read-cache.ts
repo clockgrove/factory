@@ -24,7 +24,12 @@ function copy<T extends Value>(value: T): T {
     Buffer.isBuffer(value)
       ? Buffer.from(value)
       : value && typeof value === "object"
-        ? { ...value, parentOids: [...value.parentOids], serverTime: new Date(value.serverTime) }
+        ? {
+            ...value,
+            parentOids: [...value.parentOids],
+            ...(value.committedAt ? { committedAt: new Date(value.committedAt) } : {}),
+            serverTime: new Date(value.serverTime),
+          }
         : value
   ) as T;
 }

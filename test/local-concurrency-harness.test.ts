@@ -3,11 +3,16 @@ import { describe, expect, it, vi } from "vitest";
 import { parseRunPolicy } from "../src/protocol/policy.js";
 import {
   concurrencyAuthority,
+  concurrencyMeasurements,
+  concurrencyModelConfiguration,
   concurrencyObjectiveBody,
   concurrencyRefill,
+  concurrencyReceiptProgress,
   assertInnerTakeover,
+  assertObjectiveContention,
   assertRetiredController,
   main,
+  runConcurrencyLeaseFaultScenario,
   runConcurrencyScenario,
   verifyConcurrencyArtifacts,
   type ConcurrencyPort,
@@ -26,9 +31,17 @@ const env = {
   FACTORY_CONCURRENCY_NAMESPACE: "concurrency-fixture",
   FACTORY_CONCURRENCY_EVIDENCE: "/tmp/private/concurrency.json",
   FACTORY_CONCURRENCY_MAX_MODEL_TOKENS: "500000",
-  FACTORY_CONCURRENCY_ACK: `${repository}:${unit}:start,activate-two,contend,pause-b,freeze-inner-contend-unfreeze,stop-stale,restart,resume-b,stop`,
+  FACTORY_CONCURRENCY_MODEL: "fixture-model",
+  FACTORY_CONCURRENCY_REASONING: "high",
+  FACTORY_CONCURRENCY_ACK: `${repository}:${unit}:start,activate-two,stop`,
 };
 const authority = concurrencyAuthority(env)!;
+const faultEnv = {
+  ...env,
+  FACTORY_CONCURRENCY_SCENARIO: "lease-fault",
+  FACTORY_CONCURRENCY_ACK: `${repository}:${unit}:start,activate-two,contend,pause-b,freeze-inner-contend-unfreeze,stop-stale,restart,resume-b,stop`,
+};
+const faultAuthority = concurrencyAuthority(faultEnv)!;
 describe("prospective concurrency observation window", () => {
   it("keeps omitted and explicit 45-minute authority byte-equivalent", () => {
     const original = JSON.stringify(authority);
@@ -64,18 +77,31 @@ describe("prospective concurrency observation window", () => {
     const now = vi.spyOn(Date, "now").mockReturnValue(start + 80 * 60000);
     const selectedEnv = { ...env, FACTORY_CONCURRENCY_DURATION_MINUTES: "120" };
     const selected = concurrencyAuthority(selectedEnv)!;
+    const bodies = ["body-a", "body-b"];
     const evidence = {
       startedAt: new Date(start).toISOString(),
       actions: [],
       base: "a".repeat(40),
+      actor: { id: 1, login: "fixture" },
       objectives: selected.namespaces.map((namespace, index) => ({
         namespace,
-        objective: { number: 10 + index },
-        // Previously captured terminal progress is deliberately not mutable authority.
-        terminalObservation: { status: { run: { state: "completed" } } },
+        objective: { number: 10 + index, id: 100 + index },
+        bodyDigest: createHash("sha256").update(bodies[index]!).digest("hex"),
       })),
     };
-    const call = vi.fn(async () => ({}));
+    const call = vi.fn(async () => ({ run: { state: "active" } }));
+    const request = vi.fn(async (_route: string, args: { issue_number: number }) => {
+      const index = args.issue_number - 10;
+      return {
+        data: {
+          id: 100 + index,
+          number: args.issue_number,
+          body: bodies[index],
+          user: { id: 1 },
+        },
+      };
+    });
+    const list = vi.fn(async () => []);
     try {
       await main(selectedEnv, async (_env, _runner, extension) => {
         if (!extension.extendPort) throw Error("missing production extension");
@@ -84,8 +110,8 @@ describe("prospective concurrency observation window", () => {
           evidence,
           save: vi.fn(),
           call,
-          request: vi.fn(async () => ({ data: { sha: evidence.base } })),
-          list: vi.fn(async () => []),
+          request,
+          list,
           retireClient: vi.fn(),
         })) as Pick<ConcurrencyPort, "pollPair" | "prepare">;
         await expect(port.pollPair("completed", () => true)).resolves.toHaveLength(2);
@@ -96,10 +122,11 @@ describe("prospective concurrency observation window", () => {
             return true;
           }),
         ).rejects.toMatchObject({ code: "CHECKPOINT_DEADLINE" });
+        const callsBeforeAction = call.mock.calls.length;
         await expect(port.prepare("activate")).rejects.toMatchObject({
           code: "CHECKPOINT_DEADLINE",
         });
-        expect(call).not.toHaveBeenCalled();
+        expect(call).toHaveBeenCalledTimes(callsBeforeAction);
         expect(evidence.actions).toEqual([]);
         expect(evidence.startedAt).toBe(new Date(start).toISOString());
       });
@@ -127,6 +154,174 @@ describe("prospective concurrency observation window", () => {
         verifyConcurrencyArtifacts(request, authority, "main", [], 11000),
       ).rejects.toMatchObject({ code: "CHECKPOINT_DEADLINE" });
       expect(request).toHaveBeenCalledTimes(1);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("uses one incremental repository comment listing while unchanged instead of full snapshots", async () => {
+    const current = Date.parse("2026-09-08T00:45:00.000Z");
+    const now = vi.spyOn(Date, "now").mockReturnValue(current);
+    const bodies = ["body-a", "body-b"];
+    const evidence = {
+      startedAt: new Date(current - 45 * 60_000 + 1).toISOString(),
+      actions: [],
+      actor: { id: 1, login: "fixture" },
+      objectives: authority.namespaces.map((namespace, index) => ({
+        namespace,
+        objective: { number: 10 + index, id: 100 + index },
+        bodyDigest: createHash("sha256").update(bodies[index]!).digest("hex"),
+      })),
+    };
+    const request = vi.fn(async (_route: string, args: { issue_number: number }) => {
+      const index = args.issue_number - 10;
+      return {
+        data: {
+          id: 100 + index,
+          number: args.issue_number,
+          body: bodies[index],
+          user: { id: 1 },
+        },
+      };
+    });
+    const call = vi.fn(async () => ({ run: { state: "active" } }));
+    let incrementalListings = 0;
+    const stopped = new Error("bounded observation stopped");
+    const list = vi.fn(async (route: string) => {
+      if (route === "GET /repos/{owner}/{repo}/issues/comments") {
+        incrementalListings++;
+        if (incrementalListings === 3) throw stopped;
+      }
+      return [];
+    });
+    try {
+      await expect(
+        main(env, async (_env, _runner, extension) => {
+          if (!extension.extendPort) throw Error("missing production extension");
+          const port = (await extension.extendPort({
+            port: {},
+            evidence,
+            save: vi.fn(),
+            call,
+            request,
+            list,
+            retireClient: vi.fn(),
+          })) as Pick<ConcurrencyPort, "pollPair">;
+          await port.pollPair("both-started", () => false);
+        }),
+      ).rejects.toBe(stopped);
+      expect(incrementalListings).toBe(3);
+      expect(request).toHaveBeenCalledTimes(2);
+      expect(call).toHaveBeenCalledTimes(2);
+      expect(
+        (evidence as typeof evidence & { observer: Record<string, unknown> }).observer,
+      ).toMatchObject({
+        fullObjectiveSnapshots: 2,
+        incrementalCommentListings: 2,
+        unchangedIncrementalListings: 2,
+      });
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("treats overlap, untrusted comments and cached receipts only as hints before fresh convergence", async () => {
+    const current = Date.parse("2026-09-08T00:45:00.000Z");
+    const now = vi.spyOn(Date, "now").mockReturnValue(current);
+    const bodies = ["body-a", "body-b"];
+    const evidence = {
+      startedAt: new Date(current - 45 * 60_000 + 1).toISOString(),
+      actions: [],
+      actor: { id: 1, login: "fixture" },
+      objectives: authority.namespaces.map((namespace, index) => ({
+        namespace,
+        objective: { number: 10 + index, id: 100 + index },
+        bodyDigest: createHash("sha256").update(bodies[index]!).digest("hex"),
+      })),
+    };
+    const at = new Date(current + 1_000).toISOString();
+    const comment = (objective: number, id: number, userId = 1) => ({
+      id,
+      body: `fixture\n\n<!-- clockgrove-factory:event\n${JSON.stringify({
+        protocol: "clockgrove.factory/v2",
+        kind: "controller",
+        event: "ControllerObserved",
+        objective,
+        runId: `run-${objective}`,
+        sequence: 1,
+        at,
+      })}\n-->`,
+      html_url: `https://github.com/${repository}/issues/${objective}#issuecomment-${id}`,
+      created_at: at,
+      updated_at: at,
+      user: { id: userId, login: userId === 1 ? "fixture" : "outsider" },
+    });
+    const trusted = [comment(10, 201), comment(11, 202)];
+    const outsider = comment(10, 200, 2);
+    let objectiveReads = 0;
+    const request = vi.fn(async (_route: string, args: { issue_number: number }) => {
+      objectiveReads++;
+      const index = args.issue_number - 10;
+      return {
+        data: {
+          id: 100 + index,
+          number: args.issue_number,
+          body: bodies[index],
+          user: { id: 1 },
+        },
+      };
+    });
+    const call = vi.fn(async () => ({ run: { state: "active" } }));
+    let incrementalListings = 0;
+    const list = vi.fn(async (route: string, args: { issue_number?: number }) => {
+      if (route === "GET /repos/{owner}/{repo}/issues/comments") {
+        incrementalListings++;
+        return incrementalListings === 1 ? [outsider] : [outsider, ...trusted];
+      }
+      if (route.endsWith("/sub_issues")) return [];
+      if (route.endsWith("/{issue_number}/comments")) {
+        const round = Math.floor((objectiveReads - 1) / 2);
+        if (round === 0 || (round === 1 && args.issue_number === 11)) return [];
+        return trusted.filter((entry) => entry.html_url.includes(`/issues/${args.issue_number}#`));
+      }
+      return [];
+    });
+    try {
+      await expect(
+        main(env, async (_env, _runner, extension) => {
+          if (!extension.extendPort) throw Error("missing production extension");
+          const port = (await extension.extendPort({
+            port: {},
+            evidence,
+            save: vi.fn(),
+            call,
+            request,
+            list,
+            retireClient: vi.fn(),
+          })) as Pick<ConcurrencyPort, "pollPair">;
+          await port.pollPair("both-started", (pair) =>
+            pair.every((entry) =>
+              (entry as { receipts: Array<{ event: { event: string } }> }).receipts.some(
+                ({ event }) => event.event === "ControllerObserved",
+              ),
+            ),
+          );
+        }),
+      ).resolves.toBeUndefined();
+      expect(incrementalListings).toBe(3);
+      // Baseline, incomplete fresh confirmation, then converged fresh confirmation.
+      expect(request).toHaveBeenCalledTimes(6);
+      expect(call).toHaveBeenCalledTimes(6);
+      expect(
+        vi
+          .mocked(list)
+          .mock.calls.filter(([route]) => route === "GET /repos/{owner}/{repo}/issues/comments")
+          .map(([, args]) => args),
+      ).toEqual([
+        expect.objectContaining({ since: expect.any(String), sort: "updated", direction: "asc" }),
+        expect.objectContaining({ since: expect.any(String), sort: "updated", direction: "asc" }),
+        expect.objectContaining({ since: expect.any(String), sort: "updated", direction: "asc" }),
+      ]);
     } finally {
       now.mockRestore();
     }
@@ -356,6 +551,16 @@ describe("installed two-Objective qualification authority", () => {
         capacity: { local: { maxWorkers: 1, reserveCpu: 0.5, reserveMemoryMb: 1024 } },
         allowedPaidBackends: [],
         economics: { maxModelTokens: 250000, modelTokenBudgetMode: "observed-stop" },
+        models: {
+          mode: "single-profile",
+          profiles: { qualification: { model: "fixture-model", reasoning: "high" } },
+          phaseProfiles: {
+            compile: "qualification",
+            implement: "qualification",
+            review: "qualification",
+            recover: "qualification",
+          },
+        },
       },
     });
   });
@@ -379,6 +584,55 @@ describe("installed two-Objective qualification authority", () => {
       })?.phase,
     ).toBe("preflight");
   });
+  it("requires exact requested model and reasoning settings without changing product defaults", () => {
+    expect(() => concurrencyAuthority({ ...env, FACTORY_CONCURRENCY_MODEL: undefined })).toThrow(
+      /model required/,
+    );
+    expect(() =>
+      concurrencyAuthority({ ...env, FACTORY_CONCURRENCY_REASONING: "fashionable" }),
+    ).toThrow(/reasoning effort/);
+    expect(concurrencyModelConfiguration(pair()[0], authority)).toMatchObject({
+      requested: {
+        evidence: "immutable-run-policy",
+        managementBackend: "codex-cli/local",
+      },
+      resolved: {
+        managementBackend: "codex-cli/local",
+        executionBackendOrder: ["codex-sdk/local-worktree", "codex-cli/local-worktree"],
+        phases: {
+          compile: { model: "fixture-model", reasoning: "high" },
+          implement: { model: "fixture-model", reasoning: "high" },
+        },
+      },
+      observed: {
+        executionBackends: [],
+        providerReturnedModel: "unavailable-not-recorded-in-receipts",
+      },
+    });
+  });
+  it("reports the exact graph projection interval and leaves unrecorded costs unavailable", () => {
+    const graphDigest = "d".repeat(64);
+    const measured = concurrencyMeasurements(
+      observation([
+        event(1, 1, "FactoryRunStarted", 0),
+        { ...event(1, 2, "GraphCompiled", 3), graphDigest, graphSize: 3 },
+        { ...event(1, 3, "GraphProjected", 8), graphDigest, graphSize: 3 },
+        event(1, 4, "FactoryRunCompleted", 20),
+      ]),
+      { incrementalCommentListings: 4 },
+    );
+    expect(measured).toMatchObject({
+      run: { availability: "observed", milliseconds: 20_000 },
+      graphCompiledToProjected: {
+        interval: { availability: "observed", milliseconds: 5_000 },
+        projection: { availability: "observed", graphDigest, projectedWorkItems: 3 },
+        cpuAndMemory: { availability: "unavailable" },
+        modelTokens: { availability: "unavailable" },
+      },
+      controllerMutationOperations: { availability: "unavailable" },
+      githubAccountQuotaAttributedToRun: { availability: "unavailable" },
+    });
+  });
   it("keeps useful asymmetric work in disjoint original fixture namespaces, never sleep/pressure injection", () => {
     const a = concurrencyObjectiveBody(authority.namespaces[0]!, 0);
     const b = concurrencyObjectiveBody(authority.namespaces[1]!, 1);
@@ -400,6 +654,13 @@ describe("independent authenticated timing assertions", () => {
       refill: { workItem: 21 },
     });
     expect(concurrencyRefill(pair(false))).not.toBeNull();
+    expect(concurrencyRefill([...pair()].reverse())).toMatchObject({
+      spanningObjective: 1,
+      refillObjective: 0,
+      released: { workItem: 20 },
+      refill: { workItem: 21 },
+    });
+    expect(concurrencyReceiptProgress("refill", [...pair()].reverse())).toBe(true);
   });
   it("does not manufacture refill from overlap alone or equal server timestamps", () => {
     const overlap = pair();
@@ -422,6 +683,11 @@ describe("independent authenticated timing assertions", () => {
     const invalid = pair();
     invalid[1]!.receipts.push({ event: event(2, 7, "AttemptFailed", 5) });
     expect(() => concurrencyRefill(invalid)).toThrow(/conflicting worker terminals/);
+  });
+  it("rejects a refill lifetime with missing attempt identity", () => {
+    const invalid = pair();
+    delete invalid[1]!.receipts[1]!.event.attempt;
+    expect(() => concurrencyRefill(invalid)).toThrow(/identity missing/);
   });
 });
 
@@ -486,6 +752,21 @@ describe("actual inner Director lease proof", () => {
       assertInnerTakeover(before, after, [before], { ...start, policyDigest: "f".repeat(64) }),
     ).toThrow();
   });
+  it("binds contention to the same Objective lease without consulting repository election", () => {
+    const response = {
+      isError: true,
+      content: [{ type: "text", text: "Objective #2 is leased by old" }],
+    };
+    expect(assertObjectiveContention({ response, before, after: before, objective: 2 })).toEqual({
+      boundary: "objective-lease",
+      objective: 2,
+      leaseOid: before.oid,
+      outerRepositoryLease: "not-consulted",
+    });
+    expect(() => assertObjectiveContention({ response, before, after, objective: 2 })).toThrow(
+      /changed the lease/,
+    );
+  });
 });
 
 function scenarioPort() {
@@ -509,7 +790,7 @@ function scenarioPort() {
       return { invocationId: String(actions.length), hostIdentity: "same-host" };
     },
     contend: async () => {
-      actions.push("outer-contend");
+      actions.push("same-objective-contend");
     },
     pollPair: async (phase, accept) => {
       actions.push(phase);
@@ -530,6 +811,10 @@ function scenarioPort() {
     takeover: async () => {
       actions.push("outer-takeover");
     },
+    finishThroughput: async () => {
+      actions.push("throughput-final-proofs");
+      return {};
+    },
     finish: async () => {
       actions.push("exact-final-proofs");
       return {};
@@ -546,14 +831,37 @@ describe("bounded existing installed-controller composition", () => {
     ).toMatchObject({ result: "preflight-only" });
     expect(f.actions).toEqual(["preflight"]);
   });
-  it("orders scoped pause, peer progress, accounted absence, restart and exact final proof", async () => {
+  it("runs useful throughput without manufactured delay or injected fault work", async () => {
     const f = scenarioPort();
     const result = await runConcurrencyScenario(f.port, authority);
     expect(result).toMatchObject({
       result: "passed",
+      scope: "installed-two-objective-useful-throughput-refill",
+      artificialDelayMs: 0,
+      injectedFaults: 0,
+      comparativeSavings: "not-measured",
+    });
+    expect(f.actions).toEqual([
+      "preflight",
+      "prepare:create",
+      "start",
+      "controller:active",
+      "prepare:activate",
+      "both-started",
+      "refill",
+      "completed",
+      "stop",
+      "controller:inactive",
+      "throughput-final-proofs",
+    ]);
+  });
+  it("keeps expiry, same-Objective contention and restart in an explicit fault scenario", async () => {
+    const f = scenarioPort();
+    const result = await runConcurrencyLeaseFaultScenario(f.port, faultAuthority);
+    expect(result).toMatchObject({
+      result: "passed",
       innerLeaseHeldContention: "observed",
       simultaneousInnerCasCollision: "not-exercised",
-      comparativeSavings: "not-measured",
     });
     expect(f.actions).toEqual([
       "preflight",
@@ -563,7 +871,7 @@ describe("bounded existing installed-controller composition", () => {
       "model-free-offset",
       "prepare:activate",
       "both-started",
-      "outer-contend",
+      "same-objective-contend",
       "refill",
       "pause-b",
       "scoped-pause",
@@ -585,7 +893,9 @@ describe("bounded existing installed-controller composition", () => {
     f.port.scoped = async () => {
       throw Error("response unavailable");
     };
-    await expect(runConcurrencyScenario(f.port, authority)).rejects.toThrow("response unavailable");
+    await expect(runConcurrencyLeaseFaultScenario(f.port, faultAuthority)).rejects.toThrow(
+      "response unavailable",
+    );
     expect(f.actions).not.toContain("restart");
     expect(f.actions).not.toContain("stop");
     expect(f.actions).not.toContain("exact-final-proofs");
@@ -595,7 +905,9 @@ describe("bounded existing installed-controller composition", () => {
     f.port.innerContend = async () => {
       throw Error("inner contender outcome is unknown; no automatic continuation");
     };
-    await expect(runConcurrencyScenario(f.port, authority)).rejects.toThrow(/outcome is unknown/);
+    await expect(runConcurrencyLeaseFaultScenario(f.port, faultAuthority)).rejects.toThrow(
+      /outcome is unknown/,
+    );
     expect(f.actions).toContain("accounted-absence-inner-capture");
     for (const action of ["restart", "resume-b", "stop", "exact-final-proofs"])
       expect(f.actions).not.toContain(action);
@@ -608,7 +920,7 @@ describe("bounded existing installed-controller composition", () => {
       runConcurrencyScenario,
       expect.objectContaining({
         authority,
-        scope: "installed-two-objective-concurrency",
+        scope: "installed-two-objective-useful-throughput",
         harnessPaths: expect.arrayContaining([
           "scripts/verify-local-concurrency.mjs",
           "scripts/qualification-sibling-refresh-proof.mjs",

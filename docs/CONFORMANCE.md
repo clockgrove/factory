@@ -114,7 +114,23 @@ end-to-end readiness.
 
 ### Prospective two-Objective concurrency allowance
 
-The installed `scripts/verify-local-concurrency.mjs` scenario accepts
+The installed `scripts/verify-local-concurrency.mjs` qualifier requires explicit
+`FACTORY_CONCURRENCY_MODEL` and `FACTORY_CONCURRENCY_REASONING` values before preflight. They become
+one immutable run-policy profile for compile, implement, review and recovery; they do not change
+Factory defaults. Final evidence distinguishes requested policy, deterministic phase resolution and
+observed execution backends. Provider-returned model or reasoning values remain explicitly
+unavailable when existing authenticated receipts do not contain them.
+
+The default `throughput` scenario contains only ordinary Objective creation, activation, useful
+work, symmetric freed-slot refill, completion and shutdown. It injects no delay, lease expiry,
+contention, pause or restart. `FACTORY_CONCURRENCY_SCENARIO=lease-fault` selects the separately
+acknowledged expiry/contention/restart scenario; neither result substitutes for the other. The
+observer uses bounded repository-wide incremental comment listings while receipts are unchanged,
+but those listings are wake hints only. Phase acceptance, subsequent mutation and final reporting
+always require a fresh complete authenticated Objective/sub-issue/comment/status observation.
+Historical results retain their original scenario and evidence identity.
+
+Both scenarios accept
 `FACTORY_CONCURRENCY_PER_OBJECTIVE_MAX_MODEL_TOKENS` from 250000 through 500000. Omission
 retains 250000 per Objective. `FACTORY_CONCURRENCY_MAX_MODEL_TOKENS` remains an explicit
 aggregate acknowledgement and must equal exactly twice that selection: the existing 500000

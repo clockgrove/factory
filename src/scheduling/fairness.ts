@@ -16,6 +16,12 @@ export class ObjectiveFairness {
   readonly #lastAdmission = new Map<number, number>();
   readonly #listeners = new Set<() => void>();
   readonly #requirements = new Map<number, readonly LocalDemandRequirement[]>();
+  #revision = 0;
+
+  /** Process-local wake cursor only. It never carries scheduling authority. */
+  get revision(): number {
+    return this.#revision;
+  }
 
   register(objective: number, requiresReconciliation = false): void {
     if (!this.#ready.has(objective)) this.#ready.set(objective, null);
@@ -64,11 +70,16 @@ export class ObjectiveFairness {
   }
 
   changed(): void {
+    this.#revision++;
     for (const notify of this.#listeners) notify();
   }
 
-  waitForChange(ms: number, signal?: AbortSignal): Promise<void> {
-    if (signal?.aborted) return Promise.resolve();
+  waitForChange(
+    ms: number,
+    signal?: AbortSignal,
+    observedRevision = this.#revision,
+  ): Promise<void> {
+    if (signal?.aborted || observedRevision !== this.#revision) return Promise.resolve();
     return new Promise((resolve) => {
       const done = () => {
         clearTimeout(timer);

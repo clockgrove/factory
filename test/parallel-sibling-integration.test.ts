@@ -1521,11 +1521,8 @@ describe("Supervisor parallel independent sibling integration", () => {
       );
       const claimStore = {
         ...f.storage,
-        compareAndSwapRef: (args: {
-          ref: string;
-          beforeOid: string;
-          afterOid: string;
-        }) => GitHubControlStore.prototype.compareAndSwapRef.call(undefined as never, args),
+        compareAndSwapRef: (args: { ref: string; beforeOid: string; afterOid: string }) =>
+          GitHubControlStore.prototype.compareAndSwapRef.call(undefined as never, args),
         readPullRequest: (number: number) =>
           GitHubControlStore.prototype.readPullRequest.call(undefined as never, number),
       };

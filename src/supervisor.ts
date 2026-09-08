@@ -301,6 +301,7 @@ import { rankReadyWorkItems } from "./scheduling/priority.js";
 import { validatePriorityFieldDefinition } from "./scheduling/github-priority.js";
 import { ContinuousExecutionPool } from "./scheduling/continuous-refill.js";
 import { ObjectiveFairness } from "./scheduling/fairness.js";
+import { waitForProgress } from "./scheduling/progress-wake.js";
 import {
   CachedResourceSampler,
   LinuxResourceSampler,
@@ -4206,6 +4207,10 @@ export class FactorySupervisor {
         this.#compiledProjection = durableProjection;
       }
       for (;;) {
+        // Capture before any snapshot or admission work so a peer-capacity change during this
+        // iteration cannot happen between our decision and listener registration unnoticed.
+        const fairnessRevision = this.#fairness.revision;
+        const executionRevision = activeExecutions.revision;
         if (heartbeatError) throw heartbeatError;
         activeExecutions.throwIfFailed();
         if (this.#options.signal?.aborted) {
@@ -4295,6 +4300,7 @@ export class FactorySupervisor {
           continue;
         }
         if (await this.#repairReservationReceipts(objective.items)) continue;
+        let deferredIntegration = false;
         if (this.#deliverySelection.selected === "regular-prs") {
           const unrecorded = objective.items.find((item) => {
             if (item.state !== "done" || activeExecutions.has(item.number)) return false;
@@ -4318,9 +4324,8 @@ export class FactorySupervisor {
             );
           });
           if (unrecorded) {
-            if (!(await this.#resumeIntegration(unrecorded)))
-              await sleep(this.#options.pollIntervalMs ?? 60_000, this.#options.signal);
-            continue;
+            if (await this.#resumeIntegration(unrecorded)) continue;
+            deferredIntegration = true;
           }
         }
         // GitHub can report MERGED before the response or our closure receipt arrives.
@@ -4371,11 +4376,10 @@ export class FactorySupervisor {
               deadline,
             );
           }
-          if (!progressed)
-            await sleep(this.#options.pollIntervalMs ?? 60_000, this.#options.signal);
-          continue;
+          if (progressed) continue;
+          deferredIntegration = true;
         }
-        if (allDone(objective)) {
+        if (!deferredIntegration && allDone(objective)) {
           const settlements = await activeExecutions.settle();
           const failure = settlements.find((settlement) => settlement.error);
           if (failure?.error) throw failure.error;
@@ -5013,18 +5017,12 @@ export class FactorySupervisor {
           this.#notify(`admitted: ${started.map((number) => `#${number}`).join(", ")}`);
         }
         if (capacityChanged) continue;
-        if (activeExecutions.size === 0) {
-          await this.#fairness.waitForChange(
-            this.#options.pollIntervalMs ?? 60_000,
-            this.#options.signal,
-          );
-          continue;
-        }
-        const settled = await activeExecutions.waitForChange(
-          this.#options.pollIntervalMs ?? 2_000,
-          this.#options.signal,
+        await this.#waitForProgress(
+          activeExecutions,
+          executionRevision,
+          fairnessRevision,
+          deadline,
         );
-        if (settled?.error) throw settled.error;
       }
     } catch (error) {
       if (error instanceof LeaseLostError) throw error;
@@ -8950,9 +8948,9 @@ export class FactorySupervisor {
       ),
     );
     assertIntegrationHeads(integrationLease, observedHeads);
-    const pendingEvent = [...(targetItem.factoryEvents ?? [])]
+    const pendingEvents = [...(targetItem.factoryEvents ?? [])]
       .sort((left, right) => right.sequence - left.sequence)
-      .find(
+      .filter(
         (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
           event.kind === "publication" &&
           event.runId === this.#run.runId &&
@@ -8960,9 +8958,13 @@ export class FactorySupervisor {
           event.operationId === operationId &&
           event.headSha === target.receipt.headSha,
       );
-    if (pendingEvent) {
-      assertPublicationEventMatchesReceipt(pendingEvent, target.receipt);
-    }
+    for (const event of pendingEvents) assertPublicationEventMatchesReceipt(event, target.receipt);
+    if (
+      new Set(pendingEvents.map((event) => event.asynchronousMergeUuid ?? "unknown-dispatch"))
+        .size > 1
+    )
+      throw new Error("native integration has conflicting outstanding request identities");
+    const pendingEvent = pendingEvents[0];
     const integratingMembers =
       mergePolicy === "atomic-stack"
         ? members.filter((member) =>
@@ -8996,6 +8998,22 @@ export class FactorySupervisor {
         () => capturedOwner.fence(0),
         async (admission) => {
           let result = await this.#serializeIntegration(async () => {
+            const recoveryUuid =
+              admission.dispatch?.kind === "native"
+                ? admission.dispatch.asynchronousMergeUuid
+                : undefined;
+            if (admission.dispatch && !recoveryUuid)
+              throw new IntegrationAdmissionPendingError(this.#run.objective, target.pull.number);
+            // A request already crossed the mechanical boundary. Reconcile only
+            // that UUID; changed readiness cannot unsend it and must not trigger
+            // a second request.
+            if (recoveryUuid) {
+              return this.#stacks.mergeResult(
+                target.pull.number,
+                recoveryUuid,
+                target.pull.commitSha,
+              );
+            }
             if (
               (await this.#store.getBranchHead(this.#baseBranch)).oid !==
               integratingMembers[0]!.receipt.baseSha
@@ -9012,21 +9030,39 @@ export class FactorySupervisor {
               if (current.state !== "ready")
                 throw new Error("native integration readiness changed before dispatch");
             }
-            await admission.dispatch();
-            return pendingEvent?.asynchronousMergeUuid
-              ? this.#stacks.mergeResult(
-                  target.pull.number,
-                  pendingEvent.asynchronousMergeUuid,
-                  target.pull.commitSha,
-                )
-              : this.#stacks.requestMerge({
-                  pullRequest: target.pull.number,
-                  expectedHeadSha: target.pull.commitSha,
-                  title: target.receipt.itemId,
-                  action: "default",
-                });
+            await admission.markDispatched("native");
+            const result = await this.#stacks.requestMerge({
+              pullRequest: target.pull.number,
+              expectedHeadSha: target.pull.commitSha,
+              title: target.receipt.itemId,
+              action: "default",
+            });
+            if (result.state === "pending") await admission.bindAsynchronousMerge(result.uuid);
+            return result;
           });
-          if (result.state === "failed") throw new Error(result.reason);
+          if (
+            result.state === "pending" &&
+            (admission.dispatch?.kind !== "native" ||
+              admission.dispatch.asynchronousMergeUuid !== result.uuid)
+          ) {
+            throw new Error("native integration poll changed the exact request UUID");
+          }
+          if (result.state === "failed") {
+            const uuid =
+              admission.dispatch?.kind === "native"
+                ? admission.dispatch.asynchronousMergeUuid
+                : undefined;
+            await admission.authoritativeNonExecution(
+              uuid
+                ? {
+                    kind: "native-terminal-failure",
+                    asynchronousMergeUuid: uuid,
+                    reason: result.reason,
+                  }
+                : { kind: "native-request-rejection", reason: result.reason },
+            );
+            throw new Error(result.reason);
+          }
           if (
             (result.state === "pending" || result.state === "queued") &&
             (!pendingEvent ||
@@ -9049,12 +9085,19 @@ export class FactorySupervisor {
             await sleep(this.#options.pollIntervalMs ?? 5_000, this.#options.signal);
             await this.#lease.renewIfNeeded();
             if (result.state === "pending") {
-              const uuid = result.uuid;
+              const uuid =
+                admission.dispatch?.kind === "native"
+                  ? admission.dispatch.asynchronousMergeUuid
+                  : undefined;
+              if (!uuid) throw new Error("native integration poll lacks its exact request UUID");
               result = await this.#stacks.mergeResult(
                 target.pull.number,
                 uuid,
                 target.pull.commitSha,
               );
+              if (result.state === "pending" && result.uuid !== uuid) {
+                throw new Error("native integration poll changed the exact request UUID");
+              }
             } else {
               const current = await this.#store.readPullRequest(target.pull.number);
               if (current.headSha !== target.pull.commitSha) {
@@ -9064,7 +9107,19 @@ export class FactorySupervisor {
                 result = { state: "merged", mergeSha: current.mergeCommitSha };
               }
             }
-            if (result.state === "failed") throw new Error(result.reason);
+            if (result.state === "failed") {
+              const uuid =
+                admission.dispatch?.kind === "native"
+                  ? admission.dispatch.asynchronousMergeUuid
+                  : undefined;
+              if (!uuid) throw new Error("native terminal failure lacks its request UUID");
+              await admission.authoritativeNonExecution({
+                kind: "native-terminal-failure",
+                asynchronousMergeUuid: uuid,
+                reason: result.reason,
+              });
+              throw new Error(result.reason);
+            }
           }
 
           const integrated =
@@ -9077,6 +9132,9 @@ export class FactorySupervisor {
           for (const item of ordered) this.#integrationWaits.delete(item.number);
           return true;
         },
+        pendingEvent?.asynchronousMergeUuid
+          ? { recoverNativeRequestUuid: pendingEvent.asynchronousMergeUuid }
+          : {},
       );
     } catch (error) {
       if (error instanceof IntegrationAdmissionPendingError)
@@ -12847,6 +12905,29 @@ export class FactorySupervisor {
     return (this.#integrationWaits.get(workItem)?.until ?? 0) <= Date.now();
   }
 
+  async #waitForProgress(
+    activeExecutions: ContinuousExecutionPool<number>,
+    executionRevision: number,
+    fairnessRevision: number,
+    objectiveDeadline: number,
+  ): Promise<void> {
+    const normalMaximum =
+      activeExecutions.size === 0
+        ? (this.#options.pollIntervalMs ?? 60_000)
+        : (this.#options.pollIntervalMs ?? 2_000);
+    const maximumMs = Math.max(1, Math.min(normalMaximum, objectiveDeadline - Date.now()));
+    const settled = await waitForProgress({
+      executions: activeExecutions,
+      executionRevision,
+      fairness: this.#fairness,
+      fairnessRevision,
+      maximumMs,
+      retryDeadlines: [...this.#integrationWaits.values()].map((wait) => wait.until),
+      signal: this.#options.signal,
+    });
+    if (settled?.error) throw settled.error;
+  }
+
   #deferIntegration(workItem: number, reason: string): false {
     const previous = this.#integrationWaits.get(workItem);
     const interval = Math.max(1, Math.min(this.#options.pollIntervalMs ?? 60_000, 60_000));
@@ -13026,12 +13107,23 @@ export class FactorySupervisor {
                 };
               }
             }
-            await admission.dispatch();
-            const mergeSha = await this.#store.mergePullRequest({
-              number: pull.number,
-              headSha: current.headSha,
-              commitTitle: item.title,
-            });
+            await admission.markDispatched("regular");
+            let mergeSha: string;
+            try {
+              mergeSha = await this.#store.mergePullRequest({
+                number: pull.number,
+                headSha: current.headSha,
+                commitTitle: item.title,
+              });
+            } catch (error) {
+              if ((error as { status?: number })?.status === 409) {
+                await admission.authoritativeNonExecution({
+                  kind: "regular-http-rejection",
+                  status: 409,
+                });
+              }
+              throw error;
+            }
             try {
               if (candidate) {
                 await verifyMergeCandidateSquash(

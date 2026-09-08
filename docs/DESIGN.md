@@ -274,6 +274,22 @@ it. Independent sessions coordinate capacity using a short custom-ref CAS transa
 execution-long lease. One-time import of older resource reservations and explicit scheduler ceiling
 changes are genuine shared-state boundaries. See [the locking audit](OBJECTIVE-AUTHORITY.md).
 
+The shared-capacity v2 snapshot retains every active or unresolved claim plus a bounded recent
+release journal. At 3,072 journal entries, a fenced capacity mutation moves explicit releases into
+an exact hash-sharded Git-tree tombstone set and atomically publishes that tree with the compacted
+snapshot through the existing capacity-ref CAS. The immutable marker path binds the complete owner
+and reservation digests; replay of that identity remains released, while changed resources fail
+closed. Compaction never examines lease expiry, process presence, or snapshot absence, and it never
+removes an active claim. A tombstone lookup takes seven shallow tree reads regardless of retained
+history; a compaction publishes one tree, one commit and one CAS update, plus one marker-blob upload
+for the first compaction. At 3,840 active claims the retention diagnostic requires reconciliation
+and explicit release before the unchanged 4,096-record hard bound.
+
+The tombstone set is durable Git history whose storage grows with genuinely retired identities; this
+is bounded per-operation retention, not a claim of unlimited repository storage. The new controller
+reads the original v1 snapshot and upgrades on its next write. Once v2 is written, downgrading to a
+strict v1 controller is unsupported; controller and plugin upgrades remain coordinated artifacts.
+
 Exactly one Director may schedule or integrate one Objective at a time. The lease is a commit chain
 under a custom ref such as `refs/clockgrove-factory/leases/objective-166`.
 
@@ -569,11 +585,26 @@ before validation is rerun. Parallel workers therefore cannot merge sequentially
 base. Native stacks are part of the product scope; completion requires their live conformance
 matrix.
 
+The claim records preparation with provider-observed time, the one exact dispatch, and its outcome
+separately. Preparation has a 120-second bound matching the final mechanical preparation deadline.
+After that bound, another
+currently fenced and otherwise eligible Objective may replace only the prepared record by
+expected-OID CAS. That replacement races the original actor's required prepared-to-dispatched CAS,
+so exactly one may proceed to send. The same exact operation may also replace its prepared record
+immediately after a higher-epoch takeover. Neither path applies to a dispatched request.
+
 An owned Git ref update uses expected-before-SHA CAS. GitHub's regular PR merge endpoint checks the
 head SHA, not an expected default-branch SHA. Factory therefore rechecks the base and exact validation
 under its branch claim and verifies the resulting squash parent and tree. An external branch writer
 can still race that endpoint; a mismatch is a failure, not successful validated integration. A
-dispatched but uncertain merge retains only that branch's reconciliation claim; it grants no
+single regular request's authoritative HTTP 409, or a native asynchronous request's exact UUID-bound
+terminal failure, records confirmed non-execution and releases only that claim nonce by
+expected-OID CAS. Native recovery polls only the recorded UUID; it never sends a replacement request.
+Any partially merged native member prevents non-execution release. A successful merge records the
+exact squash commit chain. Transport timeouts, response loss, missing or expired asynchronous
+results, legacy dispatches without an exact request binding, and any possible earlier outstanding
+request remain uncertain. A later refusal cannot erase that uncertainty, and no dispatched claim is
+released by age. An uncertain merge retains only that branch's reconciliation claim; it grants no
 repository-wide exclusion over Objective execution or publication. Model work and validation occur
 outside the claim.
 

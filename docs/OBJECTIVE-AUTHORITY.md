@@ -46,9 +46,13 @@ discarded or treated as zero usage.
 
 - A capacity reservation atomically checks all retained claims against global and run-specific
   ceilings. Expiry, a missing process, or absence from one snapshot does not release a claim.
-  The bounded journal currently retains released identities too; long-lived retention/compaction
-  is tracked in [#220](https://github.com/clockgrove/factory/issues/220), with replay and stale-actor
-  safety required before any pruning. Its 4096-record bound fails closed, not by discarding claims.
+  Shared-capacity v2 compacts only explicit releases into exact hash-sharded Git-tree tombstones at
+  the 3,072-record maintenance threshold. The capacity-ref CAS publishes the tombstones and active
+  snapshot together, so a crash cannot expose pruning without anti-replay evidence. Retired identity
+  lookup has fixed depth, stale epochs retain their Objective fence, and 3,840 active claims expose
+  an explicit reconciliation action before the unchanged 4,096-record hard bound. Durable retired
+  storage grows with history and remains subject to GitHub repository limits; it is not described as
+  unlimited retention. See [#220](https://github.com/clockgrove/factory/issues/220).
 - A first-time capacity import reconstructs worker reservations from authenticated original
   graphs, Work Items and ownership history, keeping those resource claims occupied. Missing worker
   history can block that one-time migration. Unknown management-model usage remains an Objective
@@ -56,9 +60,13 @@ discarded or treated as zero usage.
   nothing about that invocation. Once the shared ledger exists, normal sessions do not consult or
   wait for the service election lease.
 - An integration claim covers only mechanical final integration, never model execution or
-  validation. A prepared claim can be recovered only by the exact Objective's higher fenced epoch.
-  A dispatched claim needs exact GitHub merge proof; age alone cannot prove that a request will not
-  complete. Unresolved native asynchronous or regular merge dispatch blocks that destination
+  validation. The exact Objective's higher fenced epoch can immediately replace its prepared claim;
+  after the server-timed 120-second preparation bound, another fenced and otherwise eligible Objective can race
+  that prepared record's expected-OID CAS against the old actor's dispatched-marker CAS. A
+  dispatched claim never expires. It is released only after the exact squash chain proves success or
+  after one regular HTTP 409 or an exact native request UUID proves terminal non-execution, with no
+  partially integrated member. Response loss, lookup loss and any earlier outstanding request stay
+  uncertain. Unresolved native asynchronous or regular merge dispatch blocks that destination
   branch's integration until reconciliation, not unrelated Objective mutations.
 - GitHub regular merge supports an expected head SHA, not expected base CAS. Revalidation plus
   post-merge parent/tree proof detects an external-writer race; it does not pretend to prevent it.

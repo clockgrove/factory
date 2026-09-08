@@ -401,11 +401,17 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
         commit_sha: oid,
       }),
     );
+    const committedAt = response.data.committer?.date
+      ? new Date(response.data.committer.date)
+      : undefined;
+    if (committedAt && Number.isNaN(committedAt.getTime()))
+      throw new Error("GitHub commit has an invalid committer time");
     return {
       oid: response.data.sha,
       treeOid: response.data.tree.sha,
       parentOids: response.data.parents.map((parent) => parent.sha),
       message: response.data.message,
+      ...(committedAt ? { committedAt } : {}),
       serverTime: responseDate(response),
     };
   }
@@ -978,6 +984,43 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       throw new Error(`compiled graph tree entry ${path} is not a blob`);
     }
     return entry.sha;
+  }
+
+  /** Read one Git tree directory without recursively materializing an ever-growing tree. */
+  async readTreeDirectory(
+    treeOid: string,
+    path: string,
+  ): Promise<Array<{ name: string; type: "blob" | "tree"; sha: string }> | null> {
+    const segments = path.split("/").filter(Boolean);
+    let current = treeOid;
+    for (const segment of segments) {
+      const response = await this.#call(() =>
+        this.#octokit.request("GET /repos/{owner}/{repo}/git/trees/{tree_sha}", {
+          owner: this.#owner,
+          repo: this.#repo,
+          tree_sha: current,
+        }),
+      );
+      if (response.data.truncated) throw new Error(`Git tree directory ${path} was truncated`);
+      const entry = response.data.tree.find((candidate) => candidate.path === segment);
+      if (!entry) return null;
+      if (entry.type !== "tree" || !entry.sha)
+        throw new Error(`Git tree path ${path} crosses non-directory entry ${segment}`);
+      current = entry.sha;
+    }
+    const response = await this.#call(() =>
+      this.#octokit.request("GET /repos/{owner}/{repo}/git/trees/{tree_sha}", {
+        owner: this.#owner,
+        repo: this.#repo,
+        tree_sha: current,
+      }),
+    );
+    if (response.data.truncated) throw new Error(`Git tree directory ${path} was truncated`);
+    return response.data.tree.map((entry) => {
+      if ((entry.type !== "blob" && entry.type !== "tree") || !entry.path || !entry.sha)
+        throw new Error(`Git tree directory ${path} contains an unsupported entry`);
+      return { name: entry.path, type: entry.type, sha: entry.sha };
+    });
   }
 
   async findPullRequestForBranch(branch: string): Promise<{

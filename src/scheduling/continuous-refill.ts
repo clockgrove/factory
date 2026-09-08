@@ -23,6 +23,13 @@ function delay(ms: number, signal?: AbortSignal): Promise<null> {
 export class ContinuousExecutionPool<Key> {
   readonly #active = new Map<Key, Promise<ExecutionSettlement<Key>>>();
   readonly #completed: ExecutionSettlement<Key>[] = [];
+  readonly #listeners = new Set<() => void>();
+  #revision = 0;
+
+  /** Process-local completion cursor; settlements remain queued until consumed. */
+  get revision(): number {
+    return this.#revision;
+  }
 
   start(key: Key, operation: () => Promise<void>, onSettled: () => void = () => {}): void {
     if (this.#active.has(key)) throw new Error("execution is already active");
@@ -39,6 +46,8 @@ export class ContinuousExecutionPool<Key> {
         } finally {
           this.#active.delete(key);
           this.#completed.push(completed);
+          this.#revision++;
+          for (const notify of this.#listeners) notify();
         }
         return completed;
       });
@@ -57,6 +66,30 @@ export class ContinuousExecutionPool<Key> {
     return [...this.#active.keys()];
   }
 
+  takeCompleted(): ExecutionSettlement<Key> | null {
+    return this.#completed.shift() ?? null;
+  }
+
+  /** Non-consuming completion notification with a cursor to close listener-registration races. */
+  waitForCompletion(
+    ms: number,
+    signal?: AbortSignal,
+    observedRevision = this.#revision,
+  ): Promise<void> {
+    if (signal?.aborted || observedRevision !== this.#revision) return Promise.resolve();
+    return new Promise((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        this.#listeners.delete(done);
+        signal?.removeEventListener("abort", done);
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      this.#listeners.add(done);
+      signal?.addEventListener("abort", done, { once: true });
+    });
+  }
+
   /** A settled key is no longer active, but its failure is not recovery authority.
    * Keep the outcome queued for final draining as well as synchronous admission fences. */
   throwIfFailed(): void {
@@ -68,7 +101,7 @@ export class ContinuousExecutionPool<Key> {
     pollMs: number,
     signal?: AbortSignal,
   ): Promise<ExecutionSettlement<Key> | null> {
-    const completed = this.#completed.shift();
+    const completed = this.takeCompleted();
     if (completed) return completed;
     if (this.#active.size === 0) return delay(pollMs, signal);
     const settlement = await Promise.race([...this.#active.values(), delay(pollMs, signal)]);

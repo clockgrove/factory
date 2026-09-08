@@ -88,6 +88,7 @@ async function fixture(
     premergedNativeRoot?: boolean;
     mixedRetainedPublication?: boolean;
     omitMergedNativePrefix?: boolean;
+    nativeUuidDrift?: boolean;
     failC?: boolean;
     loseSiblingRefreshResponse?: boolean;
     completeSourceScopeEvidence?: boolean;
@@ -1628,6 +1629,15 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
           baseSha: f.git("rev-parse", "main"),
         },
       });
+      if (options.nativeUuidDrift) {
+        return {
+          state: "pending",
+          uuid: "request-a",
+          expectedHeadSha: input.expectedHeadSha,
+          mergeAction: "default",
+          mergeMethod: "squash",
+        };
+      }
       return {
         state: "merged",
         mergeSha: await store.mergePullRequest({
@@ -1637,6 +1647,20 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
         }),
       };
     });
+    if (options.nativeUuidDrift) {
+      vi.spyOn(GitHubStacks.prototype, "mergeResult").mockImplementation(
+        async (_pullRequest, uuid, expectedHeadSha) =>
+          uuid === "request-a"
+            ? {
+                state: "pending",
+                uuid: "request-b",
+                expectedHeadSha,
+                mergeAction: "default",
+                mergeMethod: "squash",
+              }
+            : { state: "failed", reason: "different request failed" },
+      );
+    }
   }
   const original = structuredClone(
     [
@@ -2928,6 +2952,33 @@ describe("Supervisor authenticated successor execution", () => {
     expect(f.launch).toHaveBeenCalledTimes(2);
     expect(await f.run()).toMatchObject({ status: "completed" });
     expect(f.launch).toHaveBeenCalledTimes(2);
+  }, 30_000);
+  it("retains request A when its poll returns pending request B", async () => {
+    const f = await successorFixture({
+      retainedPrefix: 1,
+      stackLength: 2,
+      nativeSource: true,
+      nativeUuidDrift: true,
+    });
+    const result = await f.run();
+    expect(result).toMatchObject({
+      status: "escalated",
+      reason: expect.stringContaining("changed the exact request UUID"),
+    });
+    const polls = vi.mocked(GitHubStacks.prototype.mergeResult).mock.calls;
+    expect(polls).toHaveLength(1);
+    expect(polls[0]).toEqual([19, "request-a", expect.stringMatching(/^[0-9a-f]{40}$/)]);
+    const oid = f.refs.get(integrationAdmissionRef("o/r", "main"))!;
+    const message = (await f.storage.readCommit(oid)).message;
+    const line = message.split(/\r?\n/).find((value) => value.startsWith("Factory-Integration: "))!;
+    expect(JSON.parse(Buffer.from(line.slice(21), "base64url").toString("utf8"))).toMatchObject({
+      state: "dispatched",
+      dispatch: {
+        kind: "native",
+        expectedHeadSha: polls[0]![2],
+        asynchronousMergeUuid: "request-a",
+      },
+    });
   }, 30_000);
   it.each([
     { retainedPrefix: 1 as const, stackLength: 2 as const },

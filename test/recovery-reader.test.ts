@@ -90,6 +90,7 @@ function fixture() {
   };
   const requests: Request[] = [];
   const queries: string[] = [];
+  const graphqlBodies: Array<{ query: string; variables: Record<string, unknown> }> = [];
   let comments: (page: number) => unknown[] = () => [];
   let timeline: (page: number) => unknown[] = () => [];
   const create = (recoveryInspection = true) =>
@@ -104,13 +105,18 @@ function fixture() {
         const url = new URL(request.url);
         if (url.pathname === "/graphql") {
           expect(request.method).toBe("POST");
-          const body = (await request.json()) as { query: string };
+          const body = (await request.json()) as {
+            query: string;
+            variables: Record<string, unknown>;
+          };
           expect(body.query.trimStart().startsWith("query ")).toBe(true);
           queries.push(body.query);
+          graphqlBodies.push(body);
           return Response.json({
             data: body.query.includes("ObjectiveCardinality")
               ? {
                   repository: {
+                    owner: { __typename: "User" },
                     issue: {
                       subIssues: { totalCount: data.repository.issue.subIssues.totalCount },
                     },
@@ -133,6 +139,7 @@ function fixture() {
     data,
     requests,
     queries,
+    graphqlBodies,
     create,
     comments: (read: typeof comments) => {
       comments = read;
@@ -153,6 +160,10 @@ describe("bounded recovery snapshot reader", () => {
     await expect(f.create().readObjective(7)).resolves.toMatchObject({ number: 7 });
     expect(pages(f.requests, "/comments")).toHaveLength(3);
     expect(f.queries[1]).toContain("totalCount pageInfo { hasNextPage }");
+    expect(f.graphqlBodies[1]?.query).toContain(
+      "issueFieldValues(first: 100) @include(if: $includeIssueFields)",
+    );
+    expect(f.graphqlBodies[1]?.variables.includeIssueFields).toBe(false);
     const normal = fixture();
     delete normal.data.repository.issue.subIssues.nodes[0]!.closedByPullRequestsReferences.pageInfo;
     await expect(normal.create(false).readObjective(7)).resolves.toMatchObject({ number: 7 });

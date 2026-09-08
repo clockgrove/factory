@@ -225,6 +225,7 @@ export function cancellationRequestFromComments(
 const OBJECTIVE_CARDINALITY_QUERY = `
 query ObjectiveCardinality($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
+    owner { __typename }
     issue(number: $number) {
       subIssues(first: 1) { totalCount }
     }
@@ -252,7 +253,7 @@ export function objectiveSubIssueQuerySize(totalCount: number): number {
  * the "no sidecar state" claim in §3.1 hold.
  */
 const OBJECTIVE_QUERY = `
-query Objective($owner: String!, $repo: String!, $number: Int!, $subIssueCount: Int!) {
+query Objective($owner: String!, $repo: String!, $number: Int!, $subIssueCount: Int!, $includeIssueFields: Boolean!) {
   rateLimit { cost limit remaining resetAt }
   repository(owner: $owner, name: $repo) {
     id
@@ -291,7 +292,7 @@ query Objective($owner: String!, $repo: String!, $number: Int!, $subIssueCount: 
           }
           assignees(first: 10) { nodes { login } }
           labels(first: 20) { nodes { name } }
-          issueFieldValues(first: 100) {
+          issueFieldValues(first: 100) @include(if: $includeIssueFields) {
             totalCount
             nodes {
               ... on IssueFieldSingleSelectValue {
@@ -515,6 +516,7 @@ interface GqlResponse {
 
 interface GqlObjectiveCardinality {
   repository: {
+    owner: { __typename: string };
     issue: { subIssues: { totalCount: number } } | null;
   } | null;
 }
@@ -1026,7 +1028,10 @@ export class GitHubReader {
   #cachedDefaultBranch: string | undefined;
   #authenticatedUserId: number | undefined;
   /** Stable after graph application; refreshed automatically if cardinality changes. */
-  readonly #objectiveSubIssueCounts = new Map<number, number>();
+  readonly #objectiveShapes = new Map<
+    number,
+    { subIssueCount: number; includeIssueFields: boolean }
+  >();
 
   constructor(opts: GitHubOptions) {
     this.#owner = opts.owner;
@@ -1465,7 +1470,7 @@ export class GitHubReader {
 
   /** Read one Objective and everything derivable about its Work Items. */
   async readObjective(number: number): Promise<ObjectiveSnapshot> {
-    const readCardinality = async (): Promise<number> => {
+    const readCardinality = async () => {
       const cardinality = await this.#octokit.graphql<GqlObjectiveCardinality>(
         OBJECTIVE_CARDINALITY_QUERY,
         { owner: this.#owner, repo: this.#repo, number },
@@ -1474,21 +1479,26 @@ export class GitHubReader {
       if (!cardinality.repository || !observedIssue) {
         throw new Error(`Objective #${number} not found in ${this.#owner}/${this.#repo}`);
       }
-      return objectiveSubIssueQuerySize(observedIssue.subIssues.totalCount);
+      return {
+        subIssueCount: objectiveSubIssueQuerySize(observedIssue.subIssues.totalCount),
+        // GitHub currently errors when this organization-only connection is
+        // selected on an Issue in a user-owned repository.
+        includeIssueFields: cardinality.repository.owner.__typename === "Organization",
+      };
     };
-    const readDetail = (subIssueCount: number) =>
+    const readDetail = (shape: { subIssueCount: number; includeIssueFields: boolean }) =>
       this.#octokit.graphql<GqlResponse>(
         this.#recoveryInspection ? RECOVERY_OBJECTIVE_QUERY : OBJECTIVE_QUERY,
         {
           owner: this.#owner,
           repo: this.#repo,
           number,
-          subIssueCount,
+          ...shape,
         },
       );
 
-    let subIssueCount = this.#objectiveSubIssueCounts.get(number) ?? (await readCardinality());
-    let data = await readDetail(subIssueCount);
+    let shape = this.#objectiveShapes.get(number) ?? (await readCardinality());
+    let data = await readDetail(shape);
     let repository = data.repository;
     let issue = repository?.issue;
     if (!repository || !issue) {
@@ -1500,9 +1510,9 @@ export class GitHubReader {
     // sub-issue, totalCount exposes the stale cached page; refresh once and
     // retry rather than returning a partial graph.
     if (issue.subIssues.totalCount !== issue.subIssues.nodes.length) {
-      this.#objectiveSubIssueCounts.delete(number);
-      subIssueCount = await readCardinality();
-      data = await readDetail(subIssueCount);
+      this.#objectiveShapes.delete(number);
+      shape = await readCardinality();
+      data = await readDetail(shape);
       repository = data.repository;
       issue = repository?.issue;
       if (!repository || !issue) {
@@ -1516,10 +1526,10 @@ export class GitHubReader {
     if (issue.subIssues.totalCount !== issue.subIssues.nodes.length) {
       throw new Error(`Objective #${number} sub-issues changed during snapshot; retry the read`);
     }
-    this.#objectiveSubIssueCounts.set(
-      number,
-      objectiveSubIssueQuerySize(issue.subIssues.totalCount),
-    );
+    this.#objectiveShapes.set(number, {
+      ...shape,
+      subIssueCount: objectiveSubIssueQuerySize(issue.subIssues.totalCount),
+    });
 
     const bot = repository.suggestedActors.nodes.find((a) => a.login === COPILOT_LOGIN);
     const managedAgentActors = repository.suggestedActors.nodes.flatMap((actor) =>

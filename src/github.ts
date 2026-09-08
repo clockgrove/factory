@@ -44,7 +44,6 @@ import {
   type ObjectiveAuthorityObservation,
 } from "./control/authority.js";
 import {
-  leaseEventFromCommit,
   leaseRef,
   parseLeaseCommit,
   type GitCommitObject,
@@ -1104,7 +1103,7 @@ export class GitHubReader {
     number,
     { subIssueCount: number; includeIssueFields: boolean }
   >();
-  readonly #authorityCommits = new Map<string, { lease: LeaseState; event: FactoryEvent }>();
+  readonly #authorityCommits = new Map<string, LeaseState>();
 
   constructor(opts: GitHubOptions) {
     this.#owner = opts.owner;
@@ -1665,7 +1664,7 @@ export class GitHubReader {
         `Objective #${issue.number} has writer-bound receipts but no authoritative lease ref`,
       );
     }
-    const objectiveAuthority = currentAuthority?.observation;
+    const objectiveAuthority = currentAuthority;
     const objectiveEvents = factoryEvents(
       issue.comments,
       `Objective #${issue.number}`,
@@ -1695,10 +1694,6 @@ export class GitHubReader {
           ),
         );
       }
-    }
-    if (currentAuthority) {
-      objectiveEvents.push(currentAuthority.event);
-      for (const events of workItemEvents.values()) events.push(currentAuthority.event);
     }
     const currentRunId = latestRunReceipts(objectiveEvents)?.runId;
     const agentWorkEvents = await this.#readAgentWorkEvents(
@@ -1748,10 +1743,7 @@ export class GitHubReader {
   /** Observe comments first and the authority ref second. A takeover between
    * those reads can only attenuate an older receipt; a later comment waits for
    * the next bounded snapshot. */
-  async #readObjectiveAuthority(number: number): Promise<{
-    observation: ObjectiveAuthorityObservation;
-    event: FactoryEvent;
-  } | null> {
+  async #readObjectiveAuthority(number: number): Promise<ObjectiveAuthorityObservation | null> {
     let refResponse;
     try {
       refResponse = await this.#octokit.request("GET /repos/{owner}/{repo}/git/ref/{ref}", {
@@ -1783,16 +1775,13 @@ export class GitHubReader {
         message: response.data.message,
         serverTime: observedAt,
       };
-      cached = { lease: parseLeaseCommit(commit), event: leaseEventFromCommit(commit) };
+      cached = parseLeaseCommit(commit);
       this.#authorityCommits.set(oid, cached);
     }
-    if (cached.lease.objective !== number) {
+    if (cached.objective !== number) {
       throw new Error(`Objective #${number} authority ref names another Objective`);
     }
-    return {
-      observation: objectiveAuthorityObservation(cached.lease, observedAt),
-      event: cached.event,
-    };
+    return objectiveAuthorityObservation(cached, observedAt);
   }
 
   /**

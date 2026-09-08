@@ -7,6 +7,7 @@ import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
 import { writerAuthority } from "../src/control/authority.js";
 import { hasCurrentWriterAuthority, latestRunReceipts } from "../src/control/receipts.js";
 import type { LeaseState } from "../src/control/lease.js";
+import { recoverySourceEventsDigest } from "../src/recovery/identity.js";
 
 const OBJECTIVE = 7;
 const RUN = "runtime-read-count";
@@ -146,7 +147,7 @@ function fixture(
   workItems: ReturnType<typeof item>[],
   v2 = true,
   objectiveReceipts: FactoryEvent[] = v2 ? [runStarted()] : [],
-  authorityLease?: LeaseState | null,
+  authorityLease?: LeaseState | null | (() => LeaseState | null),
 ) {
   const timelinePulls: number[] = [];
   const detail = {
@@ -211,32 +212,34 @@ function fixture(
         url.pathname.includes("/git/ref/") &&
         url.pathname.endsWith(`objective-${OBJECTIVE}`)
       ) {
-        if (authorityLease === null) {
+        const observed = typeof authorityLease === "function" ? authorityLease() : authorityLease;
+        if (observed === null) {
           return Response.json({ message: "Not Found" }, { status: 404 });
         }
         return Response.json(
-          { object: { sha: authorityLease.oid } },
+          { object: { sha: observed.oid } },
           { headers: { date: "Tue, 08 Sep 2026 00:05:00 GMT" } },
         );
       }
-      if (authorityLease && url.pathname.endsWith(`/git/commits/${authorityLease.oid}`)) {
+      const observed = typeof authorityLease === "function" ? authorityLease() : authorityLease;
+      if (observed && url.pathname.endsWith(`/git/commits/${observed.oid}`)) {
         const event = {
           protocol: "clockgrove.factory/v2",
           kind: "lease",
           event: "LeaseAcquired",
-          objective: authorityLease.objective,
-          runId: authorityLease.runId,
-          sequence: authorityLease.sequence,
+          objective: observed.objective,
+          runId: observed.runId,
+          sequence: observed.sequence,
           at: "2026-09-08T00:04:00.000Z",
-          holder: authorityLease.holder,
-          epoch: authorityLease.epoch,
-          expiresAt: authorityLease.expiresAt.toISOString(),
-          policyDigest: authorityLease.policyDigest,
+          holder: observed.holder,
+          epoch: observed.epoch,
+          expiresAt: observed.expiresAt.toISOString(),
+          policyDigest: observed.policyDigest,
         };
         const trailer = Buffer.from(JSON.stringify(event), "utf8").toString("base64url");
         return Response.json({
-          sha: authorityLease.oid,
-          tree: { sha: authorityLease.treeOid },
+          sha: observed.oid,
+          tree: { sha: observed.treeOid },
           parents: [{ sha: BASE_SHA }],
           message: `Factory lease LeaseAcquired for Objective #${OBJECTIVE}\n\nFactory-Event: ${trailer}`,
         });
@@ -342,9 +345,109 @@ describe("GitHubReader Agent Work timeline reads", () => {
       oid: currentLease.oid,
     });
     const events = snapshot.workItems[0]!.factoryEvents!;
-    expect(events.some((event) => event.kind === "lease")).toBe(true);
-    expect(hasCurrentWriterAuthority(delayed, events)).toBe(false);
+    expect(events.some((event) => event.kind === "lease")).toBe(false);
+    expect(hasCurrentWriterAuthority(delayed, events, snapshot.objectiveAuthority)).toBe(false);
     expect(events).toContainEqual(delayed);
+  });
+
+  it("keeps recovery source history stable when a successor takes authority", async () => {
+    const predecessor = {
+      ref: `refs/clockgrove-factory/leases/objective-${OBJECTIVE}`,
+      oid: "1".repeat(40),
+      treeOid: "2".repeat(40),
+      objective: OBJECTIVE,
+      runId: RUN,
+      holder: "predecessor-writer",
+      epoch: 1,
+      sequence: 8,
+      expiresAt: new Date("2026-09-08T00:10:00.000Z"),
+      policyDigest: POLICY_DIGEST,
+    } satisfies LeaseState;
+    const successor = {
+      ...predecessor,
+      oid: "3".repeat(40),
+      treeOid: "4".repeat(40),
+      runId: "successor-run",
+      holder: "successor-writer",
+      epoch: 2,
+      sequence: 1,
+    } satisfies LeaseState;
+    const start = parseFactoryEvent({ ...runStarted(), ...writerAuthority(predecessor, 1) });
+    const terminal = parseFactoryEvent({
+      protocol: "clockgrove.factory/v2",
+      kind: "run",
+      event: "FactoryRunEscalated",
+      objective: OBJECTIVE,
+      runId: RUN,
+      sequence: 7,
+      at: "2026-09-08T00:03:00.000Z",
+      reason: "recovery requested",
+      ...writerAuthority(predecessor, 7),
+    });
+    let authority = predecessor;
+    const f = fixture([], true, [start, terminal], () => authority);
+
+    const planned = await f.reader.readObjective(OBJECTIVE);
+    const rawHistory = JSON.stringify(planned.factoryEvents);
+    const plannedDigest = recoverySourceEventsDigest({
+      objective: OBJECTIVE,
+      runIds: [RUN],
+      events: planned.factoryEvents!,
+      maxSequence: 7,
+    });
+    authority = successor;
+    const revalidated = await f.reader.readObjective(OBJECTIVE);
+
+    expect(revalidated.objectiveAuthority).toMatchObject({
+      runId: "successor-run",
+      holder: "successor-writer",
+      epoch: 2,
+    });
+    expect(JSON.stringify(revalidated.factoryEvents)).toBe(rawHistory);
+    expect(
+      recoverySourceEventsDigest({
+        objective: OBJECTIVE,
+        runIds: [RUN],
+        events: revalidated.factoryEvents!,
+        maxSequence: 7,
+      }),
+    ).toBe(plannedDigest);
+  });
+
+  it("keeps authenticated history stable across same-generation lease renewal", async () => {
+    const lease = {
+      ref: `refs/clockgrove-factory/leases/objective-${OBJECTIVE}`,
+      oid: "5".repeat(40),
+      treeOid: "6".repeat(40),
+      objective: OBJECTIVE,
+      runId: RUN,
+      holder: "renewing-writer",
+      epoch: 3,
+      sequence: 4,
+      expiresAt: new Date("2026-09-08T00:10:00.000Z"),
+      policyDigest: POLICY_DIGEST,
+    } satisfies LeaseState;
+    const started = parseFactoryEvent({ ...runStarted(), ...writerAuthority(lease, 1) });
+    let authority = lease;
+    const f = fixture([], true, [started], () => authority);
+
+    const before = await f.reader.readObjective(OBJECTIVE);
+    authority = {
+      ...lease,
+      oid: "7".repeat(40),
+      treeOid: "8".repeat(40),
+      sequence: 5,
+      expiresAt: new Date("2026-09-08T00:20:00.000Z"),
+    };
+    const after = await f.reader.readObjective(OBJECTIVE);
+
+    expect(after.objectiveAuthority).toMatchObject({
+      oid: authority.oid,
+      sequence: 5,
+      expiresAt: authority.expiresAt,
+    });
+    expect(after.factoryEvents).toEqual(before.factoryEvents);
+    expect(after.factoryEvents).toEqual([started]);
   });
 
   it("fails closed when a writer-bound receipt has no authoritative Objective ref", async () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { LeaseLostError, LeaseManager } from "../src/control/lease.js";
 import { PlatformUnavailableError } from "../src/platform.js";
+import { unresolvedModelInvocations } from "../src/control/budget.js";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
 
 const terminalNames = ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"];
@@ -158,6 +159,24 @@ describe("Supervisor selected outcome survives execution teardown", () => {
         else await expect(f.run(shutdown.signal)).rejects.toBe(failure);
         expect(f.events().filter((event) => terminalNames.includes(event.event))).toEqual([]);
         expect(f.events().filter((event) => event.event === "AttemptCancelled")).toEqual([]);
+        expect(LeaseManager.prototype.release).not.toHaveBeenCalled();
+        if (fault !== "cleanup") {
+          expect(
+            unresolvedModelInvocations(f.events()).filter((event) => event.phase === "execution"),
+          ).toHaveLength(1);
+          expect(
+            f
+              .events()
+              .filter(
+                (event) =>
+                  event.kind === "budget" &&
+                  event.event === "BudgetReconciled" &&
+                  event.unit === "model_tokens" &&
+                  event.phase === "execution",
+              ),
+          ).toEqual([]);
+          expect(f.resources.size).toBe(0);
+        }
         expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);
       } finally {
         await f.dispose();

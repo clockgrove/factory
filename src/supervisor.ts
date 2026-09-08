@@ -345,6 +345,16 @@ class RunCancellationRequestedError extends Error {
   }
 }
 
+class CancellationAccountingPublicationError extends Error {
+  constructor(cause: unknown) {
+    super(
+      `cancelled execution usage receipt could not be persisted: ${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause },
+    );
+    this.name = "CancellationAccountingPublicationError";
+  }
+}
+
 class ControllerObservationRetiredError extends Error {
   constructor() {
     super("repository-controller observation retired before dispatch");
@@ -5218,6 +5228,11 @@ export class FactorySupervisor {
             error.message,
           ));
       if (unsafeCleanup) throw error;
+      // A concurrent execution may finish teardown with an accounting failure
+      // after the operator signal is raised. That failure is not itself an
+      // orderly cancellation and cannot authorize either a terminal receipt or
+      // a lease release that would permit replacement.
+      if (error instanceof CancellationAccountingPublicationError) throw error;
       if (this.#options.signal?.aborted && this.#options.shutdownBehavior === "release-lease") {
         return await releaseAfterDrain();
       }
@@ -6505,7 +6520,12 @@ export class FactorySupervisor {
           // Accounting is independent of resource absence. Always attempt
           // cleanup, but never turn a failed fenced receipt into permission
           // to finish or replace this attempt.
-          cancelledUsageWriteFailure = { error: usageError };
+          cancelledUsageWriteFailure = {
+            error:
+              usageError instanceof LeaseLostError || usageError instanceof PlatformUnavailableError
+                ? usageError
+                : new CancellationAccountingPublicationError(usageError),
+          };
         }
       }
       await confirmExecutionCleanup("failed-attempt backend cleanup");

@@ -209,6 +209,67 @@ beforeEach(() =>
     .mockResolvedValue({ status: "verified", evidenceDigest: digest, blockers: [] }),
 );
 describe("accepted successor admission reassignment", () => {
+  const approvedPolicyDifference = (f: Awaited<ReturnType<typeof fixture>>) => {
+    const approved = "b".repeat(64);
+    f.args.lease.policyDigest = approved;
+    f.args.runtime.controllingRun.policyDigest = approved;
+    f.args.runtime.planRecord.plan.policyDigest = approved;
+    f.args.runtime.claim.policyDigest = approved;
+    f.args.runtime.historicalAccounting.blockers = [
+      {
+        code: "historical-policy-difference",
+        reason:
+          "Historical usage remains under its source policy; the successor increment is approved.",
+        runId: "old",
+      },
+    ];
+    f.args.runtime.historicalAccounting.blockerCount = 1;
+  };
+  it("honors a separately approved successor policy while retaining original usage and identity", async () => {
+    const f = await fixture();
+    approvedPolicyDifference(f);
+    const events = structuredClone(f.args.runtime.events);
+    expect(await reconcileAdmissionForSuccessor(f.args)).toEqual({ authorityReceiptOid: sha(7) });
+    const old = (await f.ledger.read(10))!.history[0]!;
+    expect(old).toMatchObject({ disposition: "released", policyDigest: digest, writerEpoch: 5 });
+    expect(old.settledBySuccessor).toMatchObject({
+      policyDigest: "b".repeat(64),
+      directorEpoch: 1,
+    });
+    expect(f.args.runtime.events).toEqual(events);
+  });
+  it.each([
+    "missing-diagnostic",
+    "extra-diagnostic",
+    "other-code",
+    "truncated-diagnostics",
+    "truncated-reservations",
+    "truncated-attempts",
+    "unknown-history",
+    "unknown-current",
+    "unsettled",
+    "unapproved",
+    "policy-mismatch",
+    "claim-mismatch",
+  ])("does not let an approved policy difference conceal %s", async (fault) => {
+    const f = await fixture();
+    approvedPolicyDifference(f);
+    const accounting = f.args.runtime.historicalAccounting;
+    if (fault === "missing-diagnostic") accounting.blockerCount = 2;
+    if (fault === "extra-diagnostic") accounting.blockerCount = 0;
+    if (fault === "other-code") accounting.blockers[0]!.code = "incomplete-history";
+    if (fault === "truncated-diagnostics") accounting.diagnosticsTruncated = true;
+    if (fault === "truncated-reservations") accounting.unreconciledReservationsTruncated = true;
+    if (fault === "truncated-attempts") accounting.attemptCountsTruncated = true;
+    if (fault === "unknown-history") accounting.unknownModelUsageCount = 1;
+    if (fault === "unknown-current") f.args.runtime.currentUnknownModelUsageCount = 1;
+    if (fault === "unsettled") accounting.unreconciledReservationCount = 1;
+    if (fault === "unapproved") Object.assign(f.args.runtime, { adoptionVerified: false });
+    if (fault === "policy-mismatch") f.args.lease.policyDigest = "c".repeat(64);
+    if (fault === "claim-mismatch") f.refs.set("claim", sha(99));
+    await expect(reconcileAdmissionForSuccessor(f.args)).rejects.toThrow();
+    expect((await f.ledger.read(10))!.history[0]!.disposition).toBe("dispatching");
+  });
   it("settles exact predecessor evidence without borrowing its epoch and permits explicit reassignment", async () => {
     const f = await fixture();
     expect(await reconcileAdmissionForSuccessor(f.args)).toEqual({ authorityReceiptOid: sha(7) });

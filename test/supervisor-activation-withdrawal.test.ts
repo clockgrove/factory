@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { GitHubReader, cancellationRequestFromComments } from "../src/github.js";
 import { GitHubControlStore } from "../src/control/github-store.js";
-import { LeaseManager } from "../src/control/lease.js";
+import { LeaseLostError, LeaseManager } from "../src/control/lease.js";
 import { decodeEventComments, encodeEventComment } from "../src/control/receipts.js";
 import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js";
 import { policyDigest } from "../src/protocol/policy.js";
@@ -13,11 +13,10 @@ afterEach(async () => {
   for (const fixture of fixtures.splice(0)) await fixture.dispose();
 });
 
-async function fixture(fresh = true, repositoryFence?: () => Promise<void>) {
+async function fixture(fresh = true) {
   const f = await providerSupervisorFixture("daytona-burst", {
     controllerActivation: true,
     localOnly: true,
-    ...(repositoryFence ? { repositoryFence } : {}),
   });
   fixtures.push(f);
   vi.spyOn(GitHubReader.prototype, "readRepositoryLayout").mockResolvedValue({
@@ -204,19 +203,17 @@ describe("Supervisor activation withdrawal races", () => {
     },
   );
 
-  it("rechecks repository authority after the cancellation read before compilation", async () => {
+  it("rechecks Objective authority after the cancellation read before compilation", async () => {
     let changed = false;
-    const f = await fixture(true, async () => {
-      if (changed) throw new Error("repository fence changed during cancellation read");
+    const f = await fixture(true);
+    vi.mocked(LeaseManager.prototype.assertGeneration).mockImplementation(async () => {
+      if (changed) throw new LeaseLostError("Objective fence changed during cancellation read");
     });
     f.narrowRead.mockImplementation(async () => {
       changed = true;
       return null;
     });
-    expect(await f.run()).toMatchObject({
-      status: "escalated",
-      reason: "repository fence changed during cancellation read",
-    });
+    await expect(f.run()).rejects.toThrow("Objective fence changed during cancellation read");
     expect(f.compile).not.toHaveBeenCalled();
     expect(f.activity).toEqual([]);
   });

@@ -86,10 +86,20 @@ it("reconstructs candidate native usage after checkpoint completion but before i
     expect(git("rev-parse", `${durable.identity.deliveryHeadSha}^{tree}`)).toBe(
       durable.validation.outputTreeSha,
     );
-    expect(GitHubControlStore.prototype.compareAndSwapRef).toHaveBeenCalledOnce();
+    const publicationRefreshes = () =>
+      vi
+        .mocked(GitHubControlStore.prototype.compareAndSwapRef)
+        .mock.calls.map(([update]) => update)
+        .filter((update) => update.ref === `refs/heads/${publication.branch}`);
+    const expectedRefresh = {
+      ref: `refs/heads/${publication.branch}`,
+      beforeOid: publication.headSha,
+      afterOid: durable.identity.deliveryHeadSha,
+    };
+    expect(publicationRefreshes()).toEqual([expect.objectContaining(expectedRefresh)]);
 
     expect(await fixture.run()).toMatchObject({ status: "completed" });
-    expect(GitHubControlStore.prototype.compareAndSwapRef).toHaveBeenCalledOnce();
+    expect(publicationRefreshes()).toEqual([expect.objectContaining(expectedRefresh)]);
     expect(
       fixture
         .events()

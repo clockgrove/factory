@@ -122,9 +122,11 @@ async function fixture(backend = "codex-sdk/local-worktree") {
       },
     ],
   };
-  const manager = new CompiledGraphManager(storage, {
+  const leases = {
     assertCurrent: async () => {},
-  } as unknown as LeaseManager);
+    assertMutationAuthorized: async () => leases.assertCurrent(),
+  };
+  const manager = new CompiledGraphManager(storage, leases as unknown as LeaseManager);
   const graph = await manager.persist({ lease, base, objective });
   const projection = await manager.persistProjection({
     lease,

@@ -33,6 +33,9 @@ class MemoryStore implements CompiledGraphStore {
     if (!this.leaseValid) throw new Error("lease lost");
     this.fenced = true;
   }
+  async assertMutationAuthorized() {
+    await this.assertCurrent();
+  }
   private before(kind: string) {
     expect(this.fenced, `fence before ${kind}`).toBe(true);
     this.fenced = false;

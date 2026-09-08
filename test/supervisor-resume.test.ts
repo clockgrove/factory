@@ -1,5 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { describe, expect, it, vi } from "vitest";
+import { GitHubControlStore } from "../src/control/github-store.js";
+import { IssueAdmissionLedger } from "../src/control/issue-admission.js";
 import { LeaseManager } from "../src/control/lease.js";
 import { PlatformUnavailableError } from "../src/platform.js";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
@@ -87,44 +89,136 @@ describe("same-run controller restart after integration", () => {
     }
   }, 30_000);
 
-  it("does not redispatch an overlapping reservation after an integration transport outage", async () => {
-    const f = await providerSupervisorFixture("daytona-burst", {
-      controllerActivation: true,
-      localOnly: true,
-      loseIntegrationReceipt: "before",
-    });
-    try {
-      await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
-      expect(
-        f.events().some((event) => event.event === "BudgetReserved" && event.workItem === 9),
-      ).toBe(true);
-      expect(
-        f.events().some((event) => event.event === "AttemptStarted" && event.workItem === 9),
-      ).toBe(false);
-      const launches = f.activity.filter((entry) => entry.operation === "launch");
-      await expect(f.run()).rejects.toThrow("execution completion is unknown after dispatch");
-      expect(f.activity.filter((entry) => entry.operation === "launch")).toEqual(launches);
-      expect(
-        f
+  it.each([false, true])(
+    "recovers an overlapping intent only with durable non-dispatch proof (dispatch possible: %s)",
+    async (dispatchPossible) => {
+      const f = await providerSupervisorFixture("daytona-burst", {
+        controllerActivation: true,
+        localOnly: true,
+        loseIntegrationReceipt: "before",
+      });
+      try {
+        await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
+        expect(
+          f.events().some((event) => event.event === "BudgetReserved" && event.workItem === 9),
+        ).toBe(true);
+        expect(
+          f.events().some((event) => event.event === "AttemptStarted" && event.workItem === 9),
+        ).toBe(false);
+        const launches = f.activity.filter((entry) => entry.operation === "launch");
+        const ledger = new IssueAdmissionLedger(
+          new GitHubControlStore({
+            token: "fixture-only",
+            owner: "fixture",
+            repo: "provider-qualification",
+          }),
+        );
+        const original = (await ledger.read(9))?.history[0];
+        expect(original).toMatchObject({ disposition: "prepared", dispatchPossible: false });
+        if (!original) throw new Error("fixture omitted the original admission");
+        const originalBudget = f
           .events()
-          .some((event) =>
-            ["FactoryRunCompleted", "FactoryRunEscalated", "FactoryRunCancelled"].includes(
-              event.event,
+          .filter((event) => event.kind === "budget" && event.workItem === 9);
+        if (!dispatchPossible) {
+          expect(await f.run()).toMatchObject({ status: "completed", runId: f.runId });
+          const history = (await ledger.read(9))!.history;
+          expect(history).toHaveLength(2);
+          expect(history[0]).toMatchObject({
+            reservation: original.reservation,
+            disposition: "released",
+            dispatchPossible: false,
+            evidence: {
+              accountingSettled: true,
+              capacityReleased: true,
+              producerStopped: true,
+              resourcesReleased: true,
+            },
+          });
+          expect(history[1]!.reservation.attempt).toBeGreaterThan(original.reservation.attempt);
+          expect(
+            f
+              .events()
+              .some(
+                (event) =>
+                  event.event === "AttemptStarted" &&
+                  event.workItem === 9 &&
+                  event.attempt === original.reservation.attempt,
+              ),
+          ).toBe(false);
+          expect(
+            f
+              .events()
+              .filter(
+                (event) =>
+                  event.event === "BudgetReconciled" &&
+                  event.workItem === 9 &&
+                  event.attempt === original.reservation.attempt,
+              ),
+          ).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                amount: 0,
+                reason: "issue CAS permanently excluded dispatch of this original worker intent",
+              }),
+            ]),
+          );
+          for (const workItem of [8, 9, 10])
+            expect(
+              f.activity.filter(
+                (entry) => entry.operation === "launch" && entry.workItem === workItem,
+              ),
+            ).toHaveLength(1);
+          expect(f.resources.size).toBe(0);
+          return;
+        }
+        // A committed write-ahead dispatch marker cannot be cleared merely because
+        // no AttemptStarted receipt or provider completion survived the outage.
+        await ledger.transition({
+          workItem: 9,
+          reservationOid: original.reservation.oid,
+          objective: original.objective,
+          runId: original.runId,
+          directorEpoch: original.writerEpoch,
+          writerHolder: original.currentWriterHolder,
+          policyDigest: original.policyDigest,
+          disposition: "dispatching",
+          assertCurrent: async () => {},
+        });
+        await expect(f.run()).rejects.toThrow("execution completion is unknown after dispatch");
+        expect(f.activity.filter((entry) => entry.operation === "launch")).toEqual(launches);
+        expect((await ledger.read(9))!.history).toEqual([
+          expect.objectContaining({
+            disposition: "dispatching",
+            dispatchPossible: true,
+            reservation: original.reservation,
+          }),
+        ]);
+        expect(
+          f.events().filter((event) => event.kind === "budget" && event.workItem === 9),
+        ).toEqual(originalBudget);
+        expect(
+          f
+            .events()
+            .some((event) =>
+              ["FactoryRunCompleted", "FactoryRunEscalated", "FactoryRunCancelled"].includes(
+                event.event,
+              ),
             ),
-          ),
-      ).toBe(false);
-      expect(
-        f
-          .events()
-          .some(
-            (event) =>
-              event.workItem === 9 && ["AttemptFailed", "AttemptDeferred"].includes(event.event),
-          ),
-      ).toBe(false);
-    } finally {
-      await f.dispose();
-    }
-  }, 30_000);
+        ).toBe(false);
+        expect(
+          f
+            .events()
+            .some(
+              (event) =>
+                event.workItem === 9 && ["AttemptFailed", "AttemptDeferred"].includes(event.event),
+            ),
+        ).toBe(false);
+      } finally {
+        await f.dispose();
+      }
+    },
+    30_000,
+  );
 
   it("reconstructs a chain including accepted sibling candidate integration after restart", async () => {
     const shutdown = new AbortController();

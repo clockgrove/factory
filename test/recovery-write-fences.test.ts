@@ -34,8 +34,11 @@ function fixture() {
     createdAt: now,
   };
   const store = { addIssueComment: vi.fn(async () => {}), serverTime: vi.fn(async () => now) };
-  const assertCurrent = vi.fn(async () => {});
-  const recorder = new LifecycleRecorder(store, { assertCurrent } as unknown as LeaseManager);
+  const assertCurrent = vi.fn(async (_lease: LeaseState) => {});
+  const recorder = new LifecycleRecorder(store, {
+    assertCurrent,
+    assertMutationAuthorized: (lease: LeaseState) => assertCurrent(lease),
+  } as unknown as LeaseManager);
   const invoke = (kind: string) =>
     kind === "validation"
       ? recorder.validation({

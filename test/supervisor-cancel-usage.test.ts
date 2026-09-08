@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { LeaseLostError, LeaseManager } from "../src/control/lease.js";
-import { LifecycleRecorder } from "../src/control/events.js";
+import { GitHubControlStore } from "../src/control/github-store.js";
+import { decodeEventComments } from "../src/control/receipts.js";
 import { isModelInvocationMarker, unresolvedModelInvocations } from "../src/control/budget.js";
 import type { FactoryEvent } from "../src/protocol/events.js";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
@@ -161,13 +162,21 @@ describe("Supervisor cancellation model usage", () => {
     }
   }, 30_000);
 
-  it.each(["lease", "receipt"])(
-    "still cleans up and blocks terminal writes when the usage %s fence fails",
-    async (failure) => {
+  it.each([
+    { failure: "lease", mode: "ordinary", controllerActivation: false },
+    { failure: "receipt", mode: "ordinary", controllerActivation: false },
+    { failure: "receipt", mode: "controller release", controllerActivation: true },
+  ] as const)(
+    "still cleans up and blocks terminal writes when the usage $failure fence fails during $mode cancellation",
+    async ({ failure, controllerActivation }) => {
       const shutdown = new AbortController();
       let cancelled = false;
+      let receiptWriteAttempts = 0;
+      const usageFenceFailure =
+        failure === "lease" ? new LeaseLostError("cancellation fixture lease lost") : undefined;
       const f = await providerSupervisorFixture("daytona-burst", {
         localOnly: true,
+        controllerActivation,
         configureLocalBackend: (backend) => ({
           ...backend,
           observe: async () => {
@@ -182,18 +191,43 @@ describe("Supervisor cancellation model usage", () => {
             await backend.cancel(handle);
             cancelled = true;
             if (failure === "lease")
-              vi.mocked(LeaseManager.prototype.assertCurrent).mockRejectedValue(
-                new LeaseLostError("cancellation fixture lease lost"),
-              );
-            else
-              vi.spyOn(LifecycleRecorder.prototype, "budget").mockRejectedValue(
-                new Error("cancellation fixture receipt unavailable"),
-              );
+              vi.mocked(LeaseManager.prototype.assertCurrent).mockRejectedValue(usageFenceFailure);
           },
         }),
       });
+      if (failure === "receipt") {
+        const writer = vi.mocked(GitHubControlStore.prototype.addIssueComment);
+        const original = writer.getMockImplementation()!;
+        writer.mockImplementation(async (nodeId, body) => {
+          if (
+            decodeEventComments(body).some(
+              (event) =>
+                event.kind === "budget" &&
+                event.event === "BudgetReconciled" &&
+                event.unit === "model_tokens" &&
+                event.phase === "execution",
+            )
+          ) {
+            receiptWriteAttempts++;
+            throw new Error("cancellation fixture receipt unavailable");
+          }
+          return original(nodeId, body);
+        });
+      }
       try {
-        await expect(f.run(shutdown.signal)).rejects.toThrow(/lease lost|receipt unavailable/);
+        const run = f.run(shutdown.signal);
+        await expect(run).rejects.toThrow(/lease lost|receipt unavailable/);
+        if (failure === "receipt") {
+          const error = await run.catch((observed: unknown) => observed);
+          expect(error).toBeInstanceOf(Error);
+          expect((error as Error).name).toBe("CancellationAccountingPublicationError");
+          expect((error as Error).cause).toMatchObject({
+            message: "cancellation fixture receipt unavailable",
+          });
+          expect(receiptWriteAttempts).toBe(1);
+        } else {
+          expect(await run.catch((observed: unknown) => observed)).toBe(usageFenceFailure);
+        }
         expect(
           f
             .events()
@@ -211,6 +245,16 @@ describe("Supervisor cancellation model usage", () => {
             .events()
             .filter((event) => event.kind === "attempt" && event.event === "AttemptCancelled"),
         ).toEqual([]);
+        expect(
+          f
+            .events()
+            .filter((event) =>
+              ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(
+                event.event,
+              ),
+            ),
+        ).toEqual([]);
+        expect(LeaseManager.prototype.release).not.toHaveBeenCalled();
         expect(f.resources.size).toBe(0);
         expect(f.activity.filter((entry) => entry.operation === "cleanup")).toHaveLength(1);
         expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);

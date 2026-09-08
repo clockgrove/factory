@@ -143,15 +143,24 @@ async function fixture(
   const oid = () => createHash("sha1").update(`metadata-${counter++}`).digest("hex");
   const readCommit = async (id: string): Promise<GitCommitObject> => {
     if (id === stalePreviewOid) stalePreviewServed = true;
-    return (
-      commits.get(id) ?? {
-        oid: id,
-        treeOid: git("rev-parse", `${id}^{tree}`),
-        parentOids: git("show", "-s", "--format=%P", id).split(" ").filter(Boolean),
-        message: git("show", "-s", "--format=%B", id),
-        serverTime: new Date(),
-      }
-    );
+    const synthetic = commits.get(id);
+    if (synthetic) return synthetic;
+    // Read fresh immutable metadata in one subprocess; do not cache observations
+    // or spend three Git startups on every admission/recovery proof read.
+    const output = git("show", "-s", "--format=%T%x00%P%x00%B", id);
+    const treeEnd = output.indexOf("\0");
+    const parentsEnd = output.indexOf("\0", treeEnd + 1);
+    if (treeEnd < 0 || parentsEnd < 0) throw new Error("malformed fixture Git commit");
+    return {
+      oid: id,
+      treeOid: output.slice(0, treeEnd),
+      parentOids: output
+        .slice(treeEnd + 1, parentsEnd)
+        .split(" ")
+        .filter(Boolean),
+      message: output.slice(parentsEnd + 1).trim(),
+      serverTime: new Date(),
+    };
   };
   const storage: CompiledGraphStore = {
     readRef: async (ref) => refs.get(ref) ?? null,

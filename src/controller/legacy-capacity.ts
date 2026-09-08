@@ -2,11 +2,9 @@ import { GitHubReader } from "../github.js";
 import type { GitHubControlStore } from "../control/github-store.js";
 import { CompiledGraphManager } from "../control/graphs.js";
 import { LeaseManager } from "../control/lease.js";
-import { unresolvedModelInvocations } from "../control/budget.js";
 import { normalizeSchedulingPolicy } from "../protocol/policy.js";
 import { workerPacketFromCompiled } from "../graph.js";
 import { deriveCapacityReservations } from "../scheduling/capacity-ledger.js";
-import { observeLocalScopeBatch } from "../recovery/scope-resources.js";
 import type { SharedCapacityImport } from "./shared-capacity.js";
 
 /** Called only under short legacy-election fencing, before the shared ledger exists. */
@@ -146,41 +144,10 @@ export async function importLegacyCapacity(input: {
           });
         }
       }
-      for (const invocation of unresolvedModelInvocations(runEvents)) {
-        // Unknown tokens remain unknown in the Objective ledger. For migration,
-        // only an uncontained producer is a repository resource concern.
-        if (
-          invocation.phase === "execution" &&
-          imported.some(
-            (claim) =>
-              claim.owner.objective === objective &&
-              claim.owner.runId === invocation.runId &&
-              claim.owner.directorEpoch === invocation.directorEpoch &&
-              claim.owner.policyDigest === invocation.policyDigest &&
-              claim.reservation.workItem === invocation.workItem &&
-              claim.reservation.attempt === invocation.attempt &&
-              claim.reservation.phase === "execution",
-          )
-        )
-          continue; // The exact producer retains its occupied slot, not an invented zero.
-        const batches = runEvents.flatMap((event) =>
-          (event.kind === "attempt" || event.kind === "capacity") &&
-          event.localScopeBatch &&
-          event.directorEpoch === invocation.directorEpoch
-            ? [event.localScopeBatch]
-            : [],
-        );
-        if (batches.length === 0)
-          throw new Error(
-            `Objective #${objective} invocation ${invocation.modelInvocationId} needs exact producer-absence proof before capacity migration`,
-          );
-        for (const batch of batches) {
-          if ((await observeLocalScopeBatch(batch)).status !== "absent")
-            throw new Error(
-              `Objective #${objective} invocation ${invocation.modelInvocationId} has an unresolved producer resource during capacity migration`,
-            );
-        }
-      }
+      // Capacity migration neither settles model accounting nor proves model
+      // producer absence. Compilation/review invocations do not reserve this
+      // worker ledger. Unknown usage remains an Objective-local obligation;
+      // execution/validation resources above stay occupied until real cleanup.
     }
   }
   await input.assertCurrent();

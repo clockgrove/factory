@@ -6,6 +6,8 @@ import type { GitHubControlStore } from "../src/control/github-store.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
 import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js";
 import type { CompiledObjective } from "../src/graph.js";
+import * as scopeResources from "../src/recovery/scope-resources.js";
+import { unresolvedModelInvocations } from "../src/control/budget.js";
 
 afterEach(() => vi.restoreAllMocks());
 const base = "a".repeat(40),
@@ -57,25 +59,74 @@ it("migrates an authenticated no-worker Objective without inventing outstanding 
   expect(await importLegacyCapacity(f.args)).toEqual([]);
   expect(f.args.assertCurrent).toHaveBeenCalled();
 });
-it("requires original producer evidence for an unresolved no-worker model invocation", async () => {
-  const f = fixture([
-    event({
-      kind: "budget",
-      event: "BudgetReserved",
-      sequence: 2,
-      phase: "management",
-      unit: "model_tokens",
-      amount: 0,
-      modelInvocationId: "compile-original",
-      usageId: "invocation-compile-original",
-      directorEpoch: 1,
-      policyDigest: policy,
-    }),
-  ]);
-  await expect(importLegacyCapacity(f.args)).rejects.toThrow(
-    "Objective #7 invocation compile-original needs exact producer-absence proof",
-  );
-});
+it.each([false, true])(
+  "preserves unknown management usage without inventing global capacity or absence proof: %s",
+  async (unrelatedBatch) => {
+    const f = fixture([
+      event({
+        kind: "budget",
+        event: "BudgetReserved",
+        sequence: 2,
+        phase: "management",
+        unit: "model_tokens",
+        amount: 0,
+        modelInvocationId: "compile-original",
+        usageId: "invocation-compile-original",
+        directorEpoch: 1,
+        policyDigest: policy,
+      }),
+    ]);
+    const observe = vi
+      .spyOn(scopeResources, "observeLocalScopeBatch")
+      .mockResolvedValue({ status: "absent" } as never);
+    if (unrelatedBatch) {
+      const capacity = {
+        kind: "capacity",
+        workItem: 8,
+        attempt: 1,
+        phase: "validation",
+        backend: "factory/local-validation",
+        requestedCpu: 1,
+        requestedMemoryMb: 256,
+        directorEpoch: 1,
+        policyDigest: policy,
+      };
+      f.snapshot.workItems[0]!.factoryEvents.push(
+        event({
+          ...capacity,
+          event: "CapacityReserved",
+          sequence: 3,
+          localScopeBatch: {
+            identity: {
+              protocol: "clockgrove.factory/local-scope-v1",
+              repository: "fixture/project",
+              objective: 7,
+              workItem: 8,
+              attempt: 1,
+              runId: "legacy",
+              directorEpoch: 1,
+              policyDigest: policy,
+              phase: "validation",
+              commandIndex: 0,
+              invocationDigest: digest,
+              hostIdentity: digest,
+            },
+            commandCount: 1,
+            producerPid: 123,
+            producerStartTicks: "456",
+            deadline: "2026-09-08T00:01:00Z",
+          },
+        }),
+        event({ ...capacity, event: "CapacityReconciled", sequence: 4 }),
+      );
+    }
+    const before = structuredClone(f.snapshot);
+    expect(await importLegacyCapacity(f.args)).toEqual([]);
+    expect(f.snapshot).toEqual(before);
+    expect(unresolvedModelInvocations(f.snapshot.factoryEvents)).toHaveLength(1);
+    expect(observe).not.toHaveBeenCalled();
+  },
+);
 it("imports retained execution using exact original owner and immutable graph scope", async () => {
   const f = fixture([
     event({

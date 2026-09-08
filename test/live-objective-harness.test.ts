@@ -20,6 +20,7 @@ import {
   qualificationNamespace,
   qualificationNamespaceMarker,
   qualificationPaths,
+  qualificationFailure,
   waitForCreatedObjectiveNamespace,
 } from "../scripts/verify-live-objective.mjs";
 import { parseRunPolicy } from "../src/protocol/policy.js";
@@ -854,6 +855,31 @@ describe("explicit installed regular qualification", () => {
     await expect(
       observeRegularCommits({ evidence: value, request: async () => ({ data: { sha: "other" } }) }),
     ).rejects.toThrow(/another identity/);
+  });
+  it.each(["escalated", "cancelled"])(
+    "preserves %s before any nonexistent commit observation",
+    async (status) => {
+      const reason = "invalid validation design in describe: duplicate tier";
+      const evidence = { runResult: { status, reason }, events: [], children: [], pulls: [] };
+      const request = vi.fn();
+      await expect(observeRegularCommits({ evidence, request })).rejects.toThrow(reason);
+      expect(request).not.toHaveBeenCalled();
+      const secondary = new Error("subissue observation unavailable");
+      const result = qualificationFailure(evidence, secondary);
+      expect(result).toMatchObject({ message: reason, cause: secondary });
+      expect(evidence).toMatchObject({ secondaryObservationFailure: secondary.message });
+    },
+  );
+  it("keeps malformed completed-run commit proofs rejected and original observation errors intact", async () => {
+    const evidence = { runResult: { status: "completed", runId: "run" }, events: [] };
+    const request = vi.fn();
+    await expect(observeRegularCommits({ evidence, request })).rejects.toThrow(
+      /unbounded or malformed/,
+    );
+    expect(request).not.toHaveBeenCalled();
+    const original = new Error("commit response unavailable");
+    expect(qualificationFailure(evidence, original)).toBe(original);
+    expect(qualificationFailure({}, original)).toBe(original);
   });
 });
 

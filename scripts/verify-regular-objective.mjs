@@ -79,6 +79,8 @@ export function regularQualification(env) {
 
 /** Only immutable exact Git commit reads, after the installed Supervisor returns. */
 export async function observeRegularCommits({ evidence, request }) {
+  if (["escalated", "cancelled"].includes(evidence.runResult?.status))
+    throw new Error(evidence.runResult.reason || `Factory run ${evidence.runResult.status}`);
   const events = eventsOf(evidence);
   const shas = [
     ...new Set(

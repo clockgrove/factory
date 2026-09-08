@@ -177,6 +177,7 @@ async function seedClaims(
   claimOwner: SharedCapacityOwner,
   count: number,
   released: boolean,
+  active?: CapacityReservation,
 ): Promise<void> {
   const claims = Array.from({ length: count }, (_, index) => {
     const value = reservation(claimOwner.objective, { workItem: index + 1 });
@@ -187,16 +188,25 @@ async function seedClaims(
       released,
     };
   });
+  if (active) {
+    claims.push({
+      id: sharedCapacityClaimId(claimOwner, active.key),
+      owner: claimOwner,
+      reservation: active,
+      released: false,
+    });
+  }
+  const total = claims.length;
   const state = {
     protocol: "clockgrove.factory/shared-capacity-v1",
     repository: "fixture/project",
     generation: 1,
     limits: {
       ...limits,
-      maxParallel: Math.max(limits.maxParallel, count + 1),
-      maxLocalParallel: Math.max(limits.maxLocalParallel, count + 1),
-      cpuCapacity: Math.max(limits.cpuCapacity, count + 1),
-      memoryCapacityMb: Math.max(limits.memoryCapacityMb, (count + 1) * 128),
+      maxParallel: Math.max(limits.maxParallel, total + 1),
+      maxLocalParallel: Math.max(limits.maxLocalParallel, total + 1),
+      cpuCapacity: Math.max(limits.cpuCapacity, total + 1),
+      memoryCapacityMb: Math.max(limits.memoryCapacityMb, (total + 1) * 128),
     },
     claims,
   };
@@ -425,6 +435,32 @@ describe("independent-session durable capacity", () => {
         maxParallel: 32,
       }),
     ).toMatchObject({ reserved: false, code: "global-capacity" });
+  });
+
+  it("retries an exact transition after its released source was compacted", async () => {
+    const store = new Store(),
+      one = await owner(store, 1),
+      source = reservation(1, { workItem: SHARED_CAPACITY_COMPACT_AT + 10 }),
+      target = reservation(1, {
+        workItem: SHARED_CAPACITY_COMPACT_AT + 10,
+        phase: "validation",
+      });
+    await seedClaims(store, one, SHARED_CAPACITY_COMPACT_AT - 2, true, source);
+    await expect(
+      coordinator(store).transition(one, source.key, target, limits),
+    ).resolves.toMatchObject({ reserved: true });
+    const restarted = coordinator(store);
+    await expect(restarted.transition(one, source.key, target, limits)).resolves.toMatchObject({
+      reserved: true,
+    });
+    expect(await restarted.snapshot()).toMatchObject({ active: 1, reservations: [target] });
+    expect(await restarted.retentionStatus()).toMatchObject({
+      journalClaims: 1,
+      retiredClaims: SHARED_CAPACITY_COMPACT_AT - 1,
+    });
+    await expect(
+      restarted.transition(one, source.key, { ...target, cpu: 2 }, limits),
+    ).rejects.toThrow("transition identity mismatch");
   });
 
   it("requires verified legacy initialization only once, not leader expiry each session", async () => {

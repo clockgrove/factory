@@ -634,20 +634,17 @@ export class SharedCapacityCoordinator {
       throw new Error("capacity transition Objective mismatch");
     const claim = this.#claim(owner, next);
     return this.#change<SharedCapacityResult>(owner, async (state, retiredDigest) => {
-      const prior = state.claims.find(
-        (row) => row.id === sharedCapacityClaimId(fromOwner, fromKey),
-      );
+      const priorId = sharedCapacityClaimId(fromOwner, fromKey);
+      const prior = state.claims.find((row) => row.id === priorId);
       const existing = state.claims.find((row) => row.id === claim.id);
+      const priorRetired = prior ? null : await retiredDigest(priorId);
       if (
         existing &&
-        prior?.released &&
+        (prior?.released || priorRetired) &&
         !existing.released &&
         canonical(existing.reservation) === canonical(claim.reservation)
       )
         return { value: { reserved: true, claimId: claim.id }, changed: false };
-      const priorRetired = prior
-        ? null
-        : await retiredDigest(sharedCapacityClaimId(fromOwner, fromKey));
       const existingRetired = existing ? null : await retiredDigest(claim.id);
       if (!prior || prior.released || existing || priorRetired || existingRetired)
         throw new Error("shared capacity transition identity mismatch");

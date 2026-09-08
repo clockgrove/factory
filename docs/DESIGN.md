@@ -839,7 +839,7 @@ the existing graph commitment. `mode: "auto-repair"` runs extraction, initial co
 mechanical grounding, and independent whole-Objective judgment; it permits at most two repairs
 by default. The default envelope is seven model invocations and 600 seconds. Optional
 `maxRepairs` (0–2), `maxInvocations` (1–7), `timeoutSeconds` (1–3600), and
-`maxObservedTokens` narrow that envelope. The normal run deadline and observed-token admission
+`maxObservedTokens` configure that bounded envelope. The normal run deadline and observed-token admission
 remain additional limits. Observed tokens are not a provider-enforced hard cap. Every phase
 uses the already selected compilation model; the judge receives no compiler private reasoning.
 

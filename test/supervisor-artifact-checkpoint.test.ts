@@ -223,6 +223,9 @@ describe("Supervisor collected artifact durability", () => {
     expect(model).toMatchObject({ amount: 6, modelInvocationId: markers[0]!.modelInvocationId });
     item.factoryEvents!.push({
       ...model,
+      // Two authenticated operations report contradictory usage for one model
+      // invocation; this is not a corrupted replay of the same writer operation.
+      writerOperationId: "fixture-conflicting-terminal-usage",
       sequence: Math.max(...f.events().map((event) => event.sequence)) + 1,
       amount: 7,
       reportedModelUsage: { inputTokens: 5, outputTokens: 2 },

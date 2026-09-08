@@ -547,7 +547,7 @@ describe("host-owned publication", () => {
       validation.evidence.outputTreeSha,
     );
     const fencedStore = new GitObjectStore(repository, base.oid);
-    Object.defineProperty(fencedStore, "objectiveMutationFenceAtDispatch", { value: true });
+    Object.defineProperty(fencedStore, "objectivePublicationFenceAtDispatch", { value: true });
     const transportFencedAssert = vi.fn(async () => {});
     await publishValidated({
       ...args,

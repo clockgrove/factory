@@ -211,7 +211,7 @@ export async function buildRecoveryProposal(input: {
         (event) =>
           event.runId === start.runId &&
           TERMINALS.has(event.event) &&
-          hasCurrentWriterAuthority(event, events),
+          hasCurrentWriterAuthority(event, events, snapshot.objectiveAuthority),
       );
       require(
         terminals.length === 1 &&
@@ -1022,6 +1022,7 @@ export async function buildRecoveryProposal(input: {
               store: port,
               deliveryHeadSha: pull.headSha,
               requireCompletion: pull.merged,
+              authority: snapshot.objectiveAuthority,
             })
           : null;
       if (refresh) {
@@ -1043,6 +1044,7 @@ export async function buildRecoveryProposal(input: {
               store: port,
               deliveryHeadSha: pull.headSha,
               requireCompletion: true,
+              authority: snapshot.objectiveAuthority,
             })
           : null;
       if (pull.merged) {
@@ -1126,6 +1128,7 @@ export async function buildRecoveryProposal(input: {
       events,
       runIds,
       policy,
+      authority: snapshot.objectiveAuthority,
     });
     require(accounting.usage !== null);
     for (const workItem of failedRetries)
@@ -1200,6 +1203,7 @@ export async function buildRecoveryProposal(input: {
       plansByDigest: priorPlans,
       claims,
       candidatePlan: plan,
+      authority: snapshot.objectiveAuthority,
     });
     if (chain.status !== "verified") {
       result.blockers.push(...chain.blockers);

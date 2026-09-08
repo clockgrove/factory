@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 
 import { type FactoryEvent, parseFactoryEvent } from "../protocol/events.js";
 import { MAX_PERSISTED_EVENT_BYTES, validatePersistable } from "../protocol/limits.js";
+import { completeWriterAuthority, type ObjectiveAuthorityObservation } from "./authority.js";
 
 const COMMENT_OPEN = "<!-- clockgrove-factory:event\n";
 const COMMENT_CLOSE = "\n-->";
@@ -77,7 +78,35 @@ export function decodeEventTrailer(message: string): FactoryEvent | null {
 export function hasCurrentWriterAuthority(
   event: FactoryEvent,
   events: readonly FactoryEvent[],
+  authority?: ObjectiveAuthorityObservation | null,
 ): boolean {
+  const observed =
+    authority === undefined
+      ? [...events]
+          .reverse()
+          .find(
+            (candidate) =>
+              candidate.kind === "lease" &&
+              candidate.objective === event.objective &&
+              candidate.runId === event.runId,
+          )
+      : authority;
+  if (observed && observed.objective === event.objective && observed.runId === event.runId) {
+    const writer = completeWriterAuthority(event);
+    const sameGeneration = observed.epoch === event.writerEpoch;
+    const hasNewWriterField =
+      event.writerOperationId !== undefined ||
+      event.writerHolder !== undefined ||
+      event.writerPolicyDigest !== undefined;
+    return Boolean(
+      (writer &&
+        sameGeneration &&
+        observed.holder === writer.writerHolder &&
+        observed.policyDigest === writer.writerPolicyDigest) ||
+        (!hasNewWriterField && sameGeneration),
+    );
+  }
+  if (authority === null) return false;
   const epoch = events.reduce(
     (current, candidate) =>
       candidate.kind === "controller" &&
@@ -91,7 +120,10 @@ export function hasCurrentWriterAuthority(
   return epoch === 0 || event.writerEpoch === epoch;
 }
 
-export function latestSupportedRun(events: FactoryEvent[]): FactoryEvent | null {
+export function latestSupportedRun(
+  events: FactoryEvent[],
+  authority?: ObjectiveAuthorityObservation | null,
+): FactoryEvent | null {
   const runs = deduplicateFactoryEvents(events)
     .filter((event) => event.kind === "run")
     .sort((a, b) => a.sequence - b.sequence);
@@ -102,7 +134,7 @@ export function latestSupportedRun(events: FactoryEvent[]): FactoryEvent | null 
       (event) =>
         event.runId === start.runId &&
         event.sequence > start.sequence &&
-        hasCurrentWriterAuthority(event, events) &&
+        hasCurrentWriterAuthority(event, events, authority) &&
         ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(event.event),
     );
     if (!terminal) return start;
@@ -128,7 +160,10 @@ export interface RunReceiptSet {
  * evidence stream. This is intentionally useful for both active and terminal
  * runs; `latestSupportedRun` remains the active-run authority check.
  */
-export function latestRunReceipts(events: FactoryEvent[]): RunReceiptSet | null {
+export function latestRunReceipts(
+  events: FactoryEvent[],
+  authority?: ObjectiveAuthorityObservation | null,
+): RunReceiptSet | null {
   const deduplicated = deduplicateFactoryEvents(events).sort(
     (left, right) => left.sequence - right.sequence,
   );
@@ -145,7 +180,7 @@ export function latestRunReceipts(events: FactoryEvent[]): RunReceiptSet | null 
     .find(
       (event): event is NonNullable<RunReceiptSet["terminal"]> =>
         event.kind === "run" &&
-        hasCurrentWriterAuthority(event, deduplicated) &&
+        hasCurrentWriterAuthority(event, deduplicated, authority) &&
         ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(event.event),
     );
   return {
@@ -189,12 +224,59 @@ export function deduplicateFactoryEvents(events: FactoryEvent[]): FactoryEvent[]
     return canonical(semantic);
   };
   const applicationRequests = new Map<string, { encoded: string; event: FactoryEvent }>();
+  const writerOperations = new Map<string, { encoded: string; event: FactoryEvent }>();
   const bySequence = new Map<string, { encoded: string; event: FactoryEvent }>();
-  for (const event of events) {
+  const addBySequence = (event: FactoryEvent) => {
     const workItem = "workItem" in event ? (event.workItem ?? "") : "";
     const attempt = "attempt" in event ? (event.attempt ?? "") : "";
     const phase = "phase" in event ? event.phase : "";
     const unit = "unit" in event ? event.unit : "";
+    const requestId = "requestId" in event ? event.requestId : "";
+    const key = [
+      event.runId,
+      event.sequence,
+      event.kind,
+      event.event,
+      workItem,
+      attempt,
+      phase,
+      unit,
+      requestId,
+    ].join(":");
+    const semantic = { ...event } as Record<string, unknown>;
+    if (completeWriterAuthority(event)) {
+      delete semantic.writerOperationId;
+      delete semantic.writerHolder;
+      delete semantic.writerEpoch;
+      delete semantic.writerPolicyDigest;
+    }
+    const encoded = JSON.stringify(semantic);
+    const prior = bySequence.get(key);
+    if (prior && prior.encoded !== encoded) {
+      throw new Error(`conflicting Factory events at ${key}`);
+    }
+    if (!prior || (event.writerEpoch ?? 0) > (prior.event.writerEpoch ?? 0)) {
+      bySequence.set(key, { encoded, event });
+    }
+  };
+  for (const event of events) {
+    const writer = completeWriterAuthority(event);
+    if (writer) {
+      const key = `${event.objective}:${event.runId}:${writer.writerOperationId}`;
+      const encoded = requestFingerprint(event);
+      const prior = writerOperations.get(key);
+      if (prior && prior.encoded !== encoded) {
+        throw new Error(`conflicting Factory writer operations at ${key}`);
+      }
+      if (
+        !prior ||
+        event.sequence < prior.event.sequence ||
+        (event.sequence === prior.event.sequence && event.at < prior.event.at)
+      ) {
+        writerOperations.set(key, { encoded, event });
+      }
+      continue;
+    }
     const requestId = "requestId" in event ? event.requestId : "";
     if (typeof requestId === "string" && requestId) {
       const key = `${event.objective}:${requestId}`;
@@ -212,24 +294,9 @@ export function deduplicateFactoryEvents(events: FactoryEvent[]): FactoryEvent[]
       }
       continue;
     }
-    const key = [
-      event.runId,
-      event.sequence,
-      event.kind,
-      event.event,
-      workItem,
-      attempt,
-      phase,
-      unit,
-      requestId,
-    ].join(":");
-    const encoded = JSON.stringify(event);
-    const prior = bySequence.get(key);
-    if (prior && prior.encoded !== encoded) {
-      throw new Error(`conflicting Factory events at ${key}`);
-    }
-    if (!prior) bySequence.set(key, { encoded, event });
+    addBySequence(event);
   }
+  for (const { event } of writerOperations.values()) addBySequence(event);
   return [...bySequence.values(), ...applicationRequests.values()]
     .map(({ event }) => event)
     .sort(

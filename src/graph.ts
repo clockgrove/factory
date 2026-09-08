@@ -769,6 +769,7 @@ export class GraphApplier {
     const fence = this.#captureMutationFence?.();
     return observeMutationOperation(
       "graph-write",
+      "objective-publication",
       this.#mutationScope,
       this.#onMutationOperation,
       () => this.#dispatchMutation(fn, fence),

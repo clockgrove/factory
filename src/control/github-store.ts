@@ -17,11 +17,19 @@ import {
   type AuthenticatedFactoryEvent,
 } from "./authenticated-events.js";
 import { deriveDurableCommandState } from "./commands.js";
-import type { GitCommitObject, LeaseState, LeaseStore } from "./lease.js";
+import {
+  leaseRef,
+  parseLeaseCommit,
+  type GitCommitObject,
+  type LeaseState,
+  type LeaseStore,
+} from "./lease.js";
+import { objectiveAuthorityObservation, type ObjectiveAuthorityObservation } from "./authority.js";
 import {
   observeMutationFence,
   observeMutationOperation,
   observeMutationQueue,
+  type MutationAuthorityClass,
   type MutationOperationObservation,
 } from "./mutation-observation.js";
 import {
@@ -139,6 +147,7 @@ function authenticatedCommentEvents(
     authorLogin: string | null;
     authorAssociation: string | null;
   }>,
+  authority?: ObjectiveAuthorityObservation | null,
 ): AuthenticatedFactoryEvent[] {
   const parsed = comments.flatMap((comment) => {
     if (
@@ -152,7 +161,7 @@ function authenticatedCommentEvents(
       login: comment.authorLogin!,
     }));
   });
-  const runActors = bindAuthenticatedRunActors(parsed);
+  const runActors = bindAuthenticatedRunActors(parsed, authority);
   return parsed.filter(({ event, login }) => {
     if (
       event.kind === "run" &&
@@ -205,7 +214,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     this.#onMutationOperation = options.onMutationOperation;
   }
 
-  get objectiveMutationFenceAtDispatch(): boolean {
+  get objectivePublicationFenceAtDispatch(): boolean {
     return Boolean(this.#captureMutationFence && this.#assertMutationIdentity);
   }
 
@@ -264,20 +273,23 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     mutating = false,
     mutationClass: MutationClass = "normal",
     operationName = `${mutationClass}-mutation`,
+    authorityClass: MutationAuthorityClass = "objective-publication",
   ): Promise<T> {
     const dispatch = () => {
       // This callback runs synchronously inside the observation, before any
       // queue await. Even a rejected capture is therefore measured.
-      const scopedFence = mutating ? this.#scopedMutationFence.getStore() : undefined;
+      const authoritative = mutating && authorityClass !== "immutable-preparation";
+      const scopedFence = authoritative ? this.#scopedMutationFence.getStore() : undefined;
       // Shared transactions bind an immutable owner; do not capture or recheck
       // a second, configured Objective generation for the same operation.
       const fence =
-        scopedFence ?? (mutating ? this.#captureMutationFence?.(mutationClass) : undefined);
+        scopedFence ?? (authoritative ? this.#captureMutationFence?.(mutationClass) : undefined);
       return this.#dispatch(operation, mutating, mutationClass, fence);
     };
     if (!mutating) return dispatch();
     return observeMutationOperation(
       operationName,
+      authorityClass,
       this.#mutationScope,
       this.recordMutationOperation,
       dispatch,
@@ -379,6 +391,16 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     }
   }
 
+  async #readObjectiveAuthority(number: number): Promise<ObjectiveAuthorityObservation | null> {
+    const observation = await this.readRefWithServerTime(leaseRef(number));
+    if (!observation.oid) return null;
+    const lease = parseLeaseCommit(await this.readCommit(observation.oid));
+    if (lease.objective !== number) {
+      throw new Error(`Objective #${number} authority ref names another Objective`);
+    }
+    return objectiveAuthorityObservation(lease, observation.serverTime);
+  }
+
   async listRefs(prefix: string): Promise<Array<{ ref: string; oid: string }>> {
     const response = await this.#call(() =>
       this.#octokit.request("GET /repos/{owner}/{repo}/git/matching-refs/{ref}", {
@@ -436,6 +458,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
         ? "lease"
         : "normal",
       "createCommit",
+      "immutable-preparation",
     );
     return response.data.sha;
   }
@@ -453,6 +476,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
         true,
         ref.startsWith("refs/clockgrove-factory/leases/") ? "lease" : "normal",
         "createRef",
+        "atomic-publication",
       );
       return true;
     } catch (error) {
@@ -480,6 +504,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
         true,
         args.ref.startsWith("refs/clockgrove-factory/leases/") ? "lease" : "normal",
         "compareAndSwapRef",
+        "atomic-publication",
       );
       return true;
     } catch (error) {
@@ -634,8 +659,28 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
           if (commentsPage === 100)
             throw new Error(`Objective #${issue.number} exceeds the controller comment limit`);
         }
+        const writerBound = commentsForAuthentication.some(
+          (comment) =>
+            comment.authorLogin?.toLowerCase() === controllerLogin &&
+            TRUSTED_CONTROL_ASSOCIATIONS.has(comment.authorAssociation ?? "") &&
+            decodeEventComments(comment.body).some(
+              (event) =>
+                event.writerEpoch !== undefined ||
+                event.writerOperationId !== undefined ||
+                event.writerHolder !== undefined ||
+                event.writerPolicyDigest !== undefined,
+            ),
+        );
+        const authority = writerBound
+          ? await this.#readObjectiveAuthority(issue.number)
+          : undefined;
+        if (writerBound && !authority) {
+          throw new Error(
+            `Objective #${issue.number} has writer-bound receipts but no authoritative lease ref`,
+          );
+        }
         const authenticated = deduplicateFactoryEvents(
-          authenticatedCommentEvents(commentsForAuthentication)
+          authenticatedCommentEvents(commentsForAuthentication, authority)
             .filter(({ login }) => login.toLowerCase() === controllerLogin)
             .map(({ event }) => event),
         ).map((event) => ({ event, login: controllerLogin }));
@@ -646,10 +691,11 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
           actor: controllerLogin,
           closed: issue.state === "closed",
           events,
+          ...(authority === undefined ? {} : { authority }),
           store: this,
         });
         if (recovery) {
-          const active = latestSupportedRun(events);
+          const active = latestSupportedRun(events, authority);
           result.push({
             ...recovery,
             ...(active?.event === "FactoryRunStarted" &&
@@ -718,7 +764,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
                 event.kind === "run" &&
                 event.objective === issue.number &&
                 event.event !== "FactoryRunStarted" &&
-                hasCurrentWriterAuthority(event, events) &&
+                hasCurrentWriterAuthority(event, events, authority) &&
                 events.some(
                   (candidate) =>
                     candidate.kind === "run" &&
@@ -749,7 +795,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
                 event.baseSha === activationRequest.baseSha &&
                 event.policyDigest === activationRequest.policyDigest,
             );
-        const activeRun = latestSupportedRun(events);
+        const activeRun = latestSupportedRun(events, authority);
         const currentRun =
           activeRun?.kind === "run" &&
           activeRun.event === "FactoryRunStarted" &&
@@ -772,7 +818,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
               (event) =>
                 event.kind === "run" &&
                 event.runId === currentRun.runId &&
-                hasCurrentWriterAuthority(event, events) &&
+                hasCurrentWriterAuthority(event, events, authority) &&
                 event.event ===
                   (commandState.admissionGate!.kind === "drain"
                     ? "RunDrainCompleted"
@@ -924,6 +970,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       true,
       "normal",
       "createBlob",
+      "immutable-preparation",
     );
     return response.data.sha;
   }
@@ -962,6 +1009,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       true,
       "normal",
       "createTree",
+      "immutable-preparation",
     );
     return response.data.sha;
   }

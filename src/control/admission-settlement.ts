@@ -1,8 +1,9 @@
 import type { FactoryEvent } from "../protocol/events.js";
 import { unreconciledBudgetReservations } from "./budget.js";
 import { unreconciledCapacityReservations } from "../scheduling/capacity-ledger.js";
-import { deduplicateFactoryEvents } from "./receipts.js";
+import { deduplicateFactoryEvents, hasCurrentWriterAuthority } from "./receipts.js";
 import type { IssueAdmissionEntry, IssueAdmissionEvidence } from "./issue-admission.js";
+import type { ObjectiveAuthorityObservation } from "./authority.js";
 
 export interface AdmissionCleanupProof {
   reservationOid: string;
@@ -44,6 +45,7 @@ export function buildAdmissionSettlementEvidence(args: {
   capacity: AdmissionCapacityProof;
   definitiveNonExecution?: AdmissionNonExecutionProof;
   modelUsageExpected?: boolean;
+  authority?: ObjectiveAuthorityObservation | null | undefined;
 }): IssueAdmissionEvidence {
   const { entry, cleanup, capacity } = args;
   if (
@@ -111,7 +113,8 @@ export function buildAdmissionSettlementEvidence(args: {
         event.backend === entry.reservation.backend &&
         event.baseSha === entry.reservation.baseSha &&
         event.directorEpoch === entry.directorEpoch &&
-        event.policyDigest === entry.policyDigest,
+        event.policyDigest === entry.policyDigest &&
+        hasCurrentWriterAuthority(event, scoped, args.authority),
     )
   )
     throw new Error("admission settlement requires an exact terminal execution outcome");

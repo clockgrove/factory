@@ -2,6 +2,7 @@ import type { FactoryEvent } from "../protocol/events.js";
 import { deduplicateFactoryEvents, hasCurrentWriterAuthority } from "./receipts.js";
 import { recoveryEventDigest } from "../recovery/identity.js";
 import { policyDigest } from "../protocol/policy.js";
+import type { ObjectiveAuthorityObservation } from "./authority.js";
 
 export interface AuthenticatedFactoryEvent {
   event: FactoryEvent;
@@ -28,6 +29,7 @@ function runStartFingerprint(event: FactoryEvent): string {
  */
 export function bindAuthenticatedRunActors(
   entries: readonly AuthenticatedFactoryEvent[],
+  authority?: ObjectiveAuthorityObservation | null,
 ): Map<string, string> {
   const authenticatedRequests = deduplicateFactoryEvents(
     entries.flatMap(({ event, login }) =>
@@ -115,7 +117,7 @@ export function bindAuthenticatedRunActors(
     const predecessor = predecessors[0];
     const terminals = authenticatedHistory.filter(
       (candidate) =>
-        hasCurrentWriterAuthority(candidate, authenticatedHistory) &&
+        hasCurrentWriterAuthority(candidate, authenticatedHistory, authority) &&
         candidate.kind === "run" &&
         ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(
           candidate.event,

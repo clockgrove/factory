@@ -319,7 +319,7 @@ export class FactoryApplicationService {
             policyDigest: prior.policyDigest,
             ...(input.reason ? { reason: input.reason } : {}),
           };
-        const active = latestSupportedRun(current.factoryEvents ?? []);
+        const active = latestSupportedRun(current.factoryEvents ?? [], current.objectiveAuthority);
         if (active || prior)
           return {
             event: "FactoryRunCancellationRequested",
@@ -381,7 +381,7 @@ export class FactoryApplicationService {
     const existingRequest = this.allEvents(snapshot).find(
       (candidate) => "requestId" in candidate && candidate.requestId === input.requestId,
     );
-    const activeRun = latestSupportedRun(snapshot.factoryEvents ?? []);
+    const activeRun = latestSupportedRun(snapshot.factoryEvents ?? [], snapshot.objectiveAuthority);
     if (!activeRun && !existingRequest) {
       throw new Error(`Objective #${snapshot.number} has no active Factory run`);
     }
@@ -534,7 +534,10 @@ export class FactoryApplicationService {
       if (blocker) throw new Error(blocker);
     }
     const actor = await store.getAuthenticatedLogin();
-    const activeStart = latestSupportedRun(snapshot.factoryEvents ?? []);
+    const activeStart = latestSupportedRun(
+      snapshot.factoryEvents ?? [],
+      snapshot.objectiveAuthority,
+    );
     if (
       new Set([
         "FactoryRunCancellationRequested",

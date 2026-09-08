@@ -48,6 +48,12 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- GitHub writes now classify immutable object preparation separately from authoritative
+  publication. Blob, tree, and commit staging retain pacing, quota, cancellation, payload, scope,
+  and secret controls without an Objective lease read per object; refs, comments, issues, and pull
+  requests still capture authority before queueing and recheck it at dispatch. Fresh Director
+  receipts bind a stable writer operation, holder, epoch, and policy to the current Objective lease
+  observation while preserving older producer and accounting epochs. ([#224](https://github.com/clockgrove/factory/issues/224))
 - Repository-controller election loss now retires discovery, activation/recovery dispatch and
   election-scoped configuration without aborting otherwise-current Objective execution. Retired
   controllers await Supervisor completion and cleanup under the Objective's own writer epoch;

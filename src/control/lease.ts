@@ -21,11 +21,11 @@ export interface LeaseStore {
     operation: () => Promise<T>,
   ): Promise<T>;
   /**
-   * The concrete transport rechecks the Objective lease after any mutation
-   * queue wait and immediately before sending the request. Control helpers may
-   * then avoid an earlier duplicate read; standalone stores omit this marker.
+   * The concrete transport rechecks the Objective lease after an authoritative
+   * publication queue wait and immediately before sending that request.
+   * Immutable Git-object preparation does not use this marker.
    */
-  readonly objectiveMutationFenceAtDispatch?: boolean;
+  readonly objectivePublicationFenceAtDispatch?: boolean;
   /** Synchronous scope check paired with the dispatch-time fence guarantee. */
   assertMutationIdentity?(lease: LeaseState): void;
   readRef(ref: string): Promise<string | null>;
@@ -87,7 +87,7 @@ function leaseMessage(event: LeaseEvent): string {
   return `Factory lease ${event.event} for Objective #${event.objective}\n\nFactory-Event: ${encoded}`;
 }
 
-function parseLease(commit: GitCommitObject): LeaseState {
+export function leaseEventFromCommit(commit: GitCommitObject): LeaseEvent {
   const trailer = commit.message
     .split(/\r?\n/)
     .reverse()
@@ -96,6 +96,11 @@ function parseLease(commit: GitCommitObject): LeaseState {
   const raw = Buffer.from(trailer.slice("Factory-Event: ".length), "base64url").toString("utf8");
   const parsed = parseFactoryEvent(JSON.parse(raw));
   if (parsed.kind !== "lease") throw new Error("control ref does not contain a lease event");
+  return parsed;
+}
+
+export function parseLeaseCommit(commit: GitCommitObject): LeaseState {
+  const parsed = leaseEventFromCommit(commit);
   gitSha.parse(commit.oid);
   return {
     ref: leaseRef(parsed.objective),
@@ -136,7 +141,7 @@ export class LeaseManager {
   async read(objective: number): Promise<LeaseState | null> {
     const ref = leaseRef(objective);
     const oid = await this.#store.readRef(ref);
-    return oid ? parseLease(await this.#store.readCommit(oid)) : null;
+    return oid ? parseLeaseCommit(await this.#store.readCommit(oid)) : null;
   }
 
   async acquire(
@@ -273,7 +278,7 @@ export class LeaseManager {
         };
     const { oid } = observation;
     if (!oid) throw new LeaseLostError();
-    const current = oid === lease.oid ? lease : parseLease(await this.#store.readCommit(oid));
+    const current = oid === lease.oid ? lease : parseLeaseCommit(await this.#store.readCommit(oid));
     if (
       current.objective !== lease.objective ||
       current.epoch !== lease.epoch ||
@@ -294,7 +299,7 @@ export class LeaseManager {
    * check.
    */
   async assertMutationAuthorized(lease: LeaseState): Promise<void> {
-    if (this.#store.objectiveMutationFenceAtDispatch) {
+    if (this.#store.objectivePublicationFenceAtDispatch) {
       if (!this.#store.assertMutationIdentity)
         throw new Error("Objective mutation fence does not expose its bound lease identity");
       this.#store.assertMutationIdentity(lease);

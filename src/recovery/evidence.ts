@@ -713,6 +713,7 @@ export async function resolveRecoveryEvidence(input: {
               deliveryHeadSha: source.siblingRefresh.deliveryHeadSha,
               candidateRunId: source.siblingRefresh.candidateRunId,
               requireCompletion: item.action !== "revalidate",
+              authority: input.snapshot.objectiveAuthority,
             });
             requireEvidence(
               JSON.stringify(

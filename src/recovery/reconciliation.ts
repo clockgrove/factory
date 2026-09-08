@@ -100,7 +100,7 @@ export async function loadRecoverySourceReconciliation(input: {
       !events.some(
         (event) =>
           event.runId === input.runId &&
-          hasCurrentWriterAuthority(event, events) &&
+          hasCurrentWriterAuthority(event, events, snapshot.objectiveAuthority) &&
           ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(
             event.event,
           ),
@@ -194,6 +194,7 @@ export async function loadRecoverySourceReconciliation(input: {
     plansByDigest: plans,
     claims: claims.filter((value) => value !== claim),
     candidatePlan: plan,
+    authority: snapshot.objectiveAuthority,
   });
   requireReconciliation(chain.status === "verified");
   const completed = claim.transaction.startSequence + 2;

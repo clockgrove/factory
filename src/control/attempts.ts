@@ -7,6 +7,7 @@ import {
 } from "../protocol/events.js";
 import { assertNoSecretMaterial, PROTOCOL_V2 } from "../protocol/limits.js";
 import { encodeEventComment, encodeEventTrailer } from "./receipts.js";
+import { writerAuthority } from "./authority.js";
 import type { GitCommitObject, LeaseManager, LeaseState } from "./lease.js";
 import { ensureAdmissionCompatibility } from "./admission-compatibility.js";
 import {
@@ -244,6 +245,7 @@ export class AttemptManager {
       protocol: PROTOCOL_V2,
       kind: "attempt",
       event: "AttemptReserved",
+      ...writerAuthority(args.lease, args.sequence),
       objective: args.lease.objective,
       runId: args.lease.runId,
       sequence: args.sequence,
@@ -539,6 +541,7 @@ export class AttemptManager {
       protocol: PROTOCOL_V2,
       kind: "attempt",
       event: args.event,
+      ...writerAuthority(args.lease, args.sequence),
       objective: args.reservation.objective,
       runId: args.reservation.runId,
       sequence: args.sequence,
@@ -618,6 +621,7 @@ export class AttemptManager {
       protocol: PROTOCOL_V2,
       kind: "attempt",
       event: "AttemptReserved",
+      ...writerAuthority(args.lease, args.reservation.sequence),
       objective: args.reservation.objective,
       runId: args.reservation.runId,
       sequence: args.reservation.sequence,
@@ -660,6 +664,7 @@ export class AttemptManager {
       protocol: PROTOCOL_V2,
       kind: "scheduling",
       event: "WorkItemQueued",
+      ...writerAuthority(args.lease, args.sequence),
       objective: args.lease.objective,
       runId: args.lease.runId,
       sequence: args.sequence,
@@ -716,6 +721,7 @@ export class AttemptManager {
       protocol: PROTOCOL_V2,
       kind: "capacity",
       event: args.event,
+      ...writerAuthority(args.lease, args.sequence),
       objective: args.reservation.objective,
       runId: args.reservation.runId,
       sequence: args.sequence,

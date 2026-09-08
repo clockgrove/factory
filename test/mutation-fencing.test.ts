@@ -34,6 +34,8 @@ const write = (store: GitHubControlStore) =>
     parentOids: [],
     message: "synthetic Objective receipt",
   });
+const publish = (store: GitHubControlStore, suffix = "fixture") =>
+  store.createRef(`refs/heads/${suffix}`, "a".repeat(40));
 
 it("records an already-retired Objective before queueing without any remote read or write", async () => {
   const store = new GitHubControlStore({
@@ -48,7 +50,7 @@ it("records an already-retired Objective before queueing without any remote read
       throw new Error("transport must not run");
     },
   });
-  await expect(write(store)).rejects.toThrow("retired Objective");
+  await expect(publish(store)).rejects.toThrow("retired Objective");
   expect(store.mutationOperationTelemetry().records).toEqual([
     expect.objectContaining({ readRequests: 0, mutationRequests: 0, outcome: "failed" }),
   ]);
@@ -77,7 +79,7 @@ it("captures Objective authority before quota queueing and rejects stale queued 
       return response();
     },
   });
-  const pending = write(store);
+  const pending = publish(store);
   const outcome = expect(pending).rejects.toThrow("stale Objective epoch");
   epoch = 2;
   blocker.release();
@@ -85,7 +87,8 @@ it("captures Objective authority before quota queueing and rejects stale queued 
   expect(transports).toBe(0);
   expect(store.mutationOperationTelemetry().records).toEqual([
     expect.objectContaining({
-      operation: "createCommit",
+      operation: "createRef",
+      authorityClass: "atomic-publication",
       resourceScope: "objective:1",
       leaseAssertions: 1,
       mutationRequests: 0,
@@ -120,9 +123,9 @@ it("releases quota admission at dispatch so independent Objectives overlap remot
     });
   const firstStore = make(1),
     secondStore = make(2);
-  const first = write(firstStore);
+  const first = publish(firstStore, "objective-1");
   await firstStarted.promise;
-  const second = write(secondStore);
+  const second = publish(secondStore, "objective-2");
   try {
     await secondStarted.promise;
     await second;
@@ -173,12 +176,31 @@ it("counts actual fence reads per operation and excludes unrelated reads and dia
         : response(),
   });
   await store.readRef("refs/heads/main");
+  await store.createBlob(Buffer.from("immutable fixture", "utf8"));
+  await store.createTree({
+    entries: [{ path: "fixture.txt", mode: "100644", type: "blob", sha: "a".repeat(40) }],
+  });
   await write(store);
+  await publish(store);
   const telemetry = store.mutationOperationTelemetry();
-  expect(telemetry.records).toHaveLength(1);
-  expect(telemetry.records[0]).toMatchObject({
+  expect(telemetry.records).toHaveLength(4);
+  for (const [index, operation] of ["createBlob", "createTree", "createCommit"].entries()) {
+    expect(telemetry.records[index]).toMatchObject({
+      measurementScope: "process-local-transport-boundary",
+      operation,
+      authorityClass: "immutable-preparation",
+      leaseAssertions: 0,
+      readRequests: 0,
+      fenceReadRequests: 0,
+      mutationRequests: 1,
+      unclassifiedRequests: 0,
+      outcome: "succeeded",
+    });
+  }
+  expect(telemetry.records[3]).toMatchObject({
     measurementScope: "process-local-transport-boundary",
-    operation: "createCommit",
+    operation: "createRef",
+    authorityClass: "atomic-publication",
     leaseAssertions: 1,
     readRequests: 1,
     fenceReadRequests: 1,
@@ -186,8 +208,8 @@ it("counts actual fence reads per operation and excludes unrelated reads and dia
     unclassifiedRequests: 0,
     outcome: "succeeded",
   });
-  expect(telemetry.records[0]!.fenceMs).toBeGreaterThanOrEqual(0);
-  expect(telemetry.records[0]!.elapsedMs).toBeGreaterThanOrEqual(telemetry.records[0]!.fenceMs);
+  expect(telemetry.records[3]!.fenceMs).toBeGreaterThanOrEqual(0);
+  expect(telemetry.records[3]!.elapsedMs).toBeGreaterThanOrEqual(telemetry.records[3]!.fenceMs);
   expect(telemetry.droppedRecords).toBe(0);
 });
 
@@ -221,7 +243,7 @@ it("isolates concurrent shared-transaction fences and does not repeat a configur
         observeLeaseAssertion();
         if (epochs.get(objective) !== captured) throw new Error("stale shared-resource owner");
       },
-      () => write(store),
+      () => publish(store, `objective-${objective}`),
     );
   };
   const stale = expect(scopedWrite(1)).rejects.toThrow("stale shared-resource owner");

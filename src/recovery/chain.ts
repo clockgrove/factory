@@ -14,6 +14,7 @@ import {
   type RecoveryPlan,
   type RecoveryPlanRecord,
 } from "./plan.js";
+import type { ObjectiveAuthorityObservation } from "../control/authority.js";
 
 export { recoveryEventDigest, recoverySourceEventsDigest, recoveryClaimRef } from "./identity.js";
 type Start = Extract<FactoryEvent, { event: "FactoryRunStarted" }>;
@@ -94,6 +95,7 @@ export function verifyRecoveryChain(input: {
   plansByDigest: Readonly<Record<string, RecoveryPlanRecord>>;
   claims: readonly RecoveryClaimObservation[];
   candidatePlan: RecoveryPlan;
+  authority?: ObjectiveAuthorityObservation | null | undefined;
 }): RecoveryChainVerification {
   const result: RecoveryChainVerification = {
     status: "verified",
@@ -244,7 +246,7 @@ export function verifyRecoveryChain(input: {
           (event) =>
             event.runId === entry.runId &&
             terminalNames.has(event.event) &&
-            hasCurrentWriterAuthority(event, events),
+            hasCurrentWriterAuthority(event, events, input.authority),
         );
         require(terminal.length === 1 &&
           terminal[0]!.sequence > start.sequence &&
@@ -348,6 +350,7 @@ export function verifyRecoveryChain(input: {
         events: historical,
         runIds: plan.history.map((entry) => entry.runId),
         policy: plan.acceptedPolicy,
+        authority: input.authority,
       });
       require(accounting.usage !==
         null, "accounting-unavailable", "Historical accounting is ambiguous or unsafe; no allowance can be established.");

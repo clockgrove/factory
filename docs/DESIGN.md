@@ -313,8 +313,12 @@ duplicate preflight reads only when that transport guarantee is present. Same-ep
 not invalidate an operation. A new epoch cannot be lent to an old queued callback.
 
 Comment and receipt retries retain their idempotency identity and sequence validation. Writer
-generation is separate from original attempt or provider-accounting generation. GitHub's comment
-API cannot atomically compare a lease and append a comment: an already-dispatched request cannot be
+generation is separate from original attempt or provider-accounting generation. Fresh
+Director-authored receipts name a stable writer operation, holder, epoch and policy digest. Readers
+observe bounded comments first and the authoritative Objective ref second; a takeover between those
+reads can only attenuate the older generation. A released or expired last generation remains
+historical terminal evidence until an actual conflicting generation appears. GitHub's comment API
+cannot atomically compare a lease and append a comment: an already-dispatched request cannot be
 unsent. Delayed receipts must not grant fresh lifecycle control authority after an Objective takeover;
 historical outputs and liabilities remain subject to exact recovery and accounting checks.
 
@@ -528,6 +532,14 @@ envelope and requires all proof fields to agree, ignoring only sequence, timesta
 New refresh intents select a deterministic original receipt. An existing immutable intent keeps its
 exact receipt digest, even when another equivalent envelope is later observed. Conflicting receipts
 or ambiguous intent bindings fail closed; independently proved linear-head revisions remain separate.
+
+Publication separates unreachable Git object preparation from authoritative effects. Creating a
+bounded, secret-scanned blob, tree or commit still uses the shared mutation scheduler, pacer,
+concurrency limiter, circuit breaker and cancellation checks, but does not read an Objective lease
+per object. The object grants no authority until an owned ref create/CAS or another authoritative
+record publishes it. Ref, comment, issue and pull-request effects capture the Objective generation
+before queueing and check it immediately before transport, in addition to endpoint-specific
+idempotency and expected-revision conditions.
 
 Before merging, GitHub's current test-merge commit must name the exact target base and actual PR
 head, with the same combined tree Factory validated. Stale or absent test-merge metadata waits;
@@ -872,10 +884,11 @@ reservation is reconciled and marked `AttemptDeferred`; it remains in the audit 
 does not consume a Work Item implementation attempt. A durable failed validation remains a real
 attempt failure.
 
-Immediately before each externally visible mutation, the Director re-observes the lease ref and
-GitHub server time in one REST request. An unchanged OID reuses the already-validated lease payload;
-only a concurrently renewed OID requires a second commit read. This keeps strict per-write fencing
-without the previous three-read assertion cost.
+Immediately before each authoritative publication, the Director re-observes the lease ref and GitHub
+server time in one REST request. An unchanged OID reuses the already-validated lease payload; only a
+concurrently renewed OID requires a second commit read. Immutable Git object creation is preparation,
+not publication, and performs no Objective fence read. This keeps strict effect fencing without
+describing cooperative dispatch checks as an atomic condition on GitHub's comment or pull-request APIs.
 
 ## Packaging and portability
 

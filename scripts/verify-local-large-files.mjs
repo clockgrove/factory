@@ -29,6 +29,8 @@ import {
 } from "./verify-local-checkpoint-restart.mjs";
 import { qualificationNamespaceMarker } from "./verify-live-objective.mjs";
 import {
+  LARGE_FILE_RECIPE_VERSION,
+  LARGE_FILE_VALIDATION_COMMAND,
   largeFileObjectiveBody,
   observeLargeFileTree,
   largeFilePaths,
@@ -347,11 +349,13 @@ function checkedFixture(authority) {
   const document = privateDocument(authority.largeFile.fixture);
   assert.equal(document.digest, authority.largeFile.fixtureDigest, "fixture descriptor changed");
   const fixture = document.value;
-  assert.equal(fixture.version, "factory-large-files-fixture-v1");
+  assert.equal(fixture.version, LARGE_FILE_RECIPE_VERSION);
   assert.equal(fixture.namespace, authority.namespace);
   assert.deepEqual(fixture.paths, largeFilePaths(authority.namespace));
   assert.match(fixture.baseSha, /^[a-f0-9]{40}$/);
   assert.match(fixture.baseTreeSha, /^[a-f0-9]{40}$/);
+  assert.match(fixture.sourceBaseSha, /^[a-f0-9]{40}$/);
+  assert.match(fixture.sourceTreeSha, /^[a-f0-9]{40}$/);
   assert.equal(fixture.root, dirname(authority.largeFile.fixture));
   assert.equal(realpathSync(fixture.root), fixture.root);
   assert.equal(realpathSync(fixture.repository), fixture.repository);
@@ -372,7 +376,7 @@ function objectiveBody(authority) {
       `Do not alter the recipe, baseline test, attributes or LFS pointers. ` +
       `Allowed output path is only ${fixture.paths.payload}. Do not repair or normalize the deliberately invalid fixture output. ` +
       `This is synthetic qualification content, not a real credential or an authorization to change any other path. ` +
-      `Validation command: node --test ${fixture.paths.test}. ` +
+      `Validation command: ${LARGE_FILE_VALIDATION_COMMAND}, the repository's committed Vitest entry point. ` +
       `Factory is expected to reject the produced artifact; do not fabricate a successful artifact or change the acceptance boundary.\n`;
   }
   return `${body}\n${qualificationNamespaceMarker(authority.namespace)}\n`;
@@ -381,6 +385,11 @@ function objectiveBody(authority) {
 function verifyBaseline({ authority, evidence, command }) {
   const fixture = checkedFixture(authority);
   assert.equal(
+    fixture.sourceBaseSha,
+    evidence.sourceCommit,
+    "fixture source must match the exact committed qualification harness candidate",
+  );
+  assert.equal(
     evidence.base,
     fixture.baseSha,
     "publish the exact prepared baseline before this scenario",
@@ -388,6 +397,22 @@ function verifyBaseline({ authority, evidence, command }) {
   assert.equal(
     command("git", ["rev-parse", `${fixture.baseSha}^{tree}`], authority.checkout),
     fixture.baseTreeSha,
+  );
+  assert.equal(
+    command("git", ["rev-parse", `${fixture.baseSha}^`], authority.checkout),
+    fixture.sourceBaseSha,
+  );
+  assert.equal(
+    command("git", ["rev-parse", `${fixture.sourceBaseSha}^{tree}`], authority.checkout),
+    fixture.sourceTreeSha,
+  );
+  const packageJson = JSON.parse(
+    command("git", ["cat-file", "blob", `${fixture.baseSha}:package.json`], authority.checkout),
+  );
+  assert.equal(
+    packageJson.scripts?.test,
+    "vitest run",
+    "version-2 large-file fixture requires the committed Vitest npm test recipe",
   );
   for (const entry of fixture.baseline) {
     assert.ok(entry.path.startsWith(`${fixture.paths.prefix}/`));

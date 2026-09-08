@@ -144,13 +144,20 @@ local contracts only; they do not substitute for installed/provider execution ev
 of the local checkpoint qualifier. No opt-in means no actions. This is contributor qualification,
 not a user-facing runtime API or a claim that these scenarios have passed.
 
+The current runner requires a freshly generated version-2 fixture. Its committed test imports
+Vitest and every generated Objective names the repository-observed `npm test` validation command;
+older version-1 fixtures remain bound to their original evidence and are not reusable with this
+runner.
+
 Prepare each case in a fresh disposable private repository/namespace. The offline
 `createLargeFileFixture` export in `scripts/qualification-large-files.mjs` accepts an owned `parent`
-directory and `namespace`. To extend an existing disposable repository, also supply its local
-`sourceRepository` and exact current default-branch `baseSha` together. It creates a private
-`root/fixture.json`, a fresh `repository`, an exact child baseline commit, and two verified synthetic
-objects in that repository's standard LFS cache. It does not fetch, publish, install LFS or invoke a
-model. For example, from the committed Factory source:
+directory and `namespace`. Its standalone mode supports fixture unit tests, but an installed
+version-2 scenario also requires a local `sourceRepository` and its exact current default-branch
+`baseSha`. The runner verifies that source parent and its committed Vitest npm recipe before creating
+an Objective. The generator creates a private `root/fixture.json`, a fresh `repository`, an exact
+child baseline commit, and two verified synthetic objects in that repository's standard LFS cache.
+It does not fetch, publish, install LFS or invoke a model. For example, from the committed Factory
+source:
 
 ```bash
 node --input-type=module -e '

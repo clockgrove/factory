@@ -9,7 +9,8 @@ import * as fs from "node:fs";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const LARGE_FILE_RECIPE_VERSION = "factory-large-files-fixture-v1";
+export const LARGE_FILE_RECIPE_VERSION = "factory-large-files-fixture-v2";
+export const LARGE_FILE_VALIDATION_COMMAND = "npm test";
 export const LARGE_FILE_AUDIO_BYTES = 6 * 1024 * 1024 + 44;
 const MAX_PATCH_BYTES = 12 * 1024 * 1024;
 const INLINE_BYTES = 5 * 1024 * 1024;
@@ -78,13 +79,13 @@ function outputFiles(namespace) {
   const paths = largeFilePaths(namespace);
   const audio = audioBytes();
   const metadata = Buffer.from(
-    `${JSON.stringify({ recipe: "factory-large-files-fixture-v1", bytes: audio.length, sha256: hash(audio), format: "PCM-u8-mono-8000Hz" }, null, 2)}\n`,
+    `${JSON.stringify({ recipe: LARGE_FILE_RECIPE_VERSION, bytes: audio.length, sha256: hash(audio), format: "PCM-u8-mono-8000Hz" }, null, 2)}\n`,
   );
   const executable = Buffer.from(
     `#!/usr/bin/env node\nimport { verify } from "../large-files-recipe.mjs";\nverify("metadata");\n`,
   );
   const result = Buffer.from(
-    `${JSON.stringify({ recipe: "factory-large-files-fixture-v1", verified: true, payloadSha256: hash(audio), metadataSha256: hash(metadata), executableSha256: hash(executable) }, null, 2)}\n`,
+    `${JSON.stringify({ recipe: LARGE_FILE_RECIPE_VERSION, verified: true, payloadSha256: hash(audio), metadataSha256: hash(metadata), executableSha256: hash(executable) }, null, 2)}\n`,
   );
   return [
     {
@@ -269,7 +270,7 @@ function baselineFiles(namespace) {
       {
         path: paths.test,
         bytes: Buffer.from(
-          'import {test} from "node:test";\nimport {verify} from "./large-files-recipe.mjs";\ntest("exact large-file bytes and modes",()=>verify());\n',
+          'import {test} from "vitest";\nimport {verify} from "./large-files-recipe.mjs";\ntest("exact large-file bytes and modes",()=>verify());\n',
         ),
       },
       ...lfs.map((asset) => ({ path: asset.path, bytes: asset.pointer })),
@@ -607,7 +608,7 @@ export function assertLargeFileRefusal(observation) {
 
 export function largeFileObjectiveBody(namespace) {
   const p = largeFilePaths(namespace);
-  return `Qualify deterministic large-file handling for namespace ${namespace}. Create exactly three linear Work Items in this order, never parallel roots. Use existing committed ${p.recipe}; do not rewrite the recipe, test, attributes, or LFS files. Do not fetch/install/upload LFS or add dependencies.\n\n1. Payload (the sole root): run node ${p.recipe} payload. Create only ${p.payload}, exactly 6291500 bytes of valid PCM WAV from the existing bounded deterministic recipe. It must produce a genuine binary Git patch above 5 MiB.\n2. Metadata (depends on Payload): run node ${p.recipe} metadata. Create only ${p.executable} (Git mode 100755) and ${p.metadata}, with exact recipe bytes.\n3. Verification join (depends on Payload and Metadata): run node ${p.recipe} join. Create only ${p.result}; independently check all generated content using node ${p.recipe} verify and node --test ${p.test}.\n\nEach Work Item validates with node --test ${p.test}. The final result must preserve both existing canonical and legacy LFS pointers in Git, while their unchanged locally provisioned objects remain available. No other paths may change. Real installed workers and independent validation/review are required; fixture generation alone is not an execution pass.\n`;
+  return `Qualify deterministic large-file handling for namespace ${namespace}. Create exactly three linear Work Items in this order, never parallel roots. Use existing committed ${p.recipe}; do not rewrite the recipe, test, attributes, or LFS files. Do not fetch/install/upload LFS or add dependencies.\n\n1. Payload (the sole root): run node ${p.recipe} payload. Create only ${p.payload}, exactly 6291500 bytes of valid PCM WAV from the existing bounded deterministic recipe. It must produce a genuine binary Git patch above 5 MiB.\n2. Metadata (depends on Payload): run node ${p.recipe} metadata. Create only ${p.executable} (Git mode 100755) and ${p.metadata}, with exact recipe bytes.\n3. Verification join (depends on Payload and Metadata): run node ${p.recipe} join. Create only ${p.result}; run node ${p.recipe} verify to check all generated content.\n\nEach Work Item validates with ${LARGE_FILE_VALIDATION_COMMAND}, the repository's committed Vitest entry point. The final result must preserve both existing canonical and legacy LFS pointers in Git, while their unchanged locally provisioned objects remain available. No other paths may change. Real installed workers and independent validation/review are required; fixture generation alone is not an execution pass.\n`;
 }
 
 export function observeLargeFileTree({

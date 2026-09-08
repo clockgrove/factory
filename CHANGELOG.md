@@ -54,6 +54,10 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- Codex management preflight now proves that its durable isolated-home root is usable, and ordinary
+  Objective compilation persists model-invocation intent only after local backend preparation at
+  the final dispatch boundary. Known pre-dispatch failures no longer create an invocation marker;
+  existing markers still require exact actual usage and remain unknown otherwise. ([#256](https://github.com/clockgrove/factory/issues/256))
 - Cancellation preserves a failed known-usage receipt publication after owned cleanup, preventing
   both normal terminal cancellation and controller lease release from hiding unresolved accounting.
   Explicitly approved successor policy differences no longer incorrectly block issue admission;

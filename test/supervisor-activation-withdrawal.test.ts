@@ -123,7 +123,10 @@ function afterReceipt(eventName: FactoryEvent["event"], action: () => void) {
 describe("Supervisor activation withdrawal races", () => {
   it("persists compilation intent before the real invocation and leaves missing counters unknown", async () => {
     const f = await fixture(true);
-    f.compile.mockImplementation(async (context) => {
+    Object.assign(f.management, { supportsCompilerAdmission: true });
+    f.compile.mockImplementation(async (context, _checkpoint, beforeModelInvocation) => {
+      expect(f.events().filter(isModelInvocationMarker)).toEqual([]);
+      await beforeModelInvocation?.();
       const markers = f.events().filter(isModelInvocationMarker);
       expect(markers).toHaveLength(1);
       const start = f
@@ -166,6 +169,23 @@ describe("Supervisor activation withdrawal races", () => {
     expect(f.review).not.toHaveBeenCalled();
     expect(f.activity).toEqual([]);
     expect(f.events().some((event) => event.event === "GraphCompiled")).toBe(false);
+  });
+
+  it("does not invent an invocation when ordinary compiler preparation fails before dispatch", async () => {
+    const f = await fixture(true);
+    Object.assign(f.management, { supportsCompilerAdmission: true });
+    f.compile.mockRejectedValue(new Error("fixture: isolated home unavailable before dispatch"));
+
+    expect(await f.run()).toMatchObject({
+      status: "escalated",
+      reason: "fixture: isolated home unavailable before dispatch",
+    });
+    expect(f.compile).toHaveBeenCalledOnce();
+    expect(f.events().filter(isModelInvocationMarker)).toEqual([]);
+    expect(unresolvedModelInvocations(f.events())).toEqual([]);
+    expect(f.events().some((event) => event.event === "GraphCompiled")).toBe(false);
+    expect(f.review).not.toHaveBeenCalled();
+    expect(f.activity).toEqual([]);
   });
 
   it.each(["hard", "missing"] as const)(

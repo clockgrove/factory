@@ -171,6 +171,42 @@ async function home() {
 }
 const usage = { inputTokens: 4, outputTokens: 2 };
 describe("compiler dispatch admission", () => {
+  it("fails management readiness when its durable isolated home is unavailable", async () => {
+    const f = await fixture();
+    const authFile = join(f.directory, "auth.json");
+    await writeFile(authFile, "{}");
+    const failure = Object.assign(new Error("read-only file system"), { code: "EROFS" });
+    const createCodexHome = vi.fn(async () => {
+      throw failure;
+    });
+    mocks.run.mockResolvedValue({ exitCode: 0, stdout: "codex-cli 99.0.0", stderr: "" });
+
+    await expect(
+      new CodexCliManagementBackend({ authFile, createCodexHome }).probe(),
+    ).resolves.toEqual({
+      available: false,
+      authenticated: true,
+      reason: "isolated Codex home unavailable: read-only file system",
+    });
+    expect(createCodexHome).toHaveBeenCalledExactlyOnceWith("management");
+  });
+
+  it("removes the disposable isolated home after a successful management probe", async () => {
+    const f = await fixture();
+    const authFile = join(f.directory, "auth.json");
+    await writeFile(authFile, "{}");
+    const probeHome = await mkdtemp(join(tmpdir(), "management-probe-home-"));
+    directories.push(probeHome);
+    const createCodexHome = vi.fn(async () => probeHome);
+    mocks.run.mockResolvedValue({ exitCode: 0, stdout: "codex-cli 99.0.0", stderr: "" });
+
+    await expect(
+      new CodexCliManagementBackend({ authFile, createCodexHome }).probe(),
+    ).resolves.toEqual({ available: true, authenticated: true });
+    expect(createCodexHome).toHaveBeenCalledExactlyOnceWith("management");
+    await expect(access(probeHome)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it.each(["inventory", "compile", "judge", "repair"] as const)(
     "does not admit %s before isolated CLI home preparation succeeds",
     async (stage) => {

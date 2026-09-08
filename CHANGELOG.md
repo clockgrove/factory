@@ -45,6 +45,10 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- Installed large-file qualification Objectives now select the repository-observed `npm test`
+  recipe, and fresh version-2 fixtures provide a matching Vitest test instead of an incompatible
+  `node:test` suite. This makes the scenarios compile-ready without weakening command grounding or
+  claiming that installed execution passed. ([#203](https://github.com/clockgrove/factory/issues/203))
 - Installed checkpoint qualification now evaluates observed-stop model budgets at each linked
   dispatch marker using actual usage known at that sequence. It preserves the pre-resume remaining
   allowance fence while permitting an already-admitted final invocation to report in-flight

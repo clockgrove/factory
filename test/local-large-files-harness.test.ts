@@ -5,6 +5,10 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { parseRunPolicy } from "../src/protocol/policy.js";
 import {
+  discoverValidationCommands,
+  isGroundedValidationCommand,
+} from "../src/repository-profiles/index.js";
+import {
   largeFileAuthority,
   largeFileTransferArm,
   transferArmPath,
@@ -13,7 +17,11 @@ import {
   largeFileExtension,
   main,
 } from "../scripts/verify-local-large-files.mjs";
-import { createLargeFileFixture } from "../scripts/qualification-large-files.mjs";
+import {
+  LARGE_FILE_RECIPE_VERSION,
+  LARGE_FILE_VALIDATION_COMMAND,
+  createLargeFileFixture,
+} from "../scripts/qualification-large-files.mjs";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
 const repository = "example/disposable",
@@ -232,6 +240,45 @@ describe("installed large-file lifecycle authority", () => {
       expect(assembled.armTransfer).toBeTypeOf("function");
       expect(port.action).not.toHaveBeenCalled();
       expect(port.preflight).not.toHaveBeenCalled();
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+  it("grounds every generated artifact scenario in the matching Vitest fixture recipe", () => {
+    const parent = mkdtempSync(join(tmpdir(), "factory-large-file-objective-test-"));
+    try {
+      const fixture = createLargeFileFixture({ parent, namespace: authority.namespace });
+      const descriptor = join(fixture.root, "fixture.json");
+      const packageJson = JSON.parse(
+        readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+      );
+      const repositoryFacts = {
+        files: [{ path: "package.json" }, ...fixture.baseline.map(({ path }) => ({ path }))],
+        scripts: packageJson.scripts,
+      };
+      expect(fixture.version).toBe(LARGE_FILE_RECIPE_VERSION);
+      const fixtureTest = readFileSync(join(fixture.repository, fixture.paths.test), "utf8");
+      expect(fixtureTest).toContain('from "vitest"');
+      expect(fixtureTest).not.toContain('from "node:test"');
+      expect(discoverValidationCommands(repositoryFacts)).toContain(LARGE_FILE_VALIDATION_COMMAND);
+      expect(
+        isGroundedValidationCommand(LARGE_FILE_VALIDATION_COMMAND, repositoryFacts, [
+          fixture.paths.prefix + "/",
+        ]),
+      ).toBe(true);
+      for (const scenario of ["transfer-restart", "scope", "secret", "symlink"]) {
+        const scenarioAuthority = {
+          ...authority,
+          largeFile: {
+            scenario,
+            fixture: descriptor,
+            fixtureDigest: hash(readFileSync(descriptor, "utf8")),
+          },
+        };
+        const body = largeFileExtension(scenarioAuthority).objectiveBody(scenarioAuthority);
+        expect(body).toContain(LARGE_FILE_VALIDATION_COMMAND);
+        expect(body).not.toContain("node --test");
+      }
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }

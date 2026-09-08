@@ -1,4 +1,5 @@
-export const LARGE_FILE_RECIPE_VERSION: "factory-large-files-fixture-v1";
+export const LARGE_FILE_RECIPE_VERSION: "factory-large-files-fixture-v2";
+export const LARGE_FILE_VALIDATION_COMMAND: "npm test";
 export const LARGE_FILE_AUDIO_BYTES: number;
 export type LargeFilePhase = "payload" | "metadata" | "join";
 export type LargeFileOutputScenario = "accepted" | "scope" | "secret" | "symlink";

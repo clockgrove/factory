@@ -144,6 +144,11 @@ local contracts only; they do not substitute for installed/provider execution ev
 of the local checkpoint qualifier. No opt-in means no actions. This is contributor qualification,
 not a user-facing runtime API or a claim that these scenarios have passed.
 
+The current runner requires a freshly generated version-2 fixture. Its committed test imports
+Vitest and every generated Objective names the repository-observed `npm test` validation command;
+older version-1 fixtures remain bound to their original evidence and are not reusable with this
+runner.
+
 Prepare each case in a fresh disposable private repository/namespace. The offline
 `createLargeFileFixture` export in `scripts/qualification-large-files.mjs` accepts an owned `parent`
 directory and `namespace`. To extend an existing disposable repository, also supply its local

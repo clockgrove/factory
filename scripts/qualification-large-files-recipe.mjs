@@ -9,6 +9,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const namespace = "__FACTORY_LARGE_FILE_NAMESPACE__";
+const recipeVersion = "factory-large-files-fixture-v2";
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 function assertNamespace(namespace) {
@@ -75,13 +76,13 @@ function outputFiles(namespace) {
   const paths = largeFilePaths(namespace);
   const audio = audioBytes();
   const metadata = Buffer.from(
-    `${JSON.stringify({ recipe: "factory-large-files-fixture-v1", bytes: audio.length, sha256: hash(audio), format: "PCM-u8-mono-8000Hz" }, null, 2)}\n`,
+    `${JSON.stringify({ recipe: recipeVersion, bytes: audio.length, sha256: hash(audio), format: "PCM-u8-mono-8000Hz" }, null, 2)}\n`,
   );
   const executable = Buffer.from(
     `#!/usr/bin/env node\nimport { verify } from "../large-files-recipe.mjs";\nverify("metadata");\n`,
   );
   const result = Buffer.from(
-    `${JSON.stringify({ recipe: "factory-large-files-fixture-v1", verified: true, payloadSha256: hash(audio), metadataSha256: hash(metadata), executableSha256: hash(executable) }, null, 2)}\n`,
+    `${JSON.stringify({ recipe: recipeVersion, verified: true, payloadSha256: hash(audio), metadataSha256: hash(metadata), executableSha256: hash(executable) }, null, 2)}\n`,
   );
   return [
     {

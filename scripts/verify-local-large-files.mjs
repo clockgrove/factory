@@ -29,6 +29,8 @@ import {
 } from "./verify-local-checkpoint-restart.mjs";
 import { qualificationNamespaceMarker } from "./verify-live-objective.mjs";
 import {
+  LARGE_FILE_RECIPE_VERSION,
+  LARGE_FILE_VALIDATION_COMMAND,
   largeFileObjectiveBody,
   observeLargeFileTree,
   largeFilePaths,
@@ -347,7 +349,7 @@ function checkedFixture(authority) {
   const document = privateDocument(authority.largeFile.fixture);
   assert.equal(document.digest, authority.largeFile.fixtureDigest, "fixture descriptor changed");
   const fixture = document.value;
-  assert.equal(fixture.version, "factory-large-files-fixture-v1");
+  assert.equal(fixture.version, LARGE_FILE_RECIPE_VERSION);
   assert.equal(fixture.namespace, authority.namespace);
   assert.deepEqual(fixture.paths, largeFilePaths(authority.namespace));
   assert.match(fixture.baseSha, /^[a-f0-9]{40}$/);
@@ -372,7 +374,7 @@ function objectiveBody(authority) {
       `Do not alter the recipe, baseline test, attributes or LFS pointers. ` +
       `Allowed output path is only ${fixture.paths.payload}. Do not repair or normalize the deliberately invalid fixture output. ` +
       `This is synthetic qualification content, not a real credential or an authorization to change any other path. ` +
-      `Validation command: node --test ${fixture.paths.test}. ` +
+      `Validation command: ${LARGE_FILE_VALIDATION_COMMAND}, the repository's committed Vitest entry point. ` +
       `Factory is expected to reject the produced artifact; do not fabricate a successful artifact or change the acceptance boundary.\n`;
   }
   return `${body}\n${qualificationNamespaceMarker(authority.namespace)}\n`;

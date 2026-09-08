@@ -7811,6 +7811,11 @@ export class FactorySupervisor {
         const snapshot = await this.#reader.readObjective(this.#run.objective);
         this.#fenceSnapshot(snapshot);
         this.#sequences.observe(snapshotEvents(snapshot));
+        if (hasCancellationRequest(snapshot, this.#run.runId)) {
+          throw new RunCancellationRequestedError(
+            "operator cancelled before model invocation dispatch",
+          );
+        }
         this.#budgetEvents = deduplicateFactoryEvents([
           ...this.#budgetEvents,
           ...this.#accountingEvents(snapshotEvents(snapshot)),
@@ -14036,12 +14041,48 @@ export class FactorySupervisor {
       )
       .sort((a, b) => a.sequence - b.sequence);
     const latest = [...events].reverse().find((event) => event.kind === "attempt");
-    const validation = [...events].reverse().find((event) => event.kind === "validation");
+    let validation = [...events].reverse().find((event) => event.kind === "validation");
     let semanticallyAccepted = events.some(
       (event) => event.kind === "attempt" && event.event === "AttemptValidated",
     );
 
     await this.#reconcileInterruptedValidationCapacity(item, reservation, events);
+
+    if (
+      !validation &&
+      !events.some(
+        (event) =>
+          event.kind === "attempt" &&
+          ["AttemptFailed", "AttemptTimedOut", "AttemptCancelled", "AttemptDeferred"].includes(
+            event.event,
+          ),
+      )
+    ) {
+      const collected = events.filter(
+        (event): event is Extract<FactoryEvent, { kind: "attempt" }> =>
+          event.kind === "attempt" &&
+          event.event === "AttemptCollected" &&
+          Boolean(event.artifactDigest),
+      );
+      const digests = new Set(collected.map((event) => event.artifactDigest!));
+      if (digests.size === 1) {
+        const checkpoint = await this.#validations.load(
+          this.#validationIdentity(reservation, [...digests][0]!),
+        );
+        if (checkpoint) {
+          validation = await this.#lease.use((lease) =>
+            this.#recorder.validation({
+              lease,
+              workItemNodeId: item.id,
+              reservation,
+              evidence: checkpoint.evidence,
+              sequence: this.#sequences.take(),
+            }),
+          );
+          events.push(validation);
+        }
+      }
+    }
 
     if (validation?.kind === "validation" && validation.passed && !semanticallyAccepted) {
       semanticallyAccepted = await this.#recoverMissingInitialReview(

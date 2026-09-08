@@ -5,6 +5,7 @@ import { decodeEventComments } from "../src/control/receipts.js";
 import { PlatformUnavailableError } from "../src/platform.js";
 import { GitHubReader } from "../src/github.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
+import { ValidationCheckpointManager } from "../src/control/validation-checkpoints.js";
 import * as cleanValidation from "../src/validation/clean-run.js";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
 
@@ -42,6 +43,209 @@ async function validatedBeforeReview(stage: "validation" | "execution" = "valida
 }
 
 describe("retained validated artifact continuation", () => {
+  it("recovers an immutable passed validation when its summary comment never committed", async () => {
+    const f = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      dependencyChain: true,
+    });
+    const validation = vi.spyOn(cleanValidation, "validateArtifactClean");
+    const writer = vi.mocked(GitHubControlStore.prototype.addIssueComment);
+    const original = writer.getMockImplementation()!;
+    const failure = new PlatformUnavailableError(
+      { kind: "server_error", retryAfterMs: 1 },
+      new Error("validation summary write lost"),
+    );
+    let interrupted = false;
+    writer.mockImplementation(async (node, body) => {
+      if (
+        !interrupted &&
+        decodeEventComments(body).some(
+          (event) => event.event === "ValidationRecorded" && event.workItem === 8,
+        )
+      ) {
+        interrupted = true;
+        throw failure;
+      }
+      await original(node, body);
+    });
+    try {
+      await expect(f.run()).rejects.toBe(failure);
+      expect([...f.refs.keys()].some((ref) => ref.includes("/validations/"))).toBe(true);
+      expect(f.events().some((event) => event.event === "ValidationRecorded")).toBe(false);
+      expect(validation).toHaveBeenCalledOnce();
+      const result = await f.run();
+      expect(result, result.reason).toMatchObject({ status: "completed" });
+      expect(validation).toHaveBeenCalledTimes(3);
+      expect(
+        f.activity.filter((entry) => entry.operation === "launch").map((entry) => entry.workItem),
+      ).toEqual([8, 9, 10]);
+      expect(
+        f.events().filter((event) => event.event === "ValidationRecorded" && event.workItem === 8),
+      ).toHaveLength(1);
+      expect(
+        f.activity.filter((entry) => entry.operation === "review" && entry.workItem === 8),
+      ).toHaveLength(1);
+      expect(unresolvedModelInvocations(f.events())).toEqual([]);
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
+
+  it("rejects operator cancellation arriving after recovery snapshot but before missing review admission", async () => {
+    const { fixture: f, validation, failure } = await validatedBeforeReview();
+    try {
+      await expect(f.run()).rejects.toBe(failure);
+      const load = ValidationCheckpointManager.prototype.load;
+      let injected = false;
+      vi.spyOn(ValidationCheckpointManager.prototype, "load").mockImplementation(async function (
+        this: ValidationCheckpointManager,
+        identity,
+      ) {
+        const record = await load.call(this, identity);
+        if (!injected && identity.workItem === 8) {
+          injected = true;
+          f.snapshot.factoryEvents!.push(
+            parseFactoryEvent({
+              protocol: "clockgrove.factory/v2",
+              kind: "run",
+              event: "FactoryRunCancellationRequested",
+              objective: 7,
+              runId: f.runId,
+              sequence: Math.max(...f.events().map((event) => event.sequence)) + 1,
+              at: new Date().toISOString(),
+              requestedBy: "operator",
+              requestId: "fixture-cancel-during-recovery",
+            }),
+          );
+        }
+        return record;
+      });
+      const before = f.events().filter((event) => event.kind === "budget");
+      await expect(f.run()).resolves.toMatchObject({ status: "cancelled" });
+      expect(injected).toBe(true);
+      expect(f.events().filter((event) => event.kind === "budget")).toEqual(before);
+      expect(f.activity.filter((entry) => entry.operation.includes("review"))).toEqual([]);
+      expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);
+      expect(validation).toHaveBeenCalledOnce();
+    } finally {
+      await f.dispose();
+    }
+  }, 30_000);
+
+  it("continues validated and succeeded roots together after one interrupted cohort without replaying root work", async () => {
+    const f = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      localMaxParallel: 2,
+    });
+    f.repositoryResources.controllerLimits.maxLocalWorkers = 2;
+    const validation = vi.spyOn(cleanValidation, "validateArtifactClean");
+    const writer = vi.mocked(GitHubControlStore.prototype.addIssueComment);
+    const original = writer.getMockImplementation()!;
+    const failure = new PlatformUnavailableError(
+      { kind: "server_error", retryAfterMs: 1 },
+      new Error("fixture interrupted root cohort"),
+    );
+    let ready!: () => void;
+    let validated!: () => void;
+    const rootReady = new Promise<void>((resolve) => {
+      ready = resolve;
+    });
+    const rootValidated = new Promise<void>((resolve) => {
+      validated = resolve;
+    });
+    let interrupt = true;
+    writer.mockImplementation(async (node, body) => {
+      await original(node, body);
+      const events = decodeEventComments(body);
+      if (!interrupt) return;
+      if (
+        events.some(
+          (event) =>
+            event.event === "BudgetReconciled" &&
+            event.workItem === 9 &&
+            event.phase === "execution" &&
+            event.unit === "local_milliseconds",
+        )
+      ) {
+        ready();
+        await rootValidated;
+        throw failure;
+      }
+      if (
+        events.some(
+          (event) =>
+            event.event === "BudgetReconciled" &&
+            event.workItem === 8 &&
+            event.phase === "validation" &&
+            event.unit === "validation_milliseconds",
+        )
+      ) {
+        validated();
+        await rootReady;
+        throw failure;
+      }
+    });
+    try {
+      await expect(f.run()).rejects.toBe(failure);
+      interrupt = false;
+      const succeeded = f
+        .events()
+        .find((event) => event.event === "AttemptSucceeded" && event.workItem === 9);
+      if (!succeeded) throw new Error("second root has no terminal artifact");
+      f.snapshot.workItems[1]!.factoryEvents!.push(
+        parseFactoryEvent({
+          ...succeeded,
+          event: "AttemptCancelled",
+          writerOperationId: "fixture-cohort-controller-shutdown",
+          sequence: Math.max(...f.events().map((event) => event.sequence)) + 1,
+          reason: "controller stopped after sibling provider error",
+        }),
+      );
+      expect(validation).toHaveBeenCalledOnce();
+      expect(
+        f.events().some((event) => event.event === "AttemptCollected" && event.workItem === 9),
+      ).toBe(false);
+      expect(
+        f.events().some((event) => event.event === "ValidationRecorded" && event.workItem === 8),
+      ).toBe(true);
+      expect(f.activity.filter((entry) => entry.operation.includes("review"))).toEqual([]);
+      expect(f.resources.size).toBe(0);
+      const execution = f
+        .events()
+        .filter((event) => event.kind === "budget" && event.phase === "execution");
+      const result = await f.run();
+      expect(result, result.reason).toMatchObject({ status: "completed", runId: f.runId });
+      for (const workItem of [8, 9, 10])
+        expect(
+          f.activity.filter((entry) => entry.operation === "launch" && entry.workItem === workItem),
+        ).toHaveLength(1);
+      for (const workItem of [8, 9]) {
+        expect(
+          f
+            .events()
+            .filter((event) => event.event === "ValidationRecorded" && event.workItem === workItem),
+        ).toHaveLength(1);
+        expect(
+          f
+            .events()
+            .filter(
+              (event) =>
+                event.kind === "budget" &&
+                event.phase === "execution" &&
+                event.workItem === workItem,
+            ),
+        ).toEqual(execution.filter((event) => "workItem" in event && event.workItem === workItem));
+      }
+      expect(f.snapshot.workItems.every((item) => item.closed)).toBe(true);
+      expect(unresolvedModelInvocations(f.events())).toEqual([]);
+      expect(f.resources.size).toBe(0);
+    } finally {
+      ready();
+      validated();
+      await f.dispose();
+    }
+  }, 30_000);
+
   it.each([false, true])(
     "reuses a succeeded ready artifact after legacy shutdown only without conflicting failure (%s)",
     async (conflictingFailure) => {

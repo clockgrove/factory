@@ -74,7 +74,7 @@
     "release:artifacts": "node scripts/create-release-artifacts.mjs",
     "release:publish": "npm run verify:publish && node scripts/publish-release.mjs",
     "verify:publish": "npm run verify:release && node scripts/verify-publish-readiness.mjs && npm run release:artifacts",
-    "verify:release": "npm run typecheck && npm run lint && npm run format:check && npm run test:coverage && npm run verify:schemas && npm run verify:dist && npm run verify:package && npm run verify:npm && npm audit"
+    "verify:release": "node scripts/verify-release-preflight.mjs && npm run typecheck && npm run lint && npm run format:check && npm run test:coverage && npm run verify:schemas && npm run verify:dist && npm run verify:package && npm run verify:npm && npm audit"
   },
   "dependencies": {
     "@openai/codex-sdk": "0.153.2"

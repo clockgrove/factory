@@ -288,6 +288,12 @@ npm ci
 npm run verify:release
 ```
 
+Run the coordinated release gate directly on supported Linux with systemd 254+ and a reachable
+systemd user manager. Under WSL2, run it in the Linux host environment where
+`systemctl --user show --property=Version --value --no-pager` succeeds, not in a nested sandbox that
+cannot reach the user bus. The gate checks this requirement before starting the broad suite and then
+retains the real user-systemd containment coverage.
+
 `verify:dist` rebuilds into a temporary directory and verifies that the committed bundles match.
 `verify:package` validates every manifest/skill/schema, starts the bundled MCP server with no token,
 installs a staged copy through an isolated Codex home, and starts both installed executables without

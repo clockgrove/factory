@@ -162,13 +162,19 @@ describe("Supervisor cancellation model usage", () => {
     }
   }, 30_000);
 
-  it.each(["lease", "receipt"])(
-    "still cleans up and blocks terminal writes when the usage %s fence fails",
-    async (failure) => {
+  it.each([
+    { failure: "lease", mode: "ordinary", controllerActivation: false },
+    { failure: "receipt", mode: "ordinary", controllerActivation: false },
+    { failure: "receipt", mode: "controller release", controllerActivation: true },
+  ] as const)(
+    "still cleans up and blocks terminal writes when the usage $failure fence fails during $mode cancellation",
+    async ({ failure, controllerActivation }) => {
       const shutdown = new AbortController();
       let cancelled = false;
+      let receiptWriteAttempts = 0;
       const f = await providerSupervisorFixture("daytona-burst", {
         localOnly: true,
+        controllerActivation,
         configureLocalBackend: (backend) => ({
           ...backend,
           observe: async () => {
@@ -202,6 +208,7 @@ describe("Supervisor cancellation model usage", () => {
                 event.phase === "execution",
             )
           ) {
+            receiptWriteAttempts++;
             throw new Error("cancellation fixture receipt unavailable");
           }
           return original(nodeId, body);
@@ -217,6 +224,7 @@ describe("Supervisor cancellation model usage", () => {
           expect((error as Error).cause).toMatchObject({
             message: "cancellation fixture receipt unavailable",
           });
+          expect(receiptWriteAttempts).toBe(1);
         }
         expect(
           f
@@ -235,6 +243,14 @@ describe("Supervisor cancellation model usage", () => {
             .events()
             .filter((event) => event.kind === "attempt" && event.event === "AttemptCancelled"),
         ).toEqual([]);
+        expect(
+          f.events().filter((event) =>
+            ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(
+              event.event,
+            ),
+          ),
+        ).toEqual([]);
+        expect(LeaseManager.prototype.release).not.toHaveBeenCalled();
         expect(f.resources.size).toBe(0);
         expect(f.activity.filter((entry) => entry.operation === "cleanup")).toHaveLength(1);
         expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(1);

@@ -391,9 +391,7 @@ describe("GitHubReader Agent Work timeline reads", () => {
     const snapshot = await f.reader.readObjective(OBJECTIVE);
 
     expect(latestRunReceipts(snapshot.factoryEvents!)?.terminal).toEqual(terminal);
-    expect(snapshot.objectiveAuthority?.observedAt.toISOString()).toBe(
-      "2026-09-08T00:05:00.000Z",
-    );
+    expect(snapshot.objectiveAuthority?.observedAt.toISOString()).toBe("2026-09-08T00:05:00.000Z");
   });
 
   it.each([

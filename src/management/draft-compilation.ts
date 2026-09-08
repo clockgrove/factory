@@ -1,3 +1,4 @@
+import { z } from "zod";
 import {
   compiledGraphDigest,
   parsePersistedCompiledObjective,
@@ -13,11 +14,14 @@ import type { LeaseState } from "../control/lease.js";
 import {
   runCompilerDraftLoop,
   CompilerDraftStopError,
+  CompilerDraftAdmissionError,
   type CompilerDraftOutcome,
   type DraftStage,
 } from "../evaluation/compiler-draft-loop.js";
 import {
   compilerEvalDigest,
+  buildCompilerInferenceChallenges,
+  validateCompilerInferenceChallenges,
   parseObligationInventory,
   validateCompilerJudgeVerdict,
   CompilerJudgeVerdictSchema,
@@ -38,6 +42,8 @@ export function assertCompilerDraftSelection(
   graph: CompiledObjective,
   inputDigest?: string,
 ): void {
+  if (records.some((record) => record.kind === "terminal-conflict"))
+    throw new Error("compiler selection contains disputed terminal evidence");
   const binding = records[0]?.binding;
   if (!binding || (inputDigest !== undefined && binding.inputDigest !== inputDigest))
     throw new Error("compiler assessment inputs changed before graph projection");
@@ -65,10 +71,30 @@ export function assertCompilerDraftSelection(
   if (inventory.objectiveDigest !== binding.inputDigest || inventory.baseSha !== binding.baseSha)
     throw new Error("compiler obligation inventory differs from frozen inputs");
   const graphDigest = compiledGraphDigest(graph);
+  const reviewEvidence = selected.payload.reviewEvidence ?? null;
+  const challenges = validateCompilerInferenceChallenges(reviewEvidence ?? [], inventory);
+  const judgeIntent = records.find(
+    (record) =>
+      record.kind === "invocation" &&
+      record.payload.invocationId === verdictResult.payload.invocationId,
+  );
+  if (
+    !judgeIntent ||
+    draftDigest(judgeIntent.payload.reviewEvidence ?? null) !== draftDigest(reviewEvidence) ||
+    judgeIntent.payload.inputDigest !==
+      draftDigest({
+        inventory,
+        previous: graph,
+        failure: reviewEvidence,
+        ...(reviewEvidence === null ? {} : { reviewEvidence }),
+      })
+  )
+    throw new Error("compiler selection judge input evidence changed");
   const verdict = validateCompilerJudgeVerdict(verdictResult.payload.value, {
     draftDigest: graphDigest,
     inventory,
     graph,
+    challenges,
   });
   if (
     selected.payload.graphDigest !== graphDigest ||
@@ -157,22 +183,70 @@ export async function compileEvaluatedDraft(args: {
         await args.validate(graph);
         return graph;
       },
-      accept: (value, graph, obligations) => {
+      reviewEvidence: (candidate, priorFailure, obligations, priorReviewEvidence) => {
+        const original = inventory(obligations);
+        const carried = validateCompilerInferenceChallenges(priorReviewEvidence ?? [], original);
+        const priorVerdict = CompilerJudgeVerdictSchema.safeParse(priorFailure);
+        if (
+          !priorVerdict.success ||
+          !candidate ||
+          typeof candidate !== "object" ||
+          !("repair" in candidate)
+        )
+          return carried.length ? carried : null;
+        const summary = z
+          .object({
+            findingDispositions: z
+              .array(
+                z
+                  .object({
+                    findingId: z.string(),
+                    disposition: z.enum(["addressed", "challenged"]),
+                    reason: z.string(),
+                    evidenceIds: z.array(z.string()),
+                  })
+                  .strict(),
+              )
+              .max(64),
+          })
+          .parse(candidate.repair);
+        const fresh = buildCompilerInferenceChallenges(
+          original,
+          priorVerdict.data,
+          summary.findingDispositions,
+        );
+        const merged = new Map(
+          carried.map((entry) => [`${entry.findingId}\0${entry.obligationId}`, entry]),
+        );
+        for (const challenge of fresh)
+          merged.set(`${challenge.findingId}\0${challenge.obligationId}`, challenge);
+        const challenges = validateCompilerInferenceChallenges([...merged.values()], original);
+        return challenges.length ? challenges : null;
+      },
+      accept: (value, graph, obligations, reviewEvidence) => {
         const verdict = validateCompilerJudgeVerdict(value, {
           draftDigest: compiledGraphDigest(graph),
           graph,
           inventory: inventory(obligations),
+          challenges: validateCompilerInferenceChallenges(
+            reviewEvidence ?? [],
+            inventory(obligations),
+          ),
         });
         if (verdict.decision === "abstain")
           throw new CompilerDraftStopError("judge cannot resolve material ambiguity");
         return verdict.decision === "accept";
       },
       invoke: async (request, checkpoint) => {
-        await args.assertInputs();
-        const remainingMs = deadlineAt - Date.now();
-        if (remainingMs <= 0) throw new Error("compiler evaluation deadline exhausted");
-        frozenContext.invocationTimeoutMs = remainingMs;
-        await args.admit(request.invocationId);
+        try {
+          await args.assertInputs();
+          const remainingMs = deadlineAt - Date.now();
+          if (remainingMs <= 0) throw new Error("compiler evaluation deadline exhausted");
+          frozenContext.invocationTimeoutMs = remainingMs;
+          await args.admit(request.invocationId);
+        } catch (error) {
+          throw new CompilerDraftAdmissionError(error);
+        }
         if (request.stage === "inventory") {
           const result = await backend.extractObligations!(frozenContext, async (result) => {
             await checkpoint({ value: result.inventory, usage: result.usage });
@@ -183,7 +257,15 @@ export async function compileEvaluatedDraft(args: {
         if (request.stage === "judge") {
           if (!request.previous) throw new Error("judge has no mechanically valid draft");
           const result = await backend.judgePlan!(
-            { compilation: frozenContext, inventory: obligations, objective: request.previous },
+            {
+              compilation: frozenContext,
+              inventory: obligations,
+              objective: request.previous,
+              challenges: validateCompilerInferenceChallenges(
+                request.reviewEvidence ?? [],
+                obligations,
+              ),
+            },
             async (result) => {
               await checkpoint({ value: result.verdict, usage: result.usage });
             },
@@ -201,6 +283,10 @@ export async function compileEvaluatedDraft(args: {
                   compilation: frozenContext,
                   inventory: obligations,
                   revision: request.revision,
+                  challenges: validateCompilerInferenceChallenges(
+                    request.reviewEvidence ?? [],
+                    obligations,
+                  ),
                   ...(request.previous ? { objective: request.previous } : {}),
                   ...(verdict.success
                     ? { verdict: verdict.data }

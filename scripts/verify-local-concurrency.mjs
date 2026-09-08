@@ -16,7 +16,6 @@ import {
   assertScopeCoverage,
   assertControllerUnit,
 } from "./verify-local-checkpoint-restart.mjs";
-import { assertRepositoryContention } from "./verify-local-scheduling.mjs";
 import { authenticatedFaultEvents, isQuiescentFaultObjective } from "./verify-local-faults.mjs";
 import { qualificationModelAccounting } from "./qualification-model-accounting.mjs";
 import {
@@ -64,6 +63,82 @@ const endNames = new Set([
   "AttemptDeferred",
 ]);
 
+export function concurrencyReceiptProgress(phase, pair) {
+  const hasChangedReceiptBoundary = pair.some((observation) =>
+    Object.hasOwn(observation, "changedReceipts"),
+  );
+  if (hasChangedReceiptBoundary) {
+    const signalEvents = (observation) =>
+      eventsOf({
+        receipts: [...observation.changedReceipts, ...observation.pendingReceipts],
+      });
+    if (
+      pair.some(
+        (observation) =>
+          observation.topologyPending ||
+          observation.terminalStatusPending ||
+          signalEvents(observation).some((event) =>
+            [
+              "GraphCompiled",
+              "GraphProjected",
+              "FactoryRunCompleted",
+              "FactoryRunCancelled",
+              "FactoryRunEscalated",
+            ].includes(event.event),
+          ),
+      )
+    )
+      return true;
+    const relevant =
+      phase === "both-started"
+        ? pair.some((observation) =>
+            signalEvents(observation).some((event) => event.event === "ControllerObserved"),
+          )
+        : phase === "refill"
+          ? pair.some((observation) =>
+              signalEvents(observation).some(
+                (event) => event.event === "AttemptStarted" || endNames.has(event.event),
+              ),
+            )
+          : phase === "scoped-pause"
+            ? signalEvents(pair[1]).some((event) => event.event === "RunPauseAcknowledged")
+            : phase === "peer-completed"
+              ? signalEvents(pair[0]).some((event) => event.event === "FactoryRunCompleted")
+              : phase === "completed"
+                ? pair.some((observation) =>
+                    signalEvents(observation).some(
+                      (event) => event.event === "FactoryRunCompleted",
+                    ),
+                  )
+                : undefined;
+    if (relevant === undefined) throw Error(`unsupported concurrency observation phase: ${phase}`);
+    if (!relevant) return false;
+  }
+  if (phase === "both-started")
+    return pair.every((observation) =>
+      eventsOf(observation).some((event) => event.event === "ControllerObserved"),
+    );
+  if (phase === "refill") return concurrencyRefill(pair) !== null;
+  if (phase === "scoped-pause")
+    return eventsOf(pair[1]).some((event) => event.event === "RunPauseAcknowledged");
+  if (phase === "peer-completed")
+    return eventsOf(pair[0]).some((event) => event.event === "FactoryRunCompleted");
+  if (phase === "completed")
+    return pair.every((observation) =>
+      eventsOf(observation).some((event) => event.event === "FactoryRunCompleted"),
+    );
+  throw Error(`unsupported concurrency observation phase: ${phase}`);
+}
+
+const adverseProgress = (pair) =>
+  pair.some((observation) =>
+    eventsOf(observation).some(
+      (event) =>
+        ["FactoryRunCancelled", "FactoryRunEscalated"].includes(event.event) ||
+        event.event === "FactoryRunCancellationRequested",
+    ),
+  );
+
 /** Require an observed original failed incarnation, including its pending auto-restart.
  * The CLI propagates exit 1, so Restart=on-failure remains in force. This predicate is
  * not an atomic generation-conditional stop operation.
@@ -92,6 +167,115 @@ export function assertRetiredController(fields, original, configPath) {
   assert.equal(fields.Result, "exit-code");
 }
 const policyFor = (authority, index) => ({ ...authority, namespace: authority.namespaces[index] });
+
+const reasoningEfforts = new Set(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
+
+function qualificationModels(env) {
+  const model = env.FACTORY_CONCURRENCY_MODEL;
+  const reasoning = env.FACTORY_CONCURRENCY_REASONING;
+  assert.ok(model, "explicit concurrency qualification model required");
+  assert.ok(Buffer.byteLength(model) <= 160 && /^[A-Za-z0-9._:/+-]+$/.test(model));
+  assert.ok(reasoningEfforts.has(reasoning), "explicit supported reasoning effort required");
+  const profile = "qualification";
+  return {
+    mode: "single-profile",
+    profiles: { [profile]: { model, reasoning } },
+    phaseProfiles: Object.fromEntries(
+      ["compile", "implement", "review", "recover"].map((phase) => [phase, profile]),
+    ),
+  };
+}
+
+/** Policy resolution and authenticated backend receipts; provider-returned settings stay unavailable. */
+export function concurrencyModelConfiguration(observation, authority) {
+  const events = eventsOf(observation);
+  assert.ok(authority.policy.models, "immutable model configuration missing");
+  const phases = Object.fromEntries(
+    Object.entries(authority.policy.models.phaseProfiles).map(([phase, profile]) => [
+      phase,
+      { profile, ...authority.policy.models.profiles[profile] },
+    ]),
+  );
+  const executionBackends = [
+    ...new Set(
+      events.filter((event) => event.event === "AttemptReserved").map((event) => event.backend),
+    ),
+  ];
+  for (const backend of executionBackends)
+    assert.ok(authority.policy.backendOrder.includes(backend));
+  return {
+    requested: {
+      evidence: "immutable-run-policy",
+      models: authority.policy.models,
+      managementBackend: authority.policy.managementBackend,
+      executionBackendOrder: authority.policy.backendOrder,
+    },
+    resolved: {
+      evidence: "deterministic-run-policy-selection",
+      phases,
+      managementBackend: authority.policy.managementBackend,
+      executionBackendOrder: authority.policy.backendOrder,
+    },
+    observed: {
+      executionBackends,
+      providerReturnedModel: "unavailable-not-recorded-in-receipts",
+      providerReturnedReasoning: "unavailable-not-recorded-in-receipts",
+    },
+  };
+}
+
+export function concurrencyMeasurements(observation, observer) {
+  const events = eventsOf(observation);
+  const interval = (from, to) => {
+    const start = events.find((event) => event.event === from);
+    const end = events.find((event) => event.event === to);
+    if (!start || !end) return { availability: "unavailable", reason: "receipt-missing" };
+    return {
+      availability: "observed",
+      milliseconds: time(end) - time(start),
+      boundary: "authenticated-receipt-timestamps",
+    };
+  };
+  const compiled = events.find((event) => event.event === "GraphCompiled");
+  const projected = events.find((event) => event.event === "GraphProjected");
+  let projection;
+  if (compiled && projected) {
+    assert.equal(projected.graphDigest, compiled.graphDigest, "projected graph digest changed");
+    assert.equal(projected.graphSize, compiled.graphSize, "projected graph size changed");
+    projection = {
+      availability: "observed",
+      graphDigest: compiled.graphDigest,
+      projectedWorkItems: compiled.graphSize,
+      boundary: "authenticated-graph-receipts",
+    };
+  } else {
+    projection = { availability: "unavailable", reason: "receipt-missing" };
+  }
+  return {
+    run: interval("FactoryRunStarted", "FactoryRunCompleted"),
+    graphCompiledToProjected: {
+      interval: interval("GraphCompiled", "GraphProjected"),
+      projection,
+      cpuAndMemory: {
+        availability: "unavailable",
+        reason: "no-durable-transition-scoped-resource-receipt",
+      },
+      modelTokens: {
+        availability: "unavailable",
+        reason: "durable-model-accounting-is-not-attributed-to-this-receipt-interval",
+      },
+    },
+    observer: structuredClone(observer),
+    controllerMutationOperations: {
+      availability: "unavailable",
+      reason: "telemetry-is-process-local-and-the-qualifier-is-not-the-controller-process",
+    },
+    githubAccountQuotaAttributedToRun: {
+      availability: "unavailable",
+      reason: "account-wide-quota-is-not-run-attribution",
+    },
+  };
+}
 
 export function concurrencyAuthority(env) {
   if (env.FACTORY_LOCAL_CONCURRENCY !== "1") return null;
@@ -125,10 +309,14 @@ export function concurrencyAuthority(env) {
   ];
   const repository = env.FACTORY_CONCURRENCY_REPOSITORY;
   const unit = env.FACTORY_CONCURRENCY_CONTROLLER_UNIT;
+  const scenario = env.FACTORY_CONCURRENCY_SCENARIO ?? "throughput";
+  assert.ok(["throughput", "lease-fault"].includes(scenario), "unsupported concurrency scenario");
   if (phase === "exercise")
     assert.equal(
       env.FACTORY_CONCURRENCY_ACK,
-      `${repository}:${unit}:start,activate-two,contend,pause-b,freeze-inner-contend-unfreeze,stop-stale,restart,resume-b,stop`,
+      scenario === "throughput"
+        ? `${repository}:${unit}:start,activate-two,stop`
+        : `${repository}:${unit}:start,activate-two,contend,pause-b,freeze-inner-contend-unfreeze,stop-stale,restart,resume-b,stop`,
       "explicit two-Objective lifecycle authority required",
     );
   const authority = checkpointAuthority({
@@ -146,8 +334,10 @@ export function concurrencyAuthority(env) {
   authority.policy.maxParallel = 1;
   authority.policy.objectiveTimeoutMinutes = durationMinutes;
   authority.policy.capacity.local.maxWorkers = 1;
+  authority.policy.models = qualificationModels(env);
   return {
     ...authority,
+    scenario,
     namespaces,
     aggregateObservedThreshold,
     controllerLocalCeiling: 8,
@@ -171,12 +361,28 @@ export function concurrencyRefill(pair) {
     events
       .filter((event) => event.event === "AttemptStarted")
       .map((start) => {
+        assert.ok(
+          Number.isSafeInteger(start.objective) &&
+            start.objective > 0 &&
+            typeof start.runId === "string" &&
+            start.runId.length > 0 &&
+            Number.isSafeInteger(start.workItem) &&
+            start.workItem > 0 &&
+            Number.isSafeInteger(start.attempt) &&
+            start.attempt > 0 &&
+            Number.isSafeInteger(start.sequence) &&
+            start.sequence > 0,
+          "worker lifetime identity missing",
+        );
         const ends = events.filter(
           (event) => endNames.has(event.event) && sameAttempt(start, event),
         );
         assert.ok(ends.length <= 1, "conflicting worker terminals");
         const end = ends[0];
-        if (end) assert.ok(end.sequence > start.sequence && time(end) >= time(start));
+        if (end) {
+          assert.ok(Number.isSafeInteger(end.sequence) && end.sequence > start.sequence);
+          assert.ok(time(end) >= time(start));
+        }
         return { start, end };
       }),
   );
@@ -189,26 +395,32 @@ export function concurrencyRefill(pair) {
         "per-Objective one-worker ceiling exceeded",
       );
   }
-  for (const slow of intervals[0])
-    for (const first of intervals[1])
-      for (const refill of intervals[1]) {
-        if (!first.end || first === refill || first.end.sequence >= refill.start.sequence) continue;
-        if (
-          time(slow.start) < time(first.end) &&
-          time(first.start) < time(first.end) &&
-          time(first.end) < time(refill.start) &&
-          (!slow.end || time(refill.start) < time(slow.end))
-        ) {
-          return {
-            slow: slow.start,
-            first: first.start,
-            released: first.end,
-            refill: refill.start,
-            boundary: "authenticated-worker-lifetimes",
-            simultaneousCpu: "not-measured",
-          };
+  for (const refillIndex of [0, 1]) {
+    const spanningIndex = 1 - refillIndex;
+    for (const slow of intervals[spanningIndex])
+      for (const first of intervals[refillIndex])
+        for (const refill of intervals[refillIndex]) {
+          if (!first.end || first === refill || first.end.sequence >= refill.start.sequence)
+            continue;
+          if (
+            time(slow.start) < time(first.end) &&
+            time(first.start) < time(first.end) &&
+            time(first.end) < time(refill.start) &&
+            (!slow.end || time(refill.start) < time(slow.end))
+          ) {
+            return {
+              slow: slow.start,
+              first: first.start,
+              released: first.end,
+              refill: refill.start,
+              spanningObjective: spanningIndex,
+              refillObjective: refillIndex,
+              boundary: "authenticated-worker-lifetimes",
+              simultaneousCpu: "not-measured",
+            };
+          }
         }
-      }
+  }
   return null;
 }
 
@@ -386,9 +598,70 @@ export function assertInnerTakeover(before, after, chain, start) {
   };
 }
 
+export function assertObjectiveContention({ response, before, after, objective }) {
+  assert.equal(before.event.kind, "lease");
+  assert.equal(before.event.objective, objective);
+  assert.ok(["LeaseAcquired", "LeaseRenewed"].includes(before.event.event));
+  assert.deepEqual(
+    response,
+    {
+      isError: true,
+      content: [
+        { type: "text", text: `Objective #${objective} is leased by ${before.event.holder}` },
+      ],
+    },
+    "same-Objective contender did not stop at Objective ownership",
+  );
+  assert.equal(after.oid, before.oid, "losing same-Objective contender changed the lease");
+  assert.deepEqual(after.event, before.event);
+  return {
+    boundary: "objective-lease",
+    objective,
+    leaseOid: before.oid,
+    outerRepositoryLease: "not-consulted",
+  };
+}
+
+/** Ordinary useful-work path: no expiry offset, injected contention, pause or restart. */
 export async function runConcurrencyScenario(port, authority) {
   const preflight = await port.preflight();
   if (authority.phase === "preflight") return { result: "preflight-only", preflight };
+  assert.equal(authority.scenario, "throughput");
+  await port.prepare("create");
+  await port.action("start");
+  const controller = await port.controller("active");
+  await port.prepare("activate");
+  await port.pollPair("both-started", (pair) =>
+    pair.every((observation) =>
+      eventsOf(observation).some((event) => event.event === "ControllerObserved"),
+    ),
+  );
+  const overlap = await port.pollPair("refill", (pair) => concurrencyRefill(pair) !== null);
+  const refill = concurrencyRefill(overlap);
+  const final = await port.pollPair("completed", (pair) =>
+    pair.every((observation, index) => port.settled(observation, false, index)),
+  );
+  await port.action("stop");
+  await port.controller("inactive");
+  const proofs = await port.finishThroughput(final, controller, refill);
+  return {
+    result: "passed",
+    scope: "installed-two-objective-useful-throughput-refill",
+    controllerLocalCeiling: 8,
+    authorizedScenarioWorkerMaximum: 2,
+    aggregateObservedThreshold: authority.aggregateObservedThreshold,
+    artificialDelayMs: 0,
+    injectedFaults: 0,
+    comparativeSavings: "not-measured",
+    proofs,
+  };
+}
+
+/** Explicit controller-expiry/restart fault path, kept out of throughput measurement. */
+export async function runConcurrencyLeaseFaultScenario(port, authority) {
+  const preflight = await port.preflight();
+  if (authority.phase === "preflight") return { result: "preflight-only", preflight };
+  assert.equal(authority.scenario, "lease-fault");
   await port.prepare("create");
   await port.action("start");
   const original = await port.controller("active");
@@ -466,10 +739,17 @@ export async function main(env = process.env, run = checkpointMain) {
   process.once("SIGTERM", stop);
   const wait = (milliseconds) => sleep(milliseconds, undefined, { signal: abort.signal });
   try {
-    return await run(env, runConcurrencyScenario, {
+    const scenario =
+      authority.scenario === "throughput"
+        ? runConcurrencyScenario
+        : runConcurrencyLeaseFaultScenario;
+    return await run(env, scenario, {
       authority,
       observationWindowMinutes: authority.policy.objectiveTimeoutMinutes,
-      scope: "installed-two-objective-concurrency",
+      scope:
+        authority.scenario === "throughput"
+          ? "installed-two-objective-useful-throughput"
+          : "installed-two-objective-controller-expiry-fault",
       harnessPaths: [
         "scripts/verify-local-concurrency.mjs",
         "scripts/qualification-controller-freeze.mjs",
@@ -554,7 +834,129 @@ export async function main(env = process.env, run = checkpointMain) {
               );
           }
         };
+        const commentCache = new Map();
+        let commentCursor = Date.parse(evidence.startedAt);
+        evidence.observer = {
+          strategy: "repository-incremental-comments-with-fresh-acceptance",
+          fullObjectiveSnapshots: 0,
+          incrementalCommentListings: 0,
+          unchangedIncrementalListings: 0,
+        };
+        const commentIssue = (comment) => {
+          const prefix = `https://api.github.com/repos/${authority.repository}/issues/`;
+          assert.equal(typeof comment.issue_url, "string", "canonical comment issue URL missing");
+          assert.ok(comment.issue_url.startsWith(prefix), "comment belongs to another repository");
+          const encoded = comment.issue_url.slice(prefix.length);
+          assert.match(encoded, /^[1-9][0-9]*$/, "comment issue URL is malformed");
+          const number = Number(encoded);
+          assert.ok(Number.isSafeInteger(number) && number > 0, "comment issue unavailable");
+          assert.ok(
+            ["issues", "pull"].some(
+              (kind) =>
+                comment.html_url ===
+                `https://github.com/${authority.repository}/${kind}/${number}#issuecomment-${comment.id}`,
+            ),
+            "comment HTML URL does not match its canonical issue target",
+          );
+          return number;
+        };
+        const rememberComments = (comments) => {
+          const changed = new Set();
+          const seen = new Map();
+          for (const comment of comments) {
+            assert.ok(Number.isSafeInteger(comment.id) && comment.id > 0);
+            const issueNumber = commentIssue(comment);
+            const updated = Date.parse(comment.updated_at ?? comment.created_at);
+            assert.ok(Number.isFinite(updated), "comment update time unavailable");
+            commentCursor = Math.max(commentCursor, updated);
+            const version = hash({
+              body: comment.body,
+              htmlUrl: comment.html_url,
+              issueUrl: comment.issue_url,
+              createdAt: comment.created_at,
+              updatedAt: comment.updated_at,
+              userId: comment.user?.id,
+              userLogin: comment.user?.login,
+            });
+            const duplicate = seen.get(comment.id);
+            assert.ok(
+              !duplicate || duplicate === version,
+              "conflicting duplicate comment version in one listing",
+            );
+            seen.set(comment.id, version);
+            if (commentCache.get(comment.id)?.version !== version) changed.add(comment.id);
+            commentCache.set(comment.id, { comment, version, issueNumber });
+          }
+          return changed;
+        };
+        const receiptKey = (receipt) => `${receipt.commentId}:${hash(receipt.event)}`;
+        const hintedObservation = (record, changedComments) => {
+          assert.ok(record.latestFreshObservation, "fresh Objective baseline missing");
+          const issueNumbers = new Set([
+            record.objective.number,
+            ...record.latestFreshObservation.children.map((child) => child.number),
+          ]);
+          const comments = [...commentCache.values()]
+            .filter((entry) => issueNumbers.has(entry.issueNumber))
+            .map((entry) => entry.comment);
+          const receipts = authenticatedFaultEvents(
+            comments,
+            evidence.actor,
+            record.objective.number,
+          );
+          const changedReceipts = authenticatedFaultEvents(
+            comments.filter((comment) => changedComments.has(comment.id)),
+            evidence.actor,
+            record.objective.number,
+          );
+          const freshKeys = new Set(record.latestFreshObservation.receipts.map(receiptKey));
+          const pendingReceipts = receipts.filter((receipt) => !freshKeys.has(receiptKey(receipt)));
+          const graph = [...eventsOf({ receipts })]
+            .reverse()
+            .find((event) => ["GraphProjected", "GraphCompiled"].includes(event.event));
+          if (graph)
+            assert.ok(
+              Number.isSafeInteger(graph.graphSize) && graph.graphSize > 0 && graph.graphSize <= 3,
+              "topology receipt has invalid graph size",
+            );
+          const topologyPending = Boolean(
+            graph && record.latestFreshObservation.children.length !== graph.graphSize,
+          );
+          const terminalStates = new Map([
+            ["FactoryRunCompleted", "completed"],
+            ["FactoryRunCancelled", "cancelled"],
+            ["FactoryRunEscalated", "escalated"],
+          ]);
+          const terminalStatusPending = eventsOf({ receipts }).some((event) => {
+            const expected = terminalStates.get(event.event);
+            return expected && record.latestFreshObservation.status.run.state !== expected;
+          });
+          return {
+            ...record.latestFreshObservation,
+            receipts,
+            changedReceipts,
+            pendingReceipts,
+            topologyPending,
+            terminalStatusPending,
+          };
+        };
+        const readIncrementalComments = async () => {
+          const since = new Date(Math.max(Date.parse(evidence.startedAt), commentCursor - 1000));
+          const comments = await list(
+            "GET /repos/{owner}/{repo}/issues/comments",
+            { since: since.toISOString(), sort: "updated", direction: "asc" },
+            1000,
+            { deadline: deadline() },
+          );
+          evidence.observer.incrementalCommentListings++;
+          const changed = rememberComments(comments);
+          if (changed.size === 0) evidence.observer.unchangedIncrementalListings++;
+          evidence.observer.cursor = new Date(commentCursor).toISOString();
+          save();
+          return changed;
+        };
         const observeOne = async (record, full = false) => {
+          evidence.observer.fullObjectiveSnapshots++;
           const objective = (
             await request("GET /repos/{owner}/{repo}/issues/{issue_number}", {
               issue_number: record.objective.number,
@@ -591,12 +993,14 @@ export async function main(env = process.env, run = checkpointMain) {
                 ),
               });
           }
+          rememberComments(comments);
           const receipts = authenticatedFaultEvents(comments, evidence.actor, objective.number);
           const observation = {
             receipts,
             status: await call("factory_status", { objectiveNumber: objective.number }),
             children,
           };
+          record.latestFreshObservation = observation;
           if (!full) return observation;
           const events = receipts.map((receipt) => {
             const comment = one(
@@ -816,26 +1220,21 @@ export async function main(env = process.env, run = checkpointMain) {
             save();
           },
           contend: async (pair) => {
-            await once("outer-contention", async () => {
-              const before = await readOuter();
+            await once("same-objective-contention", async () => {
+              const objective = evidence.objectives[0].objective.number;
+              const before = await readLease(objective);
               const response = await invoke("factory_run", {
-                objectiveNumber: evidence.objectives[0].objective.number,
+                objectiveNumber: objective,
                 repository: authority.checkout,
                 untilTerminal: true,
                 policy: authority.policy,
               });
-              const after = await readOuter(),
-                controller = eventsOf(pair[0]).find(
-                  (event) => event.event === "ControllerObserved",
-                );
-              assertRepositoryContention({ response, before, after, controller });
-              return {
-                boundary: "repository-controller-outer-lease",
-                response,
-                before,
-                after,
-                innerDirector: "not-reached",
-              };
+              const after = await readLease(objective);
+              assert.ok(
+                eventsOf(pair[0]).some((event) => event.event === "ControllerObserved"),
+                "controller observation missing before Objective contention",
+              );
+              return assertObjectiveContention({ response, before, after, objective });
             });
           },
           scoped: async (action) =>
@@ -849,17 +1248,11 @@ export async function main(env = process.env, run = checkpointMain) {
             const maximumPolls = Math.ceil(
               (authority.policy.objectiveTimeoutMinutes * 60000) / 15000,
             );
+            let pair = [];
+            for (const record of evidence.objectives) pair.push(await observeOne(record));
             for (let count = 0; count < maximumPolls; count++) {
               abort.signal.throwIfAborted();
               checkpointTimeout(deadline(), 1);
-              const pair = [];
-              for (const [index, record] of evidence.objectives.entries()) {
-                // Cached terminal evidence is progress only, never a mutation/resource authorization.
-                const observed = record.terminalObservation ?? (await observeOne(record));
-                if (!record.terminalObservation && settled(observed, false, index))
-                  record.terminalObservation = observed;
-                pair.push(observed);
-              }
               evidence.latestPair = pair;
               evidence.observationPhase = phase;
               save();
@@ -882,6 +1275,15 @@ export async function main(env = process.env, run = checkpointMain) {
                 "actual refill timing not observed",
               );
               await wait(checkpointTimeout(deadline(), 15000));
+              const changedComments = await readIncrementalComments();
+              const hinted = evidence.objectives.map((record) =>
+                hintedObservation(record, changedComments),
+              );
+              if (!concurrencyReceiptProgress(phase, hinted) && !adverseProgress(hinted)) continue;
+              // Incremental comments are wake hints only. Every acceptance, terminal refusal and
+              // subsequent action is based on a fresh complete authenticated observation pair.
+              pair = [];
+              for (const record of evidence.objectives) pair.push(await observeOne(record));
             }
             throw Error("bounded scenario observation exhausted");
           },
@@ -1198,6 +1600,107 @@ export async function main(env = process.env, run = checkpointMain) {
             }
             throw Error("original inner lease expiry not observed within bound");
           },
+          finishThroughput: async (_pair, controller, refill) => {
+            checkpointTimeout(deadline(), 1);
+            const final = [];
+            for (const record of evidence.objectives) final.push(await observeOne(record, true));
+            const originalController = final[0].events.find(
+              (event) => event.event === "ControllerObserved",
+            );
+            assert.ok(originalController);
+            const generation = Object.fromEntries(
+              ["controllerId", "epoch", "controllerPolicyDigest"].map((key) => [
+                key,
+                originalController[key],
+              ]),
+            );
+            assert.ok(
+              final[1].events.some(
+                (event) =>
+                  event.event === "ControllerObserved" &&
+                  Object.keys(generation).every((key) => event[key] === generation[key]),
+              ),
+              "Objectives did not share one authenticated discovery generation",
+            );
+            const peerSnapshots = final.map((entry) => structuredClone(entry));
+            for (const [index, entry] of final.entries()) {
+              assertConcurrencySettlement(entry, policyFor(authority, index));
+              entry.controllerQualification = { generation, peers: [peerSnapshots[1 - index]] };
+              entry.modelConfiguration = concurrencyModelConfiguration(
+                entry,
+                policyFor(authority, index),
+              );
+              entry.measurements = concurrencyMeasurements(entry, evidence.observer);
+              entry.mergeProofs = await observeNativeMergeProofs({ evidence: entry, request });
+              for (const proof of entry.mergeProofs) {
+                const integration = one(
+                  entry.events.filter(
+                    (event) =>
+                      event.event === "AttemptIntegrated" && event.workItem === proof.workItem,
+                  ),
+                  "integration missing",
+                );
+                const publication = selectQualificationPublicationRecord(
+                  entry.events.filter(
+                    (event) =>
+                      event.event === "PublicationRecorded" && sameAttempt(event, integration),
+                  ),
+                );
+                assertNativeMergeProof(entry, proof, {
+                  repository: authority.repository,
+                  pull: one(
+                    entry.pulls.filter((pull) => pull.number === proof.pullRequest),
+                    "pull missing",
+                  ),
+                  publication,
+                  integration,
+                });
+              }
+            }
+            const absence = [];
+            for (const [index, observation] of final.entries()) {
+              evidence.objective = evidence.objectives[index].objective;
+              absence.push(await port.absence(observation, [controller]));
+            }
+            assert.deepEqual(installedBundleIdentity(pluginRoot), artifact);
+            const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+            for (const entry of evidence.harnessFiles)
+              assert.equal(
+                hash(readBounded(join(sourceRoot, entry.path), 262144)),
+                entry.sha256,
+                "qualifier dependency changed during execution",
+              );
+            const artifactProof = await verifyConcurrencyArtifacts(
+              request,
+              authority,
+              evidence.defaultBranch,
+              final,
+              deadline(),
+            );
+            const observedRefill = concurrencyRefill(final);
+            assert.ok(observedRefill);
+            assert.deepEqual(observedRefill.refill, refill.refill);
+            evidence.finalObjectives = final;
+            evidence.concurrencyProof = {
+              scenario: "throughput",
+              artificialDelayMs: 0,
+              refill: observedRefill,
+              absence,
+              artifactProof,
+              measurements: final.map((entry) => entry.measurements),
+            };
+            save();
+            return {
+              refill: observedRefill,
+              modelTokensKnown: final.map(
+                (entry, index) =>
+                  assertConcurrencySettlement(entry, policyFor(authority, index)).modelTokens,
+              ),
+              modelConfiguration: final.map((entry) => entry.modelConfiguration),
+              measurements: final.map((entry) => entry.measurements),
+              artifactProof,
+            };
+          },
           finish: async (_pair, original, replacement, refill) => {
             checkpointTimeout(deadline(), 1);
             const final = [];
@@ -1230,6 +1733,11 @@ export async function main(env = process.env, run = checkpointMain) {
             for (const [index, entry] of final.entries()) {
               assertConcurrencySettlement(entry, policyFor(authority, index));
               entry.controllerQualification = { generation, peers: [peerSnapshots[1 - index]] };
+              entry.modelConfiguration = concurrencyModelConfiguration(
+                entry,
+                policyFor(authority, index),
+              );
+              entry.measurements = concurrencyMeasurements(entry, evidence.observer);
               entry.mergeProofs = await observeNativeMergeProofs({ evidence: entry, request });
               for (const proof of entry.mergeProofs) {
                 const integration = one(
@@ -1339,10 +1847,12 @@ export async function main(env = process.env, run = checkpointMain) {
             );
             checkpointTimeout(deadline(), 1);
             evidence.concurrencyProof = {
+              scenario: "lease-fault",
               refill: concurrencyRefill(final),
               inner,
               absence,
               artifactProof,
+              measurements: final.map((entry) => entry.measurements),
             };
             save();
             assert.ok(evidence.concurrencyProof.refill);
@@ -1353,6 +1863,8 @@ export async function main(env = process.env, run = checkpointMain) {
                 (entry, index) =>
                   assertConcurrencySettlement(entry, policyFor(authority, index)).modelTokens,
               ),
+              modelConfiguration: final.map((entry) => entry.modelConfiguration),
+              measurements: final.map((entry) => entry.measurements),
               artifactProof,
             };
           },

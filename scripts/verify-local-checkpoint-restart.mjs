@@ -439,6 +439,51 @@ export function checkpointCompletionReady(observation, authority, pauseRequestId
 }
 export { readQualificationMergeProof as readCheckpointMergeProof } from "./qualification-merge-proof.mjs";
 
+/** Validate the policy at its actual decision boundary. Observed-stop is an
+ * admission threshold, so an already-admitted invocation may finish above it. */
+export function assertCheckpointModelAdmission(
+  accounting,
+  economics,
+  { requireRemaining = false } = {},
+) {
+  assert.ok(economics && typeof economics === "object", "model budget policy missing");
+  const limit = economics.maxModelTokens;
+  assert.ok(Number.isSafeInteger(limit) && limit >= 0, "invalid model token allowance");
+  const mode = economics.modelTokenBudgetMode;
+  assert.ok(
+    mode === "observed-stop" || mode === "hard",
+    "unsupported or missing model token budget semantics",
+  );
+  assert.equal(accounting.unresolved.length, 0, "model dispatch consumption remains unknown");
+  assert.ok(Number.isSafeInteger(accounting.total) && accounting.total >= 0);
+  if (mode === "hard") {
+    assert.ok(accounting.total < limit, "original allowance exhausted");
+    return;
+  }
+
+  const chronological = [...accounting.markers, ...accounting.usage].sort(
+    (left, right) => left.sequence - right.sequence,
+  );
+  const sequences = new Set();
+  for (const event of chronological) {
+    assert.ok(Number.isSafeInteger(event.sequence) && event.sequence >= 0);
+    assert.ok(!sequences.has(event.sequence), "ambiguous model accounting chronology");
+    sequences.add(event.sequence);
+  }
+  for (const marker of accounting.markers) {
+    const knownAtAdmission = accounting.usage
+      .filter((actual) => actual.sequence < marker.sequence)
+      .reduce((sum, actual) => sum + actual.amount, 0);
+    assert.ok(Number.isSafeInteger(knownAtAdmission));
+    assert.ok(
+      knownAtAdmission < limit,
+      "model invocation admitted without remaining observed allowance",
+    );
+  }
+  if (requireRemaining)
+    assert.ok(accounting.total < limit, "original allowance exhausted before resume");
+}
+
 export function checkpointFacts(
   observation,
   authority,
@@ -566,6 +611,9 @@ export function checkpointFacts(
     requireMarkers: authority.policy.economics?.modelTokenBudgetMode === "observed-stop",
   });
   settled(accounting.unresolved.length === 0, "model dispatch consumption remains unknown");
+  assertCheckpointModelAdmission(accounting, authority.policy.economics, {
+    requireRemaining: requirePaused,
+  });
   const usage = accounting.usage;
   const compile = completedReceipt(
     usage.filter(
@@ -727,10 +775,6 @@ export function checkpointFacts(
   assert.equal(
     observation.status.summary.economics.modelTokenBreakdown.reconciledCalls,
     usage.length,
-  );
-  assert.ok(
-    modelTokens < authority.policy.economics.maxModelTokens,
-    "original allowance exhausted",
   );
   assert.equal(
     unique(

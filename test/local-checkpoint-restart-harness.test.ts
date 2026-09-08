@@ -17,6 +17,7 @@ import {
   checkpointStartupObservation,
   checkpointReady,
   checkpointCompletionReady,
+  assertCheckpointModelAdmission,
   readCheckpointMergeProof,
   checkpointLease,
   assertScopeCoverage,
@@ -97,6 +98,19 @@ const original = {
   hostIdentity: digest,
 };
 const replacement = { ...original, pid: 101, startTicks: "2000", invocationId: "b".repeat(32) };
+
+function modelTimeline(
+  markers: number[],
+  usage: Array<[sequence: number, amount: number]>,
+  unresolved: unknown[] = [],
+) {
+  return {
+    markers: markers.map((sequence) => ({ sequence })),
+    usage: usage.map(([sequence, amount]) => ({ sequence, amount })),
+    unresolved,
+    total: usage.reduce((sum, [, amount]) => sum + amount, 0),
+  };
+}
 
 function observation(count = 1, completed = false) {
   const events: Record<string, unknown>[] = [
@@ -605,6 +619,120 @@ describe("explicit checkpoint restart authority", () => {
   ])("rejects changed authority before invocation %j", (delta) =>
     expect(() => checkpointAuthority({ ...env, ...delta })).toThrow(),
   );
+});
+
+describe("checkpoint observed-stop admission chronology", () => {
+  const observedStop = { maxModelTokens: 250000, modelTokenBudgetMode: "observed-stop" };
+
+  it("accepts the captured final-review in-flight overshoot only at final observation", () => {
+    const bounded = checkpointAuthority({
+      ...env,
+      FACTORY_CHECKPOINT_MAX_MODEL_TOKENS: "250000",
+    })!;
+    const completed = observation(3, true);
+    for (const { event } of completed.receipts)
+      if (["FactoryRunStarted", "ActivationRequested"].includes(String(event.event)))
+        event.policy = bounded.policy;
+    const amounts = [40000, 40000, 40000, 40000, 40000, 46383, 42480];
+    const actual = completed.receipts.filter(
+      ({ event }) => event.event === "BudgetReconciled" && event.unit === "model_tokens",
+    );
+    expect(actual).toHaveLength(amounts.length);
+    actual.forEach(({ event }, index) => {
+      event.amount = amounts[index];
+    });
+    const workers = completed.receipts.filter(({ event }) => event.event === "AttemptSucceeded");
+    [40000, 40000, 46383].forEach((amount, index) => {
+      workers[index]!.event.reportedModelTokens = amount;
+    });
+    completed.status.summary.economics.usage.model_tokens.value = 288863;
+    expect(checkpointFacts(completed, bounded, pause, false)).toMatchObject({
+      runId: "original",
+      modelTokens: 288863,
+      integrated: 3,
+    });
+
+    const accounting = modelTimeline(
+      [1, 3, 5, 7, 9, 11, 13],
+      [
+        [2, 40000],
+        [4, 40000],
+        [6, 40000],
+        [8, 40000],
+        [10, 40000],
+        [12, 46383],
+        [14, 42480],
+      ],
+    );
+    expect(accounting.usage.slice(0, -1).reduce((sum, event) => sum + event.amount, 0)).toBe(
+      246383,
+    );
+    expect(accounting.total).toBe(288863);
+    expect(() => assertCheckpointModelAdmission(accounting, observedStop)).not.toThrow();
+    expect(() =>
+      assertCheckpointModelAdmission(accounting, observedStop, { requireRemaining: true }),
+    ).toThrow(/before resume/);
+  });
+
+  it("rejects dispatch when known actual usage equals or exceeds the threshold", () => {
+    expect(() =>
+      assertCheckpointModelAdmission(
+        modelTimeline(
+          [1, 3],
+          [
+            [2, 250000],
+            [4, 1],
+          ],
+        ),
+        observedStop,
+      ),
+    ).toThrow(/without remaining observed allowance/);
+    expect(() =>
+      assertCheckpointModelAdmission(
+        modelTimeline(
+          [1, 3],
+          [
+            [2, 250001],
+            [4, 1],
+          ],
+        ),
+        observedStop,
+      ),
+    ).toThrow(/without remaining observed allowance/);
+  });
+
+  it("accepts concurrent admissions made before either actual usage was known", () => {
+    expect(() =>
+      assertCheckpointModelAdmission(
+        modelTimeline(
+          [1, 2],
+          [
+            [3, 170000],
+            [4, 170000],
+          ],
+        ),
+        observedStop,
+      ),
+    ).not.toThrow();
+  });
+
+  it("fails closed for unresolved, ambiguous, missing, or strict over-limit accounting", () => {
+    expect(() =>
+      assertCheckpointModelAdmission(modelTimeline([1], [], [{}]), observedStop),
+    ).toThrow(/remains unknown/);
+    expect(() =>
+      assertCheckpointModelAdmission(modelTimeline([1], [[1, 1]]), observedStop),
+    ).toThrow(/ambiguous/);
+    expect(() =>
+      assertCheckpointModelAdmission(modelTimeline([], []), { maxModelTokens: 100 }),
+    ).toThrow(/unsupported or missing/);
+    expect(() =>
+      assertCheckpointModelAdmission(modelTimeline([1], [[2, 250000]]), {
+        maxModelTokens: 250000,
+        modelTokenBudgetMode: "hard",
+      }),
+    ).toThrow(/allowance exhausted/);
+  });
 });
 
 describe("fully accounted checkpoint", () => {

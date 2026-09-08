@@ -45,6 +45,11 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- Installed checkpoint qualification now evaluates observed-stop model budgets at each linked
+  dispatch marker using actual usage known at that sequence. It preserves the pre-resume remaining
+  allowance fence while permitting an already-admitted final invocation to report in-flight
+  overshoot, and still fails closed on post-threshold admission or incomplete accounting.
+  ([#202](https://github.com/clockgrove/factory/issues/202))
 - GitHub mutation telemetry now identifies its process-local scope and scheduler-lifetime window,
   remains separate from durable run economics, and reports absent historical run measurements as
   unavailable instead of attributing a new reader process's zero counters. Current response-header

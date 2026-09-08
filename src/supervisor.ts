@@ -174,6 +174,10 @@ import {
   type ReviewCheckpointRecord,
   type ReviewIdentity,
 } from "./control/reviews.js";
+import {
+  ValidationCheckpointManager,
+  type ValidationIdentity,
+} from "./control/validation-checkpoints.js";
 import { parseFactoryEvent, type FactoryEvent } from "./protocol/events.js";
 import { assertIsolatedCandidateFailureProof } from "./recovery/isolated-candidate.js";
 import { assertNoSecretMaterial, PROTOCOL_V2 } from "./protocol/limits.js";
@@ -1165,6 +1169,7 @@ export class FactorySupervisor {
   readonly #leases: LeaseManager;
   readonly #attempts: AttemptManager;
   readonly #reviews: ReviewCheckpointManager;
+  readonly #validations: ValidationCheckpointManager;
   readonly #sessions: AppServerSessionManager;
   readonly #mergeCandidates: MergeCandidateCheckpointStore;
   readonly #siblingRefreshes: SiblingRefreshStore;
@@ -1279,6 +1284,7 @@ export class FactorySupervisor {
       legacyBinding: (reservation, nodeId) => this.#legacyAdmissionBinding(reservation, nodeId),
     });
     this.#reviews = new ReviewCheckpointManager(this.#store, this.#leases);
+    this.#validations = new ValidationCheckpointManager(this.#store, this.#leases);
     this.#sessions = new AppServerSessionManager(this.#store, this.#leases);
     this.#mergeCandidates = new MergeCandidateCheckpointStore(this.#store, this.#leases);
     this.#siblingRefreshes = new SiblingRefreshStore(this.#store, this.#leases);
@@ -4600,7 +4606,10 @@ export class FactorySupervisor {
             return await escalateAfterDrain(inconsistent, `Work Item is ${inconsistent.state}`);
           }
           const exhausted = objective.items.find(
-            (item) => item.state === "failed" && item.attempts >= this.#policy.maxAttemptsPerItem,
+            (item) =>
+              item.state === "failed" &&
+              item.attempts >= this.#policy.maxAttemptsPerItem &&
+              !this.#hasRecoverablePostSuccessCancellation(item),
           );
           if (exhausted) {
             return await escalateAfterDrain(
@@ -4616,7 +4625,9 @@ export class FactorySupervisor {
           (item) =>
             !activeExecutions.has(item.number) &&
             (["reserved", "in_flight", "validating"].includes(item.state) ||
-              (item.state === "failed" && this.#hasUnfinishedAttempt(item))),
+              (item.state === "failed" &&
+                (this.#hasUnfinishedAttempt(item) ||
+                  this.#hasRecoverablePostSuccessCancellation(item)))),
         );
         if (recoverable.length > 0) {
           for (const item of recoverable) {
@@ -6162,6 +6173,13 @@ export class FactorySupervisor {
         }),
       );
       await this.#lease.use((lease) =>
+        this.#validations.persist({
+          lease,
+          identity: this.#validationIdentity(reservation!, artifact!.digest),
+          evidence: validation!.evidence,
+        }),
+      );
+      await this.#lease.use((lease) =>
         this.#recorder.validation({
           lease,
           workItemNodeId: item.id,
@@ -6786,6 +6804,7 @@ export class FactorySupervisor {
         "attempt" in event &&
         event.attempt === reservation.attempt,
     );
+    const recoverablePostSuccessCancellation = this.#isRecoverablePostSuccessCancellation(prior);
     if (
       prior.some(
         (event) =>
@@ -6799,7 +6818,7 @@ export class FactorySupervisor {
               "AttemptIntegrated",
               "AttemptFailed",
               "AttemptTimedOut",
-              "AttemptCancelled",
+              ...(recoverablePostSuccessCancellation ? [] : ["AttemptCancelled"]),
               "AttemptDeferred",
             ].includes(event.event)),
       )
@@ -7335,6 +7354,7 @@ export class FactorySupervisor {
     }
     if (!artifact) return false;
     this.#retainArtifactContent(artifact);
+    const recoverablePostSuccessCancellation = this.#isRecoverablePostSuccessCancellation(events);
     if (
       events.some(
         (event) =>
@@ -7357,7 +7377,7 @@ export class FactorySupervisor {
               "AttemptIntegrated",
               "AttemptFailed",
               "AttemptTimedOut",
-              "AttemptCancelled",
+              ...(recoverablePostSuccessCancellation ? [] : ["AttemptCancelled"]),
               "AttemptDeferred",
             ].includes(event.event)),
       )
@@ -7558,6 +7578,19 @@ export class FactorySupervisor {
     assertManagementInvocationNotFailed(this.#budgetEvents, this.#run.runId, invocationId);
   }
 
+  #validationIdentity(reservation: AttemptReservation, artifactDigest: string): ValidationIdentity {
+    return {
+      runId: reservation.runId,
+      objective: reservation.objective,
+      workItem: reservation.workItem,
+      attempt: reservation.attempt,
+      artifactDigest,
+      baseSha: reservation.baseSha,
+      directorEpoch: reservation.directorEpoch,
+      policyDigest: reservation.policyDigest,
+    };
+  }
+
   #reviewTransaction(args: Parameters<typeof runDurableReviewTransaction>[0]) {
     return this.#modelInvocations.run(() => runDurableReviewTransaction(args));
   }
@@ -7584,6 +7617,133 @@ export class FactorySupervisor {
     return this.#management.reviewWithAdmission
       ? this.#management.reviewWithAdmission(context, admittedCheckpoint, dispatch)
       : dispatch(() => this.#management.review(context, admittedCheckpoint));
+  }
+
+  async #recoverMissingInitialReview(
+    item: DerivedWorkItem,
+    reservation: AttemptReservation,
+    events: readonly FactoryEvent[],
+    validation: Extract<FactoryEvent, { kind: "validation" }>,
+  ): Promise<boolean> {
+    const collected = events.filter(
+      (event): event is Extract<FactoryEvent, { kind: "attempt" }> =>
+        event.kind === "attempt" &&
+        event.event === "AttemptCollected" &&
+        Boolean(event.artifactDigest),
+    );
+    const artifactDigests = new Set(collected.map((event) => event.artifactDigest!));
+    if (artifactDigests.size !== 1) {
+      throw new Error("validated recovery lacks one exact collected artifact identity");
+    }
+    const artifactDigest = [...artifactDigests][0]!;
+    const reviewIdentity: ReviewIdentity = {
+      kind: "artifact",
+      runId: reservation.runId,
+      objective: reservation.objective,
+      workItem: reservation.workItem,
+      attempt: reservation.attempt,
+      artifactDigest,
+      baseSha: validation.baseSha,
+      outputTreeSha: validation.outputTreeSha,
+      evidenceDigest: validation.evidenceDigest,
+    };
+    const existing = await this.#reviews.load(reviewIdentity);
+    let invoke:
+      | ((
+          checkpoint: Parameters<ManagementBackend["review"]>[1],
+        ) => ReturnType<ManagementBackend["review"]>)
+      | undefined;
+    if (!existing) {
+      const checkpoint = await this.#validations.load(
+        this.#validationIdentity(reservation, artifactDigest),
+      );
+      if (
+        !checkpoint ||
+        !checkpoint.evidence.passed ||
+        checkpoint.evidence.digest !== validation.evidenceDigest ||
+        checkpoint.evidence.outputTreeSha !== validation.outputTreeSha
+      ) {
+        throw new Error(
+          "validated recovery lacks its authenticated full validation checkpoint; refusing to rerun validation or review incomplete evidence",
+        );
+      }
+      const original = this.#packetFor(item.number);
+      const packet = parseWorkerPacket({
+        ...original,
+        baseSha: reservation.baseSha,
+        requirements: {
+          ...original.requirements,
+          ...(this.#policy.trust === "sandbox_untrusted" &&
+          original.requirements.trust === "trusted_local"
+            ? { trust: "isolated" as const }
+            : {}),
+        },
+      });
+      const artifact = await resumeArtifactTransfer({
+        store: this.#store,
+        identity: this.#artifactTransferIdentity(reservation),
+        allowedPaths: packet.allowedPaths,
+        assertCurrent: () => this.#externalAdmission(async () => {}),
+      });
+      if (
+        !artifact ||
+        artifact.outcome !== "succeeded" ||
+        artifact.digest !== artifactDigest ||
+        artifact.baseSha !== reservation.baseSha
+      ) {
+        throw new Error("validated recovery differs from its exact retained artifact");
+      }
+      this.#retainArtifactContent(artifact);
+      const invocationId = `review-${reviewIdentityDigest(reviewIdentity)}`;
+      this.#assertManagementInvocationNotFailed(invocationId);
+      const reviewBudget = remainingBudget(this.#policy, deriveBudgetUsage(this.#budgetEvents));
+      if (reviewBudget.modelTokens !== null && reviewBudget.modelTokens <= 0) {
+        throw new Error("model-token budget is exhausted; refusing semantic review");
+      }
+      const reviewModel = resolveModelSelection(this.#policy, "review");
+      const metadata = parseGraphItemMetadata(item.body ?? "");
+      const stackMember =
+        this.#deliverySelection.selected === "native-stacks"
+          ? this.#deliveryPlan?.items.find((entry) => entry.itemId === metadata.id)
+          : undefined;
+      invoke = (reviewCheckpoint) =>
+        this.#invokeSemanticReview(
+          {
+            repository: this.#options.repository,
+            objectiveNumber: this.#run.objective,
+            workItemNumber: item.number,
+            packet,
+            artifact,
+            evidence: checkpoint.evidence,
+            requiresIsolation:
+              this.#policy.trust === "sandbox_untrusted" ||
+              packet.requirements.trust !== "trusted_local" ||
+              Boolean(stackMember?.parentItemId),
+            ...(reviewModel ? { modelSelection: reviewModel } : {}),
+          },
+          reviewCheckpoint,
+          () => this.#admitModelInvocation(invocationId, item.id, reservation),
+        );
+    }
+    const record = await this.#reviewTransaction({
+      existing,
+      ...(invoke ? { invoke } : {}),
+      persist: (result) =>
+        this.#lease.use((lease) =>
+          this.#reviews.persist({ lease, identity: reviewIdentity, result }),
+        ),
+      recover: () => this.#reviews.load(reviewIdentity),
+      recordFailureUsage: (usage) =>
+        this.#recordManagementUsage(
+          `review-${reviewIdentityDigest(reviewIdentity)}`,
+          usage,
+          item.id,
+          reservation,
+        ),
+      recordUsage: (record) => this.#recordReviewUsage(record, item, reservation),
+      recordOutcome: (record) => this.#recordInitialReviewOutcome(record, item, reservation),
+    });
+    return record.review.accepted;
   }
 
   #compilationTransaction(args: Parameters<typeof runDurableCompilationTransaction>[0]) {
@@ -7651,6 +7811,11 @@ export class FactorySupervisor {
         const snapshot = await this.#reader.readObjective(this.#run.objective);
         this.#fenceSnapshot(snapshot);
         this.#sequences.observe(snapshotEvents(snapshot));
+        if (hasCancellationRequest(snapshot, this.#run.runId)) {
+          throw new RunCancellationRequestedError(
+            "operator cancelled before model invocation dispatch",
+          );
+        }
         this.#budgetEvents = deduplicateFactoryEvents([
           ...this.#budgetEvents,
           ...this.#accountingEvents(snapshotEvents(snapshot)),
@@ -13876,46 +14041,60 @@ export class FactorySupervisor {
       )
       .sort((a, b) => a.sequence - b.sequence);
     const latest = [...events].reverse().find((event) => event.kind === "attempt");
-    const validation = [...events].reverse().find((event) => event.kind === "validation");
+    let validation = [...events].reverse().find((event) => event.kind === "validation");
     let semanticallyAccepted = events.some(
       (event) => event.kind === "attempt" && event.event === "AttemptValidated",
     );
 
     await this.#reconcileInterruptedValidationCapacity(item, reservation, events);
 
-    if (validation?.kind === "validation" && validation.passed && !semanticallyAccepted) {
-      const collected = [...events]
-        .reverse()
-        .find(
-          (event) =>
-            event.kind === "attempt" &&
-            event.event === "AttemptCollected" &&
-            Boolean(event.artifactDigest),
+    if (
+      !validation &&
+      !events.some(
+        (event) =>
+          event.kind === "attempt" &&
+          ["AttemptFailed", "AttemptTimedOut", "AttemptCancelled", "AttemptDeferred"].includes(
+            event.event,
+          ),
+      )
+    ) {
+      const collected = events.filter(
+        (event): event is Extract<FactoryEvent, { kind: "attempt" }> =>
+          event.kind === "attempt" &&
+          event.event === "AttemptCollected" &&
+          Boolean(event.artifactDigest),
+      );
+      const digests = new Set(collected.map((event) => event.artifactDigest!));
+      if (digests.size === 1) {
+        const checkpoint = await this.#validations.load(
+          this.#validationIdentity(reservation, [...digests][0]!),
         );
-      if (collected?.kind === "attempt" && collected.artifactDigest) {
-        const identity: ReviewIdentity = {
-          kind: "artifact",
-          runId: this.#run.runId,
-          objective: this.#run.objective,
-          workItem: item.number,
-          attempt: reservation.attempt,
-          artifactDigest: collected.artifactDigest,
-          baseSha: validation.baseSha,
-          outputTreeSha: validation.outputTreeSha,
-          evidenceDigest: validation.evidenceDigest,
-        };
-        const checkpoint = await this.#reviews.load(identity);
         if (checkpoint) {
-          await this.#reviewTransaction({
-            existing: checkpoint,
-            persist: async () => checkpoint,
-            recover: () => this.#reviews.load(identity),
-            recordUsage: (record) => this.#recordReviewUsage(record, item, reservation),
-            recordOutcome: (record) => this.#recordInitialReviewOutcome(record, item, reservation),
-          });
-          semanticallyAccepted = checkpoint.review.accepted;
+          const recoveredValidation = await this.#lease.use((lease) =>
+            this.#recorder.validation({
+              lease,
+              workItemNodeId: item.id,
+              reservation,
+              evidence: checkpoint.evidence,
+              sequence: this.#sequences.take(),
+            }),
+          );
+          if (recoveredValidation.kind !== "validation") {
+            throw new Error("validation recovery emitted an unexpected lifecycle receipt");
+          }
+          validation = recoveredValidation;
+          events.push(recoveredValidation);
         }
       }
+    }
+
+    if (validation?.kind === "validation" && validation.passed && !semanticallyAccepted) {
+      semanticallyAccepted = await this.#recoverMissingInitialReview(
+        item,
+        reservation,
+        events,
+        validation,
+      );
     }
 
     if (validation?.kind === "validation" && validation.passed && semanticallyAccepted) {
@@ -14474,6 +14653,53 @@ export class FactorySupervisor {
         "AttemptDeferred",
         "AttemptIntegrated",
       ].includes(event.event),
+    );
+  }
+
+  #isRecoverablePostSuccessCancellation(events: readonly FactoryEvent[]): boolean {
+    const attempts = events.filter(
+      (event): event is Extract<FactoryEvent, { kind: "attempt" }> => event.kind === "attempt",
+    );
+    const succeeded = attempts.filter(
+      (event) => event.event === "AttemptSucceeded" && Boolean(event.artifactDigest),
+    );
+    const cancelled = attempts.filter((event) => event.event === "AttemptCancelled");
+    return (
+      succeeded.length === 1 &&
+      cancelled.length === 1 &&
+      cancelled[0]!.sequence > succeeded[0]!.sequence &&
+      !attempts.some((event) =>
+        ["AttemptFailed", "AttemptTimedOut", "AttemptDeferred", "AttemptIntegrated"].includes(
+          event.event,
+        ),
+      ) &&
+      !events.some(
+        (event) =>
+          event.kind === "validation" ||
+          (event.kind === "capacity" && event.phase === "validation") ||
+          (event.kind === "attempt" &&
+            ["AttemptCollected", "AttemptValidated", "AttemptPublished"].includes(event.event)),
+      )
+    );
+  }
+
+  #hasRecoverablePostSuccessCancellation(item: DerivedWorkItem): boolean {
+    const attempts = (item.factoryEvents ?? []).filter(
+      (event) =>
+        event.runId === this.#run.runId &&
+        "workItem" in event &&
+        event.workItem === item.number &&
+        "attempt" in event &&
+        typeof event.attempt === "number",
+    );
+    const latestAttempt = attempts.reduce(
+      (highest, event) => Math.max(highest, typeof event.attempt === "number" ? event.attempt : 0),
+      0,
+    );
+    return this.#isRecoverablePostSuccessCancellation(
+      attempts.filter(
+        (event) => typeof event.attempt === "number" && event.attempt === latestAttempt,
+      ),
     );
   }
 

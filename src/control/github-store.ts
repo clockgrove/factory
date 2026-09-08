@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createOctokit, type GitHubOptions } from "../github.js";
 import {
   CircuitBreaker,
@@ -16,8 +17,19 @@ import {
   type AuthenticatedFactoryEvent,
 } from "./authenticated-events.js";
 import { deriveDurableCommandState } from "./commands.js";
-import type { GitCommitObject, LeaseStore } from "./lease.js";
-import { decodeEventComments, deduplicateFactoryEvents, latestSupportedRun } from "./receipts.js";
+import type { GitCommitObject, LeaseState, LeaseStore } from "./lease.js";
+import {
+  observeMutationFence,
+  observeMutationOperation,
+  observeMutationQueue,
+  type MutationOperationObservation,
+} from "./mutation-observation.js";
+import {
+  decodeEventComments,
+  deduplicateFactoryEvents,
+  latestSupportedRun,
+  hasCurrentWriterAuthority,
+} from "./receipts.js";
 import { classicBranchProtectionRules } from "../publication/branch-policy.js";
 import { PROTOCOL_V2 } from "../protocol/limits.js";
 import { parseRunPolicy, policyDigest } from "../protocol/policy.js";
@@ -133,6 +145,11 @@ export interface GitHubControlStoreOptions extends GitHubOptions {
   concurrency?: ConcurrencyLimiter;
   mutationScheduler?: MutationAdmission;
   beforeMutation?: (kind: MutationClass, waitedMs: number) => Promise<void>;
+  /** Capture the exact Objective generation before entering any request queue. */
+  captureMutationFence?: (kind: MutationClass) => (waitedMs: number) => Promise<void>;
+  assertMutationIdentity?: (lease: LeaseState) => void;
+  mutationScope?: string;
+  onMutationOperation?: (observation: MutationOperationObservation) => void;
 }
 
 export interface DurableObjectiveActivation {
@@ -193,6 +210,13 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
   readonly #concurrency: ConcurrencyLimiter;
   readonly #mutations: MutationAdmission;
   readonly #beforeMutation: (kind: MutationClass, waitedMs: number) => Promise<void>;
+  readonly #captureMutationFence: GitHubControlStoreOptions["captureMutationFence"];
+  readonly #assertMutationIdentity: GitHubControlStoreOptions["assertMutationIdentity"];
+  readonly #mutationScope: string;
+  readonly #onMutationOperation: GitHubControlStoreOptions["onMutationOperation"];
+  readonly #operationObservations: MutationOperationObservation[] = [];
+  readonly #scopedMutationFence = new AsyncLocalStorage<(waitedMs: number) => Promise<void>>();
+  #droppedOperationObservations = 0;
   #repositoryId: string | null = null;
 
   constructor(options: GitHubControlStoreOptions) {
@@ -209,7 +233,47 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
         ...(options.onThrottle ? { onThrottle: options.onThrottle } : {}),
       });
     this.#beforeMutation = options.beforeMutation ?? (async () => {});
+    this.#captureMutationFence = options.captureMutationFence;
+    this.#assertMutationIdentity = options.assertMutationIdentity;
+    this.#mutationScope = options.mutationScope ?? "unscoped-control-store";
+    this.#onMutationOperation = options.onMutationOperation;
   }
+
+  get objectiveMutationFenceAtDispatch(): boolean {
+    return Boolean(this.#captureMutationFence && this.#assertMutationIdentity);
+  }
+
+  assertMutationIdentity(lease: LeaseState): void {
+    if (!this.#assertMutationIdentity)
+      throw new Error("Objective mutation identity is unavailable");
+    this.#assertMutationIdentity(lease);
+  }
+
+  /** Short shared-resource transactions retain their own Objective binding even
+   * when different sessions use one coordinator store concurrently. */
+  withMutationFence<T>(
+    fence: (waitedMs: number) => Promise<void>,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return this.#scopedMutationFence.run(fence, operation);
+  }
+
+  mutationOperationTelemetry() {
+    return {
+      measurementScope: "process-local-transport-boundary" as const,
+      records: this.#operationObservations.map((record) => ({ ...record })),
+      droppedRecords: this.#droppedOperationObservations,
+    };
+  }
+
+  recordMutationOperation = (observation: MutationOperationObservation): void => {
+    if (this.#operationObservations.length === 256) {
+      this.#operationObservations.shift();
+      this.#droppedOperationObservations++;
+    }
+    this.#operationObservations.push(Object.freeze({ ...observation }));
+    this.#onMutationOperation?.(observation);
+  };
 
   /** Public-preview routes still pass through Factory's shared safety controls. */
   async stackRequest(
@@ -221,13 +285,44 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       route: string,
       parameters: Record<string, unknown>,
     ) => Promise<{ status: number; data: unknown }>;
-    return this.#call(() => request.call(this.#octokit, route, parameters), mutating);
+    return this.#call(
+      () => request.call(this.#octokit, route, parameters),
+      mutating,
+      "normal",
+      route,
+    );
   }
 
   async #call<T>(
     operation: () => Promise<T>,
     mutating = false,
     mutationClass: MutationClass = "normal",
+    operationName = `${mutationClass}-mutation`,
+  ): Promise<T> {
+    const dispatch = () => {
+      // This callback runs synchronously inside the observation, before any
+      // queue await. Even a rejected capture is therefore measured.
+      const scopedFence = mutating ? this.#scopedMutationFence.getStore() : undefined;
+      // Shared transactions bind an immutable owner; do not capture or recheck
+      // a second, configured Objective generation for the same operation.
+      const fence =
+        scopedFence ?? (mutating ? this.#captureMutationFence?.(mutationClass) : undefined);
+      return this.#dispatch(operation, mutating, mutationClass, fence);
+    };
+    if (!mutating) return dispatch();
+    return observeMutationOperation(
+      operationName,
+      this.#mutationScope,
+      this.recordMutationOperation,
+      dispatch,
+    );
+  }
+
+  async #dispatch<T>(
+    operation: () => Promise<T>,
+    mutating: boolean,
+    mutationClass: MutationClass,
+    capturedFence?: (waitedMs: number) => Promise<void>,
   ): Promise<T> {
     if (this.#breaker.isOpen()) {
       throw new PlatformUnavailableError(
@@ -246,7 +341,11 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
         );
       }
       if (mutationPermit) {
-        await this.#beforeMutation(mutationClass, mutationPermit.waitedMs);
+        observeMutationQueue(mutationPermit.waitedMs);
+        await observeMutationFence(async () => {
+          if (capturedFence) await capturedFence(mutationPermit.waitedMs);
+          await this.#beforeMutation(mutationClass, mutationPermit.waitedMs);
+        });
       }
       if (this.#breaker.isOpen()) {
         throw new PlatformUnavailableError(
@@ -364,6 +463,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
         args.message.startsWith("Factory repository-controller lease")
         ? "lease"
         : "normal",
+      "createCommit",
     );
     return response.data.sha;
   }
@@ -380,6 +480,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
           }),
         true,
         ref.startsWith("refs/clockgrove-factory/leases/") ? "lease" : "normal",
+        "createRef",
       );
       return true;
     } catch (error) {
@@ -406,6 +507,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
           }),
         true,
         args.ref.startsWith("refs/clockgrove-factory/leases/") ? "lease" : "normal",
+        "compareAndSwapRef",
       );
       return true;
     } catch (error) {
@@ -430,6 +532,8 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
           body,
         }),
       true,
+      "normal",
+      "addIssueComment",
     );
   }
 
@@ -489,6 +593,8 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
                 "Factory Objective discovery; execution requires an authorized activation",
             }),
           true,
+          "normal",
+          "createDiscoveryLabel",
         );
       } catch (createError) {
         if ((createError as { status?: number }).status !== 422) throw createError;
@@ -506,6 +612,8 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
           labels: [name],
         }),
       true,
+      "normal",
+      "labelObjective",
     );
   }
 
@@ -638,6 +746,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
                 event.kind === "run" &&
                 event.objective === issue.number &&
                 event.event !== "FactoryRunStarted" &&
+                hasCurrentWriterAuthority(event, events) &&
                 events.some(
                   (candidate) =>
                     candidate.kind === "run" &&
@@ -691,6 +800,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
               (event) =>
                 event.kind === "run" &&
                 event.runId === currentRun.runId &&
+                hasCurrentWriterAuthority(event, events) &&
                 event.event ===
                   (commandState.admissionGate!.kind === "drain"
                     ? "RunDrainCompleted"
@@ -878,6 +988,8 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
           encoding: "base64",
         }),
       true,
+      "normal",
+      "createBlob",
     );
     return response.data.sha;
   }
@@ -914,6 +1026,8 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
           tree: args.entries,
         }),
       true,
+      "normal",
+      "createTree",
     );
     return response.data.sha;
   }
@@ -983,6 +1097,8 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
           base: args.base,
         }),
       true,
+      "normal",
+      "createPullRequest",
     );
     return {
       number: response.data.number,
@@ -1206,6 +1322,8 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
             commit_title: args.commitTitle,
           }),
         true,
+        "normal",
+        "mergePullRequest",
       );
     } catch (error) {
       const current = await this.#call(() =>
@@ -1236,6 +1354,8 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
           state: "closed",
         }),
       true,
+      "normal",
+      "closePullRequest",
     );
   }
 
@@ -1250,6 +1370,8 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
           state_reason: "completed",
         }),
       true,
+      "normal",
+      "closeIssue",
     );
   }
 
@@ -1263,6 +1385,8 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
           assignees: [login],
         }),
       true,
+      "normal",
+      "assignIssue",
     );
   }
 

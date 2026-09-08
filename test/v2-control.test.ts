@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { cancellationRequestFromComments, objectiveSubIssueQuerySize } from "../src/github.js";
 
@@ -111,6 +111,32 @@ const identity = {
 };
 
 describe("Director lease", () => {
+  it("keeps a remote mutation preflight for standalone stores", async () => {
+    const store = new MemoryStore();
+    const manager = new LeaseManager({ store, durationMs: 60_000 });
+    const acquired = await manager.acquire(identity, await store.readCommit(BASE_SHA));
+    store.readRefCalls = 0;
+
+    await manager.assertMutationAuthorized(acquired);
+
+    expect(store.readRefCalls).toBe(1);
+  });
+
+  it("uses the bound identity instead of duplicating a guaranteed dispatch-time fence", async () => {
+    const store = Object.assign(new MemoryStore(), {
+      objectiveMutationFenceAtDispatch: true as const,
+      assertMutationIdentity: vi.fn(),
+    });
+    const manager = new LeaseManager({ store, durationMs: 60_000 });
+    const acquired = await manager.acquire(identity, await store.readCommit(BASE_SHA));
+    store.readRefCalls = 0;
+
+    await manager.assertMutationAuthorized(acquired);
+
+    expect(store.assertMutationIdentity).toHaveBeenCalledExactlyOnceWith(acquired);
+    expect(store.readRefCalls).toBe(0);
+  });
+
   it("distinguishes authenticated pre-acquisition contention without mutating the owned lease", async () => {
     const store = new MemoryStore();
     const manager = new LeaseManager({ store, durationMs: 60_000 });
@@ -243,6 +269,48 @@ describe("Director lease", () => {
     await controller.renewIfNeeded(true);
     finishOperation();
     await operation;
+  });
+
+  it("keeps a queued mutation bound to the epoch captured before takeover", async () => {
+    const store = new MemoryStore();
+    const manager = new LeaseManager({ store, durationMs: 60_000 });
+    const base = await store.readCommit(BASE_SHA);
+    const acquired = await manager.acquire(identity, base);
+    const controller = new LeaseController(manager, acquired, { take: () => 2 });
+    const queuedFence = controller.captureMutationFence();
+
+    store.now = new Date(acquired.expiresAt.getTime() + 1);
+    const takeover = await manager.acquire({ ...identity, runId: "run-2", holder: "host-2" }, base);
+    expect(takeover.epoch).toBe(2);
+
+    await expect(queuedFence(45_000)).rejects.toBeInstanceOf(LeaseLostError);
+  });
+
+  it("accepts a queued mutation after a renewal in the same epoch", async () => {
+    const store = new MemoryStore();
+    const manager = new LeaseManager({ store, durationMs: 60_000 });
+    const base = await store.readCommit(BASE_SHA);
+    const acquired = await manager.acquire(identity, base);
+    let sequence = 2;
+    const controller = new LeaseController(manager, acquired, { take: () => sequence++ });
+    const queuedFence = controller.captureMutationFence();
+
+    await controller.renewIfNeeded(true);
+
+    await expect(queuedFence(45_000)).resolves.toBeUndefined();
+  });
+
+  it("does not dispatch a captured shared transaction after its controller is retired", async () => {
+    const store = new MemoryStore();
+    const manager = new LeaseManager({ store, durationMs: 60_000 });
+    const acquired = await manager.acquire(identity, await store.readCommit(BASE_SHA));
+    const controller = new LeaseController(manager, acquired, { take: () => 2 });
+    const queuedFence = controller.captureMutationFence();
+    const failure = new Error("renewal failed; controller retired");
+    controller.fail(failure);
+    store.readRefCalls = 0;
+    await expect(queuedFence(1_000)).rejects.toBe(failure);
+    expect(store.readRefCalls).toBe(0);
   });
 
   it("rechecks the lease before every admitted mutation", async () => {

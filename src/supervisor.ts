@@ -1,4 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
+import { assertPeerActivation } from "./recovery/peer-trunk.js";
+import {
+  withIntegrationAdmission,
+  IntegrationAdmissionPendingError,
+} from "./control/integration-admission.js";
 import { dirname, resolve } from "node:path";
 
 import { CodexCliLocalBackend } from "./backends/codex-cli-local.js";
@@ -78,6 +83,10 @@ export {
   type GraphProjectionExpectation,
 } from "./control/graph-evidence.js";
 import { GitHubControlStore } from "./control/github-store.js";
+import type {
+  SharedCapacityCoordinator,
+  SharedCapacityOwner,
+} from "./controller/shared-capacity.js";
 import { materializePinnedCompilationTree } from "./execution/pinned-compilation-tree.js";
 import {
   assertLocalLfsAvailable,
@@ -95,6 +104,7 @@ import {
   encodeEventComment,
   nextEventSequence,
   latestSupportedRun,
+  hasCurrentWriterAuthority,
 } from "./control/receipts.js";
 import { RunManager, type RunState } from "./control/runs.js";
 import { loadRecoveryRuntime, type RecoveryRuntime } from "./recovery/runtime.js";
@@ -214,6 +224,7 @@ import type {
   ReviewResult,
 } from "./management/backend.js";
 import {
+  assertPublicationMutationAuthorized,
   integrationReadiness,
   publicationBranch,
   publishValidated,
@@ -269,7 +280,10 @@ import {
   isIntegrationValidationBackend,
   isLocalIntegrationValidationBackend,
   unreconciledCapacityReservations,
+  type CapacityLimits,
   type CapacityReservation,
+  type CapacityReservationResult,
+  type CapacitySnapshot,
 } from "./scheduling/capacity-ledger.js";
 import { rankReadyWorkItems } from "./scheduling/priority.js";
 import { validatePriorityFieldDefinition } from "./scheduling/github-priority.js";
@@ -325,8 +339,8 @@ export interface SupervisorOptions {
   backendRegistry?: BackendRegistry;
   /** RepositoryController supplies one instance to every Objective. */
   repositoryResources?: RepositorySupervisorResources;
-  /** Outer repository-controller fence, checked before every GitHub mutation. */
-  repositoryFence?: () => Promise<void>;
+  /** Durable repository-wide capacity authority supplied by production hosts. */
+  sharedCapacity?: SharedCapacityCoordinator;
   /** A service stop releases ownership without durably cancelling the run. */
   shutdownBehavior?: "cancel-run" | "release-lease";
   /** Durable controller activation fence. Foreground runs omit this. */
@@ -351,6 +365,7 @@ export interface RepositorySupervisorResources {
   mutationScheduler: MutationScheduler;
   integration: <T>(operation: () => Promise<T>) => Promise<T>;
   capacityLedger: CapacityLedger;
+  sharedCapacity?: SharedCapacityCoordinator;
   resourceSampler: ResourceSampler;
   fairness: ObjectiveFairness;
   controllerLimits: { maxLocalWorkers: number; maxPaidWorkers: number };
@@ -780,9 +795,36 @@ export class LeaseController {
 
   /** Fence every externally visible mutation using a current ref observation. */
   async guardMutation(waitedMs: number): Promise<void> {
+    return this.captureMutationFence()(waitedMs);
+  }
+
+  /**
+   * Capture the operation's generation before it enters the shared mutation
+   * queue. Reassigning a Supervisor to a later lease can therefore never lend
+   * the new epoch to an already-queued write.
+   */
+  captureMutationFence(): (waitedMs: number) => Promise<void> {
     if (this.#fatal) throw this.#fatal;
-    void waitedMs;
-    await this.manager.assertCurrent(this.lease);
+    const expected = this.lease;
+    return async (waitedMs: number) => {
+      if (this.#fatal) throw this.#fatal;
+      void waitedMs;
+      await this.manager.assertCurrent(expected);
+    };
+  }
+
+  /** Cheap envelope/scope check; the captured fence performs the remote read. */
+  assertMutationIdentity(lease: LeaseState): void {
+    const current = this.lease;
+    if (
+      lease.objective !== current.objective ||
+      lease.runId !== current.runId ||
+      lease.holder !== current.holder ||
+      lease.epoch !== current.epoch ||
+      lease.policyDigest !== current.policyDigest
+    ) {
+      throw new LeaseLostError("Objective mutation belongs to another lease generation");
+    }
   }
 
   async renewIfNeeded(force = false): Promise<void> {
@@ -805,11 +847,9 @@ export class LeaseController {
 
 /** Fence a new provider call without blocking cleanup after ownership loss. */
 export async function runWithExternalAdmissionBoundary<T>(
-  repositoryFence: () => Promise<void>,
   objectiveFence: () => Promise<void>,
   operation: () => Promise<T>,
 ): Promise<T> {
-  await repositoryFence();
   await objectiveFence();
   return operation();
 }
@@ -1096,6 +1136,7 @@ export class FactorySupervisor {
   readonly #concurrency: ConcurrencyLimiter;
   readonly #mutations: MutationScheduler;
   readonly #capacity: CapacityLedger;
+  readonly #sharedCapacity: SharedCapacityCoordinator | undefined;
   readonly #resourceSampler: CachedResourceSampler;
   readonly #fairness: ObjectiveFairness;
   readonly #controllerLimits: {
@@ -1141,6 +1182,7 @@ export class FactorySupervisor {
       });
     const scheduling = normalizeSchedulingPolicy(this.#policy);
     this.#capacity = shared?.capacityLedger ?? new CapacityLedger();
+    this.#sharedCapacity = shared?.sharedCapacity ?? options.sharedCapacity;
     this.#resourceSampler = new CachedResourceSampler(
       shared?.resourceSampler ?? new LinuxResourceSampler(),
       scheduling.capacity.local.sampleIntervalSeconds * 1_000,
@@ -1164,12 +1206,13 @@ export class FactorySupervisor {
       pacer: this.#pacer,
       concurrency: this.#concurrency,
       mutationScheduler: this.#mutations,
-      beforeMutation: async (kind: "normal" | "lease", waitedMs: number) => {
-        await this.#options.repositoryFence?.();
-        if (kind === "normal" && this.#lease) {
-          await this.#lease.guardMutation(waitedMs);
-        }
+      captureMutationFence: (kind: "normal" | "lease") =>
+        kind === "lease" ? async () => {} : this.#captureMutationFence(),
+      assertMutationIdentity: (lease: LeaseState) => {
+        if (!this.#lease) throw new LeaseLostError("Objective mutation has no acquired lease");
+        this.#lease.assertMutationIdentity(lease);
       },
+      mutationScope: `objective:${options.objective}`,
     };
     this.#reader = new GitHubReader({
       ...github,
@@ -1230,9 +1273,14 @@ export class FactorySupervisor {
     }
   }
 
-  async #guardMutation(waitedMs: number): Promise<void> {
-    await this.#options.repositoryFence?.();
-    await this.#lease.guardMutation(waitedMs);
+  /** Live process-local evidence only; never attributed to a historical run. */
+  mutationOperationTelemetry() {
+    return this.#store.mutationOperationTelemetry();
+  }
+
+  #captureMutationFence(): (waitedMs: number) => Promise<void> {
+    if (!this.#lease) throw new LeaseLostError("Objective mutation has no acquired lease");
+    return this.#lease.captureMutationFence();
   }
 
   async #externalAdmission<T>(operation: () => Promise<T>): Promise<T> {
@@ -1257,7 +1305,6 @@ export class FactorySupervisor {
       );
     }
     return runWithExternalAdmissionBoundary(
-      this.#options.repositoryFence ?? (async () => {}),
       () => this.#lease.assertGeneration("admission"),
       async () => {
         const binding = this.#activationBinding();
@@ -1274,9 +1321,8 @@ export class FactorySupervisor {
               "operator withdrew the activation through GitHub",
             );
           }
-          // The receipt read can span either authority change. Admission still
-          // belongs to both current generations, never the pre-read observation.
-          await this.#options.repositoryFence?.();
+          // The receipt read can span an authority change. Admission still
+          // belongs to the current Objective generation, never the pre-read observation.
           await this.#lease.assertGeneration("admission");
         }
         return operation();
@@ -1341,7 +1387,9 @@ export class FactorySupervisor {
         snapshot.closed &&
         snapshot.factoryEvents?.some(
           (event) =>
-            event.event === "FactoryRunCompleted" && event.runId === recovery.successorRunId,
+            event.event === "FactoryRunCompleted" &&
+            event.runId === recovery.successorRunId &&
+            hasCurrentWriterAuthority(event, snapshot.factoryEvents ?? []),
         ) &&
         snapshot.factoryEvents
           .filter((event) => event.event === "FactoryRunStarted")
@@ -1408,13 +1456,12 @@ export class FactorySupervisor {
     return recovered.run;
   }
 
-  /** Append only proved, already-completed merges under both configured fences.
+  /** Append only proved, already-completed merges under Objective ownership.
    * No worker, review, PR mutation or issue closure is permitted in this stage. */
   async #reconcileRecoverySourceMerges(objective: number, manager: RunManager) {
     const recovery = this.#options.recovery;
     if (!recovery) throw new Error("source reconciliation requires its acknowledged recovery");
     for (let repaired = 0; repaired <= 100; repaired++) {
-      await this.#guardMutation(0);
       const snapshot = await this.#reader.readObjective(objective);
       const input = {
         objective,
@@ -1448,7 +1495,6 @@ export class FactorySupervisor {
         sequence: this.#sequences.take(),
         at: (await this.#store.serverTime()).toISOString(),
       });
-      await this.#guardMutation(0);
       try {
         await this.#lease.use(() =>
           this.#store.addIssueComment(
@@ -1471,12 +1517,72 @@ export class FactorySupervisor {
     throw new Error("source reconciliation exceeded the compiled work-item bound");
   }
 
-  #releaseCapacity(key: string): void {
-    this.#capacity.release(key);
+  #capacityOwner(lease: LeaseState): SharedCapacityOwner {
+    return {
+      objective: lease.objective,
+      runId: lease.runId,
+      directorEpoch: lease.epoch,
+      policyDigest: lease.policyDigest,
+    };
+  }
+
+  async #capacitySnapshot(): Promise<CapacitySnapshot> {
+    return this.#sharedCapacity ? this.#sharedCapacity.snapshot() : this.#capacity.snapshot();
+  }
+
+  async #reserveCapacity(
+    expectedGeneration: number,
+    reservation: CapacityReservation,
+    limits: CapacityLimits,
+  ): Promise<CapacityReservationResult> {
+    if (!this.#sharedCapacity)
+      return this.#capacity.tryReserve(expectedGeneration, reservation, limits);
+    const result = await this.#lease.use((lease) =>
+      this.#sharedCapacity!.reserve(this.#capacityOwner(lease), reservation, limits),
+    );
+    const snapshot = await this.#sharedCapacity.snapshot();
+    return result.reserved
+      ? { reserved: true, reservation, generation: snapshot.generation }
+      : {
+          reserved: false,
+          code: result.code === "released-reservation" ? "duplicate-reservation" : result.code,
+          generation: snapshot.generation,
+        };
+  }
+
+  async #transitionCapacity(
+    expectedGeneration: number,
+    fromKey: string,
+    reservation: CapacityReservation,
+    limits: CapacityLimits,
+  ): Promise<CapacityReservationResult> {
+    if (!this.#sharedCapacity)
+      return this.#capacity.transition(expectedGeneration, fromKey, reservation, limits);
+    const result = await this.#lease.use((lease) =>
+      this.#sharedCapacity!.transition(this.#capacityOwner(lease), fromKey, reservation, limits),
+    );
+    const snapshot = await this.#sharedCapacity.snapshot();
+    return result.reserved
+      ? { reserved: true, reservation, generation: snapshot.generation }
+      : {
+          reserved: false,
+          code: result.code === "released-reservation" ? "duplicate-reservation" : result.code,
+          generation: snapshot.generation,
+        };
+  }
+
+  async #releaseCapacity(key: string): Promise<void> {
+    if (this.#sharedCapacity) {
+      await this.#lease.use((lease) =>
+        this.#sharedCapacity!.release(this.#capacityOwner(lease), key),
+      );
+    } else {
+      this.#capacity.release(key);
+    }
     this.#fairness.changed();
   }
 
-  #reconcileObjectiveCapacity(objective: number, items: DerivedWorkItem[]) {
+  async #reconcileObjectiveCapacity(objective: number, items: DerivedWorkItem[]) {
     const scheduling = normalizeSchedulingPolicy(this.#policy);
     const reservations = deriveCapacityReservations(
       items.map((item) => {
@@ -1507,7 +1613,40 @@ export class FactorySupervisor {
         };
       }),
     );
-    return this.#capacity.reconcileObjective(objective, reservations);
+    if (!this.#sharedCapacity) return this.#capacity.reconcileObjective(objective, reservations);
+    const verifiedPredecessors = this.#recoveryRuntime
+      ? [
+          ...new Map(
+            items.flatMap((item) =>
+              (item.factoryEvents ?? []).flatMap((event) => {
+                if (
+                  event.kind !== "attempt" ||
+                  event.event !== "AttemptReserved" ||
+                  event.runId === this.#run.runId
+                )
+                  return [];
+                const owner: SharedCapacityOwner = {
+                  objective: event.objective,
+                  runId: event.runId,
+                  directorEpoch: event.directorEpoch,
+                  policyDigest: event.policyDigest,
+                };
+                return [
+                  [`${owner.runId}:${owner.directorEpoch}:${owner.policyDigest}`, owner] as const,
+                ];
+              }),
+            ),
+          ).values(),
+        ]
+      : [];
+    await this.#lease.use((lease) =>
+      this.#sharedCapacity!.reconcile(
+        this.#capacityOwner(lease),
+        reservations,
+        verifiedPredecessors,
+      ),
+    );
+    return this.#sharedCapacity.snapshot();
   }
 
   #deriveObjective(snapshot: Snapshot): ReturnType<typeof derive> {
@@ -1660,9 +1799,19 @@ export class FactorySupervisor {
 
   async #recordControllerObservation(snapshot: Snapshot): Promise<void> {
     const observe = this.#options.controllerObservation;
-    if (!observe) return;
-    const observation = observe();
-    const observationKey = JSON.stringify(observation);
+    const owner = await this.#lease.use(async (lease) => lease);
+    const observation = observe?.() ?? {
+      controllerId: owner.holder,
+      epoch: owner.epoch,
+      expiresAt: owner.expiresAt.toISOString(),
+      controllerPolicyDigest: owner.policyDigest,
+    };
+    // A foreground writer needs one boundary per generation, not a comment
+    // for each lease renewal. Service observations retain their own lifecycle.
+    const observationKey = JSON.stringify([
+      owner.epoch,
+      observe ? observation : "objective-writer",
+    ]);
     if (this.#lastControllerObservationKey === observationKey) return;
     const latest = (snapshot.factoryEvents ?? [])
       .filter((event) => event.kind === "controller" && event.runId === this.#run.runId)
@@ -1670,6 +1819,7 @@ export class FactorySupervisor {
       .at(-1);
     if (
       latest?.kind === "controller" &&
+      latest.writerEpoch === owner.epoch &&
       latest.controllerId === observation.controllerId &&
       latest.epoch === observation.epoch &&
       latest.expiresAt === observation.expiresAt &&
@@ -1686,6 +1836,7 @@ export class FactorySupervisor {
         objectiveNodeId: snapshot.id,
         sequence: this.#sequences.take(),
         ...observation,
+        observationScope: observe ? "repository-controller" : "objective-writer",
         protocolMin: PROTOCOL_V2,
         protocolMax: PROTOCOL_V2,
       }),
@@ -1694,10 +1845,13 @@ export class FactorySupervisor {
   }
 
   async #acknowledgeOperationalGate(snapshot: Snapshot, gate: AdmissionGateCommand): Promise<void> {
+    const writerEpoch = await this.#lease.use(async (lease) => lease.epoch);
     const event = gate.kind === "drain" ? "RunDrainCompleted" : "RunPauseAcknowledged";
     const recorded = (snapshot.factoryEvents ?? []).some(
       (candidate) =>
         candidate.kind === "run" &&
+        candidate.writerEpoch === writerEpoch &&
+        hasCurrentWriterAuthority(candidate, snapshot.factoryEvents ?? []) &&
         candidate.runId === this.#run.runId &&
         candidate.event === event &&
         candidate.commandRequestId === gate.requestId,
@@ -2516,7 +2670,6 @@ export class FactorySupervisor {
       priorLease ?? undefined,
     );
     // Current Git tree is only the lease's storage parent, not an execution base.
-    await this.#options.repositoryFence?.();
     const acquired = await this.#leases.acquire(
       {
         objective: run.objective,
@@ -2539,7 +2692,6 @@ export class FactorySupervisor {
     heartbeat.unref();
     const assertCurrent = async () => {
       if (heartbeatError) throw heartbeatError;
-      await this.#options.repositoryFence?.();
       await this.#lease.assert();
       const current = await this.#reader.readObjective(run.objective);
       assertActivation(snapshotEvents(current));
@@ -2578,7 +2730,6 @@ export class FactorySupervisor {
         ...(cancellation ? [cancellation] : []),
       ]);
       this.#fenceSnapshot(current);
-      await this.#options.repositoryFence?.();
       await this.#lease.assert();
       return current;
     };
@@ -3210,7 +3361,9 @@ export class FactorySupervisor {
               pacer: this.#pacer,
               concurrency: this.#concurrency,
               mutationScheduler: this.#mutations,
-              beforeMutation: (waitedMs) => this.#guardMutation(waitedMs),
+              captureMutationFence: () => this.#captureMutationFence(),
+              mutationScope: `objective:${this.#options.objective}:managed-dispatch`,
+              onMutationOperation: this.#store.recordMutationOperation,
             })
           : undefined;
         this.#registry.register(
@@ -3505,7 +3658,6 @@ export class FactorySupervisor {
           );
           if (cancellation)
             return terminalAfterDrain("FactoryRunCancelled", "operator requested cancellation");
-          await this.#options.repositoryFence?.();
           await this.#lease.assert();
           this.#options.signal?.throwIfAborted();
           if (!finalSnapshot.closed) await this.#store.closeIssue(finalSnapshot.number);
@@ -3668,6 +3820,7 @@ export class FactorySupervisor {
               try {
                 await materializeLocalLfsAssets(this.#options.repository, tree.path, base.oid);
                 await this.#admitModelInvocation(compilationInvocationId, snapshot.id);
+                const observedCapacity = await this.#capacitySnapshot();
                 return await this.#management.compile(
                   {
                     repository: tree.path,
@@ -3686,7 +3839,7 @@ export class FactorySupervisor {
                       collectCompilationEvidence(items, {
                         objective: snapshot.number,
                         policy: this.#policy,
-                        capacity: this.#capacity.snapshot(),
+                        capacity: observedCapacity,
                         repositoryLimits: this.#controllerLimits,
                         deliveryMode: this.#deliverySelection.selected,
                         nowMs: Date.now(),
@@ -3904,7 +4057,9 @@ export class FactorySupervisor {
           pacer: this.#pacer,
           concurrency: this.#concurrency,
           mutationScheduler: this.#mutations,
-          beforeMutation: (waitedMs) => this.#guardMutation(waitedMs),
+          captureMutationFence: () => this.#captureMutationFence(),
+          mutationScope: `objective:${this.#options.objective}:graph`,
+          onMutationOperation: this.#store.recordMutationOperation,
           onThrottle: this.#notify,
         });
         let appliedWorkItems: Map<string, { id: string; number: number }> | null = null;
@@ -4406,7 +4561,7 @@ export class FactorySupervisor {
             all.findIndex((candidate) => candidate.number === item.number) === index,
         );
         const scheduling = normalizeSchedulingPolicy(this.#policy);
-        const capacity = this.#reconcileObjectiveCapacity(objective.number, objective.items);
+        const capacity = await this.#reconcileObjectiveCapacity(objective.number, objective.items);
         this.#budgetEvents = deduplicateFactoryEvents([
           ...this.#budgetEvents,
           ...this.#accountingEvents(snapshotEvents(snapshot)),
@@ -4428,14 +4583,12 @@ export class FactorySupervisor {
           );
         const nowMs = snapshot.readAt.getTime();
         let resource: ResourceSnapshot | null = null;
-        {
-          resource = await this.#resourceSampler.sample(nowMs).catch((error) => {
-            this.#notify(
-              `local resource sampling failed closed: ${error instanceof Error ? error.message : String(error)}`,
-            );
-            return null;
-          });
-        }
+        resource = await this.#resourceSampler.sample(nowMs).catch((error) => {
+          this.#notify(
+            `local resource sampling failed closed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return null;
+        });
         const ranked = rankReadyWorkItems(
           objective.items,
           scheduling.priority,
@@ -4790,7 +4943,10 @@ export class FactorySupervisor {
         for (const admission of safeAdmissions) {
           if (
             admission.reservation.local &&
-            !this.#fairness.mayAdmit(objective.number, this.#capacity.snapshot().reservations)
+            !this.#fairness.mayAdmit(
+              objective.number,
+              (await this.#capacitySnapshot()).reservations,
+            )
           )
             break;
           const item = objective.items.find(
@@ -4798,7 +4954,7 @@ export class FactorySupervisor {
           )!;
           activeExecutions.throwIfFailed();
           this.#options.signal?.throwIfAborted();
-          const committed = this.#capacity.tryReserve(
+          const committed = await this.#reserveCapacity(
             expectedCapacityGeneration,
             admission.reservation,
             limits,
@@ -4812,24 +4968,29 @@ export class FactorySupervisor {
           if (admission.reservation.local) this.#fairness.noteAdmission(objective.number);
           started.push(item.number);
           let executionCapacityReleased = false;
-          const releaseExecutionCapacity = () => {
+          const releaseExecutionCapacity = async (alreadyReleased = false) => {
             if (executionCapacityReleased) return;
+            if (alreadyReleased) {
+              executionCapacityReleased = true;
+              return;
+            }
+            await this.#releaseCapacity(admission.reservation.key);
             executionCapacityReleased = true;
-            this.#releaseCapacity(admission.reservation.key);
           };
-          activeExecutions.start(
-            item.number,
-            () =>
-              this.#execute(
+          activeExecutions.start(item.number, async () => {
+            try {
+              await this.#execute(
                 item,
                 deadline,
                 admission,
                 releaseExecutionCapacity,
                 deliveryBases.get(item.number),
                 executionAbort.signal,
-              ),
-            releaseExecutionCapacity,
-          );
+              );
+            } finally {
+              await releaseExecutionCapacity();
+            }
+          });
         }
         if (started.length > 0) {
           this.#notify(`admitted: ${started.map((number) => `#${number}`).join(", ")}`);
@@ -4886,7 +5047,7 @@ export class FactorySupervisor {
     item: DerivedWorkItem,
     objectiveDeadline: number,
     admission: AdmissionProposal,
-    releaseExecutionCapacity: () => void,
+    releaseExecutionCapacity: (alreadyReleased?: boolean) => Promise<void>,
     deliveryBase?: DeliveryExecutionBase,
     executionSignal?: AbortSignal,
     recovered?: CollectedAttemptContinuation,
@@ -4910,7 +5071,7 @@ export class FactorySupervisor {
     item: DerivedWorkItem,
     objectiveDeadline: number,
     admission: AdmissionProposal,
-    releaseExecutionCapacity: () => void,
+    releaseExecutionCapacity: (alreadyReleased?: boolean) => Promise<void>,
     deliveryBase?: DeliveryExecutionBase,
     executionSignal?: AbortSignal,
     recovered?: CollectedAttemptContinuation,
@@ -4940,6 +5101,7 @@ export class FactorySupervisor {
     let validationCapacity: CapacityReservation | undefined;
     let validationCapacityRecorded = false;
     let validationCapacityReconciled = false;
+    let validationCapacityReleased = false;
     let retryableArtifact: NormalizedArtifact | undefined;
     let retainCollectedSource = false;
     let executionCleanupConfirmed = Boolean(recovered);
@@ -5649,7 +5811,7 @@ export class FactorySupervisor {
             continue;
           }
         }
-        const current = this.#capacity.snapshot();
+        const current = await this.#capacitySnapshot();
         const limits = admissionCapacityLimits(
           this.#policy,
           validationResource,
@@ -5662,8 +5824,8 @@ export class FactorySupervisor {
           this.#controllerLimits,
         );
         const transitioned = recovered
-          ? this.#capacity.tryReserve(current.generation, validationCapacity, limits)
-          : this.#capacity.transition(
+          ? await this.#reserveCapacity(current.generation, validationCapacity, limits)
+          : await this.#transitionCapacity(
               current.generation,
               admission.reservation.key,
               validationCapacity,
@@ -5675,7 +5837,7 @@ export class FactorySupervisor {
         }
         await sleep(this.#options.pollIntervalMs ?? 2_000, executionSignal);
       }
-      releaseExecutionCapacity();
+      await releaseExecutionCapacity(!recovered);
       const scopedValidation = validator
         ? null
         : await this.#scopedValidation(
@@ -5777,7 +5939,8 @@ export class FactorySupervisor {
         });
         validationCapacityReconciled = true;
       });
-      this.#releaseCapacity(validationCapacity.key);
+      await this.#releaseCapacity(validationCapacity.key);
+      validationCapacityReleased = true;
       await this.#lease.use(async (lease) => {
         const validationDuration = Date.now() - validationStarted;
         const events = await this.#recorder.budgetBatch([
@@ -6299,7 +6462,10 @@ export class FactorySupervisor {
       } catch (error) {
         finalizationError ??= error;
       } finally {
-        if (validationCapacity) this.#releaseCapacity(validationCapacity.key);
+        if (validationCapacity && !validationCapacityReleased) {
+          await this.#releaseCapacity(validationCapacity.key);
+          validationCapacityReleased = true;
+        }
       }
       if (finalizationError) {
         // An orderly hold is not permission to suppress a later cleanup failure
@@ -6505,7 +6671,8 @@ export class FactorySupervisor {
       phase: "execution",
       backendId: reservation.backend,
     });
-    this.#capacity.release(executionKey);
+    await this.#releaseCapacity(executionKey);
+    const capacity = await this.#capacitySnapshot();
     const admission: AdmissionProposal = {
       workItem: item.number,
       backendId: reservation.backend,
@@ -6519,7 +6686,7 @@ export class FactorySupervisor {
         criticalPathLength: original.criticalPathLength,
         unfinishedDownstream: original.unfinishedDownstream,
       },
-      capacityGeneration: this.#capacity.snapshot().generation,
+      capacityGeneration: capacity.generation,
       reservation: {
         key: executionKey,
         objective: reservation.objective,
@@ -6566,7 +6733,7 @@ export class FactorySupervisor {
       item,
       deadline,
       admission,
-      () => {},
+      async () => {},
       deliveryBase,
       this.#options.signal,
       recovered,
@@ -7280,7 +7447,6 @@ export class FactorySupervisor {
           this.#budgetEvents.push(...recovered);
         }
         this.#modelInvocations.claim(key);
-        await this.#options.repositoryFence?.();
         await this.#lease.assertGeneration("admission");
       }),
     );
@@ -8364,74 +8530,126 @@ export class FactorySupervisor {
     if (pendingEvent) {
       assertPublicationEventMatchesReceipt(pendingEvent, target.receipt);
     }
-    let result = await this.#serializeIntegration(async () => {
-      await this.#lease.assertGeneration("integration");
-      return pendingEvent?.asynchronousMergeUuid
-        ? this.#stacks.mergeResult(
-            target.pull.number,
-            pendingEvent.asynchronousMergeUuid,
-            target.pull.commitSha,
-          )
-        : this.#stacks.requestMerge({
-            pullRequest: target.pull.number,
-            expectedHeadSha: target.pull.commitSha,
-            title: target.receipt.itemId,
-            action: "default",
-          });
-    });
-    if (result.state === "failed") throw new Error(result.reason);
-    if (
-      (result.state === "pending" || result.state === "queued") &&
-      (!pendingEvent ||
-        (result.state === "pending" && pendingEvent.asynchronousMergeUuid !== result.uuid))
-    ) {
-      await this.#lease.use((lease) =>
-        this.#recorder.publication({
-          lease,
-          workItemNodeId: targetItem.id,
-          sequence: this.#sequences.take(),
-          receipt: target.receipt,
-          event: "IntegrationPending",
-          operationId,
-          ...(result.state === "pending" ? { asynchronousMergeUuid: result.uuid } : {}),
-        }),
-      );
-    }
-    while (result.state !== "merged") {
-      if (Date.now() >= deadline) throw new Error("stack asynchronous integration timed out");
-      await sleep(this.#options.pollIntervalMs ?? 5_000, this.#options.signal);
-      await this.#lease.renewIfNeeded();
-      if (result.state === "pending") {
-        const uuid = result.uuid;
-        result = await this.#stacks.mergeResult(target.pull.number, uuid, target.pull.commitSha);
-      } else {
-        const current = await this.#store.readPullRequest(target.pull.number);
-        if (current.headSha !== target.pull.commitSha) {
-          throw new Error("merge-queue target head changed after validation");
-        }
-        if (current.merged && current.mergeCommitSha) {
-          result = { state: "merged", mergeSha: current.mergeCommitSha };
-        } else {
-          result = await this.#stacks.requestMerge({
-            pullRequest: target.pull.number,
-            expectedHeadSha: target.pull.commitSha,
-            title: target.receipt.itemId,
-            action: "default",
-          });
-        }
-      }
-      if (result.state === "failed") throw new Error(result.reason);
-    }
-
-    const integrated =
+    const integratingMembers =
       mergePolicy === "atomic-stack"
         ? members.filter((member) =>
             remaining.some((item) => item.number === member.receipt.workItem),
           )
         : [target];
-    await completeIntegrated(integrated);
-    for (const item of ordered) this.#integrationWaits.delete(item.number);
-    return true;
+    try {
+      const controller = this.#lease;
+      const capturedOwner = await controller.use(async (lease) => ({
+        epoch: lease.epoch,
+        fence: controller.captureMutationFence(),
+      }));
+      return await withIntegrationAdmission(
+        this.#store,
+        {
+          repository: `${this.#options.owner}/${this.#options.repo}`,
+          branch: this.#baseBranch,
+          objective: this.#run.objective,
+          runId: this.#run.runId,
+          epoch: capturedOwner.epoch,
+          pullRequest: target.pull.number,
+          headSha: target.pull.commitSha,
+          baseSha: integratingMembers[0]!.receipt.baseSha,
+          outputTreeSha: target.pull.exactHeadValidation.outputTreeSha,
+          members: integratingMembers.map((member) => ({
+            pullRequest: member.pull.number,
+            headSha: member.pull.commitSha,
+            outputTreeSha: member.pull.exactHeadValidation.outputTreeSha,
+          })),
+        },
+        () => capturedOwner.fence(0),
+        async (admission) => {
+          let result = await this.#serializeIntegration(async () => {
+            if (
+              (await this.#store.getBranchHead(this.#baseBranch)).oid !==
+              integratingMembers[0]!.receipt.baseSha
+            )
+              throw new Error("native integration base advanced before dispatch");
+            for (const member of integratingMembers) {
+              const current = await integrationReadiness(
+                this.#store,
+                member.pull,
+                member.receipt.baseSha,
+                undefined,
+                { ciExpected: this.#ciExpectedOnPullRequests },
+              );
+              if (current.state !== "ready")
+                throw new Error("native integration readiness changed before dispatch");
+            }
+            await admission.dispatch();
+            return pendingEvent?.asynchronousMergeUuid
+              ? this.#stacks.mergeResult(
+                  target.pull.number,
+                  pendingEvent.asynchronousMergeUuid,
+                  target.pull.commitSha,
+                )
+              : this.#stacks.requestMerge({
+                  pullRequest: target.pull.number,
+                  expectedHeadSha: target.pull.commitSha,
+                  title: target.receipt.itemId,
+                  action: "default",
+                });
+          });
+          if (result.state === "failed") throw new Error(result.reason);
+          if (
+            (result.state === "pending" || result.state === "queued") &&
+            (!pendingEvent ||
+              (result.state === "pending" && pendingEvent.asynchronousMergeUuid !== result.uuid))
+          ) {
+            await this.#lease.use((lease) =>
+              this.#recorder.publication({
+                lease,
+                workItemNodeId: targetItem.id,
+                sequence: this.#sequences.take(),
+                receipt: target.receipt,
+                event: "IntegrationPending",
+                operationId,
+                ...(result.state === "pending" ? { asynchronousMergeUuid: result.uuid } : {}),
+              }),
+            );
+          }
+          while (result.state !== "merged") {
+            if (Date.now() >= deadline) throw new Error("stack asynchronous integration timed out");
+            await sleep(this.#options.pollIntervalMs ?? 5_000, this.#options.signal);
+            await this.#lease.renewIfNeeded();
+            if (result.state === "pending") {
+              const uuid = result.uuid;
+              result = await this.#stacks.mergeResult(
+                target.pull.number,
+                uuid,
+                target.pull.commitSha,
+              );
+            } else {
+              const current = await this.#store.readPullRequest(target.pull.number);
+              if (current.headSha !== target.pull.commitSha) {
+                throw new Error("merge-queue target head changed after validation");
+              }
+              if (current.merged && current.mergeCommitSha) {
+                result = { state: "merged", mergeSha: current.mergeCommitSha };
+              }
+            }
+            if (result.state === "failed") throw new Error(result.reason);
+          }
+
+          const integrated =
+            mergePolicy === "atomic-stack"
+              ? members.filter((member) =>
+                  remaining.some((item) => item.number === member.receipt.workItem),
+                )
+              : [target];
+          await completeIntegrated(integrated);
+          for (const item of ordered) this.#integrationWaits.delete(item.number);
+          return true;
+        },
+      );
+    } catch (error) {
+      if (error instanceof IntegrationAdmissionPendingError)
+        return this.#deferIntegration(targetItem.number, error.message);
+      throw error;
+    }
   }
 
   async #nativeRebaseAdmissionCurrent(
@@ -9534,8 +9752,8 @@ export class FactorySupervisor {
     return true;
   }
 
-  /** Read historical peers, never resume them. A shared controller observation identifies
-   * an explicitly co-owned generation; exact-commit PR associations are discovery hints only. */
+  /** Read independently activated historical peers, never resume them.
+   * Exact-commit PR associations are discovery hints, not activation authority. */
   async #peerTrunkIntegration(
     mergeSha: string,
     receiver: Snapshot,
@@ -9545,30 +9763,6 @@ export class FactorySupervisor {
     requiresIsolation: boolean;
     executionRequiresIsolation: boolean;
   } | null> {
-    const currentController = this.#options.controllerObservation?.();
-    const observations = (receiver.factoryEvents ?? []).filter(
-      (event) => event.kind === "controller" && event.runId === receiverRun?.runId,
-    );
-    const recovery = this.#recoveryRuntime;
-    if (
-      recovery &&
-      receiver.number === recovery.controllingRun.objective &&
-      this.#run.runId === recovery.controllingRun.runId &&
-      (!receiverRun || receiverRun.runId === recovery.controllingRun.runId)
-    )
-      observations.push(...recovery.verifiedSourceControllerObservations);
-    const generations = new Set(
-      observations.flatMap((event) =>
-        event.kind === "controller"
-          ? [`${event.controllerId}:${event.epoch}:${event.controllerPolicyDigest}`]
-          : [],
-      ),
-    );
-    if (currentController)
-      generations.add(
-        `${currentController.controllerId}:${currentController.epoch}:${currentController.controllerPolicyDigest}`,
-      );
-    if (!generations.size) return null;
     const objectives = (await this.#store.readCommitObjectiveCandidates(mergeSha)).filter(
       (number) => number !== receiver.number,
     );
@@ -9600,7 +9794,9 @@ export class FactorySupervisor {
           (!start.activationRequestId && !start.recoveryRequestId) ||
           start.repository.toLowerCase() !==
             `${this.#options.owner}/${this.#options.repo}`.toLowerCase() ||
-          start.baseBranch !== receiver.defaultBranch
+          start.baseBranch !== receiver.defaultBranch ||
+          start.actor.toLowerCase() !== (receiverRun ?? this.#run).actor.toLowerCase() ||
+          start.objectiveAuthor.toLowerCase() !== snapshot.authorLogin?.toLowerCase()
         )
           continue;
         const events = snapshotEvents(snapshot).filter((event) => event.runId === start.runId);
@@ -9608,9 +9804,9 @@ export class FactorySupervisor {
           !events.some(
             (event) =>
               event.kind === "controller" &&
-              generations.has(
-                `${event.controllerId}:${event.epoch}:${event.controllerPolicyDigest}`,
-              ),
+              event.sequence > start.sequence &&
+              Number.isFinite(Date.parse(event.at)) &&
+              Date.parse(event.at) >= Date.parse(start.at),
           )
         )
           continue;
@@ -9638,6 +9834,8 @@ export class FactorySupervisor {
         const policy = parseRunPolicy(start.policy);
         if (policyDigest(policy) !== start.policyDigest)
           throw new Error("peer run policy digest changed");
+        if (!start.recoveryRequestId)
+          assertPeerActivation(start, snapshotEvents(snapshot), start.repository);
         const recovery = start.recoveryRequestId
           ? await loadRecoveryRuntime({
               objective: number,
@@ -11946,7 +12144,7 @@ export class FactorySupervisor {
                         await this.#lease.use(async (lease) => {
                           if (lease.epoch !== remoteReservation!.directorEpoch)
                             throw new Error(
-                              "adopted isolated invocation lost its reserved controller generation",
+                              "adopted isolated invocation lost its reserved Objective generation",
                             );
                         });
                         providerStarted = new Date();
@@ -12244,10 +12442,16 @@ export class FactorySupervisor {
     }
     for (;;) {
       await this.#lease.renewIfNeeded();
+      const validatedBase =
+        candidate?.identity.targetBaseSha ??
+        (adoptedSource ? pull.exactHeadValidation.baseSha : reservation.baseSha);
       const readiness = await this.#serializeIntegration(async () => {
-        const validatedBase =
-          candidate?.identity.targetBaseSha ??
-          (adoptedSource ? pull.exactHeadValidation.baseSha : reservation.baseSha);
+        // Cheap non-authoritative readiness avoids creating coordination records during
+        // ordinary pending-check polls. All checks are repeated under the shared claim.
+        // GitHub can expose the newly advanced target ref before it refreshes
+        // the PR's base metadata. That lag is a wait, not a failed candidate.
+        // Check it before integrationReadiness classifies a base mismatch as
+        // failure; the same evidence is re-read under the admission claim.
         if (candidate) {
           const observed = await this.#store.readPullRequest(pull.number);
           if (!observed.merged && observed.baseSha !== candidate.identity.targetBaseSha) {
@@ -12258,7 +12462,7 @@ export class FactorySupervisor {
             };
           }
         }
-        const current = await integrationReadiness(
+        const observedReadiness = await integrationReadiness(
           this.#store,
           pull,
           validatedBase,
@@ -12273,100 +12477,154 @@ export class FactorySupervisor {
                 : {}),
           },
         );
-        if (current.state !== "ready") return current;
-        if (candidate) {
-          // REST mergeable/test-merge metadata can lag a trunk update. Check GitHub's
-          // actual proposed tree as well as our clean application before any merge.
-          const preview = await this.#store.readPullRequest(pull.number);
-          if (
-            preview.headSha !== (deliveryHeadSha ?? pull.commitSha) ||
-            preview.baseRef !== this.#baseBranch
-          ) {
-            return {
-              state: "failed" as const,
-              reason: "pull request changed before candidate merge",
-            };
-          }
-          if (preview.merged || preview.mergeable !== true || !preview.mergeCommitSha) {
-            return {
-              state: "wait" as const,
-              reason: "waiting for current GitHub test-merge evidence",
-            };
-          }
-          const testMerge = await this.#store.readCommit(preview.mergeCommitSha);
-          if (
-            testMerge.oid !== preview.mergeCommitSha ||
-            testMerge.parentOids.length !== 2 ||
-            testMerge.parentOids[0] !== candidate.identity.targetBaseSha ||
-            testMerge.parentOids[1] !== (deliveryHeadSha ?? pull.commitSha)
-          ) {
-            return {
-              state: "wait" as const,
-              reason: "GitHub test-merge evidence is stale for the validated candidate",
-            };
-          }
-          if (testMerge.treeOid !== candidate.validation.outputTreeSha) {
-            return {
-              state: "failed" as const,
-              reason: "GitHub test-merge tree differs from the independently validated candidate",
-            };
-          }
-        }
-        const currentBase = await this.#store.getBranchHead(this.#baseBranch);
-        if (currentBase.oid !== validatedBase) {
-          return {
-            state: candidate ? ("wait" as const) : ("failed" as const),
-            reason:
-              `base branch advanced from validated commit ${validatedBase} ` +
-              `to ${currentBase.oid}`,
-          };
-        }
-        const currentRules = await this.#store.readBranchRules(this.#baseBranch);
-        const blockers = branchRuleBlockers(currentRules);
-        if (blockers.length > 0) {
-          return {
-            state: "failed" as const,
-            reason: `branch policy changed and now requires HITL: ${blockers.join(", ")}`,
-          };
-        }
-        if (requiredChecks(currentRules).length > 0) {
-          const missing = missingRequiredChecks(
-            currentRules,
-            await this.#store.readChecks(current.headSha),
-          );
-          if (missing.length > 0) {
-            return {
-              state: "wait" as const,
-              reason: `required checks have not appeared yet: ${missing.join(", ")}`,
-            };
-          }
-        }
-        await this.#lease.assertGeneration("integration");
-        const mergeSha = await this.#store.mergePullRequest({
-          number: pull.number,
-          headSha: current.headSha,
-          commitTitle: item.title,
-        });
-        try {
-          if (candidate) {
-            await verifyMergeCandidateSquash(
+        if (observedReadiness.state !== "ready") return observedReadiness;
+        const controller = this.#lease;
+        const capturedOwner = await controller.use(async (lease) => ({
+          epoch: lease.epoch,
+          fence: controller.captureMutationFence(),
+        }));
+        return withIntegrationAdmission(
+          this.#store,
+          {
+            repository: `${this.#options.owner}/${this.#options.repo}`,
+            branch: this.#baseBranch,
+            objective: this.#run.objective,
+            runId: this.#run.runId,
+            epoch: capturedOwner.epoch,
+            pullRequest: pull.number,
+            headSha: deliveryHeadSha ?? pull.commitSha,
+            baseSha: validatedBase,
+            outputTreeSha:
+              candidate?.validation.outputTreeSha ?? pull.exactHeadValidation.outputTreeSha,
+          },
+          () => capturedOwner.fence(0),
+          async (admission) => {
+            if (candidate) {
+              const observed = await this.#store.readPullRequest(pull.number);
+              if (!observed.merged && observed.baseSha !== candidate.identity.targetBaseSha) {
+                return {
+                  state: "wait" as const,
+                  reason:
+                    "waiting for GitHub pull-request base metadata to match the validated candidate",
+                };
+              }
+            }
+            const current = await integrationReadiness(
               this.#store,
-              pull.exactHeadValidation,
-              candidate.evidence,
-              mergeSha,
+              pull,
+              validatedBase,
+              this.#baseBranch,
+              {
+                ciExpected: this.#ciExpectedOnPullRequests,
+                ...(candidate ? { mergeCandidateValidation: candidate.evidence } : {}),
+                ...(siblingRefresh
+                  ? { siblingRefresh }
+                  : deliveryHeadSha
+                    ? { mergeCandidateDeliveryHeadSha: deliveryHeadSha }
+                    : {}),
+              },
             );
-          } else {
-            await verifySquashIntegration(this.#store, pull, mergeSha, validatedBase);
-          }
-        } catch (error) {
-          return {
-            state: "failed" as const,
-            reason:
-              `irreversible merge did not preserve validated state: ` +
-              (error instanceof Error ? error.message : String(error)),
-          };
-        }
-        return { state: "integrated" as const, headSha: mergeSha };
+            if (current.state !== "ready") return current;
+            if (candidate) {
+              // REST mergeable/test-merge metadata can lag a trunk update. Check GitHub's
+              // actual proposed tree as well as our clean application before any merge.
+              const preview = await this.#store.readPullRequest(pull.number);
+              if (
+                preview.headSha !== (deliveryHeadSha ?? pull.commitSha) ||
+                preview.baseRef !== this.#baseBranch
+              ) {
+                return {
+                  state: "failed" as const,
+                  reason: "pull request changed before candidate merge",
+                };
+              }
+              if (preview.merged || preview.mergeable !== true || !preview.mergeCommitSha) {
+                return {
+                  state: "wait" as const,
+                  reason: "waiting for current GitHub test-merge evidence",
+                };
+              }
+              const testMerge = await this.#store.readCommit(preview.mergeCommitSha);
+              if (
+                testMerge.oid !== preview.mergeCommitSha ||
+                testMerge.parentOids.length !== 2 ||
+                testMerge.parentOids[0] !== candidate.identity.targetBaseSha ||
+                testMerge.parentOids[1] !== (deliveryHeadSha ?? pull.commitSha)
+              ) {
+                return {
+                  state: "wait" as const,
+                  reason: "GitHub test-merge evidence is stale for the validated candidate",
+                };
+              }
+              if (testMerge.treeOid !== candidate.validation.outputTreeSha) {
+                return {
+                  state: "failed" as const,
+                  reason:
+                    "GitHub test-merge tree differs from the independently validated candidate",
+                };
+              }
+            }
+            const currentBase = await this.#store.getBranchHead(this.#baseBranch);
+            if (currentBase.oid !== validatedBase) {
+              return {
+                state: candidate ? ("wait" as const) : ("failed" as const),
+                reason:
+                  `base branch advanced from validated commit ${validatedBase} ` +
+                  `to ${currentBase.oid}`,
+              };
+            }
+            const currentRules = await this.#store.readBranchRules(this.#baseBranch);
+            const blockers = branchRuleBlockers(currentRules);
+            if (blockers.length > 0) {
+              return {
+                state: "failed" as const,
+                reason: `branch policy changed and now requires HITL: ${blockers.join(", ")}`,
+              };
+            }
+            if (requiredChecks(currentRules).length > 0) {
+              const missing = missingRequiredChecks(
+                currentRules,
+                await this.#store.readChecks(current.headSha),
+              );
+              if (missing.length > 0) {
+                return {
+                  state: "wait" as const,
+                  reason: `required checks have not appeared yet: ${missing.join(", ")}`,
+                };
+              }
+            }
+            await admission.dispatch();
+            const mergeSha = await this.#store.mergePullRequest({
+              number: pull.number,
+              headSha: current.headSha,
+              commitTitle: item.title,
+            });
+            try {
+              if (candidate) {
+                await verifyMergeCandidateSquash(
+                  this.#store,
+                  pull.exactHeadValidation,
+                  candidate.evidence,
+                  mergeSha,
+                );
+              } else {
+                await verifySquashIntegration(this.#store, pull, mergeSha, validatedBase);
+              }
+            } catch (error) {
+              return {
+                state: "failed" as const,
+                reason:
+                  `irreversible merge did not preserve validated state: ` +
+                  (error instanceof Error ? error.message : String(error)),
+              };
+            }
+            return { state: "integrated" as const, headSha: mergeSha };
+          },
+        );
+      }).catch((error: unknown) => {
+        if (error instanceof IntegrationAdmissionPendingError)
+          return { state: "wait" as const, reason: error.message };
+        throw error;
       });
       if (readiness.state === "integrated") {
         this.#integrationWaits.delete(item.number);
@@ -13120,13 +13378,17 @@ export class FactorySupervisor {
           assertCurrent: () => this.#lease.assertGeneration("publication"),
         });
         const message = `${item.title}\n\nCloses #${item.number}\nFactory-Artifact: ${artifact.digest}\nFactory-Validation: ${validation.evidenceDigest}`;
-        await this.#lease.assertGeneration("publication");
+        await assertPublicationMutationAuthorized(this.#store, () =>
+          this.#lease.assertGeneration("publication"),
+        );
         const plannedHead = await this.#store.createCommit({
           treeOid,
           parentOids: [artifact.baseSha],
           message,
         });
-        await this.#lease.assertGeneration("publication");
+        await assertPublicationMutationAuthorized(this.#store, () =>
+          this.#lease.assertGeneration("publication"),
+        );
         try {
           await this.#store.createRef(`refs/heads/${branch}`, plannedHead);
         } catch (error) {
@@ -13528,13 +13790,20 @@ export class FactorySupervisor {
     reason?: string,
   ): Promise<SupervisorResult> {
     await this.#lease.assert();
-    await runManager.terminal({
-      run: this.#run,
-      objectiveNodeId: snapshot.id,
-      event,
-      sequence: this.#sequences.take(),
-      ...(reason ? { reason } : {}),
-    });
+    // Deadline-only recovery skips normal admission, but its fresh terminal
+    // receipt still needs this writer's boundary. Ordinary runs reuse the
+    // already-recorded boundary without another comment.
+    await this.#recordControllerObservation(snapshot);
+    await this.#lease.use((lease) =>
+      runManager.terminal({
+        writerEpoch: lease.epoch,
+        run: this.#run,
+        objectiveNodeId: snapshot.id,
+        event,
+        sequence: this.#sequences.take(),
+        ...(reason ? { reason } : {}),
+      }),
+    );
     await this.#lease.release();
     return {
       status:

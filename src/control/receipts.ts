@@ -72,6 +72,25 @@ export function decodeEventTrailer(message: string): FactoryEvent | null {
   return parseFactoryEvent(JSON.parse(raw));
 }
 
+/** Attenuate control authority after takeover, without discarding history or
+ * accounting. GitHub cannot atomically fence an in-flight comment append. */
+export function hasCurrentWriterAuthority(
+  event: FactoryEvent,
+  events: readonly FactoryEvent[],
+): boolean {
+  const epoch = events.reduce(
+    (current, candidate) =>
+      candidate.kind === "controller" &&
+      candidate.event === "ControllerObserved" &&
+      candidate.objective === event.objective &&
+      candidate.runId === event.runId
+        ? Math.max(current, candidate.writerEpoch ?? 0)
+        : current,
+    0,
+  );
+  return epoch === 0 || event.writerEpoch === epoch;
+}
+
 export function latestSupportedRun(events: FactoryEvent[]): FactoryEvent | null {
   const runs = deduplicateFactoryEvents(events)
     .filter((event) => event.kind === "run")
@@ -83,6 +102,7 @@ export function latestSupportedRun(events: FactoryEvent[]): FactoryEvent | null 
       (event) =>
         event.runId === start.runId &&
         event.sequence > start.sequence &&
+        hasCurrentWriterAuthority(event, events) &&
         ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(event.event),
     );
     if (!terminal) return start;
@@ -125,6 +145,7 @@ export function latestRunReceipts(events: FactoryEvent[]): RunReceiptSet | null 
     .find(
       (event): event is NonNullable<RunReceiptSet["terminal"]> =>
         event.kind === "run" &&
+        hasCurrentWriterAuthority(event, deduplicated) &&
         ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(event.event),
     );
   return {

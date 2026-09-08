@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FactorySupervisor, type SupervisorOptions } from "../src/supervisor.js";
+import { integrationAdmissionRef } from "../src/control/integration-admission.js";
 import * as localScopes from "../src/runtime/local-scope.js";
 import { runContainedProcess } from "../src/runtime/process-group.js";
 import { GitHubReader } from "../src/github.js";
@@ -12,7 +13,11 @@ import { GitHubControlStore } from "../src/control/github-store.js";
 import { CompiledGraphManager, type CompiledGraphStore } from "../src/control/graphs.js";
 import { LeaseManager, type GitCommitObject, type LeaseState } from "../src/control/lease.js";
 import { attemptRef } from "../src/control/attempts.js";
-import { decodeEventComments, encodeEventTrailer } from "../src/control/receipts.js";
+import {
+  decodeEventComments,
+  encodeEventTrailer,
+  latestRunReceipts,
+} from "../src/control/receipts.js";
 import { DEFAULT_RUN_POLICY, parseRunPolicy, policyDigest } from "../src/protocol/policy.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
 import { renderWorkPacket, type CompiledObjective } from "../src/graph.js";
@@ -283,7 +288,10 @@ async function fixture(
     sequence: 100,
     expiresAt: new Date(Date.now() + 600_000),
   };
-  const leases = { assertCurrent: async () => {} } as unknown as LeaseManager;
+  const leases = {
+    assertCurrent: async () => {},
+    assertMutationAuthorized: async (lease: LeaseState) => leases.assertCurrent(lease),
+  } as unknown as LeaseManager;
   const graph: CompiledObjective = {
     title: "Parallel siblings",
     workItems: ["a", "b", "c", "d"]
@@ -605,9 +613,8 @@ async function fixture(
       .linkedPullRequests[0]!;
   const refreshedPulls = new Set<number>();
   let siblingRefreshResponseLost = false;
-  const refresh = vi
-    .spyOn(GitHubControlStore.prototype, "compareAndSwapRef")
-    .mockImplementation(async ({ ref, beforeOid, afterOid }) => {
+  const refresh = vi.fn(
+    async ({ ref, beforeOid, afterOid }: { ref: string; beforeOid: string; afterOid: string }) => {
       const item = snapshot.workItems.find(
         (entry) => ref === `refs/heads/${publicationBranch(7, entry.number, 1)}`,
       );
@@ -627,7 +634,17 @@ async function fixture(
         );
       }
       return true;
-    });
+    },
+  );
+  vi.spyOn(GitHubControlStore.prototype, "compareAndSwapRef").mockImplementation(async (args) => {
+    if (!args.ref.startsWith("refs/clockgrove-factory/integration-admissions/"))
+      return refresh(args);
+    if (refs.get(args.ref) !== args.beforeOid) return false;
+    const claimCommit = await readCommit(args.afterOid);
+    expect(claimCommit.parentOids).toEqual([args.beforeOid]);
+    refs.set(args.ref, args.afterOid);
+    return true;
+  });
   const mergeShas = new Map<number, string>();
   const pullBases = new Map<number, string>(
     snapshot.workItems.map((item, index) => [
@@ -1587,14 +1604,30 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
         return observedStack();
       },
     );
-    vi.spyOn(GitHubStacks.prototype, "requestMerge").mockImplementation(async (input) => ({
-      state: "merged",
-      mergeSha: await store.mergePullRequest({
-        number: input.pullRequest,
-        headSha: input.expectedHeadSha,
-        commitTitle: input.title,
-      }),
-    }));
+    vi.spyOn(GitHubStacks.prototype, "requestMerge").mockImplementation(async (input) => {
+      const oid = await store.readRef(integrationAdmissionRef("o/r", "main"));
+      expect(oid).not.toBeNull();
+      const message = (await store.readCommit(oid!)).message;
+      const line = message.split("\n").find((value) => value.startsWith("Factory-Integration: "))!;
+      const admission = JSON.parse(Buffer.from(line.slice(21), "base64url").toString("utf8"));
+      expect(admission).toMatchObject({
+        state: "dispatched",
+        identity: {
+          objective: 7,
+          pullRequest: input.pullRequest,
+          headSha: input.expectedHeadSha,
+          baseSha: f.git("rev-parse", "main"),
+        },
+      });
+      return {
+        state: "merged",
+        mergeSha: await store.mergePullRequest({
+          number: input.pullRequest,
+          headSha: input.expectedHeadSha,
+          commitTitle: input.title,
+        }),
+      };
+    });
   }
   const original = structuredClone(
     [
@@ -2643,6 +2676,10 @@ describe("Supervisor authenticated successor execution", () => {
       });
       await expect(f.run()).rejects.toBe(unavailable);
       close.mockImplementation(original);
+      const priorWriter = f.snapshot.factoryEvents!.find(
+        (event) => event.event === "ControllerObserved" && event.runId === "successor",
+      );
+      expect(priorWriter?.writerEpoch).toBe(1);
       if (premerged) expect(f.planRecord.plan.items[0]!.action).toBe("integrated");
       // The already-integrated source keeps its original predecessor receipt;
       // a redundant successor outcome is not required for closure authority.
@@ -2681,6 +2718,22 @@ describe("Supervisor authenticated successor execution", () => {
         expect(f.review).toHaveBeenCalledTimes(reviews);
         expect(f.merge).toHaveBeenCalledTimes(merges);
         expect(f.snapshot.workItems.flatMap((item) => item.factoryEvents!)).toEqual(before);
+        const receipts = latestRunReceipts(f.snapshot.factoryEvents!);
+        expect(receipts?.terminal).toMatchObject({ event: "FactoryRunCompleted", writerEpoch: 2 });
+        expect(
+          receipts?.events.some(
+            (event) => event.event === "ControllerObserved" && event.writerEpoch === 2,
+          ),
+        ).toBe(true);
+        const delayedOldTerminal = parseFactoryEvent({
+          ...receipts!.terminal!,
+          writerEpoch: 1,
+          sequence: receipts!.terminal!.sequence + 1,
+          event: "FactoryRunEscalated",
+        });
+        expect(
+          latestRunReceipts([...f.snapshot.factoryEvents!, delayedOldTerminal])?.terminal,
+        ).toEqual(receipts!.terminal);
       } finally {
         vi.useRealTimers();
       }

@@ -73,18 +73,21 @@ export class LifecycleRecorder {
     objectiveNodeId: string;
     sequence: number;
     controllerId: string;
+    observationScope?: "repository-controller" | "objective-writer";
     epoch: number;
     expiresAt: string;
     controllerPolicyDigest: string;
     protocolMin: string;
     protocolMax: string;
   }): Promise<FactoryEvent> {
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const now = await this.store.serverTime();
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
       kind: "controller",
+      writerEpoch: args.lease.epoch,
       event: "ControllerObserved",
+      ...(args.observationScope ? { observationScope: args.observationScope } : {}),
       objective: args.lease.objective,
       runId: args.lease.runId,
       sequence: args.sequence,
@@ -113,11 +116,12 @@ export class LifecycleRecorder {
     event: "RunPauseAcknowledged" | "RunDrainCompleted";
     commandRequestId: string;
   }): Promise<FactoryEvent> {
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const now = await this.store.serverTime();
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
       kind: "run",
+      writerEpoch: args.lease.epoch,
       event: args.event,
       objective: args.lease.objective,
       runId: args.lease.runId,
@@ -147,12 +151,13 @@ export class LifecycleRecorder {
     graphRef: string;
     graphBlobSha: string;
   }): Promise<FactoryEvent> {
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const now = await this.store.serverTime();
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
       kind: "graph",
       event: "GraphCompiled",
+      writerEpoch: args.lease.epoch,
       objective: args.lease.objective,
       runId: args.lease.runId,
       sequence: args.sequence,
@@ -182,12 +187,13 @@ export class LifecycleRecorder {
     projectionRef: string;
     projectionBlobSha: string;
   }): Promise<FactoryEvent> {
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const now = await this.store.serverTime();
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
       kind: "graph",
       event: "GraphProjected",
+      writerEpoch: args.lease.epoch,
       objective: args.lease.objective,
       runId: args.lease.runId,
       sequence: args.sequence,
@@ -213,12 +219,13 @@ export class LifecycleRecorder {
     sequence: number;
     selection: DeliverySelection;
   }): Promise<FactoryEvent> {
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const now = await this.store.serverTime();
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
       kind: "delivery",
       event: "DeliverySelected",
+      writerEpoch: args.lease.epoch,
       objective: args.lease.objective,
       runId: args.lease.runId,
       sequence: args.sequence,
@@ -253,7 +260,7 @@ export class LifecycleRecorder {
     asynchronousMergeUuid?: string;
     reason?: string;
   }): Promise<FactoryEvent> {
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     if (args.receipt.runId !== args.lease.runId) {
       throw new Error("publication receipt belongs to another run");
     }
@@ -261,6 +268,7 @@ export class LifecycleRecorder {
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
       kind: "publication",
+      writerEpoch: args.lease.epoch,
       event: args.event,
       objective: args.lease.objective,
       runId: args.lease.runId,
@@ -309,12 +317,13 @@ export class LifecycleRecorder {
     evidence: ValidationEvidence;
     sequence: number;
   }): Promise<FactoryEvent> {
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     assertReservationLease(args.reservation, args.lease);
     const now = await this.store.serverTime();
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
       kind: "validation",
+      writerEpoch: args.lease.epoch,
       event: "ValidationRecorded",
       objective: args.reservation.objective,
       runId: args.reservation.runId,
@@ -356,7 +365,7 @@ export class LifecycleRecorder {
     ) {
       throw new Error("budget event batch must share one lease, reservation, and destination");
     }
-    await this.leases.assertCurrent(first.lease);
+    await this.leases.assertMutationAuthorized(first.lease);
     assertReservationLease(first.reservation, first.lease);
     const now = await this.store.serverTime();
     const events = args.map((value) => {
@@ -372,6 +381,7 @@ export class LifecycleRecorder {
       return parseFactoryEvent({
         protocol: PROTOCOL_V2,
         kind: "budget",
+        writerEpoch: value.lease.epoch,
         event: value.event,
         objective: value.reservation.objective,
         runId: value.reservation.runId,
@@ -435,7 +445,7 @@ export class LifecycleRecorder {
     policyDigest?: string;
     reportedModelUsage?: ReportedModelUsage;
   }): Promise<FactoryEvent> {
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     if (
       args.modelInvocationId &&
       (args.policyDigest !== args.lease.policyDigest ||
@@ -448,6 +458,7 @@ export class LifecycleRecorder {
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
       kind: "budget",
+      writerEpoch: args.lease.epoch,
       event: args.event,
       objective: args.lease.objective,
       runId: args.lease.runId,

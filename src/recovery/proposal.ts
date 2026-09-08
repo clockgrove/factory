@@ -1,3 +1,4 @@
+import { hasCurrentWriterAuthority } from "../control/receipts.js";
 import type { FactoryReadSnapshot } from "../application/status.js";
 import { attemptRef } from "../control/attempts.js";
 import {
@@ -203,7 +204,10 @@ export async function buildRecoveryProposal(input: {
     require(!byRun.has(input.successorRunId));
     const history: RecoveryHistoryEntry[] = starts.map((start) => {
       const terminals = events.filter(
-        (event) => event.runId === start.runId && TERMINALS.has(event.event),
+        (event) =>
+          event.runId === start.runId &&
+          TERMINALS.has(event.event) &&
+          hasCurrentWriterAuthority(event, events),
       );
       require(
         terminals.length === 1 &&

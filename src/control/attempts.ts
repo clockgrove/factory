@@ -196,7 +196,7 @@ export class AttemptManager {
     admission?: AttemptAdmissionReceipt;
     prepareLocalScope?: (attempt: number, at: Date) => Promise<LocalScopeBatch | null>;
   }): Promise<AttemptReservation> {
-    await this.#leases.assertCurrent(args.lease);
+    await this.#leases.assertMutationAuthorized(args.lease);
     const existing = await this.list(args.lease.objective, args.workItem);
     const next = (existing.at(-1)?.attempt ?? 0) + 1;
     const ref = attemptRef(args.lease.objective, args.workItem, next);
@@ -227,7 +227,7 @@ export class AttemptManager {
         `Factory attempt ${next} reservation for Work Item #${args.workItem}\n\n` +
         encodeEventTrailer(event),
     });
-    await this.#leases.assertCurrent(args.lease);
+    await this.#leases.assertMutationAuthorized(args.lease);
     const won = await this.#store.createRef(ref, oid);
     if (!won) throw new AttemptReservationConflict();
     await this.#store.addIssueComment(
@@ -271,7 +271,7 @@ export class AttemptManager {
     reportedModelUsage?: ReportedModelUsage;
     allowRecovery?: boolean;
   }): Promise<AttemptEvent> {
-    await this.#leases.assertCurrent(args.lease);
+    await this.#leases.assertMutationAuthorized(args.lease);
     if (args.environmentIdentity) {
       assertNoSecretMaterial(args.environmentIdentity, "attempt environment identity");
     }
@@ -336,7 +336,7 @@ export class AttemptManager {
     workItemNodeId: string;
     reservation: AttemptReservation;
   }): Promise<void> {
-    await this.#leases.assertCurrent(args.lease);
+    await this.#leases.assertMutationAuthorized(args.lease);
     if (
       args.reservation.runId !== args.lease.runId ||
       args.reservation.policyDigest !== args.lease.policyDigest
@@ -383,7 +383,7 @@ export class AttemptManager {
     observedSubIssuePosition: number;
     prioritySource?: NonNullable<Extract<FactoryEvent, { kind: "scheduling" }>["prioritySource"]>;
   }): Promise<FactoryEvent> {
-    await this.#leases.assertCurrent(args.lease);
+    await this.#leases.assertMutationAuthorized(args.lease);
     const now = await this.#store.serverTime();
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
@@ -424,7 +424,7 @@ export class AttemptManager {
     allowRecovery?: boolean;
     localScopeBatch?: LocalScopeBatch;
   }): Promise<FactoryEvent> {
-    await this.#leases.assertCurrent(args.lease);
+    await this.#leases.assertMutationAuthorized(args.lease);
     if (
       args.allowRecovery &&
       args.reservation.directorEpoch !== args.lease.epoch &&

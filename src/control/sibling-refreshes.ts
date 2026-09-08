@@ -352,7 +352,7 @@ export class SiblingRefreshStore {
         (identity.runId !== identity.sourceRunId || args.lease.epoch >= identity.leaseEpoch),
       "lease scope mismatch",
     );
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const source = SourceSchema.parse(args.source);
     verifyExactHeadValidation(source, identity.sourceHeadSha);
     requireProof(
@@ -404,7 +404,7 @@ export class SiblingRefreshStore {
     requireProof(target.oid === identity.targetBaseSha, "target base unavailable");
     assertNoSecretMaterial({ identity, source, previous }, "sibling-refresh intent");
     const identityDigest = siblingRefreshIdentityDigest(identity);
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const plannedHeadSha = await this.store.createCommit({
       treeOid: outputTreeSha,
       parentOids: [expectedOldHeadSha, identity.targetBaseSha],
@@ -421,19 +421,19 @@ export class SiblingRefreshStore {
       ...(previous ? { previous } : {}),
     });
     await verifyCommit(this.store, value);
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const blobOid = await this.store.createBlob(Buffer.from(JSON.stringify(value), "utf8"));
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const treeOid = await this.store.createTree({
       entries: [{ path: PATH, mode: "100644", type: "blob", sha: blobOid }],
     });
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const commitOid = await this.store.createCommit({
       treeOid,
       parentOids: [identity.targetBaseSha],
       message: `Factory sibling refresh intent\n\nFactory-Sibling-Refresh: ${identityDigest}`,
     });
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     try {
       await this.store.createRef(siblingRefreshRef(identity), commitOid);
     } catch (error) {

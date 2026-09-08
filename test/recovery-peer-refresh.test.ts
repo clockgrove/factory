@@ -89,7 +89,12 @@ async function fixture(sameObjective = false, peerNonhost = false) {
       return true;
     },
   };
-  const leases = { assertCurrent: async () => {} } as unknown as LeaseManager;
+  const leases = {
+    assertCurrent: async () => {},
+    async assertMutationAuthorized(this: { assertCurrent(): Promise<void> }) {
+      await this.assertCurrent();
+    },
+  } as unknown as LeaseManager;
   type Pull = Awaited<ReturnType<RecoveryReadStore["readPullRequest"]>>;
   const pulls = new Map<number, Pull>();
   const snapshots = new Map<number, FactoryReadSnapshot>();
@@ -810,7 +815,7 @@ describe("peer refresh proposal/adoption parity", () => {
       const f = await adoptionFixture();
       if (fault === "missing-candidates") delete f.store.readCommitObjectiveCandidates;
       else if (fault === "missing-snapshot") delete f.store.readObjectiveSnapshot;
-      else Object.assign(f.peer.controller, { epoch: 99 });
+      else Object.assign(f.peer.activation, { requestedBy: "foreign" });
       const evidence = await f.resolve();
       expect(evidence.currentBase).toBe("unchanged");
       expect(evidence.sourceBindings).toBe("incomplete");
@@ -834,6 +839,11 @@ function peerEvent(f: Fixture, name: FactoryEvent["event"]) {
 describe("retained regular publication refreshed onto authenticated peer integration", () => {
   it("replays exact captured cross-Objective refresh without relabelling either original acceptance", async () => {
     const f = await fixture();
+    Object.assign(f.peer.controller, {
+      controllerId: "independent-controller",
+      epoch: 4,
+      controllerPolicyDigest: digest("independent-controller-policy"),
+    });
     const before = JSON.stringify({
       receiver: f.receiver.snapshot,
       peer: f.peer.snapshot,
@@ -913,26 +923,6 @@ describe("retained regular publication refreshed onto authenticated peer integra
       "default branch",
       (f) => {
         f.peer.snapshot.defaultBranch = "foreign";
-      },
-    ],
-    [
-      "controller id",
-      (f) => {
-        Object.assign(f.peer.controller, { controllerId: "other-controller" });
-      },
-    ],
-    [
-      "controller epoch",
-      (f) => {
-        Object.assign(f.peer.controller, { epoch: 4 });
-      },
-    ],
-    [
-      "controller policy",
-      (f) => {
-        Object.assign(f.peer.controller, {
-          controllerPolicyDigest: digest("other-controller-policy"),
-        });
       },
     ],
     [

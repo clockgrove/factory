@@ -1,3 +1,4 @@
+import { hasCurrentWriterAuthority } from "../control/receipts.js";
 import type { FactoryReadSnapshot, ReadWorkItemSnapshot } from "../application/status.js";
 import type { GitHubControlStore } from "../control/github-store.js";
 import { loadCompiledGraph, loadCompiledGraphProjection } from "../control/graphs.js";
@@ -269,7 +270,10 @@ export async function assessRecovery(input: {
     if (starts.size > 100) throw new Error("run bound");
     for (const start of starts.values()) {
       const terminals = events.filter(
-        (event) => event.runId === start.runId && TERMINALS.has(event.event),
+        (event) =>
+          event.runId === start.runId &&
+          TERMINALS.has(event.event) &&
+          hasCurrentWriterAuthority(event, events),
       );
       if (terminals.length > 1 || terminals.some((event) => event.sequence <= start.sequence))
         throw new Error("conflicting terminal history");
@@ -295,7 +299,9 @@ export async function assessRecovery(input: {
   }
   for (const start of starts.values()) {
     const runEvents = events.filter((event) => event.runId === start.runId);
-    const terminal = runEvents.filter((event) => TERMINALS.has(event.event)).at(-1);
+    const terminal = runEvents
+      .filter((event) => TERMINALS.has(event.event) && hasCurrentWriterAuthority(event, events))
+      .at(-1);
     const run: RecoveryRun = {
       runId: start.runId,
       state:

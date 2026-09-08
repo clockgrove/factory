@@ -192,6 +192,7 @@ export class RunManager {
     run: RunState;
     objectiveNodeId: string;
     event: "FactoryRunCompleted" | "FactoryRunCancelled" | "FactoryRunEscalated";
+    writerEpoch?: number;
     reason?: string;
     existingEvents?: FactoryEvent[];
     sequence?: number;
@@ -201,6 +202,7 @@ export class RunManager {
       protocol: PROTOCOL_V2,
       kind: "run",
       event: args.event,
+      ...(args.writerEpoch === undefined ? {} : { writerEpoch: args.writerEpoch }),
       objective: args.run.objective,
       runId: args.run.runId,
       sequence:

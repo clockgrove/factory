@@ -497,9 +497,10 @@ export interface GitHubMutationTelemetry {
 }
 
 /**
- * Serializes mutating requests while allowing lease traffic to pass normal
- * callers that are sleeping on the hourly content budget. Admission records
- * the request before transport so failed HTTP attempts are still priced.
+ * Serializes quota admission, not remote mutation completion. Once transport
+ * starts, an unrelated admitted operation may proceed within the shared request
+ * limiter. Lease traffic can pass callers waiting on content pacing. Actual
+ * transports, including failed attempts, are still priced exactly once.
  */
 export class MutationScheduler implements MutationAdmission {
   readonly #pacer: ContentCreationPacer;
@@ -583,6 +584,9 @@ export class MutationScheduler implements MutationAdmission {
             transported = true;
             this.#transported += 1;
             this.#pacer.recordTransported(this.#now());
+            // The rate-limit gate is not a repository data lock. Resource-specific
+            // CAS/Objective fences protect correctness after dispatch.
+            release();
           },
           recordSuccess: () => {
             if (!transported) return;

@@ -1,4 +1,5 @@
 import type { GitCommitObject, LeaseStore } from "../control/lease.js";
+import { observeLeaseAssertion } from "../control/mutation-observation.js";
 import { gitSha } from "../protocol/limits.js";
 
 export const REPOSITORY_LEASE_REF = "refs/clockgrove-factory/leases/repository-controller";
@@ -147,6 +148,7 @@ export class RepositoryLeaseManager {
   }
 
   async assertCurrent(lease: RepositoryLeaseState): Promise<void> {
+    observeLeaseAssertion();
     const observation = this.#store.readRefWithServerTime
       ? await this.#store.readRefWithServerTime(REPOSITORY_LEASE_REF)
       : {

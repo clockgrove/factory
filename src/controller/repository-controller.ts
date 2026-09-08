@@ -7,6 +7,8 @@ import {
   RepositoryLeaseLostError,
   RepositoryLeaseManager,
 } from "./repository-lease.js";
+import { SharedCapacityCoordinator, SHARED_CAPACITY_REF } from "./shared-capacity.js";
+import { importLegacyCapacity } from "./legacy-capacity.js";
 import {
   createRepositorySupervisorResources,
   FactorySupervisor,
@@ -169,10 +171,10 @@ export class GitHubRepositoryController {
   readonly #options: GitHubRepositoryControllerOptions;
   readonly #resources: RepositorySupervisorResources;
   readonly #running = new Map<number, Promise<void>>();
+  readonly #parked = new Map<number, { requestId: string; retryAt: number }>();
   #cursor = 0;
   readonly #shutdown = new AbortController();
   readonly #signal: AbortSignal;
-  #retirement: ControllerGenerationRetirement | undefined;
   #platformFailure: PlatformUnavailableError | undefined;
   #fatalFailure: unknown;
 
@@ -208,7 +210,13 @@ export class GitHubRepositoryController {
       (this.#options.capacity ?? DEFAULT_CONTROLLER_POLICY.maxActiveObjectives) -
         this.#running.size,
     );
-    const pending = ordered.filter((activation) => !this.#running.has(activation.objective));
+    const pending = ordered.filter((activation) => {
+      const parked = this.#parked.get(activation.objective);
+      return (
+        !this.#running.has(activation.objective) &&
+        (!parked || parked.requestId !== activation.requestId || parked.retryAt <= Date.now())
+      );
+    });
     const resuming = pending.filter((activation) => activation.resuming);
     const selected = [
       ...resuming,
@@ -232,10 +240,6 @@ export class GitHubRepositoryController {
         .then(() => this.#options.reconcileObjective(activation, signal, this.#resources))
         .catch((error) => {
           try {
-            if (error instanceof ControllerGenerationRetirement) {
-              this.#retirement = error;
-              this.#shutdown.abort();
-            }
             const unavailable = platformFailure(error);
             if (unavailable) {
               this.#platformFailure = ownershipFailure(
@@ -243,9 +247,21 @@ export class GitHubRepositoryController {
                 unavailable,
               ) as PlatformUnavailableError;
               this.#shutdown.abort();
-            } else if (!(error instanceof ControllerGenerationRetirement)) {
-              this.#fatalFailure = ownershipFailure(this.#fatalFailure, error);
-              this.#shutdown.abort();
+            } else {
+              // A failed Objective retains its obligations but does not own
+              // unrelated sessions. An explicit new activation/restart retries it.
+              this.#parked.set(activation.objective, {
+                requestId: activation.requestId,
+                retryAt:
+                  error instanceof LeaseAcquisitionContendedError
+                    ? Date.now() + error.retryAfterMs
+                    : Number.POSITIVE_INFINITY,
+              });
+              if (signal.aborted && !(error instanceof LeaseAcquisitionContendedError)) {
+                // A shared stop may expose unknown cleanup; retain that failure
+                // instead of treating the whole generation as safely retryable.
+                this.#fatalFailure = ownershipFailure(this.#fatalFailure, error);
+              }
             }
             this.#options.onError?.(error, activation.objective);
           } catch (callbackError) {
@@ -278,7 +294,6 @@ export class GitHubRepositoryController {
     }
     if (this.#fatalFailure && !(this.#fatalFailure instanceof LeaseAcquisitionContendedError))
       throw this.#fatalFailure;
-    if (this.#retirement) throw this.#retirement;
     const failure = ownershipFailure(
       this.#fatalFailure,
       ownershipFailure(loopFailure, this.#platformFailure),
@@ -301,11 +316,9 @@ export interface RunRepositoryControllerOptions {
   pollIntervalMs?: number;
   signal?: AbortSignal;
   onStatus?: (message: string) => void;
-  /** Outer repository-controller lease check for every Supervisor mutation. */
-  repositoryFence?: () => Promise<void>;
   /** Current repository-controller lease identity for durable observations. */
   controllerObservation?: () => ControllerObservation;
-  /** Concrete repository ownership for dual-lease successor adoption. */
+  /** Historical election identity for recovery diagnostics, not mutation authority. */
   recoveryOwnership?: RecoveryRepositoryOwnership;
   /** Injection point for deterministic conformance tests. */
   activationStore?: DurableActivationSource;
@@ -335,6 +348,7 @@ export function createGitHubRepositoryController(
   const store =
     options.activationStore ??
     new GitHubControlStore({
+      ...{ mutationScope: "controller-discovery" },
       token: options.token,
       owner: options.owner,
       repo: options.repo,
@@ -358,8 +372,8 @@ export function createGitHubRepositoryController(
       shared.fairness.register(activation.objective);
       try {
         if (activation.recovery && !options.supervisorFactory) {
-          if (!options.recoveryOwnership || !(store instanceof GitHubControlStore))
-            throw new Error("Successor adoption requires concrete repository ownership");
+          if (!(store instanceof GitHubControlStore))
+            throw new Error("Successor adoption requires a concrete GitHub store");
           await adoptRecoveryActivation({
             token: options.token,
             owner: options.owner,
@@ -367,7 +381,6 @@ export function createGitHubRepositoryController(
             activation,
             signal,
             store,
-            ownership: options.recoveryOwnership,
             checkout: options.repository,
           });
         }
@@ -391,7 +404,6 @@ export function createGitHubRepositoryController(
             signal,
             repositoryResources: shared,
             shutdownBehavior: "release-lease",
-            ...(options.repositoryFence ? { repositoryFence: options.repositoryFence } : {}),
             ...(options.controllerObservation
               ? { controllerObservation: options.controllerObservation }
               : {}),
@@ -443,10 +455,15 @@ export async function runGitHubRepositoryController(
             policy,
             resources,
             controllerId,
+            sharedPaidCeiling: options.maxPaidWorkers ?? DEFAULT_CONTROLLER_POLICY.maxLocalWorkers,
+            configureCapacity: [
+              ...(options.maxLocalWorkers !== undefined ? ["maxLocalParallel" as const] : []),
+              ...(options.maxPaidWorkers !== undefined ? ["maxCloudParallel" as const] : []),
+            ],
             ...(options.signal ? { signal: options.signal } : {}),
             ...(options.onStatus ? { onStatus: options.onStatus } : {}),
           },
-          async ({ store, signal, fence, observation, recoveryOwnership }) =>
+          async ({ store, signal, observation, recoveryOwnership }) =>
             createGitHubRepositoryController({
               ...options,
               capacity: policy.maxActiveObjectives,
@@ -454,7 +471,6 @@ export async function runGitHubRepositoryController(
               signal,
               resources,
               activationStore: store,
-              repositoryFence: fence,
               controllerObservation: observation,
               recoveryOwnership,
             }).run(),
@@ -508,8 +524,7 @@ export async function runGitHubRepositoryController(
   }
 }
 
-/** Foreground compatibility mode still owns the repository fence. It cannot
- * race a service controller merely because it targets a different Objective. */
+/** Independent sessions share short capacity transactions, not scheduler ownership. */
 export async function runForegroundObjective(
   options: SupervisorOptions,
 ): Promise<SupervisorResult> {
@@ -519,7 +534,7 @@ export async function runForegroundObjective(
   const policy = parseControllerPolicy({
     ...DEFAULT_CONTROLLER_POLICY,
     maxActiveObjectives: 1,
-    maxLocalWorkers: Math.min(runPolicy.maxParallel, scheduling.capacity.local.maxWorkers),
+    maxLocalWorkers: DEFAULT_CONTROLLER_POLICY.maxLocalWorkers,
     maxPaidWorkers:
       runPolicy.allowedPaidBackends.length === 0 ? 0 : scheduling.burst.maxCloudParallel,
   });
@@ -529,26 +544,109 @@ export async function runForegroundObjective(
       maxLocalWorkers: policy.maxLocalWorkers,
       maxPaidWorkers: policy.maxPaidWorkers,
     });
-  return withRepositoryOwnership(
-    {
-      token: options.token,
-      owner: options.owner,
-      repo: options.repo,
-      policy,
-      resources,
-      ...(options.signal ? { signal: options.signal } : {}),
-      ...(options.onStatus ? { onStatus: options.onStatus } : {}),
+  await attachSharedCapacity(options, policy, resources);
+  return new FactorySupervisor({
+    ...options,
+    policy: runPolicy,
+    repositoryResources: resources,
+  }).run();
+}
+
+async function attachSharedCapacity(
+  options: Pick<SupervisorOptions, "token" | "owner" | "repo" | "onStatus" | "signal">,
+  policy: ControllerPolicy,
+  resources: RepositorySupervisorResources,
+  existing?: {
+    store: GitHubControlStore;
+    lease: import("./repository-lease.js").RepositoryLeaseState;
+    leases: RepositoryLeaseManager;
+    base: import("../control/lease.js").GitCommitObject;
+    sharedPaidCeiling: number;
+    configureCapacity: readonly ("maxLocalParallel" | "maxCloudParallel")[];
+  },
+): Promise<void> {
+  const store = new GitHubControlStore({
+    ...{ mutationScope: "repository-capacity" },
+    token: options.token,
+    owner: options.owner,
+    repo: options.repo,
+    pacer: resources.pacer,
+    circuitBreaker: resources.circuitBreaker,
+    concurrency: resources.concurrency,
+    mutationScheduler: resources.mutationScheduler,
+    primaryQuota: primaryQuotaForCredential(options.token),
+  });
+  options.signal?.throwIfAborted();
+  const base =
+    existing?.base ?? (await store.getBranchHead((await store.getRepositoryFacts()).defaultBranch));
+  options.signal?.throwIfAborted();
+  const leases = existing?.leases ?? new RepositoryLeaseManager({ store });
+  let migrationLease = existing?.lease;
+  let releaseMigration = false;
+  if (!(await store.readRef(SHARED_CAPACITY_REF)) && !migrationLease) {
+    migrationLease = await leases.acquire(
+      {
+        controllerId: `capacity-migration-${randomUUID()}`,
+        policyDigest: controllerPolicyDigest(policy),
+      },
+      base,
+    );
+    releaseMigration = true;
+  }
+  const sharedLimits = {
+    maxParallel:
+      policy.maxLocalWorkers +
+      (existing?.sharedPaidCeiling ?? DEFAULT_CONTROLLER_POLICY.maxLocalWorkers),
+    maxLocalParallel: policy.maxLocalWorkers,
+    // A finite capacity ceiling grants no paid launch or budget authority.
+    maxCloudParallel: existing?.sharedPaidCeiling ?? DEFAULT_CONTROLLER_POLICY.maxLocalWorkers,
+    backendMaxParallel: {},
+    cpuCapacity: Number.POSITIVE_INFINITY,
+    memoryCapacityMb: Number.POSITIVE_INFINITY,
+    maxPaidUnits: Number.POSITIVE_INFINITY,
+  };
+  const coordinator = new SharedCapacityCoordinator({
+    store,
+    repository: `${options.owner}/${options.repo}`,
+    baseCommitSha: base.oid,
+    limits: sharedLimits,
+    assertLegacyCompatible: async () => {
+      if (!migrationLease)
+        throw new Error("capacity initialization requires a fenced migration boundary");
+      const captured = migrationLease;
+      return importLegacyCapacity({
+        store,
+        token: options.token,
+        owner: options.owner,
+        repo: options.repo,
+        assertCurrent: async () => {
+          options.signal?.throwIfAborted();
+          await leases.assertCurrent(captured);
+        },
+      });
     },
-    ({ signal, fence, observation }) =>
-      new FactorySupervisor({
-        ...options,
-        policy: runPolicy,
-        signal,
-        repositoryResources: resources,
-        repositoryFence: fence,
-        controllerObservation: observation,
-      }).run(),
-  );
+  });
+  try {
+    const guarded = store as GitHubControlStore & {
+      withMutationFence?<T>(fence: () => Promise<void>, operation: () => Promise<T>): Promise<T>;
+    };
+    if (migrationLease && guarded.withMutationFence) {
+      const captured = migrationLease;
+      await guarded.withMutationFence(
+        () => leases.assertCurrent(captured),
+        () => coordinator.initialize(),
+      );
+    } else await coordinator.initialize();
+    if (existing?.configureCapacity.length)
+      await coordinator.configureLimits(
+        sharedLimits,
+        () => existing.leases.assertCurrent(existing.lease),
+        existing.configureCapacity,
+      );
+  } finally {
+    if (releaseMigration && migrationLease) await leases.release(migrationLease);
+  }
+  Object.assign(resources, { sharedCapacity: coordinator });
 }
 
 interface RepositoryOwnershipOptions {
@@ -558,6 +656,8 @@ interface RepositoryOwnershipOptions {
   repo: string;
   policy: ControllerPolicy;
   resources: RepositorySupervisorResources;
+  sharedPaidCeiling: number;
+  configureCapacity: readonly ("maxLocalParallel" | "maxCloudParallel")[];
   signal?: AbortSignal;
   onStatus?: (message: string) => void;
 }
@@ -577,6 +677,7 @@ async function withRepositoryOwnership<T>(
   const primaryQuota = primaryQuotaForCredential(options.token);
   options.resources.mutationScheduler.attachPrimaryQuota(primaryQuota);
   const store = new GitHubControlStore({
+    ...{ mutationScope: "controller-election" },
     token: options.token,
     owner: options.owner,
     repo: options.repo,
@@ -600,6 +701,20 @@ async function withRepositoryOwnership<T>(
     },
     base,
   );
+  try {
+    await attachSharedCapacity(options, options.policy, options.resources, {
+      store,
+      leases,
+      lease,
+      base,
+      sharedPaidCeiling: options.sharedPaidCeiling,
+      configureCapacity: options.configureCapacity,
+    });
+  } catch (error) {
+    // Failed migration never authorizes a Supervisor or discards source claims.
+    await leases.release(lease).catch(() => undefined);
+    throw error;
+  }
   options.onStatus?.(
     `repository lease epoch ${lease.epoch} acquired; capacity=${options.policy.maxActiveObjectives} Objectives/${options.policy.maxLocalWorkers} local workers`,
   );

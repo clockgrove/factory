@@ -64,6 +64,7 @@ class MemoryStore implements CompiledGraphStore, RecoveryReadStore {
   repositoryValid = true;
   objectiveFenced = false;
   repositoryFenced = false;
+  requireRepositoryFence = true;
   loseAfter: string | null = null;
   failBefore: string | null = null;
   afterWrite?: (kind: string) => void;
@@ -84,7 +85,8 @@ class MemoryStore implements CompiledGraphStore, RecoveryReadStore {
   private before(kind: string) {
     if (this.enforce) {
       expect(this.objectiveFenced, `Objective fence before ${kind}`).toBe(true);
-      expect(this.repositoryFenced, `repository fence before ${kind}`).toBe(true);
+      if (this.requireRepositoryFence)
+        expect(this.repositoryFenced, `repository fence before ${kind}`).toBe(true);
     }
     this.objectiveFenced = false;
     this.repositoryFenced = false;
@@ -280,6 +282,9 @@ async function fixture(
   };
   const graphManager = new CompiledGraphManager(store, {
     assertCurrent: async () => {},
+    async assertMutationAuthorized(this: { assertCurrent(): Promise<void> }) {
+      await this.assertCurrent();
+    },
   } as unknown as LeaseManager);
   const graph = await graphManager.persist({ lease: objectiveLease, base, objective: graphInput });
   const projection = await graphManager.persistProjection({
@@ -536,7 +541,7 @@ async function fixture(
     historyComplete: true,
     beforeRead: undefined as ((read: number) => void) | undefined,
   };
-  const make = () =>
+  const make = (legacyRepositoryFence = true) =>
     new RecoveryCoordinator({
       store,
       readSnapshot: async () => {
@@ -544,7 +549,9 @@ async function fixture(
         return { snapshot: structuredClone(snapshot), historyComplete: state.historyComplete };
       },
       objectiveLeases: { assertCurrent: () => store.objectiveFence() },
-      repositoryLeases: { assertCurrent: () => store.repositoryFence() },
+      ...(legacyRepositoryFence
+        ? { repositoryLeases: { assertCurrent: () => store.repositoryFence() } }
+        : {}),
       observeLocalResource: (input) => observeLocalRecoveryResource(input, resourceReader),
     });
   const args = { objective: 7, planDigest: planRecord.digest, objectiveLease, repositoryLease };
@@ -566,6 +573,15 @@ async function fixture(
 }
 
 describe("fenced recovery adoption coordinator", () => {
+  it("adopts with current Objective authority without requiring repository election ownership", async () => {
+    const f = await fixture({ resource: "local" });
+    f.store.repositoryValid = false;
+    f.store.requireRepositoryFence = false;
+    const { repositoryLease: _legacy, ...objectiveArgs } = f.args;
+    expect((await f.make(false).adopt(objectiveArgs)).status).toBe("adopted");
+    expect(f.store.trace).not.toContain("repository-fence");
+    expect(f.store.trace).toContain("objective-fence");
+  });
   it("blocks unknown compiler usage rather than adopting an assumed zero subtotal", async () => {
     const f = await fixture({ missingCompileUsage: true });
     expect(await f.make().adopt(f.args)).toMatchObject({

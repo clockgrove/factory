@@ -30,6 +30,12 @@ import {
 } from "./merge-candidate.js";
 
 export interface PublicationStore {
+  /**
+   * The concrete transport rechecks Objective authority immediately before
+   * dispatching every mutation. Standalone stores omit this marker and retain
+   * the helper's explicit preflight assertion.
+   */
+  readonly objectiveMutationFenceAtDispatch?: boolean;
   readRef(ref: string): Promise<string | null>;
   readCommit(oid: string): Promise<GitCommitObject>;
   /** Required only for independent immutable sibling-refresh verification. */
@@ -80,6 +86,15 @@ export interface PublicationStore {
   mergePullRequest(args: { number: number; headSha: string; commitTitle: string }): Promise<string>;
   closeIssue(number: number): Promise<void>;
   closePullRequest(number: number): Promise<void>;
+}
+
+/** Avoid a duplicate remote preflight only when the mutation transport itself
+ * guarantees a fresh Objective fence at dispatch. */
+export async function assertPublicationMutationAuthorized(
+  store: Pick<PublicationStore, "objectiveMutationFenceAtDispatch">,
+  assertCurrent: () => Promise<void>,
+): Promise<void> {
+  if (!store.objectiveMutationFenceAtDispatch) await assertCurrent();
 }
 
 export interface PublishedPullRequest {
@@ -265,24 +280,24 @@ export async function publishValidated(args: {
       )
         throw new Error("publication bytes changed after validation");
       assertNoSecretMaterial(content.toString("latin1"), "publication content");
-      await args.assertLease();
+      await assertPublicationMutationAuthorized(args.store, args.assertLease);
       const sha = await args.store.createBlob(content);
       entries.push({ path, mode, type: "blob", sha });
     }
-    await args.assertLease();
+    await assertPublicationMutationAuthorized(args.store, args.assertLease);
     treeOid = await args.store.createTree({ baseTreeOid: args.base.treeOid, entries });
     if (treeOid !== args.validation.evidence.outputTreeSha) {
       throw new Error(
         `uploaded tree ${treeOid} does not match validated tree ${args.validation.evidence.outputTreeSha}`,
       );
     }
-    await args.assertLease();
+    await assertPublicationMutationAuthorized(args.store, args.assertLease);
     commitSha = await args.store.createCommit({
       treeOid,
       parentOids: [args.base.oid],
       message: expectedMessage,
     });
-    await args.assertLease();
+    await assertPublicationMutationAuthorized(args.store, args.assertLease);
     let branchCreated: boolean;
     try {
       branchCreated = await args.store.createRef(`refs/heads/${branch}`, commitSha);

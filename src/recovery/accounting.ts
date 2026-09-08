@@ -1,3 +1,4 @@
+import { hasCurrentWriterAuthority } from "../control/receipts.js";
 import {
   type BudgetUsage,
   deriveBudgetUsage,
@@ -215,7 +216,9 @@ export function assessRecoveryAccounting(input: {
     const starts = runEvents.filter(
       (event) => event.kind === "run" && event.event === "FactoryRunStarted",
     );
-    const terminals = runEvents.filter((event) => terminalRuns.has(event.event));
+    const terminals = runEvents.filter(
+      (event) => terminalRuns.has(event.event) && hasCurrentWriterAuthority(event, runEvents),
+    );
     const start = starts[0];
     const terminal = terminals[0];
     if (

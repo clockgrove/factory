@@ -273,7 +273,7 @@ export class CompiledGraphManager {
       cachedInputTokens?: number | undefined;
     };
   }): Promise<CompiledGraphRecord> {
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const parsed = parsePersistedCompiledObjective(args.objective);
     const graphDigest = compiledGraphDigest(parsed);
     const compilation = args.compilation
@@ -321,7 +321,7 @@ export class CompiledGraphManager {
         `Factory-Graph-Digest: ${graphDigest}\n` +
         `Factory-Graph-Blob: ${blobOid}`,
     });
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const ref = compiledGraphRef(args.lease.objective, args.lease.runId);
     let won: boolean;
     try {
@@ -381,10 +381,10 @@ export class CompiledGraphManager {
     graph: CompiledGraphRecord;
     bindings: readonly CompiledGraphProjectionBinding[];
   }): Promise<StagedCompiledGraphProjection> {
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const projection = canonicalProjection(args.graph, args.bindings);
     const blobOid = await this.store.createBlob(Buffer.from(JSON.stringify(projection), "utf8"));
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     return {
       ref: compiledGraphProjectionRef(args.lease.objective, args.lease.runId),
       blobOid,
@@ -428,7 +428,7 @@ export class CompiledGraphManager {
         `Factory-Graph-Digest: ${args.graph.graphDigest}\n` +
         `Factory-Projection-Blob: ${staged.blobOid}`,
     });
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const ref = compiledGraphProjectionRef(args.lease.objective, args.lease.runId);
     let won: boolean;
     try {

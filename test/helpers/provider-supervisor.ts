@@ -255,6 +255,7 @@ export async function providerSupervisorFixture(
   };
   const graphManager = new CompiledGraphManager(storage, {
     assertCurrent: async () => undefined,
+    assertMutationAuthorized: async () => undefined,
   } as unknown as LeaseManager);
   const graphRecord = await graphManager.persist({
     lease,
@@ -475,6 +476,13 @@ export async function providerSupervisorFixture(
   vi.spyOn(GitHubControlStore.prototype, "compareAndSwapRef").mockImplementation(
     async ({ ref, beforeOid, afterOid }) => {
       if (refs.get(ref) !== beforeOid) return false;
+      if (ref.startsWith("refs/clockgrove-factory/integration-admissions/")) {
+        const commit = await readCommit(afterOid);
+        if (commit.parentOids.length !== 1 || commit.parentOids[0] !== beforeOid)
+          throw new Error("fixture integration claim must extend its exact observed OID");
+        refs.set(ref, afterOid);
+        return true;
+      }
       const owned = [...pulls.values()].find((value) => `refs/heads/${value.branch}` === ref);
       if (!owned || owned.merged || owned.pull.state !== "OPEN" || owned.pull.headSha !== beforeOid)
         throw new Error("fixture refresh must bind an exact open Factory publication");

@@ -1,3 +1,4 @@
+import { hasCurrentWriterAuthority } from "../control/receipts.js";
 import { loadCompiledGraph } from "../control/graphs.js";
 import {
   loadMergeCandidateCheckpoint,
@@ -335,7 +336,7 @@ export async function observeRecoverySiblingRefresh(
         identity.sourceExactHeadValidationDigest === exact.digest,
     );
     // Every target advance must be an authenticated own-run integration or an
-    // explicitly owned peer integration under the same observed controller generation.
+    // independently authenticated peer integration with its own Objective ownership.
     // An intent, clean applicability, or an arbitrary parent commit cannot authorize trunk.
     let cursor = identity.targetBaseSha;
     let controllerBase = start.baseSha;
@@ -444,6 +445,7 @@ export async function observeRecoverySiblingRefresh(
       const terminal = events.find(
         (event) =>
           event.runId === start.runId &&
+          hasCurrentWriterAuthority(event, events) &&
           ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(
             event.event,
           ),
@@ -749,6 +751,7 @@ export async function observeRecoverySiblingRefresh(
     const terminal = events.find(
       (event) =>
         event.runId === candidateRunId &&
+        hasCurrentWriterAuthority(event, events) &&
         ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(event.event),
     );
     const usage = events

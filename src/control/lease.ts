@@ -1,5 +1,6 @@
 import { type LeaseEvent, parseFactoryEvent } from "../protocol/events.js";
 import { PROTOCOL_V2, gitSha } from "../protocol/limits.js";
+import { observeLeaseAssertion } from "./mutation-observation.js";
 
 export interface GitCommitObject {
   oid: string;
@@ -10,6 +11,19 @@ export interface GitCommitObject {
 }
 
 export interface LeaseStore {
+  /** Capture a caller-owned Objective fence for a short shared CAS transaction. */
+  withMutationFence?<T>(
+    fence: (waitedMs: number) => Promise<void>,
+    operation: () => Promise<T>,
+  ): Promise<T>;
+  /**
+   * The concrete transport rechecks the Objective lease after any mutation
+   * queue wait and immediately before sending the request. Control helpers may
+   * then avoid an earlier duplicate read; standalone stores omit this marker.
+   */
+  readonly objectiveMutationFenceAtDispatch?: boolean;
+  /** Synchronous scope check paired with the dispatch-time fence guarantee. */
+  assertMutationIdentity?(lease: LeaseState): void;
   readRef(ref: string): Promise<string | null>;
   /** Optional single-call ref observation carrying authoritative server time. */
   readRefWithServerTime?(ref: string): Promise<{ oid: string | null; serverTime: Date }>;
@@ -246,6 +260,7 @@ export class LeaseManager {
   }
 
   async assertCurrent(lease: LeaseState): Promise<void> {
+    observeLeaseAssertion();
     const observation = this.#store.readRefWithServerTime
       ? await this.#store.readRefWithServerTime(lease.ref)
       : {
@@ -267,6 +282,21 @@ export class LeaseManager {
     ) {
       throw new LeaseLostError();
     }
+  }
+
+  /**
+   * Preserve the control-layer fence for standalone stores while allowing the
+   * production GitHub transport to own the single authoritative dispatch-time
+   * check.
+   */
+  async assertMutationAuthorized(lease: LeaseState): Promise<void> {
+    if (this.#store.objectiveMutationFenceAtDispatch) {
+      if (!this.#store.assertMutationIdentity)
+        throw new Error("Objective mutation fence does not expose its bound lease identity");
+      this.#store.assertMutationIdentity(lease);
+      return;
+    }
+    await this.assertCurrent(lease);
   }
 
   /** Named boundary check used immediately before externally visible effects.

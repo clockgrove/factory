@@ -1,3 +1,4 @@
+import { hasCurrentWriterAuthority } from "../control/receipts.js";
 import type { FactoryReadSnapshot } from "../application/status.js";
 import { attemptRef } from "../control/attempts.js";
 import { activationCancellation } from "../control/activations.js";
@@ -71,10 +72,11 @@ function snapshotEvents(snapshot: FactoryReadSnapshot): FactoryEvent[] {
   );
   return events;
 }
-function generation(event: Extract<FactoryEvent, { kind: "controller" }>): string {
-  return `${event.controllerId}:${event.epoch}:${event.controllerPolicyDigest}`;
-}
-function assertActivation(start: Start, events: readonly FactoryEvent[], repository: string): void {
+export function assertPeerActivation(
+  start: Start,
+  events: readonly FactoryEvent[],
+  repository: string,
+): void {
   requirePeer(start.activationRequestId && !start.recoveryRequestId && !start.recoveryPlanDigest);
   const activation = one(
     events.filter(
@@ -202,7 +204,7 @@ export async function verifyRecoveryPeerTrunkIntegration(input: {
   if (receiverStart.recoveryPlanDigest) {
     // Do not recursively load this run's delivery proofs while proving one of them.
     await assertAdoption(receiverStart, receiverEvents, store);
-  } else assertActivation(receiverStart, receiverEvents, input.repository);
+  } else assertPeerActivation(receiverStart, receiverEvents, input.repository);
   if (!receiverStart.recoveryPlanDigest) {
     const graph = await loadCompiledGraph(store, receiver.number, receiverStart.runId);
     requirePeer(graph);
@@ -263,20 +265,18 @@ export async function verifyRecoveryPeerTrunkIntegration(input: {
           event.phase === "validation")) &&
       event.runId === receiverStart.runId,
   );
-  const receiverGenerations = new Set(
-    input.receiverEvents.flatMap((event) =>
-      event.kind === "controller" &&
-      event.runId === receiverStart.runId &&
-      event.sequence > receiverStart.sequence &&
-      time(event) <= beforeAt &&
-      receiverReservations.some(
-        (reservation) => event.sequence < reservation.sequence && time(event) <= time(reservation),
-      )
-        ? [generation(event)]
-        : [],
-    ),
+  const receiverObservations = input.receiverEvents.flatMap((event) =>
+    event.kind === "controller" &&
+    event.runId === receiverStart.runId &&
+    event.sequence > receiverStart.sequence &&
+    time(event) <= beforeAt &&
+    receiverReservations.some(
+      (reservation) => event.sequence < reservation.sequence && time(event) <= time(reservation),
+    )
+      ? [event]
+      : [],
   );
-  requirePeer(receiverGenerations.size > 0);
+  requirePeer(receiverObservations.length > 0);
   const numbers = await store.readCommitObjectiveCandidates(input.targetBaseSha);
   requirePeer(
     numbers.length <= 100 &&
@@ -324,7 +324,12 @@ export async function verifyRecoveryPeerTrunkIntegration(input: {
     );
     const policy = parseRunPolicy(start.policy);
     requirePeer(policyDigest(policy) === start.policyDigest);
-    const end = events.filter((event) => event.runId === start.runId && terminal.has(event.event));
+    const end = events.filter(
+      (event) =>
+        event.runId === start.runId &&
+        terminal.has(event.event) &&
+        hasCurrentWriterAuthority(event, events),
+    );
     requirePeer(end.length <= 1 && (!end.length || integrated.sequence < end[0]!.sequence));
     const runtime = start.recoveryPlanDigest
       ? await loadRecoveryRuntime({
@@ -335,7 +340,7 @@ export async function verifyRecoveryPeerTrunkIntegration(input: {
         })
       : undefined;
     if (runtime) requirePeer(runtime.status === "verified");
-    else assertActivation(start, events, input.repository);
+    else assertPeerActivation(start, events, input.repository);
     const graph =
       runtime?.status === "verified"
         ? runtime.graph
@@ -404,8 +409,7 @@ export async function verifyRecoveryPeerTrunkIntegration(input: {
             event.runId === start.runId &&
             event.sequence > start.sequence &&
             event.sequence < integrated.sequence &&
-            time(event) <= time(integrated) &&
-            receiverGenerations.has(generation(event)),
+            time(event) <= time(integrated),
         ),
       );
       const proof = one(
@@ -470,11 +474,9 @@ export async function verifyRecoveryPeerTrunkIntegration(input: {
           event.sequence < reserved.sequence &&
           time(event) <= time(reserved),
       );
-      requirePeer(
-        observations.some(
-          (event) => event.kind === "controller" && receiverGenerations.has(generation(event)),
-        ),
-      );
+      // Each Objective proves its own authenticated ownership history. Its controller
+      // generation need not equal the receiver's independent owner.
+      requirePeer(observations.length > 0);
       const ref = attemptRef(number, integrated.workItem, integrated.attempt);
       const oid = await store.readRef(ref);
       requirePeer(oid);

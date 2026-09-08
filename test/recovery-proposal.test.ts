@@ -121,7 +121,12 @@ async function fixture(withPublications = true, native: "siblings" | "stack" | f
     sequence: 1,
     expiresAt: now,
   };
-  const leases = { assertCurrent: async () => {} } as unknown as LeaseManager;
+  const leases = {
+    assertCurrent: async () => {},
+    async assertMutationAuthorized(this: { assertCurrent(): Promise<void> }) {
+      await this.assertCurrent();
+    },
+  } as unknown as LeaseManager;
   const objective: CompiledObjective = {
     title: "Private graph",
     workItems: ["a", "b", "c"].map((id) => ({

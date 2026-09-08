@@ -192,37 +192,27 @@ describe("Supervisor GraphQL admission", () => {
 
 describe("Supervisor external admission generation fence", () => {
   it.each(["compile", "review", "worker launch", "isolated validation"])(
-    "does not invoke %s after a successor owns the repository",
+    "does not invoke %s after a successor owns the Objective",
     async () => {
-      const objectiveFence = vi.fn(async () => {});
       const providerCall = vi.fn(async () => "spent");
       await expect(
-        runWithExternalAdmissionBoundary(
-          async () => {
-            throw new Error("successor repository controller is active");
-          },
-          objectiveFence,
-          providerCall,
-        ),
-      ).rejects.toThrow(/successor repository controller/);
-      expect(objectiveFence).not.toHaveBeenCalled();
+        runWithExternalAdmissionBoundary(async () => {
+          throw new Error("successor Objective Director is active");
+        }, providerCall),
+      ).rejects.toThrow(/successor Objective Director/);
       expect(providerCall).not.toHaveBeenCalled();
     },
   );
 
   it("does not invoke a provider after the Objective lease generation changes", async () => {
-    const repositoryFence = vi.fn(async () => {});
+    const objectiveFence = vi.fn(async () => {
+      throw new Error("stale Objective lease generation");
+    });
     const providerCall = vi.fn(async () => "spent");
-    await expect(
-      runWithExternalAdmissionBoundary(
-        repositoryFence,
-        async () => {
-          throw new Error("stale Objective lease generation");
-        },
-        providerCall,
-      ),
-    ).rejects.toThrow(/stale Objective lease generation/);
-    expect(repositoryFence).toHaveBeenCalledOnce();
+    await expect(runWithExternalAdmissionBoundary(objectiveFence, providerCall)).rejects.toThrow(
+      /stale Objective lease generation/,
+    );
+    expect(objectiveFence).toHaveBeenCalledOnce();
     expect(providerCall).not.toHaveBeenCalled();
   });
 });

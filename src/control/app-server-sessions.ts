@@ -104,7 +104,7 @@ export class AppServerSessionManager {
   }): Promise<void> {
     const checkpoint = parseAppServerSessionCheckpoint(args.checkpoint);
     assertReservation(args.repository, args.reservation, checkpoint);
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     if (
       args.lease.objective !== args.reservation.objective ||
       args.lease.runId !== args.reservation.runId ||
@@ -139,17 +139,17 @@ export class AppServerSessionManager {
       }
     }
     const blob = await this.store.createBlob(bytes);
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const treeOid = await this.store.createTree({
       entries: [{ path: PATH, mode: "100644", type: "blob", sha: blob }],
     });
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const commit = await this.store.createCommit({
       treeOid,
       parentOids: [args.reservation.oid],
       message: `Factory App Server ${checkpoint.stage}\n\nFactory-Session-Digest: ${createHash("sha256").update(bytes).digest("hex")}`,
     });
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     try {
       if (
         await this.store.createRef(

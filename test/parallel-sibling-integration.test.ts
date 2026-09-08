@@ -35,6 +35,10 @@ import { CodexSdkLocalBackend } from "../src/backends/codex-sdk-local.js";
 import type { ManagementBackend } from "../src/management/backend.js";
 import type { ObjectiveSnapshot, LinkedPullRequest } from "../src/types.js";
 import { PlatformUnavailableError } from "../src/platform.js";
+import {
+  integrationAdmissionRef,
+  withIntegrationAdmission,
+} from "../src/control/integration-admission.js";
 import * as cleanValidation from "../src/validation/clean-run.js";
 const actualValidate = cleanValidation.validateArtifactClean;
 
@@ -53,6 +57,7 @@ async function fixture(
     regular?: boolean;
     peerAdvance?: boolean;
     foreignPeerGeneration?: boolean;
+    foreignPeerActor?: boolean;
     missingPeerReview?: boolean;
     peerIsolated?: boolean;
     externalAdvance?: boolean;
@@ -215,7 +220,11 @@ async function fixture(
     sequence: 100,
     expiresAt: new Date(Date.now() + 600_000),
   };
-  const leases = { assertCurrent: async () => {} } as unknown as LeaseManager;
+  const assertCurrent = async () => {};
+  const leases = {
+    assertCurrent,
+    assertMutationAuthorized: assertCurrent,
+  } as unknown as LeaseManager;
   const graph: CompiledObjective = {
     title: "Parallel siblings",
     workItems: names.map((name) => ({
@@ -623,7 +632,7 @@ async function fixture(
           kind: "run",
           event: "ActivationRequested",
           requestId: "peer-activation",
-          requestedBy: "operator",
+          requestedBy: options.foreignPeerActor ? "foreign" : "operator",
           repository: "o/r",
           baseSha,
           policy,
@@ -783,9 +792,8 @@ async function fixture(
     )!.linkedPullRequests[0]!;
   let refreshResponseLost = false;
   const staleRefreshHeads = new Map<number, { head: string; remaining: number }>();
-  const refresh = vi
-    .spyOn(GitHubControlStore.prototype, "compareAndSwapRef")
-    .mockImplementation(async ({ ref, beforeOid, afterOid }) => {
+  const refresh = vi.fn(
+    async ({ ref, beforeOid, afterOid }: { ref: string; beforeOid: string; afterOid: string }) => {
       const item = snapshot.workItems.find(
         (entry) => `refs/heads/${publicationBranch(7, entry.number, 1)}` === ref,
       )!;
@@ -814,7 +822,18 @@ async function fixture(
         );
       }
       return true;
-    });
+    },
+  );
+  vi.spyOn(GitHubControlStore.prototype, "compareAndSwapRef").mockImplementation(async (args) => {
+    if (!args.ref.startsWith("refs/clockgrove-factory/integration-admissions/"))
+      return refresh(args);
+    if (refs.get(args.ref) !== args.beforeOid) return false;
+    const claim = await readCommit(args.afterOid);
+    if (claim.parentOids.length !== 1 || claim.parentOids[0] !== args.beforeOid)
+      throw new Error("fixture integration claim must extend its exact observed OID");
+    refs.set(args.ref, args.afterOid);
+    return true;
+  });
   const mergeShas = new Map<number, string>();
   if (peerMergeSha) mergeShas.set(88, peerMergeSha);
   let responseLost = false;
@@ -888,6 +907,23 @@ async function fixture(
     .spyOn(GitHubControlStore.prototype, "mergePullRequest")
     .mockImplementation(async ({ number, headSha }) => {
       expect(headSha).toBe(findPull(number).headSha);
+      const claimOid = refs.get(integrationAdmissionRef("o/r", "main"));
+      expect(claimOid).toBeDefined();
+      const line = commits
+        .get(claimOid!)!
+        .message.split("\n")
+        .find((value) => value.startsWith("Factory-Integration: "))!;
+      const claim = JSON.parse(Buffer.from(line.slice(21), "base64url").toString("utf8"));
+      expect(claim).toMatchObject({
+        state: "dispatched",
+        identity: {
+          objective: 7,
+          runId: "parallel",
+          pullRequest: number,
+          headSha,
+          baseSha: git("rev-parse", "main"),
+        },
+      });
       git("merge", "--squash", headSha);
       git("commit", "-qm", `merge PR ${number}`);
       const merged = git("rev-parse", "HEAD");
@@ -992,7 +1028,7 @@ describe("Supervisor parallel independent sibling integration", () => {
   it.each([false, true])(
     "accepts an authenticated terminal co-owned Objective's exact squash (regular=%s) without resuming it",
     async (regular) => {
-      const f = await fixture({ regular, peerAdvance: true });
+      const f = await fixture({ regular, peerAdvance: true, foreignPeerGeneration: true });
       const originalPeer = structuredClone(f.peerSnapshot);
       const result = await f.run();
       expect(result, result.reason).toMatchObject({ status: "completed" });
@@ -1011,7 +1047,7 @@ describe("Supervisor parallel independent sibling integration", () => {
     15000,
   );
 
-  it.each(["foreignPeerGeneration", "missingPeerReview"] as const)(
+  it.each(["foreignPeerActor", "missingPeerReview"] as const)(
     "rejects peer history with %s before any merge or paid candidate review",
     async (fault) => {
       const f = await fixture({ regular: true, peerAdvance: true, [fault]: true });
@@ -1422,7 +1458,11 @@ describe("Supervisor parallel independent sibling integration", () => {
         sourceExactHeadValidationDigest: source.digest,
         targetBaseSha: target,
       };
-      const leases = { assertCurrent: async () => {} } as unknown as LeaseManager;
+      const assertCurrent = async () => {};
+      const leases = {
+        assertCurrent,
+        assertMutationAuthorized: assertCurrent,
+      } as unknown as LeaseManager;
       const candidate = await new MergeCandidateCheckpointStore(f.storage, leases).persist({
         lease: f.lease,
         identity,
@@ -1479,7 +1519,32 @@ describe("Supervisor parallel independent sibling integration", () => {
           usageId: `integration-review-${reviewIdentityDigest(reviewIdentity)}`,
         }),
       );
-      const sha = await f.merge({ number: 20, headSha: f.heads[2]!, commitTitle: "merge C" });
+      const claimStore = {
+        ...f.storage,
+        compareAndSwapRef: (args: { ref: string; beforeOid: string; afterOid: string }) =>
+          GitHubControlStore.prototype.compareAndSwapRef.call(undefined as never, args),
+        readPullRequest: (number: number) =>
+          GitHubControlStore.prototype.readPullRequest.call(undefined as never, number),
+      };
+      const sha = await withIntegrationAdmission(
+        claimStore,
+        {
+          repository: "o/r",
+          branch: "main",
+          objective: 7,
+          runId: "parallel",
+          epoch: f.lease.epoch,
+          pullRequest: 20,
+          headSha: f.heads[2]!,
+          baseSha: target,
+          outputTreeSha: candidate.validation.outputTreeSha,
+        },
+        assertCurrent,
+        async (admission) => {
+          await admission.dispatch();
+          return f.merge({ number: 20, headSha: f.heads[2]!, commitTitle: "merge C" });
+        },
+      );
       const reserved = item.factoryEvents!.find(
         (event) => event.kind === "attempt" && event.event === "AttemptReserved",
       )!;

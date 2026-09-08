@@ -63,16 +63,24 @@ factory controller run OWNER/REPO --repo /absolute/path/to/repository
 ```
 
 The running process generates one controller identity and acquires the checkout's repository lease
-under that identity. Every Objective Supervisor shares it. A restarted service creates a new
-identity and must acquire a new fenced lease epoch; the unit name, PID, or an in-memory queue is never
-used as durable ownership evidence.
+under that identity for discovery leadership only. Every Objective has its own fenced lease epoch;
+normal mutations never recheck the service lease. Independent foreground sessions can run alongside
+the service and after its failure, subject to shared atomic capacity reservations. A restarted service
+must reacquire leadership, but unrelated Objectives do not wait for that election. The unit name, PID,
+or an in-memory queue is never used as durable ownership evidence.
 
-Its repository-wide ceiling defaults to eight local workers and zero paid workers, shared across
-Objectives. This is not a per-Objective adaptive default: a new run defaults to fixed concurrency
+The service's admission ceiling defaults to eight local workers and zero paid workers, shared across
+the Objectives it starts. This is not a per-Objective adaptive default: a new run defaults to fixed concurrency
 capped at two local workers, and physical headroom can narrow that further, including to zero.
 Explicit adaptive policies retain their selected ceilings. Controller ceilings are configurable
 through `--max-local-workers N` and `--max-paid-workers N`; the latter only permits capacity and never
 supplies the separate immutable run-policy provider or budget authority.
+
+Independent foreground sessions also use the durable repository capacity ledger. Its initial
+capacity-only ceiling is eight local and eight paid slots; this does not authorize any paid launch,
+and an unpaid run cannot use those paid slots. Explicit service worker-ceiling flags atomically
+configure the corresponding repository ceiling while retaining outstanding claims. Unspecified
+ceilings remain unchanged, and a later foreground session cannot widen an existing ceiling.
 
 Lifecycle operations are deliberately idempotent: `install` atomically writes the unit, reloads
 systemd and enables it; `start`, `stop`, `restart`, and `status` operate on that same deterministic

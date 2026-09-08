@@ -1,7 +1,7 @@
 import type { DurableObjectiveActivation } from "../control/github-store.js";
 import type { CompiledGraphReadStore } from "../control/graphs.js";
 import { deriveDurableCommandState } from "../control/commands.js";
-import { deduplicateFactoryEvents } from "../control/receipts.js";
+import { deduplicateFactoryEvents, hasCurrentWriterAuthority } from "../control/receipts.js";
 import type { FactoryEvent } from "../protocol/events.js";
 import { recoveryEventDigest } from "./identity.js";
 import { loadRecoveryPlan } from "./plan.js";
@@ -73,6 +73,7 @@ export async function discoverRecoveryActivation(input: {
         (event) =>
           event.runId === start.runId &&
           event.sequence > start.sequence &&
+          hasCurrentWriterAuthority(event, events) &&
           ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(
             event.event,
           ),
@@ -93,6 +94,7 @@ export async function discoverRecoveryActivation(input: {
         (event) =>
           event.kind === "run" &&
           event.runId === start.runId &&
+          hasCurrentWriterAuthority(event, events) &&
           event.event ===
             (commands.admissionGate!.kind === "drain"
               ? "RunDrainCompleted"

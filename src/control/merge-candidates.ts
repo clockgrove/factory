@@ -209,7 +209,7 @@ export class MergeCandidateCheckpointStore {
       identity.objective === args.lease.objective && identity.runId === args.lease.runId,
       "lease scope mismatch",
     );
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const value = parseCheckpoint({
       protocol: "clockgrove.factory/merge-candidate-checkpoint-v1",
       identityDigest: mergeCandidateIdentityDigest(identity),
@@ -229,19 +229,19 @@ export class MergeCandidateCheckpointStore {
     if (existing) return winner(existing);
     const base = await this.store.readCommit(identity.targetBaseSha);
     requireCheckpoint(base.oid === identity.targetBaseSha, "target base unavailable");
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const blobOid = await this.store.createBlob(Buffer.from(JSON.stringify(value), "utf8"));
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const treeOid = await this.store.createTree({
       entries: [{ path: CHECKPOINT_PATH, mode: "100644", type: "blob", sha: blobOid }],
     });
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const commitOid = await this.store.createCommit({
       treeOid,
       parentOids: [identity.targetBaseSha],
       message: `Factory merge candidate for Work Item #${identity.workItem}\n\nFactory-Merge-Candidate: ${value.identityDigest}`,
     });
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     try {
       await this.store.createRef(mergeCandidateCheckpointRef(identity), commitOid);
     } catch (error) {

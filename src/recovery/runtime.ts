@@ -1,3 +1,4 @@
+import { hasCurrentWriterAuthority } from "../control/receipts.js";
 import type { FactoryReadSnapshot } from "../application/status.js";
 import { PlatformUnavailableError } from "../platform.js";
 import { attemptRef } from "../control/attempts.js";
@@ -302,7 +303,9 @@ export async function loadRecoveryRuntime(input: {
       ),
       "successor-effect-binding-invalid",
     );
-    const terminal = suffix.filter((event) => terminals.has(event.event));
+    const terminal = suffix.filter(
+      (event) => terminals.has(event.event) && hasCurrentWriterAuthority(event, suffix),
+    );
     requireRuntime(
       terminal.length <= 1 &&
         (!terminal.length ||

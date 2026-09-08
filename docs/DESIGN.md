@@ -118,17 +118,18 @@ factory controller run OWNER/REPO --repo /absolute/path/to/repository
 ```
 
 An explicit chat/MCP activation writes a durable request and returns; the controller discovers it,
-acquires the repository and Objective leases, and continues without holding the chat turn open. The
+acquires the Objective lease, and continues without holding the chat turn open. The
 controller shares one CPU, memory, backend, and GitHub-rate-limit pool across active Objectives.
 The immutable controller ceiling defaults to two Objectives (configurable 1–32); fair admission
 allows dependency-ready regular or native-stack workers to run concurrently within shared limits.
 Activations beyond that ceiling remain durable and queued. Plugin installation never starts or installs the controller;
 service installation is a separate explicit user action.
 
-Each controller process acquires the repository lease under one generated controller identity and
-epoch. That same identity is recorded with every Objective Supervisor observation and fences
-admission and integration across the checkout. Restart or takeover acquires a new identity/epoch;
-process-local queues and cursors never survive as authority.
+The unattended service uses a repository lease only to elect its discovery scheduler. Its identity
+is an observation, not permission for an Objective mutation. Independent foreground sessions acquire
+their own Objective leases and share atomic capacity reservations with the service. A crashed service
+does not prevent those sessions from starting unrelated Objectives. Process-local queues and cursors
+never survive as authority.
 
 The foreground compatibility entry point remains:
 
@@ -265,13 +266,13 @@ second compilation. An inadequate durable graph escalates; an explicitly authori
 boundary for a different graph. See
 [`decisions/0002-immutable-graph-recovery.md`](decisions/0002-immutable-graph-recovery.md).
 
-## Repository-controller and Director leases
+## Objective authority and shared resources
 
-Exactly one repository controller owns admission and integration for a checkout. Its custom-ref
-lease records one generated controller ID, policy digest, epoch, sequence, and server-relative
-expiry. All Objective Supervisors started by that process carry this controller observation and
-recheck it at mutation boundaries. A second process cannot become an additional scheduler under the
-same identity; it must wait or acquire a later fenced epoch after expiry/release.
+The repository-controller lease elects one unattended discovery service; it is not a repository data
+lock. Normal issue, comment, receipt, projection and PR publication writes do not acquire or recheck
+it. Independent sessions coordinate capacity using a short custom-ref CAS transaction, not an
+execution-long lease. One-time import of older resource reservations and explicit scheduler ceiling
+changes are genuine shared-state boundaries. See [the locking audit](OBJECTIVE-AUTHORITY.md).
 
 Exactly one Director may schedule or integrate one Objective at a time. The lease is a commit chain
 under a custom ref such as `refs/clockgrove-factory/leases/objective-166`.
@@ -280,7 +281,17 @@ Lease mutation uses GitHub GraphQL `updateRefs`, not REST `updateRef`. Every upd
 `beforeOid` and `afterOid`; the stale caller fails atomically if the ref no longer points to the
 observed commit. The new commit records holder, run ID, monotonically increasing epoch and sequence,
 server-relative expiry, and policy digest. Launch, budget reservation, publication, validation, and
-integration all recheck current lease ownership and epoch.
+integration recheck current Objective ownership and epoch at their actual mutation boundaries.
+Queued operations capture their original Objective generation before waiting. The concrete GitHub
+transport checks it after quota admission and immediately before dispatch; control helpers avoid
+duplicate preflight reads only when that transport guarantee is present. Same-epoch renewal does
+not invalidate an operation. A new epoch cannot be lent to an old queued callback.
+
+Comment and receipt retries retain their idempotency identity and sequence validation. Writer
+generation is separate from original attempt or provider-accounting generation. GitHub's comment
+API cannot atomically compare a lease and append a comment: an already-dispatched request cannot be
+unsent. Delayed receipts must not grant fresh lifecycle control authority after an Objective takeover;
+historical outputs and liabilities remain subject to exact recovery and accounting checks.
 
 The default lease lasts ten minutes and renews with two minutes remaining. A renewal advances the
 lease commit and sequence but not its fencing epoch, so already-running operations from that same
@@ -541,12 +552,21 @@ clock skew is not interpreted as billing or cleanup evidence. Missing completion
 liability unresolved and blocks automatic replacement. A partial rebase publication replays from the
 last complete publication binding rather than pairing an old head with a newer validation receipt.
 The runtime and fault qualification of this path remains open until the implementation testing batch.
-Immediately before each regular or stacked merge, integration is repository-fenced and Factory
+Immediately before each regular or stacked merge, Factory acquires a short claim for the destination
+branch and
 rechecks the exact validated head, current stack/base relationship, current branch rules, required
 checks, leases, and mergeability. A lower-layer rebase invalidates every affected descendant receipt
 before validation is rerun. Parallel workers therefore cannot merge sequentially from the same stale
 base. Native stacks are part of the product scope; completion requires their live conformance
 matrix.
+
+An owned Git ref update uses expected-before-SHA CAS. GitHub's regular PR merge endpoint checks the
+head SHA, not an expected default-branch SHA. Factory therefore rechecks the base and exact validation
+under its branch claim and verifies the resulting squash parent and tree. An external branch writer
+can still race that endpoint; a mismatch is a failure, not successful validated integration. A
+dispatched but uncertain merge retains only that branch's reconciliation claim; it grants no
+repository-wide exclusion over Objective execution or publication. Model work and validation occur
+outside the claim.
 
 Immediately before merge, Factory rechecks lease epoch, policy digest, validated SHA, checks,
 mergeability, branch rules, scope, and semantic acceptance. Integration is a reversible squash merge.

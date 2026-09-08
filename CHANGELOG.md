@@ -6,6 +6,9 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Added
 
+- Unify Work Item ownership and attempt admission in an issue-scoped CAS ledger, preserving
+  original recovery identities and unknown liabilities through a permanent legacy-writer bridge.
+
 - Opt-in installed two-Objective refill and failure/conflict qualification scenarios, with
   exact peer provenance, original-work accounting and safe closeout requirements. Their presence
   does not imply a live qualification pass or measured throughput savings.

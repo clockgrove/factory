@@ -1795,7 +1795,9 @@ describe("Supervisor parallel independent sibling integration", () => {
           // The pending publication completes outside this observation. Its retry
           // deadline remains in the future, so the next snapshot must defer receipt
           // repair without blocking the third sibling behind it.
-          f.git("merge", "--squash", f.heads[0]);
+          const head = f.heads[0];
+          if (!head) throw new Error("missing first sibling head");
+          f.git("merge", "--squash", head);
           f.git("commit", "-qm", "external merge PR 18");
           f.mergeShas.set(18, f.git("rev-parse", "HEAD"));
           f.snapshot.workItems[0]!.linkedPullRequests[0]!.state = "MERGED";

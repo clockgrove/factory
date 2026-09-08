@@ -12430,7 +12430,7 @@ export class FactorySupervisor {
       fairnessRevision,
       maximumMs,
       retryDeadlines: [...this.#integrationWaits.values()].map((wait) => wait.until),
-      signal: this.#options.signal,
+      ...(this.#options.signal ? { signal: this.#options.signal } : {}),
     });
     if (settled?.error) throw settled.error;
   }

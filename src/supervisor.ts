@@ -78,6 +78,10 @@ export {
   type GraphProjectionExpectation,
 } from "./control/graph-evidence.js";
 import { GitHubControlStore } from "./control/github-store.js";
+import {
+  SharedCapacityCoordinator,
+  type SharedCapacityOwner,
+} from "./controller/shared-capacity.js";
 import { materializePinnedCompilationTree } from "./execution/pinned-compilation-tree.js";
 import {
   assertLocalLfsAvailable,
@@ -269,7 +273,10 @@ import {
   isIntegrationValidationBackend,
   isLocalIntegrationValidationBackend,
   unreconciledCapacityReservations,
+  type CapacityLimits,
   type CapacityReservation,
+  type CapacityReservationResult,
+  type CapacitySnapshot,
 } from "./scheduling/capacity-ledger.js";
 import { rankReadyWorkItems } from "./scheduling/priority.js";
 import { validatePriorityFieldDefinition } from "./scheduling/github-priority.js";
@@ -325,6 +332,8 @@ export interface SupervisorOptions {
   backendRegistry?: BackendRegistry;
   /** RepositoryController supplies one instance to every Objective. */
   repositoryResources?: RepositorySupervisorResources;
+  /** Durable repository-wide capacity authority supplied by production hosts. */
+  sharedCapacity?: SharedCapacityCoordinator;
   /** Outer repository-controller fence, checked before every GitHub mutation. */
   repositoryFence?: () => Promise<void>;
   /** A service stop releases ownership without durably cancelling the run. */
@@ -351,6 +360,7 @@ export interface RepositorySupervisorResources {
   mutationScheduler: MutationScheduler;
   integration: <T>(operation: () => Promise<T>) => Promise<T>;
   capacityLedger: CapacityLedger;
+  sharedCapacity?: SharedCapacityCoordinator;
   resourceSampler: ResourceSampler;
   fairness: ObjectiveFairness;
   controllerLimits: { maxLocalWorkers: number; maxPaidWorkers: number };
@@ -780,9 +790,36 @@ export class LeaseController {
 
   /** Fence every externally visible mutation using a current ref observation. */
   async guardMutation(waitedMs: number): Promise<void> {
+    return this.captureMutationFence()(waitedMs);
+  }
+
+  /**
+   * Capture the operation's generation before it enters the shared mutation
+   * queue. Reassigning a Supervisor to a later lease can therefore never lend
+   * the new epoch to an already-queued write.
+   */
+  captureMutationFence(): (waitedMs: number) => Promise<void> {
     if (this.#fatal) throw this.#fatal;
-    void waitedMs;
-    await this.manager.assertCurrent(this.lease);
+    const expected = this.lease;
+    return async (waitedMs: number) => {
+      if (this.#fatal) throw this.#fatal;
+      void waitedMs;
+      await this.manager.assertCurrent(expected);
+    };
+  }
+
+  /** Cheap envelope/scope check; the captured fence performs the remote read. */
+  assertMutationIdentity(lease: LeaseState): void {
+    const current = this.lease;
+    if (
+      lease.objective !== current.objective ||
+      lease.runId !== current.runId ||
+      lease.holder !== current.holder ||
+      lease.epoch !== current.epoch ||
+      lease.policyDigest !== current.policyDigest
+    ) {
+      throw new LeaseLostError("Objective mutation belongs to another lease generation");
+    }
   }
 
   async renewIfNeeded(force = false): Promise<void> {
@@ -805,11 +842,9 @@ export class LeaseController {
 
 /** Fence a new provider call without blocking cleanup after ownership loss. */
 export async function runWithExternalAdmissionBoundary<T>(
-  repositoryFence: () => Promise<void>,
   objectiveFence: () => Promise<void>,
   operation: () => Promise<T>,
 ): Promise<T> {
-  await repositoryFence();
   await objectiveFence();
   return operation();
 }
@@ -1096,6 +1131,7 @@ export class FactorySupervisor {
   readonly #concurrency: ConcurrencyLimiter;
   readonly #mutations: MutationScheduler;
   readonly #capacity: CapacityLedger;
+  readonly #sharedCapacity: SharedCapacityCoordinator | undefined;
   readonly #resourceSampler: CachedResourceSampler;
   readonly #fairness: ObjectiveFairness;
   readonly #controllerLimits: {
@@ -1141,6 +1177,7 @@ export class FactorySupervisor {
       });
     const scheduling = normalizeSchedulingPolicy(this.#policy);
     this.#capacity = shared?.capacityLedger ?? new CapacityLedger();
+    this.#sharedCapacity = shared?.sharedCapacity ?? options.sharedCapacity;
     this.#resourceSampler = new CachedResourceSampler(
       shared?.resourceSampler ?? new LinuxResourceSampler(),
       scheduling.capacity.local.sampleIntervalSeconds * 1_000,
@@ -1257,7 +1294,6 @@ export class FactorySupervisor {
       );
     }
     return runWithExternalAdmissionBoundary(
-      this.#options.repositoryFence ?? (async () => {}),
       () => this.#lease.assertGeneration("admission"),
       async () => {
         const binding = this.#activationBinding();
@@ -1274,9 +1310,8 @@ export class FactorySupervisor {
               "operator withdrew the activation through GitHub",
             );
           }
-          // The receipt read can span either authority change. Admission still
-          // belongs to both current generations, never the pre-read observation.
-          await this.#options.repositoryFence?.();
+          // The receipt read can span an authority change. Admission still
+          // belongs to the current Objective generation, never the pre-read observation.
           await this.#lease.assertGeneration("admission");
         }
         return operation();
@@ -1414,7 +1449,6 @@ export class FactorySupervisor {
     const recovery = this.#options.recovery;
     if (!recovery) throw new Error("source reconciliation requires its acknowledged recovery");
     for (let repaired = 0; repaired <= 100; repaired++) {
-      await this.#guardMutation(0);
       const snapshot = await this.#reader.readObjective(objective);
       const input = {
         objective,
@@ -1448,7 +1482,6 @@ export class FactorySupervisor {
         sequence: this.#sequences.take(),
         at: (await this.#store.serverTime()).toISOString(),
       });
-      await this.#guardMutation(0);
       try {
         await this.#lease.use(() =>
           this.#store.addIssueComment(
@@ -1471,12 +1504,77 @@ export class FactorySupervisor {
     throw new Error("source reconciliation exceeded the compiled work-item bound");
   }
 
-  #releaseCapacity(key: string): void {
-    this.#capacity.release(key);
+  #capacityOwner(lease: LeaseState): SharedCapacityOwner {
+    return {
+      objective: lease.objective,
+      runId: lease.runId,
+      directorEpoch: lease.epoch,
+      policyDigest: lease.policyDigest,
+    };
+  }
+
+  async #capacitySnapshot(): Promise<CapacitySnapshot> {
+    return this.#sharedCapacity ? this.#sharedCapacity.snapshot() : this.#capacity.snapshot();
+  }
+
+  async #reserveCapacity(
+    expectedGeneration: number,
+    reservation: CapacityReservation,
+    limits: CapacityLimits,
+  ): Promise<CapacityReservationResult> {
+    if (!this.#sharedCapacity)
+      return this.#capacity.tryReserve(expectedGeneration, reservation, limits);
+    const result = await this.#lease.use((lease) =>
+      this.#sharedCapacity!.reserve(this.#capacityOwner(lease), reservation, limits),
+    );
+    const snapshot = await this.#sharedCapacity.snapshot();
+    return result.reserved
+      ? { reserved: true, reservation, generation: snapshot.generation }
+      : {
+          reserved: false,
+          code: result.code === "released-reservation" ? "duplicate-reservation" : result.code,
+          generation: snapshot.generation,
+        };
+  }
+
+  async #transitionCapacity(
+    expectedGeneration: number,
+    fromKey: string,
+    reservation: CapacityReservation,
+    limits: CapacityLimits,
+  ): Promise<CapacityReservationResult> {
+    if (!this.#sharedCapacity)
+      return this.#capacity.transition(expectedGeneration, fromKey, reservation, limits);
+    const result = await this.#lease.use((lease) =>
+      this.#sharedCapacity!.transition(
+        this.#capacityOwner(lease),
+        fromKey,
+        reservation,
+        limits,
+      ),
+    );
+    const snapshot = await this.#sharedCapacity.snapshot();
+    return result.reserved
+      ? { reserved: true, reservation, generation: snapshot.generation }
+      : {
+          reserved: false,
+          code: result.code === "released-reservation" ? "duplicate-reservation" : result.code,
+          generation: snapshot.generation,
+        };
+  }
+
+  async #releaseCapacity(key: string): Promise<void> {
+    if (this.#sharedCapacity) {
+      await this.#lease.use((lease) =>
+        this.#sharedCapacity!.release(this.#capacityOwner(lease), key),
+      );
+    } else {
+      this.#capacity.release(key);
+    }
     this.#fairness.changed();
   }
 
-  #reconcileObjectiveCapacity(objective: number, items: DerivedWorkItem[]) {
+  async #reconcileObjectiveCapacity(objective: number, items: DerivedWorkItem[]) {
     const scheduling = normalizeSchedulingPolicy(this.#policy);
     const reservations = deriveCapacityReservations(
       items.map((item) => {
@@ -1507,7 +1605,40 @@ export class FactorySupervisor {
         };
       }),
     );
-    return this.#capacity.reconcileObjective(objective, reservations);
+    if (!this.#sharedCapacity) return this.#capacity.reconcileObjective(objective, reservations);
+    const verifiedPredecessors = this.#recoveryRuntime
+      ? [
+          ...new Map(
+            items.flatMap((item) =>
+              (item.factoryEvents ?? []).flatMap((event) => {
+                if (
+                  event.kind !== "attempt" ||
+                  event.event !== "AttemptReserved" ||
+                  event.runId === this.#run.runId
+                )
+                  return [];
+                const owner: SharedCapacityOwner = {
+                  objective: event.objective,
+                  runId: event.runId,
+                  directorEpoch: event.directorEpoch,
+                  policyDigest: event.policyDigest,
+                };
+                return [
+                  [`${owner.runId}:${owner.directorEpoch}:${owner.policyDigest}`, owner] as const,
+                ];
+              }),
+            ),
+          ).values(),
+        ]
+      : [];
+    await this.#lease.use((lease) =>
+      this.#sharedCapacity!.reconcile(
+        this.#capacityOwner(lease),
+        reservations,
+        verifiedPredecessors,
+      ),
+    );
+    return this.#sharedCapacity.snapshot();
   }
 
   #deriveObjective(snapshot: Snapshot): ReturnType<typeof derive> {
@@ -2516,7 +2647,6 @@ export class FactorySupervisor {
       priorLease ?? undefined,
     );
     // Current Git tree is only the lease's storage parent, not an execution base.
-    await this.#options.repositoryFence?.();
     const acquired = await this.#leases.acquire(
       {
         objective: run.objective,
@@ -2539,7 +2669,6 @@ export class FactorySupervisor {
     heartbeat.unref();
     const assertCurrent = async () => {
       if (heartbeatError) throw heartbeatError;
-      await this.#options.repositoryFence?.();
       await this.#lease.assert();
       const current = await this.#reader.readObjective(run.objective);
       assertActivation(snapshotEvents(current));
@@ -2578,7 +2707,6 @@ export class FactorySupervisor {
         ...(cancellation ? [cancellation] : []),
       ]);
       this.#fenceSnapshot(current);
-      await this.#options.repositoryFence?.();
       await this.#lease.assert();
       return current;
     };
@@ -3505,7 +3633,6 @@ export class FactorySupervisor {
           );
           if (cancellation)
             return terminalAfterDrain("FactoryRunCancelled", "operator requested cancellation");
-          await this.#options.repositoryFence?.();
           await this.#lease.assert();
           this.#options.signal?.throwIfAborted();
           if (!finalSnapshot.closed) await this.#store.closeIssue(finalSnapshot.number);
@@ -3668,6 +3795,7 @@ export class FactorySupervisor {
               try {
                 await materializeLocalLfsAssets(this.#options.repository, tree.path, base.oid);
                 await this.#admitModelInvocation(compilationInvocationId, snapshot.id);
+                const observedCapacity = await this.#capacitySnapshot();
                 return await this.#management.compile(
                   {
                     repository: tree.path,
@@ -3686,7 +3814,7 @@ export class FactorySupervisor {
                       collectCompilationEvidence(items, {
                         objective: snapshot.number,
                         policy: this.#policy,
-                        capacity: this.#capacity.snapshot(),
+                        capacity: observedCapacity,
                         repositoryLimits: this.#controllerLimits,
                         deliveryMode: this.#deliverySelection.selected,
                         nowMs: Date.now(),
@@ -4406,7 +4534,7 @@ export class FactorySupervisor {
             all.findIndex((candidate) => candidate.number === item.number) === index,
         );
         const scheduling = normalizeSchedulingPolicy(this.#policy);
-        const capacity = this.#reconcileObjectiveCapacity(objective.number, objective.items);
+        const capacity = await this.#reconcileObjectiveCapacity(objective.number, objective.items);
         this.#budgetEvents = deduplicateFactoryEvents([
           ...this.#budgetEvents,
           ...this.#accountingEvents(snapshotEvents(snapshot)),
@@ -4790,7 +4918,10 @@ export class FactorySupervisor {
         for (const admission of safeAdmissions) {
           if (
             admission.reservation.local &&
-            !this.#fairness.mayAdmit(objective.number, this.#capacity.snapshot().reservations)
+            !this.#fairness.mayAdmit(
+              objective.number,
+              (await this.#capacitySnapshot()).reservations,
+            )
           )
             break;
           const item = objective.items.find(
@@ -4798,7 +4929,7 @@ export class FactorySupervisor {
           )!;
           activeExecutions.throwIfFailed();
           this.#options.signal?.throwIfAborted();
-          const committed = this.#capacity.tryReserve(
+          const committed = await this.#reserveCapacity(
             expectedCapacityGeneration,
             admission.reservation,
             limits,
@@ -4812,23 +4943,31 @@ export class FactorySupervisor {
           if (admission.reservation.local) this.#fairness.noteAdmission(objective.number);
           started.push(item.number);
           let executionCapacityReleased = false;
-          const releaseExecutionCapacity = () => {
+          const releaseExecutionCapacity = async (alreadyReleased = false) => {
             if (executionCapacityReleased) return;
+            if (alreadyReleased) {
+              executionCapacityReleased = true;
+              return;
+            }
+            await this.#releaseCapacity(admission.reservation.key);
             executionCapacityReleased = true;
-            this.#releaseCapacity(admission.reservation.key);
           };
           activeExecutions.start(
             item.number,
-            () =>
-              this.#execute(
-                item,
-                deadline,
-                admission,
-                releaseExecutionCapacity,
-                deliveryBases.get(item.number),
-                executionAbort.signal,
-              ),
-            releaseExecutionCapacity,
+            async () => {
+              try {
+                await this.#execute(
+                  item,
+                  deadline,
+                  admission,
+                  releaseExecutionCapacity,
+                  deliveryBases.get(item.number),
+                  executionAbort.signal,
+                );
+              } finally {
+                await releaseExecutionCapacity();
+              }
+            },
           );
         }
         if (started.length > 0) {
@@ -4886,7 +5025,7 @@ export class FactorySupervisor {
     item: DerivedWorkItem,
     objectiveDeadline: number,
     admission: AdmissionProposal,
-    releaseExecutionCapacity: () => void,
+    releaseExecutionCapacity: (alreadyReleased?: boolean) => Promise<void>,
     deliveryBase?: DeliveryExecutionBase,
     executionSignal?: AbortSignal,
     recovered?: CollectedAttemptContinuation,
@@ -4910,7 +5049,7 @@ export class FactorySupervisor {
     item: DerivedWorkItem,
     objectiveDeadline: number,
     admission: AdmissionProposal,
-    releaseExecutionCapacity: () => void,
+    releaseExecutionCapacity: (alreadyReleased?: boolean) => Promise<void>,
     deliveryBase?: DeliveryExecutionBase,
     executionSignal?: AbortSignal,
     recovered?: CollectedAttemptContinuation,
@@ -4940,6 +5079,7 @@ export class FactorySupervisor {
     let validationCapacity: CapacityReservation | undefined;
     let validationCapacityRecorded = false;
     let validationCapacityReconciled = false;
+    let validationCapacityReleased = false;
     let retryableArtifact: NormalizedArtifact | undefined;
     let retainCollectedSource = false;
     let executionCleanupConfirmed = Boolean(recovered);
@@ -5649,7 +5789,7 @@ export class FactorySupervisor {
             continue;
           }
         }
-        const current = this.#capacity.snapshot();
+        const current = await this.#capacitySnapshot();
         const limits = admissionCapacityLimits(
           this.#policy,
           validationResource,
@@ -5662,8 +5802,8 @@ export class FactorySupervisor {
           this.#controllerLimits,
         );
         const transitioned = recovered
-          ? this.#capacity.tryReserve(current.generation, validationCapacity, limits)
-          : this.#capacity.transition(
+          ? await this.#reserveCapacity(current.generation, validationCapacity, limits)
+          : await this.#transitionCapacity(
               current.generation,
               admission.reservation.key,
               validationCapacity,
@@ -5675,7 +5815,7 @@ export class FactorySupervisor {
         }
         await sleep(this.#options.pollIntervalMs ?? 2_000, executionSignal);
       }
-      releaseExecutionCapacity();
+      await releaseExecutionCapacity(!recovered);
       const scopedValidation = validator
         ? null
         : await this.#scopedValidation(
@@ -5777,7 +5917,8 @@ export class FactorySupervisor {
         });
         validationCapacityReconciled = true;
       });
-      this.#releaseCapacity(validationCapacity.key);
+      await this.#releaseCapacity(validationCapacity.key);
+      validationCapacityReleased = true;
       await this.#lease.use(async (lease) => {
         const validationDuration = Date.now() - validationStarted;
         const events = await this.#recorder.budgetBatch([
@@ -6299,7 +6440,10 @@ export class FactorySupervisor {
       } catch (error) {
         finalizationError ??= error;
       } finally {
-        if (validationCapacity) this.#releaseCapacity(validationCapacity.key);
+        if (validationCapacity && !validationCapacityReleased) {
+          await this.#releaseCapacity(validationCapacity.key);
+          validationCapacityReleased = true;
+        }
       }
       if (finalizationError) {
         // An orderly hold is not permission to suppress a later cleanup failure
@@ -6505,7 +6649,8 @@ export class FactorySupervisor {
       phase: "execution",
       backendId: reservation.backend,
     });
-    this.#capacity.release(executionKey);
+    await this.#releaseCapacity(executionKey);
+    const capacity = await this.#capacitySnapshot();
     const admission: AdmissionProposal = {
       workItem: item.number,
       backendId: reservation.backend,
@@ -6519,7 +6664,7 @@ export class FactorySupervisor {
         criticalPathLength: original.criticalPathLength,
         unfinishedDownstream: original.unfinishedDownstream,
       },
-      capacityGeneration: this.#capacity.snapshot().generation,
+      capacityGeneration: capacity.generation,
       reservation: {
         key: executionKey,
         objective: reservation.objective,
@@ -6566,7 +6711,7 @@ export class FactorySupervisor {
       item,
       deadline,
       admission,
-      () => {},
+      async () => {},
       deliveryBase,
       this.#options.signal,
       recovered,
@@ -7280,7 +7425,6 @@ export class FactorySupervisor {
           this.#budgetEvents.push(...recovered);
         }
         this.#modelInvocations.claim(key);
-        await this.#options.repositoryFence?.();
         await this.#lease.assertGeneration("admission");
       }),
     );

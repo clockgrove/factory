@@ -219,7 +219,7 @@ export class ReviewCheckpointManager {
     identity: ReviewIdentity;
     result: ReviewResult;
   }): Promise<ReviewCheckpointRecord> {
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const identity = ReviewIdentitySchema.parse(args.identity);
     if (identity.objective !== args.lease.objective || identity.runId !== args.lease.runId) {
       throw new Error("semantic review identity is fenced from the current lease");
@@ -251,7 +251,7 @@ export class ReviewCheckpointManager {
         `Factory semantic review for Work Item #${identity.workItem}\n\n` +
         `Factory-Review-Identity: ${identityDigest}`,
     });
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const ref = reviewCheckpointRef(identity);
     let won: boolean;
     try {

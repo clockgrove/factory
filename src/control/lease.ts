@@ -10,6 +10,14 @@ export interface GitCommitObject {
 }
 
 export interface LeaseStore {
+  /**
+   * The concrete transport rechecks the Objective lease after any mutation
+   * queue wait and immediately before sending the request. Control helpers may
+   * then avoid an earlier duplicate read; standalone stores omit this marker.
+   */
+  readonly objectiveMutationFenceAtDispatch?: boolean;
+  /** Synchronous scope check paired with the dispatch-time fence guarantee. */
+  assertMutationIdentity?(lease: LeaseState): void;
   readRef(ref: string): Promise<string | null>;
   /** Optional single-call ref observation carrying authoritative server time. */
   readRefWithServerTime?(ref: string): Promise<{ oid: string | null; serverTime: Date }>;
@@ -267,6 +275,21 @@ export class LeaseManager {
     ) {
       throw new LeaseLostError();
     }
+  }
+
+  /**
+   * Preserve the control-layer fence for standalone stores while allowing the
+   * production GitHub transport to own the single authoritative dispatch-time
+   * check.
+   */
+  async assertMutationAuthorized(lease: LeaseState): Promise<void> {
+    if (this.#store.objectiveMutationFenceAtDispatch) {
+      if (!this.#store.assertMutationIdentity)
+        throw new Error("Objective mutation fence does not expose its bound lease identity");
+      this.#store.assertMutationIdentity(lease);
+      return;
+    }
+    await this.assertCurrent(lease);
   }
 
   /** Named boundary check used immediately before externally visible effects.

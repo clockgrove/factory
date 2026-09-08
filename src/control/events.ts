@@ -79,7 +79,7 @@ export class LifecycleRecorder {
     protocolMin: string;
     protocolMax: string;
   }): Promise<FactoryEvent> {
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const now = await this.store.serverTime();
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
@@ -113,7 +113,7 @@ export class LifecycleRecorder {
     event: "RunPauseAcknowledged" | "RunDrainCompleted";
     commandRequestId: string;
   }): Promise<FactoryEvent> {
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const now = await this.store.serverTime();
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
@@ -147,7 +147,7 @@ export class LifecycleRecorder {
     graphRef: string;
     graphBlobSha: string;
   }): Promise<FactoryEvent> {
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const now = await this.store.serverTime();
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
@@ -182,7 +182,7 @@ export class LifecycleRecorder {
     projectionRef: string;
     projectionBlobSha: string;
   }): Promise<FactoryEvent> {
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const now = await this.store.serverTime();
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
@@ -213,7 +213,7 @@ export class LifecycleRecorder {
     sequence: number;
     selection: DeliverySelection;
   }): Promise<FactoryEvent> {
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const now = await this.store.serverTime();
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
@@ -253,7 +253,7 @@ export class LifecycleRecorder {
     asynchronousMergeUuid?: string;
     reason?: string;
   }): Promise<FactoryEvent> {
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     if (args.receipt.runId !== args.lease.runId) {
       throw new Error("publication receipt belongs to another run");
     }
@@ -309,7 +309,7 @@ export class LifecycleRecorder {
     evidence: ValidationEvidence;
     sequence: number;
   }): Promise<FactoryEvent> {
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     assertReservationLease(args.reservation, args.lease);
     const now = await this.store.serverTime();
     const event = parseFactoryEvent({
@@ -356,7 +356,7 @@ export class LifecycleRecorder {
     ) {
       throw new Error("budget event batch must share one lease, reservation, and destination");
     }
-    await this.leases.assertCurrent(first.lease);
+    await this.leases.assertMutationAuthorized(first.lease);
     assertReservationLease(first.reservation, first.lease);
     const now = await this.store.serverTime();
     const events = args.map((value) => {
@@ -435,7 +435,7 @@ export class LifecycleRecorder {
     policyDigest?: string;
     reportedModelUsage?: ReportedModelUsage;
   }): Promise<FactoryEvent> {
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     if (
       args.modelInvocationId &&
       (args.policyDigest !== args.lease.policyDigest ||

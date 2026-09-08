@@ -240,7 +240,7 @@ export class NativeRebaseCheckpointStore {
         identity.directorEpoch <= args.lease.epoch,
       "lease scope mismatch",
     );
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const value = parseDocument({
       protocol: "clockgrove.factory/native-rebase-checkpoint-v1",
       identity,
@@ -267,19 +267,19 @@ export class NativeRebaseCheckpointStore {
     };
     const existing = await this.load(identity);
     if (existing) return winner(existing);
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const blobOid = await this.store.createBlob(Buffer.from(JSON.stringify(value), "utf8"));
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const treeOid = await this.store.createTree({
       entries: [{ path: PATH, mode: "100644", type: "blob", sha: blobOid }],
     });
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     const commitOid = await this.store.createCommit({
       treeOid,
       parentOids: [identity.headSha],
       message: `Factory native rebase for Work Item #${identity.workItem}\n\nFactory-Native-Rebase: ${value.identityDigest}`,
     });
-    await this.leases.assertCurrent(args.lease);
+    await this.leases.assertMutationAuthorized(args.lease);
     try {
       await this.store.createRef(nativeRebaseCheckpointRef(identity), commitOid);
     } catch (error) {

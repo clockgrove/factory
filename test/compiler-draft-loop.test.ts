@@ -12,6 +12,7 @@ import {
 } from "../src/control/compiler-drafts.js";
 import {
   runCompilerDraftLoop,
+  CompilerDraftStopError,
   type CompilerDraftCallbacks,
 } from "../src/evaluation/compiler-draft-loop.js";
 const BASE_SHA = "a".repeat(40);
@@ -329,6 +330,89 @@ describe("compiler draft durable repair", () => {
       throw new Error("after terminal");
     };
     expect((await runCompilerDraftLoop(args)).status).toBe("accepted");
+  });
+  it.each(["compile", "judge"])(
+    "stops on %s accounting persistence failure and resumes known output",
+    async (stage) => {
+      const args = await setup();
+      const recordUsage = args.callbacks.recordUsage;
+      args.callbacks.recordUsage = async (id, phase, usage) => {
+        if (phase === stage) throw new Error("ledger unavailable");
+        await recordUsage(id, phase, usage);
+      };
+      await expect(runCompilerDraftLoop(args)).rejects.toThrow("accounting reconciliation failed");
+      const records = await args.manager.load(args.binding);
+      expect(records.at(-1)).toMatchObject({
+        kind: "accounting-failure",
+        payload: { stage, error: "ledger unavailable" },
+      });
+      const completed = records.filter((r) => r.kind === "result");
+      expect(completed.at(-1)?.payload.stage).toBe(stage);
+      expect(records.some((r) => r.kind === "selection")).toBe(false);
+      args.callbacks.recordUsage = recordUsage;
+      expect((await runCompilerDraftLoop(args)).status).toBe("accepted");
+      expect(
+        vi
+          .mocked(args.callbacks.invoke)
+          .mock.calls.filter(([request]) => request.stage === stage && request.revision === 0),
+      ).toHaveLength(1);
+    },
+  );
+  it("rejects contradictory output after a terminal checkpoint", async () => {
+    const args = await setup();
+    const delegate = args.callbacks.invoke;
+    args.callbacks.invoke = async (request, checkpoint) => {
+      const result = await delegate(request, checkpoint);
+      return { ...result, value: { contradictory: true } };
+    };
+    expect(await runCompilerDraftLoop(args)).toMatchObject({
+      status: "stopped",
+      reason: "conflicting-terminal-output",
+    });
+    expect((await args.manager.load(args.binding)).some((r) => r.kind === "selection")).toBe(false);
+  });
+  it("stops on explicit judge abstention without consuming a repair", async () => {
+    const args = await setup();
+    args.callbacks.accept = () => {
+      throw new CompilerDraftStopError("material-ambiguity");
+    };
+    expect(await runCompilerDraftLoop(args)).toMatchObject({
+      status: "stopped",
+      reason: "material-ambiguity",
+    });
+    expect(
+      vi.mocked(args.callbacks.invoke).mock.calls.some(([request]) => request.stage === "repair"),
+    ).toBe(false);
+  });
+  it("detects unchanged rooted findings despite cosmetic finding identifiers", async () => {
+    const args = await setup();
+    const invoke = args.callbacks.invoke;
+    args.callbacks.invoke = async (request, checkpoint) =>
+      request.stage === "judge"
+        ? {
+            value: {
+              accepted: false,
+              findings: [
+                {
+                  id: `finding-${request.revision}`,
+                  severity: "blocking",
+                  dimension: "coverage",
+                  obligationIds: ["a"],
+                  itemIds: ["feature"],
+                  evidenceIds: ["objective"],
+                },
+              ],
+            },
+            usage: { inputTokens: 2, outputTokens: 1 },
+          }
+        : invoke(request, checkpoint);
+    expect(await runCompilerDraftLoop(args)).toMatchObject({
+      status: "stopped",
+      reason: "unchanged-blockers",
+    });
+    expect(
+      vi.mocked(invoke).mock.calls.filter(([request]) => request.stage === "repair"),
+    ).toHaveLength(1);
   });
   it("fences conflicting records and writes after selection", async () => {
     const args = await setup();

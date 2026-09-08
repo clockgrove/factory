@@ -22,7 +22,15 @@ const RecordSchema = z
     protocol: z.literal("clockgrove.factory/compiler-draft-v1"),
     binding: BindingSchema,
     sequence: z.number().int().min(0).max(255),
-    kind: z.enum(["started", "invocation", "result", "validation", "selection", "stopped"]),
+    kind: z.enum([
+      "started",
+      "invocation",
+      "result",
+      "validation",
+      "selection",
+      "stopped",
+      "accounting-failure",
+    ]),
     payload: z.record(z.unknown()),
   })
   .strict();

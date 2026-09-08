@@ -25,6 +25,9 @@ const UsageSchema = z
       value.cachedInputTokens === undefined || value.cachedInputTokens <= value.inputTokens,
   );
 export type DraftUsage = z.infer<typeof UsageSchema>;
+export class CompilerDraftStopError extends Error {}
+class CompilerDraftAccountingError extends Error {}
+
 export type DraftStage = "inventory" | "compile" | "repair" | "judge";
 export interface DraftInvocation {
   invocationId: string;
@@ -98,6 +101,24 @@ export async function runCompilerDraftLoop(args: {
     records.push(record);
     return record;
   };
+  const recordUsage = async (invocationId: string, stage: DraftStage, usage: DraftUsage) => {
+    try {
+      await callbacks.recordUsage(invocationId, stage, usage);
+    } catch (error) {
+      if (!records.some((item) => item.kind === "selection" || item.kind === "stopped"))
+        await append("accounting-failure", {
+          invocationId,
+          stage,
+          error:
+            error instanceof Error
+              ? error.message.slice(0, 4000)
+              : "accounting reconciliation failed",
+        });
+      throw new CompilerDraftAccountingError("compiler accounting reconciliation failed", {
+        cause: error,
+      });
+    }
+  };
   if (!records.length) await append("started", { limits, startedAt: now() });
   const first = records[0];
   if (
@@ -112,7 +133,7 @@ export async function runCompilerDraftLoop(args: {
     const usage = record.payload.usage === null ? null : UsageSchema.parse(record.payload.usage);
     if (usage) {
       tokens += usage.inputTokens + usage.outputTokens;
-      await callbacks.recordUsage(
+      await recordUsage(
         String(record.payload.invocationId),
         record.payload.stage as DraftStage,
         usage,
@@ -167,7 +188,7 @@ export async function runCompilerDraftLoop(args: {
     await append("stopped", { reason });
     return { status: "stopped", reason, records };
   };
-  class Stop extends Error {}
+  class Stop extends CompilerDraftStopError {}
   const invoke = async (
     stage: DraftStage,
     revision: number,
@@ -186,7 +207,10 @@ export async function runCompilerDraftLoop(args: {
       throw new Stop("invocation-input-changed");
     if (completed) {
       if (completed.payload.usage === null) throw new Stop("accounting-unavailable");
-      if (completed.payload.error) throw new Error(String(completed.payload.error));
+      if (completed.payload.error)
+        throw Object.assign(new Error(String(completed.payload.error)), {
+          proposal: completed.payload.proposal,
+        });
       return completed.payload.value;
     }
     if (
@@ -207,11 +231,14 @@ export async function runCompilerDraftLoop(args: {
       inputDigest: draftDigest({ inventory, previous, failure }),
     });
     let saved: DraftInvocationResult | null = null;
+    let contradictory = false;
     const checkpoint = async (result: DraftInvocationResult): Promise<void> => {
       const usage = result.usage === null ? null : UsageSchema.parse(result.usage);
       if (saved) {
-        if (draftDigest(saved) !== draftDigest({ value: result.value, usage }))
+        if (draftDigest(saved) !== draftDigest({ value: result.value, usage })) {
+          contradictory = true;
           throw new Error("conflicting compiler result checkpoint");
+        }
         return;
       }
       await append("result", { invocationId, stage, revision, value: result.value, usage });
@@ -226,6 +253,7 @@ export async function runCompilerDraftLoop(args: {
       await checkpoint(result);
     } catch (error) {
       // A successful terminal checkpoint survives a caller/transport failure after it.
+      if (contradictory) throw new Stop("conflicting-terminal-output");
       if (saved) result = saved;
       else {
         const known =
@@ -239,12 +267,18 @@ export async function runCompilerDraftLoop(args: {
           revision,
           value: null,
           usage,
+          ...(typeof error === "object" &&
+          error !== null &&
+          "proposal" in error &&
+          error.proposal !== undefined
+            ? { proposal: error.proposal }
+            : {}),
           error:
             error instanceof Error ? error.message.slice(0, 4000) : "management invocation failed",
         });
         if (usage) {
           tokens += usage.inputTokens + usage.outputTokens;
-          await callbacks.recordUsage(invocationId, stage, usage);
+          await recordUsage(invocationId, stage, usage);
         } else throw new Stop("accounting-unavailable");
         throw error;
       }
@@ -252,7 +286,7 @@ export async function runCompilerDraftLoop(args: {
     const usage = result.usage;
     if (!usage) throw new Stop("accounting-unavailable");
     tokens += usage.inputTokens + usage.outputTokens;
-    await callbacks.recordUsage(invocationId, stage, usage);
+    await recordUsage(invocationId, stage, usage);
     if (tokens > limits.maxObservedTokens) throw new Stop("observed-token-limit");
     if (now() - Number(first.payload.startedAt) >= limits.deadlineMs)
       throw new Stop("deadline-exhausted");
@@ -265,6 +299,7 @@ export async function runCompilerDraftLoop(args: {
     let previous: CompiledObjective | null = null;
     let failure: unknown = null;
     const seen = new Set<string>();
+    const blockerSets = new Set<string>();
     for (let revision = 0; revision <= limits.maxRepairs; revision++) {
       let graph: CompiledObjective;
       try {
@@ -277,7 +312,11 @@ export async function runCompilerDraftLoop(args: {
         );
         graph = await callbacks.validate(value);
       } catch (error) {
-        if (error instanceof Stop || error instanceof CompilerDraftReservationConflictError)
+        if (
+          error instanceof CompilerDraftStopError ||
+          error instanceof CompilerDraftReservationConflictError ||
+          error instanceof CompilerDraftAccountingError
+        )
           throw error;
         if (
           records.some(
@@ -290,6 +329,12 @@ export async function runCompilerDraftLoop(args: {
           throw new Stop("draft-grounding-changed");
         failure = {
           error: error instanceof Error ? error.message.slice(0, 4000) : "invalid draft",
+          ...(typeof error === "object" &&
+          error !== null &&
+          "proposal" in error &&
+          error.proposal !== undefined
+            ? { proposal: error.proposal }
+            : {}),
         };
         if (
           !records.some((item) => item.kind === "validation" && item.payload.revision === revision)
@@ -326,9 +371,39 @@ export async function runCompilerDraftLoop(args: {
           });
           return { status: "accepted", revision, graphDigest, graph, records };
         }
+        if (
+          verdict &&
+          typeof verdict === "object" &&
+          "findings" in verdict &&
+          Array.isArray(verdict.findings)
+        ) {
+          const roots = verdict.findings
+            .filter(
+              (finding: unknown): finding is Record<string, unknown> =>
+                !!finding &&
+                typeof finding === "object" &&
+                "severity" in finding &&
+                (finding.severity === "blocking" || finding.severity === "material-efficiency"),
+            )
+            .map((finding) => ({
+              dimension: finding.dimension,
+              obligationIds: finding.obligationIds,
+              itemIds: finding.itemIds,
+              evidenceIds: finding.evidenceIds,
+            }));
+          if (roots.length) {
+            const key = draftDigest(roots.map(draftDigest).sort());
+            if (blockerSets.has(key)) throw new Stop("unchanged-blockers");
+            blockerSets.add(key);
+          }
+        }
         failure = verdict;
       } catch (error) {
-        if (error instanceof Stop || error instanceof CompilerDraftReservationConflictError)
+        if (
+          error instanceof CompilerDraftStopError ||
+          error instanceof CompilerDraftReservationConflictError ||
+          error instanceof CompilerDraftAccountingError
+        )
           throw error;
         failure = {
           error: error instanceof Error ? error.message.slice(0, 4000) : "invalid judge verdict",
@@ -337,8 +412,12 @@ export async function runCompilerDraftLoop(args: {
     }
     return await stop("repair-limit-unresolved");
   } catch (error) {
-    if (error instanceof CompilerDraftReservationConflictError) throw error;
-    if (error instanceof Stop) return await stop(error.message);
+    if (
+      error instanceof CompilerDraftReservationConflictError ||
+      error instanceof CompilerDraftAccountingError
+    )
+      throw error;
+    if (error instanceof CompilerDraftStopError) return await stop(error.message);
     return await stop(
       `invalid-inventory: ${error instanceof Error ? error.message.slice(0, 4000) : "unknown"}`,
     );

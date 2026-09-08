@@ -3956,6 +3956,11 @@ export class FactorySupervisor {
                   return await this.#management.compile(context, checkpoint);
                 const inputDigest = compilerEvalDigest(context.objective);
                 const assertInputs = async () => {
+                  await this.#externalAdmission(async () => {});
+                  if (this.#options.signal?.aborted)
+                    throw new RunCancellationRequestedError(
+                      "operator cancelled during draft compilation",
+                    );
                   if (Date.now() >= deadline)
                     throw new Error("Objective deadline exhausted during draft compilation");
                   const fresh = await this.#reader.readObjective(snapshot.number);
@@ -3985,7 +3990,8 @@ export class FactorySupervisor {
                       baseSha: base.oid,
                       inputDigest,
                     },
-                    admit: (id) => this.#admitModelInvocation(id, snapshot.id),
+                    admit: (id) =>
+                      this.#externalAdmission(() => this.#admitModelInvocation(id, snapshot.id)),
                     recordUsage: (id, _stage, usage) =>
                       this.#recordManagementUsage(id, usage, snapshot.id, undefined, `draft-${id}`),
                     assertInputs,
@@ -3995,6 +4001,7 @@ export class FactorySupervisor {
                     deadlineAt: deadline,
                   }),
                 );
+                await assertInputs();
                 if (
                   this.#policy.compilerEvaluation.mode === "report-only" &&
                   !(

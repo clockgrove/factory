@@ -488,6 +488,34 @@ describe("compiler draft durable repair", () => {
     });
     expect(vi.mocked(delegate)).toHaveBeenCalledTimes(1);
   });
+  it("never reconciles disputed usage after a crash following the durable conflict marker", async () => {
+    const args = await setup();
+    const delegate = args.callbacks.invoke;
+    args.callbacks.invoke = async (request, checkpoint) => {
+      const result = await delegate(request, checkpoint);
+      return { ...result, usage: { inputTokens: 900, outputTokens: 800 } };
+    };
+    const append = args.manager.append.bind(args.manager);
+    const crash = vi.spyOn(args.manager, "append").mockImplementation(async (...params) => {
+      if (params[3] === "stopped") throw new Error("process unavailable");
+      const record = await append(...params);
+      if (params[3] === "terminal-conflict") throw new Error("crash after durable conflict");
+      return record;
+    });
+    await expect(runCompilerDraftLoop(args)).rejects.toThrow("process unavailable");
+    expect((await args.manager.load(args.binding)).some((r) => r.kind === "stopped")).toBe(false);
+    expect(
+      (await args.manager.load(args.binding)).some((r) => r.kind === "terminal-conflict"),
+    ).toBe(true);
+    expect(args.callbacks.recordUsage).not.toHaveBeenCalled();
+    crash.mockRestore();
+    expect(await runCompilerDraftLoop(args)).toMatchObject({
+      status: "stopped",
+      reason: "conflicting-terminal-accounting",
+    });
+    expect(args.callbacks.recordUsage).not.toHaveBeenCalled();
+    expect(vi.mocked(delegate)).toHaveBeenCalledTimes(1);
+  });
   it("refuses secrets before Git blob creation and sanitizes diagnostic evidence", async () => {
     const args = await setup();
     const fakeSecret = `ghp_${"x".repeat(30)}`;

@@ -139,7 +139,11 @@ changed-requirement, mixed, or unknown causes only with supporting evidence. Tem
 or a repeated test alone is insufficient attribution. Runtime worker-duration sums are not
 elapsed completion time; cached-input tokens are already part of input and are not added twice.
 The report can retain evidence-backed independent causal annotations; absent such annotations,
-attribution remains unknown. No dollar or savings claim follows from a heuristic score.
+attribution remains unknown. CLI `compiler-eval --annotations <file>` and MCP
+`factory_compiler_eval` accept explicit caller-supplied annotations bound to the exact run,
+graph digest and revision. Each referenced attempt and runtime evidence ID must exist in the
+authenticated report. Caller estimates remain labeled estimates; no dollar or savings claim
+follows from a heuristic score.
 
 ### Calibration and comparative evidence
 
@@ -154,6 +158,10 @@ not measurements that the implemented judge detects those defects.
 The schema retains model/prompt/source provenance, original labels, cited disagreements and
 unresolved ambiguity. Adjudication cannot silently substitute obligation text or drop an ID.
 Automated labels are never called human gold; same-model correlated error remains a limitation.
+A repair may challenge an inferred prerequisite or ambiguity with cited evidence. The independent
+judge must adjudicate that challenge against the original inventory, including when the graph
+is unchanged. Explicit Objective obligations cannot be waived. Challenge evidence is bound to
+the durable invocation and selected revision, and repair/call limits still apply.
 `measureCompilerCalibration` separates automated, human and synthetic provenance, keeps failed
 and inconclusive cases, prevents cosmetic variants crossing the held-out boundary, and measures
 omission recall, unsupported findings, unnecessary repairs, cosmetic stability and valid

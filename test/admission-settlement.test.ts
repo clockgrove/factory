@@ -6,6 +6,8 @@ import {
 import type { IssueAdmissionEntry } from "../src/control/issue-admission.js";
 import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js";
 import { PROTOCOL_V2 } from "../src/protocol/limits.js";
+import { objectiveAuthorityObservation, writerAuthority } from "../src/control/authority.js";
+import type { LeaseState } from "../src/control/lease.js";
 
 const sha = "a".repeat(40),
   digest = "b".repeat(64);
@@ -163,6 +165,32 @@ describe("admission settlement evidence", () => {
         ),
       ).resourcesReleased,
     ).toBe(true);
+  });
+  it("separates original producer identity from the current settlement writer", () => {
+    const current = {
+      ref: "refs/clockgrove-factory/leases/objective-1",
+      oid: "c".repeat(40),
+      treeOid: "d".repeat(40),
+      objective: 1,
+      runId: "run",
+      holder: "successor",
+      epoch: 2,
+      sequence: 5,
+      expiresAt: new Date("2026-09-08T00:10:00Z"),
+      policyDigest: digest,
+    } satisfies LeaseState;
+    const authority = objectiveAuthorityObservation(current, new Date("2026-09-08T00:05:00Z"));
+    const old = { ...current, holder: "predecessor", epoch: 1 } satisfies LeaseState;
+    const stale = parseFactoryEvent({ ...attempt("AttemptFailed", 3), ...writerAuthority(old, 3) });
+    const fresh = parseFactoryEvent({
+      ...attempt("AttemptFailed", 3),
+      ...writerAuthority(current, 3),
+    });
+    const accounting = [events[0]!, events[1]!, events[3]!];
+
+    expect(() => settle([...accounting, stale], { authority })).toThrow("terminal execution");
+    expect(settle([...accounting, fresh], { authority }).accountingSettled).toBe(true);
+    expect(fresh).toMatchObject({ directorEpoch: 1, writerEpoch: 2, writerHolder: "successor" });
   });
   it("accepts definitive non-execution only for an unimported prepared identity", () => {
     const definitiveNonExecution = {

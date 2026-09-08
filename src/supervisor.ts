@@ -8224,6 +8224,7 @@ export class FactorySupervisor {
         entry,
         events,
         modelUsageExpected: proof.modelUsageExpected,
+        authority: snapshot.objectiveAuthority,
         cleanup: {
           reservationOid: reservation.oid,
           resourceIdentity: entry.resourceIdentity,

@@ -23,10 +23,11 @@ import {
 import {
   LARGE_FILE_RECIPE_VERSION,
   LARGE_FILE_VALIDATION_COMMAND,
+  LARGE_FILE_VALIDATION_SCRIPT,
   createLargeFileFixture,
 } from "../scripts/qualification-large-files.mjs";
 
-const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const sourceRepository = fileURLToPath(new URL("..", import.meta.url));
 const sourceBaseSha = execFileSync("/usr/bin/git", ["rev-parse", "HEAD"], {
   cwd: sourceRepository,
@@ -276,6 +277,16 @@ describe("installed large-file lifecycle authority", () => {
           encoding: "utf8",
         }),
       );
+      const sourcePackage = execFileSync(
+        "/usr/bin/git",
+        ["cat-file", "blob", `${fixture.sourceBaseSha}:package.json`],
+        { cwd: fixture.repository },
+      );
+      const fixturePackage = execFileSync(
+        "/usr/bin/git",
+        ["cat-file", "blob", `${fixture.baseSha}:package.json`],
+        { cwd: fixture.repository },
+      );
       const repositoryFacts = {
         files: [{ path: "package.json" }, ...fixture.baseline.map(({ path }) => ({ path }))],
         scripts: packageJson.scripts,
@@ -283,6 +294,34 @@ describe("installed large-file lifecycle authority", () => {
       expect(fixture.version).toBe(LARGE_FILE_RECIPE_VERSION);
       expect(fixture.sourceBaseSha).toBe(sourceBaseSha);
       expect(packageJson.scripts.test).toBe("vitest run");
+      expect(fixture.validation).toEqual({
+        command: LARGE_FILE_VALIDATION_COMMAND,
+        script: LARGE_FILE_VALIDATION_SCRIPT,
+        recipe: `vitest run ${fixture.paths.test}`,
+        packagePath: "package.json",
+        sourcePackageDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+        packageDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      });
+      expect(hash(sourcePackage)).toBe(fixture.validation!.sourcePackageDigest);
+      expect(hash(fixturePackage)).toBe(fixture.validation!.packageDigest);
+      expect(packageJson.scripts[LARGE_FILE_VALIDATION_SCRIPT]).toBe(
+        `vitest run ${fixture.paths.test}`,
+      );
+      expect(packageJson.scripts[LARGE_FILE_VALIDATION_SCRIPT].split(" ")).toEqual([
+        "vitest",
+        "run",
+        fixture.paths.test,
+      ]);
+      expect(
+        execFileSync(
+          "/usr/bin/git",
+          ["diff", "--name-only", fixture.sourceBaseSha!, fixture.baseSha],
+          { cwd: fixture.repository, encoding: "utf8" },
+        )
+          .trim()
+          .split("\n")
+          .sort(),
+      ).toEqual(["package.json", ...fixture.baseline.map(({ path }) => path)].sort());
       const fixtureTest = readFileSync(join(fixture.repository, fixture.paths.test), "utf8");
       expect(fixtureTest).toContain('from "vitest"');
       expect(fixtureTest).not.toContain('from "node:test"');
@@ -314,6 +353,29 @@ describe("installed large-file lifecycle authority", () => {
         expect(body).toContain(LARGE_FILE_VALIDATION_COMMAND);
         expect(body).not.toContain("node --test");
       }
+      const preflightAuthority = {
+        ...authority,
+        checkout: fixture.repository,
+        largeFile: {
+          ...authority.largeFile,
+          fixture: descriptor,
+          fixtureDigest: hash(readFileSync(descriptor)),
+        },
+      };
+      const evidence = { sourceCommit: sourceBaseSha, base: fixture.baseSha };
+      const save = vi.fn();
+      const extension = largeFileExtension(preflightAuthority);
+      assert.ok(extension.preflight);
+      extension.preflight({
+        authority: preflightAuthority,
+        evidence,
+        save,
+        command(name: string, args: string[], cwd: string) {
+          return execFileSync(name, args, { cwd, encoding: "utf8" }).trim();
+        },
+      });
+      expect(evidence).toMatchObject({ largeFileStage: "preflight-complete" });
+      expect(save).toHaveBeenCalledOnce();
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }

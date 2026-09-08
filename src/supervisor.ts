@@ -8609,6 +8609,13 @@ export class FactorySupervisor {
             if (result.state === "pending") await admission.bindAsynchronousMerge(result.uuid);
             return result;
           });
+          if (
+            result.state === "pending" &&
+            (admission.dispatch?.kind !== "native" ||
+              admission.dispatch.asynchronousMergeUuid !== result.uuid)
+          ) {
+            throw new Error("native integration poll changed the exact request UUID");
+          }
           if (result.state === "failed") {
             const uuid =
               admission.dispatch?.kind === "native"
@@ -8647,12 +8654,19 @@ export class FactorySupervisor {
             await sleep(this.#options.pollIntervalMs ?? 5_000, this.#options.signal);
             await this.#lease.renewIfNeeded();
             if (result.state === "pending") {
-              const uuid = result.uuid;
+              const uuid =
+                admission.dispatch?.kind === "native"
+                  ? admission.dispatch.asynchronousMergeUuid
+                  : undefined;
+              if (!uuid) throw new Error("native integration poll lacks its exact request UUID");
               result = await this.#stacks.mergeResult(
                 target.pull.number,
                 uuid,
                 target.pull.commitSha,
               );
+              if (result.state === "pending" && result.uuid !== uuid) {
+                throw new Error("native integration poll changed the exact request UUID");
+              }
             } else {
               const current = await this.#store.readPullRequest(target.pull.number);
               if (current.headSha !== target.pull.commitSha) {

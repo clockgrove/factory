@@ -64,6 +64,7 @@ async function fixture(
     rejectReview?: boolean;
     failCombinedTests?: boolean;
     loseMergeResponse?: boolean;
+    rejectMergeOnce?: boolean;
     wrongPreviewTree?: boolean;
     loseIntegrationReceipt?: boolean;
     stalePreviewOnce?: boolean;
@@ -837,6 +838,7 @@ async function fixture(
   const mergeShas = new Map<number, string>();
   if (peerMergeSha) mergeShas.set(88, peerMergeSha);
   let responseLost = false;
+  let mergeRejected = false;
   vi.spyOn(GitHubControlStore.prototype, "findPullRequestForBranch").mockImplementation(
     async (branch) => {
       const item = snapshot.workItems.find(
@@ -924,6 +926,10 @@ async function fixture(
           baseSha: git("rev-parse", "main"),
         },
       });
+      if (number === 19 && options.rejectMergeOnce && !mergeRejected) {
+        mergeRejected = true;
+        throw Object.assign(new Error("expected head SHA no longer matches"), { status: 409 });
+      }
       git("merge", "--squash", headSha);
       git("commit", "-qm", `merge PR ${number}`);
       const merged = git("rev-parse", "HEAD");
@@ -1541,7 +1547,7 @@ describe("Supervisor parallel independent sibling integration", () => {
         },
         assertCurrent,
         async (admission) => {
-          await admission.dispatch();
+          await admission.markDispatched("regular");
           return f.merge({ number: 20, headSha: f.heads[2]!, commitTitle: "merge C" });
         },
       );
@@ -1604,6 +1610,27 @@ describe("Supervisor parallel independent sibling integration", () => {
         (entry) => entry.kind === "attempt" && entry.event === "AttemptIntegrated",
       ),
     ).toHaveLength(1);
+  });
+
+  it("records an authoritative head rejection without retaining the branch claim", async () => {
+    const f = await fixture({ regular: true, rejectMergeOnce: true });
+    const result = await f.run();
+    expect(result).toMatchObject({
+      status: "escalated",
+      reason: "expected head SHA no longer matches",
+    });
+    expect(f.review).toHaveBeenCalledOnce();
+    expect(f.validate).toHaveBeenCalledOnce();
+    expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18, 19]);
+    const oid = f.refs.get(integrationAdmissionRef("o/r", "main"))!;
+    const line = (await f.storage.readCommit(oid)).message
+      .split(/\r?\n/)
+      .find((value) => value.startsWith("Factory-Integration: "))!;
+    expect(JSON.parse(Buffer.from(line.slice(21), "base64url").toString("utf8"))).toMatchObject({
+      state: "released",
+      dispatch: { kind: "regular", pullRequest: 19 },
+      outcome: { kind: "regular-http-rejection", status: 409 },
+    });
   });
 
   it("does not merge B when its clean combined-tree tests fail", async () => {

@@ -435,11 +435,17 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
         commit_sha: oid,
       }),
     );
+    const committedAt = response.data.committer?.date
+      ? new Date(response.data.committer.date)
+      : undefined;
+    if (committedAt && Number.isNaN(committedAt.getTime()))
+      throw new Error("GitHub commit has an invalid committer time");
     return {
       oid: response.data.sha,
       treeOid: response.data.tree.sha,
       parentOids: response.data.parents.map((parent) => parent.sha),
       message: response.data.message,
+      ...(committedAt ? { committedAt } : {}),
       serverTime: responseDate(response),
     };
   }

@@ -266,7 +266,14 @@ describe("installed large-file lifecycle authority", () => {
           fixture.paths.prefix + "/",
         ]),
       ).toBe(true);
-      for (const scenario of ["transfer-restart", "scope", "secret", "symlink"]) {
+      for (const scenario of [
+        "transfer-restart",
+        "lfs-missing-tool",
+        "lfs-missing-object",
+        "scope",
+        "secret",
+        "symlink",
+      ]) {
         const scenarioAuthority = {
           ...authority,
           largeFile: {

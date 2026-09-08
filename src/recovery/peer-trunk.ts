@@ -1,6 +1,6 @@
 import { hasCurrentWriterAuthority } from "../control/receipts.js";
 import type { FactoryReadSnapshot } from "../application/status.js";
-import { attemptRef } from "../control/attempts.js";
+import { attemptRef, readAttemptReservationRef } from "../control/attempts.js";
 import { activationCancellation } from "../control/activations.js";
 import { loadCompiledGraph, loadCompiledGraphProjection } from "../control/graphs.js";
 import {
@@ -478,7 +478,12 @@ export async function verifyRecoveryPeerTrunkIntegration(input: {
       // generation need not equal the receiver's independent owner.
       requirePeer(observations.length > 0);
       const ref = attemptRef(number, integrated.workItem, integrated.attempt);
-      const oid = await store.readRef(ref);
+      const oid = await readAttemptReservationRef(
+        store,
+        number,
+        integrated.workItem,
+        integrated.attempt,
+      );
       requirePeer(oid);
       const reservation = await store.readCommit(oid);
       const trailer = decodeEventTrailer(reservation.message);

@@ -308,6 +308,31 @@ describe("GitHub stack capability and publication recovery", () => {
     );
   });
 
+  it("rejects an asynchronous poll that returns another request UUID", async () => {
+    const stacks = new GitHubStacks(
+      {
+        request: async () => ({
+          status: 200,
+          data: {
+            status: "pending",
+            details: {
+              message: "pending",
+              uuid: "merge-b",
+              merge_method: "squash",
+              merge_action: "default",
+              expected_head_sha: sha("e"),
+            },
+          },
+        }),
+      },
+      "clockgrove",
+      "factory",
+    );
+    await expect(stacks.mergeResult(2, "merge-a", sha("e"))).rejects.toThrow(
+      /different request UUID/,
+    );
+  });
+
   it("rejects an existing asynchronous merge whose recovered options differ", async () => {
     const stacks = new GitHubStacks(
       {

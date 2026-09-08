@@ -1,6 +1,10 @@
 import { hasCurrentWriterAuthority } from "../control/receipts.js";
 import type { FactoryReadSnapshot } from "../application/status.js";
-import { attemptRef } from "../control/attempts.js";
+import {
+  attemptRef,
+  listAttemptReservationRefs,
+  readAttemptReservationRef,
+} from "../control/attempts.js";
 import {
   assertAuthenticatedGraphProjection,
   assertSnapshotMatchesCompiledGraph,
@@ -384,9 +388,7 @@ export async function buildRecoveryProposal(input: {
 
     stage = "reservation";
     const reservations = new Map<string, { event: Reserved; ref: string; oid: string }>();
-    const refs = await port.listRefs(
-      `refs/clockgrove-factory/attempts/objective-${snapshot.number}/`,
-    );
+    const refs = await listAttemptReservationRefs(port, snapshot.number);
     require(refs.length <= 1_000 && new Set(refs.map((entry) => entry.ref)).size === refs.length);
     for (const ref of refs) {
       const commit = await port.readCommit(ref.oid);
@@ -418,7 +420,12 @@ export async function buildRecoveryProposal(input: {
         matching.length === 1 &&
           recoveryEventDigest(matching[0]!) === recoveryEventDigest(reserved) &&
           ref.ref === attemptRef(snapshot.number, reserved.workItem, reserved.attempt) &&
-          (await port.readRef(ref.ref)) === ref.oid &&
+          (await readAttemptReservationRef(
+            port,
+            snapshot.number,
+            reserved.workItem,
+            reserved.attempt,
+          )) === ref.oid &&
           commit.oid === ref.oid &&
           commit.parentOids.length === 1 &&
           commit.parentOids[0] === reserved.baseSha &&

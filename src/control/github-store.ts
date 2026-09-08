@@ -113,40 +113,6 @@ function isUnavailablePrivateRepositoryRuleFeature(error: unknown, documentation
   );
 }
 
-export interface RepositoryWorkItemClaim {
-  objective: number;
-  workItem: number;
-  runId: string;
-  directorEpoch: number;
-}
-
-function workItemClaimRef(workItem: number): string {
-  if (!Number.isInteger(workItem) || workItem <= 0)
-    throw new Error("Work Item number must be positive");
-  return `refs/clockgrove-factory/repository/work-items/work-item-${workItem}`;
-}
-
-function parseWorkItemClaim(commit: GitCommitObject): RepositoryWorkItemClaim {
-  const trailer = commit.message
-    .split(/\r?\n/)
-    .reverse()
-    .find((line) => line.startsWith("Factory-Repository-Claim: "));
-  if (!trailer) throw new Error("repository Work Item claim has no claim trailer");
-  const value = JSON.parse(
-    Buffer.from(trailer.slice("Factory-Repository-Claim: ".length), "base64url").toString("utf8"),
-  ) as Partial<RepositoryWorkItemClaim>;
-  if (
-    ![value.objective, value.workItem, value.directorEpoch].every(
-      (item) => Number.isInteger(item) && Number(item) > 0,
-    ) ||
-    typeof value.runId !== "string" ||
-    !value.runId
-  ) {
-    throw new Error("repository Work Item claim is invalid");
-  }
-  return value as RepositoryWorkItemClaim;
-}
-
 export interface GitHubControlStoreOptions extends GitHubOptions {
   circuitBreaker?: CircuitBreaker;
   pacer?: ContentCreationPacer;
@@ -457,11 +423,17 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
         commit_sha: oid,
       }),
     );
+    const committedAt = response.data.committer?.date
+      ? new Date(response.data.committer.date)
+      : undefined;
+    if (committedAt && Number.isNaN(committedAt.getTime()))
+      throw new Error("GitHub commit has an invalid committer time");
     return {
       oid: response.data.sha,
       treeOid: response.data.tree.sha,
       parentOids: response.data.parents.map((parent) => parent.sha),
       message: response.data.message,
+      ...(committedAt ? { committedAt } : {}),
       serverTime: responseDate(response),
     };
   }
@@ -893,44 +865,6 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
       }),
     );
     return response.data.permission;
-  }
-
-  /** Permanently bind an issue to one Objective. The repository-wide ref and
-   * atomic create make this safe across controller processes and restarts. */
-  async claimWorkItem(
-    args: RepositoryWorkItemClaim & { treeOid: string; parentOid: string },
-  ): Promise<void> {
-    const ref = workItemClaimRef(args.workItem);
-    const existingOid = await this.readRef(ref);
-    if (existingOid) {
-      const existing = parseWorkItemClaim(await this.readCommit(existingOid));
-      if (existing.workItem !== args.workItem || existing.objective !== args.objective) {
-        throw new Error(
-          `Work Item #${args.workItem} is already claimed by Objective #${existing.objective}`,
-        );
-      }
-      return;
-    }
-    const claim: RepositoryWorkItemClaim = {
-      objective: args.objective,
-      workItem: args.workItem,
-      runId: args.runId,
-      directorEpoch: args.directorEpoch,
-    };
-    const oid = await this.createCommit({
-      treeOid: args.treeOid,
-      parentOids: [args.parentOid],
-      message: `Factory repository claim for Work Item #${args.workItem}\n\nFactory-Repository-Claim: ${Buffer.from(JSON.stringify(claim)).toString("base64url")}`,
-    });
-    if (await this.createRef(ref, oid)) return;
-    const winnerOid = await this.readRef(ref);
-    if (!winnerOid) throw new Error(`Work Item #${args.workItem} claim disappeared after conflict`);
-    const winner = parseWorkItemClaim(await this.readCommit(winnerOid));
-    if (winner.workItem !== args.workItem || winner.objective !== args.objective) {
-      throw new Error(
-        `Work Item #${args.workItem} is already claimed by Objective #${winner.objective}`,
-      );
-    }
   }
 
   async getRepositoryFacts(): Promise<{

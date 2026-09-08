@@ -1,4 +1,4 @@
-import { attemptRef } from "../control/attempts.js";
+import { attemptRef, readAttemptReservationRef } from "../control/attempts.js";
 import { PlatformUnavailableError } from "../platform.js";
 import { loadCompiledGraph, loadCompiledGraphProjection } from "../control/graphs.js";
 import { decodeEventTrailer } from "../control/receipts.js";
@@ -174,7 +174,12 @@ export async function loadRecoverySourceArtifact(
       reserved.policyDigest ===
         plan.history.find((entry) => entry.runId === source.runId)?.policyDigest &&
       source.reservationRef === attemptRef(plan.objective, item.workItem, source.attempt) &&
-      (await input.store.readRef(source.reservationRef)) === source.reservationCommitOid,
+      (await readAttemptReservationRef(
+        input.store,
+        plan.objective,
+        item.workItem,
+        source.attempt,
+      )) === source.reservationCommitOid,
   );
   const reservation = await input.store.readCommit(source.reservationCommitOid);
   const trailer = decodeEventTrailer(reservation.message);

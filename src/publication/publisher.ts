@@ -30,6 +30,7 @@ import {
 } from "./merge-candidate.js";
 
 export interface PublicationStore {
+  listRefs?(prefix: string): Promise<Array<{ ref: string; oid: string }>>;
   /**
    * The concrete transport rechecks Objective authority immediately before
    * authoritative publication. Immutable object preparation remains guarded
@@ -404,11 +405,12 @@ export async function integrationReadiness(
       refresh.outputTreeSha !== candidate.candidateOutputTreeSha
     )
       throw new Error("sibling refresh does not bind this original source and candidate");
-    if (!store.readTreeEntry || !store.readBlob)
+    if (!store.readTreeEntry || !store.readBlob || !store.listRefs)
       throw new Error("sibling refresh requires immutable record read capability");
     await verifyPlannedSiblingRefreshCommit(
       {
         readRef: (ref) => store.readRef(ref),
+        listRefs: (prefix) => store.listRefs!(prefix),
         readCommit: (oid) => store.readCommit(oid),
         readTreeEntry: (tree, path) => store.readTreeEntry!(tree, path),
         readBlob: (oid) => store.readBlob!(oid),

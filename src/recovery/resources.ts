@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { PlatformUnavailableError } from "../platform.js";
-import { attemptRef } from "../control/attempts.js";
+import { attemptRef, listAttemptReservationRefs } from "../control/attempts.js";
 import { decodeEventTrailer, deduplicateFactoryEvents } from "../control/receipts.js";
 import type { StaleAttemptIdentity } from "../execution/backend.js";
 import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
@@ -43,9 +43,7 @@ async function resourceEvidence(
       event.event === "AttemptReserved" &&
       (sourceRuns.has(event.runId) || event.runId === plan.successorRunId),
   );
-  const refs = await store.listRefs(
-    `refs/clockgrove-factory/attempts/objective-${plan.objective}/`,
-  );
+  const refs = await listAttemptReservationRefs(store, plan.objective);
   // Every historical validator/scoped invocation must belong to an original
   // reservation. Otherwise iterating reservation refs could conceal a liability.
   for (const event of events) {

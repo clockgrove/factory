@@ -6,6 +6,9 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Added
 
+- Unify Work Item ownership and attempt admission in an issue-scoped CAS ledger, preserving
+  original recovery identities and unknown liabilities through a permanent legacy-writer bridge.
+
 - Opt-in installed two-Objective refill and failure/conflict qualification scenarios, with
   exact peer provenance, original-work accounting and safe closeout requirements. Their presence
   does not imply a live qualification pass or measured throughput savings.
@@ -51,6 +54,10 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
   requests still capture authority before queueing and recheck it at dispatch. Fresh Director
   receipts bind a stable writer operation, holder, epoch, and policy to the current Objective lease
   observation while preserving older producer and accounting epochs. ([#224](https://github.com/clockgrove/factory/issues/224))
+- Repository-controller election loss now retires discovery, activation/recovery dispatch and
+  election-scoped configuration without aborting otherwise-current Objective execution. Retired
+  controllers await Supervisor completion and cleanup under the Objective's own writer epoch;
+  explicit shutdown and platform safety stops retain their existing propagation. ([#225](https://github.com/clockgrove/factory/issues/225))
 - Two-Objective qualification now separates ordinary useful-throughput evidence from the
   controller-expiry fault scenario. The ordinary path injects no delay or failure, accepts either
   authenticated refill lane, uses incremental repository comment reads only as wake hints, safely

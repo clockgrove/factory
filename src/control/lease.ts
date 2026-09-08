@@ -7,6 +7,10 @@ export interface GitCommitObject {
   treeOid: string;
   parentOids: string[];
   message: string;
+  /** Committer time when the provider exposes it; Factory-created control commits
+   * use the provider-assigned value for legacy age recovery. */
+  committedAt?: Date;
+  /** Authoritative provider time when this object was observed. */
   serverTime: Date;
 }
 

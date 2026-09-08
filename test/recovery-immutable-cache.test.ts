@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
+import type { GitCommitObject } from "../src/control/lease.js";
 import type { RecoveryReadStore } from "../src/recovery/assessment.js";
 import { withImmutableRecoveryReads } from "../src/recovery/immutable-read-cache.js";
 
@@ -7,13 +8,16 @@ const oid = (n: string) => createHash("sha1").update(n).digest("hex");
 const blob = Buffer.from("exact immutable proof");
 const blobOid = createHash("sha1").update(`blob ${blob.length}\0`).update(blob).digest("hex");
 function fixture() {
-  const readCommit = vi.fn(async (sha: string) => ({
-    oid: sha,
-    treeOid: oid("tree"),
-    parentOids: [oid("parent")],
-    message: "immutable",
-    serverTime: new Date("2026-09-05T00:00:00Z"),
-  }));
+  const readCommit = vi.fn(
+    async (sha: string): Promise<GitCommitObject> => ({
+      oid: sha,
+      treeOid: oid("tree"),
+      parentOids: [oid("parent")],
+      message: "immutable",
+      committedAt: new Date("2026-09-04T23:59:00Z"),
+      serverTime: new Date("2026-09-05T00:00:00Z"),
+    }),
+  );
   const readBlob = vi.fn(async () => Buffer.from(blob));
   const readTreeEntry = vi.fn(
     async (_tree: string, _path: string): Promise<string | null> => blobOid,
@@ -43,11 +47,15 @@ describe("store-owned immutable recovery content cache", () => {
     expect(f.readCommit).toHaveBeenCalledTimes(1);
     a.message = "forged";
     a.parentOids.length = 0;
+    a.committedAt!.setTime(0);
     a.serverTime.setTime(0);
     expect(b.message).toBe("immutable");
     expect((await other.readCommit(oid("a"))).parentOids).toHaveLength(1);
     expect((await other.readCommit(oid("a"))).serverTime.toISOString()).toBe(
       "2026-09-05T00:00:00.000Z",
+    );
+    expect((await other.readCommit(oid("a"))).committedAt?.toISOString()).toBe(
+      "2026-09-04T23:59:00.000Z",
     );
     const bytes = await f.port.readBlob(blobOid);
     bytes.fill(0);

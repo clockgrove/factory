@@ -35,6 +35,9 @@ class Store implements CompiledGraphStore {
     if (!this.validLease) throw new Error("lease lost");
     this.fenced = true;
   }
+  async assertMutationAuthorized() {
+    await this.assertCurrent();
+  }
   private before(kind: string) {
     expect(this.fenced, `fence before ${kind}`).toBe(true);
     this.fenced = false;
@@ -47,6 +50,11 @@ class Store implements CompiledGraphStore {
       this.loseAfter = undefined;
       throw new Error("response lost");
     }
+  }
+  async listRefs(prefix: string) {
+    return [...this.refs]
+      .filter(([ref]) => ref.startsWith(prefix))
+      .map(([ref, oid]) => ({ ref, oid }));
   }
   async readRef(ref: string) {
     return this.refs.get(ref) ?? null;
@@ -347,7 +355,7 @@ describe("immutable native sibling refresh intent", () => {
   it("rejects source ref rewrites and changed original published trees", async () => {
     const f = fixture();
     f.store.refs.set(f.args.identity.reservationRef, sha("changed"));
-    await expect(f.manager.persist(f.args)).rejects.toThrow(/reservation ref/);
+    await expect(f.manager.persist(f.args)).rejects.toThrow(/commit unavailable/);
     f.store.refs.set(f.args.identity.reservationRef, f.args.identity.reservationOid);
     f.store.commits.get(f.args.identity.sourceHeadSha)!.treeOid = sha("changed");
     await expect(f.manager.persist(f.args)).rejects.toThrow(/original publication/);

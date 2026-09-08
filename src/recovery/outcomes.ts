@@ -1,4 +1,4 @@
-import { attemptRef } from "../control/attempts.js";
+import { attemptRef, readAttemptReservationRef } from "../control/attempts.js";
 import { PlatformUnavailableError } from "../platform.js";
 import {
   loadMergeCandidateCheckpoint,
@@ -413,7 +413,12 @@ async function verifySourceProof(
       const commit = await store.readCommit(oid);
       const trailer = decodeEventTrailer(commit.message);
       requireOutcome(
-        (await store.readRef(ref)) === oid &&
+        (await readAttemptReservationRef(
+          store,
+          plan.objective,
+          reserved.workItem,
+          reserved.attempt,
+        )) === oid &&
           commit.oid === oid &&
           trailer &&
           recoveryEventDigest(trailer) === recoveryEventDigest(reserved) &&
@@ -588,7 +593,12 @@ async function verifySourceProof(
           ),
           publication,
         );
-        const oid = await store.readRef(ref);
+        const oid = await readAttemptReservationRef(
+          store,
+          plan.objective,
+          ancestor.workItem,
+          ancestor.attempt,
+        );
         requireOutcome(oid);
         requireOutcome(
           reserved[0]!.kind === "attempt" && reserved[0]!.policyDigest === plan.policyDigest,

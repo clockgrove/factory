@@ -38,14 +38,19 @@ local qualification; the SDK/CLI default chain remains unchanged.
 
 ## Validate changes
 
-Use Node.js 20 or later. Finish the remaining implementation code in parallel, isolated worktrees
-and integrate it before running verification. During implementation, do not run tests, typechecks,
-lint/format checks, coverage, release matrices, package checks, plugin reinstalls or live qualification.
-Write regression tests alongside concrete defect fixes, but defer their execution. Use source
-inspection, authoritative API documentation and already captured contract fixtures to inform code;
-never invent provider interfaces or broaden spending/credential authority to finish a task.
+Use Node.js 20 or later. Finish independent implementation capabilities in parallel, isolated
+worktrees. During development, use focused tests, typechecks and lint/format checks proportional to
+the changed behavior; add a regression for each concrete defect. Retain targeted security,
+destructive-action, accounting and recovery checks. Use source inspection, authoritative API
+documentation and captured contract fixtures to inform code; never invent provider interfaces or
+broaden spending/credential authority to finish a task.
 
-After all implementation code is integrated, use one coordinated verification phase:
+Do not repeatedly run full coverage, release matrices, packaging, plugin reinstalls or broad live
+qualification between intermediate fixes. A narrow live probe is justified only when implementation
+depends on uncertain platform behavior and the probe is within existing authorization. Independent
+lanes own focused acceptance; the integration owner coordinates the full candidate gate below.
+
+After implementation and integration review are complete, use one coordinated qualification phase:
 
 1. Review and freeze the source, tests, documentation and manifests as an identified candidate.
 2. Run the complete suite, fix actual failures, and retain security, destructive-action, accounting

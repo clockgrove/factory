@@ -69,8 +69,11 @@ async function reconcile(args: {
     accounting.unknownModelUsage.length ||
     accounting.unreconciledReservationCount ||
     accounting.unreconciledReservations.length ||
-    accounting.blockerCount ||
-    accounting.blockers.length ||
+    // Historical ceilings can differ only because this exact successor policy
+    // was separately approved and authenticated above. This diagnostic does not
+    // erase usage or authorize any other incomplete accounting evidence.
+    accounting.blockerCount !== accounting.blockers.length ||
+    accounting.blockers.some((blocker) => blocker.code !== "historical-policy-difference") ||
     accounting.unreconciledReservationsTruncated ||
     accounting.diagnosticsTruncated ||
     accounting.attemptCountsTruncated ||

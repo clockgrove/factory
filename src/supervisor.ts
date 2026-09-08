@@ -334,8 +334,6 @@ export interface SupervisorOptions {
   repositoryResources?: RepositorySupervisorResources;
   /** Durable repository-wide capacity authority supplied by production hosts. */
   sharedCapacity?: SharedCapacityCoordinator;
-  /** Outer repository-controller fence, checked before every GitHub mutation. */
-  repositoryFence?: () => Promise<void>;
   /** A service stop releases ownership without durably cancelling the run. */
   shutdownBehavior?: "cancel-run" | "release-lease";
   /** Durable controller activation fence. Foreground runs omit this. */
@@ -1201,12 +1199,13 @@ export class FactorySupervisor {
       pacer: this.#pacer,
       concurrency: this.#concurrency,
       mutationScheduler: this.#mutations,
-      beforeMutation: async (kind: "normal" | "lease", waitedMs: number) => {
-        await this.#options.repositoryFence?.();
-        if (kind === "normal" && this.#lease) {
-          await this.#lease.guardMutation(waitedMs);
-        }
+      captureMutationFence: (kind: "normal" | "lease") =>
+        kind === "lease" ? async () => {} : this.#captureMutationFence(),
+      assertMutationIdentity: (lease: LeaseState) => {
+        if (!this.#lease) throw new LeaseLostError("Objective mutation has no acquired lease");
+        this.#lease.assertMutationIdentity(lease);
       },
+      mutationScope: `objective:${options.objective}`,
     };
     this.#reader = new GitHubReader({
       ...github,
@@ -1267,9 +1266,9 @@ export class FactorySupervisor {
     }
   }
 
-  async #guardMutation(waitedMs: number): Promise<void> {
-    await this.#options.repositoryFence?.();
-    await this.#lease.guardMutation(waitedMs);
+  #captureMutationFence(): (waitedMs: number) => Promise<void> {
+    if (!this.#lease) throw new LeaseLostError("Objective mutation has no acquired lease");
+    return this.#lease.captureMutationFence();
   }
 
   async #externalAdmission<T>(operation: () => Promise<T>): Promise<T> {
@@ -3338,7 +3337,7 @@ export class FactorySupervisor {
               pacer: this.#pacer,
               concurrency: this.#concurrency,
               mutationScheduler: this.#mutations,
-              beforeMutation: (waitedMs) => this.#guardMutation(waitedMs),
+              captureMutationFence: () => this.#captureMutationFence(),
             })
           : undefined;
         this.#registry.register(
@@ -4032,7 +4031,7 @@ export class FactorySupervisor {
           pacer: this.#pacer,
           concurrency: this.#concurrency,
           mutationScheduler: this.#mutations,
-          beforeMutation: (waitedMs) => this.#guardMutation(waitedMs),
+          captureMutationFence: () => this.#captureMutationFence(),
           onThrottle: this.#notify,
         });
         let appliedWorkItems: Map<string, { id: string; number: number }> | null = null;

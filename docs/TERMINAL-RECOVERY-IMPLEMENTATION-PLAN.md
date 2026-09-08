@@ -1,7 +1,6 @@
 # Continuing an escalated Objective
 
-Status: successor request, controller adoption, and local execution are implemented on this branch;
-delivery-lineage completion and installed-product qualification remain in progress.
+Current status: [GitHub #69](https://github.com/clockgrove/factory/issues/69).
 
 ## Available inspection
 
@@ -105,7 +104,7 @@ run cannot silently adopt predecessor work. Offline Supervisor fixtures cover re
 source, fresh combined-tree validation/review, integration response-loss replay, and subsequent
 dependent execution through Objective completion. Multi-member native-stack restoration and
 repeated-successor delivery lineage are implemented; the combined runtime and installed-live
-qualification remain deferred to the testing phase in [the implementation handoff](IMPLEMENTATION-HANDOFF.md).
+qualification have separate acceptance tracked in [GitHub #69](https://github.com/clockgrove/factory/issues/69).
 Pending claims must be reconciled to an evidenced outcome; they must not be deleted or overwritten
 to try another plan.
 Validation and budget writers reject reservations from a different run, Objective, policy, or

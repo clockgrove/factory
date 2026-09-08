@@ -1,6 +1,6 @@
 # Factory for indie developers — implementation plan
 
-Status: trunk contract corrections in progress; installed qualification and release gates remain open
+Current status: [GitHub #69](https://github.com/clockgrove/factory/issues/69).
 
 Date: 2026-09-03
 

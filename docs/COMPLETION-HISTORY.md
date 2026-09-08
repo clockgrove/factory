@@ -1,7 +1,7 @@
 # Historical completion evidence
 
 This retained snapshot is historical evidence, not the current backlog. See
-[the completion board](COMPLETION.md) for current capability status and next deliverables.
+[GitHub #69](https://github.com/clockgrove/factory/issues/69) for current capability status and next deliverables.
 
 Updated: 2026-09-07. [GitHub #69](https://github.com/clockgrove/factory/issues/69) is the
 authoritative backlog. This page summarizes capability boundaries, not execution sessions or a

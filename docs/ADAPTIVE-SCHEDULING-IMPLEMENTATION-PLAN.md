@@ -1,6 +1,6 @@
 # Adaptive priority and burst scheduling implementation plan
 
-Status: scheduling implementation complete; live qualification in progress
+Current status: [GitHub #69](https://github.com/clockgrove/factory/issues/69).
 
 Date: 2026-09-03
 

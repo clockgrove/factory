@@ -39,6 +39,8 @@ function safeProposal(error: unknown): Record<string, unknown> {
     return { proposalUnavailable: "unsafe or oversized proposal" };
   }
 }
+const TimestampSchema = z.number().finite().nonnegative().max(Number.MAX_SAFE_INTEGER);
+
 const UsageSchema = z
   .object({
     inputTokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
@@ -112,11 +114,14 @@ export async function runCompilerDraftLoop(args: {
   callbacks: CompilerDraftCallbacks;
   limits?: CompilerDraftLimits;
   now?: () => number;
+  /** Capture before bounded source gathering; an existing durable start always wins. */
+  startedAt?: number;
   fixedGraph?: CompiledObjective;
   sourceEvidence?: unknown;
 }): Promise<CompilerDraftOutcome> {
   const { manager, lease, binding, callbacks } = args;
-  const now = args.now ?? Date.now;
+  const clock = args.now ?? Date.now;
+  const now = () => TimestampSchema.parse(clock());
   const limits = LimitsSchema.parse({
     maxRepairs: args.limits?.maxRepairs ?? 2,
     maxInvocations: args.limits?.maxInvocations ?? 7,
@@ -153,7 +158,7 @@ export async function runCompilerDraftLoop(args: {
   if (!records.length)
     await append("started", {
       limits,
-      startedAt: now(),
+      startedAt: TimestampSchema.parse(args.startedAt ?? now()),
       ...(fixedGraph ? { fixedGraph, fixedGraphDigest } : {}),
       ...(sourceEvidence === null ? {} : { sourceEvidence }),
     });
@@ -161,7 +166,7 @@ export async function runCompilerDraftLoop(args: {
   if (
     first?.kind !== "started" ||
     draftDigest(first.payload.limits) !== draftDigest(limits) ||
-    typeof first.payload.startedAt !== "number" ||
+    !TimestampSchema.safeParse(first.payload.startedAt).success ||
     (first.payload.fixedGraphDigest ?? null) !== fixedGraphDigest ||
     draftDigest(first.payload.sourceEvidence ?? null) !== draftDigest(sourceEvidence) ||
     (fixedGraph !== undefined &&
@@ -169,6 +174,26 @@ export async function runCompilerDraftLoop(args: {
         fixedGraphDigest)
   )
     throw new Error("compiler draft policy changed");
+  for (const record of records) {
+    if (record.kind === "invocation" && record.payload.startedAt !== undefined)
+      TimestampSchema.parse(record.payload.startedAt);
+    if (record.kind === "result" && record.payload.completedAt !== undefined) {
+      const completedAt = TimestampSchema.parse(record.payload.completedAt);
+      const invocation = records.find(
+        (item) =>
+          item.kind === "invocation" && item.payload.invocationId === record.payload.invocationId,
+      );
+      const start = TimestampSchema.parse(invocation?.payload.startedAt);
+      if (record.payload.observedMilliseconds === null) {
+        if (
+          completedAt >= start ||
+          record.payload.timingUnavailable !== "local-clock-moved-backward"
+        )
+          throw new Error("compiler timing unavailable without evidence");
+      } else if (TimestampSchema.parse(record.payload.observedMilliseconds) !== completedAt - start)
+        throw new Error("compiler invocation interval mismatch");
+    }
+  }
   // All known terminal usage is reconciled, including rejected and failed calls, before returning/restarting.
   let tokens = 0;
   for (const record of records.filter((item) => item.kind === "result")) {
@@ -271,12 +296,26 @@ export async function runCompilerDraftLoop(args: {
     if (tokens >= limits.maxObservedTokens) throw new Stop("observed-token-limit");
     if (records.filter((item) => item.kind === "invocation").length >= limits.maxInvocations)
       throw new Stop("invocation-limit");
+    const invocationStartedAt = now();
     await append("invocation", {
+      startedAt: invocationStartedAt,
       invocationId,
       stage,
       revision,
       inputDigest: draftDigest({ inventory, previous, failure }),
     });
+    const timing = () => {
+      const completedAt = now();
+      // Local wall-clock intervals are observations, never provider billing or summed Objective time.
+      const observedMilliseconds = completedAt - invocationStartedAt;
+      if (observedMilliseconds < 0)
+        return {
+          completedAt,
+          observedMilliseconds: null,
+          timingUnavailable: "local-clock-moved-backward",
+        };
+      return { completedAt, observedMilliseconds: TimestampSchema.parse(observedMilliseconds) };
+    };
     let saved: DraftInvocationResult | null = null;
     let contradictory = false;
     let conflictingResultDigest: string | null = null;
@@ -291,7 +330,14 @@ export async function runCompilerDraftLoop(args: {
         return;
       }
       try {
-        await append("result", { invocationId, stage, revision, value: result.value, usage });
+        await append("result", {
+          invocationId,
+          stage,
+          revision,
+          value: result.value,
+          usage,
+          ...timing(),
+        });
       } catch (error) {
         throw Object.assign(new Error(diagnostic(error), { cause: error }), {
           usage,
@@ -339,6 +385,7 @@ export async function runCompilerDraftLoop(args: {
           revision,
           value: null,
           usage,
+          ...timing(),
           ...safeProposal(error),
           error: diagnostic(error),
         });

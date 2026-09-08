@@ -511,6 +511,55 @@ describe("compiler draft durable repair", () => {
       usage: { inputTokens: 2, outputTokens: 1 },
     });
   });
+  it("records local invocation intervals once, including rejected output", async () => {
+    const args = await setup();
+    let time = 100;
+    args.callbacks.invoke = async (request) => {
+      time += 25;
+      if (request.stage === "compile")
+        throw Object.assign(new Error("invalid result"), {
+          usage: { inputTokens: 2, outputTokens: 1 },
+        });
+      return { value: { obligations: ["a"] }, usage: { inputTokens: 2, outputTokens: 1 } };
+    };
+    const result = await runCompilerDraftLoop({
+      ...args,
+      now: () => time++,
+      limits: { maxRepairs: 0 },
+    });
+    for (const record of result.records.filter((item) => item.kind === "result")) {
+      const reserved = result.records.find(
+        (item) =>
+          item.kind === "invocation" && item.payload.invocationId === record.payload.invocationId,
+      )!;
+      expect(record.payload.completedAt).toBeTypeOf("number");
+      expect(record.payload.observedMilliseconds).toBe(
+        Number(record.payload.completedAt) - Number(reserved.payload.startedAt),
+      );
+      expect(Number(record.payload.observedMilliseconds)).toBeGreaterThanOrEqual(25);
+    }
+    expect(result.records.filter((item) => item.kind === "result")).toHaveLength(2);
+    expect(
+      (await runCompilerDraftLoop({ ...args, now: () => 999, limits: { maxRepairs: 0 } })).records,
+    ).toEqual(result.records);
+  });
+  it("includes source gathering in the durable deadline and never refreshes start on replay", async () => {
+    const args = await setup();
+    const options = { ...args, startedAt: 100, now: () => 300, limits: { deadlineMs: 100 } };
+    const result = await runCompilerDraftLoop(options);
+    expect(result).toMatchObject({ status: "stopped", reason: "deadline-exhausted" });
+    expect(args.callbacks.invoke).not.toHaveBeenCalled();
+    expect(result.records[0]?.payload.startedAt).toBe(100);
+    expect(
+      (await runCompilerDraftLoop({ ...options, startedAt: 299 })).records[0]?.payload.startedAt,
+    ).toBe(100);
+    const invalid = await setup();
+    await expect(runCompilerDraftLoop({ ...invalid, startedAt: -1 })).rejects.toThrow();
+    expect(invalid.callbacks.invoke).not.toHaveBeenCalled();
+    await expect(
+      runCompilerDraftLoop({ ...invalid, now: () => Number.POSITIVE_INFINITY }),
+    ).rejects.toThrow();
+  });
   it("fences conflicting records and writes after selection", async () => {
     const args = await setup();
     const result = await runCompilerDraftLoop(args);

@@ -198,7 +198,7 @@ export interface FactoryStatusReport {
   };
   workItems: StatusWorkItem[];
   summary: RunSummary | null;
-  /** Current process telemetry; separate from durable/replayed economics. */
+  /** Explicitly process-local telemetry; separate from durable/replayed run economics. */
   github?: GitHubMutationTelemetry;
 }
 
@@ -426,17 +426,7 @@ export function buildStatusReport(input: {
   const controller = [...runEvents]
     .filter((event) => event.kind === "controller")
     .sort((left, right) => right.sequence - left.sequence)[0];
-  const durableSummary = summarizeRun(events, policy ?? undefined);
-  const summary =
-    durableSummary && input.platformTelemetry
-      ? {
-          ...durableSummary,
-          economics: {
-            ...durableSummary.economics,
-            githubMutations: input.platformTelemetry,
-          },
-        }
-      : durableSummary;
+  const summary = summarizeRun(events, policy ?? undefined);
   const statusItems = items.map((item): StatusWorkItem => {
     const itemEvents = (item.factoryEvents ?? [])
       .filter((event) => !run || event.runId === run.runId)

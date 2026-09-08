@@ -45,6 +45,10 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- GitHub mutation telemetry now identifies its process-local scope and scheduler-lifetime window,
+  remains separate from durable run economics, and reports absent historical run measurements as
+  unavailable instead of attributing a new reader process's zero counters. Current response-header
+  primary quota observations remain available. ([#199](https://github.com/clockgrove/factory/issues/199))
 - Objective compilation now replaces model-invented platform, CPU, memory, artifact-storage and
   timeout sizing with pinned repository evidence, active run-policy values or named portable
   defaults, and records that provenance in each compiled Work Item.

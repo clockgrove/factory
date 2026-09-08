@@ -456,6 +456,11 @@ describe("MutationScheduler", () => {
     sent.recordSuccess?.();
     sent.release();
     expect(scheduler.telemetry()).toMatchObject({
+      measurementScope: "process-local",
+      measurementWindow: {
+        startedAt: "2026-01-01T00:00:00.000Z",
+        observedAt: "2026-01-01T00:00:00.000Z",
+      },
       admitted: 2,
       transported: 1,
       successful: 1,

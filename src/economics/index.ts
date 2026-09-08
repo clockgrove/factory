@@ -4,7 +4,6 @@ import { modelTokenBudgetIntent, type ModelTokenBudgetIntent } from "../protocol
 import { deduplicateFactoryEvents, latestRunReceipts } from "../control/receipts.js";
 import { isModelInvocationMarker, unresolvedModelInvocations } from "../control/budget.js";
 import { summarizeRuntimeEconomics, type RuntimeEconomics } from "./runtime.js";
-import type { GitHubMutationTelemetry } from "../platform.js";
 export { summarizeRuntimeEconomics, type RuntimeEconomics } from "./runtime.js";
 
 export type EvidenceMetric<T> =
@@ -322,8 +321,8 @@ export interface EconomicSummary {
     }>;
   };
   providerCost: EvidenceMetric<Array<{ provider: string; amount: number; currency: string }>>;
-  /** Live, non-durable orchestration overhead when a controller process supplies it. */
-  githubMutations?: GitHubMutationTelemetry;
+  /** Durable run attribution only. Process-local telemetry is reported outside this summary. */
+  githubMutations: { availability: "unavailable"; reason: string };
 }
 
 function summarizeProviderCost(
@@ -449,6 +448,10 @@ export function summarizeEconomics(input: {
               },
     },
     providerCost: summarizeProviderCost(input.billing ?? []),
+    githubMutations: {
+      availability: "unavailable",
+      reason: "no durable run-attributed GitHub mutation measurement is present",
+    },
   };
 }
 

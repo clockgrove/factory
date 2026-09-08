@@ -177,6 +177,9 @@ local estimate with explicit confidence. The estimate counts only actual transpo
 smooths admission below GitHub's documented outer ceiling, reduces throughput after real 403/429
 secondary feedback, and recovers gradually after successful transports. Octokit's internal retries
 are disabled so every retry returns through Factory's shared pacing and circuit controls.
+Process-local mutation counters include their scheduler-lifetime measurement window and remain
+outside durable run economics. A reader process cannot attribute its own counters to a reconstructed
+run; without durable run-bound evidence, that historical measurement is explicitly unavailable.
 
 Recovery may retain bounded immutable Git content by exact object identity across repeated proof
 calls. It never caches mutable refs, authenticated event snapshots, PR/base state, leases, physical

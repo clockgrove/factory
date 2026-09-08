@@ -244,11 +244,13 @@ describe("Supervisor cancellation model usage", () => {
             .filter((event) => event.kind === "attempt" && event.event === "AttemptCancelled"),
         ).toEqual([]);
         expect(
-          f.events().filter((event) =>
-            ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(
-              event.event,
+          f
+            .events()
+            .filter((event) =>
+              ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(
+                event.event,
+              ),
             ),
-          ),
         ).toEqual([]);
         expect(LeaseManager.prototype.release).not.toHaveBeenCalled();
         expect(f.resources.size).toBe(0);

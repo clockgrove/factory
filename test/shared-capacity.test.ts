@@ -4,7 +4,11 @@ import { LeaseManager, type LeaseStore, type GitCommitObject } from "../src/cont
 import { RepositoryLeaseManager } from "../src/controller/repository-lease.js";
 import {
   SharedCapacityCoordinator,
+  SHARED_CAPACITY_ACTION_REQUIRED_AT,
+  SHARED_CAPACITY_COMPACT_AT,
+  SHARED_CAPACITY_HARD_LIMIT,
   SHARED_CAPACITY_REF,
+  sharedCapacityClaimId,
   type SharedCapacityOwner,
 } from "../src/controller/shared-capacity.js";
 import {
@@ -20,9 +24,12 @@ class Store implements LeaseStore {
   commits = new Map<string, GitCommitObject>([
     [base, { oid: base, treeOid: base, parentOids: [], message: "base", serverTime: new Date() }],
   ]);
+  blobs = new Map<string, Buffer>();
+  trees = new Map<string, Map<string, string>>([[base, new Map()]]);
   now = new Date("2026-09-08T00:00:00Z");
   next = 1;
   loseResponse = false;
+  failCreateTree = false;
   beforeDispatch: (() => Promise<void>) | undefined;
   scopes = new AsyncLocalStorage<() => Promise<void>>();
   async withMutationFence<T>(
@@ -50,6 +57,50 @@ class Store implements LeaseStore {
     if (this.refs.has(ref)) return false;
     this.refs.set(ref, oid);
     return true;
+  }
+  async createBlob(content: Buffer) {
+    await this.scopes.getStore()?.();
+    const oid = (this.next++).toString(16).padStart(40, "0");
+    this.blobs.set(oid, content);
+    return oid;
+  }
+  async createTree(input: {
+    baseTreeOid?: string;
+    entries: Array<{
+      path: string;
+      mode: "100644" | "100755" | "120000";
+      type: "blob";
+      sha: string | null;
+    }>;
+  }) {
+    await this.scopes.getStore()?.();
+    if (this.failCreateTree) {
+      this.failCreateTree = false;
+      throw new Error("injected tree failure");
+    }
+    const oid = (this.next++).toString(16).padStart(40, "0");
+    const tree = new Map(this.trees.get(input.baseTreeOid ?? base) ?? []);
+    for (const entry of input.entries) {
+      if (entry.sha) tree.set(entry.path, entry.sha);
+      else tree.delete(entry.path);
+    }
+    this.trees.set(oid, tree);
+    return oid;
+  }
+  async readTreeDirectory(treeOid: string, path: string) {
+    const tree = this.trees.get(treeOid);
+    if (!tree) throw new Error("missing tree");
+    const prefix = `${path}/`;
+    const direct = [...tree.entries()].filter(
+      ([candidate]) =>
+        candidate.startsWith(prefix) && !candidate.slice(prefix.length).includes("/"),
+    );
+    if (direct.length === 0) return null;
+    return direct.map(([candidate, sha]) => ({
+      name: candidate.slice(prefix.length),
+      type: "blob" as const,
+      sha,
+    }));
   }
   async compareAndSwapRef(input: { ref: string; beforeOid: string; afterOid: string }) {
     if (input.ref === SHARED_CAPACITY_REF && this.beforeDispatch) {
@@ -119,6 +170,47 @@ function reservation(
     ...extra,
   };
   return { ...value, key: capacityReservationKey(value) };
+}
+
+async function seedClaims(
+  store: Store,
+  claimOwner: SharedCapacityOwner,
+  count: number,
+  released: boolean,
+): Promise<void> {
+  const claims = Array.from({ length: count }, (_, index) => {
+    const value = reservation(claimOwner.objective, { workItem: index + 1 });
+    return {
+      id: sharedCapacityClaimId(claimOwner, value.key),
+      owner: claimOwner,
+      reservation: value,
+      released,
+    };
+  });
+  const state = {
+    protocol: "clockgrove.factory/shared-capacity-v1",
+    repository: "fixture/project",
+    generation: 1,
+    limits: {
+      ...limits,
+      maxParallel: Math.max(limits.maxParallel, count + 1),
+      maxLocalParallel: Math.max(limits.maxLocalParallel, count + 1),
+      cpuCapacity: Math.max(limits.cpuCapacity, count + 1),
+      memoryCapacityMb: Math.max(limits.memoryCapacityMb, (count + 1) * 128),
+    },
+    claims,
+  };
+  const oid = (store.next++).toString(16).padStart(40, "0");
+  store.commits.set(oid, {
+    oid,
+    treeOid: base,
+    parentOids: [base],
+    message: `Factory shared capacity\n\nFactory-Shared-Capacity: ${Buffer.from(
+      JSON.stringify(state),
+    ).toString("base64url")}`,
+    serverTime: store.now,
+  });
+  store.refs.set(SHARED_CAPACITY_REF, oid);
 }
 
 describe("independent-session durable capacity", () => {
@@ -361,5 +453,145 @@ describe("independent-session durable capacity", () => {
     expect((await a.snapshot()).active).toBe(1);
     await a.release(successor, item.key);
     expect((await a.snapshot()).active).toBe(0);
+  });
+
+  it("compacts released claims into exact durable anti-replay evidence at the boundary", async () => {
+    const store = new Store(),
+      a = coordinator(store),
+      one = await owner(store, 1);
+    await seedClaims(store, one, SHARED_CAPACITY_COMPACT_AT - 1, true);
+    const fresh = reservation(1, { workItem: SHARED_CAPACITY_COMPACT_AT });
+    await expect(a.reserve(one, fresh, limits)).resolves.toMatchObject({ reserved: true });
+    expect(await a.retentionStatus()).toMatchObject({
+      journalClaims: 1,
+      activeClaims: 1,
+      releasedClaims: 0,
+      retiredClaims: SHARED_CAPACITY_COMPACT_AT - 1,
+      status: "healthy",
+    });
+    const retired = reservation(1, { workItem: 1 });
+    await expect(a.reserve(one, retired, limits)).resolves.toEqual({
+      reserved: false,
+      code: "released-reservation",
+    });
+    await expect(a.reserve(one, { ...retired, cpu: 2 }, limits)).rejects.toThrow(
+      "identity changed resources",
+    );
+  });
+
+  it("preserves compaction and both reservations across CAS contention", async () => {
+    const store = new Store(),
+      a = coordinator(store, { ...limits, maxParallel: 4, maxLocalParallel: 4 }),
+      b = coordinator(store, { ...limits, maxParallel: 4, maxLocalParallel: 4 }),
+      one = await owner(store, 1),
+      two = await owner(store, 2);
+    await seedClaims(store, one, SHARED_CAPACITY_COMPACT_AT - 1, true);
+    store.beforeDispatch = async () => {
+      await b.reserve(two, reservation(2, { workItem: SHARED_CAPACITY_COMPACT_AT + 1 }), {
+        ...limits,
+        maxParallel: 4,
+        maxLocalParallel: 4,
+      });
+    };
+    await a.reserve(one, reservation(1, { workItem: SHARED_CAPACITY_COMPACT_AT }), {
+      ...limits,
+      maxParallel: 4,
+      maxLocalParallel: 4,
+    });
+    expect(await a.snapshot()).toMatchObject({ active: 2 });
+    expect(await a.retentionStatus()).toMatchObject({
+      journalClaims: 2,
+      retiredClaims: SHARED_CAPACITY_COMPACT_AT - 1,
+    });
+  });
+
+  it("preserves compacted evidence while a ceiling configuration loses its CAS", async () => {
+    const store = new Store(),
+      a = coordinator(store),
+      b = coordinator(store),
+      one = await owner(store, 1),
+      two = await owner(store, 2);
+    await seedClaims(store, one, SHARED_CAPACITY_COMPACT_AT - 1, true);
+    store.beforeDispatch = async () => {
+      await b.reserve(two, reservation(2), limits);
+    };
+    await a.configureLimits({ ...limits, maxParallel: 3, maxLocalParallel: 3 }, async () => {});
+    expect(await a.snapshot()).toMatchObject({ active: 1 });
+    expect(await a.retentionStatus()).toMatchObject({
+      journalClaims: 1,
+      retiredClaims: SHARED_CAPACITY_COMPACT_AT - 1,
+    });
+    const three = await owner(store, 3);
+    await expect(a.reserve(three, reservation(3), limits)).resolves.toMatchObject({
+      reserved: true,
+    });
+  });
+
+  it("keeps the released journal authoritative when compaction crashes before publication", async () => {
+    const store = new Store(),
+      a = coordinator(store),
+      one = await owner(store, 1);
+    await seedClaims(store, one, SHARED_CAPACITY_COMPACT_AT - 1, true);
+    store.failCreateTree = true;
+    await expect(
+      a.reserve(one, reservation(1, { workItem: SHARED_CAPACITY_COMPACT_AT }), limits),
+    ).rejects.toThrow("injected tree failure");
+    expect(await a.retentionStatus()).toMatchObject({
+      journalClaims: SHARED_CAPACITY_COMPACT_AT - 1,
+      releasedClaims: SHARED_CAPACITY_COMPACT_AT - 1,
+      retiredClaims: 0,
+    });
+    await expect(a.reserve(one, reservation(1, { workItem: 1 }), limits)).resolves.toEqual({
+      reserved: false,
+      code: "released-reservation",
+    });
+  });
+
+  it("recovers an ambiguously accepted compaction without re-arming a retired identity", async () => {
+    const store = new Store(),
+      a = coordinator(store),
+      one = await owner(store, 1);
+    await seedClaims(store, one, SHARED_CAPACITY_COMPACT_AT - 1, true);
+    store.loseResponse = true;
+    await a.reserve(one, reservation(1, { workItem: SHARED_CAPACITY_COMPACT_AT }), limits);
+    await expect(a.reserve(one, reservation(1, { workItem: 1 }), limits)).resolves.toEqual({
+      reserved: false,
+      code: "released-reservation",
+    });
+    store.now = new Date(store.now.getTime() + 20 * 60_000);
+    await owner(store, 1, "replacement");
+    await expect(a.reserve(one, reservation(1, { workItem: 1 }), limits)).rejects.toThrow(
+      "ownership is not current",
+    );
+  });
+
+  it("reports actionable unresolved retention pressure before the hard limit", async () => {
+    const store = new Store(),
+      largeLimits = {
+        ...limits,
+        maxParallel: SHARED_CAPACITY_HARD_LIMIT + 1,
+        maxLocalParallel: SHARED_CAPACITY_HARD_LIMIT + 1,
+        cpuCapacity: SHARED_CAPACITY_HARD_LIMIT + 1,
+        memoryCapacityMb: (SHARED_CAPACITY_HARD_LIMIT + 1) * 128,
+      },
+      a = coordinator(store, largeLimits),
+      one = await owner(store, 1);
+    await seedClaims(store, one, SHARED_CAPACITY_ACTION_REQUIRED_AT, false);
+    expect(await a.retentionStatus()).toEqual({
+      journalClaims: SHARED_CAPACITY_ACTION_REQUIRED_AT,
+      activeClaims: SHARED_CAPACITY_ACTION_REQUIRED_AT,
+      releasedClaims: 0,
+      retiredClaims: 0,
+      compactAt: SHARED_CAPACITY_COMPACT_AT,
+      actionRequiredAt: SHARED_CAPACITY_ACTION_REQUIRED_AT,
+      hardLimit: SHARED_CAPACITY_HARD_LIMIT,
+      status: "action-required",
+      action:
+        "Reconcile every retained liability and explicitly release settled claims; active or unresolved claims cannot be compacted.",
+    });
+    await seedClaims(store, one, SHARED_CAPACITY_HARD_LIMIT, false);
+    await expect(
+      a.reserve(one, reservation(1, { workItem: SHARED_CAPACITY_HARD_LIMIT + 1 }), largeLimits),
+    ).rejects.toThrow("reconcile and explicitly release settled claims");
   });
 });

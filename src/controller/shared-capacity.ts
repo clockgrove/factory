@@ -13,6 +13,11 @@ import {
 
 export const SHARED_CAPACITY_REF = "refs/clockgrove-factory/coordination/capacity";
 const PREFIX = "Factory-Shared-Capacity: ";
+const RETIRED_ROOT = ".clockgrove-factory-capacity-retired";
+const RETIRED_MARKER = Buffer.from("clockgrove.factory/shared-capacity-retired-v1\n", "utf8");
+export const SHARED_CAPACITY_COMPACT_AT = 3072;
+export const SHARED_CAPACITY_ACTION_REQUIRED_AT = 3840;
+export const SHARED_CAPACITY_HARD_LIMIT = 4096;
 const number = z.number().finite().nonnegative();
 const ownerSchema = z
   .object({
@@ -63,20 +68,53 @@ const claimSchema = z
     released: z.boolean(),
   })
   .strict();
-const stateSchema = z
+const stateV1Schema = z
   .object({
     protocol: z.literal("clockgrove.factory/shared-capacity-v1"),
     repository: z.string().min(3),
     generation: z.number().int().positive(),
     limits: limitsSchema,
-    claims: z.array(claimSchema).max(4096),
+    claims: z.array(claimSchema).max(SHARED_CAPACITY_HARD_LIMIT),
   })
   .strict();
+const stateSchema = z
+  .object({
+    protocol: z.literal("clockgrove.factory/shared-capacity-v2"),
+    repository: z.string().min(3),
+    generation: z.number().int().positive(),
+    limits: limitsSchema,
+    claims: z.array(claimSchema).max(SHARED_CAPACITY_HARD_LIMIT),
+    retired: z
+      .object({
+        count: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+        markerOid: z
+          .string()
+          .regex(/^[a-f0-9]{40,64}$/)
+          .nullable(),
+      })
+      .strict(),
+  })
+  .strict()
+  .refine(
+    (state) => (state.retired.count === 0) === (state.retired.markerOid === null),
+    "shared capacity retired count and marker must agree",
+  );
 type State = z.infer<typeof stateSchema>;
 type Claim = z.infer<typeof claimSchema>;
 export type SharedCapacityResult =
   | { reserved: true; claimId: string }
   | { reserved: false; code: CapacityRejectionCode | "released-reservation" };
+export interface SharedCapacityRetentionStatus {
+  journalClaims: number;
+  activeClaims: number;
+  releasedClaims: number;
+  retiredClaims: number;
+  compactAt: number;
+  actionRequiredAt: number;
+  hardLimit: number;
+  status: "healthy" | "compaction-due" | "action-required";
+  action: string | null;
+}
 
 function canonical(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
@@ -93,6 +131,14 @@ export function sharedCapacityClaimId(owner: SharedCapacityOwner, key: string): 
   return createHash("sha256")
     .update(canonical({ owner: ownerSchema.parse(owner), key }))
     .digest("hex");
+}
+function reservationDigest(reservation: CapacityReservation): string {
+  return createHash("sha256")
+    .update(canonical(reservationSchema.parse(reservation)))
+    .digest("hex");
+}
+function retiredDirectory(id: string): string {
+  return `${RETIRED_ROOT}/${id.slice(0, 2)}/${id.slice(2, 4)}/${id.slice(4, 6)}/${id.slice(6, 8)}/${id}`;
 }
 function globalLimits(input: CapacityLimits): State["limits"] {
   const finite = (value: number) =>
@@ -160,6 +206,20 @@ export class SharedCapacityCoordinator {
     private readonly options: {
       store: LeaseStore & {
         withMutationFence?<T>(fence: () => Promise<void>, operation: () => Promise<T>): Promise<T>;
+        createBlob(content: Buffer): Promise<string>;
+        createTree(args: {
+          baseTreeOid?: string;
+          entries: Array<{
+            path: string;
+            mode: "100644" | "100755" | "120000";
+            type: "blob";
+            sha: string | null;
+          }>;
+        }): Promise<string>;
+        readTreeDirectory(
+          treeOid: string,
+          path: string,
+        ): Promise<Array<{ name: string; type: "blob" | "tree"; sha: string }> | null>;
       };
       repository: string;
       baseCommitSha: string;
@@ -181,7 +241,18 @@ export class SharedCapacityCoordinator {
       ?.slice(PREFIX.length);
     if (!encoded || encoded.length > 4 * 1024 * 1024)
       throw new Error("invalid shared capacity record");
-    const state = stateSchema.parse(JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")));
+    const raw: unknown = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+    const current = stateSchema.safeParse(raw);
+    const state = current.success
+      ? current.data
+      : (() => {
+          const legacy = stateV1Schema.parse(raw);
+          return stateSchema.parse({
+            ...legacy,
+            protocol: "clockgrove.factory/shared-capacity-v2",
+            retired: { count: 0, markerOid: null },
+          });
+        })();
     if (state.repository !== this.options.repository.toLowerCase())
       throw new Error("shared capacity repository mismatch");
     const ids = new Set<string>();
@@ -204,11 +275,12 @@ export class SharedCapacityCoordinator {
     const imported = await this.options.assertLegacyCompatible();
     const base = await this.options.store.readCommit(this.options.baseCommitSha);
     const state: State = {
-      protocol: "clockgrove.factory/shared-capacity-v1",
+      protocol: "clockgrove.factory/shared-capacity-v2",
       repository: this.options.repository.toLowerCase(),
       generation: 1,
       limits: globalLimits(this.options.limits),
       claims: (imported ?? []).map(({ owner, reservation }) => this.#claim(owner, reservation)),
+      retired: { count: 0, markerOid: null },
     };
     ledger(state);
     const oid = await this.#commit(state, base.treeOid, base.oid);
@@ -246,7 +318,10 @@ export class SharedCapacityCoordinator {
 
   async #change<T>(
     owner: SharedCapacityOwner,
-    operation: (state: State) => { value: T; changed: boolean },
+    operation: (
+      state: State,
+      retiredDigest: (id: string) => Promise<string | null>,
+    ) => Promise<{ value: T; changed: boolean }> | { value: T; changed: boolean },
   ): Promise<T> {
     const captured = ownerSchema.parse(owner);
     if (this.options.store.withMutationFence)
@@ -259,7 +334,10 @@ export class SharedCapacityCoordinator {
 
   async #changeFenced<T>(
     owner: SharedCapacityOwner,
-    operation: (state: State) => { value: T; changed: boolean },
+    operation: (
+      state: State,
+      retiredDigest: (id: string) => Promise<string | null>,
+    ) => Promise<{ value: T; changed: boolean }> | { value: T; changed: boolean },
     transportFenced: boolean,
   ): Promise<T> {
     await this.initialize();
@@ -268,11 +346,22 @@ export class SharedCapacityCoordinator {
       if (!current) throw new Error("shared capacity ref disappeared");
       await this.#assertOwner(owner);
       const next = structuredClone(current.state);
-      const result = operation(next);
-      if (!result.changed) return result.value;
+      const result = await operation(next, (id) => this.#retiredDigest(current, id));
+      let treeOid = current.treeOid;
+      let compacted = false;
+      if (next.claims.length >= SHARED_CAPACITY_COMPACT_AT) {
+        const compact = await this.#compactReleased(next, treeOid);
+        treeOid = compact.treeOid;
+        compacted = compact.removed > 0;
+      }
+      if (next.claims.length > SHARED_CAPACITY_HARD_LIMIT)
+        throw new Error(
+          `shared capacity journal has ${next.claims.length} active or unresolved claims; reconcile and explicitly release settled claims before the ${SHARED_CAPACITY_HARD_LIMIT}-record safety bound`,
+        );
+      if (!result.changed && !compacted) return result.value;
       next.generation++;
       ledger(next);
-      const oid = await this.#commit(next, current.treeOid, current.oid);
+      const oid = await this.#commit(next, treeOid, current.oid);
       if (!transportFenced) await this.#assertOwner(owner);
       try {
         const compare = () =>
@@ -293,11 +382,86 @@ export class SharedCapacityCoordinator {
     throw new Error("shared capacity contention; retry admission later");
   }
 
+  async #retiredDigest(
+    current: { treeOid: string; state: State },
+    id: string,
+  ): Promise<string | null> {
+    if (current.state.retired.count === 0) return null;
+    const entries = await this.options.store.readTreeDirectory(
+      current.treeOid,
+      retiredDirectory(id),
+    );
+    if (!entries) return null;
+    if (
+      entries.length !== 1 ||
+      entries[0]?.type !== "blob" ||
+      entries[0].sha !== current.state.retired.markerOid ||
+      !/^[a-f0-9]{64}$/.test(entries[0].name)
+    )
+      throw new Error("invalid shared capacity retired identity evidence");
+    return entries[0].name;
+  }
+
+  async #compactReleased(
+    state: State,
+    treeOid: string,
+  ): Promise<{ treeOid: string; removed: number }> {
+    const released = state.claims.filter((claim) => claim.released);
+    if (released.length === 0) return { treeOid, removed: 0 };
+    const markerOid =
+      state.retired.markerOid ?? (await this.options.store.createBlob(RETIRED_MARKER));
+    const compactedTree = await this.options.store.createTree({
+      baseTreeOid: treeOid,
+      entries: released.map((claim) => ({
+        path: `${retiredDirectory(claim.id)}/${reservationDigest(claim.reservation)}`,
+        mode: "100644" as const,
+        type: "blob" as const,
+        sha: markerOid,
+      })),
+    });
+    state.claims = state.claims.filter((claim) => !claim.released);
+    state.retired = {
+      count: state.retired.count + released.length,
+      markerOid,
+    };
+    return { treeOid: compactedTree, removed: released.length };
+  }
+
   async snapshot(): Promise<CapacitySnapshot> {
     await this.initialize();
     const current = await this.#read();
     if (!current) throw new Error("shared capacity ref disappeared");
     return ledger(current.state).snapshot();
+  }
+
+  async retentionStatus(): Promise<SharedCapacityRetentionStatus> {
+    await this.initialize();
+    const current = await this.#read();
+    if (!current) throw new Error("shared capacity ref disappeared");
+    const activeClaims = current.state.claims.filter((claim) => !claim.released).length;
+    const releasedClaims = current.state.claims.length - activeClaims;
+    const status =
+      activeClaims >= SHARED_CAPACITY_ACTION_REQUIRED_AT
+        ? "action-required"
+        : current.state.claims.length >= SHARED_CAPACITY_COMPACT_AT && releasedClaims > 0
+          ? "compaction-due"
+          : "healthy";
+    return {
+      journalClaims: current.state.claims.length,
+      activeClaims,
+      releasedClaims,
+      retiredClaims: current.state.retired.count,
+      compactAt: SHARED_CAPACITY_COMPACT_AT,
+      actionRequiredAt: SHARED_CAPACITY_ACTION_REQUIRED_AT,
+      hardLimit: SHARED_CAPACITY_HARD_LIMIT,
+      status,
+      action:
+        status === "action-required"
+          ? "Reconcile every retained liability and explicitly release settled claims; active or unresolved claims cannot be compacted."
+          : status === "compaction-due"
+            ? "Allow the next fenced capacity mutation to compact released identities."
+            : null,
+    };
   }
 
   /** Explicit controller configuration only; ordinary sessions cannot widen ceilings. */
@@ -367,7 +531,7 @@ export class SharedCapacityCoordinator {
     limits: CapacityLimits,
   ): Promise<SharedCapacityResult> {
     const claim = this.#claim(owner, reservation);
-    return this.#change<SharedCapacityResult>(owner, (state) => {
+    return this.#change<SharedCapacityResult>(owner, async (state, retiredDigest) => {
       const existing = state.claims.find((row) => row.id === claim.id);
       if (existing) {
         if (canonical(existing.reservation) !== canonical(claim.reservation))
@@ -376,6 +540,15 @@ export class SharedCapacityCoordinator {
           value: existing.released
             ? { reserved: false, code: "released-reservation" }
             : { reserved: true, claimId: claim.id },
+          changed: false,
+        };
+      }
+      const retired = await retiredDigest(claim.id);
+      if (retired) {
+        if (retired !== reservationDigest(claim.reservation))
+          throw new Error("shared capacity identity changed resources");
+        return {
+          value: { reserved: false, code: "released-reservation" },
           changed: false,
         };
       }
@@ -414,7 +587,7 @@ export class SharedCapacityCoordinator {
     if (verifiedPredecessors.some((prior) => prior.objective !== owner.objective))
       throw new Error("capacity adoption Objective mismatch");
     const claims = reservations.map((reservation) => this.#claim(owner, reservation));
-    await this.#change(owner, (state) => {
+    await this.#change(owner, async (state, retiredDigest) => {
       let changed = false;
       for (const claim of claims) {
         const prior = state.claims.find((row) => row.id === claim.id);
@@ -422,6 +595,8 @@ export class SharedCapacityCoordinator {
           if (canonical(prior.reservation) !== canonical(claim.reservation) || prior.released)
             throw new Error("reconstructed shared capacity conflicts with retained identity");
         } else {
+          if (await retiredDigest(claim.id))
+            throw new Error("reconstructed shared capacity conflicts with retained identity");
           const inherited = state.claims.find(
             (row) => !row.released && row.reservation.key === claim.reservation.key,
           );
@@ -458,7 +633,7 @@ export class SharedCapacityCoordinator {
     if (fromOwner.objective !== owner.objective)
       throw new Error("capacity transition Objective mismatch");
     const claim = this.#claim(owner, next);
-    return this.#change<SharedCapacityResult>(owner, (state) => {
+    return this.#change<SharedCapacityResult>(owner, async (state, retiredDigest) => {
       const prior = state.claims.find(
         (row) => row.id === sharedCapacityClaimId(fromOwner, fromKey),
       );
@@ -470,7 +645,11 @@ export class SharedCapacityCoordinator {
         canonical(existing.reservation) === canonical(claim.reservation)
       )
         return { value: { reserved: true, claimId: claim.id }, changed: false };
-      if (!prior || prior.released || existing)
+      const priorRetired = prior
+        ? null
+        : await retiredDigest(sharedCapacityClaimId(fromOwner, fromKey));
+      const existingRetired = existing ? null : await retiredDigest(claim.id);
+      if (!prior || prior.released || existing || priorRetired || existingRetired)
         throw new Error("shared capacity transition identity mismatch");
       const current = ledger(state);
       const result = current.transition(

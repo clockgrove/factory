@@ -56,9 +56,13 @@ discarded or treated as zero usage.
   nothing about that invocation. Once the shared ledger exists, normal sessions do not consult or
   wait for the service election lease.
 - An integration claim covers only mechanical final integration, never model execution or
-  validation. A prepared claim can be recovered only by the exact Objective's higher fenced epoch.
-  A dispatched claim needs exact GitHub merge proof; age alone cannot prove that a request will not
-  complete. Unresolved native asynchronous or regular merge dispatch blocks that destination
+  validation. The exact Objective's higher fenced epoch can immediately replace its prepared claim;
+  after the server-timed 120-second preparation bound, another fenced and otherwise eligible Objective can race
+  that prepared record's expected-OID CAS against the old actor's dispatched-marker CAS. A
+  dispatched claim never expires. It is released only after the exact squash chain proves success or
+  after one regular HTTP 409 or an exact native request UUID proves terminal non-execution, with no
+  partially integrated member. Response loss, lookup loss and any earlier outstanding request stay
+  uncertain. Unresolved native asynchronous or regular merge dispatch blocks that destination
   branch's integration until reconciliation, not unrelated Objective mutations.
 - GitHub regular merge supports an expected head SHA, not expected base CAS. Revalidation plus
   post-merge parent/tree proof detects an external-writer race; it does not pretend to prevent it.

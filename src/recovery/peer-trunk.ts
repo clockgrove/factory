@@ -328,7 +328,7 @@ export async function verifyRecoveryPeerTrunkIntegration(input: {
       (event) =>
         event.runId === start.runId &&
         terminal.has(event.event) &&
-        hasCurrentWriterAuthority(event, events),
+        hasCurrentWriterAuthority(event, events, peer.objectiveAuthority),
     );
     requirePeer(end.length <= 1 && (!end.length || integrated.sequence < end[0]!.sequence));
     const runtime = start.recoveryPlanDigest

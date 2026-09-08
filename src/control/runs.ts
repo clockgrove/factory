@@ -6,7 +6,7 @@ import { parseRunPolicy, policyDigest, type RunPolicy } from "../protocol/policy
 import { encodeEventComment, latestSupportedRun, nextEventSequence } from "./receipts.js";
 import { loadRecoveryRuntime, type RecoveryRuntime } from "../recovery/runtime.js";
 import { loadRecoverySourceReconciliation } from "../recovery/reconciliation.js";
-import { writerAuthority } from "./authority.js";
+import { writerAuthority, type ObjectiveAuthorityObservation } from "./authority.js";
 import type { LeaseState } from "./lease.js";
 
 export interface RunEventStore {
@@ -65,7 +65,7 @@ export class RunManager {
     const runtime = await loadRecoveryRuntime(input);
     if (runtime.status !== "verified")
       throw new Error(`successor runtime unavailable: ${runtime.blockers.join(", ")}`);
-    const active = latestSupportedRun([...runtime.events]);
+    const active = latestSupportedRun([...runtime.events], runtime.objectiveAuthority);
     if (
       !active ||
       active.event !== "FactoryRunStarted" ||
@@ -92,8 +92,11 @@ export class RunManager {
     };
   }
 
-  resume(events: FactoryEvent[]): RunState | null {
-    const active = latestSupportedRun(events);
+  resume(
+    events: FactoryEvent[],
+    authority?: ObjectiveAuthorityObservation | null | undefined,
+  ): RunState | null {
+    const active = latestSupportedRun(events, authority);
     if (!active || active.kind !== "run" || active.event !== "FactoryRunStarted") {
       return null;
     }
@@ -138,8 +141,9 @@ export class RunManager {
     activationRequestId?: string;
     baseSha?: string;
     writer?: LeaseState;
+    authority?: ObjectiveAuthorityObservation | null | undefined;
   }): Promise<RunState> {
-    const resumed = this.resume(args.existingEvents ?? []);
+    const resumed = this.resume(args.existingEvents ?? [], args.authority);
     if (resumed) return resumed;
     const policy = parseRunPolicy(args.policy);
     const digest = policyDigest(policy);

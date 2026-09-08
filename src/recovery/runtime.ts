@@ -60,6 +60,7 @@ export interface RecoveryRuntime {
   adoptionVerified: true;
   /** Observation of durable adoption only. Current leases/resource/admission gates remain mandatory. */
   executionAuthorized: false;
+  objectiveAuthority: FactoryReadSnapshot["objectiveAuthority"];
   controllingRun: Start;
   planRecord: RecoveryPlanRecord;
   claim: RecoveryClaimRecord;
@@ -304,7 +305,9 @@ export async function loadRecoveryRuntime(input: {
       "successor-effect-binding-invalid",
     );
     const terminal = suffix.filter(
-      (event) => terminals.has(event.event) && hasCurrentWriterAuthority(event, suffix),
+      (event) =>
+        terminals.has(event.event) &&
+        hasCurrentWriterAuthority(event, suffix, snapshot.objectiveAuthority),
     );
     requireRuntime(
       terminal.length <= 1 &&
@@ -439,6 +442,7 @@ export async function loadRecoveryRuntime(input: {
               controllingRunIds: [...sourceRunIds, input.runId],
               store: input.store,
               deliveryHeadSha: pull.headSha,
+              authority: snapshot.objectiveAuthority,
               ...(!originalCandidate ? { targetBaseSha: event.targetBaseSha } : {}),
               candidateRunId: input.runId,
               ...(!originalCandidate
@@ -650,6 +654,7 @@ export async function loadRecoveryRuntime(input: {
       plansByDigest: plans,
       claims: claims.filter((value) => value !== claim),
       candidatePlan: plan,
+      authority: snapshot.objectiveAuthority,
     });
     requireRuntime(
       chain.status === "verified" && chain.accounting?.usage,
@@ -792,6 +797,7 @@ export async function loadRecoveryRuntime(input: {
       status: "verified",
       adoptionVerified: true,
       executionAuthorized: false,
+      objectiveAuthority: snapshot.objectiveAuthority,
       controllingRun,
       planRecord: record,
       claim,

@@ -19,6 +19,7 @@ import {
 import { rankReadyWorkItems, type ObservedPrioritySource } from "../scheduling/priority.js";
 import { queuedReasonCode } from "../explanations/index.js";
 import type { GitHubMutationTelemetry } from "../platform.js";
+import type { ObjectiveAuthorityObservation } from "../control/authority.js";
 
 export interface ReadWorkItemSnapshot {
   id?: string;
@@ -58,6 +59,7 @@ export interface FactoryReadSnapshot {
     resetAt: Date;
   };
   factoryEvents?: FactoryEvent[];
+  objectiveAuthority?: ObjectiveAuthorityObservation | null;
   workItems: ReadWorkItemSnapshot[];
 }
 
@@ -334,7 +336,7 @@ export function buildStatusReport(input: {
   const events = snapshotEvents(input.snapshot);
   const observedAt = evidenceTime(input.snapshot, events);
   const items = derivedItems(input.snapshot, observedAt);
-  const run = latestRunReceipts(events);
+  const run = latestRunReceipts(events, input.snapshot.objectiveAuthority);
   const activation = latestActivation(events, input.snapshot.number);
   const withdrawal = activation && activationCancellation(events, activation);
   const activationStarted =

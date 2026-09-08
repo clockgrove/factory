@@ -1379,7 +1379,7 @@ export class FactorySupervisor {
     manager: RunManager,
     reconciliationMode: "none" | "inspect" | "repair" = "none",
   ): Promise<RunState | null> {
-    const active = latestSupportedRun(snapshot.factoryEvents ?? []);
+    const active = latestSupportedRun(snapshot.factoryEvents ?? [], snapshot.objectiveAuthority);
     const recovery = this.#options.recovery;
     if (recovery && (active?.event !== "FactoryRunStarted" || !active.recoveryRequestId)) {
       if (
@@ -1390,7 +1390,11 @@ export class FactorySupervisor {
           (event) =>
             event.event === "FactoryRunCompleted" &&
             event.runId === recovery.successorRunId &&
-            hasCurrentWriterAuthority(event, snapshot.factoryEvents ?? []),
+            hasCurrentWriterAuthority(
+              event,
+              snapshot.factoryEvents ?? [],
+              snapshot.objectiveAuthority,
+            ),
         ) &&
         snapshot.factoryEvents
           .filter((event) => event.event === "FactoryRunStarted")
@@ -1420,7 +1424,7 @@ export class FactorySupervisor {
     )
       throw new Error("successor is no longer the current non-terminal run");
     if (active?.event !== "FactoryRunStarted" || !active.recoveryRequestId)
-      return manager.resume(snapshot.factoryEvents ?? []);
+      return manager.resume(snapshot.factoryEvents ?? [], snapshot.objectiveAuthority);
     if (
       !recovery ||
       active.recoveryRequestId !== recovery.requestId ||
@@ -1852,7 +1856,11 @@ export class FactorySupervisor {
       (candidate) =>
         candidate.kind === "run" &&
         candidate.writerEpoch === writerEpoch &&
-        hasCurrentWriterAuthority(candidate, snapshot.factoryEvents ?? []) &&
+        hasCurrentWriterAuthority(
+          candidate,
+          snapshot.factoryEvents ?? [],
+          snapshot.objectiveAuthority,
+        ) &&
         candidate.runId === this.#run.runId &&
         candidate.event === event &&
         candidate.commandRequestId === gate.requestId,
@@ -2213,7 +2221,7 @@ export class FactorySupervisor {
   /** Completion-only authority after expiry: no repair or new execution may be inferred. */
   async #recordedCompletionReady(snapshot: Snapshot, deadline: number): Promise<boolean> {
     try {
-      const active = latestSupportedRun(snapshot.factoryEvents ?? []);
+      const active = latestSupportedRun(snapshot.factoryEvents ?? [], snapshot.objectiveAuthority);
       if (
         active?.event !== "FactoryRunStarted" ||
         active.runId !== this.#run.runId ||
@@ -2696,7 +2704,7 @@ export class FactorySupervisor {
       await this.#lease.assert();
       const current = await this.#reader.readObjective(run.objective);
       assertActivation(snapshotEvents(current));
-      const observed = manager.resume(current.factoryEvents ?? []);
+      const observed = manager.resume(current.factoryEvents ?? [], current.objectiveAuthority);
       if (
         !observed ||
         current.number !== run.objective ||
@@ -3575,6 +3583,7 @@ export class FactorySupervisor {
           runId,
           sequence: this.#sequences.take(),
           writer: acquired,
+          authority: snapshot.objectiveAuthority,
           ...(this.#options.activation
             ? {
                 activationRequestId: this.#options.activation.requestId,
@@ -9498,6 +9507,7 @@ export class FactorySupervisor {
           store: this.#recoveryStore,
           deliveryHeadSha: headSha,
           requireCompletion: false,
+          authority: runtime.objectiveAuthority,
         })
       ).record;
     }
@@ -11677,6 +11687,7 @@ export class FactorySupervisor {
           deliveryHeadSha: siblingRefresh.plannedHeadSha,
           candidateRunId: source.siblingRefresh.candidateRunId,
           requireCompletion: true,
+          authority: runtime.objectiveAuthority,
         });
         if (!prior.candidate) throw new Error("accepted prior sibling candidate is unavailable");
         await this.#integrate(

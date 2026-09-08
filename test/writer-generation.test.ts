@@ -13,6 +13,7 @@ import {
 import { LifecycleRecorder } from "../src/control/events.js";
 import type { LeaseManager, LeaseState } from "../src/control/lease.js";
 import { objectiveAuthorityObservation, writerAuthority } from "../src/control/authority.js";
+import { RunManager } from "../src/control/runs.js";
 
 const common = {
   protocol: "clockgrove.factory/v2",
@@ -20,6 +21,7 @@ const common = {
   runId: "run-a",
   at: "2026-09-07T00:00:00.000Z",
 };
+const POLICY_DIGEST = policyDigest(DEFAULT_RUN_POLICY);
 const start = parseFactoryEvent({
   ...common,
   kind: "run",
@@ -163,6 +165,41 @@ describe("Objective receipt writer generation", () => {
     expect(
       hasCurrentWriterAuthority(fresh, [fresh], { ...authority, holder: "successor", epoch: 3 }),
     ).toBe(false);
+  });
+  it.each([
+    ["stale epoch", { holder: "old-writer", epoch: 1, policyDigest: POLICY_DIGEST }],
+    ["wrong holder", { holder: "old-writer", epoch: 2, policyDigest: POLICY_DIGEST }],
+    ["wrong policy", { holder: "current-writer", epoch: 2, policyDigest: "f".repeat(64) }],
+  ])("RunManager resume rejects a %s terminal against canonical authority", (_name, writer) => {
+    const current = {
+      ref: "refs/clockgrove-factory/leases/objective-42",
+      oid: "c".repeat(40),
+      treeOid: "d".repeat(40),
+      objective: 42,
+      runId: "run-a",
+      holder: "current-writer",
+      epoch: 2,
+      sequence: 8,
+      expiresAt: new Date("2026-09-07T00:10:00.000Z"),
+      policyDigest: POLICY_DIGEST,
+    } satisfies LeaseState;
+    const oldController = parseFactoryEvent({
+      ...boundary,
+      writerEpoch: writer.epoch,
+      controllerId: writer.holder,
+      epoch: writer.epoch,
+    });
+    const lateTerminal = parseFactoryEvent({
+      ...terminal(writer.epoch),
+      ...writerAuthority({ ...current, ...writer } as LeaseState, 9),
+    });
+    const events = [start, oldController, lateTerminal];
+    expect(latestSupportedRun(events)).toBeNull();
+
+    const manager = new RunManager({} as ConstructorParameters<typeof RunManager>[0]);
+    expect(
+      manager.resume(events, objectiveAuthorityObservation(current, new Date(common.at))),
+    ).toMatchObject({ runId: "run-a", policyDigest: POLICY_DIGEST });
   });
   it("deduplicates exact writer-operation replay and rejects changed payloads", () => {
     const lease = {

@@ -273,7 +273,7 @@ export async function assessRecovery(input: {
         (event) =>
           event.runId === start.runId &&
           TERMINALS.has(event.event) &&
-          hasCurrentWriterAuthority(event, events),
+          hasCurrentWriterAuthority(event, events, snapshot.objectiveAuthority),
       );
       if (terminals.length > 1 || terminals.some((event) => event.sequence <= start.sequence))
         throw new Error("conflicting terminal history");
@@ -300,7 +300,11 @@ export async function assessRecovery(input: {
   for (const start of starts.values()) {
     const runEvents = events.filter((event) => event.runId === start.runId);
     const terminal = runEvents
-      .filter((event) => TERMINALS.has(event.event) && hasCurrentWriterAuthority(event, events))
+      .filter(
+        (event) =>
+          TERMINALS.has(event.event) &&
+          hasCurrentWriterAuthority(event, events, snapshot.objectiveAuthority),
+      )
       .at(-1);
     const run: RecoveryRun = {
       runId: start.runId,
@@ -796,6 +800,7 @@ export async function assessRecovery(input: {
       events,
       runIds: selectedStarts.map((start) => start.runId),
       policy,
+      authority: snapshot.objectiveAuthority,
     });
     for (const blocker of report.accounting.blockers)
       block(`accounting-${blocker.code}`, blocker.reason, {

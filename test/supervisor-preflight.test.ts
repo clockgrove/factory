@@ -196,12 +196,9 @@ describe("Supervisor external admission generation fence", () => {
     async () => {
       const providerCall = vi.fn(async () => "spent");
       await expect(
-        runWithExternalAdmissionBoundary(
-          async () => {
-            throw new Error("successor Objective Director is active");
-          },
-          providerCall,
-        ),
+        runWithExternalAdmissionBoundary(async () => {
+          throw new Error("successor Objective Director is active");
+        }, providerCall),
       ).rejects.toThrow(/successor Objective Director/);
       expect(providerCall).not.toHaveBeenCalled();
     },
@@ -212,9 +209,9 @@ describe("Supervisor external admission generation fence", () => {
       throw new Error("stale Objective lease generation");
     });
     const providerCall = vi.fn(async () => "spent");
-    await expect(
-      runWithExternalAdmissionBoundary(objectiveFence, providerCall),
-    ).rejects.toThrow(/stale Objective lease generation/);
+    await expect(runWithExternalAdmissionBoundary(objectiveFence, providerCall)).rejects.toThrow(
+      /stale Objective lease generation/,
+    );
     expect(objectiveFence).toHaveBeenCalledOnce();
     expect(providerCall).not.toHaveBeenCalled();
   });

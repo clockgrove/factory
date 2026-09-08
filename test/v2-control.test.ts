@@ -280,10 +280,7 @@ describe("Director lease", () => {
     const queuedFence = controller.captureMutationFence();
 
     store.now = new Date(acquired.expiresAt.getTime() + 1);
-    const takeover = await manager.acquire(
-      { ...identity, runId: "run-2", holder: "host-2" },
-      base,
-    );
+    const takeover = await manager.acquire({ ...identity, runId: "run-2", holder: "host-2" }, base);
     expect(takeover.epoch).toBe(2);
 
     await expect(queuedFence(45_000)).rejects.toBeInstanceOf(LeaseLostError);

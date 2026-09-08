@@ -83,9 +83,9 @@ export {
   type GraphProjectionExpectation,
 } from "./control/graph-evidence.js";
 import { GitHubControlStore } from "./control/github-store.js";
-import {
+import type {
   SharedCapacityCoordinator,
-  type SharedCapacityOwner,
+  SharedCapacityOwner,
 } from "./controller/shared-capacity.js";
 import { materializePinnedCompilationTree } from "./execution/pinned-compilation-tree.js";
 import {

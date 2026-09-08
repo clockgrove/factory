@@ -1,3 +1,10 @@
+import type {
+  ObligationInventory,
+  CompilerJudgeVerdict,
+  CompilerInferenceChallenge,
+  CompilerEvidence,
+  CompilerCaseLabel,
+} from "../evaluation/compiler-eval.js";
 import type { CompiledObjective } from "../graph.js";
 import type { NormalizedArtifact } from "../execution/artifacts.js";
 import type { WorkerPacket } from "../protocol/worker-packet.js";
@@ -16,11 +23,13 @@ export interface ManagementUsage {
 /** A paid response was observed but could not become a valid management result. */
 export class ManagementOutputError extends Error {
   readonly usage: ManagementUsage;
+  readonly proposal: unknown;
 
-  constructor(cause: unknown, usage: ManagementUsage) {
+  constructor(cause: unknown, usage: ManagementUsage, proposal?: unknown) {
     super(cause instanceof Error ? cause.message : String(cause), { cause });
     this.name = "ManagementOutputError";
     this.usage = { ...usage };
+    this.proposal = proposal;
   }
 }
 
@@ -35,11 +44,85 @@ export interface CompilationContext {
   /** Exact immutable policy activated for this compilation. */
   runPolicy: RunPolicy;
   modelSelection?: ModelSelection;
+  /** Remaining per-invocation deadline; not a hard provider token cap. */
+  invocationTimeoutMs?: number;
+  /** Trusted pinned source evidence captured once for the draft envelope. */
+  repositoryEvidence?: CompilerEvidence[];
   /** Read-only trusted observations after grounding; omitted callers retain explicit unknowns. */
   economicEvidence?: (items: readonly CompilerWorkItem[]) => Promise<DecompositionEvidence>;
 }
 
+export interface CompilerProposalTrace {
+  rawProposal: unknown;
+  normalizationTrace: string[];
+  promptDigest: string;
+  schemaDigest: string;
+  model: string | null;
+  reasoning: string | null;
+  baseSha: string;
+}
+
+export interface ObligationResult {
+  inventory: ObligationInventory;
+  usage: ManagementUsage;
+}
+export type ObligationCheckpoint = (result: ObligationResult) => Promise<void>;
+export interface PlanJudgeContext {
+  challenges?: CompilerInferenceChallenge[];
+  compilation: CompilationContext;
+  inventory: ObligationInventory;
+  objective: CompiledObjective;
+}
+export interface PlanJudgeResult {
+  verdict: CompilerJudgeVerdict;
+  usage: ManagementUsage;
+}
+export type PlanJudgeCheckpoint = (result: PlanJudgeResult) => Promise<void>;
+export interface PlanRepairContext {
+  challenges?: CompilerInferenceChallenge[];
+  compilation: CompilationContext;
+  inventory: ObligationInventory;
+  objective?: CompiledObjective;
+  verdict?: CompilerJudgeVerdict;
+  previousProposal?: unknown;
+  validationFailure?: string;
+  revision: number;
+}
+export interface CompilerCaseLabelContext {
+  compilation: CompilationContext;
+  caseDigest: string;
+  pass: "blinded" | "adjudication";
+  priorLabel?: CompilerCaseLabel;
+}
+export interface CompilerCaseLabelResult {
+  provenance: {
+    promptDigest: string;
+    schemaDigest: string;
+    sourceDigest: string;
+    baseSha: string;
+    requestedModel: string | null;
+    requestedReasoning: string | null;
+    providerReportedModel: null;
+    priorLabelDigest: string | null;
+  };
+  label: CompilerCaseLabel;
+  usage: ManagementUsage;
+}
+export type CompilerCaseLabelCheckpoint = (result: CompilerCaseLabelResult) => Promise<void>;
+export interface PlanRepairSummary {
+  changeSummary: string;
+  lineage: Array<{ itemId: string; previousItemIds: string[] }>;
+  findingDispositions: Array<{
+    findingId: string;
+    disposition: "addressed" | "challenged";
+    reason: string;
+    evidenceIds: string[];
+  }>;
+}
+
 export interface CompilationResult {
+  provenance?: CompilerProposalTrace;
+  repair?: PlanRepairSummary;
   objective: CompiledObjective;
   usage: ManagementUsage;
 }
@@ -80,12 +163,38 @@ export interface ReviewResult {
 /** Same paid-result durability boundary as Objective compilation. */
 export type ReviewCheckpoint = (result: ReviewResult) => Promise<void>;
 
+/** Called once after local preparation, immediately before dispatch; may return remaining timeout milliseconds. */
+export type CompilerModelAdmission = () => Promise<number | void>;
 export interface ManagementBackend {
+  /** Required for evaluated drafts; older backends must not silently ignore admission. */
+  readonly supportsCompilerAdmission?: true;
   readonly id: string;
   probe(): Promise<{ available: boolean; authenticated: boolean; reason?: string }>;
   compile(
     context: CompilationContext,
     checkpoint: CompilationCheckpoint,
+    beforeModelInvocation?: CompilerModelAdmission,
+  ): Promise<CompilationResult>;
+  /** Draft-stage calls share the compile accounting/checkpoint boundary. Legacy backends
+   * may omit them; callers must refuse judge-enabled compilation when unavailable. */
+  labelCompilerCase?(
+    context: CompilerCaseLabelContext,
+    checkpoint: CompilerCaseLabelCheckpoint,
+  ): Promise<CompilerCaseLabelResult>;
+  extractObligations?(
+    context: CompilationContext,
+    checkpoint: ObligationCheckpoint,
+    beforeModelInvocation?: CompilerModelAdmission,
+  ): Promise<ObligationResult>;
+  judgePlan?(
+    context: PlanJudgeContext,
+    checkpoint: PlanJudgeCheckpoint,
+    beforeModelInvocation?: CompilerModelAdmission,
+  ): Promise<PlanJudgeResult>;
+  repairPlan?(
+    context: PlanRepairContext,
+    checkpoint: CompilationCheckpoint,
+    beforeModelInvocation?: CompilerModelAdmission,
   ): Promise<CompilationResult>;
   review(context: ReviewContext, checkpoint: ReviewCheckpoint): Promise<ReviewResult>;
   /** Optional local preparation boundary. The backend must call dispatch exactly

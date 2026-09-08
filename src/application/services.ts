@@ -23,10 +23,13 @@ import type {
 import { buildDoctorReport, type DoctorChecks } from "./doctor.js";
 import { buildPlanReport, type PlanInput, type PlanningContext } from "./plan.js";
 import type { GitHubMutationTelemetry } from "../platform.js";
+import { inspectCompilerEvaluation } from "./compiler-eval.js";
+import type { CompiledGraphReadStore } from "../control/graphs.js";
 
 export const APPLICATION_OPERATIONS = [
   "doctor",
   "plan",
+  "compiler-eval",
   "recovery-plan",
   "recovery-propose",
   "recovery-request",
@@ -135,10 +138,18 @@ export interface ServiceContext {
   recovery?: RecoveryRequestService;
   diagnostics?: DoctorChecks;
   planning?: PlanningContext;
+  compilerEvaluationStore?: CompiledGraphReadStore;
   platformTelemetry?: () => GitHubMutationTelemetry;
 }
 
-export type ReadOperation = "doctor" | "plan" | "recovery-plan" | "status" | "explain" | "replay";
+export type ReadOperation =
+  | "doctor"
+  | "plan"
+  | "compiler-eval"
+  | "recovery-plan"
+  | "status"
+  | "explain"
+  | "replay";
 export type CommandOperation =
   | "pause"
   | "resume"
@@ -167,7 +178,10 @@ export class FactoryApplicationService {
     objective: number,
     workItem?: number,
     suppliedSnapshots?: unknown,
+    causalAnnotations?: unknown,
   ): Promise<unknown> {
+    if (causalAnnotations !== undefined && operation !== "compiler-eval")
+      throw new Error("Causal annotations are accepted only by compiler-eval inspection.");
     if (suppliedSnapshots !== undefined && operation !== "replay") {
       throw new Error("Supplied admission snapshots are accepted only by replay inspection.");
     }
@@ -190,6 +204,17 @@ export class FactoryApplicationService {
     }
     const snapshot = await this.context.reader.readObjective(objective);
     const repository = `${this.context.owner}/${this.context.repo}`;
+    if (operation === "compiler-eval") {
+      if (workItem !== undefined) throw new Error("compiler-eval assesses the whole Objective");
+      if (!this.context.compilerEvaluationStore)
+        throw new Error("compiler evaluation reader is not configured");
+      return inspectCompilerEvaluation({
+        repository,
+        snapshot,
+        store: this.context.compilerEvaluationStore,
+        ...(causalAnnotations === undefined ? {} : { annotations: causalAnnotations }),
+      });
+    }
     if (operation === "status") {
       return buildStatusReport({
         repository,

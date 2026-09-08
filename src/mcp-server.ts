@@ -55,6 +55,7 @@
  * burst writes; never retry through an open circuit").
  */
 
+import { CompilerCausalAnnotationsSchema } from "./application/compiler-eval.js";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -201,6 +202,7 @@ function applicationFor(
     repo,
     reader,
     platformTelemetry: () => mutations.telemetry(),
+    compilerEvaluationStore: store,
     ...(recoveryReader
       ? {
           recovery: new RecoveryRequestService({
@@ -1421,6 +1423,7 @@ type ApplicationToolInput = {
   allowanceIncrement?: RecoveryProposalInput["allowanceIncrement"];
   unknownUsageAcknowledgementDigest?: string | null;
   pinnedAdmissionSnapshots?: unknown;
+  annotations?: unknown;
 };
 
 function registerApplicationTool(
@@ -1428,6 +1431,7 @@ function registerApplicationTool(
   operation:
     | "doctor"
     | "plan"
+    | "compiler-eval"
     | "recovery-plan"
     | "recovery-propose"
     | "recovery-request"
@@ -1485,7 +1489,15 @@ function registerApplicationTool(
                 "Complete immutable run policy. Omit for fixed local-only execution up to two workers with physical resource safeguards. Adaptive concurrency is explicit; paid backends are never inferred.",
               ),
           }
-        : ["doctor", "plan", "recovery-plan", "status", "explain", "replay"].includes(operation)
+        : [
+              "doctor",
+              "plan",
+              "compiler-eval",
+              "recovery-plan",
+              "status",
+              "explain",
+              "replay",
+            ].includes(operation)
           ? {
               ...ObjectiveToolShape,
               ...(operation === "doctor" ? { repository: z.string().min(1).optional() } : {}),
@@ -1504,6 +1516,13 @@ function registerApplicationTool(
                       .regex(/^[0-9a-fA-F]{40}$/)
                       .optional(),
                     policy: z.record(z.unknown()).optional(),
+                  }
+                : {}),
+              ...(operation === "compiler-eval"
+                ? {
+                    annotations: CompilerCausalAnnotationsSchema.optional().describe(
+                      "Optional caller-supplied causal claims bound to exact run/draft/revision and cited runtime receipts. Claims remain unauthenticated conclusions; no model work or writes.",
+                    ),
                   }
                 : {}),
               ...(operation === "explain"
@@ -1538,17 +1557,19 @@ function registerApplicationTool(
     {
       title: name.replaceAll("_", " "),
       description:
-        operation === "doctor"
-          ? "Run bounded, secret-safe repository, authentication, toolchain, controller, backend, branch-policy, stack, and host-resource diagnostics. Read-only: creates no GitHub records or paid resources and never runs a model."
-          : operation === "plan"
-            ? "Inspect an existing compiled graph mechanically. Set compile=true to explicitly request one bounded management compilation and receive its observed model usage. Never activates work or writes GitHub."
-            : operation === "recovery-plan"
-              ? "Read-only assessment of historical work, graph and PR evidence, and cumulative usage. Does not authorize successor execution, reset budgets, or modify GitHub."
-              : operation === "recovery-propose"
-                ? "Read-only proposal of an exact successor plan for explicit approval. Default allowance increments are zero. Unknown usage acknowledgement and any extra allowance must be explicitly supplied; this tool writes nothing and starts no work."
-                : operation === "recovery-request"
-                  ? "Persist and acknowledge the exact inspected successor plan digest. Retains predecessor terminal history and cumulative allowance; changed evidence requires a newly acknowledged plan. The controller must independently reconcile resources and adopt before execution."
-                  : `${operation} through Factory's shared application-service boundary.`,
+        operation === "compiler-eval"
+          ? "Read authenticated immutable draft history and compiler post-mortem JSON and Markdown, retaining original failures and unknown causal attribution. No model calls, graph changes or old-run spending."
+          : operation === "doctor"
+            ? "Run bounded, secret-safe repository, authentication, toolchain, controller, backend, branch-policy, stack, and host-resource diagnostics. Read-only: creates no GitHub records or paid resources and never runs a model."
+            : operation === "plan"
+              ? "Inspect an existing compiled graph mechanically. Set compile=true to explicitly request one bounded management compilation and receive its observed model usage. Never activates work or writes GitHub."
+              : operation === "recovery-plan"
+                ? "Read-only assessment of historical work, graph and PR evidence, and cumulative usage. Does not authorize successor execution, reset budgets, or modify GitHub."
+                : operation === "recovery-propose"
+                  ? "Read-only proposal of an exact successor plan for explicit approval. Default allowance increments are zero. Unknown usage acknowledgement and any extra allowance must be explicitly supplied; this tool writes nothing and starts no work."
+                  : operation === "recovery-request"
+                    ? "Persist and acknowledge the exact inspected successor plan digest. Retains predecessor terminal history and cumulative allowance; changed evidence requires a newly acknowledged plan. The controller must independently reconcile resources and adopt before execution."
+                    : `${operation} through Factory's shared application-service boundary.`,
       inputSchema,
       annotations,
     },
@@ -1575,7 +1596,17 @@ function registerApplicationTool(
         if (!input.planDigest) throw new Error("planDigest is required");
         return service.recoveryRequest({ ...request, planDigest: input.planDigest });
       }
-      if (["doctor", "plan", "recovery-plan", "status", "explain", "replay"].includes(operation)) {
+      if (
+        [
+          "doctor",
+          "plan",
+          "compiler-eval",
+          "recovery-plan",
+          "status",
+          "explain",
+          "replay",
+        ].includes(operation)
+      ) {
         if (operation === "doctor") {
           return service.doctor(input.objectiveNumber!, resolve(input.repository ?? process.cwd()));
         }
@@ -1588,10 +1619,18 @@ function registerApplicationTool(
           });
         }
         return service.inspect(
-          operation as "doctor" | "plan" | "recovery-plan" | "status" | "explain" | "replay",
+          operation as
+            | "doctor"
+            | "plan"
+            | "compiler-eval"
+            | "recovery-plan"
+            | "status"
+            | "explain"
+            | "replay",
           input.objectiveNumber!,
           input.workItemNumber,
           input.pinnedAdmissionSnapshots,
+          input.annotations,
         );
       }
       if (operation === "activate") {

@@ -223,11 +223,18 @@ import {
 } from "./graph.js";
 import { GitHubReader, type GitHubOptions } from "./github.js";
 import { CodexCliManagementBackend } from "./management/codex-cli.js";
+import {
+  compileEvaluatedDraft,
+  assertCompilerDraftSelection,
+} from "./management/draft-compilation.js";
+import { CompilerDraftManager, loadCompilerDrafts } from "./control/compiler-drafts.js";
+import { compilerEvalDigest } from "./evaluation/compiler-eval.js";
 import { collectCompilationEvidence } from "./compiler/runtime-evidence.js";
 import { ManagementOutputError } from "./management/backend.js";
 import { reportedModelUsage, type ReportedModelUsage } from "./protocol/model-usage.js";
 import type {
   CompilationCheckpoint,
+  CompilationContext,
   CompilationResult,
   ManagementBackend,
   ManagementUsage,
@@ -562,6 +569,9 @@ export function assertManagementInvocationNotFailed(
   )
     throw new Error("management invocation already failed with recorded usage; refusing replay");
 }
+
+/** Report-only runs finish their evaluation purpose without committing an execution graph. */
+class CompilerDraftReportCompleted extends Error {}
 
 export type CompilationFaultPoint =
   | "after-model-return"
@@ -3832,6 +3842,10 @@ export class FactorySupervisor {
         );
       }
       if (this.#recoveryRuntime) {
+        if (this.#policy.compilerEvaluation?.mode === "report-only")
+          throw new Error(
+            "report-only evaluation cannot resume execution authority; inspect historical compiler-eval evidence instead",
+          );
         await this.#prepareRecoveryGraph(snapshot);
       } else {
         const observedGraph = inspectCompiledGraph(snapshot);
@@ -3852,13 +3866,45 @@ export class FactorySupervisor {
             throw new Error("durable compiled graph does not match its Objective receipt");
           }
         }
+        if (this.#policy.compilerEvaluation && sourceGraph && !durableGraph)
+          throw new Error(
+            "draft evaluation cannot replace an activated historical graph; use compiler-eval to inspect its evidence",
+          );
+        if (this.#policy.compilerEvaluation && durableGraph) {
+          if (this.#policy.compilerEvaluation.mode === "report-only")
+            throw new Error("report-only policy cannot project an execution graph");
+          const draftRecords = await loadCompilerDrafts(
+            this.#store,
+            snapshot.number,
+            this.#run.runId,
+          );
+          assertCompilerDraftSelection(
+            draftRecords,
+            durableGraph.objective,
+            observedGraph.hasReceipt
+              ? undefined
+              : compilerEvalDigest({
+                  number: snapshot.number,
+                  title: snapshot.title,
+                  body: snapshot.body,
+                }),
+          );
+          if (
+            draftRecords[0]?.binding.baseSha !== base.oid ||
+            draftRecords[0]?.binding.policyDigest !== policyDigest(this.#policy)
+          )
+            throw new Error("compiler selection policy or base changed");
+        }
         const recoverableObjective = sourceGraph?.objective ?? observedGraph.completeObjective;
+        if (this.#policy.compilerEvaluation && recoverableObjective && !durableGraph)
+          throw new Error("existing issue graph cannot bypass the independent draft assessment");
         let invokeCompilation:
           | ((checkpoint: CompilationCheckpoint) => Promise<CompilationResult>)
           | undefined;
         const compilationInvocationId = `compile-${base.oid}`;
         if (!recoverableObjective) {
-          this.#assertManagementInvocationNotFailed(compilationInvocationId);
+          if (!this.#policy.compilerEvaluation)
+            this.#assertManagementInvocationNotFailed(compilationInvocationId);
           this.#notify("compiling Objective into a dependency graph");
           if (observedGraph.hasReceipt || observedGraph.existing.length > 0) {
             throw new Error(
@@ -3886,38 +3932,115 @@ export class FactorySupervisor {
               );
               try {
                 await materializeLocalLfsAssets(this.#options.repository, tree.path, base.oid);
-                await this.#admitModelInvocation(compilationInvocationId, snapshot.id);
+                if (!this.#policy.compilerEvaluation)
+                  await this.#admitModelInvocation(compilationInvocationId, snapshot.id);
                 const observedCapacity = await this.#capacitySnapshot();
-                return await this.#management.compile(
-                  {
-                    repository: tree.path,
-                    objective: {
-                      number: snapshot.number,
-                      title: snapshot.title,
-                      body: snapshot.body,
-                    },
-                    defaultBranch: snapshot.defaultBranch,
-                    baseSha: base.oid,
-                    repositoryFiles: tree.files,
-                    repositoryLfs,
-                    allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
-                    runPolicy: this.#policy,
-                    economicEvidence: (items) =>
-                      collectCompilationEvidence(items, {
-                        objective: snapshot.number,
-                        policy: this.#policy,
-                        capacity: observedCapacity,
-                        repositoryLimits: this.#controllerLimits,
-                        deliveryMode: this.#deliverySelection.selected,
-                        nowMs: Date.now(),
-                        cooldownUntilMs: this.#resourceSampler.cooldownUntil,
-                        sampleResource: (nowMs) => this.#resourceSampler.sample(nowMs),
-                        evaluate: (input) => this.#registry.evaluate(input),
-                      }),
-                    ...(compilationModel ? { modelSelection: compilationModel } : {}),
+                const context: CompilationContext = {
+                  repository: tree.path,
+                  objective: {
+                    number: snapshot.number,
+                    title: snapshot.title,
+                    body: snapshot.body,
                   },
-                  checkpoint,
+                  defaultBranch: snapshot.defaultBranch,
+                  baseSha: base.oid,
+                  repositoryFiles: tree.files,
+                  repositoryLfs,
+                  allowedNetworkDestinations: this.#policy.allowedNetworkDestinations,
+                  runPolicy: this.#policy,
+                  economicEvidence: (items) =>
+                    collectCompilationEvidence(items, {
+                      objective: snapshot.number,
+                      policy: this.#policy,
+                      capacity: observedCapacity,
+                      repositoryLimits: this.#controllerLimits,
+                      deliveryMode: this.#deliverySelection.selected,
+                      nowMs: Date.now(),
+                      cooldownUntilMs: this.#resourceSampler.cooldownUntil,
+                      sampleResource: (nowMs) => this.#resourceSampler.sample(nowMs),
+                      evaluate: (input) => this.#registry.evaluate(input),
+                    }),
+                  ...(compilationModel ? { modelSelection: compilationModel } : {}),
+                };
+                if (!this.#policy.compilerEvaluation)
+                  return await this.#management.compile(context, checkpoint);
+                const inputDigest = compilerEvalDigest(context.objective);
+                const assertInputs = async () => {
+                  await this.#externalAdmission(async () => {});
+                  if (this.#options.signal?.aborted)
+                    throw new RunCancellationRequestedError(
+                      "operator cancelled during draft compilation",
+                    );
+                  if (Date.now() >= deadline)
+                    throw new Error("Objective deadline exhausted during draft compilation");
+                  const fresh = await this.#reader.readObjective(snapshot.number);
+                  this.#fenceSnapshot(fresh);
+                  if (
+                    compilerEvalDigest({
+                      number: fresh.number,
+                      title: fresh.title,
+                      body: fresh.body,
+                    }) !== inputDigest
+                  )
+                    throw new Error(
+                      "Objective changed during draft evaluation; new inputs require a new run",
+                    );
+                };
+                const outcome = await this.#lease.use((lease) =>
+                  compileEvaluatedDraft({
+                    context,
+                    backend: this.#management,
+                    manager: new CompilerDraftManager(this.#store, this.#leases),
+                    lease,
+                    binding: {
+                      repository: `${this.#options.owner}/${this.#options.repo}`,
+                      objective: snapshot.number,
+                      runId: this.#run.runId,
+                      policyDigest: policyDigest(this.#policy),
+                      baseSha: base.oid,
+                      inputDigest,
+                    },
+                    admit: (id) =>
+                      this.#externalAdmission(() => this.#admitModelInvocation(id, snapshot.id)),
+                    recordUsage: (id, _stage, usage) =>
+                      this.#recordManagementUsage(id, usage, snapshot.id, undefined, `draft-${id}`),
+                    assertInputs,
+                    validate: async (graph) => {
+                      assertGraphWithinRunPolicy(graph, this.#policy);
+                    },
+                    deadlineAt: deadline,
+                  }),
                 );
+                await assertInputs();
+                if (
+                  this.#policy.compilerEvaluation.mode === "report-only" &&
+                  !(
+                    outcome.status === "stopped" &&
+                    /accounting|invocation-conflict/.test(outcome.reason)
+                  )
+                ) {
+                  throw new CompilerDraftReportCompleted(
+                    `Report-only compiler evaluation completed: ${outcome.status === "accepted" ? "accepted draft" : outcome.reason}. No implementation was authorized and no Work Items were projected; inspect compiler-eval for the retained evidence.`,
+                  );
+                }
+                if (outcome.status !== "accepted")
+                  throw new Error(`compiler draft stopped without projection: ${outcome.reason}`);
+                await assertInputs();
+                const usage = outcome.records
+                  .filter((record) => record.kind === "result")
+                  .reduce(
+                    (total, record) => {
+                      const used = record.payload.usage as ManagementUsage;
+                      return {
+                        inputTokens: total.inputTokens + used.inputTokens,
+                        outputTokens: total.outputTokens + used.outputTokens,
+                      };
+                    },
+                    { inputTokens: 0, outputTokens: 0 },
+                  );
+                const result = { objective: outcome.graph, usage };
+                await checkpoint(result);
+                return result;
               } finally {
                 // A durable successful checkpoint must not become a repeated paid call
                 // merely because this exact owned temporary directory could not be removed.
@@ -3948,19 +4071,23 @@ export class FactorySupervisor {
                 lease,
                 base,
                 objective: result.objective,
-                compilation: {
-                  invocationId: compilationInvocationId,
-                  inputTokens: result.usage.inputTokens,
-                  outputTokens: result.usage.outputTokens,
-                  ...(result.usage.cachedInputTokens === undefined
-                    ? {}
-                    : { cachedInputTokens: result.usage.cachedInputTokens }),
-                },
+                ...(this.#policy.compilerEvaluation
+                  ? {}
+                  : {
+                      compilation: {
+                        invocationId: compilationInvocationId,
+                        inputTokens: result.usage.inputTokens,
+                        outputTokens: result.usage.outputTokens,
+                        ...(result.usage.cachedInputTokens === undefined
+                          ? {}
+                          : { cachedInputTokens: result.usage.cachedInputTokens }),
+                      },
+                    }),
               }),
             ),
           recover: () => graphManager.load(snapshot.number, this.#run.runId),
           recordFailureUsage: (usage) =>
-            this.#recordFailedManagementUsage(compilationInvocationId, usage, snapshot.id),
+            this.#recordManagementUsage(compilationInvocationId, usage, snapshot.id),
           recordUsage: async (record) => {
             if (!record.compilation) return;
             const amount = record.compilation.inputTokens + record.compilation.outputTokens;
@@ -4100,6 +4227,16 @@ export class FactorySupervisor {
           pendingGraphQlGraphMutations(compiled, existingGraphItems),
         );
         if (observedGraph.receiptRunId !== this.#run.runId) {
+          if (this.#policy.compilerEvaluation) {
+            const fresh = await this.#reader.readObjective(snapshot.number);
+            this.#fenceSnapshot(fresh);
+            const records = await loadCompilerDrafts(this.#store, snapshot.number, this.#run.runId);
+            assertCompilerDraftSelection(
+              records,
+              compiled,
+              compilerEvalDigest({ number: fresh.number, title: fresh.title, body: fresh.body }),
+            );
+          }
           await this.#lease.use((lease) =>
             this.#recorder.graph({
               lease,
@@ -5078,6 +5215,8 @@ export class FactorySupervisor {
         );
       }
     } catch (error) {
+      if (error instanceof CompilerDraftReportCompleted)
+        return await terminalAfterDrain("FactoryRunCompleted", error.message);
       if (error instanceof LeaseLostError) throw error;
       if (error instanceof PlatformUnavailableError) throw error;
       if (error instanceof SafeArtifactCheckpointHeldError) throw error;
@@ -6139,7 +6278,7 @@ export class FactorySupervisor {
           ),
         recover: () => this.#reviews.load(reviewIdentity),
         recordFailureUsage: (usage) =>
-          this.#recordFailedManagementUsage(
+          this.#recordManagementUsage(
             `review-${reviewIdentityDigest(reviewIdentity)}`,
             usage,
             item.id,
@@ -7579,13 +7718,13 @@ export class FactorySupervisor {
     );
   }
 
-  async #recordFailedManagementUsage(
+  async #recordManagementUsage(
     invocationId: string,
     usage: ManagementUsage,
     nodeId: string,
     reservation?: AttemptReservation,
+    usageId = `failed-${invocationId}`,
   ): Promise<void> {
-    const usageId = `failed-${invocationId}`;
     const link = this.#modelInvocationLink(invocationId, reservation);
     const amount = usage.inputTokens + usage.outputTokens;
     const matches = (events: readonly FactoryEvent[]) =>
@@ -9872,7 +10011,7 @@ export class FactorySupervisor {
         recover: () => this.#reviews.load(reviewIdentity),
         recordUsage: (record) => this.#recordReviewUsage(record, item, member.reservation),
         recordFailureUsage: (usage) =>
-          this.#recordFailedManagementUsage(
+          this.#recordManagementUsage(
             `rebase-review-${reviewIdentityDigest(reviewIdentity)}`,
             usage,
             item.id,
@@ -11229,7 +11368,7 @@ export class FactorySupervisor {
       recover: () => this.#reviews.load(reviewIdentity),
       recordUsage: (review) => this.#recordReviewUsage(review, item, member.reservation),
       recordFailureUsage: (usage) =>
-        this.#recordFailedManagementUsage(invocationId, usage, item.id, member.reservation),
+        this.#recordManagementUsage(invocationId, usage, item.id, member.reservation),
       recordOutcome: async (review) => {
         if (!review.review.accepted || review.review.unmetCriteria.length > 0)
           throw new Error(

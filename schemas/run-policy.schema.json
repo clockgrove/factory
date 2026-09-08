@@ -19,6 +19,18 @@
     "allowedNetworkDestinations"
   ],
   "properties": {
+    "compilerEvaluation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": { "enum": ["report-only", "auto-repair"] },
+        "maxRepairs": { "type": "integer", "minimum": 0, "maximum": 2 },
+        "maxInvocations": { "type": "integer", "minimum": 1, "maximum": 7 },
+        "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 3600 },
+        "maxObservedTokens": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+      }
+    },
     "backendOrder": {
       "type": "array",
       "minItems": 1,

@@ -834,6 +834,43 @@ part of the protocol; it is not accepted as an inert field.
 
 ## Management backends
 
+An explicit immutable `compilerEvaluation` policy adds an obligation-first draft stage before
+the existing graph commitment. `mode: "auto-repair"` runs extraction, initial compilation,
+mechanical grounding, and independent whole-Objective judgment; it permits at most two repairs
+by default. The default envelope is seven model invocations and 600 seconds. Optional
+`maxRepairs` (0–2), `maxInvocations` (1–7), `timeoutSeconds` (1–3600), and
+`maxObservedTokens` configure that bounded envelope. The normal run deadline and observed-token admission
+remain additional limits. Observed tokens are not a provider-enforced hard cap. Every phase
+uses the already selected compilation model; the judge receives no compiler private reasoning.
+
+`mode: "report-only"` uses the same independently judged draft with no repair and never commits
+or projects an execution graph. A completed report-only run means its evaluation purpose ended;
+it does not mean the Objective was implemented, and it does not close the Objective issue.
+Reports are available through `factory compiler-eval OWNER/REPO#NUMBER [--markdown]` and
+`factory_compiler_eval`. These inspection entry points never invoke models or spend historical
+allowances. Existing activated graphs are immutable; the source-only fixed-graph evaluation
+adapter requires a fresh report-only envelope and cannot authorize issue or worker dispatch.
+
+Draft records use `clockgrove.factory/compiler-draft-v1` in bounded immutable Git objects under
+per-Objective/run sequence refs. They retain frozen source evidence, invocation intents,
+provider proposals and normalization traces, usage, failed validation, every verdict, lineage,
+and the exact final selection. Lease-fenced create-if-absent publication admits one invocation
+winner. Missing terminal evidence is unknown accounting and forbids replay; completed results
+repair their own idempotent accounting before another call. Contradictory terminal responses,
+changed inputs, cycling drafts, repeated blockers, exhausted bounds, and material ambiguity
+fail closed. Malformed repair output consumes its attempt. Revisions never emit `GraphCompiled`;
+only an accepted exact selection reaches the existing graph commitment/projection transaction.
+Changing an Objective before that commitment invalidates its assessment, including on restart.
+
+This is an opt-in policy extension, not a change to existing immutable policies or the current
+release candidate's defaults. Runs without the field retain their original compilation path.
+Upgrade the plugin and controller together before enabling it; older controllers do not
+understand draft-stage authority and cannot safely resume these enabled runs. Default enablement
+and quality/efficiency claims require separate measured calibration and comparative evidence.
+Historical reports preserve missing originals, unresolved usage and unknown causal attribution;
+they cannot reconstruct absent evidence or revive a terminal run. See
+[the evaluation contract](EVALUATION-CORPUS.md#independent-draft-review-and-post-mortems).
+
 Mechanical scheduling never calls a model. A Management Backend receives narrow evidence and a
 strict output schema for initial compilation and criterion-specific independent semantic review.
 The management compiler explicitly classifies each criterion's risk, routes it to the least expensive

@@ -18,6 +18,7 @@ describe("packaged CLI interface", () => {
     expect(result.status).toBe(0);
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain("factory run OWNER/REPO#NUMBER");
+    expect(result.stdout).toContain("factory compiler-eval OWNER/REPO#NUMBER [--markdown]");
     expect(result.stdout).toContain("factory recovery-plan OWNER/REPO#NUMBER");
     expect(result.stdout).toContain("factory recovery-propose OWNER/REPO#NUMBER");
     expect(result.stdout).toContain("factory recovery-request OWNER/REPO#NUMBER");

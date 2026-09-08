@@ -1,0 +1,203 @@
+{
+  "version": 1,
+  "provenance": "llm-assisted",
+  "sourceCommit": "e50983029181fea2fcde81cf8a77e83cf541f58a",
+  "model": null,
+  "observedTokens": null,
+  "humanLabeled": false,
+  "heldOut": false,
+  "candidateVerdictsRead": false,
+  "manifestSha256": "e080c200a7033689805f28e9c5ea7eb9b973bf30eb9d594e04d6db4836300df1",
+  "limitation": "Automated original-source annotations supplied independently before candidate verdict inspection. Not human gold, held-out validation, measured model usage, or evidence of economic savings. Static path bindings are not behavioral proof; retained baseline properties do not mandate source edits.",
+  "cases": [
+    {
+      "id": "typed-cart",
+      "required": [
+        "Accept integer discount percentages 0 through 100; floor the final total: [101,100] at 25 percent is 150, not 149 from per-item rounding.",
+        "Default discount remains zero; preserve readonly input, nonnegative safe integer item guards, safe total guard, zero values and empty arrays."
+      ],
+      "negativeExamples": ["Omitted negative-item or overflow guards"],
+      "validAlternatives": ["One cohesive change", "Code followed by dependent tests"],
+      "uncertainty": [],
+      "sourceEvidence": [
+        {
+          "path": "typed-cart/README.md",
+          "sha256": "d82e3bdb2cacf55be9a752d1bbafc81df5af6ae1ec0ab6c987365c186c97fa52"
+        },
+        {
+          "path": "typed-cart/check.mjs",
+          "sha256": "6417cbab767fff8336a2e06de58a1123458134ea7c92ed400387442a0ff0cd61"
+        },
+        {
+          "path": "typed-cart/package.json",
+          "sha256": "ec1e85c8c5f84b3c4c0152fb6486784383fe9be9822cf2e3c0143aed69946346"
+        },
+        {
+          "path": "typed-cart/src/cart.ts",
+          "sha256": "c28781d6bab073263a07d8131f60e13fc055187c7b5a3099d8d2449e4a662713"
+        },
+        {
+          "path": "typed-cart/tsconfig.json",
+          "sha256": "137a3e442eb379827434cf79fe7ad57254e9555082c4a113b40298db877d9c0a"
+        }
+      ]
+    },
+    {
+      "id": "generated-catalog",
+      "required": [
+        "Add paused with label Waiting and rank 2 while retaining ready rank 1.",
+        "Source JSON and actual generated module must correspond byte-for-byte; retain lexical key ordering and stale-output checking.",
+        "Existing generator already sorts; no unnecessary generator source change is required."
+      ],
+      "negativeExamples": ["Output-only edits", "Stale generated output"],
+      "validAlternatives": [
+        "One combined source and generated change",
+        "Source change followed by regeneration"
+      ],
+      "uncertainty": [],
+      "sourceEvidence": [
+        {
+          "path": "generated-catalog/README.md",
+          "sha256": "abccbb079620babdff30838db19356e46244ad7cd339f62f8686a2360a55cd28"
+        },
+        {
+          "path": "generated-catalog/check.mjs",
+          "sha256": "f92279487f77d72f40a24de7855187eb6e7acee7c4a72be11933466308d0dee2"
+        },
+        {
+          "path": "generated-catalog/data/status.json",
+          "sha256": "55dfac93ae97cad926648f13816db21409693234ef81f378611bac9c2012af37"
+        },
+        {
+          "path": "generated-catalog/generated/status.mjs",
+          "sha256": "a54a5cc961c4e50adead5d9696bf615019abae02305d1b2ede5d49b1bbb51a01"
+        },
+        {
+          "path": "generated-catalog/package.json",
+          "sha256": "8256739ba9865c5d5c57e007907b86113b75a9cc217597a576fc8d3647cd0f5e"
+        },
+        {
+          "path": "generated-catalog/scripts/generate.mjs",
+          "sha256": "4f940078d9a458b10cf30cea5a6b8014ac9763841333d913ebb032d0918c9670"
+        }
+      ]
+    },
+    {
+      "id": "binary-module",
+      "required": [
+        "Actual generator emits a WebAssembly module whose answer export returns i32 42.",
+        "Generated binary corresponds to generator; instantiate the actual binary to check behavior.",
+        "Keep binary under 1024 bytes, without LFS or downloads."
+      ],
+      "negativeExamples": [
+        "JavaScript stub replacing binary",
+        "Magic-byte regex used as behavior proof",
+        "Changed binary with unchanged generator"
+      ],
+      "validAlternatives": [
+        "One generator and artifact change",
+        "Generator followed by artifact and executable check"
+      ],
+      "uncertainty": [],
+      "sourceEvidence": [
+        {
+          "path": "binary-module/README.md",
+          "sha256": "f8b83820f188aaf682eecb75aac085bfe87c2e8f81264b95d985557807bebd77"
+        },
+        {
+          "path": "binary-module/assets/answer.wasm.base64",
+          "sha256": "097d5e96bff8a1f1f129f288985f706f74da7bcef53ac077c5fb0d1361242991"
+        },
+        {
+          "path": "binary-module/check.mjs",
+          "sha256": "e624191bc60e134cb3afda0c692af826ba91d91885e1dce0c6e991c145028abf"
+        },
+        {
+          "path": "binary-module/package.json",
+          "sha256": "4f04ebcbbfe009110513a5fdd4d521b437437ee64cb97bd6ffb2fcb6c039082c"
+        },
+        {
+          "path": "binary-module/scripts/module.mjs",
+          "sha256": "5f96d539cf1c2932037e7bb8b3705d4de545eff47eca9b77f07ec05b7e7945c0"
+        }
+      ]
+    },
+    {
+      "id": "seeded-simulation",
+      "required": [
+        "Explicit capacity is a positive integer.",
+        "Preserve arrivals [3,1,3,2] for seed 7 and 4 ticks; capacity 2 gives admitted [2,1,2,2] and rejected [1,0,1,0] per tick.",
+        "Preserve repeatability and seed/tick validation; no real-time or random nondeterminism."
+      ],
+      "negativeExamples": [
+        "Global quota instead of per-tick capacity",
+        "Changed arrival sequence",
+        "Accepted zero or fractional capacity"
+      ],
+      "validAlternatives": ["One cohesive implementation and assertions"],
+      "uncertainty": [
+        "Behavior when capacity is omitted is unspecified; do not invent a required default."
+      ],
+      "sourceEvidence": [
+        {
+          "path": "seeded-simulation/README.md",
+          "sha256": "16c9ad50b2b00966564d40eba92b6c00713a44479d69ca707638eb1f8766cea0"
+        },
+        {
+          "path": "seeded-simulation/check.mjs",
+          "sha256": "1b12b4bc9de21f33e6cb4335e5c215f2cd2aa015e175ab61c1d253476627aa01"
+        },
+        {
+          "path": "seeded-simulation/package.json",
+          "sha256": "ef4ae9ce634884359f5e51675631d64a734470e6fd099cc9dcaf81ca21082a6a"
+        },
+        {
+          "path": "seeded-simulation/src/simulation.mjs",
+          "sha256": "4a671ee9fc211a686ec897e0892e1f0d229a398f13ebd0c86132229fd71afb37"
+        }
+      ]
+    },
+    {
+      "id": "visual-status",
+      "required": [
+        "Paused state displays Paused and two bars; ready displays Ready and a check.",
+        "Paused snapshot has deterministic 160 by 48 geometry, viewBox and title.",
+        "Offline assertions accompany an actual intended-size visual render showing readable, unclipped, distinct states.",
+        "Retain unknown-state guard."
+      ],
+      "negativeExamples": [
+        "Color-only distinction",
+        "String assertions offered as visual proof",
+        "Stale ready snapshot",
+        "Missing bars or title"
+      ],
+      "validAlternatives": [
+        "One renderer and snapshot change",
+        "Renderer followed by dependent snapshot"
+      ],
+      "uncertainty": [],
+      "sourceEvidence": [
+        {
+          "path": "visual-status/README.md",
+          "sha256": "6a06bc3bcf380174c9e0915999e7dd6b808878f27b3cac69687e6bd05c548220"
+        },
+        {
+          "path": "visual-status/check.mjs",
+          "sha256": "a34203ec1cb70f68b9311f9777c51b64f43f9441b74dec8a0ba886445f460ecd"
+        },
+        {
+          "path": "visual-status/package.json",
+          "sha256": "05c837aeae73e384282dd176d051b9929b41dce3615332f430888115b68a2d77"
+        },
+        {
+          "path": "visual-status/src/render.mjs",
+          "sha256": "09ceb7f5d59c0c2f9a046326e721016b6362a4391237262c72a998eacfe9dc40"
+        },
+        {
+          "path": "visual-status/visual/status.svg",
+          "sha256": "0a13d9d1b80da9553955384c7a093d2e24bcfac8cfad90dca538f53e2ae391c3"
+        }
+      ]
+    }
+  ]
+}

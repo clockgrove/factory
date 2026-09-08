@@ -13,7 +13,12 @@ import { GitHubControlStore } from "../../src/control/github-store.js";
 import { CompiledGraphManager, type CompiledGraphStore } from "../../src/control/graphs.js";
 import { LeaseManager, type GitCommitObject, type LeaseState } from "../../src/control/lease.js";
 import { decodeEventComments } from "../../src/control/receipts.js";
-import { DEFAULT_RUN_POLICY, parseRunPolicy, policyDigest } from "../../src/protocol/policy.js";
+import {
+  DEFAULT_RUN_POLICY,
+  parseRunPolicy,
+  policyDigest,
+  type RunPolicy,
+} from "../../src/protocol/policy.js";
 import { parseFactoryEvent } from "../../src/protocol/events.js";
 import { renderWorkPacket, type CompiledObjective } from "../../src/graph.js";
 import { BackendRegistry } from "../../src/execution/registry.js";
@@ -38,6 +43,7 @@ export const CODEX = "openai-codex/github-managed";
 export type ProviderScenario = "daytona-burst" | "copilot-objective" | "codex-objective";
 const pendingFixtureRetirements = new Set<object>();
 export interface ProviderFaults {
+  compilerEvaluation?: RunPolicy["compilerEvaluation"];
   repositoryFence?: () => Promise<void>;
   configureLocalBackend?: (backend: ExecutionBackend) => ExecutionBackend;
   controllerActivation?: boolean;
@@ -100,6 +106,11 @@ export async function providerSupervisorFixture(
   git("config", "user.email", "fixture@example.invalid");
   git("remote", "add", "origin", "https://github.com/fixture/provider-qualification.git");
   await writeFile(join(repository, "README.md"), "Disposable provider qualification fixture\n");
+  if (faults.compilerEvaluation)
+    await writeFile(
+      join(repository, "package.json"),
+      JSON.stringify({ scripts: { test: "node --test" } }),
+    );
   git("add", ".");
   git("commit", "-qm", "base");
   const baseSha = git("rev-parse", "HEAD");
@@ -108,6 +119,7 @@ export async function providerSupervisorFixture(
     scenario === "copilot-objective" ? COPILOT : scenario === "codex-objective" ? CODEX : DAYTONA;
   const policy = parseRunPolicy({
     ...DEFAULT_RUN_POLICY,
+    ...(faults.compilerEvaluation ? { compilerEvaluation: faults.compilerEvaluation } : {}),
     ...(faults.sandboxUntrusted ? { trust: "sandbox_untrusted" } : {}),
     backendOrder: faults.localOnly ? [LOCAL] : managed ? [provider, DAYTONA] : [LOCAL, DAYTONA],
     maxParallel: faults.localOnly ? (faults.localMaxParallel ?? 1) : managed ? 1 : 2,

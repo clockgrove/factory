@@ -4454,7 +4454,7 @@ export class FactorySupervisor {
         const objective = this.#deriveObjective(snapshot);
         // All resumed peers seed their durable execution/validation liabilities
         // before any member of the starting cohort may acquire fresh capacity.
-        this.#reconcileObjectiveCapacity(objective.number, objective.items);
+        await this.#reconcileObjectiveCapacity(objective.number, objective.items);
         this.#fairness.markReconciled(objective.number);
         if (!this.#fairness.reconciled) {
           await this.#fairness.waitForChange(

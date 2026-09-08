@@ -107,6 +107,37 @@ it.each(["execution", "validation"] as const)(
   20_000,
 );
 
+it("does not mark repository fairness reconciled before retained shared capacity settles", async () => {
+  const shutdown = new AbortController();
+  const reconcileStarted = deferred();
+  const releaseReconcile = deferred();
+  const f = await providerSupervisorFixture("daytona-burst", {
+    localOnly: true,
+    controllerActivation: true,
+  });
+  f.repositoryResources.fairness.register(7, true);
+  const markReconciled = vi.spyOn(f.repositoryResources.fairness, "markReconciled");
+  f.repositoryResources.sharedCapacity = {
+    reconcile: async () => {
+      reconcileStarted.resolve();
+      await releaseReconcile.promise;
+    },
+    snapshot: async () => ({ generation: 1, reservations: [] }),
+  } as unknown as NonNullable<typeof f.repositoryResources.sharedCapacity>;
+
+  const running = f.run(shutdown.signal);
+  try {
+    await reconcileStarted.promise;
+    expect(markReconciled).not.toHaveBeenCalled();
+    expect(f.activity.filter((entry) => entry.operation === "launch")).toHaveLength(0);
+  } finally {
+    shutdown.abort();
+    releaseReconcile.resolve();
+    await running.catch(() => {});
+    await f.dispose();
+  }
+}, 20_000);
+
 it.each([
   ["repository", "local-capacity"],
   ["cpu", "cpu-capacity"],

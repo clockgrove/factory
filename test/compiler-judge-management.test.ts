@@ -520,6 +520,9 @@ it("supplies carried challenges and prior independent corrections to the product
     evidenceIds: ["objective"],
   };
   reviewed.inferenceCorrections = [{ ...challenge, disposition: "unsupported-inference" }];
+  // The next repair still needs a real outstanding requirement after the invented one is waived.
+  reviewed.coverage[0]!.status = "partial";
+  reviewed.coverage[0]!.reason = "The original behavior still needs a correction";
   const summary = {
     changeSummary: "Preserve cited correction",
     lineage: [{ itemId: "code", previousItemIds: ["code"] }],

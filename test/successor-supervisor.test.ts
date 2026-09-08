@@ -62,14 +62,14 @@ const validateFixtureTree = cleanValidation.validateArtifactClean;
 const directories: string[] = [];
 const fixtureRunOwners: Array<{
   retirement: AbortController;
-  activeRuns: Set<Promise<unknown>>;
+  runs: Promise<unknown>[];
 }> = [];
 
 async function retireFixtureRuns() {
   const owners = fixtureRunOwners.splice(0);
   for (const owner of owners)
     owner.retirement.abort(new Error("successor Supervisor fixture is retiring"));
-  return Promise.allSettled(owners.flatMap((owner) => [...owner.activeRuns]));
+  return Promise.allSettled(owners.flatMap((owner) => owner.runs));
 }
 
 afterEach(async () => {
@@ -993,8 +993,8 @@ async function fixture(
       });
   }
   const retirement = new AbortController();
-  const activeRuns = new Set<Promise<unknown>>();
-  fixtureRunOwners.push({ retirement, activeRuns });
+  const runs: Promise<unknown>[] = [];
+  fixtureRunOwners.push({ retirement, runs });
   const run = (recovery?: SupervisorOptions["recovery"]) => {
     const operation = new FactorySupervisor({
       token: "fixture-token",
@@ -1013,11 +1013,11 @@ async function fixture(
       ...(recovery ? { recovery } : {}),
       signal: retirement.signal,
     }).run();
-    activeRuns.add(operation);
-    void operation.then(
-      () => activeRuns.delete(operation),
-      () => activeRuns.delete(operation),
-    );
+    // Keep every started operation until teardown so an assertion failure or
+    // watchdog expiry cannot drop a settled or still-running Supervisor before
+    // the fixture aborts and drains all of its work.
+    runs.push(operation);
+    void operation.catch(() => undefined);
     return operation;
   };
   return {
@@ -3046,6 +3046,9 @@ describe("Supervisor authenticated successor execution", () => {
     },
     60_000,
   );
+  // The failure-and-recovery variant can execute two complete successor
+  // generations plus real Git recovery proofs. Its 120-second watchdog only
+  // gives coordinated coverage headroom; production limits are unchanged.
   it.each([
     { artifactOnly: false, failC: false },
     { artifactOnly: true, failC: false },
@@ -3240,9 +3243,9 @@ describe("Supervisor authenticated successor execution", () => {
         }),
       ).toMatchObject({ status: "verified", usage: { modelTokens: failC ? 100 : 80 } });
     },
-    60000,
+    120_000,
   );
-  // These multi-stage integration fixtures perform real Git proof work. Under
+  // The two native sibling variants below perform real Git proof work. Under
   // coverage they use the suite's existing 60-second integration-test tier.
   it.each([false, true])(
     "preserves native sibling/join topology with artifact-only recovery %s",
@@ -3289,7 +3292,7 @@ describe("Supervisor authenticated successor execution", () => {
     expect(f.launch).toHaveBeenCalledTimes(1);
     expect(f.review).toHaveBeenCalledTimes(2);
     expect(await f.runtime()).toMatchObject({ status: "verified", usage: { modelTokens: 80 } });
-  }, 30000);
+  }, 60_000);
   it("rejects contradictory accepted adopted refresh review before integration or fresh work", async () => {
     const f = await successorFixture({ nativeSource: true });
     f.review.mockImplementationOnce(async (_context, checkpoint) => {
@@ -3469,5 +3472,5 @@ describe("Supervisor authenticated successor execution", () => {
     expect(await f.runtime()).toMatchObject({ status: "verified", usage: { modelTokens: 80 } });
     expect(f.launch).toHaveBeenCalledTimes(1);
     expect(f.review).toHaveBeenCalledTimes(2);
-  }, 30000);
+  }, 60_000);
 });

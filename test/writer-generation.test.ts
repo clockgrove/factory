@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import Ajv from "ajv";
+import addFormats from "ajv-formats";
 import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
 import {
@@ -53,6 +56,29 @@ const terminal = (writerEpoch?: number) =>
   });
 
 describe("Objective receipt writer generation", () => {
+  it("publishes the same optional generation fields and rejects malformed controller values", () => {
+    const ajv = new Ajv({ strict: false });
+    addFormats(ajv);
+    const validate = ajv.compile(
+      JSON.parse(
+        readFileSync(new URL("../schemas/factory-event.schema.json", import.meta.url), "utf8"),
+      ),
+    );
+    expect(validate(boundary)).toBe(true);
+    for (const patch of [
+      { writerEpoch: 0 },
+      { writerEpoch: -1 },
+      { writerEpoch: 1.5 },
+      { writerEpoch: "2" },
+      { observationScope: "unknown" },
+    ]) {
+      expect(validate({ ...boundary, ...patch })).toBe(false);
+      expect(() => parseFactoryEvent({ ...boundary, ...patch })).toThrow();
+    }
+    const { writerEpoch: _writerEpoch, observationScope: _scope, ...legacy } = boundary;
+    expect(validate(legacy)).toBe(true);
+    expect(() => parseFactoryEvent(legacy)).not.toThrow();
+  });
   it.each([1, undefined])(
     "rejects delayed terminal control from writer %s after takeover, retaining evidence",
     (epoch) => {

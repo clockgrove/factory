@@ -12448,6 +12448,20 @@ export class FactorySupervisor {
       const readiness = await this.#serializeIntegration(async () => {
         // Cheap non-authoritative readiness avoids creating coordination records during
         // ordinary pending-check polls. All checks are repeated under the shared claim.
+        // GitHub can expose the newly advanced target ref before it refreshes
+        // the PR's base metadata. That lag is a wait, not a failed candidate.
+        // Check it before integrationReadiness classifies a base mismatch as
+        // failure; the same evidence is re-read under the admission claim.
+        if (candidate) {
+          const observed = await this.#store.readPullRequest(pull.number);
+          if (!observed.merged && observed.baseSha !== candidate.identity.targetBaseSha) {
+            return {
+              state: "wait" as const,
+              reason:
+                "waiting for GitHub pull-request base metadata to match the validated candidate",
+            };
+          }
+        }
         const observedReadiness = await integrationReadiness(
           this.#store,
           pull,

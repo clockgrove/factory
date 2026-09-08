@@ -209,14 +209,26 @@ describe("GitHubReader Work Item history", () => {
       if (request.method !== "POST" || !request.url.endsWith("/graphql")) {
         throw new Error(`Unexpected request: ${request.method} ${request.url}`);
       }
-      const body = (await request.json()) as { query: string };
+      const body = (await request.json()) as {
+        query: string;
+        variables: Record<string, unknown>;
+      };
       let data: unknown;
       if (body.query.includes("ObjectiveCardinality")) {
-        data = { repository: { issue: { subIssues: { totalCount: 1 } } } };
+        data = {
+          repository: {
+            owner: { __typename: "Organization" },
+            issue: { subIssues: { totalCount: 1 } },
+          },
+        };
       } else {
         expect(body.query).toContain(
           "suggestedActors(capabilities: [CAN_BE_ASSIGNED], first: 100)",
         );
+        expect(body.query).toContain(
+          "issueFieldValues(first: 100) @include(if: $includeIssueFields)",
+        );
+        expect(body.variables.includeIssueFields).toBe(true);
         data = detail;
       }
       return Response.json(

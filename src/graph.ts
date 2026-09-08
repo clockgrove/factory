@@ -31,6 +31,12 @@
 import { createHash } from "node:crypto";
 
 import type { Octokit } from "@octokit/core";
+import {
+  observeMutationOperation,
+  observeMutationFence,
+  observeMutationQueue,
+  type MutationOperationObservation,
+} from "./control/mutation-observation.js";
 import { z } from "zod";
 
 import { createOctokit, type GitHubOptions } from "./github.js";
@@ -581,6 +587,9 @@ export interface GraphApplierOptions {
   concurrency?: ConcurrencyLimiter;
   mutationScheduler?: MutationAdmission;
   beforeMutation?: (waitedMs: number) => Promise<void>;
+  captureMutationFence?: () => (waitedMs: number) => Promise<void>;
+  mutationScope?: string;
+  onMutationOperation?: (observation: MutationOperationObservation) => void;
 }
 
 export interface ExistingGraphWorkItem extends CreatedWorkItem {
@@ -611,6 +620,9 @@ export class GraphApplier {
   readonly #concurrency: ConcurrencyLimiter;
   readonly #mutations: MutationAdmission;
   readonly #beforeMutation: (waitedMs: number) => Promise<void>;
+  readonly #captureMutationFence: GraphApplierOptions["captureMutationFence"];
+  readonly #mutationScope: string;
+  readonly #onMutationOperation: (observation: MutationOperationObservation) => void;
 
   constructor(opts: GraphApplierOptions) {
     this.#writer = opts.writer;
@@ -625,6 +637,9 @@ export class GraphApplier {
         onThrottle: this.#notify,
       });
     this.#beforeMutation = opts.beforeMutation ?? (async () => {});
+    this.#captureMutationFence = opts.captureMutationFence;
+    this.#mutationScope = opts.mutationScope ?? "graph-applier";
+    this.#onMutationOperation = opts.onMutationOperation ?? (() => {});
   }
 
   /** True once the circuit has tripped repeatedly enough to need a human (§7.3). */
@@ -751,6 +766,19 @@ export class GraphApplier {
    * have to import the other to get pacing right.
    */
   async #call<T>(fn: () => Promise<T>): Promise<T> {
+    const fence = this.#captureMutationFence?.();
+    return observeMutationOperation(
+      "graph-write",
+      this.#mutationScope,
+      this.#onMutationOperation,
+      () => this.#dispatchMutation(fn, fence),
+    );
+  }
+
+  async #dispatchMutation<T>(
+    fn: () => Promise<T>,
+    fence?: (waitedMs: number) => Promise<void>,
+  ): Promise<T> {
     if (this.#breaker.isOpen()) {
       const wait = this.#breaker.waitMs();
       this.#notify(`circuit open; waiting ${wait}ms before the next call`);
@@ -767,7 +795,11 @@ export class GraphApplier {
           new Error("Factory GitHub circuit opened while the graph write was queued"),
         );
       }
-      await this.#beforeMutation(mutationPermit.waitedMs);
+      observeMutationQueue(mutationPermit.waitedMs);
+      await observeMutationFence(async () => {
+        if (fence) await fence(mutationPermit.waitedMs);
+        await this.#beforeMutation(mutationPermit.waitedMs);
+      });
       if (this.#breaker.isOpen()) {
         throw new PlatformUnavailableError(
           { kind: "rate_limit", retryAfterMs: this.#breaker.waitMs() },

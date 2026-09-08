@@ -33,6 +33,12 @@
  */
 
 import type { Octokit } from "@octokit/core";
+import {
+  observeMutationOperation,
+  observeMutationFence,
+  observeMutationQueue,
+  type MutationOperationObservation,
+} from "./control/mutation-observation.js";
 
 import type { MechanicalVerdict } from "./evaluate.js";
 import type { BlastRadiusVerdict } from "./approval.js";
@@ -483,6 +489,9 @@ export interface DispatcherOptions {
   concurrency?: ConcurrencyLimiter;
   mutationScheduler?: MutationAdmission;
   beforeMutation?: (waitedMs: number) => Promise<void>;
+  captureMutationFence?: () => (waitedMs: number) => Promise<void>;
+  mutationScope?: string;
+  onMutationOperation?: (observation: MutationOperationObservation) => void;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -501,6 +510,9 @@ export class Dispatcher {
   readonly #concurrency: ConcurrencyLimiter;
   readonly #mutations: MutationAdmission;
   readonly #beforeMutation: (waitedMs: number) => Promise<void>;
+  readonly #captureMutationFence: DispatcherOptions["captureMutationFence"];
+  readonly #mutationScope: string;
+  readonly #onMutationOperation: (observation: MutationOperationObservation) => void;
 
   constructor(opts: DispatcherOptions) {
     this.#writer = opts.writer;
@@ -523,6 +535,9 @@ export class Dispatcher {
         onThrottle: this.#notify,
       });
     this.#beforeMutation = opts.beforeMutation ?? (async () => {});
+    this.#captureMutationFence = opts.captureMutationFence;
+    this.#mutationScope = opts.mutationScope ?? "dispatcher";
+    this.#onMutationOperation = opts.onMutationOperation ?? (() => {});
   }
 
   /** True once the circuit has tripped repeatedly enough to need a human (§7.3). */
@@ -1093,6 +1108,20 @@ export class Dispatcher {
    * makes, so no call site can bypass it by accident.
    */
   async #call(fn: () => Promise<void>, beforeCall?: () => void): Promise<void> {
+    const fence = this.#captureMutationFence?.();
+    return observeMutationOperation(
+      "dispatch-write",
+      this.#mutationScope,
+      this.#onMutationOperation,
+      () => this.#dispatchMutation(fn, fence, beforeCall),
+    );
+  }
+
+  async #dispatchMutation(
+    fn: () => Promise<void>,
+    fence?: (waitedMs: number) => Promise<void>,
+    beforeCall?: () => void,
+  ): Promise<void> {
     if (this.#breaker.isOpen()) {
       const wait = this.#breaker.waitMs();
       this.#notify(`circuit open; waiting ${wait}ms before the next call`);
@@ -1109,7 +1138,11 @@ export class Dispatcher {
           new Error("Factory GitHub circuit opened while the dispatch write was queued"),
         );
       }
-      await this.#beforeMutation(mutationPermit.waitedMs);
+      observeMutationQueue(mutationPermit.waitedMs);
+      await observeMutationFence(async () => {
+        if (fence) await fence(mutationPermit.waitedMs);
+        await this.#beforeMutation(mutationPermit.waitedMs);
+      });
       // Some callers have a deadline that can elapse while waiting for this
       // shared mutation permit. Keep their final synchronous fence adjacent to
       // the provider call instead of checking before the queue.

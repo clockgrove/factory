@@ -10,6 +10,11 @@ export interface GitCommitObject {
 }
 
 export interface LeaseStore {
+  /** Capture a caller-owned Objective fence for a short shared CAS transaction. */
+  withMutationFence?<T>(
+    fence: (waitedMs: number) => Promise<void>,
+    operation: () => Promise<T>,
+  ): Promise<T>;
   /**
    * The concrete transport rechecks the Objective lease after any mutation
    * queue wait and immediately before sending the request. Control helpers may

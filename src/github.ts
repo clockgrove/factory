@@ -47,6 +47,7 @@ import {
 } from "./platform.js";
 import type { FactoryEvent } from "./protocol/events.js";
 import { isManagedAgentBackendId } from "./protocol/policy.js";
+import { observeGitHubTransport } from "./control/mutation-observation.js";
 import { normalizeIssueFieldValues } from "./scheduling/github-priority.js";
 
 /** A workflow run parked in `action_required`, awaiting a maintainer's approval. */
@@ -863,7 +864,12 @@ export function createOctokit(opts: GitHubOptions): Octokit {
   };
   const octokit = new FactoryOctokit({
     auth: opts.token,
-    ...(opts.requestFetch ? { request: { fetch: opts.requestFetch } } : {}),
+    request: {
+      fetch: ((input, init) => {
+        observeGitHubTransport(input, init);
+        return (opts.requestFetch ?? globalThis.fetch)(input, init);
+      }) as typeof globalThis.fetch,
+    },
     // A mutation permit prices one transport. Hidden library retries would
     // bypass pacing and first-failure evidence, so Factory owns retry timing.
     retry: { enabled: false },

@@ -1,3 +1,4 @@
+import { hasCurrentWriterAuthority } from "../control/receipts.js";
 import type { FactoryReadSnapshot } from "../application/status.js";
 import { attemptRef } from "../control/attempts.js";
 import { activationCancellation } from "../control/activations.js";
@@ -323,7 +324,12 @@ export async function verifyRecoveryPeerTrunkIntegration(input: {
     );
     const policy = parseRunPolicy(start.policy);
     requirePeer(policyDigest(policy) === start.policyDigest);
-    const end = events.filter((event) => event.runId === start.runId && terminal.has(event.event));
+    const end = events.filter(
+      (event) =>
+        event.runId === start.runId &&
+        terminal.has(event.event) &&
+        hasCurrentWriterAuthority(event, events),
+    );
     requirePeer(end.length <= 1 && (!end.length || integrated.sequence < end[0]!.sequence));
     const runtime = start.recoveryPlanDigest
       ? await loadRecoveryRuntime({

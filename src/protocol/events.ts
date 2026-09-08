@@ -18,6 +18,8 @@ import {
 const Common = z
   .object({
     protocol: z.literal(PROTOCOL_V2),
+    // Current comment writer; not the original producer/reservation epoch.
+    writerEpoch: z.number().int().positive().optional(),
     objective: z.number().int().positive(),
     runId: safeId,
     sequence: z.number().int().nonnegative(),
@@ -295,6 +297,7 @@ const WorkItemPriorityChanged = Common.extend({
 const ControllerObserved = Common.extend({
   kind: z.literal("controller"),
   event: z.literal("ControllerObserved"),
+  observationScope: z.enum(["repository-controller", "objective-writer"]).optional(),
   controllerId: safeId,
   epoch: z.number().int().positive(),
   expiresAt: isoDate,

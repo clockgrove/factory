@@ -73,6 +73,7 @@ export class LifecycleRecorder {
     objectiveNodeId: string;
     sequence: number;
     controllerId: string;
+    observationScope?: "repository-controller" | "objective-writer";
     epoch: number;
     expiresAt: string;
     controllerPolicyDigest: string;
@@ -84,7 +85,9 @@ export class LifecycleRecorder {
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
       kind: "controller",
+      writerEpoch: args.lease.epoch,
       event: "ControllerObserved",
+      ...(args.observationScope ? { observationScope: args.observationScope } : {}),
       objective: args.lease.objective,
       runId: args.lease.runId,
       sequence: args.sequence,
@@ -118,6 +121,7 @@ export class LifecycleRecorder {
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
       kind: "run",
+      writerEpoch: args.lease.epoch,
       event: args.event,
       objective: args.lease.objective,
       runId: args.lease.runId,
@@ -153,6 +157,7 @@ export class LifecycleRecorder {
       protocol: PROTOCOL_V2,
       kind: "graph",
       event: "GraphCompiled",
+      writerEpoch: args.lease.epoch,
       objective: args.lease.objective,
       runId: args.lease.runId,
       sequence: args.sequence,
@@ -188,6 +193,7 @@ export class LifecycleRecorder {
       protocol: PROTOCOL_V2,
       kind: "graph",
       event: "GraphProjected",
+      writerEpoch: args.lease.epoch,
       objective: args.lease.objective,
       runId: args.lease.runId,
       sequence: args.sequence,
@@ -219,6 +225,7 @@ export class LifecycleRecorder {
       protocol: PROTOCOL_V2,
       kind: "delivery",
       event: "DeliverySelected",
+      writerEpoch: args.lease.epoch,
       objective: args.lease.objective,
       runId: args.lease.runId,
       sequence: args.sequence,
@@ -261,6 +268,7 @@ export class LifecycleRecorder {
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
       kind: "publication",
+      writerEpoch: args.lease.epoch,
       event: args.event,
       objective: args.lease.objective,
       runId: args.lease.runId,
@@ -315,6 +323,7 @@ export class LifecycleRecorder {
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
       kind: "validation",
+      writerEpoch: args.lease.epoch,
       event: "ValidationRecorded",
       objective: args.reservation.objective,
       runId: args.reservation.runId,
@@ -372,6 +381,7 @@ export class LifecycleRecorder {
       return parseFactoryEvent({
         protocol: PROTOCOL_V2,
         kind: "budget",
+        writerEpoch: value.lease.epoch,
         event: value.event,
         objective: value.reservation.objective,
         runId: value.reservation.runId,
@@ -448,6 +458,7 @@ export class LifecycleRecorder {
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,
       kind: "budget",
+      writerEpoch: args.lease.epoch,
       event: args.event,
       objective: args.lease.objective,
       runId: args.lease.runId,

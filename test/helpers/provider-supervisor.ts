@@ -255,6 +255,7 @@ export async function providerSupervisorFixture(
   };
   const graphManager = new CompiledGraphManager(storage, {
     assertCurrent: async () => undefined,
+    assertMutationAuthorized: async () => undefined,
   } as unknown as LeaseManager);
   const graphRecord = await graphManager.persist({
     lease,

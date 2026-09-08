@@ -1,3 +1,4 @@
+import { hasCurrentWriterAuthority } from "../control/receipts.js";
 import { createHash } from "node:crypto";
 import { deduplicateFactoryEvents } from "../control/receipts.js";
 import { type FactoryEvent, parseFactoryEvent } from "../protocol/events.js";
@@ -240,7 +241,10 @@ export function verifyRecoveryChain(input: {
       for (const entry of plan.history) {
         const start = starts.get(entry.runId)!;
         const terminal = events.filter(
-          (event) => event.runId === entry.runId && terminalNames.has(event.event),
+          (event) =>
+            event.runId === entry.runId &&
+            terminalNames.has(event.event) &&
+            hasCurrentWriterAuthority(event, events),
         );
         require(terminal.length === 1 &&
           terminal[0]!.sequence > start.sequence &&

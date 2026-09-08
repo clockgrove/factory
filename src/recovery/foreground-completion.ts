@@ -1,3 +1,4 @@
+import { hasCurrentWriterAuthority } from "../control/receipts.js";
 import { createHash } from "node:crypto";
 import { attemptRef } from "../control/attempts.js";
 import { loadCompiledGraph, loadCompiledGraphProjection } from "../control/graphs.js";
@@ -59,6 +60,7 @@ export async function deriveForegroundCompletion(
       history.filter(
         (event) =>
           event.runId === entry.runId &&
+          hasCurrentWriterAuthority(event, events) &&
           ["FactoryRunCompleted", "FactoryRunEscalated", "FactoryRunCancelled"].includes(
             event.event,
           ),

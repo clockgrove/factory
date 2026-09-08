@@ -24,7 +24,12 @@ import {
   observeMutationQueue,
   type MutationOperationObservation,
 } from "./mutation-observation.js";
-import { decodeEventComments, deduplicateFactoryEvents, latestSupportedRun } from "./receipts.js";
+import {
+  decodeEventComments,
+  deduplicateFactoryEvents,
+  latestSupportedRun,
+  hasCurrentWriterAuthority,
+} from "./receipts.js";
 import { classicBranchProtectionRules } from "../publication/branch-policy.js";
 import { PROTOCOL_V2 } from "../protocol/limits.js";
 import { parseRunPolicy, policyDigest } from "../protocol/policy.js";
@@ -739,6 +744,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
                 event.kind === "run" &&
                 event.objective === issue.number &&
                 event.event !== "FactoryRunStarted" &&
+                hasCurrentWriterAuthority(event, events) &&
                 events.some(
                   (candidate) =>
                     candidate.kind === "run" &&
@@ -792,6 +798,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
               (event) =>
                 event.kind === "run" &&
                 event.runId === currentRun.runId &&
+                hasCurrentWriterAuthority(event, events) &&
                 event.event ===
                   (commandState.admissionGate!.kind === "drain"
                     ? "RunDrainCompleted"

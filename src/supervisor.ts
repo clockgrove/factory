@@ -104,6 +104,7 @@ import {
   encodeEventComment,
   nextEventSequence,
   latestSupportedRun,
+  hasCurrentWriterAuthority,
 } from "./control/receipts.js";
 import { RunManager, type RunState } from "./control/runs.js";
 import { loadRecoveryRuntime, type RecoveryRuntime } from "./recovery/runtime.js";
@@ -1385,7 +1386,9 @@ export class FactorySupervisor {
         snapshot.closed &&
         snapshot.factoryEvents?.some(
           (event) =>
-            event.event === "FactoryRunCompleted" && event.runId === recovery.successorRunId,
+            event.event === "FactoryRunCompleted" &&
+            event.runId === recovery.successorRunId &&
+            hasCurrentWriterAuthority(event, snapshot.factoryEvents ?? []),
         ) &&
         snapshot.factoryEvents
           .filter((event) => event.event === "FactoryRunStarted")
@@ -1555,12 +1558,7 @@ export class FactorySupervisor {
     if (!this.#sharedCapacity)
       return this.#capacity.transition(expectedGeneration, fromKey, reservation, limits);
     const result = await this.#lease.use((lease) =>
-      this.#sharedCapacity!.transition(
-        this.#capacityOwner(lease),
-        fromKey,
-        reservation,
-        limits,
-      ),
+      this.#sharedCapacity!.transition(this.#capacityOwner(lease), fromKey, reservation, limits),
     );
     const snapshot = await this.#sharedCapacity.snapshot();
     return result.reserved
@@ -1800,9 +1798,19 @@ export class FactorySupervisor {
 
   async #recordControllerObservation(snapshot: Snapshot): Promise<void> {
     const observe = this.#options.controllerObservation;
-    if (!observe) return;
-    const observation = observe();
-    const observationKey = JSON.stringify(observation);
+    const owner = await this.#lease.use(async (lease) => lease);
+    const observation = observe?.() ?? {
+      controllerId: owner.holder,
+      epoch: owner.epoch,
+      expiresAt: owner.expiresAt.toISOString(),
+      controllerPolicyDigest: owner.policyDigest,
+    };
+    // A foreground writer needs one boundary per generation, not a comment
+    // for each lease renewal. Service observations retain their own lifecycle.
+    const observationKey = JSON.stringify([
+      owner.epoch,
+      observe ? observation : "objective-writer",
+    ]);
     if (this.#lastControllerObservationKey === observationKey) return;
     const latest = (snapshot.factoryEvents ?? [])
       .filter((event) => event.kind === "controller" && event.runId === this.#run.runId)
@@ -1810,6 +1818,7 @@ export class FactorySupervisor {
       .at(-1);
     if (
       latest?.kind === "controller" &&
+      latest.writerEpoch === owner.epoch &&
       latest.controllerId === observation.controllerId &&
       latest.epoch === observation.epoch &&
       latest.expiresAt === observation.expiresAt &&
@@ -1826,6 +1835,7 @@ export class FactorySupervisor {
         objectiveNodeId: snapshot.id,
         sequence: this.#sequences.take(),
         ...observation,
+        observationScope: observe ? "repository-controller" : "objective-writer",
         protocolMin: PROTOCOL_V2,
         protocolMax: PROTOCOL_V2,
       }),
@@ -1834,10 +1844,13 @@ export class FactorySupervisor {
   }
 
   async #acknowledgeOperationalGate(snapshot: Snapshot, gate: AdmissionGateCommand): Promise<void> {
+    const writerEpoch = await this.#lease.use(async (lease) => lease.epoch);
     const event = gate.kind === "drain" ? "RunDrainCompleted" : "RunPauseAcknowledged";
     const recorded = (snapshot.factoryEvents ?? []).some(
       (candidate) =>
         candidate.kind === "run" &&
+        candidate.writerEpoch === writerEpoch &&
+        hasCurrentWriterAuthority(candidate, snapshot.factoryEvents ?? []) &&
         candidate.runId === this.#run.runId &&
         candidate.event === event &&
         candidate.commandRequestId === gate.requestId,
@@ -4963,23 +4976,20 @@ export class FactorySupervisor {
             await this.#releaseCapacity(admission.reservation.key);
             executionCapacityReleased = true;
           };
-          activeExecutions.start(
-            item.number,
-            async () => {
-              try {
-                await this.#execute(
-                  item,
-                  deadline,
-                  admission,
-                  releaseExecutionCapacity,
-                  deliveryBases.get(item.number),
-                  executionAbort.signal,
-                );
-              } finally {
-                await releaseExecutionCapacity();
-              }
-            },
-          );
+          activeExecutions.start(item.number, async () => {
+            try {
+              await this.#execute(
+                item,
+                deadline,
+                admission,
+                releaseExecutionCapacity,
+                deliveryBases.get(item.number),
+                executionAbort.signal,
+              );
+            } finally {
+              await releaseExecutionCapacity();
+            }
+          });
         }
         if (started.length > 0) {
           this.#notify(`admitted: ${started.map((number) => `#${number}`).join(", ")}`);
@@ -13759,13 +13769,16 @@ export class FactorySupervisor {
     reason?: string,
   ): Promise<SupervisorResult> {
     await this.#lease.assert();
-    await runManager.terminal({
-      run: this.#run,
-      objectiveNodeId: snapshot.id,
-      event,
-      sequence: this.#sequences.take(),
-      ...(reason ? { reason } : {}),
-    });
+    await this.#lease.use((lease) =>
+      runManager.terminal({
+        writerEpoch: lease.epoch,
+        run: this.#run,
+        objectiveNodeId: snapshot.id,
+        event,
+        sequence: this.#sequences.take(),
+        ...(reason ? { reason } : {}),
+      }),
+    );
     await this.#lease.release();
     return {
       status:

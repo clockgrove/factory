@@ -1,3 +1,4 @@
+import { hasCurrentWriterAuthority } from "../control/receipts.js";
 import { loadCompiledGraph } from "../control/graphs.js";
 import {
   loadMergeCandidateCheckpoint,
@@ -444,6 +445,7 @@ export async function observeRecoverySiblingRefresh(
       const terminal = events.find(
         (event) =>
           event.runId === start.runId &&
+          hasCurrentWriterAuthority(event, events) &&
           ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(
             event.event,
           ),
@@ -749,6 +751,7 @@ export async function observeRecoverySiblingRefresh(
     const terminal = events.find(
       (event) =>
         event.runId === candidateRunId &&
+        hasCurrentWriterAuthority(event, events) &&
         ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(event.event),
     );
     const usage = events

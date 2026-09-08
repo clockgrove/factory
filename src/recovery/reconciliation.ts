@@ -1,3 +1,4 @@
+import { hasCurrentWriterAuthority } from "../control/receipts.js";
 import type { FactoryReadSnapshot } from "../application/status.js";
 import {
   assertAuthenticatedGraphProjection,
@@ -99,6 +100,7 @@ export async function loadRecoverySourceReconciliation(input: {
       !events.some(
         (event) =>
           event.runId === input.runId &&
+          hasCurrentWriterAuthority(event, events) &&
           ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(
             event.event,
           ),

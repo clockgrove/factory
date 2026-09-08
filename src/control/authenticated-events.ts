@@ -1,5 +1,5 @@
 import type { FactoryEvent } from "../protocol/events.js";
-import { deduplicateFactoryEvents } from "./receipts.js";
+import { deduplicateFactoryEvents, hasCurrentWriterAuthority } from "./receipts.js";
 import { recoveryEventDigest } from "../recovery/identity.js";
 import { policyDigest } from "../protocol/policy.js";
 
@@ -115,6 +115,7 @@ export function bindAuthenticatedRunActors(
     const predecessor = predecessors[0];
     const terminals = authenticatedHistory.filter(
       (candidate) =>
+        hasCurrentWriterAuthority(candidate, authenticatedHistory) &&
         candidate.kind === "run" &&
         ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(
           candidate.event,

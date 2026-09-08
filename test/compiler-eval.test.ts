@@ -209,6 +209,8 @@ const calibrationCase = (id: string): CompilerCalibrationCase => ({
   labelProvenance: "synthetic",
   labelEvidence: "fixture",
   expectedOmissions: [],
+  expectedRepair: false,
+  validPlan: true,
   reportedOmissions: [],
   findingCount: 0,
   unsupportedFindingCount: 0,
@@ -237,6 +239,8 @@ describe("calibration measurement boundaries", () => {
       {
         ...calibrationCase("missing"),
         expectedOmissions: ["a", "b"],
+        expectedRepair: true,
+        validPlan: false,
         reportedOmissions: ["a"],
         findingCount: 2,
         unsupportedFindingCount: 1,
@@ -347,4 +351,41 @@ it("retains failed and synthetic comparative arms without claiming observed savi
       .failedOrInconclusivePairs,
   ).toBe(1);
   expect(() => measureCompilerRepairComparison([pair, pair])).toThrow("duplicate");
+});
+
+it("does not classify justified non-coverage repairs as unnecessary", () => {
+  const result = measureCompilerCalibration([
+    { ...calibrationCase("oversized"), expectedRepair: true, validPlan: false, repaired: true },
+    calibrationCase("valid"),
+  ]);
+  expect(result.heldOut.unnecessaryRepairRate).toBe(0);
+});
+it("adjudication cannot retain an identity while reversing obligation text", () => {
+  const prior = {
+    version: 1 as const,
+    caseDigest: "a".repeat(64),
+    provenance: "llm-assisted" as const,
+    pass: "blinded" as const,
+    obligations: [
+      {
+        id: "guard",
+        text: "Reject negatives",
+        evidenceIds: ["objective"],
+        status: "required" as const,
+        reason: "Guard",
+      },
+    ],
+    disagreements: [],
+    uncertainty: [],
+  };
+  expect(() =>
+    validateCompilerCaseLabel(
+      {
+        ...prior,
+        pass: "adjudication",
+        obligations: [{ ...prior.obligations[0]!, text: "Accept negatives" }],
+      },
+      { caseDigest: prior.caseDigest, evidence, pass: "adjudication", priorLabel: prior },
+    ),
+  ).toThrow("rewrite obligation text");
 });

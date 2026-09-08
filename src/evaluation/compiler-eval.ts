@@ -312,7 +312,7 @@ export interface CompilerPostMortemCause {
 }
 export function createCompilerEvalReport(input: {
   inventory: ObligationInventory;
-  graph: CompilerObjective;
+  graph: { workItems: Array<{ id: string; dependsOn: string[]; acceptance: string[] }> };
   verdict: CompilerJudgeVerdict;
   draftDigest: string;
   mode?: "plan-review" | "post-mortem";
@@ -323,6 +323,8 @@ export function createCompilerEvalReport(input: {
   notInvokedPhases?: CompilerEvalUsage["phase"][];
   historicalEvidence?: CompilerEvidence[];
   economics?: DecompositionEvidence;
+  /** Full compiler shape is needed only for optional heuristic economics. */
+  economicGraph?: CompilerObjective;
 }) {
   const verdict = validateCompilerJudgeVerdict(input.verdict, input);
   const usage = input.usage ?? [];
@@ -386,7 +388,10 @@ export function createCompilerEvalReport(input: {
     evidence,
     usage,
     causes,
-    economics: input.economics ? assessDecomposition(input.graph.workItems, input.economics) : null,
+    economics:
+      input.economics && input.economicGraph
+        ? assessDecomposition(input.economicGraph.workItems, input.economics)
+        : null,
     observedTokenSubtotal: usage.reduce((sum, entry) => sum + (entry.observedTokens ?? 0), 0),
     observedTotalTokens:
       input.usageComplete === true && usage.every((entry) => entry.observedTokens !== null)
@@ -469,6 +474,8 @@ export interface CompilerCalibrationCase {
   labelEvidence: string;
   /** Positive = genuine omission; negative = valid plan. */
   expectedOmissions: string[];
+  expectedRepair: boolean;
+  validPlan: boolean;
   reportedOmissions: string[];
   findingCount: number;
   unsupportedFindingCount: number;
@@ -508,7 +515,7 @@ export function measureCompilerCalibration(cases: readonly CompilerCalibrationCa
         sum + entry.expectedOmissions.filter((id) => entry.reportedOmissions.includes(id)).length,
       0,
     );
-    const valid = complete.filter((entry) => entry.expectedOmissions.length === 0);
+    const valid = complete.filter((entry) => entry.validPlan && !entry.expectedRepair);
     const alternatives = complete.filter((entry) => entry.validAlternative);
     const groups = [
       ...new Set(complete.flatMap((entry) => (entry.cosmeticGroup ? [entry.cosmeticGroup] : []))),
@@ -549,7 +556,7 @@ export function measureCompilerCalibration(cases: readonly CompilerCalibrationCa
           (entry) => entry.labelProvenance === "human" && entry.expectedOmissions.length > 0,
         ) &&
         complete.some(
-          (entry) => entry.labelProvenance === "human" && entry.expectedOmissions.length === 0,
+          (entry) => entry.labelProvenance === "human" && entry.validPlan && !entry.expectedRepair,
         ),
     };
   };
@@ -667,6 +674,8 @@ export function validateCompilerCaseLabel(
     }
     for (const entry of label.obligations) {
       const original = previous.get(entry.id);
+      if (original && entry.text !== original.text)
+        throw new Error("adjudication cannot silently rewrite obligation text");
       if (
         original &&
         entry.status !== original.status &&

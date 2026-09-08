@@ -45,6 +45,10 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- Shared-capacity journals now compact only explicit releases into exact, fixed-depth Git-tree
+  tombstones published by the existing short CAS transaction. Active and unresolved claims remain
+  in the bounded snapshot, retired identities cannot be replayed or changed, and actionable
+  retention pressure is reported before the unchanged hard limit. ([#220](https://github.com/clockgrove/factory/issues/220))
 - Installed large-file qualification Objectives now select the repository-observed `npm test`
   recipe, and fresh version-2 fixtures provide a matching Vitest test instead of an incompatible
   `node:test` suite. This makes the scenarios compile-ready without weakening command grounding or

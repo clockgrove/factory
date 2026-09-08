@@ -35,7 +35,10 @@ import { CodexSdkLocalBackend } from "../src/backends/codex-sdk-local.js";
 import type { ManagementBackend } from "../src/management/backend.js";
 import type { ObjectiveSnapshot, LinkedPullRequest } from "../src/types.js";
 import { PlatformUnavailableError } from "../src/platform.js";
-import { integrationAdmissionRef } from "../src/control/integration-admission.js";
+import {
+  integrationAdmissionRef,
+  withIntegrationAdmission,
+} from "../src/control/integration-admission.js";
 import * as cleanValidation from "../src/validation/clean-run.js";
 const actualValidate = cleanValidation.validateArtifactClean;
 
@@ -217,7 +220,11 @@ async function fixture(
     sequence: 100,
     expiresAt: new Date(Date.now() + 600_000),
   };
-  const leases = { assertCurrent: async () => {} } as unknown as LeaseManager;
+  const assertCurrent = async () => {};
+  const leases = {
+    assertCurrent,
+    assertMutationAuthorized: assertCurrent,
+  } as unknown as LeaseManager;
   const graph: CompiledObjective = {
     title: "Parallel siblings",
     workItems: names.map((name) => ({
@@ -821,6 +828,9 @@ async function fixture(
     if (!args.ref.startsWith("refs/clockgrove-factory/integration-admissions/"))
       return refresh(args);
     if (refs.get(args.ref) !== args.beforeOid) return false;
+    const claim = await readCommit(args.afterOid);
+    if (claim.parentOids.length !== 1 || claim.parentOids[0] !== args.beforeOid)
+      throw new Error("fixture integration claim must extend its exact observed OID");
     refs.set(args.ref, args.afterOid);
     return true;
   });
@@ -1448,7 +1458,11 @@ describe("Supervisor parallel independent sibling integration", () => {
         sourceExactHeadValidationDigest: source.digest,
         targetBaseSha: target,
       };
-      const leases = { assertCurrent: async () => {} } as unknown as LeaseManager;
+      const assertCurrent = async () => {};
+      const leases = {
+        assertCurrent,
+        assertMutationAuthorized: assertCurrent,
+      } as unknown as LeaseManager;
       const candidate = await new MergeCandidateCheckpointStore(f.storage, leases).persist({
         lease: f.lease,
         identity,
@@ -1505,7 +1519,35 @@ describe("Supervisor parallel independent sibling integration", () => {
           usageId: `integration-review-${reviewIdentityDigest(reviewIdentity)}`,
         }),
       );
-      const sha = await f.merge({ number: 20, headSha: f.heads[2]!, commitTitle: "merge C" });
+      const claimStore = {
+        ...f.storage,
+        compareAndSwapRef: (args: {
+          ref: string;
+          beforeOid: string;
+          afterOid: string;
+        }) => GitHubControlStore.prototype.compareAndSwapRef.call(undefined as never, args),
+        readPullRequest: (number: number) =>
+          GitHubControlStore.prototype.readPullRequest.call(undefined as never, number),
+      };
+      const sha = await withIntegrationAdmission(
+        claimStore,
+        {
+          repository: "o/r",
+          branch: "main",
+          objective: 7,
+          runId: "parallel",
+          epoch: f.lease.epoch,
+          pullRequest: 20,
+          headSha: f.heads[2]!,
+          baseSha: target,
+          outputTreeSha: candidate.validation.outputTreeSha,
+        },
+        assertCurrent,
+        async (admission) => {
+          await admission.dispatch();
+          return f.merge({ number: 20, headSha: f.heads[2]!, commitTitle: "merge C" });
+        },
+      );
       const reserved = item.factoryEvents!.find(
         (event) => event.kind === "attempt" && event.event === "AttemptReserved",
       )!;

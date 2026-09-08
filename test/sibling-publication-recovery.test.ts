@@ -67,7 +67,12 @@ it("rechecks a stale publication snapshot after pending sibling checks without e
           .events()
           .filter((event) => event.event === "PublicationRecorded" && event.workItem === workItem),
       ).toHaveLength(1);
-    expect(GitHubControlStore.prototype.compareAndSwapRef).toHaveBeenCalledOnce();
+    const publicationBranchCas = vi
+      .mocked(GitHubControlStore.prototype.compareAndSwapRef)
+      .mock.calls.filter(
+        ([call]) => call.ref.startsWith("refs/heads/factory/objective-7/"),
+      );
+    expect(publicationBranchCas).toHaveLength(1);
     expect(f.activity.filter((entry) => entry.invocation)).toHaveLength(1);
     expect(f.activity.filter((entry) => entry.operation === "candidate-review")).toHaveLength(1);
     expect(f.resources.size).toBe(0);

@@ -1452,7 +1452,7 @@ export class FactorySupervisor {
     return recovered.run;
   }
 
-  /** Append only proved, already-completed merges under both configured fences.
+  /** Append only proved, already-completed merges under Objective ownership.
    * No worker, review, PR mutation or issue closure is permitted in this stage. */
   async #reconcileRecoverySourceMerges(objective: number, manager: RunManager) {
     const recovery = this.#options.recovery;
@@ -12132,7 +12132,7 @@ export class FactorySupervisor {
                         await this.#lease.use(async (lease) => {
                           if (lease.epoch !== remoteReservation!.directorEpoch)
                             throw new Error(
-                              "adopted isolated invocation lost its reserved controller generation",
+                              "adopted isolated invocation lost its reserved Objective generation",
                             );
                         });
                         providerStarted = new Date();

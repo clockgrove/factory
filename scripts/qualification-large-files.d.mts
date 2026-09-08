@@ -1,5 +1,6 @@
 export const LARGE_FILE_RECIPE_VERSION: "factory-large-files-fixture-v2";
-export const LARGE_FILE_VALIDATION_COMMAND: "npm test";
+export const LARGE_FILE_VALIDATION_SCRIPT: "test:large-file-fixture";
+export const LARGE_FILE_VALIDATION_COMMAND: "npm run test:large-file-fixture";
 export const LARGE_FILE_AUDIO_BYTES: number;
 export type LargeFilePhase = "payload" | "metadata" | "join";
 export type LargeFileOutputScenario = "accepted" | "scope" | "secret" | "symlink";
@@ -36,6 +37,14 @@ export interface LargeFileFixture {
   baseTreeSha: string;
   sourceBaseSha?: string;
   sourceTreeSha?: string;
+  validation?: {
+    command: typeof LARGE_FILE_VALIDATION_COMMAND;
+    script: typeof LARGE_FILE_VALIDATION_SCRIPT;
+    recipe: string;
+    packagePath: "package.json";
+    sourcePackageDigest: string;
+    packageDigest: string;
+  };
   paths: LargeFilePaths;
   recipePath: string;
   baseline: LargeFileExpected[];
@@ -65,6 +74,7 @@ export interface LargeFileTreeObservation {
   patchProof?: { bytes: number; digest: string; appliedTreeSha: string };
 }
 export function largeFilePaths(namespace: string): LargeFilePaths;
+export function largeFileValidationRecipe(namespace: string): string;
 export function renderLargeFileRecipe(template: string, namespace: string): string;
 export function largeFileObjectiveBody(namespace: string): string;
 export function createLargeFileFixture(input: {

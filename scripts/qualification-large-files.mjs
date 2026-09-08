@@ -10,7 +10,8 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const LARGE_FILE_RECIPE_VERSION = "factory-large-files-fixture-v2";
-export const LARGE_FILE_VALIDATION_COMMAND = "npm test";
+export const LARGE_FILE_VALIDATION_SCRIPT = "test:large-file-fixture";
+export const LARGE_FILE_VALIDATION_COMMAND = `npm run ${LARGE_FILE_VALIDATION_SCRIPT}`;
 export const LARGE_FILE_AUDIO_BYTES = 6 * 1024 * 1024 + 44;
 const MAX_PATCH_BYTES = 12 * 1024 * 1024;
 const INLINE_BYTES = 5 * 1024 * 1024;
@@ -48,6 +49,9 @@ export function largeFilePaths(namespace) {
     metadata: `${prefix}/generated/qualification-metadata.json`,
     result: `${prefix}/generated/qualification-result.json`,
   };
+}
+export function largeFileValidationRecipe(namespace) {
+  return `vitest run ${largeFilePaths(namespace).test}`;
 }
 
 // Valid mono 8-bit PCM WAV. Full-period xorshift32 words keep the Git binary patch genuinely
@@ -415,6 +419,60 @@ function describeFile(file) {
   };
 }
 
+function installScopedValidationRecipe(repository, namespace, deadline) {
+  if (!fs.existsSync(join(repository, "package.json"))) return undefined;
+  const source = regularBytes(repository, "package.json", 256 * 1024);
+  assert.equal(source.mode, "100644", "qualification source package must be a regular file");
+  const packageJson = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(source.bytes));
+  assert.ok(
+    packageJson &&
+      typeof packageJson === "object" &&
+      packageJson.scripts &&
+      typeof packageJson.scripts === "object" &&
+      !Array.isArray(packageJson.scripts),
+    "qualification source package must define scripts",
+  );
+  assert.equal(
+    packageJson.scripts.test,
+    "vitest run",
+    "version-2 large-file fixture requires the committed Vitest npm test recipe",
+  );
+  assert.equal(
+    packageJson.scripts[LARGE_FILE_VALIDATION_SCRIPT],
+    undefined,
+    "qualification source already defines the reserved large-file validation script",
+  );
+  const recipe = largeFileValidationRecipe(namespace);
+  packageJson.scripts[LARGE_FILE_VALIDATION_SCRIPT] = recipe;
+  const bytes = Buffer.from(`${JSON.stringify(packageJson, null, 2)}\n`);
+  assert.ok(bytes.length <= 256 * 1024, "qualification package exceeds its bound");
+  const fd = fs.openSync(
+    join(repository, "package.json"),
+    fs.constants.O_WRONLY | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW,
+  );
+  try {
+    fs.writeFileSync(fd, bytes);
+  } finally {
+    fs.closeSync(fd);
+  }
+  const oid = gitText(repository, ["hash-object", "-w", "--stdin"], bytes, 1024, deadline);
+  git(
+    repository,
+    ["update-index", "--add", "--cacheinfo", "100644", oid, "package.json"],
+    undefined,
+    1024,
+    deadline,
+  );
+  return {
+    command: LARGE_FILE_VALIDATION_COMMAND,
+    script: LARGE_FILE_VALIDATION_SCRIPT,
+    recipe,
+    packagePath: "package.json",
+    sourcePackageDigest: hash(source.bytes),
+    packageDigest: hash(bytes),
+  };
+}
+
 export function createLargeFileFixture({ parent, namespace, sourceRepository, baseSha }) {
   assertNamespace(namespace);
   assert.equal(
@@ -440,6 +498,9 @@ export function createLargeFileFixture({ parent, namespace, sourceRepository, ba
   );
   const sourceTreeSha = sourceRepository
     ? importBase(sourceRepository, repository, baseSha, deadline)
+    : undefined;
+  const validation = sourceRepository
+    ? installScopedValidationRecipe(repository, namespace, deadline)
     : undefined;
   const baseline = baselineFiles(namespace);
   for (const file of baseline.files) {
@@ -494,6 +555,7 @@ export function createLargeFileFixture({ parent, namespace, sourceRepository, ba
     baseSha: fixtureBase,
     baseTreeSha,
     ...(baseSha ? { sourceBaseSha: baseSha, sourceTreeSha } : {}),
+    ...(validation ? { validation } : {}),
     paths: largeFilePaths(namespace),
     recipePath: largeFilePaths(namespace).recipe,
     baseline: baseline.files.map(describeFile),
@@ -608,7 +670,7 @@ export function assertLargeFileRefusal(observation) {
 
 export function largeFileObjectiveBody(namespace) {
   const p = largeFilePaths(namespace);
-  return `Qualify deterministic large-file handling for namespace ${namespace}. Create exactly three linear Work Items in this order, never parallel roots. Use existing committed ${p.recipe}; do not rewrite the recipe, test, attributes, or LFS files. Do not fetch/install/upload LFS or add dependencies.\n\n1. Payload (the sole root): run node ${p.recipe} payload. Create only ${p.payload}, exactly 6291500 bytes of valid PCM WAV from the existing bounded deterministic recipe. It must produce a genuine binary Git patch above 5 MiB.\n2. Metadata (depends on Payload): run node ${p.recipe} metadata. Create only ${p.executable} (Git mode 100755) and ${p.metadata}, with exact recipe bytes.\n3. Verification join (depends on Payload and Metadata): run node ${p.recipe} join. Create only ${p.result}; run node ${p.recipe} verify to check all generated content.\n\nEach Work Item validates with ${LARGE_FILE_VALIDATION_COMMAND}, the repository's committed Vitest entry point. The final result must preserve both existing canonical and legacy LFS pointers in Git, while their unchanged locally provisioned objects remain available. No other paths may change. Real installed workers and independent validation/review are required; fixture generation alone is not an execution pass.\n`;
+  return `Qualify deterministic large-file handling for namespace ${namespace}. Create exactly three linear Work Items in this order, never parallel roots. Use existing committed ${p.recipe}; do not rewrite the recipe, test, attributes, or LFS files. Do not fetch/install/upload LFS or add dependencies.\n\n1. Payload (the sole root): run node ${p.recipe} payload. Create only ${p.payload}, exactly 6291500 bytes of valid PCM WAV from the existing bounded deterministic recipe. It must produce a genuine binary Git patch above 5 MiB.\n2. Metadata (depends on Payload): run node ${p.recipe} metadata. Create only ${p.executable} (Git mode 100755) and ${p.metadata}, with exact recipe bytes.\n3. Verification join (depends on Payload and Metadata): run node ${p.recipe} join. Create only ${p.result}; run node ${p.recipe} verify to check all generated content.\n\nEach Work Item validates with ${LARGE_FILE_VALIDATION_COMMAND}, the repository's committed Vitest recipe scoped to ${p.test}. The final result must preserve both existing canonical and legacy LFS pointers in Git, while their unchanged locally provisioned objects remain available. No other paths may change. Real installed workers and independent validation/review are required; fixture generation alone is not an execution pass.\n`;
 }
 
 export function observeLargeFileTree({

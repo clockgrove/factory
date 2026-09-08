@@ -31,7 +31,9 @@ import { qualificationNamespaceMarker } from "./verify-live-objective.mjs";
 import {
   LARGE_FILE_RECIPE_VERSION,
   LARGE_FILE_VALIDATION_COMMAND,
+  LARGE_FILE_VALIDATION_SCRIPT,
   largeFileObjectiveBody,
+  largeFileValidationRecipe,
   observeLargeFileTree,
   largeFilePaths,
   assertLargeFileFinalTree,
@@ -362,6 +364,16 @@ function checkedFixture(authority) {
   assert.ok(fixture.repository.startsWith(`${fixture.root}/`));
   assert.equal(fixture.lfs.length, 2);
   assert.equal(fixture.expected.length, 4);
+  assert.deepEqual(fixture.validation, {
+    command: LARGE_FILE_VALIDATION_COMMAND,
+    script: LARGE_FILE_VALIDATION_SCRIPT,
+    recipe: largeFileValidationRecipe(authority.namespace),
+    packagePath: "package.json",
+    sourcePackageDigest: fixture.validation?.sourcePackageDigest,
+    packageDigest: fixture.validation?.packageDigest,
+  });
+  assert.match(fixture.validation.sourcePackageDigest, /^[a-f0-9]{64}$/);
+  assert.match(fixture.validation.packageDigest, /^[a-f0-9]{64}$/);
   return fixture;
 }
 
@@ -384,6 +396,29 @@ function objectiveBody(authority) {
 
 function verifyBaseline({ authority, evidence, command }) {
   const fixture = checkedFixture(authority);
+  const pinnedBlob = (treeish, path) => {
+    assert.match(treeish, /^[a-f0-9]{40}$/);
+    assert.match(path, /^[A-Za-z0-9_./-]+$/);
+    const raw = spawnSync(
+      "git",
+      ["-c", "core.hooksPath=/dev/null", "cat-file", "blob", `${treeish}:${path}`],
+      {
+        cwd: authority.checkout,
+        encoding: null,
+        timeout: 15000,
+        maxBuffer: 1024 * 1024,
+        env: {
+          ...process.env,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_SYSTEM: "/dev/null",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_NO_LAZY_FETCH: "1",
+        },
+      },
+    );
+    assert.equal(raw.status, 0, "pinned baseline blob unavailable");
+    return raw.stdout;
+  };
   assert.equal(
     fixture.sourceBaseSha,
     evidence.sourceCommit,
@@ -406,36 +441,32 @@ function verifyBaseline({ authority, evidence, command }) {
     command("git", ["rev-parse", `${fixture.sourceBaseSha}^{tree}`], authority.checkout),
     fixture.sourceTreeSha,
   );
-  const packageJson = JSON.parse(
-    command("git", ["cat-file", "blob", `${fixture.baseSha}:package.json`], authority.checkout),
-  );
+  const sourcePackage = pinnedBlob(fixture.sourceBaseSha, "package.json");
+  const fixturePackage = pinnedBlob(fixture.baseSha, "package.json");
+  assert.equal(hash(sourcePackage), fixture.validation.sourcePackageDigest);
+  assert.equal(hash(fixturePackage), fixture.validation.packageDigest);
+  const sourcePackageJson = JSON.parse(sourcePackage.toString("utf8"));
+  const packageJson = JSON.parse(fixturePackage.toString("utf8"));
   assert.equal(
-    packageJson.scripts?.test,
+    sourcePackageJson.scripts?.test,
     "vitest run",
     "version-2 large-file fixture requires the committed Vitest npm test recipe",
   );
+  assert.equal(sourcePackageJson.scripts[LARGE_FILE_VALIDATION_SCRIPT], undefined);
+  const expectedPackageJson = structuredClone(sourcePackageJson);
+  expectedPackageJson.scripts[LARGE_FILE_VALIDATION_SCRIPT] = largeFileValidationRecipe(
+    fixture.namespace,
+  );
+  assert.deepEqual(
+    packageJson,
+    expectedPackageJson,
+    "fixture package changed beyond its scoped test recipe",
+  );
   for (const entry of fixture.baseline) {
     assert.ok(entry.path.startsWith(`${fixture.paths.prefix}/`));
-    const raw = spawnSync(
-      "git",
-      ["-c", "core.hooksPath=/dev/null", "cat-file", "blob", `${fixture.baseSha}:${entry.path}`],
-      {
-        cwd: authority.checkout,
-        encoding: null,
-        timeout: 15000,
-        maxBuffer: 1024 * 1024,
-        env: {
-          ...process.env,
-          GIT_CONFIG_NOSYSTEM: "1",
-          GIT_CONFIG_SYSTEM: "/dev/null",
-          GIT_CONFIG_GLOBAL: "/dev/null",
-          GIT_NO_LAZY_FETCH: "1",
-        },
-      },
-    );
-    assert.equal(raw.status, 0, "pinned baseline blob unavailable");
-    assert.equal(raw.stdout.length, entry.bytes);
-    assert.equal(hash(raw.stdout), entry.digest);
+    const raw = pinnedBlob(fixture.baseSha, entry.path);
+    assert.equal(raw.length, entry.bytes);
+    assert.equal(hash(raw), entry.digest);
     const index = command(
       "git",
       ["ls-tree", fixture.baseSha, "--", entry.path],

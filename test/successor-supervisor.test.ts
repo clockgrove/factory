@@ -2760,6 +2760,8 @@ describe("Supervisor authenticated successor execution", () => {
         ).toBe(true);
         const delayedOldTerminal = parseFactoryEvent({
           ...receipts!.terminal!,
+          writerOperationId: "fixture-delayed-old-terminal",
+          writerHolder: priorWriter!.writerHolder,
           writerEpoch: 1,
           sequence: receipts!.terminal!.sequence + 1,
           event: "FactoryRunEscalated",

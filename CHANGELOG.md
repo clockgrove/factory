@@ -51,6 +51,20 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
   requests still capture authority before queueing and recheck it at dispatch. Fresh Director
   receipts bind a stable writer operation, holder, epoch, and policy to the current Objective lease
   observation while preserving older producer and accounting epochs. ([#224](https://github.com/clockgrove/factory/issues/224))
+- Two-Objective qualification now separates ordinary useful-throughput evidence from the
+  controller-expiry fault scenario. The ordinary path injects no delay or failure, accepts either
+  authenticated refill lane, uses incremental repository comment reads only as wake hints, safely
+  filters issue and pull-request conversations by canonical issue target, and requires bounded
+  topology/terminal convergence plus fresh complete observations for acceptance and actions.
+  Supervisor waits now wake on
+  queued local completion, shared-capacity changes, or the earliest applicable retry without losing
+  pre-listener changes. Qualification records the exact requested/resolved model policy and observed
+  execution backends while leaving provider-returned settings and non-attributable quota explicitly
+  unavailable. ([#218](https://github.com/clockgrove/factory/issues/218))
+- Shared-capacity journals now compact only explicit releases into exact, fixed-depth Git-tree
+  tombstones published by the existing short CAS transaction. Active and unresolved claims remain
+  in the bounded snapshot, retired identities cannot be replayed or changed, and actionable
+  retention pressure is reported before the unchanged hard limit. ([#220](https://github.com/clockgrove/factory/issues/220))
 - Installed large-file qualification Objectives now select the repository-observed `npm test`
   recipe, and fresh version-2 fixtures provide a matching Vitest test instead of an incompatible
   `node:test` suite. This makes the scenarios compile-ready without weakening command grounding or

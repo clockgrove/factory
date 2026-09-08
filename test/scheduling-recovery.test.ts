@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { ContinuousExecutionPool } from "../src/scheduling/continuous-refill.js";
 import { CapacityLedger } from "../src/scheduling/capacity-ledger.js";
 import { ObjectiveFairness } from "../src/scheduling/fairness.js";
+import { progressWakeDelay, waitForProgress } from "../src/scheduling/progress-wake.js";
 import type { CapacityReservation } from "../src/scheduling/capacity-ledger.js";
 
 function deferred(): { promise: Promise<void>; resolve(): void } {
@@ -49,6 +50,94 @@ describe("continuous refill and recovery", () => {
     fairness.unregister(20);
     await wake;
     expect(fairness.reconciled).toBe(true);
+  });
+
+  it("does not lose a fairness change that lands before waiter registration", async () => {
+    const fairness = new ObjectiveFairness();
+    const executions = new ContinuousExecutionPool<number>();
+    fairness.register(10);
+    const observedRevision = fairness.revision;
+    fairness.reportDemand(10, 1);
+    await expect(
+      waitForProgress({
+        executions,
+        fairness,
+        fairnessRevision: observedRevision,
+        maximumMs: 60_000,
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("consumes a local completion that settled before the combined wait began", async () => {
+    const fairness = new ObjectiveFairness();
+    const executions = new ContinuousExecutionPool<number>();
+    executions.start(7, async () => {});
+    await Promise.resolve();
+    await Promise.resolve();
+    await expect(
+      waitForProgress({
+        executions,
+        fairness,
+        fairnessRevision: fairness.revision,
+        maximumMs: 60_000,
+      }),
+    ).resolves.toEqual({ key: 7 });
+  });
+
+  it("does not consume a later worker settlement when fairness wins the wake race", async () => {
+    const fairness = new ObjectiveFairness();
+    const executions = new ContinuousExecutionPool<number>();
+    const operation = deferred();
+    executions.start(7, () => operation.promise);
+    const wake = waitForProgress({
+      executions,
+      executionRevision: executions.revision,
+      fairness,
+      fairnessRevision: fairness.revision,
+      maximumMs: 60_000,
+    });
+    fairness.changed();
+    await expect(wake).resolves.toBeNull();
+    operation.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    await expect(
+      waitForProgress({
+        executions,
+        executionRevision: executions.revision,
+        fairness,
+        fairnessRevision: fairness.revision,
+        maximumMs: 60_000,
+      }),
+    ).resolves.toEqual({ key: 7 });
+  });
+
+  it("waits for the earliest future retry deadline and ignores overdue stale hints", async () => {
+    expect(progressWakeDelay(60_000, [9_000, 13_000], 10_000)).toBe(3_000);
+    expect(progressWakeDelay(60_000, [9_000], 10_000)).toBe(60_000);
+    vi.useFakeTimers();
+    try {
+      const fairness = new ObjectiveFairness();
+      const executions = new ContinuousExecutionPool<number>();
+      const wake = waitForProgress({
+        executions,
+        fairness,
+        fairnessRevision: fairness.revision,
+        maximumMs: 60_000,
+        retryDeadlines: [Date.now() + 5_000],
+      });
+      let completed = false;
+      void wake.then(() => {
+        completed = true;
+      });
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(completed).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(wake).resolves.toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("scans past currently oversized/path-blocked demand without forgetting its next free-resource turn", () => {

@@ -335,7 +335,7 @@ export async function observeRecoverySiblingRefresh(
         identity.sourceExactHeadValidationDigest === exact.digest,
     );
     // Every target advance must be an authenticated own-run integration or an
-    // explicitly owned peer integration under the same observed controller generation.
+    // independently authenticated peer integration with its own Objective ownership.
     // An intent, clean applicability, or an arbitrary parent commit cannot authorize trunk.
     let cursor = identity.targetBaseSha;
     let controllerBase = start.baseSha;

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FactorySupervisor, type SupervisorOptions } from "../src/supervisor.js";
+import { integrationAdmissionRef } from "../src/control/integration-admission.js";
 import * as localScopes from "../src/runtime/local-scope.js";
 import { runContainedProcess } from "../src/runtime/process-group.js";
 import { GitHubReader } from "../src/github.js";
@@ -605,9 +606,8 @@ async function fixture(
       .linkedPullRequests[0]!;
   const refreshedPulls = new Set<number>();
   let siblingRefreshResponseLost = false;
-  const refresh = vi
-    .spyOn(GitHubControlStore.prototype, "compareAndSwapRef")
-    .mockImplementation(async ({ ref, beforeOid, afterOid }) => {
+  const refresh = vi.fn(
+    async ({ ref, beforeOid, afterOid }: { ref: string; beforeOid: string; afterOid: string }) => {
       const item = snapshot.workItems.find(
         (entry) => ref === `refs/heads/${publicationBranch(7, entry.number, 1)}`,
       );
@@ -627,7 +627,15 @@ async function fixture(
         );
       }
       return true;
-    });
+    },
+  );
+  vi.spyOn(GitHubControlStore.prototype, "compareAndSwapRef").mockImplementation(async (args) => {
+    if (!args.ref.startsWith("refs/clockgrove-factory/integration-admissions/"))
+      return refresh(args);
+    if (refs.get(args.ref) !== args.beforeOid) return false;
+    refs.set(args.ref, args.afterOid);
+    return true;
+  });
   const mergeShas = new Map<number, string>();
   const pullBases = new Map<number, string>(
     snapshot.workItems.map((item, index) => [
@@ -1587,14 +1595,30 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
         return observedStack();
       },
     );
-    vi.spyOn(GitHubStacks.prototype, "requestMerge").mockImplementation(async (input) => ({
-      state: "merged",
-      mergeSha: await store.mergePullRequest({
-        number: input.pullRequest,
-        headSha: input.expectedHeadSha,
-        commitTitle: input.title,
-      }),
-    }));
+    vi.spyOn(GitHubStacks.prototype, "requestMerge").mockImplementation(async (input) => {
+      const oid = await store.readRef(integrationAdmissionRef("o/r", "main"));
+      expect(oid).not.toBeNull();
+      const message = (await store.readCommit(oid!)).message;
+      const line = message.split("\n").find((value) => value.startsWith("Factory-Integration: "))!;
+      const admission = JSON.parse(Buffer.from(line.slice(21), "base64url").toString("utf8"));
+      expect(admission).toMatchObject({
+        state: "dispatched",
+        identity: {
+          objective: 7,
+          pullRequest: input.pullRequest,
+          headSha: input.expectedHeadSha,
+          baseSha: f.git("rev-parse", "main"),
+        },
+      });
+      return {
+        state: "merged",
+        mergeSha: await store.mergePullRequest({
+          number: input.pullRequest,
+          headSha: input.expectedHeadSha,
+          commitTitle: input.title,
+        }),
+      };
+    });
   }
   const original = structuredClone(
     [

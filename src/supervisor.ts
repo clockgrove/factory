@@ -3938,8 +3938,6 @@ export class FactorySupervisor {
               );
               try {
                 await materializeLocalLfsAssets(this.#options.repository, tree.path, base.oid);
-                if (!this.#policy.compilerEvaluation)
-                  await this.#admitModelInvocation(compilationInvocationId, snapshot.id);
                 const observedCapacity = await this.#capacitySnapshot();
                 const context: CompilationContext = {
                   repository: tree.path,
@@ -3968,8 +3966,19 @@ export class FactorySupervisor {
                     }),
                   ...(compilationModel ? { modelSelection: compilationModel } : {}),
                 };
-                if (!this.#policy.compilerEvaluation)
+                if (!this.#policy.compilerEvaluation) {
+                  const admitCompilation = () =>
+                    this.#externalAdmission(() =>
+                      this.#admitModelInvocation(compilationInvocationId, snapshot.id),
+                    );
+                  if (this.#management.supportsCompilerAdmission) {
+                    return await this.#management.compile(context, checkpoint, admitCompilation);
+                  }
+                  // Compatibility for injected legacy backends that cannot place
+                  // durable admission at their own final dispatch boundary.
+                  await admitCompilation();
                   return await this.#management.compile(context, checkpoint);
+                }
                 const inputDigest = compilerEvalDigest(context.objective);
                 const assertInputs = async () => {
                   await this.#externalAdmission(async () => {});

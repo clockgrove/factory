@@ -926,17 +926,31 @@ export class CodexCliManagementBackend implements ManagementBackend {
       () => true,
       () => false,
     );
-    return result.exitCode === 0
-      ? {
-          available: true,
-          authenticated,
-          ...(!authenticated ? { reason: "Codex login not found" } : {}),
-        }
-      : {
-          available: false,
-          authenticated: false,
-          reason: result.stderr || "Codex CLI unavailable",
-        };
+    if (result.exitCode !== 0) {
+      return {
+        available: false,
+        authenticated: false,
+        reason: result.stderr || "Codex CLI unavailable",
+      };
+    }
+    if (!authenticated) {
+      return { available: true, authenticated: false, reason: "Codex login not found" };
+    }
+    try {
+      const codexHome = await (this.#options.createCodexHome ?? createIsolatedCodexHome)(
+        "management",
+      );
+      await rm(codexHome, { recursive: true, force: true });
+    } catch (error) {
+      return {
+        available: false,
+        authenticated: true,
+        reason: `isolated Codex home unavailable: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      };
+    }
+    return { available: true, authenticated: true };
   }
 
   async compile(

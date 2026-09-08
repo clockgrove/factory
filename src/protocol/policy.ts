@@ -227,6 +227,18 @@ export const DEFAULT_CONTROLLER_POLICY: ControllerPolicy = Object.freeze({
   pollIntervalSeconds: 15,
 });
 
+/** Opt-in draft evaluation; absent historical policies retain their original semantics. */
+export const CompilerEvaluationPolicySchema = z
+  .object({
+    mode: z.enum(["report-only", "auto-repair"]),
+    maxRepairs: z.number().int().min(0).max(2).optional(),
+    maxInvocations: z.number().int().min(1).max(7).optional(),
+    timeoutSeconds: z.number().int().min(1).max(3_600).optional(),
+    /** Observed stop threshold, never an enforceable provider token cap. */
+    maxObservedTokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(),
+  })
+  .strict();
+
 export const RunPolicySchema = z
   .object({
     backendOrder: z.array(safeId).min(1).max(16),
@@ -256,6 +268,7 @@ export const RunPolicySchema = z
     delivery: DeliveryPolicySchema.optional(),
     models: ModelsPolicySchema.optional(),
     economics: EconomicsPolicySchema.optional(),
+    compilerEvaluation: CompilerEvaluationPolicySchema.optional(),
   })
   .passthrough();
 

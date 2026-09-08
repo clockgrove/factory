@@ -6,6 +6,12 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Added
 
+- Opt-in obligation-first compiler judgment and bounded draft repair, with immutable revisions,
+  independent full-coverage review, exact accepted projection and per-invocation accounting.
+  Report-only runs never dispatch implementation. Read-only compiler evaluation JSON/Markdown
+  retains historical failures, unknown attribution, automated-label provenance and honest
+  comparative-evidence boundaries; model-backed calibration and savings are not yet qualified.
+
 - Unify Work Item ownership and attempt admission in an issue-scoped CAS ledger, preserving
   original recovery identities and unknown liabilities through a permanent legacy-writer bridge.
 

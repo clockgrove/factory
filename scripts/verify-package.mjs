@@ -57,6 +57,7 @@ const EXPECTED_TOOLS = [
   "factory_pause",
   "factory_pause_cloud",
   "factory_plan",
+  "factory_compiler_eval",
   "factory_recovery_plan",
   "factory_recovery_propose",
   "factory_recovery_request",

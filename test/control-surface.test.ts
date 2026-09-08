@@ -43,6 +43,7 @@ describe("CLI and MCP control surface", () => {
     const reads = new Set([
       "doctor",
       "plan",
+      "compiler-eval",
       "recovery-plan",
       "recovery-propose",
       "status",

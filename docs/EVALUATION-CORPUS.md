@@ -78,7 +78,95 @@ runtime API, model runner, or installed MCP tool. Existing qualification code ca
 uses actual discovery and compiler validation, exercises an injected management adapter boundary,
 and rejects malformed/cyclic manifests, missing criterion ownership, invented commands, unsafe
 requirements and stale preparation. These are deterministic regressions, not model evaluations.
-Do not run them or other checks until all concurrent implementation is integrated.
+Run affected deterministic checks during implementation. Coordinate broad release and installed
+qualification only after the declared candidate is integrated and frozen, as specified in
+`AGENTS.md` and `CONTRIBUTING.md`.
+
+## Independent draft review and post-mortems
+
+`src/evaluation/compiler-eval.ts` defines the versioned `compiler-eval` JSON report and readable
+Markdown renderer. Its source inventory is derived from the original Objective and pinned
+repository before any draft is shown to the judge. Objective text is retained in bounded chunks;
+repository source discovery includes at most 32 pinned blob excerpts and explicitly records
+unavailable or omitted sources. Citations must match captured identities and excerpt bytes.
+Missing evidence remains uncertainty, not permission to infer that existing behavior satisfies
+the Objective. Every obligation maps to exact item acceptance text, every item has a granularity
+assessment, and every dependency has a cited reason. All rubric dimensions are assessed or
+explicitly unavailable/not applicable. Blocking coverage, feasibility and material efficiency
+findings cannot be averaged away; uncertain minor preferences remain advisory.
+
+The optional management methods `extractObligations`, `judgePlan`, and `repairPlan` reuse the
+Codex management backend and its strict structured outputs. Repairs return a complete candidate,
+change summary, explicit ID lineage and finding dispositions. The same mechanical grounding and
+full independent coverage review run again after each revision. Compiler self-assessment never
+establishes that a correction succeeded. `compileEvaluatedDraft` connects these methods to
+`runCompilerDraftLoop`, the Git draft journal, and existing invocation admission/accounting.
+No new model selection or provider spending authority is introduced.
+
+An operator enables the integrated flow with a complete normal run policy containing:
+
+```json
+{
+  "compilerEvaluation": {
+    "mode": "auto-repair",
+    "maxRepairs": 2,
+    "maxInvocations": 7,
+    "timeoutSeconds": 600,
+    "maxObservedTokens": 40000
+  }
+}
+```
+
+The number above is an illustrative operator-selected observed threshold, not a measured optimal
+allowance or a hard token cap. Omitting the entire field preserves the legacy path; omitting the
+individual limits uses the bounded defaults documented in `DESIGN.md`. Report-only mode permits
+no repairs and no execution graph projection. The existing write-free `factory plan --compile`
+entry point remains a single response-only compilation; it does not create a durable evaluated
+run. Draft evaluation requires its explicit immutable run envelope.
+
+`factory compiler-eval OWNER/REPO#NUMBER` / `factory_compiler_eval` load existing authenticated
+run and draft evidence without writes or model calls. The JSON includes per-revision reports,
+original failure identities, selected graph identity, and existing run economics; `--markdown`
+prints the readable report. Older runs without an original inventory or verdict expose those gaps
+instead of pretending to have been independently judged. The source-only fixed-graph adapter
+can assess a supplied immutable graph under a fresh report-only authority; it skips compilation
+without inventing a zero-token model receipt and cannot mutate the historical graph. It is not
+an automatic old-run replay or a public authorization shortcut.
+
+Post-mortems separate observed token/time subtotals, unknown totals, evaluation overhead, and
+estimated avoidable waste. Causal findings may identify compiler, worker, infrastructure,
+changed-requirement, mixed, or unknown causes only with supporting evidence. Temporal proximity
+or a repeated test alone is insufficient attribution. Runtime worker-duration sums are not
+elapsed completion time; cached-input tokens are already part of input and are not added twice.
+The report can retain evidence-backed independent causal annotations; absent such annotations,
+attribution remains unknown. No dollar or savings claim follows from a heuristic score.
+
+### Calibration and comparative evidence
+
+`test/fixtures/evaluation/compiler-labels.json` retains an independent automated source annotation
+pass over the existing five cases at its recorded source/manifest digests. It is explicitly
+neither human ground truth nor held-out evidence; its exact model and token usage are unavailable.
+Annotations include valid alternative decompositions and negative controls, including cases
+where retained baseline behavior needs no new source edit. They are source recommendations,
+not measurements that the implemented judge detects those defects.
+
+`labelCompilerCase` supports a blinded source-only label pass and a separate adjudication pass.
+The schema retains model/prompt/source provenance, original labels, cited disagreements and
+unresolved ambiguity. Adjudication cannot silently substitute obligation text or drop an ID.
+Automated labels are never called human gold; same-model correlated error remains a limitation.
+`measureCompilerCalibration` separates automated, human and synthetic provenance, keeps failed
+and inconclusive cases, prevents cosmetic variants crossing the held-out boundary, and measures
+omission recall, unsupported findings, unnecessary repairs, cosmetic stability and valid
+alternative acceptance. An independently labeled valid-plan/expected-repair outcome is separate
+from omission labels: complete but unsafe or badly fragmented plans may require justified repair.
+
+`measureCompilerRepairComparison` retains matched baseline/repaired arms, original failures, observed
+effort and missing measurements. Synthetic examples exercise arithmetic and fencing only; they
+cannot establish saved tokens, speedup, calibrated judge quality or installed execution. Actual
+positive/negative held-out labeling, independently adjudicated judge results, repeated matched
+compilations and representative executed outcomes remain required under the appropriate #112
+and #109 authority. Keep model policy, Objective/base, capacity and acceptance matched; retain
+evaluation overhead, failed/reworked effort and uncertainty rather than selecting only successes.
 
 ## Tool-selection consumption contract
 

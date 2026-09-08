@@ -112,7 +112,10 @@ export async function inspectCompilerEvaluation(args: {
       phase: invocation.stage === "inventory" ? "obligations" : invocation.stage,
       evidenceId: `draft-invocation-${record.sequence}`,
       observedTokens: counters ? counters.inputTokens + counters.outputTokens : null,
-      observedMilliseconds: null,
+      observedMilliseconds:
+        typeof result?.payload.observedMilliseconds === "number"
+          ? result.payload.observedMilliseconds
+          : null,
     };
   });
   const missingEvidence: string[] = [];

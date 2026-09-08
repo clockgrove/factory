@@ -45,6 +45,10 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- Repository-controller election loss now retires discovery, activation/recovery dispatch and
+  election-scoped configuration without aborting otherwise-current Objective execution. Retired
+  controllers await Supervisor completion and cleanup under the Objective's own writer epoch;
+  explicit shutdown and platform safety stops retain their existing propagation. ([#225](https://github.com/clockgrove/factory/issues/225))
 - Two-Objective qualification now separates ordinary useful-throughput evidence from the
   controller-expiry fault scenario. The ordinary path injects no delay or failure, accepts either
   authenticated refill lane, uses incremental repository comment reads only as wake hints, safely

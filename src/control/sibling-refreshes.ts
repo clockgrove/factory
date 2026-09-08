@@ -4,7 +4,7 @@ import { parseFactoryEvent } from "../protocol/events.js";
 import { assertNoSecretMaterial, gitSha, safeId, sha256Digest } from "../protocol/limits.js";
 import { publicationBranch } from "../publication/publisher.js";
 import { verifyExactHeadValidation, type ExactHeadValidationEvidence } from "../validation/plan.js";
-import { attemptRef } from "./attempts.js";
+import { attemptRef, readAttemptReservationRef, type AttemptStore } from "./attempts.js";
 import type { CompiledGraphReadStore, CompiledGraphStore } from "./graphs.js";
 import type { LeaseManager, LeaseState } from "./lease.js";
 
@@ -185,12 +185,17 @@ async function readRecord(
   return { ref, commitOid: oid, blobOid, ...value };
 }
 async function verifySource(
-  store: CompiledGraphReadStore,
+  store: CompiledGraphReadStore & Pick<AttemptStore, "listRefs">,
   record: Pick<SiblingRefreshRecord, "identity" | "source">,
 ): Promise<void> {
   const { identity, source } = record;
   requireProof(
-    (await store.readRef(identity.reservationRef)) === identity.reservationOid,
+    (await readAttemptReservationRef(
+      store,
+      identity.objective,
+      identity.workItem,
+      identity.attempt,
+    )) === identity.reservationOid,
     "source reservation ref changed",
   );
   const reservation = await store.readCommit(identity.reservationOid);
@@ -260,7 +265,7 @@ async function verifyCommit(
 /** Re-read immutable refs and all bounded links; returns oldest to newest. This
  * proves planned Git identity, NOT authenticated publication, cleanup or merge authority. */
 export async function loadSiblingRefreshLineage(
-  store: CompiledGraphReadStore,
+  store: CompiledGraphReadStore & Pick<AttemptStore, "listRefs">,
   record: SiblingRefreshRecord,
 ): Promise<SiblingRefreshRecord[]> {
   const current = await readRecord(store, record.ref);
@@ -306,13 +311,13 @@ export async function loadSiblingRefreshLineage(
   return lineage.reverse();
 }
 export async function verifyPlannedSiblingRefreshCommit(
-  store: CompiledGraphReadStore,
+  store: CompiledGraphReadStore & Pick<AttemptStore, "listRefs">,
   record: SiblingRefreshRecord,
 ): Promise<void> {
   await loadSiblingRefreshLineage(store, record);
 }
 export async function loadSiblingRefresh(
-  store: CompiledGraphReadStore,
+  store: CompiledGraphReadStore & Pick<AttemptStore, "listRefs">,
   input: SiblingRefreshIdentity,
 ): Promise<SiblingRefreshRecord | null> {
   const identity = parseIdentity(input);
@@ -330,7 +335,7 @@ export async function loadSiblingRefresh(
  * proves the permitted trunk advance and fences subsequent non-force branch CAS. */
 export class SiblingRefreshStore {
   constructor(
-    private readonly store: CompiledGraphStore,
+    private readonly store: CompiledGraphStore & Pick<AttemptStore, "listRefs">,
     private readonly leases: LeaseManager,
   ) {}
   load(identity: SiblingRefreshIdentity): Promise<SiblingRefreshRecord | null> {

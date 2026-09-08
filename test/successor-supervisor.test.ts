@@ -637,6 +637,15 @@ async function fixture(
     },
   );
   vi.spyOn(GitHubControlStore.prototype, "compareAndSwapRef").mockImplementation(async (args) => {
+    if (
+      args.ref.startsWith("refs/clockgrove-factory/admission/") ||
+      args.ref.startsWith("refs/clockgrove-factory/repository/work-items/")
+    ) {
+      if (refs.get(args.ref) !== args.beforeOid) return false;
+      expect((await readCommit(args.afterOid)).parentOids[0]).toBe(args.beforeOid);
+      refs.set(args.ref, args.afterOid);
+      return true;
+    }
     if (!args.ref.startsWith("refs/clockgrove-factory/integration-admissions/"))
       return refresh(args);
     if (refs.get(args.ref) !== args.beforeOid) return false;

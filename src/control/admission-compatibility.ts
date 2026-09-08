@@ -62,6 +62,26 @@ export function isAdmissionBarrier(ref: string, commit: GitCommitObject): boolea
   return true;
 }
 
+/** Detect retained orphan or conflicting namespaces before treating claim absence as fresh. */
+async function assertLegacyNamespaces(
+  store: AdmissionCompatibilityStore,
+  workItem: number,
+  permittedObjective?: number,
+): Promise<void> {
+  const refs = await store.listRefs("refs/clockgrove-factory/attempts/");
+  for (const { ref } of refs) {
+    if (!ref.includes(`/work-item-${workItem}/`)) continue;
+    const match =
+      /^refs\/clockgrove-factory\/attempts\/objective-(\d+)\/work-item-(\d+)\/attempt-\d+$/.exec(
+        ref,
+      );
+    if (!match || permittedObjective === undefined || Number(match[1]) !== permittedObjective)
+      throw new Error(
+        "orphan or conflicting legacy attempt namespace; restore authenticated original ownership and reconcile before admission",
+      );
+  }
+}
+
 /**
  * Permanently close both entry points used by historical binaries before a new
  * arbiter can admit. The old claim parser rejects this marker; old attempt list
@@ -117,6 +137,7 @@ export async function ensureAdmissionCompatibility(
         )
           throw new Error("compatibility marker contradicts original claim");
       }
+      await assertLegacyNamespaces(store, args.workItem, currentMarker.legacy?.objective);
       claimOid = before!;
       break;
     }
@@ -147,6 +168,7 @@ export async function ensureAdmissionCompatibility(
         );
       legacy = { objective: old.objective, claimOid: before! };
     }
+    await assertLegacyNamespaces(store, args.workItem, legacy?.objective);
     currentMarker = {
       protocol: "clockgrove.factory/admission-compatibility-v1",
       workItem: args.workItem,

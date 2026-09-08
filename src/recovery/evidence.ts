@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { PlatformUnavailableError } from "../platform.js";
 import type { FactoryReadSnapshot } from "../application/status.js";
-import { attemptRef } from "../control/attempts.js";
+import { attemptRef, readAttemptReservationRef } from "../control/attempts.js";
 import { observeRecoverySiblingRefresh, recoverySiblingRefreshBinding } from "./sibling-refresh.js";
 import {
   assertAuthenticatedGraphProjection,
@@ -513,7 +513,12 @@ export async function resolveRecoveryEvidence(input: {
         if (reservation.kind !== "attempt") throw new Error("reservation kind");
         requireEvidence(
           source.reservationRef === attemptRef(plan.objective, item.workItem, source.attempt) &&
-            (await store.readRef(source.reservationRef)) === source.reservationCommitOid,
+            (await readAttemptReservationRef(
+              store,
+              plan.objective,
+              item.workItem,
+              source.attempt,
+            )) === source.reservationCommitOid,
         );
         const commit = await store.readCommit(source.reservationCommitOid);
         const trailer = decodeEventTrailer(commit.message);

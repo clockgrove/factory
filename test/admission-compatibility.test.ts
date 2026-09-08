@@ -224,6 +224,39 @@ describe("admission compatibility bridge", () => {
     expect(isAdmissionBarrier(result.barrierRef!, barrier)).toBe(true);
     expect(() => isAdmissionBarrier(attemptRef(9, 7, 1), barrier)).toThrow("binding");
   });
+  it("rejects retained attempts when the original claim is missing before writing a marker", async () => {
+    const store = new Store();
+    await oldClaim(store);
+    await oldReserve(store);
+    store.refs.delete(claimRef);
+    const before = [...store.refs];
+    await expect(ensureAdmissionCompatibility(store, args)).rejects.toThrow(
+      "orphan or conflicting",
+    );
+    await expect(ensureAdmissionCompatibility(store, { ...args, objective: 9 })).rejects.toThrow(
+      "orphan or conflicting",
+    );
+    expect([...store.refs]).toEqual(before);
+  });
+  it("rejects another legacy Objective namespace for the same issue", async () => {
+    const store = new Store();
+    await oldClaim(store);
+    const old = await oldReserve(store);
+    store.refs.set(attemptRef(9, 7, 1), old.oid);
+    const before = await store.readRef(claimRef);
+    await expect(ensureAdmissionCompatibility(store, args)).rejects.toThrow(
+      "orphan or conflicting",
+    );
+    expect(await store.readRef(claimRef)).toBe(before);
+  });
+  it("rechecks fresh markers for subsequently visible orphan evidence", async () => {
+    const store = new Store();
+    await ensureAdmissionCompatibility(store, args);
+    store.refs.set(attemptRef(9, 7, 1), base.oid);
+    await expect(ensureAdmissionCompatibility(store, args)).rejects.toThrow(
+      "orphan or conflicting",
+    );
+  });
   it("rejects a marker detached from the original claim commit", async () => {
     const store = new Store();
     await oldClaim(store);

@@ -39,6 +39,20 @@ const evidenceSchema = z
     evidenceOid: gitSha,
   })
   .strict();
+const successorSchema = z
+  .object({
+    objective: positive,
+    runId: text,
+    directorEpoch: positive,
+    writerHolder: text,
+    policyDigest: text,
+    graphDigest: text,
+    graphCommitOid: gitSha,
+    projectionCommitOid: gitSha,
+    authorityReceiptOid: gitSha,
+  })
+  .strict();
+export type IssueAdmissionSuccessorAuthority = z.infer<typeof successorSchema>;
 const entrySchema = identitySchema
   .extend({
     disposition: z.enum(["prepared", "dispatching", "terminal", "reconciled", "released"]),
@@ -48,6 +62,7 @@ const entrySchema = identitySchema
     evidence: evidenceSchema.optional(),
     imported: z.boolean().optional(),
     reassignmentReceiptOid: gitSha.optional(),
+    settledBySuccessor: successorSchema.optional(),
   })
   .strict();
 const recordSchema = z
@@ -234,6 +249,54 @@ export class IssueAdmissionLedger {
     });
   }
 
+  /** Called only after authenticated accepted-successor runtime and exact settlement verification.
+   * Destination authority is retained separately; its epoch never becomes source-run authority. */
+  async transitionForSuccessor(
+    args: Fence & {
+      workItem: number;
+      reservationOid: string;
+      authority: IssueAdmissionSuccessorAuthority;
+      evidence: IssueAdmissionEvidence;
+    },
+  ): Promise<IssueAdmissionRecord> {
+    const authority = successorSchema.parse(args.authority);
+    return this.#fenced(args.assertCurrent, async () => {
+      await args.assertCurrent();
+      const prior = await this.read(args.workItem);
+      const entry = prior?.history.find((item) => item.reservation.oid === args.reservationOid);
+      if (
+        !prior ||
+        !entry ||
+        entry.objective !== authority.objective ||
+        entry.runId === authority.runId
+      )
+        throw Error("successor settlement scope changed");
+      this.#settlement(entry, args.evidence);
+      if (entry.disposition === "released") {
+        if (
+          JSON.stringify(entry.settledBySuccessor) === JSON.stringify(authority) &&
+          JSON.stringify(entry.evidence) === JSON.stringify(args.evidence)
+        )
+          return prior;
+        throw Error("released successor settlement cannot change authority");
+      }
+      return this.#write(
+        prior,
+        prior.history.map((item) =>
+          item !== entry
+            ? item
+            : {
+                ...entry,
+                disposition: "released",
+                evidence: args.evidence,
+                settledBySuccessor: authority,
+              },
+        ),
+        args.assertCurrent,
+      );
+    });
+  }
+
   /** Authenticated historical identities are retained occupied, including unknown dispatch/accounting.
    * Compatibility ownership must already exclude every legacy producer for these issues. */
   async importLegacy(
@@ -335,6 +398,17 @@ export class IssueAdmissionLedger {
           .flatMap((entry) => (entry.reassignmentReceiptOid ? [entry.reassignmentReceiptOid] : [])),
         ...new Set(
           history.flatMap((entry) => {
+            const authority = entry.settledBySuccessor?.authorityReceiptOid;
+            return authority &&
+              !prior?.history.some(
+                (old) => old.settledBySuccessor?.authorityReceiptOid === authority,
+              )
+              ? [authority]
+              : [];
+          }),
+        ),
+        ...new Set(
+          history.flatMap((entry) => {
             const proof = entry.evidence?.evidenceOid;
             return proof && !prior?.history.some((old) => old.evidence?.evidenceOid === proof)
               ? [proof]
@@ -384,6 +458,13 @@ export function parseIssueAdmissionCommit(
   let attempt = 0;
   const identities = new Set<string>();
   for (const entry of record.history) {
+    if (
+      entry.settledBySuccessor &&
+      (entry.disposition !== "released" ||
+        entry.settledBySuccessor.objective !== entry.objective ||
+        entry.settledBySuccessor.runId === entry.runId)
+    )
+      throw Error("successor settlement identity changed");
     if (
       (entry.disposition === "prepared" && entry.dispatchPossible) ||
       (entry.disposition === "dispatching" && !entry.dispatchPossible) ||

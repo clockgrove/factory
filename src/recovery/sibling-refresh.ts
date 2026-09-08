@@ -1,3 +1,4 @@
+import { readAttemptReservationRef } from "../control/attempts.js";
 import { hasCurrentWriterAuthority } from "../control/receipts.js";
 import { loadCompiledGraph } from "../control/graphs.js";
 import {
@@ -614,7 +615,12 @@ export async function observeRecoverySiblingRefresh(
           }
         } else {
           const ref = `refs/clockgrove-factory/attempts/objective-${input.objective}/work-item-${integrated.workItem}/attempt-${integrated.attempt}`;
-          const oid = await store.readRef(ref);
+          const oid = await readAttemptReservationRef(
+            store,
+            input.objective,
+            integrated.workItem,
+            integrated.attempt,
+          );
           requireRefresh(oid && pull.nodeId);
           const prior = await observeRecoverySiblingRefresh(
             {

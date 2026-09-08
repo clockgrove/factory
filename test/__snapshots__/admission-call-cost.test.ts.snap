@@ -1,0 +1,59 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`deterministic admission call profile > reports baseline, first-use, steady retry, and migration overhead separately 1`] = `
+{
+  "legacyInitial": {
+    "comment": 1,
+    "createCommit": 2,
+    "createRef": 2,
+    "fence": 2,
+    "listRefs": 1,
+    "readRef": 1,
+    "serverTime": 1,
+    "simulatedFenceMs": 4,
+  },
+  "legacySteady": {
+    "comment": 1,
+    "createCommit": 1,
+    "createRef": 1,
+    "fence": 2,
+    "listRefs": 1,
+    "readCommit": 2,
+    "readRef": 1,
+    "serverTime": 1,
+    "simulatedFenceMs": 4,
+  },
+  "migration": {
+    "CAS": 1,
+    "createCommit": 3,
+    "createRef": 2,
+    "fence": 8,
+    "listRefs": 3,
+    "readCommit": 6,
+    "readRef": 3,
+    "simulatedFenceMs": 16,
+  },
+  "newInitial": {
+    "comment": 1,
+    "createCommit": 3,
+    "createRef": 2,
+    "fence": 7,
+    "listRefs": 1,
+    "readCommit": 1,
+    "readRef": 4,
+    "serverTime": 1,
+    "simulatedFenceMs": 14,
+  },
+  "newSteady": {
+    "CAS": 1,
+    "comment": 1,
+    "createCommit": 2,
+    "fence": 6,
+    "listRefs": 1,
+    "readCommit": 5,
+    "readRef": 4,
+    "serverTime": 1,
+    "simulatedFenceMs": 12,
+  },
+}
+`;

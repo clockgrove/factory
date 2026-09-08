@@ -4,6 +4,8 @@ import {
   withIntegrationAdmission,
   IntegrationAdmissionPendingError,
 } from "./control/integration-admission.js";
+import { reconcileAdmissionForSuccessor } from "./control/admission-reassignment.js";
+import { observeLocalScopeBatch } from "./recovery/scope-resources.js";
 import { dirname, resolve } from "node:path";
 
 import { CodexCliLocalBackend } from "./backends/codex-cli-local.js";
@@ -34,7 +36,16 @@ import {
 import { DaytonaBackend, DaytonaResourceCleanupError } from "./backends/daytona.js";
 import { VercelSandboxBackend } from "./backends/vercel-sandbox.js";
 import { validationInvocationOwnership } from "./backends/validation-invocation.js";
-import { AttemptManager, type AttemptReservation } from "./control/attempts.js";
+import {
+  buildAdmissionSettlementEvidence,
+  hasOriginalAdmissionProducerCompletion,
+} from "./control/admission-settlement.js";
+import {
+  AttemptManager,
+  listAttemptReservationRefs,
+  type AttemptAdmissionBinding,
+  type AttemptReservation,
+} from "./control/attempts.js";
 import {
   artifactRecoveryCopyAvailable,
   persistArtifactTransfer,
@@ -98,6 +109,7 @@ import {
   LeaseLostError,
   LeaseManager,
   type LeaseState,
+  type GitCommitObject,
 } from "./control/lease.js";
 import {
   deduplicateFactoryEvents,
@@ -1234,6 +1246,7 @@ export class FactorySupervisor {
     this.#attempts = new AttemptManager({
       store: this.#store,
       leases: this.#leases,
+      legacyBinding: (reservation, nodeId) => this.#legacyAdmissionBinding(reservation, nodeId),
     });
     this.#reviews = new ReviewCheckpointManager(this.#store, this.#leases);
     this.#sessions = new AppServerSessionManager(this.#store, this.#leases);
@@ -3286,8 +3299,8 @@ export class FactorySupervisor {
         completed ? undefined : "Objective was closed externally before all Work Items completed",
       );
     }
-    const recoveryBlocker = await inspectImplicitRestart(snapshot, (prefix) =>
-      this.#store.listRefs(prefix),
+    const recoveryBlocker = await inspectImplicitRestart(snapshot, () =>
+      listAttemptReservationRefs(this.#store, snapshot.number),
     );
     if (recoveryBlocker) {
       return this.#startlessEscalation(recoveryBlocker, snapshot, actor);
@@ -3512,8 +3525,8 @@ export class FactorySupervisor {
         throw new Error("Objective run changed during startup; re-read its current state");
       }
       if (!resumedRun) {
-        const blocker = await inspectImplicitRestart(current, (prefix) =>
-          this.#store.listRefs(prefix),
+        const blocker = await inspectImplicitRestart(current, () =>
+          listAttemptReservationRefs(this.#store, current.number),
         );
         if (blocker) {
           const rejected = await this.#startlessEscalation(blocker, current, actor);
@@ -4750,11 +4763,15 @@ export class FactorySupervisor {
               (packet.requirements.timeoutMinutes ?? this.#policy.workItemTimeoutMinutes) * 60_000,
               Math.max(1, deadline - nowMs),
             );
+            const issueAdmission = await this.#attempts.ledger.read(priority.item.number);
             const nextAttempt =
-              (priority.item.factoryEvents ?? []).reduce(
-                (highest, event) =>
-                  event.kind === "attempt" ? Math.max(highest, event.attempt) : highest,
-                0,
+              Math.max(
+                issueAdmission?.history.at(-1)?.reservation.attempt ?? 0,
+                (priority.item.factoryEvents ?? []).reduce(
+                  (highest, event) =>
+                    event.kind === "attempt" ? Math.max(highest, event.attempt) : highest,
+                  0,
+                ),
               ) + 1;
             const queued = queuedState(priority.item, this.#run.runId);
             const backends = applyCloudPause(
@@ -5107,6 +5124,7 @@ export class FactorySupervisor {
     let executionCleanupConfirmed = Boolean(recovered);
     let completedArtifactRetained = Boolean(recovered);
     let safeHoldShutdown = false;
+    let admissionPipelineClosed = false;
     let backendLaunchAttempted = false;
     let executionTerminalObserved = Boolean(recovered);
     let terminalModelTokens: number | undefined;
@@ -5197,6 +5215,11 @@ export class FactorySupervisor {
       noHandleReplacementNotBefore = new Date(attemptDeadline.getTime() + 60_000).toISOString();
       if (!recovered) {
         await this.#lease.use(async (lease) => {
+          const reassignmentAuthorityReceiptOid = await this.#reconcileIssueAdmissionHistory(
+            item,
+            lease,
+            base,
+          );
           const prior = (await this.#attempts.list(this.#run.objective, item.number)).filter(
             (attempt) =>
               (this.#recoveryRuntime?.accountingRunIds ?? [this.#run.runId]).includes(
@@ -5298,24 +5321,51 @@ export class FactorySupervisor {
               throw new Error("managed-session budget changed after validation admission planning");
             }
           }
-          // Admission is the durable attempt-ref creation, rather than the
-          // preceding local backend choice.  Fence immediately before it.
+          // The issue ledger CAS admits work after the local backend/capacity plan.
+          // Capture the Objective generation immediately before that transition.
           await this.#leases.assertGeneration(lease, "admission");
-          await this.#store.claimWorkItem({
-            objective: this.#run.objective,
-            workItem: item.number,
-            runId: this.#run.runId,
-            directorEpoch: lease.epoch,
-            treeOid: base.treeOid,
-            parentOid: base.oid,
-          });
           reservation = await this.#attempts.reserve({
+            ...(reassignmentAuthorityReceiptOid ? { reassignmentAuthorityReceiptOid } : {}),
             lease,
             workItem: item.number,
             workItemNodeId: item.id,
             backend: selected.capabilities.id,
             base,
             sequence: this.#sequences.take(),
+            binding: async (attempt) => {
+              if (attempt !== admission.reservation.attempt)
+                throw new Error(
+                  "issue admission advanced after the capacity plan; reread before retry",
+                );
+              const projection = this.#compiledProjection;
+              if (
+                !projection ||
+                !projection.bindings.some(
+                  (binding) =>
+                    binding.issueNodeId === item.id && binding.issueNumber === item.number,
+                )
+              )
+                throw new Error("issue admission requires its immutable graph projection");
+              const commit = await this.#store.readCommit(projection.commitOid);
+              if (commit.parentOids.length !== 1)
+                throw new Error("invalid graph projection ancestry");
+              return {
+                graphDigest: projection.graphDigest,
+                graphCommitOid: commit.parentOids[0]!,
+                projectionCommitOid: projection.commitOid,
+                capacityReservationId: admission.reservation.key,
+                budgetReservationId: `${this.#run.runId}:${item.number}:${attempt}:execution:${budgetUnit}:default`,
+                resourceIdentity: JSON.stringify([
+                  this.#run.objective,
+                  this.#run.runId,
+                  item.number,
+                  attempt,
+                  selected!.capabilities.id,
+                  lease.epoch,
+                  lease.policyDigest,
+                ]),
+              };
+            },
             prepareLocalScope: async (attempt) => {
               if (!selected!.capabilities.hostExecution) return null;
               const host = await (this.#localScopeHost ??= discoverLocalScopeHost());
@@ -5475,6 +5525,7 @@ export class FactorySupervisor {
               this.#policy,
               this.#modelInvocations.active,
             );
+          await this.#lease.use((lease) => this.#attempts.markDispatching(lease, reservation!));
           backendLaunchAttempted = true;
           return selected!.launch({
             repository: `${this.#options.owner}/${this.#options.repo}`,
@@ -6129,6 +6180,7 @@ export class FactorySupervisor {
       // Publication ends the worker pipeline. The next reconstructed snapshot
       // integrates regular and native siblings through exact candidate recovery.
       await this.#retryArtifacts.delete(item.number);
+      admissionPipelineClosed = true;
     } catch (error) {
       if (
         error instanceof SafeArtifactCheckpointShutdownError &&
@@ -6438,6 +6490,7 @@ export class FactorySupervisor {
       } else {
         throw error;
       }
+      admissionPipelineClosed = true;
       if (cancellation) throw new RunCancellationRequestedError(reason);
       this.#notify(`Work Item #${item.number} failed: ${reason}`);
     } finally {
@@ -6466,6 +6519,19 @@ export class FactorySupervisor {
           await this.#releaseCapacity(validationCapacity.key);
           validationCapacityReleased = true;
         }
+      }
+      if (
+        !finalizationError &&
+        admissionPipelineClosed &&
+        reservation &&
+        (!backendLaunchAttempted || executionCleanupConfirmed)
+      ) {
+        await releaseExecutionCapacity();
+        await this.#settleIssueAdmission(item, reservation, {
+          cleanupConfirmed: executionCleanupConfirmed || !backendLaunchAttempted,
+          definitiveNonExecution: !backendLaunchAttempted && !recovered,
+          modelUsageExpected: selected?.capabilities.reportsModelUsage ?? false,
+        });
       }
       if (finalizationError) {
         // An orderly hold is not permission to suppress a later cleanup failure
@@ -7785,6 +7851,262 @@ export class FactorySupervisor {
         });
       }
     }
+  }
+
+  async #reconcileIssueAdmissionHistory(
+    item: DerivedWorkItem,
+    lease: LeaseState,
+    base: GitCommitObject,
+  ): Promise<string | undefined> {
+    await this.#attempts.ensureCompatibility(lease, item.number, item.id, base);
+    const ledger = await this.#attempts.ledger.read(item.number);
+    if (!ledger) return;
+    const snapshot = await this.#reader.readObjective(lease.objective);
+    const events = snapshotEvents(snapshot);
+    for (const entry of ledger.history) {
+      if (
+        entry.disposition === "released" ||
+        entry.runId !== lease.runId ||
+        entry.objective !== lease.objective
+      )
+        continue;
+      const reservation = (await this.#attempts.list(entry.objective, item.number)).find(
+        (candidate) => candidate.oid === entry.reservation.oid,
+      );
+      if (!reservation) throw new Error("issue admission original reservation unavailable");
+      let producerClosed = hasOriginalAdmissionProducerCompletion(entry, events);
+      if (!producerClosed && reservation.localScopeBatch) {
+        producerClosed =
+          (await observeLocalScopeBatch(reservation.localScopeBatch)).status === "absent";
+      }
+      if (!producerClosed) continue;
+      const backend = this.#registry.get(reservation.backend);
+      if (!backend?.reconcileStale) continue;
+      const resources = new Set(
+        events.flatMap((event) =>
+          event.kind === "attempt" &&
+          event.runId === reservation.runId &&
+          event.workItem === reservation.workItem &&
+          event.attempt === reservation.attempt &&
+          event.providerResourceId
+            ? [event.providerResourceId]
+            : [],
+        ),
+      );
+      if (resources.size > 1)
+        throw new Error("issue admission original resource identity conflicts");
+      await backend.reconcileStale({
+        repository: `${this.#options.owner}/${this.#options.repo}`,
+        objective: reservation.objective,
+        workItem: reservation.workItem,
+        attempt: reservation.attempt,
+        runId: reservation.runId,
+        directorEpoch: reservation.directorEpoch,
+        policyDigest: reservation.policyDigest,
+        phase: "execution",
+        ...(reservation.localScopeBatch ? { localScopeBatch: reservation.localScopeBatch } : {}),
+        ...(resources.size ? { providerResourceId: [...resources][0]! } : {}),
+      });
+      await this.#settleIssueAdmission(item, reservation, {
+        cleanupConfirmed: true,
+        definitiveNonExecution: false,
+        modelUsageExpected: backend.capabilities.reportsModelUsage ?? false,
+      });
+    }
+    if (this.#recoveryRuntime) {
+      const transfer = await reconcileAdmissionForSuccessor({
+        store: this.#store,
+        ledger: this.#attempts.ledger,
+        runtime: this.#recoveryRuntime,
+        lease,
+        workItem: item.number,
+        workItemNodeId: item.id,
+        assertCurrent: () => this.#leases.assertCurrent(lease).then(() => {}),
+        assertCapacityReleased: async (entry) => {
+          const capacity = await this.#capacitySnapshot();
+          if (
+            capacity.reservations.some(
+              (reservation) =>
+                reservation.objective === entry.objective &&
+                reservation.workItem === entry.workItem &&
+                reservation.attempt === entry.reservation.attempt,
+            )
+          )
+            throw new Error("accepted issue transfer still has reserved capacity");
+        },
+      });
+      return transfer?.authorityReceiptOid;
+    }
+  }
+
+  async #legacyAdmissionBinding(
+    reservation: AttemptReservation,
+    nodeId: string,
+  ): Promise<AttemptAdmissionBinding> {
+    const snapshot = await this.#reader.readObjective(reservation.objective);
+    const events = snapshotEvents(snapshot);
+    const start = events.find(
+      (event) =>
+        event.kind === "run" &&
+        event.event === "FactoryRunStarted" &&
+        event.runId === reservation.runId &&
+        event.policyDigest === reservation.policyDigest,
+    );
+    if (!start)
+      throw new Error(
+        "legacy admission has no authenticated original run; use explicit recovery assessment",
+      );
+    const adoptedGraph = this.#recoveryRuntime?.accountingRunIds.includes(reservation.runId)
+      ? this.#recoveryRuntime
+      : undefined;
+    const graph =
+      (await loadCompiledGraph(this.#store, reservation.objective, reservation.runId)) ??
+      adoptedGraph?.graph;
+    const projection =
+      adoptedGraph?.projection ??
+      (graph &&
+        (await loadCompiledGraphProjection(
+          this.#store,
+          reservation.objective,
+          reservation.runId,
+          graph,
+        )));
+    if (!graph || !projection)
+      throw new Error("legacy admission original graph/projection unavailable");
+    assertAuthenticatedGraphProjection(
+      events,
+      reservation.objective,
+      adoptedGraph?.planRecord.plan.graph.sourceRunId ?? reservation.runId,
+      projection,
+    );
+    if (
+      !projection.bindings.some(
+        (binding) => binding.issueNumber === reservation.workItem && binding.issueNodeId === nodeId,
+      )
+    )
+      throw new Error("legacy admission does not bind this original issue identity");
+    const unit = isManagedAgentBackendId(reservation.backend)
+      ? "managed_sessions"
+      : isSandboxBackendId(reservation.backend)
+        ? "sandbox_milliseconds"
+        : "local_milliseconds";
+    return {
+      graphDigest: graph.graphDigest,
+      graphCommitOid: graph.commitOid,
+      projectionCommitOid: projection.commitOid,
+      capacityReservationId: capacityReservationKey({
+        objective: reservation.objective,
+        workItem: reservation.workItem,
+        attempt: reservation.attempt,
+        phase: "execution",
+        backendId: reservation.backend,
+      }),
+      budgetReservationId: `${reservation.runId}:${reservation.workItem}:${reservation.attempt}:execution:${unit}:default`,
+      resourceIdentity: JSON.stringify([
+        reservation.objective,
+        reservation.runId,
+        reservation.workItem,
+        reservation.attempt,
+        reservation.backend,
+        reservation.directorEpoch,
+        reservation.policyDigest,
+      ]),
+    };
+  }
+
+  /** Called only after the owning execution/reconciler has positively stopped its exact producer.
+   * Read current authenticated receipts independently; failure retains the issue liability. */
+  async #settleIssueAdmission(
+    item: DerivedWorkItem,
+    reservation: AttemptReservation,
+    proof: {
+      cleanupConfirmed: boolean;
+      definitiveNonExecution: boolean;
+      modelUsageExpected: boolean;
+    },
+  ): Promise<void> {
+    if (!proof.cleanupConfirmed) return;
+    const record = await this.#attempts.ledger.read(item.number);
+    const entry = record?.history.find((entry) => entry.reservation.oid === reservation.oid);
+    if (!entry || entry.disposition === "released") return;
+    const snapshot = await this.#reader.readObjective(reservation.objective);
+    const events = snapshotEvents(snapshot);
+    const capacity = await this.#capacitySnapshot();
+    if (
+      capacity.reservations.some(
+        (claim) =>
+          claim.objective === reservation.objective &&
+          claim.workItem === reservation.workItem &&
+          claim.attempt === reservation.attempt,
+      )
+    )
+      return;
+    // The immutable evidence commit records what this exact producer observed. It is reachable
+    // through the ledger transition, and is not a reconstructed zero-usage claim.
+    const base = await this.#store.readCommit(reservation.baseSha);
+    await this.#lease.use(async (lease) => {
+      if (lease.runId !== reservation.runId || lease.objective !== reservation.objective) return;
+      const payload = {
+        protocol: "clockgrove.factory/admission-settlement-v1",
+        reservationOid: reservation.oid,
+        resourceIdentity: entry.resourceIdentity,
+        capacityReservationId: entry.capacityReservationId,
+        budgetReservationId: entry.budgetReservationId,
+        writerHolder: lease.holder,
+        writerEpoch: lease.epoch,
+        definitiveNonExecution: proof.definitiveNonExecution,
+        producerStopped: true,
+        resourcesReleased: true,
+        capacityReleased: true,
+        events: events.filter(
+          (event) =>
+            event.runId === reservation.runId &&
+            "workItem" in event &&
+            event.workItem === reservation.workItem &&
+            "attempt" in event &&
+            event.attempt === reservation.attempt,
+        ),
+      };
+      // Validate before recording: incomplete accounting is expected during held recovery.
+      const input = {
+        entry,
+        events,
+        modelUsageExpected: proof.modelUsageExpected,
+        cleanup: {
+          reservationOid: reservation.oid,
+          resourceIdentity: entry.resourceIdentity,
+          producerStopped: true as const,
+          resourcesReleased: true as const,
+          evidenceOid: base.oid,
+        },
+        capacity: {
+          reservationOid: reservation.oid,
+          capacityReservationId: entry.capacityReservationId,
+          released: true as const,
+        },
+        ...(proof.definitiveNonExecution
+          ? {
+              definitiveNonExecution: {
+                reservationOid: reservation.oid,
+                evidenceOid: base.oid,
+                dispatchPrevented: true as const,
+              },
+            }
+          : {}),
+      };
+      let evidence;
+      try {
+        evidence = buildAdmissionSettlementEvidence(input);
+      } catch {
+        return;
+      }
+      const evidenceOid = await this.#store.createCommit({
+        treeOid: base.treeOid,
+        parentOids: [record!.oid],
+        message: `Factory exact admission settlement\n\nFactory-Admission-Settlement: ${Buffer.from(JSON.stringify(payload)).toString("base64url")}`,
+      });
+      await this.#attempts.settle(lease, reservation, { ...evidence, evidenceOid });
+    });
   }
 
   #packetFor(workItem: number): WorkerPacket {
@@ -13717,6 +14039,13 @@ export class FactorySupervisor {
           : "prior Director stopped before producing a durable publishable artifact; infrastructure interruption does not consume a Work Item attempt",
         allowRecovery: true,
       }),
+    );
+    await this.#lease.use(async (lease) =>
+      this.#reconcileIssueAdmissionHistory(
+        item,
+        lease,
+        await this.#store.readCommit(reservation.baseSha),
+      ),
     );
   }
 

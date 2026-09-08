@@ -6,7 +6,7 @@ import {
   assertAuthenticatedGraphProjection,
   assertSnapshotMatchesCompiledGraph,
 } from "../control/graph-evidence.js";
-import { attemptRef } from "../control/attempts.js";
+import { attemptRef, listAttemptReservationRefs } from "../control/attempts.js";
 import { loadReviewCheckpoint, type ReviewIdentity } from "../control/reviews.js";
 import { decodeEventTrailer, deduplicateFactoryEvents } from "../control/receipts.js";
 import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
@@ -429,9 +429,7 @@ export async function assessRecovery(input: {
   }
   try {
     if (!Number.isSafeInteger(snapshot.number) || snapshot.number <= 0) throw new Error("identity");
-    const refs = await port.listRefs(
-      `refs/clockgrove-factory/attempts/objective-${snapshot.number}/`,
-    );
+    const refs = await listAttemptReservationRefs(port, snapshot.number);
     if (refs.length > 1_000) throw new Error("reservation bound");
     for (const ref of refs) {
       let reservation: Attempt | undefined;

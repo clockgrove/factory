@@ -72,7 +72,9 @@ async function fixture(withPublications = true, native: "siblings" | "stack" | f
     serverTime: now,
   };
   commits.set(base.oid, base);
-  const storage: CompiledGraphStore = {
+  const storage: CompiledGraphStore & Pick<RecoveryReadStore, "listRefs"> = {
+    listRefs: async (prefix) =>
+      [...refs].filter(([ref]) => ref.startsWith(prefix)).map(([ref, oid]) => ({ ref, oid })),
     readRef: async (ref) => refs.get(ref) ?? null,
     readCommit: async (id) => {
       const value = commits.get(id);
@@ -1646,7 +1648,7 @@ describe("bounded read-only immutable recovery proposals", () => {
 
   it("bounds total unique reads during authenticated historical reservation verification", async () => {
     const f = await fixture(false);
-    for (let attempt = 1; attempt <= 300; attempt++) {
+    for (let attempt = 1; attempt <= 600; attempt++) {
       const reserved = f.event({
         kind: "attempt",
         event: "AttemptReserved",

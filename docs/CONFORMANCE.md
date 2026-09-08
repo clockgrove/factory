@@ -1,11 +1,13 @@
-# Factory verification status
+# Factory conformance gates and evidence
 
 Updated: 2026-09-06
 
-This ledger distinguishes implemented behavior, scoped observations, and release qualification.
+This ledger retains exact-candidate observations and release requirements, not current project status.
 [DESIGN.md](DESIGN.md#definition-of-done) defines the contract; the
-[completion board](COMPLETION.md) links remaining work. An adapter or passing component test does
-not establish broader support. All six prepublication gates below remain **Open**.
+[GitHub project summary](https://github.com/clockgrove/factory/issues/69) links remaining work.
+An adapter or passing component test does not establish broader support. The gate table remains
+machine-checked release state bound to exact candidate evidence, not a general project backlog;
+all six prepublication gates remain required. Dated component observations retain their original scope.
 
 ## Recorded component results
 

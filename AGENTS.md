@@ -3,9 +3,15 @@
 These rules govern AI contributors building Factory, not the workers Factory runs for adopters.
 
 Use [`docs/DESIGN.md`](docs/DESIGN.md) for the product contract,
-[`docs/COMPLETION.md`](docs/COMPLETION.md) for current capability status, and
+[GitHub #69](https://github.com/clockgrove/factory/issues/69) for current capability status, and
 [`CONTRIBUTING.md`](CONTRIBUTING.md) for detailed procedures. GitHub and the repository are the
 source of truth; conversation history is not.
+
+Current project status lives in the body of #69, with linked issues owning detailed acceptance
+and evidence. Update that body and affected issue dependencies when a capability changes state;
+comments preserve history, not a competing current board. Repository documents retain contracts,
+procedures and historical evidence, not a second live status table. Distinguish implemented,
+integrated and qualified, and bind qualification to its exact candidate and scenario.
 
 ## Mission: trunk, branches, leaves
 
@@ -53,6 +59,12 @@ release requirement, but do not make an unrelated release leaf block an earlier 
 
 ## Verify proportionally
 
+- Declare each candidate's capability set, owner and acceptance before qualification. Finish that
+  batch; admit additional work only for a demonstrated acceptance blocker or non-negotiable safety
+  violation. Retain other requirements in their milestone issues instead of expanding the batch.
+- Before a code PR merges, check the proposed integrated tree with typecheck, changed-file checks
+  and affected interface regressions. Restore broken main promptly; do not make unrelated lanes
+  inherit known integration failures while waiting for a release candidate.
 - During implementation, use focused checks and captured platform contracts when they reduce risk.
   Add a regression for each concrete defect.
 - Do not repeatedly run broad suites, packaging, plugin reinstalls, or live qualification between
@@ -63,6 +75,9 @@ release requirement, but do not make an unrelated release leaf block an earlier 
 - Build and install the exact passing artifact once per stable candidate. Installed qualification
   must use that artifact, not a mutable worktree or handwritten MCP configuration.
 - Evidence proves only its exact candidate, host, and scenario. Never relabel it more broadly.
+- Mechanically preflight qualification fixture provenance, real validation recipes, dependencies
+  and evidence identities before model-backed runs. Share compatible scenario evidence across
+  issues; separate ordinary throughput cases from fault injection.
 
 ## Non-negotiable boundaries
 
@@ -84,7 +99,7 @@ release requirement, but do not make an unrelated release leaf block an earlier 
 
 ## Resume efficiently
 
-On resume, read the active goal, `git status`, recent `git log`, and relevant completion-board entries.
+On resume, read the active goal, `git status`, recent `git log`, the #69 body and linked active issues.
 Identify the current trunk, branches, and leaves before acting. Continue the highest-impact authorized
 deliverable without replanning settled work. Keep tool output narrow and use parallel agents for
 genuinely independent outcomes—not as a measure of progress.

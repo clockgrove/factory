@@ -347,8 +347,10 @@ export interface SupervisorOptions {
   activation?: { requestId: string; baseSha: string };
   /** Exact acknowledged successor; selects complete authenticated recovery history reads. */
   recovery?: { requestId: string; planDigest: string; successorRunId: string };
-  /** Current fenced repository-controller identity, sampled for durable status. */
-  controllerObservation?: () => ControllerObservation;
+  /** Current fenced repository-controller identity, sampled for durable status.
+   * A retired discovery generation returns undefined; Objective authority then
+   * remains observable solely through the current Objective writer. */
+  controllerObservation?: () => ControllerObservation | undefined;
 }
 
 export interface ControllerObservation {
@@ -1800,7 +1802,8 @@ export class FactorySupervisor {
   async #recordControllerObservation(snapshot: Snapshot): Promise<void> {
     const observe = this.#options.controllerObservation;
     const owner = await this.#lease.use(async (lease) => lease);
-    const observation = observe?.() ?? {
+    const observedController = observe?.();
+    const observation = observedController ?? {
       controllerId: owner.holder,
       epoch: owner.epoch,
       expiresAt: owner.expiresAt.toISOString(),
@@ -1810,7 +1813,7 @@ export class FactorySupervisor {
     // for each lease renewal. Service observations retain their own lifecycle.
     const observationKey = JSON.stringify([
       owner.epoch,
-      observe ? observation : "objective-writer",
+      observedController ? observation : "objective-writer",
     ]);
     if (this.#lastControllerObservationKey === observationKey) return;
     const latest = (snapshot.factoryEvents ?? [])
@@ -1836,7 +1839,7 @@ export class FactorySupervisor {
         objectiveNodeId: snapshot.id,
         sequence: this.#sequences.take(),
         ...observation,
-        observationScope: observe ? "repository-controller" : "objective-writer",
+        observationScope: observedController ? "repository-controller" : "objective-writer",
         protocolMin: PROTOCOL_V2,
         protocolMax: PROTOCOL_V2,
       }),

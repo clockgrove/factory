@@ -159,3 +159,49 @@ it("counts actual fence reads per operation and excludes unrelated reads and dia
   expect(telemetry.records[0]!.elapsedMs).toBeGreaterThanOrEqual(telemetry.records[0]!.fenceMs);
   expect(telemetry.droppedRecords).toBe(0);
 });
+
+it("isolates concurrent shared-transaction fences and does not repeat a configured Objective check", async () => {
+  const mutations = scheduler();
+  const blocker = await mutations.acquire();
+  const epochs = new Map([
+    [1, 1],
+    [2, 1],
+  ]);
+  let configuredChecks = 0;
+  let transports = 0;
+  const store = new GitHubControlStore({
+    token: "scoped-transaction-fixture",
+    owner: "fixture",
+    repo: "project",
+    mutationScheduler: mutations,
+    mutationScope: "shared-resource",
+    captureMutationFence: () => async () => {
+      configuredChecks++;
+    },
+    requestFetch: async () => {
+      transports++;
+      return response();
+    },
+  });
+  const scopedWrite = (objective: number) => {
+    const captured = epochs.get(objective);
+    return store.withMutationFence(
+      async () => {
+        observeLeaseAssertion();
+        if (epochs.get(objective) !== captured) throw new Error("stale shared-resource owner");
+      },
+      () => write(store),
+    );
+  };
+  const stale = expect(scopedWrite(1)).rejects.toThrow("stale shared-resource owner");
+  const unrelated = scopedWrite(2);
+  epochs.set(1, 2);
+  blocker.release();
+  await Promise.all([stale, unrelated]);
+  expect(transports).toBe(1);
+  expect(configuredChecks).toBe(0);
+  expect(store.mutationOperationTelemetry().records).toEqual([
+    expect.objectContaining({ leaseAssertions: 1, mutationRequests: 0, outcome: "failed" }),
+    expect.objectContaining({ leaseAssertions: 1, mutationRequests: 1, outcome: "succeeded" }),
+  ]);
+});

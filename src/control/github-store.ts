@@ -298,13 +298,9 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     // LeaseController merely because the owning Supervisor changed its field.
     const configuredFence = mutating ? this.#captureMutationFence?.(mutationClass) : undefined;
     const scopedFence = mutating ? this.#scopedMutationFence.getStore() : undefined;
-    const fence =
-      configuredFence || scopedFence
-        ? async (waitedMs: number) => {
-            if (configuredFence) await configuredFence(waitedMs);
-            if (scopedFence) await scopedFence(waitedMs);
-          }
-        : undefined;
+    // A shared transaction binds its immutable owner explicitly; checking the
+    // configured Objective again would duplicate the same remote lease read.
+    const fence = scopedFence ?? configuredFence;
     const dispatch = () => this.#dispatch(operation, mutating, mutationClass, fence);
     if (!mutating) return dispatch();
     return observeMutationOperation(

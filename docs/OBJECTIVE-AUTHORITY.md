@@ -12,7 +12,7 @@ not evidence of installed throughput or a substitute for live qualification.
 | Graph commits, projection receipts, issue creation and dependency links | Objective authority plus immutable graph/projection identities. Related issue writes replay idempotently; conflicting relationships fail closed rather than holding two issue locks. |
 | Review, durable-session, merge-candidate, native-rebase and sibling-refresh checkpoints | Objective authority and exact immutable checkpoint/attempt binding. Original producer epoch remains distinct from the current recovery writer. |
 | PR creation, work branches and publication | Objective authority; branch/ref creation or expected-before-SHA CAS protects the exact branch. No default-branch claim until integration. |
-| Work Item assignment across Objectives | Existing per-Work-Item claim ref CAS; no repository exclusion. |
+| Work Item ownership, attempts and reassignment | One issue-scoped admission ledger CAS; immutable graph/run binding, exact settlement and explicit accepted transfer authority. Permanent legacy namespace barriers preserve a single arbiter. See [issue admission](ISSUE-ADMISSION.md). |
 | Default-branch integration | Short destination-branch claim, expected validated base/head/tree, current rules and GitHub merge semantics. Independent execution and publication continue. |
 | Global worker, backend, path and resource reservations | Shared capacity ledger CAS; retry a losing reservation update. No lock is held for worker execution or ordinary GitHub mutations. |
 | Service controller lease acquisition, renewal and retirement | Retained for discovery leader election. Election loss retires discovery/configuration, not otherwise-current Objective execution or data. |

@@ -176,7 +176,7 @@ describe("same-run controller restart after integration", () => {
           );
         if (fault === "reservation") {
           const ref = [...f.refs.keys()].find(
-            (ref) => ref.includes("/attempts/") && ref.includes("work-item-8/"),
+            (ref) => ref === "refs/clockgrove-factory/admission/work-item-8",
           );
           expect(ref).toBeDefined();
           f.refs.delete(ref!);

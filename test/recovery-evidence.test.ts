@@ -101,7 +101,12 @@ async function fixture(rebase = false) {
     sequence: 1,
     expiresAt: now,
   };
-  const leases = { assertCurrent: async () => {} } as unknown as LeaseManager;
+  const leases = {
+    assertCurrent: async () => {},
+    async assertMutationAuthorized(this: { assertCurrent(): Promise<void> }) {
+      await this.assertCurrent();
+    },
+  } as unknown as LeaseManager;
   const objective: CompiledObjective = {
     title: "Private objective",
     workItems: [
@@ -334,7 +339,9 @@ async function fixture(rebase = false) {
     readCommit: vi.fn(storage.readCommit),
     readBlob: vi.fn(storage.readBlob),
     readTreeEntry: vi.fn(storage.readTreeEntry),
-    listRefs: vi.fn(async () => []),
+    listRefs: vi.fn(async (prefix: string) =>
+      [...refs].filter(([ref]) => ref.startsWith(prefix)).map(([ref, oid]) => ({ ref, oid })),
+    ),
     readPullRequest: vi.fn(async () => pull),
     getRepositoryFacts: vi.fn(async () => ({
       fullName: "o/r",

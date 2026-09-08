@@ -43,6 +43,7 @@ export interface ProviderFaults {
   controllerActivation?: boolean;
   afterIntegration?: () => void;
   localOnly?: boolean;
+  maxAttemptsPerItem?: number;
   noModelTokenBudget?: boolean;
   dependencyChain?: boolean;
   adaptiveLocal?: boolean;
@@ -110,7 +111,7 @@ export async function providerSupervisorFixture(
     ...(faults.sandboxUntrusted ? { trust: "sandbox_untrusted" } : {}),
     backendOrder: faults.localOnly ? [LOCAL] : managed ? [provider, DAYTONA] : [LOCAL, DAYTONA],
     maxParallel: faults.localOnly ? (faults.localMaxParallel ?? 1) : managed ? 1 : 2,
-    maxAttemptsPerItem: 1,
+    maxAttemptsPerItem: faults.maxAttemptsPerItem ?? 1,
     workItemTimeoutMinutes: 2,
     objectiveTimeoutMinutes: 20,
     allowedPaidBackends: faults.localOnly ? [] : managed ? [provider, DAYTONA] : [DAYTONA],
@@ -467,6 +468,14 @@ export async function providerSupervisorFixture(
     ...(faults.controllerActivation ? { epoch: ++leaseGeneration } : {}),
   }));
   vi.spyOn(LeaseManager.prototype, "assertCurrent").mockResolvedValue(undefined);
+  // This fixture replaces transport writes, so model the dispatch-time authority
+  // check that the real GitHub transport performs after queueing.
+  vi.spyOn(LeaseManager.prototype, "assertMutationAuthorized").mockImplementation(function (
+    this: LeaseManager,
+    lease,
+  ) {
+    return this.assertCurrent(lease);
+  });
   vi.spyOn(LeaseManager.prototype, "assertGeneration").mockResolvedValue(undefined);
   vi.spyOn(LeaseManager.prototype, "release").mockImplementation(async (value) => value);
   const pulls = new Map<
@@ -476,10 +485,17 @@ export async function providerSupervisorFixture(
   vi.spyOn(GitHubControlStore.prototype, "compareAndSwapRef").mockImplementation(
     async ({ ref, beforeOid, afterOid }) => {
       if (refs.get(ref) !== beforeOid) return false;
-      if (ref.startsWith("refs/clockgrove-factory/integration-admissions/")) {
+      if (
+        ref.startsWith("refs/clockgrove-factory/integration-admissions/") ||
+        ref.startsWith("refs/clockgrove-factory/admission/")
+      ) {
         const commit = await readCommit(afterOid);
-        if (commit.parentOids.length !== 1 || commit.parentOids[0] !== beforeOid)
-          throw new Error("fixture integration claim must extend its exact observed OID");
+        if (
+          commit.parentOids[0] !== beforeOid ||
+          (ref.startsWith("refs/clockgrove-factory/integration-admissions/") &&
+            commit.parentOids.length !== 1)
+        )
+          throw new Error("fixture control CAS must extend its exact observed OID");
         refs.set(ref, afterOid);
         return true;
       }

@@ -1,7 +1,7 @@
 import { hasCurrentWriterAuthority } from "../control/receipts.js";
 import type { FactoryReadSnapshot } from "../application/status.js";
 import { PlatformUnavailableError } from "../platform.js";
-import { attemptRef } from "../control/attempts.js";
+import { readAttemptReservationRef } from "../control/attempts.js";
 import {
   loadMergeCandidateCheckpoint,
   mergeCandidateIdentityDigest,
@@ -342,8 +342,11 @@ export async function loadRecoveryRuntime(input: {
         ),
         "successor-attempt-conflict",
       );
-      const ref = await input.store.readRef(
-        attemptRef(input.objective, first.workItem, first.attempt),
+      const ref = await readAttemptReservationRef(
+        input.store,
+        input.objective,
+        first.workItem,
+        first.attempt,
       );
       requireRuntime(ref, "successor-reservation-unavailable");
       const commit = await input.store.readCommit(ref);

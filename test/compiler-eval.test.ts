@@ -389,3 +389,46 @@ it("adjudication cannot retain an identity while reversing obligation text", () 
     ),
   ).toThrow("rewrite obligation text");
 });
+
+it("independently corrects cited hallucinated prerequisites without waiving explicit obligations", () => {
+  const inferred = structuredClone(inventory);
+  inferred.obligations[1]!.kind = "prerequisite";
+  const review = verdict();
+  review.inventoryDigest = compilerEvalDigest(inferred);
+  review.coverage[1]!.status = "missing";
+  review.coverage[1]!.itemIds = [];
+  review.coverage[1]!.acceptanceBindings = [];
+  const challenge = {
+    findingId: "invented-integration",
+    obligationId: "integration",
+    reason: "Original Objective never requires this inferred integration",
+    evidenceIds: ["objective"],
+  };
+  review.inferenceCorrections = [{ ...challenge, disposition: "unsupported-inference" }];
+  const context = { ...expected, inventory: inferred, challenges: [challenge] };
+  expect(validateCompilerJudgeVerdict(review, context).decision).toBe("accept");
+  expect(inferred.obligations).toHaveLength(2);
+  expect(review.coverage[1]!.status).toBe("missing");
+  expect(() => validateCompilerJudgeVerdict(review, { ...context, challenges: [] })).toThrow(
+    "matching compiler challenge",
+  );
+  const explicit = structuredClone(inferred);
+  explicit.obligations[1]!.kind = "explicit";
+  review.inventoryDigest = compilerEvalDigest(explicit);
+  expect(() => validateCompilerJudgeVerdict(review, { ...context, inventory: explicit })).toThrow(
+    "cannot be waived",
+  );
+});
+
+it("separates human, assisted and synthetic calibration outcomes including failures", () => {
+  const result = measureCompilerCalibration([
+    { ...calibrationCase("human"), labelProvenance: "human" },
+    { ...calibrationCase("assisted"), labelProvenance: "llm-assisted", repaired: true },
+    { ...calibrationCase("synthetic-failure"), outcome: "failed" },
+  ]);
+  expect(result.aggregateProvenance).toBe("mixed");
+  expect(result.byProvenance.human.heldOut.unnecessaryRepairRate).toBe(0);
+  expect(result.byProvenance["llm-assisted"].heldOut.unnecessaryRepairRate).toBe(1);
+  expect(result.byProvenance.synthetic.heldOut.failed).toBe(1);
+  expect(result.humanCalibrationProven).toBe(false);
+});

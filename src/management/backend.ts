@@ -1,6 +1,7 @@
 import type {
   ObligationInventory,
   CompilerJudgeVerdict,
+  CompilerInferenceChallenge,
   CompilerEvidence,
   CompilerCaseLabel,
 } from "../evaluation/compiler-eval.js";
@@ -67,6 +68,7 @@ export interface ObligationResult {
 }
 export type ObligationCheckpoint = (result: ObligationResult) => Promise<void>;
 export interface PlanJudgeContext {
+  challenges?: CompilerInferenceChallenge[];
   compilation: CompilationContext;
   inventory: ObligationInventory;
   objective: CompiledObjective;
@@ -77,6 +79,7 @@ export interface PlanJudgeResult {
 }
 export type PlanJudgeCheckpoint = (result: PlanJudgeResult) => Promise<void>;
 export interface PlanRepairContext {
+  challenges?: CompilerInferenceChallenge[];
   compilation: CompilationContext;
   inventory: ObligationInventory;
   objective?: CompiledObjective;
@@ -92,6 +95,16 @@ export interface CompilerCaseLabelContext {
   priorLabel?: CompilerCaseLabel;
 }
 export interface CompilerCaseLabelResult {
+  provenance: {
+    promptDigest: string;
+    schemaDigest: string;
+    sourceDigest: string;
+    baseSha: string;
+    requestedModel: string | null;
+    requestedReasoning: string | null;
+    providerReportedModel: null;
+    priorLabelDigest: string | null;
+  };
   label: CompilerCaseLabel;
   usage: ManagementUsage;
 }

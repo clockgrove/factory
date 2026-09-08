@@ -374,3 +374,119 @@ describe("independent compiler management boundaries", () => {
     ).rejects.toThrow("deadline exhausted");
   });
 });
+
+it("adjudicates a cited inferred-obligation challenge independently without changing the graph", async () => {
+  const { context, inventory, proposal } = await fixture();
+  const compiled = await new CodexCliManagementBackend({
+    runStructured: async () => ({ value: proposal, usage }),
+  }).compile(context, async () => {});
+  inventory.obligations.push({
+    id: "invented",
+    text: "Install unrelated infrastructure",
+    kind: "prerequisite",
+    evidenceIds: ["objective"],
+    acceptanceEvidence: "Inferred infrastructure exists",
+  });
+  const reviewed = verdict(inventory, compiled.objective);
+  reviewed.coverage.push({
+    obligationId: "invented",
+    status: "missing",
+    itemIds: [],
+    acceptanceBindings: [],
+    evidenceIds: ["objective"],
+    reason: "Original source does not require infrastructure",
+  });
+  const challenge = {
+    findingId: "false-positive",
+    obligationId: "invented",
+    reason: "Original request only asks for tests",
+    evidenceIds: ["objective"],
+  };
+  reviewed.inferenceCorrections = [{ ...challenge, disposition: "unsupported-inference" }];
+  const runStructured = vi.fn(async (_cwd, _schema, prompt: string) => {
+    expect(prompt).toContain("Adjudicate any structured evidence-cited challenges independently");
+    expect(prompt).toContain(JSON.stringify(challenge));
+    expect(prompt).not.toContain("PRIVATE_COMPILER_REASONING");
+    return { value: reviewed, usage };
+  });
+  const result = await new CodexCliManagementBackend({ runStructured }).judgePlan(
+    { compilation: context, inventory, objective: compiled.objective, challenges: [challenge] },
+    async () => {},
+  );
+  expect(result.verdict.decision).toBe("accept");
+  expect(result.verdict.coverage.find((entry) => entry.obligationId === "invented")!.status).toBe(
+    "missing",
+  );
+  expect(runStructured).toHaveBeenCalledOnce();
+  inventory.obligations.at(-1)!.kind = "explicit";
+  reviewed.inventoryDigest = compilerEvalDigest(inventory);
+  await expect(
+    new CodexCliManagementBackend({ runStructured }).judgePlan(
+      { compilation: context, inventory, objective: compiled.objective, challenges: [challenge] },
+      async () => {},
+    ),
+  ).rejects.toMatchObject({ name: "ManagementOutputError", usage });
+});
+
+it("retains actual assisted-label prompt/source identities and marks provider model unknown", async () => {
+  const { context } = await fixture();
+  const prior = {
+    version: 1 as const,
+    caseDigest: "f".repeat(64),
+    provenance: "llm-assisted" as const,
+    pass: "blinded" as const,
+    obligations: [
+      {
+        id: "tests",
+        text: "Tests required",
+        evidenceIds: ["objective"],
+        status: "required" as const,
+        reason: "Source request",
+      },
+    ],
+    disagreements: [],
+    uncertainty: [],
+  };
+  let capturedPrompt = "";
+  let capturedSchema: unknown;
+  const result = await new CodexCliManagementBackend({
+    model: "requested-model",
+    runStructured: async (_cwd, schema, prompt) => {
+      capturedPrompt = prompt;
+      capturedSchema = schema;
+      return { value: { ...prior, pass: "adjudication" }, usage };
+    },
+  }).labelCompilerCase(
+    { compilation: context, caseDigest: prior.caseDigest, pass: "adjudication", priorLabel: prior },
+    async () => {},
+  );
+  expect(result.provenance).toMatchObject({
+    promptDigest: compilerEvalDigest(capturedPrompt),
+    schemaDigest: compilerEvalDigest(capturedSchema),
+    requestedModel: "requested-model",
+    providerReportedModel: null,
+    priorLabelDigest: compilerEvalDigest(prior),
+    baseSha: context.baseSha,
+  });
+  const source = JSON.parse(capturedPrompt.split("\n\n").at(-1)!);
+  expect(result.provenance.sourceDigest).toBe(compilerEvalDigest(source));
+});
+
+it("permits 129 dependency reviews in both provider and runtime judge schemas", async () => {
+  const { default: Ajv } = await import("ajv");
+  const { CompilerJudgeVerdictSchema } = await import("../src/evaluation/compiler-eval.js");
+  const { context, inventory, proposal } = await fixture();
+  const compiled = await new CodexCliManagementBackend({
+    runStructured: async () => ({ value: proposal, usage }),
+  }).compile(context, async () => {});
+  const output = verdict(inventory, compiled.objective);
+  output.inferenceCorrections = [];
+  output.dependencies = Array.from({ length: 129 }, (_, index) => ({
+    itemId: `item-${index}`,
+    dependsOn: "base",
+    reason: "Dependency rationale",
+    evidenceIds: ["objective"],
+  }));
+  expect(new Ajv({ strict: false }).compile(CODEX_PLAN_JUDGE_SCHEMA)(output)).toBe(true);
+  expect(CompilerJudgeVerdictSchema.safeParse(output).success).toBe(true);
+});

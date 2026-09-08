@@ -132,6 +132,20 @@ export const CompilerJudgeVerdictSchema = z
           .strict(),
       )
       .max(64),
+    inferenceCorrections: z
+      .array(
+        z
+          .object({
+            findingId: Id,
+            obligationId: Id,
+            disposition: z.enum(["unsupported-inference", "upheld"]),
+            reason: Text,
+            evidenceIds: Refs.min(1),
+          })
+          .strict(),
+      )
+      .max(64)
+      .optional(),
     uncertainty: z.array(Text).max(64),
     decision: z.enum(["accept", "repair", "abstain"]),
   })
@@ -210,6 +224,7 @@ export function validateCompilerJudgeVerdict(
     draftDigest: string;
     inventory: ObligationInventory;
     graph: { workItems: Array<{ id: string; dependsOn: string[]; acceptance: string[] }> };
+    challenges?: CompilerInferenceChallenge[];
   },
 ): CompilerJudgeVerdict {
   const verdict = CompilerJudgeVerdictSchema.parse(value);
@@ -284,9 +299,50 @@ export function validateCompilerJudgeVerdict(
     if (!entry.obligationIds.length && !entry.itemIds.length)
       throw new Error("finding requires affected identity");
   }
+  const challenges = validateCompilerInferenceChallenges(
+    expected.challenges ?? [],
+    expected.inventory,
+  );
+  const corrections = verdict.inferenceCorrections ?? [];
+  unique(
+    corrections.map((entry) => `${entry.findingId}\0${entry.obligationId}`),
+    "inference correction",
+  );
+  const unsupported = new Set<string>();
+  for (const correction of corrections) {
+    const challenge = challenges.find(
+      (entry) =>
+        entry.findingId === correction.findingId && entry.obligationId === correction.obligationId,
+    );
+    if (!challenge) throw new Error("inference correction requires a matching compiler challenge");
+    references(correction.evidenceIds, evidence, "inference correction citation");
+    if (!correction.evidenceIds.some((id) => challenge.evidenceIds.includes(id)))
+      throw new Error("inference correction must adjudicate cited challenge evidence");
+    if (correction.disposition === "unsupported-inference") {
+      if (
+        expected.inventory.obligations.find((entry) => entry.id === correction.obligationId)
+          ?.kind === "explicit"
+      )
+        throw new Error("explicit Objective obligations cannot be waived");
+      const coverage = verdict.coverage.find(
+        (entry) => entry.obligationId === correction.obligationId,
+      );
+      if (coverage?.status !== "missing" && coverage?.status !== "unknown")
+        throw new Error("unsupported inference must preserve missing or unknown original coverage");
+      unsupported.add(correction.obligationId);
+    }
+  }
+  if (
+    corrections.some(
+      (entry) => entry.disposition === "upheld" && unsupported.has(entry.obligationId),
+    )
+  )
+    throw new Error("contradictory inference corrections");
   if (
     verdict.decision === "accept" &&
-    (verdict.coverage.some((entry) => entry.status !== "covered") ||
+    (verdict.coverage.some(
+      (entry) => entry.status !== "covered" && !unsupported.has(entry.obligationId),
+    ) ||
       verdict.findings.some((entry) => entry.severity !== "advisory") ||
       verdict.items.some((entry) => entry.granularity === "unknown") ||
       verdict.dimensions.some((entry) => entry.status === "unknown"))
@@ -315,6 +371,7 @@ export function createCompilerEvalReport(input: {
   graph: { workItems: Array<{ id: string; dependsOn: string[]; acceptance: string[] }> };
   verdict: CompilerJudgeVerdict;
   draftDigest: string;
+  challenges?: CompilerInferenceChallenge[];
   mode?: "plan-review" | "post-mortem";
   usage?: CompilerEvalUsage[];
   causes?: CompilerPostMortemCause[];
@@ -385,6 +442,7 @@ export function createCompilerEvalReport(input: {
     inventory: input.inventory,
     draftDigest: input.draftDigest,
     verdict,
+    challenges: input.challenges ?? [],
     evidence,
     usage,
     causes,
@@ -416,6 +474,13 @@ export function renderCompilerEvalMarkdown(report: CompilerEvalReport): string {
     ...report.verdict.coverage.map(
       (entry) =>
         `- ${clean(entry.obligationId)}: ${entry.status} — ${clean(entry.reason)} (evidence: ${entry.evidenceIds.map(clean).join(", ")})`,
+    ),
+    "",
+    "## Independently adjudicated inference corrections",
+    "",
+    ...(report.verdict.inferenceCorrections ?? []).map(
+      (entry) =>
+        `- ${clean(entry.obligationId)} (finding ${clean(entry.findingId)}): ${entry.disposition}; ${clean(entry.reason)}; evidence: ${entry.evidenceIds.map(clean).join(", ")}. Original obligation and coverage remain preserved.`,
     ),
     "",
     "## Granularity and dependencies",
@@ -506,8 +571,13 @@ export function measureCompilerCalibration(cases: readonly CompilerCalibrationCa
   }
   const ratio = (numerator: number, denominator: number) =>
     denominator ? numerator / denominator : null;
-  const measure = (split: CompilerCalibrationCase["split"]) => {
-    const all = cases.filter((entry) => entry.split === split);
+  const measure = (
+    split: CompilerCalibrationCase["split"],
+    provenance?: CompilerCalibrationCase["labelProvenance"],
+  ) => {
+    const all = cases.filter(
+      (entry) => entry.split === split && (!provenance || entry.labelProvenance === provenance),
+    );
     const complete = all.filter((entry) => entry.outcome === "completed");
     const expected = complete.reduce((sum, entry) => sum + entry.expectedOmissions.length, 0);
     const found = complete.reduce(
@@ -581,6 +651,24 @@ export function measureCompilerCalibration(cases: readonly CompilerCalibrationCa
     cases: [...cases],
     calibration,
     heldOut,
+    aggregateProvenance:
+      new Set(cases.map((entry) => entry.labelProvenance)).size > 1
+        ? "mixed"
+        : (cases[0]?.labelProvenance ?? "unavailable"),
+    byProvenance: {
+      human: {
+        calibration: measure("calibration", "human"),
+        heldOut: measure("held-out", "human"),
+      },
+      "llm-assisted": {
+        calibration: measure("calibration", "llm-assisted"),
+        heldOut: measure("held-out", "llm-assisted"),
+      },
+      synthetic: {
+        calibration: measure("calibration", "synthetic"),
+        heldOut: measure("held-out", "synthetic"),
+      },
+    },
     humanCalibrationProven:
       cases.length > 0 &&
       cases.every((entry) => entry.labelProvenance === "human" && entry.outcome === "completed") &&
@@ -775,4 +863,62 @@ export function measureCompilerRepairComparison(pairs: readonly CompilerComparis
     limitation:
       "Matched observations describe these cases only; estimated defects and judge scores do not establish savings. Positive differences mean less observed repaired effort, negative differences mean more.",
   };
+}
+
+export const CompilerInferenceChallengeSchema = z
+  .object({
+    findingId: Id,
+    obligationId: Id,
+    reason: Text,
+    evidenceIds: Refs.min(1),
+  })
+  .strict();
+export type CompilerInferenceChallenge = z.infer<typeof CompilerInferenceChallengeSchema>;
+export function validateCompilerInferenceChallenges(
+  value: unknown,
+  inventory: ObligationInventory,
+): CompilerInferenceChallenge[] {
+  const challenges = z.array(CompilerInferenceChallengeSchema).max(64).parse(value);
+  unique(
+    challenges.map((entry) => `${entry.findingId}\0${entry.obligationId}`),
+    "inference challenge",
+  );
+  const evidence = new Set(inventory.evidence.map((entry) => entry.id));
+  const obligations = new Set(inventory.obligations.map((entry) => entry.id));
+  for (const challenge of challenges) {
+    references([challenge.obligationId], obligations, "challenged obligation");
+    references(challenge.evidenceIds, evidence, "challenge citation");
+  }
+  return challenges;
+}
+/** Only structured, cited dispositions enter the isolated judge; never compiler private reasoning. */
+export function buildCompilerInferenceChallenges(
+  inventory: ObligationInventory,
+  prior: CompilerJudgeVerdict,
+  dispositions: readonly {
+    findingId: string;
+    disposition: "addressed" | "challenged";
+    reason: string;
+    evidenceIds: string[];
+  }[],
+): CompilerInferenceChallenge[] {
+  if (prior.inventoryDigest !== compilerEvalDigest(inventory))
+    throw new Error("challenge inventory identity mismatch");
+  unique(
+    dispositions.map((entry) => entry.findingId),
+    "finding disposition",
+  );
+  const challenges: CompilerInferenceChallenge[] = [];
+  for (const disposition of dispositions.filter((entry) => entry.disposition === "challenged")) {
+    const finding = prior.findings.find((entry) => entry.id === disposition.findingId);
+    if (!finding) throw new Error("challenge refers to unknown prior finding");
+    for (const obligationId of finding.obligationIds)
+      challenges.push({
+        findingId: finding.id,
+        obligationId,
+        reason: disposition.reason,
+        evidenceIds: disposition.evidenceIds,
+      });
+  }
+  return validateCompilerInferenceChallenges(challenges, inventory);
 }

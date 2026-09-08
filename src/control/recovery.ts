@@ -1,10 +1,12 @@
 import type { FactoryEvent } from "../protocol/events.js";
 import { deduplicateFactoryEvents, latestSupportedRun } from "./receipts.js";
+import type { ObjectiveAuthorityObservation } from "./authority.js";
 
 export interface RecoverySnapshot {
   number: number;
   closed?: boolean;
   factoryEvents?: FactoryEvent[];
+  objectiveAuthority?: ObjectiveAuthorityObservation | null;
   workItems: Array<{
     number: number;
     closed?: boolean;
@@ -28,7 +30,10 @@ export const TERMINAL_RECOVERY_REQUIRED =
 function needsSuccessorInspection(snapshot: RecoverySnapshot): boolean {
   // A missing/deleted start causes authenticated readers to omit its subsequent
   // comments. Surviving refs and PRs must still prevent an apparent fresh start.
-  return !snapshot.closed && !latestSupportedRun(snapshot.factoryEvents ?? []);
+  return (
+    !snapshot.closed &&
+    !latestSupportedRun(snapshot.factoryEvents ?? [], snapshot.objectiveAuthority)
+  );
 }
 
 /** Cheap rejection at command entry. The Supervisor additionally checks reservation refs. */

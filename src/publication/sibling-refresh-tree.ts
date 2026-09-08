@@ -68,7 +68,7 @@ export async function prepareSiblingRefreshTree(input: {
   packet: WorkerPacket;
   store: Pick<
     PublicationStore,
-    "objectiveMutationFenceAtDispatch" | "readCommit" | "createBlob" | "createTree"
+    "objectivePublicationFenceAtDispatch" | "readCommit" | "createBlob" | "createTree"
   >;
   assertCurrent: () => Promise<void>;
   /** Recovery can bind an already validated tree before any immutable upload. */

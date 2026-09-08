@@ -6,6 +6,7 @@ export interface MutationOperationObservation {
   measurementScope: "process-local-transport-boundary";
   operationId: string;
   operation: string;
+  authorityClass: MutationAuthorityClass;
   resourceScope: string;
   startedAt: string;
   elapsedMs: number;
@@ -18,6 +19,12 @@ export interface MutationOperationObservation {
   unclassifiedRequests: number;
   outcome: "succeeded" | "failed";
 }
+
+/** Authority needed by a GitHub write, independently of its pacing priority. */
+export type MutationAuthorityClass =
+  | "immutable-preparation"
+  | "objective-publication"
+  | "atomic-publication";
 
 interface Context {
   observation: MutationOperationObservation;
@@ -100,6 +107,7 @@ export function observeMutationQueue(waitedMs: number): void {
 
 export async function observeMutationOperation<T>(
   operation: string,
+  authorityClass: MutationAuthorityClass,
   resourceScope: string,
   report: (observation: MutationOperationObservation) => void,
   work: () => Promise<T>,
@@ -109,6 +117,7 @@ export async function observeMutationOperation<T>(
     measurementScope: "process-local-transport-boundary",
     operationId: randomUUID(),
     operation,
+    authorityClass,
     resourceScope,
     startedAt: new Date().toISOString(),
     elapsedMs: 0,

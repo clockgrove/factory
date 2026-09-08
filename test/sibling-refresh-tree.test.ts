@@ -218,7 +218,7 @@ async function fixture() {
     writes,
     enableDispatchFence() {
       dispatchFenced = true;
-      Object.defineProperty(store, "objectiveMutationFenceAtDispatch", { value: true });
+      Object.defineProperty(store, "objectivePublicationFenceAtDispatch", { value: true });
     },
   };
 }

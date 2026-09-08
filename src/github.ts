@@ -40,6 +40,16 @@ import {
   latestRunReceipts,
 } from "./control/receipts.js";
 import {
+  objectiveAuthorityObservation,
+  type ObjectiveAuthorityObservation,
+} from "./control/authority.js";
+import {
+  leaseRef,
+  parseLeaseCommit,
+  type GitCommitObject,
+  type LeaseState,
+} from "./control/lease.js";
+import {
   PlatformUnavailableError,
   classifyRefusal,
   primaryQuotaForCredential,
@@ -788,6 +798,7 @@ function factoryEvents(
   subject: string,
   expected: { objective: number; workItem?: number },
   actorsByRun?: ReadonlyMap<string, string>,
+  authority?: ObjectiveAuthorityObservation | null,
 ): FactoryEvent[] {
   if (!comments) return [];
   if (comments.totalCount > comments.nodes.length) {
@@ -815,7 +826,9 @@ function factoryEvents(
   // The activating identity is authenticated by GitHub as the author of the
   // RunStarted comment. Every later receipt must come from that same identity;
   // an issue participant cannot forge state by pasting a Factory envelope.
-  const runActors = actorsByRun ? new Map(actorsByRun) : bindAuthenticatedRunActors(parsed);
+  const runActors = actorsByRun
+    ? new Map(actorsByRun)
+    : bindAuthenticatedRunActors(parsed, authority);
   return deduplicateFactoryEvents(
     parsed
       .filter(({ event, login }) => {
@@ -1090,6 +1103,7 @@ export class GitHubReader {
     number,
     { subIssueCount: number; includeIssueFields: boolean }
   >();
+  readonly #authorityCommits = new Map<string, LeaseState>();
 
   constructor(opts: GitHubOptions) {
     this.#owner = opts.owner;
@@ -1627,9 +1641,37 @@ export class GitHubReader {
       );
       if (hydrated) workItem.comments = hydrated;
     }
-    const objectiveEvents = factoryEvents(issue.comments, `Objective #${issue.number}`, {
-      objective: issue.number,
-    });
+    const writerBound = [
+      issue.comments,
+      ...issue.subIssues.nodes.map((item) => item.comments),
+    ].some((comments) =>
+      comments?.nodes.some(
+        (comment) =>
+          Boolean(comment.author?.login) &&
+          TRUSTED_ASSOCIATIONS.has(comment.authorAssociation ?? "") &&
+          decodeEventComments(comment.body).some(
+            (event) =>
+              event.writerEpoch !== undefined ||
+              event.writerOperationId !== undefined ||
+              event.writerHolder !== undefined ||
+              event.writerPolicyDigest !== undefined,
+          ),
+      ),
+    );
+    const currentAuthority = writerBound ? await this.#readObjectiveAuthority(issue.number) : null;
+    if (writerBound && !currentAuthority) {
+      throw new Error(
+        `Objective #${issue.number} has writer-bound receipts but no authoritative lease ref`,
+      );
+    }
+    const objectiveAuthority = currentAuthority;
+    const objectiveEvents = factoryEvents(
+      issue.comments,
+      `Objective #${issue.number}`,
+      { objective: issue.number },
+      undefined,
+      objectiveAuthority,
+    );
     const v2 = objectiveEvents.some((event) => event.protocol === "clockgrove.factory/v2");
     const actorsByRun = new Map(
       objectiveEvents.flatMap((event) =>
@@ -1648,6 +1690,7 @@ export class GitHubReader {
             `Work Item #${workItem.number}`,
             { objective: issue.number, workItem: workItem.number },
             actorsByRun,
+            objectiveAuthority,
           ),
         );
       }
@@ -1693,7 +1736,52 @@ export class GitHubReader {
       managedAgentActors,
       ciExpectedOnPullRequests: await this.#ciExpectedOnPullRequests(),
       ...(v2 ? { factoryEvents: objectiveEvents } : {}),
+      ...(objectiveAuthority === undefined ? {} : { objectiveAuthority }),
     };
+  }
+
+  /** Observe comments first and the authority ref second. A takeover between
+   * those reads can only attenuate an older receipt; a later comment waits for
+   * the next bounded snapshot. */
+  async #readObjectiveAuthority(number: number): Promise<ObjectiveAuthorityObservation | null> {
+    let refResponse;
+    try {
+      refResponse = await this.#octokit.request("GET /repos/{owner}/{repo}/git/ref/{ref}", {
+        owner: this.#owner,
+        repo: this.#repo,
+        ref: leaseRef(number).slice("refs/".length),
+      });
+    } catch (error) {
+      if ((error as { status?: number }).status === 404) return null;
+      throw error;
+    }
+    const date = refResponse.headers.date;
+    if (!date) throw new Error("Objective authority response did not contain a Date header");
+    const observedAt = new Date(String(date));
+    if (Number.isNaN(observedAt.getTime())) {
+      throw new Error(`invalid Objective authority Date header: ${date}`);
+    }
+    const oid = refResponse.data.object.sha;
+    let cached = this.#authorityCommits.get(oid);
+    if (!cached) {
+      const response = await this.#octokit.request(
+        "GET /repos/{owner}/{repo}/git/commits/{commit_sha}",
+        { owner: this.#owner, repo: this.#repo, commit_sha: oid },
+      );
+      const commit: GitCommitObject = {
+        oid: response.data.sha,
+        treeOid: response.data.tree.sha,
+        parentOids: response.data.parents.map((parent) => parent.sha),
+        message: response.data.message,
+        serverTime: observedAt,
+      };
+      cached = parseLeaseCommit(commit);
+      this.#authorityCommits.set(oid, cached);
+    }
+    if (cached.objective !== number) {
+      throw new Error(`Objective #${number} authority ref names another Objective`);
+    }
+    return objectiveAuthorityObservation(cached, observedAt);
   }
 
   /**

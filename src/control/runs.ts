@@ -6,6 +6,8 @@ import { parseRunPolicy, policyDigest, type RunPolicy } from "../protocol/policy
 import { encodeEventComment, latestSupportedRun, nextEventSequence } from "./receipts.js";
 import { loadRecoveryRuntime, type RecoveryRuntime } from "../recovery/runtime.js";
 import { loadRecoverySourceReconciliation } from "../recovery/reconciliation.js";
+import { writerAuthority, type ObjectiveAuthorityObservation } from "./authority.js";
+import type { LeaseState } from "./lease.js";
 
 export interface RunEventStore {
   addIssueComment(issueNodeId: string, body: string): Promise<void>;
@@ -63,7 +65,7 @@ export class RunManager {
     const runtime = await loadRecoveryRuntime(input);
     if (runtime.status !== "verified")
       throw new Error(`successor runtime unavailable: ${runtime.blockers.join(", ")}`);
-    const active = latestSupportedRun([...runtime.events]);
+    const active = latestSupportedRun([...runtime.events], runtime.objectiveAuthority);
     if (
       !active ||
       active.event !== "FactoryRunStarted" ||
@@ -90,8 +92,11 @@ export class RunManager {
     };
   }
 
-  resume(events: FactoryEvent[]): RunState | null {
-    const active = latestSupportedRun(events);
+  resume(
+    events: FactoryEvent[],
+    authority?: ObjectiveAuthorityObservation | null | undefined,
+  ): RunState | null {
+    const active = latestSupportedRun(events, authority);
     if (!active || active.kind !== "run" || active.event !== "FactoryRunStarted") {
       return null;
     }
@@ -135,8 +140,10 @@ export class RunManager {
     sequence?: number;
     activationRequestId?: string;
     baseSha?: string;
+    writer?: LeaseState;
+    authority?: ObjectiveAuthorityObservation | null | undefined;
   }): Promise<RunState> {
-    const resumed = this.resume(args.existingEvents ?? []);
+    const resumed = this.resume(args.existingEvents ?? [], args.authority);
     if (resumed) return resumed;
     const policy = parseRunPolicy(args.policy);
     const digest = policyDigest(policy);
@@ -151,6 +158,7 @@ export class RunManager {
       protocol: PROTOCOL_V2,
       kind: "run",
       event: "FactoryRunStarted",
+      ...(args.writer ? writerAuthority(args.writer, sequence) : {}),
       objective: args.objective,
       runId: args.runId ?? randomUUID(),
       sequence,
@@ -193,6 +201,7 @@ export class RunManager {
     objectiveNodeId: string;
     event: "FactoryRunCompleted" | "FactoryRunCancelled" | "FactoryRunEscalated";
     writerEpoch?: number;
+    writer?: LeaseState;
     reason?: string;
     existingEvents?: FactoryEvent[];
     sequence?: number;
@@ -202,7 +211,15 @@ export class RunManager {
       protocol: PROTOCOL_V2,
       kind: "run",
       event: args.event,
-      ...(args.writerEpoch === undefined ? {} : { writerEpoch: args.writerEpoch }),
+      ...(args.writer
+        ? writerAuthority(
+            args.writer,
+            args.sequence ??
+              Math.max(args.run.sequence + 1, nextEventSequence(args.existingEvents ?? [])),
+          )
+        : args.writerEpoch === undefined
+          ? {}
+          : { writerEpoch: args.writerEpoch }),
       objective: args.run.objective,
       runId: args.run.runId,
       sequence:

@@ -25,6 +25,7 @@ import { recoveryAdoptionEvents } from "./transaction.js";
 import { verifyRecoverySourceIntegration } from "./outcomes.js";
 import { assertIsolatedCandidateProof } from "./isolated-candidate.js";
 import { verifyRecoveryPeerTrunkIntegration } from "./peer-trunk.js";
+import type { ObjectiveAuthorityObservation } from "../control/authority.js";
 
 type Source = NonNullable<RecoveryPlanItem["source"]>;
 function requireRefresh(value: unknown): asserts value {
@@ -48,6 +49,7 @@ export async function observeRecoverySiblingRefresh(
     candidateIdentityDigest?: string;
     requireCompletion?: boolean;
     beforeSequence?: number;
+    authority?: ObjectiveAuthorityObservation | null | undefined;
   },
   visiting = new Set<string>(),
 ) {
@@ -446,7 +448,7 @@ export async function observeRecoverySiblingRefresh(
       const terminal = events.find(
         (event) =>
           event.runId === start.runId &&
-          hasCurrentWriterAuthority(event, events) &&
+          hasCurrentWriterAuthority(event, events, input.authority) &&
           ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(
             event.event,
           ),
@@ -757,7 +759,7 @@ export async function observeRecoverySiblingRefresh(
     const terminal = events.find(
       (event) =>
         event.runId === candidateRunId &&
-        hasCurrentWriterAuthority(event, events) &&
+        hasCurrentWriterAuthority(event, events, input.authority) &&
         ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(event.event),
     );
     const usage = events

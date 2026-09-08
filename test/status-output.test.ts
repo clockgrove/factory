@@ -351,6 +351,46 @@ describe("bounded status, explain, and replay output", () => {
     });
   });
 
+  it("keeps status and summary active when canonical authority rejects a stale terminal", () => {
+    const current = snapshot();
+    current.factoryEvents![1] = event({
+      ...current.factoryEvents![1]!,
+      writerEpoch: 1,
+      controllerId: "old-controller",
+      epoch: 1,
+    });
+    current.factoryEvents!.push(
+      event({
+        kind: "run",
+        event: "FactoryRunCompleted",
+        sequence: 6,
+        at: "2026-09-04T12:02:00.000Z",
+        writerOperationId: "e".repeat(64),
+        writerHolder: "old-controller",
+        writerEpoch: 1,
+        writerPolicyDigest: policyDigest(policy),
+      }),
+    );
+    current.objectiveAuthority = {
+      objective: 7,
+      runId: "run-status",
+      holder: "current-controller",
+      epoch: 2,
+      policyDigest: policyDigest(policy),
+      sequence: 7,
+      oid: "f".repeat(40),
+      expiresAt: new Date("2026-09-04T12:10:00.000Z"),
+      observedAt: new Date("2026-09-04T12:03:00.000Z"),
+    };
+
+    const report = buildStatusReport({ repository: "clockgrove/factory", snapshot: current });
+
+    expect(report.run).toMatchObject({ state: "active" });
+    expect(report.summary).toMatchObject({ outcome: "active" });
+    expect(report.summary).not.toHaveProperty("finishedAt");
+    expect(report.summary?.elapsedMilliseconds).toMatchObject({ availability: "unavailable" });
+  });
+
   it("marks historical run mutation measurements unavailable without process telemetry", () => {
     const report = buildStatusReport({
       repository: "clockgrove/factory",

@@ -1,4 +1,5 @@
 import { hasCurrentWriterAuthority } from "../control/receipts.js";
+import type { ObjectiveAuthorityObservation } from "../control/authority.js";
 import {
   type BudgetUsage,
   deriveBudgetUsage,
@@ -131,6 +132,7 @@ export function assessRecoveryAccounting(input: {
   events: FactoryEvent[];
   runIds: readonly string[];
   policy: RunPolicy;
+  authority?: ObjectiveAuthorityObservation | null | undefined;
 }): RecoveryAccountingAssessment {
   const result: RecoveryAccountingAssessment = {
     scope: "historical-assessment",
@@ -217,7 +219,9 @@ export function assessRecoveryAccounting(input: {
       (event) => event.kind === "run" && event.event === "FactoryRunStarted",
     );
     const terminals = runEvents.filter(
-      (event) => terminalRuns.has(event.event) && hasCurrentWriterAuthority(event, runEvents),
+      (event) =>
+        terminalRuns.has(event.event) &&
+        hasCurrentWriterAuthority(event, runEvents, input.authority),
     );
     const start = starts[0];
     const terminal = terminals[0];

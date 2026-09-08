@@ -126,9 +126,12 @@ work, symmetric freed-slot refill, completion and shutdown. It injects no delay,
 contention, pause or restart. `FACTORY_CONCURRENCY_SCENARIO=lease-fault` selects the separately
 acknowledged expiry/contention/restart scenario; neither result substitutes for the other. The
 observer uses bounded repository-wide incremental comment listings while receipts are unchanged,
-but those listings are wake hints only. Phase acceptance, subsequent mutation and final reporting
-always require a fresh complete authenticated Objective/sub-issue/comment/status observation.
-Historical results retain their original scenario and evidence identity.
+but those listings are wake hints only. Their canonical issue target is validated before owned issue
+filtering because GitHub includes pull-request conversations in the same endpoint. Authenticated
+graph or terminal changes force bounded fresh reads until child topology, receipts and terminal
+status converge. Phase acceptance, subsequent mutation and final reporting always require a fresh
+complete authenticated Objective/sub-issue/comment/status observation. Historical results retain
+their original scenario and evidence identity.
 
 Both scenarios accept
 `FACTORY_CONCURRENCY_PER_OBJECTIVE_MAX_MODEL_TOKENS` from 250000 through 500000. Omission

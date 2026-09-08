@@ -47,8 +47,10 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 - Two-Objective qualification now separates ordinary useful-throughput evidence from the
   controller-expiry fault scenario. The ordinary path injects no delay or failure, accepts either
-  authenticated refill lane, uses incremental repository comment reads only as wake hints, and
-  requires fresh complete observations for acceptance and actions. Supervisor waits now wake on
+  authenticated refill lane, uses incremental repository comment reads only as wake hints, safely
+  filters issue and pull-request conversations by canonical issue target, and requires bounded
+  topology/terminal convergence plus fresh complete observations for acceptance and actions.
+  Supervisor waits now wake on
   queued local completion, shared-capacity changes, or the earliest applicable retry without losing
   pre-listener changes. Qualification records the exact requested/resolved model policy and observed
   execution backends while leaving provider-returned settings and non-attributable quota explicitly

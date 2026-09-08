@@ -225,7 +225,7 @@ describe("prospective concurrency observation window", () => {
     }
   });
 
-  it("treats overlap, untrusted comments and cached receipts only as hints before fresh convergence", async () => {
+  it("treats overlap, trusted PR duplicates, untrusted comments and cached receipts only as hints", async () => {
     const current = Date.parse("2026-09-08T00:45:00.000Z");
     const now = vi.spyOn(Date, "now").mockReturnValue(current);
     const bodies = ["body-a", "body-b"];
@@ -251,6 +251,7 @@ describe("prospective concurrency observation window", () => {
         sequence: 1,
         at,
       })}\n-->`,
+      issue_url: `https://api.github.com/repos/${repository}/issues/${objective}`,
       html_url: `https://github.com/${repository}/issues/${objective}#issuecomment-${id}`,
       created_at: at,
       updated_at: at,
@@ -258,6 +259,10 @@ describe("prospective concurrency observation window", () => {
     });
     const trusted = [comment(10, 201), comment(11, 202)];
     const outsider = comment(10, 200, 2);
+    const trustedPr = {
+      ...comment(900, 199),
+      html_url: `https://github.com/${repository}/pull/900#issuecomment-199`,
+    };
     let objectiveReads = 0;
     const request = vi.fn(async (_route: string, args: { issue_number: number }) => {
       objectiveReads++;
@@ -276,7 +281,9 @@ describe("prospective concurrency observation window", () => {
     const list = vi.fn(async (route: string, args: { issue_number?: number }) => {
       if (route === "GET /repos/{owner}/{repo}/issues/comments") {
         incrementalListings++;
-        return incrementalListings === 1 ? [outsider] : [outsider, ...trusted];
+        return incrementalListings === 1
+          ? [trustedPr, trustedPr, outsider]
+          : [trustedPr, trustedPr, outsider, ...trusted];
       }
       if (route.endsWith("/sub_issues")) return [];
       if (route.endsWith("/{issue_number}/comments")) {
@@ -322,6 +329,230 @@ describe("prospective concurrency observation window", () => {
         expect.objectContaining({ since: expect.any(String), sort: "updated", direction: "asc" }),
         expect.objectContaining({ since: expect.any(String), sort: "updated", direction: "asc" }),
       ]);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("refreshes new child topology before accepting refill and terminal progress", async () => {
+    const current = Date.parse("2026-09-08T00:45:00.000Z");
+    const now = vi.spyOn(Date, "now").mockReturnValue(current);
+    const bodies = ["body-a", "body-b"];
+    const evidence = {
+      startedAt: new Date(current - 45 * 60_000 + 1).toISOString(),
+      actions: [],
+      actor: { id: 1, login: "fixture" },
+      objectives: authority.namespaces.map((namespace, index) => ({
+        namespace,
+        objective: { number: 10 + index, id: 100 + index },
+        bodyDigest: createHash("sha256").update(bodies[index]!).digest("hex"),
+      })),
+    };
+    const comment = (issue: number, id: number, receipt: Record<string, unknown>) => ({
+      id,
+      body: `fixture\n\n<!-- clockgrove-factory:event\n${JSON.stringify({
+        protocol: "clockgrove.factory/v2",
+        kind: "fixture",
+        ...receipt,
+      })}\n-->`,
+      issue_url: `https://api.github.com/repos/${repository}/issues/${issue}`,
+      html_url: `https://github.com/${repository}/issues/${issue}#issuecomment-${id}`,
+      created_at: receipt.at,
+      updated_at: receipt.at,
+      user: { id: 1, login: "fixture" },
+    });
+    const graphDigest = "d".repeat(64);
+    const objectiveComments = new Map<number, ReturnType<typeof comment>[]>();
+    const childComments = new Map<number, ReturnType<typeof comment>[]>();
+    let id = 300;
+    for (const objective of [10, 11]) {
+      const runId = `run-${objective}`;
+      objectiveComments.set(objective, [
+        comment(objective, id++, {
+          objective,
+          runId,
+          sequence: 1,
+          event: "ControllerObserved",
+          at: at(0),
+        }),
+        comment(objective, id++, {
+          objective,
+          runId,
+          sequence: 2,
+          event: "GraphCompiled",
+          graphDigest,
+          graphSize: 3,
+          at: at(1),
+        }),
+        comment(objective, id++, {
+          objective,
+          runId,
+          sequence: 3,
+          event: "GraphProjected",
+          graphDigest,
+          graphSize: 3,
+          at: at(2),
+        }),
+      ]);
+      const childBase = objective * 10;
+      const lifetimes =
+        objective === 10
+          ? [
+              event(objective, 4, "AttemptStarted", 3, childBase + 1),
+              event(objective, 5, "AttemptSucceeded", 20, childBase + 1),
+              event(objective, 6, "AttemptStarted", 22, childBase + 2),
+            ]
+          : [
+              event(objective, 4, "AttemptStarted", 4, childBase + 1),
+              event(objective, 5, "AttemptSucceeded", 6, childBase + 1),
+              event(objective, 6, "AttemptStarted", 8, childBase + 2),
+            ];
+      for (const receipt of lifetimes) {
+        const issue = receipt.workItem as number;
+        childComments.set(issue, [
+          ...(childComments.get(issue) ?? []),
+          comment(issue, id++, receipt),
+        ]);
+      }
+    }
+    const terminalComments = [10, 11].map((objective) =>
+      comment(objective, id++, {
+        objective,
+        runId: `run-${objective}`,
+        sequence: 20,
+        event: "FactoryRunCompleted",
+        at: at(30),
+      }),
+    );
+    const request = vi.fn(async (_route: string, args: { issue_number: number }) => {
+      const index = args.issue_number - 10;
+      return {
+        data: {
+          id: 100 + index,
+          number: args.issue_number,
+          body: bodies[index],
+          user: { id: 1 },
+        },
+      };
+    });
+    let topologyVisible = false;
+    let terminalVisible = false;
+    let incrementalListings = 0;
+    const list = vi.fn(async (route: string, args: { issue_number?: number }) => {
+      if (route === "GET /repos/{owner}/{repo}/issues/comments") {
+        incrementalListings++;
+        if (incrementalListings === 1) {
+          topologyVisible = true;
+          return [...objectiveComments.values(), ...childComments.values()].flat();
+        }
+        terminalVisible = true;
+        return [...objectiveComments.values(), ...childComments.values(), terminalComments].flat();
+      }
+      if (route.endsWith("/sub_issues"))
+        return topologyVisible
+          ? [1, 2, 3].map((offset) => ({ number: args.issue_number! * 10 + offset }))
+          : [];
+      if (route.endsWith("/{issue_number}/comments")) {
+        const objectiveRows = objectiveComments.get(args.issue_number!) ?? [];
+        const rows = [
+          ...(topologyVisible ? objectiveRows : objectiveRows.slice(0, 1)),
+          ...(childComments.get(args.issue_number!) ?? []),
+        ];
+        return terminalVisible && [10, 11].includes(args.issue_number!)
+          ? [...rows, terminalComments[args.issue_number! - 10]!]
+          : rows;
+      }
+      return [];
+    });
+    const call = vi.fn(async () => ({ run: { state: terminalVisible ? "completed" : "active" } }));
+    try {
+      await expect(
+        main(env, async (_env, _runner, extension) => {
+          if (!extension.extendPort) throw Error("missing production extension");
+          const port = (await extension.extendPort({
+            port: {},
+            evidence,
+            save: vi.fn(),
+            call,
+            request,
+            list,
+            retireClient: vi.fn(),
+          })) as Pick<ConcurrencyPort, "pollPair">;
+          const refill = await port.pollPair("refill", (pair) => concurrencyRefill(pair) !== null);
+          expect(refill.every((entry) => entry.children.length === 3)).toBe(true);
+          const terminal = await port.pollPair("completed", (pair) =>
+            pair.every(
+              (entry) =>
+                entry.status.run.state === "completed" &&
+                entry.receipts.some(
+                  ({ event: receipt }: { event: { event: string } }) =>
+                    receipt.event === "FactoryRunCompleted",
+                ),
+            ),
+          );
+          expect(terminal.every((entry) => entry.children.length === 3)).toBe(true);
+        }),
+      ).resolves.toBeUndefined();
+      expect(incrementalListings).toBe(2);
+      expect(request).toHaveBeenCalledTimes(8);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it.each([
+    ["cross-repository", "https://api.github.com/repos/other/repository/issues/10"],
+    ["malformed", `https://api.github.com/repos/${repository}/issues/not-a-number`],
+  ])("rejects a %s canonical comment URL before using its receipt", async (_name, issueUrl) => {
+    const current = Date.parse("2026-09-08T00:45:00.000Z");
+    const now = vi.spyOn(Date, "now").mockReturnValue(current);
+    const bodies = ["body-a", "body-b"];
+    const evidence = {
+      startedAt: new Date(current - 45 * 60_000 + 1).toISOString(),
+      actions: [],
+      actor: { id: 1, login: "fixture" },
+      objectives: authority.namespaces.map((namespace, index) => ({
+        namespace,
+        objective: { number: 10 + index, id: 100 + index },
+        bodyDigest: createHash("sha256").update(bodies[index]!).digest("hex"),
+      })),
+    };
+    const request = vi.fn(async (_route: string, args: { issue_number: number }) => ({
+      data: {
+        id: 100 + args.issue_number - 10,
+        number: args.issue_number,
+        body: bodies[args.issue_number - 10],
+        user: { id: 1 },
+      },
+    }));
+    const invalid = {
+      id: 999,
+      body: "not trusted",
+      issue_url: issueUrl,
+      html_url: `https://github.com/${repository}/pull/999#issuecomment-999`,
+      created_at: new Date(current + 1).toISOString(),
+      updated_at: new Date(current + 1).toISOString(),
+      user: { id: 2, login: "outsider" },
+    };
+    const list = vi.fn(async (route: string) =>
+      route === "GET /repos/{owner}/{repo}/issues/comments" ? [invalid] : [],
+    );
+    try {
+      await expect(
+        main(env, async (_env, _runner, extension) => {
+          if (!extension.extendPort) throw Error("missing production extension");
+          const port = (await extension.extendPort({
+            port: {},
+            evidence,
+            save: vi.fn(),
+            call: vi.fn(async () => ({ run: { state: "active" } })),
+            request,
+            list,
+            retireClient: vi.fn(),
+          })) as Pick<ConcurrencyPort, "pollPair">;
+          await port.pollPair("both-started", () => false);
+        }),
+      ).rejects.toThrow(/comment belongs to another repository|comment issue URL is malformed/);
     } finally {
       now.mockRestore();
     }

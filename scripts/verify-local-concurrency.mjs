@@ -64,6 +64,56 @@ const endNames = new Set([
 ]);
 
 export function concurrencyReceiptProgress(phase, pair) {
+  const hasChangedReceiptBoundary = pair.some((observation) =>
+    Object.hasOwn(observation, "changedReceipts"),
+  );
+  if (hasChangedReceiptBoundary) {
+    const signalEvents = (observation) =>
+      eventsOf({
+        receipts: [...observation.changedReceipts, ...observation.pendingReceipts],
+      });
+    if (
+      pair.some(
+        (observation) =>
+          observation.topologyPending ||
+          observation.terminalStatusPending ||
+          signalEvents(observation).some((event) =>
+            [
+              "GraphCompiled",
+              "GraphProjected",
+              "FactoryRunCompleted",
+              "FactoryRunCancelled",
+              "FactoryRunEscalated",
+            ].includes(event.event),
+          ),
+      )
+    )
+      return true;
+    const relevant =
+      phase === "both-started"
+        ? pair.some((observation) =>
+            signalEvents(observation).some((event) => event.event === "ControllerObserved"),
+          )
+        : phase === "refill"
+          ? pair.some((observation) =>
+              signalEvents(observation).some(
+                (event) => event.event === "AttemptStarted" || endNames.has(event.event),
+              ),
+            )
+          : phase === "scoped-pause"
+            ? signalEvents(pair[1]).some((event) => event.event === "RunPauseAcknowledged")
+            : phase === "peer-completed"
+              ? signalEvents(pair[0]).some((event) => event.event === "FactoryRunCompleted")
+              : phase === "completed"
+                ? pair.some((observation) =>
+                    signalEvents(observation).some(
+                      (event) => event.event === "FactoryRunCompleted",
+                    ),
+                  )
+                : undefined;
+    if (relevant === undefined) throw Error(`unsupported concurrency observation phase: ${phase}`);
+    if (!relevant) return false;
+  }
   if (phase === "both-started")
     return pair.every((observation) =>
       eventsOf(observation).some((event) => event.event === "ControllerObserved"),
@@ -793,43 +843,101 @@ export async function main(env = process.env, run = checkpointMain) {
           unchangedIncrementalListings: 0,
         };
         const commentIssue = (comment) => {
-          const prefix = `https://github.com/${authority.repository}/issues/`;
-          assert.ok(comment.html_url.startsWith(prefix), "comment belongs to another repository");
-          const number = Number(comment.html_url.slice(prefix.length).split("#", 1)[0]);
+          const prefix = `https://api.github.com/repos/${authority.repository}/issues/`;
+          assert.equal(typeof comment.issue_url, "string", "canonical comment issue URL missing");
+          assert.ok(comment.issue_url.startsWith(prefix), "comment belongs to another repository");
+          const encoded = comment.issue_url.slice(prefix.length);
+          assert.match(encoded, /^[1-9][0-9]*$/, "comment issue URL is malformed");
+          const number = Number(encoded);
           assert.ok(Number.isSafeInteger(number) && number > 0, "comment issue unavailable");
+          assert.ok(
+            ["issues", "pull"].some(
+              (kind) =>
+                comment.html_url ===
+                `https://github.com/${authority.repository}/${kind}/${number}#issuecomment-${comment.id}`,
+            ),
+            "comment HTML URL does not match its canonical issue target",
+          );
           return number;
         };
         const rememberComments = (comments) => {
           const changed = new Set();
+          const seen = new Map();
           for (const comment of comments) {
             assert.ok(Number.isSafeInteger(comment.id) && comment.id > 0);
+            const issueNumber = commentIssue(comment);
             const updated = Date.parse(comment.updated_at ?? comment.created_at);
             assert.ok(Number.isFinite(updated), "comment update time unavailable");
             commentCursor = Math.max(commentCursor, updated);
             const version = hash({
               body: comment.body,
               htmlUrl: comment.html_url,
+              issueUrl: comment.issue_url,
+              createdAt: comment.created_at,
               updatedAt: comment.updated_at,
               userId: comment.user?.id,
+              userLogin: comment.user?.login,
             });
-            if (commentCache.get(comment.id)?.version !== version)
-              changed.add(commentIssue(comment));
-            commentCache.set(comment.id, { comment, version });
+            const duplicate = seen.get(comment.id);
+            assert.ok(
+              !duplicate || duplicate === version,
+              "conflicting duplicate comment version in one listing",
+            );
+            seen.set(comment.id, version);
+            if (commentCache.get(comment.id)?.version !== version) changed.add(comment.id);
+            commentCache.set(comment.id, { comment, version, issueNumber });
           }
           return changed;
         };
-        const hintedObservation = (record) => {
+        const receiptKey = (receipt) => `${receipt.commentId}:${hash(receipt.event)}`;
+        const hintedObservation = (record, changedComments) => {
           assert.ok(record.latestFreshObservation, "fresh Objective baseline missing");
           const issueNumbers = new Set([
             record.objective.number,
             ...record.latestFreshObservation.children.map((child) => child.number),
           ]);
           const comments = [...commentCache.values()]
-            .map((entry) => entry.comment)
-            .filter((comment) => issueNumbers.has(commentIssue(comment)));
+            .filter((entry) => issueNumbers.has(entry.issueNumber))
+            .map((entry) => entry.comment);
+          const receipts = authenticatedFaultEvents(
+            comments,
+            evidence.actor,
+            record.objective.number,
+          );
+          const changedReceipts = authenticatedFaultEvents(
+            comments.filter((comment) => changedComments.has(comment.id)),
+            evidence.actor,
+            record.objective.number,
+          );
+          const freshKeys = new Set(record.latestFreshObservation.receipts.map(receiptKey));
+          const pendingReceipts = receipts.filter((receipt) => !freshKeys.has(receiptKey(receipt)));
+          const graph = [...eventsOf({ receipts })]
+            .reverse()
+            .find((event) => ["GraphProjected", "GraphCompiled"].includes(event.event));
+          if (graph)
+            assert.ok(
+              Number.isSafeInteger(graph.graphSize) && graph.graphSize > 0 && graph.graphSize <= 3,
+              "topology receipt has invalid graph size",
+            );
+          const topologyPending = Boolean(
+            graph && record.latestFreshObservation.children.length !== graph.graphSize,
+          );
+          const terminalStates = new Map([
+            ["FactoryRunCompleted", "completed"],
+            ["FactoryRunCancelled", "cancelled"],
+            ["FactoryRunEscalated", "escalated"],
+          ]);
+          const terminalStatusPending = eventsOf({ receipts }).some((event) => {
+            const expected = terminalStates.get(event.event);
+            return expected && record.latestFreshObservation.status.run.state !== expected;
+          });
           return {
             ...record.latestFreshObservation,
-            receipts: authenticatedFaultEvents(comments, evidence.actor, record.objective.number),
+            receipts,
+            changedReceipts,
+            pendingReceipts,
+            topologyPending,
+            terminalStatusPending,
           };
         };
         const readIncrementalComments = async () => {
@@ -1167,8 +1275,10 @@ export async function main(env = process.env, run = checkpointMain) {
                 "actual refill timing not observed",
               );
               await wait(checkpointTimeout(deadline(), 15000));
-              await readIncrementalComments();
-              const hinted = evidence.objectives.map(hintedObservation);
+              const changedComments = await readIncrementalComments();
+              const hinted = evidence.objectives.map((record) =>
+                hintedObservation(record, changedComments),
+              );
               if (!concurrencyReceiptProgress(phase, hinted) && !adverseProgress(hinted)) continue;
               // Incremental comments are wake hints only. Every acceptance, terminal refusal and
               // subsequent action is based on a fresh complete authenticated observation pair.

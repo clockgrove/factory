@@ -299,14 +299,16 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
     mutationClass: MutationClass = "normal",
     operationName = `${mutationClass}-mutation`,
   ): Promise<T> {
-    // Capture before all awaits: a queued old write cannot inherit a replacement
-    // LeaseController merely because the owning Supervisor changed its field.
-    const configuredFence = mutating ? this.#captureMutationFence?.(mutationClass) : undefined;
-    const scopedFence = mutating ? this.#scopedMutationFence.getStore() : undefined;
-    // A shared transaction binds its immutable owner explicitly; checking the
-    // configured Objective again would duplicate the same remote lease read.
-    const fence = scopedFence ?? configuredFence;
-    const dispatch = () => this.#dispatch(operation, mutating, mutationClass, fence);
+    const dispatch = () => {
+      // This callback runs synchronously inside the observation, before any
+      // queue await. Even a rejected capture is therefore measured.
+      const scopedFence = mutating ? this.#scopedMutationFence.getStore() : undefined;
+      // Shared transactions bind an immutable owner; do not capture or recheck
+      // a second, configured Objective generation for the same operation.
+      const fence =
+        scopedFence ?? (mutating ? this.#captureMutationFence?.(mutationClass) : undefined);
+      return this.#dispatch(operation, mutating, mutationClass, fence);
+    };
     if (!mutating) return dispatch();
     return observeMutationOperation(
       operationName,

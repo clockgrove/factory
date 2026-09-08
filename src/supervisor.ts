@@ -8537,10 +8537,11 @@ export class FactorySupervisor {
           )
         : [target];
     try {
-      const integrationFence = await this.#lease.use(async (lease) => {
-        const expected = lease;
-        return () => this.#leases.assertGeneration(expected, "integration");
-      });
+      const controller = this.#lease;
+      const capturedOwner = await controller.use(async (lease) => ({
+        epoch: lease.epoch,
+        fence: controller.captureMutationFence(),
+      }));
       return await withIntegrationAdmission(
         this.#store,
         {
@@ -8548,7 +8549,7 @@ export class FactorySupervisor {
           branch: this.#baseBranch,
           objective: this.#run.objective,
           runId: this.#run.runId,
-          epoch: await this.#lease.use(async (lease) => lease.epoch),
+          epoch: capturedOwner.epoch,
           pullRequest: target.pull.number,
           headSha: target.pull.commitSha,
           baseSha: integratingMembers[0]!.receipt.baseSha,
@@ -8559,7 +8560,7 @@ export class FactorySupervisor {
             outputTreeSha: member.pull.exactHeadValidation.outputTreeSha,
           })),
         },
-        integrationFence,
+        () => capturedOwner.fence(0),
         async (admission) => {
           let result = await this.#serializeIntegration(async () => {
             if (
@@ -12463,10 +12464,11 @@ export class FactorySupervisor {
           },
         );
         if (observedReadiness.state !== "ready") return observedReadiness;
-        const integrationFence = await this.#lease.use(async (lease) => {
-          const expected = lease;
-          return () => this.#leases.assertGeneration(expected, "integration");
-        });
+        const controller = this.#lease;
+        const capturedOwner = await controller.use(async (lease) => ({
+          epoch: lease.epoch,
+          fence: controller.captureMutationFence(),
+        }));
         return withIntegrationAdmission(
           this.#store,
           {
@@ -12474,14 +12476,14 @@ export class FactorySupervisor {
             branch: this.#baseBranch,
             objective: this.#run.objective,
             runId: this.#run.runId,
-            epoch: await this.#lease.use(async (lease) => lease.epoch),
+            epoch: capturedOwner.epoch,
             pullRequest: pull.number,
             headSha: deliveryHeadSha ?? pull.commitSha,
             baseSha: validatedBase,
             outputTreeSha:
               candidate?.validation.outputTreeSha ?? pull.exactHeadValidation.outputTreeSha,
           },
-          integrationFence,
+          () => capturedOwner.fence(0),
           async (admission) => {
             if (candidate) {
               const observed = await this.#store.readPullRequest(pull.number);

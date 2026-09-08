@@ -300,6 +300,19 @@ describe("Director lease", () => {
     await expect(queuedFence(45_000)).resolves.toBeUndefined();
   });
 
+  it("does not dispatch a captured shared transaction after its controller is retired", async () => {
+    const store = new MemoryStore();
+    const manager = new LeaseManager({ store, durationMs: 60_000 });
+    const acquired = await manager.acquire(identity, await store.readCommit(BASE_SHA));
+    const controller = new LeaseController(manager, acquired, { take: () => 2 });
+    const queuedFence = controller.captureMutationFence();
+    const failure = new Error("renewal failed; controller retired");
+    controller.fail(failure);
+    store.readRefCalls = 0;
+    await expect(queuedFence(1_000)).rejects.toBe(failure);
+    expect(store.readRefCalls).toBe(0);
+  });
+
   it("rechecks the lease before every admitted mutation", async () => {
     const store = new MemoryStore();
     const manager = new LeaseManager({ store, durationMs: 7 * 86_400_000 });

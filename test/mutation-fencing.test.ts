@@ -35,6 +35,25 @@ const write = (store: GitHubControlStore) =>
     message: "synthetic Objective receipt",
   });
 
+it("records an already-retired Objective before queueing without any remote read or write", async () => {
+  const store = new GitHubControlStore({
+    token: "retired-objective-fixture",
+    owner: "fixture",
+    repo: "project",
+    mutationScheduler: scheduler(),
+    captureMutationFence: () => {
+      throw new Error("retired Objective");
+    },
+    requestFetch: async () => {
+      throw new Error("transport must not run");
+    },
+  });
+  await expect(write(store)).rejects.toThrow("retired Objective");
+  expect(store.mutationOperationTelemetry().records).toEqual([
+    expect.objectContaining({ readRequests: 0, mutationRequests: 0, outcome: "failed" }),
+  ]);
+});
+
 it("captures Objective authority before quota queueing and rejects stale queued writes", async () => {
   const mutations = scheduler();
   const blocker = await mutations.acquire();

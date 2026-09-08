@@ -151,11 +151,13 @@ runner.
 
 Prepare each case in a fresh disposable private repository/namespace. The offline
 `createLargeFileFixture` export in `scripts/qualification-large-files.mjs` accepts an owned `parent`
-directory and `namespace`. To extend an existing disposable repository, also supply its local
-`sourceRepository` and exact current default-branch `baseSha` together. It creates a private
-`root/fixture.json`, a fresh `repository`, an exact child baseline commit, and two verified synthetic
-objects in that repository's standard LFS cache. It does not fetch, publish, install LFS or invoke a
-model. For example, from the committed Factory source:
+directory and `namespace`. Its standalone mode supports fixture unit tests, but an installed
+version-2 scenario also requires a local `sourceRepository` and its exact current default-branch
+`baseSha`. The runner verifies that source parent and its committed Vitest npm recipe before creating
+an Objective. The generator creates a private `root/fixture.json`, a fresh `repository`, an exact
+child baseline commit, and two verified synthetic objects in that repository's standard LFS cache.
+It does not fetch, publish, install LFS or invoke a model. For example, from the committed Factory
+source:
 
 ```bash
 node --input-type=module -e '

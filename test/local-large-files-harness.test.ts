@@ -1,7 +1,9 @@
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { parseRunPolicy } from "../src/protocol/policy.js";
 import {
@@ -24,6 +26,11 @@ import {
 } from "../scripts/qualification-large-files.mjs";
 
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
+const sourceRepository = fileURLToPath(new URL("..", import.meta.url));
+const sourceBaseSha = execFileSync("/usr/bin/git", ["rev-parse", "HEAD"], {
+  cwd: sourceRepository,
+  encoding: "utf8",
+}).trim();
 const repository = "example/disposable",
   checkout = "/home/example/disposable";
 const unit = `clockgrove-factory-${hash(`${repository}\0${checkout}`).slice(0, 16)}.service`;
@@ -52,6 +59,14 @@ const original = {
 const replacement = { ...original, pid: 124, startTicks: "457", invocationId: "c".repeat(32) };
 const baseSha = "d".repeat(40),
   policyDigest = "e".repeat(64);
+function fixture(parent: string) {
+  return createLargeFileFixture({
+    parent,
+    namespace: authority.namespace,
+    sourceRepository,
+    baseSha: sourceBaseSha,
+  });
+}
 function scenario() {
   const common = {
     repository,
@@ -219,8 +234,8 @@ describe("installed large-file lifecycle authority", () => {
   it("assembles ports before preflight has discovered a base or created an Objective", async () => {
     const parent = mkdtempSync(join(tmpdir(), "factory-large-file-port-test-"));
     try {
-      const fixture = createLargeFileFixture({ parent, namespace: authority.namespace });
-      const path = join(fixture.root, "fixture.json");
+      const prepared = fixture(parent);
+      const path = join(prepared.root, "fixture.json");
       const extension = largeFileExtension({
         ...authority,
         largeFile: {
@@ -243,20 +258,30 @@ describe("installed large-file lifecycle authority", () => {
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
   it("grounds every generated artifact scenario in the matching Vitest fixture recipe", () => {
     const parent = mkdtempSync(join(tmpdir(), "factory-large-file-objective-test-"));
     try {
-      const fixture = createLargeFileFixture({ parent, namespace: authority.namespace });
+      const fixture = createLargeFileFixture({
+        parent,
+        namespace: authority.namespace,
+        sourceRepository,
+        baseSha: sourceBaseSha,
+      });
       const descriptor = join(fixture.root, "fixture.json");
       const packageJson = JSON.parse(
-        readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+        execFileSync("/usr/bin/git", ["cat-file", "blob", `${fixture.baseSha}:package.json`], {
+          cwd: fixture.repository,
+          encoding: "utf8",
+        }),
       );
       const repositoryFacts = {
         files: [{ path: "package.json" }, ...fixture.baseline.map(({ path }) => ({ path }))],
         scripts: packageJson.scripts,
       };
       expect(fixture.version).toBe(LARGE_FILE_RECIPE_VERSION);
+      expect(fixture.sourceBaseSha).toBe(sourceBaseSha);
+      expect(packageJson.scripts.test).toBe("vitest run");
       const fixtureTest = readFileSync(join(fixture.repository, fixture.paths.test), "utf8");
       expect(fixtureTest).toContain('from "vitest"');
       expect(fixtureTest).not.toContain('from "node:test"');
@@ -286,6 +311,26 @@ describe("installed large-file lifecycle authority", () => {
         expect(body).toContain(LARGE_FILE_VALIDATION_COMMAND);
         expect(body).not.toContain("node --test");
       }
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  }, 30_000);
+  it("rejects a standalone fixture before authoring an ungrounded Objective", () => {
+    const parent = mkdtempSync(join(tmpdir(), "factory-large-file-standalone-test-"));
+    try {
+      const standalone = createLargeFileFixture({ parent, namespace: authority.namespace });
+      const descriptor = join(standalone.root, "fixture.json");
+      const standaloneAuthority = {
+        ...authority,
+        largeFile: {
+          ...authority.largeFile,
+          fixture: descriptor,
+          fixtureDigest: hash(readFileSync(descriptor, "utf8")),
+        },
+      };
+      expect(() =>
+        largeFileExtension(standaloneAuthority).objectiveBody(standaloneAuthority),
+      ).toThrow();
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }

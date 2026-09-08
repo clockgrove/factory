@@ -354,6 +354,8 @@ function checkedFixture(authority) {
   assert.deepEqual(fixture.paths, largeFilePaths(authority.namespace));
   assert.match(fixture.baseSha, /^[a-f0-9]{40}$/);
   assert.match(fixture.baseTreeSha, /^[a-f0-9]{40}$/);
+  assert.match(fixture.sourceBaseSha, /^[a-f0-9]{40}$/);
+  assert.match(fixture.sourceTreeSha, /^[a-f0-9]{40}$/);
   assert.equal(fixture.root, dirname(authority.largeFile.fixture));
   assert.equal(realpathSync(fixture.root), fixture.root);
   assert.equal(realpathSync(fixture.repository), fixture.repository);
@@ -390,6 +392,22 @@ function verifyBaseline({ authority, evidence, command }) {
   assert.equal(
     command("git", ["rev-parse", `${fixture.baseSha}^{tree}`], authority.checkout),
     fixture.baseTreeSha,
+  );
+  assert.equal(
+    command("git", ["rev-parse", `${fixture.baseSha}^`], authority.checkout),
+    fixture.sourceBaseSha,
+  );
+  assert.equal(
+    command("git", ["rev-parse", `${fixture.sourceBaseSha}^{tree}`], authority.checkout),
+    fixture.sourceTreeSha,
+  );
+  const packageJson = JSON.parse(
+    command("git", ["cat-file", "blob", `${fixture.baseSha}:package.json`], authority.checkout),
+  );
+  assert.equal(
+    packageJson.scripts?.test,
+    "vitest run",
+    "version-2 large-file fixture requires the committed Vitest npm test recipe",
   );
   for (const entry of fixture.baseline) {
     assert.ok(entry.path.startsWith(`${fixture.paths.prefix}/`));

@@ -6382,7 +6382,10 @@ export class FactorySupervisor {
           // cleanup, but never turn a failed fenced receipt into permission
           // to finish or replace this attempt.
           cancelledUsageWriteFailure = {
-            error: new CancellationAccountingPublicationError(usageError),
+            error:
+              usageError instanceof LeaseLostError || usageError instanceof PlatformUnavailableError
+                ? usageError
+                : new CancellationAccountingPublicationError(usageError),
           };
         }
       }

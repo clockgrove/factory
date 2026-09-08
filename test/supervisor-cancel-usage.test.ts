@@ -172,6 +172,8 @@ describe("Supervisor cancellation model usage", () => {
       const shutdown = new AbortController();
       let cancelled = false;
       let receiptWriteAttempts = 0;
+      const usageFenceFailure =
+        failure === "lease" ? new LeaseLostError("cancellation fixture lease lost") : undefined;
       const f = await providerSupervisorFixture("daytona-burst", {
         localOnly: true,
         controllerActivation,
@@ -189,9 +191,7 @@ describe("Supervisor cancellation model usage", () => {
             await backend.cancel(handle);
             cancelled = true;
             if (failure === "lease")
-              vi.mocked(LeaseManager.prototype.assertCurrent).mockRejectedValue(
-                new LeaseLostError("cancellation fixture lease lost"),
-              );
+              vi.mocked(LeaseManager.prototype.assertCurrent).mockRejectedValue(usageFenceFailure);
           },
         }),
       });
@@ -225,6 +225,8 @@ describe("Supervisor cancellation model usage", () => {
             message: "cancellation fixture receipt unavailable",
           });
           expect(receiptWriteAttempts).toBe(1);
+        } else {
+          expect(await run.catch((observed: unknown) => observed)).toBe(usageFenceFailure);
         }
         expect(
           f

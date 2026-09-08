@@ -1266,6 +1266,11 @@ export class FactorySupervisor {
     }
   }
 
+  /** Live process-local evidence only; never attributed to a historical run. */
+  mutationOperationTelemetry() {
+    return this.#store.mutationOperationTelemetry();
+  }
+
   #captureMutationFence(): (waitedMs: number) => Promise<void> {
     if (!this.#lease) throw new LeaseLostError("Objective mutation has no acquired lease");
     return this.#lease.captureMutationFence();
@@ -3338,6 +3343,8 @@ export class FactorySupervisor {
               concurrency: this.#concurrency,
               mutationScheduler: this.#mutations,
               captureMutationFence: () => this.#captureMutationFence(),
+              mutationScope: `objective:${this.#options.objective}:managed-dispatch`,
+              onMutationOperation: this.#store.recordMutationOperation,
             })
           : undefined;
         this.#registry.register(
@@ -4032,6 +4039,8 @@ export class FactorySupervisor {
           concurrency: this.#concurrency,
           mutationScheduler: this.#mutations,
           captureMutationFence: () => this.#captureMutationFence(),
+          mutationScope: `objective:${this.#options.objective}:graph`,
+          onMutationOperation: this.#store.recordMutationOperation,
           onThrottle: this.#notify,
         });
         let appliedWorkItems: Map<string, { id: string; number: number }> | null = null;

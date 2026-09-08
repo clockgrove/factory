@@ -15,7 +15,7 @@ not evidence of installed throughput or a substitute for live qualification.
 | Work Item assignment across Objectives | Existing per-Work-Item claim ref CAS; no repository exclusion. |
 | Default-branch integration | Short destination-branch claim, expected validated base/head/tree, current rules and GitHub merge semantics. Independent execution and publication continue. |
 | Global worker, backend, path and resource reservations | Shared capacity ledger CAS; retry a losing reservation update. No lock is held for worker execution or ordinary GitHub mutations. |
-| Service controller lease acquisition, renewal and retirement | Retained for discovery leader election. It does not fence Objective data. |
+| Service controller lease acquisition, renewal and retirement | Retained for discovery leader election. Election loss retires discovery/configuration, not otherwise-current Objective execution or data. |
 | First import of historical capacity / explicit service ceiling changes | Short scheduler-ownership fence around genuine shared-state initialization or configuration. Existing resource liabilities are imported, never freed merely by timeout. |
 | RecoveryCoordinator legacy optional repository guard | Compatibility-only explicit caller contract. Production adoption uses Objective ownership at the queued mutation boundary. |
 
@@ -23,6 +23,14 @@ not evidence of installed throughput or a substitute for live qualification.
 Quota admission, the bounded HTTP concurrency limiter and GitHub's primary/secondary backoff also
 remain. None grants data ownership. Quota admission releases when transport begins rather than
 waiting for an unrelated request's HTTP response.
+
+Repository-election retirement and execution stop are separate signals. A proven election loss
+prevents fresh discovery, activation/recovery dispatch, leader observations and explicit shared
+configuration, then awaits the existing Supervisor cohort without lending it the old controller
+generation. Those Supervisors continue only through their own current Objective writer epoch. An
+explicit shutdown or cancellation still reaches its intended execution, and credential, account,
+quota, circuit or other platform-safety failures preserve their existing stop/backoff propagation.
+Neither election expiry nor takeover releases a shared-capacity claim or proves a producer stopped.
 
 ## Writes and delayed actors
 

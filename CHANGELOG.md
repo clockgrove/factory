@@ -45,6 +45,10 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- Repository-controller election loss now retires discovery, activation/recovery dispatch and
+  election-scoped configuration without aborting otherwise-current Objective execution. Retired
+  controllers await Supervisor completion and cleanup under the Objective's own writer epoch;
+  explicit shutdown and platform safety stops retain their existing propagation. ([#225](https://github.com/clockgrove/factory/issues/225))
 - Installed large-file qualification Objectives now select the repository-observed `npm test`
   recipe, and fresh version-2 fixtures provide a matching Vitest test instead of an incompatible
   `node:test` suite. This makes the scenarios compile-ready without weakening command grounding or

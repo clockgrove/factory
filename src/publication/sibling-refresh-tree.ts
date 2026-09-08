@@ -14,7 +14,7 @@ import { assertNoSecretMaterial, gitSha } from "../protocol/limits.js";
 import type { WorkerPacket } from "../protocol/worker-packet.js";
 import { runContainedProcess, sanitizedWorkerEnvironment } from "../runtime/process-group.js";
 import { inspectPatchManifest } from "../runtime/artifact-patch.js";
-import type { PublicationStore } from "./publisher.js";
+import { assertPublicationMutationAuthorized, type PublicationStore } from "./publisher.js";
 
 // GitHub's ordinary Git-blob read contract is bounded at 100 MB. Large assets
 // outside that contract require their repository's separate asset/LFS policy.
@@ -66,7 +66,10 @@ export async function prepareSiblingRefreshTree(input: {
   repository: string;
   artifact: NormalizedArtifact;
   packet: WorkerPacket;
-  store: Pick<PublicationStore, "readCommit" | "createBlob" | "createTree">;
+  store: Pick<
+    PublicationStore,
+    "objectiveMutationFenceAtDispatch" | "readCommit" | "createBlob" | "createTree"
+  >;
   assertCurrent: () => Promise<void>;
   /** Recovery can bind an already validated tree before any immutable upload. */
   expectedOutputTreeSha?: string;
@@ -220,7 +223,7 @@ export async function prepareSiblingRefreshTree(input: {
           .digest("hex");
         if (actual !== blobOid) throw new Error("raw blob object identity changed");
         assertNoSecretMaterial(content.toString("latin1"), "sibling publication content");
-        await input.assertCurrent();
+        await assertPublicationMutationAuthorized(input.store, input.assertCurrent);
         remaining();
         if ((await input.store.createBlob(content)) !== blobOid)
           throw new Error("uploaded blob identity differs from prepared raw object");
@@ -233,7 +236,7 @@ export async function prepareSiblingRefreshTree(input: {
         sha: blobOid,
       });
     }
-    await input.assertCurrent();
+    await assertPublicationMutationAuthorized(input.store, input.assertCurrent);
     remaining();
     const uploadedTree = await input.store.createTree({ baseTreeOid: base.treeOid, entries });
     if (uploadedTree !== outputTreeSha) throw new Error("uploaded tree differs from prepared tree");

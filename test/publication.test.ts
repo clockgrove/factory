@@ -523,9 +523,10 @@ describe("host-owned publication", () => {
     await cleanupLocalWorktree(worker);
     const validation = await validateArtifactClean({ repository, artifact, packet });
     const store = new GitObjectStore(repository, base.oid);
+    const assertLease = vi.fn(async () => {});
     const args = {
       store,
-      assertLease: async () => {},
+      assertLease,
       base,
       validation,
       artifact,
@@ -537,10 +538,25 @@ describe("host-owned publication", () => {
     };
     const first = await publishValidated(args);
     const second = await publishValidated(args);
+    // Standalone stores retain a preflight before each of four Git-object
+    // writes, plus the phase assertion before PR discovery. An idempotent
+    // replay performs only that final phase assertion.
+    expect(assertLease).toHaveBeenCalledTimes(6);
     expect(second).toEqual(first);
     expect(git(repository, ["rev-parse", `${first.commitSha}^{tree}`])).toBe(
       validation.evidence.outputTreeSha,
     );
+    const fencedStore = new GitObjectStore(repository, base.oid);
+    Object.defineProperty(fencedStore, "objectiveMutationFenceAtDispatch", { value: true });
+    const transportFencedAssert = vi.fn(async () => {});
+    await publishValidated({
+      ...args,
+      store: fencedStore,
+      assertLease: transportFencedAssert,
+    });
+    // The concrete transport owns the four per-write fences; the meaningful
+    // publication-phase assertion before PR discovery remains.
+    expect(transportFencedAssert).toHaveBeenCalledTimes(1);
     await discardValidationResult(validation);
     await rm(repository, { recursive: true, force: true });
   });

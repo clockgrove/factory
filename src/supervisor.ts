@@ -224,6 +224,7 @@ import type {
   ReviewResult,
 } from "./management/backend.js";
 import {
+  assertPublicationMutationAuthorized,
   integrationReadiness,
   publicationBranch,
   publishValidated,
@@ -13361,13 +13362,17 @@ export class FactorySupervisor {
           assertCurrent: () => this.#lease.assertGeneration("publication"),
         });
         const message = `${item.title}\n\nCloses #${item.number}\nFactory-Artifact: ${artifact.digest}\nFactory-Validation: ${validation.evidenceDigest}`;
-        await this.#lease.assertGeneration("publication");
+        await assertPublicationMutationAuthorized(this.#store, () =>
+          this.#lease.assertGeneration("publication"),
+        );
         const plannedHead = await this.#store.createCommit({
           treeOid,
           parentOids: [artifact.baseSha],
           message,
         });
-        await this.#lease.assertGeneration("publication");
+        await assertPublicationMutationAuthorized(this.#store, () =>
+          this.#lease.assertGeneration("publication"),
+        );
         try {
           await this.#store.createRef(`refs/heads/${branch}`, plannedHead);
         } catch (error) {

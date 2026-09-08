@@ -152,8 +152,9 @@ async function fixture() {
     authorized = true;
   });
   const writes: string[] = [];
+  let dispatchFenced = false;
   const consumeFence = (kind: string) => {
-    expect(authorized, `${kind} must follow a fresh fence`).toBe(true);
+    if (!dispatchFenced) expect(authorized, `${kind} must follow a fresh fence`).toBe(true);
     authorized = false;
     writes.push(kind);
   };
@@ -215,6 +216,10 @@ async function fixture() {
     store,
     assertCurrent,
     writes,
+    enableDispatchFence() {
+      dispatchFenced = true;
+      Object.defineProperty(store, "objectiveMutationFenceAtDispatch", { value: true });
+    },
   };
 }
 
@@ -258,6 +263,16 @@ describe("object-only sibling refresh tree preparation", () => {
     expect(entries).not.toContain("delete.txt");
     expect(entries).not.toContain("caller.txt");
     expect(f.writes.at(-1)).toBe("tree");
+  });
+
+  it("delegates upload fences to a concrete dispatch-fenced transport", async () => {
+    const f = await fixture();
+    f.enableDispatchFence();
+    await expect(prepareSiblingRefreshTree(f)).resolves.toBe(f.expectedTree);
+    expect(f.writes.at(-1)).toBe("tree");
+    // Entry admission remains explicit; per-blob and tree preflights are
+    // supplied by the concrete mutation transport instead.
+    expect(f.assertCurrent).toHaveBeenCalledTimes(1);
   });
 
   it.each(["packet-base", "scope", "manifest", "digest", "remote-base", "validated-tree"] as const)(

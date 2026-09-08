@@ -138,6 +138,10 @@ async function integrationAdmission<T>(
   assertObjective: () => Promise<void>,
   operation: (admission: IntegrationAdmission) => Promise<T>,
 ): Promise<T> {
+  // A concrete store that supplies withMutationFence performs this exact
+  // captured check after queueing and immediately before every mutation. Keep
+  // the explicit checks only for standalone stores without that guarantee.
+  const assertBeforeMutation = store.withMutationFence ? async () => {} : assertObjective;
   identity = identitySchema.parse(identity);
   const ref = integrationAdmissionRef(identity.repository, identity.branch);
   let oid = await store.readRef(ref);
@@ -164,7 +168,7 @@ async function integrationAdmission<T>(
       prior.identity.baseSha === identity.baseSha &&
       prior.identity.outputTreeSha === identity.outputTreeSha &&
       JSON.stringify(prior.identity.members) === JSON.stringify(identity.members);
-    if (recoveringPrepared) await assertObjective();
+    if (recoveringPrepared) await assertBeforeMutation();
     if (
       prior.state !== "released" &&
       !recoveringPrepared &&
@@ -184,13 +188,13 @@ async function integrationAdmission<T>(
     state: "prepared",
   };
   const write = async (next: Record): Promise<void> => {
-    await assertObjective();
+    await assertBeforeMutation();
     const nextOid = await store.createCommit({
       treeOid: base.treeOid,
       parentOids: oid ? [oid] : [identity.baseSha],
       message: `Factory default-branch integration\n\nFactory-Integration: ${Buffer.from(JSON.stringify(next)).toString("base64url")}`,
     });
-    await assertObjective();
+    await assertBeforeMutation();
     const changed = oid
       ? await store.compareAndSwapRef({ ref, beforeOid: oid, afterOid: nextOid })
       : await store.createRef(ref, nextOid);
@@ -208,7 +212,7 @@ async function integrationAdmission<T>(
         // Set before awaiting: an uncertain marker write must never release ownership.
         dispatched = true;
         await write({ ...record, state: "dispatched" });
-        await assertObjective();
+        await assertBeforeMutation();
         if ((await store.readRef(ref)) !== oid)
           throw Error("integration admission lost before dispatch");
       },

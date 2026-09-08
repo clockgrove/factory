@@ -8526,6 +8526,10 @@ export class FactorySupervisor {
           )
         : [target];
     try {
+      const integrationFence = await this.#lease.use(async (lease) => {
+        const expected = lease;
+        return () => this.#leases.assertGeneration(expected, "integration");
+      });
       return await withIntegrationAdmission(
         this.#store,
         {
@@ -8544,10 +8548,9 @@ export class FactorySupervisor {
             outputTreeSha: member.pull.exactHeadValidation.outputTreeSha,
           })),
         },
-        () => this.#lease.assertGeneration("integration"),
+        integrationFence,
         async (admission) => {
           let result = await this.#serializeIntegration(async () => {
-            await this.#lease.assertGeneration("integration");
             if (
               (await this.#store.getBranchHead(this.#baseBranch)).oid !==
               integratingMembers[0]!.receipt.baseSha
@@ -12449,6 +12452,10 @@ export class FactorySupervisor {
           },
         );
         if (observedReadiness.state !== "ready") return observedReadiness;
+        const integrationFence = await this.#lease.use(async (lease) => {
+          const expected = lease;
+          return () => this.#leases.assertGeneration(expected, "integration");
+        });
         return withIntegrationAdmission(
           this.#store,
           {
@@ -12463,7 +12470,7 @@ export class FactorySupervisor {
             outputTreeSha:
               candidate?.validation.outputTreeSha ?? pull.exactHeadValidation.outputTreeSha,
           },
-          () => this.#lease.assertGeneration("integration"),
+          integrationFence,
           async (admission) => {
             if (candidate) {
               const observed = await this.#store.readPullRequest(pull.number);
@@ -12559,7 +12566,6 @@ export class FactorySupervisor {
                 };
               }
             }
-            await this.#lease.assertGeneration("integration");
             await admission.dispatch();
             const mergeSha = await this.#store.mergePullRequest({
               number: pull.number,

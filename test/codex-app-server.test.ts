@@ -769,11 +769,15 @@ describe("Codex App Server local backend", () => {
         return true;
       },
     };
+    const assertCurrent = async () => {
+      if (!current) throw new Error("lease lost");
+      fenced = true;
+    };
     const leases = {
-      async assertCurrent() {
-        if (!current) throw new Error("lease lost");
-        fenced = true;
-      },
+      assertCurrent,
+      // This standalone fake has no dispatch-fenced GitHub transport, so the
+      // control helper must retain the same live assertion for each write.
+      assertMutationAuthorized: assertCurrent,
     } as unknown as LeaseManager;
     const manager = new AppServerSessionManager(store, leases);
     const reservation: AttemptReservation = {

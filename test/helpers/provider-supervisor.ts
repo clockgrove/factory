@@ -153,13 +153,24 @@ export async function providerSupervisorFixture(
   });
   const pd = policyDigest(policy);
   const refs = new Map<string, string>();
-  const readCommit = async (oid: string): Promise<GitCommitObject> => ({
-    oid,
-    treeOid: git("rev-parse", `${oid}^{tree}`),
-    parentOids: git("show", "-s", "--format=%P", oid).split(" ").filter(Boolean),
-    message: rawGit(["show", "-s", "--format=%B", oid]),
-    serverTime: new Date(),
-  });
+  const readCommit = async (oid: string): Promise<GitCommitObject> => {
+    // One fresh immutable read, not three subprocesses per ledger observation.
+    // Split only the metadata delimiters so the full message stays unchanged.
+    const output = rawGit(["show", "-s", "--format=%T%x00%P%x00%B", oid]);
+    const treeEnd = output.indexOf("\0");
+    const parentsEnd = output.indexOf("\0", treeEnd + 1);
+    if (treeEnd < 0 || parentsEnd < 0) throw new Error("malformed fixture Git commit");
+    return {
+      oid,
+      treeOid: output.slice(0, treeEnd),
+      parentOids: output
+        .slice(treeEnd + 1, parentsEnd)
+        .split(" ")
+        .filter(Boolean),
+      message: output.slice(parentsEnd + 1),
+      serverTime: new Date(),
+    };
+  };
   const storage: CompiledGraphStore = {
     readRef: async (ref) => refs.get(ref) ?? null,
     readCommit,
@@ -465,7 +476,9 @@ export async function providerSupervisorFixture(
   vi.spyOn(LeaseManager.prototype, "acquire").mockImplementation(async (identity) => ({
     ...lease,
     ...identity,
-    ...(faults.controllerActivation ? { epoch: ++leaseGeneration } : {}),
+    // Every acquisition gets a new holder, including foreground restart. Model
+    // the real lease's increasing epoch instead of lending epoch 1 to new owners.
+    epoch: ++leaseGeneration,
   }));
   vi.spyOn(LeaseManager.prototype, "assertCurrent").mockResolvedValue(undefined);
   // This fixture replaces transport writes, so model the dispatch-time authority
@@ -640,6 +653,7 @@ export async function providerSupervisorFixture(
                 parseFactoryEvent({
                   ...usage,
                   event,
+                  writerOperationId: `fixture-completed-prior-validation-${index}`,
                   usageId: "fixture-completed-prior-validation",
                   phase: "validation",
                   amount: policy.maxSandboxMinutes * 60_000,

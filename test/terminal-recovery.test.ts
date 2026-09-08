@@ -9,9 +9,10 @@ import { CodexCliLocalBackend } from "../src/backends/codex-cli-local.js";
 import { CodexSdkLocalBackend } from "../src/backends/codex-sdk-local.js";
 import { GitHubControlStore } from "../src/control/github-store.js";
 import { LeaseManager } from "../src/control/lease.js";
+import { attemptRef } from "../src/control/attempts.js";
 import { LifecycleRecorder } from "../src/control/events.js";
 import { RunManager } from "../src/control/runs.js";
-import { decodeEventComments } from "../src/control/receipts.js";
+import { decodeEventComments, encodeEventTrailer } from "../src/control/receipts.js";
 import {
   implicitRestartBlocker,
   inspectImplicitRestart,
@@ -80,6 +81,26 @@ const graph = () =>
     graphRef: "refs/clockgrove-factory/graphs/objective-7/prior",
     graphBlobSha: "b".repeat(40),
   });
+
+/** The reader enumerates legacy attempts and issue ledgers independently. */
+function mockSurvivingReservation(present: () => boolean): void {
+  const oid = "b".repeat(40);
+  vi.spyOn(GitHubControlStore.prototype, "listRefs").mockImplementation(async (prefix) => {
+    if (prefix === "refs/clockgrove-factory/admission/work-item-") return [];
+    expect(prefix).toBe("refs/clockgrove-factory/attempts/objective-7/");
+    return present() ? [{ ref: attemptRef(7, 8, 1), oid }] : [];
+  });
+  vi.spyOn(GitHubControlStore.prototype, "readCommit").mockImplementation(async (requested) => {
+    expect(requested).toBe(oid);
+    return {
+      oid,
+      treeOid: "d".repeat(40),
+      parentOids: ["a".repeat(40)],
+      message: encodeEventTrailer(attempt()),
+      serverTime: new Date(),
+    };
+  });
+}
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -190,11 +211,9 @@ describe("terminal-run recovery admission", () => {
       });
       vi.spyOn(GitHubControlStore.prototype, "getAuthenticatedLogin").mockResolvedValue("operator");
       vi.spyOn(GitHubControlStore.prototype, "readRepositoryPermission").mockResolvedValue("write");
-      const refs = vi.spyOn(GitHubControlStore.prototype, "listRefs").mockResolvedValue([]);
-      if (change === "reservation")
-        refs
-          .mockResolvedValueOnce([])
-          .mockResolvedValue([{ ref: "reservation", oid: "b".repeat(40) }]);
+      let acquiredLease = false;
+      if (change === "reservation") mockSurvivingReservation(() => acquiredLease);
+      else vi.spyOn(GitHubControlStore.prototype, "listRefs").mockResolvedValue([]);
       vi.spyOn(GitHubControlStore.prototype, "readBranchRules").mockResolvedValue([]);
       vi.spyOn(GitHubControlStore.prototype, "getBranchHead").mockResolvedValue({
         oid: "a".repeat(40),
@@ -209,15 +228,18 @@ describe("terminal-run recovery admission", () => {
       vi.spyOn(LeaseManager.prototype, "read").mockResolvedValue(null);
       const acquire = vi
         .spyOn(LeaseManager.prototype, "acquire")
-        .mockImplementation(async (identity, base, sequence) => ({
-          ...identity,
-          ref: "refs/clockgrove-factory/leases/objective-7",
-          oid: "c".repeat(40),
-          treeOid: base.treeOid,
-          epoch: 2,
-          sequence: sequence ?? 1,
-          expiresAt: new Date(Date.now() + 60_000),
-        }));
+        .mockImplementation(async (identity, base, sequence) => {
+          acquiredLease = true;
+          return {
+            ...identity,
+            ref: "refs/clockgrove-factory/leases/objective-7",
+            oid: "c".repeat(40),
+            treeOid: base.treeOid,
+            epoch: 2,
+            sequence: sequence ?? 1,
+            expiresAt: new Date(Date.now() + 60_000),
+          };
+        });
       const release = vi
         .spyOn(LeaseManager.prototype, "release")
         .mockImplementation(async (lease) => lease);
@@ -630,9 +652,7 @@ describe("terminal-run recovery admission", () => {
         vi.spyOn(GitHubControlStore.prototype, "readRepositoryPermission").mockResolvedValue(
           "write",
         );
-        vi.spyOn(GitHubControlStore.prototype, "listRefs").mockResolvedValue([
-          { ref: "reservation", oid: "b".repeat(40) },
-        ]);
+        mockSurvivingReservation(() => true);
         const lease = vi.spyOn(LeaseManager.prototype, "acquire");
         const start = vi.spyOn(RunManager.prototype, "start");
         const probe = vi.spyOn(CodexCliManagementBackend.prototype, "probe");

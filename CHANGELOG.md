@@ -48,6 +48,11 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- Cancellation preserves a failed known-usage receipt publication after owned cleanup, preventing
+  both normal terminal cancellation and controller lease release from hiding unresolved accounting.
+  Explicitly approved successor policy differences no longer incorrectly block issue admission;
+  exact authority, complete accounting and resource reconciliation remain required.
+  ([#240](https://github.com/clockgrove/factory/issues/240), [#241](https://github.com/clockgrove/factory/issues/241))
 - GitHub writes now classify immutable object preparation separately from authoritative
   publication. Blob, tree, and commit staging retain pacing, quota, cancellation, payload, scope,
   and secret controls without an Objective lease read per object; refs, comments, issues, and pull

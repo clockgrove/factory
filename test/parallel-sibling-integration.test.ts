@@ -35,6 +35,7 @@ import { CodexSdkLocalBackend } from "../src/backends/codex-sdk-local.js";
 import type { ManagementBackend } from "../src/management/backend.js";
 import type { ObjectiveSnapshot, LinkedPullRequest } from "../src/types.js";
 import { PlatformUnavailableError } from "../src/platform.js";
+import { parseIssueAdmissionCommit } from "../src/control/issue-admission.js";
 import {
   integrationAdmissionRef,
   withIntegrationAdmission,
@@ -378,15 +379,27 @@ async function fixture(
         ...fields,
       });
     const reserved = attempt({ event: "AttemptReserved" });
-    const reservationOid = oid();
-    refs.set(attemptRef(7, number, 1), reservationOid);
-    commits.set(reservationOid, {
-      oid: reservationOid,
+    // These pre-existing attempts were admitted by the legacy controller:
+    // retain its original issue ownership for the compatibility import.
+    const ownerOid = await storage.createCommit({
+      treeOid: (await readCommit(baseSha)).treeOid,
+      parentOids: [baseSha],
+      message: `Factory-Repository-Claim: ${Buffer.from(
+        JSON.stringify({
+          objective: 7,
+          workItem: number,
+          runId: reserved.runId,
+          directorEpoch: 1,
+        }),
+      ).toString("base64url")}`,
+    });
+    refs.set(`refs/clockgrove-factory/repository/work-items/work-item-${number}`, ownerOid);
+    const reservationOid = await storage.createCommit({
       treeOid: (await readCommit(baseSha)).treeOid,
       parentOids: [baseSha],
       message: encodeEventTrailer(reserved),
-      serverTime: now,
     });
+    refs.set(attemptRef(7, number, 1), reservationOid);
     const plan = delivery.items.find((entry) => entry.itemId === item.id)!;
     const pull: LinkedPullRequest = {
       id: `PR_${number}`,
@@ -826,11 +839,21 @@ async function fixture(
     },
   );
   vi.spyOn(GitHubControlStore.prototype, "compareAndSwapRef").mockImplementation(async (args) => {
-    if (!args.ref.startsWith("refs/clockgrove-factory/integration-admissions/"))
+    const admissionIssue =
+      /^refs\/clockgrove-factory\/(?:admission\/work-item-|repository\/work-items\/work-item-)([1-9][0-9]*)$/.exec(
+        args.ref,
+      );
+    const ownedAdmission =
+      admissionIssue &&
+      snapshot.workItems.some((item) => item.number === Number(admissionIssue[1]));
+    if (!args.ref.startsWith("refs/clockgrove-factory/integration-admissions/") && !ownedAdmission)
       return refresh(args);
     if (refs.get(args.ref) !== args.beforeOid) return false;
     const claim = await readCommit(args.afterOid);
-    if (claim.parentOids.length !== 1 || claim.parentOids[0] !== args.beforeOid)
+    if (ownedAdmission && args.ref.startsWith("refs/clockgrove-factory/admission/")) {
+      const record = parseIssueAdmissionCommit(claim, Number(admissionIssue![1]));
+      expect(record.priorRevisionOid).toBe(args.beforeOid);
+    } else if (claim.parentOids.length !== 1 || claim.parentOids[0] !== args.beforeOid)
       throw new Error("fixture integration claim must extend its exact observed OID");
     refs.set(args.ref, args.afterOid);
     return true;
@@ -1022,7 +1045,8 @@ async function fixture(
 describe("Supervisor parallel independent sibling integration", () => {
   it("integrates concurrent regular publications through exact refresh and candidate validation", async () => {
     const f = await fixture({ regular: true });
-    expect(await f.run()).toMatchObject({ status: "completed" });
+    const result = await f.run();
+    expect(result, result.reason).toMatchObject({ status: "completed" });
     expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([18, 19]);
     expect(f.refresh).toHaveBeenCalledOnce();
     expect(f.review).toHaveBeenCalledOnce();
@@ -1739,6 +1763,9 @@ describe("Supervisor parallel independent sibling integration", () => {
       expect(f.launch).not.toHaveBeenCalled();
       expect(f.renewLease).toHaveBeenCalled();
     },
+    // Includes real Git ancestry/import work around twelve simulated minutes.
+    // Scheduling bounds remain the explicit read/review/validation assertions above.
+    10_000,
   );
 
   it("observes durable cancellation during preview backoff without another candidate or merge", async () => {

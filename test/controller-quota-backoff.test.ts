@@ -421,6 +421,35 @@ describe("controller quota boundary", () => {
     });
   });
 
+  it("does not let election retirement hide a platform failure from the draining cohort", async () => {
+    ownershipMocks();
+    vi.spyOn(RepositoryLeaseManager.prototype, "renew").mockRejectedValueOnce(
+      new RepositoryLeaseLostError("successor advanced the election lease"),
+    );
+    const shutdown = new AbortController();
+    const logs: string[] = [];
+    let finish!: () => void;
+    const task = runGitHubRepositoryController({
+      ...options(shutdown.signal),
+      onStatus: (message) => logs.push(message),
+      supervisorFactory: () => ({
+        run: async () => {
+          await new Promise<void>((resolve) => {
+            finish = resolve;
+          });
+          throw quota(120_000);
+        },
+      }),
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(480_000);
+    finish();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(logs.join("\n")).toContain("repository controller paused for platform backoff");
+    shutdown.abort();
+    await task;
+  });
+
   it("does not turn an active cleanup failure into a platform retry", async () => {
     const failure = new Error("resource cleanup unverified");
     const controller = new GitHubRepositoryController({

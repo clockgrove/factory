@@ -815,7 +815,12 @@ async function withRepositoryOwnership<T>(
   } finally {
     ownership.abort();
     await renewal;
-    failure = ownershipFailure(failure, renewalFailure);
+    // Election retirement is subordinate to a concrete cohort/discovery
+    // failure observed while that cohort drained. Preserve the platform or
+    // cleanup result so its safety/backoff semantics are not mislabeled as a
+    // generic handoff; a sole election loss remains the terminal result.
+    if (!(renewalFailure instanceof RepositoryLeaseLostError && failure !== undefined))
+      failure = ownershipFailure(failure, renewalFailure);
     if (options.resources.circuitBreaker.isOpen()) {
       failure = ownershipFailure(
         failure,

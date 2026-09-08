@@ -13,7 +13,11 @@ import { GitHubControlStore } from "../src/control/github-store.js";
 import { CompiledGraphManager, type CompiledGraphStore } from "../src/control/graphs.js";
 import { LeaseManager, type GitCommitObject, type LeaseState } from "../src/control/lease.js";
 import { attemptRef } from "../src/control/attempts.js";
-import { decodeEventComments, encodeEventTrailer } from "../src/control/receipts.js";
+import {
+  decodeEventComments,
+  encodeEventTrailer,
+  latestRunReceipts,
+} from "../src/control/receipts.js";
 import { DEFAULT_RUN_POLICY, parseRunPolicy, policyDigest } from "../src/protocol/policy.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
 import { renderWorkPacket, type CompiledObjective } from "../src/graph.js";
@@ -284,7 +288,10 @@ async function fixture(
     sequence: 100,
     expiresAt: new Date(Date.now() + 600_000),
   };
-  const leases = { assertCurrent: async () => {} } as unknown as LeaseManager;
+  const leases = {
+    assertCurrent: async () => {},
+    assertMutationAuthorized: async (lease: LeaseState) => leases.assertCurrent(lease),
+  } as unknown as LeaseManager;
   const graph: CompiledObjective = {
     title: "Parallel siblings",
     workItems: ["a", "b", "c", "d"]
@@ -633,6 +640,8 @@ async function fixture(
     if (!args.ref.startsWith("refs/clockgrove-factory/integration-admissions/"))
       return refresh(args);
     if (refs.get(args.ref) !== args.beforeOid) return false;
+    const claimCommit = await readCommit(args.afterOid);
+    expect(claimCommit.parentOids).toEqual([args.beforeOid]);
     refs.set(args.ref, args.afterOid);
     return true;
   });
@@ -2667,6 +2676,10 @@ describe("Supervisor authenticated successor execution", () => {
       });
       await expect(f.run()).rejects.toBe(unavailable);
       close.mockImplementation(original);
+      const priorWriter = f.snapshot.factoryEvents!.find(
+        (event) => event.event === "ControllerObserved" && event.runId === "successor",
+      );
+      expect(priorWriter?.writerEpoch).toBe(1);
       if (premerged) expect(f.planRecord.plan.items[0]!.action).toBe("integrated");
       // The already-integrated source keeps its original predecessor receipt;
       // a redundant successor outcome is not required for closure authority.
@@ -2705,6 +2718,22 @@ describe("Supervisor authenticated successor execution", () => {
         expect(f.review).toHaveBeenCalledTimes(reviews);
         expect(f.merge).toHaveBeenCalledTimes(merges);
         expect(f.snapshot.workItems.flatMap((item) => item.factoryEvents!)).toEqual(before);
+        const receipts = latestRunReceipts(f.snapshot.factoryEvents!);
+        expect(receipts?.terminal).toMatchObject({ event: "FactoryRunCompleted", writerEpoch: 2 });
+        expect(
+          receipts?.events.some(
+            (event) => event.event === "ControllerObserved" && event.writerEpoch === 2,
+          ),
+        ).toBe(true);
+        const delayedOldTerminal = parseFactoryEvent({
+          ...receipts!.terminal!,
+          writerEpoch: 1,
+          sequence: receipts!.terminal!.sequence + 1,
+          event: "FactoryRunEscalated",
+        });
+        expect(
+          latestRunReceipts([...f.snapshot.factoryEvents!, delayedOldTerminal])?.terminal,
+        ).toEqual(receipts!.terminal);
       } finally {
         vi.useRealTimers();
       }

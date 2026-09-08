@@ -81,10 +81,25 @@ export function deriveV2State(
     if (workItem.blockedBy.some((dependency) => !dependency.closed)) return "blocked";
     return "unstarted";
   }
+  const succeeded = attemptEvents.filter(
+    (event) => event.event === "AttemptSucceeded" && Boolean(event.artifactDigest),
+  );
+  const cancelled = attemptEvents.filter((event) => event.event === "AttemptCancelled");
+  const recoveredCollection = attemptEvents.find(
+    (event) =>
+      event.event === "AttemptCollected" &&
+      event.recoveryEpoch !== undefined &&
+      cancelled.length === 1 &&
+      succeeded.length === 1 &&
+      event.sequence > cancelled[0]!.sequence &&
+      cancelled[0]!.sequence > succeeded[0]!.sequence &&
+      event.artifactDigest === succeeded[0]!.artifactDigest,
+  );
   const terminalFailure = events.some(
     (event) =>
       event.kind === "attempt" &&
-      ["AttemptFailed", "AttemptTimedOut", "AttemptCancelled"].includes(event.event),
+      (["AttemptFailed", "AttemptTimedOut"].includes(event.event) ||
+        (event.event === "AttemptCancelled" && !recoveredCollection)),
   );
   if (terminalFailure) return "failed";
   const validation = [...events].reverse().find((event) => event.kind === "validation");

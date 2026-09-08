@@ -215,9 +215,10 @@ describe("retained validated artifact continuation", () => {
       expect(review).toHaveBeenCalledOnce();
       const unknown = unresolvedModelInvocations(f.events());
       expect(unknown.length).toBeGreaterThan(0);
-      await expect(f.run()).rejects.toThrow(
-        /model invocation consumption is unknown|retained output has later lifecycle evidence/,
-      );
+      await expect(f.run()).resolves.toMatchObject({
+        status: "escalated",
+        reason: expect.stringMatching(/model invocation consumption is unknown/),
+      });
       expect(review).toHaveBeenCalledOnce();
       expect(validation).toHaveBeenCalledOnce();
       expect(unresolvedModelInvocations(f.events())).toEqual(unknown);

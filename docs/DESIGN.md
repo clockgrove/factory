@@ -274,6 +274,22 @@ it. Independent sessions coordinate capacity using a short custom-ref CAS transa
 execution-long lease. One-time import of older resource reservations and explicit scheduler ceiling
 changes are genuine shared-state boundaries. See [the locking audit](OBJECTIVE-AUTHORITY.md).
 
+The shared-capacity v2 snapshot retains every active or unresolved claim plus a bounded recent
+release journal. At 3,072 journal entries, a fenced capacity mutation moves explicit releases into
+an exact hash-sharded Git-tree tombstone set and atomically publishes that tree with the compacted
+snapshot through the existing capacity-ref CAS. The immutable marker path binds the complete owner
+and reservation digests; replay of that identity remains released, while changed resources fail
+closed. Compaction never examines lease expiry, process presence, or snapshot absence, and it never
+removes an active claim. A tombstone lookup takes seven shallow tree reads regardless of retained
+history; a compaction publishes one tree, one commit and one CAS update, plus one marker-blob upload
+for the first compaction. At 3,840 active claims the retention diagnostic requires reconciliation
+and explicit release before the unchanged 4,096-record hard bound.
+
+The tombstone set is durable Git history whose storage grows with genuinely retired identities; this
+is bounded per-operation retention, not a claim of unlimited repository storage. The new controller
+reads the original v1 snapshot and upgrades on its next write. Once v2 is written, downgrading to a
+strict v1 controller is unsupported; controller and plugin upgrades remain coordinated artifacts.
+
 Exactly one Director may schedule or integrate one Objective at a time. The lease is a commit chain
 under a custom ref such as `refs/clockgrove-factory/leases/objective-166`.
 

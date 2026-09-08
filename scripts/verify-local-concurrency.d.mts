@@ -3,6 +3,7 @@ import type {
   CheckpointExtension,
 } from "./verify-local-checkpoint-restart.mjs";
 export interface ConcurrencyAuthority extends CheckpointAuthority {
+  scenario: "throughput" | "lease-fault";
   namespaces: string[];
   aggregateObservedThreshold: number;
   controllerLocalCeiling: number;
@@ -13,6 +14,15 @@ export function concurrencyAuthority(
 ): ConcurrencyAuthority | null;
 export function concurrencyObjectiveBody(namespace: string, index: number): string;
 export function concurrencyRefill(pair: unknown[]): Record<string, unknown> | null;
+export function concurrencyReceiptProgress(phase: string, pair: unknown[]): boolean;
+export function concurrencyModelConfiguration(
+  observation: unknown,
+  authority: CheckpointAuthority,
+): Record<string, unknown>;
+export function concurrencyMeasurements(
+  observation: unknown,
+  observer: unknown,
+): Record<string, unknown>;
 export function assertConcurrencySettlement(
   observation: unknown,
   authority: CheckpointAuthority,
@@ -37,6 +47,7 @@ export interface ConcurrencyPort {
   captureCheckpoint(pair: unknown[], original: unknown): Promise<unknown>;
   innerContend(original: unknown): Promise<unknown>;
   takeover(checkpoint: unknown): Promise<unknown>;
+  finishThroughput(pair: unknown[], controller: unknown, refill: unknown): Promise<unknown>;
   finish(
     pair: unknown[],
     original: unknown,
@@ -45,6 +56,10 @@ export interface ConcurrencyPort {
   ): Promise<unknown>;
 }
 export function runConcurrencyScenario(
+  port: ConcurrencyPort,
+  authority: ConcurrencyAuthority,
+): Promise<Record<string, unknown>>;
+export function runConcurrencyLeaseFaultScenario(
   port: ConcurrencyPort,
   authority: ConcurrencyAuthority,
 ): Promise<Record<string, unknown>>;
@@ -72,3 +87,9 @@ export function assertRetiredController(
   original: { unit: string; invocationId: string; pid: number },
   configPath: string,
 ): void;
+export function assertObjectiveContention(input: {
+  response: unknown;
+  before: unknown;
+  after: unknown;
+  objective: number;
+}): Record<string, unknown>;

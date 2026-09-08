@@ -1806,6 +1806,59 @@ describe("Supervisor parallel independent sibling integration", () => {
     expect(f.launch).not.toHaveBeenCalled();
   });
 
+  it("integrates a ready sibling while a closed sibling's missing receipt is deferred", async () => {
+    const abort = new AbortController();
+    let observedWait!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      observedWait = resolve;
+    });
+    let f!: Awaited<ReturnType<typeof fixture>>;
+    f = await fixture({
+      thirdSibling: true,
+      pollIntervalMs: 60_000,
+      signal: abort.signal,
+      onStatus: (message) => {
+        if (message.includes("Work Item #8 integration waiting:")) {
+          // The pending publication completes outside this observation. Its retry
+          // deadline remains in the future, so the next snapshot must defer receipt
+          // repair without blocking the third sibling behind it.
+          f.git("merge", "--squash", f.heads[0]);
+          f.git("commit", "-qm", "external merge PR 18");
+          f.mergeShas.set(18, f.git("rev-parse", "HEAD"));
+          f.snapshot.workItems[0]!.linkedPullRequests[0]!.state = "MERGED";
+          f.snapshot.workItems[0]!.linkedPullRequests[0]!.mergedAt = new Date();
+          f.snapshot.workItems[0]!.closed = true;
+          vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+          observedWait();
+        }
+      },
+      afterMerge: (number) => {
+        if (number === 20) abort.abort();
+      },
+    });
+    vi.mocked(GitHubControlStore.prototype.readChecks).mockImplementation(async (headSha) => ({
+      pending: headSha === f.heads[0] ? ["fixture-ci"] : [],
+      failed: [],
+      observed: [],
+      observedChecks: [],
+    }));
+
+    const completion = f.run();
+    await waiting;
+    const result = await completion;
+    expect(result, result.reason).toMatchObject({ status: "cancelled" });
+    expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([19, 20]);
+    expect(f.snapshot.workItems[0]!.closed).toBe(true);
+    expect(
+      f.snapshot.workItems[0]!.factoryEvents!.some(
+        (event) => event.kind === "attempt" && event.event === "AttemptIntegrated",
+      ),
+    ).toBe(false);
+    expect(f.review).toHaveBeenCalledTimes(2);
+    expect(f.validate).toHaveBeenCalledTimes(2);
+    expect(f.launch).not.toHaveBeenCalled();
+  }, 15_000);
+
   it("does not claim resource cleanup when clean validation throws without completion evidence", async () => {
     const f = await fixture();
     f.validate.mockRejectedValueOnce(new Error("validator process cleanup uncertain"));

@@ -46,9 +46,13 @@ discarded or treated as zero usage.
 
 - A capacity reservation atomically checks all retained claims against global and run-specific
   ceilings. Expiry, a missing process, or absence from one snapshot does not release a claim.
-  The bounded journal currently retains released identities too; long-lived retention/compaction
-  is tracked in [#220](https://github.com/clockgrove/factory/issues/220), with replay and stale-actor
-  safety required before any pruning. Its 4096-record bound fails closed, not by discarding claims.
+  Shared-capacity v2 compacts only explicit releases into exact hash-sharded Git-tree tombstones at
+  the 3,072-record maintenance threshold. The capacity-ref CAS publishes the tombstones and active
+  snapshot together, so a crash cannot expose pruning without anti-replay evidence. Retired identity
+  lookup has fixed depth, stale epochs retain their Objective fence, and 3,840 active claims expose
+  an explicit reconciliation action before the unchanged 4,096-record hard bound. Durable retired
+  storage grows with history and remains subject to GitHub repository limits; it is not described as
+  unlimited retention. See [#220](https://github.com/clockgrove/factory/issues/220).
 - A first-time capacity import reconstructs worker reservations from authenticated original
   graphs, Work Items and ownership history, keeping those resource claims occupied. Missing worker
   history can block that one-time migration. Unknown management-model usage remains an Objective

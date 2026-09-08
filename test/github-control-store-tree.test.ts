@@ -6,8 +6,8 @@ const LEVEL = "b".repeat(40);
 const DIRECTORY = "c".repeat(40);
 const MARKER = "d".repeat(40);
 
-function response(tree: unknown[]) {
-  return Response.json({ truncated: false, tree });
+function response(tree: unknown[], truncated = false) {
+  return Response.json({ truncated, tree });
 }
 
 describe("bounded Git tree directory reads", () => {
@@ -55,5 +55,15 @@ describe("bounded Git tree directory reads", () => {
     await expect(invalid.readTreeDirectory(ROOT, "retired/claim")).rejects.toThrow(
       "crosses non-directory entry",
     );
+  });
+
+  it("fails closed when any traversed directory is truncated", async () => {
+    const store = new GitHubControlStore({
+      token: "fixture-only",
+      owner: "o",
+      repo: "r",
+      requestFetch: async () => response([], true),
+    });
+    await expect(store.readTreeDirectory(ROOT, "retired/claim")).rejects.toThrow("was truncated");
   });
 });

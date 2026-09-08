@@ -1067,6 +1067,7 @@ export class GitHubControlStore implements LeaseStore, AttemptStore {
           tree_sha: current,
         }),
       );
+      if (response.data.truncated) throw new Error(`Git tree directory ${path} was truncated`);
       const entry = response.data.tree.find((candidate) => candidate.path === segment);
       if (!entry) return null;
       if (entry.type !== "tree" || !entry.sha)

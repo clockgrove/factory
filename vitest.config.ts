@@ -2,6 +2,7 @@ import { configDefaults, defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
+    setupFiles: ["./test/setup-temporary-namespace.ts"],
     exclude: [...configDefaults.exclude, "test/*-live.test.ts"],
     coverage: {
       provider: "v8",

@@ -20,6 +20,7 @@ import {
 } from "../src/execution/artifact-content.js";
 import { normalizeArtifact, payloadPatchMarker } from "../src/execution/artifacts.js";
 import type { GitCommitObject } from "../src/control/lease.js";
+import { enterTemporaryNamespace } from "./helpers/temporary-namespace.js";
 
 // Copy the real module into a configurable test namespace: native ESM exports
 // cannot be spied on. All un-intercepted filesystem operations remain real.
@@ -142,6 +143,48 @@ async function artifact(baseSha: string, bytes = "safe retained transfer bytes")
 }
 
 describe("immutable GitHub artifact transfer lifecycle", () => {
+  it("isolates transfers from an occupied external pending-artifact namespace", async () => {
+    const external = enterTemporaryNamespace();
+    roots.push(external.root);
+    try {
+      for (let index = 0; index < 16; index++) {
+        await fs.mkdir(
+          join(external.root, `factory-collected-${process.getuid?.() ?? "unknown"}-${index}`),
+          { mode: 0o700 },
+        );
+      }
+      const id = identity();
+      const args = {
+        store: store().api,
+        identity: id,
+        artifact: normalizeArtifact({
+          baseSha: id.baseSha,
+          patch: "inline",
+          changedPaths: ["asset.dat"],
+          outcome: "succeeded",
+        }),
+        allowedPaths: ["asset.dat"],
+        assertCurrent: async () => {},
+      };
+      await expect(persistArtifactTransfer(args)).rejects.toThrow(
+        "pending artifact cache count bound reached",
+      );
+      const isolated = enterTemporaryNamespace();
+      try {
+        await expect(persistArtifactTransfer(args)).resolves.toMatchObject({
+          lifecycle: "retained",
+        });
+      } finally {
+        isolated.restore();
+      }
+      expect(
+        (await fs.readdir(external.root)).filter((name) => name.startsWith("factory-collected-")),
+      ).toHaveLength(16);
+    } finally {
+      external.restore();
+    }
+  });
+
   it("interrupts above-inline bytes only after durable intent and resumes the original private copy without rearming", async () => {
     const memory = store(),
       id = identity(),

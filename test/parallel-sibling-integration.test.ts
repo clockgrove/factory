@@ -1848,6 +1848,7 @@ describe("Supervisor parallel independent sibling integration", () => {
     const waiting = new Promise<void>((resolve) => {
       observedWait = resolve;
     });
+    let deferredAt = 0;
     let f!: Awaited<ReturnType<typeof fixture>>;
     f = await fixture({
       thirdSibling: true,
@@ -1866,7 +1867,7 @@ describe("Supervisor parallel independent sibling integration", () => {
           f.snapshot.workItems[0]!.linkedPullRequests[0]!.state = "MERGED";
           f.snapshot.workItems[0]!.linkedPullRequests[0]!.mergedAt = new Date();
           f.snapshot.workItems[0]!.closed = true;
-          vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+          deferredAt = Date.now();
           observedWait();
         }
       },
@@ -1883,7 +1884,9 @@ describe("Supervisor parallel independent sibling integration", () => {
 
     const completion = f.run();
     await waiting;
+    expect(deferredAt).toBeGreaterThan(0);
     const result = await completion;
+    expect(Date.now() - deferredAt).toBeLessThan(60_000);
     expect(result, result.reason).toMatchObject({ status: "cancelled" });
     expect(f.merge.mock.calls.map(([input]) => input.number)).toEqual([19, 20]);
     expect(f.snapshot.workItems[0]!.closed).toBe(true);

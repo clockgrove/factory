@@ -60,7 +60,20 @@ import { validationInvocationOwnership } from "../src/backends/validation-invoca
 const validateFixtureTree = cleanValidation.validateArtifactClean;
 
 const directories: string[] = [];
+const fixtureRunOwners: Array<{
+  retirement: AbortController;
+  activeRuns: Set<Promise<unknown>>;
+}> = [];
+
+async function retireFixtureRuns() {
+  const owners = fixtureRunOwners.splice(0);
+  for (const owner of owners)
+    owner.retirement.abort(new Error("successor Supervisor fixture is retiring"));
+  return Promise.allSettled(owners.flatMap((owner) => [...owner.activeRuns]));
+}
+
 afterEach(async () => {
+  await retireFixtureRuns();
   vi.restoreAllMocks();
   for (const directory of directories.splice(0))
     await rm(directory, { recursive: true, force: true });
@@ -212,11 +225,21 @@ async function fixture(
     if (synthetic) return synthetic;
     let immutable = immutableCommits.get(id);
     if (!immutable) {
+      // Read the immutable commit's fresh metadata in one subprocess. The
+      // fixture previously paid for three Git startups on every newly observed
+      // merge while exercising the same production proof.
+      const output = git("show", "-s", "--format=%T%x00%P%x00%B", id);
+      const treeEnd = output.indexOf("\0");
+      const parentsEnd = output.indexOf("\0", treeEnd + 1);
+      if (treeEnd < 0 || parentsEnd < 0) throw new Error("malformed fixture Git commit");
       immutable = {
         oid: id,
-        treeOid: git("rev-parse", `${id}^{tree}`),
-        parentOids: git("show", "-s", "--format=%P", id).split(" ").filter(Boolean),
-        message: git("show", "-s", "--format=%B", id),
+        treeOid: output.slice(0, treeEnd),
+        parentOids: output
+          .slice(treeEnd + 1, parentsEnd)
+          .split(" ")
+          .filter(Boolean),
+        message: output.slice(parentsEnd + 1).trim(),
       };
       immutableCommits.set(id, immutable);
     }
@@ -969,8 +992,11 @@ async function fixture(
         cleanup: unused,
       });
   }
-  const run = (recovery?: SupervisorOptions["recovery"]) =>
-    new FactorySupervisor({
+  const retirement = new AbortController();
+  const activeRuns = new Set<Promise<unknown>>();
+  fixtureRunOwners.push({ retirement, activeRuns });
+  const run = (recovery?: SupervisorOptions["recovery"]) => {
+    const operation = new FactorySupervisor({
       token: "fixture-token",
       owner: "o",
       repo: "r",
@@ -985,7 +1011,15 @@ async function fixture(
       pollIntervalMs: 50,
       onStatus: (message) => messages.push(message),
       ...(recovery ? { recovery } : {}),
+      signal: retirement.signal,
     }).run();
+    activeRuns.add(operation);
+    void operation.then(
+      () => activeRuns.delete(operation),
+      () => activeRuns.delete(operation),
+    );
+    return operation;
+  };
   return {
     run,
     snapshot,
@@ -3229,6 +3263,18 @@ describe("Supervisor authenticated successor execution", () => {
     },
     30000,
   );
+  it("retires an abandoned successor run before restoring mocks and removing its repository", async () => {
+    const f = await successorFixture({
+      nativeSource: true,
+      providerOwnedRetainedBranch: true,
+      staleRetainedBaseUntilRefresh: true,
+    });
+    const run = f.run();
+    const settlements = await retireFixtureRuns();
+    expect(settlements).toHaveLength(1);
+    expect(settlements[0]).toMatchObject({ status: "fulfilled" });
+    expect(await run).toMatchObject({ status: "cancelled" });
+  });
   it("resumes the same adopted native sibling after lost refresh response without replacing retained work", async () => {
     const f = await successorFixture({ nativeSource: true, loseSiblingRefreshResponse: true });
     await expect(f.run()).rejects.toThrow(PlatformUnavailableError);

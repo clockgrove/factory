@@ -26,10 +26,15 @@ waiting for an unrelated request's HTTP response.
 
 ## Writes and delayed actors
 
-Normal writes capture authority before their first queue wait and check it immediately before
-transport. A scoped capacity or integration transaction supplies its own immutable Objective fence;
-the configured fence is not checked a second time. Standalone stores without a guaranteed
-dispatch-time fence retain manager preflight checks.
+Writes are classified independently from pacing priority. `immutable-preparation` creates unreachable
+Git blobs, trees and commits under the ordinary authorization, scope, secret, payload, cancellation,
+quota, pacing, concurrency and circuit-breaker controls, but performs no Objective lease read.
+`objective-publication` and `atomic-publication` capture authority before their first queue wait and
+check it immediately before transport. A scoped capacity or integration transaction supplies its own
+immutable Objective fence; the configured fence is not checked a second time. Its check of a separate
+Objective lease ref remains cooperative dispatch fencing, not part of the server-enforced CAS on the
+capacity or integration ref. Standalone stores without a guaranteed dispatch-time publication fence
+retain manager preflight checks.
 
 GitHub comment retries are not exactly-once HTTP delivery. Receipt identities and sequences collapse
 exact duplicates and reject contradictory payloads. Application command request IDs remain
@@ -37,10 +42,14 @@ idempotency keys and authenticated user commands do not wait for a Director leas
 application uses stable identities and optimistic reconciliation, not nested Objective locks.
 
 The comment API has no atomic lease-and-append precondition. Dispatch fencing cannot retract an
-in-flight request. Writer generation must therefore fence fresh control authority independently of
-the original attempt generation; delayed old-owner acknowledgements cannot settle a newer owner.
-Historical artifact and accounting evidence is preserved for explicit reconciliation, not silently
-discarded or treated as zero usage.
+in-flight request. Fresh Director receipts therefore carry `writerOperationId`, `writerHolder`,
+`writerEpoch`, and `writerPolicyDigest`, independently of the original attempt generation. A bounded
+reader observes comments and then the current Objective lease ref; exact Objective/run/holder/epoch/
+policy agreement is required before a receipt grants new control. Same-generation renewal may change
+the lease sequence and OID. Delayed old-owner acknowledgements cannot settle a newer owner. A released
+last generation still supplies legitimate historical terminal evidence; actual takeover, not timeout
+alone, attenuates its fresh authority. Historical artifact and accounting evidence is preserved for
+explicit reconciliation, not silently discarded or treated as zero usage.
 
 ## Remaining shared-state boundaries
 
@@ -83,7 +92,7 @@ assertion, plus the actual transport fences. This is a deterministic component c
 claim about historical live-run quota or end-to-end throughput.
 
 `FactorySupervisor.mutationOperationTelemetry()` exposes a bounded process-local record stream:
-operation and resource scope, queue time, fence time, lease assertions, actual read/write fetch
+operation, authority class and resource scope, queue time, fence time, lease assertions, actual read/write fetch
 attempts, fence-only reads, unclassified fetches, elapsed time and outcome. Dropped record counts
 make retention limits explicit. Diagnostic sink failure cannot invalidate a successful write.
 These measurements are not GitHub account quota attribution, provider billing or durable authority.
@@ -99,6 +108,8 @@ These measurements are not GitHub account quota attribution, provider billing or
 | Controller failure does not block unrelated Objectives | Controller/foreground tests: no election acquisition on an initialized independent session, Objective-local failure isolation. |
 | Global capacity survives multiple sessions and crashes | `shared-capacity.test.ts`: CAS contention, limits, retained liabilities and explicit release/reconciliation. |
 | Fencing cost is visible per operation | `mutation-fencing.test.ts`: exact fetch/read counts, fence timing, no unrelated-read attribution and nonfatal diagnostics. |
+| Immutable preparation does not borrow authority | `mutation-fencing.test.ts`: blob/tree/commit records each show zero lease assertions while the publishing ref is fenced. |
+| Receipt authority comes from the Objective ref | `writer-generation.test.ts`, `github-reader-agent-work.test.ts`: complete writer binding, conflicting operation rejection, comment-then-ref observation and retained stale evidence. |
 
 Run the focused suite on the integrated source candidate and retain its exact identity. Ordinary
 throughput qualification must contain no manufactured lease-expiry delays or compounded failures.

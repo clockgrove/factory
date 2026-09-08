@@ -45,6 +45,12 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- GitHub writes now classify immutable object preparation separately from authoritative
+  publication. Blob, tree, and commit staging retain pacing, quota, cancellation, payload, scope,
+  and secret controls without an Objective lease read per object; refs, comments, issues, and pull
+  requests still capture authority before queueing and recheck it at dispatch. Fresh Director
+  receipts bind a stable writer operation, holder, epoch, and policy to the current Objective lease
+  observation while preserving older producer and accounting epochs. ([#224](https://github.com/clockgrove/factory/issues/224))
 - Installed large-file qualification Objectives now select the repository-observed `npm test`
   recipe, and fresh version-2 fixtures provide a matching Vitest test instead of an incompatible
   `node:test` suite. This makes the scenarios compile-ready without weakening command grounding or

@@ -50,7 +50,9 @@ async function fixture(sameObjective = false, peerNonhost = false) {
     serverTime: new Date(at),
   };
   commits.set(base.oid, base);
-  const storage: CompiledGraphStore = {
+  const storage: CompiledGraphStore & Pick<RecoveryReadStore, "listRefs"> = {
+    listRefs: async (prefix) =>
+      [...refs].filter(([ref]) => ref.startsWith(prefix)).map(([ref, oid]) => ({ ref, oid })),
     readRef: async (ref) => refs.get(ref) ?? null,
     readCommit: async (oid) => {
       const value = commits.get(oid);

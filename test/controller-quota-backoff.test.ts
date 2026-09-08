@@ -1,6 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GitHubControlStore } from "../src/control/github-store.js";
-import { RepositoryLeaseManager } from "../src/controller/repository-lease.js";
+import {
+  RepositoryLeaseLostError,
+  RepositoryLeaseManager,
+} from "../src/controller/repository-lease.js";
 import { SharedCapacityCoordinator } from "../src/controller/shared-capacity.js";
 import { ControllerGenerationRetirement } from "../src/controller/retirement.js";
 import { LeaseAcquisitionContendedError, LeaseLostError } from "../src/control/lease.js";
@@ -349,6 +352,101 @@ describe("controller quota boundary", () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(mock.acquire).toHaveBeenCalledTimes(2);
     abort.abort();
+    await task;
+  });
+
+  it("preserves the platform safety stop for active Objectives when renewal is refused", async () => {
+    const mock = ownershipMocks();
+    vi.spyOn(RepositoryLeaseManager.prototype, "renew").mockRejectedValueOnce(quota(120_000));
+    const shutdown = new AbortController();
+    let executionSignal: AbortSignal | undefined;
+    const task = runGitHubRepositoryController({
+      ...options(shutdown.signal),
+      supervisorFactory: (_activation, _resources, _observation, signal) => ({
+        run: async () => {
+          executionSignal = signal;
+          await new Promise<void>((resolve) =>
+            signal?.addEventListener("abort", () => resolve(), { once: true }),
+          );
+        },
+      }),
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(executionSignal?.aborted).toBe(false);
+    await vi.advanceTimersByTimeAsync(480_000);
+    expect(executionSignal?.aborted).toBe(true);
+    expect(mock.release).not.toHaveBeenCalled();
+    shutdown.abort();
+    await task;
+  });
+
+  it("retires election observations but awaits an otherwise-current Objective after takeover", async () => {
+    const mock = ownershipMocks();
+    const takeover = new RepositoryLeaseLostError("successor advanced the election lease");
+    vi.spyOn(RepositoryLeaseManager.prototype, "renew").mockRejectedValueOnce(takeover);
+    let observe: (() => unknown) | undefined;
+    let finish!: () => void;
+    const run = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const task = runGitHubRepositoryController({
+      ...options(new AbortController().signal),
+      supervisorFactory: (_activation, _resources, observation, signal) => {
+        observe = observation;
+        return {
+          run: async () => {
+            expect(signal?.aborted).toBe(false);
+            await run();
+            expect(signal?.aborted).toBe(false);
+          },
+        };
+      },
+    });
+    const outcome = task.catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(observe?.()).toMatchObject({ epoch: 1 });
+    await vi.advanceTimersByTimeAsync(480_000);
+    expect(observe?.()).toBeUndefined();
+    const retiredDiscoveryCount = mock.discover.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(mock.discover).toHaveBeenCalledTimes(retiredDiscoveryCount);
+    expect(mock.release).not.toHaveBeenCalled();
+    finish();
+    expect(await outcome).toMatchObject({
+      message: expect.stringContaining("non-retryable failure (repository-lease-lost)"),
+    });
+  });
+
+  it("does not let election retirement hide a platform failure from the draining cohort", async () => {
+    ownershipMocks();
+    vi.spyOn(RepositoryLeaseManager.prototype, "renew").mockRejectedValueOnce(
+      new RepositoryLeaseLostError("successor advanced the election lease"),
+    );
+    const shutdown = new AbortController();
+    const logs: string[] = [];
+    let finish!: () => void;
+    const task = runGitHubRepositoryController({
+      ...options(shutdown.signal),
+      onStatus: (message) => logs.push(message),
+      supervisorFactory: () => ({
+        run: async () => {
+          await new Promise<void>((resolve) => {
+            finish = resolve;
+          });
+          throw quota(120_000);
+        },
+      }),
+    });
+    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(480_000);
+    finish();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(logs.join("\n")).toContain("repository controller paused for platform backoff");
+    shutdown.abort();
     await task;
   });
 

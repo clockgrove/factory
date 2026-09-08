@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import {
   type AttemptEvent,
   type FactoryEvent,
@@ -7,9 +8,19 @@ import {
 import { assertNoSecretMaterial, PROTOCOL_V2 } from "../protocol/limits.js";
 import { encodeEventComment, encodeEventTrailer } from "./receipts.js";
 import type { GitCommitObject, LeaseManager, LeaseState } from "./lease.js";
+import { ensureAdmissionCompatibility } from "./admission-compatibility.js";
+import {
+  IssueAdmissionLedger,
+  type IssueAdmissionIdentity,
+  type IssueAdmissionEvidence,
+} from "./issue-admission.js";
+import { listAttemptReservationRefs } from "./attempt-readers.js";
+export { listAttemptReservationRefs, readAttemptReservationRef } from "./attempt-readers.js";
 import type { LocalScopeBatch } from "../protocol/local-scope.js";
 
 export interface AttemptStore {
+  readRef(ref: string): Promise<string | null>;
+  compareAndSwapRef(args: { ref: string; beforeOid: string; afterOid: string }): Promise<boolean>;
   listRefs(prefix: string): Promise<Array<{ ref: string; oid: string }>>;
   readCommit(oid: string): Promise<GitCommitObject>;
   createCommit(args: { treeOid: string; parentOids: string[]; message: string }): Promise<string>;
@@ -163,23 +174,40 @@ function parseReservation(ref: string, commit: GitCommitObject): AttemptReservat
   };
 }
 
+export interface AttemptAdmissionBinding {
+  graphDigest: string;
+  graphCommitOid: string;
+  projectionCommitOid: string;
+  capacityReservationId: string;
+  budgetReservationId: string;
+  resourceIdentity: string;
+}
+
 export interface AttemptManagerOptions {
   store: AttemptStore;
   leases: LeaseManager;
+  /** Authenticated original graph/run bindings; historical liabilities are never inferred from current parentage. */
+  legacyBinding?: (
+    reservation: AttemptReservation,
+    issueNodeId: string,
+  ) => Promise<AttemptAdmissionBinding>;
 }
 
 export class AttemptManager {
   readonly #store: AttemptStore;
   readonly #leases: LeaseManager;
+  readonly ledger: IssueAdmissionLedger;
+  readonly #legacyBinding: AttemptManagerOptions["legacyBinding"];
 
   constructor(options: AttemptManagerOptions) {
     this.#store = options.store;
     this.#leases = options.leases;
+    this.ledger = new IssueAdmissionLedger(options.store);
+    this.#legacyBinding = options.legacyBinding;
   }
 
   async list(objective: number, workItem: number): Promise<AttemptReservation[]> {
-    const prefix = attemptRefPrefix(objective, workItem);
-    const refs = await this.#store.listRefs(prefix);
+    const refs = await listAttemptReservationRefs(this.#store, objective, workItem);
     const attempts = await Promise.all(
       refs.map(async ({ ref, oid }) => parseReservation(ref, await this.#store.readCommit(oid))),
     );
@@ -195,10 +223,20 @@ export class AttemptManager {
     sequence: number;
     admission?: AttemptAdmissionReceipt;
     prepareLocalScope?: (attempt: number, at: Date) => Promise<LocalScopeBatch | null>;
+    binding: (attempt: number) => Promise<AttemptAdmissionBinding>;
+    /** Supplied only after authenticated accepted-successor reconciliation. */
+    reassignmentAuthorityReceiptOid?: string;
   }): Promise<AttemptReservation> {
     await this.#leases.assertMutationAuthorized(args.lease);
-    const existing = await this.list(args.lease.objective, args.workItem);
-    const next = (existing.at(-1)?.attempt ?? 0) + 1;
+    const compatibility = await this.ensureCompatibility(
+      args.lease,
+      args.workItem,
+      args.workItemNodeId,
+      args.base,
+    );
+    const current = await this.ledger.read(args.workItem);
+    const next = (current?.history.at(-1)?.reservation.attempt ?? 0) + 1;
+    const binding = await args.binding(next);
     const ref = attemptRef(args.lease.objective, args.workItem, next);
     const now = await this.#store.serverTime();
     const localScopeBatch = await args.prepareLocalScope?.(next, now);
@@ -228,8 +266,27 @@ export class AttemptManager {
         encodeEventTrailer(event),
     });
     await this.#leases.assertMutationAuthorized(args.lease);
-    const won = await this.#store.createRef(ref, oid);
-    if (!won) throw new AttemptReservationConflict();
+    const admissionIdentity = {
+      ...binding,
+      workItem: args.workItem,
+      workItemNodeId: args.workItemNodeId,
+      objective: args.lease.objective,
+      runId: args.lease.runId,
+      directorEpoch: args.lease.epoch,
+      writerHolder: args.lease.holder,
+      policyDigest: args.lease.policyDigest,
+      reservation: { ref, oid, attempt: next, backend: args.backend, baseSha: args.base.oid },
+      compatibilityClaimOid: compatibility.claimOid,
+      assertCurrent: () => this.#leases.assertCurrent(args.lease).then(() => {}),
+    };
+    if (args.reassignmentAuthorityReceiptOid) {
+      await this.ledger.reassign({
+        ...admissionIdentity,
+        authorityReceiptOid: args.reassignmentAuthorityReceiptOid,
+      });
+    } else {
+      await this.ledger.admit(admissionIdentity);
+    }
     await this.#store.addIssueComment(
       args.workItemNodeId,
       encodeEventComment(`Factory reserved attempt ${next} using \`${args.backend}\`.`, event),
@@ -250,6 +307,191 @@ export class AttemptManager {
       ...(args.admission ? { admission: args.admission } : {}),
       ...(localScopeBatch ? { localScopeBatch } : {}),
     };
+  }
+
+  async ensureCompatibility(
+    lease: LeaseState,
+    workItem: number,
+    workItemNodeId: string,
+    base: GitCommitObject,
+  ) {
+    const assertCurrent = () => this.#leases.assertCurrent(lease).then(() => {});
+    const compatibility = await ensureAdmissionCompatibility(this.#store, {
+      workItem,
+      workItemNodeId,
+      objective: lease.objective,
+      base,
+      assertCurrent,
+    });
+    const current = await this.ledger.read(workItem);
+    if (
+      !current &&
+      compatibility.legacyObjective &&
+      compatibility.legacyObjective !== lease.objective
+    )
+      throw new Error("legacy issue ownership requires explicit accepted reassignment");
+    if (!current && compatibility.legacy.length) {
+      if (!this.#legacyBinding)
+        throw new Error(
+          "legacy admission needs authenticated graph/run evidence; reconcile the original run",
+        );
+      const history: IssueAdmissionIdentity[] = [];
+      for (const old of compatibility.legacy) {
+        const reservation = parseReservation(old.ref, await this.#store.readCommit(old.oid));
+        const binding = await this.#legacyBinding(reservation, workItemNodeId);
+        history.push({
+          ...binding,
+          workItem,
+          workItemNodeId,
+          objective: reservation.objective,
+          runId: reservation.runId,
+          directorEpoch: reservation.directorEpoch,
+          writerHolder:
+            reservation.runId === lease.runId &&
+            reservation.objective === lease.objective &&
+            reservation.directorEpoch === lease.epoch
+              ? lease.holder
+              : `legacy:${reservation.oid}`,
+          policyDigest: reservation.policyDigest,
+          reservation: {
+            ref: old.ref,
+            oid: old.oid,
+            attempt: reservation.attempt,
+            backend: reservation.backend,
+            baseSha: reservation.baseSha,
+          },
+          compatibilityClaimOid: compatibility.claimOid,
+        });
+      }
+      await this.ledger.importLegacy({
+        workItem,
+        workItemNodeId,
+        compatibilityClaimOid: compatibility.claimOid,
+        history,
+        assertCurrent,
+      });
+    }
+    return compatibility;
+  }
+
+  async assertReservation(
+    lease: LeaseState,
+    reservation: AttemptReservation,
+    workItemNodeId: string,
+  ) {
+    let record = await this.ledger.read(reservation.workItem);
+    if (!record) {
+      await this.ensureCompatibility(
+        lease,
+        reservation.workItem,
+        workItemNodeId,
+        await this.#store.readCommit(reservation.baseSha),
+      );
+      record = await this.ledger.read(reservation.workItem);
+    }
+    const admission = record?.history.find((entry) => entry.reservation.oid === reservation.oid);
+    const owner = record?.history.at(-1);
+    if (
+      !admission ||
+      !owner ||
+      admission.workItemNodeId !== workItemNodeId ||
+      owner.objective !== lease.objective ||
+      owner.runId !== lease.runId ||
+      admission.objective !== reservation.objective ||
+      admission.runId !== reservation.runId ||
+      admission.objective !== lease.objective ||
+      admission.runId !== lease.runId ||
+      admission.policyDigest !== lease.policyDigest ||
+      admission.policyDigest !== reservation.policyDigest ||
+      admission.reservation.ref !== reservation.ref ||
+      admission.reservation.attempt !== reservation.attempt ||
+      admission.reservation.backend !== reservation.backend ||
+      admission.reservation.baseSha !== reservation.baseSha ||
+      admission.directorEpoch !== reservation.directorEpoch ||
+      admission.writerEpoch > lease.epoch ||
+      (admission.writerEpoch === lease.epoch && admission.currentWriterHolder !== lease.holder)
+    )
+      throw new Error("attempt receipt does not own the exact issue admission");
+    const original = parseReservation(
+      reservation.ref,
+      await this.#store.readCommit(reservation.oid),
+    );
+    if (!isDeepStrictEqual(original, reservation))
+      throw new Error("attempt reservation differs from its immutable metadata");
+    return admission;
+  }
+
+  /** Restart can close an original intent without inventing producer/process absence:
+   * winning the issue CAS prevents every old callback from ever gaining dispatch permission. */
+  async recoverUndispatched(args: {
+    lease: LeaseState;
+    reservation: AttemptReservation;
+    workItemNodeId: string;
+    sequence: number;
+  }): Promise<boolean> {
+    await this.#leases.assertCurrent(args.lease);
+    await this.assertReservation(args.lease, args.reservation, args.workItemNodeId);
+    const closed = await this.ledger.closeUndispatched({
+      workItem: args.reservation.workItem,
+      reservationOid: args.reservation.oid,
+      objective: args.lease.objective,
+      runId: args.lease.runId,
+      directorEpoch: args.lease.epoch,
+      writerHolder: args.lease.holder,
+      policyDigest: args.lease.policyDigest,
+      assertCurrent: () => this.#leases.assertCurrent(args.lease).then(() => {}),
+    });
+    if (!closed) return false;
+    await this.repairReservationComment(args);
+    await this.record({
+      ...args,
+      event: "AttemptDeferred",
+      allowRecovery: true,
+      reason:
+        "issue admission CAS permanently closed the original intent before any backend dispatch",
+    });
+    return true;
+  }
+
+  /** A winning transition is pre-dispatch intent, never a license to replay launch. */
+  async markDispatching(lease: LeaseState, reservation: AttemptReservation): Promise<void> {
+    if (
+      reservation.objective !== lease.objective ||
+      reservation.runId !== lease.runId ||
+      reservation.policyDigest !== lease.policyDigest ||
+      reservation.directorEpoch !== lease.epoch
+    )
+      throw new Error("attempt dispatch authority changed");
+    await this.ledger.transition({
+      workItem: reservation.workItem,
+      reservationOid: reservation.oid,
+      objective: lease.objective,
+      runId: lease.runId,
+      directorEpoch: lease.epoch,
+      writerHolder: lease.holder,
+      policyDigest: lease.policyDigest,
+      disposition: "dispatching",
+      assertCurrent: () => this.#leases.assertCurrent(lease).then(() => {}),
+    });
+  }
+
+  async settle(
+    lease: LeaseState,
+    reservation: AttemptReservation,
+    evidence: IssueAdmissionEvidence,
+  ): Promise<void> {
+    await this.ledger.transition({
+      workItem: reservation.workItem,
+      reservationOid: reservation.oid,
+      objective: lease.objective,
+      runId: lease.runId,
+      directorEpoch: lease.epoch,
+      writerHolder: lease.holder,
+      policyDigest: lease.policyDigest,
+      disposition: "released",
+      evidence,
+      assertCurrent: () => this.#leases.assertCurrent(lease).then(() => {}),
+    });
   }
 
   async record(args: {
@@ -287,6 +529,11 @@ export class AttemptManager {
     ) {
       throw new Error("attempt reservation is fenced from the current lease epoch");
     }
+    const admission = await this.assertReservation(
+      args.lease,
+      args.reservation,
+      args.workItemNodeId,
+    );
     const now = await this.#store.serverTime();
     const event: AttemptEvent = {
       protocol: PROTOCOL_V2,
@@ -328,6 +575,29 @@ export class AttemptManager {
         event,
       ),
     );
+    if (
+      [
+        "AttemptSucceeded",
+        "AttemptFailed",
+        "AttemptTimedOut",
+        "AttemptCancelled",
+        "AttemptDeferred",
+        "AttemptIntegrated",
+      ].includes(args.event) &&
+      !["released", "reconciled", "terminal"].includes(admission.disposition)
+    ) {
+      await this.ledger.transition({
+        workItem: args.reservation.workItem,
+        reservationOid: args.reservation.oid,
+        objective: args.lease.objective,
+        runId: args.lease.runId,
+        directorEpoch: args.lease.epoch,
+        writerHolder: args.lease.holder,
+        policyDigest: args.lease.policyDigest,
+        disposition: "terminal",
+        assertCurrent: () => this.#leases.assertCurrent(args.lease).then(() => {}),
+      });
+    }
     return event;
   }
 
@@ -343,6 +613,7 @@ export class AttemptManager {
     ) {
       throw new Error("cannot repair a reservation from another run or policy");
     }
+    await this.assertReservation(args.lease, args.reservation, args.workItemNodeId);
     const event: AttemptEvent = {
       protocol: PROTOCOL_V2,
       kind: "attempt",
@@ -439,6 +710,7 @@ export class AttemptManager {
     ) {
       throw new Error("capacity reservation is fenced from the current lease");
     }
+    await this.assertReservation(args.lease, args.reservation, args.workItemNodeId);
     const now = await this.#store.serverTime();
     const event = parseFactoryEvent({
       protocol: PROTOCOL_V2,

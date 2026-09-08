@@ -102,7 +102,12 @@ async function fixture(rebase = false) {
     sequence: 1,
     expiresAt: now,
   };
-  const leases = { assertCurrent: async () => {} } as unknown as LeaseManager;
+  const leases = {
+    assertCurrent: async () => {},
+    async assertMutationAuthorized(this: { assertCurrent(): Promise<void> }) {
+      await this.assertCurrent();
+    },
+  } as unknown as LeaseManager;
   const objective: CompiledObjective = {
     title: "Private objective",
     workItems: [
@@ -362,7 +367,9 @@ async function fixture(rebase = false) {
     readCommit: vi.fn(storage.readCommit),
     readBlob: vi.fn(storage.readBlob),
     readTreeEntry: vi.fn(storage.readTreeEntry),
-    listRefs: vi.fn(async (): Promise<Array<{ ref: string; oid: string }>> => []),
+    listRefs: vi.fn(async (prefix: string) =>
+      [...refs].filter(([ref]) => ref.startsWith(prefix)).map(([ref, oid]) => ({ ref, oid })),
+    ),
     readPullRequest: vi.fn(async (_number: number) => pull),
     getRepositoryFacts: vi.fn(async () => ({
       fullName: "o/r",
@@ -971,10 +978,8 @@ describe("explicit adopted-source integration outcomes", () => {
     f.input.snapshot.workItems[0]!.factoryEvents = f.input.events.filter(
       (value) => "workItem" in value && value.workItem === 8,
     );
-    f.input.store.listRefs.mockImplementation(async () =>
-      [...f.refs]
-        .filter(([ref]) => ref.includes("/recovery-claims/"))
-        .map(([ref, oid]) => ({ ref, oid })),
+    f.input.store.listRefs.mockImplementation(async (prefix) =>
+      [...f.refs].filter(([ref]) => ref.startsWith(prefix)).map(([ref, oid]) => ({ ref, oid })),
     );
     const result = await loadRecoveryRuntime({
       objective: 7,

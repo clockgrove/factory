@@ -159,7 +159,10 @@ export interface GitHubRepositoryControllerOptions {
   ) => Promise<void>;
   capacity?: number;
   pollIntervalMs?: number;
+  /** Explicit process shutdown/cancellation. Stops discovery and active Objectives. */
   signal?: AbortSignal;
+  /** Discovery-election retirement. Stops new dispatch but not active Objectives. */
+  discoverySignal?: AbortSignal;
   onError?: (error: unknown, objective: number) => void;
   resources?: RepositorySupervisorResources;
 }
@@ -173,16 +176,20 @@ export class GitHubRepositoryController {
   readonly #running = new Map<number, Promise<void>>();
   readonly #parked = new Map<number, { requestId: string; retryAt: number }>();
   #cursor = 0;
-  readonly #shutdown = new AbortController();
-  readonly #signal: AbortSignal;
+  readonly #failureStop = new AbortController();
+  readonly #discoverySignal: AbortSignal;
+  readonly #executionSignal: AbortSignal;
   #platformFailure: PlatformUnavailableError | undefined;
   #fatalFailure: unknown;
 
   constructor(options: GitHubRepositoryControllerOptions) {
     this.#options = options;
-    this.#signal = options.signal
-      ? AbortSignal.any([options.signal, this.#shutdown.signal])
-      : this.#shutdown.signal;
+    this.#executionSignal = options.signal
+      ? AbortSignal.any([options.signal, this.#failureStop.signal])
+      : this.#failureStop.signal;
+    this.#discoverySignal = options.discoverySignal
+      ? AbortSignal.any([options.discoverySignal, this.#executionSignal])
+      : this.#executionSignal;
     if (
       !Number.isInteger(options.capacity ?? DEFAULT_CONTROLLER_POLICY.maxActiveObjectives) ||
       (options.capacity ?? DEFAULT_CONTROLLER_POLICY.maxActiveObjectives) < 1 ||
@@ -193,7 +200,7 @@ export class GitHubRepositoryController {
   }
 
   async reconcileOnce(): Promise<number> {
-    if (this.#signal.aborted) return 0;
+    if (this.#discoverySignal.aborted) return 0;
     const discovered = [...(await this.#options.store.discoverObjectiveActivations())]
       .filter(
         (item, index, all) =>
@@ -231,13 +238,16 @@ export class GitHubRepositoryController {
       this.#resources.fairness.register(activation.objective, true);
     let started = 0;
     for (const activation of selected) {
-      if (this.#signal.aborted) {
+      if (this.#discoverySignal.aborted) {
         this.#resources.fairness.unregister(activation.objective);
         continue;
       }
-      const signal = this.#signal;
+      const signal = this.#executionSignal;
       const task = Promise.resolve()
-        .then(() => this.#options.reconcileObjective(activation, signal, this.#resources))
+        .then(() => {
+          this.#discoverySignal.throwIfAborted();
+          return this.#options.reconcileObjective(activation, signal, this.#resources);
+        })
         .catch((error) => {
           try {
             const unavailable = platformFailure(error);
@@ -246,7 +256,7 @@ export class GitHubRepositoryController {
                 this.#platformFailure,
                 unavailable,
               ) as PlatformUnavailableError;
-              this.#shutdown.abort();
+              this.#failureStop.abort(unavailable);
             } else {
               // A failed Objective retains its obligations but does not own
               // unrelated sessions. An explicit new activation/restart retries it.
@@ -266,7 +276,7 @@ export class GitHubRepositoryController {
             this.#options.onError?.(error, activation.objective);
           } catch (callbackError) {
             this.#fatalFailure = callbackError;
-            this.#shutdown.abort();
+            this.#failureStop.abort(callbackError);
           }
         })
         .finally(() => {
@@ -282,14 +292,16 @@ export class GitHubRepositoryController {
   async run(): Promise<void> {
     let loopFailure: unknown;
     try {
-      while (!this.#signal.aborted) {
+      while (!this.#discoverySignal.aborted) {
         await this.reconcileOnce();
-        await interruptibleDelay(this.#options.pollIntervalMs ?? 60_000, this.#signal);
+        await interruptibleDelay(this.#options.pollIntervalMs ?? 60_000, this.#discoverySignal);
       }
     } catch (error) {
       loopFailure = error;
+      // Discovery transport/account/invariant failures retain their existing
+      // safety propagation. Election-only retirement never reaches this path.
+      this.#failureStop.abort(error);
     } finally {
-      this.#shutdown.abort();
       await this.settle();
     }
     if (this.#fatalFailure && !(this.#fatalFailure instanceof LeaseAcquisitionContendedError))
@@ -317,7 +329,7 @@ export interface RunRepositoryControllerOptions {
   signal?: AbortSignal;
   onStatus?: (message: string) => void;
   /** Current repository-controller lease identity for durable observations. */
-  controllerObservation?: () => ControllerObservation;
+  controllerObservation?: () => ControllerObservation | undefined;
   /** Historical election identity for recovery diagnostics, not mutation authority. */
   recoveryOwnership?: RecoveryRepositoryOwnership;
   /** Injection point for deterministic conformance tests. */
@@ -327,17 +339,23 @@ export interface RunRepositoryControllerOptions {
   supervisorFactory?: (
     activation: DurableObjectiveActivation,
     resources: RepositorySupervisorResources,
-    controllerObservation?: () => ControllerObservation,
+    controllerObservation?: () => ControllerObservation | undefined,
+    signal?: AbortSignal,
   ) => {
     run(): Promise<SupervisorResult | void>;
   };
+}
+
+export interface CreateGitHubRepositoryControllerOptions extends RunRepositoryControllerOptions {
+  /** Internal election-retirement signal supplied by the ownership wrapper. */
+  discoverySignal?: AbortSignal;
 }
 
 /** Concrete unattended activation path for `factory controller run`.
  * Discovery and every Supervisor restart reconstruct state from GitHub; only
  * rate-limit and integration coordination are intentionally process-local. */
 export function createGitHubRepositoryController(
-  options: RunRepositoryControllerOptions,
+  options: CreateGitHubRepositoryControllerOptions,
 ): GitHubRepositoryController {
   const resources =
     options.resources ??
@@ -364,6 +382,7 @@ export function createGitHubRepositoryController(
     ...(options.capacity === undefined ? {} : { capacity: options.capacity }),
     ...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
+    ...(options.discoverySignal === undefined ? {} : { discoverySignal: options.discoverySignal }),
     onError: (error, objective) =>
       options.onStatus?.(
         `Objective #${objective} reconciliation failed: ${controllerFailureDiagnostic(error)}`,
@@ -385,7 +404,7 @@ export function createGitHubRepositoryController(
           });
         }
         const supervisor =
-          options.supervisorFactory?.(activation, shared, options.controllerObservation) ??
+          options.supervisorFactory?.(activation, shared, options.controllerObservation, signal) ??
           new FactorySupervisor({
             token: options.token,
             owner: options.owner,
@@ -463,12 +482,13 @@ export async function runGitHubRepositoryController(
             ...(options.signal ? { signal: options.signal } : {}),
             ...(options.onStatus ? { onStatus: options.onStatus } : {}),
           },
-          async ({ store, signal, observation, recoveryOwnership }) =>
+          async ({ store, signal, executionSignal, observation, recoveryOwnership }) =>
             createGitHubRepositoryController({
               ...options,
               capacity: policy.maxActiveObjectives,
               pollIntervalMs: policy.pollIntervalSeconds * 1_000,
-              signal,
+              signal: executionSignal,
+              discoverySignal: signal,
               resources,
               activationStore: store,
               controllerObservation: observation,
@@ -664,9 +684,12 @@ interface RepositoryOwnershipOptions {
 
 interface RepositoryOwnership {
   store: GitHubControlStore;
+  /** Election-scoped signal: discovery/configuration only. */
   signal: AbortSignal;
+  /** Explicit shutdown/cancellation signal for active Objective execution. */
+  executionSignal: AbortSignal;
   fence: () => Promise<void>;
-  observation: () => ControllerObservation;
+  observation: () => ControllerObservation | undefined;
   recoveryOwnership: RecoveryRepositoryOwnership;
 }
 
@@ -720,16 +743,26 @@ async function withRepositoryOwnership<T>(
   );
 
   const ownership = new AbortController();
+  const executionStop = new AbortController();
   const signal = options.signal
     ? AbortSignal.any([options.signal, ownership.signal])
     : ownership.signal;
+  const executionSignal = options.signal
+    ? AbortSignal.any([options.signal, executionStop.signal])
+    : executionStop.signal;
   let renewalFailure: unknown;
+  const retire = (error: unknown): void => {
+    ownership.abort(error);
+    // Only a proven election loss is discovery-local. Quota, credential,
+    // account and invariant failures retain the previous safety stop.
+    if (!(error instanceof RepositoryLeaseLostError)) executionStop.abort(error);
+  };
   const fence = async (): Promise<void> => {
     try {
       await leases.assertCurrent(lease);
     } catch (error) {
       renewalFailure = error;
-      ownership.abort();
+      retire(error);
       throw error;
     }
   };
@@ -745,7 +778,7 @@ async function withRepositoryOwnership<T>(
         options.onStatus?.(
           `repository lease renewal failed; retiring controller ownership (${controllerFailureDiagnostic(error)})`,
         );
-        ownership.abort();
+        retire(error);
         return;
       }
     }
@@ -753,15 +786,18 @@ async function withRepositoryOwnership<T>(
     // Attach immediately: a diagnostic callback must not create an unhandled
     // background rejection while the foreground operation is still draining.
     renewalFailure = error;
-    ownership.abort();
+    retire(error);
   });
 
-  const observation = (): ControllerObservation => ({
-    controllerId: lease.controllerId,
-    epoch: lease.epoch,
-    expiresAt: lease.expiresAt.toISOString(),
-    controllerPolicyDigest: lease.policyDigest,
-  });
+  const observation = (): ControllerObservation | undefined =>
+    ownership.signal.aborted
+      ? undefined
+      : {
+          controllerId: lease.controllerId,
+          epoch: lease.epoch,
+          expiresAt: lease.expiresAt.toISOString(),
+          controllerPolicyDigest: lease.policyDigest,
+        };
 
   let result: T | undefined;
   let failure: unknown;
@@ -769,6 +805,7 @@ async function withRepositoryOwnership<T>(
     result = await operation({
       store,
       signal,
+      executionSignal,
       fence,
       observation,
       recoveryOwnership: { leases, current: () => lease },
@@ -778,7 +815,12 @@ async function withRepositoryOwnership<T>(
   } finally {
     ownership.abort();
     await renewal;
-    failure = ownershipFailure(failure, renewalFailure);
+    // Election retirement is subordinate to a concrete cohort/discovery
+    // failure observed while that cohort drained. Preserve the platform or
+    // cleanup result so its safety/backoff semantics are not mislabeled as a
+    // generic handoff; a sole election loss remains the terminal result.
+    if (!(renewalFailure instanceof RepositoryLeaseLostError && failure !== undefined))
+      failure = ownershipFailure(failure, renewalFailure);
     if (options.resources.circuitBreaker.isOpen()) {
       failure = ownershipFailure(
         failure,

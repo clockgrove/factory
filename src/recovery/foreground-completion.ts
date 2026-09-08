@@ -1,6 +1,6 @@
 import { hasCurrentWriterAuthority } from "../control/receipts.js";
 import { createHash } from "node:crypto";
-import { attemptRef } from "../control/attempts.js";
+import { attemptRef, readAttemptReservationRef } from "../control/attempts.js";
 import { loadCompiledGraph, loadCompiledGraphProjection } from "../control/graphs.js";
 import { assertAuthenticatedGraphProjection } from "../control/graph-evidence.js";
 import { decodeEventTrailer, deduplicateFactoryEvents } from "../control/receipts.js";
@@ -136,7 +136,12 @@ export async function deriveForegroundCompletion(
   );
   const ref = attemptRef(plan.objective, reserved.workItem, reserved.attempt);
   requireProof(ref === source.reservationRef);
-  const oid = await input.store.readRef(ref);
+  const oid = await readAttemptReservationRef(
+    input.store,
+    plan.objective,
+    reserved.workItem,
+    reserved.attempt,
+  );
   requireProof(oid === source.reservationCommitOid);
   const commit = await input.store.readCommit(oid!);
   const trailer = decodeEventTrailer(commit.message);

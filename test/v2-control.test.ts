@@ -103,6 +103,15 @@ class MemoryStore implements LeaseStore, AttemptStore {
   }
 }
 
+const binding = async (attempt: number) => ({
+  graphDigest: "c".repeat(64),
+  graphCommitOid: BASE_SHA,
+  projectionCommitOid: TREE_SHA,
+  capacityReservationId: `42:43:${attempt}:execution:codex-cli/local-worktree`,
+  budgetReservationId: `run-1:43:${attempt}:execution:local_milliseconds:default`,
+  resourceIdentity: `resource-${attempt}`,
+});
+
 const identity = {
   objective: 42,
   runId: "run-1",
@@ -343,6 +352,7 @@ describe("attempt reservation", () => {
     const attempts = new AttemptManager({ store, leases });
 
     const first = await attempts.reserve({
+      binding,
       lease,
       workItem: 43,
       workItemNodeId: "I_43",
@@ -367,7 +377,8 @@ describe("attempt reservation", () => {
     });
     expect(first.attempt).toBe(1);
     expect(first.baseSha).toBe(BASE_SHA);
-    expect(store.refs.get(first.ref)).toBe(first.oid);
+    expect(store.refs.has(first.ref)).toBe(false);
+    expect((await attempts.ledger.read(43))!.history[0]!.reservation.oid).toBe(first.oid);
     expect(store.comments[0]?.body).toContain("AttemptReserved");
     expect(first.admission).toMatchObject({
       admissionClass: "local",
@@ -479,7 +490,31 @@ describe("attempt reservation", () => {
     });
     expect(capacity).toMatchObject({ kind: "capacity", event: "CapacityReserved" });
 
+    await expect(
+      attempts.reserve({
+        binding,
+        lease,
+        workItem: 43,
+        workItemNodeId: "I_43",
+        backend: first.backend,
+        base,
+        sequence: 5,
+      }),
+    ).rejects.toThrow("occupied");
+    const entry = (await attempts.ledger.read(43))!.history[0]!;
+    await attempts.settle(lease, first, {
+      reservationOid: first.oid,
+      resourceIdentity: entry.resourceIdentity,
+      capacityReservationId: entry.capacityReservationId,
+      budgetReservationId: entry.budgetReservationId,
+      producerStopped: true,
+      resourcesReleased: true,
+      capacityReleased: true,
+      accountingSettled: true,
+      evidenceOid: BASE_SHA,
+    });
     const second = await attempts.reserve({
+      binding,
       lease,
       workItem: 43,
       workItemNodeId: "I_43",
@@ -501,6 +536,7 @@ describe("attempt reservation", () => {
     const attempts = new AttemptManager({ store, leases });
     await expect(
       attempts.reserve({
+        binding,
         lease,
         workItem: 43,
         workItemNodeId: "I_43",
@@ -538,6 +574,7 @@ describe("attempt reservation", () => {
     };
     await expect(
       attempts.reserve({
+        binding,
         lease,
         workItem: 43,
         workItemNodeId: "I_43",
@@ -591,6 +628,7 @@ describe("attempt reservation", () => {
     const firstLease = await leases.acquire(identity, base);
     const attempts = new AttemptManager({ store, leases });
     const reservation = await attempts.reserve({
+      binding,
       lease: firstLease,
       workItem: 43,
       workItemNodeId: "I_43",

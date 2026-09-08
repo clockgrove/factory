@@ -929,6 +929,16 @@ export async function verifyQualificationFinalArtifact({ verifier, defaultVerifi
   await (verifier ?? defaultVerifier)(hooks);
 }
 
+/** A failed observation must not replace an already returned terminal failure. */
+export function qualificationFailure(evidence, error) {
+  const result = evidence.runResult;
+  const observed = error instanceof Error ? error.message : String(error);
+  if (!["escalated", "cancelled"].includes(result?.status)) return error;
+  const reason = result.reason || `Factory run ${result.status}`;
+  if (observed !== reason) evidence.secondaryObservationFailure = observed;
+  return new Error(reason, { cause: error });
+}
+
 export async function main(qualification = {}) {
   const preflightOnly = process.env.FACTORY_LIVE_OBJECTIVE_PREFLIGHT === "1";
   if (process.env.FACTORY_LIVE_OBJECTIVE !== "1" && !preflightOnly) {
@@ -1380,8 +1390,9 @@ export async function main(qualification = {}) {
     save();
     console.log(`Passed ${evidence.scope}; evidence: ${evidencePath}`);
   } catch (error) {
+    const failure = qualificationFailure(evidence, error);
     evidence.result = "failed";
-    evidence.failure = error instanceof Error ? error.message : String(error);
+    evidence.failure = failure instanceof Error ? failure.message : String(failure);
     if (evidence.objective) {
       try {
         evidence.status = await call("factory_status", {
@@ -1405,7 +1416,7 @@ export async function main(qualification = {}) {
     }
     evidence.completionAssessment = (qualification.assessCompletion ?? assessCompletion)(evidence);
     save();
-    throw error;
+    throw failure;
   } finally {
     await client.close();
   }

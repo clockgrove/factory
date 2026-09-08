@@ -68,3 +68,4 @@ export function assessQualificationPreflight(input: unknown): {
 };
 export function assertMcpSurface(tools: unknown): void;
 export function assertRetryableObjective(input: unknown): void;
+export function qualificationFailure(evidence: unknown, error: unknown): unknown;

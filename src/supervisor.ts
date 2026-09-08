@@ -8515,9 +8515,9 @@ export class FactorySupervisor {
       ),
     );
     assertIntegrationHeads(integrationLease, observedHeads);
-    const pendingEvent = [...(targetItem.factoryEvents ?? [])]
+    const pendingEvents = [...(targetItem.factoryEvents ?? [])]
       .sort((left, right) => right.sequence - left.sequence)
-      .find(
+      .filter(
         (event): event is Extract<FactoryEvent, { kind: "publication" }> =>
           event.kind === "publication" &&
           event.runId === this.#run.runId &&
@@ -8525,9 +8525,13 @@ export class FactorySupervisor {
           event.operationId === operationId &&
           event.headSha === target.receipt.headSha,
       );
-    if (pendingEvent) {
-      assertPublicationEventMatchesReceipt(pendingEvent, target.receipt);
-    }
+    for (const event of pendingEvents) assertPublicationEventMatchesReceipt(event, target.receipt);
+    if (
+      new Set(pendingEvents.map((event) => event.asynchronousMergeUuid ?? "unknown-dispatch"))
+        .size > 1
+    )
+      throw new Error("native integration has conflicting outstanding request identities");
+    const pendingEvent = pendingEvents[0];
     const integratingMembers =
       mergePolicy === "atomic-stack"
         ? members.filter((member) =>
@@ -8561,6 +8565,22 @@ export class FactorySupervisor {
         () => capturedOwner.fence(0),
         async (admission) => {
           let result = await this.#serializeIntegration(async () => {
+            const recoveryUuid =
+              admission.dispatch?.kind === "native"
+                ? admission.dispatch.asynchronousMergeUuid
+                : undefined;
+            if (admission.dispatch && !recoveryUuid)
+              throw new IntegrationAdmissionPendingError(this.#run.objective, target.pull.number);
+            // A request already crossed the mechanical boundary. Reconcile only
+            // that UUID; changed readiness cannot unsend it and must not trigger
+            // a second request.
+            if (recoveryUuid) {
+              return this.#stacks.mergeResult(
+                target.pull.number,
+                recoveryUuid,
+                target.pull.commitSha,
+              );
+            }
             if (
               (await this.#store.getBranchHead(this.#baseBranch)).oid !==
               integratingMembers[0]!.receipt.baseSha
@@ -8577,21 +8597,39 @@ export class FactorySupervisor {
               if (current.state !== "ready")
                 throw new Error("native integration readiness changed before dispatch");
             }
-            await admission.dispatch();
-            return pendingEvent?.asynchronousMergeUuid
-              ? this.#stacks.mergeResult(
-                  target.pull.number,
-                  pendingEvent.asynchronousMergeUuid,
-                  target.pull.commitSha,
-                )
-              : this.#stacks.requestMerge({
-                  pullRequest: target.pull.number,
-                  expectedHeadSha: target.pull.commitSha,
-                  title: target.receipt.itemId,
-                  action: "default",
-                });
+            await admission.markDispatched("native");
+            const result = await this.#stacks.requestMerge({
+              pullRequest: target.pull.number,
+              expectedHeadSha: target.pull.commitSha,
+              title: target.receipt.itemId,
+              action: "default",
+            });
+            if (result.state === "pending") await admission.bindAsynchronousMerge(result.uuid);
+            return result;
           });
-          if (result.state === "failed") throw new Error(result.reason);
+          if (
+            result.state === "pending" &&
+            (admission.dispatch?.kind !== "native" ||
+              admission.dispatch.asynchronousMergeUuid !== result.uuid)
+          ) {
+            throw new Error("native integration poll changed the exact request UUID");
+          }
+          if (result.state === "failed") {
+            const uuid =
+              admission.dispatch?.kind === "native"
+                ? admission.dispatch.asynchronousMergeUuid
+                : undefined;
+            await admission.authoritativeNonExecution(
+              uuid
+                ? {
+                    kind: "native-terminal-failure",
+                    asynchronousMergeUuid: uuid,
+                    reason: result.reason,
+                  }
+                : { kind: "native-request-rejection", reason: result.reason },
+            );
+            throw new Error(result.reason);
+          }
           if (
             (result.state === "pending" || result.state === "queued") &&
             (!pendingEvent ||
@@ -8614,12 +8652,19 @@ export class FactorySupervisor {
             await sleep(this.#options.pollIntervalMs ?? 5_000, this.#options.signal);
             await this.#lease.renewIfNeeded();
             if (result.state === "pending") {
-              const uuid = result.uuid;
+              const uuid =
+                admission.dispatch?.kind === "native"
+                  ? admission.dispatch.asynchronousMergeUuid
+                  : undefined;
+              if (!uuid) throw new Error("native integration poll lacks its exact request UUID");
               result = await this.#stacks.mergeResult(
                 target.pull.number,
                 uuid,
                 target.pull.commitSha,
               );
+              if (result.state === "pending" && result.uuid !== uuid) {
+                throw new Error("native integration poll changed the exact request UUID");
+              }
             } else {
               const current = await this.#store.readPullRequest(target.pull.number);
               if (current.headSha !== target.pull.commitSha) {
@@ -8629,7 +8674,19 @@ export class FactorySupervisor {
                 result = { state: "merged", mergeSha: current.mergeCommitSha };
               }
             }
-            if (result.state === "failed") throw new Error(result.reason);
+            if (result.state === "failed") {
+              const uuid =
+                admission.dispatch?.kind === "native"
+                  ? admission.dispatch.asynchronousMergeUuid
+                  : undefined;
+              if (!uuid) throw new Error("native terminal failure lacks its request UUID");
+              await admission.authoritativeNonExecution({
+                kind: "native-terminal-failure",
+                asynchronousMergeUuid: uuid,
+                reason: result.reason,
+              });
+              throw new Error(result.reason);
+            }
           }
 
           const integrated =
@@ -8642,6 +8699,9 @@ export class FactorySupervisor {
           for (const item of ordered) this.#integrationWaits.delete(item.number);
           return true;
         },
+        pendingEvent?.asynchronousMergeUuid
+          ? { recoverNativeRequestUuid: pendingEvent.asynchronousMergeUuid }
+          : {},
       );
     } catch (error) {
       if (error instanceof IntegrationAdmissionPendingError)
@@ -12614,12 +12674,23 @@ export class FactorySupervisor {
                 };
               }
             }
-            await admission.dispatch();
-            const mergeSha = await this.#store.mergePullRequest({
-              number: pull.number,
-              headSha: current.headSha,
-              commitTitle: item.title,
-            });
+            await admission.markDispatched("regular");
+            let mergeSha: string;
+            try {
+              mergeSha = await this.#store.mergePullRequest({
+                number: pull.number,
+                headSha: current.headSha,
+                commitTitle: item.title,
+              });
+            } catch (error) {
+              if ((error as { status?: number })?.status === 409) {
+                await admission.authoritativeNonExecution({
+                  kind: "regular-http-rejection",
+                  status: 409,
+                });
+              }
+              throw error;
+            }
             try {
               if (candidate) {
                 await verifyMergeCandidateSquash(

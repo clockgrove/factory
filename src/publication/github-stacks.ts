@@ -372,6 +372,9 @@ export class GitHubStacks {
     ) {
       throw new Error("asynchronous merge poll is bound to a stale pull request head");
     }
+    if (result.state === "pending" && result.uuid !== uuid) {
+      throw new Error("asynchronous merge poll returned a different request UUID");
+    }
     return result;
   }
 

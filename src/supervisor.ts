@@ -13774,6 +13774,10 @@ export class FactorySupervisor {
     reason?: string,
   ): Promise<SupervisorResult> {
     await this.#lease.assert();
+    // Deadline-only recovery skips normal admission, but its fresh terminal
+    // receipt still needs this writer's boundary. Ordinary runs reuse the
+    // already-recorded boundary without another comment.
+    await this.#recordControllerObservation(snapshot);
     await this.#lease.use((lease) =>
       runManager.terminal({
         writerEpoch: lease.epoch,

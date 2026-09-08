@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import { GitHubControlStore } from "../src/control/github-store.js";
+import { LeaseManager, type LeaseState } from "../src/control/lease.js";
 import { observeLeaseAssertion } from "../src/control/mutation-observation.js";
 import { ContentCreationPacer, MutationScheduler } from "../src/platform.js";
 
@@ -121,6 +122,18 @@ it("releases quota admission at dispatch so independent Objectives overlap remot
 
 it("counts actual fence reads per operation and excludes unrelated reads and diagnostic failures", async () => {
   let store!: GitHubControlStore;
+  const lease: LeaseState = {
+    ref: "refs/clockgrove-factory/leases/objective-3",
+    oid: "c".repeat(40),
+    treeOid: "b".repeat(40),
+    objective: 3,
+    runId: "run-3",
+    holder: "session-3",
+    policyDigest: "d".repeat(64),
+    epoch: 1,
+    sequence: 1,
+    expiresAt: new Date("2026-09-08T00:10:00Z"),
+  };
   store = new GitHubControlStore({
     token: "operation-count-fixture",
     owner: "fixture",
@@ -128,8 +141,7 @@ it("counts actual fence reads per operation and excludes unrelated reads and dia
     mutationScope: "objective:3",
     mutationScheduler: scheduler(),
     captureMutationFence: () => async () => {
-      observeLeaseAssertion();
-      await store.readRefWithServerTime("refs/clockgrove-factory/leases/objective-3");
+      await new LeaseManager({ store }).assertCurrent(lease);
     },
     onMutationOperation: () => {
       throw new Error("diagnostics must not invalidate publication");

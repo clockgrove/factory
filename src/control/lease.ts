@@ -1,5 +1,6 @@
 import { type LeaseEvent, parseFactoryEvent } from "../protocol/events.js";
 import { PROTOCOL_V2, gitSha } from "../protocol/limits.js";
+import { observeLeaseAssertion } from "./mutation-observation.js";
 
 export interface GitCommitObject {
   oid: string;
@@ -259,6 +260,7 @@ export class LeaseManager {
   }
 
   async assertCurrent(lease: LeaseState): Promise<void> {
+    observeLeaseAssertion();
     const observation = this.#store.readRefWithServerTime
       ? await this.#store.readRefWithServerTime(lease.ref)
       : {

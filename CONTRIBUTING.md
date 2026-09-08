@@ -78,6 +78,14 @@ configuration or credentials and does not create a paid provider resource. `npm 
 runs typecheck, lint, formatting, coverage, schema, deterministic-build, plugin, npm-package, and
 production-audit gates as one command.
 
+The coordinated `verify:release` gate must run directly in a supported Linux environment with
+systemd 254 or newer and a reachable systemd **user manager**. This includes the Linux side of WSL2,
+not a nested sandbox that cannot reach the WSL user bus. Before starting any broad checks, the command
+runs the bounded read-only probe
+`systemctl --user show --property=Version --value --no-pager`; run that exact command yourself when
+diagnosing the host. A passing preflight does not replace or skip the suite's real transient-scope
+containment tests.
+
 ## AI-assisted development workflow
 
 This section and root `AGENTS.md` guide contributors building Factory. Changes here do not change

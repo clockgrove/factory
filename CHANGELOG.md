@@ -54,6 +54,10 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- Coordinated release verification now fails before broad coverage when Linux systemd 254+ or its
+  user-manager transport is unavailable, with one actionable host diagnostic. Deterministic injected
+  regressions cover unavailable and available transports while the real host-containment suite stays
+  enabled. ([#258](https://github.com/clockgrove/factory/issues/258))
 - Codex management preflight now proves that its durable isolated-home root is usable, and ordinary
   Objective compilation persists model-invocation intent only after local backend preparation at
   the final dispatch boundary. Known pre-dispatch failures no longer create an invocation marker;

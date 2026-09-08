@@ -88,8 +88,10 @@ gate into a platform or paid-provider support claim.
 | DOD-8 — Explainable, replayable economics | `test/status-output.test.ts`, `test/explanations.test.ts`, `test/replay.test.ts`, `test/economics.test.ts`, `test/model-economics.test.ts`, `test/budget.test.ts`, `test/admission.test.ts`, installed MCP surface verification | Budget-intent correction #136 passed integrated checks and matching installation: explicit observed-stop selection for new thresholds, unsupported hard-cap refusal, durable unknown-call fencing and distinct historical interpretation. Comparative benefit remains unproven under #109. |
 | DOD-9 — Evidenced human boundaries | `test/approval.test.ts`, `test/branch-policy.test.ts`, `test/supervisor-preflight.test.ts`, `test/budget.test.ts`, `test/explanations.test.ts`, `test/execution-contract.test.ts` | Implemented and fail-closed fixtures pass |
 
-The release command is `npm run verify:release`: typecheck, lint, formatting, coverage, schema,
-deterministic bundle, clean plugin/npm package, and production dependency-audit gates. Recovery of
+The release command is `npm run verify:release`: a bounded Linux systemd 254+ user-manager preflight,
+then typecheck, lint, formatting, coverage, schema, deterministic bundle, clean plugin/npm package,
+and production dependency-audit gates. The preflight fails before broad tests when the user bus is
+unreachable; it does not replace or skip the real transient-scope containment coverage. Recovery of
 existing recorded runs is covered by
 `test/fixtures/legacy-run-policy.json`, `test/policy.test.ts`, `test/dispatch.test.ts`,
 `test/state.test.ts`, `test/v2-protocol.test.ts`, `test/v2-state.test.ts`, and the active-run history

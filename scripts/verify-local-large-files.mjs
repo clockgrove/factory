@@ -385,6 +385,11 @@ function objectiveBody(authority) {
 function verifyBaseline({ authority, evidence, command }) {
   const fixture = checkedFixture(authority);
   assert.equal(
+    fixture.sourceBaseSha,
+    evidence.sourceCommit,
+    "fixture source must match the exact committed qualification harness candidate",
+  );
+  assert.equal(
     evidence.base,
     fixture.baseSha,
     "publish the exact prepared baseline before this scenario",

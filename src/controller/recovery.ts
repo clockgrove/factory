@@ -14,14 +14,14 @@ export interface RecoveryRepositoryOwnership {
   current(): RepositoryLeaseState;
 }
 
-/** Complete adoption under both real leases before constructing an execution Supervisor. */
+/** Complete Objective-scoped adoption before constructing an execution Supervisor. */
 export async function adoptRecoveryActivation(input: {
   token: string;
   owner: string;
   repo: string;
   activation: DurableObjectiveActivation;
   store: GitHubControlStore;
-  ownership: RecoveryRepositoryOwnership;
+  ownership?: RecoveryRepositoryOwnership;
   signal: AbortSignal;
   checkout: string;
 }): Promise<void> {
@@ -40,7 +40,6 @@ export async function adoptRecoveryActivation(input: {
     snapshot: await reader.readObjective(input.activation.objective),
     historyComplete: true,
   });
-  await input.ownership.leases.assertCurrent(input.ownership.current());
   if (input.signal.aborted) throw new Error("Recovery adoption cancelled before mutation");
   const runtime = await loadRecoveryRuntime({
     objective: input.activation.objective,
@@ -66,7 +65,6 @@ export async function adoptRecoveryActivation(input: {
   )
     throw new Error("Recovery activation changed before adoption");
   const objectiveLeases = new LeaseManager({ store: input.store });
-  await input.ownership.leases.assertCurrent(input.ownership.current());
   if (input.signal.aborted) throw new Error("Recovery adoption cancelled before lease acquisition");
   const objectiveLease = await objectiveLeases.acquire(
     {
@@ -95,14 +93,25 @@ export async function adoptRecoveryActivation(input: {
           await objectiveLeases.assertCurrent(lease);
         },
       },
-      repositoryLeases: input.ownership.leases,
     });
-    const result = await coordinator.adopt({
-      objective: input.activation.objective,
-      planDigest: recovery.planDigest,
-      objectiveLease,
-      repositoryLease: input.ownership.current(),
-    });
+    const adoption = () =>
+      coordinator.adopt({
+        objective: input.activation.objective,
+        planDigest: recovery.planDigest,
+        objectiveLease,
+      });
+    const transport = input.store as GitHubControlStore & {
+      withMutationFence?<T>(fence: () => Promise<void>, operation: () => Promise<T>): Promise<T>;
+    };
+    // Scope follows every bound store mutator through its transport queue.
+    // A later Objective owner never inherits this adoption's captured authority.
+    const captured = structuredClone(objectiveLease);
+    const result = transport.withMutationFence
+      ? await transport.withMutationFence(async () => {
+          if (input.signal.aborted) throw new Error("Recovery adoption cancelled");
+          await objectiveLeases.assertCurrent(captured);
+        }, adoption)
+      : await adoption();
     if (result.status === "blocked" && result.blockers.includes("resource-absence-unverified")) {
       const observed = await readSnapshot();
       if (

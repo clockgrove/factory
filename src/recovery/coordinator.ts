@@ -29,7 +29,8 @@ interface CoordinatorPorts {
   /** Complete reader-authenticated Objective and child history, never user-supplied envelopes. */
   readSnapshot(): Promise<{ snapshot: FactoryReadSnapshot; historyComplete: boolean }>;
   objectiveLeases: Pick<LeaseManager, "assertCurrent">;
-  repositoryLeases: Pick<RepositoryLeaseManager, "assertCurrent">;
+  /** Legacy callers may retain their original dual-lease contract. */
+  repositoryLeases?: Pick<RepositoryLeaseManager, "assertCurrent">;
   /** Test seam for the concrete read-only local observer, not an eligibility callback. */
   observeLocalResource?: typeof observeLocalRecoveryResource;
   scopePort?: LocalScopeReadPort;
@@ -38,7 +39,7 @@ interface AdoptionInput {
   objective: number;
   planDigest: string;
   objectiveLease: LeaseState;
-  repositoryLease: RepositoryLeaseState;
+  repositoryLease?: RepositoryLeaseState;
 }
 export interface RecoveryCoordinatorResult {
   status: "adopted" | "pending" | "blocked";
@@ -76,7 +77,11 @@ export class RecoveryCoordinator {
   constructor(private readonly ports: CoordinatorPorts) {}
 
   async #fence(input: AdoptionInput): Promise<void> {
-    await this.ports.repositoryLeases.assertCurrent(input.repositoryLease);
+    if (this.ports.repositoryLeases || input.repositoryLease) {
+      if (!this.ports.repositoryLeases || !input.repositoryLease)
+        throw new Error("incomplete legacy recovery ownership");
+      await this.ports.repositoryLeases.assertCurrent(input.repositoryLease);
+    }
     await this.ports.objectiveLeases.assertCurrent(input.objectiveLease);
   }
 

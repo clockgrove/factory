@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { type LeaseStore, LeaseManager } from "../control/lease.js";
+import { observeLeaseAssertion } from "../control/mutation-observation.js";
 import {
   CapacityLedger,
   capacityReservationKey,
@@ -22,6 +23,10 @@ const ownerSchema = z
   })
   .strict();
 export type SharedCapacityOwner = z.infer<typeof ownerSchema>;
+export interface SharedCapacityImport {
+  owner: SharedCapacityOwner;
+  reservation: CapacityReservation;
+}
 const reservationSchema = z
   .object({
     key: z.string(),
@@ -150,16 +155,21 @@ function ledger(state: State): CapacityLedger {
 
 /** GitHub CAS serializes only reservation changes, never Objective execution or writes. */
 export class SharedCapacityCoordinator {
+  readonly #leases: LeaseManager;
   constructor(
     private readonly options: {
-      store: LeaseStore;
+      store: LeaseStore & {
+        withMutationFence?<T>(fence: () => Promise<void>, operation: () => Promise<T>): Promise<T>;
+      };
       repository: string;
       baseCommitSha: string;
       limits: CapacityLimits;
       /** Must prove legacy resources are absent/imported; expiry alone is not proof. */
-      assertLegacyCompatible: () => Promise<void>;
+      assertLegacyCompatible: () => Promise<void | readonly SharedCapacityImport[]>;
     },
-  ) {}
+  ) {
+    this.#leases = new LeaseManager({ store: options.store });
+  }
 
   async #read(): Promise<{ oid: string; treeOid: string; state: State } | null> {
     const oid = await this.options.store.readRef(SHARED_CAPACITY_REF);
@@ -191,15 +201,16 @@ export class SharedCapacityCoordinator {
 
   async initialize(): Promise<void> {
     if (await this.#read()) return;
-    await this.options.assertLegacyCompatible();
+    const imported = await this.options.assertLegacyCompatible();
     const base = await this.options.store.readCommit(this.options.baseCommitSha);
     const state: State = {
       protocol: "clockgrove.factory/shared-capacity-v1",
       repository: this.options.repository.toLowerCase(),
       generation: 1,
       limits: globalLimits(this.options.limits),
-      claims: [],
+      claims: (imported ?? []).map(({ owner, reservation }) => this.#claim(owner, reservation)),
     };
+    ledger(state);
     const oid = await this.#commit(state, base.treeOid, base.oid);
     try {
       await this.options.store.createRef(SHARED_CAPACITY_REF, oid);
@@ -220,8 +231,9 @@ export class SharedCapacityCoordinator {
   }
 
   async #assertOwner(owner: SharedCapacityOwner): Promise<void> {
+    observeLeaseAssertion();
     ownerSchema.parse(owner);
-    const lease = await new LeaseManager({ store: this.options.store }).read(owner.objective);
+    const lease = await this.#leases.read(owner.objective);
     if (
       !lease ||
       lease.runId !== owner.runId ||
@@ -236,6 +248,20 @@ export class SharedCapacityCoordinator {
     owner: SharedCapacityOwner,
     operation: (state: State) => { value: T; changed: boolean },
   ): Promise<T> {
+    const captured = ownerSchema.parse(owner);
+    if (this.options.store.withMutationFence)
+      return this.options.store.withMutationFence(
+        () => this.#assertOwner(captured),
+        () => this.#changeFenced(captured, operation, true),
+      );
+    return this.#changeFenced(captured, operation, false);
+  }
+
+  async #changeFenced<T>(
+    owner: SharedCapacityOwner,
+    operation: (state: State) => { value: T; changed: boolean },
+    transportFenced: boolean,
+  ): Promise<T> {
     await this.initialize();
     for (let attempt = 0; attempt < 16; attempt++) {
       const current = await this.#read();
@@ -247,16 +273,16 @@ export class SharedCapacityCoordinator {
       next.generation++;
       ledger(next);
       const oid = await this.#commit(next, current.treeOid, current.oid);
-      await this.#assertOwner(owner);
+      if (!transportFenced) await this.#assertOwner(owner);
       try {
-        if (
-          await this.options.store.compareAndSwapRef({
+        const compare = () =>
+          this.options.store.compareAndSwapRef({
             ref: SHARED_CAPACITY_REF,
             beforeOid: current.oid,
             afterOid: oid,
-          })
-        )
-          return result.value;
+          });
+        const updated = await compare();
+        if (updated) return result.value;
       } catch (error) {
         // Only reconcile an ambiguously accepted write; never replay uncertain work.
         const observed = await this.#read();
@@ -272,6 +298,48 @@ export class SharedCapacityCoordinator {
     const current = await this.#read();
     if (!current) throw new Error("shared capacity ref disappeared");
     return ledger(current.state).snapshot();
+  }
+
+  /** Explicit controller configuration only; ordinary sessions cannot widen ceilings. */
+  async configureLimits(
+    limits: CapacityLimits,
+    assertAuthority: () => Promise<void>,
+  ): Promise<void> {
+    const requested = globalLimits(limits);
+    const configure = async () => {
+      await this.initialize();
+      for (let attempt = 0; attempt < 16; attempt++) {
+        const current = await this.#read();
+        if (!current) throw new Error("shared capacity ref disappeared");
+        await assertAuthority();
+        if (canonical(current.state.limits) === canonical(requested)) return;
+        const next = {
+          ...current.state,
+          generation: current.state.generation + 1,
+          limits: requested,
+        };
+        // Tightening never revokes or drops an existing resource obligation.
+        const oid = await this.#commit(next, current.treeOid, current.oid);
+        await assertAuthority();
+        try {
+          if (
+            await this.options.store.compareAndSwapRef({
+              ref: SHARED_CAPACITY_REF,
+              beforeOid: current.oid,
+              afterOid: oid,
+            })
+          )
+            return;
+        } catch (error) {
+          if ((await this.#read())?.oid === oid) return;
+          throw error;
+        }
+      }
+      throw new Error("shared capacity policy contention; retry configuration later");
+    };
+    if (this.options.store.withMutationFence)
+      await this.options.store.withMutationFence(assertAuthority, configure);
+    else await configure();
   }
 
   #claim(owner: SharedCapacityOwner, reservation: CapacityReservation): Claim {

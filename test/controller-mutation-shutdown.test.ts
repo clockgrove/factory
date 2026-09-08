@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { GitHubControlStore } from "../src/control/github-store.js";
 import { RepositoryLeaseManager } from "../src/controller/repository-lease.js";
+import { SharedCapacityCoordinator } from "../src/controller/shared-capacity.js";
 import { runGitHubRepositoryController } from "../src/controller/repository-controller.js";
 import { createRepositorySupervisorResources } from "../src/supervisor.js";
 import {
@@ -14,9 +15,11 @@ vi.mock("../src/supervisor.js", async (original) => ({
   verifyLocalRepository: vi.fn(async () => {}),
 }));
 
-beforeEach(() =>
-  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] }),
-);
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date", "performance"] });
+  vi.spyOn(SharedCapacityCoordinator.prototype, "initialize").mockResolvedValue();
+  vi.spyOn(GitHubControlStore.prototype, "readRef").mockResolvedValue("c".repeat(40));
+});
 afterEach(() => {
   vi.restoreAllMocks();
   vi.useRealTimers();

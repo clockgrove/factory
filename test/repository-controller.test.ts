@@ -73,7 +73,7 @@ describe("repository controller", () => {
     for (const release of releases) release();
   });
 
-  it("retires its generation only after all admitted reconciliations settle, without redispatch", async () => {
+  it("parks an Objective requiring producer retirement without redispatch or global shutdown", async () => {
     let cleaned = false;
     let calls = 0;
     const controller = new GitHubRepositoryController({
@@ -102,10 +102,45 @@ describe("repository controller", () => {
         }
       },
     });
-    await expect(controller.run()).rejects.toBeInstanceOf(ControllerGenerationRetirement);
+    expect(await controller.reconcileOnce()).toBe(1);
+    await controller.settle();
     expect(cleaned).toBe(true);
     expect(calls).toBe(1);
     expect(await controller.reconcileOnce()).toBe(0);
+  });
+
+  it("parks one failed Objective without aborting an independently running peer", async () => {
+    let peerSignal: AbortSignal | undefined;
+    let finishPeer!: () => void;
+    const controller = new GitHubRepositoryController({
+      capacity: 2,
+      store: {
+        discoverObjectiveActivations: async () =>
+          [1, 2].map((objective) => ({
+            objective,
+            activatedAt: "2026-01-01T00:00:00Z",
+            requestId: `request-${objective}`,
+            policy: {},
+            policyDigest: "c".repeat(64),
+            baseSha: "a".repeat(40),
+            requestedBy: "operator",
+          })),
+      },
+      reconcileObjective: async (activation, signal) => {
+        if (activation.objective === 1) throw new Error("Objective-specific artifact failure");
+        peerSignal = signal;
+        await new Promise<void>((resolve) => {
+          finishPeer = resolve;
+        });
+      },
+    });
+    expect(await controller.reconcileOnce()).toBe(2);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(peerSignal?.aborted).toBe(false);
+    expect(await controller.reconcileOnce()).toBe(0);
+    finishPeer();
+    await controller.settle();
   });
 
   it("connects durable discovery to fair per-Objective supervisors with shared resources", async () => {

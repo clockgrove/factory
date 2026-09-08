@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GitHubControlStore } from "../src/control/github-store.js";
 import { RepositoryLeaseManager } from "../src/controller/repository-lease.js";
+import { SharedCapacityCoordinator } from "../src/controller/shared-capacity.js";
 import { ControllerGenerationRetirement } from "../src/controller/retirement.js";
 import { LeaseAcquisitionContendedError, LeaseLostError } from "../src/control/lease.js";
 import {
@@ -43,6 +44,10 @@ const options = (signal: AbortSignal) => ({
 });
 
 function ownershipMocks() {
+  // These tests isolate election/backoff; real capacity CAS and migration have
+  // independent contract tests. The production ledger is already initialized.
+  vi.spyOn(SharedCapacityCoordinator.prototype, "initialize").mockResolvedValue();
+  vi.spyOn(GitHubControlStore.prototype, "readRef").mockResolvedValue("c".repeat(40));
   const facts = vi
     .spyOn(GitHubControlStore.prototype, "getRepositoryFacts")
     .mockResolvedValue({ defaultBranch: "main" } as never);
@@ -78,11 +83,34 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+async function parkedFailure(error: unknown) {
+  const mock = ownershipMocks();
+  const logs: string[] = [];
+  const abort = new AbortController();
+  const run = vi.fn(async () => {
+    throw error;
+  });
+  const task = runGitHubRepositoryController({
+    ...options(abort.signal),
+    onStatus: (line) => logs.push(line),
+    supervisorFactory: () => ({ run }),
+  });
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(run).toHaveBeenCalledTimes(1);
+  expect(mock.release).not.toHaveBeenCalled();
+  abort.abort();
+  await task;
+  expect(mock.acquire).toHaveBeenCalledTimes(1);
+  return logs.join("\n");
+}
+
 describe("controller quota boundary", () => {
   it("preserves a contended peer's independent sibling cleanup failure instead of retrying", async () => {
     const failure = Error("second Objective cleanup remains unknown");
     const seen: number[] = [];
+    const stop = new AbortController();
     const controller = new GitHubRepositoryController({
+      signal: stop.signal,
       store: {
         discoverObjectiveActivations: async () => [activation, { ...activation, objective: 2 }],
       },
@@ -96,7 +124,12 @@ describe("controller quota boundary", () => {
         throw failure;
       },
     });
-    await expect(controller.run()).rejects.toBe(failure);
+    const task = controller.run();
+    const result = expect(task).rejects.toBe(failure);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(seen).toEqual([1, 2]);
+    stop.abort();
+    await result;
     expect(seen).toEqual([1, 2]);
     expect(await controller.reconcileOnce()).toBe(0);
   });
@@ -117,7 +150,7 @@ describe("controller quota boundary", () => {
       expect(await controller.reconcileOnce()).toBe(0);
     },
   );
-  it("waits in the same process after contended acquisition, then reconstructs a fresh cohort", async () => {
+  it("retries the contended Objective without releasing or reacquiring scheduler leadership", async () => {
     const mock = ownershipMocks();
     const abort = new AbortController();
     const run = vi
@@ -131,14 +164,12 @@ describe("controller quota boundary", () => {
     await vi.advanceTimersByTimeAsync(119_999);
     expect(run).toHaveBeenCalledTimes(1);
     expect(mock.acquire).toHaveBeenCalledTimes(1);
-    expect(mock.release).toHaveBeenCalledTimes(1);
+    expect(mock.release).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     await task;
     expect(run).toHaveBeenCalledTimes(2);
-    expect(mock.acquire).toHaveBeenCalledTimes(2);
-    expect(mock.acquire.mock.calls[0]![0].controllerId).toBe(
-      mock.acquire.mock.calls[1]![0].controllerId,
-    );
+    expect(mock.acquire).toHaveBeenCalledTimes(1);
+    expect(mock.release).toHaveBeenCalledTimes(1);
   });
 
   it("can stop during expected contention without another acquisition", async () => {
@@ -158,7 +189,7 @@ describe("controller quota boundary", () => {
   });
 
   it.each(["active-lease", "release"] as const)(
-    "keeps %s failure fatal instead of treating it as acquisition contention",
+    "preserves %s failure without replaying the failed Objective",
     async (boundary) => {
       const mock = ownershipMocks();
       const failure = new LeaseLostError("lost owned generation");
@@ -168,12 +199,19 @@ describe("controller quota boundary", () => {
           boundary === "active-lease" ? failure : new LeaseAcquisitionContendedError(1, 120_000),
         );
       if (boundary === "release") mock.release.mockRejectedValueOnce(failure);
-      await expect(
-        runGitHubRepositoryController({
-          ...options(new AbortController().signal),
-          supervisorFactory: () => ({ run }),
-        }),
-      ).rejects.toThrow("non-retryable failure (objective-lease-lost)");
+      const abort = new AbortController();
+      const task = runGitHubRepositoryController({
+        ...options(abort.signal),
+        supervisorFactory: () => ({ run }),
+      });
+      const result =
+        boundary === "release"
+          ? expect(task).rejects.toThrow("non-retryable failure (objective-lease-lost)")
+          : expect(task).resolves.toBeUndefined();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(run).toHaveBeenCalledTimes(1);
+      abort.abort();
+      await result;
       expect(run).toHaveBeenCalledTimes(1);
       expect(mock.acquire).toHaveBeenCalledTimes(1);
     },
@@ -337,36 +375,15 @@ describe("controller quota boundary", () => {
   });
 
   it("does not leak raw authentication errors from asynchronous reconciliation", async () => {
-    const mock = ownershipMocks();
-    const logs: string[] = [];
     const secret = "Bearer private-token";
-    const run = async () => {
-      throw { status: 403, message: secret };
-    };
-    const task = runGitHubRepositoryController({
-      ...options(new AbortController().signal),
-      onStatus: (line) => logs.push(line),
-      supervisorFactory: () => ({ run }),
-    });
-    await expect(task).rejects.toThrow("non-retryable failure");
-    expect(logs.join("\n")).not.toContain(secret);
-    expect(logs.join("\n")).toContain("github-permission-403");
-    expect(mock.acquire).toHaveBeenCalledTimes(1);
+    const logs = await parkedFailure({ status: 403, message: secret });
+    expect(logs).not.toContain(secret);
+    expect(logs).toContain("github-permission-403");
   });
 
-  it("preserves deliberate controller-generation retirement identity", async () => {
-    ownershipMocks();
+  it("preserves producer-retirement diagnostics while parking only its Objective", async () => {
     const retirement = new ControllerGenerationRetirement();
-    await expect(
-      runGitHubRepositoryController({
-        ...options(new AbortController().signal),
-        supervisorFactory: () => ({
-          run: async () => {
-            throw retirement;
-          },
-        }),
-      }),
-    ).rejects.toBe(retirement);
+    expect(await parkedFailure(retirement)).toContain("controller-generation-retirement");
   });
 
   it.each([
@@ -376,33 +393,17 @@ describe("controller quota boundary", () => {
   ])(
     "retains bounded recovery %s diagnostics without raw provider details",
     async (status, blockers) => {
-      ownershipMocks();
-      await expect(
-        runGitHubRepositoryController({
-          ...options(new AbortController().signal),
-          supervisorFactory: () => ({
-            run: async () => {
-              throw new Error(`Recovery adoption ${status}: ${blockers}`);
-            },
-          }),
-        }),
-      ).rejects.toThrow(`recovery-adoption-${status}: ${blockers}`);
+      expect(await parkedFailure(new Error(`Recovery adoption ${status}: ${blockers}`))).toContain(
+        `recovery-adoption-${status}: ${blockers}`,
+      );
     },
   );
 
   it("does not expose arbitrary recovery-shaped error details", async () => {
-    ownershipMocks();
     const secret = "Bearer private-token";
-    await expect(
-      runGitHubRepositoryController({
-        ...options(new AbortController().signal),
-        supervisorFactory: () => ({
-          run: async () => {
-            throw new Error(`Recovery adoption blocked: ${secret}`);
-          },
-        }),
-      }),
-    ).rejects.toThrow("controller-invariant-failure");
+    const logs = await parkedFailure(new Error(`Recovery adoption blocked: ${secret}`));
+    expect(logs).toContain("controller-invariant-failure");
+    expect(logs).not.toContain(secret);
   });
 
   it("handles a failing asynchronous diagnostic without an unhandled task rejection", async () => {

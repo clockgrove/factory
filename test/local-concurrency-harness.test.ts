@@ -465,6 +465,11 @@ describe("prospective concurrency observation window", () => {
       return [];
     });
     const call = vi.fn(async () => ({ run: { state: terminalVisible ? "completed" : "active" } }));
+    type FixtureObservation = {
+      children: unknown[];
+      status: Awaited<ReturnType<typeof call>>;
+      receipts: { event: { event: string } }[];
+    };
     try {
       await expect(
         main(env, async (_env, _runner, extension) => {
@@ -477,7 +482,12 @@ describe("prospective concurrency observation window", () => {
             request,
             list,
             retireClient: vi.fn(),
-          })) as Pick<ConcurrencyPort, "pollPair">;
+          })) as {
+            pollPair(
+              phase: string,
+              accept: (pair: FixtureObservation[]) => boolean,
+            ): Promise<FixtureObservation[]>;
+          };
           const refill = await port.pollPair("refill", (pair) => concurrencyRefill(pair) !== null);
           expect(refill.every((entry) => entry.children.length === 3)).toBe(true);
           const terminal = await port.pollPair("completed", (pair) =>

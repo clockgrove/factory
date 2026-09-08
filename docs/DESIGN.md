@@ -597,7 +597,8 @@ validation timestamps and review identity. Controller and sandbox intervals are 
 clock skew is not interpreted as billing or cleanup evidence. Missing completion leaves the paid
 liability unresolved and blocks automatic replacement. A partial rebase publication replays from the
 last complete publication binding rather than pairing an old head with a newer validation receipt.
-The runtime and fault qualification of this path remains open until the implementation testing batch.
+This path requires runtime and fault qualification; current acceptance is tracked in
+[GitHub #69](https://github.com/clockgrove/factory/issues/69) and its linked delivery/provider issues.
 Immediately before each regular or stacked merge, Factory acquires a short claim for the destination
 branch and
 rechecks the exact validated head, current stack/base relationship, current branch rules, required

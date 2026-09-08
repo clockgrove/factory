@@ -9,7 +9,9 @@ security boundary, and claims in the pull request.
 Read [`docs/DESIGN.md`](docs/DESIGN.md) first. It states the goals, the non-goals, and the rules that
 changes are judged against; [`AGENTS.md`](AGENTS.md) states the engineering conventions.
 All remaining product work is tracked in ordinary GitHub issues linked from
-[`docs/COMPLETION.md`](docs/COMPLETION.md). The board is a concise summary, not a separate backlog;
+[GitHub #69](https://github.com/clockgrove/factory/issues/69). Its body is the single current
+project summary; linked issues own detailed acceptance and evidence, not duplicate status boards.
+Repository documents retain durable contracts, procedures and historical evidence;
 contributor tasks do not require Factory Objective compilation. Accepted implementation waves remain
 in [`docs/DELIVERY-PLAN.md`](docs/DELIVERY-PLAN.md).
 
@@ -161,10 +163,18 @@ one-capability-at-a-time limit. Every lane needs a concrete finish-line delivera
 running, waiting, completed, or blocked status. Resume a completed agent explicitly before assigning
 follow-up work; do not create extra audits, docs, or test infrastructure just to occupy agents.
 
-Finish the remaining implementation in parallel before the coordinated qualification phase above.
-Keep one concise completion board with acceptance criteria, code/testing/external-input classification,
-owner, dependencies, and next deliverable. Link detailed historical evidence. Report completed
-capabilities, remaining work, the critical path, and required decisions; counts are supporting detail.
+Finish the declared candidate's implementation in parallel before coordinated qualification; do not
+interpret "remaining implementation" as every future backlog enhancement. Apply the candidate
+admission and cheap integrated-tree checks in AGENTS.md without repeating broad release gates.
+Maintain the body of #69 with milestone, code/testing/external-input classification, owner,
+dependencies, next deliverable and evidence links. Update it and affected issue bodies as part of
+capability completion; comments remain historical. Keep implemented, integrated and qualified
+distinct. Preserve every accepted obligation in a milestone issue, including explicit deferrals.
+Before starting a capability, map its obligations to acceptance and check that individually passing
+parts compose into the requested outcome; this does not require a new evaluator or framework.
+At completion report elapsed time, total observed model usage including failed/reworked effort,
+integration/review defects, human interventions and remaining unproven requirements. Missing
+measurements remain unknown. Report the critical path and required decisions, not utilization alone.
 All applicable release and live-conformance gates still apply.
 
 Do not commit credentials, local Factory state,

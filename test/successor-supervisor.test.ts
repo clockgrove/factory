@@ -3242,6 +3242,8 @@ describe("Supervisor authenticated successor execution", () => {
     },
     60000,
   );
+  // These multi-stage integration fixtures perform real Git proof work. Under
+  // coverage they use the suite's existing 60-second integration-test tier.
   it.each([false, true])(
     "preserves native sibling/join topology with artifact-only recovery %s",
     async (artifactOnly) => {
@@ -3261,7 +3263,7 @@ describe("Supervisor authenticated successor execution", () => {
       ).toMatchObject({ selected: "native-stacks" });
       expect(await f.runtime()).toMatchObject({ status: "verified", usage: { modelTokens: 80 } });
     },
-    30000,
+    60000,
   );
   it("retires an abandoned successor run before restoring mocks and removing its repository", async () => {
     const f = await successorFixture({
@@ -3351,7 +3353,7 @@ describe("Supervisor authenticated successor execution", () => {
     ]);
     expect(f.planRecord.plan.items[1]!.source?.artifactHead?.headSha).toBe(f.heads[1]);
     expect(await f.runtime()).toMatchObject({ status: "verified", usage: { modelTokens: 80 } });
-  }, 30000);
+  }, 60000);
 
   it("rejects an artifact branch replacement after acknowledgement before opening a PR", async () => {
     const f = await successorFixture({ artifactOnly: true });

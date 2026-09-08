@@ -157,6 +157,9 @@ async function fixture(topology: "regular" | "sibling" | "stack" = "regular") {
   };
   const manager = new CompiledGraphManager(graphStore, {
     assertCurrent: async () => {},
+    async assertMutationAuthorized(this: { assertCurrent(): Promise<void> }) {
+      await this.assertCurrent();
+    },
   } as unknown as LeaseManager);
   const graph = await manager.persist({ lease, base, objective });
   const projection = await manager.persistProjection({
@@ -170,6 +173,9 @@ async function fixture(topology: "regular" | "sibling" | "stack" = "regular") {
   });
   const review = await new ReviewCheckpointManager(graphStore, {
     assertCurrent: async () => {},
+    async assertMutationAuthorized(this: { assertCurrent(): Promise<void> }) {
+      await this.assertCurrent();
+    },
   } as unknown as LeaseManager).persist({
     lease,
     identity: {
@@ -794,6 +800,9 @@ describe("read-only recovery assessment", () => {
     f.publish();
     const checkpoint = await new ReviewCheckpointManager(f.graphStore, {
       assertCurrent: async () => {},
+      async assertMutationAuthorized(this: { assertCurrent(): Promise<void> }) {
+        await this.assertCurrent();
+      },
     } as unknown as LeaseManager).persist({
       lease: f.lease,
       identity: {

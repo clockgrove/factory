@@ -89,7 +89,12 @@ async function fixture(sameObjective = false, peerNonhost = false) {
       return true;
     },
   };
-  const leases = { assertCurrent: async () => {} } as unknown as LeaseManager;
+  const leases = {
+    assertCurrent: async () => {},
+    async assertMutationAuthorized(this: { assertCurrent(): Promise<void> }) {
+      await this.assertCurrent();
+    },
+  } as unknown as LeaseManager;
   type Pull = Awaited<ReturnType<RecoveryReadStore["readPullRequest"]>>;
   const pulls = new Map<number, Pull>();
   const snapshots = new Map<number, FactoryReadSnapshot>();

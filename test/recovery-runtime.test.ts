@@ -288,6 +288,9 @@ async function fixture(
     graphInput.workItems[0]!.delivery = { group: "feature", relationship: "root" };
   const graphManager = new CompiledGraphManager(store, {
     assertCurrent: async () => {},
+    async assertMutationAuthorized(this: { assertCurrent(): Promise<void> }) {
+      await this.assertCurrent();
+    },
   } as unknown as LeaseManager);
   const graph = await graphManager.persist({ lease: objectiveLease, base, objective: graphInput });
   const projection = await graphManager.persistProjection({
@@ -924,6 +927,9 @@ describe("verified successor runtime loader", () => {
     };
     const record = await new RecoveryPlanManager(f.store, {
       assertCurrent: async () => {},
+      async assertMutationAuthorized(this: { assertCurrent(): Promise<void> }) {
+        await this.assertCurrent();
+      },
     } as unknown as LeaseManager).persist({
       lease: { ...f.args.objectiveLease, runId: "third" },
       plan,

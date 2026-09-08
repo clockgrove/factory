@@ -282,6 +282,9 @@ async function fixture(
   };
   const graphManager = new CompiledGraphManager(store, {
     assertCurrent: async () => {},
+    async assertMutationAuthorized(this: { assertCurrent(): Promise<void> }) {
+      await this.assertCurrent();
+    },
   } as unknown as LeaseManager);
   const graph = await graphManager.persist({ lease: objectiveLease, base, objective: graphInput });
   const projection = await graphManager.persistProjection({

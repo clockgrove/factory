@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -298,7 +299,7 @@ describe("installed large-file lifecycle authority", () => {
         "scope",
         "secret",
         "symlink",
-      ]) {
+      ] as const) {
         const scenarioAuthority = {
           ...authority,
           largeFile: {
@@ -307,7 +308,9 @@ describe("installed large-file lifecycle authority", () => {
             fixtureDigest: hash(readFileSync(descriptor, "utf8")),
           },
         };
-        const body = largeFileExtension(scenarioAuthority).objectiveBody(scenarioAuthority);
+        const { objectiveBody } = largeFileExtension(scenarioAuthority);
+        assert.ok(objectiveBody, "large-file extension must author its Objective");
+        const body = objectiveBody(scenarioAuthority);
         expect(body).toContain(LARGE_FILE_VALIDATION_COMMAND);
         expect(body).not.toContain("node --test");
       }
@@ -328,9 +331,9 @@ describe("installed large-file lifecycle authority", () => {
           fixtureDigest: hash(readFileSync(descriptor, "utf8")),
         },
       };
-      expect(() =>
-        largeFileExtension(standaloneAuthority).objectiveBody(standaloneAuthority),
-      ).toThrow();
+      const { objectiveBody } = largeFileExtension(standaloneAuthority);
+      assert.ok(objectiveBody, "large-file extension must author its Objective");
+      expect(() => objectiveBody(standaloneAuthority)).toThrow();
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }

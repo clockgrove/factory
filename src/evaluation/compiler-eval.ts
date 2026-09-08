@@ -413,11 +413,29 @@ export function renderCompilerEvalMarkdown(report: CompilerEvalReport): string {
         `- ${clean(entry.obligationId)}: ${entry.status} — ${clean(entry.reason)} (evidence: ${entry.evidenceIds.map(clean).join(", ")})`,
     ),
     "",
+    "## Granularity and dependencies",
+    "",
+    ...report.verdict.items.map(
+      (entry) =>
+        `- ${clean(entry.itemId)}: ${entry.granularity}; ${clean(entry.reason)}; evidence: ${entry.evidenceIds.map(clean).join(", ")}`,
+    ),
+    ...report.verdict.dependencies.map(
+      (entry) =>
+        `- ${clean(entry.itemId)} depends on ${clean(entry.dependsOn)}: ${clean(entry.reason)}; evidence: ${entry.evidenceIds.map(clean).join(", ")}`,
+    ),
+    "",
+    "## Quality dimensions",
+    "",
+    ...report.verdict.dimensions.map(
+      (entry) =>
+        `- ${entry.dimension}: ${entry.status}; ${clean(entry.reason)}; evidence: ${entry.evidenceIds.map(clean).join(", ")}`,
+    ),
+    "",
     "## Findings",
     "",
     ...report.verdict.findings.map(
       (entry) =>
-        `- ${entry.severity}: ${clean(entry.rootCause)}. Correction: ${clean(entry.correction)}. Confidence: ${entry.confidence}; uncertainty: ${clean(entry.uncertainty)}`,
+        `- ${entry.severity}: ${clean(entry.rootCause)}. Correction: ${clean(entry.correction)}. Affected obligations: ${entry.obligationIds.map(clean).join(", ")}; items: ${entry.itemIds.map(clean).join(", ")}; evidence: ${entry.evidenceIds.map(clean).join(", ")}. Confidence: ${entry.confidence}; uncertainty: ${clean(entry.uncertainty)}`,
     ),
     "",
     "## Attribution",
@@ -425,6 +443,13 @@ export function renderCompilerEvalMarkdown(report: CompilerEvalReport): string {
     ...report.causes.map(
       (entry) =>
         `- ${clean(entry.findingId)}: ${entry.cause}; ${clean(entry.explanation)}; estimated avoidable tokens: ${entry.estimatedAvoidableTokens ?? "unknown"}; evidence: ${entry.evidenceIds.map(clean).join(", ")}`,
+    ),
+    "",
+    "## Invocation observations",
+    "",
+    ...report.usage.map(
+      (entry) =>
+        `- ${clean(entry.invocationId)} (${entry.phase}): observed tokens ${entry.observedTokens ?? "unknown"}, milliseconds ${entry.observedMilliseconds ?? "unknown"}; evidence: ${clean(entry.evidenceId)}`,
     ),
     "",
     "## Accounting and limitations",
@@ -656,4 +681,89 @@ export function validateCompilerCaseLabel(
   )
     throw new Error("ambiguous labels must expose uncertainty");
   return label;
+}
+
+export interface CompilerComparisonArm {
+  outcome: "accepted" | "failed" | "inconclusive";
+  evidenceIds: string[];
+  remainingObligations: string[];
+  regressions: string[];
+  /** Total observed effort includes extraction, all failed calls, repair, judge and workers. */
+  observedTotalTokens: number | null;
+  observedElapsedMilliseconds: number | null;
+}
+export interface CompilerComparisonPair {
+  caseDigest: string;
+  conditionsDigest: string;
+  provenance: "observed" | "synthetic";
+  unrepaired: CompilerComparisonArm;
+  repaired: CompilerComparisonArm;
+}
+/** Keeps failed/inconclusive arms in the denominator and never turns judge scores into savings. */
+export function measureCompilerRepairComparison(pairs: readonly CompilerComparisonPair[]) {
+  unique(
+    pairs.map((pair) => `${pair.caseDigest}:${pair.conditionsDigest}`),
+    "comparison pair",
+  );
+  for (const pair of pairs) {
+    Digest.parse(pair.caseDigest);
+    Digest.parse(pair.conditionsDigest);
+    for (const arm of [pair.unrepaired, pair.repaired]) {
+      if (arm.evidenceIds.length === 0)
+        throw new Error("comparison requires original arm evidence");
+      for (const value of [arm.observedTotalTokens, arm.observedElapsedMilliseconds])
+        if (value !== null && (!Number.isFinite(value) || value < 0))
+          throw new Error("invalid comparison observation");
+    }
+  }
+  const measured = pairs.filter(
+    (pair) =>
+      pair.provenance === "observed" &&
+      pair.unrepaired.outcome === "accepted" &&
+      pair.repaired.outcome === "accepted" &&
+      pair.unrepaired.observedTotalTokens !== null &&
+      pair.repaired.observedTotalTokens !== null &&
+      pair.unrepaired.observedElapsedMilliseconds !== null &&
+      pair.repaired.observedElapsedMilliseconds !== null,
+  );
+  return {
+    version: 1 as const,
+    pairs: [...pairs],
+    pairCount: pairs.length,
+    measuredPairCount: measured.length,
+    failedOrInconclusivePairs: pairs.filter(
+      (pair) => pair.unrepaired.outcome !== "accepted" || pair.repaired.outcome !== "accepted",
+    ).length,
+    defectReduction: pairs.reduce(
+      (sum, pair) =>
+        sum +
+        pair.unrepaired.remainingObligations.length -
+        pair.repaired.remainingObligations.length,
+      0,
+    ),
+    regressions: pairs.reduce((sum, pair) => sum + pair.repaired.regressions.length, 0),
+    observedTokenDifference:
+      measured.length > 0
+        ? measured.reduce(
+            (sum, pair) =>
+              sum +
+              (pair.unrepaired.observedTotalTokens ?? 0) -
+              (pair.repaired.observedTotalTokens ?? 0),
+            0,
+          )
+        : null,
+    observedElapsedDifferenceMilliseconds:
+      measured.length > 0
+        ? measured.reduce(
+            (sum, pair) =>
+              sum +
+              (pair.unrepaired.observedElapsedMilliseconds ?? 0) -
+              (pair.repaired.observedElapsedMilliseconds ?? 0),
+            0,
+          )
+        : null,
+    economicBenefitMeasured: measured.length > 0 && measured.length === pairs.length,
+    limitation:
+      "Matched observations describe these cases only; estimated defects and judge scores do not establish savings. Positive differences mean less observed repaired effort, negative differences mean more.",
+  };
 }

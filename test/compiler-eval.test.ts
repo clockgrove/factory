@@ -6,6 +6,7 @@ import {
   compilerEvalDigest,
   createCompilerEvalReport,
   measureCompilerCalibration,
+  measureCompilerRepairComparison,
   parseObligationInventory,
   renderCompilerEvalMarkdown,
   validateCompilerJudgeVerdict,
@@ -320,4 +321,30 @@ describe("assisted label provenance", () => {
       ]).humanCalibrationProven,
     ).toBe(false);
   });
+});
+
+it("retains failed and synthetic comparative arms without claiming observed savings", () => {
+  const arm = {
+    outcome: "accepted" as const,
+    evidenceIds: ["result"],
+    remainingObligations: [],
+    regressions: [],
+    observedTotalTokens: 100,
+    observedElapsedMilliseconds: 10,
+  };
+  const pair = {
+    caseDigest: "a".repeat(64),
+    conditionsDigest: "b".repeat(64),
+    provenance: "synthetic" as const,
+    unrepaired: arm,
+    repaired: { ...arm, observedTotalTokens: 50 },
+  };
+  expect(measureCompilerRepairComparison([pair]).observedTokenDifference).toBeNull();
+  const measured = measureCompilerRepairComparison([{ ...pair, provenance: "observed" }]);
+  expect(measured.observedTokenDifference).toBe(50);
+  expect(
+    measureCompilerRepairComparison([{ ...pair, repaired: { ...arm, outcome: "failed" } }])
+      .failedOrInconclusivePairs,
+  ).toBe(1);
+  expect(() => measureCompilerRepairComparison([pair, pair])).toThrow("duplicate");
 });

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { assertNoSecretMaterial, assertWithinBytes } from "../protocol/limits.js";
 import {
   compiledGraphDigest,
   parsePersistedCompiledObjective,
@@ -13,6 +14,31 @@ import {
 } from "../control/compiler-drafts.js";
 import type { LeaseState } from "../control/lease.js";
 
+function diagnostic(error: unknown): string {
+  const text = error instanceof Error ? error.message : String(error);
+  try {
+    assertNoSecretMaterial(text, "compiler diagnostic");
+    return text.slice(0, 4000);
+  } catch {
+    return "diagnostic withheld: suspected secret material";
+  }
+}
+function safeProposal(error: unknown): Record<string, unknown> {
+  if (
+    typeof error !== "object" ||
+    error === null ||
+    !("proposal" in error) ||
+    error.proposal === undefined
+  )
+    return {};
+  try {
+    assertWithinBytes(error.proposal, 512 * 1024, "compiler proposal");
+    assertNoSecretMaterial(error.proposal, "compiler proposal");
+    return { proposal: error.proposal };
+  } catch {
+    return { proposalUnavailable: "unsafe or oversized proposal" };
+  }
+}
 const UsageSchema = z
   .object({
     inputTokens: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
@@ -86,6 +112,8 @@ export async function runCompilerDraftLoop(args: {
   callbacks: CompilerDraftCallbacks;
   limits?: CompilerDraftLimits;
   now?: () => number;
+  fixedGraph?: CompiledObjective;
+  sourceEvidence?: unknown;
 }): Promise<CompilerDraftOutcome> {
   const { manager, lease, binding, callbacks } = args;
   const now = args.now ?? Date.now;
@@ -95,6 +123,12 @@ export async function runCompilerDraftLoop(args: {
     maxObservedTokens: args.limits?.maxObservedTokens ?? Number.MAX_SAFE_INTEGER,
     deadlineMs: args.limits?.deadlineMs ?? 600_000,
   });
+  const fixedGraph =
+    args.fixedGraph === undefined ? undefined : parsePersistedCompiledObjective(args.fixedGraph);
+  if (fixedGraph && limits.maxRepairs !== 0)
+    throw new Error("fixed historical graph requires zero repairs");
+  const fixedGraphDigest = fixedGraph ? compiledGraphDigest(fixedGraph) : null;
+  const sourceEvidence = args.sourceEvidence ?? null;
   const records = await manager.load(binding);
   const append = async (kind: CompilerDraftRecord["kind"], payload: Record<string, unknown>) => {
     const record = await manager.append(lease, binding, records.length, kind, payload);
@@ -109,22 +143,30 @@ export async function runCompilerDraftLoop(args: {
         await append("accounting-failure", {
           invocationId,
           stage,
-          error:
-            error instanceof Error
-              ? error.message.slice(0, 4000)
-              : "accounting reconciliation failed",
+          error: diagnostic(error),
         });
       throw new CompilerDraftAccountingError("compiler accounting reconciliation failed", {
         cause: error,
       });
     }
   };
-  if (!records.length) await append("started", { limits, startedAt: now() });
+  if (!records.length)
+    await append("started", {
+      limits,
+      startedAt: now(),
+      ...(fixedGraph ? { fixedGraph, fixedGraphDigest } : {}),
+      ...(sourceEvidence === null ? {} : { sourceEvidence }),
+    });
   const first = records[0];
   if (
     first?.kind !== "started" ||
     draftDigest(first.payload.limits) !== draftDigest(limits) ||
-    typeof first.payload.startedAt !== "number"
+    typeof first.payload.startedAt !== "number" ||
+    (first.payload.fixedGraphDigest ?? null) !== fixedGraphDigest ||
+    draftDigest(first.payload.sourceEvidence ?? null) !== draftDigest(sourceEvidence) ||
+    (fixedGraph !== undefined &&
+      compiledGraphDigest(parsePersistedCompiledObjective(first.payload.fixedGraph)) !==
+        fixedGraphDigest)
   )
     throw new Error("compiler draft policy changed");
   // All known terminal usage is reconciled, including rejected and failed calls, before returning/restarting.
@@ -159,13 +201,15 @@ export async function runCompilerDraftLoop(args: {
     );
     if (
       !inventoryResult ||
-      !proposal ||
+      (!proposal && !fixedGraph) ||
       !judged ||
       records.some((item) => item.kind === "result" && item.payload.usage === null)
     )
       throw new Error("compiler selection lacks known invocation evidence");
     const inventory = await callbacks.validateInventory(inventoryResult.payload.value);
-    const graph = await callbacks.validate(proposal.payload.value);
+    const graph = await callbacks.validate(
+      fixedGraph ? { objective: fixedGraph } : proposal!.payload.value,
+    );
     parsePersistedCompiledObjective(terminal.payload.graph);
     if (
       draftDigest(inventory) !== terminal.payload.inventoryDigest ||
@@ -185,9 +229,12 @@ export async function runCompilerDraftLoop(args: {
   }
   if (terminal) return { status: "stopped", reason: String(terminal.payload.reason), records };
   const stop = async (reason: string): Promise<CompilerDraftOutcome> => {
-    await append("stopped", { reason });
-    return { status: "stopped", reason, records };
+    const safeReason = diagnostic(reason);
+    await append("stopped", { reason: safeReason });
+    return { status: "stopped", reason: safeReason, records };
   };
+  if (records.some((item) => item.kind === "terminal-conflict"))
+    return await stop("conflicting-terminal-output");
   class Stop extends CompilerDraftStopError {}
   const invoke = async (
     stage: DraftStage,
@@ -232,16 +279,25 @@ export async function runCompilerDraftLoop(args: {
     });
     let saved: DraftInvocationResult | null = null;
     let contradictory = false;
+    let conflictingResultDigest: string | null = null;
     const checkpoint = async (result: DraftInvocationResult): Promise<void> => {
       const usage = result.usage === null ? null : UsageSchema.parse(result.usage);
       if (saved) {
         if (draftDigest(saved) !== draftDigest({ value: result.value, usage })) {
           contradictory = true;
+          conflictingResultDigest = draftDigest({ value: result.value, usage });
           throw new Error("conflicting compiler result checkpoint");
         }
         return;
       }
-      await append("result", { invocationId, stage, revision, value: result.value, usage });
+      try {
+        await append("result", { invocationId, stage, revision, value: result.value, usage });
+      } catch (error) {
+        throw Object.assign(new Error(diagnostic(error), { cause: error }), {
+          usage,
+          proposal: result.value,
+        });
+      }
       saved = { value: result.value, usage };
     };
     let result: DraftInvocationResult;
@@ -253,7 +309,23 @@ export async function runCompilerDraftLoop(args: {
       await checkpoint(result);
     } catch (error) {
       // A successful terminal checkpoint survives a caller/transport failure after it.
-      if (contradictory) throw new Stop("conflicting-terminal-output");
+      if (contradictory) {
+        await append("terminal-conflict", {
+          invocationId,
+          stage,
+          revision,
+          conflictingResultDigest,
+        });
+        const known = records.find(
+          (item) => item.kind === "result" && item.payload.invocationId === invocationId,
+        );
+        if (known?.payload.usage) {
+          const usage = UsageSchema.parse(known.payload.usage);
+          tokens += usage.inputTokens + usage.outputTokens;
+          await recordUsage(invocationId, stage, usage);
+        }
+        throw new Stop("conflicting-terminal-output");
+      }
       if (saved) result = saved;
       else {
         const known =
@@ -267,14 +339,8 @@ export async function runCompilerDraftLoop(args: {
           revision,
           value: null,
           usage,
-          ...(typeof error === "object" &&
-          error !== null &&
-          "proposal" in error &&
-          error.proposal !== undefined
-            ? { proposal: error.proposal }
-            : {}),
-          error:
-            error instanceof Error ? error.message.slice(0, 4000) : "management invocation failed",
+          ...safeProposal(error),
+          error: diagnostic(error),
         });
         if (usage) {
           tokens += usage.inputTokens + usage.outputTokens;
@@ -303,13 +369,15 @@ export async function runCompilerDraftLoop(args: {
     for (let revision = 0; revision <= limits.maxRepairs; revision++) {
       let graph: CompiledObjective;
       try {
-        const value = await invoke(
-          revision === 0 ? "compile" : "repair",
-          revision,
-          inventory,
-          previous,
-          failure,
-        );
+        const value = fixedGraph
+          ? { objective: fixedGraph }
+          : await invoke(
+              revision === 0 ? "compile" : "repair",
+              revision,
+              inventory,
+              previous,
+              failure,
+            );
         graph = await callbacks.validate(value);
       } catch (error) {
         if (
@@ -328,13 +396,8 @@ export async function runCompilerDraftLoop(args: {
         )
           throw new Stop("draft-grounding-changed");
         failure = {
-          error: error instanceof Error ? error.message.slice(0, 4000) : "invalid draft",
-          ...(typeof error === "object" &&
-          error !== null &&
-          "proposal" in error &&
-          error.proposal !== undefined
-            ? { proposal: error.proposal }
-            : {}),
+          error: diagnostic(error),
+          ...safeProposal(error),
         };
         if (
           !records.some((item) => item.kind === "validation" && item.payload.revision === revision)
@@ -343,6 +406,8 @@ export async function runCompilerDraftLoop(args: {
         continue;
       }
       const graphDigest = compiledGraphDigest(graph);
+      if (fixedGraphDigest !== null && graphDigest !== fixedGraphDigest)
+        throw new Stop("fixed-graph-changed");
       const validated = records.find(
         (item) => item.kind === "validation" && item.payload.revision === revision,
       );
@@ -406,7 +471,7 @@ export async function runCompilerDraftLoop(args: {
         )
           throw error;
         failure = {
-          error: error instanceof Error ? error.message.slice(0, 4000) : "invalid judge verdict",
+          error: diagnostic(error),
         };
       }
     }
@@ -418,8 +483,6 @@ export async function runCompilerDraftLoop(args: {
     )
       throw error;
     if (error instanceof CompilerDraftStopError) return await stop(error.message);
-    return await stop(
-      `invalid-inventory: ${error instanceof Error ? error.message.slice(0, 4000) : "unknown"}`,
-    );
+    return await stop(`invalid-inventory: ${diagnostic(error)}`);
   }
 }

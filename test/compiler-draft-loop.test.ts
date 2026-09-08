@@ -414,6 +414,103 @@ describe("compiler draft durable repair", () => {
       vi.mocked(invoke).mock.calls.filter(([request]) => request.stage === "repair"),
     ).toHaveLength(1);
   });
+  it("judges a fixed historical graph after inventory without fabricated compilation usage", async () => {
+    const args = await setup();
+    const graph = objective();
+    const calls: string[] = [];
+    args.callbacks.invoke = vi.fn(async (request) => {
+      calls.push(request.stage);
+      return {
+        value: request.stage === "inventory" ? { obligations: ["a"] } : { accepted: true },
+        usage: { inputTokens: 2, outputTokens: 1 },
+      };
+    });
+    args.callbacks.validate = (value) => (value as { objective: CompiledObjective }).objective;
+    const fixed = {
+      ...args,
+      fixedGraph: graph,
+      sourceEvidence: { objective: "Original request", sources: ["pinned source"] },
+      limits: { maxRepairs: 0 },
+    };
+    const result = await runCompilerDraftLoop(fixed);
+    expect(result.status).toBe("accepted");
+    expect(calls).toEqual(["inventory", "judge"]);
+    expect(result.records[0]?.payload).toMatchObject({
+      fixedGraph: graph,
+      sourceEvidence: fixed.sourceEvidence,
+    });
+    expect(result.records.filter((item) => item.kind === "result")).toHaveLength(2);
+    expect((await runCompilerDraftLoop(fixed)).status).toBe("accepted");
+    expect(calls).toEqual(["inventory", "judge"]);
+    await expect(
+      runCompilerDraftLoop({ ...fixed, fixedGraph: objective("changed") }),
+    ).rejects.toThrow("policy changed");
+    await expect(
+      runCompilerDraftLoop({ ...fixed, sourceEvidence: { objective: "changed" } }),
+    ).rejects.toThrow("policy changed");
+    await expect(runCompilerDraftLoop({ ...fixed, limits: { maxRepairs: 1 } })).rejects.toThrow(
+      "zero repairs",
+    );
+  });
+  it("reconciles known usage before stopping contradictory checkpoints", async () => {
+    const args = await setup();
+    const delegate = args.callbacks.invoke;
+    args.callbacks.invoke = async (request, checkpoint) => {
+      const result = await delegate(request, checkpoint);
+      return { ...result, value: { contradictory: true } };
+    };
+    expect(await runCompilerDraftLoop(args)).toMatchObject({
+      status: "stopped",
+      reason: "conflicting-terminal-output",
+    });
+    expect(args.callbacks.recordUsage).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(args.callbacks.recordUsage).mock.calls[0]?.[2]).toEqual({
+      inputTokens: 2,
+      outputTokens: 1,
+    });
+  });
+  it("remembers contradictory output when accounting reconciliation also fails", async () => {
+    const args = await setup();
+    const delegate = args.callbacks.invoke;
+    const account = args.callbacks.recordUsage;
+    args.callbacks.invoke = async (request, checkpoint) => {
+      const result = await delegate(request, checkpoint);
+      return { ...result, value: { contradictory: true } };
+    };
+    args.callbacks.recordUsage = async () => {
+      throw new Error("ledger unavailable");
+    };
+    await expect(runCompilerDraftLoop(args)).rejects.toThrow("accounting reconciliation failed");
+    args.callbacks.recordUsage = account;
+    expect(await runCompilerDraftLoop(args)).toMatchObject({
+      status: "stopped",
+      reason: "conflicting-terminal-output",
+    });
+    expect(vi.mocked(delegate)).toHaveBeenCalledTimes(1);
+  });
+  it("refuses secrets before Git blob creation and sanitizes diagnostic evidence", async () => {
+    const args = await setup();
+    const fakeSecret = `ghp_${"x".repeat(30)}`;
+    const blobs = vi.spyOn(args.store, "createBlob");
+    await expect(
+      args.manager.append(args.lease, args.binding, 0, "started", { secret: fakeSecret }),
+    ).rejects.toThrow("suspected GitHub token");
+    expect(blobs).not.toHaveBeenCalled();
+    args.callbacks.invoke = async () => {
+      throw Object.assign(new Error(`provider failed ${fakeSecret}`), {
+        usage: { inputTokens: 2, outputTokens: 1 },
+        proposal: { secret: fakeSecret },
+      });
+    };
+    const result = await runCompilerDraftLoop(args);
+    expect(result.status).toBe("stopped");
+    expect(JSON.stringify(result.records)).not.toContain(fakeSecret);
+    expect(result.records.find((item) => item.kind === "result")?.payload).toMatchObject({
+      error: "diagnostic withheld: suspected secret material",
+      proposalUnavailable: "unsafe or oversized proposal",
+      usage: { inputTokens: 2, outputTokens: 1 },
+    });
+  });
   it("fences conflicting records and writes after selection", async () => {
     const args = await setup();
     const result = await runCompilerDraftLoop(args);

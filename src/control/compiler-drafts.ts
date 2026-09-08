@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { assertNoSecretMaterial } from "../protocol/limits.js";
 import type { CompiledGraphStore, CompiledGraphReadStore } from "./graphs.js";
 import type { LeaseManager, LeaseState } from "./lease.js";
 import { PlatformUnavailableError } from "../platform.js";
@@ -30,6 +31,7 @@ const RecordSchema = z
       "selection",
       "stopped",
       "accounting-failure",
+      "terminal-conflict",
     ]),
     payload: z.record(z.unknown()),
   })
@@ -81,6 +83,7 @@ export class CompilerDraftManager {
       kind,
       payload,
     });
+    assertNoSecretMaterial(record, "compiler draft evidence");
     const text = canonicalDraftJson(record);
     const existing = await this.load(binding);
     if (existing[sequence]) {

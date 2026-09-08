@@ -135,8 +135,13 @@ export async function compileEvaluatedDraft(args: {
   if (!policy) throw new Error("compiler evaluation requires explicit immutable policy");
   if (args.fixedGraph && policy.mode !== "report-only")
     throw new Error("historical fixed graphs require a separate report-only evaluation purpose");
-  if (!backend.extractObligations || !backend.judgePlan || !backend.repairPlan)
-    throw new Error("management backend does not support compiler evaluation");
+  if (
+    !backend.extractObligations ||
+    !backend.judgePlan ||
+    !backend.repairPlan ||
+    !backend.supportsCompilerAdmission
+  )
+    throw new Error("management backend does not support compiler evaluation dispatch admission");
   const evidence = await readCompilerObligationEvidence(context);
   const frozenContext = { ...context, repositoryEvidence: evidence };
   const prior = await args.manager.load(args.binding);
@@ -168,6 +173,7 @@ export async function compileEvaluatedDraft(args: {
         : { maxObservedTokens: policy.maxObservedTokens }),
     },
     callbacks: {
+      reserveAtDispatch: true,
       recordUsage: args.recordUsage,
       validateInventory: inventory,
       validate: async (value) => {
@@ -237,76 +243,109 @@ export async function compileEvaluatedDraft(args: {
           throw new CompilerDraftStopError("judge cannot resolve material ambiguity");
         return verdict.decision === "accept";
       },
-      invoke: async (request, checkpoint) => {
+      invoke: async (
+        request,
+        checkpoint,
+        reserve = async () => {
+          throw new Error("compiler dispatch reservation missing");
+        },
+      ) => {
+        let dispatched = false;
+        let dispatchRequested = false;
+        frozenContext.invocationTimeoutMs = deadlineAt - Date.now();
+        const beforeModelInvocation = async () => {
+          if (dispatchRequested)
+            throw new CompilerDraftAdmissionError(
+              new Error("compiler backend requested duplicate admission"),
+            );
+          dispatchRequested = true;
+          try {
+            await args.assertInputs();
+            const remainingMs = deadlineAt - Date.now();
+            if (remainingMs <= 0) throw new Error("compiler evaluation deadline exhausted");
+            frozenContext.invocationTimeoutMs = remainingMs;
+            await reserve();
+            await args.admit(request.invocationId);
+            const dispatchTimeoutMs = deadlineAt - Date.now();
+            if (dispatchTimeoutMs <= 0) throw new Error("compiler evaluation deadline exhausted");
+            dispatched = true;
+            return dispatchTimeoutMs;
+          } catch (error) {
+            throw new CompilerDraftAdmissionError(error);
+          }
+        };
         try {
-          await args.assertInputs();
-          const remainingMs = deadlineAt - Date.now();
-          if (remainingMs <= 0) throw new Error("compiler evaluation deadline exhausted");
-          frozenContext.invocationTimeoutMs = remainingMs;
-          await args.admit(request.invocationId);
-        } catch (error) {
-          throw new CompilerDraftAdmissionError(error);
-        }
-        if (request.stage === "inventory") {
-          const result = await backend.extractObligations!(frozenContext, async (result) => {
-            await checkpoint({ value: result.inventory, usage: result.usage });
-          });
-          return { value: result.inventory, usage: result.usage };
-        }
-        const obligations = inventory(request.inventory);
-        if (request.stage === "judge") {
-          if (!request.previous) throw new Error("judge has no mechanically valid draft");
-          const result = await backend.judgePlan!(
-            {
-              compilation: frozenContext,
-              inventory: obligations,
-              objective: request.previous,
-              challenges: validateCompilerInferenceChallenges(
-                request.reviewEvidence ?? [],
-                obligations,
-              ),
-            },
-            async (result) => {
-              await checkpoint({ value: result.verdict, usage: result.usage });
-            },
-          );
-          return { value: result.verdict, usage: result.usage };
-        }
-        const checkpointCompilation = async (result: CompilationResult) =>
-          checkpoint({ value: result, usage: result.usage });
-        const verdict = CompilerJudgeVerdictSchema.safeParse(request.failure);
-        const result =
-          request.stage === "compile"
-            ? await backend.compile(frozenContext, checkpointCompilation)
-            : await backend.repairPlan!(
-                {
-                  compilation: frozenContext,
-                  inventory: obligations,
-                  revision: request.revision,
-                  challenges: validateCompilerInferenceChallenges(
-                    request.reviewEvidence ?? [],
-                    obligations,
-                  ),
-                  ...(request.previous ? { objective: request.previous } : {}),
-                  ...(verdict.success
-                    ? { verdict: verdict.data }
-                    : {
-                        validationFailure:
-                          typeof request.failure === "object" &&
+          if (request.stage === "inventory") {
+            const result = await backend.extractObligations!(
+              frozenContext,
+              async (result) => {
+                await checkpoint({ value: result.inventory, usage: result.usage });
+              },
+              beforeModelInvocation,
+            );
+            return { value: result.inventory, usage: result.usage };
+          }
+          const obligations = inventory(request.inventory);
+          if (request.stage === "judge") {
+            if (!request.previous) throw new Error("judge has no mechanically valid draft");
+            const result = await backend.judgePlan!(
+              {
+                compilation: frozenContext,
+                inventory: obligations,
+                objective: request.previous,
+                challenges: validateCompilerInferenceChallenges(
+                  request.reviewEvidence ?? [],
+                  obligations,
+                ),
+              },
+              async (result) => {
+                await checkpoint({ value: result.verdict, usage: result.usage });
+              },
+              beforeModelInvocation,
+            );
+            return { value: result.verdict, usage: result.usage };
+          }
+          const checkpointCompilation = async (result: CompilationResult) =>
+            checkpoint({ value: result, usage: result.usage });
+          const verdict = CompilerJudgeVerdictSchema.safeParse(request.failure);
+          const result =
+            request.stage === "compile"
+              ? await backend.compile(frozenContext, checkpointCompilation, beforeModelInvocation)
+              : await backend.repairPlan!(
+                  {
+                    compilation: frozenContext,
+                    inventory: obligations,
+                    revision: request.revision,
+                    challenges: validateCompilerInferenceChallenges(
+                      request.reviewEvidence ?? [],
+                      obligations,
+                    ),
+                    ...(request.previous ? { objective: request.previous } : {}),
+                    ...(verdict.success
+                      ? { verdict: verdict.data }
+                      : {
+                          validationFailure:
+                            typeof request.failure === "object" &&
+                            request.failure !== null &&
+                            "error" in request.failure
+                              ? String(request.failure.error)
+                              : "prior draft failed mechanical validation",
+                          ...(typeof request.failure === "object" &&
                           request.failure !== null &&
-                          "error" in request.failure
-                            ? String(request.failure.error)
-                            : "prior draft failed mechanical validation",
-                        ...(typeof request.failure === "object" &&
-                        request.failure !== null &&
-                        "proposal" in request.failure
-                          ? { previousProposal: request.failure.proposal }
-                          : {}),
-                      }),
-                },
-                checkpointCompilation,
-              );
-        return { value: result, usage: result.usage };
+                          "proposal" in request.failure
+                            ? { previousProposal: request.failure.proposal }
+                            : {}),
+                        }),
+                  },
+                  checkpointCompilation,
+                  beforeModelInvocation,
+                );
+          return { value: result, usage: result.usage };
+        } catch (error) {
+          if (!dispatched && !(error instanceof CompilerDraftAdmissionError))
+            throw new CompilerDraftAdmissionError(error);
+          throw error;
+        }
       },
     },
   });

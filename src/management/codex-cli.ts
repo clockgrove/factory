@@ -29,6 +29,7 @@ import {
 import { resolveCodexCommand } from "../runtime/codex-command.js";
 import type {
   CompilationContext,
+  CompilerModelAdmission,
   ObligationCheckpoint,
   ObligationResult,
   PlanJudgeContext,
@@ -903,6 +904,7 @@ function parseManagementJsonlResult<T>(stdout: string): { value: T; usage: Manag
 
 export class CodexCliManagementBackend implements ManagementBackend {
   readonly id = "codex-cli/local";
+  readonly supportsCompilerAdmission = true as const;
   readonly #options: CodexManagementOptions;
 
   constructor(options: CodexManagementOptions = {}) {
@@ -940,13 +942,15 @@ export class CodexCliManagementBackend implements ManagementBackend {
   async compile(
     context: CompilationContext,
     checkpoint: CompilationCheckpoint,
+    beforeModelInvocation?: CompilerModelAdmission,
   ): Promise<CompilationResult> {
-    return this.#compile(context, checkpoint);
+    return this.#compile(context, checkpoint, undefined, beforeModelInvocation);
   }
 
   async repairPlan(
     context: PlanRepairContext,
     checkpoint: CompilationCheckpoint,
+    beforeModelInvocation?: CompilerModelAdmission,
   ): Promise<CompilationResult> {
     if (!Number.isSafeInteger(context.revision) || context.revision < 1)
       throw new Error("invalid repair revision");
@@ -965,13 +969,14 @@ export class CodexCliManagementBackend implements ManagementBackend {
       baseSha: context.compilation.baseSha,
       evidence: await readCompilerObligationEvidence(context.compilation),
     });
-    return this.#compile(context.compilation, checkpoint, context);
+    return this.#compile(context.compilation, checkpoint, context, beforeModelInvocation);
   }
 
   async #compile(
     context: CompilationContext,
     checkpoint: CompilationCheckpoint,
     repair?: PlanRepairContext,
+    beforeModelInvocation?: CompilerModelAdmission,
   ): Promise<CompilationResult> {
     assertWithinBytes(context, 512 * 1024, "compilation context");
     assertNoSecretMaterial(context, "compilation context");
@@ -1041,6 +1046,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
       context.modelSelection,
       false,
       context.invocationTimeoutMs,
+      beforeModelInvocation,
     );
     let result: CompilationResult;
     try {
@@ -1238,6 +1244,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
   async extractObligations(
     context: CompilationContext,
     checkpoint: ObligationCheckpoint,
+    beforeModelInvocation?: CompilerModelAdmission,
   ): Promise<ObligationResult> {
     assertWithinBytes(context, 512 * 1024, "obligation context");
     assertNoSecretMaterial(context, "obligation context");
@@ -1262,6 +1269,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
       context.modelSelection,
       false,
       context.invocationTimeoutMs,
+      beforeModelInvocation,
     );
     try {
       assertWithinBytes(value, 512 * 1024, "obligation output");
@@ -1278,6 +1286,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
   async judgePlan(
     context: PlanJudgeContext,
     checkpoint: PlanJudgeCheckpoint,
+    beforeModelInvocation?: CompilerModelAdmission,
   ): Promise<PlanJudgeResult> {
     const { compilation, inventory, objective } = context;
     const challenges = validateCompilerInferenceChallenges(context.challenges ?? [], inventory);
@@ -1319,6 +1328,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
       compilation.modelSelection,
       false,
       compilation.invocationTimeoutMs,
+      beforeModelInvocation,
     );
     try {
       assertWithinBytes(value, 512 * 1024, "judge output");
@@ -1333,7 +1343,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
       await checkpoint(result);
       return result;
     } catch (error) {
-      throw new ManagementOutputError(error, usage);
+      throw new ManagementOutputError(error, usage, value);
     }
   }
 
@@ -1411,6 +1421,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
     modelSelection?: CompilationContext["modelSelection"],
     pinnedCheckout = false,
     invocationTimeoutMs?: number,
+    beforeModelInvocation?: CompilerModelAdmission,
   ): Promise<{ value: T; usage: ManagementUsage }> {
     if (
       invocationTimeoutMs !== undefined &&
@@ -1418,6 +1429,7 @@ export class CodexCliManagementBackend implements ManagementBackend {
     )
       throw new Error("compiler invocation deadline exhausted");
     if (this.#options.runStructured) {
+      await beforeModelInvocation?.();
       const result = await this.#options.runStructured(cwd, schema, prompt, modelSelection);
       return {
         value: result.value as T,
@@ -1463,15 +1475,18 @@ export class CodexCliManagementBackend implements ManagementBackend {
         { ...process.env, FACTORY_SUPERVISED: "1" },
         this.#options.permittedModelCredentials ?? [],
       );
+      const invocationEnvironment = isolateCodexEnvironment(
+        pinnedCheckout ? pinnedGitEnvironment(environment) : environment,
+        codexHome,
+      );
+      const invocationArgs = [...target.args, ...args];
+      const admittedTimeoutMs = await beforeModelInvocation?.();
       const result = await runContainedProcess({
         command: target.command,
-        args: [...target.args, ...args],
+        args: invocationArgs,
         cwd,
-        env: isolateCodexEnvironment(
-          pinnedCheckout ? pinnedGitEnvironment(environment) : environment,
-          codexHome,
-        ),
-        timeoutMs: Math.min(30 * 60_000, invocationTimeoutMs ?? 30 * 60_000),
+        env: invocationEnvironment,
+        timeoutMs: Math.min(30 * 60_000, admittedTimeoutMs ?? invocationTimeoutMs ?? 30 * 60_000),
         maxOutputBytes: 2 * 1024 * 1024,
       });
       if (result.exitCode !== 0) {

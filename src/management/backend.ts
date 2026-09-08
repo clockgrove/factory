@@ -163,12 +163,17 @@ export interface ReviewResult {
 /** Same paid-result durability boundary as Objective compilation. */
 export type ReviewCheckpoint = (result: ReviewResult) => Promise<void>;
 
+/** Called once after local preparation, immediately before dispatch; may return remaining timeout milliseconds. */
+export type CompilerModelAdmission = () => Promise<number | void>;
 export interface ManagementBackend {
+  /** Required for evaluated drafts; older backends must not silently ignore admission. */
+  readonly supportsCompilerAdmission?: true;
   readonly id: string;
   probe(): Promise<{ available: boolean; authenticated: boolean; reason?: string }>;
   compile(
     context: CompilationContext,
     checkpoint: CompilationCheckpoint,
+    beforeModelInvocation?: CompilerModelAdmission,
   ): Promise<CompilationResult>;
   /** Draft-stage calls share the compile accounting/checkpoint boundary. Legacy backends
    * may omit them; callers must refuse judge-enabled compilation when unavailable. */
@@ -179,11 +184,17 @@ export interface ManagementBackend {
   extractObligations?(
     context: CompilationContext,
     checkpoint: ObligationCheckpoint,
+    beforeModelInvocation?: CompilerModelAdmission,
   ): Promise<ObligationResult>;
-  judgePlan?(context: PlanJudgeContext, checkpoint: PlanJudgeCheckpoint): Promise<PlanJudgeResult>;
+  judgePlan?(
+    context: PlanJudgeContext,
+    checkpoint: PlanJudgeCheckpoint,
+    beforeModelInvocation?: CompilerModelAdmission,
+  ): Promise<PlanJudgeResult>;
   repairPlan?(
     context: PlanRepairContext,
     checkpoint: CompilationCheckpoint,
+    beforeModelInvocation?: CompilerModelAdmission,
   ): Promise<CompilationResult>;
   review(context: ReviewContext, checkpoint: ReviewCheckpoint): Promise<ReviewResult>;
   /** Optional local preparation boundary. The backend must call dispatch exactly

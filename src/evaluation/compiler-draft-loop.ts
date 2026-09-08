@@ -54,7 +54,7 @@ const UsageSchema = z
   );
 export type DraftUsage = z.infer<typeof UsageSchema>;
 export class CompilerDraftStopError extends Error {}
-/** Admission failed before the backend was called; absence of provider usage is not a failed paid call. */
+/** Admission failed before provider dispatch; absence of provider usage is not a failed paid call. */
 export class CompilerDraftAdmissionError extends Error {
   constructor(cause: unknown) {
     super("compiler invocation admission failed", { cause });
@@ -81,7 +81,10 @@ export interface CompilerDraftCallbacks {
   invoke(
     request: DraftInvocation,
     checkpoint: (result: DraftInvocationResult) => Promise<void>,
+    reserve?: () => Promise<void>,
   ): Promise<DraftInvocationResult>;
+  /** Prepare locally before recording a possible paid invocation. */
+  reserveAtDispatch?: boolean;
   /** Must be idempotent by invocation ID; replay reconciles usage before any new admission. */
   recordUsage(invocationId: string, stage: DraftStage, usage: DraftUsage): Promise<void>;
   validateInventory(value: unknown): unknown | Promise<unknown>;
@@ -350,6 +353,8 @@ export async function runCompilerDraftLoop(args: {
       throw new Stop("invocation-input-changed");
     if (completed) {
       if (completed.payload.usage === null) throw new Stop("accounting-unavailable");
+      if (typeof completed.payload.stopReason === "string")
+        throw new Stop(completed.payload.stopReason);
       if (completed.payload.error)
         throw Object.assign(new Error(String(completed.payload.error)), {
           proposal: completed.payload.proposal,
@@ -367,21 +372,32 @@ export async function runCompilerDraftLoop(args: {
     if (tokens >= limits.maxObservedTokens) throw new Stop("observed-token-limit");
     if (records.filter((item) => item.kind === "invocation").length >= limits.maxInvocations)
       throw new Stop("invocation-limit");
-    const invocationStartedAt = now();
-    await append("invocation", {
-      startedAt: invocationStartedAt,
-      invocationId,
-      stage,
-      revision,
-      inputDigest: draftDigest({
-        inventory,
-        previous,
-        failure,
+    let invocationStartedAt: number | null = null;
+    let reserving = false;
+    const reserve = async () => {
+      if (reserving)
+        throw new CompilerDraftAdmissionError(new Error("compiler dispatch already reserved"));
+      reserving = true;
+      const startedAt = now();
+      await append("invocation", {
+        startedAt,
+        invocationId,
+        stage,
+        revision,
+        inputDigest: draftDigest({
+          inventory,
+          previous,
+          failure,
+          ...(reviewEvidence === null ? {} : { reviewEvidence }),
+        }),
         ...(reviewEvidence === null ? {} : { reviewEvidence }),
-      }),
-      ...(reviewEvidence === null ? {} : { reviewEvidence }),
-    });
+      });
+      invocationStartedAt = startedAt;
+    };
+    if (!callbacks.reserveAtDispatch) await reserve();
     const timing = () => {
+      if (invocationStartedAt === null)
+        throw new Error("compiler result has no dispatch reservation");
       const completedAt = now();
       // Local wall-clock intervals are observations, never provider billing or summed Objective time.
       const observedMilliseconds = completedAt - invocationStartedAt;
@@ -441,6 +457,7 @@ export async function runCompilerDraftLoop(args: {
       result = await callbacks.invoke(
         { invocationId, stage, revision, inventory, previous, failure, reviewEvidence },
         checkpoint,
+        reserve,
       );
       await checkpoint(result);
     } catch (error) {
@@ -474,6 +491,12 @@ export async function runCompilerDraftLoop(args: {
             ? UsageSchema.safeParse(error.usage)
             : null;
         const usage = known?.success ? known.data : null;
+        const stopCause =
+          error instanceof CompilerDraftStopError
+            ? error
+            : error instanceof Error && error.cause instanceof CompilerDraftStopError
+              ? error.cause
+              : null;
         await append("result", {
           invocationId,
           stage,
@@ -483,11 +506,13 @@ export async function runCompilerDraftLoop(args: {
           ...timing(),
           ...safeProposal(error),
           error: diagnostic(error),
+          ...(stopCause ? { stopReason: diagnostic(stopCause) } : {}),
         });
         if (usage) {
           tokens += usage.inputTokens + usage.outputTokens;
           await recordUsage(invocationId, stage, usage);
         } else throw new Stop("accounting-unavailable");
+        if (stopCause) throw stopCause;
         throw error;
       }
     }

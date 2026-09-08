@@ -18,6 +18,7 @@ import {
 } from "../src/management/codex-cli.js";
 import type {
   CompilationContext,
+  CompilerModelAdmission,
   ManagementBackend,
   PlanJudgeContext,
 } from "../src/management/backend.js";
@@ -211,15 +212,31 @@ describe("bounded independent challenge integration", () => {
     let judges = 0;
     const usage = { inputTokens: 2, outputTokens: 1 };
     const backend = {
-      extractObligations: async () => {
+      supportsCompilerAdmission: true,
+      extractObligations: async (
+        _context: unknown,
+        _checkpoint: unknown,
+        beforeModelInvocation?: CompilerModelAdmission,
+      ) => {
+        await beforeModelInvocation?.();
         calls.push("inventory");
         return { inventory: f.inventory, usage };
       },
-      compile: async () => {
+      compile: async (
+        _context: unknown,
+        _checkpoint: unknown,
+        beforeModelInvocation?: CompilerModelAdmission,
+      ) => {
+        await beforeModelInvocation?.();
         calls.push("compile");
         return { objective: f.graph, usage };
       },
-      repairPlan: async (context: { revision: number; challenges?: unknown[] }) => {
+      repairPlan: async (
+        context: { revision: number; challenges?: unknown[] },
+        _checkpoint: unknown,
+        beforeModelInvocation?: CompilerModelAdmission,
+      ) => {
+        await beforeModelInvocation?.();
         calls.push("repair");
         if (context.revision === 2) expect(context.challenges).toHaveLength(1);
         const graph = structuredClone(f.graph);
@@ -244,7 +261,12 @@ describe("bounded independent challenge integration", () => {
           },
         };
       },
-      judgePlan: async (context: PlanJudgeContext) => {
+      judgePlan: async (
+        context: PlanJudgeContext,
+        _checkpoint: unknown,
+        beforeModelInvocation?: CompilerModelAdmission,
+      ) => {
+        await beforeModelInvocation?.();
         calls.push("judge");
         judges++;
         expect(context.challenges ?? []).toHaveLength(judges === 1 ? 0 : 1);
@@ -278,8 +300,17 @@ describe("bounded independent challenge integration", () => {
   it("propagates original pre-provider admission failures without synthetic usage results", async () => {
     const f = await fixture();
     const cause = new Error("Objective withdrawn");
+    const provider = vi.fn();
     const backend = {
-      extractObligations: vi.fn(),
+      supportsCompilerAdmission: true,
+      extractObligations: async (
+        _context: unknown,
+        _checkpoint: unknown,
+        beforeModelInvocation?: CompilerModelAdmission,
+      ) => {
+        await beforeModelInvocation?.();
+        return provider();
+      },
       judgePlan: vi.fn(),
       repairPlan: vi.fn(),
     } as unknown as ManagementBackend;
@@ -297,7 +328,7 @@ describe("bounded independent challenge integration", () => {
         validate: async () => {},
       }),
     ).rejects.toBe(cause);
-    expect(backend.extractObligations).not.toHaveBeenCalled();
+    expect(provider).not.toHaveBeenCalled();
     expect(f.records.filter((record) => record.kind === "result")).toHaveLength(0);
     expect(f.records.filter((record) => record.kind === "accounting-failure")).toHaveLength(0);
   });
@@ -355,9 +386,29 @@ it("reconsiders a cited item-only granularity false positive on the unchanged gr
   let repairs = 0;
   const usage = { inputTokens: 2, outputTokens: 1 };
   const backend = {
-    extractObligations: async () => ({ inventory: f.inventory, usage }),
-    compile: async () => ({ objective: f.graph, usage }),
-    repairPlan: async () => {
+    supportsCompilerAdmission: true,
+    extractObligations: async (
+      _context: unknown,
+      _checkpoint: unknown,
+      beforeModelInvocation?: CompilerModelAdmission,
+    ) => {
+      await beforeModelInvocation?.();
+      return { inventory: f.inventory, usage };
+    },
+    compile: async (
+      _context: unknown,
+      _checkpoint: unknown,
+      beforeModelInvocation?: CompilerModelAdmission,
+    ) => {
+      await beforeModelInvocation?.();
+      return { objective: f.graph, usage };
+    },
+    repairPlan: async (
+      _context: unknown,
+      _checkpoint: unknown,
+      beforeModelInvocation?: CompilerModelAdmission,
+    ) => {
+      await beforeModelInvocation?.();
       repairs++;
       return {
         objective: f.graph,
@@ -380,7 +431,12 @@ it("reconsiders a cited item-only granularity false positive on the unchanged gr
         },
       };
     },
-    judgePlan: async (context: PlanJudgeContext) => {
+    judgePlan: async (
+      context: PlanJudgeContext,
+      _checkpoint: unknown,
+      beforeModelInvocation?: CompilerModelAdmission,
+    ) => {
+      await beforeModelInvocation?.();
       judges++;
       const review = judged(context, judges === 2);
       if (judges === 1)

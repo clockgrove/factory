@@ -28,7 +28,9 @@ function freshObjective(f: Fixture) {
 }
 function configureCompiler(f: Fixture, decision: "accept" | "repair" = "accept") {
   const calls: string[] = [];
-  f.management.extractObligations = async (context, checkpoint) => {
+  Object.assign(f.management, { supportsCompilerAdmission: true });
+  f.management.extractObligations = async (context, checkpoint, beforeModelInvocation) => {
+    await beforeModelInvocation?.();
     calls.push("inventory");
     const inventory: ObligationInventory = {
       version: 1,
@@ -49,7 +51,8 @@ function configureCompiler(f: Fixture, decision: "accept" | "repair" = "accept")
     await checkpoint(result);
     return result;
   };
-  f.management.compile = async (context, checkpoint) => {
+  f.management.compile = async (context, checkpoint, beforeModelInvocation) => {
+    await beforeModelInvocation?.();
     calls.push("compile");
     const criterion = "answer.txt contains the required answer";
     const objective = compileObjective({
@@ -100,7 +103,8 @@ function configureCompiler(f: Fixture, decision: "accept" | "repair" = "accept")
     await checkpoint(result);
     return result;
   };
-  f.management.judgePlan = async (context, checkpoint) => {
+  f.management.judgePlan = async (context, checkpoint, beforeModelInvocation) => {
+    await beforeModelInvocation?.();
     calls.push("judge");
     const verdict: CompilerJudgeVerdict = {
       version: 1,
@@ -291,8 +295,8 @@ it("honors activation cancellation after inventory before any further model admi
     freshObjective(f);
     const calls = configureCompiler(f);
     const extract = f.management.extractObligations!;
-    f.management.extractObligations = async (context, checkpoint) => {
-      const result = await extract(context, checkpoint);
+    f.management.extractObligations = async (context, checkpoint, beforeModelInvocation) => {
+      const result = await extract(context, checkpoint, beforeModelInvocation);
       const start = f.snapshot.factoryEvents!.find((event) => event.event === "FactoryRunStarted")!;
       if (start.kind !== "run" || start.event !== "FactoryRunStarted" || !start.baseSha)
         throw new Error("fixture requires pinned activation");

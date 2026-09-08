@@ -31,6 +31,7 @@ import { CodexCliManagementBackend } from "./management/codex-cli.js";
 import { runForegroundObjective, runGitHubRepositoryController } from "./controller/index.js";
 import { SystemdControllerLifecycle, SystemdUserService } from "./service/index.js";
 import { GitHubStacks, type GitHubStackTransport } from "./publication/github-stacks.js";
+import { readCompilerCausalAnnotationsFile } from "./application/compiler-eval.js";
 import { readSuppliedReplayFile } from "./replay/file.js";
 import { SUPPLIED_REPLAY_ERROR } from "./replay/supplied.js";
 import { ContentCreationPacer, MutationScheduler, primaryQuotaForCredential } from "./platform.js";
@@ -50,7 +51,7 @@ const USAGE = [
   "  factory controller install|start|stop|restart|status|uninstall OWNER/REPO --repo DIR",
   "  factory doctor OWNER/REPO#NUMBER [--repo DIR]",
   "  factory plan OWNER/REPO#NUMBER [--compile] [--repo DIR] [--base-sha SHA] [--policy FILE]",
-  "  factory compiler-eval OWNER/REPO#NUMBER [--markdown]  (read-only draft history and post-mortem)",
+  "  factory compiler-eval OWNER/REPO#NUMBER [--markdown] [--annotations FILE]  (read-only draft history and post-mortem)",
   "  factory status|explain OWNER/REPO#NUMBER [--work-item NUMBER]",
   "  factory replay OWNER/REPO#NUMBER [--snapshots FILE]  (caller-supplied simulations; read-only)",
   "  factory recovery-plan OWNER/REPO#NUMBER  (read-only; does not authorize execution)",
@@ -233,6 +234,12 @@ async function applicationCommand(command: string, args: string[]): Promise<void
   }
   const read = ["doctor", "plan", "compiler-eval", "recovery-plan", "status", "explain", "replay"];
   if (read.includes(command)) {
+    const annotationPath = option(args, "--annotations");
+    if (annotationPath && command !== "compiler-eval")
+      fail("--annotations is accepted only by compiler-eval");
+    const causalAnnotations = annotationPath
+      ? await readCompilerCausalAnnotationsFile(annotationPath)
+      : undefined;
     const workItem = option(args, "--work-item");
     const result =
       command === "doctor"
@@ -251,6 +258,7 @@ async function applicationCommand(command: string, args: string[]): Promise<void
               target.objective,
               workItem ? Number(workItem) : undefined,
               pinnedAdmissionSnapshots,
+              causalAnnotations,
             );
     process.stdout.write(
       command === "compiler-eval" &&

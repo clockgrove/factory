@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
 import { CompiledGraphManager } from "../src/control/graphs.js";
+import { GitHubReader, cancellationRequestFromComments } from "../src/github.js";
+import { encodeEventComment } from "../src/control/receipts.js";
+import { parseFactoryEvent } from "../src/protocol/events.js";
 import { GitHubControlStore } from "../src/control/github-store.js";
 import { PlatformUnavailableError } from "../src/platform.js";
 import { compileObjective } from "../src/compiler/index.js";
@@ -277,3 +280,77 @@ describe("Supervisor compiler evaluation activation boundary", () => {
     }
   }, 30_000);
 });
+
+it("honors activation cancellation after inventory before any further model admission", async () => {
+  const f = await providerSupervisorFixture("daytona-burst", {
+    localOnly: true,
+    controllerActivation: true,
+    compilerEvaluation: { mode: "auto-repair" },
+  });
+  try {
+    freshObjective(f);
+    const calls = configureCompiler(f);
+    const extract = f.management.extractObligations!;
+    f.management.extractObligations = async (context, checkpoint) => {
+      const result = await extract(context, checkpoint);
+      const start = f.snapshot.factoryEvents!.find((event) => event.event === "FactoryRunStarted")!;
+      if (start.kind !== "run" || start.event !== "FactoryRunStarted" || !start.baseSha)
+        throw new Error("fixture requires pinned activation");
+      const withdrawal = parseFactoryEvent({
+        protocol: "clockgrove.factory/v2",
+        kind: "run",
+        event: "ActivationCancellationRequested",
+        objective: 7,
+        runId: "fixture-activation",
+        activationRequestId: "fixture-activation",
+        requestId: "withdraw-after-inventory",
+        requestedBy: "operator",
+        repository: "fixture/provider-qualification",
+        baseSha: start.baseSha,
+        policyDigest: start.policyDigest,
+        sequence: Math.max(...f.events().map((event) => event.sequence)) + 1,
+        at: new Date().toISOString(),
+      });
+      const authenticated = cancellationRequestFromComments(
+        [
+          {
+            body: encodeEventComment("Withdraw activation", withdrawal),
+            authorLogin: "operator",
+            authorAssociation: "OWNER",
+          },
+        ],
+        f.runId,
+        "operator",
+        {
+          objective: 7,
+          requestId: "fixture-activation",
+          repository: "fixture/provider-qualification",
+          requestedBy: "operator",
+          baseSha: start.baseSha,
+          policyDigest: start.policyDigest,
+        },
+      );
+      expect(authenticated).not.toBeNull();
+      f.snapshot.factoryEvents!.push(authenticated!);
+      vi.mocked(GitHubReader.prototype.readRunCancellationRequest).mockResolvedValue(authenticated);
+      return result;
+    };
+    const result = await f.run();
+    expect(result.status).toBe("cancelled");
+    expect(calls).toEqual(["inventory"]);
+    assertNoProjection(f);
+    expect([...f.refs.keys()].some((ref) => ref.includes("/graphs/"))).toBe(false);
+    expect(
+      f
+        .events()
+        .filter(
+          (event) =>
+            event.event === "BudgetReconciled" &&
+            event.kind === "budget" &&
+            event.unit === "model_tokens",
+        ),
+    ).toHaveLength(1);
+  } finally {
+    await f.dispose();
+  }
+}, 30_000);

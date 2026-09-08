@@ -55,6 +55,7 @@
  * burst writes; never retry through an open circuit").
  */
 
+import { CompilerCausalAnnotationsSchema } from "./application/compiler-eval.js";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -1422,6 +1423,7 @@ type ApplicationToolInput = {
   allowanceIncrement?: RecoveryProposalInput["allowanceIncrement"];
   unknownUsageAcknowledgementDigest?: string | null;
   pinnedAdmissionSnapshots?: unknown;
+  annotations?: unknown;
 };
 
 function registerApplicationTool(
@@ -1514,6 +1516,13 @@ function registerApplicationTool(
                       .regex(/^[0-9a-fA-F]{40}$/)
                       .optional(),
                     policy: z.record(z.unknown()).optional(),
+                  }
+                : {}),
+              ...(operation === "compiler-eval"
+                ? {
+                    annotations: CompilerCausalAnnotationsSchema.optional().describe(
+                      "Optional caller-supplied causal claims bound to exact run/draft/revision and cited runtime receipts. Claims remain unauthenticated conclusions; no model work or writes.",
+                    ),
                   }
                 : {}),
               ...(operation === "explain"
@@ -1621,6 +1630,7 @@ function registerApplicationTool(
           input.objectiveNumber!,
           input.workItemNumber,
           input.pinnedAdmissionSnapshots,
+          input.annotations,
         );
       }
       if (operation === "activate") {

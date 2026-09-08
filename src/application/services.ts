@@ -178,7 +178,10 @@ export class FactoryApplicationService {
     objective: number,
     workItem?: number,
     suppliedSnapshots?: unknown,
+    causalAnnotations?: unknown,
   ): Promise<unknown> {
+    if (causalAnnotations !== undefined && operation !== "compiler-eval")
+      throw new Error("Causal annotations are accepted only by compiler-eval inspection.");
     if (suppliedSnapshots !== undefined && operation !== "replay") {
       throw new Error("Supplied admission snapshots are accepted only by replay inspection.");
     }
@@ -209,6 +212,7 @@ export class FactoryApplicationService {
         repository,
         snapshot,
         store: this.context.compilerEvaluationStore,
+        ...(causalAnnotations === undefined ? {} : { annotations: causalAnnotations }),
       });
     }
     if (operation === "status") {

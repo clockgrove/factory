@@ -2,6 +2,7 @@ import type { FactoryEvent } from "../protocol/events.js";
 import type { RunPolicy } from "../protocol/policy.js";
 import { modelTokenBudgetIntent, type ModelTokenBudgetIntent } from "../protocol/budget-intent.js";
 import { deduplicateFactoryEvents, latestRunReceipts } from "../control/receipts.js";
+import type { ObjectiveAuthorityObservation } from "../control/authority.js";
 import { isModelInvocationMarker, unresolvedModelInvocations } from "../control/budget.js";
 import { summarizeRuntimeEconomics, type RuntimeEconomics } from "./runtime.js";
 export { summarizeRuntimeEconomics, type RuntimeEconomics } from "./runtime.js";
@@ -503,8 +504,9 @@ function terminalAttemptName(events: readonly FactoryEvent[]): string | null {
 export function summarizeRun(
   events: readonly FactoryEvent[],
   policy?: RunPolicy,
+  authority?: ObjectiveAuthorityObservation | null | undefined,
 ): RunSummary | null {
-  const receiptSet = latestRunReceipts([...events]);
+  const receiptSet = latestRunReceipts([...events], authority);
   if (!receiptSet) return null;
   const runEvents = receiptSet.events;
   const attemptGroups = new Map<string, FactoryEvent[]>();

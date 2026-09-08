@@ -428,7 +428,7 @@ export function buildStatusReport(input: {
   const controller = [...runEvents]
     .filter((event) => event.kind === "controller")
     .sort((left, right) => right.sequence - left.sequence)[0];
-  const summary = summarizeRun(events, policy ?? undefined);
+  const summary = summarizeRun(events, policy ?? undefined, input.snapshot.objectiveAuthority);
   const statusItems = items.map((item): StatusWorkItem => {
     const itemEvents = (item.factoryEvents ?? [])
       .filter((event) => !run || event.runId === run.runId)

@@ -37,6 +37,8 @@ export const EXPLANATION_CODES = {
   admissionRemoteRequired: "admission.remote-required",
   admissionBurst: "admission.burst",
   executionFailed: "execution.failed",
+  executionRunEscalated: "execution.run-escalated",
+  recoverySuccessorEscalated: "recovery.successor-escalated",
   executionRunning: "execution.running",
   deliveryPending: "delivery.pending",
   deliveryCompleted: "delivery.completed",
@@ -57,6 +59,7 @@ export type ExplanationCategory =
   | "economic"
   | "admission"
   | "execution"
+  | "recovery"
   | "delivery"
   | "state";
 
@@ -72,6 +75,8 @@ export interface Explanation {
     | "complete"
     | "informational";
   summary: string;
+  gate?: "execution" | "recovery-successor";
+  requiredAction?: string;
   evidence: Record<string, unknown>;
 }
 

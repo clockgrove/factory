@@ -590,6 +590,61 @@ describe("read-only recovery assessment", () => {
     });
   });
 
+  it("preserves terminal reasons for an older predecessor and its later recovery successor", async () => {
+    const f = await fixture();
+    const terminalReason =
+      "successor artifact-only recovery requires an explicit artifact consumer; no replacement worker is authorized";
+    f.snapshot.factoryEvents![3] = event({
+      kind: "run",
+      event: "FactoryRunEscalated",
+      sequence: 30,
+      reason: "older predecessor escalation remains historical evidence",
+    });
+    f.snapshot.factoryEvents!.push(
+      event({
+        ...start("recovery-successor", 31),
+        baseSha: f.base.oid,
+        recoveryRequestId: "recovery-request-7",
+        recoveryPlanDigest: "d".repeat(64),
+        predecessorRunId: "source",
+      }),
+      event({
+        kind: "run",
+        event: "FactoryRunEscalated",
+        runId: "recovery-successor",
+        sequence: 32,
+        at: "2026-09-04T00:05:00.000Z",
+        reason: terminalReason,
+      }),
+    );
+
+    const result = await f.assess();
+
+    expect(result.runs).toMatchObject([
+      {
+        runId: "source",
+        state: "escalated",
+        terminal: {
+          runId: "source",
+          sequence: 30,
+          reason: "older predecessor escalation remains historical evidence",
+        },
+      },
+      {
+        runId: "recovery-successor",
+        state: "escalated",
+        terminal: {
+          runId: "recovery-successor",
+          event: "FactoryRunEscalated",
+          sequence: 32,
+          at: "2026-09-04T00:05:00.000Z",
+          reason: terminalReason,
+          reasonDigest: "0536a190cf51e1d827a3ebdfd212e9dd59016f2dbd56544b9c9184f5092276ac",
+        },
+      },
+    ]);
+  });
+
   it.each(["FAILURE", "PENDING", "missing"] as const)(
     "blocks a runless %s check-suite rollup despite empty REST checks",
     async (rollup) => {

@@ -9,7 +9,12 @@ import {
 import { parseWorkerPacketFromIssue } from "../graph.js";
 import type { LinkedPullRequest, WorkItemSnapshot } from "../types.js";
 import { deriveState, queuedSince, type DerivedWorkItem } from "../state.js";
-import { deduplicateFactoryEvents, latestRunReceipts } from "../control/receipts.js";
+import {
+  deduplicateFactoryEvents,
+  latestRunReceipts,
+  terminalRunEvidence,
+  type TerminalRunEvidence,
+} from "../control/receipts.js";
 import { deriveDurableCommandState } from "../control/commands.js";
 import { summarizeRun, type RunSummary } from "../economics/index.js";
 import {
@@ -115,6 +120,7 @@ export interface FactoryStatusReport {
         policyDigest: string;
         startedAt: string;
         finishedAt?: string;
+        terminal?: TerminalRunEvidence;
         cloudPaused: boolean;
         pendingRetries: number[];
       };
@@ -586,6 +592,7 @@ export function buildStatusReport(input: {
             (left, right) => left - right,
           ),
           ...(run.terminal ? { finishedAt: run.terminal.at } : {}),
+          ...(run.terminal ? { terminal: terminalRunEvidence(run.terminal) } : {}),
         }
       : { availability: "unavailable", state: "not-started" },
     readyOrder,

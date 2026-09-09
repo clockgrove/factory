@@ -200,6 +200,7 @@ async function fixture() {
     workItemNodeId: "I_10",
     assertCurrent,
     assertCapacityReleased: vi.fn(async () => {}),
+    modelUsageExpected: vi.fn(() => true),
   };
   return { args, ledger, commits, refs, identity };
 }
@@ -237,6 +238,23 @@ describe("accepted successor admission reassignment", () => {
       directorEpoch: 1,
     });
     expect(f.args.runtime.events).toEqual(events);
+  });
+  it("uses the authenticated backend capability when worker model usage is not expected", async () => {
+    const f = await fixture();
+    f.args.runtime.events = f.args.runtime.events.filter(
+      (event) =>
+        !(
+          event.kind === "budget" &&
+          event.event === "BudgetReconciled" &&
+          event.phase === "execution" &&
+          event.unit === "model_tokens"
+        ),
+    );
+    f.args.modelUsageExpected.mockReturnValue(false);
+    await expect(reconcileAdmissionForSuccessor(f.args)).resolves.toEqual({
+      authorityReceiptOid: sha(7),
+    });
+    expect(f.args.modelUsageExpected).toHaveBeenCalled();
   });
   it.each([
     "missing-diagnostic",

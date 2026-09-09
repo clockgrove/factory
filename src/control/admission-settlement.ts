@@ -22,6 +22,17 @@ export interface AdmissionNonExecutionProof {
   evidenceOid: string;
   dispatchPrevented: true;
 }
+export interface AdmissionArtifactConsumerProof {
+  reservationOid: string;
+  evidenceOid: string;
+  dispatchPrevented: true;
+  sourceRunId: string;
+  sourceReservationOid: string;
+  sourceAttempt: number;
+  artifactDigest: string;
+  recoveryPlanCommitOid: string;
+  recoveryClaimOid: string;
+}
 const terminal = new Set([
   "AttemptFailed",
   "AttemptTimedOut",
@@ -44,6 +55,7 @@ export function buildAdmissionSettlementEvidence(args: {
   cleanup: AdmissionCleanupProof;
   capacity: AdmissionCapacityProof;
   definitiveNonExecution?: AdmissionNonExecutionProof;
+  definitiveArtifactConsumer?: AdmissionArtifactConsumerProof;
   modelUsageExpected?: boolean;
   authority?: ObjectiveAuthorityObservation | null | undefined;
 }): IssueAdmissionEvidence {
@@ -84,6 +96,9 @@ export function buildAdmissionSettlementEvidence(args: {
   )
     throw new Error("admission settlement has no exact original reservation receipt");
   const nonExecution = args.definitiveNonExecution;
+  const artifactConsumer = args.definitiveArtifactConsumer;
+  if (nonExecution && artifactConsumer)
+    throw new Error("admission settlement has contradictory non-execution proofs");
   if (
     nonExecution &&
     (entry.dispatchPossible ||
@@ -104,8 +119,58 @@ export function buildAdmissionSettlementEvidence(args: {
       ))
   )
     throw new Error("definitive non-execution proof does not bind a never-dispatched admission");
+  const consumerBinding = entry.artifactConsumer;
+  const consumerSuccess = scoped.filter(
+    (event) =>
+      event.kind === "attempt" &&
+      event.event === "AttemptSucceeded" &&
+      event.artifactDigest === consumerBinding?.artifactDigest,
+  );
+  if (
+    artifactConsumer &&
+    (!consumerBinding ||
+      entry.dispatchPossible ||
+      entry.imported ||
+      artifactConsumer.reservationOid !== entry.reservation.oid ||
+      artifactConsumer.dispatchPrevented !== true ||
+      artifactConsumer.recoveryPlanCommitOid !== consumerBinding.recoveryPlanCommitOid ||
+      artifactConsumer.recoveryClaimOid !== consumerBinding.recoveryClaimOid ||
+      artifactConsumer.sourceRunId !== consumerBinding.sourceRunId ||
+      artifactConsumer.sourceReservationOid !== consumerBinding.sourceReservationOid ||
+      artifactConsumer.sourceAttempt !== consumerBinding.sourceAttempt ||
+      artifactConsumer.artifactDigest !== consumerBinding.artifactDigest ||
+      entry.reassignmentReceiptOid !== consumerBinding.recoveryClaimOid ||
+      consumerBinding.sourceRunId === entry.runId ||
+      consumerBinding.sourceAttempt >= entry.reservation.attempt ||
+      entry.budgetReservationId !==
+        `${entry.runId}:${entry.workItem}:${entry.reservation.attempt}:artifact-consumer:none` ||
+      entry.resourceIdentity !==
+        JSON.stringify([
+          entry.objective,
+          entry.runId,
+          entry.workItem,
+          entry.reservation.attempt,
+          "retained-artifact-consumer",
+          consumerBinding.sourceRunId,
+          consumerBinding.artifactDigest,
+        ]) ||
+      !/^[a-f0-9]{40}$/.test(artifactConsumer.evidenceOid) ||
+      consumerSuccess.length !== 1 ||
+      scoped.some(
+        (event) =>
+          (event.kind === "attempt" &&
+            (event.event === "AttemptStarted" ||
+              event.backend !== entry.reservation.backend ||
+              event.baseSha !== entry.reservation.baseSha ||
+              event.directorEpoch !== entry.directorEpoch ||
+              event.policyDigest !== entry.policyDigest)) ||
+          ((event.kind === "budget" || event.kind === "capacity") && event.phase === "execution"),
+      ))
+  )
+    throw new Error("artifact consumer proof does not bind an accepted non-dispatching consumer");
   if (
     !nonExecution &&
+    !artifactConsumer &&
     !scoped.some(
       (event) =>
         event.kind === "attempt" &&
@@ -135,6 +200,7 @@ export function buildAdmissionSettlementEvidence(args: {
     throw new Error("admission capacity remains reserved");
   if (
     !nonExecution &&
+    !artifactConsumer &&
     !scoped.some(
       (event) =>
         event.kind === "budget" &&
@@ -146,6 +212,7 @@ export function buildAdmissionSettlementEvidence(args: {
     throw new Error("admission has no native execution budget evidence; missing usage is unknown");
   if (
     !nonExecution &&
+    !artifactConsumer &&
     args.modelUsageExpected &&
     !scoped.some(
       (event) =>

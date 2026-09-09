@@ -334,7 +334,12 @@ export async function loadRecoveryRuntime(input: {
       const reserved = group.filter((event) => event.event === "AttemptReserved");
       requireRuntime(reserved.length === 1, "successor-reservation-unavailable");
       const first = reserved[0]!;
-      requireRuntime(items.get(first.workItem)?.action === "execute", "successor-action-mismatch");
+      const planned = items.get(first.workItem);
+      const artifactConsumer = planned?.action === "reconcile" && planned.source?.artifactDigest;
+      requireRuntime(
+        planned?.action === "execute" || Boolean(artifactConsumer),
+        "successor-action-mismatch",
+      );
       requireRuntime(
         group.every(
           (event) =>
@@ -345,6 +350,34 @@ export async function loadRecoveryRuntime(input: {
         ),
         "successor-attempt-conflict",
       );
+      if (artifactConsumer) {
+        requireRuntime(
+          first.attempt > planned!.source!.attempt &&
+            first.localScopeBatch === undefined &&
+            first.artifactConsumer?.sourceRunId === planned!.source!.runId &&
+            first.artifactConsumer.sourceReservationOid === planned!.source!.reservationCommitOid &&
+            first.artifactConsumer.sourceAttempt === planned!.source!.attempt &&
+            first.artifactConsumer.artifactDigest === planned!.source!.artifactDigest &&
+            first.artifactConsumer.recoveryPlanCommitOid === record.commitOid &&
+            first.artifactConsumer.recoveryClaimOid === claim.oid &&
+            !group.some((event) => event.event === "AttemptStarted") &&
+            !suffix.some(
+              (event) =>
+                event.kind === "budget" &&
+                event.workItem === first.workItem &&
+                event.attempt === first.attempt &&
+                event.phase === "execution",
+            ) &&
+            group.every(
+              (event) =>
+                event.event !== "AttemptSucceeded" ||
+                (event.artifactDigest === artifactConsumer &&
+                  event.reportedModelTokens === undefined &&
+                  event.reportedModelUsage === undefined),
+            ),
+          "successor-artifact-consumer-conflict",
+        );
+      }
       const ref = await readAttemptReservationRef(
         input.store,
         input.objective,
@@ -768,7 +801,14 @@ export async function loadRecoveryRuntime(input: {
       }
     const counts = new Map<number, number>();
     for (const group of attempts.values())
-      if (!group.some((event) => event.event === "AttemptDeferred"))
+      if (
+        !group.some((event) => event.event === "AttemptDeferred") &&
+        !(
+          group[0]!.runId === input.runId &&
+          items.get(group[0]!.workItem)?.action === "reconcile" &&
+          !group.some((event) => event.event === "AttemptStarted")
+        )
+      )
         counts.set(group[0]!.workItem, (counts.get(group[0]!.workItem) ?? 0) + 1);
     const unknown: Array<{ workItem: number; attempt: number }> = [];
     for (const group of currentAttempts.values()) {

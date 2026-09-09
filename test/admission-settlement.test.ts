@@ -218,6 +218,94 @@ describe("admission settlement evidence", () => {
       }),
     ).toThrow("never-dispatched");
   });
+  it("settles only an accepted, non-dispatching retained-artifact consumer", () => {
+    const claim = "c".repeat(40);
+    const plan = "d".repeat(40);
+    const consumerEntry: IssueAdmissionEntry = {
+      ...entry,
+      runId: "successor",
+      reservation: { ...entry.reservation, attempt: 2 },
+      budgetReservationId: "successor:2:2:artifact-consumer:none",
+      resourceIdentity: JSON.stringify([
+        1,
+        "successor",
+        2,
+        2,
+        "retained-artifact-consumer",
+        "run",
+        digest,
+      ]),
+      disposition: "terminal",
+      dispatchPossible: false,
+      reassignmentReceiptOid: claim,
+      artifactConsumer: {
+        sourceRunId: "run",
+        sourceReservationOid: sha,
+        sourceAttempt: 1,
+        artifactDigest: digest,
+        recoveryPlanCommitOid: plan,
+        recoveryClaimOid: claim,
+      },
+    };
+    const consumerCommon = { ...common, runId: "successor", attempt: 2 };
+    const reserved = parseFactoryEvent({
+      ...consumerCommon,
+      kind: "attempt",
+      event: "AttemptReserved",
+      sequence: 5,
+      backend: entry.reservation.backend,
+      baseSha: sha,
+    });
+    const succeeded = parseFactoryEvent({
+      ...consumerCommon,
+      kind: "attempt",
+      event: "AttemptSucceeded",
+      sequence: 6,
+      backend: entry.reservation.backend,
+      baseSha: sha,
+      artifactDigest: digest,
+    });
+    const definitiveArtifactConsumer = {
+      reservationOid: sha,
+      evidenceOid: sha,
+      dispatchPrevented: true as const,
+      sourceRunId: "run",
+      sourceReservationOid: sha,
+      sourceAttempt: 1,
+      artifactDigest: digest,
+      recoveryPlanCommitOid: plan,
+      recoveryClaimOid: claim,
+    };
+    const started = parseFactoryEvent({
+      ...consumerCommon,
+      kind: "attempt",
+      event: "AttemptStarted",
+      sequence: 7,
+      backend: entry.reservation.backend,
+      baseSha: sha,
+    });
+    expect(
+      settle([reserved, succeeded], {
+        entry: consumerEntry,
+        cleanup: { ...cleanup, resourceIdentity: consumerEntry.resourceIdentity },
+        definitiveArtifactConsumer,
+      }).accountingSettled,
+    ).toBe(true);
+    expect(() =>
+      settle([reserved, succeeded, started], {
+        entry: consumerEntry,
+        cleanup: { ...cleanup, resourceIdentity: consumerEntry.resourceIdentity },
+        definitiveArtifactConsumer,
+      }),
+    ).toThrow("accepted non-dispatching consumer");
+    expect(() =>
+      settle([reserved, succeeded], {
+        entry: { ...consumerEntry, artifactConsumer: undefined },
+        cleanup: { ...cleanup, resourceIdentity: consumerEntry.resourceIdentity },
+        definitiveArtifactConsumer,
+      }),
+    ).toThrow("accepted non-dispatching consumer");
+  });
 });
 
 describe("original admission producer completion", () => {

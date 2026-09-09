@@ -455,6 +455,18 @@ export function deriveCapacityReservations(
     for (const [attempt, values] of attempts) {
       const reserved = values.find((event) => event.event === "AttemptReserved");
       if (!reserved || values.some((event) => executionTerminal.has(event.event))) continue;
+      const nonDispatchingArtifactConsumer =
+        reserved.artifactConsumer !== undefined &&
+        !values.some((event) => event.event === "AttemptStarted") &&
+        !events.some(
+          (event) =>
+            event.kind === "budget" &&
+            event.runId === reserved.runId &&
+            event.workItem === reserved.workItem &&
+            event.attempt === reserved.attempt &&
+            event.phase === "execution",
+        );
+      if (nonDispatchingArtifactConsumer) continue;
       // A retained successful artifact may be cancelled without changing its
       // AttemptSucceeded receipt. Only the cleanup writer's exact later resource
       // reconciliation discharges that original execution reservation.

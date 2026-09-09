@@ -462,7 +462,9 @@ interface DeliveryExecutionBase {
   requiresIsolation?: boolean;
 }
 
-/** Already collected original execution, never a replacement worker or new attempt. */
+/** Already collected execution, never a replacement worker. A successor-owned
+ * artifact-consumer reservation may carry predecessor bytes into validation
+ * without copying predecessor execution usage into the successor ledger. */
 interface CollectedAttemptContinuation {
   reservation: AttemptReservation;
   packet: WorkerPacket;
@@ -472,6 +474,10 @@ interface CollectedAttemptContinuation {
   nativeUsage: {
     unit: "local_milliseconds" | "sandbox_milliseconds" | "managed_sessions";
     amount: number;
+  };
+  adoptedSource?: {
+    reservation: AttemptReservation;
+    artifactDigest: string;
   };
   worker?: LocalWorktree;
 }
@@ -1714,7 +1720,8 @@ export class FactorySupervisor {
         const count =
           this.#recoveryRuntime!.attemptCounts.find((entry) => entry.workItem === item.number)
             ?.count ?? 0;
-        if (!planned?.source || planned.action === "execute") return { ...item, attempts: count };
+        if (!planned?.source || ["execute", "reconcile"].includes(planned.action))
+          return { ...item, attempts: count };
         const integrated = this.#recoveryRuntime!.sourceIntegrations.some(
           (proof) => proof.outcome.workItem === item.number,
         );
@@ -1750,13 +1757,22 @@ export class FactorySupervisor {
     };
   }
 
+  #plannedRecoveryItem(workItem: number) {
+    return this.#recoveryRuntime?.planRecord.plan.items.find(
+      (entry) => entry.workItem === workItem,
+    );
+  }
+
   async #prepareRecoveryGraph(snapshot: Snapshot): Promise<void> {
     const runtime = this.#recoveryRuntime!;
     const compiled = runtime.graph.objective;
     if (
       runtime.planRecord.plan.items.some(
         (item) =>
-          item.action !== "execute" && !item.source?.publication && !item.source?.artifactHead,
+          item.action !== "execute" &&
+          !item.source?.publication &&
+          !item.source?.artifactHead &&
+          !(item.action === "reconcile" && item.source?.artifactDigest),
       )
     )
       throw new Error(
@@ -4474,6 +4490,7 @@ export class FactorySupervisor {
             if (
               !planned?.source ||
               planned.action === "execute" ||
+              planned.action === "reconcile" ||
               item.state !== "for_review" ||
               !this.#integrationDue(item.number)
             )
@@ -4642,7 +4659,10 @@ export class FactorySupervisor {
           for (const item of recoverable) {
             activeExecutions.throwIfFailed();
             this.#options.signal?.throwIfAborted();
-            await this.#recoverInterrupted(item, deadline, objective.items);
+            const planned = this.#plannedRecoveryItem(item.number);
+            if (planned?.action === "reconcile" && planned.source?.artifactDigest)
+              await this.#recoverAdoptedRetainedArtifact(item, deadline);
+            else await this.#recoverInterrupted(item, deadline, objective.items);
           }
           continue;
         }
@@ -5310,6 +5330,7 @@ export class FactorySupervisor {
   ): Promise<void> {
     if (
       this.#recoveryRuntime &&
+      !recovered?.adoptedSource &&
       !this.#recoveryRuntime.planRecord.plan.items.some(
         (planned) => planned.workItem === item.number && planned.action === "execute",
       )
@@ -5937,6 +5958,8 @@ export class FactorySupervisor {
             ...(terminalModelUsage ? { reportedModelUsage: terminalModelUsage } : {}),
           }),
         );
+      if (recovered?.adoptedSource)
+        await this.#settleArtifactConsumerAdmission(item, reservation, recovered.adoptedSource);
       await confirmExecutionCleanup("post-collection backend cleanup");
       if (!recovered)
         await this.#lease.use(async (lease) => {
@@ -6757,7 +6780,18 @@ export class FactorySupervisor {
         await this.#settleIssueAdmission(item, reservation, {
           cleanupConfirmed: executionCleanupConfirmed || !backendLaunchAttempted,
           definitiveNonExecution: !backendLaunchAttempted && !recovered,
-          modelUsageExpected: selected?.capabilities.reportsModelUsage ?? false,
+          modelUsageExpected:
+            !recovered?.adoptedSource && (selected?.capabilities.reportsModelUsage ?? false),
+          ...(recovered?.adoptedSource
+            ? {
+                artifactConsumer: {
+                  sourceRunId: recovered.adoptedSource.reservation.runId,
+                  sourceReservationOid: recovered.adoptedSource.reservation.oid,
+                  sourceAttempt: recovered.adoptedSource.reservation.attempt,
+                  artifactDigest: recovered.adoptedSource.artifactDigest,
+                },
+              }
+            : {}),
         });
       }
       if (finalizationError) {
@@ -6781,6 +6815,7 @@ export class FactorySupervisor {
   ): Promise<void> {
     this.#options.signal?.throwIfAborted();
     const { reservation, packet, artifact, modelUsage, nativeUsage } = recovered;
+    const adopted = recovered.adoptedSource;
     const modelTokens =
       recovered.modelTokens ??
       (modelUsage ? modelUsage.inputTokens + modelUsage.outputTokens : undefined);
@@ -6797,7 +6832,7 @@ export class FactorySupervisor {
       packet.baseSha !== reservation.baseSha ||
       artifact.baseSha !== reservation.baseSha ||
       artifact.outcome !== "succeeded" ||
-      (backend.capabilities.hostExecution && !reservation.localScopeBatch) ||
+      (backend.capabilities.hostExecution && !reservation.localScopeBatch && !adopted) ||
       (reservation.localScopeBatch &&
         reservation.localScopeBatch.identity.invocationDigest !== workerPacketDigest(packet))
     )
@@ -6859,6 +6894,7 @@ export class FactorySupervisor {
         event.unit === nativeUsage.unit,
     );
     if (
+      !adopted &&
       modelUsage &&
       model.some(
         (event) =>
@@ -6874,6 +6910,7 @@ export class FactorySupervisor {
     )
       throw new Error("collected continuation has conflicting model usage breakdowns");
     if (
+      !adopted &&
       prior.some(
         (event) =>
           event.kind === "attempt" &&
@@ -6889,28 +6926,41 @@ export class FactorySupervisor {
         ? "sandbox_milliseconds"
         : "local_milliseconds";
     if (
-      (this.#policy.economics &&
+      !adopted &&
+      ((this.#policy.economics &&
         backend.capabilities.reportsModelUsage &&
         (modelTokens === undefined || !model.length)) ||
-      (modelTokens !== undefined &&
-        (!Number.isSafeInteger(modelTokens) ||
-          modelTokens < 0 ||
-          !model.length ||
-          model.some(
-            (event) =>
-              event.kind !== "budget" ||
-              event.usageId !== `worker-${item.number}-${reservation.attempt}` ||
-              event.amount !== modelTokens,
-          ))) ||
-      (modelUsage && modelUsage.inputTokens + modelUsage.outputTokens !== modelTokens) ||
-      (modelTokens === undefined && model.length > 0) ||
-      nativeUsage.unit !== expectedUnit ||
-      !native.length ||
-      native.some((event) => event.kind !== "budget" || event.amount !== nativeUsage.amount) ||
-      !Number.isFinite(nativeUsage.amount) ||
-      nativeUsage.amount < 0
+        (modelTokens !== undefined &&
+          (!Number.isSafeInteger(modelTokens) ||
+            modelTokens < 0 ||
+            !model.length ||
+            model.some(
+              (event) =>
+                event.kind !== "budget" ||
+                event.usageId !== `worker-${item.number}-${reservation.attempt}` ||
+                event.amount !== modelTokens,
+            ))) ||
+        (modelUsage && modelUsage.inputTokens + modelUsage.outputTokens !== modelTokens) ||
+        (modelTokens === undefined && model.length > 0) ||
+        nativeUsage.unit !== expectedUnit ||
+        !native.length ||
+        native.some((event) => event.kind !== "budget" || event.amount !== nativeUsage.amount) ||
+        !Number.isFinite(nativeUsage.amount) ||
+        nativeUsage.amount < 0)
     )
       throw new Error("collected continuation lacks exact reconciled execution accounting");
+    if (
+      adopted &&
+      (modelTokens !== undefined ||
+        modelUsage !== undefined ||
+        model.length > 0 ||
+        native.length > 0 ||
+        artifact.digest !== adopted.artifactDigest ||
+        adopted.reservation.objective !== reservation.objective ||
+        adopted.reservation.workItem !== reservation.workItem ||
+        adopted.reservation.runId === reservation.runId)
+    )
+      throw new Error("adopted artifact continuation conflicts with predecessor provenance");
     let validation: AdmissionProposal["validation"];
     if (packet.requirements.trust !== "trusted_local" || !backend.capabilities.hostExecution) {
       const held = unreconciledBudgetReservations(prior).filter(
@@ -6965,7 +7015,7 @@ export class FactorySupervisor {
       phase: "execution",
       backendId: reservation.backend,
     });
-    await this.#releaseCapacity(executionKey);
+    if (!adopted) await this.#releaseCapacity(executionKey);
     const capacity = await this.#capacitySnapshot();
     const admission: AdmissionProposal = {
       workItem: item.number,
@@ -7330,13 +7380,36 @@ export class FactorySupervisor {
     deadline: number,
   ): Promise<boolean> {
     if (backend.capabilities.providerManagedPublication) return false;
+    const planned = this.#plannedRecoveryItem(item.number);
+    let adoptedSource: CollectedAttemptContinuation["adoptedSource"];
+    if (planned?.action === "reconcile" && planned.source?.artifactDigest) {
+      const source = planned.source;
+      const sourceReservation = (await this.#attempts.list(this.#run.objective, item.number)).find(
+        (candidate) =>
+          candidate.runId === source.runId &&
+          candidate.attempt === source.attempt &&
+          candidate.oid === source.reservationCommitOid &&
+          candidate.ref === source.reservationRef,
+      );
+      if (
+        !sourceReservation ||
+        reservation.runId !== this.#run.runId ||
+        reservation.attempt <= sourceReservation.attempt ||
+        reservation.backend !== sourceReservation.backend ||
+        reservation.baseSha !== sourceReservation.baseSha
+      )
+        throw new Error("successor artifact consumer differs from its accepted predecessor");
+      adoptedSource = { reservation: sourceReservation, artifactDigest: source.artifactDigest! };
+    }
     const original = this.#packetFor(item.number);
+    const retainedRetryContext = retryContext(
+      item,
+      adoptedSource?.reservation.runId ?? this.#run.runId,
+    );
     const packet = parseWorkerPacket({
       ...original,
       baseSha: reservation.baseSha,
-      ...(retryContext(item, this.#run.runId)
-        ? { retryContext: retryContext(item, this.#run.runId) }
-        : {}),
+      ...(retainedRetryContext ? { retryContext: retainedRetryContext } : {}),
       requirements: {
         ...original.requirements,
         ...(this.#policy.trust === "sandbox_untrusted" &&
@@ -7422,7 +7495,12 @@ export class FactorySupervisor {
         event.phase === "execution" &&
         event.unit === "model_tokens",
     );
-    if (this.#policy.economics && backend.capabilities.reportsModelUsage && !model.length) {
+    if (
+      !adoptedSource &&
+      this.#policy.economics &&
+      backend.capabilities.reportsModelUsage &&
+      !model.length
+    ) {
       await this.#recoverAppServerUsage(item, reservation, events);
       model = this.#budgetEvents.filter(
         (event): event is Extract<FactoryEvent, { kind: "budget" }> =>
@@ -7442,7 +7520,12 @@ export class FactorySupervisor {
         : undefined;
     // A content checkpoint does not invent accounting. The session fallback may
     // restore an exact terminal usage receipt, but must not dispatch a new turn.
-    if (this.#policy.economics && backend.capabilities.reportsModelUsage && !model.length)
+    if (
+      !adoptedSource &&
+      this.#policy.economics &&
+      backend.capabilities.reportsModelUsage &&
+      !model.length
+    )
       throw new Error(
         "retained output lacks exact terminal model usage; automated replacement is blocked pending usage recovery",
       );
@@ -7456,7 +7539,7 @@ export class FactorySupervisor {
         event.phase === "execution" &&
         event.unit === unit,
     );
-    if (!native.length) {
+    if (!adoptedSource && !native.length) {
       const held = unreconciledBudgetReservations(events).filter(
         (event) => event.phase === "execution" && event.unit === unit,
       );
@@ -7488,9 +7571,10 @@ export class FactorySupervisor {
       reservation,
       packet,
       artifact,
-      ...(model.length ? { modelTokens: model[0]!.amount } : {}),
-      ...(modelUsage ? { modelUsage } : {}),
-      nativeUsage: { unit, amount: native[0]!.amount },
+      ...(!adoptedSource && model.length ? { modelTokens: model[0]!.amount } : {}),
+      ...(!adoptedSource && modelUsage ? { modelUsage } : {}),
+      nativeUsage: { unit, amount: adoptedSource ? 0 : native[0]!.amount },
+      ...(adoptedSource ? { adoptedSource } : {}),
     });
     return true;
   }
@@ -8419,6 +8503,11 @@ export class FactorySupervisor {
           )
             throw new Error("accepted issue transfer still has reserved capacity");
         },
+        modelUsageExpected: (entry) => {
+          const backend = this.#registry.get(entry.reservation.backend);
+          if (!backend) throw new Error("accepted issue transfer backend is unavailable");
+          return backend.capabilities.reportsModelUsage ?? false;
+        },
       });
       return transfer?.authorityReceiptOid;
     }
@@ -8508,6 +8597,12 @@ export class FactorySupervisor {
       cleanupConfirmed: boolean;
       definitiveNonExecution: boolean;
       modelUsageExpected: boolean;
+      artifactConsumer?: {
+        sourceRunId: string;
+        sourceReservationOid: string;
+        sourceAttempt: number;
+        artifactDigest: string;
+      };
     },
   ): Promise<void> {
     if (!proof.cleanupConfirmed) return;
@@ -8540,6 +8635,7 @@ export class FactorySupervisor {
         writerHolder: lease.holder,
         writerEpoch: lease.epoch,
         definitiveNonExecution: proof.definitiveNonExecution,
+        ...(proof.artifactConsumer ? { artifactConsumer: proof.artifactConsumer } : {}),
         producerStopped: true,
         resourcesReleased: true,
         capacityReleased: true,
@@ -8579,6 +8675,21 @@ export class FactorySupervisor {
               },
             }
           : {}),
+        ...(proof.artifactConsumer && entry.artifactConsumer
+          ? {
+              definitiveArtifactConsumer: {
+                reservationOid: reservation.oid,
+                evidenceOid: base.oid,
+                dispatchPrevented: true as const,
+                sourceRunId: proof.artifactConsumer.sourceRunId,
+                sourceReservationOid: proof.artifactConsumer.sourceReservationOid,
+                sourceAttempt: proof.artifactConsumer.sourceAttempt,
+                artifactDigest: proof.artifactConsumer.artifactDigest,
+                recoveryPlanCommitOid: entry.artifactConsumer.recoveryPlanCommitOid,
+                recoveryClaimOid: entry.artifactConsumer.recoveryClaimOid,
+              },
+            }
+          : {}),
       };
       let evidence;
       try {
@@ -8593,6 +8704,35 @@ export class FactorySupervisor {
       });
       await this.#attempts.settle(lease, reservation, { ...evidence, evidenceOid });
     });
+  }
+
+  /** A retained-artifact consumer never owns execution capacity or model work.
+   * Settle its exact issue CAS immediately after durable success, before validation,
+   * and retry bounded snapshot lag rather than leaving a hidden occupied identity. */
+  async #settleArtifactConsumerAdmission(
+    item: DerivedWorkItem,
+    reservation: AttemptReservation,
+    adopted: NonNullable<CollectedAttemptContinuation["adoptedSource"]>,
+  ): Promise<void> {
+    for (let observation = 0; observation < 3; observation++) {
+      await this.#settleIssueAdmission(item, reservation, {
+        cleanupConfirmed: true,
+        definitiveNonExecution: false,
+        modelUsageExpected: false,
+        artifactConsumer: {
+          sourceRunId: adopted.reservation.runId,
+          sourceReservationOid: adopted.reservation.oid,
+          sourceAttempt: adopted.reservation.attempt,
+          artifactDigest: adopted.artifactDigest,
+        },
+      });
+      const entry = (await this.#attempts.ledger.read(item.number))?.history.find(
+        (candidate) => candidate.reservation.oid === reservation.oid,
+      );
+      if (entry?.disposition === "released") return;
+      if (observation < 2) await sleep(this.#options.pollIntervalMs ?? 2_000);
+    }
+    throw new ArtifactCompletionUnavailableError();
   }
 
   #packetFor(workItem: number): WorkerPacket {
@@ -8627,7 +8767,12 @@ export class FactorySupervisor {
   ): Promise<NativeStackMember> {
     const runtime = this.#recoveryRuntime;
     const planned = runtime?.planRecord.plan.items.find((entry) => entry.workItem === item.number);
-    if (runtime && planned?.source && planned.action !== "execute") {
+    if (
+      runtime &&
+      planned?.source &&
+      planned.action !== "execute" &&
+      planned.action !== "reconcile"
+    ) {
       const source = planned.source;
       const restored = runtime.sourcePublications.find(
         (proof) => proof.publication.workItem === item.number,
@@ -14014,6 +14159,296 @@ export class FactorySupervisor {
     }
   }
 
+  /** Continue a predecessor's durable successful bytes under a new, explicitly
+   * non-dispatching successor reservation. The predecessor execution remains the
+   * sole owner of its model/native accounting; this reservation only owns the
+   * validation, review and publication that follow. */
+  async #recoverAdoptedRetainedArtifact(item: DerivedWorkItem, deadline: number): Promise<void> {
+    const runtime = this.#recoveryRuntime!;
+    const planned = runtime.planRecord.plan.items.find((entry) => entry.workItem === item.number);
+    const source = planned?.source;
+    if (planned?.action !== "reconcile" || !source?.artifactDigest)
+      throw new Error("retained artifact reconciliation is absent from the accepted plan");
+    const reservations = await this.#attempts.list(this.#run.objective, item.number);
+    const sourceReservation = reservations.find(
+      (candidate) =>
+        candidate.runId === source.runId &&
+        candidate.attempt === source.attempt &&
+        candidate.oid === source.reservationCommitOid &&
+        candidate.ref === source.reservationRef,
+    );
+    if (!sourceReservation) throw new Error("retained artifact source reservation is unavailable");
+    const sourcePacket = parseWorkerPacket({
+      ...this.#packetFor(item.number),
+      baseSha: sourceReservation.baseSha,
+      ...(retryContext(item, source.runId)
+        ? { retryContext: retryContext(item, source.runId) }
+        : {}),
+    });
+    if (
+      sourceReservation.localScopeBatch?.identity.invocationDigest !==
+      workerPacketDigest(sourcePacket)
+    )
+      throw new Error("retained artifact differs from its original scoped invocation");
+    const packet = parseWorkerPacket({
+      ...sourcePacket,
+      requirements: {
+        ...sourcePacket.requirements,
+        ...(this.#policy.trust === "sandbox_untrusted" &&
+        sourcePacket.requirements.trust === "trusted_local"
+          ? { trust: "isolated" as const }
+          : {}),
+      },
+    });
+    const events = runtime.events.filter(
+      (event) =>
+        event.runId === source.runId &&
+        "workItem" in event &&
+        event.workItem === item.number &&
+        "attempt" in event &&
+        event.attempt === source.attempt,
+    );
+    const succeeded = events.filter(
+      (event) =>
+        event.kind === "attempt" &&
+        event.event === "AttemptSucceeded" &&
+        event.artifactDigest === source.artifactDigest,
+    );
+    if (
+      succeeded.length !== 1 ||
+      events.some(
+        (event) =>
+          event.kind === "validation" ||
+          (event.kind === "capacity" && event.phase === "validation") ||
+          (event.kind === "attempt" &&
+            [
+              "AttemptCollected",
+              "AttemptValidated",
+              "AttemptPublished",
+              "AttemptIntegrated",
+              "AttemptFailed",
+              "AttemptTimedOut",
+              "AttemptCancelled",
+              "AttemptDeferred",
+            ].includes(event.event)),
+      )
+    )
+      throw new Error("retained artifact source has incompatible later lifecycle evidence");
+    const backend = this.#registry.get(sourceReservation.backend);
+    if (!backend || backend.capabilities.providerManagedPublication || !backend.reconcileStale)
+      throw new Error("retained artifact source backend cannot prove its execution absent");
+    if (packet.requirements.trust !== "trusted_local" || !backend.capabilities.hostExecution)
+      throw new Error(
+        "retained artifact reconciliation requires a separately authorized independent-validation allowance",
+      );
+    const model = events.filter(
+      (event) =>
+        event.kind === "budget" &&
+        event.event === "BudgetReconciled" &&
+        event.phase === "execution" &&
+        event.unit === "model_tokens",
+    );
+    const reported = succeeded[0]!.kind === "attempt" ? succeeded[0]!.reportedModelTokens : null;
+    if (
+      this.#policy.economics &&
+      backend.capabilities.reportsModelUsage &&
+      (reported === undefined ||
+        model.length !== 1 ||
+        model[0]?.kind !== "budget" ||
+        model[0].amount !== reported)
+    )
+      throw new Error("retained artifact lacks exact predecessor model accounting");
+    const nativeUnit = isSandboxBackendId(sourceReservation.backend)
+      ? "sandbox_milliseconds"
+      : "local_milliseconds";
+    const native = events.filter(
+      (event) =>
+        event.kind === "budget" &&
+        event.event === "BudgetReconciled" &&
+        event.phase === "execution" &&
+        event.unit === nativeUnit,
+    );
+    if (native.length !== 1 || unreconciledBudgetReservations(events).length)
+      throw new Error("retained artifact lacks exact predecessor native accounting");
+    await backend.reconcileStale({
+      repository: `${this.#options.owner}/${this.#options.repo}`,
+      objective: sourceReservation.objective,
+      workItem: sourceReservation.workItem,
+      attempt: sourceReservation.attempt,
+      runId: sourceReservation.runId,
+      directorEpoch: sourceReservation.directorEpoch,
+      policyDigest: sourceReservation.policyDigest,
+      phase: "execution",
+      localScopeBatch: sourceReservation.localScopeBatch,
+      ...(() => {
+        const started = events.find(
+          (event) => event.kind === "attempt" && event.event === "AttemptStarted",
+        );
+        return started?.kind === "attempt" && started.providerResourceId
+          ? { providerResourceId: started.providerResourceId }
+          : {};
+      })(),
+    });
+    const artifact = await resumeArtifactTransfer({
+      store: this.#store,
+      identity: this.#artifactTransferIdentity(sourceReservation),
+      allowedPaths: packet.allowedPaths,
+      assertCurrent: () => this.#externalAdmission(async () => {}),
+    });
+    if (!artifact || artifact.digest !== source.artifactDigest)
+      throw new ArtifactCompletionUnavailableError();
+    this.#retainArtifactContent(artifact);
+    const base = await this.#store.readCommit(sourceReservation.baseSha);
+    let reservation = reservations
+      .filter((candidate) => candidate.runId === this.#run.runId)
+      .sort((left, right) => right.attempt - left.attempt)[0];
+    const existingConsumer = Boolean(reservation);
+    if (
+      reservation &&
+      (reservation.attempt <= sourceReservation.attempt ||
+        reservation.backend !== sourceReservation.backend ||
+        reservation.baseSha !== sourceReservation.baseSha ||
+        reservation.policyDigest !== this.#run.policyDigest ||
+        Boolean(reservation.localScopeBatch) ||
+        reservation.artifactConsumer?.sourceRunId !== source.runId ||
+        reservation.artifactConsumer.sourceReservationOid !== sourceReservation.oid ||
+        reservation.artifactConsumer.sourceAttempt !== source.attempt ||
+        reservation.artifactConsumer.artifactDigest !== source.artifactDigest ||
+        reservation.artifactConsumer.recoveryPlanCommitOid !== runtime.planRecord.commitOid ||
+        reservation.artifactConsumer.recoveryClaimOid !== runtime.claim.oid)
+    )
+      throw new Error("existing successor artifact consumer differs from the accepted source");
+    if (!reservation)
+      await this.#lease.use(async (lease) => {
+        const reassignmentAuthorityReceiptOid = await this.#reconcileIssueAdmissionHistory(
+          item,
+          lease,
+          base,
+        );
+        const admission = sourceReservation.admission ?? {
+          admissionClass: "local" as const,
+          admissionReason: "local-capacity" as const,
+          requestedCpu: 1,
+          requestedMemoryMb: 512,
+          priorityRank: 0,
+          prioritySource: "subissue-order" as const,
+          subIssuePosition: 0,
+          criticalPathLength: 0,
+          unfinishedDownstream: 0,
+        };
+        reservation = await this.#attempts.reserve({
+          ...(reassignmentAuthorityReceiptOid ? { reassignmentAuthorityReceiptOid } : {}),
+          lease,
+          workItem: item.number,
+          workItemNodeId: item.id,
+          backend: sourceReservation.backend,
+          base,
+          sequence: this.#sequences.take(),
+          admission,
+          binding: async (attempt) => {
+            const projection = this.#compiledProjection;
+            if (
+              !projection ||
+              !projection.bindings.some(
+                (binding) => binding.issueNodeId === item.id && binding.issueNumber === item.number,
+              )
+            )
+              throw new Error("artifact consumer requires its immutable graph projection");
+            const projectionCommit = await this.#store.readCommit(projection.commitOid);
+            if (projectionCommit.parentOids.length !== 1)
+              throw new Error("artifact consumer graph projection ancestry is invalid");
+            const capacityReservationId = capacityReservationKey({
+              objective: this.#run.objective,
+              workItem: item.number,
+              attempt,
+              phase: "execution",
+              backendId: sourceReservation.backend,
+            });
+            return {
+              graphDigest: projection.graphDigest,
+              graphCommitOid: projectionCommit.parentOids[0]!,
+              projectionCommitOid: projection.commitOid,
+              capacityReservationId,
+              budgetReservationId: `${this.#run.runId}:${item.number}:${attempt}:artifact-consumer:none`,
+              resourceIdentity: JSON.stringify([
+                this.#run.objective,
+                this.#run.runId,
+                item.number,
+                attempt,
+                "retained-artifact-consumer",
+                source.runId,
+                source.artifactDigest,
+              ]),
+              artifactConsumer: {
+                sourceRunId: source.runId,
+                sourceReservationOid: sourceReservation.oid,
+                sourceAttempt: source.attempt,
+                artifactDigest: source.artifactDigest!,
+                recoveryPlanCommitOid: runtime.planRecord.commitOid,
+                recoveryClaimOid: runtime.claim.oid,
+              },
+            };
+          },
+        });
+      });
+    if (!reservation) throw new Error("artifact consumer reservation did not complete");
+    const consumerAdmission = (await this.#attempts.ledger.read(item.number))?.history.find(
+      (entry) => entry.reservation.oid === reservation!.oid,
+    );
+    if (
+      !consumerAdmission?.artifactConsumer ||
+      consumerAdmission.dispatchPossible ||
+      consumerAdmission.imported ||
+      consumerAdmission.reassignmentReceiptOid !== runtime.claim.oid ||
+      consumerAdmission.artifactConsumer.sourceRunId !== source.runId ||
+      consumerAdmission.artifactConsumer.sourceReservationOid !== sourceReservation.oid ||
+      consumerAdmission.artifactConsumer.sourceAttempt !== source.attempt ||
+      consumerAdmission.artifactConsumer.artifactDigest !== source.artifactDigest ||
+      consumerAdmission.artifactConsumer.recoveryPlanCommitOid !== runtime.planRecord.commitOid ||
+      consumerAdmission.artifactConsumer.recoveryClaimOid !== runtime.claim.oid
+    )
+      throw new Error("artifact consumer admission differs from the accepted recovery authority");
+    await persistArtifactTransfer({
+      store: this.#store,
+      identity: this.#artifactTransferIdentity(reservation),
+      artifact,
+      allowedPaths: packet.allowedPaths,
+      assertCurrent: () => this.#externalAdmission(async () => {}),
+    });
+    if (
+      existingConsumer &&
+      (item.factoryEvents ?? []).some(
+        (event) =>
+          event.kind === "attempt" &&
+          event.runId === reservation!.runId &&
+          event.attempt === reservation!.attempt &&
+          event.event === "AttemptSucceeded" &&
+          event.artifactDigest === source.artifactDigest,
+      )
+    )
+      await this.#settleArtifactConsumerAdmission(item, reservation, {
+        reservation: sourceReservation,
+        artifactDigest: source.artifactDigest,
+      });
+    if (existingConsumer) {
+      await this.#continueCollectedArtifact(item, deadline, {
+        reservation,
+        packet,
+        artifact,
+        nativeUsage: { unit: nativeUnit, amount: 0 },
+        adoptedSource: { reservation: sourceReservation, artifactDigest: source.artifactDigest },
+      });
+      return;
+    }
+    await this.#continueCollectedArtifact(item, deadline, {
+      reservation,
+      packet,
+      artifact,
+      nativeUsage: { unit: nativeUnit, amount: 0 },
+      adoptedSource: { reservation: sourceReservation, artifactDigest: source.artifactDigest },
+    });
+  }
+
   async #recoverInterrupted(
     item: DerivedWorkItem,
     deadline: number,
@@ -14036,7 +14471,13 @@ export class FactorySupervisor {
     if (!reservation) {
       throw new Error(`Work Item #${item.number} has recoverable state but no attempt ref`);
     }
-    if (await this.#recoverUndispatchedAdmission(item, reservation)) return;
+    const adoptedArtifactConsumer =
+      this.#plannedRecoveryItem(item.number)?.action === "reconcile" &&
+      Boolean(this.#plannedRecoveryItem(item.number)?.source?.artifactDigest);
+    // This reservation deliberately never dispatches a worker, but its durable
+    // AttemptSucceeded receipt means it is no longer an undispatched intent.
+    if (!adoptedArtifactConsumer && (await this.#recoverUndispatchedAdmission(item, reservation)))
+      return;
     const backend = this.#registry.get(reservation.backend);
     if (!backend) {
       throw new Error(`cannot reconcile unavailable backend ${reservation.backend}`);
@@ -14512,6 +14953,11 @@ export class FactorySupervisor {
     }
 
     if (await this.#recoverRetainedArtifact(item, reservation, events, backend, deadline)) return;
+    const recoveryAction = this.#recoveryRuntime?.planRecord.plan.items.find(
+      (planned) => planned.workItem === item.number,
+    );
+    if (recoveryAction?.action === "reconcile" && recoveryAction.source?.artifactDigest)
+      throw new ArtifactCompletionUnavailableError();
 
     if (backend.capabilities.providerManagedPublication) {
       const attemptStartedAt = events.find(

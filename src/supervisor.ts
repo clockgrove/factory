@@ -3860,7 +3860,12 @@ export class FactorySupervisor {
               commit.parentOids[0] !== base.oid
             )
               throw new Error("current run graph differs from its authenticated source graph");
-          } else {
+          } else if (!this.#policy.compilerEvaluation) {
+            // Ordinary compilation authenticates this pre-receipt restart
+            // window through its single invocation checkpoint. Evaluated
+            // compilation uses immutable draft-stage records instead; those
+            // are verified below by assertCompilerDraftSelection before any
+            // graph receipt or projection is allowed.
             assertAuthenticatedCompilationCheckpoint({
               graph: durableGraph,
               graphCommit: commit,

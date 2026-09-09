@@ -240,6 +240,9 @@ describe("terminal-run recovery admission", () => {
             expiresAt: new Date(Date.now() + 60_000),
           };
         });
+      const assertCurrent = vi
+        .spyOn(LeaseManager.prototype, "assertCurrent")
+        .mockResolvedValue(undefined);
       const release = vi
         .spyOn(LeaseManager.prototype, "release")
         .mockImplementation(async (lease) => lease);
@@ -300,6 +303,34 @@ describe("terminal-run recovery admission", () => {
       expect(probe).toHaveBeenCalledOnce();
       expect(acquire).toHaveBeenCalledOnce();
       expect(release).toHaveBeenCalledOnce();
+      const reachesGraphPreflight =
+        change !== "active" &&
+        ![
+          "resumed-policy",
+          "resumed-actor",
+          "resumed-base",
+          "resumed-activation",
+          "resumed-time",
+          "resumed-run-id",
+          "resumed-objective-id",
+          "resumed-repository-id",
+          "resumed-author",
+          "resumed-branch",
+        ].includes(change);
+      expect(assertCurrent).toHaveBeenCalledTimes(reachesGraphPreflight ? 1 : 0);
+      if (reachesGraphPreflight) {
+        expect(assertCurrent.mock.calls[0]![0]).toMatchObject({
+          objective: 7,
+          oid: "c".repeat(40),
+          epoch: 2,
+        });
+        expect(acquire.mock.invocationCallOrder[0]).toBeLessThan(
+          assertCurrent.mock.invocationCallOrder[0]!,
+        );
+        expect(assertCurrent.mock.invocationCallOrder[0]).toBeLessThan(
+          release.mock.invocationCallOrder[0]!,
+        );
+      }
       expect(release.mock.calls[0]![0].runId).toBe(acquire.mock.calls[0]![0].runId);
       expect(read.mock.invocationCallOrder[1]).toBeGreaterThan(
         acquire.mock.invocationCallOrder[0]!,

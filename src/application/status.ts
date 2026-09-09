@@ -1,5 +1,9 @@
 import type { FactoryEvent } from "../protocol/events.js";
-import { activationCancellation, latestActivation } from "../control/activations.js";
+import {
+  activationCancellation,
+  activationRejection,
+  latestActivation,
+} from "../control/activations.js";
 import {
   isManagedAgentBackendId,
   isSandboxBackendId,
@@ -103,6 +107,8 @@ export interface FactoryStatusReport {
     requestId: string;
     state: "queued" | "withdrawn" | "started" | "cancellation-requested" | "rejected";
     cancellationRequestId?: string;
+    rejectionReason?: string;
+    rejectedAt?: string;
   };
   repository: string;
   objective: {
@@ -123,6 +129,34 @@ export interface FactoryStatusReport {
         terminal?: TerminalRunEvidence;
         cloudPaused: boolean;
         pendingRetries: number[];
+      };
+  operatorAction:
+    | {
+        required: false;
+        monitoring: "continue" | "stop";
+        code:
+          | "objective-inactive"
+          | "activation-queued"
+          | "activation-withdrawn"
+          | "run-active"
+          | "run-pausing"
+          | "run-draining"
+          | "run-completed"
+          | "run-cancelled";
+        summary: string;
+        evidence: Record<string, unknown>;
+      }
+    | {
+        required: true;
+        monitoring: "stop";
+        code:
+          | "activation-rejected"
+          | "run-paused"
+          | "run-escalated"
+          | "recovery-successor-escalated";
+        summary: string;
+        requiredAction: string;
+        evidence: Record<string, unknown>;
       };
   readyOrder: Array<{
     position: number;
@@ -353,18 +387,7 @@ export function buildStatusReport(input: {
         event.event === "FactoryRunStarted" &&
         event.activationRequestId === activation.requestId,
     );
-  const activationRejected =
-    activation &&
-    events.some(
-      (event) =>
-        event.kind === "run" &&
-        event.event === "ActivationRejected" &&
-        event.activationRequestId === activation.requestId &&
-        event.runId === activation.runId &&
-        event.requestedBy.toLowerCase() === activation.requestedBy.toLowerCase() &&
-        event.baseSha === activation.baseSha &&
-        event.policyDigest === activation.policyDigest,
-    );
+  const rejected = activation ? activationRejection(events, activation) : undefined;
   const policy = policyFor(events);
   const runEvents = run?.events ?? [];
   const effective = policy ? normalizeSchedulingPolicy(policy) : null;
@@ -435,6 +458,138 @@ export function buildStatusReport(input: {
     .filter((event) => event.kind === "controller")
     .sort((left, right) => right.sequence - left.sequence)[0];
   const summary = summarizeRun(events, policy ?? undefined, input.snapshot.objectiveAuthority);
+  const admissionGateAcknowledged = Boolean(
+    commandState?.admissionGate &&
+      runEvents.some(
+        (event) =>
+          event.kind === "run" &&
+          event.event ===
+            (commandState.admissionGate!.kind === "drain"
+              ? "RunDrainCompleted"
+              : "RunPauseAcknowledged") &&
+          event.commandRequestId === commandState.admissionGate!.requestId &&
+          event.sequence > commandState.admissionGate!.sequence,
+      ),
+  );
+  const pendingActivation = Boolean(
+    activation &&
+      !activationStarted &&
+      !withdrawal &&
+      !rejected &&
+      activation.sequence > (run?.terminal?.sequence ?? 0),
+  );
+  if (activationStarted && rejected)
+    throw new Error("activation rejection conflicts with its authenticated run start");
+  const operatorAction: FactoryStatusReport["operatorAction"] = pendingActivation
+    ? {
+        required: false,
+        monitoring: "continue",
+        code: "activation-queued",
+        summary: "The accepted activation can still start autonomously.",
+        evidence: { activationRequestId: activation!.requestId },
+      }
+    : rejected && rejected.sequence > (run?.terminal?.sequence ?? 0)
+      ? {
+          required: true,
+          monitoring: "stop",
+          code: "activation-rejected",
+          summary: `No Factory work is active. Activation was rejected before run start: ${rejected.reason}`,
+          requiredAction:
+            "Correct the recorded preflight reason, then submit a new explicitly authorized activation request. Do not keep polling this rejected request.",
+          evidence: {
+            activationRequestId: rejected.activationRequestId,
+            rejectedAt: rejected.at,
+            reason: rejected.reason,
+          },
+        }
+      : withdrawal && !activationStarted
+        ? {
+            required: false,
+            monitoring: "stop",
+            code: "activation-withdrawn",
+            summary: "No Factory work is active. The activation was withdrawn before run start.",
+            evidence: {
+              activationRequestId: withdrawal.activationRequestId,
+              cancellationRequestId: withdrawal.requestId,
+            },
+          }
+        : run?.terminal
+          ? run.terminal.event === "FactoryRunCompleted"
+            ? {
+                required: false,
+                monitoring: "stop",
+                code: "run-completed",
+                summary: "Factory completed the Objective; recurring monitoring should stop.",
+                evidence: { runId: run.runId, terminalAt: run.terminal.at },
+              }
+            : run.terminal.event === "FactoryRunCancelled"
+              ? {
+                  required: false,
+                  monitoring: "stop",
+                  code: "run-cancelled",
+                  summary: "No Factory work is active. The run was cancelled.",
+                  evidence: { runId: run.runId, terminalAt: run.terminal.at },
+                }
+              : {
+                  required: true,
+                  monitoring: "stop",
+                  code: run.start.predecessorRunId
+                    ? "recovery-successor-escalated"
+                    : "run-escalated",
+                  summary: `No Factory work is active. ${run.terminal.reason ?? "The run ended in terminal escalation."}`,
+                  requiredAction: run.start.predecessorRunId
+                    ? "Resolve the recorded terminal reason, then use factory_recovery_plan before proposing another explicitly authorized successor. Do not keep polling this terminal run."
+                    : "Resolve the recorded terminal reason, then use factory_recovery_plan before proposing an explicitly authorized successor. Do not keep polling this terminal run.",
+                  evidence: {
+                    runId: run.runId,
+                    terminalAt: run.terminal.at,
+                    terminalSequence: run.terminal.sequence,
+                    ...(run.terminal.reason ? { reason: run.terminal.reason } : {}),
+                  },
+                }
+          : commandState?.admissionsPaused
+            ? admissionGateAcknowledged
+              ? {
+                  required: true,
+                  monitoring: "stop",
+                  code: "run-paused",
+                  summary: "No Factory work is active. The requested stop is acknowledged.",
+                  requiredAction:
+                    "Use factory_resume only after the user explicitly asks to resume; do not poll an acknowledged stopped run.",
+                  evidence: {
+                    runId: run!.runId,
+                    commandRequestId: commandState.admissionGate!.requestId,
+                    stopKind: commandState.admissionGate!.kind,
+                  },
+                }
+              : {
+                  required: false,
+                  monitoring: "continue",
+                  code: commandState.draining ? "run-draining" : "run-pausing",
+                  summary: commandState.draining
+                    ? "Drain is in progress; admitted work is still reconciling before Factory acknowledges the stop."
+                    : "Pause is in progress; admitted work is still reconciling before Factory acknowledges the stop.",
+                  evidence: {
+                    runId: run!.runId,
+                    commandRequestId: commandState.admissionGate!.requestId,
+                    stopKind: commandState.admissionGate!.kind,
+                  },
+                }
+            : run
+              ? {
+                  required: false,
+                  monitoring: "continue",
+                  code: "run-active",
+                  summary: "The Factory run can still make autonomous progress.",
+                  evidence: { runId: run.runId },
+                }
+              : {
+                  required: false,
+                  monitoring: "stop",
+                  code: "objective-inactive",
+                  summary: "No Factory run or accepted activation is active.",
+                  evidence: {},
+                };
   const statusItems = items.map((item): StatusWorkItem => {
     const itemEvents = (item.factoryEvents ?? [])
       .filter((event) => !run || event.runId === run.runId)
@@ -556,10 +711,11 @@ export function buildStatusReport(input: {
                 : ("withdrawn" as const)
               : activationStarted
                 ? ("started" as const)
-                : activationRejected
+                : rejected
                   ? ("rejected" as const)
                   : ("queued" as const),
             ...(withdrawal ? { cancellationRequestId: withdrawal.requestId } : {}),
+            ...(rejected ? { rejectionReason: rejected.reason, rejectedAt: rejected.at } : {}),
           },
         }
       : {}),
@@ -595,6 +751,7 @@ export function buildStatusReport(input: {
           ...(run.terminal ? { terminal: terminalRunEvidence(run.terminal) } : {}),
         }
       : { availability: "unavailable", state: "not-started" },
+    operatorAction,
     readyOrder,
     readyOrderAvailability,
     capacity: {

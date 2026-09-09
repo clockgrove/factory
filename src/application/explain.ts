@@ -86,12 +86,33 @@ export function buildExplanationReport(input: {
   if (!run) {
     const inactive = explainGate({ gate: "authority", reason: "run-inactive" });
     explanations.push(
-      status.activation?.state === "withdrawn"
+      status.activation?.state === "rejected"
         ? {
-            ...inactive,
-            summary: `Activation ${status.activation.requestId} was withdrawn by request ${status.activation.cancellationRequestId}; no Factory run started.`,
+            code: EXPLANATION_CODES.authorityActivationRejected,
+            category: "authority",
+            disposition: "failed",
+            summary:
+              status.activation.rejectionReason ??
+              "The activation was rejected before a Factory run started.",
+            gate: "activation",
+            requiredAction:
+              "No Factory work is active; stop recurring monitoring. Correct the recorded preflight reason, then submit a new explicitly authorized activation request.",
+            evidence: {
+              activationRequestId: status.activation.requestId,
+              ...(status.activation.rejectedAt ? { rejectedAt: status.activation.rejectedAt } : {}),
+              ...(status.activation.rejectionReason
+                ? { reason: status.activation.rejectionReason }
+                : {}),
+              factoryWorkActive: false,
+              monitoring: "stop",
+            },
           }
-        : inactive,
+        : status.activation?.state === "withdrawn"
+          ? {
+              ...inactive,
+              summary: `Activation ${status.activation.requestId} was withdrawn by request ${status.activation.cancellationRequestId}; no Factory run started.`,
+            }
+          : inactive,
     );
   }
   if (run?.terminal?.event === "FactoryRunEscalated") {
@@ -106,8 +127,8 @@ export function buildExplanationReport(input: {
       summary: terminal.reason ?? "The selected Factory run ended in terminal escalation.",
       gate: recoverySuccessor ? "recovery-successor" : "execution",
       requiredAction: recoverySuccessor
-        ? "Resolve the recorded terminal reason, then use factory_recovery_plan before proposing another explicitly authorized successor."
-        : "Resolve the recorded terminal reason before requesting an explicitly authorized recovery successor.",
+        ? "No Factory work is active; stop recurring monitoring. Resolve the recorded terminal reason, then use factory_recovery_plan before proposing another explicitly authorized successor."
+        : "No Factory work is active; stop recurring monitoring. Resolve the recorded terminal reason before requesting an explicitly authorized recovery successor.",
       evidence: {
         runId: terminal.runId,
         terminalSequence: terminal.sequence,
@@ -120,7 +141,19 @@ export function buildExplanationReport(input: {
         ...(run.start.recoveryPlanDigest
           ? { recoveryPlanDigest: run.start.recoveryPlanDigest }
           : {}),
+        factoryWorkActive: false,
+        monitoring: "stop",
       },
+    });
+  }
+  if (!run?.terminal && status.operatorAction.code === "run-paused") {
+    explanations.push({
+      code: EXPLANATION_CODES.authorityRunPaused,
+      category: "authority",
+      disposition: "blocked",
+      summary: status.operatorAction.summary,
+      requiredAction: status.operatorAction.requiredAction,
+      evidence: { ...status.operatorAction.evidence, monitoring: "stop" },
     });
   }
   for (const item of selected) {

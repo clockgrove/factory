@@ -1432,6 +1432,16 @@ describe("bounded read-only immutable recovery proposals", () => {
     expect(first.blockers).toEqual([]);
     expect(first.status).toBe("proposed");
     expect(first.unknownUsageDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(first.operatorAction).toMatchObject({
+      required: true,
+      monitoring: "stop",
+      code: "acknowledge-unknown-usage",
+      requiredAction: expect.stringContaining(first.unknownUsageDigest!),
+      evidence: {
+        unknownUsageDigest: first.unknownUsageDigest,
+        acknowledgementGrantsAdditionalAllowance: false,
+      },
+    });
     expect(first.plan!.graph).toMatchObject({
       mode: "adopt-existing",
       sourceRunId: "successor",
@@ -1446,6 +1456,15 @@ describe("bounded read-only immutable recovery proposals", () => {
     });
     expect(acknowledged.status).toBe("proposed");
     expect(acknowledged.plan!.unknownUsageAcknowledgementDigest).toBe(first.unknownUsageDigest);
+    expect(acknowledged.operatorAction).toMatchObject({
+      required: true,
+      monitoring: "stop",
+      code: "submit-recovery-request",
+      evidence: {
+        planDigest: acknowledged.planDigest,
+        unknownUsageAcknowledged: true,
+      },
+    });
     expect(f.mutations.createRef).not.toHaveBeenCalled();
     expect(f.mutations.createCommit).not.toHaveBeenCalled();
 
@@ -1477,6 +1496,12 @@ describe("bounded read-only immutable recovery proposals", () => {
     expect(result.blockers).toEqual([]);
     expect(result.status).toBe("proposed");
     expect(result.executionAuthorized).toBe(false);
+    expect(result.operatorAction).toMatchObject({
+      required: true,
+      monitoring: "stop",
+      code: "submit-recovery-request",
+      evidence: { planDigest: result.planDigest, unknownUsageAcknowledged: false },
+    });
     expect(parseRecoveryPlan(result.plan)).toEqual(result.plan);
     expect(result.plan!.items.map((item) => item.action)).toEqual([
       "integrated",
@@ -1550,6 +1575,12 @@ describe("bounded read-only immutable recovery proposals", () => {
     const invalid = await f.build({ unknownUsageAcknowledgementDigest: digest("a") });
     expect(invalid.status).toBe("blocked");
     expect(invalid.blockers[0]!.code).toBe("unknown-usage-acknowledgement-mismatch");
+    expect(invalid.operatorAction).toMatchObject({
+      required: true,
+      monitoring: "stop",
+      code: "resolve-recovery-blockers",
+      evidence: { blockerCount: 1 },
+    });
   });
 
   it.each([

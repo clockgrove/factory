@@ -54,6 +54,18 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- Interrupted accepted compiler-evaluation graphs now authenticate their pre-receipt restart through
+  exact immutable draft-selection and per-stage accounting evidence, while ordinary compilation
+  retains its single-invocation checkpoint requirement. Changed Objective input still blocks before
+  projection or repeated model work. ([#280](https://github.com/clockgrove/factory/issues/280))
+- Terminal-recovery startup-race fixtures now explicitly model the lease assertion added by graph
+  preflight, preserving their offline boundary and proving acquire/assert/release ordering without a
+  live GitHub fallback. ([#281](https://github.com/clockgrove/factory/issues/281))
+- Status now returns a mandatory machine-readable operator action that permits monitoring only while
+  autonomous progress remains possible. Terminal, rejected, paused, and recovery-authority gates say
+  that no Factory work is active, stop recurring monitors, preserve the exact reason or unknown usage
+  digest, and identify one next action. The Director asks once at human gates instead of repeatedly
+  polling immutable state. ([#278](https://github.com/clockgrove/factory/issues/278))
 - Fresh Objective startup now classifies empty, authenticated, or strictly adoptable Work Item graph
   input under the acquired lease before `FactoryRunStarted`. `factory_doctor` exposes the same
   read-only classification; malformed or mixed pre-existing Work Items produce an actionable

@@ -99,6 +99,9 @@ Restarting the controller resumes eligible non-terminal work; it does not revive
 cancelled run. For an escalated Objective, ask the Director to inspect `factory_recovery_plan`,
 then propose a successor with `factory_recovery_propose`. The proposal is read-only and binds the
 existing graph, issues, source artifacts, historical usage, and continuation actions to a digest.
+`factory_status.operatorAction.monitoring: "stop"` means no Factory work is active: pause or delete
+any attached recurring monitor and report the returned next action once. Do not keep polling a
+terminal run, rejected activation, acknowledged deliberate pause, or recovery authority gate.
 
 When you authorize that continuation, the Director submits `factory_recovery_request` with the
 exact proposal digest and request ID. The controller discovers that request, independently proves
@@ -124,7 +127,9 @@ allowance requires explicit amounts, supplied identically to both commands with
 does not change trust or backend policy. Unknown historical usage remains unknown and requires
 explicit acknowledgement of the returned `unknownUsageDigest` (not `planDigest`) via
 `--acknowledge-unknown-usage DIGEST` on both commands. Restored credentials or an account quota reset
-grant neither increment nor acknowledgement.
+grant neither increment nor acknowledgement. The acknowledgement preserves the unknown historical
+usage; it neither asserts zero nor grants additional allowance. Ask for this decision once, show the
+exact digest, and leave monitoring stopped while waiting.
 
 Local recovery can require the existing owned service to exit and restart into a new launcher
 generation. Factory uses only its already configured restart policy; it does not reconfigure a

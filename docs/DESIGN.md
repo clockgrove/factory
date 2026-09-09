@@ -300,6 +300,11 @@ copied from an authenticated historical receipt must contain no new compilation 
 `GraphProjected` receipt may repair only its exact staged projection blob; missing or divergent
 staged content blocks rather than manufacturing a projection.
 
+Opt-in compiler evaluation uses a different authenticated checkpoint: the complete immutable
+draft-stage selection and its linked per-stage actual-usage records. A pre-receipt restart must
+validate that workflow-specific evidence before projection; it cannot reinterpret the graph as an
+ordinary compilation or use it after its Objective-input binding changes.
+
 The graph is immutable for the lifetime of its run. Factory may retry a Work Item with bounded prior
 failure evidence, but it does not silently replace issue scope, dependencies, or budget through a
 second compilation. An inadequate durable graph escalates; an explicitly authorized new run is the
@@ -998,6 +1003,15 @@ An activation that is permanently rejected before a run starts records `Activati
 to the exact request, base SHA, policy digest, and activating actor. That receipt suppresses repeated
 discovery of only that activation. Classified transient platform failures do not write a rejection;
 the repository controller keeps the request eligible and applies a bounded retry-after backoff.
+
+Read-only status always returns a machine-readable `operatorAction`. Accepted queued activations,
+non-terminal unpaused runs, and pause/drain requests still reconciling admitted work report
+`monitoring: continue`. Inactive, withdrawn, completed, cancelled, acknowledged-paused, rejected, or
+escalated states report `monitoring: stop`. Stopped states say plainly that no Factory work is active
+and, when authority is required, identify exactly one next action. Recovery proposals use the same
+stop contract to distinguish evidence repair, exact unknown usage acknowledgement, and submission
+of an already authorized digest-bound request. A client must not turn a terminal or human-authority
+gate into recurring status polling.
 
 The activating actor may withdraw a queued activation with `factory_cancel`. Before a run starts,
 this writes `ActivationCancellationRequested`, binding the original activation request, repository,

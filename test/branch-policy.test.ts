@@ -30,6 +30,93 @@ describe("v2 branch-policy preflight", () => {
     ).toEqual([]);
   });
 
+  it("accepts current non-approval pull-request metadata without weakening real review gates", () => {
+    const current = {
+      type: "pull_request",
+      parameters: {
+        required_approving_review_count: 0,
+        dismiss_stale_reviews_on_push: true,
+        require_code_owner_review: false,
+        require_last_push_approval: false,
+        required_review_thread_resolution: true,
+        require_extra_approval_for_unattributed_changes: true,
+        required_reviewers: [],
+        dismissal_restriction: { enabled: false, allowed_actors: [] },
+        allowed_merge_methods: ["squash", "rebase"],
+      },
+    };
+
+    expect(branchRuleBlockers([current])).toEqual([]);
+    expect(
+      branchRuleBlockers([
+        {
+          ...current,
+          parameters: {
+            ...current.parameters,
+            required_approving_review_count: 1,
+          },
+        },
+      ]),
+    ).toEqual(["required human pull-request review"]);
+  });
+
+  it("requires human action for positive path reviewers and rejects malformed review metadata", () => {
+    expect(
+      branchRuleBlockers([
+        {
+          type: "pull_request",
+          parameters: {
+            required_approving_review_count: 0,
+            required_reviewers: [
+              {
+                file_patterns: ["src/**"],
+                minimum_approvals: 1,
+                reviewer: { id: 42, type: "Team" },
+              },
+            ],
+            dismissal_restriction: {
+              enabled: true,
+              allowed_actors: [{ id: 7, type: "RepositoryRole" }],
+            },
+          },
+        },
+      ]),
+    ).toEqual(["required human pull-request review"]);
+
+    expect(
+      branchRuleBlockers([
+        {
+          type: "pull_request",
+          parameters: {
+            required_reviewers: [
+              {
+                file_patterns: "src/**",
+                minimum_approvals: 11,
+                reviewer: { id: "42", type: "User" },
+                future_gate: true,
+              },
+            ],
+            dismissal_restriction: {
+              enabled: "false",
+              allowed_actors: [{ id: 7, type: "Team", future_actor_gate: true }],
+              future_gate: true,
+            },
+            require_extra_approval_for_unattributed_changes: "true",
+          },
+        },
+      ]),
+    ).toEqual([
+      "malformed pull-request parameter require_extra_approval_for_unattributed_changes",
+      "unsupported required reviewer parameter future_gate",
+      "malformed required reviewer file patterns 0",
+      "malformed required reviewer approval count 0",
+      "malformed required reviewer identity 0",
+      "unsupported review dismissal restriction parameter future_gate",
+      "malformed review dismissal restriction enabled state",
+      "malformed review dismissal restriction actors",
+    ]);
+  });
+
   it("fails closed on unknown rules and human or incompatible merge requirements", () => {
     expect(branchRuleBlockers([{ type: "required_deployments" }])).toEqual([
       "unsupported branch rule required_deployments",
@@ -52,10 +139,7 @@ describe("v2 branch-policy preflight", () => {
           parameters: { required_review_thread_resolution: true, future_gate: false },
         },
       ]),
-    ).toEqual([
-      "unsupported pull-request parameter future_gate",
-      "required human pull-request review",
-    ]);
+    ).toEqual(["unsupported pull-request parameter future_gate"]);
   });
 
   it("extracts and deduplicates required check contexts", () => {

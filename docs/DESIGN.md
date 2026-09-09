@@ -487,8 +487,12 @@ adapter must explicitly reconcile findings before it can replace or participate 
 ### Pull-request integration
 
 Only branch-rule shapes whose autonomous semantics are proven are allowed. Unknown rule types fail
-closed. Human-approval, code-owner, last-push approval, and incompatible merge-method requirements
-escalate rather than being bypassed. Regular sibling PRs are the default. Explicit stacked delivery
+closed. Human-approval, code-owner, last-push approval, positive path-specific reviewer, and
+incompatible merge-method requirements escalate rather than being bypassed. Conversation-resolution,
+review-dismissal restrictions, optional path reviewers, and the extra-unattributed-Copilot-approval
+flag do not invent an approval requirement when the configured approval count is zero; GitHub's
+current mergeability and merge response still enforce any actual unresolved conversation or review.
+Regular sibling PRs are the default. Explicit stacked delivery
 uses GitHub's pinned REST surface only after an observed repository capability probe; an
 unavailable capability produces a durable configured fallback or escalation before publication.
 Regular and native-stack delivery both admit independent Work Items concurrently. When an earlier

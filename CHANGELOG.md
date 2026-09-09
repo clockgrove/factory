@@ -54,6 +54,11 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- Pull-request branch-policy preflight now understands GitHub's current required-reviewer,
+  dismissal-restriction, and unattributed-Copilot-approval fields. Optional review metadata and
+  conversation resolution no longer invent a human-approval requirement when zero approvals are
+  configured; positive global, code-owner, last-push, or path-specific approvals still fail closed.
+  ([#271](https://github.com/clockgrove/factory/issues/271))
 - Status, explanation, and recovery assessment now expose the authenticated concrete terminal
   reason for the selected run, including recovery successors, bound to its run, sequence,
   timestamp, and SHA-256 digest. Successor escalation explanations also provide a stable code,

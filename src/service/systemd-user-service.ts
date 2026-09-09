@@ -28,6 +28,16 @@ export interface SystemdStatus {
   installed: boolean;
   enabled: boolean;
   active: boolean;
+  launcherCurrent: boolean;
+  healthy: boolean;
+  reasonCode:
+    | "controller-not-installed"
+    | "controller-unit-unmanaged"
+    | "controller-launcher-stale"
+    | "controller-disabled"
+    | "controller-inactive"
+    | null;
+  action: string | null;
   unit: string;
 }
 export interface SystemdUserServiceOptions {
@@ -39,6 +49,8 @@ export interface SystemdUserServiceOptions {
   run?: (args: readonly string[]) => Promise<unknown>;
   /** Read at install time only; no credentials or unrelated environment are persisted. */
   commandEnvironment?: () => CommandEnvironment;
+  /** A Type=simple service must remain active beyond systemctl's successful start request. */
+  startupHealthDelayMs?: number;
 }
 
 export class SystemdUserService {
@@ -46,6 +58,7 @@ export class SystemdUserService {
   readonly #directory: string;
   readonly #run: (args: readonly string[]) => Promise<unknown>;
   readonly #commandEnvironment: () => CommandEnvironment;
+  readonly #startupHealthDelayMs: number;
   constructor(options: SystemdUserServiceOptions) {
     if (options.factoryCommand && options.factoryExecutable) {
       throw new Error("configure factoryCommand or factoryExecutable, not both");
@@ -66,6 +79,9 @@ export class SystemdUserService {
     this.#directory = resolve(options.unitDirectory ?? join(config, "systemd/user"));
     this.#run = options.run ?? (async (args) => execFileAsync("systemctl", ["--user", ...args]));
     this.#commandEnvironment = options.commandEnvironment ?? (() => process.env);
+    this.#startupHealthDelayMs = options.startupHealthDelayMs ?? 500;
+    if (!Number.isFinite(this.#startupHealthDelayMs) || this.#startupHealthDelayMs < 0)
+      throw new Error("startup health delay must be a finite nonnegative number");
   }
 
   unitName(input: SystemdServiceInput): string {
@@ -103,10 +119,14 @@ export class SystemdUserService {
     return status;
   }
   async start(input: SystemdServiceInput): Promise<SystemdStatus> {
-    await this.#requireInstalled(input);
+    await this.#requireCurrentLauncher(input);
     await this.#run(["start", this.unitName(input)]);
+    await delay(this.#startupHealthDelayMs);
     const status = await this.status(input);
-    if (!status.active) throw new Error(`failed to start ${status.unit}`);
+    if (!status.healthy)
+      throw new Error(
+        `controller-start-unhealthy: ${status.unit} failed its post-start health check (${status.reasonCode ?? "unknown"}); ${status.action ?? "inspect the user service"}`,
+      );
     return status;
   }
   async stop(input: SystemdServiceInput): Promise<SystemdStatus> {
@@ -116,10 +136,14 @@ export class SystemdUserService {
     return status;
   }
   async restart(input: SystemdServiceInput): Promise<SystemdStatus> {
-    await this.#requireInstalled(input);
+    await this.#requireCurrentLauncher(input);
     await this.#run(["restart", this.unitName(input)]);
+    await delay(this.#startupHealthDelayMs);
     const status = await this.status(input);
-    if (!status.active) throw new Error(`failed to restart ${status.unit}`);
+    if (!status.healthy)
+      throw new Error(
+        `controller-restart-unhealthy: ${status.unit} failed its post-restart health check (${status.reasonCode ?? "unknown"}); ${status.action ?? "inspect the user service"}`,
+      );
     return status;
   }
   async uninstall(input: SystemdServiceInput): Promise<SystemdStatus> {
@@ -136,12 +160,56 @@ export class SystemdUserService {
     return status;
   }
   async status(input: SystemdServiceInput): Promise<SystemdStatus> {
-    const installed = await exists(this.unitPath(input));
+    let body: string | undefined;
+    try {
+      body = await readFile(this.unitPath(input), "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    const installed = body !== undefined;
     // Query systemd even after the file is removed: its manager may still
     // have a loaded or enabled unit, which uninstall must never conceal.
     const enabled = await this.#is(["is-enabled", "--quiet", this.unitName(input)]);
     const active = await this.#is(["is-active", "--quiet", this.unitName(input)]);
-    return { installed, enabled, active, unit: this.unitName(input) };
+    const managed = body?.startsWith(FACTORY_UNIT_MARKER) ?? false;
+    const launcherCurrent = Boolean(
+      managed &&
+        body?.split("\n").includes(this.#execStart(input)) &&
+        (await this.#commandAvailable()),
+    );
+    const reasonCode = !installed
+      ? "controller-not-installed"
+      : !managed
+        ? "controller-unit-unmanaged"
+        : !launcherCurrent
+          ? "controller-launcher-stale"
+          : !enabled
+            ? "controller-disabled"
+            : !active
+              ? "controller-inactive"
+              : null;
+    const action =
+      reasonCode === "controller-not-installed"
+        ? "install the repository controller"
+        : reasonCode === "controller-unit-unmanaged"
+          ? "resolve the unmanaged unit conflict before installing Factory"
+          : reasonCode === "controller-launcher-stale"
+            ? "run the idempotent controller install operation to refresh the launcher"
+            : reasonCode === "controller-disabled"
+              ? "run the idempotent controller install operation to enable the unit"
+              : reasonCode === "controller-inactive"
+                ? "start the repository controller"
+                : null;
+    return {
+      installed,
+      enabled,
+      active,
+      launcherCurrent,
+      healthy: reasonCode === null,
+      reasonCode,
+      action,
+      unit: this.unitName(input),
+    };
   }
   async #is(args: readonly string[]): Promise<boolean> {
     try {
@@ -158,9 +226,13 @@ export class SystemdUserService {
       /* desired state is verified below */
     }
   }
-  async #requireInstalled(input: SystemdServiceInput): Promise<void> {
-    if (!(await exists(this.unitPath(input))))
-      throw new Error(`${this.unitName(input)} is not installed`);
+  async #requireCurrentLauncher(input: SystemdServiceInput): Promise<void> {
+    const status = await this.status(input);
+    if (!status.installed) throw new Error(`${status.unit} is not installed`);
+    if (!status.launcherCurrent)
+      throw new Error(
+        `${status.reasonCode ?? "controller-launcher-stale"}: ${status.unit}; ${status.action ?? "refresh the installed controller"}`,
+      );
   }
   async #discoverCommandEnvironment(): Promise<string[]> {
     const environment = this.#commandEnvironment();
@@ -212,8 +284,23 @@ export class SystemdUserService {
   }
   #unit(input: SystemdServiceInput, environment: string[]): string {
     const checkout = resolve(input.checkout);
+    return `${FACTORY_UNIT_MARKER}\n[Unit]\nDescription=Clockgrove Factory repository controller for ${escapeDescription(input.repository)}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory=${systemdDirectivePath(checkout)}\n${environment.join("")}${this.#execStart(input)}\nRestart=on-failure\nRestartPreventExitStatus=2 130\nRestartSec=30\nTimeoutStopSec=90\nKillMode=control-group\n\n[Install]\nWantedBy=default.target\n`;
+  }
+  #execStart(input: SystemdServiceInput): string {
     const command = this.#command.map(systemdQuote).join(" ");
-    return `${FACTORY_UNIT_MARKER}\n[Unit]\nDescription=Clockgrove Factory repository controller for ${escapeDescription(input.repository)}\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nWorkingDirectory=${systemdDirectivePath(checkout)}\n${environment.join("")}ExecStart=${command} controller run ${systemdQuote(input.repository)} --repo ${systemdQuote(checkout)}\nRestart=on-failure\nRestartPreventExitStatus=2 130\nRestartSec=30\nTimeoutStopSec=90\nKillMode=control-group\n\n[Install]\nWantedBy=default.target\n`;
+    return `ExecStart=${command} controller run ${systemdQuote(input.repository)} --repo ${systemdQuote(resolve(input.checkout))}`;
+  }
+  async #commandAvailable(): Promise<boolean> {
+    for (const [index, part] of this.#command.entries()) {
+      if (!isAbsolute(part)) continue;
+      try {
+        await access(part, index === 0 ? fsConstants.X_OK : fsConstants.R_OK);
+        if (!(await stat(part)).isFile()) return false;
+      } catch {
+        return false;
+      }
+    }
+    return true;
   }
 }
 
@@ -232,14 +319,8 @@ async function executableFile(path: string): Promise<boolean> {
   }
 }
 
-async function exists(path: string): Promise<boolean> {
-  try {
-    await readFile(path);
-    return true;
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw e;
-  }
+function delay(ms: number): Promise<void> {
+  return ms === 0 ? Promise.resolve() : new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 }
 function validateInput(input: SystemdServiceInput): void {
   if (!/^[^/\s]+\/[^/\s]+$/.test(input.repository))

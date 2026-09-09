@@ -7,6 +7,7 @@ import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js"
 import { policyDigest } from "../src/protocol/policy.js";
 import { isModelInvocationMarker, unresolvedModelInvocations } from "../src/control/budget.js";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
+import { GithubOctokitGraphWriter, renderLegacyWorkItemCore } from "../src/graph.js";
 
 const fixtures: Awaited<ReturnType<typeof providerSupervisorFixture>>[] = [];
 afterEach(async () => {
@@ -121,6 +122,206 @@ function afterReceipt(eventName: FactoryEvent["event"], action: () => void) {
 }
 
 describe("Supervisor activation withdrawal races", () => {
+  it("rejects malformed pre-existing Work Items before starting a run", async () => {
+    const f = await fixture(true);
+    f.snapshot.workItems = [
+      {
+        id: "I_8",
+        number: 8,
+        title: "Malformed existing item",
+        body: "A planning note without the bounded legacy sections",
+        closed: false,
+        assignees: [],
+        labels: ["factory:work-item"],
+        blockedBy: [],
+        linkedPullRequests: [],
+        copilotAssignments: [],
+        factoryEvents: [],
+      },
+    ];
+
+    expect(await f.run()).toMatchObject({
+      status: "escalated",
+      runId: "not-started",
+      reason: expect.stringMatching(
+        /Objective graph preflight failed.*six ordered legacy sections/,
+      ),
+    });
+    expect(f.events()).toContainEqual(
+      expect.objectContaining({
+        event: "ActivationRejected",
+        activationRequestId: "fixture-activation",
+      }),
+    );
+    expect(
+      f
+        .events()
+        .filter(
+          (event) =>
+            event.event === "FactoryRunStarted" ||
+            event.event === "DeliverySelected" ||
+            event.kind === "budget" ||
+            event.kind === "attempt",
+        ),
+    ).toEqual([]);
+    expect(f.compile).not.toHaveBeenCalled();
+    expect(f.activity).toEqual([]);
+  });
+
+  it("compiles and adopts valid existing Work Items on a fresh activation without recreating topology", async () => {
+    const f = await fixture(true);
+    const core = {
+      goal: "Create a.txt containing a",
+      acceptance: ["a.txt has the expected text"],
+      scope: ["a.txt"],
+      preconditions: [],
+      outOfScope: [],
+      conventions: [],
+    };
+    f.snapshot.workItems = [
+      {
+        id: "I_8",
+        number: 8,
+        title: "Implement a",
+        body: renderLegacyWorkItemCore(core),
+        closed: false,
+        assignees: [],
+        labels: ["factory:work-item"],
+        blockedBy: [],
+        linkedPullRequests: [],
+        copilotAssignments: [],
+        factoryEvents: [],
+      },
+    ];
+    f.compile.mockImplementation(async (context, checkpoint) => {
+      const result = {
+        objective: {
+          title: f.snapshot.title,
+          workItems: [
+            {
+              id: "adopted-8",
+              title: "Implement a",
+              ...core,
+              dependsOn: [],
+              baseSha: context.baseSha,
+              validationCommands: ["node --test"],
+              requirements: {
+                os: ["linux"],
+                architecture: [],
+                tools: ["node"],
+                services: [],
+                networkDestinations: [],
+                permittedSecretNames: [],
+                trust: "trusted_local" as const,
+                estimatedDurationMinutes: 1,
+              },
+              artifactContract: "clockgrove.factory/artifact-v1" as const,
+              delivery: { group: "adopted-8", relationship: "root" as const },
+            },
+          ],
+        },
+        usage: { inputTokens: 10, outputTokens: 5 },
+      };
+      await checkpoint(result);
+      return result;
+    });
+    const create = vi
+      .spyOn(GithubOctokitGraphWriter.prototype, "createWorkItemIssue")
+      .mockRejectedValue(new Error("legacy adoption must not create an issue"));
+    const addBlockedBy = vi
+      .spyOn(GithubOctokitGraphWriter.prototype, "addBlockedBy")
+      .mockRejectedValue(new Error("legacy adoption must not create an edge"));
+    const update = vi
+      .spyOn(GithubOctokitGraphWriter.prototype, "updateWorkItemIssue")
+      .mockImplementation(async ({ issueId, body }) => {
+        expect(issueId).toBe("I_8");
+        f.snapshot.workItems[0]!.body = body;
+      });
+
+    expect(await f.run()).toMatchObject({ status: "completed", objective: 7 });
+    expect(f.compile).toHaveBeenCalledOnce();
+    expect(update).toHaveBeenCalledOnce();
+    expect(create).not.toHaveBeenCalled();
+    expect(addBlockedBy).not.toHaveBeenCalled();
+    expect(f.snapshot.workItems).toHaveLength(1);
+    expect(f.snapshot.workItems[0]).toMatchObject({ id: "I_8", number: 8, closed: true });
+    expect(f.events().filter((event) => event.event === "GraphCompiled")).toHaveLength(1);
+    expect(f.events().filter((event) => event.event === "GraphProjected")).toHaveLength(1);
+  });
+
+  it("refuses adoption writes when a legacy Work Item changes during compilation", async () => {
+    const f = await fixture(true);
+    const core = {
+      goal: "Create a.txt containing a",
+      acceptance: ["a.txt has the expected text"],
+      scope: ["a.txt"],
+      preconditions: [],
+      outOfScope: [],
+      conventions: [],
+    };
+    f.snapshot.workItems = [
+      {
+        id: "I_8",
+        number: 8,
+        title: "Implement a",
+        body: renderLegacyWorkItemCore(core),
+        closed: false,
+        assignees: [],
+        labels: ["factory:work-item"],
+        blockedBy: [],
+        linkedPullRequests: [],
+        copilotAssignments: [],
+        factoryEvents: [],
+      },
+    ];
+    f.compile.mockImplementation(async (context, checkpoint) => {
+      const result = {
+        objective: {
+          title: f.snapshot.title,
+          workItems: [
+            {
+              id: "adopted-8",
+              title: "Implement a",
+              ...core,
+              dependsOn: [],
+              baseSha: context.baseSha,
+              validationCommands: ["node --test"],
+              requirements: {
+                os: ["linux"],
+                architecture: [],
+                tools: ["node"],
+                services: [],
+                networkDestinations: [],
+                permittedSecretNames: [],
+                trust: "trusted_local" as const,
+              },
+              artifactContract: "clockgrove.factory/artifact-v1" as const,
+              delivery: { group: "adopted-8", relationship: "root" as const },
+            },
+          ],
+        },
+        usage: { inputTokens: 10, outputTokens: 5 },
+      };
+      await checkpoint(result);
+      f.snapshot.workItems[0]!.body = renderLegacyWorkItemCore({
+        ...core,
+        goal: "A concurrently changed goal",
+      });
+      return result;
+    });
+    const update = vi.spyOn(GithubOctokitGraphWriter.prototype, "updateWorkItemIssue");
+
+    expect(await f.run()).toMatchObject({
+      status: "escalated",
+      reason: expect.stringContaining("legacy Work Item constraints changed during"),
+    });
+    expect(f.compile).toHaveBeenCalledOnce();
+    expect(update).not.toHaveBeenCalled();
+    expect(f.activity).toEqual([]);
+    expect(f.events().filter((event) => event.event === "GraphCompiled")).toHaveLength(0);
+    expect(f.events().filter((event) => event.event === "GraphProjected")).toHaveLength(0);
+  });
+
   it("persists compilation intent before the real invocation and leaves missing counters unknown", async () => {
     const f = await fixture(true);
     Object.assign(f.management, { supportsCompilerAdmission: true });

@@ -254,6 +254,14 @@ and timestamp. Restart resumes the latest supported non-terminal run without bro
 The recorded policy wins over new command defaults on resume; a different policy requires a new run,
 not a silent mid-run mutation.
 
+Before a fresh activation records `FactoryRunStarted`, the Director re-reads the Objective under its
+acquired Objective lease and classifies the complete child-issue state with the same bounded,
+side-effect-free check exposed by `factory_doctor`. The only startable states are no Work Items,
+authenticated graph input, or the exact adoptable legacy shape described below. Invalid or mixed
+input records `ActivationRejected` without delivery selection, model invocation, Work Item mutation,
+or worker admission. A human edit after that observation is still detected by the later immutable
+compilation and projection fences; the lease fences Factory writers, not arbitrary GitHub editors.
+
 Before the first sub-issue write, the activating Director stores the complete validated graph as a
 blob reachable from an immutable per-run custom ref, then writes an authenticated `GraphCompiled`
 receipt containing the graph digest, size, ref, and blob OID. Each compiled Work Item also carries a

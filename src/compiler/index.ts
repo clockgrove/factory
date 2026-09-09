@@ -33,6 +33,7 @@ import {
   inferCriterionRisk,
   validateCriterionValidationDesign,
 } from "./validation-design.js";
+import { bootstrapPackageValidationCommand, PNPM_BOOTSTRAP_REGISTRY } from "../validation/plan.js";
 
 export type ConflictClass = "parallel-safe" | "exclusive" | "generated" | "large-binary";
 export type ValidationTier = CriterionValidationTier;
@@ -261,11 +262,30 @@ export function validateCompiledObjective(
       const invalid = w.validationCommands.find((command) =>
         Array.isArray(commandEvidence)
           ? !commandEvidence.includes(command)
-          : !isGroundedValidationCommand(command, commandEvidence, w.scope),
+          : !isGroundedValidationCommand(command, commandEvidence, w.scope, {
+              root: w.dependsOn.length === 0,
+              tools: w.requirements.tools,
+            }),
       );
       if (invalid !== undefined)
         throw new Error(
-          `invented validation command in ${w.id}: ${JSON.stringify(invalid.slice(0, 200))}; repository-observed commands: ${JSON.stringify(observed).slice(0, 600)}. Use an observed command or specialize an observed bare node --test with concrete existing or Work Item-scoped JavaScript test files; flags, shell syntax, and unplanned targets are not allowed.`,
+          `invented validation command in ${w.id}: ${JSON.stringify(invalid.slice(0, 200))}; repository-observed commands: ${JSON.stringify(observed).slice(0, 600)}. Use an observed command, specialize an observed bare node --test with concrete existing or Work Item-scoped JavaScript test files, or use one finite pnpm validation script only for a dependency-root bootstrap item that creates package.json; flags, shell syntax, and unplanned targets are not allowed.`,
+        );
+      if (
+        !Array.isArray(commandEvidence) &&
+        observed.length === 0 &&
+        w.validationCommands.some((command) => bootstrapPackageValidationCommand(command)) &&
+        w.validationCommands.length !== 1
+      )
+        throw new Error(`bootstrap validation in ${w.id} must name exactly one pnpm script`);
+      if (
+        !Array.isArray(commandEvidence) &&
+        observed.length === 0 &&
+        w.validationCommands.some((command) => bootstrapPackageValidationCommand(command)) &&
+        !w.requirements.networkDestinations.includes(PNPM_BOOTSTRAP_REGISTRY)
+      )
+        throw new Error(
+          `bootstrap validation in ${w.id} must declare ${PNPM_BOOTSTRAP_REGISTRY} for the Supervisor-owned frozen setup`,
         );
     }
     if (

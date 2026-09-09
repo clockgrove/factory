@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -14,6 +14,7 @@ import { createValidationEvidence } from "../src/validation/evidence.js";
 import type { WorkerPacket } from "../src/protocol/worker-packet.js";
 import type { ReviewResult } from "../src/management/backend.js";
 import { validateArtifactClean, discardValidationResult } from "../src/validation/clean-run.js";
+import { pnpmBootstrapLock } from "./helpers/pnpm-bootstrap.js";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -88,7 +89,125 @@ async function fixture() {
   };
 }
 
+async function greenfieldFixture(unsafeLifecycle = false) {
+  const repository = await mkdtemp(join(tmpdir(), "factory-review-greenfield-test-"));
+  roots.push(repository);
+  const git = (...args: string[]) =>
+    execFileSync("git", args, { cwd: repository, encoding: "utf8" }).trim();
+  git("init", "-q", "-b", "main");
+  git("config", "user.name", "Fixture");
+  git("config", "user.email", "fixture@example.invalid");
+  await writeFile(join(repository, "README.md"), "Greenfield fixture\n");
+  git("add", ".");
+  git("commit", "-qm", "base");
+  const baseSha = git("rev-parse", "HEAD");
+  const worker = await createLocalWorktree(repository, baseSha);
+  await mkdir(join(worker.path, "packages", "example"), { recursive: true });
+  await writeFile(
+    join(worker.path, "package.json"),
+    JSON.stringify({
+      name: "greenfield",
+      private: true,
+      packageManager: "pnpm@10.17.1",
+      scripts: {
+        check: "turbo run check",
+        ...(unsafeLifecycle ? { precheck: "node --test escape.test.js" } : {}),
+      },
+      devDependencies: { turbo: "2.5.6", typescript: "5.9.2" },
+    }),
+  );
+  await writeFile(
+    join(worker.path, "pnpm-lock.yaml"),
+    pnpmBootstrapLock([".", "packages/example"], ["turbo@2.5.6", "typescript@5.9.2"]),
+  );
+  await writeFile(join(worker.path, "pnpm-workspace.yaml"), "packages:\n  - packages/*\n");
+  await writeFile(
+    join(worker.path, "turbo.json"),
+    '{"tasks":{"check":{"dependsOn":["^check"]}}}\n',
+  );
+  await writeFile(
+    join(worker.path, "packages", "example", "package.json"),
+    JSON.stringify({ name: "example", scripts: { check: "tsc --noEmit" } }),
+  );
+  git("-C", worker.path, "add", ".");
+  const artifact = await collectLocalArtifact(worker);
+  await cleanupLocalWorktree(worker);
+  const packet: WorkerPacket = {
+    baseSha,
+    goal: "Bootstrap the workspace",
+    acceptanceCriteria: ["the workspace check is deterministic"],
+    allowedPaths: [
+      "package.json",
+      "pnpm-lock.yaml",
+      "pnpm-workspace.yaml",
+      "turbo.json",
+      "packages/",
+    ],
+    preconditions: [],
+    outOfScope: [],
+    conventions: [],
+    validationCommands: ["pnpm check"],
+    artifactContract: "clockgrove.factory/artifact-v1",
+    requirements: {
+      os: ["linux"],
+      architecture: [],
+      tools: ["node", "pnpm"],
+      services: [],
+      networkDestinations: ["registry.npmjs.org"],
+      permittedSecretNames: [],
+      trust: "trusted_local",
+    },
+  };
+  const evidence = createValidationEvidence({
+    protocol: "clockgrove.factory/validation-v1",
+    artifactDigest: artifact.digest,
+    baseSha,
+    outputTreeSha: artifact.fileManifest!.resultTreeSha,
+    commands: [
+      { command: "pnpm --version", exitCode: 0, durationMs: 1 },
+      {
+        command:
+          "pnpm install --frozen-lockfile --ignore-scripts --registry=https://registry.npmjs.org/",
+        exitCode: 0,
+        durationMs: 1,
+      },
+      { command: "pnpm check", exitCode: 0, durationMs: 1 },
+    ],
+    passed: true,
+    startedAt: "2026-09-09T18:00:00.000Z",
+    completedAt: "2026-09-09T18:00:01.000Z",
+  });
+  return {
+    repository,
+    packet,
+    artifact,
+    evidence,
+    objectiveNumber: 166,
+    workItemNumber: 168,
+    requiresIsolation: false,
+  };
+}
+
 describe("exact semantic review materialization", () => {
+  it("rechecks the exact bounded bootstrap recipe without rerunning it", async () => {
+    const input = await greenfieldFixture();
+    await expect(
+      withVerifiedReviewCheckout(input, async (repository) => ({
+        root: JSON.parse(await readFile(join(repository, "package.json"), "utf8")).scripts.check,
+        leaf: JSON.parse(
+          await readFile(join(repository, "packages", "example", "package.json"), "utf8"),
+        ).scripts.check,
+      })),
+    ).resolves.toEqual({ root: "turbo run check", leaf: "tsc --noEmit" });
+  });
+
+  it("refuses a forged passing receipt when the materialized bootstrap recipe has hooks", async () => {
+    const input = await greenfieldFixture(true);
+    await expect(withVerifiedReviewCheckout(input, async () => "reviewed")).rejects.toThrow(
+      /lifecycle hooks/,
+    );
+  });
+
   it("binds the actual review command cwd and -C to a real independently validated tree", async () => {
     const input = await fixture();
     const validation = await validateArtifactClean(input);

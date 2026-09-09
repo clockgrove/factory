@@ -1,3 +1,4 @@
+import { access } from "node:fs/promises";
 import { join } from "node:path";
 import { executionAffectingReason } from "../approval.js";
 import {
@@ -15,6 +16,10 @@ import { materializePinnedCompilationTree } from "../execution/pinned-compilatio
 import { materializeLocalLfsAssets } from "../repository-profiles/git-lfs.js";
 import { runContainedProcess, sanitizedWorkerEnvironment } from "../runtime/process-group.js";
 import { verifyValidationEvidence } from "../validation/evidence.js";
+import {
+  assertBootstrapPackageValidation,
+  isBootstrapDependencySurface,
+} from "../validation/clean-run.js";
 import type { ReviewContext } from "./backend.js";
 import { ReviewCheckoutCleanupError } from "./backend.js";
 import { pinnedGitEnvironment } from "../runtime/pinned-git-environment.js";
@@ -41,8 +46,7 @@ export async function withVerifiedReviewCheckout<T>(
   )
     throw new Error("semantic review artifact and passed validation identities differ");
   assertArtifactScope(artifact, input.packet.allowedPaths);
-  if (artifact.changedPaths.some((path) => executionAffectingReason(path) !== null))
-    throw new Error("semantic review artifact touches a sensitive surface");
+  const sensitive = artifact.changedPaths.filter((path) => executionAffectingReason(path) !== null);
   assertNoSecretMaterial(
     { patch: artifact.patch, logs: artifact.logs },
     "semantic review artifact",
@@ -50,6 +54,10 @@ export async function withVerifiedReviewCheckout<T>(
   const worktree = await materializePinnedCompilationTree(input.repository, artifact.baseSha, {
     purpose: "worktree",
   });
+  const basePackageJsonPresent = await access(join(worktree.path, "package.json")).then(
+    () => true,
+    () => false,
+  );
   const deadline = Date.now() + 120_000;
   const git = async (args: string[]) => {
     const remaining = deadline - Date.now();
@@ -103,6 +111,16 @@ export async function withVerifiedReviewCheckout<T>(
     )
       throw new Error("semantic review materialized tree differs from validated output tree");
     await verifyMaterializedFiles(worktree.path, manifest);
+    const bootstrapValidation = basePackageJsonPresent
+      ? null
+      : await assertBootstrapPackageValidation(
+          worktree,
+          artifact,
+          input.packet,
+          input.packet.validationCommands,
+        );
+    if (sensitive.length > 0 && !isBootstrapDependencySurface(sensitive, bootstrapValidation))
+      throw new Error("semantic review artifact touches a sensitive surface");
     return await review(worktree.path);
   } catch (error) {
     reviewFailure = error;

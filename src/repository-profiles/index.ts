@@ -1,5 +1,8 @@
 import { posix } from "node:path";
-import { assertSafeValidationCommand } from "../validation/plan.js";
+import {
+  assertSafeValidationCommand,
+  bootstrapPackageValidationCommand,
+} from "../validation/plan.js";
 import { normalizePinnedLfsFacts, type PinnedLfsFacts } from "./git-lfs.js";
 
 export { readRepositoryFacts } from "./read.js";
@@ -220,13 +223,28 @@ export function isGroundedValidationCommand(
   command: string,
   facts: RepositoryFacts,
   scope: string[],
+  bootstrap?: { root: boolean; tools: string[] },
 ): boolean {
   const observed = discoverValidationCommands(facts);
   if (observed.includes(command)) return true;
   // A bare observed runner permits selecting a concrete existing test, or a
   // test the current Work Item is explicitly allowed to create. An observed
   // targeted recipe does not authorize replacing its targets or adding flags.
-  if (!observed.includes("node --test")) return false;
+  if (!observed.includes("node --test")) {
+    const packageScript = bootstrapPackageValidationCommand(command);
+    const basePaths = new Set(normalizeRepositoryFacts(facts).files.map((file) => file.path));
+    return Boolean(
+      packageScript &&
+        bootstrap?.root &&
+        bootstrap.tools.includes(packageScript.manager) &&
+        observed.length === 0 &&
+        !basePaths.has("package.json") &&
+        scope.some(
+          (path) =>
+            path === "package.json" || (path.endsWith("/") && "package.json".startsWith(path)),
+        ),
+    );
+  }
   const targets = nodeTestTargets(command);
   if (!targets?.length) return false;
   const observedPaths = new Set(normalizeRepositoryFacts(facts).files.map((file) => file.path));

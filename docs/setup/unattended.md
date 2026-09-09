@@ -30,6 +30,11 @@ the service separately even if a foreground plugin probe already works.
    Obtain the real installed path from the client; do not guess a cache version. Use the returned
    `unit` value, not a made-up service name. If no controller is installed, explicitly authorize
    its installation first; plugin installation alone does not create it.
+   Treat `healthy: false` as an execution gate even when systemd transiently reports `active: true`.
+   `controller-launcher-stale` means the managed unit no longer names an available exact Factory
+   launcher; the supported repair is an idempotent controller install followed by start. A start or
+   restart response is accepted only after the service remains healthy through its initial
+   observation window.
 2. In that Linux user's home, create a private directory such as
    `~/.config/clockgrove-factory` with mode `0700`, and a file `providers.env` with mode `0600`.
    Edit it privately. This is an operator-chosen file, not a path Factory searches automatically.

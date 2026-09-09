@@ -321,15 +321,24 @@ export async function buildDoctorReport(input: {
         checkout: input.checkout,
         requestId: `doctor:${input.repository.toLowerCase()}:${input.checkout}`,
       });
-      const state = details as { installed?: boolean; active?: boolean };
+      const state = details as {
+        installed?: boolean;
+        active?: boolean;
+        healthy?: boolean;
+        reasonCode?: string | null;
+        action?: string | null;
+      };
+      const healthy = state.healthy ?? state.active;
       return {
-        summary: state.active
+        summary: healthy
           ? "repository controller is active"
-          : state.installed
-            ? "repository controller is installed but inactive"
-            : "repository controller is not installed",
+          : state.reasonCode
+            ? `repository controller is unhealthy (${state.reasonCode}); ${state.action ?? "inspect the controller service"}`
+            : state.installed
+              ? "repository controller is installed but inactive"
+              : "repository controller is not installed",
         details,
-        status: state.active ? ("pass" as const) : ("warning" as const),
+        status: healthy ? ("pass" as const) : ("warning" as const),
       };
     }),
   ]);

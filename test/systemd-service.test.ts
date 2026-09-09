@@ -26,18 +26,20 @@ async function commandFixture() {
   };
   const input = { repository: "Owner/Repo", checkout: root };
   const run = vi.fn(async () => {});
+  const factoryBundle = await executable("factory", "factory.js");
   const create = (
     commandEnvironment: NonNullable<
       ConstructorParameters<typeof SystemdUserService>[0]["commandEnvironment"]
     >,
   ) =>
     new SystemdUserService({
-      factoryCommand: [process.execPath, "/opt/factory/dist/factory.js"],
+      factoryCommand: [process.execPath, factoryBundle],
       unitDirectory: join(root, "units"),
       run,
       commandEnvironment,
+      startupHealthDelayMs: 0,
     });
-  return { root, input, executable, run, create };
+  return { root, input, executable, factoryBundle, run, create };
 }
 function unitEnvironment(unit: string): Record<string, string> {
   return Object.fromEntries(
@@ -214,9 +216,10 @@ describe("systemd installed command discovery", () => {
     let enabled = false;
     let active = false;
     const service = new SystemdUserService({
-      factoryCommand: [process.execPath, "/opt/factory.js"],
+      factoryCommand: [process.execPath, f.factoryBundle],
       unitDirectory: join(f.root, "units"),
       commandEnvironment: environment,
+      startupHealthDelayMs: 0,
       run: async (args) => {
         if (args[0] === "enable") enabled = true;
         if (args[0] === "disable") enabled = false;
@@ -244,8 +247,10 @@ describe("systemd installed command discovery", () => {
 describe("systemd user service lifecycle", () => {
   it("is idempotent through install, start, stop, restart, status, and uninstall", async () => {
     const directory = await mkdtemp(join(tmpdir(), "factory-systemd-test-"));
+    const bundle = join(directory, "factory.js");
+    await writeFile(bundle, "// controller fixture\n");
     let enabled = false;
-    let active = false;
+    let active = true;
     const calls: string[][] = [];
     const run = async (args: readonly string[]) => {
       calls.push([...args]);
@@ -258,16 +263,17 @@ describe("systemd user service lifecycle", () => {
       if (action === "is-active" && !active) throw new Error("inactive");
     };
     const service = new SystemdUserService({
-      factoryCommand: ["/usr/bin/node", "/opt/factory/dist/factory.js"],
+      factoryCommand: [process.execPath, bundle],
       unitDirectory: directory,
       run,
+      startupHealthDelayMs: 0,
     });
     const input = { repository: "Owner/Repo", checkout: "/work/repo" };
 
     expect(await service.install(input)).toMatchObject({
       installed: true,
       enabled: true,
-      active: false,
+      active: true,
     });
     expect(await service.install(input)).toMatchObject({
       installed: true,
@@ -275,7 +281,7 @@ describe("systemd user service lifecycle", () => {
     });
     const unit = await readFile(service.unitPath(input), "utf8");
     expect(unit).toContain(
-      'ExecStart="/usr/bin/node" "/opt/factory/dist/factory.js" controller run "Owner/Repo" --repo "/work/repo"',
+      `ExecStart="${process.execPath}" "${bundle}" controller run "Owner/Repo" --repo "/work/repo"`,
     );
     expect(unit).toMatch(/^# Managed by Clockgrove Factory v2/);
     expect(await service.start(input)).toMatchObject({ active: true });
@@ -299,6 +305,88 @@ describe("systemd user service lifecycle", () => {
       active: false,
     });
     expect(calls.some((args) => args[0] === "daemon-reload")).toBe(true);
+  });
+
+  it("classifies a stale managed launcher and repairs it through idempotent install", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-systemd-stale-"));
+    const bundle = join(directory, "current", "factory.js");
+    await mkdir(dirname(bundle), { recursive: true });
+    await writeFile(bundle, "// current controller fixture\n");
+    let enabled = true;
+    let active = true;
+    const calls: string[][] = [];
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, bundle],
+      unitDirectory: directory,
+      startupHealthDelayMs: 0,
+      run: async (args) => {
+        calls.push([...args]);
+        if (args[0] === "enable") enabled = true;
+        if (args[0] === "start") active = true;
+        if (args[0] === "is-enabled" && !enabled) throw new Error("disabled");
+        if (args[0] === "is-active" && !active) throw new Error("inactive");
+      },
+    });
+    const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+    await writeFile(
+      service.unitPath(input),
+      '# Managed by Clockgrove Factory v2\n[Service]\nExecStart="/usr/bin/node" "/missing/old-cache/factory.js" controller run "Owner/Repo" --repo "/work/repo"\n',
+    );
+
+    expect(await service.status(input)).toMatchObject({
+      installed: true,
+      enabled: true,
+      active: true,
+      launcherCurrent: false,
+      healthy: false,
+      reasonCode: "controller-launcher-stale",
+      action: expect.stringContaining("idempotent controller install"),
+    });
+    await expect(service.start(input)).rejects.toThrow("controller-launcher-stale");
+    expect(calls.some((args) => args[0] === "start")).toBe(false);
+
+    active = false;
+    expect(await service.install(input)).toMatchObject({
+      launcherCurrent: true,
+      reasonCode: "controller-inactive",
+    });
+    expect(await readFile(service.unitPath(input), "utf8")).toContain(`"${bundle}"`);
+    expect(await service.start(input)).toMatchObject({ healthy: true, reasonCode: null });
+  });
+
+  it("rejects a successful systemctl request when the controller immediately exits", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "factory-systemd-start-health-"));
+    const bundle = join(directory, "factory.js");
+    await writeFile(bundle, "// controller fixture\n");
+    let enabled = false;
+    let active = false;
+    const service = new SystemdUserService({
+      factoryCommand: [process.execPath, bundle],
+      unitDirectory: directory,
+      startupHealthDelayMs: 10,
+      run: async (args) => {
+        if (args[0] === "enable") enabled = true;
+        if (args[0] === "start") {
+          active = true;
+          setTimeout(() => {
+            active = false;
+          }, 0);
+        }
+        if (args[0] === "is-enabled" && !enabled) throw new Error("disabled");
+        if (args[0] === "is-active" && !active) throw new Error("inactive");
+      },
+    });
+    const input = { repository: "Owner/Repo", checkout: "/work/repo" };
+    await service.install(input);
+
+    await expect(service.start(input)).rejects.toThrow(
+      /controller-start-unhealthy:.*controller-inactive/,
+    );
+    expect(await service.status(input)).toMatchObject({
+      launcherCurrent: true,
+      healthy: false,
+      reasonCode: "controller-inactive",
+    });
   });
 
   it("never overwrites an unmanaged unit with the deterministic Factory name", async () => {

@@ -232,6 +232,24 @@ describe("read-only checkout preflight", () => {
       repositoryFacts: async () => ({ ...(await healthyChecks().repositoryFacts!()), fork: true }),
     });
     expect(forked.overall).toBe("attention-required");
+    const staleController = await report({
+      ...healthyChecks(),
+      controller: {
+        status: async () => ({
+          installed: true,
+          enabled: true,
+          active: true,
+          launcherCurrent: false,
+          healthy: false,
+          reasonCode: "controller-launcher-stale",
+          action: "run the idempotent controller install operation to refresh the launcher",
+        }),
+      } as unknown as NonNullable<DoctorChecks["controller"]>,
+    });
+    expect(staleController.diagnostics.find((entry) => entry.area === "controller")).toMatchObject({
+      status: "warning",
+      summary: expect.stringContaining("controller-launcher-stale"),
+    });
     for (const resourceProbe of [
       async () => ({}),
       async () => ({ ...((await healthyChecks().resourceProbe!()) as object), effectiveCpu: 0.5 }),

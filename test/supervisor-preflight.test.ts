@@ -11,6 +11,8 @@ import { parseFactoryEvent } from "../src/protocol/events.js";
 import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 import {
   compiledGraphDigest,
+  parseLegacyGraphConstraints,
+  renderLegacyWorkItemCore,
   renderWorkPacket,
   type CompiledObjective,
   type ExistingGraphWorkItem,
@@ -155,6 +157,38 @@ describe("Supervisor GraphQL admission", () => {
     expect(pendingGraphQlGraphMutations(graph, [issue("a", 22, [])])).toBe(2);
     expect(pendingGraphQlGraphMutations(graph, [issue("a", 22, []), issue("b", 23, [])])).toBe(1);
     expect(pendingGraphQlGraphMutations(graph, [issue("a", 22, []), issue("b", 23, [22])])).toBe(0);
+  });
+
+  it("reserves only remaining body upgrades for a bound legacy graph", () => {
+    const graph = immutableGraph();
+    graph.workItems[0]!.id = "adopted-21";
+    graph.workItems[1]!.id = "adopted-22";
+    graph.workItems[1]!.dependsOn = ["adopted-21"];
+    const constraints = parseLegacyGraphConstraints({
+      objectiveTitle: graph.title,
+      workItems: graph.workItems.map((item, index) => ({
+        id: `issue-node-${21 + index}`,
+        number: 21 + index,
+        title: item.title,
+        body: renderLegacyWorkItemCore(item),
+        blockedByNumbers: index === 0 ? [] : [21],
+      })),
+    });
+
+    expect(pendingGraphQlGraphMutations(graph, [], constraints)).toBe(2);
+    expect(
+      pendingGraphQlGraphMutations(
+        graph,
+        [
+          {
+            compilerId: "adopted-21",
+            number: 21,
+            blockedByNumbers: [],
+          } as unknown as ExistingGraphWorkItem,
+        ],
+        constraints,
+      ),
+    ).toBe(1);
   });
 
   it("pauses before admission when the control-plane reserve is unavailable", () => {

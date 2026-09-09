@@ -2,9 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   addScopeSerializationEdges,
+  assertCompiledObjectiveAdoptsLegacyConstraints,
   compiledGraphDigest,
   GraphApplier,
+  legacyGraphConstraintsDigest,
   parseGraphItemMetadata,
+  parseLegacyGraphConstraints,
+  parseLegacyGraphConstraintsSnapshot,
+  renderLegacyWorkItemCore,
   renderWorkPacket,
   validateGraph,
   type CompiledObjective,
@@ -93,6 +98,12 @@ class FakeGraphWriter implements GraphWriter {
   async addBlockedBy(issueId: string, blockingIssueId: string): Promise<void> {
     this.calls.push(`addBlockedBy:${issueId}:${blockingIssueId}`);
     if (this.failing.addBlockedBy) throw this.failing.addBlockedBy;
+  }
+
+  async updateWorkItemIssue(args: { issueId: string; body: string }): Promise<void> {
+    this.calls.push(`updateWorkItemIssue:${args.issueId}`);
+    this.bodies.push(args.body);
+    if (this.failing.updateWorkItemIssue) throw this.failing.updateWorkItemIssue;
   }
 }
 
@@ -205,6 +216,152 @@ describe("addScopeSerializationEdges", () => {
   });
 });
 
+describe("legacy Work Item constraints", () => {
+  const body = (over: { goal?: string; scope?: string[] } = {}) =>
+    [
+      `## Goal\n\n${over.goal ?? "Preserve the existing outcome."}`,
+      "## Acceptance\n\n- Existing acceptance remains exact.",
+      `## Scope\n\n${(over.scope ?? ["src/a.ts"]).map((value) => `- ${value}`).join("\n")}`,
+      "## Preconditions\n\n- The parent Objective remains open.",
+      "## Out of scope\n\n- Do not widen authority.",
+      "## Conventions\n\n- Fail closed.",
+    ].join("\n\n");
+
+  it("binds ordered legacy core fields and native dependency topology", () => {
+    const constraints = parseLegacyGraphConstraints({
+      objectiveTitle: "Existing Objective",
+      workItems: [
+        { id: "I_8", number: 8, title: "First", body: body(), blockedByNumbers: [] },
+        {
+          id: "I_9",
+          number: 9,
+          title: "Second",
+          body: body({ scope: ["src/b.ts"] }),
+          blockedByNumbers: [8],
+        },
+      ],
+    });
+    const compiled: CompiledObjective = {
+      title: constraints.objectiveTitle,
+      workItems: constraints.workItems.map((item) => ({
+        id: item.compilerId,
+        title: item.title,
+        goal: item.goal,
+        acceptance: item.acceptance,
+        scope: item.scope,
+        preconditions: item.preconditions,
+        outOfScope: item.outOfScope,
+        conventions: item.conventions,
+        dependsOn: item.blockedByNumbers.map((number) => `adopted-${number}`),
+      })),
+    };
+
+    expect(() =>
+      assertCompiledObjectiveAdoptsLegacyConstraints(compiled, constraints),
+    ).not.toThrow();
+    expect(legacyGraphConstraintsDigest(constraints)).toMatch(/^[0-9a-f]{64}$/);
+    compiled.workItems[1]!.acceptance = ["Weakened acceptance"];
+    expect(() => assertCompiledObjectiveAdoptsLegacyConstraints(compiled, constraints)).toThrow(
+      /changed legacy Work Item #9/,
+    );
+  });
+
+  it("rejects partial Factory metadata, extra sections, and foreign blockers", () => {
+    const input = {
+      objectiveTitle: "Existing Objective",
+      workItems: [{ id: "I_8", number: 8, title: "First", body: body(), blockedByNumbers: [] }],
+    };
+    expect(() =>
+      parseLegacyGraphConstraints({
+        ...input,
+        workItems: [{ ...input.workItems[0]!, body: `${body()}\n\n## Surprise\n\nNo.` }],
+      }),
+    ).toThrow(/six ordered legacy sections/);
+    expect(() =>
+      parseLegacyGraphConstraints({
+        ...input,
+        workItems: [
+          {
+            ...input.workItems[0]!,
+            body: `${body()}\n\n<!-- clockgrove-factory:graph-item malformed -->`,
+          },
+        ],
+      }),
+    ).toThrow(/Factory metadata/);
+    expect(() =>
+      parseLegacyGraphConstraints({
+        ...input,
+        workItems: [{ ...input.workItems[0]!, blockedByNumbers: [99] }],
+      }),
+    ).toThrow(/outside its Work Items/);
+  });
+
+  it("reconstructs one constraint digest from mixed raw and upgraded bodies", () => {
+    const constraints = parseLegacyGraphConstraints({
+      objectiveTitle: "Existing Objective",
+      workItems: [
+        { id: "I_8", number: 8, title: "First", body: body(), blockedByNumbers: [] },
+        {
+          id: "I_9",
+          number: 9,
+          title: "Second",
+          body: body({ scope: ["src/b.ts"] }),
+          blockedByNumbers: [8],
+        },
+      ],
+    });
+    const compiled: CompiledObjective = {
+      title: constraints.objectiveTitle,
+      workItems: constraints.workItems.map((item) => ({
+        id: item.compilerId,
+        title: item.title,
+        goal: item.goal,
+        acceptance: item.acceptance,
+        scope: item.scope,
+        preconditions: item.preconditions,
+        outOfScope: item.outOfScope,
+        conventions: item.conventions,
+        dependsOn: item.blockedByNumbers.map((number) => `adopted-${number}`),
+        baseSha: "a".repeat(40),
+        validationCommands: ["npm test"],
+        requirements: {
+          os: [],
+          architecture: [],
+          tools: ["node"],
+          services: [],
+          networkDestinations: [],
+          permittedSecretNames: [],
+          trust: "trusted_local",
+        },
+        artifactContract: "clockgrove.factory/artifact-v1",
+      })),
+    };
+    const digest = compiledGraphDigest(compiled);
+    const mixed = parseLegacyGraphConstraintsSnapshot({
+      objectiveTitle: constraints.objectiveTitle,
+      workItems: constraints.workItems.map((item, index) => ({
+        id: item.issueNodeId,
+        number: item.issueNumber,
+        title: item.title,
+        body:
+          index === 0
+            ? renderWorkPacket(compiled.workItems[index]!, {
+                protocol: "clockgrove.factory/graph-v1",
+                id: item.compilerId,
+                graphDigest: digest,
+                graphSize: compiled.workItems.length,
+                index,
+                dependsOn: compiled.workItems[index]!.dependsOn,
+              })
+            : renderLegacyWorkItemCore(item),
+        blockedByNumbers: item.blockedByNumbers,
+      })),
+    });
+
+    expect(legacyGraphConstraintsDigest(mixed)).toBe(legacyGraphConstraintsDigest(constraints));
+  });
+});
+
 describe("renderWorkPacket", () => {
   it("renders only non-empty sections, in §8 order", () => {
     const body = renderWorkPacket(
@@ -300,6 +457,128 @@ describe("GraphApplier.apply", () => {
       existingWorkItems: [existingItem(graph, 0, 90), existingItem(graph, 1, 91, [90])],
     });
     expect(noWrites.calls).toEqual([]);
+  });
+
+  it("adopts existing Work Items by updating bodies without creating issues or edges", async () => {
+    const legacy = parseLegacyGraphConstraints({
+      objectiveTitle: "Existing Objective",
+      workItems: [
+        {
+          id: "I_8",
+          number: 8,
+          title: "First",
+          body: [
+            "## Goal\n\nFirst goal.",
+            "## Acceptance\n\n- First passes.",
+            "## Scope\n\n- src/a.ts",
+            "## Preconditions\n\n",
+            "## Out of scope\n\n- No extras.",
+            "## Conventions\n\n- Stay exact.",
+          ].join("\n\n"),
+          blockedByNumbers: [],
+        },
+        {
+          id: "I_9",
+          number: 9,
+          title: "Second",
+          body: [
+            "## Goal\n\nSecond goal.",
+            "## Acceptance\n\n- Second passes.",
+            "## Scope\n\n- src/b.ts",
+            "## Preconditions\n\n- First is complete.",
+            "## Out of scope\n\n- No extras.",
+            "## Conventions\n\n- Stay exact.",
+          ].join("\n\n"),
+          blockedByNumbers: [8],
+        },
+      ],
+    });
+    const graph: CompiledObjective = {
+      title: legacy.objectiveTitle,
+      workItems: legacy.workItems.map((item) => ({
+        id: item.compilerId,
+        title: item.title,
+        goal: item.goal,
+        acceptance: item.acceptance,
+        scope: item.scope,
+        preconditions: item.preconditions,
+        outOfScope: item.outOfScope,
+        conventions: item.conventions,
+        dependsOn: item.blockedByNumbers.map((number) => `adopted-${number}`),
+      })),
+    };
+    const writer = new FakeGraphWriter();
+    const applied = await new GraphApplier({
+      writer,
+      mutationScheduler: advancingMutationScheduler(),
+    }).apply(graph, { ...ctx, legacyGraphConstraints: legacy });
+
+    expect(writer.calls).toEqual(["updateWorkItemIssue:I_8", "updateWorkItemIssue:I_9"]);
+    expect(applied.get("adopted-8")).toEqual({ id: "I_8", number: 8 });
+    expect(parseGraphItemMetadata(writer.bodies[1]!)).toMatchObject({
+      id: "adopted-9",
+      dependsOn: ["adopted-8"],
+    });
+
+    const firstMetadata = parseGraphItemMetadata(writer.bodies[0]!);
+    const replayWriter = new FakeGraphWriter();
+    const replayed = await new GraphApplier({
+      writer: replayWriter,
+      mutationScheduler: advancingMutationScheduler(),
+    }).apply(graph, {
+      ...ctx,
+      legacyGraphConstraints: legacy,
+      existingWorkItems: [
+        {
+          id: "I_8",
+          number: 8,
+          title: "First",
+          body: writer.bodies[0]!,
+          compilerId: firstMetadata.id,
+          graphDigest: firstMetadata.graphDigest,
+          graphSize: firstMetadata.graphSize,
+          index: firstMetadata.index,
+          dependsOn: firstMetadata.dependsOn,
+          blockedByNumbers: [],
+        },
+      ],
+    });
+    expect(replayWriter.calls).toEqual(["updateWorkItemIssue:I_9"]);
+    expect(replayed.get("adopted-8")).toEqual({ id: "I_8", number: 8 });
+  });
+
+  it("rejects changed native topology before an adoption write", async () => {
+    const legacy = parseLegacyGraphConstraints({
+      objectiveTitle: "Existing Objective",
+      workItems: [
+        {
+          id: "I_8",
+          number: 8,
+          title: "First",
+          body: "## Goal\n\nFirst.\n\n## Acceptance\n\n- Pass.\n\n## Scope\n\n- src/a.ts\n\n## Preconditions\n\n\n## Out of scope\n\n\n## Conventions\n\n",
+          blockedByNumbers: [],
+        },
+      ],
+    });
+    const graph = objective([
+      workItem({
+        id: "adopted-8",
+        title: "First",
+        goal: "First.",
+        acceptance: ["Pass."],
+        scope: ["src/a.ts"],
+      }),
+    ]);
+    graph.title = legacy.objectiveTitle;
+    const writer = new FakeGraphWriter();
+    legacy.workItems[0]!.blockedByNumbers = [9];
+    await expect(
+      new GraphApplier({ writer, mutationScheduler: advancingMutationScheduler() }).apply(graph, {
+        ...ctx,
+        legacyGraphConstraints: legacy,
+      }),
+    ).rejects.toThrow();
+    expect(writer.calls).toEqual([]);
   });
 
   it("rejects a modified partial Work Item before making another write", async () => {

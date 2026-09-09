@@ -7,6 +7,7 @@ import { assessRecoveryAccounting, type RecoveryAccountingAssessment } from "./a
 import { recoveryClaimRef, recoveryEventDigest, recoverySourceEventsDigest } from "./identity.js";
 import {
   parseRecoveryPlan,
+  recoveryGraphIdentity,
   recoveryHistoryDigest,
   recoveryPlanDigest,
   recoveryPlanRef,
@@ -294,10 +295,10 @@ export function verifyRecoveryChain(input: {
       if (previous)
         require(plan.predecessor.runId === previous.plan.successorRunId &&
           plan.baseBranch === previous.plan.baseBranch &&
-          plan.graph.digest === previous.plan.graph.digest &&
-          plan.graph.projection.bindingDigest ===
-            previous.plan.graph.projection
-              .bindingDigest, "predecessor-chain-mismatch", "Successor recovery must continue the explicitly linked predecessor and unchanged Objective graph.");
+          recoveryGraphIdentity(plan.graph) ===
+            recoveryGraphIdentity(
+              previous.plan.graph,
+            ), "predecessor-chain-mismatch", "Successor recovery must continue the explicitly linked predecessor and unchanged Objective graph authority.");
       const request = requestFor(plan, digest, !current);
       if (!current) {
         const start = starts.get(plan.successorRunId);

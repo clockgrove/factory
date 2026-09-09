@@ -1,7 +1,6 @@
 import { hasCurrentWriterAuthority } from "../control/receipts.js";
 import { createHash } from "node:crypto";
 import { attemptRef, readAttemptReservationRef } from "../control/attempts.js";
-import { loadCompiledGraph, loadCompiledGraphProjection } from "../control/graphs.js";
 import { assertAuthenticatedGraphProjection } from "../control/graph-evidence.js";
 import { decodeEventTrailer, deduplicateFactoryEvents } from "../control/receipts.js";
 import { durableAttemptId } from "../execution/session.js";
@@ -13,7 +12,7 @@ import { parseWorkerPacket, workerPacketDigest } from "../protocol/worker-packet
 import { validationPlanFromPacket } from "../validation/plan.js";
 import type { RecoveryReadStore } from "./assessment.js";
 import { recoveryEventDigest, recoverySourceEventsDigest } from "./identity.js";
-import { parseRecoveryPlan, type RecoveryPlan } from "./plan.js";
+import { loadRecoveryPlanGraph, parseRecoveryPlan, type RecoveryPlan } from "./plan.js";
 
 export interface ForegroundCompletionInput {
   batch: LocalScopeBatch;
@@ -291,14 +290,9 @@ export async function deriveForegroundCompletion(
   );
 
   requireProof(plan.graph.sourceRunId === reserved.runId);
-  const graph = await loadCompiledGraph(input.store, plan.objective, reserved.runId);
-  requireProof(
-    graph &&
-      graph.ref === plan.graph.ref &&
-      graph.commitOid === plan.graph.commitOid &&
-      graph.blobOid === plan.graph.blobOid &&
-      graph.graphDigest === plan.graph.digest,
-  );
+  const resolvedGraph = await loadRecoveryPlanGraph(input.store, plan, history);
+  requireProof(resolvedGraph);
+  const { graph, projection } = resolvedGraph;
   const graphEvent = one(
     history.filter((event) => event.event === "GraphCompiled" && event.runId === reserved.runId),
   );
@@ -310,18 +304,7 @@ export async function deriveForegroundCompletion(
       graphEvent.graphSize === graph.graphSize &&
       graphEvent.sequence < reserved.sequence,
   );
-  const projection = await loadCompiledGraphProjection(
-    input.store,
-    plan.objective,
-    reserved.runId,
-    graph,
-  );
-  requireProof(
-    projection &&
-      projection.ref === plan.graph.projection.ref &&
-      projection.commitOid === plan.graph.projection.commitOid &&
-      projection.blobOid === plan.graph.projection.blobOid,
-  );
+  requireProof(projection.ref === plan.graph.projection.ref);
   assertAuthenticatedGraphProjection(history, plan.objective, reserved.runId, projection);
   requireProof(
     projection.bindings.some(

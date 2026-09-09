@@ -118,8 +118,13 @@ import {
   latestSupportedRun,
   hasCurrentWriterAuthority,
 } from "./control/receipts.js";
+import { assertAuthenticatedCompilationCheckpoint } from "./control/compilation-checkpoint.js";
 import { RunManager, type RunState } from "./control/runs.js";
-import { loadRecoveryRuntime, type RecoveryRuntime } from "./recovery/runtime.js";
+import {
+  loadRecoveryRuntime,
+  type RecoveryGraphBootstrapRuntime,
+  type RecoveryRuntime,
+} from "./recovery/runtime.js";
 import { nativeSourceRequiresIsolation } from "./execution/native-ancestry-trust.js";
 import {
   loadRecoverySourceArtifact,
@@ -197,6 +202,7 @@ import {
   type WorkerPacket,
 } from "./protocol/worker-packet.js";
 import { recoveryEventDigest } from "./recovery/identity.js";
+import { isRecoveryAdoptionGraph } from "./recovery/plan.js";
 import {
   BackendRegistry,
   NoExecutionBackendError,
@@ -216,14 +222,20 @@ import {
 } from "./execution/artifact-content-scope.js";
 import { Dispatcher, GithubOctokitWriter } from "./dispatch.js";
 import {
+  assertCompiledObjectiveAdoptsLegacyConstraints,
+  assertExistingGraphWorkItemsMatchCompiled,
   compiledGraphDigest,
   GraphApplier,
   GithubOctokitGraphWriter,
+  legacyGraphConstraintsDigest,
   parseGraphItemMetadata,
+  parseLegacyGraphConstraints,
+  parseLegacyGraphConstraintsSnapshot,
   parseWorkerPacketFromIssue,
   workerPacketFromCompiled,
   type CompiledObjective,
   type ExistingGraphWorkItem,
+  type LegacyGraphConstraints,
 } from "./graph.js";
 import { GitHubReader, type GitHubOptions } from "./github.js";
 import { CodexCliManagementBackend } from "./management/codex-cli.js";
@@ -673,8 +685,14 @@ export function graphQlAdmissionReserve(
 export function pendingGraphQlGraphMutations(
   objective: CompiledObjective,
   existing: ExistingGraphWorkItem[],
+  legacyGraphConstraints?: LegacyGraphConstraints,
 ): number {
   const existingById = new Map(existing.map((item) => [item.compilerId, item]));
+  if (legacyGraphConstraints) {
+    assertCompiledObjectiveAdoptsLegacyConstraints(objective, legacyGraphConstraints);
+    return legacyGraphConstraints.workItems.filter((item) => !existingById.has(item.compilerId))
+      .length;
+  }
   const missingIssues = objective.workItems.filter((item) => !existingById.has(item.id)).length;
   const missingDependencies = objective.workItems.reduce((count, item) => {
     const observedItem = existingById.get(item.id);
@@ -993,6 +1011,7 @@ function inspectCompiledGraph(snapshot: Snapshot): {
   expectedBlobSha?: string;
   completeObjective?: CompiledObjective;
   existing: ExistingGraphWorkItem[];
+  legacyGraphConstraints?: LegacyGraphConstraints;
 } {
   const receipt = deduplicateFactoryEvents(snapshot.factoryEvents ?? [])
     .filter((event) => event.kind === "graph" && event.event === "GraphCompiled")
@@ -1013,18 +1032,44 @@ function inspectCompiledGraph(snapshot: Snapshot): {
     };
   }
   if (!receipt || receipt.kind !== "graph") {
-    throw new Error("Objective has Work Items but no authenticated v2 graph receipt");
+    const legacyGraphConstraints = parseLegacyGraphConstraints({
+      objectiveTitle: snapshot.title,
+      workItems: snapshot.workItems.map((item) => ({
+        id: item.id,
+        number: item.number,
+        title: item.title,
+        body: item.body ?? "",
+        blockedByNumbers: item.blockedBy.map((dependency) => dependency.number),
+      })),
+    });
+    return { hasReceipt: false, existing: [], legacyGraphConstraints };
   }
-  const parsed = snapshot.workItems.map((item) => {
-    let metadata;
+  const legacy = [] as Snapshot["workItems"];
+  const parsed = snapshot.workItems.flatMap((item) => {
     try {
-      metadata = parseGraphItemMetadata(item.body ?? "");
-    } catch (error) {
-      throw new Error(
-        `Work Item #${item.number} is not part of a recoverable v2 compiled graph: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      return [{ item, metadata: parseGraphItemMetadata(item.body ?? "") }];
+    } catch (metadataError) {
+      try {
+        parseLegacyGraphConstraints({
+          objectiveTitle: snapshot.title,
+          workItems: [
+            {
+              id: item.id,
+              number: item.number,
+              title: item.title,
+              body: item.body ?? "",
+              blockedByNumbers: [],
+            },
+          ],
+        });
+        legacy.push(item);
+        return [];
+      } catch (legacyError) {
+        throw new Error(
+          `Work Item #${item.number} is neither authenticated v2 nor bounded legacy input: ${metadataError instanceof Error ? metadataError.message : String(metadataError)}; ${legacyError instanceof Error ? legacyError.message : String(legacyError)}`,
+        );
+      }
     }
-    return { item, metadata };
   });
   parsed.sort((a, b) => a.metadata.index - b.metadata.index);
   const digests = new Set(parsed.map(({ metadata }) => metadata.graphDigest));
@@ -1032,19 +1077,18 @@ function inspectCompiledGraph(snapshot: Snapshot): {
   const ids = new Set(parsed.map(({ metadata }) => metadata.id));
   const indexes = new Set(parsed.map(({ metadata }) => metadata.index));
   if (
-    digests.size !== 1 ||
-    sizes.size !== 1 ||
+    (parsed.length > 0 && (digests.size !== 1 || sizes.size !== 1)) ||
     ids.size !== parsed.length ||
     indexes.size !== parsed.length
   ) {
     throw new Error("Objective contains mixed or duplicate compiled-graph receipts");
   }
-  const expectedDigest = parsed[0]!.metadata.graphDigest;
-  const expectedSize = parsed[0]!.metadata.graphSize;
+  const expectedDigest = parsed[0]?.metadata.graphDigest ?? receipt.graphDigest;
+  const expectedSize = parsed[0]?.metadata.graphSize ?? receipt.graphSize;
   if (expectedDigest !== receipt.graphDigest || expectedSize !== receipt.graphSize) {
     throw new Error("Work Item graph metadata does not match the authenticated Objective receipt");
   }
-  if (parsed.length > expectedSize) {
+  if (snapshot.workItems.length > expectedSize) {
     throw new Error("Objective contains more Work Items than its compiled graph declares");
   }
   if (parsed.some(({ metadata }) => metadata.index >= expectedSize)) {
@@ -1062,6 +1106,23 @@ function inspectCompiledGraph(snapshot: Snapshot): {
     body: item.body ?? "",
     blockedByNumbers: item.blockedBy.map((dependency) => dependency.number),
   }));
+  let legacyGraphConstraints: LegacyGraphConstraints | undefined;
+  if (
+    legacy.length > 0 ||
+    (parsed.length === snapshot.workItems.length &&
+      parsed.every(({ item, metadata }) => metadata.id === `adopted-${item.number}`))
+  ) {
+    legacyGraphConstraints = parseLegacyGraphConstraintsSnapshot({
+      objectiveTitle: snapshot.title,
+      workItems: snapshot.workItems.map((item) => ({
+        id: item.id,
+        number: item.number,
+        title: item.title,
+        body: item.body ?? "",
+        blockedByNumbers: item.blockedBy.map((dependency) => dependency.number),
+      })),
+    });
+  }
   if (parsed.length !== expectedSize) {
     return {
       hasReceipt: true,
@@ -1071,6 +1132,7 @@ function inspectCompiledGraph(snapshot: Snapshot): {
       expectedBlobSha: receipt.graphBlobSha,
       receiptRunId: receipt.runId,
       existing,
+      ...(legacyGraphConstraints ? { legacyGraphConstraints } : {}),
     };
   }
   const completeObjective: CompiledObjective = {
@@ -1104,6 +1166,7 @@ function inspectCompiledGraph(snapshot: Snapshot): {
     receiptRunId: receipt.runId,
     ...(reconstructable ? { completeObjective } : {}),
     existing,
+    ...(legacyGraphConstraints ? { legacyGraphConstraints } : {}),
   };
 }
 
@@ -1216,6 +1279,7 @@ export class FactorySupervisor {
   #durablePackets = new Map<number, WorkerPacket>();
   #compiledGraph: CompiledObjective | null = null;
   #recoveryRuntime: RecoveryRuntime | null = null;
+  #recoveryGraphBootstrap: RecoveryGraphBootstrapRuntime | null = null;
   #compiledProjection: CompiledGraphProjectionRecord | null = null;
   #localScopeHost: ReturnType<typeof discoverLocalScopeHost> | undefined;
 
@@ -1339,24 +1403,39 @@ export class FactorySupervisor {
   }
 
   async #externalAdmission<T>(operation: () => Promise<T>): Promise<T> {
-    if (this.#recoveryRuntime) {
-      await this.#resumeObservedRun(
-        await this.#reader.readObjective(this.#run.objective),
-        new RunManager(this.#store),
-      );
+    if (this.#recoveryRuntime || this.#recoveryGraphBootstrap) {
+      const fresh = await this.#reader.readObjective(this.#run.objective);
+      if (this.#recoveryGraphBootstrap) {
+        const observed = await loadRecoveryRuntime({
+          objective: fresh.number,
+          runId: this.#run.runId,
+          store: this.#recoveryStore,
+          readSnapshot: async () => ({ snapshot: fresh, historyComplete: true }),
+        });
+        if (
+          observed.status === "blocked" ||
+          observed.planRecord.digest !== this.#recoveryGraphBootstrap.planRecord.digest
+        )
+          throw new Error("successor graph-bootstrap authority changed");
+        if (observed.status === "verified") {
+          this.#recoveryRuntime = observed;
+          this.#recoveryGraphBootstrap = null;
+        } else this.#recoveryGraphBootstrap = observed;
+      } else await this.#resumeObservedRun(fresh, new RunManager(this.#store));
+      const recovery = this.#recoveryRuntime ?? this.#recoveryGraphBootstrap!;
       const resources = await verifyRecoveryResources({
-        planRecord: this.#recoveryRuntime.planRecord,
-        events: this.#recoveryRuntime.events,
+        planRecord: recovery.planRecord,
+        events: recovery.events,
         store: this.#store,
       });
       if (resources.status !== "verified")
         throw new Error(`successor resources unavailable: ${resources.blockers.join(", ")}`);
-      if (this.#recoveryRuntime.currentUnknownModelUsageCount > 0)
+      if (recovery.currentUnknownModelUsageCount > 0)
         throw new Error("successor model usage is unknown; refusing another invocation");
       this.#budgetEvents = mergeAccountingSnapshot(
         this.#budgetEvents,
-        [...this.#recoveryRuntime.events],
-        new Set(this.#recoveryRuntime.accountingRunIds),
+        [...recovery.events],
+        new Set(recovery.accountingRunIds),
       );
     }
     return runWithExternalAdmissionBoundary(
@@ -1424,7 +1503,9 @@ export class FactorySupervisor {
   }
 
   #accountingEvents(events: FactoryEvent[], currentRunId = this.#run.runId): FactoryEvent[] {
-    const runs = new Set(this.#recoveryRuntime?.accountingRunIds ?? [currentRunId]);
+    const runs = new Set(
+      (this.#recoveryRuntime ?? this.#recoveryGraphBootstrap)?.accountingRunIds ?? [currentRunId],
+    );
     return events.filter((event) => runs.has(event.runId));
   }
 
@@ -1438,6 +1519,7 @@ export class FactorySupervisor {
     if (recovery && (active?.event !== "FactoryRunStarted" || !active.recoveryRequestId)) {
       if (
         !this.#recoveryRuntime &&
+        !this.#recoveryGraphBootstrap &&
         !active &&
         snapshot.closed &&
         snapshot.factoryEvents?.some(
@@ -1472,9 +1554,10 @@ export class FactorySupervisor {
       throw new Error("recovery request does not name the current active successor");
     }
     if (
-      this.#recoveryRuntime &&
+      (this.#recoveryRuntime || this.#recoveryGraphBootstrap) &&
       (active?.event !== "FactoryRunStarted" ||
-        active.runId !== this.#recoveryRuntime.controllingRun.runId)
+        active.runId !==
+          (this.#recoveryRuntime ?? this.#recoveryGraphBootstrap)!.controllingRun.runId)
     )
       throw new Error("successor is no longer the current non-terminal run");
     if (active?.event !== "FactoryRunStarted" || !active.recoveryRequestId)
@@ -1500,7 +1583,8 @@ export class FactorySupervisor {
     } catch (error) {
       if (error instanceof PlatformUnavailableError) throw error;
       // Ordinary execution/admission never uses this startup-only repair path.
-      if (reconciliationMode === "none" || this.#recoveryRuntime) throw error;
+      if (reconciliationMode === "none" || this.#recoveryRuntime || this.#recoveryGraphBootstrap)
+        throw error;
       const inspection = await manager.inspectRecoveryReconciliation({
         ...input,
         planDigest: recovery.planDigest,
@@ -1509,9 +1593,16 @@ export class FactorySupervisor {
       if (reconciliationMode === "inspect") return inspection.run;
       recovered = await this.#reconcileRecoverySourceMerges(snapshot.number, manager);
     }
-    if (this.#recoveryRuntime && this.#recoveryRuntime.controllingRun.runId !== recovered.run.runId)
+    const priorRuntime = this.#recoveryRuntime ?? this.#recoveryGraphBootstrap;
+    if (priorRuntime && priorRuntime.controllingRun.runId !== recovered.run.runId)
       throw new Error("successor runtime changed during execution");
-    this.#recoveryRuntime = recovered.runtime;
+    if (recovered.runtime.status === "verified") {
+      this.#recoveryRuntime = recovered.runtime;
+      this.#recoveryGraphBootstrap = null;
+    } else {
+      this.#recoveryRuntime = null;
+      this.#recoveryGraphBootstrap = recovered.runtime;
+    }
     return recovered.run;
   }
 
@@ -3863,31 +3954,83 @@ export class FactorySupervisor {
           `stacked delivery unavailable: ${this.#deliverySelection.reason}`,
         );
       }
+      if (
+        (this.#recoveryRuntime || this.#recoveryGraphBootstrap) &&
+        this.#policy.compilerEvaluation?.mode === "report-only"
+      )
+        throw new Error(
+          "report-only evaluation cannot resume execution authority; inspect historical compiler-eval evidence instead",
+        );
       if (this.#recoveryRuntime) {
-        if (this.#policy.compilerEvaluation?.mode === "report-only")
-          throw new Error(
-            "report-only evaluation cannot resume execution authority; inspect historical compiler-eval evidence instead",
-          );
         await this.#prepareRecoveryGraph(snapshot);
       } else {
         const observedGraph = inspectCompiledGraph(snapshot);
+        const legacyGraphConstraints = observedGraph.legacyGraphConstraints;
+        const legacyConstraintDigest = legacyGraphConstraints
+          ? legacyGraphConstraintsDigest(legacyGraphConstraints)
+          : null;
+        const legacyObjectiveInputDigest = legacyGraphConstraints
+          ? compilerEvalDigest({
+              number: snapshot.number,
+              title: snapshot.title,
+              body: snapshot.body,
+            })
+          : null;
+        if (this.#recoveryGraphBootstrap) {
+          const authorized = this.#recoveryGraphBootstrap.planRecord.plan.graph;
+          if (
+            !isRecoveryAdoptionGraph(authorized) ||
+            authorized.sourceRunId !== this.#run.runId ||
+            legacyObjectiveInputDigest !== authorized.objectiveInputDigest ||
+            legacyConstraintDigest !== authorized.constraintDigest
+          )
+            throw new Error("successor legacy graph constraints changed after acknowledgement");
+        }
         const graphManager = new CompiledGraphManager(this.#store, this.#leases);
         let durableGraph = await graphManager.load(snapshot.number, this.#run.runId);
-        const sourceGraph =
-          durableGraph ??
-          (observedGraph.receiptRunId && observedGraph.receiptRunId !== this.#run.runId
-            ? await graphManager.load(snapshot.number, observedGraph.receiptRunId)
-            : null);
-        if (sourceGraph && observedGraph.expectedDigest) {
+        const receiptGraph = observedGraph.receiptRunId
+          ? observedGraph.receiptRunId === this.#run.runId
+            ? durableGraph
+            : await graphManager.load(snapshot.number, observedGraph.receiptRunId)
+          : null;
+        if (receiptGraph && observedGraph.expectedDigest) {
           if (
-            sourceGraph.graphDigest !== observedGraph.expectedDigest ||
-            sourceGraph.graphSize !== observedGraph.expectedSize ||
-            sourceGraph.ref !== observedGraph.expectedRef ||
-            sourceGraph.blobOid !== observedGraph.expectedBlobSha
+            receiptGraph.graphDigest !== observedGraph.expectedDigest ||
+            receiptGraph.graphSize !== observedGraph.expectedSize ||
+            receiptGraph.ref !== observedGraph.expectedRef ||
+            receiptGraph.blobOid !== observedGraph.expectedBlobSha
           ) {
             throw new Error("durable compiled graph does not match its Objective receipt");
           }
         }
+        if (observedGraph.expectedDigest && !receiptGraph)
+          throw new Error("authenticated compiled graph record is unavailable");
+        if (durableGraph && observedGraph.receiptRunId !== this.#run.runId) {
+          const commit = await this.#store.readCommit(durableGraph.commitOid);
+          if (receiptGraph) {
+            if (
+              durableGraph.graphDigest !== receiptGraph.graphDigest ||
+              durableGraph.graphSize !== receiptGraph.graphSize ||
+              durableGraph.compilation !== undefined ||
+              commit.oid !== durableGraph.commitOid ||
+              commit.parentOids.length !== 1 ||
+              commit.parentOids[0] !== base.oid
+            )
+              throw new Error("current run graph differs from its authenticated source graph");
+          } else {
+            assertAuthenticatedCompilationCheckpoint({
+              graph: durableGraph,
+              graphCommit: commit,
+              events: snapshotEvents(snapshot),
+              objective: snapshot.number,
+              runId: this.#run.runId,
+              expectedBaseSha: base.oid,
+              expectedInvocationId: `compile-${base.oid}`,
+              expectedPolicyDigest: policyDigest(this.#policy),
+            });
+          }
+        }
+        const sourceGraph = durableGraph ?? receiptGraph;
         if (this.#policy.compilerEvaluation && sourceGraph && !durableGraph)
           throw new Error(
             "draft evaluation cannot replace an activated historical graph; use compiler-eval to inspect its evidence",
@@ -3962,6 +4105,7 @@ export class FactorySupervisor {
                     title: snapshot.title,
                     body: snapshot.body,
                   },
+                  ...(legacyGraphConstraints ? { legacyGraphConstraints } : {}),
                   defaultBranch: snapshot.defaultBranch,
                   baseSha: base.oid,
                   repositoryFiles: tree.files,
@@ -4015,6 +4159,14 @@ export class FactorySupervisor {
                   )
                     throw new Error(
                       "Objective changed during draft evaluation; new inputs require a new run",
+                    );
+                  const currentLegacy = inspectCompiledGraph(fresh).legacyGraphConstraints;
+                  if (
+                    legacyConstraintDigest !==
+                    (currentLegacy ? legacyGraphConstraintsDigest(currentLegacy) : null)
+                  )
+                    throw new Error(
+                      "legacy Work Items changed during draft evaluation; new inputs require a new recovery plan",
                     );
                 };
                 const outcome = await this.#lease.use((lease) =>
@@ -4181,6 +4333,8 @@ export class FactorySupervisor {
             }
           },
           preflight: async (objective) => {
+            if (legacyGraphConstraints)
+              assertCompiledObjectiveAdoptsLegacyConstraints(objective, legacyGraphConstraints);
             assertGraphWithinRunPolicy(objective, this.#policy);
             if (this.#deliverySelection.selected === "native-stacks") {
               const deliveryItems = objective.workItems.map((item) => {
@@ -4209,6 +4363,24 @@ export class FactorySupervisor {
           },
         });
         const compiled = durableGraph.objective;
+        const refreshLegacySnapshot = async (reason: string) => {
+          if (!legacyGraphConstraints) return;
+          const fresh = await this.#reader.readObjective(snapshot.number);
+          const current = inspectCompiledGraph(fresh);
+          if (
+            legacyObjectiveInputDigest !==
+              compilerEvalDigest({ number: fresh.number, title: fresh.title, body: fresh.body }) ||
+            legacyConstraintDigest !==
+              (current.legacyGraphConstraints
+                ? legacyGraphConstraintsDigest(current.legacyGraphConstraints)
+                : null)
+          )
+            throw new Error(`legacy Work Item constraints changed ${reason}`);
+          assertExistingGraphWorkItemsMatchCompiled(compiled, current.existing);
+          snapshot = fresh;
+          this.#sequences.observe(snapshotEvents(snapshot));
+        };
+        await refreshLegacySnapshot("during Objective compilation");
         let durableProjection = await graphManager.loadProjection(
           snapshot.number,
           this.#run.runId,
@@ -4250,12 +4422,18 @@ export class FactorySupervisor {
           assertSnapshotMatchesCompiledGraph(compiled, snapshot, staged.bindings);
         }
         let existingGraphItems = observedGraph.existing;
+        const pendingGraphMutations = pendingGraphQlGraphMutations(
+          compiled,
+          existingGraphItems,
+          legacyGraphConstraints,
+        );
         assertGraphQlAdmissionHeadroom(
           snapshot.graphQlRateLimit,
           this.#policy,
           Math.min(this.#policy.maxParallel, compiled.workItems.length),
           this.#notify,
-          pendingGraphQlGraphMutations(compiled, existingGraphItems),
+          pendingGraphMutations *
+            (legacyGraphConstraints ? (snapshot.graphQlRateLimit?.cost ?? 1) + 1 : 1),
         );
         if (observedGraph.receiptRunId !== this.#run.runId) {
           if (this.#policy.compilerEvaluation) {
@@ -4292,6 +4470,7 @@ export class FactorySupervisor {
           pacer: this.#pacer,
           concurrency: this.#concurrency,
           mutationScheduler: this.#mutations,
+          beforeMutation: () => refreshLegacySnapshot("before a graph adoption write"),
           captureMutationFence: () => this.#captureMutationFence(),
           mutationScope: `objective:${this.#options.objective}:graph`,
           onMutationOperation: this.#store.recordMutationOperation,
@@ -4311,6 +4490,7 @@ export class FactorySupervisor {
               objectiveIssueId: snapshot.id,
               ...(snapshot.workItemLabelId ? { workItemLabelId: snapshot.workItemLabelId } : {}),
               existingWorkItems: existingGraphItems,
+              ...(legacyGraphConstraints ? { legacyGraphConstraints } : {}),
             });
             break;
           } catch (error) {
@@ -4335,6 +4515,13 @@ export class FactorySupervisor {
             ) {
               throw error;
             }
+            if (
+              legacyConstraintDigest !==
+              (recovered.legacyGraphConstraints
+                ? legacyGraphConstraintsDigest(recovered.legacyGraphConstraints)
+                : null)
+            )
+              throw new Error("legacy Work Item constraints changed during graph adoption");
             const after = JSON.stringify(
               recovered.existing.map((item) => [
                 item.compilerId,
@@ -4349,6 +4536,7 @@ export class FactorySupervisor {
         if (!appliedWorkItems) {
           throw new Error("compiled graph application returned no GitHub issue projection");
         }
+        await refreshLegacySnapshot("before graph projection");
         const projectionBindings = compiled.workItems.map((item) => {
           const issue = appliedWorkItems!.get(item.id);
           if (!issue) {
@@ -4426,6 +4614,23 @@ export class FactorySupervisor {
         );
         this.#compiledGraph = compiled;
         this.#compiledProjection = durableProjection;
+        if (this.#recoveryGraphBootstrap) {
+          snapshot = await this.#reader.readObjective(snapshot.number);
+          this.#sequences.observe(snapshotEvents(snapshot));
+          const completed = await loadRecoveryRuntime({
+            objective: snapshot.number,
+            runId: this.#run.runId,
+            store: this.#recoveryStore,
+            readSnapshot: async () => ({ snapshot, historyComplete: true }),
+          });
+          if (
+            completed.status !== "verified" ||
+            completed.planRecord.digest !== this.#recoveryGraphBootstrap.planRecord.digest
+          )
+            throw new Error("successor graph adoption did not produce a verified runtime");
+          this.#recoveryRuntime = completed;
+          this.#recoveryGraphBootstrap = null;
+        }
       }
       for (;;) {
         // Capture before any snapshot or admission work so a peer-capacity change during this
@@ -11934,6 +12139,7 @@ export class FactorySupervisor {
       store: this.#store,
       stacks: this.#stacks,
       baseBranch: this.#baseBranch,
+      events: runtime.events,
       assertCurrent: async () => {
         await this.#externalAdmission(async () => {});
         await this.#lease.assertGeneration("publication");

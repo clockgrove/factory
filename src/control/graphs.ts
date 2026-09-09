@@ -224,7 +224,7 @@ export async function loadCompiledGraphProjection(
   };
 }
 
-async function loadStagedCompiledGraphProjection(
+export async function loadStagedCompiledGraphProjection(
   store: Pick<CompiledGraphReadStore, "readBlob">,
   objective: number,
   runId: string,

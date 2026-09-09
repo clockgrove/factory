@@ -269,6 +269,29 @@ title, body, metadata, and blocker edges; a removed, replaced, or swapped sub-is
 rather than inheriting another Work Item's attempt history. Any divergent ref, receipt, projection,
 or per-item envelope fails closed.
 
+A narrow recovery bootstrap covers an Objective whose Work Items were created before any
+authenticated graph receipt. Factory accepts only the historical six-section Work Item shape and
+binds the Objective compilation input plus the complete issue node IDs, numbers, titles, core
+sections, order, and native blocker topology into the immutable recovery plan. That plan must
+describe an effect-free graphless predecessor and every item as unstarted execution; existing
+attempts, capacity, validation, publication, graph, or non-management budget effects refuse
+adoption. After explicit recovery authorization and any required unknown-usage acknowledgement, the
+compiler receives those fields as authenticated constraints and may add only execution metadata.
+Factory updates the same issue bodies in place; it does not create Work Items or dependency edges.
+Mixed raw and upgraded bodies reconstruct the same constraint digest after a lost response. A
+successor compiler dispatch marker without exact usage closure remains unknown and prevents another
+compiler or worker session, just like every other unresolved model invocation. Once `GraphCompiled`
+and `GraphProjected` agree, ordinary immutable graph recovery applies and no later retry recompiles
+it.
+
+The deterministic current-run graph ref is not a compiler receipt. Before `GraphCompiled` exists,
+restart accepts that ref only when its commit is based on the run's exact base, contains the atomic
+compiler invocation/result counters for that graph digest, and the Objective journal contains one
+matching dispatch marker followed by its exact actual-usage closure under the run policy. A graph
+copied from an authenticated historical receipt must contain no new compilation claim. Similarly, a
+`GraphProjected` receipt may repair only its exact staged projection blob; missing or divergent
+staged content blocks rather than manufacturing a projection.
+
 The graph is immutable for the lifetime of its run. Factory may retry a Work Item with bounded prior
 failure evidence, but it does not silently replace issue scope, dependencies, or budget through a
 second compilation. An inadequate durable graph escalates; an explicitly authorized new run is the
@@ -373,6 +396,9 @@ Crash recovery is reconstruction:
 - validation reruns against the exact head SHA;
 - integration always re-reads current merge and issue state.
 - an interrupted graph application repairs only missing issues and dependency edges.
+- a specifically authorized graphless adoption upgrades only the same bound Work Item bodies; an
+  interrupted compiler invocation or ambiguous agent dispatch blocks replacement rather than being
+  treated as unused capacity.
 
 ## Provider-neutral Work Item state
 

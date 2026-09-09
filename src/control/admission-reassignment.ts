@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
+import { assertCompiledObjectiveAdoptsLegacyConstraints } from "../graph.js";
 import type { RecoveryReadStore } from "../recovery/assessment.js";
+import { isRecoveryAdoptionGraph, recoveryPlanBindingDigest } from "../recovery/plan.js";
 import type { RecoveryRuntime } from "../recovery/runtime.js";
 import { verifyRecoveryResources } from "../recovery/resources.js";
 import {
@@ -125,11 +127,28 @@ async function reconcile(args: {
     plan.items.filter(
       (item) => item.workItem === args.workItem && item.issueNodeId === args.workItemNodeId,
     ).length !== 1 ||
-    runtime.graph.commitOid !== plan.graph.commitOid ||
-    runtime.graph.graphDigest !== plan.graph.digest ||
-    runtime.projection.commitOid !== plan.graph.projection.commitOid
+    runtime.graph.ref !== plan.graph.ref ||
+    runtime.projection.ref !== plan.graph.projection.ref ||
+    recoveryPlanBindingDigest(
+      runtime.projection.bindings.map((binding) => ({
+        compilerId: binding.compilerId,
+        issueNodeId: binding.issueNodeId,
+        workItem: binding.issueNumber,
+      })),
+    ) !== plan.graph.projection.bindingDigest
   )
     throw Error("issue reassignment graph projection changed");
+  if (isRecoveryAdoptionGraph(plan.graph)) {
+    assertCompiledObjectiveAdoptsLegacyConstraints(runtime.graph.objective, plan.graph.constraints);
+  } else if (
+    runtime.graph.commitOid !== plan.graph.commitOid ||
+    runtime.graph.blobOid !== plan.graph.blobOid ||
+    runtime.graph.graphDigest !== plan.graph.digest ||
+    runtime.projection.commitOid !== plan.graph.projection.commitOid ||
+    runtime.projection.blobOid !== plan.graph.projection.blobOid
+  ) {
+    throw Error("issue reassignment persisted graph identity changed");
+  }
   const accounting = runtime.historicalAccounting;
   if (
     accounting.unknownModelUsageCount ||
@@ -145,7 +164,8 @@ async function reconcile(args: {
     accounting.diagnosticsTruncated ||
     accounting.attemptCountsTruncated ||
     runtime.currentUnknownModelUsageCount ||
-    runtime.currentUnknownModelUsage.length
+    runtime.currentUnknownModelUsage.length ||
+    runtime.currentUnknownManagementInvocations.length
   )
     throw Error("issue reassignment accounting remains unknown or incomplete");
   await args.assertCurrent();
@@ -162,9 +182,9 @@ async function reconcile(args: {
       !plan.history.some(
         (origin) => origin.runId === entry.runId && origin.policyDigest === entry.policyDigest,
       ) ||
-      entry.graphCommitOid !== plan.graph.commitOid ||
-      entry.graphDigest !== plan.graph.digest ||
-      entry.projectionCommitOid !== plan.graph.projection.commitOid
+      entry.graphCommitOid !== runtime.graph.commitOid ||
+      entry.graphDigest !== runtime.graph.graphDigest ||
+      entry.projectionCommitOid !== runtime.projection.commitOid
     )
       throw Error("issue reassignment cannot borrow an unrelated source graph or run");
   }

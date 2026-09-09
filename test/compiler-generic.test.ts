@@ -15,7 +15,12 @@ import {
   type RepositoryFacts,
 } from "../src/repository-profiles/index.js";
 import { CodexCliManagementBackend } from "../src/management/codex-cli.js";
-import { validateGraph, workerPacketFromCompiled } from "../src/graph.js";
+import {
+  parseLegacyGraphConstraints,
+  renderLegacyWorkItemCore,
+  validateGraph,
+  workerPacketFromCompiled,
+} from "../src/graph.js";
 import { validationPlanFromPacket } from "../src/validation/plan.js";
 import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 
@@ -84,6 +89,80 @@ const compile = (workItems: CompilerWorkItemInput[]) =>
   compileObjective({ title: "Generic", baseSha: sha, repositoryFacts: facts, workItems });
 
 describe("generic repository command grounding", () => {
+  it("constrains compilation to enrich the exact existing Work Item core", async () => {
+    const root = await repository({
+      "package.json": JSON.stringify({ scripts: { test: "node --test" } }),
+    });
+    const constrained = item("adopted-8", {
+      title: "Existing Work Item",
+      goal: "Preserve the reviewed behavior.",
+      acceptance: ["The existing behavior passes."],
+      scope: ["package.json"],
+    });
+    const legacyGraphConstraints = parseLegacyGraphConstraints({
+      objectiveTitle: "Generic",
+      workItems: [
+        {
+          id: "I_8",
+          number: 8,
+          title: constrained.title,
+          body: renderLegacyWorkItemCore(constrained),
+          blockedByNumbers: [],
+        },
+      ],
+    });
+    const context = {
+      repository: root,
+      repositoryFiles: ["package.json"],
+      objective: { number: 1, title: "Generic", body: "Implement the existing plan" },
+      defaultBranch: "main",
+      baseSha: sha,
+      allowedNetworkDestinations: [],
+      runPolicy: DEFAULT_RUN_POLICY,
+      legacyGraphConstraints,
+    };
+    const backend = new CodexCliManagementBackend({
+      runStructured: async (_cwd, _schema, prompt) => {
+        expect(prompt).toContain("authenticated human-authored Work Items");
+        expect(prompt).toContain(JSON.stringify(legacyGraphConstraints));
+        return {
+          value: { title: "Generic", workItems: [constrained] },
+          usage: { inputTokens: 1, outputTokens: 1 },
+        };
+      },
+    });
+
+    await expect(backend.compile(context, async () => {})).resolves.toMatchObject({
+      objective: { workItems: [{ id: "adopted-8", title: "Existing Work Item" }] },
+    });
+
+    await expect(
+      new CodexCliManagementBackend({
+        runStructured: async () => ({
+          value: {
+            title: "Generic",
+            workItems: [
+              {
+                ...constrained,
+                acceptance: ["A rewritten criterion."],
+                validation: [
+                  {
+                    ...constrained.validation![0]!,
+                    criteria: ["A rewritten criterion."],
+                  },
+                ],
+                criterionRisks: [
+                  { criterion: "A rewritten criterion.", risk: "ordinary" as const },
+                ],
+              },
+            ],
+          },
+          usage: { inputTokens: 1, outputTokens: 1 },
+        }),
+      }).compile(context, async () => {}),
+    ).rejects.toThrow(/changed legacy Work Item #8/);
+  });
+
   it("preserves pinned LFS tooling and conservatively serializes asset scope", () => {
     const repositoryLfs = {
       baseSha: sha,

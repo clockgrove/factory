@@ -118,6 +118,272 @@ export interface CompiledObjective {
   workItems: CompiledWorkItem[];
 }
 
+/**
+ * A pre-v2 Work Item is untrusted input, not a recoverable compiled graph. These
+ * fields are the bounded human-authored core Factory may preserve while a new
+ * compiler run adds the v2 execution packet. The compiler-local ID is derived
+ * mechanically from the immutable issue number so a recovery plan can bind the
+ * future projection before any model invocation occurs.
+ */
+export interface LegacyWorkItemConstraint {
+  compilerId: string;
+  issueNodeId: string;
+  issueNumber: number;
+  title: string;
+  goal: string;
+  acceptance: string[];
+  scope: string[];
+  preconditions: string[];
+  outOfScope: string[];
+  conventions: string[];
+  blockedByNumbers: number[];
+}
+
+export interface LegacyGraphConstraints {
+  protocol: "clockgrove.factory/legacy-graph-constraints-v1";
+  objectiveTitle: string;
+  workItems: LegacyWorkItemConstraint[];
+}
+
+const LEGACY_HEADINGS = [
+  "Goal",
+  "Acceptance",
+  "Scope",
+  "Preconditions",
+  "Out of scope",
+  "Conventions",
+] as const;
+
+/** Parse only Factory's historical six-section Work Item shape. */
+export function parseLegacyWorkItemConstraint(input: {
+  id: string;
+  number: number;
+  title: string;
+  body: string;
+  blockedByNumbers: number[];
+}): LegacyWorkItemConstraint {
+  if (!input.id || input.id.length > 200)
+    throw new Error("legacy Work Item node identity is invalid");
+  if (!Number.isSafeInteger(input.number) || input.number <= 0)
+    throw new Error("legacy Work Item number is invalid");
+  if (!input.title.trim() || input.title.length > 256)
+    throw new Error(`legacy Work Item #${input.number} title is invalid`);
+  assertWithinBytes(input.body, 128 * 1024, `legacy Work Item #${input.number}`);
+  if (/clockgrove-factory:(?:worker-packet|graph-item)/i.test(input.body))
+    throw new Error(`Work Item #${input.number} contains partial or malformed Factory metadata`);
+
+  const headings = [...input.body.matchAll(/^##[ \t]+([^\r\n]+?)[ \t]*$/gm)];
+  if (
+    headings.length !== LEGACY_HEADINGS.length ||
+    headings.some((match, index) => match[1] !== LEGACY_HEADINGS[index])
+  )
+    throw new Error(
+      `Work Item #${input.number} must contain exactly the six ordered legacy sections`,
+    );
+
+  const sections = new Map<string, string>();
+  for (const [index, match] of headings.entries()) {
+    const start = match.index! + match[0].length;
+    const end = headings[index + 1]?.index ?? input.body.length;
+    sections.set(match[1]!, input.body.slice(start, end).trim());
+  }
+  if (input.body.slice(0, headings[0]!.index).trim())
+    throw new Error(`Work Item #${input.number} has content before its Goal section`);
+
+  const list = (heading: (typeof LEGACY_HEADINGS)[number], required = false): string[] => {
+    const value = sections.get(heading) ?? "";
+    const lines = value.split(/\r?\n/).filter((line) => line.trim().length > 0);
+    if (lines.some((line) => !line.startsWith("- ") || !line.slice(2).trim()))
+      throw new Error(`Work Item #${input.number} ${heading} must be a flat bullet list`);
+    const items = lines.map((line) => line.slice(2).trim());
+    if ((required && items.length === 0) || items.length > 64)
+      throw new Error(`Work Item #${input.number} ${heading} item count is invalid`);
+    if (items.some((item) => item.length > 2_000))
+      throw new Error(`Work Item #${input.number} ${heading} item is too large`);
+    return items;
+  };
+  const goal = sections.get("Goal") ?? "";
+  if (!goal || goal.length > 4_000 || /^\s*[-#]/m.test(goal))
+    throw new Error(`Work Item #${input.number} Goal must be bounded prose`);
+  const blockedByNumbers = [...input.blockedByNumbers].sort((left, right) => left - right);
+  if (
+    blockedByNumbers.length > 50 ||
+    new Set(blockedByNumbers).size !== blockedByNumbers.length ||
+    blockedByNumbers.some(
+      (number) => !Number.isSafeInteger(number) || number <= 0 || number === input.number,
+    )
+  )
+    throw new Error(`Work Item #${input.number} has invalid legacy dependencies`);
+  return {
+    compilerId: `adopted-${input.number}`,
+    issueNodeId: input.id,
+    issueNumber: input.number,
+    title: input.title,
+    goal,
+    acceptance: list("Acceptance", true),
+    scope: list("Scope", true).map((path) => RepositoryScopePathSchema.parse(path)),
+    preconditions: list("Preconditions"),
+    outOfScope: list("Out of scope"),
+    conventions: list("Conventions"),
+    blockedByNumbers,
+  };
+}
+
+export function parseLegacyGraphConstraints(input: {
+  objectiveTitle: string;
+  workItems: Array<{
+    id: string;
+    number: number;
+    title: string;
+    body: string;
+    blockedByNumbers: number[];
+  }>;
+}): LegacyGraphConstraints {
+  if (!input.objectiveTitle.trim() || input.objectiveTitle.length > 256)
+    throw new Error("legacy Objective title is invalid");
+  if (input.workItems.length < 1 || input.workItems.length > 100)
+    throw new Error("legacy Objective must contain between 1 and 100 Work Items");
+  const workItems = input.workItems.map(parseLegacyWorkItemConstraint);
+  const numbers = new Set(workItems.map((item) => item.issueNumber));
+  const nodes = new Set(workItems.map((item) => item.issueNodeId));
+  if (numbers.size !== workItems.length || nodes.size !== workItems.length)
+    throw new Error("legacy Objective contains duplicate Work Item identity");
+  if (workItems.some((item) => item.blockedByNumbers.some((number) => !numbers.has(number))))
+    throw new Error("legacy Objective has a dependency outside its Work Items");
+  const byNumber = new Map(workItems.map((item) => [item.issueNumber, item]));
+  const state = new Map<number, "visiting" | "done">();
+  const visit = (number: number): void => {
+    const mark = state.get(number);
+    if (mark === "done") return;
+    if (mark === "visiting") throw new Error("legacy Objective dependency graph contains a cycle");
+    state.set(number, "visiting");
+    for (const dependency of byNumber.get(number)!.blockedByNumbers) visit(dependency);
+    state.set(number, "done");
+  };
+  for (const item of workItems) visit(item.issueNumber);
+  return {
+    protocol: "clockgrove.factory/legacy-graph-constraints-v1",
+    objectiveTitle: input.objectiveTitle,
+    workItems,
+  };
+}
+
+export function legacyGraphConstraintsDigest(input: LegacyGraphConstraints): string {
+  const parsed = parseLegacyGraphConstraints({
+    objectiveTitle: input.objectiveTitle,
+    workItems: input.workItems.map((item) => ({
+      id: item.issueNodeId,
+      number: item.issueNumber,
+      title: item.title,
+      body: renderLegacyWorkItemCore(item),
+      blockedByNumbers: item.blockedByNumbers,
+    })),
+  });
+  return createHash("sha256").update(canonical(parsed)).digest("hex");
+}
+
+/** Reconstruct the same bounded legacy core during an interrupted adoption.
+ * Authenticated adopted bodies contribute only their immutable Worker Packet
+ * core; raw bodies must still match the exact historical six-section shape. */
+export function parseLegacyGraphConstraintsSnapshot(input: {
+  objectiveTitle: string;
+  workItems: Array<{
+    id: string;
+    number: number;
+    title: string;
+    body: string;
+    blockedByNumbers: number[];
+  }>;
+}): LegacyGraphConstraints {
+  return parseLegacyGraphConstraints({
+    objectiveTitle: input.objectiveTitle,
+    workItems: input.workItems.map((item) => {
+      try {
+        const metadata = parseGraphItemMetadata(item.body);
+        if (metadata.id !== `adopted-${item.number}`)
+          throw new Error(`Work Item #${item.number} has non-adoption graph metadata`);
+        const packet = parseWorkerPacketFromIssue(item.body);
+        return {
+          ...item,
+          body: renderLegacyWorkItemCore({
+            goal: packet.goal,
+            acceptance: packet.acceptanceCriteria,
+            scope: packet.allowedPaths,
+            preconditions: packet.preconditions,
+            outOfScope: packet.outOfScope,
+            conventions: packet.conventions,
+          }),
+        };
+      } catch (error) {
+        if (/clockgrove-factory:(?:worker-packet|graph-item)/i.test(item.body)) throw error;
+        return item;
+      }
+    }),
+  });
+}
+
+export function renderLegacyWorkItemCore(
+  item: Pick<
+    LegacyWorkItemConstraint,
+    "goal" | "acceptance" | "scope" | "preconditions" | "outOfScope" | "conventions"
+  >,
+): string {
+  const section = (heading: string, values: string[]) =>
+    `## ${heading}\n\n${values.map((value) => `- ${value}`).join("\n")}`;
+  return [
+    `## Goal\n\n${item.goal}`,
+    section("Acceptance", item.acceptance),
+    section("Scope", item.scope),
+    section("Preconditions", item.preconditions),
+    section("Out of scope", item.outOfScope),
+    section("Conventions", item.conventions),
+  ].join("\n\n");
+}
+
+/** The model may enrich only fields absent from a legacy Work Item. */
+export function assertCompiledObjectiveAdoptsLegacyConstraints(
+  objective: CompiledObjective,
+  constraints: LegacyGraphConstraints,
+): void {
+  if (
+    objective.title !== constraints.objectiveTitle ||
+    objective.workItems.length !== constraints.workItems.length
+  )
+    throw new Error("compiled Objective changed legacy graph identity or cardinality");
+  const expectedIdByNumber = new Map(
+    constraints.workItems.map((item) => [item.issueNumber, item.compilerId]),
+  );
+  for (const [index, expected] of constraints.workItems.entries()) {
+    const actual = objective.workItems[index];
+    if (!actual)
+      throw new Error(`compiled Objective omitted legacy Work Item #${expected.issueNumber}`);
+    const actualCore = {
+      id: actual.id,
+      title: actual.title,
+      goal: actual.goal,
+      acceptance: actual.acceptance,
+      scope: actual.scope,
+      preconditions: actual.preconditions,
+      outOfScope: actual.outOfScope,
+      conventions: actual.conventions,
+      dependsOn: actual.dependsOn,
+    };
+    const expectedCore = {
+      id: expected.compilerId,
+      title: expected.title,
+      goal: expected.goal,
+      acceptance: expected.acceptance,
+      scope: expected.scope,
+      preconditions: expected.preconditions,
+      outOfScope: expected.outOfScope,
+      conventions: expected.conventions,
+      dependsOn: expected.blockedByNumbers.map((number) => expectedIdByNumber.get(number)!),
+    };
+    if (canonical(actualCore) !== canonical(expectedCore))
+      throw new Error(`compiled Objective changed legacy Work Item #${expected.issueNumber}`);
+  }
+}
+
 function scopeOverlaps(left: string, right: string): boolean {
   const leftDirectory = left.endsWith("/");
   const rightDirectory = right.endsWith("/");
@@ -504,6 +770,8 @@ export interface GraphWriter {
     body: string;
     labelIds?: string[];
   }): Promise<CreatedWorkItem>;
+  /** Updates only the body of an already authenticated legacy sub-issue. */
+  updateWorkItemIssue(args: { issueId: string; body: string }): Promise<void>;
   /** `issueId` is the blocked issue; `blockingIssueId` is the dependency. */
   addBlockedBy(issueId: string, blockingIssueId: string): Promise<void>;
 }
@@ -542,6 +810,13 @@ mutation AddBlockedBy($issueId: ID!, $blockingIssueId: ID!) {
   }
 }`;
 
+const UPDATE_WORK_ITEM_ISSUE_MUTATION = `
+mutation UpdateWorkItemIssue($issueId: ID!, $body: String!) {
+  updateIssue(input: { id: $issueId, body: $body }) {
+    issue { id number }
+  }
+}`;
+
 interface CreateIssueResponse {
   createIssue: { issue: { id: string; number: number } };
 }
@@ -573,6 +848,10 @@ export class GithubOctokitGraphWriter implements GraphWriter {
   async addBlockedBy(issueId: string, blockingIssueId: string): Promise<void> {
     await this.#octokit.graphql(ADD_BLOCKED_BY_MUTATION, { issueId, blockingIssueId });
   }
+
+  async updateWorkItemIssue(args: { issueId: string; body: string }): Promise<void> {
+    await this.#octokit.graphql(UPDATE_WORK_ITEM_ISSUE_MUTATION, args);
+  }
 }
 
 function sleep(ms: number): Promise<void> {
@@ -601,6 +880,45 @@ export interface ExistingGraphWorkItem extends CreatedWorkItem {
   title: string;
   body: string;
   blockedByNumbers: number[];
+}
+
+/** Validate any already projected subset without requiring the remaining
+ * legacy bodies to have been upgraded yet. */
+export function assertExistingGraphWorkItemsMatchCompiled(
+  objective: CompiledObjective,
+  existing: readonly ExistingGraphWorkItem[],
+): void {
+  const digest = compiledGraphDigest(objective);
+  const expectedById = new Map(objective.workItems.map((item) => [item.id, item]));
+  const seen = new Set<string>();
+  for (const observed of existing) {
+    if (observed.graphDigest !== digest || observed.graphSize !== objective.workItems.length)
+      throw new Error(
+        `existing Work Item ${observed.compilerId} belongs to a different compiled graph`,
+      );
+    if (seen.has(observed.compilerId))
+      throw new Error(`duplicate existing Work Item id: ${observed.compilerId}`);
+    seen.add(observed.compilerId);
+    const expected = expectedById.get(observed.compilerId);
+    if (!expected)
+      throw new Error(`existing Work Item ${observed.compilerId} is absent from the durable graph`);
+    const index = objective.workItems.indexOf(expected);
+    const metadata: GraphItemMetadata = {
+      protocol: "clockgrove.factory/graph-v1",
+      id: expected.id,
+      graphDigest: digest,
+      graphSize: objective.workItems.length,
+      index,
+      dependsOn: expected.dependsOn,
+    };
+    if (
+      observed.index !== index ||
+      JSON.stringify(observed.dependsOn) !== JSON.stringify(expected.dependsOn) ||
+      observed.title !== expected.title ||
+      observed.body.trim() !== renderWorkPacket(expected, metadata).trim()
+    )
+      throw new Error(`existing Work Item ${observed.compilerId} differs from the durable graph`);
+  }
 }
 
 /**
@@ -666,6 +984,8 @@ export class GraphApplier {
       objectiveIssueId: string;
       workItemLabelId?: string;
       existingWorkItems?: ExistingGraphWorkItem[];
+      /** Complete authenticated legacy snapshot. Its cardinality forbids issue creation. */
+      legacyGraphConstraints?: LegacyGraphConstraints;
     },
   ): Promise<Map<string, CreatedWorkItem>> {
     validateGraph(objective);
@@ -673,41 +993,48 @@ export class GraphApplier {
 
     const created = new Map<string, CreatedWorkItem>();
     const observedDependencies = new Map<string, Set<number>>();
-    const expectedById = new Map(objective.workItems.map((item) => [item.id, item]));
+    assertExistingGraphWorkItemsMatchCompiled(objective, ctx.existingWorkItems ?? []);
     for (const existing of ctx.existingWorkItems ?? []) {
-      if (existing.graphDigest !== digest || existing.graphSize !== objective.workItems.length) {
-        throw new Error(
-          `existing Work Item ${existing.compilerId} belongs to a different compiled graph`,
-        );
-      }
-      if (created.has(existing.compilerId)) {
-        throw new Error(`duplicate existing Work Item id: ${existing.compilerId}`);
-      }
-      const expected = expectedById.get(existing.compilerId);
-      if (!expected) {
-        throw new Error(
-          `existing Work Item ${existing.compilerId} is absent from the durable graph`,
-        );
-      }
-      const expectedIndex = objective.workItems.indexOf(expected);
-      const metadata: GraphItemMetadata = {
-        protocol: "clockgrove.factory/graph-v1",
-        id: expected.id,
-        graphDigest: digest,
-        graphSize: objective.workItems.length,
-        index: expectedIndex,
-        dependsOn: expected.dependsOn,
-      };
-      if (
-        existing.index !== expectedIndex ||
-        JSON.stringify(existing.dependsOn) !== JSON.stringify(expected.dependsOn) ||
-        existing.title !== expected.title ||
-        existing.body.trim() !== renderWorkPacket(expected, metadata).trim()
-      ) {
-        throw new Error(`existing Work Item ${existing.compilerId} differs from the durable graph`);
-      }
       created.set(existing.compilerId, { id: existing.id, number: existing.number });
       observedDependencies.set(existing.compilerId, new Set(existing.blockedByNumbers));
+    }
+    const legacyById = new Map<string, LegacyWorkItemConstraint>();
+    if (ctx.legacyGraphConstraints) {
+      assertCompiledObjectiveAdoptsLegacyConstraints(objective, ctx.legacyGraphConstraints);
+      for (const legacy of ctx.legacyGraphConstraints.workItems) {
+        if (legacyById.has(legacy.compilerId))
+          throw new Error(`duplicate legacy Work Item id: ${legacy.compilerId}`);
+        legacyById.set(legacy.compilerId, legacy);
+        const authenticated = (ctx.existingWorkItems ?? []).find(
+          (item) => item.compilerId === legacy.compilerId,
+        );
+        if (authenticated) {
+          if (
+            authenticated.id !== legacy.issueNodeId ||
+            authenticated.number !== legacy.issueNumber
+          )
+            throw new Error(`adopted Work Item ${legacy.compilerId} changed GitHub identity`);
+          continue;
+        }
+        if (created.has(legacy.compilerId))
+          throw new Error(`legacy Work Item ${legacy.compilerId} collides with graph projection`);
+        created.set(legacy.compilerId, {
+          id: legacy.issueNodeId,
+          number: legacy.issueNumber,
+        });
+        observedDependencies.set(legacy.compilerId, new Set(legacy.blockedByNumbers));
+      }
+      if (
+        created.size !== objective.workItems.length ||
+        objective.workItems.some((item) => !created.has(item.id))
+      )
+        throw new Error("legacy adoption does not bind every compiled Work Item");
+      for (const item of objective.workItems) {
+        const expected = item.dependsOn.map((id) => created.get(id)!.number).sort((a, b) => a - b);
+        const observed = [...(observedDependencies.get(item.id) ?? [])].sort((a, b) => a - b);
+        if (canonical(expected) !== canonical(observed))
+          throw new Error(`legacy Work Item ${item.id} dependency topology changed`);
+      }
     }
     for (const existing of ctx.existingWorkItems ?? []) {
       const expectedDependencyNumbers = new Set(
@@ -744,6 +1071,29 @@ export class GraphApplier {
         }),
       );
       created.set(wi.id, issue);
+    }
+
+    // All identities and native edges are validated before the first body write.
+    // A lost response is replayable because the authenticated envelope makes the
+    // completed update observable while the remaining legacy bodies retain the
+    // same immutable constraint digest.
+    for (const [index, wi] of objective.workItems.entries()) {
+      const legacy = legacyById.get(wi.id);
+      if (!legacy || (ctx.existingWorkItems ?? []).some((item) => item.compilerId === wi.id))
+        continue;
+      await this.#call(() =>
+        this.#writer.updateWorkItemIssue({
+          issueId: legacy.issueNodeId,
+          body: renderWorkPacket(wi, {
+            protocol: "clockgrove.factory/graph-v1",
+            id: wi.id,
+            graphDigest: digest,
+            graphSize: objective.workItems.length,
+            index,
+            dependsOn: wi.dependsOn,
+          }),
+        }),
+      );
     }
 
     for (const wi of objective.workItems) {

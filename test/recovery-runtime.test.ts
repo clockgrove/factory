@@ -6,7 +6,12 @@ import type { GitHubControlStore } from "../src/control/github-store.js";
 import { recoveryReadPort } from "../src/recovery/github-read-port.js";
 import { loadRecoverySourceReconciliation } from "../src/recovery/reconciliation.js";
 import { loadHistoricalRecoveryRuntimes } from "../src/recovery/historical-runtime.js";
-import { CompiledGraphManager, type CompiledGraphStore } from "../src/control/graphs.js";
+import {
+  compiledGraphProjectionRef,
+  compiledGraphRef,
+  CompiledGraphManager,
+  type CompiledGraphStore,
+} from "../src/control/graphs.js";
 import type { GitCommitObject, LeaseManager, LeaseState } from "../src/control/lease.js";
 import { decodeEventComments, encodeEventTrailer } from "../src/control/receipts.js";
 import { attemptRef } from "../src/control/attempts.js";
@@ -14,7 +19,13 @@ import {
   REPOSITORY_LEASE_REF,
   type RepositoryLeaseState,
 } from "../src/controller/repository-lease.js";
-import { renderWorkPacket, type CompiledObjective } from "../src/graph.js";
+import {
+  legacyGraphConstraintsDigest,
+  parseLegacyGraphConstraints,
+  renderLegacyWorkItemCore,
+  renderWorkPacket,
+  type CompiledObjective,
+} from "../src/graph.js";
 import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
 import { RecoveryCoordinator } from "../src/recovery/coordinator.js";
@@ -26,6 +37,9 @@ import {
   type LocalResourceReader,
 } from "../src/recovery/local-resources.js";
 import { recoveryEventDigest, recoverySourceEventsDigest } from "../src/recovery/identity.js";
+import { assessRecoveryAccounting } from "../src/recovery/accounting.js";
+import { recoveryUnknownUsageDigest } from "../src/recovery/chain.js";
+import { compilerEvalDigest } from "../src/evaluation/compiler-eval.js";
 import {
   RECOVERY_PLAN_PROTOCOL,
   RecoveryPlanManager,
@@ -200,6 +214,7 @@ async function fixture(
     stacked?: boolean;
     activated?: boolean;
     controllerObservation?: boolean;
+    graphless?: boolean;
   } = {},
 ) {
   const store = new MemoryStore();
@@ -316,41 +331,45 @@ async function fixture(
     kind: "run",
     event: "FactoryRunEscalated",
     sequence: 10,
-    reason: "paused",
+    reason: options.graphless
+      ? "Objective has Work Items but no authenticated v2 graph receipt"
+      : "paused",
   });
-  const events = [
-    start,
-    event({
-      kind: "graph",
-      event: "GraphCompiled",
-      sequence: 2,
-      graphDigest: graph.graphDigest,
-      graphSize: 1,
-      baseSha: base.oid,
-      graphRef: graph.ref,
-      graphBlobSha: graph.blobOid,
-    }),
-    event({
-      kind: "graph",
-      event: "GraphProjected",
-      sequence: 3,
-      graphDigest: graph.graphDigest,
-      graphSize: 1,
-      projectionRef: projection.ref,
-      projectionBlobSha: projection.blobOid,
-    }),
-    event({
-      kind: "budget",
-      event: "BudgetReconciled",
-      sequence: 4,
-      phase: "management",
-      unit: "model_tokens",
-      amount: 10,
-      usageId: `compile-${graph.graphDigest}`,
-    }),
-    terminal,
-  ];
-  if (options.missingCompileUsage) events.splice(3, 1);
+  const events = options.graphless
+    ? [start, terminal]
+    : [
+        start,
+        event({
+          kind: "graph",
+          event: "GraphCompiled",
+          sequence: 2,
+          graphDigest: graph.graphDigest,
+          graphSize: 1,
+          baseSha: base.oid,
+          graphRef: graph.ref,
+          graphBlobSha: graph.blobOid,
+        }),
+        event({
+          kind: "graph",
+          event: "GraphProjected",
+          sequence: 3,
+          graphDigest: graph.graphDigest,
+          graphSize: 1,
+          projectionRef: projection.ref,
+          projectionBlobSha: projection.blobOid,
+        }),
+        event({
+          kind: "budget",
+          event: "BudgetReconciled",
+          sequence: 4,
+          phase: "management",
+          unit: "model_tokens",
+          amount: 10,
+          usageId: `compile-${graph.graphDigest}`,
+        }),
+        terminal,
+      ];
+  if (options.missingCompileUsage && !options.graphless) events.splice(3, 1);
   if (options.controllerObservation)
     events.push(
       event({
@@ -456,15 +475,18 @@ async function fixture(
         id: "issue-8",
         number: 8,
         title: "Feature",
-        body: renderWorkPacket(graphInput.workItems[0]!, {
-          protocol: "clockgrove.factory/graph-v1",
-          id: "feature",
-          graphDigest: graph.graphDigest,
-          graphSize: 1,
-          index: 0,
-          dependsOn: [],
-        }),
+        body: options.graphless
+          ? renderLegacyWorkItemCore(graphInput.workItems[0]!)
+          : renderWorkPacket(graphInput.workItems[0]!, {
+              protocol: "clockgrove.factory/graph-v1",
+              id: "feature",
+              graphDigest: graph.graphDigest,
+              graphSize: 1,
+              index: 0,
+              dependsOn: [],
+            }),
         closed: false,
+        assignees: [],
         blockedBy: [],
         linkedPullRequests: [],
         copilotAssignments: [],
@@ -484,7 +506,7 @@ async function fixture(
     {
       workItem: 8,
       issueNodeId: "issue-8",
-      compilerId: "feature",
+      compilerId: options.graphless ? "adopted-8" : "feature",
       action: "execute",
       source,
       observedPullRequest: null,
@@ -501,6 +523,26 @@ async function fixture(
     managedSessions: policy.maxManagedAgentSessions,
     implementationAttemptsPerItem: policy.maxAttemptsPerItem,
   };
+  const legacyConstraints = options.graphless
+    ? parseLegacyGraphConstraints({
+        objectiveTitle: graphInput.title,
+        workItems: [
+          {
+            id: "issue-8",
+            number: 8,
+            title: "Feature",
+            body: renderLegacyWorkItemCore(graphInput.workItems[0]!),
+            blockedByNumbers: [],
+          },
+        ],
+      })
+    : null;
+  const sourceEventsDigest = recoverySourceEventsDigest({
+    objective: 7,
+    runIds: ["source"],
+    events,
+    maxSequence: 10,
+  });
   const plan: RecoveryPlan = {
     protocol: RECOVERY_PLAN_PROTOCOL,
     repository: "o/r",
@@ -512,29 +554,41 @@ async function fixture(
     predecessor,
     history,
     historyDigest: recoveryHistoryDigest(history),
-    sourceEventsDigest: recoverySourceEventsDigest({
-      objective: 7,
-      runIds: ["source"],
-      events,
-      maxSequence: 10,
-    }),
+    sourceEventsDigest,
     sourceEventMaxSequence: 10,
     priorPlanDigest: null,
     expectedBaseSha: base.oid,
     baseBranch: "main",
-    graph: {
-      sourceRunId: "source",
-      ref: graph.ref,
-      commitOid: graph.commitOid,
-      blobOid: graph.blobOid,
-      digest: graph.graphDigest,
-      projection: {
-        ref: projection.ref,
-        commitOid: projection.commitOid,
-        blobOid: projection.blobOid,
-        bindingDigest: recoveryPlanBindingDigest(items),
-      },
-    },
+    graph: legacyConstraints
+      ? {
+          mode: "adopt-existing",
+          sourceRunId: "successor",
+          ref: compiledGraphRef(7, "successor"),
+          objectiveInputDigest: compilerEvalDigest({
+            number: 7,
+            title: graphInput.title,
+            body: undefined,
+          }),
+          constraintDigest: legacyGraphConstraintsDigest(legacyConstraints),
+          constraints: legacyConstraints,
+          projection: {
+            ref: compiledGraphProjectionRef(7, "successor"),
+            bindingDigest: recoveryPlanBindingDigest(items),
+          },
+        }
+      : {
+          sourceRunId: "source",
+          ref: graph.ref,
+          commitOid: graph.commitOid,
+          blobOid: graph.blobOid,
+          digest: graph.graphDigest,
+          projection: {
+            ref: projection.ref,
+            commitOid: projection.commitOid,
+            blobOid: projection.blobOid,
+            bindingDigest: recoveryPlanBindingDigest(items),
+          },
+        },
     acceptedPolicy: policy,
     policyDigest: policyDigest(policy),
     allowance: {
@@ -550,6 +604,21 @@ async function fixture(
     unknownUsageAcknowledgementDigest: null,
     items,
   };
+  if (options.graphless) {
+    const accounting = assessRecoveryAccounting({
+      objective: 7,
+      repository: "o/r",
+      events,
+      runIds: ["source"],
+      policy,
+    });
+    plan.unknownUsageAcknowledgementDigest = recoveryUnknownUsageDigest(
+      sourceEventsDigest,
+      accounting,
+    );
+    store.refs.delete(graph.ref);
+    store.refs.delete(projection.ref);
+  }
   objectiveLease.runId = "successor";
   const planRecord = await new RecoveryPlanManager(store, {
     assertCurrent: async () => {},
@@ -595,6 +664,8 @@ async function fixture(
     store,
     snapshot,
     planRecord,
+    graphInput,
+    graphManager,
     state,
     make,
     args,
@@ -657,6 +728,402 @@ async function addAttempt(f: Awaited<ReturnType<typeof adopted>>, attempt = 1) {
 }
 
 describe("verified successor runtime loader", () => {
+  it("holds a graphless successor in bootstrap until its constrained graph projection is authenticated", async () => {
+    const f = await adopted({ graphless: true });
+    const bootstrap = await f.read();
+    expect(bootstrap).toMatchObject({ status: "graph-bootstrap", graph: null, projection: null });
+
+    const objective = structuredClone(f.graphInput);
+    objective.workItems[0]!.id = "adopted-8";
+    const invocationId = `compile-${base.oid}`;
+    const successorGraph = await f.graphManager.persist({
+      lease: f.args.objectiveLease,
+      base,
+      objective,
+      compilation: { invocationId, inputTokens: 11, outputTokens: 19 },
+    });
+    let sequence = Math.max(...f.snapshot.factoryEvents!.map((entry) => entry.sequence)) + 1;
+    f.snapshot.factoryEvents!.push(
+      event({
+        kind: "budget",
+        event: "BudgetReserved",
+        runId: "successor",
+        sequence: sequence++,
+        phase: "management",
+        unit: "model_tokens",
+        amount: 0,
+        usageId: `invocation-${invocationId}`,
+        modelInvocationId: invocationId,
+        directorEpoch: 2,
+        policyDigest: f.planRecord.plan.policyDigest,
+      }),
+      event({
+        kind: "budget",
+        event: "BudgetReconciled",
+        runId: "successor",
+        sequence: sequence++,
+        phase: "management",
+        unit: "model_tokens",
+        amount: 30,
+        usageId: `compile-${successorGraph.graphDigest}`,
+        modelInvocationId: invocationId,
+        directorEpoch: 2,
+        policyDigest: f.planRecord.plan.policyDigest,
+        reportedModelUsage: { inputTokens: 11, outputTokens: 19 },
+      }),
+      event({
+        kind: "graph",
+        event: "GraphCompiled",
+        runId: "successor",
+        sequence: sequence++,
+        graphDigest: successorGraph.graphDigest,
+        graphSize: 1,
+        baseSha: base.oid,
+        graphRef: successorGraph.ref,
+        graphBlobSha: successorGraph.blobOid,
+      }),
+    );
+    f.snapshot.workItems[0]!.body = renderWorkPacket(objective.workItems[0]!, {
+      protocol: "clockgrove.factory/graph-v1",
+      id: "adopted-8",
+      graphDigest: successorGraph.graphDigest,
+      graphSize: 1,
+      index: 0,
+      dependsOn: [],
+    });
+    const successorProjection = await f.graphManager.persistProjection({
+      lease: f.args.objectiveLease,
+      graph: successorGraph,
+      bindings: [{ compilerId: "adopted-8", issueNodeId: "issue-8", issueNumber: 8 }],
+    });
+    f.snapshot.factoryEvents!.push(
+      event({
+        kind: "graph",
+        event: "GraphProjected",
+        runId: "successor",
+        sequence,
+        graphDigest: successorGraph.graphDigest,
+        graphSize: 1,
+        projectionRef: successorProjection.ref,
+        projectionBlobSha: successorProjection.blobOid,
+      }),
+    );
+
+    const verified = await f.read();
+    expect(verified).toMatchObject({ status: "verified" });
+    if (verified.status !== "verified") throw new Error("expected verified adopted graph");
+    expect(verified.graph.graphDigest).toBe(successorGraph.graphDigest);
+    expect(verified.projection.bindings).toEqual([
+      { compilerId: "adopted-8", issueNodeId: "issue-8", issueNumber: 8 },
+    ]);
+  });
+
+  it("preserves an interrupted bootstrap compiler dispatch as unknown instead of permitting replay", async () => {
+    const f = await adopted({ graphless: true });
+    const invocationId = `compile-${base.oid}`;
+    f.snapshot.factoryEvents!.push(
+      event({
+        kind: "budget",
+        event: "BudgetReserved",
+        runId: "successor",
+        sequence: Math.max(...f.snapshot.factoryEvents!.map((entry) => entry.sequence)) + 1,
+        phase: "management",
+        unit: "model_tokens",
+        amount: 0,
+        usageId: `invocation-${invocationId}`,
+        modelInvocationId: invocationId,
+        directorEpoch: 2,
+        policyDigest: f.planRecord.plan.policyDigest,
+      }),
+    );
+
+    expect(await f.read()).toMatchObject({
+      status: "graph-bootstrap",
+      graph: null,
+      projection: null,
+      currentUnknownManagementInvocations: [invocationId],
+      currentUnknownModelUsageCount: 1,
+      usage: { modelTokens: 0 },
+    });
+  });
+
+  it("refuses execution effects before the adopted graph projection is authenticated", async () => {
+    const f = await adopted({ graphless: true });
+    await addAttempt(f);
+
+    expect(await f.read()).toMatchObject({
+      status: "blocked",
+      blockers: ["graph-bootstrap-has-execution-effects"],
+    });
+  });
+
+  it("refuses a newly assigned Work Item during graph bootstrap", async () => {
+    const f = await adopted({ graphless: true });
+    f.snapshot.workItems[0]!.assignees = ["human-owner"];
+
+    expect(await f.read()).toMatchObject({ status: "blocked" });
+  });
+
+  it("refuses Objective prose changed after graph-bootstrap acknowledgement", async () => {
+    const f = await adopted({ graphless: true });
+    f.snapshot.body = "New compilation instructions after acknowledgement.";
+
+    expect(await f.read()).toMatchObject({ status: "blocked" });
+  });
+
+  it("retains a compiled checkpoint that crashed before its Objective receipt", async () => {
+    const f = await adopted({ graphless: true });
+    const objective = structuredClone(f.graphInput);
+    objective.workItems[0]!.id = "adopted-8";
+    const invocationId = `compile-${base.oid}`;
+    const checkpoint = await f.graphManager.persist({
+      lease: f.args.objectiveLease,
+      base,
+      objective,
+      compilation: { invocationId, inputTokens: 11, outputTokens: 19 },
+    });
+    let sequence = Math.max(...f.snapshot.factoryEvents!.map((entry) => entry.sequence)) + 1;
+    f.snapshot.factoryEvents!.push(
+      event({
+        kind: "budget",
+        event: "BudgetReserved",
+        runId: "successor",
+        sequence: sequence++,
+        phase: "management",
+        unit: "model_tokens",
+        amount: 0,
+        usageId: `invocation-${invocationId}`,
+        modelInvocationId: invocationId,
+        directorEpoch: 2,
+        policyDigest: f.planRecord.plan.policyDigest,
+      }),
+      event({
+        kind: "budget",
+        event: "BudgetReconciled",
+        runId: "successor",
+        sequence,
+        phase: "management",
+        unit: "model_tokens",
+        amount: 30,
+        usageId: `compile-${checkpoint.graphDigest}`,
+        modelInvocationId: invocationId,
+        directorEpoch: 2,
+        policyDigest: f.planRecord.plan.policyDigest,
+        reportedModelUsage: { inputTokens: 11, outputTokens: 19 },
+      }),
+    );
+
+    expect(await f.read()).toMatchObject({
+      status: "graph-bootstrap",
+      graph: null,
+      projection: null,
+      currentUnknownManagementInvocations: [],
+      currentUnknownModelUsageCount: 0,
+      usage: { modelTokens: 30 },
+    });
+    expect(checkpoint.ref).toBe(f.planRecord.plan.graph.ref);
+  });
+
+  it("rejects a pre-created graph ref even when forged events close the expected invocation", async () => {
+    const f = await adopted({ graphless: true });
+    const objective = structuredClone(f.graphInput);
+    objective.workItems[0]!.id = "adopted-8";
+    const precreated = await f.graphManager.persist({
+      lease: f.args.objectiveLease,
+      base,
+      objective,
+    });
+    const invocationId = `compile-${base.oid}`;
+    let sequence = Math.max(...f.snapshot.factoryEvents!.map((entry) => entry.sequence)) + 1;
+    f.snapshot.factoryEvents!.push(
+      event({
+        kind: "budget",
+        event: "BudgetReserved",
+        runId: "successor",
+        sequence: sequence++,
+        phase: "management",
+        unit: "model_tokens",
+        amount: 0,
+        usageId: `invocation-${invocationId}`,
+        modelInvocationId: invocationId,
+        directorEpoch: 2,
+        policyDigest: f.planRecord.plan.policyDigest,
+      }),
+      event({
+        kind: "budget",
+        event: "BudgetReconciled",
+        runId: "successor",
+        sequence,
+        phase: "management",
+        unit: "model_tokens",
+        amount: 30,
+        usageId: `compile-${precreated.graphDigest}`,
+        modelInvocationId: invocationId,
+        directorEpoch: 2,
+        policyDigest: f.planRecord.plan.policyDigest,
+        reportedModelUsage: { inputTokens: 11, outputTokens: 19 },
+      }),
+    );
+
+    expect(await f.read()).toMatchObject({
+      status: "blocked",
+      blockers: ["source-bindings-unavailable"],
+    });
+  });
+
+  it("rejects a bootstrap projection receipt when its immutable projection is absent", async () => {
+    const f = await adopted({ graphless: true });
+    const objective = structuredClone(f.graphInput);
+    objective.workItems[0]!.id = "adopted-8";
+    const invocationId = `compile-${base.oid}`;
+    const successorGraph = await f.graphManager.persist({
+      lease: f.args.objectiveLease,
+      base,
+      objective,
+      compilation: { invocationId, inputTokens: 11, outputTokens: 19 },
+    });
+    let sequence = Math.max(...f.snapshot.factoryEvents!.map((entry) => entry.sequence)) + 1;
+    f.snapshot.factoryEvents!.push(
+      event({
+        kind: "budget",
+        event: "BudgetReserved",
+        runId: "successor",
+        sequence: sequence++,
+        phase: "management",
+        unit: "model_tokens",
+        amount: 0,
+        usageId: `invocation-${invocationId}`,
+        modelInvocationId: invocationId,
+        directorEpoch: 2,
+        policyDigest: f.planRecord.plan.policyDigest,
+      }),
+      event({
+        kind: "budget",
+        event: "BudgetReconciled",
+        runId: "successor",
+        sequence: sequence++,
+        phase: "management",
+        unit: "model_tokens",
+        amount: 30,
+        usageId: `compile-${successorGraph.graphDigest}`,
+        modelInvocationId: invocationId,
+        directorEpoch: 2,
+        policyDigest: f.planRecord.plan.policyDigest,
+        reportedModelUsage: { inputTokens: 11, outputTokens: 19 },
+      }),
+      event({
+        kind: "graph",
+        event: "GraphCompiled",
+        runId: "successor",
+        sequence: sequence++,
+        graphDigest: successorGraph.graphDigest,
+        graphSize: 1,
+        baseSha: base.oid,
+        graphRef: successorGraph.ref,
+        graphBlobSha: successorGraph.blobOid,
+      }),
+      event({
+        kind: "graph",
+        event: "GraphProjected",
+        runId: "successor",
+        sequence,
+        graphDigest: successorGraph.graphDigest,
+        graphSize: 1,
+        projectionRef: f.planRecord.plan.graph.projection.ref,
+        projectionBlobSha: sha("8"),
+      }),
+    );
+
+    expect(await f.read()).toMatchObject({ status: "blocked" });
+  });
+
+  it("retains an authenticated staged projection until its immutable ref is repaired", async () => {
+    const f = await adopted({ graphless: true });
+    const objective = structuredClone(f.graphInput);
+    objective.workItems[0]!.id = "adopted-8";
+    const invocationId = `compile-${base.oid}`;
+    const graph = await f.graphManager.persist({
+      lease: f.args.objectiveLease,
+      base,
+      objective,
+      compilation: { invocationId, inputTokens: 11, outputTokens: 19 },
+    });
+    const bindings = [{ compilerId: "adopted-8", issueNodeId: "issue-8", issueNumber: 8 }];
+    const staged = await f.graphManager.stageProjection({
+      lease: f.args.objectiveLease,
+      graph,
+      bindings,
+    });
+    f.snapshot.workItems[0]!.body = renderWorkPacket(objective.workItems[0]!, {
+      protocol: "clockgrove.factory/graph-v1",
+      id: "adopted-8",
+      graphDigest: graph.graphDigest,
+      graphSize: 1,
+      index: 0,
+      dependsOn: [],
+    });
+    let sequence = Math.max(...f.snapshot.factoryEvents!.map((entry) => entry.sequence)) + 1;
+    f.snapshot.factoryEvents!.push(
+      event({
+        kind: "budget",
+        event: "BudgetReserved",
+        runId: "successor",
+        sequence: sequence++,
+        phase: "management",
+        unit: "model_tokens",
+        amount: 0,
+        usageId: `invocation-${invocationId}`,
+        modelInvocationId: invocationId,
+        directorEpoch: 2,
+        policyDigest: f.planRecord.plan.policyDigest,
+      }),
+      event({
+        kind: "budget",
+        event: "BudgetReconciled",
+        runId: "successor",
+        sequence: sequence++,
+        phase: "management",
+        unit: "model_tokens",
+        amount: 30,
+        usageId: `compile-${graph.graphDigest}`,
+        modelInvocationId: invocationId,
+        directorEpoch: 2,
+        policyDigest: f.planRecord.plan.policyDigest,
+        reportedModelUsage: { inputTokens: 11, outputTokens: 19 },
+      }),
+      event({
+        kind: "graph",
+        event: "GraphCompiled",
+        runId: "successor",
+        sequence: sequence++,
+        graphDigest: graph.graphDigest,
+        graphSize: 1,
+        baseSha: base.oid,
+        graphRef: graph.ref,
+        graphBlobSha: graph.blobOid,
+      }),
+      event({
+        kind: "graph",
+        event: "GraphProjected",
+        runId: "successor",
+        sequence,
+        graphDigest: graph.graphDigest,
+        graphSize: 1,
+        projectionRef: staged.ref,
+        projectionBlobSha: staged.blobOid,
+      }),
+    );
+
+    expect(await f.read()).toMatchObject({ status: "graph-bootstrap" });
+    await f.graphManager.persistProjection({
+      lease: f.args.objectiveLease,
+      graph,
+      bindings,
+      expectedBlobOid: staged.blobOid,
+    });
+    expect(await f.read()).toMatchObject({ status: "verified" });
+  });
+
   it("exposes only digest-verified predecessor controller generations to successor consumers", async () => {
     const f = await adopted({ controllerObservation: true });
     const result = await f.read();

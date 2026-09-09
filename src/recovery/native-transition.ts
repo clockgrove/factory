@@ -1,10 +1,9 @@
-import { loadCompiledGraph } from "../control/graphs.js";
 import type { FactoryEvent } from "../protocol/events.js";
 import { planDelivery } from "../publication/delivery.js";
 import type { RecoveryReadStore } from "./assessment.js";
 import { loadRecoveryClaim } from "./claims.js";
 import { recoveryEventDigest } from "./identity.js";
-import { loadRecoveryPlan, type RecoveryPlanRecord } from "./plan.js";
+import { loadRecoveryPlan, loadRecoveryPlanGraph, type RecoveryPlanRecord } from "./plan.js";
 import { verifyRecoverySourceIntegration } from "./outcomes.js";
 import { nativePublicationStackNumber } from "./native-source-stacks.js";
 
@@ -83,13 +82,9 @@ export async function observeRecoveryNativeTransition(input: {
         restored.sourceValidationDigest === source.validation.evidenceDigest &&
         restored.sourceReservationReceiptDigest === source.reservationReceiptDigest,
     );
-  const graph = await loadCompiledGraph(input.store, plan.objective, plan.graph.sourceRunId);
-  requireTransition(
-    graph &&
-      graph.commitOid === plan.graph.commitOid &&
-      graph.blobOid === plan.graph.blobOid &&
-      graph.graphDigest === plan.graph.digest,
-  );
+  const resolvedGraph = await loadRecoveryPlanGraph(input.store, plan, input.events);
+  requireTransition(resolvedGraph);
+  const { graph } = resolvedGraph;
   const topology = planDelivery(
     graph.objective.workItems.map((entry) => {
       requireTransition(entry.delivery);

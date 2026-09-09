@@ -14,7 +14,11 @@ import {
 import { RecoveryRequestService } from "../src/recovery/requests.js";
 import { discoverRecoveryActivation } from "../src/recovery/discovery.js";
 import { sourceUsesCurrentProducer } from "../src/controller/retirement.js";
-import { renderWorkPacket, type CompiledObjective } from "../src/graph.js";
+import {
+  renderLegacyWorkItemCore,
+  renderWorkPacket,
+  type CompiledObjective,
+} from "../src/graph.js";
 import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
 import { publicationBranch } from "../src/publication/publisher.js";
@@ -251,6 +255,7 @@ async function fixture(withPublications = true, native: "siblings" | "stack" | f
         dependsOn: item.dependsOn,
       }),
       closed: false,
+      assignees: [],
       blockedBy: item.dependsOn.map((id) => ({ number: id === "a" ? 8 : 9, closed: false })),
       linkedPullRequests: [],
       copilotAssignments: [],
@@ -1402,6 +1407,70 @@ describe("explicit recovery request application", () => {
 });
 
 describe("bounded read-only immutable recovery proposals", () => {
+  it("proposes an exact graph bootstrap for untouched legacy Work Items and exposes unknown usage", async () => {
+    const f = await fixture(false);
+    for (const ref of [...f.refs.keys()])
+      if (ref.includes("/graphs/") || ref.includes("/graph-projections/")) f.refs.delete(ref);
+    f.snapshot.factoryEvents = f.snapshot
+      .factoryEvents!.filter((entry) => entry.kind !== "graph" && entry.kind !== "budget")
+      .map((entry) =>
+        entry.event === "FactoryRunEscalated"
+          ? f.event({
+              kind: "run",
+              event: "FactoryRunEscalated",
+              sequence: entry.sequence,
+              reason: "Objective has Work Items but no authenticated v2 graph receipt",
+            })
+          : entry,
+      );
+    for (const [index, item] of f.snapshot.workItems.entries()) {
+      const compiled = f.graph.objective.workItems[index]!;
+      item.body = renderLegacyWorkItemCore(compiled);
+    }
+
+    const first = await f.build();
+    expect(first.blockers).toEqual([]);
+    expect(first.status).toBe("proposed");
+    expect(first.unknownUsageDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(first.plan!.graph).toMatchObject({
+      mode: "adopt-existing",
+      sourceRunId: "successor",
+    });
+    expect(first.plan!.items.map((item) => [item.workItem, item.compilerId, item.action])).toEqual([
+      [8, "adopted-8", "execute"],
+      [9, "adopted-9", "execute"],
+      [10, "adopted-10", "execute"],
+    ]);
+    const acknowledged = await f.build({
+      unknownUsageAcknowledgementDigest: first.unknownUsageDigest,
+    });
+    expect(acknowledged.status).toBe("proposed");
+    expect(acknowledged.plan!.unknownUsageAcknowledgementDigest).toBe(first.unknownUsageDigest);
+    expect(f.mutations.createRef).not.toHaveBeenCalled();
+    expect(f.mutations.createCommit).not.toHaveBeenCalled();
+
+    const terminalSequence = f.snapshot.factoryEvents!.find(
+      (entry) => entry.event === "FactoryRunEscalated",
+    )!.sequence;
+    const usedSequences = new Set(f.snapshot.factoryEvents!.map((entry) => entry.sequence));
+    const sequence = Array.from({ length: terminalSequence - 1 }, (_, index) => index + 1).find(
+      (candidate) => !usedSequences.has(candidate),
+    )!;
+    f.snapshot.factoryEvents!.push(
+      f.event({
+        kind: "budget",
+        event: "BudgetReserved",
+        sequence,
+        workItem: 8,
+        attempt: 1,
+        phase: "execution",
+        unit: "local_milliseconds",
+        amount: 1,
+      }),
+    );
+    expect(await f.build()).toMatchObject({ status: "blocked" });
+  });
+
   it("retains integrated A, revalidates stale B, and executes untouched join C without invented attempts", async () => {
     const f = await fixture();
     const result = await f.build();

@@ -1,11 +1,10 @@
-import { loadCompiledGraph } from "../control/graphs.js";
 import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
 import { planDelivery } from "../publication/delivery.js";
 import type { GitHubStack, GitHubStacks } from "../publication/github-stacks.js";
 import { verifyExactHeadValidation, type ExactHeadValidationEvidence } from "../validation/plan.js";
 import type { RecoveryReadStore } from "./assessment.js";
 import { recoveryEventDigest } from "./identity.js";
-import { recoveryPlanDigest } from "./plan.js";
+import { loadRecoveryPlanGraph, recoveryPlanDigest } from "./plan.js";
 import type { RecoverySourceArtifactProof } from "./source-publications.js";
 
 export interface RecoveryNativeExistingMember {
@@ -26,6 +25,8 @@ export interface RecoveryNativeSourceStackInput {
   /** Must retain the production transport's pacing and mutation fences. */
   stacks: Pick<GitHubStacks, "ensureStack" | "ensureExtended" | "get" | "list">;
   baseBranch: string;
+  /** Complete authenticated history containing the source graph receipts. */
+  events: readonly FactoryEvent[];
   assertCurrent(): Promise<void>;
 }
 export type RecoveryNativeSourceStackResult =
@@ -150,15 +151,9 @@ export async function ensureRecoveryNativeSourceStack(
     "plan or native delivery binding changed",
   );
   await input.assertCurrent();
-  const graph = await loadCompiledGraph(input.store, plan.objective, plan.graph.sourceRunId);
-  requireStack(
-    graph &&
-      graph.ref === plan.graph.ref &&
-      graph.commitOid === plan.graph.commitOid &&
-      graph.blobOid === plan.graph.blobOid &&
-      graph.graphDigest === plan.graph.digest,
-    "acknowledged graph unavailable",
-  );
+  const resolvedGraph = await loadRecoveryPlanGraph(input.store, plan, input.events);
+  requireStack(resolvedGraph, "acknowledged graph unavailable");
+  const { graph } = resolvedGraph;
   const topology = planDelivery(
     graph.objective.workItems.map((item) => {
       requireStack(item.delivery, "graph lacks delivery topology");

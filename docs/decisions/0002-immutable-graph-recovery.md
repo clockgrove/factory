@@ -40,9 +40,24 @@ inadequate or execution exhausts its bounded attempts, Factory escalates with ev
 different graph requires an explicitly authorized new run; it is not a hidden mutation of the active
 run.
 
+One constrained bootstrap applies when human-authored Work Items already exist but no graph ever
+became durable. An explicit recovery plan binds the Objective prose, their complete bounded core,
+GitHub identities, order, and dependency topology before compilation. The compiler may enrich only
+those same items, and graph application updates their bodies without creating issues or edges.
+Partial upgrades are reconstructed from the mixed raw/authenticated snapshot. This is not
+replanning an active graph: the predecessor must be graphless and free of Work Item execution
+effects, and an unresolved compiler invocation remains unknown accounting that forbids replay.
+
+A predictable ref name is never evidence that the compiler ran. In the narrow crash interval before
+`GraphCompiled`, recovery requires an atomic compilation record in the graph commit and the exact
+durable dispatch/actual-usage pair for that invocation. Historical graph copies cannot carry a new
+compilation claim. After body projection, an authenticated `GraphProjected` receipt may finish
+publishing only the exact staged projection blob it already names.
+
 ## Consequences
 
-- Crash recovery is deterministic and never needs a model call.
+- Recovery after a durable graph is deterministic and never needs a model call; the explicit
+  graphless-adoption bootstrap permits one constrained, durably admitted compilation.
 - Existing issue and attempt history keeps one auditable meaning.
 - Factory can safely repair a response-lost graph write without duplicating valid work.
 - A moved or replaced sub-issue cannot inherit another compiler ID's receipts after restart.

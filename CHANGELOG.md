@@ -54,6 +54,19 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- A deterministic current-run graph ref no longer bypasses the compiler when `GraphCompiled` is
+  absent. Pre-receipt restart now requires the graph's atomic compilation record plus the exact
+  management dispatch and actual-usage closure; a historical graph copy must not claim a new
+  compilation. An authenticated staged projection can still finish its one-way immutable-ref
+  publication after a lost response. ([#275](https://github.com/clockgrove/factory/issues/275))
+- A graphless terminal run may now recover an Objective whose bounded, human-authored Work Items
+  already exist. The recovery plan authenticates the Objective prose plus their issue identities,
+  six-section core, order, and native dependency topology before any model call; compilation may
+  only enrich those exact items, and projection updates their bodies without creating issues or
+  edges.
+  Interrupted compiler dispatch remains unknown usage and blocks replay, while partial body and
+  graph/projection writes resume idempotently under the same successor authority.
+  ([#274](https://github.com/clockgrove/factory/issues/274))
 - Pull-request branch-policy preflight now understands GitHub's current required-reviewer,
   dismissal-restriction, and unattributed-Copilot-approval fields. Optional review metadata and
   conversation resolution no longer invent a human-approval requirement when zero approvals are

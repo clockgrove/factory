@@ -2,16 +2,27 @@ import { createHash } from "node:crypto";
 import { PlatformUnavailableError } from "../platform.js";
 import type { FactoryReadSnapshot } from "../application/status.js";
 import { attemptRef, readAttemptReservationRef } from "../control/attempts.js";
+import { assertAuthenticatedCompilationCheckpoint } from "../control/compilation-checkpoint.js";
 import { observeRecoverySiblingRefresh, recoverySiblingRefreshBinding } from "./sibling-refresh.js";
 import {
   assertAuthenticatedGraphProjection,
   assertSnapshotMatchesCompiledGraph,
 } from "../control/graph-evidence.js";
-import { loadCompiledGraph, loadCompiledGraphProjection } from "../control/graphs.js";
+import {
+  loadCompiledGraph,
+  loadCompiledGraphProjection,
+  loadStagedCompiledGraphProjection,
+} from "../control/graphs.js";
 import { decodeEventTrailer, deduplicateFactoryEvents } from "../control/receipts.js";
 import { loadReviewCheckpoint, type ReviewIdentity } from "../control/reviews.js";
 import { type FactoryEvent, parseFactoryEvent } from "../protocol/events.js";
 import { policyDigest } from "../protocol/policy.js";
+import { compilerEvalDigest } from "../evaluation/compiler-eval.js";
+import {
+  assertCompiledObjectiveAdoptsLegacyConstraints,
+  legacyGraphConstraintsDigest,
+  parseLegacyGraphConstraintsSnapshot,
+} from "../graph.js";
 import { selectEquivalentPublicationRecord } from "../publication/recorded-publication.js";
 import { bindValidationToPublishedHead } from "../validation/plan.js";
 import type { RecoveryReadStore } from "./assessment.js";
@@ -25,7 +36,10 @@ import { verifyPriorRecoveryDelivery } from "./outcomes.js";
 import { recoveryAdoptionEvents } from "./transaction.js";
 import {
   loadRecoveryPlan,
+  isRecoveryAdoptionGraph,
+  isRecoveryPersistedGraph,
   parseRecoveryPlan,
+  recoveryGraphIdentity,
   recoveryPlanBindingDigest,
   recoveryPlanDigest,
   recoveryPlanRef,
@@ -276,6 +290,28 @@ export async function resolveRecoveryEvidence(input: {
           controllingStart.predecessorRunId === plan.predecessor.runId &&
           controllingStart.policyDigest === plan.policyDigest,
       );
+    const planGraph = plan.graph;
+    const requireBootstrapObjectiveInput = () => {
+      requireEvidence(
+        isRecoveryAdoptionGraph(planGraph) &&
+          compilerEvalDigest({
+            number: snapshot.number,
+            title: snapshot.title,
+            body: snapshot.body,
+          }) === planGraph.objectiveInputDigest,
+      );
+    };
+    const requireBootstrapItemState = () =>
+      requireEvidence(
+        snapshot.workItems.every(
+          (item) =>
+            item.closed === false &&
+            Array.isArray(item.assignees) &&
+            item.assignees.length === 0 &&
+            item.copilotAssignments!.length === 0 &&
+            item.linkedPullRequests!.length === 0,
+        ),
+      );
     const graphCache = new Map<string, Promise<void>>();
     const verifyGraph = (runId: string): Promise<void> => {
       const previous = graphCache.get(runId);
@@ -283,6 +319,30 @@ export async function resolveRecoveryEvidence(input: {
       const promise = (async () => {
         const graph = await loadCompiledGraph(store, plan.objective, runId);
         if (!graph) {
+          if (isRecoveryAdoptionGraph(planGraph) && runId === planGraph.sourceRunId) {
+            requireBootstrapObjectiveInput();
+            requireBootstrapItemState();
+            const current = parseLegacyGraphConstraintsSnapshot({
+              objectiveTitle: snapshot.title,
+              workItems: snapshot.workItems.map((item) => {
+                requireEvidence(
+                  item.id && item.title && item.body !== undefined && item.blockedBy !== undefined,
+                );
+                return {
+                  id: item.id!,
+                  number: item.number,
+                  title: item.title!,
+                  body: item.body ?? "",
+                  blockedByNumbers: item.blockedBy!.map((dependency) => dependency.number),
+                };
+              }),
+            });
+            requireEvidence(
+              legacyGraphConstraintsDigest(current) === planGraph.constraintDigest &&
+                !events.some((event) => event.runId === runId && event.kind === "graph"),
+            );
+            return;
+          }
           const start = starts.get(runId);
           requireEvidence(start?.recoveryPlanDigest);
           const adopted = await loadRecoveryPlan(store, plan.objective, start!.recoveryPlanDigest!);
@@ -290,8 +350,7 @@ export async function resolveRecoveryEvidence(input: {
             adopted &&
               adopted.plan.successorRunId === runId &&
               adopted.plan.graph.sourceRunId !== runId &&
-              adopted.plan.graph.digest === plan.graph.digest &&
-              adopted.plan.graph.projection.bindingDigest === plan.graph.projection.bindingDigest &&
+              recoveryGraphIdentity(adopted.plan.graph) === recoveryGraphIdentity(planGraph) &&
               adopted.plan.history.length < plan.history.length,
           );
           const claim = await loadRecoveryClaim(
@@ -323,13 +382,70 @@ export async function resolveRecoveryEvidence(input: {
           await verifyGraph(adopted!.plan.graph.sourceRunId);
           return;
         }
-        requireEvidence(
-          graph && graph.graphDigest === plan.graph.digest && graph.graphSize === plan.items.length,
-        );
+        requireEvidence(graph.graphSize === plan.items.length);
+        if (isRecoveryPersistedGraph(planGraph))
+          requireEvidence(graph.graphDigest === planGraph.digest);
+        else assertCompiledObjectiveAdoptsLegacyConstraints(graph.objective, planGraph.constraints);
         if (!graph) throw new Error("missing graph");
+        if (isRecoveryAdoptionGraph(planGraph) && runId === planGraph.sourceRunId) {
+          const sourceStart = starts.get(runId);
+          requireEvidence(sourceStart);
+          if (!sourceStart) throw new Error("missing adoption graph source start");
+          const sourceBaseSha = sourceStart.baseSha;
+          requireEvidence(sourceBaseSha);
+          if (!sourceBaseSha) throw new Error("missing adoption graph source base");
+          const graphCommit = await store.readCommit(graph.commitOid);
+          requireEvidence(
+            graphCommit.oid === graph.commitOid &&
+              graphCommit.parentOids.length === 1 &&
+              graphCommit.parentOids[0] === sourceBaseSha &&
+              graph.objective.workItems.every((item) => item.baseSha === sourceBaseSha),
+          );
+          assertAuthenticatedCompilationCheckpoint({
+            graph,
+            graphCommit,
+            events,
+            objective: plan.objective,
+            runId,
+            expectedBaseSha: sourceBaseSha,
+            expectedInvocationId: `compile-${sourceBaseSha}`,
+            expectedPolicyDigest: sourceStart.policyDigest,
+          });
+        }
         const compiled = events.filter(
           (event) => event.runId === runId && event.event === "GraphCompiled",
         );
+        const projection = await loadCompiledGraphProjection(store, plan.objective, runId, graph);
+        if (
+          isRecoveryAdoptionGraph(planGraph) &&
+          runId === planGraph.sourceRunId &&
+          compiled.length === 0
+        ) {
+          requireBootstrapObjectiveInput();
+          requireBootstrapItemState();
+          const current = parseLegacyGraphConstraintsSnapshot({
+            objectiveTitle: snapshot.title,
+            workItems: snapshot.workItems.map((item) => {
+              requireEvidence(
+                item.id && item.title && item.body !== undefined && item.blockedBy !== undefined,
+              );
+              return {
+                id: item.id!,
+                number: item.number,
+                title: item.title!,
+                body: item.body ?? "",
+                blockedByNumbers: item.blockedBy!.map((dependency) => dependency.number),
+              };
+            }),
+          });
+          requireEvidence(
+            graph.ref === planGraph.ref &&
+              projection === null &&
+              legacyGraphConstraintsDigest(current) === planGraph.constraintDigest &&
+              !events.some((event) => event.runId === runId && event.kind === "graph"),
+          );
+          return;
+        }
         requireEvidence(
           compiled.length === 1 &&
             compiled[0]!.kind === "graph" &&
@@ -339,7 +455,65 @@ export async function resolveRecoveryEvidence(input: {
             compiled[0]!.graphDigest === graph.graphDigest &&
             compiled[0]!.graphSize === graph.graphSize,
         );
-        const projection = await loadCompiledGraphProjection(store, plan.objective, runId, graph);
+        if (!projection && isRecoveryAdoptionGraph(planGraph) && runId === planGraph.sourceRunId) {
+          requireBootstrapItemState();
+          const projected = events.filter(
+            (event): event is Extract<FactoryEvent, { kind: "graph"; event: "GraphProjected" }> =>
+              event.kind === "graph" && event.runId === runId && event.event === "GraphProjected",
+          );
+          if (projected.length === 0) {
+            const current = parseLegacyGraphConstraintsSnapshot({
+              objectiveTitle: snapshot.title,
+              workItems: snapshot.workItems.map((item) => {
+                requireEvidence(
+                  item.id && item.title && item.body !== undefined && item.blockedBy !== undefined,
+                );
+                return {
+                  id: item.id!,
+                  number: item.number,
+                  title: item.title!,
+                  body: item.body ?? "",
+                  blockedByNumbers: item.blockedBy!.map((dependency) => dependency.number),
+                };
+              }),
+            });
+            requireEvidence(legacyGraphConstraintsDigest(current) === planGraph.constraintDigest);
+            return;
+          }
+          requireEvidence(projected.length === 1 && projected[0]!.sequence > compiled[0]!.sequence);
+          const staged = await loadStagedCompiledGraphProjection(
+            store,
+            plan.objective,
+            runId,
+            graph,
+            projected[0]!.projectionBlobSha,
+          );
+          requireEvidence(staged.ref === planGraph.projection.ref);
+          assertAuthenticatedGraphProjection(events, plan.objective, runId, staged);
+          requireEvidence(
+            recoveryPlanBindingDigest(
+              staged.bindings.map((binding) => ({
+                compilerId: binding.compilerId,
+                issueNodeId: binding.issueNodeId,
+                workItem: binding.issueNumber,
+              })),
+            ) === planGraph.projection.bindingDigest,
+          );
+          assertSnapshotMatchesCompiledGraph(
+            graph.objective,
+            {
+              workItems: snapshot.workItems.map((item) => ({
+                id: item.id!,
+                number: item.number,
+                title: item.title!,
+                body: item.body ?? null,
+                blockedBy: item.blockedBy!,
+              })),
+            },
+            staged.bindings,
+          );
+          return;
+        }
         requireEvidence(projection);
         if (!projection) throw new Error("missing projection");
         assertAuthenticatedGraphProjection(events, plan.objective, runId, projection);
@@ -350,7 +524,7 @@ export async function resolveRecoveryEvidence(input: {
               issueNodeId: binding.issueNodeId,
               workItem: binding.issueNumber,
             })),
-          ) === plan.graph.projection.bindingDigest,
+          ) === planGraph.projection.bindingDigest,
         );
         assertSnapshotMatchesCompiledGraph(
           graph.objective,
@@ -370,20 +544,23 @@ export async function resolveRecoveryEvidence(input: {
           },
           projection.bindings,
         );
-        if (runId === plan.graph.sourceRunId)
+        if (runId === planGraph.sourceRunId) {
           requireEvidence(
-            graph.ref === plan.graph.ref &&
-              graph.commitOid === plan.graph.commitOid &&
-              graph.blobOid === plan.graph.blobOid &&
-              projection.ref === plan.graph.projection.ref &&
-              projection.commitOid === plan.graph.projection.commitOid &&
-              projection.blobOid === plan.graph.projection.blobOid,
+            graph.ref === planGraph.ref && projection.ref === planGraph.projection.ref,
           );
+          if (isRecoveryPersistedGraph(planGraph))
+            requireEvidence(
+              graph.commitOid === planGraph.commitOid &&
+                graph.blobOid === planGraph.blobOid &&
+                projection.commitOid === planGraph.projection.commitOid &&
+                projection.blobOid === planGraph.projection.blobOid,
+            );
+        }
       })();
       graphCache.set(runId, promise);
       return promise;
     };
-    await verifyGraph(plan.graph.sourceRunId);
+    await verifyGraph(planGraph.sourceRunId);
     const facts = await read("facts", () => input.store.getRepositoryFacts());
     requireEvidence(
       facts.fullName.toLowerCase() === plan.repository.toLowerCase() &&

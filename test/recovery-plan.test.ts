@@ -9,7 +9,9 @@ import {
   type CompiledGraphStore,
 } from "../src/control/graphs.js";
 import type { GitCommitObject, LeaseState } from "../src/control/lease.js";
+import { legacyGraphConstraintsDigest, parseLegacyGraphConstraints } from "../src/graph.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
+import { compilerEvalDigest } from "../src/evaluation/compiler-eval.js";
 import {
   loadRecoveryPlan,
   MAX_RECOVERY_PLAN_BYTES,
@@ -159,6 +161,47 @@ function publicationProposal(): RecoveryPlan {
   return plan;
 }
 
+function adoptionProposal(): RecoveryPlan {
+  const plan = proposal();
+  plan.items[0]!.compilerId = "adopted-8";
+  const constraints = parseLegacyGraphConstraints({
+    objectiveTitle: "Legacy Objective",
+    workItems: [
+      {
+        id: "I_8",
+        number: 8,
+        title: "Legacy item",
+        body: [
+          "## Goal\n\nPreserve the reviewed goal.",
+          "## Acceptance\n\n- Existing behavior passes",
+          "## Scope\n\n- src/work.ts",
+          "## Preconditions\n\n",
+          "## Out of scope\n\n",
+          "## Conventions\n\n",
+        ].join("\n\n"),
+        blockedByNumbers: [],
+      },
+    ],
+  });
+  plan.graph = {
+    mode: "adopt-existing",
+    sourceRunId: plan.successorRunId,
+    ref: compiledGraphRef(7, plan.successorRunId),
+    objectiveInputDigest: compilerEvalDigest({
+      number: 7,
+      title: "Legacy Objective",
+      body: undefined,
+    }),
+    constraintDigest: legacyGraphConstraintsDigest(constraints),
+    constraints,
+    projection: {
+      ref: compiledGraphProjectionRef(7, plan.successorRunId),
+      bindingDigest: recoveryPlanBindingDigest(plan.items),
+    },
+  };
+  return plan;
+}
+
 class Store implements CompiledGraphStore {
   refs = new Map<string, string>();
   commits = new Map<string, GitCommitObject>();
@@ -267,6 +310,21 @@ function lease(plan: RecoveryPlan): LeaseState {
 }
 
 describe("immutable recovery proposal", () => {
+  it("binds a graph bootstrap to the exact legacy issue core and successor", () => {
+    const plan = adoptionProposal();
+    expect(parseRecoveryPlan(plan)).toEqual(plan);
+    const changedCore = structuredClone(plan);
+    if ("mode" in changedCore.graph)
+      changedCore.graph.constraints.workItems[0]!.goal = "Changed after acknowledgement";
+    expect(() => parseRecoveryPlan(changedCore)).toThrow(/constraint digest/i);
+    const changedIdentity = structuredClone(plan);
+    changedIdentity.items[0]!.issueNodeId = "I_other";
+    expect(() => parseRecoveryPlan(changedIdentity)).toThrow(/binding|constraints/i);
+    const changedSource = structuredClone(plan);
+    changedSource.graph.sourceRunId = "foreign";
+    expect(() => parseRecoveryPlan(changedSource)).toThrow(/graph source/i);
+  });
+
   it("binds a prior delivered tree without rewriting the original validated artifact", () => {
     const plan = publicationProposal();
     const item = plan.items[0]!;

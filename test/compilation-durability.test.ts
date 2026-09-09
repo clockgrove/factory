@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import { ManagementOutputError } from "../src/management/backend.js";
 
 import { deriveBudgetUsage, remainingBudget } from "../src/control/budget.js";
+import { assertAuthenticatedCompilationCheckpoint } from "../src/control/compilation-checkpoint.js";
 import { DEFAULT_RUN_POLICY } from "../src/protocol/policy.js";
 import type { CompiledGraphRecord } from "../src/control/graphs.js";
+import type { GitCommitObject } from "../src/control/lease.js";
 import type { FactoryEvent } from "../src/protocol/events.js";
 import {
   assertManagementInvocationNotFailed,
@@ -13,6 +15,7 @@ import {
 import type { CompilationCheckpoint, CompilationResult } from "../src/management/backend.js";
 
 const graphDigest = "d".repeat(64);
+const policy = "e".repeat(64);
 const objective = {
   title: "Durable compile",
   workItems: [
@@ -81,7 +84,112 @@ function budgetEvent(sequence: number): Extract<FactoryEvent, { kind: "budget" }
   };
 }
 
+function compilationCheckpointEvents(): FactoryEvent[] {
+  const invocationId = `compile-${"a".repeat(40)}`;
+  return [
+    {
+      ...budgetEvent(1),
+      event: "BudgetReserved",
+      amount: 0,
+      usageId: `invocation-${invocationId}`,
+      modelInvocationId: invocationId,
+      directorEpoch: 4,
+      policyDigest: policy,
+    },
+    {
+      ...budgetEvent(2),
+      modelInvocationId: invocationId,
+      directorEpoch: 4,
+      policyDigest: policy,
+      reportedModelUsage: { inputTokens: 11, outputTokens: 19 },
+    },
+  ];
+}
+
+function graphCommit(parent = "a".repeat(40)): GitCommitObject {
+  return {
+    oid: "b".repeat(40),
+    treeOid: "f".repeat(40),
+    parentOids: [parent],
+    message: "compiled graph",
+    serverTime: new Date("2026-09-04T00:00:00.000Z"),
+  };
+}
+
 describe("durable compilation transaction", () => {
+  it("authenticates only the exact graph, invocation, usage, policy, and base checkpoint", () => {
+    const graph = record();
+    const events = compilationCheckpointEvents();
+    const args = {
+      graph,
+      graphCommit: graphCommit(),
+      events,
+      objective: 1,
+      runId: "run-test",
+      expectedBaseSha: "a".repeat(40),
+      expectedInvocationId: `compile-${"a".repeat(40)}`,
+      expectedPolicyDigest: policy,
+    };
+    expect(() => assertAuthenticatedCompilationCheckpoint(args)).not.toThrow();
+    expect(() =>
+      assertAuthenticatedCompilationCheckpoint({
+        ...args,
+        graphCommit: graphCommit("9".repeat(40)),
+      }),
+    ).toThrow(/exact compilation checkpoint/);
+    const { compilation: _compilation, ...withoutCompilation } = graph;
+    expect(() =>
+      assertAuthenticatedCompilationCheckpoint({
+        ...args,
+        graph: withoutCompilation,
+      }),
+    ).toThrow(/exact compilation checkpoint/);
+    expect(() =>
+      assertAuthenticatedCompilationCheckpoint({
+        ...args,
+        events: events.map((event) =>
+          event.event === "BudgetReconciled" ? { ...event, amount: 31 } : event,
+        ),
+      }),
+    ).toThrow(/actual-usage checkpoint/);
+    expect(() =>
+      assertAuthenticatedCompilationCheckpoint({
+        ...args,
+        events: events.map((event) => ({ ...event, policyDigest: "8".repeat(64) })),
+      }),
+    ).toThrow(/actual-usage checkpoint/);
+    expect(() =>
+      assertAuthenticatedCompilationCheckpoint({
+        ...args,
+        events: events.map((event) =>
+          event.event === "BudgetReserved" ? { ...event, amount: 1 } : event,
+        ),
+      }),
+    ).toThrow(/actual-usage checkpoint/);
+    expect(() =>
+      assertAuthenticatedCompilationCheckpoint({
+        ...args,
+        events: events.map((event) =>
+          event.event === "BudgetReserved" ? { ...event, usageId: "unrelated" } : event,
+        ),
+      }),
+    ).toThrow(/actual-usage checkpoint/);
+  });
+
+  it("refuses an ambiguous compiler checkpoint until exact actual usage is durable", () => {
+    const args = {
+      graph: record(),
+      graphCommit: graphCommit(),
+      events: compilationCheckpointEvents().slice(0, 1),
+      objective: 1,
+      runId: "run-test",
+      expectedBaseSha: "a".repeat(40),
+      expectedInvocationId: `compile-${"a".repeat(40)}`,
+      expectedPolicyDigest: policy,
+    };
+    expect(() => assertAuthenticatedCompilationCheckpoint(args)).toThrow(/actual-usage checkpoint/);
+  });
+
   it("replays failed usage once and refuses the same paid invocation across restart", () => {
     const invocationId = `compile-${"a".repeat(40)}`;
     const receipt = { ...budgetEvent(1), usageId: `failed-${invocationId}` };

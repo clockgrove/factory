@@ -1,6 +1,5 @@
 import { attemptRef, readAttemptReservationRef } from "../control/attempts.js";
 import { PlatformUnavailableError } from "../platform.js";
-import { loadCompiledGraph, loadCompiledGraphProjection } from "../control/graphs.js";
 import { decodeEventTrailer } from "../control/receipts.js";
 import { loadReviewCheckpoint } from "../control/reviews.js";
 import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
@@ -14,6 +13,7 @@ import type { RecoveryReadStore } from "./assessment.js";
 import { loadRecoveryClaim, type RecoveryClaimRecord } from "./claims.js";
 import {
   loadRecoveryPlan,
+  loadRecoveryPlanGraph,
   recoveryPlanDigest,
   recoveryPlanBindingDigest,
   type RecoveryPlanRecord,
@@ -311,30 +311,17 @@ export async function loadRecoverySourceArtifact(
           event.sequence < accepted[0]!.sequence,
       ),
   );
-  const graph = await loadCompiledGraph(input.store, plan.objective, plan.graph.sourceRunId);
+  const resolvedGraph = await loadRecoveryPlanGraph(input.store, plan, events);
+  requireEvidence(resolvedGraph);
+  const { graph, projection } = resolvedGraph;
   requireEvidence(
-    graph &&
-      graph.commitOid === plan.graph.commitOid &&
-      graph.blobOid === plan.graph.blobOid &&
-      graph.graphDigest === plan.graph.digest,
-  );
-  const projection = await loadCompiledGraphProjection(
-    input.store,
-    plan.objective,
-    plan.graph.sourceRunId,
-    graph,
-  );
-  requireEvidence(
-    projection &&
-      projection.commitOid === plan.graph.projection.commitOid &&
-      projection.blobOid === plan.graph.projection.blobOid &&
-      recoveryPlanBindingDigest(
-        projection.bindings.map((binding) => ({
-          compilerId: binding.compilerId,
-          issueNodeId: binding.issueNodeId,
-          workItem: binding.issueNumber,
-        })),
-      ) === plan.graph.projection.bindingDigest,
+    recoveryPlanBindingDigest(
+      projection.bindings.map((binding) => ({
+        compilerId: binding.compilerId,
+        issueNodeId: binding.issueNodeId,
+        workItem: binding.issueNumber,
+      })),
+    ) === plan.graph.projection.bindingDigest,
   );
   let delivery: RecoverySourceArtifactProof["delivery"] = {
     unitId: `delivery/${item.compilerId}`,

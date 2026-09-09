@@ -4,7 +4,6 @@ import {
   assertAuthenticatedGraphProjection,
   assertSnapshotMatchesCompiledGraph,
 } from "../control/graph-evidence.js";
-import { loadCompiledGraph, loadCompiledGraphProjection } from "../control/graphs.js";
 import { deduplicateFactoryEvents } from "../control/receipts.js";
 import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
 import { planDelivery } from "../publication/delivery.js";
@@ -12,7 +11,7 @@ import type { RecoveryReadStore } from "./assessment.js";
 import { verifyRecoveryChain } from "./chain.js";
 import { loadRecoveryClaim, type RecoveryClaimRecord } from "./claims.js";
 import { recoveryClaimRef, recoveryEventDigest } from "./identity.js";
-import { loadRecoveryPlan, type RecoveryPlanRecord } from "./plan.js";
+import { loadRecoveryPlan, loadRecoveryPlanGraph, type RecoveryPlanRecord } from "./plan.js";
 import { verifyRecoveryMergedSource, type RecoveryMergedSourceProof } from "./outcomes.js";
 import { recoveryAdoptionEvents } from "./transaction.js";
 
@@ -226,13 +225,9 @@ export async function loadRecoverySourceReconciliation(input: {
             plan.items.some((item) => item.workItem === event.workItem)),
       ),
   );
-  const graph = await loadCompiledGraph(store, input.objective, plan.graph.sourceRunId);
-  requireReconciliation(
-    graph &&
-      graph.commitOid === plan.graph.commitOid &&
-      graph.blobOid === plan.graph.blobOid &&
-      graph.graphDigest === plan.graph.digest,
-  );
+  const resolvedGraph = await loadRecoveryPlanGraph(store, plan, events);
+  requireReconciliation(resolvedGraph);
+  const { graph, projection } = resolvedGraph;
   const compiled = events.filter(
     (event) => event.event === "GraphCompiled" && event.runId === plan.graph.sourceRunId,
   );
@@ -244,17 +239,7 @@ export async function loadRecoverySourceReconciliation(input: {
       compiled[0]!.graphDigest === graph.graphDigest &&
       compiled[0]!.graphSize === plan.items.length,
   );
-  const projection = await loadCompiledGraphProjection(
-    store,
-    input.objective,
-    plan.graph.sourceRunId,
-    graph,
-  );
-  requireReconciliation(
-    projection &&
-      projection.commitOid === plan.graph.projection.commitOid &&
-      projection.blobOid === plan.graph.projection.blobOid,
-  );
+  requireReconciliation(projection.ref === plan.graph.projection.ref);
   requireReconciliation(
     projection.bindings.length === plan.items.length &&
       projection.bindings.every((binding) =>

@@ -6,13 +6,27 @@ import { attemptRef } from "../control/attempts.js";
 import {
   compiledGraphRef,
   compiledGraphProjectionRef,
+  loadCompiledGraph,
+  loadCompiledGraphProjection,
   type CompiledGraphReadStore,
+  type CompiledGraphRecord,
+  type CompiledGraphProjectionRecord,
   type CompiledGraphStore,
 } from "../control/graphs.js";
 import type { LeaseManager, LeaseState } from "../control/lease.js";
 import { assertNoSecretMaterial } from "../protocol/limits.js";
 import { RunPolicySchema, parseRunPolicy, policyDigest } from "../protocol/policy.js";
 import { publicationBranch } from "../publication/publisher.js";
+import {
+  assertCompiledObjectiveAdoptsLegacyConstraints,
+  legacyGraphConstraintsDigest,
+  parseLegacyGraphConstraints,
+  renderLegacyWorkItemCore,
+  type LegacyGraphConstraints,
+} from "../graph.js";
+import { assertAuthenticatedGraphProjection } from "../control/graph-evidence.js";
+import type { FactoryEvent } from "../protocol/events.js";
+import { deduplicateFactoryEvents } from "../control/receipts.js";
 
 export const RECOVERY_PLAN_PROTOCOL = "clockgrove.factory/recovery-plan-v1" as const;
 export const MAX_RECOVERY_PLAN_BYTES = 256 * 1024;
@@ -190,6 +204,53 @@ const itemSchema = z
   .strict();
 export type RecoveryPlanItem = z.infer<typeof itemSchema>;
 
+const persistedGraphSchema = z
+  .object({
+    sourceRunId: identifier,
+    ref: reference,
+    commitOid: sha,
+    blobOid: sha,
+    digest,
+    projection: z
+      .object({ ref: reference, commitOid: sha, blobOid: sha, bindingDigest: digest })
+      .strict(),
+  })
+  .strict();
+
+const legacyConstraintItemSchema = z
+  .object({
+    compilerId: identifier,
+    issueNodeId: identifier,
+    issueNumber: positive,
+    title: z.string().min(1).max(256),
+    goal: z.string().min(1).max(4_000),
+    acceptance: z.array(z.string().min(1).max(2_000)).min(1).max(64),
+    scope: z.array(z.string().min(1).max(1_000)).min(1).max(64),
+    preconditions: z.array(z.string().min(1).max(2_000)).max(64),
+    outOfScope: z.array(z.string().min(1).max(2_000)).max(64),
+    conventions: z.array(z.string().min(1).max(2_000)).max(64),
+    blockedByNumbers: z.array(positive).max(50),
+  })
+  .strict();
+const legacyConstraintsSchema = z
+  .object({
+    protocol: z.literal("clockgrove.factory/legacy-graph-constraints-v1"),
+    objectiveTitle: z.string().min(1).max(256),
+    workItems: z.array(legacyConstraintItemSchema).min(1).max(100),
+  })
+  .strict();
+const adoptionGraphSchema = z
+  .object({
+    mode: z.literal("adopt-existing"),
+    sourceRunId: identifier,
+    ref: reference,
+    objectiveInputDigest: digest,
+    constraintDigest: digest,
+    constraints: legacyConstraintsSchema,
+    projection: z.object({ ref: reference, bindingDigest: digest }).strict(),
+  })
+  .strict();
+
 const planSchema = z
   .object({
     protocol: z.literal(RECOVERY_PLAN_PROTOCOL),
@@ -207,18 +268,7 @@ const planSchema = z
     priorPlanDigest: digest.nullable(),
     expectedBaseSha: sha,
     baseBranch: branch,
-    graph: z
-      .object({
-        sourceRunId: identifier,
-        ref: reference,
-        commitOid: sha,
-        blobOid: sha,
-        digest,
-        projection: z
-          .object({ ref: reference, commitOid: sha, blobOid: sha, bindingDigest: digest })
-          .strict(),
-      })
-      .strict(),
+    graph: z.union([persistedGraphSchema, adoptionGraphSchema]),
     acceptedPolicy: RunPolicySchema.strict(),
     policyDigest: digest,
     allowance: z
@@ -231,6 +281,125 @@ const planSchema = z
 
 /** Immutable proposal only. Neither this document nor its ref authorizes execution. */
 export type RecoveryPlan = z.infer<typeof planSchema>;
+export type RecoveryPlanGraph = RecoveryPlan["graph"];
+export type RecoveryAdoptionGraph = z.infer<typeof adoptionGraphSchema>;
+export function isRecoveryAdoptionGraph(graph: RecoveryPlanGraph): graph is RecoveryAdoptionGraph {
+  return "mode" in graph && graph.mode === "adopt-existing";
+}
+export function isRecoveryPersistedGraph(
+  graph: RecoveryPlanGraph,
+): graph is z.infer<typeof persistedGraphSchema> {
+  return !isRecoveryAdoptionGraph(graph);
+}
+
+export function recoveryGraphIdentity(graph: RecoveryPlanGraph): string {
+  return hash(
+    isRecoveryAdoptionGraph(graph)
+      ? {
+          mode: graph.mode,
+          sourceRunId: graph.sourceRunId,
+          objectiveInputDigest: graph.objectiveInputDigest,
+          constraintDigest: graph.constraintDigest,
+          bindingDigest: graph.projection.bindingDigest,
+        }
+      : {
+          mode: "persisted",
+          sourceRunId: graph.sourceRunId,
+          digest: graph.digest,
+          bindingDigest: graph.projection.bindingDigest,
+        },
+  );
+}
+
+/**
+ * Resolve the immutable graph authorized by a recovery plan. A normal plan
+ * binds exact Git objects. An adoption plan instead binds the complete legacy
+ * core and GitHub identities before the model is called; once the successor
+ * has compiled the enrichment, its own authenticated graph/projection receipts
+ * make those newly persisted records immutable.
+ */
+export async function loadRecoveryPlanGraph(
+  store: CompiledGraphReadStore,
+  plan: RecoveryPlan,
+  events: readonly FactoryEvent[],
+): Promise<{
+  graph: CompiledGraphRecord;
+  projection: CompiledGraphProjectionRecord;
+} | null> {
+  const uniqueEvents = deduplicateFactoryEvents([...events]);
+  const graph = await loadCompiledGraph(store, plan.objective, plan.graph.sourceRunId);
+  if (!graph) return null;
+  const projection = await loadCompiledGraphProjection(
+    store,
+    plan.objective,
+    plan.graph.sourceRunId,
+    graph,
+  );
+  if (!projection) return null;
+  if (
+    graph.ref !== plan.graph.ref ||
+    projection.ref !== plan.graph.projection.ref ||
+    projection.bindings.length !== plan.items.length ||
+    recoveryPlanBindingDigest(
+      projection.bindings.map((binding) => ({
+        compilerId: binding.compilerId,
+        issueNodeId: binding.issueNodeId,
+        workItem: binding.issueNumber,
+      })),
+    ) !== plan.graph.projection.bindingDigest
+  )
+    return null;
+  if (isRecoveryPersistedGraph(plan.graph)) {
+    if (
+      graph.commitOid !== plan.graph.commitOid ||
+      graph.blobOid !== plan.graph.blobOid ||
+      graph.graphDigest !== plan.graph.digest ||
+      projection.commitOid !== plan.graph.projection.commitOid ||
+      projection.blobOid !== plan.graph.projection.blobOid
+    )
+      return null;
+  } else {
+    try {
+      assertCompiledObjectiveAdoptsLegacyConstraints(graph.objective, plan.graph.constraints);
+    } catch {
+      return null;
+    }
+  }
+  const compiled = uniqueEvents.filter(
+    (event) =>
+      event.kind === "graph" &&
+      event.event === "GraphCompiled" &&
+      event.objective === plan.objective &&
+      event.runId === plan.graph.sourceRunId,
+  );
+  if (
+    compiled.length !== 1 ||
+    compiled[0]!.graphRef !== graph.ref ||
+    compiled[0]!.graphBlobSha !== graph.blobOid ||
+    compiled[0]!.graphDigest !== graph.graphDigest ||
+    compiled[0]!.graphSize !== graph.graphSize
+  )
+    return null;
+  const projected = uniqueEvents.filter(
+    (event) =>
+      event.kind === "graph" &&
+      event.event === "GraphProjected" &&
+      event.objective === plan.objective &&
+      event.runId === plan.graph.sourceRunId,
+  );
+  if (projected.length !== 1 || projected[0]!.sequence <= compiled[0]!.sequence) return null;
+  try {
+    assertAuthenticatedGraphProjection(
+      uniqueEvents,
+      plan.objective,
+      plan.graph.sourceRunId,
+      projection,
+    );
+  } catch {
+    return null;
+  }
+  return { graph, projection };
+}
 export interface RecoveryPlanRecord {
   ref: string;
   commitOid: string;
@@ -301,7 +470,11 @@ export function parseRecoveryPlan(input: unknown): RecoveryPlan {
     ),
     "predecessor must match final source run",
   );
-  requirePlan(runIds.has(plan.graph.sourceRunId), "graph source is outside history");
+  requirePlan(
+    runIds.has(plan.graph.sourceRunId) ||
+      (isRecoveryAdoptionGraph(plan.graph) && plan.graph.sourceRunId === plan.successorRunId),
+    "graph source is outside history or the bound adoption successor",
+  );
   requirePlan(
     plan.graph.ref === compiledGraphRef(plan.objective, plan.graph.sourceRunId),
     "graph reference scope mismatch",
@@ -315,6 +488,49 @@ export function parseRecoveryPlan(input: unknown): RecoveryPlan {
     plan.graph.projection.bindingDigest === recoveryPlanBindingDigest(plan.items),
     "projection binding digest mismatch",
   );
+  if (isRecoveryAdoptionGraph(plan.graph)) {
+    const constraints = parseLegacyGraphConstraints({
+      objectiveTitle: plan.graph.constraints.objectiveTitle,
+      workItems: plan.graph.constraints.workItems.map((item) => ({
+        id: item.issueNodeId,
+        number: item.issueNumber,
+        title: item.title,
+        body: renderLegacyWorkItemCore(item),
+        blockedByNumbers: item.blockedByNumbers,
+      })),
+    });
+    requirePlan(
+      legacyGraphConstraintsDigest(constraints) === plan.graph.constraintDigest,
+      "legacy graph constraint digest mismatch",
+    );
+    requirePlan(
+      canonical(constraints) === canonical(plan.graph.constraints as LegacyGraphConstraints),
+      "legacy graph constraints are not canonical",
+    );
+    requirePlan(
+      constraints.workItems.length === plan.items.length &&
+        constraints.workItems.every((constraint, index) => {
+          const item = plan.items[index];
+          return (
+            item?.workItem === constraint.issueNumber &&
+            item.issueNodeId === constraint.issueNodeId &&
+            item.compilerId === constraint.compilerId
+          );
+        }),
+      "legacy graph plan items differ from their authenticated constraints",
+    );
+    if (plan.graph.sourceRunId === plan.successorRunId)
+      requirePlan(
+        plan.items.every(
+          (item) =>
+            item.action === "execute" &&
+            item.source === null &&
+            item.observedPullRequest === null &&
+            item.resources.state === "not-required",
+        ),
+        "graph bootstrap cannot adopt historical execution effects",
+      );
+  }
   requirePlan(
     new Set(plan.items.map((item) => item.workItem)).size === plan.items.length &&
       new Set(plan.items.map((item) => item.issueNodeId)).size === plan.items.length &&

@@ -9,7 +9,12 @@ import {
   assertAuthenticatedGraphProjection,
   assertSnapshotMatchesCompiledGraph,
 } from "../control/graph-evidence.js";
-import { loadCompiledGraph, loadCompiledGraphProjection } from "../control/graphs.js";
+import {
+  compiledGraphProjectionRef,
+  compiledGraphRef,
+  loadCompiledGraph,
+  loadCompiledGraphProjection,
+} from "../control/graphs.js";
 import { decodeEventTrailer, deduplicateFactoryEvents } from "../control/receipts.js";
 import { loadReviewCheckpoint, type ReviewIdentity } from "../control/reviews.js";
 import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
@@ -18,6 +23,12 @@ import { planDelivery } from "../publication/delivery.js";
 import { branchRuleBlockers, missingRequiredChecks } from "../publication/branch-policy.js";
 import { publicationBranch } from "../publication/publisher.js";
 import { bindValidationToPublishedHead } from "../validation/plan.js";
+import { compilerEvalDigest } from "../evaluation/compiler-eval.js";
+import {
+  legacyGraphConstraintsDigest,
+  parseLegacyGraphConstraints,
+  type LegacyGraphConstraints,
+} from "../graph.js";
 import { assessRecoveryAccounting } from "./accounting.js";
 import type { RecoveryBlocker, RecoveryReadStore } from "./assessment.js";
 import { loadRecoveryClaim, type RecoveryClaimRecord } from "./claims.js";
@@ -39,6 +50,7 @@ import {
 import { verifyRecoveryProposalResources } from "./resources.js";
 import {
   RECOVERY_PLAN_PROTOCOL,
+  isRecoveryAdoptionGraph,
   loadRecoveryPlan,
   parseRecoveryPlan,
   recoveryHistoryDigest,
@@ -381,10 +393,87 @@ export async function buildRecoveryProposal(input: {
       );
       graphs.set(start.runId, { graph, projection });
     }
-    const graphSource = [...graphs.entries()].at(-1);
-    require(graphSource);
-    const [graphRunId, { graph, projection }] = graphSource;
-    require([...graphs.values()].every((value) => value.graph.graphDigest === graph.graphDigest));
+    const priorAdoptionGraph =
+      priorDigest && isRecoveryAdoptionGraph(priorPlans[priorDigest]!.plan.graph)
+        ? priorPlans[priorDigest]!.plan.graph
+        : null;
+    // An adoption plan's authority remains the run that first compiled the
+    // constrained graph. Later successors may copy that graph into their own
+    // refs for ordinary execution, but a further recovery must not silently
+    // move the plan's graph authority to the newest copy.
+    const graphSource = priorAdoptionGraph
+      ? graphs.has(priorAdoptionGraph.sourceRunId)
+        ? ([priorAdoptionGraph.sourceRunId, graphs.get(priorAdoptionGraph.sourceRunId)!] as const)
+        : undefined
+      : [...graphs.entries()].at(-1);
+    let graphRunId: string;
+    let graph: NonNullable<Awaited<ReturnType<typeof loadCompiledGraph>>> | null = null;
+    let projection: NonNullable<Awaited<ReturnType<typeof loadCompiledGraphProjection>>> | null =
+      null;
+    let adoptionConstraints: LegacyGraphConstraints | null = null;
+    if (graphSource) {
+      [graphRunId, { graph, projection }] = graphSource;
+      require(
+        [...graphs.values()].every((value) => value.graph.graphDigest === graph!.graphDigest),
+      );
+    } else {
+      // Narrow bootstrap only: the predecessor stopped specifically because
+      // human-authored Work Items predated an authenticated graph. No worker,
+      // graph, validation, capacity, or publication effect may be re-labelled
+      // as a clean adoption. Historical management usage remains unknown and
+      // is handled by the normal exact acknowledgement protocol below.
+      const predecessorEvents = events.filter((event) => event.runId === predecessorStart.runId);
+      const terminal = predecessorEvents.find(
+        (event) =>
+          event.event === "FactoryRunEscalated" &&
+          hasCurrentWriterAuthority(event, events, snapshot.objectiveAuthority),
+      );
+      require(
+        priorDigest === null &&
+          historicalRuntimes.size === 0 &&
+          terminal?.event === "FactoryRunEscalated" &&
+          terminal.reason === "Objective has Work Items but no authenticated v2 graph receipt" &&
+          !events.some((event) =>
+            ["attempt", "capacity", "validation", "publication", "graph"].includes(event.kind),
+          ) &&
+          !events.some(
+            (event) =>
+              event.kind === "budget" &&
+              (event.phase !== "management" ||
+                event.unit !== "model_tokens" ||
+                event.workItem !== undefined ||
+                event.attempt !== undefined),
+          ) &&
+          snapshot.workItems.every(
+            (item) =>
+              item.closed === false &&
+              Array.isArray(item.assignees) &&
+              item.assignees.length === 0 &&
+              item.copilotAssignments!.length === 0 &&
+              item.linkedPullRequests!.length === 0,
+          ),
+      );
+      adoptionConstraints = parseLegacyGraphConstraints({
+        objectiveTitle: snapshot.title,
+        workItems: snapshot.workItems.map((item) => ({
+          id: item.id!,
+          number: item.number,
+          title: item.title!,
+          body: item.body ?? "",
+          blockedByNumbers: item.blockedBy!.map((dependency) => dependency.number),
+        })),
+      });
+      graphRunId = input.successorRunId;
+    }
+    const bindings = projection
+      ? projection.bindings
+      : adoptionConstraints!.workItems.map((item) => ({
+          compilerId: item.compilerId,
+          issueNodeId: item.issueNodeId,
+          issueNumber: item.issueNumber,
+        }));
+    if (priorAdoptionGraph)
+      require(graph && projection && graphRunId === priorAdoptionGraph.sourceRunId);
 
     stage = "reservation";
     const reservations = new Map<string, { event: Reserved; ref: string; oid: string }>();
@@ -430,7 +519,7 @@ export async function buildRecoveryProposal(input: {
           commit.parentOids.length === 1 &&
           commit.parentOids[0] === reserved.baseSha &&
           commit.treeOid === (await port.readCommit(reserved.baseSha)).treeOid &&
-          projection.bindings.some((binding) => binding.issueNumber === reserved.workItem),
+          bindings.some((binding) => binding.issueNumber === reserved.workItem),
       );
       reservations.set(`${reserved.workItem}:${reserved.attempt}`, {
         event: reserved,
@@ -473,7 +562,7 @@ export async function buildRecoveryProposal(input: {
 
     const items: RecoveryPlanItem[] = [];
     const failedRetries = new Set<number>();
-    for (const binding of projection.bindings) {
+    for (const binding of bindings) {
       currentWorkItem = binding.issueNumber;
       stage = "item-history";
       const item = snapshot.workItems.find((value) => value.number === binding.issueNumber)!;
@@ -584,6 +673,7 @@ export async function buildRecoveryProposal(input: {
         );
         continue;
       }
+      require(graph && projection);
       const reserved = selected.event;
       require(
         itemEvents.every(
@@ -1157,19 +1247,38 @@ export async function buildRecoveryProposal(input: {
       priorPlanDigest: priorDigest,
       expectedBaseSha: base.oid,
       baseBranch: snapshot.defaultBranch,
-      graph: {
-        sourceRunId: graphRunId,
-        ref: graph.ref,
-        commitOid: graph.commitOid,
-        blobOid: graph.blobOid,
-        digest: graph.graphDigest,
-        projection: {
-          ref: projection.ref,
-          commitOid: projection.commitOid,
-          blobOid: projection.blobOid,
-          bindingDigest: recoveryPlanBindingDigest(items),
-        },
-      },
+      graph: priorAdoptionGraph
+        ? priorAdoptionGraph
+        : graph && projection
+          ? {
+              sourceRunId: graphRunId,
+              ref: graph.ref,
+              commitOid: graph.commitOid,
+              blobOid: graph.blobOid,
+              digest: graph.graphDigest,
+              projection: {
+                ref: projection.ref,
+                commitOid: projection.commitOid,
+                blobOid: projection.blobOid,
+                bindingDigest: recoveryPlanBindingDigest(items),
+              },
+            }
+          : {
+              mode: "adopt-existing",
+              sourceRunId: graphRunId,
+              ref: compiledGraphRef(snapshot.number, graphRunId),
+              objectiveInputDigest: compilerEvalDigest({
+                number: snapshot.number,
+                title: snapshot.title,
+                body: snapshot.body,
+              }),
+              constraintDigest: legacyGraphConstraintsDigest(adoptionConstraints!),
+              constraints: adoptionConstraints!,
+              projection: {
+                ref: compiledGraphProjectionRef(snapshot.number, graphRunId),
+                bindingDigest: recoveryPlanBindingDigest(items),
+              },
+            },
       acceptedPolicy: policy,
       policyDigest: policyDigest(policy),
       allowance: { before, increment, after },

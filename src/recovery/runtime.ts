@@ -14,13 +14,13 @@ import {
   assertIsolatedCandidateProof,
   assertIsolatedCandidateReservation,
 } from "./isolated-candidate.js";
-import { deriveBudgetUsage, remainingBudget, type BudgetUsage } from "../control/budget.js";
 import {
-  loadCompiledGraph,
-  loadCompiledGraphProjection,
-  type CompiledGraphRecord,
-  type CompiledGraphProjectionRecord,
-} from "../control/graphs.js";
+  deriveBudgetUsage,
+  remainingBudget,
+  unresolvedModelInvocations,
+  type BudgetUsage,
+} from "../control/budget.js";
+import type { CompiledGraphRecord, CompiledGraphProjectionRecord } from "../control/graphs.js";
 import { decodeEventTrailer, deduplicateFactoryEvents } from "../control/receipts.js";
 import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
 import type { RecoveryAccountingAssessment } from "./accounting.js";
@@ -29,7 +29,12 @@ import { verifyRecoveryChain } from "./chain.js";
 import { loadRecoveryClaim, type RecoveryClaimRecord } from "./claims.js";
 import { resolveRecoveryEvidence, type RecoveryEvidenceResolution } from "./evidence.js";
 import { recoveryClaimRef, createRecoveryEventDigest } from "./identity.js";
-import { loadRecoveryPlan, type RecoveryPlanRecord } from "./plan.js";
+import {
+  isRecoveryAdoptionGraph,
+  loadRecoveryPlan,
+  loadRecoveryPlanGraph,
+  type RecoveryPlanRecord,
+} from "./plan.js";
 import { recoveryAdoptionEvents } from "./transaction.js";
 import { recoveryRunHistoryActivations } from "./activation-history.js";
 import {
@@ -55,8 +60,7 @@ const workerTerminals = new Set([
 const attemptKey = (event: { runId: string; workItem?: unknown; attempt?: unknown }) =>
   JSON.stringify([event.runId, event.workItem, event.attempt]);
 
-export interface RecoveryRuntime {
-  status: "verified";
+interface RecoveryRuntimeCommon {
   adoptionVerified: true;
   /** Observation of durable adoption only. Current leases/resource/admission gates remain mandatory. */
   executionAuthorized: false;
@@ -64,8 +68,6 @@ export interface RecoveryRuntime {
   controllingRun: Start;
   planRecord: RecoveryPlanRecord;
   claim: RecoveryClaimRecord;
-  graph: CompiledGraphRecord;
-  projection: CompiledGraphProjectionRecord;
   sourceRunIds: readonly string[];
   accountingRunIds: readonly string[];
   /** Controller generations from exact source receipt fences, exposed only after
@@ -88,10 +90,24 @@ export interface RecoveryRuntime {
   attemptCounts: Array<{ workItem: number; count: number; remaining: number }>;
   /** Complete observed subtotal is not a substitute for missing terminal token counters. */
   currentUnknownModelUsage: Array<{ workItem: number; attempt: number }>;
+  /** A durable dispatch marker without its exact usage closure is unknown, including
+   * management compilation/review calls that do not belong to a worker attempt. */
+  currentUnknownManagementInvocations: string[];
   currentUnknownModelUsageCount: number;
+}
+export interface RecoveryRuntime extends RecoveryRuntimeCommon {
+  status: "verified";
+  graph: CompiledGraphRecord;
+  projection: CompiledGraphProjectionRecord;
+}
+export interface RecoveryGraphBootstrapRuntime extends RecoveryRuntimeCommon {
+  status: "graph-bootstrap";
+  graph: null;
+  projection: null;
 }
 export type RecoveryRuntimeResult =
   | RecoveryRuntime
+  | RecoveryGraphBootstrapRuntime
   | {
       status: "blocked";
       adoptionVerified: false;
@@ -293,7 +309,8 @@ export async function loadRecoveryRuntime(input: {
           (event.kind !== "recovery" ||
             event.event === "RecoverySourceIntegrated" ||
             event.event === "RecoverySourcePublished") &&
-          event.kind !== "graph" &&
+          (event.kind !== "graph" ||
+            (isRecoveryAdoptionGraph(plan.graph) && plan.graph.sourceRunId === input.runId)) &&
           event.event !== "FactoryRunStarted" &&
           event.event !== "ActivationRequested" &&
           event.event !== "ActivationRejected" &&
@@ -315,7 +332,7 @@ export async function loadRecoveryRuntime(input: {
           !suffix.some(
             (event) =>
               event.sequence > terminal[0]!.sequence &&
-              (["attempt", "capacity", "validation", "publication", "budget"].includes(
+              (["attempt", "capacity", "validation", "publication", "budget", "graph"].includes(
                 event.kind,
               ) ||
                 event.event === "RecoverySourceIntegrated" ||
@@ -721,20 +738,27 @@ export async function loadRecoveryRuntime(input: {
       ),
       "source-bindings-unavailable",
     );
-    const graph = await loadCompiledGraph(input.store, input.objective, plan.graph.sourceRunId);
-    requireRuntime(graph, "graph-unavailable");
-    const projection = await loadCompiledGraphProjection(
-      input.store,
-      input.objective,
-      plan.graph.sourceRunId,
-      graph,
-    );
+    const resolvedGraph = await loadRecoveryPlanGraph(input.store, plan, events);
     requireRuntime(
-      projection &&
-        graph.commitOid === plan.graph.commitOid &&
-        projection.commitOid === plan.graph.projection.commitOid,
+      resolvedGraph ||
+        (isRecoveryAdoptionGraph(plan.graph) && plan.graph.sourceRunId === input.runId),
       "graph-observation-changed",
     );
+    if (!resolvedGraph)
+      requireRuntime(
+        suffix.every(
+          (event) =>
+            !["attempt", "capacity", "validation", "publication"].includes(event.kind) &&
+            event.event !== "RecoverySourceIntegrated" &&
+            event.event !== "RecoverySourcePublished" &&
+            (event.kind !== "budget" ||
+              (event.phase === "management" &&
+                event.unit === "model_tokens" &&
+                event.workItem === undefined &&
+                event.attempt === undefined)),
+        ),
+        "graph-bootstrap-has-execution-effects",
+      );
     const sourceIntegrations: RecoverySourceIntegrationProof[] = [];
     for (const outcome of suffix)
       if (outcome.event === "RecoverySourceIntegrated") {
@@ -836,16 +860,17 @@ export async function loadRecoveryRuntime(input: {
       if (!budget.length || !reported.length)
         unknown.push({ workItem: group[0]!.workItem, attempt: group[0]!.attempt });
     }
-    return {
-      status: "verified",
+    const unknownManagementInvocations = unresolvedModelInvocations(events, input.runId)
+      .filter((event) => event.phase === "management")
+      .map((event) => event.modelInvocationId)
+      .sort();
+    const common: RecoveryRuntimeCommon = {
       adoptionVerified: true,
       executionAuthorized: false,
       objectiveAuthority: snapshot.objectiveAuthority,
       controllingRun,
       planRecord: record,
       claim,
-      graph,
-      projection,
       sourceRunIds,
       accountingRunIds: [...sourceRunIds, input.runId],
       verifiedSourceControllerObservations,
@@ -864,8 +889,17 @@ export async function loadRecoveryRuntime(input: {
         remaining: Math.max(0, plan.acceptedPolicy.maxAttemptsPerItem - count),
       })),
       currentUnknownModelUsage: unknown.slice(0, 100),
-      currentUnknownModelUsageCount: unknown.length,
+      currentUnknownManagementInvocations: unknownManagementInvocations.slice(0, 100),
+      currentUnknownModelUsageCount: unknown.length + unknownManagementInvocations.length,
     };
+    return resolvedGraph
+      ? {
+          ...common,
+          status: "verified",
+          graph: resolvedGraph.graph,
+          projection: resolvedGraph.projection,
+        }
+      : { ...common, status: "graph-bootstrap", graph: null, projection: null };
   } catch (error) {
     if (error instanceof PlatformUnavailableError) throw error;
     return {

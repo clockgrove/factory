@@ -18,6 +18,7 @@ import {
 } from "../src/recovery/native-source-stacks.js";
 import { recoveryClaimRef, recoveryEventDigest } from "../src/recovery/identity.js";
 import {
+  isRecoveryPersistedGraph,
   parseRecoveryPlan,
   recoveryHistoryDigest,
   recoveryPlanBindingDigest,
@@ -381,22 +382,79 @@ function fixture(originals = 0, retained = 3, failedSuffix = false) {
       nodeId: pull.nodeId,
     })),
     store: {
-      readRef: async (ref) => (ref === plan.graph.ref ? plan.graph.commitOid : null),
+      readRef: async (ref) => {
+        if (!isRecoveryPersistedGraph(plan.graph)) return null;
+        if (ref === plan.graph.ref) return plan.graph.commitOid;
+        if (ref === plan.graph.projection.ref) return plan.graph.projection.commitOid;
+        return null;
+      },
       readCommit: async (oid) => ({
         oid,
         treeOid: sha("b"),
-        parentOids: [sha("a")],
+        parentOids:
+          isRecoveryPersistedGraph(plan.graph) && oid === plan.graph.projection.commitOid
+            ? [plan.graph.commitOid]
+            : [sha("a")],
         message: "compiled graph",
         serverTime: new Date(),
       }),
-      readTreeEntry: async (_tree, path) =>
-        path.endsWith("compiled-objective.json") ? plan.graph.blobOid : null,
-      readBlob: async () => serializeCompiledObjective(graph),
+      readTreeEntry: async (_tree, path) => {
+        if (!isRecoveryPersistedGraph(plan.graph)) return null;
+        if (path.endsWith("compiled-objective.json")) return plan.graph.blobOid;
+        if (path.endsWith("graph-projection.json")) return plan.graph.projection.blobOid;
+        return null;
+      },
+      readBlob: async (oid) => {
+        if (isRecoveryPersistedGraph(plan.graph) && oid === plan.graph.projection.blobOid)
+          return Buffer.from(
+            JSON.stringify({
+              protocol: "clockgrove.factory/graph-projection-v1",
+              graphDigest: compiledGraphDigest(graph),
+              bindings: plan.items.map((item) => ({
+                compilerId: item.compilerId,
+                issueNodeId: item.issueNodeId,
+                issueNumber: item.workItem,
+              })),
+            }),
+          );
+        return serializeCompiledObjective(graph);
+      },
       readPullRequest: async (number) =>
         structuredClone(pulls.find((pull) => pull.number === number)!),
     },
     stacks: new GitHubStacks(transport, "fixture", "native-recovery"),
     baseBranch: "main",
+    events: [
+      parseFactoryEvent({
+        protocol: "clockgrove.factory/v2",
+        objective: 7,
+        runId: "source",
+        at: "2026-09-05T00:00:00Z",
+        sequence: 18,
+        kind: "graph",
+        event: "GraphCompiled",
+        graphDigest: compiledGraphDigest(graph),
+        graphSize: graph.workItems.length,
+        baseSha: sha("a"),
+        graphRef: plan.graph.ref,
+        graphBlobSha: isRecoveryPersistedGraph(plan.graph) ? plan.graph.blobOid : sha("c"),
+      }),
+      parseFactoryEvent({
+        protocol: "clockgrove.factory/v2",
+        objective: 7,
+        runId: "source",
+        at: "2026-09-05T00:00:00Z",
+        sequence: 19,
+        kind: "graph",
+        event: "GraphProjected",
+        graphDigest: compiledGraphDigest(graph),
+        graphSize: graph.workItems.length,
+        projectionRef: plan.graph.projection.ref,
+        projectionBlobSha: isRecoveryPersistedGraph(plan.graph)
+          ? plan.graph.projection.blobOid
+          : sha("e"),
+      }),
+    ],
     assertCurrent: vi.fn(async () => undefined),
   };
   return {

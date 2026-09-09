@@ -5,6 +5,7 @@ import { parseFactoryEvent } from "../src/protocol/events.js";
 import { PROTOCOL_V2 } from "../src/protocol/limits.js";
 import type { GitCommitObject } from "../src/control/lease.js";
 import type { RecoveryRuntime } from "../src/recovery/runtime.js";
+import { recoveryPlanBindingDigest } from "../src/recovery/plan.js";
 import { verifyRecoveryResources } from "../src/recovery/resources.js";
 vi.mock("../src/recovery/resources.js", () => ({ verifyRecoveryResources: vi.fn() }));
 const sha = (n: number) => n.toString(16).padStart(40, "0");
@@ -147,8 +148,22 @@ async function fixture() {
         successorRunId: "new",
         objective: 20,
         policyDigest: digest,
-        graph: { commitOid: sha(3), digest, projection: { commitOid: sha(4) } },
-        items: [{ workItem: 10, issueNodeId: "I_10" }],
+        graph: {
+          sourceRunId: "old",
+          ref: "graph",
+          commitOid: sha(3),
+          blobOid: sha(11),
+          digest,
+          projection: {
+            ref: "projection",
+            commitOid: sha(4),
+            blobOid: sha(12),
+            bindingDigest: recoveryPlanBindingDigest([
+              { workItem: 10, issueNodeId: "I_10", compilerId: "work" },
+            ]),
+          },
+        },
+        items: [{ workItem: 10, issueNodeId: "I_10", compilerId: "work" }],
         history: [{ runId: "old", policyDigest: digest }],
       },
     },
@@ -162,8 +177,13 @@ async function fixture() {
       planDigest: digest,
       requestId: "request",
     },
-    graph: { commitOid: sha(3), graphDigest: digest },
-    projection: { commitOid: sha(4), bindings: [{ issueNumber: 10, issueNodeId: "I_10" }] },
+    graph: { ref: "graph", commitOid: sha(3), blobOid: sha(11), graphDigest: digest },
+    projection: {
+      ref: "projection",
+      commitOid: sha(4),
+      blobOid: sha(12),
+      bindings: [{ compilerId: "work", issueNumber: 10, issueNodeId: "I_10" }],
+    },
     sourceRunIds: ["old"],
     events,
     historicalAccounting: {
@@ -179,6 +199,7 @@ async function fixture() {
     },
     currentUnknownModelUsageCount: 0,
     currentUnknownModelUsage: [],
+    currentUnknownManagementInvocations: [],
   } as unknown as RecoveryRuntime;
   const args = {
     store: store as unknown as Parameters<typeof reconcileAdmissionForSuccessor>[0]["store"],
@@ -325,7 +346,9 @@ describe("accepted successor admission reassignment", () => {
         f.args.runtime.events = f.args.runtime.events.filter(
           (event) => event.event !== "AttemptFailed",
         );
-      if (kind === "graph") f.args.runtime.planRecord.plan.graph.commitOid = sha(99);
+      if (kind === "graph")
+        f.args.runtime.planRecord.plan.graph.ref =
+          "refs/clockgrove-factory/compiled-graphs/objective-20/run-conflict";
       if (kind === "claim") f.refs.set("claim", sha(99));
       await expect(reconcileAdmissionForSuccessor(f.args)).rejects.toThrow();
       expect((await f.ledger.read(10))!.history[0]!.disposition).toBe("dispatching");

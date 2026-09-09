@@ -5,7 +5,7 @@ import type {
   CompilerEvidence,
   CompilerCaseLabel,
 } from "../evaluation/compiler-eval.js";
-import type { CompiledObjective } from "../graph.js";
+import type { CompiledObjective, LegacyGraphConstraints } from "../graph.js";
 import type { NormalizedArtifact } from "../execution/artifacts.js";
 import type { WorkerPacket } from "../protocol/worker-packet.js";
 import type { ValidationEvidence } from "../validation/evidence.js";
@@ -48,6 +48,8 @@ export interface CompilationContext {
   invocationTimeoutMs?: number;
   /** Trusted pinned source evidence captured once for the draft envelope. */
   repositoryEvidence?: CompilerEvidence[];
+  /** Authenticated pre-v2 issue core. The compiler may enrich, never decompose or rewrite it. */
+  legacyGraphConstraints?: LegacyGraphConstraints;
   /** Read-only trusted observations after grounding; omitted callers retain explicit unknowns. */
   economicEvidence?: (items: readonly CompilerWorkItem[]) => Promise<DecompositionEvidence>;
 }

@@ -4,7 +4,11 @@ import { type FactoryEvent, parseFactoryEvent } from "../protocol/events.js";
 import { PROTOCOL_V2 } from "../protocol/limits.js";
 import { parseRunPolicy, policyDigest, type RunPolicy } from "../protocol/policy.js";
 import { encodeEventComment, latestSupportedRun, nextEventSequence } from "./receipts.js";
-import { loadRecoveryRuntime, type RecoveryRuntime } from "../recovery/runtime.js";
+import {
+  loadRecoveryRuntime,
+  type RecoveryGraphBootstrapRuntime,
+  type RecoveryRuntime,
+} from "../recovery/runtime.js";
 import { loadRecoverySourceReconciliation } from "../recovery/reconciliation.js";
 import { writerAuthority, type ObjectiveAuthorityObservation } from "./authority.js";
 import type { LeaseState } from "./lease.js";
@@ -59,11 +63,12 @@ export class RunManager {
   }
 
   /** A real authenticated repository read, never an eligibility flag, opens the successor path. */
-  async resumeRecovery(
-    input: Parameters<typeof loadRecoveryRuntime>[0],
-  ): Promise<{ run: RunState; runtime: RecoveryRuntime }> {
+  async resumeRecovery(input: Parameters<typeof loadRecoveryRuntime>[0]): Promise<{
+    run: RunState;
+    runtime: RecoveryRuntime | RecoveryGraphBootstrapRuntime;
+  }> {
     const runtime = await loadRecoveryRuntime(input);
-    if (runtime.status !== "verified")
+    if (runtime.status === "blocked")
       throw new Error(`successor runtime unavailable: ${runtime.blockers.join(", ")}`);
     const active = latestSupportedRun([...runtime.events], runtime.objectiveAuthority);
     if (

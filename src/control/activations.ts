@@ -9,6 +9,10 @@ export type ActivationCancellation = Extract<
   FactoryEvent,
   { kind: "run"; event: "ActivationCancellationRequested" }
 >;
+export type ActivationRejection = Extract<
+  FactoryEvent,
+  { kind: "run"; event: "ActivationRejected" }
+>;
 export interface ActivationBinding {
   objective: number;
   requestId: string;
@@ -54,6 +58,30 @@ export function activationCancellation(
       event.policyDigest !== binding.policyDigest
     )
       throw new Error("activation cancellation differs from its immutable activation binding");
+    return true;
+  });
+}
+
+/** Return only the rejection for this exact immutable activation request. */
+export function activationRejection(
+  events: readonly FactoryEvent[],
+  binding: ActivationBinding,
+): ActivationRejection | undefined {
+  return deduplicateFactoryEvents([...events]).find((event): event is ActivationRejection => {
+    if (
+      event.kind !== "run" ||
+      event.event !== "ActivationRejected" ||
+      event.objective !== binding.objective ||
+      event.activationRequestId !== binding.requestId ||
+      event.runId !== binding.requestId
+    )
+      return false;
+    if (
+      event.requestedBy.toLowerCase() !== binding.requestedBy.toLowerCase() ||
+      event.baseSha !== binding.baseSha ||
+      event.policyDigest !== binding.policyDigest
+    )
+      throw new Error("activation rejection differs from its immutable activation binding");
     return true;
   });
 }

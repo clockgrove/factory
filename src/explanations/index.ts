@@ -15,6 +15,8 @@ export const EXPLANATION_CODES = {
   capacitySampleUnavailable: "capacity.sample-unavailable",
   authorityLeaseUnavailable: "authority.lease-unavailable",
   authorityRunInactive: "authority.run-inactive",
+  authorityActivationRejected: "authority.activation-rejected",
+  authorityRunPaused: "authority.run-paused",
   priorityBurstThreshold: "priority.burst-threshold",
   prioritySourceUnavailable: "priority.source-unavailable",
   priorityObserved: "priority.observed",
@@ -75,7 +77,7 @@ export interface Explanation {
     | "complete"
     | "informational";
   summary: string;
-  gate?: "execution" | "recovery-successor";
+  gate?: "activation" | "execution" | "recovery-successor";
   requiredAction?: string;
   evidence: Record<string, unknown>;
 }

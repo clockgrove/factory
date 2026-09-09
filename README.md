@@ -120,7 +120,9 @@ The Director skill uses bounded, read-only operations when the user is inspectin
 - `factory_status` returns the current Objective/run state, active and queued Work Items, resource
   pressure, burst activity, and aggregate execution economics. Current GitHub response-header quota
   observations and process-local mutation counters are reported separately with their measurement
-  scope/window; absent durable run-attributed mutation measurements remain unavailable.
+  scope/window; absent durable run-attributed mutation measurements remain unavailable. Its
+  `operatorAction` says whether autonomous progress remains monitorable or the state is stopped and
+  requires one concrete operator action.
 - `factory_explain` returns stable reason codes, policy gates, observed evidence, and the concrete
   action needed to unblock waiting or escalated work.
 - `factory_replay` reconstructs durable scheduling receipts and can replay a credential-free pinned
@@ -139,7 +141,9 @@ The Director skill uses bounded, read-only operations when the user is inspectin
 - `factory_recovery_propose` builds a read-only, digest-bound successor plan. With explicit user
   authorization, `factory_recovery_request` records that exact plan for controller adoption;
   it preserves the original issues and cumulative allowance. Resource and evidence checks still
-  gate execution. See [terminal recovery](docs/setup/unattended.md#continue-after-terminal-escalation).
+  gate execution. The proposal's `operatorAction` distinguishes evidence blockers, exact unknown
+  usage acknowledgement, and a ready-but-unauthorized request; none is active work to poll. See
+  [terminal recovery](docs/setup/unattended.md#continue-after-terminal-escalation).
 
 These reports mark unavailable observations explicitly. They do not invent token counts, provider
 costs, capacity readings, or timing data that were not durably observed.

@@ -82,6 +82,11 @@ undo its withdrawal. Do not simulate cancellation by closing issues or PRs.
 
 ## After terminal escalation
 
+A terminal run is stopped, not still working. If the client attached a recurring heartbeat or
+monitor, pause or delete it as soon as status reports `operatorAction.monitoring: "stop"`; send one
+actionable update and do not schedule more status reads. Resume monitoring only after the user grants
+the missing authority and Factory has accepted a non-terminal successor.
+
 When the user asks to continue an escalated Objective or inspect its remaining work, call
 `factory_recovery_plan`. It inspects historical graph, reservation, PR, and accounting evidence
 without writing GitHub or launching workers. Report reusable candidates separately from missing
@@ -96,7 +101,11 @@ The assessment is not execution authority. For an explicitly authorized continua
 2. Resolve any missing authority before writing: an exhausted allowance needs an explicit increment;
    unknown historical usage needs the user's acknowledgement of the returned `unknownUsageDigest`.
    Pass that digest as `unknownUsageAcknowledgementDigest` and propose again when authorized.
-   Neither a quota reset nor a repaired check or credential grants extra Factory allowance.
+   Show the exact digest, explain that the historical invocation has no trustworthy actual-usage
+   closure so zero cannot be inferred, and state that acknowledgement preserves the uncertainty but
+   grants no additional allowance. Ask once for an explicit yes/no decision. While waiting, do not
+   poll status or leave a heartbeat active. Neither a quota reset nor a repaired check or credential
+   grants extra Factory allowance.
 3. Call `factory_recovery_request` with the exact proposed `planDigest`, the same `requestId`, and
    the same increment/acknowledgement inputs. This writes a digest-bound successor request, not a
    revival of the terminal run. After an uncertain response, retry those exact inputs with the same
@@ -118,7 +127,10 @@ dispatch to bypass recovery gates. Resume/retry applies to non-terminal runs, no
 
 Use `factory_status` for a read-only status request. Report its bounded Objective and run state,
 Work Item counts and active details, open blockers, attempts, scheduling decisions, burst activity,
-and cost totals. If the user asks why work is waiting or what evidence would unblock it, call
+cost totals, then honor `operatorAction.monitoring`: `continue` permits an existing monitor while
+autonomous progress is possible; `stop` requires any attached recurring monitor to be paused or
+deleted and the response to say plainly that no Factory work is active. If the user asks why work is
+waiting or what evidence would unblock it, call
 `factory_explain` and preserve its stable reason code, gate, evidence, and required action.
 
 Use `factory_replay` only when the user asks to audit or reproduce scheduling. It is read-only: it

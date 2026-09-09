@@ -312,6 +312,12 @@ describe("bounded status, explain, and replay output", () => {
       committed: 120_000,
       remaining: 1_680_000,
     });
+    expect(report.operatorAction).toMatchObject({
+      required: false,
+      monitoring: "continue",
+      code: "run-active",
+      evidence: { runId: "run-status" },
+    });
   });
 
   it("reports active-process telemetry with its scope and window outside run economics", () => {
@@ -345,6 +351,12 @@ describe("bounded status, explain, and replay output", () => {
       platformTelemetry: readerTelemetry,
     });
     expect(report.run).toMatchObject({ state: "completed" });
+    expect(report.operatorAction).toMatchObject({
+      required: false,
+      monitoring: "stop",
+      code: "run-completed",
+      evidence: { runId: "run-status", terminalAt: "2026-09-04T12:02:00.000Z" },
+    });
     expect(report.github).toEqual(readerTelemetry);
     expect(report.summary?.economics.githubMutations).toMatchObject({
       availability: "unavailable",
@@ -460,6 +472,17 @@ describe("bounded status, explain, and replay output", () => {
       },
     });
     expect(JSON.stringify(status.run)).not.toContain("older predecessor escalation");
+    expect(status.operatorAction).toMatchObject({
+      required: true,
+      monitoring: "stop",
+      code: "recovery-successor-escalated",
+      summary: expect.stringContaining(terminalReason),
+      evidence: {
+        runId: successorRunId,
+        terminalSequence: 8,
+        reason: terminalReason,
+      },
+    });
 
     const explanation = buildExplanationReport({
       repository: "clockgrove/factory",
@@ -480,8 +503,140 @@ describe("bounded status, explain, and replay output", () => {
         terminalAt: "2026-09-04T12:04:00.000Z",
         reason: terminalReason,
         reasonDigest: "0536a190cf51e1d827a3ebdfd212e9dd59016f2dbd56544b9c9184f5092276ac",
+        factoryWorkActive: false,
+        monitoring: "stop",
       },
     });
+  });
+
+  it("reports an exact activation rejection as a stopped human-action gate", () => {
+    const rejected = snapshot();
+    rejected.workItems = [];
+    rejected.factoryEvents = [
+      event({
+        kind: "run",
+        event: "ActivationRequested",
+        runId: "activation-rejected",
+        sequence: 1,
+        requestedBy: "private-operator-name",
+        requestId: "activation-rejected",
+        repository: "clockgrove/factory",
+        baseSha: sha,
+        policy,
+        policyDigest: policyDigest(policy),
+        controllerProtocolMin: "clockgrove.factory/v2",
+        controllerProtocolMax: "clockgrove.factory/v2",
+      }),
+      event({
+        kind: "run",
+        event: "ActivationRejected",
+        runId: "activation-rejected",
+        sequence: 2,
+        at: "2026-09-04T12:00:01.000Z",
+        activationRequestId: "activation-rejected",
+        requestedBy: "private-operator-name",
+        baseSha: sha,
+        policyDigest: policyDigest(policy),
+        reason: "existing Work Item graph packet is malformed",
+      }),
+    ];
+
+    const status = buildStatusReport({ repository: "clockgrove/factory", snapshot: rejected });
+    expect(status.activation).toEqual({
+      requestId: "activation-rejected",
+      state: "rejected",
+      rejectionReason: "existing Work Item graph packet is malformed",
+      rejectedAt: "2026-09-04T12:00:01.000Z",
+    });
+    expect(status.run).toEqual({ availability: "unavailable", state: "not-started" });
+    expect(status.operatorAction).toMatchObject({
+      required: true,
+      monitoring: "stop",
+      code: "activation-rejected",
+      summary: expect.stringContaining("existing Work Item graph packet is malformed"),
+      evidence: {
+        activationRequestId: "activation-rejected",
+        reason: "existing Work Item graph packet is malformed",
+      },
+    });
+
+    const explanation = buildExplanationReport({
+      repository: "clockgrove/factory",
+      snapshot: rejected,
+    });
+    expect(explanation.explanations).toMatchObject([
+      {
+        code: EXPLANATION_CODES.authorityActivationRejected,
+        category: "authority",
+        disposition: "failed",
+        gate: "activation",
+        summary: "existing Work Item graph packet is malformed",
+        evidence: {
+          activationRequestId: "activation-rejected",
+          rejectedAt: "2026-09-04T12:00:01.000Z",
+          reason: "existing Work Item graph packet is malformed",
+          factoryWorkActive: false,
+          monitoring: "stop",
+        },
+      },
+    ]);
+
+    const conflicting = structuredClone(rejected);
+    conflicting.factoryEvents!.push(
+      event({
+        kind: "run",
+        event: "FactoryRunStarted",
+        sequence: 3,
+        actor: "private-operator-name",
+        repository: "clockgrove/factory",
+        objectiveAuthor: "private-operator-name",
+        fork: false,
+        baseBranch: "main",
+        policy,
+        policyDigest: policyDigest(policy),
+        activationRequestId: "activation-rejected",
+        baseSha: sha,
+      }),
+    );
+    expect(() =>
+      buildStatusReport({ repository: "clockgrove/factory", snapshot: conflicting }),
+    ).toThrow("activation rejection conflicts with its authenticated run start");
+  });
+
+  it("rejects an activation rejection that differs from its immutable request", () => {
+    const rejected = snapshot();
+    rejected.workItems = [];
+    rejected.factoryEvents = [
+      event({
+        kind: "run",
+        event: "ActivationRequested",
+        runId: "activation-rejected",
+        sequence: 1,
+        requestedBy: "private-operator-name",
+        requestId: "activation-rejected",
+        repository: "clockgrove/factory",
+        baseSha: sha,
+        policy,
+        policyDigest: policyDigest(policy),
+        controllerProtocolMin: "clockgrove.factory/v2",
+        controllerProtocolMax: "clockgrove.factory/v2",
+      }),
+      event({
+        kind: "run",
+        event: "ActivationRejected",
+        runId: "activation-rejected",
+        sequence: 2,
+        activationRequestId: "activation-rejected",
+        requestedBy: "different-operator",
+        baseSha: sha,
+        policyDigest: policyDigest(policy),
+        reason: "forged rejection",
+      }),
+    ];
+
+    expect(() =>
+      buildStatusReport({ repository: "clockgrove/factory", snapshot: rejected }),
+    ).toThrow("activation rejection differs from its immutable activation binding");
   });
 
   it("returns stable explanations without provider responses", () => {
@@ -592,10 +747,118 @@ describe("bounded status, explain, and replay output", () => {
       cloudPaused: true,
       pendingRetries: [11],
     });
+    expect(report.operatorAction).toMatchObject({
+      required: false,
+      monitoring: "continue",
+      code: "run-pausing",
+      evidence: {
+        runId: "run-status",
+        commandRequestId: "pause-status",
+        stopKind: "pause",
+      },
+    });
     expect(report.readyOrder[0]).toMatchObject({
       workItem: 11,
       rank: 3,
       source: "operator-command",
+    });
+  });
+
+  it("stops monitoring only after a pause is durably acknowledged", () => {
+    const paused = snapshot();
+    paused.workItems = [];
+    paused.factoryEvents!.push(
+      event({
+        kind: "run",
+        event: "RunPauseRequested",
+        sequence: 6,
+        requestedBy: "private-operator-name",
+        requestId: "pause-status",
+      }),
+      event({
+        kind: "run",
+        event: "RunPauseAcknowledged",
+        sequence: 7,
+        commandRequestId: "pause-status",
+      }),
+    );
+
+    const report = buildStatusReport({ repository: "clockgrove/factory", snapshot: paused });
+    expect(report.operatorAction).toMatchObject({
+      required: true,
+      monitoring: "stop",
+      code: "run-paused",
+      summary: expect.stringContaining("No Factory work is active"),
+      evidence: {
+        runId: "run-status",
+        commandRequestId: "pause-status",
+        stopKind: "pause",
+      },
+    });
+    const explanation = buildExplanationReport({
+      repository: "clockgrove/factory",
+      snapshot: paused,
+    });
+    expect(explanation.explanations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: EXPLANATION_CODES.authorityRunPaused,
+          category: "authority",
+          disposition: "blocked",
+          evidence: {
+            runId: "run-status",
+            commandRequestId: "pause-status",
+            stopKind: "pause",
+            monitoring: "stop",
+          },
+        }),
+      ]),
+    );
+  });
+
+  it("keeps monitoring a drain until its durable completion acknowledgement", () => {
+    const draining = snapshot();
+    draining.workItems = [];
+    draining.factoryEvents!.push(
+      event({
+        kind: "run",
+        event: "RunDrainCompleted",
+        sequence: 5,
+        commandRequestId: "drain-status",
+      }),
+      event({
+        kind: "run",
+        event: "RunDrainRequested",
+        sequence: 6,
+        requestedBy: "private-operator-name",
+        requestId: "drain-status",
+      }),
+    );
+
+    expect(
+      buildStatusReport({ repository: "clockgrove/factory", snapshot: draining }).operatorAction,
+    ).toMatchObject({
+      required: false,
+      monitoring: "continue",
+      code: "run-draining",
+      evidence: { commandRequestId: "drain-status", stopKind: "drain" },
+    });
+
+    draining.factoryEvents!.push(
+      event({
+        kind: "run",
+        event: "RunDrainCompleted",
+        sequence: 7,
+        commandRequestId: "drain-status",
+      }),
+    );
+    expect(
+      buildStatusReport({ repository: "clockgrove/factory", snapshot: draining }).operatorAction,
+    ).toMatchObject({
+      required: true,
+      monitoring: "stop",
+      code: "run-paused",
+      evidence: { commandRequestId: "drain-status", stopKind: "drain" },
     });
   });
 });

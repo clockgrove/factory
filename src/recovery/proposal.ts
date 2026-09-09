@@ -72,8 +72,63 @@ export interface RecoveryProposalResult {
   planDigest: string | null;
   /** An observed acknowledgement identity, never an automatic acknowledgement. */
   unknownUsageDigest: string | null;
+  operatorAction: {
+    required: true;
+    monitoring: "stop";
+    code: "resolve-recovery-blockers" | "acknowledge-unknown-usage" | "submit-recovery-request";
+    summary: string;
+    requiredAction: string;
+    evidence: Record<string, unknown>;
+  };
   blockers: RecoveryBlocker[];
   reads: { performed: number; limit: number };
+}
+
+function withRecoveryOperatorAction(result: RecoveryProposalResult): RecoveryProposalResult {
+  if (result.status === "blocked") {
+    result.operatorAction = {
+      required: true,
+      monitoring: "stop",
+      code: "resolve-recovery-blockers",
+      summary: "No Factory work is active and this recovery proposal is blocked.",
+      requiredAction:
+        "Resolve the returned evidence blockers, then build a new read-only proposal. Do not poll the terminal source run.",
+      evidence: { blockerCount: result.blockers.length },
+    };
+    return result;
+  }
+  if (
+    result.unknownUsageDigest &&
+    result.plan?.unknownUsageAcknowledgementDigest !== result.unknownUsageDigest
+  ) {
+    result.operatorAction = {
+      required: true,
+      monitoring: "stop",
+      code: "acknowledge-unknown-usage",
+      summary:
+        "No Factory work is active. Historical model usage cannot be proven zero and requires the user's exact acknowledgement before recovery can be requested.",
+      requiredAction: `Ask the user once whether they acknowledge unknown usage digest ${result.unknownUsageDigest}. Explain that acknowledgement preserves the uncertainty and grants no additional allowance. Do not poll while waiting.`,
+      evidence: {
+        unknownUsageDigest: result.unknownUsageDigest,
+        acknowledgementGrantsAdditionalAllowance: false,
+      },
+    };
+    return result;
+  }
+  result.operatorAction = {
+    required: true,
+    monitoring: "stop",
+    code: "submit-recovery-request",
+    summary:
+      "No Factory work is active. The read-only proposal is complete but does not authorize execution.",
+    requiredAction:
+      "If the user explicitly authorized this exact continuation, submit factory_recovery_request with the exact plan digest and matching inputs; otherwise ask for authorization once. Do not poll the terminal source run.",
+    evidence: {
+      planDigest: result.planDigest,
+      unknownUsageAcknowledged: Boolean(result.unknownUsageDigest),
+    },
+  };
+  return result;
 }
 type Start = Extract<FactoryEvent, { event: "FactoryRunStarted" }>;
 type Reserved = Extract<FactoryEvent, { kind: "attempt" }>;
@@ -113,6 +168,15 @@ export async function buildRecoveryProposal(input: {
     plan: null,
     planDigest: null,
     unknownUsageDigest: null,
+    operatorAction: {
+      required: true,
+      monitoring: "stop",
+      code: "resolve-recovery-blockers",
+      summary: "No Factory work is active and recovery evidence has not been verified.",
+      requiredAction:
+        "Resolve the returned evidence blockers, then build a new read-only proposal. Do not poll the terminal source run.",
+      evidence: { blockerCount: 0 },
+    },
     blockers: [],
     reads: { performed: 0, limit: RECOVERY_PROPOSAL_READ_LIMIT },
   };
@@ -1316,7 +1380,7 @@ export async function buildRecoveryProposal(input: {
     });
     if (chain.status !== "verified") {
       result.blockers.push(...chain.blockers);
-      return result;
+      return withRecoveryOperatorAction(result);
     }
     result.status = "proposed";
     result.plan = plan;
@@ -1328,5 +1392,5 @@ export async function buildRecoveryProposal(input: {
       ...(currentWorkItem === undefined ? {} : { workItem: currentWorkItem }),
     });
   }
-  return result;
+  return withRecoveryOperatorAction(result);
 }

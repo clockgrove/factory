@@ -6,7 +6,7 @@ import {
   queuedReasonCode,
   type Explanation,
 } from "../explanations/index.js";
-import { latestRunReceipts } from "../control/receipts.js";
+import { latestRunReceipts, terminalRunEvidence } from "../control/receipts.js";
 import { buildStatusReport, snapshotEvents, type FactoryReadSnapshot } from "./status.js";
 
 export interface FactoryExplanationReport {
@@ -69,7 +69,7 @@ export function buildExplanationReport(input: {
   workItem?: number;
 }): FactoryExplanationReport {
   const events = snapshotEvents(input.snapshot);
-  const run = latestRunReceipts(events);
+  const run = latestRunReceipts(events, input.snapshot.objectiveAuthority);
   const status = buildStatusReport({
     repository: input.repository,
     snapshot: input.snapshot,
@@ -93,6 +93,35 @@ export function buildExplanationReport(input: {
           }
         : inactive,
     );
+  }
+  if (run?.terminal?.event === "FactoryRunEscalated") {
+    const terminal = terminalRunEvidence(run.terminal);
+    const recoverySuccessor = Boolean(run.start.predecessorRunId);
+    explanations.push({
+      code: recoverySuccessor
+        ? EXPLANATION_CODES.recoverySuccessorEscalated
+        : EXPLANATION_CODES.executionRunEscalated,
+      category: recoverySuccessor ? "recovery" : "execution",
+      disposition: "failed",
+      summary: terminal.reason ?? "The selected Factory run ended in terminal escalation.",
+      gate: recoverySuccessor ? "recovery-successor" : "execution",
+      requiredAction: recoverySuccessor
+        ? "Resolve the recorded terminal reason, then use factory_recovery_plan before proposing another explicitly authorized successor."
+        : "Resolve the recorded terminal reason before requesting an explicitly authorized recovery successor.",
+      evidence: {
+        runId: terminal.runId,
+        terminalSequence: terminal.sequence,
+        terminalAt: terminal.at,
+        terminalEvent: terminal.event,
+        ...(terminal.reason !== undefined ? { reason: terminal.reason } : {}),
+        ...(terminal.reasonDigest ? { reasonDigest: terminal.reasonDigest } : {}),
+        ...(run.start.predecessorRunId ? { predecessorRunId: run.start.predecessorRunId } : {}),
+        ...(run.start.recoveryRequestId ? { recoveryRequestId: run.start.recoveryRequestId } : {}),
+        ...(run.start.recoveryPlanDigest
+          ? { recoveryPlanDigest: run.start.recoveryPlanDigest }
+          : {}),
+      },
+    });
   }
   for (const item of selected) {
     if (item.openDependencies.length > 0) {

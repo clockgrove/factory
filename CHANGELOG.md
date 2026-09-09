@@ -54,6 +54,10 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- Status, explanation, and recovery assessment now expose the authenticated concrete terminal
+  reason for the selected run, including recovery successors, bound to its run, sequence,
+  timestamp, and SHA-256 digest. Successor escalation explanations also provide a stable code,
+  recovery gate, evidence, and required action. ([#267](https://github.com/clockgrove/factory/issues/267))
 - Coordinated release verification now fails before broad coverage when Linux systemd 254+ or its
   user-manager transport is unavailable, with one actionable host diagnostic. Deterministic injected
   regressions cover unavailable and available transports while the real host-containment suite stays

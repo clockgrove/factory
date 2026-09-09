@@ -1,4 +1,8 @@
-import { hasCurrentWriterAuthority } from "../control/receipts.js";
+import {
+  hasCurrentWriterAuthority,
+  terminalRunEvidence,
+  type TerminalRunEvidence,
+} from "../control/receipts.js";
 import type { FactoryReadSnapshot, ReadWorkItemSnapshot } from "../application/status.js";
 import type { GitHubControlStore } from "../control/github-store.js";
 import { loadCompiledGraph, loadCompiledGraphProjection } from "../control/graphs.js";
@@ -76,6 +80,7 @@ export interface RecoveryRun {
   runId: string;
   state: "active" | "completed" | "cancelled" | "escalated";
   policyDigest: string;
+  terminal?: TerminalRunEvidence;
   graph: {
     status: "verified" | "absent" | "unavailable";
     digest?: string;
@@ -301,7 +306,16 @@ export async function assessRecovery(input: {
     const runEvents = events.filter((event) => event.runId === start.runId);
     const terminal = runEvents
       .filter(
-        (event) =>
+        (
+          event,
+        ): event is Extract<
+          FactoryEvent,
+          {
+            kind: "run";
+            event: "FactoryRunCompleted" | "FactoryRunCancelled" | "FactoryRunEscalated";
+          }
+        > =>
+          event.kind === "run" &&
           TERMINALS.has(event.event) &&
           hasCurrentWriterAuthority(event, events, snapshot.objectiveAuthority),
       )
@@ -317,6 +331,7 @@ export async function assessRecovery(input: {
               ? "escalated"
               : "active",
       policyDigest: start.policyDigest,
+      ...(terminal ? { terminal: terminalRunEvidence(terminal) } : {}),
       graph: { status: "absent" },
     };
     report.runs.push(run);

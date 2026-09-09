@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 
 import { type FactoryEvent, parseFactoryEvent } from "../protocol/events.js";
 import { MAX_PERSISTED_EVENT_BYTES, validatePersistable } from "../protocol/limits.js";
@@ -153,6 +154,34 @@ export interface RunReceiptSet {
     }
   >;
   events: FactoryEvent[];
+}
+
+export interface TerminalRunEvidence {
+  runId: string;
+  event: "FactoryRunCompleted" | "FactoryRunCancelled" | "FactoryRunEscalated";
+  sequence: number;
+  at: string;
+  reason?: string;
+  reasonDigest?: string;
+}
+
+/** Preserve the authenticated terminal receipt while making its human-readable
+ * reason independently addressable by a stable digest. */
+export function terminalRunEvidence(
+  terminal: NonNullable<RunReceiptSet["terminal"]>,
+): TerminalRunEvidence {
+  return {
+    runId: terminal.runId,
+    event: terminal.event,
+    sequence: terminal.sequence,
+    at: terminal.at,
+    ...(terminal.reason !== undefined
+      ? {
+          reason: terminal.reason,
+          reasonDigest: createHash("sha256").update(terminal.reason).digest("hex"),
+        }
+      : {}),
+  };
 }
 
 /**

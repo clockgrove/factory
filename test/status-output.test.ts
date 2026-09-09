@@ -403,6 +403,87 @@ describe("bounded status, explain, and replay output", () => {
     });
   });
 
+  it("binds status and explanation to a terminal recovery successor instead of an older escalation", () => {
+    const current = snapshot();
+    const successorRunId =
+      "recovery-a0546ecd67c3311ec6ad54e7c0e372cc3926c77c004b2888550968f080d8643b";
+    const terminalReason =
+      "successor artifact-only recovery requires an explicit artifact consumer; no replacement worker is authorized";
+    current.factoryEvents!.push(
+      event({
+        kind: "run",
+        event: "FactoryRunEscalated",
+        sequence: 6,
+        at: "2026-09-04T12:02:00.000Z",
+        reason: "older predecessor escalation must not be selected",
+      }),
+      event({
+        kind: "run",
+        event: "FactoryRunStarted",
+        runId: successorRunId,
+        sequence: 7,
+        at: "2026-09-04T12:03:00.000Z",
+        actor: "private-operator-name",
+        repository: "clockgrove/factory",
+        objectiveAuthor: "private-operator-name",
+        fork: false,
+        baseBranch: "main",
+        policy,
+        policyDigest: policyDigest(policy),
+        baseSha: sha,
+        recoveryRequestId: "recovery-request-7",
+        recoveryPlanDigest: "d".repeat(64),
+        predecessorRunId: "run-status",
+      }),
+      event({
+        kind: "run",
+        event: "FactoryRunEscalated",
+        runId: successorRunId,
+        sequence: 8,
+        at: "2026-09-04T12:04:00.000Z",
+        reason: terminalReason,
+      }),
+    );
+
+    const status = buildStatusReport({ repository: "clockgrove/factory", snapshot: current });
+    expect(status.run).toMatchObject({
+      availability: "observed",
+      runId: successorRunId,
+      state: "escalated",
+      terminal: {
+        runId: successorRunId,
+        event: "FactoryRunEscalated",
+        sequence: 8,
+        at: "2026-09-04T12:04:00.000Z",
+        reason: terminalReason,
+        reasonDigest: "0536a190cf51e1d827a3ebdfd212e9dd59016f2dbd56544b9c9184f5092276ac",
+      },
+    });
+    expect(JSON.stringify(status.run)).not.toContain("older predecessor escalation");
+
+    const explanation = buildExplanationReport({
+      repository: "clockgrove/factory",
+      snapshot: current,
+    });
+    expect(explanation.explanations[0]).toMatchObject({
+      code: EXPLANATION_CODES.recoverySuccessorEscalated,
+      category: "recovery",
+      disposition: "failed",
+      summary: terminalReason,
+      gate: "recovery-successor",
+      requiredAction: expect.stringContaining("factory_recovery_plan"),
+      evidence: {
+        runId: successorRunId,
+        predecessorRunId: "run-status",
+        terminalEvent: "FactoryRunEscalated",
+        terminalSequence: 8,
+        terminalAt: "2026-09-04T12:04:00.000Z",
+        reason: terminalReason,
+        reasonDigest: "0536a190cf51e1d827a3ebdfd212e9dd59016f2dbd56544b9c9184f5092276ac",
+      },
+    });
+  });
+
   it("returns stable explanations without provider responses", () => {
     const report = buildExplanationReport({
       repository: "clockgrove/factory",

@@ -14,12 +14,15 @@ import {
 } from "../scheduling/resource-sampler.js";
 import { normalizeSchedulingPolicy } from "../protocol/policy.js";
 import { inspectLocalCheckout } from "./checkout.js";
+import { inspectObjectiveGraphInput } from "../control/objective-graph-input.js";
+import { legacyGraphConstraintsDigest } from "../graph.js";
 
 export type DiagnosticStatus = "pass" | "warning" | "fail";
 
 export interface DoctorDiagnostic {
   area:
     | "repository"
+    | "graph"
     | "authentication"
     | "toolchain"
     | "controller"
@@ -187,6 +190,37 @@ export async function buildDoctorReport(input: {
       },
       status:
         facts.fork || !facts.canPush || snapshot.closed ? ("warning" as const) : ("pass" as const),
+    };
+  });
+
+  await check("graph", async () => {
+    if (!snapshot) throw new Error("Objective snapshot is unavailable");
+    const inspection = inspectObjectiveGraphInput(snapshot);
+    const details = {
+      classification: inspection.classification,
+      workItemCount: snapshot.workItems.length,
+      hasGraphReceipt: inspection.hasReceipt,
+      ...(inspection.legacyGraphConstraints
+        ? {
+            legacyConstraintDigest: legacyGraphConstraintsDigest(inspection.legacyGraphConstraints),
+          }
+        : {}),
+    };
+    if (inspection.classification === "empty") {
+      return {
+        summary: "Objective has no Work Items; ordinary compilation can create its graph",
+        details,
+      };
+    }
+    if (inspection.classification === "legacy-adoptable") {
+      return {
+        summary: `${snapshot.workItems.length} existing Work Items are bounded adoption inputs; Factory will enrich the same issues without recreating them`,
+        details,
+      };
+    }
+    return {
+      summary: "Objective has authenticated graph input that Factory can verify during startup",
+      details,
     };
   });
 

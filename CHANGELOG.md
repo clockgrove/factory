@@ -54,6 +54,11 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- Fresh Objective startup now classifies empty, authenticated, or strictly adoptable Work Item graph
+  input under the acquired lease before `FactoryRunStarted`. `factory_doctor` exposes the same
+  read-only classification; malformed or mixed pre-existing Work Items produce an actionable
+  `ActivationRejected` receipt without delivery, model, graph-mutation, or worker effects. A full
+  Supervisor regression protects ordinary same-issue adoption. ([#277](https://github.com/clockgrove/factory/issues/277))
 - A deterministic current-run graph ref no longer bypasses the compiler when `GraphCompiled` is
   absent. Pre-receipt restart now requires the graph's atomic compilation record plus the exact
   management dispatch and actual-usage closure; a historical graph copy must not claim a new

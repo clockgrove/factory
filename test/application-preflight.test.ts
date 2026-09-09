@@ -16,7 +16,7 @@ import {
   validatePlanningCheckout,
   readPlanningRepositoryLayout,
 } from "../src/application/plan.js";
-import { compiledGraphDigest, renderWorkPacket } from "../src/graph.js";
+import { compiledGraphDigest, renderLegacyWorkItemCore, renderWorkPacket } from "../src/graph.js";
 import { compileObjective } from "../src/compiler/index.js";
 import type { ManagementBackend } from "../src/management/backend.js";
 import type { CompilationContext, CompilationCheckpoint } from "../src/management/backend.js";
@@ -90,6 +90,75 @@ function healthyChecks(): DoctorChecks {
 }
 
 describe("read-only checkout preflight", () => {
+  it("reports valid existing Work Items as bounded same-issue adoption input", async () => {
+    const f = await fixture();
+    const report = await buildDoctorReport({
+      repository: "o/r",
+      objective: 7,
+      checkout: f.root,
+      readObjective: async () => ({
+        ...snapshot,
+        workItems: [
+          {
+            id: "I_8",
+            number: 8,
+            title: "Existing reviewed item",
+            body: renderLegacyWorkItemCore({
+              goal: "Implement the reviewed behavior",
+              acceptance: ["The behavior is observable"],
+              scope: ["sample.py"],
+              preconditions: [],
+              outOfScope: [],
+              conventions: [],
+            }),
+            blockedBy: [],
+          },
+        ],
+      }),
+      checks: healthyChecks(),
+    });
+
+    expect(report.overall).toBe("ready");
+    expect(report.diagnostics.find((entry) => entry.area === "graph")).toMatchObject({
+      status: "pass",
+      summary: expect.stringContaining("same issues"),
+      details: {
+        classification: "legacy-adoptable",
+        workItemCount: 1,
+        hasGraphReceipt: false,
+        legacyConstraintDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+      },
+    });
+  });
+
+  it("reports malformed existing Work Items as an activation-blocking graph diagnostic", async () => {
+    const f = await fixture();
+    const report = await buildDoctorReport({
+      repository: "o/r",
+      objective: 7,
+      checkout: f.root,
+      readObjective: async () => ({
+        ...snapshot,
+        workItems: [
+          {
+            id: "I_8",
+            number: 8,
+            title: "Malformed item",
+            body: "not a bounded legacy Work Item",
+            blockedBy: [],
+          },
+        ],
+      }),
+      checks: healthyChecks(),
+    });
+
+    expect(report.overall).toBe("attention-required");
+    expect(report.diagnostics.find((entry) => entry.area === "graph")).toMatchObject({
+      status: "fail",
+      summary: expect.stringContaining("six ordered legacy sections"),
+    });
+  });
+
   it.each([false, true])(
     "checks the same checkout again after compilation (concurrent edit: %s)",
     async (changed) => {

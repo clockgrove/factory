@@ -13,6 +13,7 @@ import { GitHubControlStore } from "../src/control/github-store.js";
 import { CompiledGraphManager, type CompiledGraphStore } from "../src/control/graphs.js";
 import { LeaseManager, type GitCommitObject, type LeaseState } from "../src/control/lease.js";
 import { attemptRef } from "../src/control/attempts.js";
+import { IssueAdmissionLedger } from "../src/control/issue-admission.js";
 import {
   decodeEventComments,
   encodeEventTrailer,
@@ -20,7 +21,11 @@ import {
 } from "../src/control/receipts.js";
 import { DEFAULT_RUN_POLICY, parseRunPolicy, policyDigest } from "../src/protocol/policy.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
-import { renderWorkPacket, type CompiledObjective } from "../src/graph.js";
+import {
+  renderWorkPacket,
+  workerPacketFromCompiled,
+  type CompiledObjective,
+} from "../src/graph.js";
 import { planDelivery } from "../src/publication/delivery.js";
 import { GitHubStacks } from "../src/publication/github-stacks.js";
 import { publicationBranch } from "../src/publication/publisher.js";
@@ -44,7 +49,7 @@ import { RecoveryPlanManager } from "../src/recovery/plan.js";
 import { RecoveryClaimManager } from "../src/recovery/claims.js";
 import { recoveryAdoptionEvents } from "../src/recovery/transaction.js";
 import { normalizeArtifact } from "../src/execution/artifacts.js";
-import { workerPacketDigest } from "../src/protocol/worker-packet.js";
+import { parseWorkerPacket, workerPacketDigest } from "../src/protocol/worker-packet.js";
 import { loadRecoveryRuntime } from "../src/recovery/runtime.js";
 import * as siblingRefreshProof from "../src/recovery/sibling-refresh.js";
 import { recoveryReadPort } from "../src/recovery/github-read-port.js";
@@ -56,6 +61,7 @@ import {
   type ExecutionBackend,
 } from "../src/execution/backend.js";
 import { validationInvocationOwnership } from "../src/backends/validation-invocation.js";
+import { persistArtifactTransfer } from "../src/control/artifact-transfers.js";
 
 const validateFixtureTree = cleanValidation.validateArtifactClean;
 
@@ -92,6 +98,9 @@ async function fixture(
     stalePreviewOnce?: boolean;
     tokenLimit?: number;
     artifactOnly?: boolean;
+    interruptedRetainedArtifact?: boolean;
+    successorSandboxUntrusted?: boolean;
+    loseArtifactConsumerSuccessResponse?: boolean;
     loseArtifactPrResponse?: boolean;
     nativeSource?: boolean;
     retainedPrefix?: 1 | 2 | 3;
@@ -163,6 +172,7 @@ async function fixture(
   const now = new Date(Date.now() - (options.historicalSuccessor ? 120_000 : 0));
   const policy = parseRunPolicy({
     ...DEFAULT_RUN_POLICY,
+    ...(options.successorSandboxUntrusted ? { trust: "sandbox_untrusted" as const } : {}),
     ...(options.failC ? { maxAttemptsPerItem: 1 } : {}),
     ...(options.tokenLimit === undefined
       ? {}
@@ -590,6 +600,7 @@ async function fixture(
     readCommit(git("rev-parse", "main")),
   );
   let lostIntegrationReceipt = false;
+  let lostArtifactConsumerSuccessResponse = false;
   vi.spyOn(GitHubControlStore.prototype, "addIssueComment").mockImplementation(
     async (node, body) => {
       const events = decodeEventComments(body);
@@ -610,6 +621,23 @@ async function fixture(
       const target =
         node === snapshot.id ? snapshot : snapshot.workItems.find((item) => item.id === node)!;
       target.factoryEvents!.push(...events);
+      if (
+        options.loseArtifactConsumerSuccessResponse &&
+        !lostArtifactConsumerSuccessResponse &&
+        events.some(
+          (entry) =>
+            entry.kind === "attempt" &&
+            entry.runId === "successor" &&
+            entry.workItem === 9 &&
+            entry.event === "AttemptSucceeded",
+        )
+      ) {
+        lostArtifactConsumerSuccessResponse = true;
+        throw new PlatformUnavailableError(
+          { kind: "server_error", retryAfterMs: 1 },
+          new Error("artifact consumer success response lost"),
+        );
+      }
     },
   );
   vi.spyOn(GitHubControlStore.prototype, "closeIssue").mockImplementation(async (number) => {
@@ -640,7 +668,13 @@ async function fixture(
   const refresh = vi.fn(
     async ({ ref, beforeOid, afterOid }: { ref: string; beforeOid: string; afterOid: string }) => {
       const item = snapshot.workItems.find(
-        (entry) => ref === `refs/heads/${publicationBranch(7, entry.number, 1)}`,
+        (entry) =>
+          ref ===
+          `refs/heads/${publicationBranch(
+            7,
+            entry.number,
+            options.interruptedRetainedArtifact && entry.number === 9 ? 2 : 1,
+          )}`,
       );
       if (!item || refs.get(ref) !== beforeOid) return false;
       const commit = await readCommit(afterOid);
@@ -752,9 +786,11 @@ async function fixture(
       headRef:
         number === 19 && options.providerOwnedRetainedBranch
           ? "provider/retained-b"
-          : number === 20 && options.failC
-            ? publicationBranch(7, 10, 2)
-            : publicationBranch(7, number - 10, 1),
+          : number === 19 && options.interruptedRetainedArtifact
+            ? publicationBranch(7, 9, 2)
+            : number === 20 && options.failC
+              ? publicationBranch(7, 10, 2)
+              : publicationBranch(7, number - 10, 1),
       state: pull.state === "OPEN" ? "open" : "closed",
       draft: false,
       merged: pull.state === "MERGED",
@@ -1437,6 +1473,158 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
       usageId: `compile-${"0".repeat(64)}`,
     }),
   );
+  if (options.interruptedRetainedArtifact) {
+    const item = f.snapshot.workItems[1]!;
+    const reserved = item.factoryEvents!.find((event) => event.event === "AttemptReserved");
+    if (reserved?.kind !== "attempt" || !reserved.localScopeBatch)
+      throw new Error("interrupted retained artifact reservation fixture");
+    const packet = parseWorkerPacket({
+      ...workerPacketFromCompiled(f.graph.workItems[1]!),
+      baseSha: reserved.baseSha,
+    });
+    const scopedReserved = parseFactoryEvent({
+      ...reserved,
+      admissionClass: "local",
+      admissionReason: "local-capacity",
+      requestedCpu: 1,
+      requestedMemoryMb: 512,
+      priorityRank: 0,
+      prioritySource: "subissue-order",
+      subIssuePosition: 1,
+      criticalPathLength: 1,
+      unfinishedDownstream: 1,
+      localScopeBatch: {
+        ...reserved.localScopeBatch,
+        identity: {
+          ...reserved.localScopeBatch.identity,
+          invocationDigest: workerPacketDigest(packet),
+        },
+      },
+    });
+    if (scopedReserved.kind !== "attempt") throw new Error("scoped reservation fixture");
+    const artifact = normalizeArtifact({
+      baseSha: reserved.baseSha,
+      changedPaths: ["b.txt"],
+      patch: `${f.git("diff", "--binary", reserved.baseSha, f.heads[1]!)}\n`,
+      outcome: "succeeded",
+    });
+    item.factoryEvents = [
+      scopedReserved,
+      f.event({
+        kind: "budget",
+        event: "BudgetReserved",
+        workItem: item.number,
+        attempt: scopedReserved.attempt,
+        phase: "execution",
+        unit: "local_milliseconds",
+        amount: 1_800_000,
+      }),
+      f.event({
+        kind: "budget",
+        event: "BudgetReserved",
+        workItem: item.number,
+        attempt: scopedReserved.attempt,
+        phase: "execution",
+        unit: "model_tokens",
+        amount: 0,
+        usageId: `invocation-worker-${item.number}-${scopedReserved.attempt}`,
+        modelInvocationId: `worker-${item.number}-${scopedReserved.attempt}`,
+        directorEpoch: scopedReserved.directorEpoch,
+        policyDigest: scopedReserved.policyDigest,
+      }),
+      f.event({
+        ...scopedReserved,
+        localScopeBatch: undefined,
+        event: "AttemptStarted",
+        sequence: f.sequence,
+        providerResourceId: "fixture-interrupted-retained-artifact",
+        resourceHostIdentity: hostIdentity,
+      }),
+      f.event({
+        kind: "budget",
+        event: "BudgetReconciled",
+        workItem: item.number,
+        attempt: reserved.attempt,
+        phase: "execution",
+        unit: "model_tokens",
+        amount: 0,
+        usageId: `worker-${item.number}-${scopedReserved.attempt}`,
+        modelInvocationId: `worker-${item.number}-${scopedReserved.attempt}`,
+        directorEpoch: scopedReserved.directorEpoch,
+        policyDigest: scopedReserved.policyDigest,
+      }),
+      f.event({
+        ...scopedReserved,
+        localScopeBatch: undefined,
+        event: "AttemptSucceeded",
+        sequence: f.sequence,
+        artifactDigest: artifact.digest,
+        reportedModelTokens: 0,
+      }),
+      f.event({
+        kind: "budget",
+        event: "BudgetReconciled",
+        workItem: item.number,
+        attempt: reserved.attempt,
+        phase: "execution",
+        unit: "local_milliseconds",
+        amount: 123,
+      }),
+      f.event({
+        kind: "capacity",
+        event: "CapacityReconciled",
+        workItem: item.number,
+        attempt: scopedReserved.attempt,
+        phase: "execution",
+        backend: scopedReserved.backend,
+        requestedCpu: 1,
+        requestedMemoryMb: 512,
+        directorEpoch: scopedReserved.directorEpoch,
+        policyDigest: scopedReserved.policyDigest,
+        reason: "fixture source execution resource is absent",
+      }),
+    ];
+    item.linkedPullRequests = [];
+    const attemptOid = f.git(
+      "commit-tree",
+      `${scopedReserved.baseSha}^{tree}`,
+      "-p",
+      scopedReserved.baseSha,
+      "-m",
+      encodeEventTrailer(scopedReserved),
+    );
+    f.refs.set(attemptRef(7, item.number, scopedReserved.attempt), attemptOid);
+    const claimOid = await f.storage.createCommit({
+      treeOid: (await f.storage.readCommit(scopedReserved.baseSha)).treeOid,
+      parentOids: [scopedReserved.baseSha],
+      message: `Factory legacy issue claim\n\nFactory-Repository-Claim: ${Buffer.from(
+        JSON.stringify({
+          objective: 7,
+          workItem: item.number,
+          runId: scopedReserved.runId,
+          directorEpoch: scopedReserved.directorEpoch,
+        }),
+      ).toString("base64url")}`,
+    });
+    f.refs.set(`refs/clockgrove-factory/repository/work-items/work-item-${item.number}`, claimOid);
+    f.refs.delete(`refs/heads/${publicationBranch(7, item.number, scopedReserved.attempt)}`);
+    await persistArtifactTransfer({
+      store,
+      identity: {
+        repository: "o/r",
+        objective: 7,
+        workItem: item.number,
+        attempt: scopedReserved.attempt,
+        runId: scopedReserved.runId,
+        directorEpoch: scopedReserved.directorEpoch,
+        policyDigest: scopedReserved.policyDigest,
+        baseSha: scopedReserved.baseSha,
+      },
+      artifact,
+      allowedPaths: ["b.txt"],
+      assertCurrent: async () => {},
+    });
+  }
   const terminal = f.event({
     kind: "run",
     event: "FactoryRunEscalated",
@@ -1556,7 +1744,8 @@ async function successorFixture(options: Parameters<typeof fixture>[0] = {}) {
   vi.spyOn(CodexSdkLocalBackend.prototype, "cleanup").mockResolvedValue(undefined);
   vi.spyOn(GitHubControlStore.prototype, "createPullRequest").mockImplementation(async (args) => {
     const workItem = Number(args.head.match(/work-item-(\d+)/)![1]);
-    expect(args.head).toBe(publicationBranch(7, workItem, workItem === 10 ? context.attempt : 1));
+    const attempt = workItem === 10 ? context.attempt : options.interruptedRetainedArtifact ? 2 : 1;
+    expect(args.head).toBe(publicationBranch(7, workItem, attempt));
     const pull: LinkedPullRequest = {
       ...(f.snapshot.workItems.find((item) => item.linkedPullRequests.length)
         ?.linkedPullRequests[0] ?? {
@@ -2028,6 +2217,106 @@ describe("Supervisor adopted isolated candidate validation", () => {
     },
     30000,
   );
+  it("continues an unvalidated retained artifact without authorizing a replacement worker", async () => {
+    const f = await successorFixture({ interruptedRetainedArtifact: true });
+    expect(f.planRecord.plan.items).toEqual([
+      expect.objectContaining({ workItem: 8, action: "integrated" }),
+      expect.objectContaining({
+        workItem: 9,
+        action: "reconcile",
+        source: expect.objectContaining({ artifactDigest: expect.any(String) }),
+      }),
+      expect.objectContaining({ workItem: 10, action: "execute" }),
+    ]);
+    const result = await f.run();
+    expect(
+      result,
+      `${result.reason ?? ""} ${JSON.stringify(
+        f.snapshot.workItems.map((item) => ({
+          number: item.number,
+          closed: item.closed,
+          events: item.factoryEvents?.map(
+            (event) => `${event.runId}:${event.event}:${"attempt" in event ? event.attempt : ""}`,
+          ),
+        })),
+      )}`,
+    ).toMatchObject({
+      status: "completed",
+    });
+    expect(f.launch).toHaveBeenCalledTimes(1);
+    expect(f.launch.mock.calls[0]![0].workItem).toBe(10);
+    // B and C receive clean validation/review, and advancing B's stacked base
+    // causes one additional exact-head sibling revalidation before C integrates.
+    expect(f.validate).toHaveBeenCalledTimes(3);
+    expect(f.review).toHaveBeenCalledTimes(3);
+    expect(f.snapshot.workItems.every((item) => item.closed)).toBe(true);
+  }, 60_000);
+
+  it("refuses retained-artifact local validation under a tightened successor trust policy", async () => {
+    const f = await successorFixture({
+      interruptedRetainedArtifact: true,
+      successorSandboxUntrusted: true,
+      adoptedIsolatedValidation: {},
+    });
+    await expect(f.run()).resolves.toMatchObject({
+      status: "escalated",
+      reason: expect.stringContaining("separately authorized independent-validation allowance"),
+    });
+    expect(f.launch).not.toHaveBeenCalled();
+    expect(f.validate).not.toHaveBeenCalled();
+    expect(
+      f.snapshot.workItems[1]!.factoryEvents!.some(
+        (event) => event.runId === "successor" && event.event === "AttemptReserved",
+      ),
+    ).toBe(false);
+  }, 30_000);
+
+  it("resumes the non-dispatching artifact consumer after its success response is lost", async () => {
+    const f = await successorFixture({
+      interruptedRetainedArtifact: true,
+      loseArtifactConsumerSuccessResponse: true,
+    });
+    await expect(f.run()).rejects.toBeInstanceOf(PlatformUnavailableError);
+    expect(f.launch).not.toHaveBeenCalled();
+    const interrupted = f.snapshot.workItems[1]!.factoryEvents!.filter(
+      (event) => event.runId === "successor",
+    );
+    expect(
+      interrupted.filter((event) => event.kind === "attempt" && event.event === "AttemptSucceeded"),
+    ).toHaveLength(1);
+    expect(
+      interrupted.some(
+        (event) =>
+          (event.kind === "attempt" &&
+            ["AttemptStarted", "AttemptDeferred"].includes(event.event)) ||
+          (event.kind === "budget" && event.phase === "execution"),
+      ),
+    ).toBe(false);
+
+    const resumed = await f.run();
+    expect(
+      resumed,
+      `${resumed.reason ?? ""} ${JSON.stringify(
+        f.snapshot.workItems.map((item) => ({
+          number: item.number,
+          closed: item.closed,
+          events: item.factoryEvents?.map(
+            (event) => `${event.runId}:${event.event}:${"attempt" in event ? event.attempt : ""}`,
+          ),
+        })),
+      )}`,
+    ).toMatchObject({ status: "completed" });
+    expect(f.launch).toHaveBeenCalledTimes(1);
+    expect(f.launch.mock.calls[0]![0].workItem).toBe(10);
+    expect(f.snapshot.workItems.every((item) => item.closed)).toBe(true);
+    expect(
+      (
+        await new IssueAdmissionLedger(
+          f.storage as unknown as ConstructorParameters<typeof IssueAdmissionLedger>[0],
+        ).read(9)
+      )?.history.find((entry) => entry.runId === "successor" && entry.reservation.attempt === 2),
+    ).toMatchObject({ disposition: "released", dispatchPossible: false });
+  }, 60_000);
 
   it.each([
     { paid: false, available: true },

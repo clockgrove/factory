@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import { ArtifactConsumerBindingSchema } from "../protocol/events.js";
 import { gitSha } from "../protocol/limits.js";
 import type { GitCommitObject, LeaseStore } from "./lease.js";
 
@@ -25,6 +26,7 @@ const identitySchema = z
     budgetReservationId: text,
     resourceIdentity: text,
     compatibilityClaimOid: gitSha,
+    artifactConsumer: ArtifactConsumerBindingSchema.optional(),
   })
   .strict();
 const evidenceSchema = z

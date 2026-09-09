@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { FactoryEvent } from "../src/protocol/events.js";
+import { parseFactoryEvent, type FactoryEvent } from "../src/protocol/events.js";
 import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
 import { assessRecoveryAccounting } from "../src/recovery/accounting.js";
 
@@ -483,6 +483,42 @@ describe("historical successor accounting assessment", () => {
     const result = assess(events);
     expect(result.attemptCounts).toEqual([]);
     expect(result.usage?.modelTokens).toBe(30);
+  });
+  it("does not charge a bound non-dispatching artifact consumer as an implementation attempt", () => {
+    const consumer = {
+      ...common("one", 4),
+      kind: "attempt" as const,
+      objective: 1,
+      workItem: 2,
+      attempt: 2,
+      backend: "codex-sdk/local-worktree",
+      baseSha: "a".repeat(40),
+      directorEpoch: 2,
+      policyDigest: digest,
+    };
+    const artifactDigest = "b".repeat(64);
+    const events = [
+      ...history("one"),
+      parseFactoryEvent({
+        ...consumer,
+        event: "AttemptReserved",
+        artifactConsumer: {
+          sourceRunId: "source",
+          sourceReservationOid: "c".repeat(40),
+          sourceAttempt: 1,
+          artifactDigest,
+          recoveryPlanCommitOid: "d".repeat(40),
+          recoveryClaimOid: "e".repeat(40),
+        },
+      }),
+      parseFactoryEvent({
+        ...consumer,
+        sequence: 5,
+        event: "AttemptSucceeded",
+        artifactDigest,
+      }),
+    ];
+    expect(assess(events).attemptCounts).toEqual([]);
   });
   it.each([Number.MAX_SAFE_INTEGER + 1, Number.POSITIVE_INFINITY, -1, 1.5])(
     "rejects unsafe model token amount %s",

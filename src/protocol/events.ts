@@ -334,6 +334,18 @@ const attemptEventNames = [
   "AttemptIntegrated",
 ] as const;
 
+export const ArtifactConsumerBindingSchema = z
+  .object({
+    sourceRunId: safeId,
+    sourceReservationOid: gitSha,
+    sourceAttempt: z.number().int().positive(),
+    artifactDigest: sha256Digest,
+    recoveryPlanCommitOid: gitSha,
+    recoveryClaimOid: gitSha,
+  })
+  .strict();
+export type ArtifactConsumerBinding = z.infer<typeof ArtifactConsumerBindingSchema>;
+
 const Attempt = Common.extend({
   kind: z.literal("attempt"),
   event: z.enum(attemptEventNames),
@@ -355,6 +367,7 @@ const Attempt = Common.extend({
     .max(256 * 1024 * 1024)
     .optional(),
   localScopeBatch: LocalScopeBatchSchema.optional(),
+  artifactConsumer: ArtifactConsumerBindingSchema.optional(),
   artifactDigest: sha256Digest.optional(),
   headSha: gitSha.optional(),
   sessionId: boundedText(500).optional(),
@@ -388,6 +401,20 @@ const Attempt = Common.extend({
       message: "source archive digest and size must be recorded together",
     });
   const scopeBatch = event.localScopeBatch;
+  if (
+    event.artifactConsumer &&
+    (event.event !== "AttemptReserved" ||
+      event.localScopeBatch !== undefined ||
+      event.artifactDigest !== undefined ||
+      event.providerResourceId !== undefined ||
+      event.reportedModelTokens !== undefined ||
+      event.reportedModelUsage !== undefined)
+  )
+    context.addIssue({
+      code: "custom",
+      path: ["artifactConsumer"],
+      message: "artifact consumer binding belongs only to a non-dispatching reservation",
+    });
   if (scopeBatch) {
     const scope = scopeBatch.identity;
     if (

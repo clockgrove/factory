@@ -375,7 +375,21 @@ export function assessRecoveryAccounting(input: {
           "An accepted artifact has no matching semantic-review model-token reconciliation; compilation usage alone does not prove review usage.",
       });
     // Infrastructure-deferred attempts preserve spend but do not consume implementation retries.
-    if (!group.some((event) => event.event === "AttemptDeferred")) {
+    const nonDispatchingArtifactConsumer =
+      first.event === "AttemptReserved" &&
+      first.artifactConsumer !== undefined &&
+      !group.some((event) => event.event === "AttemptStarted") &&
+      !budgets.some(
+        (event) =>
+          event.runId === first.runId &&
+          event.workItem === first.workItem &&
+          event.attempt === first.attempt &&
+          event.phase === "execution",
+      );
+    if (
+      !group.some((event) => event.event === "AttemptDeferred") &&
+      !nonDispatchingArtifactConsumer
+    ) {
       const entry = counts.get(first.workItem) ?? {
         workItem: first.workItem,
         count: 0,

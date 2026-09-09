@@ -5,6 +5,7 @@ import {
   type ReportedModelUsage,
   parseFactoryEvent,
 } from "../protocol/events.js";
+import type { ArtifactConsumerBinding } from "../protocol/events.js";
 import { assertNoSecretMaterial, PROTOCOL_V2 } from "../protocol/limits.js";
 import { encodeEventComment, encodeEventTrailer } from "./receipts.js";
 import { writerAuthority } from "./authority.js";
@@ -45,6 +46,7 @@ export interface AttemptReservation {
   createdAt: Date;
   admission?: AttemptAdmissionReceipt;
   localScopeBatch?: LocalScopeBatch;
+  artifactConsumer?: ArtifactConsumerBinding;
 }
 
 export interface AttemptAdmissionReceipt {
@@ -172,6 +174,7 @@ function parseReservation(ref: string, commit: GitCommitObject): AttemptReservat
     createdAt: new Date(event.at),
     ...(admission ? { admission } : {}),
     ...(event.localScopeBatch ? { localScopeBatch: event.localScopeBatch } : {}),
+    ...(event.artifactConsumer ? { artifactConsumer: event.artifactConsumer } : {}),
   };
 }
 
@@ -182,6 +185,7 @@ export interface AttemptAdmissionBinding {
   capacityReservationId: string;
   budgetReservationId: string;
   resourceIdentity: string;
+  artifactConsumer?: ArtifactConsumerBinding;
 }
 
 export interface AttemptManagerOptions {
@@ -258,6 +262,7 @@ export class AttemptManager {
       policyDigest: args.lease.policyDigest,
       ...(args.admission ?? {}),
       ...(localScopeBatch ? { localScopeBatch } : {}),
+      ...(binding.artifactConsumer ? { artifactConsumer: binding.artifactConsumer } : {}),
     };
     parseFactoryEvent(event);
     const oid = await this.#store.createCommit({
@@ -308,6 +313,7 @@ export class AttemptManager {
       createdAt: now,
       ...(args.admission ? { admission: args.admission } : {}),
       ...(localScopeBatch ? { localScopeBatch } : {}),
+      ...(binding.artifactConsumer ? { artifactConsumer: binding.artifactConsumer } : {}),
     };
   }
 
@@ -635,6 +641,9 @@ export class AttemptManager {
       ...(args.reservation.admission ?? {}),
       ...(args.reservation.localScopeBatch
         ? { localScopeBatch: args.reservation.localScopeBatch }
+        : {}),
+      ...(args.reservation.artifactConsumer
+        ? { artifactConsumer: args.reservation.artifactConsumer }
         : {}),
     };
     await this.#store.addIssueComment(

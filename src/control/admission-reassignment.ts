@@ -9,6 +9,72 @@ import {
 import type { IssueAdmissionEntry, IssueAdmissionLedger } from "./issue-admission.js";
 import type { LeaseState, LeaseStore } from "./lease.js";
 
+/** A recovery-chain terminal is written only after the Supervisor drains its
+ * execution pool. For an explicitly retained successful artifact, that exact
+ * terminal plus the accepted plan proves the old callback cannot resume after
+ * issue reassignment; resource absence and accounting remain separate gates. */
+function hasAcceptedRetainedArtifactProducerCompletion(
+  entry: IssueAdmissionEntry,
+  runtime: RecoveryRuntime,
+): boolean {
+  const item = runtime.planRecord.plan.items.find(
+    (candidate) => candidate.workItem === entry.workItem,
+  );
+  const source = item?.source;
+  const history = runtime.planRecord.plan.history.find(
+    (candidate) => candidate.runId === entry.runId,
+  );
+  if (
+    item?.action !== "reconcile" ||
+    !source?.artifactDigest ||
+    source.runId !== entry.runId ||
+    source.attempt !== entry.reservation.attempt ||
+    !history
+  )
+    return false;
+  const scoped = runtime.events.filter(
+    (event) =>
+      event.runId === entry.runId &&
+      "workItem" in event &&
+      event.workItem === entry.workItem &&
+      "attempt" in event &&
+      event.attempt === entry.reservation.attempt,
+  );
+  const succeeded = scoped.filter(
+    (event) =>
+      event.kind === "attempt" &&
+      event.event === "AttemptSucceeded" &&
+      event.artifactDigest === source.artifactDigest,
+  );
+  const terminal = runtime.events.find(
+    (event) =>
+      event.runId === entry.runId &&
+      event.sequence === history.terminalSequence &&
+      event.event === history.terminalEvent,
+  );
+  return (
+    succeeded.length === 1 &&
+    Boolean(terminal) &&
+    scoped.every((event) => event.sequence < history.terminalSequence) &&
+    !scoped.some(
+      (event) =>
+        event.kind === "validation" ||
+        (event.kind === "capacity" && event.phase === "validation") ||
+        (event.kind === "attempt" &&
+          [
+            "AttemptCollected",
+            "AttemptValidated",
+            "AttemptPublished",
+            "AttemptIntegrated",
+            "AttemptFailed",
+            "AttemptTimedOut",
+            "AttemptCancelled",
+            "AttemptDeferred",
+          ].includes(event.event)),
+    )
+  );
+}
+
 /** An already verified accepted successor is an explicit reassignment boundary.
  * Re-observe live resources/capacity; a lease takeover alone never settles its predecessor. */
 async function reconcile(args: {
@@ -20,6 +86,7 @@ async function reconcile(args: {
   workItemNodeId: string;
   assertCurrent: () => Promise<void>;
   assertCapacityReleased: (entry: IssueAdmissionEntry) => Promise<void>;
+  modelUsageExpected: (entry: IssueAdmissionEntry) => boolean;
 }): Promise<{ authorityReceiptOid: string } | undefined> {
   const { runtime, lease, store } = args;
   const ledger = await args.ledger.read(args.workItem);
@@ -112,7 +179,10 @@ async function reconcile(args: {
     throw Error("issue reassignment requires positive current predecessor resource proof");
   for (const entry of occupied) {
     // Current resource absence does not prove that an old callback cannot produce again.
-    if (!hasOriginalAdmissionProducerCompletion(entry, runtime.events))
+    if (
+      !hasOriginalAdmissionProducerCompletion(entry, runtime.events) &&
+      !hasAcceptedRetainedArtifactProducerCompletion(entry, runtime)
+    )
       throw Error("issue reassignment has no original producer completion proof");
     await args.assertCapacityReleased(entry);
     // Validate all accounting before writing settlement evidence or releasing any entry.
@@ -131,7 +201,7 @@ async function reconcile(args: {
         capacityReservationId: entry.capacityReservationId,
         released: true,
       },
-      modelUsageExpected: true,
+      modelUsageExpected: args.modelUsageExpected(entry),
     });
   }
   const claimCommit = await store.readCommit(runtime.claim.oid);
@@ -185,7 +255,7 @@ async function reconcile(args: {
         capacityReservationId: entry.capacityReservationId,
         released: true,
       },
-      modelUsageExpected: true,
+      modelUsageExpected: args.modelUsageExpected(entry),
     });
     await args.ledger.transitionForSuccessor({
       workItem: args.workItem,

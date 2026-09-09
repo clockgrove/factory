@@ -53,7 +53,12 @@ const limits: CapacityLimits = {
 };
 
 function attemptEvent(
-  event: "AttemptReserved" | "AttemptStarted" | "AttemptCollected" | "AttemptFailed",
+  event:
+    | "AttemptReserved"
+    | "AttemptStarted"
+    | "AttemptSucceeded"
+    | "AttemptCollected"
+    | "AttemptFailed",
   sequence: number,
   extra: Record<string, unknown> = {},
 ): FactoryEvent {
@@ -398,6 +403,47 @@ describe("repository-wide capacity ledger", () => {
       },
     ]);
     expect(terminal).toEqual([]);
+  });
+
+  it("does not reconstruct execution capacity for a bound non-dispatching artifact consumer", () => {
+    const artifactConsumer = {
+      sourceRunId: "source",
+      sourceReservationOid: "b".repeat(40),
+      sourceAttempt: 1,
+      artifactDigest: "c".repeat(64),
+      recoveryPlanCommitOid: "d".repeat(40),
+      recoveryClaimOid: "e".repeat(40),
+    };
+    expect(
+      deriveCapacityReservations([
+        {
+          objective: 1,
+          workItem: 10,
+          events: [
+            attemptEvent("AttemptReserved", 1, { artifactConsumer }),
+            attemptEvent("AttemptSucceeded", 2, {
+              artifactDigest: artifactConsumer.artifactDigest,
+            }),
+          ],
+          defaultCpu: 1,
+          defaultMemoryMb: 2_048,
+        },
+      ]),
+    ).toEqual([]);
+    expect(
+      deriveCapacityReservations([
+        {
+          objective: 1,
+          workItem: 10,
+          events: [
+            attemptEvent("AttemptReserved", 1, { artifactConsumer }),
+            attemptEvent("AttemptStarted", 2),
+          ],
+          defaultCpu: 1,
+          defaultMemoryMb: 2_048,
+        },
+      ]),
+    ).toHaveLength(1);
   });
 
   it("reconstructs validation capacity until its idempotent reconciliation", () => {

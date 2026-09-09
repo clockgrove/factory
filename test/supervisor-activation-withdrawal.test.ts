@@ -8,16 +8,18 @@ import { policyDigest } from "../src/protocol/policy.js";
 import { isModelInvocationMarker, unresolvedModelInvocations } from "../src/control/budget.js";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
 import { GithubOctokitGraphWriter, renderLegacyWorkItemCore } from "../src/graph.js";
+import * as localScopeRuntime from "../src/runtime/local-scope.js";
 
 const fixtures: Awaited<ReturnType<typeof providerSupervisorFixture>>[] = [];
 afterEach(async () => {
   for (const fixture of fixtures.splice(0)) await fixture.dispose();
 });
 
-async function fixture(fresh = true) {
+async function fixture(fresh = true, greenfieldBootstrap = false) {
   const f = await providerSupervisorFixture("daytona-burst", {
     controllerActivation: true,
     localOnly: true,
+    greenfieldBootstrap,
   });
   fixtures.push(f);
   vi.spyOn(GitHubReader.prototype, "readRepositoryLayout").mockResolvedValue({
@@ -247,6 +249,83 @@ describe("Supervisor activation withdrawal races", () => {
     expect(f.snapshot.workItems[0]).toMatchObject({ id: "I_8", number: 8, closed: true });
     expect(f.events().filter((event) => event.event === "GraphCompiled")).toHaveLength(1);
     expect(f.events().filter((event) => event.event === "GraphProjected")).toHaveLength(1);
+  });
+
+  it("compiles a greenfield bootstrap and reaches a worker attempt under the bounded recipe", async () => {
+    const f = await fixture(true, true);
+    f.compile.mockImplementation(async (_context, checkpoint) => {
+      const result = {
+        objective: f.graph,
+        usage: { inputTokens: 10, outputTokens: 5 },
+      };
+      await checkpoint(result);
+      return result;
+    });
+    vi.spyOn(GithubOctokitGraphWriter.prototype, "createWorkItemIssue").mockImplementation(
+      async ({ title, body }) => {
+        f.snapshot.workItems.push({
+          id: "I_8",
+          number: 8,
+          title,
+          body,
+          closed: false,
+          assignees: [],
+          labels: ["factory:work-item"],
+          blockedBy: [],
+          linkedPullRequests: [],
+          copilotAssignments: [],
+          factoryEvents: [],
+        });
+        return { id: "I_8", number: 8 };
+      },
+    );
+    const scoped = vi
+      .spyOn(localScopeRuntime, "runScopedLocalProcess")
+      .mockImplementation(async (identity) => ({
+        exitCode: 0,
+        signal: null,
+        stdout: identity.commandIndex === 0 ? "10.17.1\n" : "",
+        stderr: "",
+        durationMs: 1,
+        timedOut: false,
+      }));
+
+    const result = await f.run();
+    expect(result).toMatchObject({
+      status: "escalated",
+      reason: expect.stringContaining(
+        "greenfield bootstrap pull request #108 passed bounded validation",
+      ),
+    });
+    expect(f.compile).toHaveBeenCalledOnce();
+    expect(
+      f.events().filter((event) => event.kind === "attempt" && event.event === "AttemptStarted"),
+    ).toHaveLength(1);
+    expect(f.activity).toContainEqual({
+      operation: "launch",
+      backend: "codex-sdk/local-worktree",
+      workItem: 8,
+    });
+    expect(scoped).toHaveBeenCalledTimes(3);
+    expect(f.mergePull).not.toHaveBeenCalled();
+    expect(f.snapshot.workItems[0]?.linkedPullRequests).toContainEqual(
+      expect.objectContaining({ number: 108, state: "OPEN", mergedAt: null }),
+    );
+    expect(f.events().filter((event) => event.event === "AttemptIntegrated")).toHaveLength(0);
+    expect(f.events().filter((event) => event.event === "GraphCompiled")).toHaveLength(1);
+    expect(f.events().filter((event) => event.event === "GraphProjected")).toHaveLength(1);
+
+    const restarted = await f.run();
+    expect(restarted).toMatchObject({
+      status: "escalated",
+      reason: expect.stringContaining("explicit evidence-preserving successor-run recovery"),
+    });
+    expect(f.compile).toHaveBeenCalledOnce();
+    expect(scoped).toHaveBeenCalledTimes(3);
+    expect(
+      f.events().filter((event) => event.kind === "attempt" && event.event === "AttemptStarted"),
+    ).toHaveLength(1);
+    expect(f.mergePull).not.toHaveBeenCalled();
   });
 
   it("refuses adoption writes when a legacy Work Item changes during compilation", async () => {

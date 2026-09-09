@@ -54,6 +54,14 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- A dependency-root Work Item may now introduce one tightly bounded pnpm validation script when the
+  frozen repository has no package recipe. Compiler admission, fresh-checkout validation, isolated
+  validators and semantic review bind the exact package-manager version, scoped manifests, SHA-512
+  lock integrity, workspace/Turbo closure and finite leaf checks; setup is hook-free and restricted
+  to the declared npm registry.
+  Because these manifests establish dependency authority, Factory publishes the validated PR but
+  requires a human merge before Objective recovery continues. Existing Work Items retain the
+  repository-observed command rule. ([#284](https://github.com/clockgrove/factory/issues/284))
 - Interrupted accepted compiler-evaluation graphs now authenticate their pre-receipt restart through
   exact immutable draft-selection and per-stage accounting evidence, while ordinary compilation
   retains its single-invocation checkpoint requirement. Changed Objective input still blocks before

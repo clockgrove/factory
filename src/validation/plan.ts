@@ -10,6 +10,41 @@ export interface ValidationPlan {
 }
 
 export const NPM_VALIDATION_SETUP_COMMAND = "npm ci --no-audit --no-fund";
+export const PNPM_BOOTSTRAP_VERSION_COMMAND = "pnpm --version";
+export const PNPM_BOOTSTRAP_VALIDATION_SETUP_COMMAND =
+  "pnpm install --frozen-lockfile --ignore-scripts --registry=https://registry.npmjs.org/";
+export const PNPM_BOOTSTRAP_REGISTRY = "registry.npmjs.org";
+
+const PACKAGE_SCRIPT_NAME = /^[A-Za-z0-9][A-Za-z0-9:_.-]{0,127}$/;
+
+export type BootstrapPackageValidationCommand = {
+  manager: "pnpm";
+  script: string;
+};
+
+const BOOTSTRAP_VALIDATION_SCRIPT =
+  /^(?:typecheck|test|lint|check|verify|build)(?:[:._-][A-Za-z0-9][A-Za-z0-9:_.-]{0,111})?$/;
+
+/**
+ * Recognize only finite package-script entry points. The script body remains
+ * untrusted until clean validation inspects the materialized package manifests.
+ */
+export function bootstrapPackageValidationCommand(
+  command: string,
+): BootstrapPackageValidationCommand | null {
+  const tokens = command.trim().split(/\s+/);
+  const manager = tokens[0];
+  if (manager !== "pnpm") return null;
+  const script =
+    tokens.length === 3 && tokens[1] === "run"
+      ? tokens[2]
+      : tokens.length === 2
+        ? tokens[1]
+        : undefined;
+  if (!script || !PACKAGE_SCRIPT_NAME.test(script) || !BOOTSTRAP_VALIDATION_SCRIPT.test(script))
+    return null;
+  return { manager, script };
+}
 
 export interface ExactHeadValidationEvidence {
   protocol: "clockgrove.factory/exact-head-validation-v1";

@@ -335,7 +335,11 @@ import {
   type CleanValidationResult,
   type CleanValidationInput,
 } from "./validation/clean-run.js";
-import { bindValidationToPublishedHead, validationPlanFromPacket } from "./validation/plan.js";
+import {
+  bindValidationToPublishedHead,
+  bootstrapPackageValidationCommand,
+  validationPlanFromPacket,
+} from "./validation/plan.js";
 import {
   discoverLocalScopeHost,
   observeLocalScope,
@@ -1760,9 +1764,15 @@ export class FactorySupervisor {
             ? { producerUnit: host.producerUnit, producerInvocationId: host.producerInvocationId }
             : {}),
         },
-        // The optional npm setup consumes at most one additional index. Unused
-        // scopes stay absent; each actual command is covered before the first launch.
-        commandCount: validationPlanFromPacket(packet).commands.length + 1,
+        // Ordinary npm setup consumes at most one additional index; a bootstrap
+        // pnpm validation proves the tool version and then performs setup.
+        // Unused scopes stay absent; every actual command is pre-authorized.
+        commandCount:
+          validationPlanFromPacket(packet).commands.length +
+          (packet.validationCommands.length === 1 &&
+          bootstrapPackageValidationCommand(packet.validationCommands[0]!)
+            ? 2
+            : 1),
         producerPid: host.producerPid,
         producerStartTicks: host.producerStartTicks,
         deadline: deadline.toISOString(),
@@ -13527,6 +13537,22 @@ export class FactorySupervisor {
     deliveryHeadSha?: string,
     siblingRefresh?: SiblingRefreshRecord,
   ): Promise<boolean> {
+    const packet = this.#packetFor(item.number);
+    const bootstrapCommand =
+      packet.validationCommands.length === 1
+        ? bootstrapPackageValidationCommand(packet.validationCommands[0]!)
+        : null;
+    if (bootstrapCommand && packet.allowedPaths.includes("package.json")) {
+      const sourceBase = await this.#store.readCommit(pull.exactHeadValidation.baseSha);
+      const basePackageJson = await this.#store.readTreeEntry(sourceBase.treeOid, "package.json");
+      if (basePackageJson === null) {
+        const current = await this.#store.readPullRequest(pull.number);
+        if (!current.merged)
+          throw new Error(
+            `greenfield bootstrap pull request #${pull.number} passed bounded validation but changes dependency authority; review and merge it by hand before recovering the Objective`,
+          );
+      }
+    }
     if (siblingRefresh) {
       if (deliveryHeadSha || candidate?.identity.deliveryHeadSha !== siblingRefresh.plannedHeadSha)
         throw new Error("sibling integration lacks its distinct changed-head validation identity");

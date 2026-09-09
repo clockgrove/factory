@@ -137,4 +137,31 @@ describe("sandbox bootstrap contracts", () => {
     expect(rendered).not.toContain("GITHUB_TOKEN");
     expect(rendered).not.toContain("@openai/codex");
   });
+
+  it("renders the exact version and offline setup gates for isolated bootstrap validation", () => {
+    const base = context();
+    base.packet.allowedPaths = ["package.json", "pnpm-lock.yaml"];
+    base.packet.validationCommands = ["pnpm check"];
+    base.packet.requirements.tools = ["node", "pnpm"];
+    base.packet.requirements.networkDestinations = ["registry.npmjs.org"];
+    const validation: IsolatedValidationContext = {
+      ...base,
+      artifact: normalizeArtifact({
+        baseSha: SHA,
+        patch: "diff --git a/package.json b/package.json\n",
+        changedPaths: ["package.json", "pnpm-lock.yaml"],
+        outcome: "succeeded",
+      }),
+    };
+    const rendered = sandboxValidationFiles(validation, Buffer.from("archive"))
+      .map((file) => file.content.toString("utf8"))
+      .join("\n");
+    expect(rendered).toContain('"bootstrapPnpm":true');
+    expect(rendered).toContain("pnpm --version");
+    expect(rendered).toContain(
+      "pnpm install --frozen-lockfile --ignore-scripts --registry=https://registry.npmjs.org/",
+    );
+    expect(rendered).toContain('COREPACK_ENABLE_NETWORK: "0"');
+    expect(rendered).toContain('npm_config_verify_store_integrity: "true"');
+  });
 });

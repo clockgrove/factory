@@ -13,7 +13,13 @@ import type {
   StaleAttemptIdentity,
 } from "../execution/backend.js";
 import { assertNoSecretMaterial } from "../protocol/limits.js";
-import { NPM_VALIDATION_SETUP_COMMAND } from "../validation/plan.js";
+import {
+  bootstrapPackageValidationCommand,
+  NPM_VALIDATION_SETUP_COMMAND,
+  PNPM_BOOTSTRAP_REGISTRY,
+  PNPM_BOOTSTRAP_VALIDATION_SETUP_COMMAND,
+  PNPM_BOOTSTRAP_VERSION_COMMAND,
+} from "../validation/plan.js";
 import { CODEX_WORKER_OUTPUT_SCHEMA, workerPacketPrompt } from "./codex-cli-local.js";
 import { validationInvocationOwnership } from "./validation-invocation.js";
 
@@ -229,6 +235,10 @@ export function sandboxValidationFiles(
   const configuration = {
     expectedPaths: [...context.artifact.changedPaths].sort(),
     commands: context.packet.validationCommands,
+    bootstrapPnpm:
+      context.packet.validationCommands.length === 1 &&
+      context.artifact.changedPaths.includes("package.json") &&
+      bootstrapPackageValidationCommand(context.packet.validationCommands[0]!) !== null,
     timeoutMsPerCommand: Math.min(
       (context.packet.requirements.timeoutMinutes ?? 30) * 60_000,
       60 * 60_000,
@@ -242,7 +252,36 @@ const workspace = new URL("../workspace/", import.meta.url).pathname;
 const config = JSON.parse(readFileSync(new URL("config.json", import.meta.url), "utf8"));
 const startedAt = new Date().toISOString();
 const commands = [];
-const childEnv = { PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin", HOME: "/tmp/factory-home", CI: "true", FACTORY_SUPERVISED: "1" };
+const childEnv = {
+  PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+  HOME: "/tmp/factory-home",
+  CI: "true",
+  FACTORY_SUPERVISED: "1",
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
+  COREPACK_ENABLE_NETWORK: "0",
+  COREPACK_ENABLE_PROJECT_SPEC: "0",
+  XDG_CONFIG_HOME: "/tmp/factory-pnpm-config",
+  NPM_CONFIG_USERCONFIG: "/dev/null",
+  npm_config_dangerously_allow_all_builds: "false",
+  npm_config_enable_global_virtual_store: "false",
+  npm_config_enable_pre_post_scripts: "false",
+  npm_config_frozen_lockfile: "true",
+  npm_config_ignore_scripts: "true",
+  npm_config_lockfile: "true",
+  npm_config_manage_package_manager_versions: "false",
+  npm_config_modules_dir: "node_modules",
+  npm_config_node_linker: "isolated",
+  npm_config_package_import_method: "copy",
+  npm_config_registry: ${JSON.stringify(`https://${PNPM_BOOTSTRAP_REGISTRY}/`)},
+  npm_config_script_shell: "/bin/sh",
+  npm_config_side_effects_cache: "false",
+  npm_config_strict_store_pkg_content_check: "true",
+  npm_config_symlink: "true",
+  npm_config_use_running_store_server: "false",
+  npm_config_verify_deps_before_run: "error",
+  npm_config_verify_store_integrity: "true",
+  npm_config_virtual_store_dir: "node_modules/.pnpm",
+};
 
 function git(args) {
   return execFileSync("git", args, { cwd: workspace, encoding: "utf8", maxBuffer: 1024 * 1024 });
@@ -251,6 +290,7 @@ function git(args) {
 try {
   mkdirSync(workspace, { recursive: true });
   mkdirSync("/tmp/factory-home", { recursive: true });
+  mkdirSync("/tmp/factory-pnpm-config", { recursive: true });
   execFileSync("tar", ["-xf", root + "source.tar", "-C", workspace]);
   git(["init", "-q"]);
   git(["config", "user.name", "clockgrove-factory"]);
@@ -264,7 +304,43 @@ try {
     throw new Error("applied artifact paths do not match its manifest");
   }
   let failureReason;
-  if (existsSync(workspace + "package-lock.json") || existsSync(workspace + "npm-shrinkwrap.json")) {
+  if (config.bootstrapPnpm) {
+    const manifest = JSON.parse(readFileSync(workspace + "package.json", "utf8"));
+    const expectedVersion = typeof manifest.packageManager === "string" && manifest.packageManager.startsWith("pnpm@")
+      ? manifest.packageManager.slice("pnpm@".length)
+      : "";
+    const versionCommand = ${JSON.stringify(PNPM_BOOTSTRAP_VERSION_COMMAND)};
+    const versionBegan = Date.now();
+    const version = spawnSync("pnpm", ["--version"], {
+      cwd: workspace,
+      timeout: config.timeoutMsPerCommand,
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+      env: childEnv,
+    });
+    let versionExitCode = version.status ?? (version.error?.code === "ETIMEDOUT" ? 124 : 1);
+    if (versionExitCode === 0 && version.stdout.trim() !== expectedVersion) versionExitCode = 1;
+    commands.push({ command: versionCommand, exitCode: versionExitCode, durationMs: Date.now() - versionBegan });
+    if (versionExitCode !== 0) {
+      failureReason = versionExitCode === 124 ? "validation setup timed out: " + versionCommand : "validation setup used a pnpm version other than " + expectedVersion;
+    }
+    if (!failureReason) {
+      const command = ${JSON.stringify(PNPM_BOOTSTRAP_VALIDATION_SETUP_COMMAND)};
+      const began = Date.now();
+      const install = spawnSync("pnpm", ["install", "--frozen-lockfile", "--ignore-scripts", ${JSON.stringify(`--registry=https://${PNPM_BOOTSTRAP_REGISTRY}/`)}], {
+        cwd: workspace,
+        timeout: config.timeoutMsPerCommand,
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024,
+        env: childEnv,
+      });
+      const exitCode = install.status ?? (install.error?.code === "ETIMEDOUT" ? 124 : 1);
+      commands.push({ command, exitCode, durationMs: Date.now() - began });
+      if (exitCode !== 0) {
+        failureReason = exitCode === 124 ? "validation setup timed out: " + command : "validation setup failed (" + exitCode + "): " + command;
+      }
+    }
+  } else if (existsSync(workspace + "package-lock.json") || existsSync(workspace + "npm-shrinkwrap.json")) {
     const command = ${JSON.stringify(NPM_VALIDATION_SETUP_COMMAND)};
     const began = Date.now();
     const install = spawnSync("npm", ["ci", "--no-audit", "--no-fund"], {

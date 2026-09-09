@@ -3,7 +3,7 @@
  * GitHub transport and execution resources are simulations, never live evidence. */
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { vi } from "vitest";
@@ -35,6 +35,7 @@ import type { ObjectiveSnapshot, LinkedPullRequest } from "../../src/types.js";
 import { GitHubStacks } from "../../src/publication/github-stacks.js";
 import { PlatformUnavailableError } from "../../src/platform.js";
 import * as artifactTransfers from "../../src/control/artifact-transfers.js";
+import { pnpmBootstrapLock } from "./pnpm-bootstrap.js";
 
 export const LOCAL = "codex-sdk/local-worktree";
 export const DAYTONA = "codex-cli/daytona";
@@ -73,6 +74,7 @@ export interface ProviderFaults {
   nativeDuringRebaseValidation?: () => void;
   nativeRebaseReviewRejects?: boolean;
   nativeRebaseBudgetExhaustion?: boolean;
+  greenfieldBootstrap?: boolean;
 }
 
 export async function providerSupervisorFixture(
@@ -237,7 +239,14 @@ export async function providerSupervisorFixture(
     sequence: 100,
     expiresAt: new Date(Date.now() + 600_000),
   };
-  const graph: CompiledObjective = {
+  const bootstrapPaths = [
+    "package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    "turbo.json",
+    "packages/example/package.json",
+  ];
+  const ordinaryGraph: CompiledObjective = {
     title: "Provider multi-wave qualification",
     workItems: ["a", "b", "join"].map((id, index) => ({
       id,
@@ -277,6 +286,44 @@ export async function providerSupervisorFixture(
           : { group: id, relationship: index === 2 ? "join-after-merge" : "root" },
     })),
   };
+  const graph: CompiledObjective = faults.greenfieldBootstrap
+    ? {
+        title: "Greenfield bootstrap qualification",
+        workItems: [
+          {
+            id: "bootstrap",
+            title: "Bootstrap workspace",
+            goal: "Create a pinned workspace and deterministic check",
+            acceptance: ["the introduced workspace check passes"],
+            scope: [
+              "package.json",
+              "pnpm-lock.yaml",
+              "pnpm-workspace.yaml",
+              "turbo.json",
+              "packages/",
+            ],
+            preconditions: [],
+            outOfScope: [],
+            conventions: [],
+            dependsOn: [],
+            baseSha,
+            validationCommands: ["pnpm check"],
+            requirements: {
+              os: ["linux"],
+              architecture: [],
+              tools: ["node", "pnpm"],
+              services: [],
+              networkDestinations: ["registry.npmjs.org"],
+              permittedSecretNames: [],
+              trust: "trusted_local",
+              estimatedDurationMinutes: 1,
+            },
+            artifactContract: "clockgrove.factory/artifact-v1",
+            delivery: { group: "bootstrap", relationship: "root" },
+          },
+        ],
+      }
+    : ordinaryGraph;
   const graphManager = new CompiledGraphManager(storage, {
     assertCurrent: async () => undefined,
     assertMutationAuthorized: async () => undefined,
@@ -344,7 +391,7 @@ export async function providerSupervisorFixture(
         kind: "graph",
         event: "GraphCompiled",
         graphDigest: graphRecord.graphDigest,
-        graphSize: 3,
+        graphSize: graph.workItems.length,
         baseSha,
         graphRef: graphRecord.ref,
         graphBlobSha: graphRecord.blobOid,
@@ -353,7 +400,7 @@ export async function providerSupervisorFixture(
         kind: "graph",
         event: "GraphProjected",
         graphDigest: graphRecord.graphDigest,
-        graphSize: 3,
+        graphSize: graph.workItems.length,
         projectionRef: projection.ref,
         projectionBlobSha: projection.blobOid,
       }),
@@ -366,7 +413,7 @@ export async function providerSupervisorFixture(
         protocol: "clockgrove.factory/graph-v1",
         id: item.id,
         graphDigest: graphRecord.graphDigest,
-        graphSize: 3,
+        graphSize: graph.workItems.length,
         index,
         dependsOn: item.dependsOn,
       }),
@@ -551,7 +598,9 @@ export async function providerSupervisorFixture(
       body: "",
       changedLines: 1,
       changedFiles: 1,
-      changedFilePaths: [`${graph.workItems[workItem - 8]!.id}.txt`],
+      changedFilePaths: faults.greenfieldBootstrap
+        ? bootstrapPaths
+        : [`${graph.workItems[workItem - 8]!.id}.txt`],
       commitSubjects: [item.title],
       checks: null,
       mergeable: "MERGEABLE",
@@ -732,7 +781,7 @@ export async function providerSupervisorFixture(
       isolation: providerManaged ? "managed" : remote ? "container" : "process",
       supportedOs: ["linux"],
       supportedArchitectures: ["x64", "arm64"],
-      supportedTools: ["node"],
+      supportedTools: faults.greenfieldBootstrap ? ["node", "pnpm"] : ["node"],
       supportedServices: [],
       supportsCancellation: true,
       supportsObservation: true,
@@ -762,8 +811,39 @@ export async function providerSupervisorFixture(
         resources.add(resourceId);
         running.set(resourceId, input);
         const name = graph.workItems[input.workItem - 8]!.id;
-        await writeFile(join(input.workspace, `${name}.txt`), `${name}\n`);
-        execFileSync("git", ["add", `${name}.txt`], { cwd: input.workspace });
+        if (faults.greenfieldBootstrap) {
+          await mkdir(join(input.workspace, "packages", "example"), { recursive: true });
+          await writeFile(
+            join(input.workspace, "package.json"),
+            JSON.stringify({
+              name: "greenfield",
+              private: true,
+              packageManager: "pnpm@10.17.1",
+              scripts: { check: "turbo run check" },
+              devDependencies: { turbo: "2.5.6", typescript: "5.9.2" },
+            }),
+          );
+          await writeFile(
+            join(input.workspace, "pnpm-lock.yaml"),
+            pnpmBootstrapLock([".", "packages/example"], ["turbo@2.5.6", "typescript@5.9.2"]),
+          );
+          await writeFile(
+            join(input.workspace, "pnpm-workspace.yaml"),
+            "packages:\n  - packages/*\n",
+          );
+          await writeFile(
+            join(input.workspace, "turbo.json"),
+            '{"tasks":{"check":{"dependsOn":["^check"]}}}\n',
+          );
+          await writeFile(
+            join(input.workspace, "packages", "example", "package.json"),
+            JSON.stringify({ name: "example", scripts: { check: "tsc --noEmit" } }),
+          );
+          execFileSync("git", ["add", ...bootstrapPaths], { cwd: input.workspace });
+        } else {
+          await writeFile(join(input.workspace, `${name}.txt`), `${name}\n`);
+          execFileSync("git", ["add", `${name}.txt`], { cwd: input.workspace });
+        }
         const handle: BackendHandle = {
           backendId: id,
           resourceId,
@@ -831,7 +911,9 @@ export async function providerSupervisorFixture(
         return normalizeArtifact({
           baseSha: input.packet.baseSha,
           patch,
-          changedPaths: [`${graph.workItems[input.workItem - 8]!.id}.txt`],
+          changedPaths: faults.greenfieldBootstrap
+            ? bootstrapPaths
+            : [`${graph.workItems[input.workItem - 8]!.id}.txt`],
           commands: [],
           logs: "Simulated provider result",
           outcome: "succeeded",
@@ -975,12 +1057,14 @@ export async function providerSupervisorFixture(
   return {
     repository,
     runId: lease.runId,
+    graph,
     policy,
     snapshot,
     management,
     repositoryResources: shared,
     activity,
     resources,
+    mergePull,
     events,
     refs,
     run: (signal?: AbortSignal) => {

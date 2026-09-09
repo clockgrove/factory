@@ -137,6 +137,23 @@ describe("compiled worker navigation context", () => {
     expect(prompt).not.toContain("Repository navigation guidance");
     expect(prompt).toContain("Allowed paths:\n- src/a.ts\n- src/b.ts");
   });
+
+  it("gives a greenfield bootstrap worker the exact artifact-time validation boundary", () => {
+    const context = compiledWorkerContext();
+    context.packet.allowedPaths = [
+      "package.json",
+      "pnpm-lock.yaml",
+      "pnpm-workspace.yaml",
+      "turbo.json",
+      "packages/",
+    ];
+    context.packet.validationCommands = ["pnpm check"];
+    context.packet.requirements.tools = ["node", "pnpm"];
+    const prompt = workerPacketPrompt(context);
+    expect(prompt).toContain("Greenfield bootstrap validation is intentionally narrow");
+    expect(prompt).toContain('exactly "turbo run check"');
+    expect(prompt).toContain("frozen install only from that registry with scripts disabled");
+  });
 });
 
 function providerWorkItem(id: string, dependsOn: string[], scope: string[]) {
@@ -740,6 +757,72 @@ describe("bounded objective compiler", () => {
         ],
       }),
     ).toThrow(/root topology/);
+  });
+
+  it("admits one scoped pnpm script only for the dependency-root greenfield bootstrap", () => {
+    const bootstrap = {
+      ...base,
+      id: "bootstrap",
+      scope: ["package.json", "pnpm-lock.yaml", "turbo.json", "packages/"],
+      validationCommands: ["pnpm check"],
+      requirements: {
+        ...base.requirements,
+        tools: ["node", "pnpm"],
+        networkDestinations: ["registry.npmjs.org"],
+      },
+      delivery: { group: "bootstrap", relationship: "root" as const },
+      validation: [
+        {
+          tier: "mechanical" as const,
+          criteria: [...base.acceptance],
+          rationale: "The introduced, artifact-bound check script validates the bootstrap.",
+          evidenceCommands: ["pnpm check"],
+        },
+      ],
+    };
+    const greenfield = { files: [{ path: "README.md" }], scripts: {} };
+    expect(() =>
+      validateCompiledObjective({ title: "Bootstrap", workItems: [bootstrap] }, greenfield),
+    ).not.toThrow();
+    for (const invalid of [
+      { ...bootstrap, scope: ["pnpm-lock.yaml", "turbo.json"] },
+      { ...bootstrap, validationCommands: ["pnpm install"] },
+      { ...bootstrap, validationCommands: ["npm test"] },
+      { ...bootstrap, validationCommands: ["pnpm check", "pnpm test"] },
+      {
+        ...bootstrap,
+        requirements: { ...bootstrap.requirements, networkDestinations: [] },
+      },
+    ]) {
+      expect(() =>
+        validateCompiledObjective({ title: "Bootstrap", workItems: [invalid] }, greenfield),
+      ).toThrow(/invented validation command|exactly one pnpm script|must declare registry/);
+    }
+
+    const later = {
+      ...base,
+      id: "later",
+      scope: ["src/later.ts"],
+      dependsOn: ["bootstrap"],
+      validationCommands: ["pnpm check"],
+      requirements: {
+        ...base.requirements,
+        tools: ["node", "pnpm"],
+        networkDestinations: ["registry.npmjs.org"],
+      },
+      delivery: { group: "later", relationship: "sibling" as const },
+      validation: [
+        {
+          tier: "mechanical" as const,
+          criteria: [...base.acceptance],
+          rationale: "Fixture command.",
+          evidenceCommands: ["pnpm check"],
+        },
+      ],
+    };
+    expect(() =>
+      validateCompiledObjective({ title: "Bootstrap", workItems: [bootstrap, later] }, greenfield),
+    ).toThrow(/invented validation command in later/);
   });
   it("requires every compiler analysis record", () => {
     const incomplete = { ...base };

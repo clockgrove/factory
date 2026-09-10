@@ -13,9 +13,9 @@ import {
   loadCompiledGraphProjection,
   loadStagedCompiledGraphProjection,
 } from "../control/graphs.js";
-import { decodeEventTrailer, deduplicateFactoryEvents } from "../control/receipts.js";
+import { decodeEventTrailer } from "../control/receipts.js";
 import { loadReviewCheckpoint, type ReviewIdentity } from "../control/reviews.js";
-import { type FactoryEvent, parseFactoryEvent } from "../protocol/events.js";
+import type { FactoryEvent } from "../protocol/events.js";
 import { policyDigest } from "../protocol/policy.js";
 import { compilerEvalDigest } from "../evaluation/compiler-eval.js";
 import {
@@ -28,9 +28,10 @@ import { bindValidationToPublishedHead } from "../validation/plan.js";
 import type { RecoveryReadStore } from "./assessment.js";
 import { loadRecoveryClaim, type RecoveryClaimRecord } from "./claims.js";
 import {
-  createRecoveryEventDigest,
   recoveryEventDigest,
+  recoveryEventObservation,
   recoverySourceEventsDigest,
+  type RecoveryEventInput,
 } from "./identity.js";
 import { verifyPriorRecoveryDelivery } from "./outcomes.js";
 import { recoveryAdoptionEvents } from "./transaction.js";
@@ -105,12 +106,15 @@ export interface RecoveryEvidenceResolution {
   reads: { performed: number; limit: number };
 }
 
-function receiptIdentity(event: FactoryEvent): RecoveryReceiptIdentity {
+function receiptIdentity(
+  event: FactoryEvent,
+  digestOf: (event: FactoryEvent) => string,
+): RecoveryReceiptIdentity {
   return {
     runId: event.runId,
     event: event.event,
     sequence: event.sequence,
-    digest: recoveryEventDigest(event),
+    digest: digestOf(event),
     ...("workItem" in event && typeof event.workItem === "number"
       ? { workItem: event.workItem }
       : {}),
@@ -143,12 +147,11 @@ export function recoveryEvidenceDigest(resolution: RecoveryEvidenceResolution): 
 /** Resolve original immutable evidence without copying attempts into, or authorizing, the controlling run. */
 export async function resolveRecoveryEvidence(input: {
   planRecord: RecoveryPlanRecord;
-  events: readonly FactoryEvent[];
+  events: RecoveryEventInput;
   claim: RecoveryClaimRecord | null;
   store: RecoveryReadStore;
   snapshot: FactoryReadSnapshot;
 }): Promise<RecoveryEvidenceResolution> {
-  const recoveryEventDigest = createRecoveryEventDigest();
   const output: RecoveryEvidenceResolution = {
     controllingRunId: input.planRecord.plan.successorRunId,
     sourcePlanDigest: input.planRecord.digest,
@@ -213,7 +216,12 @@ export async function resolveRecoveryEvidence(input: {
       : {}),
   };
   try {
-    requireEvidence(input.events.length <= 10_000);
+    const observation = recoveryEventObservation(input.events, {
+      maxEvents: 10_000,
+    }).semanticView();
+    const events = observation.events;
+    const observedDigest = (event: FactoryEvent) => observation.digestOf(event);
+    requireEvidence(events.length <= 10_000);
     const plan = parseRecoveryPlan(input.planRecord.plan);
     requireEvidence(
       input.planRecord.digest === recoveryPlanDigest(plan) &&
@@ -245,21 +253,20 @@ export async function resolveRecoveryEvidence(input: {
             typeof item.closed === "boolean",
         ),
     );
-    const events = deduplicateFactoryEvents(input.events.map(parseFactoryEvent));
     requireEvidence(events.every((event) => event.objective === plan.objective));
     const sourceRunIds = plan.history.map((entry) => entry.runId);
     requireEvidence(
       recoverySourceEventsDigest({
         objective: plan.objective,
         runIds: sourceRunIds,
-        events,
+        events: observation,
         maxSequence: plan.sourceEventMaxSequence,
       }) === plan.sourceEventsDigest,
     );
     output.currentSourceEventsDigest = recoverySourceEventsDigest({
       objective: plan.objective,
       runIds: sourceRunIds,
-      events,
+      events: observation,
       maxSequence: Number.MAX_SAFE_INTEGER,
     });
     if (output.currentSourceEventsDigest !== plan.sourceEventsDigest)
@@ -278,7 +285,7 @@ export async function resolveRecoveryEvidence(input: {
       const start = starts.get(entry.runId);
       requireEvidence(
         start &&
-          recoveryEventDigest(start) === entry.startDigest &&
+          observation.digestOf(start) === entry.startDigest &&
           start.policyDigest === entry.policyDigest,
       );
     }
@@ -366,18 +373,19 @@ export async function resolveRecoveryEvidence(input: {
           requireEvidence(claim && request?.event === "RecoveryRequested" && predecessor);
           if (!claim || request?.event !== "RecoveryRequested" || !predecessor)
             throw new Error("missing graph adoption");
-          const expected = recoveryAdoptionEvents({
-            planRecord: adopted!,
-            claim,
-            authenticatedRequest: request,
-            predecessorStart: predecessor,
-          });
+          const expected = recoveryAdoptionEvents(
+            {
+              planRecord: adopted!,
+              claim,
+              authenticatedRequest: request,
+              predecessorStart: predecessor,
+            },
+            observation,
+          );
           requireEvidence(
             expected
               .map(recoveryEventDigest)
-              .every((expectedDigest) =>
-                events.some((event) => recoveryEventDigest(event) === expectedDigest),
-              ),
+              .every((expectedDigest) => observation.findByDigest(expectedDigest)),
           );
           await verifyGraph(adopted!.plan.graph.sourceRunId);
           return;
@@ -404,7 +412,7 @@ export async function resolveRecoveryEvidence(input: {
           assertAuthenticatedCompilationCheckpoint({
             graph,
             graphCommit,
-            events,
+            events: [...events],
             objective: plan.objective,
             runId,
             expectedBaseSha: sourceBaseSha,
@@ -591,7 +599,7 @@ export async function resolveRecoveryEvidence(input: {
         const request = events.find(
           (event) =>
             event.event === "RecoveryRequested" &&
-            recoveryEventDigest(event) === claim!.requestDigest,
+            observation.digestOf(event) === claim!.requestDigest,
         );
         requireEvidence(
           request &&
@@ -636,7 +644,9 @@ export async function resolveRecoveryEvidence(input: {
         requireEvidence(!successor.length || controllingStart);
         resolved.successorEffectCount = successor.length;
         resolved.successorEffectsTruncated = successor.length > 100;
-        resolved.successorEffects = successor.slice(0, 100).map(receiptIdentity);
+        resolved.successorEffects = successor
+          .slice(0, 100)
+          .map((event) => receiptIdentity(event, observedDigest));
         const source = item.source;
         const currentItem = snapshot.workItems.find(
           (candidate) => candidate.number === item.workItem,
@@ -676,7 +686,7 @@ export async function resolveRecoveryEvidence(input: {
           const matches = sourceEvents.filter(
             (event) =>
               event.sequence <= plan.sourceEventMaxSequence &&
-              recoveryEventDigest(event) === digest,
+              observation.digestOf(event) === digest,
           );
           requireEvidence(matches.length === 1);
           return matches[0]!;
@@ -717,7 +727,7 @@ export async function resolveRecoveryEvidence(input: {
         resolved.reservation = {
           ref: source.reservationRef,
           commitOid: source.reservationCommitOid,
-          receipt: receiptIdentity(reservation),
+          receipt: receiptIdentity(reservation, observedDigest),
         };
         if (source.artifactDigest)
           requireEvidence(
@@ -738,7 +748,10 @@ export async function resolveRecoveryEvidence(input: {
               validation.outputTreeSha === source.validation.outputTreeSha &&
               validation.evidenceDigest === source.validation.evidenceDigest,
           );
-          resolved.validation = { ...source.validation, receipt: receiptIdentity(validation) };
+          resolved.validation = {
+            ...source.validation,
+            receipt: receiptIdentity(validation, observedDigest),
+          };
         }
         if (source.review) {
           requireEvidence(source.validation && source.artifactDigest);
@@ -807,13 +820,19 @@ export async function resolveRecoveryEvidence(input: {
           resolved.review = { ...source.review };
         }
         if (source.priorDelivery) {
-          const prior = await verifyPriorRecoveryDelivery({ plan, item, events, store });
+          const prior = await verifyPriorRecoveryDelivery({
+            plan,
+            item,
+            events: observation,
+            store,
+          });
           const publication = source.publication!;
-          const receipt = events.find(
-            (event) => recoveryEventDigest(event) === publication.receiptDigest,
-          );
+          const receipt = observation.findByDigest(publication.receiptDigest);
           requireEvidence(receipt);
-          resolved.publication = { ...publication, receipt: receiptIdentity(receipt!) };
+          resolved.publication = {
+            ...publication,
+            receipt: receiptIdentity(receipt!, observedDigest),
+          };
           const pull = await store.readPullRequest(publication.pullRequest);
           const head = await store.readCommit(pull.headSha);
           const observed = item.observedPullRequest;
@@ -884,7 +903,7 @@ export async function resolveRecoveryEvidence(input: {
               objective: plan.objective,
               workItem: item.workItem,
               source,
-              events,
+              events: observation,
               controllingRunIds: plan.history.map((entry) => entry.runId),
               store,
               deliveryHeadSha: source.siblingRefresh.deliveryHeadSha,
@@ -903,7 +922,7 @@ export async function resolveRecoveryEvidence(input: {
             branch: publication.branch,
             baseSha: publication.baseSha,
             headSha: publication.headSha,
-            receipt: receiptIdentity(publication),
+            receipt: receiptIdentity(publication, observedDigest),
           };
           try {
             const pull = await read(`pull:${publication.pullRequest}`, () =>

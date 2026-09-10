@@ -1,12 +1,17 @@
 import { createHash } from "node:crypto";
 import { PlatformUnavailableError } from "../platform.js";
 import { attemptRef, listAttemptReservationRefs } from "../control/attempts.js";
-import { decodeEventTrailer, deduplicateFactoryEvents } from "../control/receipts.js";
+import { decodeEventTrailer } from "../control/receipts.js";
 import type { StaleAttemptIdentity } from "../execution/backend.js";
-import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
+import type { FactoryEvent } from "../protocol/events.js";
 import type { RecoveryReadStore } from "./assessment.js";
 import { parseRecoveryPlan, type RecoveryPlan, type RecoveryPlanRecord } from "./plan.js";
-import { recoveryEventDigest } from "./identity.js";
+import {
+  recoveryEventDigest,
+  recoveryEventObservation,
+  type RecoveryEventInput,
+  type RecoveryEventObservation,
+} from "./identity.js";
 import {
   localRecoveryResourceIdentityDigest,
   observeLocalRecoveryResource,
@@ -32,10 +37,11 @@ const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(va
 
 async function resourceEvidence(
   plan: RecoveryPlan,
-  events: FactoryEvent[],
+  observation: RecoveryEventObservation,
   store: RecoveryReadStore,
   ports: RecoveryResourcePorts,
 ): Promise<string> {
+  const events = observation.events;
   const sourceRuns = new Set(plan.history.map((entry) => entry.runId));
   const reservations = events.filter(
     (event): event is Attempt =>
@@ -80,8 +86,7 @@ async function resourceEvidence(
         ref.ref === attemptRef(plan.objective, reserved.workItem, reserved.attempt) &&
         reserved.objective === plan.objective &&
         (sourceRuns.has(reserved.runId) || reserved.runId === plan.successorRunId) &&
-        reservations.filter((event) => recoveryEventDigest(event) === recoveryEventDigest(reserved))
-          .length === 1 &&
+        reservations.includes(observation.findByDigest(recoveryEventDigest(reserved)) as Attempt) &&
         commit.parentOids.length === 1 &&
         commit.parentOids[0] === reserved.baseSha,
       "reservation-binding-mismatch",
@@ -138,7 +143,7 @@ async function resourceEvidence(
       const observed = batch.identity.producerUnit
         ? await observeLocalScopeBatch(batch, ports.scopePort)
         : await observeCompletedForegroundScopeBatch(
-            { batch, plan, events, store },
+            { batch, plan, events: observation, store },
             ports.scopePort,
           );
       requireGate(
@@ -227,7 +232,7 @@ async function resourceEvidence(
 export async function verifyRecoveryResources(
   input: {
     planRecord: RecoveryPlanRecord;
-    events: readonly FactoryEvent[];
+    events: RecoveryEventInput;
     store: RecoveryReadStore;
   } & RecoveryResourcePorts,
 ): Promise<{
@@ -242,21 +247,23 @@ export async function verifyRecoveryResources(
 export async function verifyRecoveryProposalResources(
   input: {
     plan: RecoveryPlan;
-    events: readonly FactoryEvent[];
+    events: RecoveryEventInput;
     store: RecoveryReadStore;
   } & RecoveryResourcePorts,
 ): Promise<{ status: "verified" | "blocked"; evidenceDigest: string | null; blockers: string[] }> {
   try {
     const plan = parseRecoveryPlan(input.plan);
-    requireGate(input.events.length <= 10_000, "resource-history-bound");
-    const events = deduplicateFactoryEvents(input.events.map(parseFactoryEvent));
+    const observation = recoveryEventObservation(input.events, {
+      maxEvents: 10_000,
+    }).semanticView();
+    const events = observation.events;
     requireGate(
       events.every((event) => event.objective === plan.objective),
       "resource-objective-mismatch",
     );
     const evidenceDigest = await resourceEvidence(
       plan,
-      events,
+      observation,
       withImmutableRecoveryReads(input.store),
       input,
     );

@@ -19,7 +19,11 @@ import { selectEquivalentPublicationRecord } from "../publication/recorded-publi
 import { bindValidationToPublishedHead } from "../validation/plan.js";
 import type { RecoveryReadStore } from "./assessment.js";
 import { loadRecoveryClaim } from "./claims.js";
-import { createRecoveryEventDigest } from "./identity.js";
+import {
+  recoveryEventDigest,
+  recoveryEventObservation,
+  type RecoveryEventInput,
+} from "./identity.js";
 import { loadRecoveryPlan, type RecoveryPlanItem } from "./plan.js";
 import { recoveryAdoptionEvents } from "./transaction.js";
 import { verifyRecoverySourceIntegration } from "./outcomes.js";
@@ -39,7 +43,7 @@ export async function observeRecoverySiblingRefresh(
     objective: number;
     workItem: number;
     source: Source;
-    events: readonly FactoryEvent[];
+    events: RecoveryEventInput;
     /** Only the already authenticated accepted recovery chain, including its current run. */
     controllingRunIds: readonly string[];
     store: RecoveryReadStore;
@@ -53,8 +57,9 @@ export async function observeRecoverySiblingRefresh(
   },
   visiting = new Set<string>(),
 ) {
-  const recoveryEventDigest = createRecoveryEventDigest();
-  const { source, events } = input;
+  const observation = recoveryEventObservation(input.events, { maxEvents: 10_000 });
+  const { source } = input;
+  const events = observation.events;
   let reads = 0;
   const store = new Proxy({} as RecoveryReadStore, {
     get(_target, property) {
@@ -71,9 +76,7 @@ export async function observeRecoverySiblingRefresh(
   requireRefresh(!visiting.has(input.deliveryHeadSha) && visiting.size < 100);
   visiting = new Set(visiting).add(input.deliveryHeadSha);
   requireRefresh(publication.stackNumber === null);
-  const reserved = events.find(
-    (event) => recoveryEventDigest(event) === source.reservationReceiptDigest,
-  );
+  const reserved = observation.findByDigest(source.reservationReceiptDigest);
   requireRefresh(
     reserved?.event === "AttemptReserved" &&
       reserved.runId === source.runId &&
@@ -86,9 +89,7 @@ export async function observeRecoverySiblingRefresh(
     requireRefresh(
       publication.branch === publicationBranch(input.objective, input.workItem, source.attempt),
     );
-  const publicationEvent = events.find(
-    (event) => recoveryEventDigest(event) === publication.receiptDigest,
-  );
+  const publicationEvent = observation.findByDigest(publication.receiptDigest);
   requireRefresh(
     publicationEvent &&
       ((publicationEvent.event === "PublicationRecorded" &&
@@ -138,7 +139,7 @@ export async function observeRecoverySiblingRefresh(
     );
   const publicationDigests = new Set(
     equivalentPublications.length
-      ? equivalentPublications.map(recoveryEventDigest)
+      ? equivalentPublications.map((event) => observation.digestOf(event))
       : [publication.receiptDigest],
   );
   const original = await store.readCommit(publication.headSha);
@@ -313,16 +314,19 @@ export async function observeRecoverySiblingRefresh(
       );
       const predecessor = starts.find((event) => event.runId === adopted.plan.predecessor.runId);
       requireRefresh(claim && request?.event === "RecoveryRequested" && predecessor);
-      const expected = recoveryAdoptionEvents({
-        planRecord: adopted,
-        claim,
-        authenticatedRequest: request,
-        predecessorStart: predecessor,
-      });
+      const expected = recoveryAdoptionEvents(
+        {
+          planRecord: adopted,
+          claim,
+          authenticatedRequest: request,
+          predecessorStart: predecessor,
+        },
+        observation,
+      );
       requireRefresh(
         expected.every((expected) => {
           const expectedDigest = recoveryEventDigest(expected);
-          return events.some((event) => recoveryEventDigest(event) === expectedDigest);
+          return observation.findByDigest(expectedDigest);
         }),
       );
     }
@@ -432,7 +436,7 @@ export async function observeRecoverySiblingRefresh(
           repository: input.repository,
           receiverObjective: input.objective,
           receiverStart: start,
-          receiverEvents: events,
+          receiverEvents: observation,
           targetBaseSha: cursor,
           beforeAt: horizon.at,
           store,
@@ -471,7 +475,7 @@ export async function observeRecoverySiblingRefresh(
         const proof = await verifyRecoverySourceIntegration({
           planRecord,
           claim,
-          events,
+          events: observation,
           store,
           outcome: integrated,
           proofTraversal: visiting,
@@ -628,7 +632,7 @@ export async function observeRecoverySiblingRefresh(
             {
               repository: input.repository,
               objective: input.objective,
-              events,
+              events: observation,
               controllingRunIds: input.controllingRunIds,
               store,
               workItem: integrated.workItem,
@@ -640,17 +644,17 @@ export async function observeRecoverySiblingRefresh(
                 attempt: integrated.attempt,
                 reservationRef: ref,
                 reservationCommitOid: oid,
-                reservationReceiptDigest: recoveryEventDigest(reservation[0]!),
+                reservationReceiptDigest: observation.digestOf(reservation[0]!),
                 artifactDigest: null,
                 review: null,
                 validation: {
-                  receiptDigest: recoveryEventDigest(validation),
+                  receiptDigest: observation.digestOf(validation),
                   evidenceDigest: validation.evidenceDigest,
                   baseSha: validation.baseSha,
                   outputTreeSha: validation.outputTreeSha,
                 },
                 publication: {
-                  receiptDigest: recoveryEventDigest(publication),
+                  receiptDigest: observation.digestOf(publication),
                   mode: publication.mode,
                   pullRequest: publication.pullRequest,
                   pullRequestNodeId: pull.nodeId,

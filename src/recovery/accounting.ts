@@ -7,9 +7,13 @@ import {
   remainingBudget,
   unreconciledBudgetReservations,
 } from "../control/budget.js";
-import { deduplicateFactoryEvents } from "../control/receipts.js";
-import { type FactoryEvent, parseFactoryEvent } from "../protocol/events.js";
+import type { FactoryEvent } from "../protocol/events.js";
 import { type RunPolicy, parseRunPolicy, policyDigest } from "../protocol/policy.js";
+import {
+  RecoveryEventObservation,
+  recoveryEventObservation,
+  type RecoveryEventInput,
+} from "./identity.js";
 
 type BudgetEvent = Extract<FactoryEvent, { kind: "budget" }>;
 type AttemptEvent = Extract<FactoryEvent, { kind: "attempt" }>;
@@ -129,7 +133,7 @@ const reservationSource = (event: BudgetEvent): BudgetEvent => ({
 export function assessRecoveryAccounting(input: {
   objective: number;
   repository: string;
-  events: FactoryEvent[];
+  events: RecoveryEventInput;
   runIds: readonly string[];
   policy: RunPolicy;
   authority?: ObjectiveAuthorityObservation | null | undefined;
@@ -171,10 +175,12 @@ export function assessRecoveryAccounting(input: {
     input.objective <= 0 ||
     !/^[\w.-]+\/[\w.-]+$/.test(input.repository) ||
     !Array.isArray(input.runIds) ||
-    !Array.isArray(input.events) ||
+    (!(input.events instanceof RecoveryEventObservation) && !Array.isArray(input.events)) ||
     input.runIds.length === 0 ||
     input.runIds.length > 100 ||
-    input.events.length > 50_000 ||
+    (input.events instanceof RecoveryEventObservation
+      ? input.events.events.length
+      : input.events.length) > 50_000 ||
     input.runIds.some((id) => typeof id !== "string" || !id || id.length > 300) ||
     new Set(input.runIds).size !== input.runIds.length
   ) {
@@ -185,15 +191,14 @@ export function assessRecoveryAccounting(input: {
     return result;
   }
   result.runIds = [...input.runIds];
-  let events: FactoryEvent[];
+  let events: readonly FactoryEvent[];
   let digest: string;
   try {
     parseRunPolicy(input.policy);
     digest = policyDigest(input.policy);
     const selected = new Set(input.runIds);
-    events = deduplicateFactoryEvents(
-      input.events.filter((event) => selected.has(event.runId)).map(parseFactoryEvent),
-    );
+    const observation = recoveryEventObservation(input.events).semanticView();
+    events = observation.select((event) => selected.has(event.runId)).events;
   } catch {
     block(
       "invalid-receipts-or-policy",
@@ -305,9 +310,9 @@ export function assessRecoveryAccounting(input: {
     }
     nativeTotals.set(entry.unit, total);
   }
-  result.usage = deriveBudgetUsage(events);
+  result.usage = deriveBudgetUsage([...events]);
   result.remaining = remainingBudget(input.policy, result.usage);
-  const outstanding = unreconciledBudgetReservations(events);
+  const outstanding = unreconciledBudgetReservations([...events]);
   result.unreconciledReservationCount = outstanding.length;
   result.unreconciledReservationsTruncated = outstanding.length > 100;
   result.unreconciledReservations = outstanding.slice(0, 100).map(reservationSource);

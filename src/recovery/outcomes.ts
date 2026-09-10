@@ -22,9 +22,11 @@ import {
 import type { RecoveryReadStore } from "./assessment.js";
 import { loadRecoveryClaim, type RecoveryClaimRecord } from "./claims.js";
 import {
-  createRecoveryEventDigest,
   recoveryEventDigest,
+  recoveryEventObservation,
   recoverySourceEventsDigest,
+  type RecoveryEventInput,
+  type RecoveryEventObservation,
 } from "./identity.js";
 import {
   loadRecoveryPlan,
@@ -72,11 +74,12 @@ function requireOutcome(condition: unknown): asserts condition {
 export async function verifyPriorRecoveryDelivery(input: {
   plan: RecoveryPlan;
   item: RecoveryPlanItem;
-  events: readonly FactoryEvent[];
+  events: RecoveryEventInput;
   store: RecoveryReadStore;
   proofTraversal?: ReadonlySet<string>;
 }): Promise<RecoverySourceIntegrationProof> {
-  const { plan, item, events, store } = input;
+  const { plan, item, store } = input;
+  const observation = recoveryEventObservation(input.events, { maxEvents: 10_000 });
   const reference = item.source?.priorDelivery;
   requireOutcome(reference && item.action === "integrated" && plan.history.length <= 100);
   let cursor = plan.priorPlanDigest;
@@ -114,11 +117,8 @@ export async function verifyPriorRecoveryDelivery(input: {
     return JSON.stringify(original);
   };
   requireOutcome(core(priorItem.source) === core(item.source!));
-  const matches = events.filter(
-    (event) => recoveryEventDigest(event) === reference.integrationReceiptDigest,
-  );
-  requireOutcome(matches.length === 1 && matches[0]!.event === "RecoverySourceIntegrated");
-  const outcome = matches[0]!;
+  const outcome = observation.findByDigest(reference.integrationReceiptDigest);
+  requireOutcome(outcome?.event === "RecoverySourceIntegrated");
   requireOutcome(
     outcome.runId === reference.runId &&
       outcome.planDigest === record.digest &&
@@ -127,15 +127,11 @@ export async function verifyPriorRecoveryDelivery(input: {
   );
   let publication = priorItem.source.publication;
   if (!publication) {
-    const restored = events.filter(
-      (event) => recoveryEventDigest(event) === outcome.sourcePublicationReceiptDigest,
-    );
+    const restored = observation.findByDigest(outcome.sourcePublicationReceiptDigest);
     requireOutcome(
-      restored.length === 1 &&
-        restored[0]!.event === "RecoverySourcePublished" &&
-        restored[0]!.runId === reference.runId,
+      restored?.event === "RecoverySourcePublished" && restored.runId === reference.runId,
     );
-    publication = recoverySourcePublicationBinding(restored[0]!, plan.repository);
+    publication = recoverySourcePublicationBinding(restored, plan.repository, observation);
   }
   requireOutcome(JSON.stringify(publication) === JSON.stringify(item.source!.publication));
   const claim = await loadRecoveryClaim(store, plan.objective, record.plan.predecessor.runId);
@@ -144,7 +140,7 @@ export async function verifyPriorRecoveryDelivery(input: {
     ...(input.proofTraversal ? { proofTraversal: input.proofTraversal } : {}),
     planRecord: record,
     claim,
-    events,
+    events: observation,
     store,
     outcome,
   });
@@ -189,6 +185,7 @@ export function createRecoverySourceIntegratedEvent(input: {
   mergeCandidateIdentityDigest?: string;
   deliveryHeadSha?: string;
   sourcePublication?: RecoverySourcePublishedEvent;
+  eventObservation?: RecoveryEventObservation;
   sequence: number;
   at: string;
 }): RecoverySourceIntegratedEvent {
@@ -199,7 +196,11 @@ export function createRecoverySourceIntegratedEvent(input: {
   const publication =
     source?.publication ??
     (input.sourcePublication
-      ? recoverySourcePublicationBinding(input.sourcePublication, plan.repository)
+      ? recoverySourcePublicationBinding(
+          input.sourcePublication,
+          plan.repository,
+          input.eventObservation,
+        )
       : null);
   requireOutcome(
     record.digest === recoveryPlanDigest(plan) &&
@@ -252,7 +253,7 @@ export function createRecoverySourceIntegratedEvent(input: {
 interface SourceProofInput {
   planRecord: RecoveryPlanRecord;
   claim: RecoveryClaimRecord;
-  events: readonly FactoryEvent[];
+  events: RecoveryEventInput;
   store: RecoveryReadStore;
   /** Shared path bound across sibling, outcome, and prior-delivery proof recursion. */
   proofTraversal?: ReadonlySet<string>;
@@ -287,20 +288,12 @@ export async function verifyRecoveryMergedSource(
 async function verifySourceProof(
   input: SourceProofInput & ({ outcome: RecoverySourceIntegratedEvent } | { workItem: number }),
 ): Promise<RecoverySourceIntegrationResult | RecoveryMergedSourceProof> {
-  const recoveryEventDigest = createRecoveryEventDigest();
   try {
     const proofKey = `outcome:${input.planRecord.digest}:${"outcome" in input ? input.outcome.workItem : input.workItem}`;
     requireOutcome(!input.proofTraversal?.has(proofKey) && (input.proofTraversal?.size ?? 0) < 100);
     const proofTraversal = new Set(input.proofTraversal).add(proofKey);
-    requireOutcome(input.events.length <= 10_000);
-    const events = [
-      ...new Map(
-        input.events.map((raw) => {
-          const value = parseFactoryEvent(raw);
-          return [recoveryEventDigest(value), value] as const;
-        }),
-      ).values(),
-    ];
+    const observation = recoveryEventObservation(input.events, { maxEvents: 10_000 });
+    const events = observation.events;
     requireOutcome(new Set(events.map((event) => event.sequence)).size === events.length);
     let reads = 0;
     const cache = new Map<string, Promise<unknown>>();
@@ -352,31 +345,32 @@ async function verifySourceProof(
         starts.length === 1 &&
         starts[0]!.event === "FactoryRunStarted",
     );
-    const envelopes = recoveryAdoptionEvents({
-      planRecord: record,
-      claim,
-      authenticatedRequest: requests[0]!,
-      predecessorStart: starts[0]!,
-    });
+    const envelopes = recoveryAdoptionEvents(
+      {
+        planRecord: record,
+        claim,
+        authenticatedRequest: requests[0]!,
+        predecessorStart: starts[0]!,
+      },
+      observation,
+    );
     requireOutcome(
       envelopes
         .map(recoveryEventDigest)
-        .every((expectedDigest) =>
-          events.some((event) => recoveryEventDigest(event) === expectedDigest),
-        ),
+        .every((expectedDigest) => observation.findByDigest(expectedDigest)),
     );
     requireOutcome(
       recoverySourceEventsDigest({
         objective: plan.objective,
         runIds: plan.history.map((value) => value.runId),
-        events,
+        events: observation,
         maxSequence: Number.MAX_SAFE_INTEGER,
       }) === plan.sourceEventsDigest,
     );
     const exact = (digest: string) => {
-      const matches = events.filter((event) => recoveryEventDigest(event) === digest);
-      requireOutcome(matches.length === 1);
-      return matches[0]!;
+      const event = observation.findByDigest(digest);
+      requireOutcome(event);
+      return event;
     };
     const sameAttempt = (event: FactoryEvent, runId: string, workItem: number, attempt: number) =>
       event.runId === runId &&
@@ -421,7 +415,7 @@ async function verifySourceProof(
         )) === oid &&
           commit.oid === oid &&
           trailer &&
-          recoveryEventDigest(trailer) === recoveryEventDigest(reserved) &&
+          recoveryEventDigest(trailer) === observation.digestOf(reserved) &&
           commit.parentOids.length === 1 &&
           commit.parentOids[0] === reserved.baseSha &&
           (await store.readCommit(reserved.baseSha)).treeOid === commit.treeOid,
@@ -639,17 +633,17 @@ async function verifySourceProof(
                     attempt: ancestor.attempt,
                     reservationRef: ref,
                     reservationCommitOid: oid,
-                    reservationReceiptDigest: recoveryEventDigest(reserved[0]!),
+                    reservationReceiptDigest: observation.digestOf(reserved[0]!),
                     artifactDigest: null,
                     review: null,
                     validation: {
-                      receiptDigest: recoveryEventDigest(validation),
+                      receiptDigest: observation.digestOf(validation),
                       evidenceDigest: validation.evidenceDigest,
                       baseSha: validation.baseSha,
                       outputTreeSha: validation.outputTreeSha,
                     },
                     publication: {
-                      receiptDigest: recoveryEventDigest(publication),
+                      receiptDigest: observation.digestOf(publication),
                       mode: publication.mode,
                       pullRequest: publication.pullRequest,
                       pullRequestNodeId: pull.nodeId!,
@@ -662,7 +656,7 @@ async function verifySourceProof(
                       stackNumber: publication.stackNumber ?? null,
                     },
                   },
-                  events,
+                  events: observation,
                   store,
                   controllingRunIds: [
                     ...plan.history.map((entry) => entry.runId),
@@ -694,9 +688,21 @@ async function verifySourceProof(
     const verifySource = async (
       raw: RecoverySourceIntegratedEvent,
     ): Promise<RecoverySourceIntegrationProof> => {
-      const outcome = parseFactoryEvent(raw);
+      let outcome: FactoryEvent;
+      let digest: string;
+      try {
+        digest = observation.digestOf(raw);
+        outcome = raw;
+      } catch {
+        outcome = parseFactoryEvent(raw);
+        digest = recoveryEventDigest(outcome);
+      }
       requireOutcome(outcome.event === "RecoverySourceIntegrated");
-      const digest = recoveryEventDigest(outcome);
+      const recordedOutcome = observation.findByDigest(digest);
+      if (recordedOutcome) {
+        requireOutcome(recordedOutcome.event === "RecoverySourceIntegrated");
+        outcome = recordedOutcome;
+      }
       const previous = checked.get(digest);
       if (previous) return previous;
       requireOutcome(!visiting.has(digest) && visiting.size < plan.items.length + 1);
@@ -714,7 +720,7 @@ async function verifySourceProof(
               planRecord: record,
               claim,
               store,
-              events,
+              events: observation,
               publication: sourcePublication,
               proofTraversal,
             })
@@ -728,6 +734,7 @@ async function verifySourceProof(
         sequence: outcome.sequence,
         at: outcome.at,
         ...(sourcePublication ? { sourcePublication } : {}),
+        eventObservation: observation,
         ...(outcome.mergeCandidateIdentityDigest
           ? { mergeCandidateIdentityDigest: outcome.mergeCandidateIdentityDigest }
           : {}),
@@ -737,14 +744,15 @@ async function verifySourceProof(
         recoveryEventDigest(expected) === digest &&
           outcome.sequence > envelopes[2].sequence &&
           !events.some(
-            (event) => event.sequence === outcome.sequence && recoveryEventDigest(event) !== digest,
+            (event) =>
+              event.sequence === outcome.sequence && observation.digestOf(event) !== digest,
           ) &&
           !events.some(
             (event) =>
               event.event === "RecoverySourceIntegrated" &&
               event.runId === plan.successorRunId &&
               event.workItem === outcome.workItem &&
-              recoveryEventDigest(event) !== digest,
+              observation.digestOf(event) !== digest,
           ),
       );
       const material = await verifyMaterial(outcome, sourcePublication, outcome.sequence, true);
@@ -775,7 +783,7 @@ async function verifySourceProof(
         const prior = await verifyPriorRecoveryDelivery({
           plan,
           item,
-          events,
+          events: observation,
           store,
           proofTraversal,
         });
@@ -789,7 +797,7 @@ async function verifySourceProof(
       const publicationBinding =
         source.publication ??
         (sourcePublication
-          ? recoverySourcePublicationBinding(sourcePublication, plan.repository)
+          ? recoverySourcePublicationBinding(sourcePublication, plan.repository, observation)
           : null);
       requireOutcome(publicationBinding);
       const reservation = exact(source.reservationReceiptDigest);
@@ -916,7 +924,7 @@ async function verifySourceProof(
             objective: plan.objective,
             workItem: item.workItem,
             source: { ...source, publication },
-            events,
+            events: observation,
             store,
             controllingRunIds: [...plan.history.map((entry) => entry.runId), plan.successorRunId],
             deliveryHeadSha: outcome.deliveryHeadSha,
@@ -950,7 +958,7 @@ async function verifySourceProof(
           requireOutcome(publication.mode === "native-stacks");
           const transition = await observeRecoveryNativeTransition({
             planRecord: record,
-            events,
+            events: observation,
             store,
             workItem: item.workItem,
           });
@@ -1032,7 +1040,7 @@ async function verifySourceProof(
             planRecord: record,
             claim,
             store,
-            events,
+            events: observation,
             publication: sourcePublication,
             proofTraversal,
           })
@@ -1041,7 +1049,7 @@ async function verifySourceProof(
     const publication =
       item.source.publication ??
       (sourcePublication
-        ? recoverySourcePublicationBinding(sourcePublication, plan.repository)
+        ? recoverySourcePublicationBinding(sourcePublication, plan.repository, observation)
         : null);
     requireOutcome(publication?.mode === "native-stacks");
     const pull = await store.readPullRequest(publication.pullRequest);

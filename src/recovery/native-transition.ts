@@ -1,8 +1,7 @@
-import type { FactoryEvent } from "../protocol/events.js";
 import { planDelivery } from "../publication/delivery.js";
 import type { RecoveryReadStore } from "./assessment.js";
 import { loadRecoveryClaim } from "./claims.js";
-import { recoveryEventDigest } from "./identity.js";
+import { recoveryEventObservation, type RecoveryEventInput } from "./identity.js";
 import { loadRecoveryPlan, loadRecoveryPlanGraph, type RecoveryPlanRecord } from "./plan.js";
 import { verifyRecoverySourceIntegration } from "./outcomes.js";
 import { nativePublicationStackNumber } from "./native-source-stacks.js";
@@ -17,7 +16,7 @@ function requireTransition(value: unknown): asserts value {
  */
 export async function observeRecoveryNativeTransition(input: {
   planRecord: RecoveryPlanRecord;
-  events: readonly FactoryEvent[];
+  events: RecoveryEventInput;
   store: RecoveryReadStore;
   workItem: number;
 }): Promise<{
@@ -28,7 +27,8 @@ export async function observeRecoveryNativeTransition(input: {
   stackNumber: number;
   lowerOutcomeDigest: string;
 }> {
-  requireTransition(input.events.length <= 10_000);
+  const observation = recoveryEventObservation(input.events, { maxEvents: 10_000 });
+  const events = observation.events;
   const record = await loadRecoveryPlan(
     input.store,
     input.planRecord.plan.objective,
@@ -44,7 +44,7 @@ export async function observeRecoveryNativeTransition(input: {
   const item = plan.items.find((entry) => entry.workItem === input.workItem);
   const source = item?.source;
   requireTransition(source?.validation);
-  const publications = input.events.filter(
+  const publications = events.filter(
     (event) =>
       event.event === "RecoverySourcePublished" &&
       event.runId === plan.successorRunId &&
@@ -65,11 +65,11 @@ export async function observeRecoveryNativeTransition(input: {
         }
       : null);
   const original = source.publication
-    ? input.events.find((event) => recoveryEventDigest(event) === source.publication!.receiptDigest)
+    ? observation.findByDigest(source.publication.receiptDigest)
     : null;
   const stackNumber =
     original?.kind === "publication"
-      ? nativePublicationStackNumber(original, input.events)
+      ? nativePublicationStackNumber(original, events)
       : publication?.stackNumber;
   requireTransition(publication?.mode === "native-stacks" && stackNumber && input.store.readStack);
   if (!source.publication)
@@ -82,7 +82,7 @@ export async function observeRecoveryNativeTransition(input: {
         restored.sourceValidationDigest === source.validation.evidenceDigest &&
         restored.sourceReservationReceiptDigest === source.reservationReceiptDigest,
     );
-  const resolvedGraph = await loadRecoveryPlanGraph(input.store, plan, input.events);
+  const resolvedGraph = await loadRecoveryPlanGraph(input.store, plan, events);
   requireTransition(resolvedGraph);
   const { graph } = resolvedGraph;
   const topology = planDelivery(
@@ -116,7 +116,7 @@ export async function observeRecoveryNativeTransition(input: {
       source.validation.baseSha ===
         (parent.source.publication?.headSha ?? parent.source.artifactHead?.headSha),
   );
-  const lower = input.events.filter(
+  const lower = events.filter(
     (event) =>
       event.event === "RecoverySourceIntegrated" &&
       event.runId === plan.successorRunId &&
@@ -128,7 +128,7 @@ export async function observeRecoveryNativeTransition(input: {
   const lowerProof = await verifyRecoverySourceIntegration({
     planRecord: record,
     claim,
-    events: input.events,
+    events: observation,
     store: input.store,
     outcome: lower[0]!,
   });
@@ -172,6 +172,6 @@ export async function observeRecoveryNativeTransition(input: {
     targetBaseSha,
     outputTreeSha: head.treeOid,
     stackNumber: stack.number,
-    lowerOutcomeDigest: recoveryEventDigest(lowerProof.outcome),
+    lowerOutcomeDigest: observation.digestOf(lowerProof.outcome),
   };
 }

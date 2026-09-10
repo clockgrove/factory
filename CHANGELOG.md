@@ -54,6 +54,12 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- Recovery successor verification now builds one bounded, immutable event observation per
+  authenticated repository snapshot and shares its validated canonical/digest index across chain,
+  accounting, evidence, outcome, publication, resource, and sibling-refresh proofs. Large histories
+  are indexed in abortable batches without the former 512-entry reparse cliff; standalone trailers
+  and later repository reads still receive full validation and cannot inherit snapshot authority.
+  ([#285](https://github.com/clockgrove/factory/issues/285))
 - An adopted successor that terminally stops after fully accounted management compilation but
   before authenticated graph projection can now be recovered again. The next immutable plan carries
   the exact Objective, legacy constraints, policy, allowance, history, and unknown-usage liability

@@ -4,13 +4,17 @@ import {
   assertAuthenticatedGraphProjection,
   assertSnapshotMatchesCompiledGraph,
 } from "../control/graph-evidence.js";
-import { deduplicateFactoryEvents } from "../control/receipts.js";
-import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
+import type { FactoryEvent } from "../protocol/events.js";
 import { planDelivery } from "../publication/delivery.js";
 import type { RecoveryReadStore } from "./assessment.js";
 import { verifyRecoveryChain } from "./chain.js";
 import { loadRecoveryClaim, type RecoveryClaimRecord } from "./claims.js";
-import { recoveryClaimRef, recoveryEventDigest } from "./identity.js";
+import {
+  observeRecoveryEvents,
+  recoveryClaimRef,
+  recoveryEventDigest,
+  type RecoveryEventObservation,
+} from "./identity.js";
 import { loadRecoveryPlan, loadRecoveryPlanGraph, type RecoveryPlanRecord } from "./plan.js";
 import { verifyRecoveryMergedSource, type RecoveryMergedSourceProof } from "./outcomes.js";
 import { recoveryAdoptionEvents } from "./transaction.js";
@@ -22,6 +26,7 @@ export interface RecoverySourceReconciliation {
   claim: RecoveryClaimRecord;
   /** Complete original observations, including all current accounting liabilities. */
   events: readonly FactoryEvent[];
+  eventObservation: RecoveryEventObservation;
   mergedSources: Array<RecoveryMergedSourceProof & { issueNodeId: string }>;
 }
 function requireReconciliation(value: unknown): asserts value {
@@ -40,6 +45,7 @@ export async function loadRecoverySourceReconciliation(input: {
   planDigest: string;
   requestId: string;
   store: RecoveryReadStore;
+  signal?: AbortSignal;
   readSnapshot(): Promise<{ snapshot: FactoryReadSnapshot; historyComplete: boolean }>;
 }): Promise<RecoverySourceReconciliation> {
   let reads = 0;
@@ -73,22 +79,17 @@ export async function loadRecoverySourceReconciliation(input: {
     ...snapshot.factoryEvents,
     ...snapshot.workItems.flatMap((item) => item.factoryEvents!),
   ];
-  requireReconciliation(
-    raw.length <= 10_000 && Buffer.byteLength(JSON.stringify(raw)) <= 16 * 1024 * 1024,
-  );
-  const events = [
-    ...new Map(
-      raw.map((value) => {
-        const event = parseFactoryEvent(value);
-        return [recoveryEventDigest(event), event] as const;
-      }),
-    ).values(),
-  ].sort((a, b) => a.sequence - b.sequence);
+  const eventObservation = await observeRecoveryEvents(raw, {
+    maxEvents: 10_000,
+    maxBytes: 16 * 1024 * 1024,
+    sortBySequence: true,
+    ...(input.signal ? { signal: input.signal } : {}),
+  });
+  const events = eventObservation.events;
   requireReconciliation(
     new Set(events.map((event) => event.sequence)).size === events.length &&
       events.every((event) => event.objective === input.objective),
   );
-  deduplicateFactoryEvents(events);
   const starts = events.filter((event): event is Start => event.event === "FactoryRunStarted");
   const controllingRun = starts.at(-1);
   requireReconciliation(
@@ -164,16 +165,17 @@ export async function loadRecoverySourceReconciliation(input: {
         requests[0]!.event === "RecoveryRequested" &&
         predecessor,
     );
-    const expected = recoveryAdoptionEvents({
-      planRecord: linked,
-      claim: boundClaim,
-      authenticatedRequest: requests[0]!,
-      predecessorStart: predecessor,
-    });
+    const expected = recoveryAdoptionEvents(
+      {
+        planRecord: linked,
+        claim: boundClaim,
+        authenticatedRequest: requests[0]!,
+        predecessorStart: predecessor,
+      },
+      eventObservation,
+    );
     requireReconciliation(
-      expected.every((envelope) =>
-        events.some((event) => recoveryEventDigest(event) === recoveryEventDigest(envelope)),
-      ) &&
+      expected.every((envelope) => eventObservation.findByDigest(recoveryEventDigest(envelope))) &&
         events.filter(
           (event) =>
             event.runId === linked.plan.successorRunId &&
@@ -189,7 +191,7 @@ export async function loadRecoverySourceReconciliation(input: {
     objective: input.objective,
     objectiveNodeId: plan.objectiveNodeId,
     historyComplete: true,
-    events: events.filter((event) => sourceRuns.has(event.runId)),
+    events: eventObservation.select((event) => sourceRuns.has(event.runId)),
     plansByDigest: plans,
     claims: claims.filter((value) => value !== claim),
     candidatePlan: plan,
@@ -326,12 +328,19 @@ export async function loadRecoverySourceReconciliation(input: {
       const proof = await verifyRecoveryMergedSource({
         planRecord: record,
         claim,
-        events,
+        events: eventObservation,
         store,
         workItem: item.workItem,
       });
       mergedSources.push({ ...proof, issueNodeId: item.issueNodeId });
     }
   }
-  return { controllingRun, planRecord: record, claim, events, mergedSources };
+  return {
+    controllingRun,
+    planRecord: record,
+    claim,
+    events,
+    eventObservation,
+    mergedSources,
+  };
 }

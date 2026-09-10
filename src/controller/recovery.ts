@@ -46,6 +46,7 @@ export async function adoptRecoveryActivation(input: {
     runId: recovery.successorRunId,
     store: read,
     readSnapshot,
+    signal: input.signal,
   });
   if (runtime.status === "verified") {
     if (
@@ -99,6 +100,7 @@ export async function adoptRecoveryActivation(input: {
         objective: input.activation.objective,
         planDigest: recovery.planDigest,
         objectiveLease,
+        signal: input.signal,
       });
     const transport = input.store as GitHubControlStore & {
       withMutationFence?<T>(fence: () => Promise<void>, operation: () => Promise<T>): Promise<T>;

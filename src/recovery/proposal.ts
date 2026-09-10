@@ -15,9 +15,9 @@ import {
   loadCompiledGraph,
   loadCompiledGraphProjection,
 } from "../control/graphs.js";
-import { decodeEventTrailer, deduplicateFactoryEvents } from "../control/receipts.js";
+import { decodeEventTrailer } from "../control/receipts.js";
 import { loadReviewCheckpoint, type ReviewIdentity } from "../control/reviews.js";
-import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
+import type { FactoryEvent } from "../protocol/events.js";
 import { parseRunPolicy, policyDigest } from "../protocol/policy.js";
 import { planDelivery } from "../publication/delivery.js";
 import { branchRuleBlockers, missingRequiredChecks } from "../publication/branch-policy.js";
@@ -33,7 +33,12 @@ import { assessRecoveryAccounting } from "./accounting.js";
 import type { RecoveryBlocker, RecoveryReadStore } from "./assessment.js";
 import { loadRecoveryClaim, type RecoveryClaimRecord } from "./claims.js";
 import { recoveryUnknownUsageDigest, verifyRecoveryChain } from "./chain.js";
-import { recoveryClaimRef, recoveryEventDigest, recoverySourceEventsDigest } from "./identity.js";
+import {
+  observeRecoveryEvents,
+  recoveryClaimRef,
+  recoveryEventDigest,
+  recoverySourceEventsDigest,
+} from "./identity.js";
 import { verifyRecoverySourceIntegration, verifyPriorRecoveryDelivery } from "./outcomes.js";
 import { recoverySourcePublicationBinding } from "./source-publications.js";
 import {
@@ -164,6 +169,7 @@ export async function buildRecoveryProposal(input: {
   successorRunId: string;
   allowanceIncrement?: RecoveryAllowanceIncrement;
   unknownUsageAcknowledgementDigest?: string | null;
+  signal?: AbortSignal;
 }): Promise<RecoveryProposalResult> {
   const result: RecoveryProposalResult = {
     status: "blocked",
@@ -267,15 +273,34 @@ export async function buildRecoveryProposal(input: {
           Array.isArray(item.linkedPullRequests) &&
           Array.isArray(item.copilotAssignments),
       );
+    const factoryEventCount = snapshot.factoryEvents.length;
+    const itemEventSegments = snapshot.workItems.map((item) => ({
+      count: item.factoryEvents!.length,
+      workItem: item.number,
+    }));
     const raw = [
       ...snapshot.factoryEvents,
       ...snapshot.workItems.flatMap((item) => item.factoryEvents!),
     ];
-    require(raw.length <= 50_000 && Buffer.byteLength(JSON.stringify(raw)) <= 16 * 1024 * 1024);
     stage = "history";
-    const events = deduplicateFactoryEvents(raw.map(parseFactoryEvent)).sort(
-      (a, b) => a.sequence - b.sequence,
-    );
+    const authenticatedObservation = await observeRecoveryEvents(raw, {
+      maxEvents: 50_000,
+      maxBytes: 16 * 1024 * 1024,
+      sortBySequence: true,
+      ...(input.signal ? { signal: input.signal } : {}),
+    });
+    const validatedInputEvents = authenticatedObservation.validatedInputEvents();
+    let inputOffset = factoryEventCount;
+    for (const segment of itemEventSegments) {
+      const itemEvents = validatedInputEvents.slice(inputOffset, inputOffset + segment.count);
+      inputOffset += segment.count;
+      require(
+        itemEvents.every((event) => !("workItem" in event) || event.workItem === segment.workItem),
+      );
+    }
+    require(inputOffset === validatedInputEvents.length);
+    const observation = authenticatedObservation.semanticView();
+    const events = observation.events;
     require(events.every((event) => event.objective === snapshot.number));
     const starts = events.filter((event): event is Start => event.event === "FactoryRunStarted");
     require(
@@ -302,8 +327,8 @@ export async function buildRecoveryProposal(input: {
       const terminal = terminals[0]!;
       return {
         runId: start.runId,
-        startDigest: recoveryEventDigest(start),
-        terminalDigest: recoveryEventDigest(terminal),
+        startDigest: observation.digestOf(start),
+        terminalDigest: observation.digestOf(terminal),
         terminalEvent: terminal.event as RecoveryHistoryEntry["terminalEvent"],
         terminalSequence: terminal.sequence,
         policyDigest: start.policyDigest,
@@ -322,12 +347,6 @@ export async function buildRecoveryProposal(input: {
           (byRun.has(event.runId) && event.sequence > byRun.get(event.runId)!.sequence),
       ),
     );
-    for (const item of snapshot.workItems)
-      require(
-        item.factoryEvents!.every(
-          (event) => !("workItem" in event) || event.workItem === item.number,
-        ),
-      );
     const predecessorStart = starts.at(-1)!;
     const { policyDigest: _sourcePolicyDigest, ...predecessor } = history.at(-1)!;
     stage = "repository";
@@ -382,11 +401,12 @@ export async function buildRecoveryProposal(input: {
           historyComplete: true,
           latestRunId: predecessorStart.runId,
           store: port,
+          eventObservation: observation,
         })
       : new Map<string, RecoveryRuntime>();
     const verifiedCapacity = new Set(
       [...historicalRuntimes.values()].flatMap((runtime) =>
-        runtime.verifiedSourceCapacity.map(recoveryEventDigest),
+        runtime.verifiedSourceCapacity.map((event) => runtime.eventObservation.digestOf(event)),
       ),
     );
     stage = "graph";
@@ -585,25 +605,28 @@ export async function buildRecoveryProposal(input: {
       require(graph && projection && graphRunId === priorAdoptionGraph.sourceRunId);
 
     stage = "reservation";
-    const reservations = new Map<string, { event: Reserved; ref: string; oid: string }>();
+    const reservations = new Map<
+      string,
+      { event: Reserved; digest: string; ref: string; oid: string }
+    >();
     const refs = await listAttemptReservationRefs(port, snapshot.number);
     require(refs.length <= 1_000 && new Set(refs.map((entry) => entry.ref)).size === refs.length);
     for (const ref of refs) {
       const commit = await port.readCommit(ref.oid);
       const reserved = decodeEventTrailer(commit.message);
+      const reservedDigest = reserved ? recoveryEventDigest(reserved) : null;
+      const historicalRuntime = reserved ? historicalRuntimes.get(reserved.runId) : undefined;
       require(
         reserved?.kind === "attempt" &&
           reserved.event === "AttemptReserved" &&
           reserved.objective === snapshot.number &&
           reserved.policyDigest === byRun.get(reserved.runId)?.policyDigest &&
           (graphs.has(reserved.runId) ||
-            historicalRuntimes
-              .get(reserved.runId)
-              ?.currentEvents.some(
-                (event) =>
-                  event.event === "AttemptReserved" &&
-                  recoveryEventDigest(event) === recoveryEventDigest(reserved),
-              )),
+            historicalRuntime?.currentEvents.some(
+              (event) =>
+                event.event === "AttemptReserved" &&
+                historicalRuntime.eventObservation.digestOf(event) === reservedDigest,
+            )),
       );
       const matching = events.filter(
         (event) =>
@@ -616,7 +639,8 @@ export async function buildRecoveryProposal(input: {
       );
       require(
         matching.length === 1 &&
-          recoveryEventDigest(matching[0]!) === recoveryEventDigest(reserved) &&
+          reservedDigest !== null &&
+          observation.digestOf(matching[0]!) === reservedDigest &&
           ref.ref === attemptRef(snapshot.number, reserved.workItem, reserved.attempt) &&
           (await readAttemptReservationRef(
             port,
@@ -632,6 +656,7 @@ export async function buildRecoveryProposal(input: {
       );
       reservations.set(`${reserved.workItem}:${reserved.attempt}`, {
         event: reserved,
+        digest: reservedDigest!,
         ref: ref.ref,
         oid: ref.oid,
       });
@@ -651,7 +676,7 @@ export async function buildRecoveryProposal(input: {
     for (const event of events) {
       if (!["attempt", "capacity", "validation", "publication"].includes(event.kind)) continue;
       if (event.kind === "capacity" && event.sourceRunId) {
-        require(verifiedCapacity.has(recoveryEventDigest(event)));
+        require(verifiedCapacity.has(observation.digestOf(event)));
         continue;
       }
       const reservation = reservations.get(`${event.workItem}:${event.attempt}`)?.event;
@@ -712,18 +737,16 @@ export async function buildRecoveryProposal(input: {
         const proof = await verifyRecoverySourceIntegration({
           planRecord: prior,
           claim,
-          events,
+          events: observation,
           store: port,
           outcome: priorOutcome,
         });
         require(proof.status === "verified");
         let publication = priorItem.source.publication;
         if (!publication) {
-          const restored = events.find(
-            (event) => recoveryEventDigest(event) === priorOutcome.sourcePublicationReceiptDigest,
-          );
+          const restored = observation.findByDigest(priorOutcome.sourcePublicationReceiptDigest);
           require(restored?.event === "RecoverySourcePublished");
-          publication = recoverySourcePublicationBinding(restored, repository);
+          publication = recoverySourcePublicationBinding(restored, repository, observation);
         }
         const pull = await port.readPullRequest(publication.pullRequest);
         const head = await port.readCommit(pull.headSha);
@@ -750,7 +773,7 @@ export async function buildRecoveryProposal(input: {
           priorDelivery: {
             runId: priorOutcome.runId,
             planDigest: prior.digest,
-            integrationReceiptDigest: recoveryEventDigest(priorOutcome),
+            integrationReceiptDigest: observation.digestOf(priorOutcome),
             outputTreeSha: proof.outputTreeSha,
             ...(priorOutcome.deliveryHeadSha
               ? { deliveryHeadSha: priorOutcome.deliveryHeadSha }
@@ -813,7 +836,7 @@ export async function buildRecoveryProposal(input: {
         attempt: reserved.attempt,
         reservationRef: selected.ref,
         reservationCommitOid: selected.oid,
-        reservationReceiptDigest: recoveryEventDigest(reserved),
+        reservationReceiptDigest: selected.digest,
         artifactDigest: null,
         validation: null,
         review: null,
@@ -920,7 +943,7 @@ export async function buildRecoveryProposal(input: {
           commit.treeOid === validation.outputTreeSha,
       );
       source.validation = {
-        receiptDigest: recoveryEventDigest(validation),
+        receiptDigest: observation.digestOf(validation),
         evidenceDigest: validation.evidenceDigest,
         baseSha: validation.baseSha,
         outputTreeSha: validation.outputTreeSha,
@@ -1053,7 +1076,7 @@ export async function buildRecoveryProposal(input: {
       const observedHead = await port.readCommit(pull.headSha);
       require(observedHead.oid === pull.headSha);
       source.publication = {
-        receiptDigest: recoveryEventDigest(publication),
+        receiptDigest: observation.digestOf(publication),
         mode: publication.mode,
         pullRequest: publication.pullRequest,
         pullRequestNodeId: pull.nodeId!,
@@ -1216,7 +1239,7 @@ export async function buildRecoveryProposal(input: {
               objective: snapshot.number,
               workItem: item.number,
               source,
-              events,
+              events: observation,
               controllingRunIds: history.map((entry) => entry.runId),
               store: port,
               deliveryHeadSha: pull.headSha,
@@ -1238,7 +1261,7 @@ export async function buildRecoveryProposal(input: {
               objective: snapshot.number,
               workItem: item.number,
               source,
-              events,
+              events: observation,
               controllingRunIds: history.map((entry) => entry.runId),
               store: port,
               deliveryHeadSha: pull.headSha,
@@ -1318,13 +1341,13 @@ export async function buildRecoveryProposal(input: {
     const sourceEventsDigest = recoverySourceEventsDigest({
       objective: snapshot.number,
       runIds,
-      events,
+      events: observation,
       maxSequence: sourceEventMaxSequence,
     });
     const accounting = assessRecoveryAccounting({
       objective: snapshot.number,
       repository,
-      events,
+      events: observation,
       runIds,
       policy,
       authority: snapshot.objectiveAuthority,
@@ -1403,7 +1426,11 @@ export async function buildRecoveryProposal(input: {
           accounting.blockerCount === accounting.blockers.length &&
           accounting.blockers.every((blocker) => blocker.code === "historical-policy-difference"),
       );
-      const resources = await verifyRecoveryProposalResources({ plan, events, store: port });
+      const resources = await verifyRecoveryProposalResources({
+        plan,
+        events: observation,
+        store: port,
+      });
       for (const workItem of failedRetries)
         plan.items.find((item) => item.workItem === workItem)!.resources.state =
           resources.status === "verified" ? "unknown" : "reconciliation-required";
@@ -1411,14 +1438,14 @@ export async function buildRecoveryProposal(input: {
     stage = "chain";
     for (const item of plan.items)
       if (item.source?.priorDelivery)
-        await verifyPriorRecoveryDelivery({ plan, item, events, store: port });
+        await verifyPriorRecoveryDelivery({ plan, item, events: observation, store: port });
     const chain = verifyRecoveryChain({
       repository,
       repositoryId: snapshot.repositoryId,
       objective: snapshot.number,
       objectiveNodeId: snapshot.id,
       historyComplete: true,
-      events,
+      events: observation,
       plansByDigest: priorPlans,
       claims,
       candidatePlan: plan,

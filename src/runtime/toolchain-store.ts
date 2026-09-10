@@ -130,6 +130,16 @@ const RELEASE_SPECS: Record<ManagedToolchain, ReleaseSpec> = {
     versionArgs: ["--version"],
     versionOutput: (version) => version,
   },
+  uv: {
+    owner: "astral-sh",
+    repository: "uv",
+    assetName: "uv-x86_64-unknown-linux-gnu.tar.gz",
+    archive: "tar.gz",
+    executablePath: "uv-x86_64-unknown-linux-gnu/uv",
+    version: (tag) => /^(\d+\.\d+\.\d+)$/.exec(tag)?.[1] ?? null,
+    versionArgs: ["--version"],
+    versionOutput: (version) => `uv ${version}`,
+  },
 };
 
 export function toolchainStoreRoot(env: NodeJS.ProcessEnv = process.env): string {
@@ -276,6 +286,26 @@ function assertNodeDistributionIdentity(identity: NodeDistributionIdentity): voi
     throw new Error("official Node distribution identity is invalid");
 }
 
+function assertPythonReleaseSelection(selected: {
+  release: GitHubRelease;
+  asset: GitHubReleaseAsset;
+  version: string;
+}): void {
+  const expectedName = `cpython-${selected.version}+${selected.release.tag}-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz`;
+  const expectedUrl = `https://github.com/astral-sh/python-build-standalone/releases/download/${selected.release.tag}/${expectedName}`;
+  if (
+    !Number.isSafeInteger(selected.release.id) ||
+    selected.release.id <= 0 ||
+    !Number.isSafeInteger(selected.asset.id) ||
+    selected.asset.id <= 0 ||
+    !/^\d{8}$/.test(selected.release.tag) ||
+    !/^\d+\.\d+\.\d+$/.test(selected.version) ||
+    selected.asset.name !== expectedName ||
+    selected.asset.browserDownloadUrl !== expectedUrl
+  )
+    throw new Error("latest Python GA has an unsupported official origin identity");
+}
+
 async function createGithubComponent(
   tool: ManagedToolchain,
   options: ToolchainProvisionOptions,
@@ -412,6 +442,95 @@ function compareVersions(left: string, right: string): number {
   return 0;
 }
 
+async function selectLatestPythonDistribution(
+  source: ToolchainReleaseSource,
+): Promise<{ release: GitHubRelease; asset: GitHubReleaseAsset; version: string }> {
+  const releases = (await source.listReleases("astral-sh", "python-build-standalone"))
+    .filter((release) => !release.draft && !release.prerelease && /^\d{8}$/.test(release.tag))
+    .sort((left, right) => (right.tag < left.tag ? -1 : right.tag > left.tag ? 1 : 0));
+  const release = releases[0];
+  if (!release) throw new Error("python-build-standalone has no supported stable CPython GA");
+  const assets = source.listReleaseAssets
+    ? await source.listReleaseAssets("astral-sh", "python-build-standalone", release.id)
+    : release.assets;
+  const candidates = assets.flatMap((asset) => {
+    const match =
+      /^cpython-(\d+\.\d+\.\d+)\+(\d{8})-x86_64-unknown-linux-gnu-install_only_stripped\.tar\.gz$/.exec(
+        asset.name,
+      );
+    return match?.[2] === release.tag ? [{ asset, version: match[1]! }] : [];
+  });
+  candidates.sort((left, right) => compareVersions(right.version, left.version));
+  const selected = candidates[0];
+  if (!selected) throw new Error("latest Python GA has no supported CPython Linux x64 asset");
+  if (candidates.filter(({ version }) => version === selected.version).length !== 1)
+    throw new Error("latest Python GA has an ambiguous CPython Linux x64 asset");
+  if (!/^sha256:[a-f0-9]{64}$/.test(selected.asset.digest))
+    throw new Error("latest Python GA lacks an official SHA-256 asset digest");
+  if (selected.asset.size <= 0 || selected.asset.size > MAX_ASSET_BYTES)
+    throw new Error("latest Python GA asset size is outside the supported bound");
+  const result = { release, ...selected };
+  assertPythonReleaseSelection(result);
+  return result;
+}
+
+async function createPythonBuildStandaloneComponent(
+  options: ToolchainProvisionOptions,
+  staging: string,
+  selected: Awaited<ReturnType<typeof selectLatestPythonDistribution>>,
+): Promise<RuntimeComponentReceipt> {
+  assertPythonReleaseSelection(selected);
+  const run = options.run ?? execFileAsync;
+  const bytes = await options.source.downloadAsset(
+    "astral-sh",
+    "python-build-standalone",
+    selected.asset.id,
+  );
+  if (bytes.byteLength !== selected.asset.size)
+    throw new Error("Python GA asset size changed during download");
+  const archiveDigest = sha256Bytes(bytes);
+  if (archiveDigest !== selected.asset.digest.slice("sha256:".length))
+    throw new Error("Python GA asset digest differs from official release metadata");
+  const componentRoot = join(staging, "python");
+  await mkdir(componentRoot, { recursive: true, mode: 0o700 });
+  const archivePath = join(componentRoot, "asset");
+  await writeFile(archivePath, bytes, { mode: 0o600, flag: "wx" });
+  const treeRoot = join(componentRoot, "root");
+  const executablePath = "python/bin/python3";
+  await extractAsset(archivePath, "tar.gz", treeRoot, executablePath, run);
+  const executable = join(treeRoot, ...executablePath.split("/"));
+  const versionResult = await run(executable, ["--version"], {
+    encoding: "utf8",
+    timeout: 15_000,
+    maxBuffer: 1024 * 1024,
+    env: { PATH: "/usr/bin:/bin", HOME: join(staging, "home"), PYTHONNOUSERSITE: "1" },
+  });
+  if (versionResult.stdout.trim() !== `Python ${selected.version}`)
+    throw new Error(`managed Python does not report selected GA ${selected.version}`);
+  return {
+    id: "python",
+    version: selected.version,
+    release: {
+      provider: "github",
+      repository: "astral-sh/python-build-standalone",
+      releaseId: String(selected.release.id),
+      tag: selected.release.tag,
+      publishedAt: selected.release.publishedAt,
+    },
+    asset: {
+      assetId: String(selected.asset.id),
+      name: selected.asset.name,
+      url: selected.asset.browserDownloadUrl,
+      size: selected.asset.size,
+      sha256: archiveDigest,
+      archive: "tar.gz",
+    },
+    executablePath,
+    executableSha256: await sha256File(executable),
+    treeSha256: await sha256Tree(treeRoot),
+  };
+}
+
 async function atomicWrite(path: string, content: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
@@ -461,12 +580,15 @@ export async function provisionToolchain(
   );
   const selectedNode =
     tool === "pnpm" ? await options.source.resolveLatestNodeDistribution?.() : undefined;
+  const selectedPython =
+    tool === "uv" ? await selectLatestPythonDistribution(options.source) : undefined;
   if (tool === "pnpm" && !selectedNode)
     throw new Error("pnpm provisioning source cannot resolve the latest official Node GA");
   try {
     const current = await activeRuntimeBundle(tool, root);
     const component = current.components.find(({ id }) => id === tool);
     const node = current.components.find(({ id }) => id === "node");
+    const python = current.components.find(({ id }) => id === "python");
     if (
       component?.release.releaseId === String(selected.release.id) &&
       component.asset.assetId === String(selected.asset.id) &&
@@ -474,7 +596,11 @@ export async function provisionToolchain(
       (tool !== "pnpm" ||
         (node?.version === selectedNode!.version &&
           node.asset.url === selectedNode!.url &&
-          node.asset.sha256 === selectedNode!.sha256))
+          node.asset.sha256 === selectedNode!.sha256)) &&
+      (tool !== "uv" ||
+        (python?.version === selectedPython!.version &&
+          python.asset.assetId === String(selectedPython!.asset.id) &&
+          python.asset.sha256 === selectedPython!.asset.digest.slice("sha256:".length)))
     )
       return current;
   } catch {
@@ -484,13 +610,15 @@ export async function provisionToolchain(
   try {
     const primary = await createGithubComponent(tool, options, staging, selected);
     const components =
-      tool === "pnpm"
-        ? [await createNodeComponent(selectedNode!, options, staging), primary]
-        : [primary];
+      tool === "uv"
+        ? [primary, await createPythonBuildStandaloneComponent(options, staging, selectedPython!)]
+        : tool === "pnpm"
+          ? [await createNodeComponent(selectedNode!, options, staging), primary]
+          : [primary];
     const unsigned: Omit<RuntimeBundleReceipt, "digest"> = {
       protocol: "clockgrove.factory/toolchain-runtime-bundle-v1",
       tool,
-      adapter: tool === "pnpm" ? "node-pnpm" : "javascript-bun",
+      adapter: tool === "pnpm" ? "node-pnpm" : tool === "bun" ? "javascript-bun" : "python-uv",
       adapterContract: 1,
       platform: SUPPORTED_RUNTIME_PLATFORM,
       components,
@@ -588,7 +716,7 @@ function exactPnpmRestoreIdentity(receipt: RuntimeBundleReceipt): {
 }
 
 function exactGithubRestoreIdentity(
-  tool: "bun",
+  tool: "bun" | "uv",
   component: RuntimeComponentReceipt,
 ): ReturnType<typeof selectLatestGa> {
   const spec = RELEASE_SPECS[tool];
@@ -634,6 +762,53 @@ function exactGithubRestoreIdentity(
   return selected;
 }
 
+function exactPythonRestoreIdentity(
+  component: RuntimeComponentReceipt,
+): Awaited<ReturnType<typeof selectLatestPythonDistribution>> {
+  const releaseId = Number(component.release.releaseId);
+  const assetId = Number(component.asset.assetId);
+  const expectedName = `cpython-${component.version}+${component.release.tag}-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz`;
+  if (
+    component.id !== "python" ||
+    component.release.provider !== "github" ||
+    component.release.repository !== "astral-sh/python-build-standalone" ||
+    !/^\d{8}$/.test(component.release.tag) ||
+    !/^\d+\.\d+\.\d+$/.test(component.version) ||
+    !Number.isSafeInteger(releaseId) ||
+    releaseId <= 0 ||
+    !Number.isSafeInteger(assetId) ||
+    assetId <= 0 ||
+    component.asset.name !== expectedName ||
+    component.asset.archive !== "tar.gz" ||
+    component.executablePath !== "python/bin/python3" ||
+    component.executableOnly !== undefined ||
+    component.asset.url !==
+      `https://github.com/astral-sh/python-build-standalone/releases/download/${component.release.tag}/${expectedName}`
+  )
+    throw new Error("uv runtime receipt has an unsupported Python origin identity");
+  const selected = {
+    version: component.version,
+    release: {
+      id: releaseId,
+      tag: component.release.tag,
+      draft: false,
+      prerelease: false,
+      publishedAt: component.release.publishedAt,
+      assets: [],
+    },
+    asset: {
+      id: assetId,
+      name: component.asset.name,
+      url: component.asset.url,
+      browserDownloadUrl: component.asset.url,
+      size: component.asset.size,
+      digest: `sha256:${component.asset.sha256}`,
+    },
+  };
+  assertPythonReleaseSelection(selected);
+  return selected;
+}
+
 /** Reacquire one historical receipt exactly. This never changes the active pointer. */
 export async function restoreToolchain(
   receipt: RuntimeBundleReceipt,
@@ -673,7 +848,27 @@ export async function restoreToolchain(
         ),
       ];
     } else {
-      throw new Error("managed runtime receipt uses an unsupported adapter");
+      if (
+        receipt.adapter !== "python-uv" ||
+        receipt.adapterContract !== 1 ||
+        receipt.components.length !== 2 ||
+        receipt.components[0]?.id !== "uv" ||
+        receipt.components[1]?.id !== "python"
+      )
+        throw new Error("managed runtime receipt is not a restorable uv adapter");
+      components = [
+        await createGithubComponent(
+          "uv",
+          options,
+          staging,
+          exactGithubRestoreIdentity("uv", receipt.components[0]),
+        ),
+        await createPythonBuildStandaloneComponent(
+          options,
+          staging,
+          exactPythonRestoreIdentity(receipt.components[1]),
+        ),
+      ];
     }
     if (
       canonicalJson(components) !== canonicalJson(receipt.components) ||

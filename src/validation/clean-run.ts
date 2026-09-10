@@ -41,6 +41,12 @@ import {
   inspectBunAuthority,
   parseBunValidationCommand,
 } from "../toolchains/bun.js";
+import {
+  inspectUvAuthority,
+  loadUvAuthoritySurface,
+  parseUvPytestCommand,
+  uvPytestCommandForOperation,
+} from "../toolchains/uv.js";
 
 function managedPnpmVersion(packet?: WorkerPacket): string {
   const digests = new Set(
@@ -536,7 +542,7 @@ async function assertTurboTaskConfiguration(root: string, script: string): Promi
 }
 
 export interface BootstrapPackageValidation {
-  manager: "pnpm" | "bun";
+  manager: "pnpm" | "bun" | "uv";
   expectedVersion: string;
   versionCommand: string;
   setupCommand: string;
@@ -544,7 +550,7 @@ export interface BootstrapPackageValidation {
   changedOperations: Set<string>;
 }
 
-export async function assertBunValidation(
+export async function assertBunOrUvValidation(
   worktree: Pick<LocalWorktree, "path">,
   artifact: NormalizedArtifact,
   packet: WorkerPacket,
@@ -553,12 +559,18 @@ export async function assertBunValidation(
 ): Promise<BootstrapPackageValidation | null> {
   const managed = commands.flatMap((command) => {
     const parsed = futureToolchainCommand(command);
-    return parsed?.runner === "bun" ? [parsed] : [];
+    return parsed && (parsed.runner === "bun" || parsed.runner === "uv") ? [parsed] : [];
   });
   if (managed.length === 0) return null;
-  if (managed.length !== commands.length)
+  const runners = new Set<"bun" | "uv">(
+    managed.map(({ runner }) => {
+      if (runner !== "bun" && runner !== "uv") throw new Error("unsupported managed adapter");
+      return runner;
+    }),
+  );
+  if (managed.length !== commands.length || runners.size !== 1)
     throw new Error("validation may not mix or bypass managed toolchain adapters");
-  const runner = "bun";
+  const runner = [...runners][0]!;
   if (!packet.requirements.tools.includes(runner))
     throw new Error(`${runner} validation is missing its declared tool requirement`);
   const adapter = managed[0]!.adapter;
@@ -583,44 +595,84 @@ export async function assertBunValidation(
       .filter(({ adapter: candidate }) => candidate === adapter.id)
       .flatMap(({ operations }) => operations),
   ];
-  const component = runtime.components.find(({ id }) => id === "bun");
-  if (!component) throw new Error("Bun runtime bundle lacks its executable component");
-  const inspectionCommands = [
-    ...commands,
-    ...promisedOperations.map((operation) => {
-      const parsed = bunValidationCommandForOperation(operation);
-      if (!parsed)
-        throw new Error("Bun capability operation is outside the finite adapter contract");
-      return parsed.workspace === "."
-        ? `bun run ${parsed.script}`
-        : `bun --cwd ${parsed.workspace} run ${parsed.script}`;
-    }),
-  ];
-  const inspections = await Promise.all(
-    [...new Set(inspectionCommands)].map(async (command) => {
-      if (!parseBunValidationCommand(command))
-        throw new Error("Bun validation command is outside the finite adapter contract");
-      return inspectBunAuthority({
-        root: worktree.path,
-        command,
-        exactVersion: component.version,
-      });
-    }),
-  );
-  const authorityPaths = [...new Set(inspections.flatMap(({ authorityPaths: paths }) => paths))];
+  let authorityPaths: string[];
+  let expectedVersion: string;
   const changedOperations = new Set<string>();
-  for (const manifestPath of new Set(inspections.map(({ manifestPath }) => manifestPath))) {
-    if (!artifact.changedPaths.includes(manifestPath)) continue;
-    const before = stringRecord(
-      basePackageManifests.get(manifestPath)?.scripts,
-      `scripts in base ${manifestPath}`,
+  if (runner === "bun") {
+    const component = runtime.components.find(({ id }) => id === "bun");
+    if (!component) throw new Error("Bun runtime bundle lacks its executable component");
+    const inspectionCommands = [
+      ...commands,
+      ...promisedOperations.map((operation) => {
+        const parsed = bunValidationCommandForOperation(operation);
+        if (!parsed)
+          throw new Error("Bun capability operation is outside the finite adapter contract");
+        return parsed.workspace === "."
+          ? `bun run ${parsed.script}`
+          : `bun --cwd ${parsed.workspace} run ${parsed.script}`;
+      }),
+    ];
+    const inspections = await Promise.all(
+      [...new Set(inspectionCommands)].map(async (command) => {
+        if (!parseBunValidationCommand(command))
+          throw new Error("Bun validation command is outside the finite adapter contract");
+        return inspectBunAuthority({
+          root: worktree.path,
+          command,
+          exactVersion: component.version,
+        });
+      }),
     );
-    const after = stringRecord(
-      (await readPackageManifest(worktree.path, manifestPath)).scripts,
-      `scripts in ${manifestPath}`,
+    authorityPaths = [...new Set(inspections.flatMap(({ authorityPaths: paths }) => paths))];
+    for (const manifestPath of new Set(inspections.map(({ manifestPath }) => manifestPath))) {
+      if (!artifact.changedPaths.includes(manifestPath)) continue;
+      const before = stringRecord(
+        basePackageManifests.get(manifestPath)?.scripts,
+        `scripts in base ${manifestPath}`,
+      );
+      const after = stringRecord(
+        (await readPackageManifest(worktree.path, manifestPath)).scripts,
+        `scripts in ${manifestPath}`,
+      );
+      for (const name of new Set([...Object.keys(before), ...Object.keys(after)]))
+        if (before[name] !== after[name]) changedOperations.add(name);
+    }
+    expectedVersion = component.version;
+  } else {
+    const uv = runtime.components.find(({ id }) => id === "uv");
+    const python = runtime.components.find(({ id }) => id === "python");
+    if (!uv || !python) throw new Error("uv runtime bundle lacks uv or Python");
+    const inspectionCommands = [
+      ...commands,
+      ...promisedOperations.map((operation) => {
+        const parsed = uvPytestCommandForOperation(operation);
+        if (!parsed)
+          throw new Error("uv capability operation is outside the finite adapter contract");
+        return parsed.projectDirectory === "."
+          ? "uv run --locked --no-sync python -m pytest"
+          : `uv run --project ${parsed.projectDirectory} --locked --no-sync python -m pytest`;
+      }),
+    ];
+    const parsedCommands = [...new Set(inspectionCommands)].map((command) => {
+      const parsed = parseUvPytestCommand(command);
+      if (!parsed) throw new Error("uv validation command is outside the finite adapter contract");
+      return parsed;
+    });
+    const { files, repositoryPaths } = await loadUvAuthoritySurface(
+      worktree.path,
+      parsedCommands.map(({ projectDirectory }) => projectDirectory),
     );
-    for (const name of new Set([...Object.keys(before), ...Object.keys(after)]))
-      if (before[name] !== after[name]) changedOperations.add(name);
+    const inspections = parsedCommands.map((parsed) => {
+      return inspectUvAuthority({
+        command: parsed,
+        files,
+        repositoryPaths,
+        uvVersion: uv.version,
+        pythonVersion: python.version,
+      });
+    });
+    authorityPaths = [...new Set(inspections.flatMap(({ authorityPaths: paths }) => paths))];
+    expectedVersion = `${uv.version}/Python ${python.version}`;
   }
   const authority = new Set(authorityPaths);
   const sensitive = artifact.changedPaths.filter((path) => executionAffectingReason(path) !== null);
@@ -628,7 +680,7 @@ export async function assertBunValidation(
     throw new Error(`${runner} artifact changes authority outside its inspected scope`);
   return {
     manager: runner,
-    expectedVersion: component.version,
+    expectedVersion,
     versionCommand: `${runner} --version`,
     setupCommand: adapter.setupCommands.at(-1) ?? `${runner} setup`,
     permittedSensitivePaths: new Set(authorityPaths),
@@ -932,7 +984,7 @@ export function isBootstrapDependencySurface(
 
 function isPotentialBootstrapDependencySurface(
   paths: string[],
-  managers: Set<"pnpm" | "bun">,
+  managers: Set<"pnpm" | "bun" | "uv">,
 ): boolean {
   return paths.every(
     (path) =>
@@ -944,7 +996,12 @@ function isPotentialBootstrapDependencySurface(
           path === "turbo.json" ||
           path.endsWith("/package.json"))) ||
       (managers.has("bun") &&
-        (path === "package.json" || path === "bun.lock" || path.endsWith("/package.json"))),
+        (path === "package.json" || path === "bun.lock" || path.endsWith("/package.json"))) ||
+      (managers.has("uv") &&
+        (path === "pyproject.toml" ||
+          path === "uv.lock" ||
+          path === ".python-version" ||
+          path.endsWith("/pyproject.toml"))),
   );
 }
 
@@ -956,7 +1013,8 @@ async function managedValidationPlan(
 ) {
   const environment = sanitizedWorkerEnvironment(source);
   for (const key of Object.keys(environment))
-    if (/^(?:npm_config_|pnpm_|bun_)/i.test(key)) delete environment[key];
+    if (/^(?:npm_config_|pnpm_|bun_|uv_|pip_|python|virtual_env)/i.test(key))
+      delete environment[key];
   const configRoot = join(worktreeRoot, "managed-toolchain-config");
   await mkdir(configRoot, { recursive: true });
   return localManagedToolchainPlan(
@@ -1053,12 +1111,14 @@ export async function validateArtifactClean(
   assertNoSecretMaterial({ patch: artifact.patch, logs: artifact.logs }, "artifact");
 
   const plan = validationPlanFromPacket(input.packet);
-  const potentialBootstrapManagers = new Set<"pnpm" | "bun">(
+  const potentialBootstrapManagers = new Set<"pnpm" | "bun" | "uv">(
     plan.commands.flatMap((command) => {
       const parsed = bootstrapPackageValidationCommand(command);
       if (parsed) return [parsed.manager];
       const managed = futureToolchainCommand(command);
-      return managed?.runner === "bun" ? [managed.runner] : [];
+      return managed && (managed.runner === "bun" || managed.runner === "uv")
+        ? [managed.runner]
+        : [];
     }),
   );
   if (
@@ -1176,7 +1236,7 @@ export async function validateArtifactClean(
       : await assertBootstrapPackageValidation(worktree, artifact, input.packet, plan.commands);
     const packageValidation =
       pnpmValidation ??
-      (await assertBunValidation(
+      (await assertBunOrUvValidation(
         worktree,
         artifact,
         input.packet,

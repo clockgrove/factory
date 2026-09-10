@@ -4,7 +4,7 @@ import { lstat, opendir, readFile, readlink } from "node:fs/promises";
 import { arch, platform } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 
-export type ManagedToolchain = "pnpm" | "bun";
+export type ManagedToolchain = "pnpm" | "bun" | "uv";
 export type RuntimeArchiveFormat = "raw" | "tar.gz" | "tar.xz" | "zip";
 
 export interface RuntimePlatform {

@@ -67,7 +67,7 @@ official release origin and asset pattern. Repository adapters own pins, authori
 operations, preparation, environment isolation and source/lock policy. The first qualified platform
 is Linux x64 glibc.
 
-Factory initially exposes two provisioned bundles:
+Factory initially exposes three provisioned bundles:
 
 - `node-pnpm`: the latest stable official Node Linux x64 distribution plus the latest stable pnpm
   standalone program. Repository authority is `package.json`, `pnpm-lock.yaml`, and any explicitly
@@ -75,6 +75,11 @@ Factory initially exposes two provisioned bundles:
 - `javascript-bun`: the latest stable official baseline Linux x64 Bun ZIP. Factory extracts ZIPs in
   its bounded materializer rather than requiring an ambient archive utility. Repository authority is
   an exact `packageManager` pin, `bun.lock`, and declared direct-child workspace manifests.
+- `python-uv`: the latest stable official uv Linux x64 archive plus the newest stable CPython
+  install-only archive from the latest stable `python-build-standalone` release. Repository authority
+  requires exact uv and Python pins, wheel-only locked registry dependencies, and a finite
+  `python -m pytest` operation; automatic Python acquisition and source builds remain disabled.
+
 Old receipts remain addressable so a reserved or recovered attempt does not move to a newer active
 selection. Provisioning `all` resolves each tool independently and activates a bundle only after all
 of its components pass digest, extraction, executable-version and tree verification. Tree identity
@@ -107,7 +112,7 @@ normalized separately.
 - Backend adapters must materialize and attest every component or report the capability unavailable.
 - Provisioning and adapter qualification remain separate evidence boundaries; one installed bundle
   does not qualify its adapter or an adjacent platform.
-- Native Win32/Darwin, Linux arm64/musl, arbitrary Bun commands, uv/Python execution,
+- Native Win32/Darwin, Linux arm64/musl, arbitrary Bun commands, uv source/editable/native builds,
   and toolchains outside the catalog remain unsupported until a dedicated contract and evidence
   exist.
 - Loss or corruption of an already selected local bundle fails readiness closed. Automatic network

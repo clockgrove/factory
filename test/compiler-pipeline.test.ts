@@ -1047,6 +1047,16 @@ describe("bounded objective compiler", () => {
       operationKeys: ["packages/api:check", "test"],
       descendantKey: "packages/api:check",
     },
+    {
+      runner: "uv",
+      adapter: "python-uv",
+      rootPaths: ["pyproject.toml", "uv.lock", ".python-version"],
+      networks: ["pypi.org", "files.pythonhosted.org"],
+      providerCommand: "uv run --locked --no-sync python -m pytest",
+      descendantCommand: "uv run --project packages/api --locked --no-sync python -m pytest",
+      operationKeys: [".", "packages/api"],
+      descendantKey: "packages/api",
+    },
   ])(
     "derives absent $runner authority, operations, and runtime bindings",
     ({

@@ -185,7 +185,7 @@ export const RepositoryCapabilityOperationSchema = z
 
 export const RuntimeBundleRequirementSchema = z
   .object({
-    tool: z.enum(["pnpm", "bun"]),
+    tool: z.enum(["pnpm", "bun", "uv"]),
     adapter: safeId,
     adapterContract: z.number().int().positive().max(1_000),
     platform: z
@@ -210,7 +210,7 @@ export const SelectedRuntimeBundleRequirementSchema = RuntimeBundleRequirementSc
 export const RuntimeBundleReceiptSchema = z
   .object({
     protocol: z.literal("clockgrove.factory/toolchain-runtime-bundle-v1"),
-    tool: z.enum(["pnpm", "bun"]),
+    tool: z.enum(["pnpm", "bun", "uv"]),
     adapter: safeId,
     adapterContract: z.number().int().positive().max(1_000),
     platform: z

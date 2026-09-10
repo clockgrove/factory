@@ -32,9 +32,14 @@ import {
   validationSetupCommandCount,
 } from "../src/toolchains/authority.js";
 
-async function installManagedFixture(): Promise<RuntimeBundleReceipt> {
-  const tool = "bun" as const;
-  const specifications = [{ id: "bun", version: "1.3.10", executablePath: "bun/bin/bun" }];
+async function installManagedFixture(tool: "bun" | "uv"): Promise<RuntimeBundleReceipt> {
+  const specifications =
+    tool === "bun"
+      ? [{ id: "bun", version: "1.3.10", executablePath: "bun/bin/bun" }]
+      : [
+          { id: "uv", version: "0.12.12", executablePath: "uv/bin/uv" },
+          { id: "python", version: "3.14.7", executablePath: "python/bin/python3" },
+        ];
   const scratch = await mkdtemp(join(tmpdir(), `factory-${tool}-authority-plan-`));
   const components = [];
   for (const specification of specifications) {
@@ -70,7 +75,7 @@ async function installManagedFixture(): Promise<RuntimeBundleReceipt> {
   const unsigned = {
     protocol: "clockgrove.factory/toolchain-runtime-bundle-v1" as const,
     tool,
-    adapter: "javascript-bun",
+    adapter: tool === "bun" ? "javascript-bun" : "python-uv",
     adapterContract: 1,
     platform: SUPPORTED_RUNTIME_PLATFORM,
     components,
@@ -125,6 +130,7 @@ describe("toolchain authority adapters", () => {
         { runner: "npm", provisioning: "host-observed", future: false },
         { runner: "pnpm", provisioning: "factory-provisioned", future: true },
         { runner: "bun", provisioning: "factory-provisioned", future: true },
+        { runner: "uv", provisioning: "factory-provisioned", future: true },
         { runner: "cargo", provisioning: "host-observed", future: false },
         { runner: "go", provisioning: "host-observed", future: false },
         { runner: "python", provisioning: "host-observed", future: false },
@@ -132,22 +138,30 @@ describe("toolchain authority adapters", () => {
     );
   });
 
-  it("uses the adapter-owned Bun plan in production isolation", async () => {
-    const receipt = await installManagedFixture();
-    const adapter = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "javascript-bun")!;
-    const plan = isolatedManagedToolchainPlan(
-      ["bun run test"],
-      [
-        {
-          ...adapter.runtimeRequirement!,
-          bundleDigest: receipt.digest,
-        },
-      ],
-    );
+  it.each([
+    {
+      tool: "bun" as const,
+      adapter: "javascript-bun",
+      commands: ["bun run test"],
+      setup: "bun install --frozen-lockfile",
+    },
+    {
+      tool: "uv" as const,
+      adapter: "python-uv",
+      commands: ["uv run --locked --no-sync python -m pytest"],
+      setup: "uv sync --locked",
+    },
+  ])("uses the adapter-owned $tool plan in production isolation", async (fixture) => {
+    const receipt = await installManagedFixture(fixture.tool);
+    const adapter = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === fixture.adapter)!;
+    const plan = isolatedManagedToolchainPlan(fixture.commands, [
+      {
+        ...adapter.runtimeRequirement!,
+        bundleDigest: receipt.digest,
+      },
+    ]);
     expect(plan?.plan.environment.PATH).toBe("/tmp/factory-toolchain/bin");
-    expect(
-      plan?.plan.setup.some(({ display }) => display.startsWith("bun install --frozen-lockfile")),
-    ).toBe(true);
+    expect(plan?.plan.setup.some(({ display }) => display.startsWith(fixture.setup))).toBe(true);
     expect(plan?.plan.setup.map(({ display }) => display)).toEqual(adapter.setupCommands);
     expect(plan?.plan.assets.every(({ treeSha256 }) => /^[a-f0-9]{64}$/.test(treeSha256))).toBe(
       true,
@@ -349,7 +363,7 @@ describe("toolchain authority adapters", () => {
     expect(unprovisionedFutureToolchainReason("bun run test")).toBeUndefined();
     expect(
       unprovisionedFutureToolchainReason("uv run --locked --no-sync python -m pytest"),
-    ).toMatch(/uv.*no Factory-provisioned/);
+    ).toBeUndefined();
     expect(unprovisionedFutureToolchainReason("cargo test")).toMatch(
       /cargo.*no Factory-provisioned/,
     );

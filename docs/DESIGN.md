@@ -550,7 +550,7 @@ than reserializing it. Issue-only inspection reconstructs every raw Worker Packe
 validation, and foreground completion reapplies a reservation's exact activation to the execution
 view before comparing its invocation digest.
 
-The first concrete future-capable adapters are `node-pnpm` and `javascript-bun`.
+The first concrete future-capable adapters are `node-pnpm`, `javascript-bun`, and `python-uv`.
 They apply independently of unrelated repository recipes only when their complete root authority is
 absent; a partially present authority surface is never bootstrap authority. One dependency-root Work
 Item owns the authority and promises every descendant finite operation. At explicit
@@ -569,9 +569,18 @@ lifecycle companions, exotic sources and arbitrary Bun commands. Factory provisi
 Linux x64 Bun ZIP and extracts it with a bounded in-process parser, so `unzip` and ambient Bun are not
 host requirements. Only finite `bun run <validation-script>` operations are admitted.
 
+`python-uv` pins exact uv and CPython patches through `pyproject.toml`, `.python-version`, and
+`uv.lock`. It permits only wheel-backed registry dependencies for a non-installing application/test
+profile, rejects source, editable, VCS, path and alternate-index authority, disables automatic Python
+downloads and user configuration, and admits only the finite locked/no-sync pytest operation for the
+root or an exact declared workspace member. Its bundle contains official uv and
+`python-build-standalone` CPython assets. uv configuration discovery is inspected only at the root,
+the selected member, and that member's ancestor directories; unrelated package managers, large
+subtrees, and symlinks outside this authority do not become uv authority or readiness dependencies.
+
 Every adapter performs one frozen hook-free setup from its declared registry destinations and records
 version, setup and validation commands in order. Isolated validation uploads, verifies and directly
-executes the same receipt-bound components. npm, uv, Cargo, Go, ambient Python, and uncatalogued runners
+executes the same receipt-bound components. npm, Cargo, Go, ambient Python, and uncatalogued runners
 have no future-authority adapter; existing observed recipes remain usable, while absent recipes fail
 before execution. If a selected bundle is missing or corrupt, recovery fails readiness closed.
 `AttemptReserved` retains the complete receipt and upstream origin identity, so an operator can run

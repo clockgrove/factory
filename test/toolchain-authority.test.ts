@@ -9,6 +9,9 @@ import { activeRuntimeBundleSync, toolchainStoreRoot } from "../src/runtime/tool
 import {
   canonicalJson,
   runtimeBundleDigest,
+  sha256Bytes,
+  sha256Tree,
+  SUPPORTED_RUNTIME_PLATFORM,
   type RuntimeBundleReceipt,
 } from "../src/runtime/toolchain-bundle.js";
 import { parseWorkerPacket } from "../src/protocol/worker-packet.js";
@@ -28,14 +31,6 @@ import {
   unprovisionedFutureToolchainReason,
   validationSetupCommandCount,
 } from "../src/toolchains/authority.js";
-import {
-  type RuntimeBundleReceipt,
-  runtimeBundleDigest,
-  sha256Bytes,
-  sha256Tree,
-  SUPPORTED_RUNTIME_PLATFORM,
-} from "../src/runtime/toolchain-bundle.js";
-import { toolchainStoreRoot } from "../src/runtime/toolchain-store.js";
 
 async function installManagedFixture(): Promise<RuntimeBundleReceipt> {
   const tool = "bun" as const;
@@ -156,6 +151,136 @@ describe("toolchain authority adapters", () => {
     expect(plan?.plan.assets.every(({ treeSha256 }) => /^[a-f0-9]{64}$/.test(treeSha256))).toBe(
       true,
     );
+  });
+
+  it("rejects Bun authority changed after its provider generation", async () => {
+    const receipt = await installManagedFixture();
+    const repository = await mkdtemp(join(tmpdir(), "factory-bun-provider-proof-"));
+    execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repository });
+    execFileSync("git", ["config", "user.name", "Factory Test"], { cwd: repository });
+    execFileSync("git", ["config", "user.email", "factory@example.invalid"], {
+      cwd: repository,
+    });
+    const manifest = {
+      name: "proof",
+      version: "1.0.0",
+      packageManager: "bun@1.3.10",
+      scripts: { test: "bun test" },
+    };
+    await writeFile(join(repository, "package.json"), JSON.stringify(manifest));
+    await writeFile(
+      join(repository, "bun.lock"),
+      JSON.stringify({
+        lockfileVersion: 1,
+        configVersion: 1,
+        workspaces: { "": { name: "proof" } },
+        packages: {},
+      }),
+    );
+    execFileSync("git", ["add", "."], { cwd: repository });
+    execFileSync("git", ["commit", "-qm", "provider generation"], { cwd: repository });
+    const providerBase = {
+      oid: execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: repository,
+        encoding: "utf8",
+      }).trim(),
+      treeOid: execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+        cwd: repository,
+        encoding: "utf8",
+      }).trim(),
+    };
+    await writeFile(
+      join(repository, "package.json"),
+      JSON.stringify({ ...manifest, description: "authority drift" }),
+    );
+    execFileSync("git", ["add", "package.json"], { cwd: repository });
+    execFileSync("git", ["commit", "-qm", "change authority"], { cwd: repository });
+    const currentBase = {
+      oid: execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: repository,
+        encoding: "utf8",
+      }).trim(),
+      treeOid: execFileSync("git", ["rev-parse", "HEAD^{tree}"], {
+        cwd: repository,
+        encoding: "utf8",
+      }).trim(),
+    };
+    const adapter = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "javascript-bun")!;
+    const runtime = { ...adapter.runtimeRequirement!, bundleDigest: receipt.digest };
+    const sourceRef = "refs/heads/main";
+    const packet = parseWorkerPacket({
+      goal: "Use the integrated Bun test.",
+      acceptanceCriteria: ["The test passes."],
+      allowedPaths: ["src/"],
+      preconditions: [],
+      outOfScope: [],
+      conventions: [],
+      baseSha: currentBase.oid,
+      validationCommands: ["bun run test"],
+      requirements: {
+        os: ["linux"],
+        architecture: [],
+        tools: ["bun"],
+        services: [],
+        networkDestinations: ["registry.npmjs.org"],
+        permittedSecretNames: [],
+        trust: "trusted_local",
+      },
+      repositoryCapabilities: {
+        provides: [],
+        requires: [
+          {
+            adapter: adapter.id,
+            generation: `${adapter.id}/root`,
+            providerWorkItem: "root",
+            authorityPaths: ["package.json", "bun.lock"],
+            operation: { kind: "package-script", key: "test" },
+            activation: "integrated-base",
+            runtime: adapter.runtimeRequirement,
+          },
+        ],
+      },
+      managedRuntimes: [runtime],
+      artifactContract: "clockgrove.factory/artifact-v1",
+    });
+    const providerPacket = parseWorkerPacket({
+      ...packet,
+      baseSha: providerBase.oid,
+      repositoryCapabilities: undefined,
+    });
+    const providerActivation = createManagedRuntimeActivation({
+      packet: providerPacket,
+      baseSha: providerBase.oid,
+      sourceRef,
+      proofDigests: [],
+      receipts: [receipt],
+    })!;
+    const provider = {
+      id: "root",
+      dependsOn: [] as string[],
+      scope: ["package.json", "bun.lock"],
+      issueNumber: 293,
+      integration: {
+        kind: "attempt" as const,
+        runId: "00000000-0000-4000-8000-000000000293",
+        attempt: 1,
+        commitSha: providerBase.oid,
+        treeOid: providerBase.treeOid,
+        reservationOid: "c".repeat(40),
+        reservationReceiptDigest: "d".repeat(64),
+        receiptDigest: "a".repeat(64),
+        managedRuntimeActivation: providerActivation,
+      },
+    };
+    await expect(
+      resolveIntegratedRepositoryCapabilities({
+        repository,
+        base: currentBase,
+        sourceRef,
+        packet,
+        providerById: () => provider,
+      }),
+    ).rejects.toThrow(/Bun authority bytes changed after the declared provider generation/);
   });
 
   it("parses npm and pnpm as distinct finite package-script adapters", () => {

@@ -534,11 +534,25 @@ async function assertBunLock(
 
   const resolvedPackages = new Set<string>();
   for (const [key, candidate] of Object.entries(packages)) {
-    if (!Array.isArray(candidate) || candidate.length < 4 || candidate.length > 8)
+    if (!Array.isArray(candidate))
       throw new Error(`Bun lockfile has malformed package resolution: ${key}`);
     const identity = candidate[0];
     if (typeof identity !== "string")
       throw new Error(`Bun lockfile has malformed package identity: ${key}`);
+    const workspaceMarker = identity.lastIndexOf("@workspace:");
+    if (workspaceMarker > 0) {
+      const name = identity.slice(0, workspaceMarker);
+      const directory = identity.slice(workspaceMarker + "@workspace:".length);
+      if (
+        candidate.length !== 1 ||
+        !PACKAGE_NAME.test(name) ||
+        workspaceNames.get(name) !== directory
+      )
+        throw new Error(`Bun lockfile has malformed workspace resolution: ${key}`);
+      continue;
+    }
+    if (candidate.length < 4 || candidate.length > 8)
+      throw new Error(`Bun lockfile has malformed package resolution: ${key}`);
     const separator = identity.lastIndexOf("@");
     const name = identity.slice(0, separator);
     const version = identity.slice(separator + 1);

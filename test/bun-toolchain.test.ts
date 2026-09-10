@@ -75,6 +75,8 @@ async function workspaceFixture(): Promise<string> {
         "packages/shared": { name: "shared" },
       },
       {
+        api: ["api@workspace:packages/api"],
+        shared: ["shared@workspace:packages/shared"],
         vitest: [
           "vitest@3.2.4",
           "",
@@ -197,6 +199,20 @@ describe("Bun toolchain adapter", () => {
       scriptBody: "vitest run",
       workspaceManifests: ["packages/api/package.json", "packages/shared/package.json"],
     });
+  });
+
+  it("rejects a workspace package tuple that does not match declared membership", async () => {
+    const root = await workspaceFixture();
+    const lock = JSON.parse(await readFile(join(root, "bun.lock"), "utf8"));
+    lock.packages.api = ["api@workspace:packages/shared"];
+    await writeJson(join(root, "bun.lock"), lock);
+    await expect(
+      inspectBunAuthority({
+        root,
+        command: "bun --cwd packages/api run test",
+        exactVersion: "1.3.10",
+      }),
+    ).rejects.toThrow(/malformed workspace resolution/);
   });
 
   it("rejects ambient configuration, mixed locks, hooks, trust, unsafe sources, and drift", async () => {

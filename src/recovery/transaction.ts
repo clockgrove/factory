@@ -5,7 +5,14 @@ import {
   type AuthenticatedRecoveryRequest,
   type RecoveryClaimRecord,
 } from "./claims.js";
-import { recoveryEventDigest, recoverySourceEventsDigest } from "./identity.js";
+import {
+  recoveryEventDigest,
+  recoveryEventObservation,
+  recoveryEventSemanticConflictScopes,
+  recoverySourceEventsDigest,
+  type RecoveryEventInput,
+  type RecoveryEventObservation,
+} from "./identity.js";
 import { parseRecoveryPlan, type RecoveryPlanRecord } from "./plan.js";
 import { recoveryRunHistoryActivations } from "./activation-history.js";
 
@@ -32,15 +39,37 @@ function requireBinding(condition: unknown): asserts condition {
  */
 export function recoveryAdoptionEvents(
   input: TransactionBinding,
+  observation?: RecoveryEventObservation,
 ): readonly [Start, Consumed, Completed] {
   const plan = parseRecoveryPlan(input.planRecord.plan);
-  assertRecoveryClaimBinding(input);
-  const predecessor = parseFactoryEvent(input.predecessorStart);
+  assertRecoveryClaimBinding(input, observation);
+  let predecessor = input.predecessorStart;
+  let predecessorDigest: string;
+  if (observation) {
+    try {
+      predecessorDigest = observation.digestOf(predecessor);
+    } catch {
+      const parsedPredecessor = parseFactoryEvent(predecessor);
+      requireBinding(parsedPredecessor.event === "FactoryRunStarted");
+      predecessor = parsedPredecessor;
+      predecessorDigest = recoveryEventDigest(parsedPredecessor);
+      const observed = observation.findByDigest(predecessorDigest);
+      if (observed) {
+        requireBinding(observed.event === "FactoryRunStarted");
+        predecessor = observed;
+      }
+    }
+  } else {
+    const parsedPredecessor = parseFactoryEvent(predecessor);
+    requireBinding(parsedPredecessor.event === "FactoryRunStarted");
+    predecessor = parsedPredecessor;
+    predecessorDigest = recoveryEventDigest(parsedPredecessor);
+  }
   requireBinding(predecessor.event === "FactoryRunStarted");
   requireBinding(
     predecessor.objective === plan.objective &&
       predecessor.runId === plan.predecessor.runId &&
-      recoveryEventDigest(predecessor) === plan.predecessor.startDigest &&
+      predecessorDigest === plan.predecessor.startDigest &&
       predecessor.repository.toLowerCase() === plan.repository.toLowerCase() &&
       predecessor.baseBranch === plan.baseBranch &&
       predecessor.actor.toLowerCase() === input.authenticatedRequest.requestedBy.toLowerCase() &&
@@ -122,7 +151,7 @@ export interface RecoveryAdoptionInspection {
  * pure inspection cannot grant that authority, even in the complete state.
  */
 export function inspectRecoveryAdoption(
-  input: TransactionBinding & { events: readonly FactoryEvent[]; historyComplete: boolean },
+  input: TransactionBinding & { events: RecoveryEventInput; historyComplete: boolean },
 ): RecoveryAdoptionInspection {
   const blocked = (code: string): RecoveryAdoptionInspection => ({
     state: "blocked",
@@ -130,44 +159,55 @@ export function inspectRecoveryAdoption(
     nextEvent: null,
     blockers: [code],
   });
+  if (!input.historyComplete) return blocked("history-incomplete");
+  if (Array.isArray(input.events) && input.events.length > 50_000)
+    return blocked("history-incomplete");
+  let observation: RecoveryEventObservation;
   try {
-    if (!input.historyComplete || input.events.length > 50_000)
-      return blocked("history-incomplete");
-    const expected = recoveryAdoptionEvents(input);
+    observation = recoveryEventObservation(input.events, { maxEvents: 50_000 });
+  } catch (error) {
+    const scopes = recoveryEventSemanticConflictScopes(error);
+    if (!scopes) return blocked("transaction-binding-invalid");
+    const plan = input.planRecord.plan;
+    if (scopes.some((scope) => scope.objective !== plan.objective))
+      return blocked("event-scope-mismatch");
+    if (scopes.some((scope) => scope.runId === plan.successorRunId))
+      return blocked("unexpected-successor-event");
+    return blocked("transaction-binding-invalid");
+  }
+  try {
+    const events = observation.events;
+    const expected = recoveryAdoptionEvents(input, observation);
     const plan = input.planRecord.plan;
     // Deduplicate only byte-equivalent parsed envelopes. Semantic deduplication
     // intentionally ignores timestamps and sequences elsewhere; using it here
     // would conceal conflicting transaction retries after a lost response.
-    const unique = new Map<string, FactoryEvent>();
-    for (const raw of input.events) {
-      const event = parseFactoryEvent(raw);
+    for (const event of events) {
       if (event.objective !== plan.objective || !Number.isSafeInteger(event.sequence))
         return blocked("event-scope-mismatch");
-      unique.set(recoveryEventDigest(event), event);
     }
-    const events = [...unique.values()];
     const sourceRuns = new Set(plan.history.map((entry) => entry.runId));
-    const activations = recoveryRunHistoryActivations(plan, events);
+    const activations = recoveryRunHistoryActivations(plan, observation);
     if (!activations) return blocked("unplanned-run-history");
     const requests = events.filter(
       (event) =>
         event.event === "RecoveryRequested" && event.predecessorRunId === plan.predecessor.runId,
     );
-    if (requests.length !== 1 || recoveryEventDigest(requests[0]!) !== input.claim.requestDigest)
+    if (requests.length !== 1 || observation.digestOf(requests[0]!) !== input.claim.requestDigest)
       return blocked("request-missing-or-conflicting");
     if (
-      !events.some((event) => recoveryEventDigest(event) === plan.predecessor.startDigest) ||
+      !observation.findByDigest(plan.predecessor.startDigest) ||
       !events.some(
         (event) =>
           event.runId === plan.predecessor.runId &&
           event.event === plan.predecessor.terminalEvent &&
           event.sequence === plan.predecessor.terminalSequence &&
-          recoveryEventDigest(event) === plan.predecessor.terminalDigest,
+          observation.digestOf(event) === plan.predecessor.terminalDigest,
       ) ||
       recoverySourceEventsDigest({
         objective: plan.objective,
         runIds: [...sourceRuns],
-        events,
+        events: observation,
         // Include late-arriving source receipts, not just the old plan cutoff.
         maxSequence: Number.MAX_SAFE_INTEGER,
       }) !== plan.sourceEventsDigest
@@ -175,7 +215,7 @@ export function inspectRecoveryAdoption(
       return blocked("source-fence-changed");
     const expectedDigests = expected.map(recoveryEventDigest);
     const observed = events.filter((event) => event.runId === plan.successorRunId);
-    if (observed.some((event) => !expectedDigests.includes(recoveryEventDigest(event))))
+    if (observed.some((event) => !expectedDigests.includes(observation.digestOf(event))))
       return blocked("unexpected-successor-event");
     for (const event of events) {
       if (
@@ -186,7 +226,7 @@ export function inspectRecoveryAdoption(
       )
         return blocked("transaction-sequence-collision");
     }
-    const seen = new Set(observed.map(recoveryEventDigest));
+    const seen = new Set(observed.map((event) => observation.digestOf(event)));
     let prefix = 0;
     while (prefix < expected.length && seen.has(expectedDigests[prefix]!)) prefix++;
     if (observed.length !== prefix) return blocked("transaction-prefix-incomplete");

@@ -21,9 +21,11 @@ import {
 import { observeRecoveryNativeTransition } from "./native-transition.js";
 import { observeRecoverySiblingRefresh } from "./sibling-refresh.js";
 import {
-  createRecoveryEventDigest,
   recoveryEventDigest,
+  recoveryEventObservation,
   recoverySourceEventsDigest,
+  type RecoveryEventInput,
+  type RecoveryEventObservation,
 } from "./identity.js";
 import { recoveryAdoptionEvents } from "./transaction.js";
 
@@ -35,9 +37,10 @@ export type RecoverySourcePublishedEvent = Extract<
 export function recoverySourcePublicationBinding(
   event: RecoverySourcePublishedEvent,
   repository: string,
+  observation?: RecoveryEventObservation,
 ) {
   return {
-    receiptDigest: recoveryEventDigest(event),
+    receiptDigest: observation ? observation.digestOf(event) : recoveryEventDigest(event),
     mode: event.mode,
     pullRequest: event.pullRequest,
     pullRequestNodeId: event.pullRequestNodeId,
@@ -53,7 +56,7 @@ export function recoverySourcePublicationBinding(
 type Input = {
   planRecord: RecoveryPlanRecord;
   claim: RecoveryClaimRecord;
-  events: readonly FactoryEvent[];
+  events: RecoveryEventInput;
   store: RecoveryReadStore;
   workItem: number;
   proofTraversal?: ReadonlySet<string>;
@@ -83,16 +86,8 @@ export async function loadRecoverySourceArtifact(
   input: Input,
   recordedPublication?: RecoverySourcePublishedEvent,
 ): Promise<RecoverySourceArtifactProof> {
-  const recoveryEventDigest = createRecoveryEventDigest();
-  requireEvidence(input.events.length <= 10000);
-  const events = [
-    ...new Map(
-      input.events.map((value) => {
-        const event = parseFactoryEvent(value);
-        return [recoveryEventDigest(event), event] as const;
-      }),
-    ).values(),
-  ];
+  const observation = recoveryEventObservation(input.events, { maxEvents: 10_000 });
+  const events = observation.events;
   requireEvidence(new Set(events.map((event) => event.sequence)).size === events.length);
   const record = await loadRecoveryPlan(
     input.store,
@@ -127,20 +122,23 @@ export async function loadRecoverySourceArtifact(
       starts.length === 1 &&
       starts[0]!.event === "FactoryRunStarted",
   );
-  for (const expected of recoveryAdoptionEvents({
-    planRecord: record,
-    claim,
-    authenticatedRequest: requests[0]!,
-    predecessorStart: starts[0]!,
-  })) {
+  for (const expected of recoveryAdoptionEvents(
+    {
+      planRecord: record,
+      claim,
+      authenticatedRequest: requests[0]!,
+      predecessorStart: starts[0]!,
+    },
+    observation,
+  )) {
     const expectedDigest = recoveryEventDigest(expected);
-    requireEvidence(events.some((event) => recoveryEventDigest(event) === expectedDigest));
+    requireEvidence(observation.findByDigest(expectedDigest));
   }
   requireEvidence(
     recoverySourceEventsDigest({
       objective: plan.objective,
       runIds: plan.history.map((entry) => entry.runId),
-      events,
+      events: observation,
       maxSequence: Number.MAX_SAFE_INTEGER,
     }) === plan.sourceEventsDigest,
   );
@@ -157,7 +155,7 @@ export async function loadRecoverySourceArtifact(
       source.review,
   );
   const exact = (digest: string) => {
-    const event = events.find((event) => recoveryEventDigest(event) === digest);
+    const event = observation.findByDigest(digest);
     requireEvidence(event);
     return event;
   };
@@ -202,10 +200,16 @@ export async function loadRecoverySourceArtifact(
   );
   const { branch, headSha, treeSha } = source.artifactHead;
   let publishedHeadObserved = false;
-  if (
-    recordedPublication &&
-    events.some((event) => recoveryEventDigest(event) === recoveryEventDigest(recordedPublication))
-  ) {
+  if (recordedPublication) {
+    let recordedDigest: string;
+    try {
+      recordedDigest = observation.digestOf(recordedPublication);
+    } catch {
+      recordedDigest = recoveryEventDigest(recordedPublication);
+    }
+    const observedPublication = observation.findByDigest(recordedDigest);
+    requireEvidence(observedPublication?.event === "RecoverySourcePublished");
+    recordedPublication = observedPublication;
     requireEvidence(
       recordedPublication.runId === plan.successorRunId &&
         recordedPublication.planDigest === record.digest &&
@@ -234,9 +238,13 @@ export async function loadRecoverySourceArtifact(
             workItem: input.workItem,
             source: {
               ...source,
-              publication: recoverySourcePublicationBinding(recordedPublication, plan.repository),
+              publication: recoverySourcePublicationBinding(
+                recordedPublication,
+                plan.repository,
+                observation,
+              ),
             },
-            events,
+            events: observation,
             store: input.store,
             controllingRunIds: [...plan.history.map((entry) => entry.runId), plan.successorRunId],
             deliveryHeadSha: pull.headSha,
@@ -246,7 +254,7 @@ export async function loadRecoverySourceArtifact(
       } else
         await observeRecoveryNativeTransition({
           planRecord: record,
-          events,
+          events: observation,
           store: input.store,
           workItem: input.workItem,
         });
@@ -446,15 +454,23 @@ export async function verifyRecoverySourcePublication(
     }
   | { status: "blocked"; blockers: string[]; executionAuthorized: false }
 > {
-  const recoveryEventDigest = createRecoveryEventDigest();
   try {
-    const event = parseFactoryEvent(input.publication);
+    const observation = recoveryEventObservation(input.events, { maxEvents: 10_000 });
+    let event: FactoryEvent;
+    let eventDigest: string;
+    try {
+      eventDigest = observation.digestOf(input.publication);
+      event = input.publication;
+    } catch {
+      event = parseFactoryEvent(input.publication);
+      eventDigest = recoveryEventDigest(event);
+    }
     requireEvidence(event.event === "RecoverySourcePublished");
-    const recorded = input.events.some(
-      (value) => recoveryEventDigest(value) === recoveryEventDigest(event),
-    );
+    const recordedEvent = observation.findByDigest(eventDigest);
+    const recorded = recordedEvent?.event === "RecoverySourcePublished";
+    if (recorded) event = recordedEvent;
     const artifact = await loadRecoverySourceArtifact(
-      { ...input, workItem: event.workItem },
+      { ...input, events: observation, workItem: event.workItem },
       recorded ? event : undefined,
     );
     const expected = createRecoverySourcePublishedEvent({
@@ -468,10 +484,10 @@ export async function verifyRecoverySourcePublication(
       at: event.at,
     });
     requireEvidence(
-      recoveryEventDigest(event) === recoveryEventDigest(expected) &&
+      eventDigest === recoveryEventDigest(expected) &&
         event.sequence > artifact.claim.transaction.startSequence + 2,
     );
-    const selection = input.events.filter(
+    const selection = observation.events.filter(
       (value) => value.kind === "delivery" && value.runId === event.runId,
     );
     requireEvidence(
@@ -481,13 +497,13 @@ export async function verifyRecoverySourcePublication(
         selection[0]!.sequence < event.sequence,
     );
     requireEvidence(
-      !input.events.some(
+      !observation.events.some(
         (value) =>
           (value.sequence === event.sequence ||
             (value.event === "RecoverySourcePublished" &&
               value.runId === event.runId &&
               value.workItem === event.workItem)) &&
-          recoveryEventDigest(value) !== recoveryEventDigest(event),
+          observation.digestOf(value) !== eventDigest,
       ),
     );
     const pull = await input.store.readPullRequest(event.pullRequest);
@@ -507,9 +523,9 @@ export async function verifyRecoverySourcePublication(
             workItem: event.workItem,
             source: {
               ...source,
-              publication: recoverySourcePublicationBinding(event, plan.repository),
+              publication: recoverySourcePublicationBinding(event, plan.repository, observation),
             },
-            events: input.events,
+            events: observation,
             store: input.store,
             controllingRunIds: [...plan.history.map((entry) => entry.runId), plan.successorRunId],
             deliveryHeadSha: pull.headSha,
@@ -519,7 +535,7 @@ export async function verifyRecoverySourcePublication(
       } else
         await observeRecoveryNativeTransition({
           planRecord: artifact.planRecord,
-          events: input.events,
+          events: observation,
           store: input.store,
           workItem: event.workItem,
         });

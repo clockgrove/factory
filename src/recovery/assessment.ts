@@ -12,8 +12,8 @@ import {
 } from "../control/graph-evidence.js";
 import { attemptRef, listAttemptReservationRefs } from "../control/attempts.js";
 import { loadReviewCheckpoint, type ReviewIdentity } from "../control/reviews.js";
-import { decodeEventTrailer, deduplicateFactoryEvents } from "../control/receipts.js";
-import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
+import { decodeEventTrailer } from "../control/receipts.js";
+import type { FactoryEvent } from "../protocol/events.js";
 import { parseRunPolicy, policyDigest } from "../protocol/policy.js";
 import type { GitHubStack } from "../publication/github-stacks.js";
 import {
@@ -26,6 +26,7 @@ import { branchRuleBlockers, missingRequiredChecks } from "../publication/branch
 import { publicationBranch } from "../publication/publisher.js";
 import { bindValidationToPublishedHead } from "../validation/plan.js";
 import { assessRecoveryAccounting, type RecoveryAccountingAssessment } from "./accounting.js";
+import { observeRecoveryEvents, type RecoveryEventObservation } from "./identity.js";
 
 /** Only read ports are accepted; assessment cannot obtain mutation or execution authority. */
 export type RecoveryReadStore = Pick<
@@ -129,6 +130,7 @@ export async function assessRecovery(input: {
   repository: string;
   snapshot: FactoryReadSnapshot;
   store: RecoveryReadStore;
+  signal?: AbortSignal;
 }): Promise<RecoveryAssessment> {
   const { snapshot, repository, store } = input;
   const report: RecoveryAssessment = {
@@ -191,7 +193,9 @@ export async function assessRecovery(input: {
       ? { readStack: (number: number) => read(`stack:${number}`, () => store.readStack!(number)) }
       : {}),
   };
-  let events: FactoryEvent[] = [];
+  let events: readonly FactoryEvent[] = [];
+  let observation: RecoveryEventObservation | undefined;
+  let factoryEvents: readonly FactoryEvent[] = [];
   const starts = new Map<string, Start>();
   const verifiedGraphs = new Map<string, Map<number, string>>();
   const graphParents = new Map<string, Map<number, string[]>>();
@@ -228,22 +232,30 @@ export async function assessRecovery(input: {
       )
     )
       throw new Error("incomplete observed history");
-    const raw = [
-      ...(snapshot.factoryEvents ?? []),
-      ...items.flatMap((item) => item.factoryEvents ?? []),
-    ];
-    if (raw.length > 10_000) throw new Error("history bound");
-    events = deduplicateFactoryEvents(raw.map(parseFactoryEvent)).sort(
-      (a, b) => a.sequence - b.sequence,
-    );
-    for (const item of items) {
-      if (
-        (item.factoryEvents ?? []).some(
-          (event) => "workItem" in event && event.workItem !== item.number,
-        )
-      )
+    const factoryEventCount = snapshot.factoryEvents.length;
+    const itemEventSegments = items.map((item) => ({
+      count: item.factoryEvents!.length,
+      workItem: item.number,
+    }));
+    const raw = [...snapshot.factoryEvents, ...items.flatMap((item) => item.factoryEvents)];
+    const authenticatedObservation = await observeRecoveryEvents(raw, {
+      maxEvents: 10_000,
+      sortBySequence: true,
+      ...(input.signal ? { signal: input.signal } : {}),
+    });
+    const validatedInputEvents = authenticatedObservation.validatedInputEvents();
+    factoryEvents = validatedInputEvents.slice(0, factoryEventCount);
+    let inputOffset = factoryEventCount;
+    for (const segment of itemEventSegments) {
+      const itemEvents = validatedInputEvents.slice(inputOffset, inputOffset + segment.count);
+      inputOffset += segment.count;
+      if (itemEvents.some((event) => "workItem" in event && event.workItem !== segment.workItem))
         throw new Error("receipt issue binding");
     }
+    if (inputOffset !== validatedInputEvents.length)
+      throw new Error("recovery event input segmentation");
+    observation = authenticatedObservation.semanticView();
+    events = observation.events;
     const facts = await port.getRepositoryFacts();
     if (
       facts.fullName.toLowerCase() !== repository.toLowerCase() ||
@@ -252,9 +264,7 @@ export async function assessRecovery(input: {
       throw new Error("repository mismatch");
     baseSha = (await port.getBranchHead(snapshot.defaultBranch)).oid;
     repositoryValid = true;
-    for (const event of [...(snapshot.factoryEvents ?? [])].sort(
-      (a, b) => a.sequence - b.sequence,
-    )) {
+    for (const event of [...factoryEvents].sort((a, b) => a.sequence - b.sequence)) {
       if (event.kind !== "run" || event.event !== "FactoryRunStarted") continue;
       const policy = parseRunPolicy(event.policy);
       if (
@@ -810,7 +820,7 @@ export async function assessRecovery(input: {
     report.accounting = assessRecoveryAccounting({
       objective: snapshot.number,
       repository,
-      events,
+      events: observation ?? events,
       runIds: selectedStarts.map((start) => start.runId),
       policy,
       authority: snapshot.objectiveAuthority,

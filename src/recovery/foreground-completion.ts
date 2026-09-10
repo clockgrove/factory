@@ -2,23 +2,27 @@ import { hasCurrentWriterAuthority } from "../control/receipts.js";
 import { createHash } from "node:crypto";
 import { attemptRef, readAttemptReservationRef } from "../control/attempts.js";
 import { assertAuthenticatedGraphProjection } from "../control/graph-evidence.js";
-import { decodeEventTrailer, deduplicateFactoryEvents } from "../control/receipts.js";
+import { decodeEventTrailer } from "../control/receipts.js";
 import { durableAttemptId } from "../execution/session.js";
 import { workerPacketFromCompiled } from "../graph.js";
-import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
 import { LocalScopeBatchSchema, type LocalScopeBatch } from "../protocol/local-scope.js";
 import { policyDigest } from "../protocol/policy.js";
 import { parseWorkerPacket, workerPacketDigest } from "../protocol/worker-packet.js";
 import { validationPlanFromPacket } from "../validation/plan.js";
 import type { RecoveryReadStore } from "./assessment.js";
-import { recoveryEventDigest, recoverySourceEventsDigest } from "./identity.js";
+import {
+  recoveryEventDigest,
+  recoveryEventObservation,
+  recoverySourceEventsDigest,
+  type RecoveryEventInput,
+} from "./identity.js";
 import { loadRecoveryPlanGraph, parseRecoveryPlan, type RecoveryPlan } from "./plan.js";
 
 export interface ForegroundCompletionInput {
   batch: LocalScopeBatch;
   plan: RecoveryPlan;
   /** Complete actor-authenticated history, as required by recovery resource verification. */
-  events: readonly FactoryEvent[];
+  events: RecoveryEventInput;
   store: RecoveryReadStore;
 }
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -38,15 +42,18 @@ export async function deriveForegroundCompletion(
 ): Promise<string> {
   const plan = parseRecoveryPlan(input.plan);
   const batch = LocalScopeBatchSchema.parse(input.batch);
-  requireProof(!batch.identity.producerUnit && input.events.length <= 10_000);
-  const events = deduplicateFactoryEvents(input.events.map(parseFactoryEvent));
+  requireProof(!batch.identity.producerUnit);
+  const observation = recoveryEventObservation(input.events, {
+    maxEvents: 10_000,
+  }).semanticView();
+  const events = observation.events;
   requireProof(events.every((event) => event.objective === plan.objective));
   const runs = new Set(plan.history.map((entry) => entry.runId));
   requireProof(
     recoverySourceEventsDigest({
       objective: plan.objective,
       runIds: [...runs],
-      events,
+      events: observation,
       maxSequence: plan.sourceEventMaxSequence,
     }) === plan.sourceEventsDigest,
   );
@@ -70,8 +77,8 @@ export async function deriveForegroundCompletion(
         start.repository.toLowerCase() === plan.repository.toLowerCase() &&
         policyDigest(start.policy) === entry.policyDigest &&
         start.policyDigest === entry.policyDigest &&
-        recoveryEventDigest(start) === entry.startDigest &&
-        recoveryEventDigest(terminal) === entry.terminalDigest &&
+        observation.digestOf(start) === entry.startDigest &&
+        observation.digestOf(terminal) === entry.terminalDigest &&
         terminal.event === entry.terminalEvent &&
         terminal.sequence === entry.terminalSequence &&
         history
@@ -117,7 +124,7 @@ export async function deriveForegroundCompletion(
       ["codex-sdk/local-worktree", "codex-cli/local-worktree"].includes(reserved.backend) &&
       reserved.directorEpoch === identity.directorEpoch &&
       reserved.policyDigest === identity.policyDigest &&
-      source.reservationReceiptDigest === recoveryEventDigest(reserved),
+      source.reservationReceiptDigest === observation.digestOf(reserved),
   );
   requireProof(
     attempts.every(
@@ -147,7 +154,7 @@ export async function deriveForegroundCompletion(
   requireProof(
     commit.oid === oid &&
       trailer &&
-      recoveryEventDigest(trailer) === recoveryEventDigest(reserved) &&
+      recoveryEventDigest(trailer) === observation.digestOf(reserved) &&
       commit.parentOids.length === 1 &&
       commit.parentOids[0] === reserved.baseSha &&
       (await input.store.readCommit(reserved.baseSha)).treeOid === commit.treeOid,
@@ -272,7 +279,7 @@ export async function deriveForegroundCompletion(
       !validationUsage.usageId &&
       validation.passed &&
       validation.baseSha === reserved.baseSha &&
-      recoveryEventDigest(validation) === source.validation.receiptDigest &&
+      observation.digestOf(validation) === source.validation.receiptDigest &&
       validation.evidenceDigest === source.validation.evidenceDigest &&
       validation.outputTreeSha === source.validation.outputTreeSha,
   );

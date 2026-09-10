@@ -165,6 +165,27 @@ export interface TerminalRunEvidence {
   reasonDigest?: string;
 }
 
+export interface FactoryEventConflictScope {
+  readonly objective: number;
+  readonly runId: string;
+}
+
+/** Structured conflict metadata lets fail-closed callers preserve their public
+ * diagnostics without inspecting or reparsing untrusted event payloads. */
+export class FactoryEventConflictError extends Error {
+  readonly scopes: readonly FactoryEventConflictScope[];
+
+  constructor(message: string, left: FactoryEvent, right: FactoryEvent) {
+    super(message);
+    this.name = "FactoryEventConflictError";
+    this.scopes = Object.freeze(
+      [left, right].map((event) =>
+        Object.freeze({ objective: event.objective, runId: event.runId }),
+      ),
+    );
+  }
+}
+
 /** Preserve the authenticated terminal receipt while making its human-readable
  * reason independently addressable by a stable digest. */
 export function terminalRunEvidence(
@@ -282,7 +303,11 @@ export function deduplicateFactoryEvents(events: FactoryEvent[]): FactoryEvent[]
     const encoded = JSON.stringify(semantic);
     const prior = bySequence.get(key);
     if (prior && prior.encoded !== encoded) {
-      throw new Error(`conflicting Factory events at ${key}`);
+      throw new FactoryEventConflictError(
+        `conflicting Factory events at ${key}`,
+        prior.event,
+        event,
+      );
     }
     if (!prior || (event.writerEpoch ?? 0) > (prior.event.writerEpoch ?? 0)) {
       bySequence.set(key, { encoded, event });
@@ -295,7 +320,11 @@ export function deduplicateFactoryEvents(events: FactoryEvent[]): FactoryEvent[]
       const encoded = requestFingerprint(event);
       const prior = writerOperations.get(key);
       if (prior && prior.encoded !== encoded) {
-        throw new Error(`conflicting Factory writer operations at ${key}`);
+        throw new FactoryEventConflictError(
+          `conflicting Factory writer operations at ${key}`,
+          prior.event,
+          event,
+        );
       }
       if (
         !prior ||
@@ -312,7 +341,11 @@ export function deduplicateFactoryEvents(events: FactoryEvent[]): FactoryEvent[]
       const encoded = requestFingerprint(event);
       const prior = applicationRequests.get(key);
       if (prior && prior.encoded !== encoded) {
-        throw new Error(`conflicting Factory application requests at ${key}`);
+        throw new FactoryEventConflictError(
+          `conflicting Factory application requests at ${key}`,
+          prior.event,
+          event,
+        );
       }
       if (
         !prior ||

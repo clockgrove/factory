@@ -935,6 +935,24 @@ describe("read-only recovery assessment", () => {
     expect((await f.assess()).runs.map((run) => run.runId)).toEqual(["source", "later"]);
   });
 
+  it("binds item receipts from the authenticated snapshot rather than later raw mutation", async () => {
+    const f = await fixture();
+    f.reserve();
+    const receipt = f.snapshot.workItems[0]!.factoryEvents![0]!;
+    f.snapshot.workItems[0]!.factoryEvents!.push(
+      ...Array.from({ length: 600 }, () => structuredClone(receipt)),
+    );
+
+    const pending = f.assess();
+    queueMicrotask(() => {
+      if ("workItem" in receipt) receipt.workItem = 9;
+    });
+    const result = await pending;
+
+    expect(result.blockers.map((blocker) => blocker.code)).not.toContain("history-unavailable");
+    expect(result.workItems[0]!.classification).toBe("reconciliation-required");
+  });
+
   it("requires revalidation of a recoverable artifact when the current base advances", async () => {
     const f = await fixture();
     f.artifact();

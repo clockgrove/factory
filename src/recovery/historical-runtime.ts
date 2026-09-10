@@ -1,9 +1,12 @@
 import type { FactoryReadSnapshot } from "../application/status.js";
 import { hasCurrentWriterAuthority } from "../control/receipts.js";
-import type { FactoryEvent } from "../protocol/events.js";
 import type { RecoveryReadStore } from "./assessment.js";
 import { loadRecoveryClaim } from "./claims.js";
-import { recoveryClaimRef, recoverySourceEventsDigest } from "./identity.js";
+import {
+  recoveryClaimRef,
+  recoverySourceEventsDigest,
+  type RecoveryEventObservation,
+} from "./identity.js";
 import { loadRecoveryPlan, type RecoveryPlanRecord } from "./plan.js";
 import {
   loadRecoveryRuntime,
@@ -68,14 +71,26 @@ export async function loadHistoricalRecoveryRuntimes(input: {
   historyComplete: boolean;
   store: RecoveryReadStore;
   latestRunId: string;
+  eventObservation?: RecoveryEventObservation;
 }): Promise<ReadonlyMap<string, AuthenticatedHistoricalRuntime>> {
   requireHistory(input.historyComplete);
+  const latestSnapshot = input.eventObservation
+    ? {
+        ...input.snapshot,
+        factoryEvents: [...input.eventObservation.events],
+        workItems: input.snapshot.workItems.map((item) => ({ ...item, factoryEvents: [] })),
+      }
+    : input.snapshot;
   const latest = await authenticateHistoricalRuntime(
     await loadRecoveryRuntime({
       objective: input.snapshot.number,
       runId: input.latestRunId,
       store: input.store,
-      readSnapshot: async () => ({ snapshot: input.snapshot, historyComplete: true }),
+      readSnapshot: async () => ({
+        snapshot: latestSnapshot,
+        historyComplete: true,
+        ...(input.eventObservation ? { eventObservation: input.eventObservation } : {}),
+      }),
     }),
     input.store,
   );
@@ -144,13 +159,14 @@ export async function loadHistoricalRecoveryRuntimes(input: {
         recoverySourceEventsDigest({
           objective: input.snapshot.number,
           runIds: following.plan.history.map((entry) => entry.runId),
-          events: latest.events,
+          events: latest.eventObservation,
           maxSequence: cutoff,
         }) === following.plan.sourceEventsDigest,
     );
-    const prefix = (events: readonly FactoryEvent[]) =>
-      events.filter((event) => event.sequence <= cutoff);
-    const historicalEvents = prefix(latest.events);
+    const historicalObservation = latest.eventObservation.select(
+      (event) => event.sequence <= cutoff,
+    );
+    const historicalEvents = historicalObservation.events;
     requireHistory(historicalEvents.every((event) => allowedRuns.has(event.runId)));
     const historicalClaimRefs = new Set(
       records
@@ -177,10 +193,12 @@ export async function loadHistoricalRecoveryRuntimes(input: {
     });
     const snapshot: FactoryReadSnapshot = {
       ...input.snapshot,
-      factoryEvents: prefix(input.snapshot.factoryEvents ?? []),
+      // Preserve the authenticated view as the sole event source. Recovery
+      // verification treats Objective and Work Item streams as one observation.
+      factoryEvents: [...historicalEvents],
       workItems: input.snapshot.workItems.map((item) => ({
         ...item,
-        factoryEvents: prefix(item.factoryEvents ?? []),
+        factoryEvents: [],
       })),
     };
     const runtime = await authenticateHistoricalRuntime(
@@ -188,7 +206,11 @@ export async function loadHistoricalRecoveryRuntimes(input: {
         objective: input.snapshot.number,
         runId: record.plan.successorRunId,
         store,
-        readSnapshot: async () => ({ snapshot, historyComplete: true }),
+        readSnapshot: async () => ({
+          snapshot,
+          historyComplete: true,
+          eventObservation: historicalObservation,
+        }),
       }),
       store,
     );

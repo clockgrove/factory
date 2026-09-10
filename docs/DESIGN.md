@@ -196,6 +196,15 @@ calls. It never caches mutable refs, authenticated event snapshots, PR/base stat
 absence or an admission decision. A cache hit saves a content read, not an authority check; failures
 and misses are not retained, and cached response timestamps are not fresh server-time evidence.
 
+Within one complete authenticated repository read, recovery does build a bounded event observation:
+it safely materializes every envelope, applies the full protocol and persisted-material validation,
+canonicalizes and digests it once, and deeply freezes the parsed result. Nested chain, accounting,
+evidence, publication, outcome, resource, and sibling proofs share that observation or an attenuated
+view of its members. Membership is snapshot-local and non-authoritative: structurally equal clones,
+independent trailers and events from any later repository read must be fully validated again. The
+observation is discarded as a unit on abort or integrity failure and is never global, persisted, or
+used to skip a fresh authority read.
+
 A classified quota refusal imposes a shared retry boundary, including during controller bootstrap,
 discovery and lease retirement. An in-flight success cannot clear a later retry deadline. After
 settling the current generation, the same process waits abortably and reconstructs ownership; it

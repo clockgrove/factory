@@ -1,11 +1,15 @@
 import { hasCurrentWriterAuthority } from "../control/receipts.js";
 import { createHash } from "node:crypto";
-import { deduplicateFactoryEvents } from "../control/receipts.js";
-import { type FactoryEvent, parseFactoryEvent } from "../protocol/events.js";
+import type { FactoryEvent } from "../protocol/events.js";
 import { type RunPolicy, policyDigest } from "../protocol/policy.js";
 import { unresolvedModelInvocations } from "../control/budget.js";
 import { assessRecoveryAccounting, type RecoveryAccountingAssessment } from "./accounting.js";
-import { recoveryClaimRef, recoveryEventDigest, recoverySourceEventsDigest } from "./identity.js";
+import {
+  recoveryClaimRef,
+  recoveryEventObservation,
+  recoverySourceEventsDigest,
+  type RecoveryEventInput,
+} from "./identity.js";
 import {
   parseRecoveryPlan,
   isRecoveryAdoptionGraph,
@@ -144,7 +148,7 @@ export function verifyRecoveryChain(input: {
   objective: number;
   objectiveNodeId: string;
   historyComplete: boolean;
-  events: readonly FactoryEvent[];
+  events: RecoveryEventInput;
   plansByDigest: Readonly<Record<string, RecoveryPlanRecord>>;
   claims: readonly RecoveryClaimObservation[];
   candidatePlan: RecoveryPlan;
@@ -175,14 +179,15 @@ export function verifyRecoveryChain(input: {
     }
   };
   try {
+    const observation = recoveryEventObservation(input.events).semanticView();
+    const events = observation.events;
     require(input.historyComplete === true &&
-      input.events.length <= 50_000 &&
+      events.length <= 50_000 &&
       input.claims.length <= 100 &&
       Object.keys(input.plansByDigest).length <=
         100, "history-incomplete", "Complete bounded authenticated history, immutable plans, and claim observations are required.");
     const candidate = parseRecoveryPlan(input.candidatePlan);
     const candidateDigest = recoveryPlanDigest(candidate);
-    const events = deduplicateFactoryEvents(input.events.map(parseFactoryEvent));
     require(events.every(
       (event) => event.objective === input.objective && Number.isSafeInteger(event.sequence),
     ), "event-scope-mismatch", "History contains a foreign Objective or unsafe event sequence.");
@@ -304,9 +309,9 @@ export function verifyRecoveryChain(input: {
         require(terminal.length === 1 &&
           terminal[0]!.sequence > start.sequence &&
           terminal[0]!.sequence <= plan.sourceEventMaxSequence &&
-          recoveryEventDigest(start) === entry.startDigest &&
+          observation.digestOf(start) === entry.startDigest &&
           start.policyDigest === entry.policyDigest &&
-          recoveryEventDigest(terminal[0]!) === entry.terminalDigest &&
+          observation.digestOf(terminal[0]!) === entry.terminalDigest &&
           terminal[0]!.event === entry.terminalEvent &&
           terminal[0]!.sequence ===
             entry.terminalSequence, "terminal-history-mismatch", "Historical start, terminal envelope, sequence, or policy does not match the immutable history entry.");
@@ -315,7 +320,7 @@ export function verifyRecoveryChain(input: {
         recoverySourceEventsDigest({
           objective: input.objective,
           runIds: plan.history.map((entry) => entry.runId),
-          events,
+          events: observation,
           maxSequence: plan.sourceEventMaxSequence,
         }) ===
           plan.sourceEventsDigest, "source-fence-mismatch", "Source receipt history changed at the acknowledged snapshot fence.");
@@ -390,7 +395,7 @@ export function verifyRecoveryChain(input: {
             (event) => event.claimRef === claimRef && event.claimOid === observed[0]!.oid,
           ), "claim-observation-mismatch", "The immutable claim ref/payload/commit is unobserved or differs from the request and consumed start.");
       }
-      const historical = events.filter(
+      const historicalObservation = observation.select(
         (event) =>
           selected.has(event.runId) &&
           (event.kind !== "recovery" ||
@@ -401,7 +406,7 @@ export function verifyRecoveryChain(input: {
       const accounting = assessRecoveryAccounting({
         objective: input.objective,
         repository: input.repository,
-        events: historical,
+        events: historicalObservation,
         runIds: plan.history.map((entry) => entry.runId),
         policy: plan.acceptedPolicy,
         authority: input.authority,

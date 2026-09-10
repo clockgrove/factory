@@ -7,13 +7,13 @@ import {
   assertAuthenticatedGraphProjection,
   assertSnapshotMatchesCompiledGraph,
 } from "../control/graph-evidence.js";
-import { decodeEventTrailer, deduplicateFactoryEvents } from "../control/receipts.js";
+import { decodeEventTrailer } from "../control/receipts.js";
 import { loadReviewCheckpoint } from "../control/reviews.js";
 import {
   loadMergeCandidateCheckpoint,
   mergeCandidateIdentityDigest,
 } from "../control/merge-candidates.js";
-import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
+import type { FactoryEvent } from "../protocol/events.js";
 import {
   parseRunPolicy,
   policyDigest,
@@ -24,7 +24,12 @@ import { selectEquivalentPublicationRecord } from "../publication/recorded-publi
 import { publicationBranch } from "../publication/publisher.js";
 import { bindValidationToPublishedHead } from "../validation/plan.js";
 import type { RecoveryReadStore } from "./assessment.js";
-import { recoveryEventDigest } from "./identity.js";
+import {
+  recoveryEventDigest,
+  recoveryEventObservation,
+  type RecoveryEventInput,
+  type RecoveryEventObservation,
+} from "./identity.js";
 import { loadRecoveryRuntime } from "./runtime.js";
 import { observeRecoverySiblingRefresh } from "./sibling-refresh.js";
 import { assertIsolatedCandidateProof } from "./isolated-candidate.js";
@@ -51,7 +56,7 @@ const time = (event: FactoryEvent) => {
   requirePeer(Number.isFinite(at));
   return at;
 };
-function snapshotEvents(snapshot: FactoryReadSnapshot): FactoryEvent[] {
+function snapshotEvents(snapshot: FactoryReadSnapshot): RecoveryEventObservation {
   requirePeer(
     snapshot.id &&
       snapshot.repositoryId &&
@@ -64,13 +69,17 @@ function snapshotEvents(snapshot: FactoryReadSnapshot): FactoryEvent[] {
     ...snapshot.factoryEvents,
     ...snapshot.workItems.flatMap((item) => item.factoryEvents!),
   ];
-  requirePeer(raw.length <= 10000 && Buffer.byteLength(JSON.stringify(raw)) <= 16 * 1024 * 1024);
-  const events = deduplicateFactoryEvents(raw.map(parseFactoryEvent));
+  const observation = recoveryEventObservation(raw, {
+    maxEvents: 10_000,
+    maxBytes: 16 * 1024 * 1024,
+    sortBySequence: true,
+  }).semanticView();
+  const events = observation.events;
   requirePeer(events.every((event) => event.objective === snapshot.number));
   requirePeer(
     new Set(events.map((event) => `${event.runId}:${event.sequence}`)).size === events.length,
   );
-  return events;
+  return observation;
 }
 export function assertPeerActivation(
   start: Start,
@@ -107,9 +116,10 @@ export function assertPeerActivation(
 
 async function assertAdoption(
   start: Start,
-  events: FactoryEvent[],
+  observation: RecoveryEventObservation,
   store: RecoveryReadStore,
 ): Promise<void> {
+  const events = observation.events;
   requirePeer(start.recoveryPlanDigest);
   const planRecord = await loadRecoveryPlan(store, start.objective, start.recoveryPlanDigest);
   requirePeer(planRecord && planRecord.plan.successorRunId === start.runId);
@@ -129,16 +139,17 @@ async function assertAdoption(
   requirePeer(
     claim && request.event === "RecoveryRequested" && predecessor.event === "FactoryRunStarted",
   );
-  const expected = recoveryAdoptionEvents({
-    planRecord,
-    claim,
-    authenticatedRequest: request,
-    predecessorStart: predecessor,
-  });
+  const expected = recoveryAdoptionEvents(
+    {
+      planRecord,
+      claim,
+      authenticatedRequest: request,
+      predecessorStart: predecessor,
+    },
+    observation,
+  );
   requirePeer(
-    expected.every((expected) =>
-      events.some((event) => recoveryEventDigest(event) === recoveryEventDigest(expected)),
-    ),
+    expected.every((expected) => observation.findByDigest(recoveryEventDigest(expected))),
   );
 }
 
@@ -148,7 +159,7 @@ export async function verifyRecoveryPeerTrunkIntegration(input: {
   repository: string;
   receiverObjective: number;
   receiverStart: Start;
-  receiverEvents: readonly FactoryEvent[];
+  receiverEvents: RecoveryEventInput;
   targetBaseSha: string;
   /** Authenticated receiver receipt horizon; never a Git author timestamp or current clock. */
   beforeAt: string;
@@ -170,9 +181,17 @@ export async function verifyRecoveryPeerTrunkIntegration(input: {
     },
   });
   requirePeer(store.readCommitObjectiveCandidates && store.readObjectiveSnapshot);
+  const inputObservation = recoveryEventObservation(input.receiverEvents, { maxEvents: 10_000 });
+  const inputEvents = inputObservation.events;
   const receiver = await store.readObjectiveSnapshot(input.receiverObjective);
-  const receiverEvents = snapshotEvents(receiver);
-  const receiverDigests = new Set(receiverEvents.map(recoveryEventDigest));
+  const receiverObservation = snapshotEvents(receiver);
+  const receiverEvents = receiverObservation.events;
+  let suppliedStartDigest: string;
+  try {
+    suppliedStartDigest = inputObservation.digestOf(input.receiverStart);
+  } catch {
+    suppliedStartDigest = recoveryEventDigest(input.receiverStart);
+  }
   const receiverStart = one(
     receiverEvents.filter(
       (event) => event.event === "FactoryRunStarted" && event.runId === input.receiverStart.runId,
@@ -180,12 +199,11 @@ export async function verifyRecoveryPeerTrunkIntegration(input: {
   );
   requirePeer(
     receiverStart.event === "FactoryRunStarted" &&
-      recoveryEventDigest(receiverStart) === recoveryEventDigest(input.receiverStart) &&
-      input.receiverEvents.length <= 10000 &&
-      input.receiverEvents.every(
+      receiverObservation.digestOf(receiverStart) === suppliedStartDigest &&
+      inputEvents.every(
         (event) =>
           event.objective === input.receiverObjective &&
-          receiverDigests.has(recoveryEventDigest(event)),
+          receiverObservation.findByDigest(inputObservation.digestOf(event)),
       ) &&
       receiverStart.repository.toLowerCase() === input.repository.toLowerCase() &&
       receiverStart.baseBranch === receiver.defaultBranch &&
@@ -196,14 +214,14 @@ export async function verifyRecoveryPeerTrunkIntegration(input: {
   const beforeAt = Date.parse(input.beforeAt);
   requirePeer(
     Number.isFinite(beforeAt) &&
-      input.receiverEvents.some(
+      inputEvents.some(
         (event) => event.runId === receiverStart.runId && event.at === input.beforeAt,
       ) &&
       beforeAt >= time(receiverStart),
   );
   if (receiverStart.recoveryPlanDigest) {
     // Do not recursively load this run's delivery proofs while proving one of them.
-    await assertAdoption(receiverStart, receiverEvents, store);
+    await assertAdoption(receiverStart, receiverObservation, store);
   } else assertPeerActivation(receiverStart, receiverEvents, input.repository);
   if (!receiverStart.recoveryPlanDigest) {
     const graph = await loadCompiledGraph(store, receiver.number, receiverStart.runId);
@@ -257,7 +275,7 @@ export async function verifyRecoveryPeerTrunkIntegration(input: {
       projection.bindings,
     );
   }
-  const receiverReservations = input.receiverEvents.filter(
+  const receiverReservations = inputEvents.filter(
     (event) =>
       (event.event === "AttemptReserved" ||
         (receiverStart.recoveryPlanDigest &&
@@ -265,7 +283,7 @@ export async function verifyRecoveryPeerTrunkIntegration(input: {
           event.phase === "validation")) &&
       event.runId === receiverStart.runId,
   );
-  const receiverObservations = input.receiverEvents.flatMap((event) =>
+  const receiverObservations = inputEvents.flatMap((event) =>
     event.kind === "controller" &&
     event.runId === receiverStart.runId &&
     event.sequence > receiverStart.sequence &&
@@ -293,7 +311,8 @@ export async function verifyRecoveryPeerTrunkIntegration(input: {
         peer.repositoryId === receiver.repositoryId &&
         peer.defaultBranch === receiver.defaultBranch,
     );
-    const events = snapshotEvents(peer);
+    const peerObservation = snapshotEvents(peer);
+    const events = peerObservation.events;
     const integrations = events.filter(
       (event) =>
         (event.event === "AttemptIntegrated" && event.headSha === input.targetBaseSha) ||
@@ -414,7 +433,9 @@ export async function verifyRecoveryPeerTrunkIntegration(input: {
       );
       const proof = one(
         runtime.sourceIntegrations.filter(
-          (proof) => recoveryEventDigest(proof.outcome) === recoveryEventDigest(integrated),
+          (proof) =>
+            runtime.eventObservation.digestOf(proof.outcome) ===
+            peerObservation.digestOf(integrated),
         ),
       );
       requirePeer(
@@ -490,7 +511,7 @@ export async function verifyRecoveryPeerTrunkIntegration(input: {
       requirePeer(
         reservation.oid === oid &&
           trailer &&
-          recoveryEventDigest(trailer) === recoveryEventDigest(reserved) &&
+          recoveryEventDigest(trailer) === peerObservation.digestOf(reserved) &&
           reservation.parentOids.length === 1 &&
           reservation.parentOids[0] === reserved.baseSha &&
           (await store.readCommit(reserved.baseSha)).treeOid === reservation.treeOid,
@@ -636,7 +657,7 @@ export async function verifyRecoveryPeerTrunkIntegration(input: {
             repository: input.repository,
             objective: number,
             workItem: integrated.workItem,
-            events,
+            events: peerObservation,
             controllingRunIds:
               runtime?.status === "verified" ? runtime.accountingRunIds : [start.runId],
             store,
@@ -648,17 +669,17 @@ export async function verifyRecoveryPeerTrunkIntegration(input: {
               attempt: integrated.attempt,
               reservationRef: ref,
               reservationCommitOid: oid,
-              reservationReceiptDigest: recoveryEventDigest(reserved),
+              reservationReceiptDigest: peerObservation.digestOf(reserved),
               artifactDigest: published.artifactDigest,
               review: null,
               validation: {
-                receiptDigest: recoveryEventDigest(validation),
+                receiptDigest: peerObservation.digestOf(validation),
                 evidenceDigest: validation.evidenceDigest,
                 baseSha: validation.baseSha,
                 outputTreeSha: validation.outputTreeSha,
               },
               publication: {
-                receiptDigest: recoveryEventDigest(publication),
+                receiptDigest: peerObservation.digestOf(publication),
                 mode: publication.mode,
                 pullRequest: publication.pullRequest,
                 pullRequestNodeId: pull.nodeId!,

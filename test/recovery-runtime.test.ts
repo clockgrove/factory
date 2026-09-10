@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { PlatformUnavailableError } from "../src/platform.js";
 import { describe, expect, it, vi } from "vitest";
+import * as protocol from "../src/protocol/events.js";
 import type { FactoryReadSnapshot } from "../src/application/status.js";
 import type { GitHubControlStore } from "../src/control/github-store.js";
 import { recoveryReadPort } from "../src/recovery/github-read-port.js";
@@ -728,6 +729,44 @@ async function addAttempt(f: Awaited<ReturnType<typeof adopted>>, attempt = 1) {
 }
 
 describe("verified successor runtime loader", () => {
+  it("shares one authenticated event observation across successor verification stages beyond 512 inputs", async () => {
+    const f = await adopted();
+    const duplicate = f.snapshot.factoryEvents![0]!;
+    f.snapshot.factoryEvents!.push(
+      ...Array.from({ length: 600 }, () => structuredClone(duplicate)),
+    );
+    const inputEvents =
+      f.snapshot.factoryEvents!.length +
+      f.snapshot.workItems.reduce((total, item) => total + (item.factoryEvents?.length ?? 0), 0);
+    const parse = vi.spyOn(protocol, "parseFactoryEvent");
+
+    const result = await f.read();
+    expect(result.status).toBe("verified");
+    if (result.status !== "verified") throw new Error("expected verified runtime");
+    expect(result.events).toBe(result.eventObservation.events);
+    expect(result.eventObservation.stats).toMatchObject({
+      inputEvents,
+      parsedEvents: inputEvents,
+      canonicalizedEvents: inputEvents,
+      digestedEvents: inputEvents,
+      retainedEvents: inputEvents - 600,
+    });
+    const indexedEvents = new Set(result.events);
+    expect(
+      parse.mock.calls
+        .filter(([value]) => indexedEvents.has(value as FactoryEvent))
+        .map(([value]) => ({
+          event: (value as FactoryEvent).event,
+          runId: (value as FactoryEvent).runId,
+          sequence: (value as FactoryEvent).sequence,
+        })),
+    ).toEqual([]);
+    // Three newly constructed adoption envelopes and their independent digest
+    // validation account for the fixed six non-observation parses.
+    expect(parse).toHaveBeenCalledTimes(inputEvents + 6);
+    parse.mockRestore();
+  });
+
   it("holds a graphless successor in bootstrap until its constrained graph projection is authenticated", async () => {
     const f = await adopted({ graphless: true });
     const bootstrap = await f.read();

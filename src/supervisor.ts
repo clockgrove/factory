@@ -1244,6 +1244,7 @@ export class FactorySupervisor {
           runId: this.#run.runId,
           store: this.#recoveryStore,
           readSnapshot: async () => ({ snapshot: fresh, historyComplete: true }),
+          ...(this.#options.signal ? { signal: this.#options.signal } : {}),
         });
         if (
           observed.status === "blocked" ||
@@ -1375,6 +1376,7 @@ export class FactorySupervisor {
           runId: recovery.successorRunId,
           store: this.#recoveryStore,
           readSnapshot: async () => ({ snapshot, historyComplete: true }),
+          ...(this.#options.signal ? { signal: this.#options.signal } : {}),
         });
         if (
           completed.status !== "verified" ||
@@ -2252,6 +2254,7 @@ export class FactorySupervisor {
           runId: this.#run.runId,
           store: this.#recoveryStore,
           readSnapshot: async () => ({ snapshot, historyComplete: true }),
+          ...(this.#options.signal ? { signal: this.#options.signal } : {}),
         });
         if (
           runtime.status !== "verified" ||
@@ -4480,6 +4483,7 @@ export class FactorySupervisor {
             runId: this.#run.runId,
             store: this.#recoveryStore,
             readSnapshot: async () => ({ snapshot, historyComplete: true }),
+            ...(this.#options.signal ? { signal: this.#options.signal } : {}),
           });
           if (
             completed.status !== "verified" ||
@@ -10919,6 +10923,7 @@ export class FactorySupervisor {
               runId: start.runId,
               store: this.#recoveryStore,
               readSnapshot: async () => ({ snapshot, historyComplete: true }),
+              ...(this.#options.signal ? { signal: this.#options.signal } : {}),
             })
           : undefined;
         if (recovery && recovery.status !== "verified")

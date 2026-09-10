@@ -6,7 +6,12 @@ import type { LeaseManager, LeaseState } from "../control/lease.js";
 import { type FactoryEvent, parseFactoryEvent } from "../protocol/events.js";
 import { assertNoSecretMaterial } from "../protocol/limits.js";
 import type { RecoveryClaimObservation } from "./chain.js";
-import { recoveryClaimRef, recoveryEventDigest } from "./identity.js";
+import {
+  recoveryClaimRef,
+  recoveryEventDigest,
+  recoveryEventObservation,
+  type RecoveryEventObservation,
+} from "./identity.js";
 import {
   loadRecoveryPlan,
   parseRecoveryPlan,
@@ -134,8 +139,25 @@ function payloadFor(
   record: RecoveryPlanRecord,
   request: AuthenticatedRecoveryRequest,
   transaction: RecoveryClaimTransaction,
+  observation?: RecoveryEventObservation,
 ): RecoveryClaim {
-  const parsed = parseFactoryEvent(request);
+  let parsed: FactoryEvent;
+  let requestDigest: string;
+  if (observation) {
+    const checked = recoveryEventObservation(observation, { maxEvents: 50_000 });
+    try {
+      requestDigest = checked.digestOf(request);
+      parsed = request;
+    } catch {
+      parsed = parseFactoryEvent(request);
+      requestDigest = recoveryEventDigest(parsed);
+      const observed = checked.findByDigest(requestDigest);
+      if (observed) parsed = observed;
+    }
+  } else {
+    parsed = parseFactoryEvent(request);
+    requestDigest = recoveryEventDigest(parsed);
+  }
   requireClaim(parsed.event === "RecoveryRequested", "authenticated recovery request is required");
   requireClaim(
     parsed.objective === plan.objective &&
@@ -158,7 +180,7 @@ function payloadFor(
     objective: plan.objective,
     objectiveNodeId: plan.objectiveNodeId,
     requestId: plan.requestId,
-    requestDigest: recoveryEventDigest(parsed),
+    requestDigest,
     requestSequence: parsed.sequence,
     planDigest: record.digest,
     planRef: record.ref,
@@ -216,11 +238,14 @@ function assertSameClaim(record: RecoveryClaimRecord, expected: RecoveryClaim): 
 }
 
 /** Rechecks an independently loaded claim against the exact reader-authenticated acknowledgement. */
-export function assertRecoveryClaimBinding(args: {
-  claim: RecoveryClaimRecord;
-  planRecord: RecoveryPlanRecord;
-  authenticatedRequest: AuthenticatedRecoveryRequest;
-}): void {
+export function assertRecoveryClaimBinding(
+  args: {
+    claim: RecoveryClaimRecord;
+    planRecord: RecoveryPlanRecord;
+    authenticatedRequest: AuthenticatedRecoveryRequest;
+  },
+  observation?: RecoveryEventObservation,
+): void {
   const plan = parseRecoveryPlan(args.planRecord.plan);
   requireClaim(
     args.planRecord.digest === recoveryPlanDigest(plan) &&
@@ -240,6 +265,7 @@ export function assertRecoveryClaimBinding(args: {
     args.planRecord,
     args.authenticatedRequest,
     args.claim.transaction,
+    observation,
   );
   assertSameClaim(args.claim, expected);
 }

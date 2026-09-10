@@ -1,6 +1,6 @@
 import type { FactoryEvent } from "../protocol/events.js";
 import { policyDigest } from "../protocol/policy.js";
-import { recoveryEventDigest } from "./identity.js";
+import { recoveryEventObservation, type RecoveryEventInput } from "./identity.js";
 import type { RecoveryPlan } from "./plan.js";
 
 /** Authenticated request envelopes have their own run/sequence namespace. They
@@ -9,8 +9,10 @@ import type { RecoveryPlan } from "./plan.js";
  * Exact transport duplicates must already have been collapsed by the caller. */
 export function recoveryRunHistoryActivations(
   plan: RecoveryPlan,
-  events: readonly FactoryEvent[],
+  input: RecoveryEventInput,
 ): ReadonlySet<FactoryEvent> | null {
+  const observation = recoveryEventObservation(input);
+  const events = observation.events;
   const sourceRuns = new Set(plan.history.map((entry) => entry.runId));
   const activations = new Set<FactoryEvent>();
   for (const entry of plan.history) {
@@ -19,7 +21,7 @@ export function recoveryRunHistoryActivations(
     );
     const start = starts[0];
     if (start?.event !== "FactoryRunStarted" || !start.activationRequestId) continue;
-    if (starts.length !== 1 || recoveryEventDigest(start) !== entry.startDigest) return null;
+    if (starts.length !== 1 || observation.digestOf(start) !== entry.startDigest) return null;
     const requests = events.filter(
       (event) =>
         event.event === "ActivationRequested" && event.requestId === start.activationRequestId,

@@ -21,14 +21,20 @@ import {
   type BudgetUsage,
 } from "../control/budget.js";
 import type { CompiledGraphRecord, CompiledGraphProjectionRecord } from "../control/graphs.js";
-import { decodeEventTrailer, deduplicateFactoryEvents } from "../control/receipts.js";
-import { parseFactoryEvent, type FactoryEvent } from "../protocol/events.js";
+import { decodeEventTrailer } from "../control/receipts.js";
+import type { FactoryEvent } from "../protocol/events.js";
 import type { RecoveryAccountingAssessment } from "./accounting.js";
 import type { RecoveryReadStore } from "./assessment.js";
 import { verifyRecoveryChain } from "./chain.js";
 import { loadRecoveryClaim, type RecoveryClaimRecord } from "./claims.js";
 import { resolveRecoveryEvidence, type RecoveryEvidenceResolution } from "./evidence.js";
-import { recoveryClaimRef, createRecoveryEventDigest } from "./identity.js";
+import {
+  recoveryClaimRef,
+  recoveryEventDigest,
+  observeRecoveryEvents,
+  recoveryEventObservation,
+  type RecoveryEventObservation,
+} from "./identity.js";
 import {
   isRecoveryAdoptionGraph,
   loadRecoveryPlan,
@@ -75,6 +81,8 @@ interface RecoveryRuntimeCommon {
   verifiedSourceControllerObservations: readonly Extract<FactoryEvent, { kind: "controller" }>[];
   /** Original envelopes: no synthetic starts, terminal records, or re-labelled attempts. */
   events: readonly FactoryEvent[];
+  /** Authenticated index for this exact repository observation; never reused for a later read. */
+  eventObservation: RecoveryEventObservation;
   currentEvents: readonly FactoryEvent[];
   sourceEvidence: RecoveryEvidenceResolution;
   sourceIntegrations: readonly RecoverySourceIntegrationProof[];
@@ -156,12 +164,17 @@ export async function loadRecoveryRuntime(input: {
   objective: number;
   runId: string;
   store: RecoveryReadStore;
-  readSnapshot(): Promise<{ snapshot: FactoryReadSnapshot; historyComplete: boolean }>;
+  signal?: AbortSignal;
+  readSnapshot(): Promise<{
+    snapshot: FactoryReadSnapshot;
+    historyComplete: boolean;
+    /** A view derived from this exact snapshot read, used only by historical replay. */
+    eventObservation?: RecoveryEventObservation;
+  }>;
 }): Promise<RecoveryRuntimeResult> {
-  const recoveryEventDigest = createRecoveryEventDigest();
   try {
     input = { ...input, store: boundedReadStore(input.store) };
-    const { snapshot, historyComplete } = await input.readSnapshot();
+    const { snapshot, historyComplete, eventObservation } = await input.readSnapshot();
     requireRuntime(
       historyComplete &&
         snapshot.number === input.objective &&
@@ -175,20 +188,38 @@ export async function loadRecoveryRuntime(input: {
       ...snapshot.workItems.flatMap((item) => item.factoryEvents!),
     ];
     requireRuntime(raw.length <= 10_000, "history-bound");
-    // Exact lost-response duplicates are harmless; different envelopes at one sequence are not.
-    const unique = new Map<string, FactoryEvent>();
-    for (const value of raw) {
-      const event = parseFactoryEvent(value);
+    // Authenticate, canonicalize and digest this complete repository observation once.
+    // Exact lost-response duplicates collapse; semantic conflicts still fail closed.
+    const observation = eventObservation
+      ? recoveryEventObservation(eventObservation, {
+          maxEvents: 10_000,
+          sortBySequence: true,
+        })
+      : await observeRecoveryEvents(raw, {
+          maxEvents: 10_000,
+          sortBySequence: true,
+          ...(input.signal ? { signal: input.signal } : {}),
+        });
+    if (eventObservation)
       requireRuntime(
-        event.objective === input.objective && Number.isSafeInteger(event.sequence),
-        "event-scope-mismatch",
+        raw.length === observation.events.length &&
+          raw.every((event) => {
+            try {
+              observation.digestOf(event);
+              return true;
+            } catch {
+              return false;
+            }
+          }),
+        "event-observation-mismatch",
       );
-      const digest = recoveryEventDigest(event);
-      unique.set(digest, event);
-    }
-    const events = [...unique.values()].sort((a, b) => a.sequence - b.sequence);
-    // Also reject semantically conflicting receipts; retain exact originals for transaction checks.
-    deduplicateFactoryEvents(events);
+    const events = observation.events;
+    requireRuntime(
+      events.every(
+        (event) => event.objective === input.objective && Number.isSafeInteger(event.sequence),
+      ),
+      "event-scope-mismatch",
+    );
     const starts = events.filter(
       (event): event is Start => event.event === "FactoryRunStarted" && event.runId === input.runId,
     );
@@ -212,12 +243,12 @@ export async function loadRecoveryRuntime(input: {
     );
     const sourceRunIds = plan.history.map((entry) => entry.runId);
     const sourceIds = new Set(sourceRunIds);
-    const activations = recoveryRunHistoryActivations(plan, events);
+    const activations = recoveryRunHistoryActivations(plan, observation);
     requireRuntime(activations, "unplanned-run-history");
     const sequences = new Map<number, string>();
     for (const event of events) {
       if (activations.has(event)) continue;
-      const digest = recoveryEventDigest(event);
+      const digest = observation.digestOf(event);
       requireRuntime(
         !sequences.has(event.sequence) || sequences.get(event.sequence) === digest,
         "event-sequence-conflict",
@@ -274,16 +305,19 @@ export async function loadRecoveryRuntime(input: {
           event.event === "FactoryRunStarted" && event.runId === p.predecessor.runId,
       );
       requireRuntime(c && r.length === 1 && s, "adoption-authority-unavailable");
-      const expected = recoveryAdoptionEvents({
-        planRecord: linked,
-        claim: c,
-        authenticatedRequest: r[0]!,
-        predecessorStart: s,
-      });
+      const expected = recoveryAdoptionEvents(
+        {
+          planRecord: linked,
+          claim: c,
+          authenticatedRequest: r[0]!,
+          predecessorStart: s,
+        },
+        observation,
+      );
       for (const envelope of expected) {
         const expectedDigest = recoveryEventDigest(envelope);
         requireRuntime(
-          events.some((event) => recoveryEventDigest(event) === expectedDigest),
+          observation.findByDigest(expectedDigest),
           "adoption-envelope-missing-or-conflicting",
         );
       }
@@ -407,7 +441,7 @@ export async function loadRecoveryRuntime(input: {
       requireRuntime(
         commit.oid === ref &&
           trailer &&
-          recoveryEventDigest(trailer) === recoveryEventDigest(first) &&
+          recoveryEventDigest(trailer) === observation.digestOf(first) &&
           commit.parentOids.length === 1 &&
           commit.parentOids[0] === first.baseSha &&
           (await input.store.readCommit(first.baseSha)).treeOid === commit.treeOid,
@@ -420,7 +454,7 @@ export async function loadRecoveryRuntime(input: {
         const proof = await verifyRecoverySourcePublication({
           planRecord: record,
           claim,
-          events,
+          events: observation,
           store: input.store,
           publication,
         });
@@ -437,7 +471,11 @@ export async function loadRecoveryRuntime(input: {
       const publication =
         source?.publication ??
         (adoptedPublication
-          ? recoverySourcePublicationBinding(adoptedPublication.publication, plan.repository)
+          ? recoverySourcePublicationBinding(
+              adoptedPublication.publication,
+              plan.repository,
+              observation,
+            )
           : null);
       requireRuntime(
         source &&
@@ -491,7 +529,7 @@ export async function loadRecoveryRuntime(input: {
               objective: input.objective,
               workItem: event.workItem,
               source: { ...source, publication },
-              events,
+              events: observation,
               controllingRunIds: [...sourceRunIds, input.runId],
               store: input.store,
               deliveryHeadSha: pull.headSha,
@@ -685,7 +723,8 @@ export async function loadRecoveryRuntime(input: {
       "orphan-successor-attempt-effect",
     );
     // This partition is historical assessment only, after the full current suffix was validated above.
-    const sourceEvents = events.filter((event) => sourceIds.has(event.runId));
+    const sourceObservation = observation.select((event) => sourceIds.has(event.runId));
+    const sourceEvents = sourceObservation.events;
     for (const item of plan.items)
       if (item.source === null)
         requireRuntime(
@@ -703,7 +742,7 @@ export async function loadRecoveryRuntime(input: {
       objective: input.objective,
       objectiveNodeId: plan.objectiveNodeId,
       historyComplete,
-      events: sourceEvents,
+      events: sourceObservation,
       plansByDigest: plans,
       claims: claims.filter((value) => value !== claim),
       candidatePlan: plan,
@@ -720,7 +759,7 @@ export async function loadRecoveryRuntime(input: {
     const sourceEvidence = await resolveRecoveryEvidence({
       planRecord: record,
       claim,
-      events,
+      events: observation,
       store: input.store,
       snapshot,
     });
@@ -765,7 +804,7 @@ export async function loadRecoveryRuntime(input: {
         const proof = await verifyRecoverySourceIntegration({
           planRecord: record,
           claim,
-          events,
+          events: observation,
           store: input.store,
           outcome,
         });
@@ -815,7 +854,7 @@ export async function loadRecoveryRuntime(input: {
       );
       totals.set(entry.unit, total);
     }
-    const usage = deriveBudgetUsage(events);
+    const usage = deriveBudgetUsage([...events]);
     const attempts = new Map<string, Attempt[]>();
     for (const event of events)
       if (event.kind === "attempt") {
@@ -860,7 +899,7 @@ export async function loadRecoveryRuntime(input: {
       if (!budget.length || !reported.length)
         unknown.push({ workItem: group[0]!.workItem, attempt: group[0]!.attempt });
     }
-    const unknownManagementInvocations = unresolvedModelInvocations(events, input.runId)
+    const unknownManagementInvocations = unresolvedModelInvocations([...events], input.runId)
       .filter((event) => event.phase === "management")
       .map((event) => event.modelInvocationId)
       .sort();
@@ -875,6 +914,7 @@ export async function loadRecoveryRuntime(input: {
       accountingRunIds: [...sourceRunIds, input.runId],
       verifiedSourceControllerObservations,
       events,
+      eventObservation: observation,
       currentEvents,
       sourceEvidence,
       sourceIntegrations,

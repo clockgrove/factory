@@ -770,8 +770,8 @@ describe("authenticated sibling refresh recovery", () => {
     expect(proof.lineage.map((entry) => entry.identity.runId)).toEqual(["source"]);
     expect(proof.candidate).toBeNull();
     expect(proof.source).toEqual(f.record.source);
-    // A previous successful observation cannot authorize mutated receipt content,
-    // even when the caller reuses the same input/event objects.
+    // A new observation cannot authorize mutated receipt content, even when the
+    // caller reuses the same input/event objects across repository reads.
     const completion = args.events.find((event) => event.event === "RecoveryAdoptionCompleted");
     if (completion?.event !== "RecoveryAdoptionCompleted") throw new Error("fixture adoption");
     const originalDigest = completion.planDigest;
@@ -786,25 +786,24 @@ describe("authenticated sibling refresh recovery", () => {
     const originalAttempts = successorStart.policy.maxAttemptsPerItem;
     let mutated = false;
     try {
-      await expect(
-        observeRecoverySiblingRefresh({
-          ...args,
-          store: {
-            ...args.store,
-            readCommit: async (oid) => {
-              const commit = await args.store.readCommit(oid);
-              if (!mutated && oid === f.source.publication!.headSha) {
-                // The initial digest scans have already visited this same envelope.
-                // A nested mutation during an await must not reuse the cached digest.
-                mutated = true;
-                successorStart.policy.maxAttemptsPerItem = 0;
-              }
-              return commit;
-            },
+      const isolated = await observeRecoverySiblingRefresh({
+        ...args,
+        store: {
+          ...args.store,
+          readCommit: async (oid) => {
+            const commit = await args.store.readCommit(oid);
+            if (!mutated && oid === f.source.publication!.headSha) {
+              // Construction has already copied and frozen this snapshot. A
+              // later mutation of the caller's raw value cannot change it.
+              mutated = true;
+              successorStart.policy.maxAttemptsPerItem = 0;
+            }
+            return commit;
           },
-        }),
-      ).rejects.toThrow();
+        },
+      });
       expect(mutated).toBe(true);
+      expect(isolated.source).toEqual(proof.source);
     } finally {
       successorStart.policy.maxAttemptsPerItem = originalAttempts;
     }
@@ -1533,6 +1532,23 @@ describe("bounded read-only immutable recovery proposals", () => {
     expect(f.mutations.createCommit).not.toHaveBeenCalled();
   });
 
+  it("binds item receipts from the authenticated snapshot rather than later raw mutation", async () => {
+    const f = await fixture();
+    const receipt = f.snapshot.workItems[0]!.factoryEvents![0]!;
+    f.snapshot.workItems[0]!.factoryEvents!.push(
+      ...Array.from({ length: 600 }, () => structuredClone(receipt)),
+    );
+
+    const pending = f.build();
+    queueMicrotask(() => {
+      if ("workItem" in receipt) receipt.workItem = 9;
+    });
+    const result = await pending;
+
+    expect(result.status).toBe("proposed");
+    expect(result.blockers).toEqual([]);
+  });
+
   it("retains earlier executed history even when the latest terminal run is an empty failure", async () => {
     const f = await fixture();
     f.snapshot.factoryEvents!.push(
@@ -1845,6 +1861,22 @@ describe("bounded read-only immutable recovery proposals", () => {
     expect(result.plan!.allowance.before).toEqual(record.plan.allowance.after);
     expect(result.plan!.history).toHaveLength(2);
     expect(result.plan!.predecessor.startDigest).toBe(recoveryEventDigest(transaction[0]));
+
+    // A semantic request retry is harmless for ordinary derived views, but the
+    // historical adoption transaction must retain it and reject ambiguity.
+    f.snapshot.factoryEvents!.push(
+      f.event({
+        ...request,
+        sequence: 106,
+        at: new Date(now.getTime() + 1_000).toISOString(),
+      }),
+    );
+    const ambiguous = await f.build({
+      requestId: "ambiguous-request",
+      successorRunId: "ambiguous-successor",
+    });
+    expect(ambiguous.status).toBe("blocked");
+    expect(ambiguous.blockers[0]!.code).toBe("historical-runtime-authentication");
   });
 
   it("continues an accounted terminal graph bootstrap without inventing graph authority", async () => {

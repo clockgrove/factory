@@ -2,19 +2,24 @@ import type { FactoryReadSnapshot } from "../application/status.js";
 import { PlatformUnavailableError } from "../platform.js";
 import type { CompiledGraphStore } from "../control/graphs.js";
 import type { LeaseManager, LeaseState } from "../control/lease.js";
-import { deduplicateFactoryEvents, encodeEventComment } from "../control/receipts.js";
+import { encodeEventComment } from "../control/receipts.js";
 import type { RunEventStore } from "../control/runs.js";
 import type {
   RepositoryLeaseManager,
   RepositoryLeaseState,
 } from "../controller/repository-lease.js";
-import { type FactoryEvent, parseFactoryEvent } from "../protocol/events.js";
+import type { FactoryEvent } from "../protocol/events.js";
 import { verifyRecoveryAdmission } from "./admission.js";
 import type { RecoveryReadStore } from "./assessment.js";
 import { verifyRecoveryChain } from "./chain.js";
 import { RecoveryClaimManager, loadRecoveryClaim, type RecoveryClaimRecord } from "./claims.js";
 import { recoveryEvidenceDigest, resolveRecoveryEvidence } from "./evidence.js";
-import { recoveryClaimRef, recoveryEventDigest } from "./identity.js";
+import {
+  observeRecoveryEvents,
+  recoveryClaimRef,
+  recoveryEventDigest,
+  type RecoveryEventObservation,
+} from "./identity.js";
 import type { observeLocalRecoveryResource } from "./local-resources.js";
 import { loadRecoveryPlan, type RecoveryPlanRecord } from "./plan.js";
 import { inspectRecoveryAdoption } from "./transaction.js";
@@ -40,6 +45,7 @@ interface AdoptionInput {
   planDigest: string;
   objectiveLease: LeaseState;
   repositoryLease?: RepositoryLeaseState;
+  signal?: AbortSignal;
 }
 export interface RecoveryCoordinatorResult {
   status: "adopted" | "pending" | "blocked";
@@ -53,7 +59,8 @@ interface Inspection {
   claim: RecoveryClaimRecord | null;
   request: Request;
   predecessor: Start;
-  events: FactoryEvent[];
+  events: readonly FactoryEvent[];
+  eventObservation: RecoveryEventObservation;
   evidenceDigest: string;
   accountingDigest: string;
   resourceEvidenceDigest: string;
@@ -77,6 +84,7 @@ export class RecoveryCoordinator {
   constructor(private readonly ports: CoordinatorPorts) {}
 
   async #fence(input: AdoptionInput): Promise<void> {
+    if (input.signal?.aborted) throw new Error("Recovery adoption cancelled");
     if (this.ports.repositoryLeases || input.repositoryLease) {
       if (!this.ports.repositoryLeases || !input.repositoryLease)
         throw new Error("incomplete legacy recovery ownership");
@@ -102,8 +110,12 @@ export class RecoveryCoordinator {
       ...snapshot.factoryEvents!,
       ...snapshot.workItems.flatMap((item) => item.factoryEvents!),
     ];
-    requireGate(raw.length <= 10_000, "history-bound");
-    const events = deduplicateFactoryEvents(raw.map(parseFactoryEvent));
+    const eventObservation = await observeRecoveryEvents(raw, {
+      maxEvents: 10_000,
+      ...(input.signal ? { signal: input.signal } : {}),
+    });
+    const semanticObservation = eventObservation.semanticView();
+    const events = semanticObservation.events;
     const record = await loadRecoveryPlan(store, input.objective, input.planDigest);
     requireGate(record, "plan-unavailable");
     const plan = record.plan;
@@ -167,7 +179,7 @@ export class RecoveryCoordinator {
         claim: candidate,
         authenticatedRequest: request,
         predecessorStart: predecessor,
-        events,
+        events: eventObservation,
         historyComplete,
       });
       requireGate(replay.state !== "blocked", replay.blockers[0] ?? "adoption-replay-conflict");
@@ -180,8 +192,8 @@ export class RecoveryCoordinator {
     // Only an exact verified candidate transaction prefix can be projected out.
     // The chain checker still sees every other run, claim, request, and charge.
     const sourceEvents = candidate
-      ? events.filter((event) => event.runId !== plan.successorRunId)
-      : events;
+      ? semanticObservation.select((event) => event.runId !== plan.successorRunId)
+      : semanticObservation;
     const chain = verifyRecoveryChain({
       repository: plan.repository,
       repositoryId: plan.repositoryId,
@@ -207,7 +219,7 @@ export class RecoveryCoordinator {
     const evidence = await resolveRecoveryEvidence({
       planRecord: record,
       claim: candidate,
-      events,
+      events: semanticObservation,
       store,
       snapshot,
     });
@@ -217,13 +229,14 @@ export class RecoveryCoordinator {
         evidence.blockers.every((blocker) => blocker.code === "resource-cleanup-unverified"),
       "source-evidence-blocked",
     );
-    const resources = await this.#resources(record, events);
+    const resources = await this.#resources(record, semanticObservation);
     const observation: Inspection = {
       planRecord: record,
       claim: candidate,
       request,
       predecessor,
       events,
+      eventObservation,
       accountingDigest: admission.accountingDigest,
       evidenceDigest: recoveryEvidenceDigest(evidence),
       resourceEvidenceDigest: resources,
@@ -239,7 +252,7 @@ export class RecoveryCoordinator {
     return observation;
   }
 
-  async #resources(record: RecoveryPlanRecord, events: FactoryEvent[]): Promise<string> {
+  async #resources(record: RecoveryPlanRecord, events: RecoveryEventObservation): Promise<string> {
     const result = await verifyRecoveryResources({
       planRecord: record,
       events,
@@ -308,7 +321,7 @@ export class RecoveryCoordinator {
           claim: inspection.claim,
           authenticatedRequest: inspection.request,
           predecessorStart: inspection.predecessor,
-          events: inspection.events,
+          events: inspection.eventObservation,
           historyComplete: true,
         });
         if (replay.state === "complete") return result("adopted");
@@ -332,7 +345,7 @@ export class RecoveryCoordinator {
         } catch (error) {
           if (error instanceof PlatformUnavailableError) throw error;
           const reloaded = await this.#inspect(input);
-          if (!reloaded.events.some((event) => recoveryEventDigest(event) === expectedDigest))
+          if (!reloaded.eventObservation.findByDigest(expectedDigest))
             return result("pending", ["comment-response-unresolved"]);
           inspection = reloaded;
         }

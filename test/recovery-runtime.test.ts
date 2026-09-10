@@ -818,6 +818,96 @@ describe("verified successor runtime loader", () => {
     ]);
   });
 
+  it("authenticates only a terminal, effect-free graph bootstrap as historical", async () => {
+    const f = await adopted({ graphless: true });
+    f.snapshot.factoryEvents!.push(
+      event({
+        kind: "run",
+        event: "FactoryRunEscalated",
+        runId: "successor",
+        sequence: Math.max(...f.snapshot.factoryEvents!.map((entry) => entry.sequence)) + 1,
+        reason: "compiler preflight rejected before graph persistence",
+      }),
+    );
+
+    const result = await loadHistoricalRecoveryRuntimes({
+      snapshot: f.snapshot,
+      historyComplete: true,
+      store: f.store,
+      latestRunId: "successor",
+    });
+    expect([...result.keys()]).toEqual(["successor"]);
+    expect(result.get("successor")).toMatchObject({
+      status: "graph-bootstrap",
+      currentUnknownModelUsageCount: 0,
+    });
+  });
+
+  it("distinguishes an unauthenticated graph checkpoint from missing historical evidence", async () => {
+    const f = await adopted({ graphless: true });
+    const objective = structuredClone(f.graphInput);
+    objective.workItems[0]!.id = "adopted-8";
+    const invocationId = `compile-${base.oid}`;
+    const checkpoint = await f.graphManager.persist({
+      lease: f.args.objectiveLease,
+      base,
+      objective,
+      compilation: { invocationId, inputTokens: 11, outputTokens: 19 },
+    });
+    let sequence = Math.max(...f.snapshot.factoryEvents!.map((entry) => entry.sequence)) + 1;
+    f.snapshot.factoryEvents!.push(
+      event({
+        kind: "budget",
+        event: "BudgetReserved",
+        runId: "successor",
+        sequence: sequence++,
+        phase: "management",
+        unit: "model_tokens",
+        amount: 0,
+        usageId: `invocation-${invocationId}`,
+        modelInvocationId: invocationId,
+        directorEpoch: 2,
+        policyDigest: f.planRecord.plan.policyDigest,
+      }),
+      event({
+        kind: "budget",
+        event: "BudgetReconciled",
+        runId: "successor",
+        sequence: sequence++,
+        phase: "management",
+        unit: "model_tokens",
+        amount: 30,
+        usageId: `compile-${checkpoint.graphDigest}`,
+        modelInvocationId: invocationId,
+        directorEpoch: 2,
+        policyDigest: f.planRecord.plan.policyDigest,
+        reportedModelUsage: { inputTokens: 11, outputTokens: 19 },
+      }),
+      event({
+        kind: "run",
+        event: "FactoryRunEscalated",
+        runId: "successor",
+        sequence,
+        reason: "graph receipt was not published",
+      }),
+    );
+
+    const runtime = await f.read();
+    expect(runtime, JSON.stringify(runtime)).toMatchObject({ status: "graph-bootstrap" });
+
+    await expect(
+      loadHistoricalRecoveryRuntimes({
+        snapshot: f.snapshot,
+        historyComplete: true,
+        store: f.store,
+        latestRunId: "successor",
+      }),
+    ).rejects.toMatchObject({
+      blockerCode: "historical-graph-bootstrap-unsupported",
+      message: expect.stringContaining("absent graph and projection refs"),
+    });
+  });
+
   it("preserves an interrupted bootstrap compiler dispatch as unknown instead of permitting replay", async () => {
     const f = await adopted({ graphless: true });
     const invocationId = `compile-${base.oid}`;

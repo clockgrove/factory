@@ -54,6 +54,13 @@ Notable changes to Factory. See [GitHub issues](https://github.com/clockgrove/fa
 
 ### Changed
 
+- An adopted successor that terminally stops after fully accounted management compilation but
+  before authenticated graph projection can now be recovered again. The next immutable plan carries
+  the exact Objective, legacy constraints, policy, allowance, history, and unknown-usage liability
+  while moving compilation authority only to the explicitly requested successor. Any execution
+  effect, unresolved invocation, changed Work Item, surviving graph/projection ref, or conflicting
+  chain evidence still fails closed with a graph-bootstrap-specific diagnostic.
+  ([#287](https://github.com/clockgrove/factory/issues/287))
 - A dependency-root Work Item may now introduce one tightly bounded pnpm validation script when the
   frozen repository has no package recipe. Compiler admission, fresh-checkout validation, isolated
   validators and semantic review bind the exact package-manager version, scoped manifests, SHA-512

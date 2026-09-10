@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { compiledGraphRef, compiledGraphProjectionRef } from "../src/control/graphs.js";
+import { compilerEvalDigest } from "../src/evaluation/compiler-eval.js";
+import { legacyGraphConstraintsDigest, parseLegacyGraphConstraints } from "../src/graph.js";
 import { type FactoryEvent, parseFactoryEvent } from "../src/protocol/events.js";
 import { DEFAULT_RUN_POLICY, type RunPolicy, policyDigest } from "../src/protocol/policy.js";
 import {
@@ -261,6 +263,55 @@ function successorFixture() {
   value.candidatePlan = proposal(value.events, "third", first);
   return value;
 }
+function bindGraphBootstrap(plan: RecoveryPlan, sourceRunId = plan.successorRunId): RecoveryPlan {
+  plan.items[0]!.compilerId = "adopted-8";
+  const constraints = parseLegacyGraphConstraints({
+    objectiveTitle: "Legacy Objective",
+    workItems: [
+      {
+        id: "I_8",
+        number: 8,
+        title: "Legacy item",
+        body: [
+          "## Goal\n\nPreserve the reviewed goal.",
+          "## Acceptance\n\n- Existing behavior passes",
+          "## Scope\n\n- src/work.ts",
+          "## Preconditions\n\n",
+          "## Out of scope\n\n",
+          "## Conventions\n\n",
+        ].join("\n\n"),
+        blockedByNumbers: [],
+      },
+    ],
+  });
+  plan.graph = {
+    mode: "adopt-existing",
+    sourceRunId,
+    ref: compiledGraphRef(7, sourceRunId),
+    objectiveInputDigest: compilerEvalDigest({
+      number: 7,
+      title: "Legacy Objective",
+      body: undefined,
+    }),
+    constraintDigest: legacyGraphConstraintsDigest(constraints),
+    constraints,
+    projection: {
+      ref: compiledGraphProjectionRef(7, sourceRunId),
+      bindingDigest: recoveryPlanBindingDigest(plan.items),
+    },
+  };
+  return plan;
+}
+function graphBootstrapSuccessorFixture(extraEvents: FactoryEvent[] = []) {
+  const value = fixture();
+  const first = bindGraphBootstrap(value.candidatePlan);
+  const admission = admitted(first);
+  value.events.push(...admission.events, ...extraEvents);
+  value.plansByDigest[recoveryPlanDigest(first)] = record(first);
+  value.claims.push(admission.claim);
+  value.candidatePlan = bindGraphBootstrap(proposal(value.events, "third", first), "third");
+  return value;
+}
 const codes = (value: ReturnType<typeof verifyRecoveryChain>) =>
   value.blockers.map((blocker) => blocker.code);
 
@@ -327,6 +378,53 @@ describe("pure authenticated recovery chain verification", () => {
     expect(result.allowance?.after.modelTokens).toBe(1100);
     expect(result.accounting?.usage?.modelTokens).toBe(20);
     expect(result.accounting?.remaining?.modelTokens).toBe(1080);
+  });
+  it("moves graph-bootstrap compilation authority only across an exact effect-free successor", () => {
+    const value = graphBootstrapSuccessorFixture();
+    const result = verifyRecoveryChain(value);
+    expect(result.status).toBe("verified");
+    expect(result.accounting?.usage?.modelTokens).toBe(20);
+
+    const changedConstraints = structuredClone(value);
+    if (!("mode" in changedConstraints.candidatePlan.graph)) throw new Error("fixture graph");
+    changedConstraints.candidatePlan.graph.constraints.workItems[0]!.goal = "changed";
+    changedConstraints.candidatePlan.graph.constraintDigest = legacyGraphConstraintsDigest(
+      changedConstraints.candidatePlan.graph.constraints,
+    );
+    expect(codes(verifyRecoveryChain(changedConstraints))).toContain("predecessor-chain-mismatch");
+
+    const executionEffect = graphBootstrapSuccessorFixture([
+      event({
+        kind: "validation",
+        event: "ValidationRecorded",
+        runId: "successor",
+        sequence: 22,
+        workItem: 8,
+        attempt: 1,
+        baseSha: sha("a"),
+        outputTreeSha: sha("b"),
+        evidenceDigest: digest("e"),
+        passed: true,
+      }),
+    ]);
+    expect(codes(verifyRecoveryChain(executionEffect))).toContain("predecessor-chain-mismatch");
+
+    const unresolvedUsage = graphBootstrapSuccessorFixture([
+      event({
+        kind: "budget",
+        event: "BudgetReserved",
+        runId: "successor",
+        sequence: 22,
+        phase: "management",
+        unit: "model_tokens",
+        amount: 0,
+        usageId: "invocation-compile-next",
+        modelInvocationId: "compile-next",
+        directorEpoch: 2,
+        policyDigest: policyDigest(policy),
+      }),
+    ]);
+    expect(codes(verifyRecoveryChain(unresolvedUsage))).toContain("predecessor-chain-mismatch");
   });
   it("retains graph-only failed runs in bootstrap accounting", () => {
     const value = fixture();

@@ -36,12 +36,15 @@ import { recoveryUnknownUsageDigest, verifyRecoveryChain } from "./chain.js";
 import { recoveryClaimRef, recoveryEventDigest, recoverySourceEventsDigest } from "./identity.js";
 import { verifyRecoverySourceIntegration, verifyPriorRecoveryDelivery } from "./outcomes.js";
 import { recoverySourcePublicationBinding } from "./source-publications.js";
-import { loadHistoricalRecoveryRuntimes } from "./historical-runtime.js";
+import {
+  HistoricalRecoveryRuntimeError,
+  loadHistoricalRecoveryRuntimes,
+} from "./historical-runtime.js";
 import {
   isNativePublicationStackLink,
   nativePublicationStackNumber,
 } from "./native-source-stacks.js";
-import type { RecoveryRuntime } from "./runtime.js";
+import type { RecoveryGraphBootstrapRuntime, RecoveryRuntime } from "./runtime.js";
 import { observeRecoverySiblingRefresh, recoverySiblingRefreshBinding } from "./sibling-refresh.js";
 import {
   equivalentPublicationRecords,
@@ -402,12 +405,18 @@ export async function buildRecoveryProposal(input: {
         const runtime = historicalRuntimes.get(start.runId);
         if (runtime) {
           require(compiled.length === 0 && runtime.planRecord.digest === start.recoveryPlanDigest);
-          // Actual independently loaded graph/projection returned by authenticated
-          // runtime verification, not a synthetic graph receipt under this run.
-          graphs.set(runtime.planRecord.plan.graph.sourceRunId, {
-            graph: runtime.graph,
-            projection: runtime.projection,
-          });
+          if (runtime.status === "verified") {
+            // Actual independently loaded graph/projection returned by authenticated
+            // runtime verification, not a synthetic graph receipt under this run.
+            graphs.set(runtime.planRecord.plan.graph.sourceRunId, {
+              graph: runtime.graph,
+              projection: runtime.projection,
+            });
+          } else
+            require(
+              runtime.planRecord.plan.graph.sourceRunId === start.runId &&
+                runtime.currentUnknownModelUsageCount === 0,
+            );
           continue;
         }
         require(
@@ -461,15 +470,23 @@ export async function buildRecoveryProposal(input: {
       priorDigest && isRecoveryAdoptionGraph(priorPlans[priorDigest]!.plan.graph)
         ? priorPlans[priorDigest]!.plan.graph
         : null;
+    const priorAdoptionRuntime: RecoveryGraphBootstrapRuntime | RecoveryRuntime | undefined =
+      priorAdoptionGraph ? historicalRuntimes.get(priorAdoptionGraph.sourceRunId) : undefined;
+    const continueGraphBootstrap = Boolean(
+      priorAdoptionGraph &&
+        priorAdoptionRuntime?.status === "graph-bootstrap" &&
+        predecessorStart.runId === priorAdoptionGraph.sourceRunId,
+    );
     // An adoption plan's authority remains the run that first compiled the
     // constrained graph. Later successors may copy that graph into their own
     // refs for ordinary execution, but a further recovery must not silently
     // move the plan's graph authority to the newest copy.
-    const graphSource = priorAdoptionGraph
-      ? graphs.has(priorAdoptionGraph.sourceRunId)
-        ? ([priorAdoptionGraph.sourceRunId, graphs.get(priorAdoptionGraph.sourceRunId)!] as const)
-        : undefined
-      : [...graphs.entries()].at(-1);
+    const graphSource =
+      priorAdoptionGraph && !continueGraphBootstrap
+        ? graphs.has(priorAdoptionGraph.sourceRunId)
+          ? ([priorAdoptionGraph.sourceRunId, graphs.get(priorAdoptionGraph.sourceRunId)!] as const)
+          : undefined
+        : [...graphs.entries()].at(-1);
     let graphRunId: string;
     let graph: NonNullable<Awaited<ReturnType<typeof loadCompiledGraph>>> | null = null;
     let projection: NonNullable<Awaited<ReturnType<typeof loadCompiledGraphProjection>>> | null =
@@ -480,6 +497,34 @@ export async function buildRecoveryProposal(input: {
       require(
         [...graphs.values()].every((value) => value.graph.graphDigest === graph!.graphDigest),
       );
+    } else if (continueGraphBootstrap && priorAdoptionGraph) {
+      const constraints = parseLegacyGraphConstraints({
+        objectiveTitle: snapshot.title,
+        workItems: snapshot.workItems.map((item) => ({
+          id: item.id!,
+          number: item.number,
+          title: item.title!,
+          body: item.body ?? "",
+          blockedByNumbers: item.blockedBy!.map((dependency) => dependency.number),
+        })),
+      });
+      require(
+        compilerEvalDigest({
+          number: snapshot.number,
+          title: snapshot.title,
+          body: snapshot.body,
+        }) === priorAdoptionGraph.objectiveInputDigest &&
+          legacyGraphConstraintsDigest(constraints) === priorAdoptionGraph.constraintDigest &&
+          snapshot.workItems.every(
+            (item) =>
+              item.closed === false &&
+              item.assignees!.length === 0 &&
+              item.copilotAssignments!.length === 0 &&
+              item.linkedPullRequests!.length === 0,
+          ),
+      );
+      adoptionConstraints = constraints;
+      graphRunId = input.successorRunId;
     } else {
       // Narrow bootstrap only: the predecessor stopped specifically because
       // human-authored Work Items predated an authenticated graph. No worker,
@@ -536,7 +581,7 @@ export async function buildRecoveryProposal(input: {
           issueNodeId: item.issueNodeId,
           issueNumber: item.issueNumber,
         }));
-    if (priorAdoptionGraph)
+    if (priorAdoptionGraph && !continueGraphBootstrap)
       require(graph && projection && graphRunId === priorAdoptionGraph.sourceRunId);
 
     stage = "reservation";
@@ -1311,38 +1356,39 @@ export async function buildRecoveryProposal(input: {
       priorPlanDigest: priorDigest,
       expectedBaseSha: base.oid,
       baseBranch: snapshot.defaultBranch,
-      graph: priorAdoptionGraph
-        ? priorAdoptionGraph
-        : graph && projection
-          ? {
-              sourceRunId: graphRunId,
-              ref: graph.ref,
-              commitOid: graph.commitOid,
-              blobOid: graph.blobOid,
-              digest: graph.graphDigest,
-              projection: {
-                ref: projection.ref,
-                commitOid: projection.commitOid,
-                blobOid: projection.blobOid,
-                bindingDigest: recoveryPlanBindingDigest(items),
+      graph:
+        priorAdoptionGraph && !continueGraphBootstrap
+          ? priorAdoptionGraph
+          : graph && projection
+            ? {
+                sourceRunId: graphRunId,
+                ref: graph.ref,
+                commitOid: graph.commitOid,
+                blobOid: graph.blobOid,
+                digest: graph.graphDigest,
+                projection: {
+                  ref: projection.ref,
+                  commitOid: projection.commitOid,
+                  blobOid: projection.blobOid,
+                  bindingDigest: recoveryPlanBindingDigest(items),
+                },
+              }
+            : {
+                mode: "adopt-existing",
+                sourceRunId: graphRunId,
+                ref: compiledGraphRef(snapshot.number, graphRunId),
+                objectiveInputDigest: compilerEvalDigest({
+                  number: snapshot.number,
+                  title: snapshot.title,
+                  body: snapshot.body,
+                }),
+                constraintDigest: legacyGraphConstraintsDigest(adoptionConstraints!),
+                constraints: adoptionConstraints!,
+                projection: {
+                  ref: compiledGraphProjectionRef(snapshot.number, graphRunId),
+                  bindingDigest: recoveryPlanBindingDigest(items),
+                },
               },
-            }
-          : {
-              mode: "adopt-existing",
-              sourceRunId: graphRunId,
-              ref: compiledGraphRef(snapshot.number, graphRunId),
-              objectiveInputDigest: compilerEvalDigest({
-                number: snapshot.number,
-                title: snapshot.title,
-                body: snapshot.body,
-              }),
-              constraintDigest: legacyGraphConstraintsDigest(adoptionConstraints!),
-              constraints: adoptionConstraints!,
-              projection: {
-                ref: compiledGraphProjectionRef(snapshot.number, graphRunId),
-                bindingDigest: recoveryPlanBindingDigest(items),
-              },
-            },
       acceptedPolicy: policy,
       policyDigest: policyDigest(policy),
       allowance: { before, increment, after },
@@ -1385,7 +1431,15 @@ export async function buildRecoveryProposal(input: {
     result.status = "proposed";
     result.plan = plan;
     result.planDigest = recoveryPlanDigest(plan);
-  } catch {
+  } catch (error) {
+    if (error instanceof HistoricalRecoveryRuntimeError) {
+      result.blockers.push({
+        code: error.blockerCode,
+        reason: error.message,
+        ...(currentWorkItem === undefined ? {} : { workItem: currentWorkItem }),
+      });
+      return withRecoveryOperatorAction(result);
+    }
     result.blockers.push({
       code: stage,
       reason: `Recovery proposal ${stage} evidence is missing, conflicting, unsupported, or outside its bound; re-observe that evidence before acknowledgement.`,

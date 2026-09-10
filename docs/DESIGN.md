@@ -292,6 +292,17 @@ compiler or worker session, just like every other unresolved model invocation. O
 and `GraphProjected` agree, ordinary immutable graph recovery applies and no later retry recompiles
 it.
 
+If that adopted successor reaches an authoritative terminal after its management usage is fully
+reconciled but before either graph ref exists, another explicit recovery may continue the same
+bootstrap. The chain verifier retains the original Objective-input, constraint, projection-binding,
+policy, cumulative allowance, history, and unknown-usage acknowledgements, while binding the new
+graph and projection refs to the newly requested successor. It permits this authority handoff only
+when the prior successor has no attempt, scheduling, capacity, validation, publication, source-delivery,
+integration, graph, non-management budget, or unresolved model-invocation effects. The Objective and
+every legacy Work Item must still reproduce the acknowledged constraints and remain open,
+unassigned, and without a linked pull request. A compiled checkpoint without its authenticated
+receipts is not absence: a surviving graph or projection ref blocks the handoff.
+
 The deterministic current-run graph ref is not a compiler receipt. Before `GraphCompiled` exists,
 restart accepts that ref only when its commit is based on the run's exact base, contains the atomic
 compiler invocation/result counters for that graph digest, and the Objective journal contains one

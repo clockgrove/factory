@@ -24,7 +24,11 @@ import { DEFAULT_RUN_POLICY, policyDigest } from "../src/protocol/policy.js";
 import { publicationBranch } from "../src/publication/publisher.js";
 import { bindValidationToPublishedHead } from "../src/validation/plan.js";
 import { buildRecoveryProposal } from "../src/recovery/proposal.js";
-import { parseRecoveryPlan, RecoveryPlanManager } from "../src/recovery/plan.js";
+import {
+  isRecoveryAdoptionGraph,
+  parseRecoveryPlan,
+  RecoveryPlanManager,
+} from "../src/recovery/plan.js";
 import type { RecoveryReadStore } from "../src/recovery/assessment.js";
 import { RecoveryClaimManager } from "../src/recovery/claims.js";
 import { recoveryAdoptionEvents } from "../src/recovery/transaction.js";
@@ -501,6 +505,25 @@ async function fixture(withPublications = true, native: "siblings" | "stack" | f
     event,
     base,
   };
+}
+
+function makeLegacyGraphless(f: Awaited<ReturnType<typeof fixture>>): void {
+  for (const ref of [...f.refs.keys()])
+    if (ref.includes("/graphs/") || ref.includes("/graph-projections/")) f.refs.delete(ref);
+  f.snapshot.factoryEvents = f.snapshot
+    .factoryEvents!.filter((entry) => entry.kind !== "graph" && entry.kind !== "budget")
+    .map((entry) =>
+      entry.event === "FactoryRunEscalated"
+        ? f.event({
+            kind: "run",
+            event: "FactoryRunEscalated",
+            sequence: entry.sequence,
+            reason: "Objective has Work Items but no authenticated v2 graph receipt",
+          })
+        : entry,
+    );
+  for (const [index, item] of f.snapshot.workItems.entries())
+    item.body = renderLegacyWorkItemCore(f.graph.objective.workItems[index]!);
 }
 
 async function refreshedSiblingFixture() {
@@ -1409,24 +1432,7 @@ describe("explicit recovery request application", () => {
 describe("bounded read-only immutable recovery proposals", () => {
   it("proposes an exact graph bootstrap for untouched legacy Work Items and exposes unknown usage", async () => {
     const f = await fixture(false);
-    for (const ref of [...f.refs.keys()])
-      if (ref.includes("/graphs/") || ref.includes("/graph-projections/")) f.refs.delete(ref);
-    f.snapshot.factoryEvents = f.snapshot
-      .factoryEvents!.filter((entry) => entry.kind !== "graph" && entry.kind !== "budget")
-      .map((entry) =>
-        entry.event === "FactoryRunEscalated"
-          ? f.event({
-              kind: "run",
-              event: "FactoryRunEscalated",
-              sequence: entry.sequence,
-              reason: "Objective has Work Items but no authenticated v2 graph receipt",
-            })
-          : entry,
-      );
-    for (const [index, item] of f.snapshot.workItems.entries()) {
-      const compiled = f.graph.objective.workItems[index]!;
-      item.body = renderLegacyWorkItemCore(compiled);
-    }
+    makeLegacyGraphless(f);
 
     const first = await f.build();
     expect(first.blockers).toEqual([]);
@@ -1839,5 +1845,213 @@ describe("bounded read-only immutable recovery proposals", () => {
     expect(result.plan!.allowance.before).toEqual(record.plan.allowance.after);
     expect(result.plan!.history).toHaveLength(2);
     expect(result.plan!.predecessor.startDigest).toBe(recoveryEventDigest(transaction[0]));
+  });
+
+  it("continues an accounted terminal graph bootstrap without inventing graph authority", async () => {
+    const f = await fixture(false);
+    makeLegacyGraphless(f);
+    const unacknowledged = await f.build({ successorRunId: "first-successor" });
+    expect(unacknowledged.status).toBe("proposed");
+    const first = await f.build({
+      successorRunId: "first-successor",
+      unknownUsageAcknowledgementDigest: unacknowledged.unknownUsageDigest,
+    });
+    const record = await new RecoveryPlanManager(f.storage, f.leases).persist({
+      lease: { ...f.lease, runId: "first-successor" },
+      plan: first.plan!,
+    });
+    const request = f.event({
+      kind: "recovery",
+      event: "RecoveryRequested",
+      sequence: 101,
+      requestId: record.plan.requestId,
+      repository: "o/r",
+      requestedBy: "operator",
+      predecessorRunId: "source",
+      predecessorTerminalDigest: record.plan.predecessor.terminalDigest,
+      successorRunId: "first-successor",
+      planDigest: record.digest,
+      policyDigest: record.plan.policyDigest,
+      baseSha: record.plan.expectedBaseSha,
+    });
+    if (request.event !== "RecoveryRequested") throw new Error("fixture request");
+    const claim = await new RecoveryClaimManager(f.storage, f.leases).claim({
+      lease: { ...f.lease, runId: "first-successor" },
+      planRecord: record,
+      authenticatedRequest: request,
+      transaction: {
+        at: now.toISOString(),
+        startSequence: 102,
+        evidenceDigest: digest("a"),
+        accountingDigest: digest("b"),
+        resourceEvidenceDigest: digest("c"),
+      },
+    });
+    const adoption = recoveryAdoptionEvents({
+      planRecord: record,
+      claim,
+      authenticatedRequest: request,
+      predecessorStart: f.start as Extract<FactoryEvent, { event: "FactoryRunStarted" }>,
+    });
+    const invocationId = `compile-${f.base.oid}`;
+    f.snapshot.factoryEvents!.push(
+      request,
+      ...adoption,
+      f.event({
+        kind: "budget",
+        event: "BudgetReserved",
+        runId: "first-successor",
+        sequence: 105,
+        phase: "management",
+        unit: "model_tokens",
+        amount: 0,
+        usageId: `invocation-${invocationId}`,
+        modelInvocationId: invocationId,
+        directorEpoch: 1,
+        policyDigest: record.plan.policyDigest,
+      }),
+      f.event({
+        kind: "budget",
+        event: "BudgetReconciled",
+        runId: "first-successor",
+        sequence: 106,
+        phase: "management",
+        unit: "model_tokens",
+        amount: 30,
+        usageId: `compile-${digest("d")}`,
+        modelInvocationId: invocationId,
+        directorEpoch: 1,
+        policyDigest: record.plan.policyDigest,
+        reportedModelUsage: { inputTokens: 11, outputTokens: 19 },
+      }),
+      f.event({
+        kind: "run",
+        event: "FactoryRunEscalated",
+        runId: "first-successor",
+        sequence: 107,
+        reason: "compiled graph rejected before projection",
+      }),
+    );
+
+    const second = await f.build({
+      requestId: "second-request",
+      successorRunId: "second-successor",
+    });
+    if (!isRecoveryAdoptionGraph(record.plan.graph)) throw new Error("fixture graph");
+    expect(second.blockers).toEqual([]);
+    expect(second.status).toBe("proposed");
+    expect(second.plan).toMatchObject({
+      priorPlanDigest: record.digest,
+      graph: {
+        mode: "adopt-existing",
+        sourceRunId: "second-successor",
+        objectiveInputDigest: record.plan.graph.objectiveInputDigest,
+        constraintDigest: record.plan.graph.constraintDigest,
+      },
+      allowance: { before: record.plan.allowance.after, increment: { modelTokens: 0 } },
+      items: record.plan.items.map((item) => ({
+        workItem: item.workItem,
+        compilerId: item.compilerId,
+        action: "execute",
+        source: null,
+      })),
+    });
+    expect(second.plan!.graph.ref).not.toBe(record.plan.graph.ref);
+    expect(second.plan!.graph.projection.ref).not.toBe(record.plan.graph.projection.ref);
+    expect(second.plan!.history).toHaveLength(2);
+    expect(second.unknownUsageDigest).toMatch(/^[0-9a-f]{64}$/);
+    expect(second.unknownUsageDigest).not.toBe(unacknowledged.unknownUsageDigest);
+
+    f.snapshot.workItems[0]!.body = renderLegacyWorkItemCore({
+      ...f.graph.objective.workItems[0]!,
+      goal: "Changed after the first bootstrap acknowledgement",
+    });
+    const changed = await f.build({
+      requestId: "changed-request",
+      successorRunId: "changed-successor",
+    });
+    expect(changed.status).toBe("blocked");
+    expect(changed.blockers[0]!.code).toBe("historical-runtime-authentication");
+  });
+
+  it("rejects a terminal graph bootstrap with unresolved current compiler usage", async () => {
+    const f = await fixture(false);
+    makeLegacyGraphless(f);
+    const unacknowledged = await f.build({ successorRunId: "first-successor" });
+    const first = await f.build({
+      successorRunId: "first-successor",
+      unknownUsageAcknowledgementDigest: unacknowledged.unknownUsageDigest,
+    });
+    const record = await new RecoveryPlanManager(f.storage, f.leases).persist({
+      lease: { ...f.lease, runId: "first-successor" },
+      plan: first.plan!,
+    });
+    const request = f.event({
+      kind: "recovery",
+      event: "RecoveryRequested",
+      sequence: 101,
+      requestId: record.plan.requestId,
+      repository: "o/r",
+      requestedBy: "operator",
+      predecessorRunId: "source",
+      predecessorTerminalDigest: record.plan.predecessor.terminalDigest,
+      successorRunId: "first-successor",
+      planDigest: record.digest,
+      policyDigest: record.plan.policyDigest,
+      baseSha: record.plan.expectedBaseSha,
+    });
+    if (request.event !== "RecoveryRequested") throw new Error("fixture request");
+    const claim = await new RecoveryClaimManager(f.storage, f.leases).claim({
+      lease: { ...f.lease, runId: "first-successor" },
+      planRecord: record,
+      authenticatedRequest: request,
+      transaction: {
+        at: now.toISOString(),
+        startSequence: 102,
+        evidenceDigest: digest("a"),
+        accountingDigest: digest("b"),
+        resourceEvidenceDigest: digest("c"),
+      },
+    });
+    const invocationId = `compile-${f.base.oid}`;
+    f.snapshot.factoryEvents!.push(
+      request,
+      ...recoveryAdoptionEvents({
+        planRecord: record,
+        claim,
+        authenticatedRequest: request,
+        predecessorStart: f.start as Extract<FactoryEvent, { event: "FactoryRunStarted" }>,
+      }),
+      f.event({
+        kind: "budget",
+        event: "BudgetReserved",
+        runId: "first-successor",
+        sequence: 105,
+        phase: "management",
+        unit: "model_tokens",
+        amount: 0,
+        usageId: `invocation-${invocationId}`,
+        modelInvocationId: invocationId,
+        directorEpoch: 1,
+        policyDigest: record.plan.policyDigest,
+      }),
+      f.event({
+        kind: "run",
+        event: "FactoryRunEscalated",
+        runId: "first-successor",
+        sequence: 106,
+        reason: "compiler response lost",
+      }),
+    );
+
+    const second = await f.build({
+      requestId: "second-request",
+      successorRunId: "second-successor",
+    });
+    expect(second.status).toBe("blocked");
+    expect(second.blockers[0]).toEqual({
+      code: "historical-graph-bootstrap-unsupported",
+      reason: expect.stringContaining("closed management usage"),
+    });
   });
 });

@@ -134,12 +134,12 @@ describe("toolchain authority adapters", () => {
 
   it("uses the adapter-owned Bun plan in production isolation", async () => {
     const receipt = await installManagedFixture();
+    const adapter = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "javascript-bun")!;
     const plan = isolatedManagedToolchainPlan(
       ["bun run test"],
       [
         {
-          ...TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "javascript-bun")!
-            .runtimeRequirement!,
+          ...adapter.runtimeRequirement!,
           bundleDigest: receipt.digest,
         },
       ],
@@ -148,6 +148,7 @@ describe("toolchain authority adapters", () => {
     expect(
       plan?.plan.setup.some(({ display }) => display.startsWith("bun install --frozen-lockfile")),
     ).toBe(true);
+    expect(plan?.plan.setup.map(({ display }) => display)).toEqual(adapter.setupCommands);
     expect(plan?.plan.assets.every(({ treeSha256 }) => /^[a-f0-9]{64}$/.test(treeSha256))).toBe(
       true,
     );

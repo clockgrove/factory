@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -116,6 +116,16 @@ describe("managed toolchain store", () => {
     ).toBe(receipt.digest);
     expect(downloads).toBe(1);
 
+    const [component] = runtimeComponentPaths(root, receipt);
+    await chmod(component!.executable, 0o600);
+    expect(await toolchainStatus("pnpm", root)).toMatchObject({
+      state: "corrupt",
+      reason: expect.stringMatching(/integrity verification/),
+    });
+    expect(() => activeRuntimeBundleSync("pnpm", root)).toThrow(/integrity verification/);
+    await chmod(component!.executable, 0o700);
+    expect(await toolchainStatus("pnpm", root)).toMatchObject({ state: "ready" });
+
     const secondRoot = await mkdtemp(join(tmpdir(), "factory-toolchain-store-"));
     roots.push(secondRoot);
     const reconstructed = await provisionToolchain("pnpm", {
@@ -127,7 +137,6 @@ describe("managed toolchain store", () => {
     expect(reconstructed.resolvedAt).not.toBe(receipt.resolvedAt);
     expect(reconstructed.digest).toBe(receipt.digest);
 
-    const [component] = runtimeComponentPaths(root, receipt);
     await writeFile(component!.asset, "corrupt", "utf8");
     expect(await toolchainStatus("pnpm", root)).toMatchObject({
       state: "corrupt",

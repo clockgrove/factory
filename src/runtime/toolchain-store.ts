@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { constants as fsConstants, readFileSync } from "node:fs";
+import { constants as fsConstants, readFileSync, statSync } from "node:fs";
 import {
   access,
   chmod,
@@ -742,7 +742,8 @@ export function activeRuntimeBundleSync(
     if (
       sha256FileSync(join(componentRoot, "asset")) !== component.asset.sha256 ||
       sha256FileSync(executable) !== component.executableSha256 ||
-      sha256TreeSync(tree) !== component.treeSha256
+      sha256TreeSync(tree) !== component.treeSha256 ||
+      (statSync(executable).mode & 0o111) === 0
     )
       throw new Error(`${receipt.tool} managed runtime cache failed integrity verification`);
   }
@@ -780,7 +781,8 @@ export function runtimeBundleByDigestSync(
     if (
       sha256FileSync(join(componentRoot, "asset")) !== component.asset.sha256 ||
       sha256FileSync(executable) !== component.executableSha256 ||
-      sha256TreeSync(tree) !== component.treeSha256
+      sha256TreeSync(tree) !== component.treeSha256 ||
+      (statSync(executable).mode & 0o111) === 0
     )
       throw new Error(`${receipt.tool} managed runtime cache failed integrity verification`);
   }
@@ -798,15 +800,17 @@ export async function verifyRuntimeBundle(
     const archive = join(componentRoot, "asset");
     const tree = join(componentRoot, "root");
     const executable = safeStoreChild(tree, ...component.executablePath.split("/"));
-    const [archiveDigest, executableDigest, treeDigest] = await Promise.all([
+    const [archiveDigest, executableDigest, treeDigest, executableStat] = await Promise.all([
       sha256File(archive),
       sha256File(executable),
       sha256Tree(tree),
+      stat(executable),
     ]);
     if (
       archiveDigest !== component.asset.sha256 ||
       executableDigest !== component.executableSha256 ||
-      treeDigest !== component.treeSha256
+      treeDigest !== component.treeSha256 ||
+      (executableStat.mode & 0o111) === 0
     )
       throw new Error(`${receipt.tool} managed runtime cache failed integrity verification`);
   }

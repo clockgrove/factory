@@ -31,7 +31,9 @@ import { constants as fsConstants, readFileSync } from "node:fs";
 import {
   BUN_ADAPTER_CONTRACT,
   BUN_ADAPTER_ID,
+  BUN_INSTALL_COMMAND,
   BUN_PACKAGE_REGISTRY,
+  BUN_VERSION_COMMAND,
   bunCapabilityOperation,
   createBunManagedExecutionPlan,
   inspectBunAuthority,
@@ -943,7 +945,7 @@ export const TOOLCHAIN_AUTHORITY_ADAPTERS: readonly ToolchainAuthorityAdapter[] 
     deferredOperations: true,
     futurePackageScripts: true,
     requiredRootPaths: ["package.json", "bun.lock"],
-    setupCommands: ["bun --version", "bun install --frozen-lockfile --ignore-scripts"],
+    setupCommands: [BUN_VERSION_COMMAND, BUN_INSTALL_COMMAND],
     networkDestination: BUN_PACKAGE_REGISTRY,
     runtimeRequirement: {
       ...runtimeRequirement("bun", BUN_ADAPTER_ID),

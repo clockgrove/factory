@@ -13,6 +13,16 @@ import { runtimeComponentPaths, verifyRuntimeBundle } from "../runtime/toolchain
 export const BUN_ADAPTER_ID = "javascript-bun";
 export const BUN_ADAPTER_CONTRACT = 1;
 export const BUN_PACKAGE_REGISTRY = "registry.npmjs.org";
+export const BUN_VERSION_COMMAND = "bun --version";
+export const BUN_INSTALL_ARGS = [
+  "install",
+  "--frozen-lockfile",
+  "--ignore-scripts",
+  "--backend=copyfile",
+  "--linker=isolated",
+  `--registry=https://${BUN_PACKAGE_REGISTRY}/`,
+] as const;
+export const BUN_INSTALL_COMMAND = `bun ${BUN_INSTALL_ARGS.join(" ")}`;
 
 const SCRIPT_NAME =
   /^(?:typecheck|test|lint|check|verify|build)(?:[:._-][A-Za-z0-9][A-Za-z0-9:_.-]{0,63})?$/;
@@ -672,23 +682,16 @@ export function createBunManagedExecutionPlan(input: {
     ],
     setup: [
       {
-        display: "bun --version",
+        display: BUN_VERSION_COMMAND,
         executableId: "bun",
         args: ["--version"],
         expectedStdout: component.version,
         network: "none",
       },
       {
-        display: `bun install --frozen-lockfile --ignore-scripts --backend=copyfile --linker=isolated --registry=https://${BUN_PACKAGE_REGISTRY}/`,
+        display: BUN_INSTALL_COMMAND,
         executableId: "bun",
-        args: [
-          "install",
-          "--frozen-lockfile",
-          "--ignore-scripts",
-          "--backend=copyfile",
-          "--linker=isolated",
-          `--registry=https://${BUN_PACKAGE_REGISTRY}/`,
-        ],
+        args: [...BUN_INSTALL_ARGS],
         network: "package-registry",
       },
     ],

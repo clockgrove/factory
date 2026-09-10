@@ -1861,6 +1861,22 @@ describe("bounded read-only immutable recovery proposals", () => {
     expect(result.plan!.allowance.before).toEqual(record.plan.allowance.after);
     expect(result.plan!.history).toHaveLength(2);
     expect(result.plan!.predecessor.startDigest).toBe(recoveryEventDigest(transaction[0]));
+
+    // A semantic request retry is harmless for ordinary derived views, but the
+    // historical adoption transaction must retain it and reject ambiguity.
+    f.snapshot.factoryEvents!.push(
+      f.event({
+        ...request,
+        sequence: 106,
+        at: new Date(now.getTime() + 1_000).toISOString(),
+      }),
+    );
+    const ambiguous = await f.build({
+      requestId: "ambiguous-request",
+      successorRunId: "ambiguous-successor",
+    });
+    expect(ambiguous.status).toBe("blocked");
+    expect(ambiguous.blockers[0]!.code).toBe("historical-runtime-authentication");
   });
 
   it("continues an accounted terminal graph bootstrap without inventing graph authority", async () => {

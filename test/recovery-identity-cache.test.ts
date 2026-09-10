@@ -297,6 +297,23 @@ describe("observation-scoped recovery event identity", () => {
     await expect(pending).rejects.toThrow("deadline observed");
   });
 
+  it("snapshots later-batch envelopes before yielding to caller mutation", async () => {
+    const events = Array.from({ length: 600 }, (_, index) => rawFixture(index + 1));
+    const later = events[500]!;
+    if (later.event !== "FactoryRunEscalated") throw new Error("fixture terminal");
+    const expected = recoveryEventDigest(later);
+
+    const pending = observeRecoveryEvents(events, { batchSize: 10, maxEvents: 600 });
+    queueMicrotask(() => {
+      later.reason = "mutated after the repository read";
+    });
+    const observation = await pending;
+    const indexed = observation.events.find((event) => event.sequence === later.sequence)!;
+
+    expect(observation.digestOf(indexed)).toBe(expected);
+    expect(indexed).toMatchObject({ reason: "fixture terminal" });
+  });
+
   it("rejects standard-prototype mutation between asynchronous batches", async () => {
     const events = Array.from({ length: 600 }, (_, index) => rawFixture(index + 1));
     const previous = Object.getOwnPropertyDescriptor(Array.prototype, "factoryInjected");

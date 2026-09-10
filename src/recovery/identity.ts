@@ -296,8 +296,7 @@ class RecoveryEventObservationBuilder {
   readonly #parsed: FactoryEvent[] = [];
   #canonicalBytes = 0;
 
-  add(raw: unknown, maxBytes: number): void {
-    const materialized = materializeDataOnly(raw);
+  addMaterialized(materialized: unknown, maxBytes: number): void {
     const event = parseFactoryEvent(materialized);
     freezeParsedData(event);
     const identity = digestValidatedFactoryEvent(event);
@@ -431,7 +430,7 @@ export class RecoveryEventObservation {
     const { maxEvents, maxBytes } = observationBounds(options);
     const values = observationInput(input, maxEvents);
     const builder = new RecoveryEventObservationBuilder();
-    for (const raw of values) builder.add(raw, maxBytes);
+    for (const raw of values) builder.addMaterialized(materializeDataOnly(raw), maxBytes);
     assertStandardPrototypes();
     return builder.finish(values.length, options.sortBySequence === true);
   }
@@ -541,10 +540,16 @@ export async function observeRecoveryEvents(
 ): Promise<RecoveryEventObservation> {
   assertStandardPrototypes();
   const { maxEvents, maxBytes } = observationBounds(options);
-  const values = observationInput(input, maxEvents);
+  const inputValues = observationInput(input, maxEvents);
   const batchSize = options.batchSize ?? 256;
   if (!Number.isSafeInteger(batchSize) || batchSize < 1 || batchSize > 4096)
     throw new Error("invalid recovery event observation batch bound");
+  abortObservation(options.signal);
+  assertStandardPrototypes();
+  // Capture the complete data-only contents before the first event-loop yield.
+  // Parsing and identity work can then remain batched without allowing a caller
+  // mutation to combine values from different moments into one observation.
+  const values = inputValues.map((value) => materializeDataOnly(value));
   abortObservation(options.signal);
   assertStandardPrototypes();
   const builder = new RecoveryEventObservationBuilder();
@@ -552,7 +557,7 @@ export async function observeRecoveryEvents(
     abortObservation(options.signal);
     assertStandardPrototypes();
     const end = Math.min(values.length, offset + batchSize);
-    for (let index = offset; index < end; index++) builder.add(values[index], maxBytes);
+    for (let index = offset; index < end; index++) builder.addMaterialized(values[index], maxBytes);
     if (offset + batchSize < values.length)
       await new Promise<void>((resolve) => setImmediate(resolve));
   }

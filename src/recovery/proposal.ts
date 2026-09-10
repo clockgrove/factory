@@ -401,7 +401,9 @@ export async function buildRecoveryProposal(input: {
           historyComplete: true,
           latestRunId: predecessorStart.runId,
           store: port,
-          eventObservation: observation,
+          // Historical transaction validation must retain exact retries. The
+          // semantic view below is appropriate only after that boundary.
+          eventObservation: authenticatedObservation,
         })
       : new Map<string, RecoveryRuntime>();
     const verifiedCapacity = new Set(

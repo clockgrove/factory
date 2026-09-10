@@ -201,10 +201,15 @@ describe("uv structural authority", () => {
     )!;
     const root = `[project]
 name = "workspace-root"
+requires-python = "==${PYTHON_VERSION}"
+dependencies = []
 
 [tool.uv]
 required-version = "==${UV_VERSION}"
 package = false
+
+[dependency-groups]
+dev = ["pytest==8.4.2"]
 
 [tool.uv.workspace]
 members = ["packages/api", "packages/shared"]
@@ -228,22 +233,24 @@ dependencies = []
 [tool.uv]
 package = false
 `;
+    const files = {
+      "pyproject.toml": root,
+      "packages/api/pyproject.toml": member,
+      "packages/shared/pyproject.toml": shared,
+      "uv.lock": `version = 1\nrequires-python = "==${PYTHON_VERSION}"\n\n${virtualPackage("workspace-root", ".")}\n${virtualPackage("api", "packages/api")}\n${virtualPackage("shared", "packages/shared")}\n${wheelPackage("pytest", "8.4.2")}`,
+      ".python-version": PYTHON_VERSION,
+    };
+    const repositoryPaths = [
+      "pyproject.toml",
+      "packages/api/pyproject.toml",
+      "packages/shared/pyproject.toml",
+      "uv.lock",
+      ".python-version",
+    ];
     const inspection = inspectUvAuthority({
       command,
-      files: {
-        "pyproject.toml": root,
-        "packages/api/pyproject.toml": member,
-        "packages/shared/pyproject.toml": shared,
-        "uv.lock": `version = 1\nrequires-python = "==${PYTHON_VERSION}"\n\n${virtualPackage("workspace-root", ".")}\n${virtualPackage("api", "packages/api")}\n${virtualPackage("shared", "packages/shared")}\n${wheelPackage("pytest", "8.4.2")}`,
-        ".python-version": PYTHON_VERSION,
-      },
-      repositoryPaths: [
-        "pyproject.toml",
-        "packages/api/pyproject.toml",
-        "packages/shared/pyproject.toml",
-        "uv.lock",
-        ".python-version",
-      ],
+      files,
+      repositoryPaths,
       uvVersion: UV_VERSION,
       pythonVersion: PYTHON_VERSION,
     });
@@ -255,6 +262,15 @@ package = false
       "packages/api/pyproject.toml",
       "packages/shared/pyproject.toml",
     ]);
+    expect(
+      inspectUvAuthority({
+        command: parseUvPytestCommand("uv run --locked --no-sync python -m pytest")!,
+        files,
+        repositoryPaths,
+        uvVersion: UV_VERSION,
+        pythonVersion: PYTHON_VERSION,
+      }).operation,
+    ).toEqual({ kind: "python-test", key: "." });
 
     expect(() =>
       inspectUvAuthority({

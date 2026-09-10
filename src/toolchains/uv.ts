@@ -438,10 +438,7 @@ export async function loadUvAuthoritySurface(
     )
   )
     throw new Error("uv project is not an exact declared workspace member");
-  const authorityDirectories = new Set([
-    ...(selected as string[]),
-    ...(selected.some((directory) => directory !== ".") ? workspaceMembers : []),
-  ]);
+  const authorityDirectories = new Set([...(selected as string[]), ...workspaceMembers]);
   const directories = new Set<string>();
   for (const directory of authorityDirectories)
     for (const ancestor of uvAuthorityDirectories(directory)) directories.add(ancestor);
@@ -597,22 +594,17 @@ export function inspectUvAuthority(input: UvAuthorityInspectionInput): UvAuthori
   const permittedVirtualPaths = new Set(["."]);
   let selected = root;
   const workspaceMembers = declaredWorkspaceMembers(rootText);
-  if (projectDirectory === ".") {
-    if (workspaceMembers.length > 0)
-      throw new Error("root uv validation may not implicitly select a workspace");
-  } else {
-    if (!workspaceMembers.includes(projectDirectory))
-      throw new Error("uv project is not an exact declared workspace member");
-    for (const member of workspaceMembers) {
-      const memberPath = authorityPath(member, "pyproject.toml");
-      const memberText = input.files[memberPath];
-      if (memberText === undefined) throw new Error(`uv workspace member is missing ${memberPath}`);
-      const project = inspectProject(memberText, memberPath, input.uvVersion, false);
-      projects.push(project);
-      permittedVirtualPaths.add(member);
-      authorityPaths.push(memberPath);
-      if (member === projectDirectory) selected = project;
-    }
+  if (projectDirectory !== "." && !workspaceMembers.includes(projectDirectory))
+    throw new Error("uv project is not an exact declared workspace member");
+  for (const member of workspaceMembers) {
+    const memberPath = authorityPath(member, "pyproject.toml");
+    const memberText = input.files[memberPath];
+    if (memberText === undefined) throw new Error(`uv workspace member is missing ${memberPath}`);
+    const project = inspectProject(memberText, memberPath, input.uvVersion, false);
+    projects.push(project);
+    permittedVirtualPaths.add(member);
+    authorityPaths.push(memberPath);
+    if (member === projectDirectory) selected = project;
   }
 
   const requiresPython = tomlString(

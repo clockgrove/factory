@@ -22,6 +22,8 @@ import {
 import { DEFAULT_RUN_POLICY, parseRunPolicy, policyDigest } from "../src/protocol/policy.js";
 import { parseFactoryEvent } from "../src/protocol/events.js";
 import {
+  GithubOctokitGraphWriter,
+  renderLegacyWorkItemCore,
   renderWorkPacket,
   workerPacketFromCompiled,
   type CompiledObjective,
@@ -1031,7 +1033,7 @@ async function fixture(
   const retirement = new AbortController();
   const runs: Promise<unknown>[] = [];
   fixtureRunOwners.push({ retirement, runs });
-  const run = (recovery?: SupervisorOptions["recovery"]) => {
+  const run = (recovery?: SupervisorOptions["recovery"], signal?: AbortSignal) => {
     const operation = new FactorySupervisor({
       token: "fixture-token",
       owner: "o",
@@ -1047,7 +1049,7 @@ async function fixture(
       pollIntervalMs: 50,
       onStatus: (message) => messages.push(message),
       ...(recovery ? { recovery } : {}),
-      signal: retirement.signal,
+      signal: signal ? AbortSignal.any([signal, retirement.signal]) : retirement.signal,
     }).run();
     // Keep every started operation until teardown so an assertion failure or
     // watchdog expiry cannot drop a settled or still-running Supervisor before
@@ -3335,6 +3337,273 @@ describe("Supervisor authenticated successor execution", () => {
     },
     60_000,
   );
+  it("recompiles once in a second successor after an accounted graph-bootstrap terminal", async () => {
+    const f = await fixture();
+    const store = new GitHubControlStore({ token: "fixture-token", owner: "o", repo: "r" });
+    const sourceStart = f.snapshot.factoryEvents!.find(
+      (event) => event.event === "FactoryRunStarted" && event.runId === "parallel",
+    );
+    if (sourceStart?.event !== "FactoryRunStarted") throw new Error("fixture source start");
+    f.refs.clear();
+    f.snapshot.factoryEvents = [sourceStart];
+    f.snapshot.workItems = f.graph.workItems.map((item, index) => ({
+      id: `I_${index + 8}`,
+      number: index + 8,
+      title: item.title,
+      body: renderLegacyWorkItemCore(item),
+      closed: false,
+      assignees: [],
+      labels: [],
+      blockedBy: item.dependsOn.map((id) => ({
+        number: 8 + f.graph.workItems.findIndex((candidate) => candidate.id === id),
+        closed: false,
+      })),
+      linkedPullRequests: [],
+      copilotAssignments: [],
+      factoryEvents: [],
+    }));
+    const observedEvents = () => [
+      ...f.snapshot.factoryEvents!,
+      ...f.snapshot.workItems.flatMap((item) => item.factoryEvents!),
+    ];
+    const append = (fields: Record<string, unknown>) => {
+      const next = Math.max(...observedEvents().map((event) => event.sequence)) + 1;
+      const value = parseFactoryEvent({
+        protocol: "clockgrove.factory/v2",
+        objective: 7,
+        runId: "parallel",
+        sequence: next,
+        at: new Date().toISOString(),
+        ...fields,
+      });
+      f.snapshot.factoryEvents!.push(value);
+      return value;
+    };
+    append({
+      kind: "run",
+      event: "FactoryRunEscalated",
+      reason: "Objective has Work Items but no authenticated v2 graph receipt",
+    });
+    const acknowledgedProposal = async (requestId: string, successorRunId: string) => {
+      const observed = await buildRecoveryProposal({
+        repository: "o/r",
+        snapshot: f.snapshot,
+        historyComplete: true,
+        store: recoveryReadPort(store, "o", "r"),
+        requestId,
+        successorRunId,
+      });
+      expect(observed.status, JSON.stringify(observed.blockers)).toBe("proposed");
+      if (!observed.plan) throw new Error("fixture recovery proposal");
+      if (!observed.unknownUsageDigest) return observed;
+      const acknowledged = await buildRecoveryProposal({
+        repository: "o/r",
+        snapshot: f.snapshot,
+        historyComplete: true,
+        store: recoveryReadPort(store, "o", "r"),
+        requestId,
+        successorRunId,
+        unknownUsageAcknowledgementDigest: observed.unknownUsageDigest,
+      });
+      expect(acknowledged.status, JSON.stringify(acknowledged.blockers)).toBe("proposed");
+      if (!acknowledged.plan) throw new Error("fixture acknowledged recovery proposal");
+      return acknowledged;
+    };
+    const adopt = async (
+      proposal: Awaited<ReturnType<typeof buildRecoveryProposal>>,
+      predecessorRunId: string,
+    ) => {
+      if (!proposal.plan) throw new Error("fixture plan");
+      const successorRunId = proposal.plan.successorRunId;
+      const lease = { ...f.lease, runId: successorRunId };
+      const planRecord = await new RecoveryPlanManager(f.storage, f.leases).persist({
+        lease,
+        plan: proposal.plan,
+      });
+      const predecessorStart = f.snapshot.factoryEvents!.find(
+        (event) => event.event === "FactoryRunStarted" && event.runId === predecessorRunId,
+      );
+      if (predecessorStart?.event !== "FactoryRunStarted")
+        throw new Error("fixture predecessor start");
+      const request = append({
+        kind: "recovery",
+        event: "RecoveryRequested",
+        runId: predecessorRunId,
+        requestedBy: "operator",
+        requestId: planRecord.plan.requestId,
+        repository: "o/r",
+        planDigest: planRecord.digest,
+        predecessorRunId,
+        predecessorTerminalDigest: planRecord.plan.predecessor.terminalDigest,
+        successorRunId,
+        policyDigest: planRecord.plan.policyDigest,
+        baseSha: planRecord.plan.expectedBaseSha,
+      });
+      if (request.event !== "RecoveryRequested") throw new Error("fixture recovery request");
+      const claim = await new RecoveryClaimManager(f.storage, f.leases).claim({
+        lease,
+        planRecord,
+        authenticatedRequest: request,
+        transaction: {
+          at: new Date().toISOString(),
+          startSequence: Math.max(...observedEvents().map((event) => event.sequence)) + 1,
+          evidenceDigest: "1".repeat(64),
+          accountingDigest: "2".repeat(64),
+          resourceEvidenceDigest: "3".repeat(64),
+        },
+      });
+      f.snapshot.factoryEvents!.push(
+        ...recoveryAdoptionEvents({
+          planRecord,
+          claim,
+          authenticatedRequest: request,
+          predecessorStart,
+        }),
+      );
+      return { planRecord, claim };
+    };
+
+    const first = await acknowledgedProposal("first-request", "first-successor");
+    const firstAdoption = await adopt(first, "parallel");
+    const invocationId = `compile-${f.baseSha}`;
+    append({
+      kind: "budget",
+      event: "BudgetReserved",
+      runId: "first-successor",
+      phase: "management",
+      unit: "model_tokens",
+      amount: 0,
+      usageId: `invocation-${invocationId}`,
+      modelInvocationId: invocationId,
+      directorEpoch: 2,
+      policyDigest: firstAdoption.planRecord.plan.policyDigest,
+    });
+    append({
+      kind: "budget",
+      event: "BudgetReconciled",
+      runId: "first-successor",
+      phase: "management",
+      unit: "model_tokens",
+      amount: 30,
+      usageId: `compile-${"d".repeat(64)}`,
+      modelInvocationId: invocationId,
+      directorEpoch: 2,
+      policyDigest: firstAdoption.planRecord.plan.policyDigest,
+      reportedModelUsage: { inputTokens: 11, outputTokens: 19 },
+    });
+    append({
+      kind: "run",
+      event: "FactoryRunEscalated",
+      runId: "first-successor",
+      reason: "compiled graph rejected before projection",
+    });
+
+    const secondObserved = await buildRecoveryProposal({
+      repository: "o/r",
+      snapshot: f.snapshot,
+      historyComplete: true,
+      store: recoveryReadPort(store, "o", "r"),
+      requestId: "second-request",
+      successorRunId: "second-successor",
+    });
+    expect(secondObserved.unknownUsageDigest).not.toBe(first.unknownUsageDigest);
+    const second = await acknowledgedProposal("second-request", "second-successor");
+    const secondAdoption = await adopt(second, "first-successor");
+    const secondRuntime = await loadRecoveryRuntime({
+      objective: 7,
+      runId: "second-successor",
+      store: recoveryReadPort(store, "o", "r"),
+      readSnapshot: async () => ({ snapshot: f.snapshot, historyComplete: true }),
+    });
+    expect(secondRuntime, JSON.stringify(secondRuntime)).toMatchObject({
+      status: "graph-bootstrap",
+    });
+
+    const idMap = new Map(
+      f.graph.workItems.map((item, index) => [item.id, `adopted-${index + 8}`]),
+    );
+    const compiled: CompiledObjective = {
+      title: f.graph.title,
+      workItems: f.graph.workItems.map((item, index) => ({
+        ...item,
+        id: `adopted-${index + 8}`,
+        dependsOn: item.dependsOn.map((id) => idMap.get(id)!),
+      })),
+    };
+    const compile = vi.mocked(f.management.compile);
+    compile.mockImplementation(async (context, checkpoint) => {
+      expect(context.legacyGraphConstraints?.workItems).toHaveLength(compiled.workItems.length);
+      const result = {
+        objective: compiled,
+        usage: { inputTokens: 7, outputTokens: 8 },
+      };
+      await checkpoint(result);
+      return result;
+    });
+    const create = vi
+      .spyOn(GithubOctokitGraphWriter.prototype, "createWorkItemIssue")
+      .mockRejectedValue(new Error("recovery must not duplicate an issue"));
+    const edge = vi
+      .spyOn(GithubOctokitGraphWriter.prototype, "addBlockedBy")
+      .mockRejectedValue(new Error("recovery must not duplicate an edge"));
+    const update = vi
+      .spyOn(GithubOctokitGraphWriter.prototype, "updateWorkItemIssue")
+      .mockImplementation(async ({ issueId, body }) => {
+        f.snapshot.workItems.find((item) => item.id === issueId)!.body = body;
+      });
+    const controllerStop = new AbortController();
+    const comment = vi.mocked(GitHubControlStore.prototype.addIssueComment);
+    const recordComment = comment.getMockImplementation()!;
+    comment.mockImplementation(async (node, body) => {
+      await recordComment(node, body);
+      if (
+        decodeEventComments(body).some(
+          (event) => event.event === "GraphProjected" && event.runId === "second-successor",
+        )
+      )
+        controllerStop.abort();
+    });
+
+    const result = await f.run(
+      {
+        requestId: secondAdoption.planRecord.plan.requestId,
+        planDigest: secondAdoption.planRecord.digest,
+        successorRunId: "second-successor",
+      },
+      controllerStop.signal,
+    );
+    expect(result).toMatchObject({ status: "cancelled", runId: "second-successor" });
+    expect(compile).toHaveBeenCalledOnce();
+    expect(create).not.toHaveBeenCalled();
+    expect(edge).not.toHaveBeenCalled();
+    expect(update).toHaveBeenCalledTimes(compiled.workItems.length);
+    const all = observedEvents();
+    expect(
+      all.filter((event) => event.event === "GraphCompiled" && event.runId === "second-successor"),
+    ).toHaveLength(1);
+    expect(
+      all.filter((event) => event.event === "GraphProjected" && event.runId === "second-successor"),
+    ).toHaveLength(1);
+    expect(all.filter((event) => event.kind === "attempt")).toHaveLength(0);
+    expect(
+      all.filter(
+        (event) =>
+          event.kind === "budget" &&
+          event.event === "BudgetReconciled" &&
+          event.runId === "first-successor" &&
+          event.modelInvocationId === invocationId,
+      ),
+    ).toHaveLength(1);
+    expect(
+      all.filter(
+        (event) =>
+          event.kind === "budget" &&
+          event.event === "BudgetReconciled" &&
+          event.runId === "second-successor" &&
+          event.modelInvocationId === invocationId,
+      ),
+    ).toHaveLength(1);
+  }, 60_000);
   // The failure-and-recovery variant can execute two complete successor
   // generations plus real Git recovery proofs. Its 120-second watchdog only
   // gives coordinated coverage headroom; production limits are unchanged.

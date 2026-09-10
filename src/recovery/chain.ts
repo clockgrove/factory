@@ -3,10 +3,12 @@ import { createHash } from "node:crypto";
 import { deduplicateFactoryEvents } from "../control/receipts.js";
 import { type FactoryEvent, parseFactoryEvent } from "../protocol/events.js";
 import { type RunPolicy, policyDigest } from "../protocol/policy.js";
+import { unresolvedModelInvocations } from "../control/budget.js";
 import { assessRecoveryAccounting, type RecoveryAccountingAssessment } from "./accounting.js";
 import { recoveryClaimRef, recoveryEventDigest, recoverySourceEventsDigest } from "./identity.js";
 import {
   parseRecoveryPlan,
+  isRecoveryAdoptionGraph,
   recoveryGraphIdentity,
   recoveryHistoryDigest,
   recoveryPlanDigest,
@@ -63,6 +65,56 @@ const sameAllowance = (left: RecoveryAllowance, right: RecoveryAllowance) =>
   left.sandboxMinutes === right.sandboxMinutes &&
   left.managedSessions === right.managedSessions &&
   left.implementationAttemptsPerItem === right.implementationAttemptsPerItem;
+
+function continuesGraphAuthority(
+  previous: RecoveryPlan,
+  current: RecoveryPlan,
+  events: readonly FactoryEvent[],
+): boolean {
+  if (recoveryGraphIdentity(current.graph) === recoveryGraphIdentity(previous.graph)) return true;
+  if (!isRecoveryAdoptionGraph(previous.graph) || !isRecoveryAdoptionGraph(current.graph))
+    return false;
+  if (
+    previous.graph.sourceRunId !== previous.successorRunId ||
+    current.graph.sourceRunId !== current.successorRunId ||
+    previous.graph.objectiveInputDigest !== current.graph.objectiveInputDigest ||
+    previous.graph.constraintDigest !== current.graph.constraintDigest ||
+    previous.graph.projection.bindingDigest !== current.graph.projection.bindingDigest ||
+    JSON.stringify(previous.graph.constraints) !== JSON.stringify(current.graph.constraints)
+  )
+    return false;
+  const source = events.filter((event) => event.runId === previous.successorRunId);
+  if (unresolvedModelInvocations([...events], previous.successorRunId).length > 0) return false;
+  return source.every((event) => {
+    if (
+      ["attempt", "scheduling", "capacity", "validation", "publication", "graph"].includes(
+        event.kind,
+      )
+    )
+      return false;
+    if (event.kind === "budget")
+      return (
+        event.phase === "management" &&
+        event.unit === "model_tokens" &&
+        event.workItem === undefined &&
+        event.attempt === undefined
+      );
+    if (event.kind === "recovery")
+      return (
+        event.event === "RecoveryConsumed" ||
+        event.event === "RecoveryAdoptionCompleted" ||
+        (event.event === "RecoveryRequested" &&
+          event.requestId === current.requestId &&
+          event.planDigest === recoveryPlanDigest(current) &&
+          event.predecessorRunId === previous.successorRunId &&
+          event.predecessorTerminalDigest === current.predecessor.terminalDigest &&
+          event.successorRunId === current.successorRunId &&
+          event.policyDigest === current.policyDigest &&
+          event.baseSha === current.expectedBaseSha)
+      );
+    return true;
+  });
+}
 
 /** Acknowledgement identity includes the full source fence even when diagnostics are bounded. */
 export function recoveryUnknownUsageDigest(
@@ -295,10 +347,11 @@ export function verifyRecoveryChain(input: {
       if (previous)
         require(plan.predecessor.runId === previous.plan.successorRunId &&
           plan.baseBranch === previous.plan.baseBranch &&
-          recoveryGraphIdentity(plan.graph) ===
-            recoveryGraphIdentity(
-              previous.plan.graph,
-            ), "predecessor-chain-mismatch", "Successor recovery must continue the explicitly linked predecessor and unchanged Objective graph authority.");
+          continuesGraphAuthority(
+            previous.plan,
+            plan,
+            events,
+          ), "predecessor-chain-mismatch", "Successor recovery must continue the explicitly linked predecessor and unchanged Objective graph authority.");
       const request = requestFor(plan, digest, !current);
       if (!current) {
         const start = starts.get(plan.successorRunId);

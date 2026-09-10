@@ -1,13 +1,60 @@
 import type { FactoryReadSnapshot } from "../application/status.js";
+import { hasCurrentWriterAuthority } from "../control/receipts.js";
 import type { FactoryEvent } from "../protocol/events.js";
 import type { RecoveryReadStore } from "./assessment.js";
 import { loadRecoveryClaim } from "./claims.js";
 import { recoveryClaimRef, recoverySourceEventsDigest } from "./identity.js";
 import { loadRecoveryPlan, type RecoveryPlanRecord } from "./plan.js";
-import { loadRecoveryRuntime, type RecoveryRuntime } from "./runtime.js";
+import {
+  loadRecoveryRuntime,
+  type RecoveryGraphBootstrapRuntime,
+  type RecoveryRuntime,
+  type RecoveryRuntimeResult,
+} from "./runtime.js";
 
 function requireHistory(condition: unknown): asserts condition {
   if (!condition) throw new Error("historical recovery runtime binding unavailable");
+}
+
+export class HistoricalRecoveryRuntimeError extends Error {
+  constructor(
+    readonly blockerCode:
+      | "historical-runtime-authentication"
+      | "historical-graph-bootstrap-unsupported",
+    message: string,
+  ) {
+    super(message);
+    this.name = "HistoricalRecoveryRuntimeError";
+  }
+}
+
+type AuthenticatedHistoricalRuntime = RecoveryRuntime | RecoveryGraphBootstrapRuntime;
+
+async function authenticateHistoricalRuntime(
+  runtime: RecoveryRuntimeResult,
+  store: RecoveryReadStore,
+): Promise<AuthenticatedHistoricalRuntime> {
+  if (runtime.status === "blocked")
+    throw new HistoricalRecoveryRuntimeError(
+      "historical-runtime-authentication",
+      "A historical successor runtime failed plan, claim, adoption, or source-evidence authentication; re-observe its durable evidence.",
+    );
+  if (runtime.status !== "graph-bootstrap") return runtime;
+  const terminal = runtime.currentEvents.filter((event) =>
+    ["FactoryRunCompleted", "FactoryRunCancelled", "FactoryRunEscalated"].includes(event.event),
+  );
+  if (
+    terminal.length !== 1 ||
+    !hasCurrentWriterAuthority(terminal[0]!, runtime.events, runtime.objectiveAuthority) ||
+    runtime.currentUnknownModelUsageCount !== 0 ||
+    (await store.readRef(runtime.planRecord.plan.graph.ref)) !== null ||
+    (await store.readRef(runtime.planRecord.plan.graph.projection.ref)) !== null
+  )
+    throw new HistoricalRecoveryRuntimeError(
+      "historical-graph-bootstrap-unsupported",
+      "An authenticated historical graph-bootstrap generation is not safely recoverable: it requires one authoritative terminal, closed management usage, and absent graph and projection refs.",
+    );
+  return runtime;
 }
 
 /**
@@ -21,16 +68,18 @@ export async function loadHistoricalRecoveryRuntimes(input: {
   historyComplete: boolean;
   store: RecoveryReadStore;
   latestRunId: string;
-}): Promise<ReadonlyMap<string, RecoveryRuntime>> {
+}): Promise<ReadonlyMap<string, AuthenticatedHistoricalRuntime>> {
   requireHistory(input.historyComplete);
-  const latest = await loadRecoveryRuntime({
-    objective: input.snapshot.number,
-    runId: input.latestRunId,
-    store: input.store,
-    readSnapshot: async () => ({ snapshot: input.snapshot, historyComplete: true }),
-  });
-  requireHistory(latest.status === "verified");
-  const runtimes = new Map<string, RecoveryRuntime>([[input.latestRunId, latest]]);
+  const latest = await authenticateHistoricalRuntime(
+    await loadRecoveryRuntime({
+      objective: input.snapshot.number,
+      runId: input.latestRunId,
+      store: input.store,
+      readSnapshot: async () => ({ snapshot: input.snapshot, historyComplete: true }),
+    }),
+    input.store,
+  );
+  const runtimes = new Map<string, AuthenticatedHistoricalRuntime>([[input.latestRunId, latest]]);
   const records: RecoveryPlanRecord[] = [latest.planRecord];
   const seen = new Set([latest.planRecord.digest]);
   let next = latest.planRecord;
@@ -134,13 +183,16 @@ export async function loadHistoricalRecoveryRuntimes(input: {
         factoryEvents: prefix(item.factoryEvents ?? []),
       })),
     };
-    const runtime = await loadRecoveryRuntime({
-      objective: input.snapshot.number,
-      runId: record.plan.successorRunId,
+    const runtime = await authenticateHistoricalRuntime(
+      await loadRecoveryRuntime({
+        objective: input.snapshot.number,
+        runId: record.plan.successorRunId,
+        store,
+        readSnapshot: async () => ({ snapshot, historyComplete: true }),
+      }),
       store,
-      readSnapshot: async () => ({ snapshot, historyComplete: true }),
-    });
-    requireHistory(runtime.status === "verified" && runtime.planRecord.digest === record.digest);
+    );
+    requireHistory(runtime.planRecord.digest === record.digest);
     runtimes.set(record.plan.successorRunId, runtime);
   }
   return runtimes;

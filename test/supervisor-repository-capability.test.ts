@@ -1,5 +1,7 @@
-import { cp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -10,6 +12,7 @@ import { ContinuousExecutionPool } from "../src/scheduling/continuous-refill.js"
 import { TOOLCHAIN_AUTHORITY_ADAPTERS } from "../src/toolchains/authority.js";
 import {
   activeRuntimeBundleSync,
+  provisionToolchain,
   restoreToolchain,
   runtimeComponentPaths,
   toolchainStoreRoot,
@@ -17,6 +20,7 @@ import {
 import {
   canonicalJson,
   runtimeBundleDigest,
+  sha256Bytes,
   type RuntimeBundleReceipt,
 } from "../src/runtime/toolchain-bundle.js";
 import { providerSupervisorFixture } from "./helpers/provider-supervisor.js";
@@ -27,17 +31,56 @@ afterEach(async () => {
   for (const fixture of fixtures.splice(0)) await fixture.dispose();
 });
 
-function admitLocalValidation() {
+function admitLocalValidation(version = "10.34.5") {
   return vi
     .spyOn(localScopeRuntime, "runScopedLocalProcess")
     .mockImplementation(async (_identity, command) => ({
       exitCode: 0,
       signal: null,
-      stdout: command.args?.[0] === "--version" ? "10.34.5\n" : "",
+      stdout: command.args?.[0] === "--version" ? `${version}\n` : "",
       stderr: "",
       durationMs: 1,
       timedOut: false,
     }));
+}
+
+async function provisionBunFixture(): Promise<void> {
+  const assets = await mkdtemp(join(tmpdir(), "factory-bun-supervisor-assets-"));
+  const tree = join(assets, "tree");
+  await mkdir(join(tree, "bun-linux-x64-baseline"), { recursive: true });
+  await writeFile(join(tree, "bun-linux-x64-baseline/bun"), "fixture bun");
+  const archive = join(assets, "bun.zip");
+  execFileSync("python3", ["-m", "zipfile", "-c", archive, "bun-linux-x64-baseline"], {
+    cwd: tree,
+  });
+  const bytes = await readFile(archive);
+  await provisionToolchain("bun", {
+    source: {
+      listReleases: async () => [
+        {
+          id: 293,
+          tag: "bun-v1.3.10",
+          draft: false,
+          prerelease: false,
+          publishedAt: "2026-09-10T00:00:00.000Z",
+          assets: [
+            {
+              id: 2930,
+              name: "bun-linux-x64-baseline.zip",
+              url: "https://api.github.test/assets/2930",
+              browserDownloadUrl:
+                "https://github.com/oven-sh/bun/releases/download/bun-v1.3.10/bun-linux-x64-baseline.zip",
+              size: bytes.byteLength,
+              digest: `sha256:${sha256Bytes(bytes)}`,
+            },
+          ],
+        },
+      ],
+      downloadAsset: async () => bytes,
+    },
+    run: (async () => ({ stdout: "1.3.10\n", stderr: "" })) as never,
+  });
+  await rm(assets, { recursive: true, force: true });
 }
 
 async function installAlternativePnpmReceipt(
@@ -61,6 +104,41 @@ async function installAlternativePnpmReceipt(
 }
 
 describe("Supervisor repository-capability admission", () => {
+  it("runs a Bun provider through integration before its exact-base consumer", async () => {
+    await provisionBunFixture();
+    const fixture = await providerSupervisorFixture("daytona-burst", {
+      localOnly: true,
+      localMaxParallel: 2,
+      capabilityAdmission: "valid",
+      capabilityAdapter: "bun",
+    });
+    fixtures.push(fixture);
+    const scoped = admitLocalValidation("1.3.10");
+    try {
+      const result = await fixture.run();
+      expect(result, result.reason).toMatchObject({ status: "completed" });
+      const providerIntegrated = fixture
+        .events()
+        .find(
+          (event) =>
+            event.kind === "attempt" && event.event === "AttemptIntegrated" && event.workItem === 8,
+        );
+      const consumerReserved = fixture
+        .events()
+        .find(
+          (event) =>
+            event.kind === "attempt" && event.event === "AttemptReserved" && event.workItem === 9,
+        );
+      expect(providerIntegrated).toBeDefined();
+      expect(consumerReserved).toBeDefined();
+      expect(consumerReserved!.sequence).toBeGreaterThan(providerIntegrated!.sequence);
+      expect(fixture.events().filter((event) => event.event === "GraphCompiled")).toHaveLength(1);
+      expect(scoped).toHaveBeenCalled();
+    } finally {
+      scoped.mockRestore();
+    }
+  }, 30_000);
+
   it("grounds a descendant on the exact integrated provider before reserving or invoking it", async () => {
     const fixture = await providerSupervisorFixture("daytona-burst", {
       localOnly: true,

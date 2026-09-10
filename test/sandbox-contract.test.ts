@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { access, chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -9,9 +10,12 @@ import {
   SANDBOX_CODEX_PACKAGE,
   parseIsolatedValidationResult,
   sandboxBootstrapFiles,
+  sandboxManagedToolchainFiles,
   sandboxResourceName,
   sandboxValidationFiles,
 } from "../src/backends/sandbox-common.js";
+import type { ManagedToolchainPlan } from "../src/runtime/toolchain-bundle.js";
+import { sha256Tree } from "../src/runtime/toolchain-bundle.js";
 import { normalizeArtifact } from "../src/execution/artifacts.js";
 import type { AttemptContext, IsolatedValidationContext } from "../src/execution/backend.js";
 import { assertIsolatedValidationMatchesPlan } from "../src/validation/clean-run.js";
@@ -273,6 +277,77 @@ describe("sandbox bootstrap contracts", () => {
     expect(rendered).toContain('"COREPACK_ENABLE_NETWORK":"0"');
     expect(rendered).toContain('"npm_config_verify_store_integrity":"true"');
     expect(rendered).toContain("spawnSync(executable.path, args");
+    expect(rendered).toContain("managed runtime tree digest mismatch");
     expect(rendered).not.toContain('spawnSync("pnpm"');
+  });
+
+  it("materializes a verified Bun ZIP without an ambient unzip executable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "factory-bun-materializer-"));
+    const runtimeRoot = "/tmp/factory-toolchain";
+    try {
+      await rm(runtimeRoot, { recursive: true, force: true });
+      const fixture = join(root, "fixture");
+      const executableRelative = "bun-linux-x64-baseline/bun";
+      const executable = Buffer.from("#!/bin/sh\nprintf '1.4.2\\n'\n", "utf8");
+      await mkdir(dirname(join(fixture, executableRelative)), { recursive: true });
+      await writeFile(join(fixture, executableRelative), executable);
+      const archivePath = join(root, "bun.zip");
+      execFileSync("python3", ["-m", "zipfile", "-c", archivePath, "bun-linux-x64-baseline"], {
+        cwd: fixture,
+      });
+      const archive = await readFile(archivePath);
+      const sha256 = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+      const plan: ManagedToolchainPlan = {
+        tool: "bun",
+        bundleDigest: "a".repeat(64),
+        assets: [
+          {
+            id: "bun",
+            path: "toolchains/bun.asset",
+            content: archive,
+            sha256: sha256(archive),
+            archive: "zip",
+            executablePath: executableRelative,
+            executableSha256: sha256(executable),
+            treeSha256: await sha256Tree(fixture),
+          },
+        ],
+        executables: [
+          {
+            id: "bun",
+            assetId: "bun",
+            kind: "native",
+            relativePath: executableRelative,
+            argsPrefix: [],
+          },
+        ],
+        setup: [],
+        validation: [],
+        environment: { PATH: "/usr/bin:/bin" },
+      };
+      for (const file of sandboxManagedToolchainFiles(plan)) {
+        const path = join(root, file.path);
+        await mkdir(dirname(path), { recursive: true });
+        await writeFile(path, file.content, { mode: file.mode ?? 0o600 });
+      }
+      const output = join(root, "materialized.json");
+      execFileSync(
+        process.execPath,
+        [
+          join(root, "factory/materialize-toolchain.mjs"),
+          join(root, "factory/managed-toolchain.json"),
+          output,
+        ],
+        { env: { PATH: "/factory-test-no-ambient-tools" } },
+      );
+      const materialized = JSON.parse(await readFile(output, "utf8")) as {
+        executables: { bun: { path: string } };
+      };
+      await expect(access(materialized.executables.bun.path)).resolves.toBeUndefined();
+      expect(await readFile(materialized.executables.bun.path)).toEqual(executable);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+      await rm(runtimeRoot, { recursive: true, force: true });
+    }
   });
 });

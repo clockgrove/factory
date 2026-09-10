@@ -164,7 +164,7 @@ const DEFAULT_CREATE_VISIBILITY_DELAY_MS = 500;
 const MAX_CREATE_VISIBILITY_WINDOW_MS = 30_000;
 const MAX_SECRET_LIST_PAGES = 100;
 const DAYTONA_BASE_TOOLS = ["git", "node", "npm", "npx", "bash", "sh", "grep"];
-const DAYTONA_MANAGED_TOOLS: readonly ManagedToolchain[] = ["pnpm"];
+const DAYTONA_MANAGED_TOOLS: readonly ManagedToolchain[] = ["pnpm", "bun"];
 
 /** Official Node multi-platform image index pinned by digest for reproducible
  * supported Daytona execution. Tags are deliberately not accepted. */

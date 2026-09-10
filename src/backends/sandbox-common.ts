@@ -125,7 +125,8 @@ export function sandboxManagedToolchainFiles(plan: ManagedToolchainPlan): Sandbo
 const MANAGED_TOOLCHAIN_MATERIALIZER = String.raw`import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, copyFileSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
+import { inflateRawSync } from "node:zlib";
 
 const configPath = resolve(process.argv[2]);
 const outputPath = resolve(process.argv[3]);
@@ -141,6 +142,33 @@ const safeChild = (root, relative) => {
   return target;
 };
 const digest = path => createHash("sha256").update(readFileSync(path)).digest("hex");
+const canonical = value => Array.isArray(value)
+  ? "[" + value.map(canonical).join(",") + "]"
+  : value !== null && typeof value === "object"
+    ? "{" + Object.keys(value).filter(key => value[key] !== undefined).sort().map(key => JSON.stringify(key) + ":" + canonical(value[key])).join(",") + "}"
+    : JSON.stringify(value);
+const treeDigest = root => {
+  const absoluteRoot = resolve(root);
+  const entries = [];
+  const visit = directory => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      const stat = lstatSync(path);
+      const name = relative(absoluteRoot, path).split(sep).join("/");
+      if (stat.isSymbolicLink()) {
+        const link = readlinkSync(path);
+        const target = resolve(directory, link);
+        if (link.startsWith("/") || (target !== absoluteRoot && !target.startsWith(absoluteRoot + "/"))) throw new Error("managed runtime tree contains an escaping symbolic link");
+        entries.push({ path: name, link });
+      } else if (stat.isDirectory()) visit(path);
+      else if (stat.isFile()) entries.push({ path: name, sha256: digest(path) });
+      else throw new Error("managed runtime tree contains an unsupported entry");
+    }
+  };
+  visit(absoluteRoot);
+  entries.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+  return createHash("sha256").update(Buffer.from(canonical(entries), "utf8")).digest("hex");
+};
 const validateListing = (listing, executablePath) => {
   const entries = listing.split(/\r?\n/).filter(Boolean);
   if (entries.length === 0 || entries.length > 100000) throw new Error("managed runtime archive has an invalid entry count");
@@ -149,6 +177,82 @@ const validateListing = (listing, executablePath) => {
     if (normalized && !safeRelative(normalized)) throw new Error("managed runtime archive contains an unsafe path");
   }
   if (!entries.some(entry => entry.replace(/\/$/, "") === executablePath)) throw new Error("managed runtime archive lacks its declared executable");
+};
+const zipCrc32 = bytes => {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+};
+const zipEntries = archive => {
+  let eocd = -1;
+  const minimum = Math.max(0, archive.length - 65557);
+  for (let offset = archive.length - 22; offset >= minimum; offset -= 1) {
+    if (archive.readUInt32LE(offset) === 0x06054b50 && offset + 22 + archive.readUInt16LE(offset + 20) === archive.length) { eocd = offset; break; }
+  }
+  if (eocd < 0) throw new Error("ZIP archive lacks a valid central directory");
+  const count = archive.readUInt16LE(eocd + 10);
+  const centralSize = archive.readUInt32LE(eocd + 12);
+  const centralOffset = archive.readUInt32LE(eocd + 16);
+  if (archive.readUInt16LE(eocd + 4) !== 0 || archive.readUInt16LE(eocd + 6) !== 0 || archive.readUInt16LE(eocd + 8) !== count) throw new Error("multi-disk ZIP archives are unsupported");
+  if (count === 0 || count === 0xffff || count > 100000 || centralOffset + centralSize > eocd) throw new Error("ZIP archive central directory is invalid");
+  const entries = [];
+  let offset = centralOffset;
+  let total = 0;
+  for (let index = 0; index < count; index += 1) {
+    if (offset + 46 > archive.length || archive.readUInt32LE(offset) !== 0x02014b50) throw new Error("ZIP central directory is malformed");
+    const madeBy = archive.readUInt16LE(offset + 4);
+    const flags = archive.readUInt16LE(offset + 8);
+    const compression = archive.readUInt16LE(offset + 10);
+    const crc32 = archive.readUInt32LE(offset + 16);
+    const compressedSize = archive.readUInt32LE(offset + 20);
+    const uncompressedSize = archive.readUInt32LE(offset + 24);
+    const nameLength = archive.readUInt16LE(offset + 28);
+    const extraLength = archive.readUInt16LE(offset + 30);
+    const commentLength = archive.readUInt16LE(offset + 32);
+    const external = archive.readUInt32LE(offset + 38);
+    const localOffset = archive.readUInt32LE(offset + 42);
+    const end = offset + 46 + nameLength + extraLength + commentLength;
+    if (end > archive.length || (flags & 1) !== 0 || compressedSize === 0xffffffff || uncompressedSize === 0xffffffff || localOffset === 0xffffffff || (compression !== 0 && compression !== 8)) throw new Error("ZIP entry metadata is unsupported");
+    const rawName = archive.subarray(offset + 46, offset + 46 + nameLength).toString("utf8");
+    const name = rawName.endsWith("/") ? rawName.slice(0, -1) : rawName;
+    if (!safeRelative(name) || name.includes("\0")) throw new Error("ZIP archive contains an unsafe path");
+    const unixType = (external >>> 16) & 0o170000;
+    const directory = rawName.endsWith("/") || (external & 0x10) !== 0 || unixType === 0o040000;
+    if ((madeBy >>> 8) === 3 && unixType !== 0 && unixType !== 0o040000 && unixType !== 0o100000) throw new Error("ZIP archive contains a symbolic link or special file");
+    total += uncompressedSize;
+    if (total > 512 * 1024 * 1024) throw new Error("ZIP archive expands beyond the supported bound");
+    entries.push({ name, flags, compression, crc32, compressedSize, uncompressedSize, localOffset, directory });
+    offset = end;
+  }
+  if (offset !== centralOffset + centralSize) throw new Error("ZIP central directory size is inconsistent");
+  return entries;
+};
+const extractZip = (archivePath, target, executablePath) => {
+  const archive = readFileSync(archivePath);
+  const entries = zipEntries(archive);
+  if (!entries.some(entry => !entry.directory && entry.name === executablePath)) throw new Error("managed runtime archive lacks its declared executable");
+  for (const entry of entries) {
+    const destination = safeChild(target, entry.name);
+    if (entry.directory) { mkdirSync(destination, { recursive: true, mode: 0o700 }); continue; }
+    const offset = entry.localOffset;
+    if (offset + 30 > archive.length || archive.readUInt32LE(offset) !== 0x04034b50) throw new Error("ZIP local header is malformed");
+    const flags = archive.readUInt16LE(offset + 6);
+    const compression = archive.readUInt16LE(offset + 8);
+    const nameLength = archive.readUInt16LE(offset + 26);
+    const extraLength = archive.readUInt16LE(offset + 28);
+    const dataOffset = offset + 30 + nameLength + extraLength;
+    const dataEnd = dataOffset + entry.compressedSize;
+    const localName = archive.subarray(offset + 30, offset + 30 + nameLength).toString("utf8").replace(/\/$/, "");
+    if (dataEnd > archive.length || flags !== entry.flags || compression !== entry.compression || localName !== entry.name) throw new Error("ZIP local metadata is inconsistent");
+    const compressed = archive.subarray(dataOffset, dataEnd);
+    const bytes = compression === 0 ? Buffer.from(compressed) : inflateRawSync(compressed, { maxOutputLength: entry.uncompressedSize });
+    if (bytes.length !== entry.uncompressedSize || zipCrc32(bytes) !== entry.crc32) throw new Error("ZIP entry failed size or CRC verification");
+    mkdirSync(dirname(destination), { recursive: true, mode: 0o700 });
+    writeFileSync(destination, bytes, { mode: 0o600, flag: "wx" });
+  }
 };
 const assertRegularTree = root => {
   const visit = directory => {
@@ -170,7 +274,7 @@ mkdirSync(runtimeRoot, { recursive: true, mode: 0o700 });
 mkdirSync(binRoot, { recursive: true, mode: 0o700 });
 const assetExecutables = new Map();
 for (const asset of config.assets) {
-  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(asset.id) || !safeRelative(asset.path) || !safeRelative(asset.executablePath)) throw new Error("managed runtime asset metadata is invalid");
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(asset.id) || !safeRelative(asset.path) || !safeRelative(asset.executablePath) || !/^[a-f0-9]{64}$/.test(asset.treeSha256)) throw new Error("managed runtime asset metadata is invalid");
   const archive = safeChild(factoryRoot, asset.path);
   if (digest(archive) !== asset.sha256) throw new Error("managed runtime archive digest mismatch");
   const target = safeChild(runtimeRoot, asset.id);
@@ -184,14 +288,13 @@ for (const asset of config.assets) {
     validateListing(listing, asset.executablePath);
     execFileSync("tar", ["-x" + compression + "f", archive, "-C", target, "--no-same-owner", "--no-same-permissions", ...(asset.executableOnly ? [asset.executablePath] : [])], { maxBuffer: 1024 * 1024 });
   } else if (asset.archive === "zip") {
-    const listing = execFileSync("unzip", ["-Z1", archive], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
-    validateListing(listing, asset.executablePath);
-    execFileSync("unzip", ["-q", archive, "-d", target], { maxBuffer: 1024 * 1024 });
+    extractZip(archive, target, asset.executablePath);
   } else throw new Error("managed runtime archive format is unsupported");
   assertRegularTree(target);
   const executable = safeChild(target, asset.executablePath);
   if (!statSync(executable).isFile() || digest(executable) !== asset.executableSha256) throw new Error("managed runtime executable digest mismatch");
   chmodSync(executable, 0o700);
+  if (treeDigest(target) !== asset.treeSha256) throw new Error("managed runtime tree digest mismatch");
   assetExecutables.set(asset.id, executable);
 }
 

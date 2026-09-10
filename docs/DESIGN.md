@@ -550,25 +550,44 @@ than reserializing it. Issue-only inspection reconstructs every raw Worker Packe
 validation, and foreground completion reapplies a reservation's exact activation to the execution
 view before comparing its invocation digest.
 
-The first concrete future-capable adapter is `node-pnpm`. It applies independently of unrelated
-repository recipes only when both root `package.json` and `pnpm-lock.yaml` are absent. One
-dependency-root Work Item owns both and names one finite pnpm script; a partially present authority
-surface is not bootstrap authority. The root artifact must promise every descendant operation. It
-pins pnpm 10.34.5 and exact dependencies; workspace links remain within enumerated in-scope
-direct-child packages; registry lock entries carry SHA-512 integrity; URL, git, tarball, patch,
-escaping local sources, lifecycle hooks, and package-manager overrides are rejected; and selected
-leaf/Turbo closures use a finite check-only grammar. Factory supplies checksum-pinned Node/pnpm bytes,
-performs one frozen hook-free setup from the declared `registry.npmjs.org`, and records version,
-setup, and validation commands in order. Isolated validation uploads, verifies, and directly executes
-the same receipt-bound Node/pnpm bundle. Unmanaged isolated validation stops after its first failure,
-recording only the successful prefix and that failure; complete success still executes the full plan.
-npm, bun, uv, Cargo, Go, and Python have no future-authority
-adapter in this release; their existing recipes remain usable, while absent recipes fail before
-execution rather than falling back to ambient tools. If a selected pnpm bundle is missing or corrupt,
-recovery fails readiness closed. `AttemptReserved` retains the complete receipt and upstream origin
-identity, so an operator can run `factory toolchains restore RECEIPT.json` to reacquire and verify the
-historical pnpm and Node assets without resolving latest or moving the active pointer. Recovery then
-reuses the same receipt and graph; it does not recompile or silently select a newer active bundle.
+The first concrete future-capable adapters are `node-pnpm` and `javascript-bun`.
+They apply independently of unrelated repository recipes only when their complete root authority is
+absent; a partially present authority surface is never bootstrap authority. One dependency-root Work
+Item owns the authority and promises every descendant finite operation. At explicit
+`factory toolchains provision` time, Factory resolves the latest stable upstream releases, records
+their official immutable identities and digests, and retains older bundles.
+
+`node-pnpm` pins the selected pnpm version and exact dependencies; workspace links remain within
+enumerated in-scope direct-child packages; registry lock entries carry SHA-512 integrity; and URL,
+git, tarball, patch, escaping local sources, lifecycle hooks, and package-manager overrides are
+rejected. Selected leaf/Turbo closures use a finite check-only grammar. Its runtime bundle contains
+both the official Node executable and pnpm standalone program.
+
+`javascript-bun` pins `packageManager: bun@<exact version>`, `bun.lock`, exact registry dependencies,
+and direct-child workspace manifests. It rejects alternate configuration, trusted dependencies,
+lifecycle companions, exotic sources and arbitrary Bun commands. Factory provisions the baseline
+Linux x64 Bun ZIP and extracts it with a bounded in-process parser, so `unzip` and ambient Bun are not
+host requirements. Only finite `bun run <validation-script>` operations are admitted.
+
+Every adapter performs one frozen hook-free setup from its declared registry destinations and records
+version, setup and validation commands in order. Isolated validation uploads, verifies and directly
+executes the same receipt-bound components. npm, uv, Cargo, Go, ambient Python, and uncatalogued runners
+have no future-authority adapter; existing observed recipes remain usable, while absent recipes fail
+before execution. If a selected bundle is missing or corrupt, recovery fails readiness closed.
+`AttemptReserved` retains the complete receipt and upstream origin identity, so an operator can run
+`factory toolchains restore RECEIPT.json` to reacquire every historical component without resolving
+latest or moving the active pointer. Recovery reuses the same receipt and graph; it does not
+recompile or silently select a newer active bundle. Extracted-tree identity hashes canonical
+code-unit-ordered relative paths, file bytes, and bounded in-tree symlink targets. Ambient umask modes
+are excluded; each declared executable is separately digest-checked and normalized to executable
+permissions before the complete tree is accepted.
+
+For an integrated-base consumer, that historical receipt comes from the provider generation's
+authenticated `AttemptReserved` event and integration lineage, never from the mutable active
+selection. Historical graphs that omit the abstract top-level runtime retain their exact stored
+identity and receive only an in-memory compatibility view; fresh persistence remains strict.
+Unmanaged isolated validation stops after its first failure, recording only the successful prefix
+and that failure, while complete success still executes the full plan.
 
 Execution-affecting artifacts retain two separate gates. Package manifests, lockfiles, registry
 configuration, workflows, and actions may never auto-integrate: immediately before merge Factory

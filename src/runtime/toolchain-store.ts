@@ -35,6 +35,7 @@ import {
   sha256TreeSync,
   SUPPORTED_RUNTIME_PLATFORM,
 } from "./toolchain-bundle.js";
+import { extractZipArchive } from "./zip-archive.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_ASSET_BYTES = 512 * 1024 * 1024;
@@ -119,6 +120,16 @@ const RELEASE_SPECS: Record<ManagedToolchain, ReleaseSpec> = {
     versionArgs: ["--version"],
     versionOutput: (version) => version,
   },
+  bun: {
+    owner: "oven-sh",
+    repository: "bun",
+    assetName: "bun-linux-x64-baseline.zip",
+    archive: "zip",
+    executablePath: "bun-linux-x64-baseline/bun",
+    version: (tag) => /^bun-v(\d+\.\d+\.\d+)$/.exec(tag)?.[1] ?? null,
+    versionArgs: ["--version"],
+    versionOutput: (version) => version,
+  },
 };
 
 export function toolchainStoreRoot(env: NodeJS.ProcessEnv = process.env): string {
@@ -151,20 +162,26 @@ function selectLatestGa(
   version: string;
 } {
   const spec = RELEASE_SPECS[tool];
-  for (const release of releases) {
+  const candidates = releases.flatMap((release) => {
     const version = !release.draft && !release.prerelease ? spec.version(release.tag) : null;
-    if (!version) continue;
-    const assets = release.assets.filter(({ name }) => name === spec.assetName);
-    if (assets.length !== 1)
-      throw new Error(`${tool} GA ${release.tag} does not have one ${spec.assetName} asset`);
-    const asset = assets[0]!;
-    if (!/^sha256:[a-f0-9]{64}$/.test(asset.digest))
-      throw new Error(`${tool} GA ${release.tag} lacks an official SHA-256 asset digest`);
-    if (asset.size <= 0 || asset.size > MAX_ASSET_BYTES)
-      throw new Error(`${tool} GA ${release.tag} asset size is outside the supported bound`);
-    return { release, asset, version };
-  }
-  throw new Error(`${tool} has no supported stable GA release`);
+    return version ? [{ release, version }] : [];
+  });
+  candidates.sort(
+    (left, right) =>
+      compareVersions(right.version, left.version) ||
+      Date.parse(right.release.publishedAt) - Date.parse(left.release.publishedAt),
+  );
+  const selected = candidates[0];
+  if (!selected) throw new Error(`${tool} has no supported stable GA release`);
+  const assets = selected.release.assets.filter(({ name }) => name === spec.assetName);
+  if (assets.length !== 1)
+    throw new Error(`${tool} GA ${selected.release.tag} does not have one ${spec.assetName} asset`);
+  const asset = assets[0]!;
+  if (!/^sha256:[a-f0-9]{64}$/.test(asset.digest))
+    throw new Error(`${tool} GA ${selected.release.tag} lacks an official SHA-256 asset digest`);
+  if (asset.size <= 0 || asset.size > MAX_ASSET_BYTES)
+    throw new Error(`${tool} GA ${selected.release.tag} asset size is outside the supported bound`);
+  return { ...selected, asset };
 }
 
 function validateArchiveListing(listing: string, executablePath: string): void {
@@ -217,21 +234,46 @@ async function extractAsset(
       },
     );
   } else {
-    const listed = await run("unzip", ["-Z1", archivePath], {
-      encoding: "utf8",
-      maxBuffer: 16 * 1024 * 1024,
-      timeout: 30_000,
-    });
-    validateArchiveListing(listed.stdout, executablePath);
-    await run("unzip", ["-q", archivePath, "-d", target], {
-      maxBuffer: 1024 * 1024,
-      timeout: 120_000,
-    });
+    extractZipArchive(await readFile(archivePath), target, executablePath);
   }
   const executable = safeStoreChild(target, ...executablePath.split("/"));
   const executableStat = await stat(executable);
   if (!executableStat.isFile()) throw new Error("managed runtime executable is not a regular file");
   await chmod(executable, 0o700);
+}
+
+function assertGithubReleaseSelection(
+  tool: ManagedToolchain,
+  selected: ReturnType<typeof selectLatestGa>,
+): void {
+  const spec = RELEASE_SPECS[tool];
+  const expectedUrl = `https://github.com/${spec.owner}/${spec.repository}/releases/download/${selected.release.tag}/${spec.assetName}`;
+  if (
+    !Number.isSafeInteger(selected.release.id) ||
+    selected.release.id <= 0 ||
+    !Number.isSafeInteger(selected.asset.id) ||
+    selected.asset.id <= 0 ||
+    spec.version(selected.release.tag) !== selected.version ||
+    selected.asset.name !== spec.assetName ||
+    selected.asset.browserDownloadUrl !== expectedUrl
+  )
+    throw new Error(`${tool} GA has an unsupported official origin identity`);
+}
+
+function assertNodeDistributionIdentity(identity: NodeDistributionIdentity): void {
+  if (
+    !/^\d+\.\d+\.\d+$/.test(identity.version) ||
+    identity.tag !== `v${identity.version}` ||
+    !/^[a-f0-9]{64}$/.test(identity.sha256) ||
+    identity.name.includes("/") ||
+    identity.url !== `https://nodejs.org/dist/${identity.tag}/${identity.name}` ||
+    (identity.archive !== "raw" && identity.archive !== "tar.xz") ||
+    (identity.archive === "raw" && identity.executablePath !== "node") ||
+    (identity.archive === "tar.xz" &&
+      (identity.name !== `node-${identity.tag}-linux-x64.tar.xz` ||
+        identity.executablePath !== `node-${identity.tag}-linux-x64/bin/node`))
+  )
+    throw new Error("official Node distribution identity is invalid");
 }
 
 async function createGithubComponent(
@@ -246,6 +288,7 @@ async function createGithubComponent(
     const releases = await options.source.listReleases(spec.owner, spec.repository);
     resolved = selectLatestGa(tool, releases);
   }
+  assertGithubReleaseSelection(tool, resolved);
   const bytes = await options.source.downloadAsset(spec.owner, spec.repository, resolved.asset.id);
   if (bytes.byteLength !== resolved.asset.size)
     throw new Error(`${tool} asset size changed during download`);
@@ -304,14 +347,7 @@ async function createNodeComponent(
   options: ToolchainProvisionOptions,
   staging: string,
 ): Promise<RuntimeComponentReceipt> {
-  if (
-    !/^\d+\.\d+\.\d+$/.test(identity.version) ||
-    identity.tag !== `v${identity.version}` ||
-    !/^[a-f0-9]{64}$/.test(identity.sha256) ||
-    !identity.url.startsWith(`https://nodejs.org/dist/${identity.tag}/`) ||
-    !safeRelativePath(identity.executablePath)
-  )
-    throw new Error("official Node distribution identity is invalid");
+  assertNodeDistributionIdentity(identity);
   if (!options.source.downloadNodeDistribution)
     throw new Error("pnpm provisioning source cannot download the official Node distribution");
   const bytes = await options.source.downloadNodeDistribution(identity);
@@ -366,6 +402,16 @@ async function createNodeComponent(
   };
 }
 
+function compareVersions(left: string, right: string): number {
+  const l = left.split(".").map(Number);
+  const r = right.split(".").map(Number);
+  for (let index = 0; index < 3; index += 1) {
+    const difference = (l[index] ?? 0) - (r[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
+}
+
 async function atomicWrite(path: string, content: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
@@ -413,8 +459,9 @@ export async function provisionToolchain(
     tool,
     await options.source.listReleases(spec.owner, spec.repository),
   );
-  const selectedNode = await options.source.resolveLatestNodeDistribution?.();
-  if (!selectedNode)
+  const selectedNode =
+    tool === "pnpm" ? await options.source.resolveLatestNodeDistribution?.() : undefined;
+  if (tool === "pnpm" && !selectedNode)
     throw new Error("pnpm provisioning source cannot resolve the latest official Node GA");
   try {
     const current = await activeRuntimeBundle(tool, root);
@@ -424,9 +471,10 @@ export async function provisionToolchain(
       component?.release.releaseId === String(selected.release.id) &&
       component.asset.assetId === String(selected.asset.id) &&
       component.asset.sha256 === selected.asset.digest.slice("sha256:".length) &&
-      node?.version === selectedNode.version &&
-      node.asset.url === selectedNode.url &&
-      node.asset.sha256 === selectedNode.sha256
+      (tool !== "pnpm" ||
+        (node?.version === selectedNode!.version &&
+          node.asset.url === selectedNode!.url &&
+          node.asset.sha256 === selectedNode!.sha256))
     )
       return current;
   } catch {
@@ -435,11 +483,14 @@ export async function provisionToolchain(
   const staging = await mkdtemp(join(root, ".provision-"));
   try {
     const primary = await createGithubComponent(tool, options, staging, selected);
-    const components = [await createNodeComponent(selectedNode, options, staging), primary];
+    const components =
+      tool === "pnpm"
+        ? [await createNodeComponent(selectedNode!, options, staging), primary]
+        : [primary];
     const unsigned: Omit<RuntimeBundleReceipt, "digest"> = {
       protocol: "clockgrove.factory/toolchain-runtime-bundle-v1",
       tool,
-      adapter: "node-pnpm",
+      adapter: tool === "pnpm" ? "node-pnpm" : "javascript-bun",
       adapterContract: 1,
       platform: SUPPORTED_RUNTIME_PLATFORM,
       components,
@@ -502,37 +553,85 @@ function exactPnpmRestoreIdentity(receipt: RuntimeBundleReceipt): {
     node.executableOnly !== true
   )
     throw new Error("pnpm runtime receipt has an unsupported Node origin identity");
-  return {
-    node: {
-      version: node.version,
-      tag: node.release.tag,
-      publishedAt: node.release.publishedAt,
-      name: node.asset.name,
-      url: node.asset.url,
-      sha256: node.asset.sha256,
-      archive: node.asset.archive,
-      executablePath: node.executablePath,
+  const nodeIdentity: NodeDistributionIdentity = {
+    version: node.version,
+    tag: node.release.tag,
+    publishedAt: node.release.publishedAt,
+    name: node.asset.name,
+    url: node.asset.url,
+    sha256: node.asset.sha256,
+    archive: node.asset.archive,
+    executablePath: node.executablePath,
+  };
+  const selected: ReturnType<typeof selectLatestGa> = {
+    version: pnpm.version,
+    release: {
+      id: releaseId,
+      tag: pnpm.release.tag,
+      draft: false,
+      prerelease: false,
+      publishedAt: pnpm.release.publishedAt,
+      assets: [],
     },
-    selected: {
-      version: pnpm.version,
-      release: {
-        id: releaseId,
-        tag: pnpm.release.tag,
-        draft: false,
-        prerelease: false,
-        publishedAt: pnpm.release.publishedAt,
-        assets: [],
-      },
-      asset: {
-        id: assetId,
-        name: pnpm.asset.name,
-        url: pnpm.asset.url,
-        browserDownloadUrl: pnpm.asset.url,
-        size: pnpm.asset.size,
-        digest: `sha256:${pnpm.asset.sha256}`,
-      },
+    asset: {
+      id: assetId,
+      name: pnpm.asset.name,
+      url: pnpm.asset.url,
+      browserDownloadUrl: pnpm.asset.url,
+      size: pnpm.asset.size,
+      digest: `sha256:${pnpm.asset.sha256}`,
     },
   };
+  assertNodeDistributionIdentity(nodeIdentity);
+  assertGithubReleaseSelection("pnpm", selected);
+  return { node: nodeIdentity, selected };
+}
+
+function exactGithubRestoreIdentity(
+  tool: "bun",
+  component: RuntimeComponentReceipt,
+): ReturnType<typeof selectLatestGa> {
+  const spec = RELEASE_SPECS[tool];
+  const releaseId = Number(component.release.releaseId);
+  const assetId = Number(component.asset.assetId);
+  if (
+    component.id !== tool ||
+    component.release.provider !== "github" ||
+    component.release.repository !== `${spec.owner}/${spec.repository}` ||
+    spec.version(component.release.tag) !== component.version ||
+    !Number.isSafeInteger(releaseId) ||
+    releaseId <= 0 ||
+    !Number.isSafeInteger(assetId) ||
+    assetId <= 0 ||
+    component.asset.name !== spec.assetName ||
+    component.asset.archive !== spec.archive ||
+    component.executablePath !== spec.executablePath ||
+    component.executableOnly !== undefined ||
+    component.asset.url !==
+      `https://github.com/${spec.owner}/${spec.repository}/releases/download/${component.release.tag}/${spec.assetName}`
+  )
+    throw new Error(`${tool} runtime receipt has an unsupported GitHub origin identity`);
+  const selected = {
+    version: component.version,
+    release: {
+      id: releaseId,
+      tag: component.release.tag,
+      draft: false,
+      prerelease: false,
+      publishedAt: component.release.publishedAt,
+      assets: [],
+    },
+    asset: {
+      id: assetId,
+      name: component.asset.name,
+      url: component.asset.url,
+      browserDownloadUrl: component.asset.url,
+      size: component.asset.size,
+      digest: `sha256:${component.asset.sha256}`,
+    },
+  };
+  assertGithubReleaseSelection(tool, selected);
+  return selected;
 }
 
 /** Reacquire one historical receipt exactly. This never changes the active pointer. */
@@ -541,7 +640,7 @@ export async function restoreToolchain(
   options: ToolchainRestoreOptions,
 ): Promise<RuntimeBundleReceipt> {
   assertSupportedRuntimePlatform();
-  const exact = exactPnpmRestoreIdentity(receipt);
+  assertRuntimeBundleReceipt(receipt);
   const root = resolve(options.root ?? toolchainStoreRoot());
   await mkdir(join(root, "bundles"), { recursive: true, mode: 0o700 });
   try {
@@ -551,17 +650,40 @@ export async function restoreToolchain(
   }
   const staging = await mkdtemp(join(root, ".restore-"));
   try {
-    const primary = await createGithubComponent("pnpm", options, staging, exact.selected);
-    const node = await createNodeComponent(exact.node, options, staging);
+    let components: RuntimeComponentReceipt[];
+    if (receipt.tool === "pnpm") {
+      const exact = exactPnpmRestoreIdentity(receipt);
+      const primary = await createGithubComponent("pnpm", options, staging, exact.selected);
+      const node = await createNodeComponent(exact.node, options, staging);
+      components = [node, primary];
+    } else if (receipt.tool === "bun") {
+      if (
+        receipt.adapter !== "javascript-bun" ||
+        receipt.adapterContract !== 1 ||
+        receipt.components.length !== 1 ||
+        receipt.components[0]?.id !== "bun"
+      )
+        throw new Error("managed runtime receipt is not a restorable Bun adapter");
+      components = [
+        await createGithubComponent(
+          "bun",
+          options,
+          staging,
+          exactGithubRestoreIdentity("bun", receipt.components[0]),
+        ),
+      ];
+    } else {
+      throw new Error("managed runtime receipt uses an unsupported adapter");
+    }
     if (
-      canonicalJson([node, primary]) !== canonicalJson(receipt.components) ||
+      canonicalJson(components) !== canonicalJson(receipt.components) ||
       runtimeBundleDigest({
         protocol: receipt.protocol,
         tool: receipt.tool,
         adapter: receipt.adapter,
         adapterContract: receipt.adapterContract,
         platform: receipt.platform,
-        components: [node, primary],
+        components,
         resolvedAt: receipt.resolvedAt,
       }) !== receipt.digest
     )

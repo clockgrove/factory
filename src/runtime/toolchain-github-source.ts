@@ -129,15 +129,26 @@ export class OctokitToolchainReleaseSource implements ToolchainReleaseSource {
       date?: unknown;
       files?: unknown;
     }>;
-    const release = index.find(
-      ({ version, date, files }) =>
-        typeof version === "string" &&
-        /^v\d+\.\d+\.\d+$/.test(version) &&
+    if (!Array.isArray(index)) throw new Error("official Node release index is malformed");
+    const releases = index.flatMap((candidate) => {
+      const { version, date, files } = candidate;
+      const match = typeof version === "string" ? /^v(\d+)\.(\d+)\.(\d+)$/.exec(version) : null;
+      return match &&
         typeof date === "string" &&
         /^\d{4}-\d{2}-\d{2}$/.test(date) &&
         Array.isArray(files) &&
-        files.includes("linux-x64"),
-    );
+        files.includes("linux-x64")
+        ? [{ ...candidate, version, date, semver: match.slice(1).map(Number) }]
+        : [];
+    });
+    releases.sort((left, right) => {
+      for (let index = 0; index < 3; index += 1) {
+        const difference = right.semver[index]! - left.semver[index]!;
+        if (difference !== 0) return difference;
+      }
+      return right.date < left.date ? -1 : right.date > left.date ? 1 : 0;
+    });
+    const release = releases[0];
     if (!release || typeof release.version !== "string" || typeof release.date !== "string")
       throw new Error("official Node release index has no Linux x64 GA");
     const name = `node-${release.version}-linux-x64.tar.xz`;

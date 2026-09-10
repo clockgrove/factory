@@ -215,6 +215,41 @@ describe("managed toolchain store", () => {
     ).rejects.toThrow(/size changed|digest differs/);
   });
 
+  it("rejects provisioned origin metadata that exact restore would reject", async () => {
+    const root = await mkdtemp(join(tmpdir(), "factory-toolchain-store-"));
+    roots.push(root);
+    const bytes = Buffer.from("runtime", "utf8");
+    const badOrigin = source(bytes);
+    const releases = await badOrigin.listReleases("pnpm", "pnpm");
+    releases[1]!.assets[0]!.browserDownloadUrl = "https://attacker.invalid/pnpm-linux-x64";
+    badOrigin.listReleases = async () => releases;
+    let downloaded = false;
+    badOrigin.downloadAsset = async () => {
+      downloaded = true;
+      return bytes;
+    };
+    await expect(
+      provisionToolchain("pnpm", { root, source: badOrigin, run: fakeRun }),
+    ).rejects.toThrow(/unsupported official origin identity/);
+    expect(downloaded).toBe(false);
+    expect(await toolchainStatus("pnpm", root)).toMatchObject({ state: "missing" });
+
+    const badNode = source(bytes);
+    badNode.resolveLatestNodeDistribution = async () => ({
+      version: "22.14.0",
+      tag: "v22.14.0",
+      publishedAt: "2026-09-08T00:00:00.000Z",
+      name: "node-v22.14.0-linux-x64.tar.xz",
+      url: "https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.xz",
+      sha256: digest(testNodeBytes),
+      archive: "tar.xz",
+      executablePath: "node",
+    });
+    await expect(
+      provisionToolchain("pnpm", { root, source: badNode, run: fakeRun }),
+    ).rejects.toThrow(/official Node distribution identity is invalid/);
+  });
+
   it("rejects a receipt changed after provisioning", async () => {
     const root = await mkdtemp(join(tmpdir(), "factory-toolchain-store-"));
     roots.push(root);
@@ -300,5 +335,67 @@ describe("managed toolchain store", () => {
     expect(latestLookups).toBe(0);
     expect((await runtimeBundleByDigest("pnpm", first.digest, root)).digest).toBe(first.digest);
     expect((await activeRuntimeBundle("pnpm", root)).digest).toBe(second.digest);
+  });
+  it("provisions the baseline Bun GA zip without consulting ambient Bun", async () => {
+    const root = await mkdtemp(join(tmpdir(), "factory-toolchain-store-"));
+    const assets = await mkdtemp(join(tmpdir(), "factory-toolchain-assets-"));
+    roots.push(root, assets);
+    const tree = join(assets, "tree");
+    await mkdir(join(tree, "bun-linux-x64-baseline"), { recursive: true });
+    await writeFile(join(tree, "bun-linux-x64-baseline/bun"), "#!/bin/sh\nprintf '1.4.2\\n'\n");
+    const archive = join(assets, "bun.zip");
+    execFileSync("python3", ["-m", "zipfile", "-c", archive, "bun-linux-x64-baseline"], {
+      cwd: tree,
+    });
+    const bytes = await readFile(archive);
+    const bunRelease: GitHubRelease = {
+      id: 42,
+      tag: "bun-v1.4.2",
+      draft: false,
+      prerelease: false,
+      publishedAt: "2026-09-09T00:00:00.000Z",
+      assets: [
+        {
+          id: 420,
+          name: "bun-linux-x64-baseline.zip",
+          url: "https://api.github.test/assets/420",
+          browserDownloadUrl:
+            "https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64-baseline.zip",
+          size: bytes.byteLength,
+          digest: `sha256:${digest(bytes)}`,
+        },
+      ],
+    };
+    const receipt = await provisionToolchain("bun", {
+      root,
+      source: {
+        listReleases: async () => [bunRelease],
+        downloadAsset: async () => bytes,
+      },
+    });
+    expect(receipt).toMatchObject({
+      tool: "bun",
+      components: [
+        {
+          id: "bun",
+          version: "1.4.2",
+          asset: { archive: "zip", sha256: digest(bytes) },
+        },
+      ],
+    });
+    await rm(join(root, "bundles", receipt.digest), { recursive: true });
+    let latestLookups = 0;
+    const restored = await restoreToolchain(receipt, {
+      root,
+      source: {
+        listReleases: async () => {
+          latestLookups += 1;
+          throw new Error("exact restore must not resolve latest");
+        },
+        downloadAsset: async () => bytes,
+      },
+    });
+    expect(restored.digest).toBe(receipt.digest);
+    expect(latestLookups).toBe(0);
   });
 });

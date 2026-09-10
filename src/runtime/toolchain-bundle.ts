@@ -4,7 +4,7 @@ import { lstat, opendir, readFile, readlink } from "node:fs/promises";
 import { arch, platform } from "node:os";
 import { join, relative, resolve, sep } from "node:path";
 
-export type ManagedToolchain = "pnpm";
+export type ManagedToolchain = "pnpm" | "bun";
 export type RuntimeArchiveFormat = "raw" | "tar.gz" | "tar.xz" | "zip";
 
 export interface RuntimePlatform {
@@ -53,8 +53,7 @@ export interface RuntimeBundleReceipt {
 }
 
 export interface RuntimeBundleRequirement {
-  /** #289 exposes only pnpm; other stored bundles are not executable adapters. */
-  tool: "pnpm";
+  tool: ManagedToolchain;
   adapter: string;
   adapterContract: number;
   platform: RuntimePlatform;
@@ -71,6 +70,7 @@ export interface ManagedRuntimeAsset {
   archive: RuntimeArchiveFormat;
   executablePath: string;
   executableSha256: string;
+  treeSha256: string;
   executableOnly?: true;
 }
 
@@ -195,9 +195,7 @@ export function sha256FileSync(path: string): string {
 
 export async function sha256Tree(root: string): Promise<string> {
   const absoluteRoot = resolve(root);
-  const entries: Array<
-    { path: string; mode: number; sha256: string } | { path: string; mode: number; link: string }
-  > = [];
+  const entries: Array<{ path: string; sha256: string } | { path: string; link: string }> = [];
   const visit = async (directory: string): Promise<void> => {
     const handle = await opendir(directory);
     for await (const entry of handle) {
@@ -213,29 +211,25 @@ export async function sha256Tree(root: string): Promise<string> {
           throw new Error("managed runtime tree contains an escaping symlink");
         entries.push({
           path: relative(absoluteRoot, path).split(sep).join("/"),
-          mode: stat.mode & 0o777,
           link,
         });
       } else if (stat.isDirectory()) await visit(path);
       else if (stat.isFile())
         entries.push({
           path: relative(absoluteRoot, path).split(sep).join("/"),
-          mode: stat.mode & 0o777,
           sha256: sha256Bytes(await readFile(path)),
         });
       else throw new Error("managed runtime tree contains an unsupported entry");
     }
   };
   await visit(absoluteRoot);
-  entries.sort((left, right) => left.path.localeCompare(right.path));
+  entries.sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
   return sha256Bytes(Buffer.from(canonicalJson(entries), "utf8"));
 }
 
 export function sha256TreeSync(root: string): string {
   const absoluteRoot = resolve(root);
-  const entries: Array<
-    { path: string; mode: number; sha256: string } | { path: string; mode: number; link: string }
-  > = [];
+  const entries: Array<{ path: string; sha256: string } | { path: string; link: string }> = [];
   const visit = (directory: string): void => {
     const handle = opendirSync(directory);
     try {
@@ -254,14 +248,12 @@ export function sha256TreeSync(root: string): string {
             throw new Error("managed runtime tree contains an escaping symlink");
           entries.push({
             path: relative(absoluteRoot, path).split(sep).join("/"),
-            mode: stat.mode & 0o777,
             link,
           });
         } else if (stat.isDirectory()) visit(path);
         else if (stat.isFile())
           entries.push({
             path: relative(absoluteRoot, path).split(sep).join("/"),
-            mode: stat.mode & 0o777,
             sha256: sha256FileSync(path),
           });
         else throw new Error("managed runtime tree contains an unsupported entry");
@@ -271,6 +263,6 @@ export function sha256TreeSync(root: string): string {
     }
   };
   visit(absoluteRoot);
-  entries.sort((left, right) => left.path.localeCompare(right.path));
+  entries.sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
   return sha256Bytes(Buffer.from(canonicalJson(entries), "utf8"));
 }

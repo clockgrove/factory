@@ -101,15 +101,79 @@ function assertStandardPrototypes(): void {
     throw new Error("standard prototypes changed during recovery observation");
 }
 
-function materializeDataOnly(value: unknown, ancestors = new Set<object>(), depth = 0): unknown {
+interface MaterializationByteBudget {
+  remaining: number;
+}
+
+function consumeMaterializationBytes(budget: MaterializationByteBudget, bytes: number): void {
+  budget.remaining -= bytes;
+  if (budget.remaining < 0) throw new Error("recovery event observation exceeds byte bound");
+}
+
+/** Count the UTF-8 bytes JSON serialization would retain without first
+ * allocating an attacker-sized escaped string. */
+function consumeJsonStringBytes(budget: MaterializationByteBudget, value: string): void {
+  let remaining = budget.remaining - 2;
+  if (remaining < 0) throw new Error("recovery event observation exceeds byte bound");
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    let bytes: number;
+    if (
+      code === 0x22 ||
+      code === 0x5c ||
+      code === 0x08 ||
+      code === 0x09 ||
+      code === 0x0a ||
+      code === 0x0c ||
+      code === 0x0d
+    )
+      bytes = 2;
+    else if (code <= 0x1f) bytes = 6;
+    else if (code <= 0x7f) bytes = 1;
+    else if (code <= 0x7ff) bytes = 2;
+    else if (code >= 0xd800 && code <= 0xdbff) {
+      const low = value.charCodeAt(index + 1);
+      if (low >= 0xdc00 && low <= 0xdfff) {
+        bytes = 4;
+        index++;
+      } else bytes = 6;
+    } else if (code >= 0xdc00 && code <= 0xdfff) bytes = 6;
+    else bytes = 3;
+    remaining -= bytes;
+    if (remaining < 0) throw new Error("recovery event observation exceeds byte bound");
+  }
+  budget.remaining = remaining;
+}
+
+function materializeDataOnly(
+  value: unknown,
+  ancestors = new Set<object>(),
+  depth = 0,
+  budget?: MaterializationByteBudget,
+): unknown {
   if (
     value === null ||
     value === undefined ||
     typeof value === "string" ||
     typeof value === "boolean" ||
     (typeof value === "number" && Number.isFinite(value))
-  )
+  ) {
+    if (budget) {
+      if (typeof value === "string") consumeJsonStringBytes(budget, value);
+      else
+        consumeMaterializationBytes(
+          budget,
+          value === null || value === undefined
+            ? 4
+            : typeof value === "boolean"
+              ? value
+                ? 4
+                : 5
+              : JSON.stringify(value).length,
+        );
+    }
     return value;
+  }
   if (!value || typeof value !== "object" || depth > 32 || types.isProxy(value))
     throw new Error("recovery observation requires bounded data-only events");
   if (ancestors.has(value)) throw new Error("recovery observation requires acyclic events");
@@ -130,14 +194,19 @@ function materializeDataOnly(value: unknown, ancestors = new Set<object>(), dept
     values.some((key) => !descriptors[key]!.enumerable)
   )
     throw new Error("recovery observation does not accept sparse or hidden fields");
+  if (budget) consumeMaterializationBytes(budget, 2 + Math.max(0, values.length - 1));
   const clone: unknown[] | Record<string, unknown> = array ? [] : {};
   for (const key of values) {
     const descriptor = descriptors[key]!;
     if (!("value" in descriptor)) throw new Error("recovery observation does not accept accessors");
+    if (budget && !array) {
+      consumeJsonStringBytes(budget, key);
+      consumeMaterializationBytes(budget, 1);
+    }
     Object.defineProperty(clone, key, {
       configurable: true,
       enumerable: true,
-      value: materializeDataOnly(descriptor.value, ancestors, depth + 1),
+      value: materializeDataOnly(descriptor.value, ancestors, depth + 1, budget),
       writable: true,
     });
   }
@@ -549,7 +618,10 @@ export async function observeRecoveryEvents(
   // Capture the complete data-only contents before the first event-loop yield.
   // Parsing and identity work can then remain batched without allowing a caller
   // mutation to combine values from different moments into one observation.
-  const values = inputValues.map((value) => materializeDataOnly(value));
+  const materializationBudget = { remaining: maxBytes };
+  const values: unknown[] = [];
+  for (const value of inputValues)
+    values.push(materializeDataOnly(value, new Set<object>(), 0, materializationBudget));
   abortObservation(options.signal);
   assertStandardPrototypes();
   const builder = new RecoveryEventObservationBuilder();

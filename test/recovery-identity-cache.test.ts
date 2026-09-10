@@ -314,6 +314,27 @@ describe("observation-scoped recovery event identity", () => {
     expect(indexed).toMatchObject({ reason: "fixture terminal" });
   });
 
+  it("enforces the aggregate byte bound while materializing the snapshot", async () => {
+    const padded = {
+      ...rawFixture(),
+      padding: 'é🙂\u0001"\\\ud800'.repeat(128),
+    } as protocol.FactoryEvent;
+    const unreachable = new Proxy(rawFixture(4), {});
+    const eventBytes = Buffer.byteLength(JSON.stringify(padded), "utf8");
+    const exact = await observeRecoveryEvents([padded], { maxBytes: eventBytes });
+
+    expect(exact.stats.canonicalBytes).toBe(eventBytes);
+
+    const parse = vi.spyOn(protocol, "parseFactoryEvent");
+    await expect(
+      observeRecoveryEvents([padded, structuredClone(padded), unreachable], {
+        maxBytes: eventBytes + 32,
+        maxEvents: 3,
+      }),
+    ).rejects.toThrow(/byte bound/);
+    expect(parse).not.toHaveBeenCalled();
+  });
+
   it("rejects standard-prototype mutation between asynchronous batches", async () => {
     const events = Array.from({ length: 600 }, (_, index) => rawFixture(index + 1));
     const previous = Object.getOwnPropertyDescriptor(Array.prototype, "factoryInjected");

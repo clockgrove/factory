@@ -13,6 +13,7 @@ import {
 } from "../src/runtime/toolchain-bundle.js";
 import {
   buildUvManagedExecutionPlan,
+  createUvManagedToolchainPlan,
   inspectUvAuthority,
   loadUvAuthoritySurface,
   parseUvPytestCommand,
@@ -46,6 +47,14 @@ source = { registry = "https://pypi.org/simple" }
 wheels = [
   { url = "https://files.pythonhosted.org/packages/${name}-${version}-py3-none-any.whl", hash = "${HASH}", size = 42 },
 ]
+`;
+}
+
+function virtualPackage(name: string, path: string): string {
+  return `[[package]]
+name = "${name}"
+version = "1.0.0"
+source = { virtual = "${path}" }
 `;
 }
 
@@ -198,7 +207,7 @@ required-version = "==${UV_VERSION}"
 package = false
 
 [tool.uv.workspace]
-members = ["packages/api"]
+members = ["packages/api", "packages/shared"]
 `;
     const member = `[project]
 name = "api"
@@ -211,17 +220,27 @@ package = false
 [dependency-groups]
 dev = ["pytest==8.4.2"]
 `;
+    const shared = `[project]
+name = "shared"
+requires-python = "==${PYTHON_VERSION}"
+dependencies = []
+
+[tool.uv]
+package = false
+`;
     const inspection = inspectUvAuthority({
       command,
       files: {
         "pyproject.toml": root,
         "packages/api/pyproject.toml": member,
-        "uv.lock": `version = 1\nrequires-python = "==${PYTHON_VERSION}"\n\n${wheelPackage("pytest", "8.4.2")}`,
+        "packages/shared/pyproject.toml": shared,
+        "uv.lock": `version = 1\nrequires-python = "==${PYTHON_VERSION}"\n\n${virtualPackage("workspace-root", ".")}\n${virtualPackage("api", "packages/api")}\n${virtualPackage("shared", "packages/shared")}\n${wheelPackage("pytest", "8.4.2")}`,
         ".python-version": PYTHON_VERSION,
       },
       repositoryPaths: [
         "pyproject.toml",
         "packages/api/pyproject.toml",
+        "packages/shared/pyproject.toml",
         "uv.lock",
         ".python-version",
       ],
@@ -234,7 +253,28 @@ dev = ["pytest==8.4.2"]
       "uv.lock",
       ".python-version",
       "packages/api/pyproject.toml",
+      "packages/shared/pyproject.toml",
     ]);
+
+    expect(() =>
+      inspectUvAuthority({
+        command,
+        files: {
+          "pyproject.toml": root,
+          "packages/api/pyproject.toml": member,
+          "uv.lock": `version = 1\nrequires-python = "==${PYTHON_VERSION}"\n\n${wheelPackage("pytest", "8.4.2")}`,
+          ".python-version": PYTHON_VERSION,
+        },
+        repositoryPaths: [
+          "pyproject.toml",
+          "packages/api/pyproject.toml",
+          "uv.lock",
+          ".python-version",
+        ],
+        uvVersion: UV_VERSION,
+        pythonVersion: PYTHON_VERSION,
+      }),
+    ).toThrow(/workspace member is missing packages\/shared\/pyproject\.toml/);
   });
 
   it("rejects mixed managers, configuration, builds, custom sources, and escape", () => {
@@ -300,10 +340,30 @@ dev = ["pytest==8.4.2"]
 
     const outside = await mkdtemp(join(tmpdir(), "factory-uv-outside-"));
     await writeFile(join(outside, "pyproject.toml"), rootPyproject());
+    await writeFile(
+      join(root, "pyproject.toml"),
+      `${rootPyproject()}\n[tool.uv.workspace]\nmembers = ["packages/api"]\n`,
+    );
     await mkdir(join(root, "packages"));
     await symlink(outside, join(root, "packages", "api"));
     await expect(loadUvAuthoritySurface(root, ["packages/api"])).rejects.toThrow(
       /ancestor is not a real directory/,
+    );
+
+    const workspace = await mkdtemp(join(tmpdir(), "factory-uv-complete-workspace-"));
+    await mkdir(join(workspace, "packages/api"), { recursive: true });
+    await mkdir(join(workspace, "packages/shared"), { recursive: true });
+    await writeFile(
+      join(workspace, "pyproject.toml"),
+      `${rootPyproject()}\n[tool.uv.workspace]\nmembers = ["packages/api", "packages/shared"]\n`,
+    );
+    await writeFile(join(workspace, "uv.lock"), lockfile());
+    await writeFile(join(workspace, ".python-version"), PYTHON_VERSION);
+    await writeFile(join(workspace, "packages/api/pyproject.toml"), rootPyproject());
+    await writeFile(join(workspace, "packages/shared/pyproject.toml"), rootPyproject());
+    const workspaceSurface = await loadUvAuthoritySurface(workspace, ["packages/api"]);
+    expect(Object.keys(workspaceSurface.files)).toEqual(
+      expect.arrayContaining(["packages/api/pyproject.toml", "packages/shared/pyproject.toml"]),
     );
   });
 
@@ -416,6 +476,27 @@ describe("uv managed execution plan", () => {
     });
     expect(Object.keys(plan.environment).some((key) => key === "VIRTUAL_ENV")).toBe(false);
     expect(plan.validation[0]!.executable).not.toBe(plan.setup[1]!.executable);
+
+    const isolated = createUvManagedToolchainPlan({
+      receipt: runtime.receipt,
+      privateRoot: "/tmp/factory-toolchain",
+      commands: ["uv run --project packages/api --locked --no-sync python -m pytest"],
+      assets: runtime.receipt.components.map((component) => ({
+        id: component.id,
+        path: `toolchains/${component.id}.asset`,
+        content: Buffer.from("fixture"),
+        sha256: component.asset.sha256,
+        archive: component.asset.archive,
+        executablePath: component.executablePath,
+        executableSha256: component.executableSha256,
+        treeSha256: component.treeSha256,
+      })),
+    });
+    expect(isolated.executables.find(({ id }) => id === "venv-python")).toMatchObject({
+      kind: "generated",
+      generatedFrom: "python",
+      relativePath: "/tmp/factory-toolchain/environment/bin/python",
+    });
   });
 
   it("rejects a tampered receipt before resolving commands", async () => {

@@ -918,8 +918,7 @@ async function resolveUvIntegratedBase(
   const { createLocalWorktree, cleanupLocalWorktree } = await import(
     "../runtime/local-worktree.js"
   );
-  let authorityDigest = "";
-  const inspect = async (commitSha: string) => {
+  const inspect = async (commitSha: string): Promise<string> => {
     const worktree = await createLocalWorktree(input.repository, commitSha);
     try {
       const commands = input.requirements.map((requirement) => {
@@ -942,7 +941,7 @@ async function resolveUvIntegratedBase(
           pythonVersion: python.version,
         });
       });
-      authorityDigest = await authorityDigestForPaths(
+      return await authorityDigestForPaths(
         worktree.path,
         inspections.flatMap(({ authorityPaths }) => authorityPaths),
       );
@@ -950,8 +949,14 @@ async function resolveUvIntegratedBase(
       await cleanupLocalWorktree(worktree);
     }
   };
-  await inspect(input.provider.integration.commitSha);
-  if (input.provider.integration.commitSha !== input.base.oid) await inspect(input.base.oid);
+  const providerAuthorityDigest = await inspect(input.provider.integration.commitSha);
+  const currentAuthorityDigest =
+    input.provider.integration.commitSha === input.base.oid
+      ? providerAuthorityDigest
+      : await inspect(input.base.oid);
+  if (providerAuthorityDigest !== currentAuthorityDigest)
+    throw new Error("uv authority bytes changed after the declared provider generation");
+  const authorityDigest = providerAuthorityDigest;
   const preparationDigest = createHash("sha256")
     .update(
       canonical({

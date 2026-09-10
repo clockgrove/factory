@@ -168,35 +168,72 @@ describe("toolchain authority adapters", () => {
     );
   });
 
-  it("rejects Bun authority changed after its provider generation", async () => {
-    const receipt = await installManagedFixture();
-    const repository = await mkdtemp(join(tmpdir(), "factory-bun-provider-proof-"));
+  it.each([
+    {
+      tool: "bun" as const,
+      adapterId: "javascript-bun",
+      command: "bun --cwd packages/api run test",
+      authorityPaths: ["package.json", "bun.lock"],
+      discoveredAuthorityPath: "packages/api/package.json",
+      files: {
+        "package.json": JSON.stringify({
+          name: "proof",
+          version: "1.0.0",
+          packageManager: "bun@1.3.10",
+          workspaces: ["packages/*"],
+        }),
+        "packages/api/package.json": JSON.stringify({
+          name: "api",
+          version: "1.0.0",
+          scripts: { test: "bun test" },
+        }),
+        "bun.lock": JSON.stringify({
+          lockfileVersion: 1,
+          configVersion: 1,
+          workspaces: { "": { name: "proof" }, "packages/api": { name: "api" } },
+          packages: { api: ["api@workspace:packages/api"] },
+        }),
+      },
+      changedPath: "package.json",
+      changedContent: JSON.stringify({
+        name: "proof",
+        version: "1.0.0",
+        packageManager: "bun@1.3.10",
+        description: "authority drift",
+        workspaces: ["packages/*"],
+      }),
+      tools: ["bun"],
+      networkDestinations: ["registry.npmjs.org"],
+      expected: /Bun authority bytes changed/,
+    },
+    {
+      tool: "uv" as const,
+      adapterId: "python-uv",
+      command: "uv run --locked --no-sync python -m pytest",
+      authorityPaths: ["pyproject.toml", "uv.lock", ".python-version"],
+      files: {
+        "pyproject.toml": `[project]\nname = "proof"\nrequires-python = "==3.14.7"\ndependencies = []\n\n[tool.uv]\nrequired-version = "==0.12.12"\npackage = false\n\n[dependency-groups]\ndev = ["pytest==8.4.2"]\n`,
+        "uv.lock": `version = 1\nrequires-python = "==3.14.7"\n\n[[package]]\nname = "pytest"\nversion = "8.4.2"\nsource = { registry = "https://pypi.org/simple" }\nwheels = [{ url = "https://files.pythonhosted.org/packages/pytest.whl", hash = "sha256:${"a".repeat(64)}" }]\n`,
+        ".python-version": "3.14.7\n",
+      },
+      changedPath: "pyproject.toml",
+      changedContent: `[project]\nname = "proof"\ndescription = "authority drift"\nrequires-python = "==3.14.7"\ndependencies = []\n\n[tool.uv]\nrequired-version = "==0.12.12"\npackage = false\n\n[dependency-groups]\ndev = ["pytest==8.4.2"]\n`,
+      tools: ["uv", "python"],
+      networkDestinations: ["pypi.org", "files.pythonhosted.org"],
+      expected: /uv authority bytes changed/,
+    },
+  ])("rejects $tool authority changed after its provider generation", async (fixture) => {
+    const receipt = await installManagedFixture(fixture.tool);
+    const repository = await mkdtemp(join(tmpdir(), `factory-${fixture.tool}-provider-proof-`));
     execFileSync("git", ["init", "-q", "-b", "main"], { cwd: repository });
     execFileSync("git", ["config", "user.name", "Factory Test"], { cwd: repository });
     execFileSync("git", ["config", "user.email", "factory@example.invalid"], {
       cwd: repository,
     });
-    const manifest = {
-      name: "proof",
-      version: "1.0.0",
-      packageManager: "bun@1.3.10",
-      workspaces: ["packages/*"],
-    };
-    await writeFile(join(repository, "package.json"), JSON.stringify(manifest));
-    await mkdir(join(repository, "packages/api"), { recursive: true });
-    await writeFile(
-      join(repository, "packages/api/package.json"),
-      JSON.stringify({ name: "api", version: "1.0.0", scripts: { test: "bun test" } }),
-    );
-    await writeFile(
-      join(repository, "bun.lock"),
-      JSON.stringify({
-        lockfileVersion: 1,
-        configVersion: 1,
-        workspaces: { "": { name: "proof" }, "packages/api": { name: "api" } },
-        packages: { api: ["api@workspace:packages/api"] },
-      }),
-    );
+    for (const [path, content] of Object.entries(fixture.files)) {
+      await mkdir(dirname(join(repository, path)), { recursive: true });
+      await writeFile(join(repository, path), content);
+    }
     execFileSync("git", ["add", "."], { cwd: repository });
     execFileSync("git", ["commit", "-qm", "provider generation"], { cwd: repository });
     const providerBase = {
@@ -209,11 +246,8 @@ describe("toolchain authority adapters", () => {
         encoding: "utf8",
       }).trim(),
     };
-    await writeFile(
-      join(repository, "package.json"),
-      JSON.stringify({ ...manifest, description: "authority drift" }),
-    );
-    execFileSync("git", ["add", "package.json"], { cwd: repository });
+    await writeFile(join(repository, fixture.changedPath), fixture.changedContent);
+    execFileSync("git", ["add", fixture.changedPath], { cwd: repository });
     execFileSync("git", ["commit", "-qm", "change authority"], { cwd: repository });
     const currentBase = {
       oid: execFileSync("git", ["rev-parse", "HEAD"], {
@@ -225,24 +259,24 @@ describe("toolchain authority adapters", () => {
         encoding: "utf8",
       }).trim(),
     };
-    const adapter = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === "javascript-bun")!;
+    const adapter = TOOLCHAIN_AUTHORITY_ADAPTERS.find(({ id }) => id === fixture.adapterId)!;
     const runtime = { ...adapter.runtimeRequirement!, bundleDigest: receipt.digest };
     const sourceRef = "refs/heads/main";
     const packet = parseWorkerPacket({
-      goal: "Use the integrated Bun test.",
+      goal: `Use the integrated ${fixture.tool} test.`,
       acceptanceCriteria: ["The test passes."],
       allowedPaths: ["src/"],
       preconditions: [],
       outOfScope: [],
       conventions: [],
       baseSha: currentBase.oid,
-      validationCommands: ["bun --cwd packages/api run test"],
+      validationCommands: [fixture.command],
       requirements: {
         os: ["linux"],
         architecture: [],
-        tools: ["bun"],
+        tools: fixture.tools,
         services: [],
-        networkDestinations: ["registry.npmjs.org"],
+        networkDestinations: fixture.networkDestinations,
         permittedSecretNames: [],
         trust: "trusted_local",
       },
@@ -253,8 +287,8 @@ describe("toolchain authority adapters", () => {
             adapter: adapter.id,
             generation: `${adapter.id}/root`,
             providerWorkItem: "root",
-            authorityPaths: ["package.json", "bun.lock"],
-            operation: { kind: "package-script", key: "packages/api:test" },
+            authorityPaths: fixture.authorityPaths,
+            operation: adapter.operation!(fixture.command)!,
             activation: "integrated-base",
             runtime: adapter.runtimeRequirement,
           },
@@ -278,11 +312,14 @@ describe("toolchain authority adapters", () => {
     const provider = {
       id: "root",
       dependsOn: [] as string[],
-      scope: ["package.json", "bun.lock"],
-      issueNumber: 293,
+      scope: fixture.authorityPaths,
+      issueNumber: fixture.tool === "bun" ? 293 : 291,
       integration: {
         kind: "attempt" as const,
-        runId: "00000000-0000-4000-8000-000000000293",
+        runId:
+          fixture.tool === "bun"
+            ? "00000000-0000-4000-8000-000000000293"
+            : "00000000-0000-4000-8000-000000000291",
         attempt: 1,
         commitSha: providerBase.oid,
         treeOid: providerBase.treeOid,
@@ -292,6 +329,18 @@ describe("toolchain authority adapters", () => {
         managedRuntimeActivation: providerActivation,
       },
     };
+    if (fixture.discoveredAuthorityPath) {
+      await expect(
+        resolveIntegratedRepositoryCapabilities({
+          repository,
+          base: currentBase,
+          sourceRef,
+          packet,
+          providerById: () => provider,
+        }),
+      ).rejects.toThrow(/Bun authority includes a path outside its provider scope/);
+      provider.scope.push(fixture.discoveredAuthorityPath);
+    }
     await expect(
       resolveIntegratedRepositoryCapabilities({
         repository,
@@ -300,17 +349,7 @@ describe("toolchain authority adapters", () => {
         packet,
         providerById: () => provider,
       }),
-    ).rejects.toThrow(/Bun authority includes a path outside its provider scope/);
-    provider.scope.push("packages/api/package.json");
-    await expect(
-      resolveIntegratedRepositoryCapabilities({
-        repository,
-        base: currentBase,
-        sourceRef,
-        packet,
-        providerById: () => provider,
-      }),
-    ).rejects.toThrow(/Bun authority bytes changed after the declared provider generation/);
+    ).rejects.toThrow(fixture.expected);
   });
 
   it("parses npm and pnpm as distinct finite package-script adapters", () => {

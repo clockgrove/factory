@@ -80,6 +80,8 @@ export interface ManagedExecutable {
   kind: "native" | "node" | "generated";
   relativePath: string;
   argsPrefix: string[];
+  /** Verified executable whose resolved target a generated symlink must retain. */
+  generatedFrom?: string;
 }
 
 export interface ManagedExecutionStep {

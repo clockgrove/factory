@@ -401,7 +401,22 @@ function assertNoAlternateAuthority(paths: readonly string[], projectDirectory: 
   }
 }
 
-/** Load only root and selected-project authority plus config-search ancestors. */
+function declaredWorkspaceMembers(rootText: string): string[] {
+  const workspace = section(parseToml(rootText, "pyproject.toml"), "tool.uv.workspace");
+  if (workspace.size === 0) return [];
+  if ([...workspace.keys()].some((key) => key !== "members"))
+    throw new Error("uv workspace contains unsupported selection configuration");
+  const members = tomlStringArray(workspace.get("members"), "tool.uv.workspace.members");
+  if (
+    members.length === 0 ||
+    members.some((member) => normalizeUvProjectDirectory(member) !== member) ||
+    new Set(members).size !== members.length
+  )
+    throw new Error("uv workspace must declare exact unique members");
+  return members;
+}
+
+/** Load root and complete declared-workspace authority plus config-search ancestors. */
 export async function loadUvAuthoritySurface(
   root: string,
   projectDirectories: readonly string[],
@@ -411,8 +426,24 @@ export async function loadUvAuthoritySurface(
   const selected = [...new Set(projectDirectories.map(normalizeUvProjectDirectory))];
   if (selected.some((directory) => directory === null))
     throw new Error("uv project directory escapes repository authority");
+  const rootManifest = join(absoluteRoot, "pyproject.toml");
+  const rootStat = await lstat(rootManifest);
+  if (!rootStat.isFile() || rootStat.isSymbolicLink() || rootStat.size > 4 * 1024 * 1024)
+    throw new Error("uv authority is not a bounded regular file: pyproject.toml");
+  const rootText = await readFile(rootManifest, "utf8");
+  const workspaceMembers = declaredWorkspaceMembers(rootText);
+  if (
+    selected.some(
+      (directory) => directory !== "." && !workspaceMembers.includes(directory as string),
+    )
+  )
+    throw new Error("uv project is not an exact declared workspace member");
+  const authorityDirectories = new Set([
+    ...(selected as string[]),
+    ...(selected.some((directory) => directory !== ".") ? workspaceMembers : []),
+  ]);
   const directories = new Set<string>();
-  for (const directory of selected as string[])
+  for (const directory of authorityDirectories)
     for (const ancestor of uvAuthorityDirectories(directory)) directories.add(ancestor);
   const repositoryPaths = new Set<string>();
   for (const directory of directories) {
@@ -431,10 +462,14 @@ export async function loadUvAuthoritySurface(
     }
   }
   const authorityFiles = new Set(["pyproject.toml", "uv.lock", ".python-version"]);
-  for (const directory of selected as string[])
+  for (const directory of authorityDirectories)
     if (directory !== ".") authorityFiles.add(`${directory}/pyproject.toml`);
-  const files: Record<string, string> = {};
+  const files: Record<string, string> = { "pyproject.toml": rootText };
   for (const path of authorityFiles) {
+    if (path === "pyproject.toml") {
+      repositoryPaths.add(path);
+      continue;
+    }
     const absolute = join(absoluteRoot, path);
     if (!absolute.startsWith(`${absoluteRoot}/`))
       throw new Error(`uv authority file escapes repository root: ${path}`);
@@ -561,29 +596,23 @@ export function inspectUvAuthority(input: UvAuthorityInspectionInput): UvAuthori
   const projects = [root];
   const permittedVirtualPaths = new Set(["."]);
   let selected = root;
-  const rootDocument = parseToml(rootText, "pyproject.toml");
-  const workspace = section(rootDocument, "tool.uv.workspace");
+  const workspaceMembers = declaredWorkspaceMembers(rootText);
   if (projectDirectory === ".") {
-    if (workspace.size > 0)
+    if (workspaceMembers.length > 0)
       throw new Error("root uv validation may not implicitly select a workspace");
   } else {
-    if ([...workspace.keys()].some((key) => key !== "members"))
-      throw new Error("uv workspace contains unsupported selection configuration");
-    const members = tomlStringArray(workspace.get("members"), "tool.uv.workspace.members");
-    if (
-      members.length === 0 ||
-      members.some((member) => normalizeUvProjectDirectory(member) !== member) ||
-      new Set(members).size !== members.length ||
-      !members.includes(projectDirectory)
-    )
+    if (!workspaceMembers.includes(projectDirectory))
       throw new Error("uv project is not an exact declared workspace member");
-    const memberPath = authorityPath(projectDirectory, "pyproject.toml");
-    const memberText = input.files[memberPath];
-    if (memberText === undefined) throw new Error(`uv workspace member is missing ${memberPath}`);
-    selected = inspectProject(memberText, memberPath, input.uvVersion, false);
-    projects.push(selected);
-    permittedVirtualPaths.add(projectDirectory);
-    authorityPaths.push(memberPath);
+    for (const member of workspaceMembers) {
+      const memberPath = authorityPath(member, "pyproject.toml");
+      const memberText = input.files[memberPath];
+      if (memberText === undefined) throw new Error(`uv workspace member is missing ${memberPath}`);
+      const project = inspectProject(memberText, memberPath, input.uvVersion, false);
+      projects.push(project);
+      permittedVirtualPaths.add(member);
+      authorityPaths.push(memberPath);
+      if (member === projectDirectory) selected = project;
+    }
   }
 
   const requiresPython = tomlString(
@@ -708,6 +737,7 @@ export function createUvManagedToolchainPlan(input: {
         kind: "generated",
         relativePath: join(environmentRoot, "bin", "python"),
         argsPrefix: [],
+        generatedFrom: "python",
       },
     ],
     setup: [
